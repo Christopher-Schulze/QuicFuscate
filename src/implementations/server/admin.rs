@@ -24,16 +24,208 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::io;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::Path;
 use std::sync::Arc;
+#[cfg(unix)]
+use std::time::Duration;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
+#[cfg(unix)]
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(any(test, feature = "rust-tests"))]
 use super::metrics::Metrics;
+
+#[cfg(unix)]
+const ADMIN_SOCKET_MODE: u32 = 0o600;
+#[cfg(unix)]
+const MAX_ADMIN_COMMAND_BYTES: usize = 8 * 1024;
+#[cfg(unix)]
+const ADMIN_COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const ADMIN_SOCKET_LIVENESS_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdminSocketIdentity {
+    device: u64,
+    inode: u64,
+    uid: u32,
+}
+
+#[cfg(unix)]
+fn current_effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and returns the process effective UID.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+fn inspect_admin_socket(path: &Path) -> io::Result<AdminSocketIdentity> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("refusing non-socket admin path {}", path.display()),
+        ));
+    }
+    let uid = current_effective_uid();
+    if metadata.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing admin socket {} owned by uid {}, current uid is {}",
+                path.display(),
+                metadata.uid(),
+                uid
+            ),
+        ));
+    }
+    Ok(AdminSocketIdentity { device: metadata.dev(), inode: metadata.ino(), uid })
+}
+
+#[cfg(unix)]
+async fn preflight_existing_admin_socket(path: &Path) -> io::Result<Option<AdminSocketIdentity>> {
+    let identity = match inspect_admin_socket(path) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    match tokio::time::timeout(ADMIN_SOCKET_LIVENESS_TIMEOUT, UnixStream::connect(path)).await {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("admin socket {} is already served", path.display()),
+            ))
+        }
+        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => Ok(Some(identity)),
+        Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Ok(Err(error)) => Err(io::Error::new(
+            error.kind(),
+            format!("could not determine admin socket liveness for {}: {error}", path.display()),
+        )),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("admin socket liveness probe timed out: {}", path.display()),
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn remove_verified_stale_admin_socket(
+    path: &Path,
+    expected: AdminSocketIdentity,
+) -> io::Result<()> {
+    let actual = match inspect_admin_socket(path) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("admin socket path changed during stale cleanup: {}", path.display()),
+        ));
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn secure_bound_admin_socket(path: &Path, expected: AdminSocketIdentity) -> io::Result<()> {
+    let before = inspect_admin_socket(path)?;
+    if before != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("admin socket path changed before permission hardening: {}", path.display()),
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(ADMIN_SOCKET_MODE))?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    let after = inspect_admin_socket(path)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if after != expected || mode != ADMIN_SOCKET_MODE {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "admin socket permission verification failed for {}: mode {:o}",
+                path.display(),
+                mode
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn read_admin_command_with_timeout<R>(
+    reader: &mut R,
+    timeout: Duration,
+) -> io::Result<Option<String>>
+where
+    R: AsyncRead + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut command = Vec::with_capacity(MAX_ADMIN_COMMAND_BYTES);
+    let mut chunk = [0_u8; 1024];
+
+    loop {
+        let count = match tokio::time::timeout_at(deadline, reader.read(&mut chunk)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "admin command read deadline exceeded",
+                ));
+            }
+        };
+        if count == 0 {
+            if command.is_empty() {
+                return Ok(None);
+            }
+            return String::from_utf8(command)
+                .map(Some)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+
+        let newline = chunk[..count].iter().position(|byte| *byte == b'\n');
+        let prefix_len = newline.unwrap_or(count);
+        if command.len().saturating_add(prefix_len) > MAX_ADMIN_COMMAND_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("admin command exceeds {} bytes", MAX_ADMIN_COMMAND_BYTES),
+            ));
+        }
+        command.extend_from_slice(&chunk[..prefix_len]);
+        if newline.is_some() {
+            return String::from_utf8(command)
+                .map(Some)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn read_admin_command<R>(reader: &mut R) -> io::Result<Option<String>>
+where
+    R: AsyncRead + Unpin,
+{
+    read_admin_command_with_timeout(reader, ADMIN_COMMAND_READ_TIMEOUT).await
+}
 
 /// Admin command types.
 #[derive(Debug, Serialize, Deserialize)]
@@ -345,6 +537,7 @@ pub struct AdminServer {
     socket_path: std::path::PathBuf,
     handler: Arc<dyn AdminHandler>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    bound_socket: parking_lot::Mutex<Option<AdminSocketIdentity>>,
 }
 
 #[cfg(unix)]
@@ -355,6 +548,7 @@ impl AdminServer {
             socket_path: socket_path.as_ref().to_path_buf(),
             handler,
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bound_socket: parking_lot::Mutex::new(None),
         }
     }
 
@@ -368,17 +562,29 @@ impl AdminServer {
         self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Run the admin server.
-    pub async fn run(&self) -> std::io::Result<()> {
-        // Remove old socket if exists
-        if let Err(e) = std::fs::remove_file(&self.socket_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
+    fn cleanup_bound_socket(&self) {
+        let identity = *self.bound_socket.lock();
+        let Some(identity) = identity else {
+            return;
+        };
+        match remove_verified_stale_admin_socket(&self.socket_path, identity) {
+            Ok(()) => {
+                self.bound_socket.lock().take();
+            }
+            Err(error) => {
                 log::warn!(
-                    "Failed to remove stale admin socket {}: {}",
+                    "Failed to remove owned admin socket {}: {}",
                     self.socket_path.display(),
-                    e
+                    error
                 );
             }
+        }
+    }
+
+    /// Run the admin server.
+    pub async fn run(&self) -> std::io::Result<()> {
+        if let Some(identity) = preflight_existing_admin_socket(&self.socket_path).await? {
+            remove_verified_stale_admin_socket(&self.socket_path, identity)?;
         }
 
         // Create parent directory
@@ -387,6 +593,9 @@ impl AdminServer {
         }
 
         let listener = UnixListener::bind(&self.socket_path)?;
+        let identity = inspect_admin_socket(&self.socket_path)?;
+        *self.bound_socket.lock() = Some(identity);
+        secure_bound_admin_socket(&self.socket_path, identity)?;
         log::info!("Admin socket listening on {:?}", self.socket_path);
 
         while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
@@ -411,15 +620,8 @@ impl AdminServer {
         }
 
         // Cleanup
-        if let Err(e) = std::fs::remove_file(&self.socket_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    "Failed to remove admin socket on shutdown {}: {}",
-                    self.socket_path.display(),
-                    e
-                );
-            }
-        }
+        drop(listener);
+        self.cleanup_bound_socket();
         log::info!("Admin socket stopped");
         Ok(())
     }
@@ -430,9 +632,9 @@ impl AdminServer {
     ) -> std::io::Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-
-        reader.read_line(&mut line).await?;
+        let Some(line) = read_admin_command(&mut reader).await? else {
+            return Ok(());
+        };
 
         let response = match serde_json::from_str::<AdminCommand>(&line) {
             Ok(cmd) => {
@@ -473,21 +675,29 @@ impl AdminServer {
 #[cfg(unix)]
 impl Drop for AdminServer {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.socket_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log::debug!(
-                    "AdminServer drop socket cleanup failed ({}): {}",
-                    self.socket_path.display(),
-                    e
-                );
-            }
-        }
+        self.cleanup_bound_socket();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn unique_admin_test_dir(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "quicfuscate-admin-test-{}-{}-{}",
+            std::process::id(),
+            suffix,
+            label
+        ));
+        std::fs::create_dir(&path).expect("create unique admin test directory");
+        path
+    }
 
     #[test]
     fn test_admin_command_parse() {
@@ -596,5 +806,115 @@ mod tests {
             ClientIdentity::Session(super::super::session::SessionId::from_u64(7))
         );
         assert_eq!(ClientIdentity::canonical(None, remote), ClientIdentity::Remote(remote));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admin_socket_is_owner_only_and_removed_on_shutdown() {
+        let directory = unique_admin_test_dir("mode");
+        let path = directory.join("ctl.sock");
+        let handler = Arc::new(DefaultAdminHandler::new(Arc::new(Metrics::new())));
+        let server = AdminServer::new(&path, handler);
+        let shutdown = server.shutdown_signal();
+        let task = tokio::spawn(async move { server.run().await });
+
+        let metadata = loop {
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => break metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(error) => panic!("admin socket metadata failed: {error}"),
+            }
+        };
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, ADMIN_SOCKET_MODE);
+
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("admin server shutdown timed out")
+            .expect("admin server task panicked");
+        assert!(result.is_ok(), "admin server failed: {:?}", result.err());
+        assert!(!path.exists(), "admin socket survived shutdown");
+        std::fs::remove_dir(&directory).expect("remove admin test directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admin_start_refuses_preexisting_regular_path_without_deleting_it() {
+        let directory = unique_admin_test_dir("regular-path");
+        let path = directory.join("ctl.sock");
+        std::fs::write(&path, b"caller-owned sentinel").expect("write sentinel");
+        let handler = Arc::new(DefaultAdminHandler::new(Arc::new(Metrics::new())));
+        let server = AdminServer::new(&path, handler);
+
+        let error = server.run().await.expect_err("regular path must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).expect("read sentinel"), b"caller-owned sentinel");
+        std::fs::remove_file(&path).expect("remove test sentinel");
+        std::fs::remove_dir(&directory).expect("remove admin test directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admin_stale_socket_cleanup_requires_owned_unserved_socket() {
+        let directory = unique_admin_test_dir("stale");
+        let path = directory.join("ctl.sock");
+        let stale_listener =
+            std::os::unix::net::UnixListener::bind(&path).expect("bind stale socket");
+        drop(stale_listener);
+
+        let identity = preflight_existing_admin_socket(&path)
+            .await
+            .expect("stale socket preflight")
+            .expect("stale socket identity");
+        remove_verified_stale_admin_socket(&path, identity).expect("remove stale socket");
+        assert!(!path.exists());
+        std::fs::remove_dir(&directory).expect("remove admin test directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admin_live_socket_is_not_treated_as_stale() {
+        let directory = unique_admin_test_dir("live");
+        let path = directory.join("ctl.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind live socket");
+
+        let error = preflight_existing_admin_socket(&path)
+            .await
+            .expect_err("live socket must block replacement");
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        drop(listener);
+        std::fs::remove_file(&path).expect("remove live test socket");
+        std::fs::remove_dir(&directory).expect("remove admin test directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admin_command_reader_rejects_overlong_line() {
+        let (mut writer, stream) = UnixStream::pair().expect("create Unix stream pair");
+        let mut reader = BufReader::new(stream);
+        let mut command = vec![b'a'; MAX_ADMIN_COMMAND_BYTES + 1];
+        command.push(b'\n');
+        let writer_task = tokio::spawn(async move { writer.write_all(&command).await });
+
+        let error = read_admin_command_with_timeout(&mut reader, Duration::from_secs(1))
+            .await
+            .expect_err("overlong admin command must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let _ = writer_task.await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admin_command_reader_releases_silent_client_at_deadline() {
+        let (_writer, stream) = UnixStream::pair().expect("create Unix stream pair");
+        let mut reader = BufReader::new(stream);
+
+        let error = read_admin_command_with_timeout(&mut reader, Duration::from_millis(20))
+            .await
+            .expect_err("silent admin command must hit its deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 }
