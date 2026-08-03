@@ -616,6 +616,28 @@ mod tests {
     }
 
     #[test]
+    fn test_server_dns_upstream_failure_returns_servfail() {
+        let payload = test_dns_query_payload();
+        let response = resolve_dns_query_via_upstream(&payload, &[]);
+        assert!(!response.is_empty(), "server failure must remain a DNS response");
+        assert_eq!(response[3] & 0x0f, 2, "upstream failure must be SERVFAIL");
+        let parsed = crate::dns::parse_dns_query(&payload).expect("query must parse");
+        let mut pos = 12;
+        loop {
+            let label_len = response[pos] as usize;
+            pos += 1;
+            if label_len == 0 {
+                break;
+            }
+            pos += label_len;
+        }
+        assert_eq!(
+            u16::from_be_bytes([response[pos], response[pos + 1]]),
+            parsed.raw_qtype
+        );
+    }
+
+    #[test]
     fn test_parse_ipv4_dest_valid() {
         // Construct a minimal IPv4 packet with dest 10.8.0.2
         let mut pkt = [0u8; 20];

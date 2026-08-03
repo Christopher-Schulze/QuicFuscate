@@ -265,15 +265,15 @@ fn build_ipv6_udp_dns_response_packet(
 }
 
 fn resolve_dns_query_via_upstream(query: &[u8], upstream_resolvers: &[Ipv4Addr]) -> Vec<u8> {
-    for upstream in upstream_resolvers {
-        match crate::dns::forward_dns_query(query, *upstream) {
-            Ok(response) => return response,
-            Err(error) => log::debug!("DNS upstream {} failed: {}", upstream, error),
+    match crate::dns::resolve_via_dns_upstreams(query, upstream_resolvers) {
+        Ok(response) => response,
+        Err(error) => {
+            log::debug!("DNS upstream resolution failed, returning SERVFAIL: {error}");
+            crate::dns::parse_dns_query(query)
+                .map(|parsed| crate::dns::build_dns_servfail(&parsed))
+                .or_else(|| crate::dns::build_dns_servfail_from_packet(query))
+                .unwrap_or_default()
         }
-    }
-    match crate::dns::parse_dns_query(query) {
-        Some(parsed) => crate::dns::build_dns_nxdomain(&parsed),
-        None => Vec::new(),
     }
 }
 

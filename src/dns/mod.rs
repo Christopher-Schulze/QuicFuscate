@@ -20,6 +20,14 @@ pub const DEFAULT_DOH_UPSTREAM: &[&str] =
 pub const DEFAULT_DNS_UPSTREAM: &[Ipv4Addr] =
     &[Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(9, 9, 9, 9)];
 
+const DNS_FLAG_QR: u16 = 0x8000;
+const DNS_FLAG_OPCODE_MASK: u16 = 0x7800;
+const DNS_FLAG_RD: u16 = 0x0100;
+const DNS_FLAG_CD: u16 = 0x0010;
+const DNS_RCODE_NOERROR: u8 = 0;
+const DNS_RCODE_SERVFAIL: u8 = 2;
+const DNS_RCODE_NXDOMAIN: u8 = 3;
+
 /// DNS query types (RFC 1035 §3.2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -60,6 +68,8 @@ pub struct DnsQuery {
     pub flags: u16,
     pub qname: String,
     pub qtype: DnsQType,
+    /// Original wire QTYPE, retained when `qtype` is `Unknown`.
+    pub raw_qtype: u16,
     pub qclass: u16,
 }
 
@@ -77,6 +87,9 @@ pub fn parse_dns_query(pkt: &[u8]) -> Option<DnsQuery> {
     }
     let id = u16::from_be_bytes([pkt[0], pkt[1]]);
     let flags = u16::from_be_bytes([pkt[2], pkt[3]]);
+    if flags & DNS_FLAG_QR != 0 {
+        return None;
+    }
     let qdcount = u16::from_be_bytes([pkt[4], pkt[5]]);
     if qdcount == 0 {
         return None;
@@ -89,7 +102,7 @@ pub fn parse_dns_query(pkt: &[u8]) -> Option<DnsQuery> {
     }
     let qtype = u16::from_be_bytes([pkt[pos], pkt[pos + 1]]);
     let qclass = u16::from_be_bytes([pkt[pos + 2], pkt[pos + 3]]);
-    Some(DnsQuery { id, flags, qname, qtype: DnsQType::from_u16(qtype), qclass })
+    Some(DnsQuery { id, flags, qname, qtype: DnsQType::from_u16(qtype), raw_qtype: qtype, qclass })
 }
 
 /// Parse a DNS name (RFC 1035 §3.1, label encoding).
@@ -150,23 +163,45 @@ fn encode_name(name: &str, out: &mut Vec<u8>) {
     out.push(0); // Root terminator.
 }
 
+fn response_flags(request_flags: u16, rcode: u8) -> u16 {
+    DNS_FLAG_QR
+        | (request_flags & (DNS_FLAG_OPCODE_MASK | DNS_FLAG_RD | DNS_FLAG_CD))
+        | u16::from(rcode & 0x0f)
+}
+
+fn append_question(query: &DnsQuery, pkt: &mut Vec<u8>) {
+    encode_name(&query.qname, pkt);
+    pkt.extend_from_slice(&query.raw_qtype.to_be_bytes());
+    pkt.extend_from_slice(&query.qclass.to_be_bytes());
+}
+
+fn build_dns_error(query: &DnsQuery, rcode: u8) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(64);
+    pkt.extend_from_slice(&query.id.to_be_bytes());
+    pkt.extend_from_slice(&response_flags(query.flags, rcode).to_be_bytes());
+    pkt.extend_from_slice(&1u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    append_question(query, &mut pkt);
+    pkt
+}
+
 /// Build a DNS response packet with the given answer records.
 ///
 /// For A records: `answers` is a list of (name, ipv4).
 /// For AAAA records: `answers` is a list of (name, ipv6).
 pub fn build_dns_response_a(query: &DnsQuery, answers: &[Ipv4Addr]) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(512);
-    // Header: ID, flags (QR=1, RD=1, RA=1, RCODE=0), QDCOUNT=1, ANCOUNT=answers.len()
+    // Header: ID, derived response flags, QDCOUNT=1, ANCOUNT=answers.len().
     pkt.extend_from_slice(&query.id.to_be_bytes());
-    pkt.extend_from_slice(&[0x81, 0x80]); // Standard response, no error
+    pkt.extend_from_slice(&response_flags(query.flags, DNS_RCODE_NOERROR).to_be_bytes());
     pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
     pkt.extend_from_slice(&(answers.len() as u16).to_be_bytes()); // ANCOUNT
     pkt.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     pkt.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
                                                 // Question section.
-    encode_name(&query.qname, &mut pkt);
-    pkt.extend_from_slice(&(query.qtype as u16).to_be_bytes());
-    pkt.extend_from_slice(&query.qclass.to_be_bytes());
+    append_question(query, &mut pkt);
     // Answer section.
     for ip in answers {
         encode_name(&query.qname, &mut pkt);
@@ -183,14 +218,12 @@ pub fn build_dns_response_a(query: &DnsQuery, answers: &[Ipv4Addr]) -> Vec<u8> {
 pub fn build_dns_response_aaaa(query: &DnsQuery, answers: &[Ipv6Addr]) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(512);
     pkt.extend_from_slice(&query.id.to_be_bytes());
-    pkt.extend_from_slice(&[0x81, 0x80]);
+    pkt.extend_from_slice(&response_flags(query.flags, DNS_RCODE_NOERROR).to_be_bytes());
     pkt.extend_from_slice(&1u16.to_be_bytes());
     pkt.extend_from_slice(&(answers.len() as u16).to_be_bytes());
     pkt.extend_from_slice(&0u16.to_be_bytes());
     pkt.extend_from_slice(&0u16.to_be_bytes());
-    encode_name(&query.qname, &mut pkt);
-    pkt.extend_from_slice(&28u16.to_be_bytes()); // TYPE AAAA
-    pkt.extend_from_slice(&query.qclass.to_be_bytes());
+    append_question(query, &mut pkt);
     for ip in answers {
         encode_name(&query.qname, &mut pkt);
         pkt.extend_from_slice(&28u16.to_be_bytes());
@@ -204,17 +237,31 @@ pub fn build_dns_response_aaaa(query: &DnsQuery, answers: &[Ipv6Addr]) -> Vec<u8
 
 /// Build a NXDOMAIN response (no such domain).
 pub fn build_dns_nxdomain(query: &DnsQuery) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(64);
-    pkt.extend_from_slice(&query.id.to_be_bytes());
-    pkt.extend_from_slice(&[0x81, 0x83]); // NXDOMAIN
-    pkt.extend_from_slice(&1u16.to_be_bytes());
-    pkt.extend_from_slice(&0u16.to_be_bytes()); // 0 answers
-    pkt.extend_from_slice(&0u16.to_be_bytes());
-    pkt.extend_from_slice(&0u16.to_be_bytes());
-    encode_name(&query.qname, &mut pkt);
-    pkt.extend_from_slice(&(query.qtype as u16).to_be_bytes());
-    pkt.extend_from_slice(&query.qclass.to_be_bytes());
-    pkt
+    build_dns_error(query, DNS_RCODE_NXDOMAIN)
+}
+
+/// Build a SERVFAIL response for an upstream or proxy failure.
+pub fn build_dns_servfail(query: &DnsQuery) -> Vec<u8> {
+    build_dns_error(query, DNS_RCODE_SERVFAIL)
+}
+
+/// Build a header-only SERVFAIL when the query cannot be parsed into a full
+/// question. Packets without a complete transaction ID cannot receive a
+/// correlated response and return `None`.
+pub fn build_dns_servfail_from_packet(pkt: &[u8]) -> Option<Vec<u8>> {
+    if pkt.len() < 2 {
+        return None;
+    }
+    let id = u16::from_be_bytes([pkt[0], *pkt.get(1)?]);
+    let request_flags = if pkt.len() >= 4 { u16::from_be_bytes([pkt[2], pkt[3]]) } else { 0 };
+    let mut response = Vec::with_capacity(12);
+    response.extend_from_slice(&id.to_be_bytes());
+    response.extend_from_slice(&response_flags(request_flags, DNS_RCODE_SERVFAIL).to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    Some(response)
 }
 
 /// Check if a UDP packet on port 53 is a DNS query.
@@ -519,11 +566,60 @@ pub async fn resolve_via_doh(query: &[u8], doh_endpoint: &str) -> Result<Vec<u8>
     resolve_via_doh_with_client(query, doh_endpoint, &client).await
 }
 
+async fn resolve_via_doh_endpoints(
+    query: &[u8],
+    doh_endpoints: &[String],
+    client: &reqwest::Client,
+) -> Result<Vec<u8>, DnsProxyError> {
+    let mut last_error = None;
+    for endpoint in doh_endpoints {
+        match resolve_via_doh_with_client(query, endpoint, client).await {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    Err(DnsProxyError::UpstreamError(format!(
+        "all DoH endpoints failed{}",
+        last_error.map(|error| format!(": {error}")).unwrap_or_default()
+    )))
+}
+
+/// Resolve through plain DNS upstreams using the shared typed result contract.
+/// A successful response is returned unchanged, including a genuine upstream
+/// NXDOMAIN. Transport and configuration failures remain errors so callers can
+/// synthesize SERVFAIL without confusing failure with a negative answer.
+pub fn resolve_via_dns_upstreams(
+    query: &[u8],
+    upstream_resolvers: &[Ipv4Addr],
+) -> Result<Vec<u8>, DnsProxyError> {
+    if upstream_resolvers.is_empty() {
+        return Err(DnsProxyError::UpstreamError(
+            "no DNS upstream resolvers are configured".to_string(),
+        ));
+    }
+
+    let mut last_error = None;
+    for upstream in upstream_resolvers {
+        match forward_dns_query(query, *upstream) {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                log::debug!("DNS upstream {upstream} failed: {error}");
+                last_error = Some(error.to_string());
+            }
+        }
+    }
+    Err(DnsProxyError::UpstreamError(format!(
+        "all DNS upstream resolvers failed{}",
+        last_error.map(|error| format!(": {error}")).unwrap_or_default()
+    )))
+}
+
 /// Error type for DNS proxy operations.
 #[derive(Debug)]
 pub enum DnsProxyError {
     IoError(std::io::Error),
     DohError(String),
+    UpstreamError(String),
     ParseError(String),
     ConfigError(String),
 }
@@ -533,6 +629,7 @@ impl std::fmt::Display for DnsProxyError {
         match self {
             Self::IoError(e) => write!(f, "DNS I/O error: {e}"),
             Self::DohError(s) => write!(f, "DoH error: {s}"),
+            Self::UpstreamError(s) => write!(f, "DNS upstream error: {s}"),
             Self::ParseError(s) => write!(f, "DNS parse error: {s}"),
             Self::ConfigError(s) => write!(f, "DNS configuration error: {s}"),
         }
@@ -557,8 +654,11 @@ pub async fn process_dns_query(
     pkt: &[u8],
     config: &DnsProxyConfig,
 ) -> Result<Vec<u8>, DnsProxyError> {
-    let query = parse_dns_query(pkt)
-        .ok_or_else(|| DnsProxyError::ParseError("invalid DNS query".into()))?;
+    let Some(query) = parse_dns_query(pkt) else {
+        return build_dns_servfail_from_packet(pkt).ok_or_else(|| {
+            DnsProxyError::ParseError("invalid DNS query without a complete transaction ID".into())
+        });
+    };
 
     if config.use_doh && !config.doh_endpoints.is_empty() {
         // Client-side: resolve via DoH through the tunnel. The shared HTTP
@@ -566,35 +666,25 @@ pub async fn process_dns_query(
         // across all queries and endpoints, benefiting from connection
         // pooling and avoiding a per-query TLS handshake.
         //
-        // If the cached client cannot be built (e.g. TLS backend
-        // unavailable), fall back to NXDOMAIN rather than propagating the
-        // error — the caller expects a DNS response packet, not an error.
-        match config.doh_client() {
-            Ok(client) => {
-                for endpoint in &config.doh_endpoints {
-                    if let Ok(response) = resolve_via_doh_with_client(pkt, endpoint, &client).await
-                    {
-                        return Ok(response);
-                    }
-                }
-                // All DoH endpoints failed — fall back to NXDOMAIN.
-                Ok(build_dns_nxdomain(&query))
-            }
-            Err(e) => {
-                log::warn!("DoH client build failed, returning NXDOMAIN: {e}");
-                Ok(build_dns_nxdomain(&query))
+        let result = match config.doh_client() {
+            Ok(client) => resolve_via_doh_endpoints(pkt, &config.doh_endpoints, &client).await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                log::warn!("DoH resolution failed, returning SERVFAIL: {error}");
+                Ok(build_dns_servfail(&query))
             }
         }
-    } else if !config.upstream_resolvers.is_empty() {
-        // Server-side: forward to upstream DNS resolver.
-        for upstream in &config.upstream_resolvers {
-            if let Ok(response) = forward_dns_query(pkt, *upstream) {
-                return Ok(response);
-            }
-        }
-        Ok(build_dns_nxdomain(&query))
     } else {
-        Ok(build_dns_nxdomain(&query))
+        match resolve_via_dns_upstreams(pkt, &config.upstream_resolvers) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                log::warn!("DNS resolution failed, returning SERVFAIL: {error}");
+                Ok(build_dns_servfail(&query))
+            }
+        }
     }
 }
 
@@ -603,9 +693,13 @@ mod tests {
     use super::*;
 
     fn make_dns_query_packet(domain: &str, qtype: u16) -> Vec<u8> {
+        make_dns_query_packet_with_flags(domain, qtype, 0x0100)
+    }
+
+    fn make_dns_query_packet_with_flags(domain: &str, qtype: u16, flags: u16) -> Vec<u8> {
         let mut pkt = Vec::new();
         pkt.extend_from_slice(&12345u16.to_be_bytes()); // ID
-        pkt.extend_from_slice(&[0x01, 0x00]); // Standard query, RD=1
+        pkt.extend_from_slice(&flags.to_be_bytes());
         pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
         pkt.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
         pkt.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
@@ -644,12 +738,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_dns_query_rejects_response_packets() {
+        let mut pkt = make_dns_query_packet("example.com", 1);
+        pkt[2] |= 0x80;
+        assert!(parse_dns_query(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_unknown_qtype_is_preserved_in_servfail_question() {
+        let raw_qtype = 65280;
+        let pkt = make_dns_query_packet("example.com", raw_qtype);
+        let query = parse_dns_query(&pkt).expect("query should parse");
+        assert_eq!(query.qtype, DnsQType::Unknown);
+        assert_eq!(query.raw_qtype, raw_qtype);
+
+        let response = build_dns_servfail(&query);
+        let mut pos = 12;
+        parse_name(&response, &mut pos).expect("response question name");
+        assert_eq!(u16::from_be_bytes([response[pos], response[pos + 1]]), raw_qtype);
+    }
+
+    #[test]
+    fn test_synthesized_response_preserves_opcode_rd_and_cd() {
+        let pkt = make_dns_query_packet_with_flags("example.com", 1, 0x2910);
+        let query = parse_dns_query(&pkt).expect("query should parse");
+        let response = build_dns_servfail(&query);
+        assert_eq!(
+            u16::from_be_bytes([response[2], response[3]]),
+            0xa912,
+            "response must set QR, preserve opcode/RD/CD, and set SERVFAIL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_malformed_query_with_transaction_id_returns_servfail() {
+        let pkt = [0x12, 0x34, 0x29, 0x10, 0, 0, 0, 0, 0, 0, 0, 0];
+        let result = process_dns_query(&pkt, &DnsProxyConfig::default()).await.unwrap();
+        assert_eq!(u16::from_be_bytes([result[0], result[1]]), 0x1234);
+        assert_eq!(result[3] & 0x0f, DNS_RCODE_SERVFAIL);
+        assert_eq!(u16::from_be_bytes([result[4], result[5]]), 0);
+    }
+
+    #[test]
     fn test_build_dns_response_a() {
         let query = DnsQuery {
             id: 42,
             flags: 0x0100,
             qname: "test.com".into(),
             qtype: DnsQType::A,
+            raw_qtype: 1,
             qclass: 1,
         };
         let ips = vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)];
@@ -667,6 +804,7 @@ mod tests {
             flags: 0x0100,
             qname: "nonexistent.invalid".into(),
             qtype: DnsQType::A,
+            raw_qtype: 1,
             qclass: 1,
         };
         let response = build_dns_nxdomain(&query);
@@ -768,7 +906,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_dns_query_with_no_resolvers_returns_nxdomain() {
+    async fn test_process_dns_query_with_no_resolvers_returns_servfail() {
         let pkt = make_dns_query_packet("example.com", 1);
         let config = DnsProxyConfig {
             doh_endpoints: vec![],
@@ -777,8 +915,7 @@ mod tests {
             ..Default::default()
         };
         let result = process_dns_query(&pkt, &config).await.unwrap();
-        // Should be NXDOMAIN (RCODE=3).
-        assert_eq!(result[3] & 0x0F, 3);
+        assert_eq!(result[3] & 0x0F, DNS_RCODE_SERVFAIL);
     }
 
     #[tokio::test]
@@ -798,10 +935,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_dns_query_doh_failure_returns_nxdomain_not_error() {
-        // When DoH is enabled but all endpoints fail (unreachable), the
-        // function must return a NXDOMAIN response packet, not an error.
-        // This is the production contract: callers expect a DNS response.
+    async fn test_process_dns_query_doh_failure_returns_servfail_not_nxdomain() {
+        // When DoH is enabled but all endpoints fail, the proxy must return
+        // SERVFAIL rather than fabricating a negative answer.
         let pkt = make_dns_query_packet("example.com", 1);
         let config = DnsProxyConfig {
             doh_endpoints: vec!["https://invalid.localhost.invalid/dns-query".to_string()],
@@ -810,8 +946,8 @@ mod tests {
             ..Default::default()
         };
         let result = process_dns_query(&pkt, &config).await;
-        assert!(result.is_ok(), "DoH failure should return NXDOMAIN, not error");
+        assert!(result.is_ok(), "DoH failure should return SERVFAIL, not error");
         let response = result.unwrap();
-        assert_eq!(response[3] & 0x0F, 3, "response should be NXDOMAIN (RCODE=3)");
+        assert_eq!(response[3] & 0x0F, DNS_RCODE_SERVFAIL, "response should be SERVFAIL");
     }
 }

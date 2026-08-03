@@ -838,7 +838,7 @@ The shared DoH primitives and client runtime owner are implemented in `src/dns/m
 - `DnsProxyConfig` owns the configured endpoint list, pre-pins endpoint addresses before resolver mutation, and caches one `reqwest::Client` for connection reuse.
 - `ClientDnsRuntime` binds the configured client listener on localhost UDP/53, calls `process_dns_query()` for RFC 8484 responses, and restores the prior platform resolver before TUN or connection teardown. The embedded Engine and standalone TUN client use this owner when `enable_doh` is enabled.
 - Endpoint resolution occurs before kill-switch connecting policy and before the local resolver changes. Invalid HTTPS endpoints, unsupported credentials/fragments, missing hosts, non-53 listener ports, and non-DoH client configs fail closed.
-- The live server TUN path forwards intercepted DNS with plain UDP `forward_dns_query()` rather than this DoH helper. That server ownership model is intentional and its failure/admission semantics remain tracked in TODO-666, TODO-668, and TODO-611.
+- The live server TUN path forwards intercepted DNS with plain UDP `forward_dns_query()` rather than this DoH helper. That server ownership model is intentional; `resolve_via_dns_upstreams()` shares the SERVFAIL-versus-upstream-response contract with the client proxy, while rate limiting and wire admission remain tracked in TODO-611, TODO-668, TODO-669, and TODO-770.
 - Standalone client mode without TUN does not install an OS resolver owner. macOS uses the existing network-service backend; Linux and Windows receive the active TUN interface name through the platform DNS hook.
 
 #### Async Stealth Scheduler (Non-Blocking)
@@ -4458,7 +4458,7 @@ nslookup -type=A example.com
 # The response should come from your configured VPN DNS servers, not your ISP
 ```
 
-Linux root validation uses `scripts/tests/tun-e2e-dns-leak-netns.sh`. The gate creates server/client namespaces, opens a real QKey-authenticated TUN/MASQUE tunnel, runs one explicit query through the server TUN IP and one normal resolver query through a private `/etc/resolv.conf` mount pointed at the client localhost proxy, verifies resolver restoration, and captures the client underlay with tcpdump. Passing evidence requires both DNS responses plus `raw_port_53_packets=0`. Set `QF_E2E_DOH_PROVIDER` for a reachable provider-success run; the default endpoint intentionally proves local ownership and cleanup with NXDOMAIN fallback.
+Linux root validation uses `scripts/tests/tun-e2e-dns-leak-netns.sh`. The gate creates server/client namespaces, opens a real QKey-authenticated TUN/MASQUE tunnel, runs one explicit query through the server TUN IP and one normal resolver query through a private `/etc/resolv.conf` mount pointed at the client localhost proxy, verifies resolver restoration, and captures the client underlay with tcpdump. Passing evidence requires both DNS responses plus `raw_port_53_packets=0`. Set `QF_E2E_DOH_PROVIDER` for a reachable provider-success run; the default endpoint intentionally proves local ownership and cleanup with a SERVFAIL fallback when the test provider is unreachable.
 
 #### Common DNS Leak Causes
 1. **Split-tunnel configuration:** Ensure all DNS traffic routes through the tunnel
@@ -4683,7 +4683,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **PKI ambient time source**: `src/pki/mod.rs` uses the wall clock for generated certificate validity; a checked and injectable PKI time source remains tracked in TODO-656.
 - **Client profile ID collision**: `src/implementations/client/profile.rs` masks a nanosecond timestamp to 32 bits, creating predictable collisions. Tracked in TODO-658.
 - **Retry token length validation after encoding**: `src/implementations/server/ddos.rs` checks `MAX_RETRY_TOKEN_LEN` only after building the token. Tracked in TODO-659.
-- **DNS NXDOMAIN lie**: `src/dns/mod.rs` returns NXDOMAIN for upstream failures. Tracked in TODO-666.
+- **DNS failure result contract**: `src/dns/mod.rs` and the server TUN intercept preserve genuine upstream responses and synthesize SERVFAIL for upstream, configuration, and parse failures. TODO-666 owns the implementation and targeted regression evidence; the strict Clippy and remote full-gate result remains pending.
 - **DNS query wire semantics**: DNS admission accepts incomplete query/header/name semantics and synthetic responses can rewrite the original question. Tracked in TODO-770.
 - **DNS client runtime wiring**: `ClientDnsRuntime` now owns localhost UDP/53, pre-pinned RFC 8484 DoH endpoint transport, platform resolver mutation, and restoration in the Engine and standalone TUN client. The Linux E2E harness exercises explicit TUN DNS, OS/application DNS, underlay capture, and restoration. Resolved by TODO-771; native macOS/Windows proof remains environment-specific.
 - **Local close error kind**: `Connection::close()` now records structured `LocalApplicationClosed` or `LocalConnectionClosed` state matching the emitted frame, while preserving any earlier local root cause. `ClientConnection::close()` is the explicit application-close API; `close_transport()` covers transport errors and public accessors expose the local/remote split. Resolved by TODO-772.
