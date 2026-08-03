@@ -473,6 +473,7 @@ impl QuicFuscateConnection {
             qkey_initial_token,
             use_utls,
             None,
+            None,
         )
     }
 
@@ -490,6 +491,7 @@ impl QuicFuscateConnection {
         qkey_initial_token: Option<Vec<u8>>,
         use_utls: bool,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        http_authority: Option<&str>,
     ) -> Result<Self, String> {
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
@@ -509,7 +511,10 @@ impl QuicFuscateConnection {
         crate::transport::rand::rand_bytes(&mut scid_bytes);
         let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
 
-        let (sni, host_header) = stealth_manager.get_connection_headers(server_name);
+        let (sni, default_host_header) = stealth_manager.get_connection_headers(server_name);
+        let host_header = http_authority
+            .map(|authority| authority.to_owned())
+            .unwrap_or(default_host_header);
 
         // When a QKey is provided, embed its 12-char hex ID as the QUIC Initial packet
         // token so the server can look up the QKey record during connection acceptance.

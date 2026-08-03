@@ -2654,7 +2654,7 @@ Profile rotation allows QuicFuscate to periodically switch the active browser/OS
 
 ```
     --local <addr>          Local UDP bind address (default: 0.0.0.0:0)
-    --url <url>             URL used by the client (default: https://cloudflare-dns.com/)
+    --url <url>             HTTPS target URL; omitted uses https://cloudflare-dns.com/
     --tun                   Enable TUN bridging (optional)
     --tun-name <name>       TUN interface name
     --tun-mtu <mtu>         TUN MTU (default 1500)
@@ -2951,7 +2951,7 @@ Global CLI flags (all commands):
 
 **Network Options:**
 - `--local`: Local UDP address (default: 0.0.0.0:0)
-- `--url`: URL to request (default: https://cloudflare-dns.com/)
+- `--url`: Optional HTTPS target URL. Omission selects the default target `https://cloudflare-dns.com/` with `source=default`; an explicit value is accepted only with an `https` scheme, a non-empty domain or IP authority, and a port in `1..=65535`. An empty path becomes `/`, queries remain part of the HTTP/3 `:path`, explicit ports remain part of `:authority`, IPv6 authorities are bracketed while the SNI host is not, and userinfo, fragments, hostless forms, malformed authorities, and unsupported schemes fail before socket binding with `source=explicit` never falling back to the default.
 - `--cc-algorithm`: Congestion control (reno, cubic, bbr2, bbr3) [default: bbr3]
 
 **Stealth Options:**

@@ -34,6 +34,7 @@ static ADMIN_LOG_BUFFER: OnceLock<
     Arc<quicfuscate::implementations::server::admin_logs::AdminLogBuffer>,
 > = OnceLock::new();
 
+#[cfg(test)]
 const DEFAULT_RUNTIME_SNI_HOST: &str = "cdn.cloudflare.com";
 const DEFAULT_RUNTIME_URL: &str = "https://cloudflare-dns.com/";
 const CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS";
@@ -939,9 +940,9 @@ enum Commands {
         #[clap(long, default_value = "0.0.0.0:0")]
         local: String,
 
-        /// The URL to request
-        #[clap(short, long, default_value = "https://cloudflare-dns.com/")]
-        url: String,
+        /// The HTTPS URL to request; omitted uses https://cloudflare-dns.com/
+        #[clap(short, long, value_name = "URL")]
+        url: Option<String>,
 
         #[command(flatten)]
         shared: SharedArgs,

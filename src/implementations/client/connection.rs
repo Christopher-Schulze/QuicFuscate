@@ -84,6 +84,7 @@ impl ClientConnection {
             qkey_initial_token,
             Self::should_use_utls(config),
             runtime_owner,
+            None,
         )
         .map_err(|e| {
             crate::instrumentation::global().client.connection_failure();

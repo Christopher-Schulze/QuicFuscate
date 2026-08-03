@@ -182,7 +182,7 @@ async fn async_main(
             run_client(
                 remote.as_str(),
                 local.as_str(),
-                url.as_str(),
+                url.as_deref(),
                 shared.profile,
                 shared.os,
                 &shared.profile_seq,
@@ -913,6 +913,129 @@ fn synchronize_client_tun_mtu(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientTargetSource {
+    Default,
+    Explicit,
+}
+
+impl ClientTargetSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClientTarget {
+    source: ClientTargetSource,
+    host: String,
+    authority: String,
+    port: u16,
+    request_path: String,
+    transport_destination: std::net::SocketAddr,
+    alternate_transport_ip: Option<IpAddr>,
+}
+
+fn invalid_client_target(reason: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("invalid client URL: {reason}"),
+    )
+}
+
+fn resolve_client_target(
+    raw_url: Option<&str>,
+    remote_addr_str: &str,
+) -> std::io::Result<ClientTarget> {
+    let (source, raw_url) = match raw_url {
+        Some(raw_url) => (ClientTargetSource::Explicit, raw_url),
+        None => (ClientTargetSource::Default, DEFAULT_RUNTIME_URL),
+    };
+    let parsed = url::Url::parse(raw_url).map_err(invalid_client_target)?;
+
+    if parsed.scheme() != "https" {
+        return Err(invalid_client_target(format!(
+            "unsupported scheme {:?}; expected https",
+            parsed.scheme()
+        )));
+    }
+    let (raw_scheme, raw_authority_and_path) = raw_url
+        .split_once("://")
+        .ok_or_else(|| invalid_client_target("authority is required after https://"))?;
+    let authority_is_missing = raw_authority_and_path.is_empty()
+        || matches!(raw_authority_and_path.as_bytes().first(), Some(b'/' | b'?' | b'#'));
+    if !raw_scheme.eq_ignore_ascii_case("https") || authority_is_missing {
+        return Err(invalid_client_target("authority is required after https://"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(invalid_client_target("credentials are not supported"));
+    }
+    if parsed.fragment().is_some() {
+        return Err(invalid_client_target("fragments are not supported"));
+    }
+
+    let host_kind = parsed.host().ok_or_else(|| invalid_client_target("host is required"))?;
+    let host = match host_kind {
+        url::Host::Ipv6(address) => address.to_string(),
+        _ => parsed
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| invalid_client_target("host is required"))?
+            .to_owned(),
+    };
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| invalid_client_target("URL has no usable port"))?;
+    if port == 0 {
+        return Err(invalid_client_target("port must be between 1 and 65535"));
+    }
+
+    let authority_host = match host_kind {
+        url::Host::Ipv6(_) => format!("[{host}]"),
+        _ => host.clone(),
+    };
+    let authority = match parsed.port() {
+        Some(port) => format!("{authority_host}:{port}"),
+        None => authority_host,
+    };
+    let path = if parsed.path().is_empty() { "/" } else { parsed.path() };
+    let request_path = match parsed.query() {
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_owned(),
+    };
+
+    let resolved_servers: Vec<_> = remote_addr_str.to_socket_addrs()?.collect();
+    let transport_destination = resolved_servers.first().copied().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
+    })?;
+    let alternate_transport_ip = resolved_servers
+        .iter()
+        .map(|address| address.ip())
+        .find(|ip| ip.is_ipv4() != transport_destination.ip().is_ipv4());
+
+    let target = ClientTarget {
+        source,
+        host,
+        authority,
+        port,
+        request_path,
+        transport_destination,
+        alternate_transport_ip,
+    };
+    info!(
+        "Accepted client target source={} host={} port={} authority={} transport_destination={}",
+        target.source.label(),
+        target.host,
+        target.port,
+        target.authority,
+        target.transport_destination
+    );
+    Ok(target)
+}
+
 fn load_client_ca_file(
     config: &mut quicfuscate::transport::Config,
     path: &Path,
@@ -937,7 +1060,7 @@ fn load_client_ca_file(
 async fn run_client(
     remote_addr_str: &str,
     local_addr_str: &str,
-    url: &str,
+    url: Option<&str>,
     profile: BrowserProfile,
     os: OsProfile,
     profile_seq: &Option<Vec<String>>,
@@ -1003,14 +1126,9 @@ async fn run_client(
         return Ok(());
     }
 
-    let resolved_servers: Vec<_> = remote_addr_str.to_socket_addrs()?.collect();
-    let server_addr = resolved_servers.first().copied().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "Server address not found")
-    })?;
-    let alternate_server_ip = resolved_servers
-        .iter()
-        .map(|address| address.ip())
-        .find(|ip| ip.is_ipv4() != server_addr.ip().is_ipv4());
+    let target = resolve_client_target(url, remote_addr_str)?;
+    let server_addr = target.transport_destination;
+    let alternate_server_ip = target.alternate_transport_ip;
 
     let local_addr = local_addr_str.to_socket_addrs()?.next().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Local address invalid")
@@ -1109,22 +1227,6 @@ async fn run_client(
         None
     };
 
-    let url_parsed = match url::Url::parse(url) {
-        Ok(u) => u,
-        Err(e1) => {
-            warn!("Invalid URL '{}': {}. Falling back to {}", url, e1, DEFAULT_RUNTIME_URL);
-            match url::Url::parse(DEFAULT_RUNTIME_URL) {
-                Ok(u2) => u2,
-                Err(e2) => {
-                    error!("Fallback URL parse failed: {}", e2);
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "invalid URL",
-                    ));
-                }
-            }
-        }
-    };
     quicfuscate::implementations::server::apply_runtime_stealth_overrides(
         &mut stealth_config,
         profile,
@@ -1136,7 +1238,7 @@ async fn run_client(
         disable_http3,
     );
 
-    let host = url_parsed.host_str().unwrap_or(DEFAULT_RUNTIME_SNI_HOST);
+    let host = target.host.as_str();
     let opt_params = runtime_optimize_config(
         config_path,
         opt_cfg,
@@ -1180,6 +1282,7 @@ async fn run_client(
         qkey_initial_token,
         !no_utls,
         Some(stealth_runtime.clone()),
+        Some(target.authority.as_str()),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -1562,7 +1665,7 @@ async fn run_client(
                 }
 
                 if conn.conn.is_established() && !request_sent {
-                    match conn.send_http3_request(url_parsed.path()) {
+                    match conn.send_http3_request(target.request_path.as_str()) {
                         Ok(_) => {
                             request_sent = true;
                         }

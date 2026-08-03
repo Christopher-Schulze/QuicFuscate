@@ -34,6 +34,93 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn client_target_defaults_when_url_is_omitted() {
+        let target = resolve_client_target(None, "127.0.0.1:4433").expect("default client target");
+
+        assert_eq!(target.source, ClientTargetSource::Default);
+        assert_eq!(target.host, "cloudflare-dns.com");
+        assert_eq!(target.authority, "cloudflare-dns.com");
+        assert_eq!(target.port, 443);
+        assert_eq!(target.request_path, "/");
+        assert_eq!(target.transport_destination, "127.0.0.1:4433".parse().unwrap());
+        assert_eq!(target.alternate_transport_ip, None);
+    }
+
+    #[test]
+    fn client_target_accepts_https_host_and_normalizes_empty_path() {
+        let target = resolve_client_target(Some("https://example.com"), "127.0.0.1:4433")
+            .expect("explicit HTTPS host should be valid");
+
+        assert_eq!(target.source, ClientTargetSource::Explicit);
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.authority, "example.com");
+        assert_eq!(target.port, 443);
+        assert_eq!(target.request_path, "/");
+    }
+
+    #[test]
+    fn client_target_preserves_ipv4_query_and_explicit_port() {
+        let target = resolve_client_target(
+            Some("https://192.0.2.10:8443/status?probe=1"),
+            "127.0.0.1:4433",
+        )
+            .expect("IPv4 target should be valid");
+
+        assert_eq!(target.host, "192.0.2.10");
+        assert_eq!(target.authority, "192.0.2.10:8443");
+        assert_eq!(target.port, 8443);
+        assert_eq!(target.request_path, "/status?probe=1");
+    }
+
+    #[test]
+    fn client_target_brackets_ipv6_authority_without_bracketing_sni_host() {
+        let target = resolve_client_target(
+            Some("https://[2001:db8::1]:8443/health"),
+            "[2001:db8::1]:4433",
+        )
+            .expect("IPv6 target should be valid");
+
+        assert_eq!(target.host, "2001:db8::1");
+        assert_eq!(target.authority, "[2001:db8::1]:8443");
+        assert_eq!(target.port, 8443);
+        assert_eq!(target.request_path, "/health");
+        assert_eq!(target.transport_destination, "[2001:db8::1]:4433".parse().unwrap());
+        assert_eq!(target.alternate_transport_ip, None);
+    }
+
+    fn assert_invalid_client_target(raw_url: &str) {
+        let error = resolve_client_target(Some(raw_url), "127.0.0.1:4433")
+            .expect_err("target must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().starts_with("invalid client URL:"));
+    }
+
+    #[test]
+    fn invalid_client_target_fails_before_remote_resolution() {
+        let error = resolve_client_target(Some("http://example.com/health"), "not-an-address")
+            .expect_err("invalid URL must fail before remote resolution");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("unsupported scheme"));
+    }
+
+    #[test]
+    fn client_target_rejects_invalid_host_scheme_authority_credentials_and_fragment() {
+        for raw_url in [
+            "https://[broken",
+            "https:/health",
+            "https:///health",
+            "https://",
+            "http://example.com/health",
+            "https://:443/health",
+            "https://user:password@example.com/health",
+            "https://example.com/health#fragment",
+        ] {
+            assert_invalid_client_target(raw_url);
+        }
+    }
+
+    #[test]
     fn client_ipv4_packet_too_big_response_advertises_tunnel_mtu() {
         let response = client_packet_too_big_response(&ipv4_packet(1400), 1280);
 
