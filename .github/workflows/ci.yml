@@ -431,6 +431,7 @@ jobs:
             QF_E2E_ARTIFACT_DIR="$GITHUB_WORKSPACE/scripts/out/tests/server-ipv4-ptb-native" \
             QF_E2E_THROUGHPUT_TRIAL_SECONDS=5 \
             QF_E2E_DEFER_PMTU_GAIN_GATE=1 \
+            QF_E2E_SERVER_LOGGING_MODE=verbose \
             PROJECT_ROOT="$GITHUB_WORKSPACE" \
             scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh
 

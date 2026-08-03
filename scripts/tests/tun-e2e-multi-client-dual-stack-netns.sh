@@ -28,6 +28,7 @@ EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
 CLIENT_RECV_DIAGNOSTICS="${QF_E2E_CLIENT_RECV_DIAGNOSTICS:-1}"
 FEC_MODE="${QF_E2E_FEC_MODE:-auto}"
 DEFER_PMTU_GAIN_GATE="${QF_E2E_DEFER_PMTU_GAIN_GATE:-0}"
+SERVER_LOGGING_MODE="${QF_E2E_SERVER_LOGGING_MODE:-normal}"
 
 SERVER_NS="qf523s"
 CLIENT_NS=("qf523c1" "qf523c2" "qf523c3")
@@ -259,6 +260,7 @@ start_phase() {
   printf '[transport]\nmtu = %s\nmax_udp_payload = %s\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
     "$pmtu_payload_max" "$pmtu_payload_max" "$pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$phase_config"
   printf '\n[fec]\nmode = "%s"\n' "$FEC_MODE" >>"$phase_config"
+  printf '\n[logging]\nmode = "%s"\n' "$SERVER_LOGGING_MODE" >>"$phase_config"
   printf '[transport]\nmtu = %s\nmax_udp_payload = %s\ndisable_pmtud = false\npmtu_min_mtu = 1280\npmtu_max_mtu = %s\npmtu_probe_interval_ms = %s\npmtu_black_hole_timeout_ms = %s\n' \
     "$client_pmtu_payload_max" "$client_pmtu_payload_max" "$client_pmtu_payload_max" "$probe_interval_ms" "$black_hole_timeout_ms" >"$client_phase_config"
   printf '\n[fec]\nmode = "%s"\n' "$FEC_MODE" >>"$client_phase_config"
@@ -1060,6 +1062,8 @@ main() {
     fail 'QF_E2E_FEC_MODE must be auto or off'
   [[ "$DEFER_PMTU_GAIN_GATE" == "0" || "$DEFER_PMTU_GAIN_GATE" == "1" ]] || \
     fail 'QF_E2E_DEFER_PMTU_GAIN_GATE must be 0 or 1'
+  [[ "$SERVER_LOGGING_MODE" == "normal" || "$SERVER_LOGGING_MODE" == "verbose" ]] || \
+    fail 'QF_E2E_SERVER_LOGGING_MODE must be normal or verbose'
   [[ -r "$CA" && -r "$CA_KEY" ]] || fail 'CA certificate or key fixture is unreadable'
 
   exec 9>"$LOCK_FILE"
