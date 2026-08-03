@@ -127,6 +127,7 @@ pub struct Metrics {
     pub masque_downlink_response_drop_byte_capacity: AtomicU64,
     pub masque_downlink_response_drop_terminal_transport_error: AtomicU64,
     pub masque_downlink_response_drop_shutdown: AtomicU64,
+    pub dns_intercept_dropped: AtomicU64,
 
     // Stealth metrics
     pub stealth_http3_active: AtomicU64,
@@ -225,6 +226,7 @@ impl Metrics {
             masque_downlink_response_drop_byte_capacity: AtomicU64::new(0),
             masque_downlink_response_drop_terminal_transport_error: AtomicU64::new(0),
             masque_downlink_response_drop_shutdown: AtomicU64::new(0),
+            dns_intercept_dropped: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
             fec_packets_encoded: FecProcessCounter::new(FecProcessCounterKind::Emitted),
@@ -325,6 +327,11 @@ impl Metrics {
     pub fn record_rate_limited(&self) {
         self.rate_limited.fetch_add(1, Ordering::Relaxed);
         crate::instrumentation::global().server.rate_limit_hit();
+    }
+
+    pub fn record_dns_intercept_drop(&self) {
+        self.dns_intercept_dropped.fetch_add(1, Ordering::Relaxed);
+        self.record_rate_limited();
     }
 
     pub(crate) fn record_ddos_sample(
@@ -821,6 +828,15 @@ impl Metrics {
             );
         }
         out.push('\n');
+
+        out.push_str(
+            "# HELP quicfuscate_dns_intercept_dropped_total DNS queries dropped before blocking upstream resolution\n",
+        );
+        out.push_str("# TYPE quicfuscate_dns_intercept_dropped_total counter\n");
+        write_metric!(
+            "quicfuscate_dns_intercept_dropped_total {}\n\n",
+            self.dns_intercept_dropped.load(Ordering::Relaxed)
+        );
 
         // Stealth
         out.push_str("# HELP quicfuscate_stealth_http3_active Clients using HTTP/3 stealth\n");
@@ -1432,6 +1448,17 @@ mod tests {
         assert!(output.contains(
             "quicfuscate_masque_downlink_response_events_total{event=\"drop_shutdown\"} 3"
         ));
+    }
+
+    #[test]
+    fn dns_intercept_drop_metric_is_exported_and_rate_limited() {
+        let metrics = Metrics::new();
+        metrics.record_dns_intercept_drop();
+
+        let output = metrics.export();
+
+        assert!(output.contains("quicfuscate_dns_intercept_dropped_total 1"));
+        assert_eq!(metrics.dns_intercept_dropped.load(Ordering::Relaxed), 1);
     }
 
     #[test]

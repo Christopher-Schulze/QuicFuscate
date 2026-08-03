@@ -287,11 +287,100 @@ fn resolve_dns_query_via_upstream(query: &[u8], upstream_resolvers: &[Ipv4Addr])
     )
 }
 
+const DNS_INTERCEPT_MAX_IN_FLIGHT: usize = 128;
+const DNS_INTERCEPT_GLOBAL_PPS: u64 = 2_000;
+const DNS_INTERCEPT_GLOBAL_BURST: u64 = 4_000;
+const DNS_INTERCEPT_SOURCE_PPS: u64 = 100;
+const DNS_INTERCEPT_SOURCE_BURST: u64 = 200;
+const DNS_INTERCEPT_BUCKET_IDLE: Duration = Duration::from_secs(60);
+const DNS_INTERCEPT_BUCKET_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DnsInterceptAdmissionDrop {
+    InFlight,
+    GlobalRate,
+    SourceRate,
+}
+
+struct DnsInterceptAdmission {
+    in_flight: Arc<tokio::sync::Semaphore>,
+    global_rate: GlobalRateLimiter,
+    source_rate: RateLimiter,
+    last_prune: Mutex<Instant>,
+}
+
+impl DnsInterceptAdmission {
+    fn new() -> Self {
+        Self::with_limits(
+            DNS_INTERCEPT_MAX_IN_FLIGHT,
+            DNS_INTERCEPT_GLOBAL_PPS,
+            DNS_INTERCEPT_GLOBAL_BURST,
+            DNS_INTERCEPT_SOURCE_PPS,
+            DNS_INTERCEPT_SOURCE_BURST,
+        )
+    }
+
+    fn with_limits(
+        max_in_flight: usize,
+        global_pps: u64,
+        global_burst: u64,
+        source_pps: u64,
+        source_burst: u64,
+    ) -> Self {
+        Self {
+            in_flight: Arc::new(tokio::sync::Semaphore::new(max_in_flight)),
+            global_rate: GlobalRateLimiter::new(global_pps, global_burst),
+            source_rate: RateLimiter::new(RateLimitConfig {
+                max_pps: source_pps,
+                max_bps: 0,
+                refill_interval: Duration::from_secs(1),
+                burst_size: source_burst,
+            }),
+            last_prune: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn try_acquire(
+        &self,
+        source_ip: IpAddr,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, DnsInterceptAdmissionDrop> {
+        self.prune_idle_if_due();
+        let permit = self
+            .in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| DnsInterceptAdmissionDrop::InFlight)?;
+        if !self.global_rate.check() {
+            return Err(DnsInterceptAdmissionDrop::GlobalRate);
+        }
+        if !self.source_rate.check_packet_ip(source_ip) {
+            return Err(DnsInterceptAdmissionDrop::SourceRate);
+        }
+        Ok(permit)
+    }
+
+    fn prune_idle_if_due(&self) {
+        let should_prune = {
+            let mut last_prune = self.last_prune.lock();
+            if last_prune.elapsed() < DNS_INTERCEPT_BUCKET_PRUNE_INTERVAL {
+                false
+            } else {
+                *last_prune = Instant::now();
+                true
+            }
+        };
+        if should_prune {
+            self.source_rate.prune_idle(DNS_INTERCEPT_BUCKET_IDLE);
+        }
+    }
+}
+
 fn spawn_dns_intercept(
     pkt: &[u8],
     upstream_resolvers: Arc<Vec<Ipv4Addr>>,
     downlink_queue: Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
     metrics: Arc<Metrics>,
+    admission: Arc<DnsInterceptAdmission>,
     fingerprint_profile: OsFingerprintProfile,
 ) -> bool {
     let parsed = parse_ipv4_udp_dns_query(pkt)
@@ -345,7 +434,24 @@ fn spawn_dns_intercept(
     } else {
         return false;
     };
+    let Some(source_ip) = parse_ipv4_udp_dns_query(pkt)
+        .map(|query| IpAddr::V4(query.src_ip))
+        .or_else(|| parse_ipv6_udp_dns_query(pkt).map(|query| IpAddr::V6(query.src_ip)))
+    else {
+        return false;
+    };
+    let permit = match admission.try_acquire(source_ip) {
+        Ok(permit) => permit,
+        Err(reason) => {
+            metrics.record_dns_intercept_drop();
+            log::debug!(
+                "DNS intercept dropped before upstream resolution for {source_ip}: {reason:?}"
+            );
+            return true;
+        }
+    };
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let response = resolve_dns_query_via_upstream(&payload, upstream_resolvers.as_slice());
         if response.is_empty() {
             return;
@@ -379,6 +485,55 @@ pub(crate) fn open_server_tun(
     {
     crate::interface::validate_tun_runtime_requirements().map_err(|e| format!("{:?}", e))?;
     TunInterface::open(tun_config, pool).map_err(|e| format!("{:?}", e))
+    }
+}
+
+#[cfg(test)]
+mod dns_intercept_admission_tests {
+    use super::*;
+
+    #[test]
+    fn admission_bounds_concurrent_upstream_work() {
+        let admission = DnsInterceptAdmission::with_limits(1, 100, 100, 100, 100);
+        let source = IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2));
+        let permit = admission.try_acquire(source).expect("first exchange must be admitted");
+
+        assert!(matches!(
+            admission.try_acquire(source),
+            Err(DnsInterceptAdmissionDrop::InFlight)
+        ));
+
+        drop(permit);
+        assert!(admission.try_acquire(source).is_ok());
+    }
+
+    #[test]
+    fn admission_applies_global_and_per_source_caps() {
+        let per_source = DnsInterceptAdmission::with_limits(4, 100, 100, 1, 1);
+        let first_source = IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2));
+        let second_source = IpAddr::V4(Ipv4Addr::new(10, 8, 0, 3));
+        let permit = per_source
+            .try_acquire(first_source)
+            .expect("first source query must be admitted");
+        drop(permit);
+        assert!(matches!(
+            per_source.try_acquire(first_source),
+            Err(DnsInterceptAdmissionDrop::SourceRate)
+        ));
+        let other_permit = per_source
+            .try_acquire(second_source)
+            .expect("a different source must have its own bucket");
+        drop(other_permit);
+
+        let global = DnsInterceptAdmission::with_limits(4, 1, 1, 100, 100);
+        let permit = global
+            .try_acquire(first_source)
+            .expect("global burst must admit the first query");
+        drop(permit);
+        assert!(matches!(
+            global.try_acquire(second_source),
+            Err(DnsInterceptAdmissionDrop::GlobalRate)
+        ));
     }
 }
 

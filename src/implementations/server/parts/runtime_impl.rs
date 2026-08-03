@@ -818,6 +818,7 @@ impl ServerRuntime {
         let tun_enable = runtime_config.tun_enable;
         let fingerprint_profile = runtime_config.transport.fingerprint_profile();
         let dns_upstream_resolvers = Arc::new(self.server_config.dns_servers.clone());
+        let dns_intercept_admission = Arc::new(DnsInterceptAdmission::new());
         if self.state != ServerState::Stopped {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -1090,6 +1091,7 @@ impl ServerRuntime {
                                 runtime_parts.server_ips,
                                 tun_enable,
                                 Arc::clone(&dns_upstream_resolvers),
+                                Arc::clone(&dns_intercept_admission),
                                 Arc::clone(&runtime_parts.tun_fault),
                                 Arc::clone(&runtime_parts.tun_notify),
                                 Arc::clone(&runtime_parts.shutdown),
