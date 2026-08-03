@@ -638,6 +638,17 @@ mod tests {
     }
 
     #[test]
+    fn test_server_dns_genuine_nxdomain_passes_through_unchanged() {
+        let payload = test_dns_query_payload();
+        let parsed = crate::dns::parse_dns_query(&payload).expect("query must parse");
+        let genuine_nxdomain = crate::dns::build_dns_nxdomain(&parsed);
+        let response = response_from_dns_upstream_result(&payload, Ok(genuine_nxdomain.clone()));
+
+        assert_eq!(response, genuine_nxdomain);
+        assert_eq!(response[3] & 0x0f, 3, "genuine upstream NXDOMAIN must remain NXDOMAIN");
+    }
+
+    #[test]
     fn test_parse_ipv4_dest_valid() {
         // Construct a minimal IPv4 packet with dest 10.8.0.2
         let mut pkt = [0u8; 20];

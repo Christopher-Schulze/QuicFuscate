@@ -264,17 +264,27 @@ fn build_ipv6_udp_dns_response_packet(
     Some(pkt)
 }
 
-fn resolve_dns_query_via_upstream(query: &[u8], upstream_resolvers: &[Ipv4Addr]) -> Vec<u8> {
-    match crate::dns::resolve_via_dns_upstreams(query, upstream_resolvers) {
+fn response_from_dns_upstream_result(
+    query: &[u8],
+    result: Result<Vec<u8>, crate::dns::DnsProxyError>,
+) -> Vec<u8> {
+    match result {
         Ok(response) => response,
         Err(error) => {
             log::debug!("DNS upstream resolution failed, returning SERVFAIL: {error}");
             crate::dns::parse_dns_query(query)
                 .map(|parsed| crate::dns::build_dns_servfail(&parsed))
                 .or_else(|| crate::dns::build_dns_servfail_from_packet(query))
-                .unwrap_or_default()
+            .unwrap_or_default()
         }
     }
+}
+
+fn resolve_dns_query_via_upstream(query: &[u8], upstream_resolvers: &[Ipv4Addr]) -> Vec<u8> {
+    response_from_dns_upstream_result(
+        query,
+        crate::dns::resolve_via_dns_upstreams(query, upstream_resolvers),
+    )
 }
 
 fn spawn_dns_intercept(
