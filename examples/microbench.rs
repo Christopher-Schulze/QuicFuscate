@@ -4,6 +4,7 @@
 //   microbench help
 //   microbench aes-block <total_bytes_per_iter> <iters>
 //   microbench ghash <total_bytes_per_iter> <iters>
+//   microbench ghash-short <iters>
 //   microbench aes-gcm <total_bytes_per_iter> <iters>
 //   microbench chacha-x4 <total_bytes_per_iter> <iters>
 //   microbench bitpack <bit_width:1-8> <values_per_iter> <iters>
@@ -93,6 +94,39 @@ fn bench_ghash(total_bytes: usize, iters: usize) {
         processed,
         iters,
         elapsed,
+        format_mbps(processed, elapsed),
+        sink
+    );
+}
+
+fn bench_ghash_short(iters: usize) {
+    use quicfuscate::crypto::aes::aes128_encrypt_block;
+    use quicfuscate::crypto::gcm::ghash;
+
+    const AAD_BYTES: usize = 32;
+    const CIPHERTEXT_BYTES: usize = 128;
+    let key = [0u8; 16];
+    let zero = [0u8; 16];
+    let h = aes128_encrypt_block(&key, &zero);
+    let aad = [0u8; AAD_BYTES];
+    let mut ct = [0u8; CIPHERTEXT_BYTES];
+    let mut sink: u8 = 0;
+    let start = Instant::now();
+    for i in 0..iters {
+        ct[0] = (i & 0xFF) as u8;
+        let tag = ghash(h, &aad, &ct);
+        sink ^= tag[0];
+    }
+    let elapsed = start.elapsed().as_nanos();
+    let processed = (AAD_BYTES + CIPHERTEXT_BYTES) * iters;
+    let ns_per_packet = if iters == 0 { 0.0 } else { elapsed as f64 / iters as f64 };
+    println!(
+        "bench,ghash-short,packets,{},bytes,{},iters,{},ns_total,{},ns_per_packet,{:.3},mbps,{:.3},sink,{}",
+        iters,
+        processed,
+        iters,
+        elapsed,
+        ns_per_packet,
         format_mbps(processed, elapsed),
         sink
     );
@@ -340,7 +374,7 @@ fn print_profile_info() {
 
 fn print_help() {
     eprintln!(
-        "Microbench CLI\n\nCommands:\n  profile\n  aes-block <bytes_per_iter> <iters>\n  ghash <bytes_per_iter> <iters>\n  aes-gcm <bytes_per_iter> <iters>\n  chacha-x4 <bytes_per_iter> <iters>\n  morus-enc <bytes_per_iter> <iters>\n  morus-dec <bytes_per_iter> <iters>\n  poly1305-mac <bytes_per_iter> <iters>\n  sha256 <bytes_per_iter> <iters> [backend:auto|avx2|vnni|scalar] (requires --features benches)\n  hmac-sha256 <bytes_per_iter> <iters>\n  varint <values_per_iter> <iters>\n  hdr-validate <headers_per_iter> <iters>\n  bitpack <bit_width:1-8> <values_per_iter> <iters>\n  bitunpack <bit_width:1-8> <values_per_iter> <iters>\n  qpack-enc <bytes_per_iter> <iters>\n  qpack-dec <bytes_per_iter> <iters>\n  popcnt <bytes_per_iter> <iters>\nSizes accept suffixes: B, KiB, MiB"
+        "Microbench CLI\n\nCommands:\n  profile\n  aes-block <bytes_per_iter> <iters>\n  ghash <bytes_per_iter> <iters>\n  ghash-short <iters>\n  aes-gcm <bytes_per_iter> <iters>\n  chacha-x4 <bytes_per_iter> <iters>\n  morus-enc <bytes_per_iter> <iters>\n  morus-dec <bytes_per_iter> <iters>\n  poly1305-mac <bytes_per_iter> <iters>\n  sha256 <bytes_per_iter> <iters> [backend:auto|avx2|vnni|scalar] (requires --features benches)\n  hmac-sha256 <bytes_per_iter> <iters>\n  varint <values_per_iter> <iters>\n  hdr-validate <headers_per_iter> <iters>\n  bitpack <bit_width:1-8> <values_per_iter> <iters>\n  bitunpack <bit_width:1-8> <values_per_iter> <iters>\n  qpack-enc <bytes_per_iter> <iters>\n  qpack-dec <bytes_per_iter> <iters>\n  popcnt <bytes_per_iter> <iters>\nSizes accept suffixes: B, KiB, MiB"
     );
 }
 
@@ -353,6 +387,15 @@ fn main() {
     let cmd = &args[1];
     if cmd == "profile" {
         print_profile_info();
+        return;
+    }
+
+    if cmd == "ghash-short" {
+        if args.len() != 3 {
+            print_help();
+            std::process::exit(2);
+        }
+        bench_ghash_short(parse_usize(&args[2]));
         return;
     }
 

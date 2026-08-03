@@ -40,6 +40,10 @@ qf_json_append_object "$RESULTS_JSON" "meta=json:{\"iters\":$ITERS,\"sizes\":\"$
 
 echo "ts,$(date -Iseconds)" | tee "$OUT_CSV" >/dev/null
 
+info "Running repeated short-packet GHASH: fixed 32B AAD + 128B ciphertext | iters=$ITERS"
+run cargo run --release -q --example microbench -- ghash-short "$ITERS" | tee -a "$OUT_CSV"
+echo "---" | tee -a "$OUT_CSV"
+
 for sz in "${SIZES[@]}"; do
   run cargo run --release -q --example microbench -- ghash "$sz" "$ITERS" | tee -a "$OUT_CSV"
   echo "---" | tee -a "$OUT_CSV"

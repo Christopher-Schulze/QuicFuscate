@@ -1,14 +1,61 @@
 #[cfg(all(test, target_arch = "x86_64"))]
 use std::sync::Mutex;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use std::sync::OnceLock;
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GhashOverride {
+    Auto,
+    Vpclmul,
+    Pclmul,
+    Sse,
+    Scalar,
+    Unknown,
+}
+
+#[cfg(target_arch = "x86_64")]
+static GHASH_OVERRIDE: OnceLock<Option<GhashOverride>> = OnceLock::new();
 
 #[cfg(all(test, target_arch = "x86_64"))]
-static GHASH_TEST_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
+static GHASH_TEST_OVERRIDE: Mutex<Option<GhashOverride>> = Mutex::new(None);
+
+#[cfg(target_arch = "x86_64")]
+fn parse_ghash_override(value: &str) -> GhashOverride {
+    if value.eq_ignore_ascii_case("auto") {
+        GhashOverride::Auto
+    } else if value.eq_ignore_ascii_case("vpclmul") {
+        GhashOverride::Vpclmul
+    } else if value.eq_ignore_ascii_case("pclmul") {
+        GhashOverride::Pclmul
+    } else if value.eq_ignore_ascii_case("sse") {
+        GhashOverride::Sse
+    } else if value.eq_ignore_ascii_case("scalar") || value.eq_ignore_ascii_case("ref") {
+        GhashOverride::Scalar
+    } else {
+        GhashOverride::Unknown
+    }
+}
 
 /// Test-only: override the GHASH backend selection for deterministic testing.
 #[cfg(all(test, target_arch = "x86_64"))]
 pub fn __test_set_ghash_override(val: Option<&str>) {
     let mut guard = GHASH_TEST_OVERRIDE.lock().unwrap();
-    *guard = val.map(|s| s.to_lowercase());
+    *guard = val.map(parse_ghash_override);
+}
+
+#[cfg(target_arch = "aarch64")]
+static GHASH_PMULL_ENABLED: OnceLock<bool> = OnceLock::new();
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn ghash_pmull_enabled() -> bool {
+    *GHASH_PMULL_ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QUICFUSCATE_GHASH_PMULL").ok().as_deref(),
+            Some("0") | Some("false") | Some("FALSE") | Some("off") | Some("OFF")
+        )
+    })
 }
 
 const GHASH_REDUCTION: u128 = 0xe100_0000_0000_0000_0000_0000_0000_0000;
@@ -95,13 +142,27 @@ fn reduce_natural_gf128_product(mut low: u128, mut high: u128) -> u128 {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn ghash_override_value() -> Option<String> {
+#[inline(always)]
+fn ghash_override_value() -> Option<GhashOverride> {
     #[cfg(all(test, target_arch = "x86_64"))]
-    if let Some(mode) = GHASH_TEST_OVERRIDE.lock().unwrap().clone() {
+    if let Some(mode) = GHASH_TEST_OVERRIDE.lock().unwrap().as_ref().copied() {
         return Some(mode);
     }
 
-    std::env::var("QUICFUSCATE_GHASH").ok()
+    GHASH_OVERRIDE
+        .get_or_init(|| {
+            std::env::var("QUICFUSCATE_GHASH").ok().map(|raw| {
+                let mode = parse_ghash_override(&raw);
+                if mode == GhashOverride::Unknown {
+                    log::warn!("unknown GHASH override '{}'; falling back to auto", raw);
+                    GhashOverride::Auto
+                } else {
+                    mode
+                }
+            })
+        })
+        .as_ref()
+        .copied()
 }
 
 /// Compute GHASH over AAD and ciphertext with runtime SIMD dispatch.
@@ -115,10 +176,10 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
 
         let detector = crate::optimize::FeatureDetector::instance();
         let features = detector.features_full();
-        if let Some(mode) = ghash_override_value().map(|s| s.to_lowercase()) {
-            match mode.as_str() {
-                "auto" => {}
-                "vpclmul" => {
+        if let Some(mode) = ghash_override_value() {
+            match mode {
+                GhashOverride::Auto => {}
+                GhashOverride::Vpclmul => {
                     if detector.has_feature(CpuFeature::VPCLMULQDQ)
                         && detector.has_feature(CpuFeature::PCLMULQDQ)
                         && detector.has_feature(CpuFeature::SSSE3)
@@ -132,7 +193,7 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
                             "GHASH override 'vpclmul' requested but VPCLMUL support is unavailable; falling back"
                         );
                 }
-                "pclmul" => {
+                GhashOverride::Pclmul => {
                     if detector.has_feature(CpuFeature::PCLMULQDQ) {
                         crate::optimize::telemetry::GHASH_PCLMUL_OPS.inc();
                         return ghash_hw_pclmul(h, aad, ct);
@@ -141,7 +202,7 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
                             "GHASH override 'pclmul' requested but PCLMULQDQ support is unavailable; falling back"
                         );
                 }
-                "sse" => {
+                GhashOverride::Sse => {
                     if features.sse41 && features.ssse3 {
                         crate::optimize::telemetry::GHASH_SSE_OPS.inc();
                         return ghash_hw_sse(h, aad, ct);
@@ -150,15 +211,15 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
                             "GHASH override 'sse' requested but SSE4.1/SSSE3 are unavailable; falling back"
                         );
                 }
-                "scalar" | "ref" => {
+                GhashOverride::Scalar => {
                     crate::optimize::telemetry::GHASH_SCALAR_OPS.inc();
                     crate::optimize::telemetry::GHASH_SCALAR_CALLS.inc();
                     crate::optimize::telemetry::GHASH_SCALAR_BYTES
                         .inc_by((aad.len().saturating_add(ct.len())) as u64);
                     return ghash_software(h, aad, ct);
                 }
-                other => {
-                    log::warn!("unknown GHASH override '{}'; falling back to auto", other);
+                GhashOverride::Unknown => {
+                    log::warn!("unknown GHASH test override; falling back to auto");
                 }
             }
         }
@@ -186,12 +247,7 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     #[cfg(target_arch = "aarch64")]
     unsafe {
         let detector = crate::optimize::FeatureDetector::instance();
-        let gate = std::env::var("QUICFUSCATE_GHASH_PMULL").ok();
-        let disabled = matches!(
-            gate.as_deref(),
-            Some("0") | Some("false") | Some("FALSE") | Some("off") | Some("OFF")
-        );
-        if !disabled {
+        if ghash_pmull_enabled() {
             let finalize = |hw: [u8; 16]| -> [u8; 16] {
                 #[cfg(any(test, debug_assertions))]
                 {
