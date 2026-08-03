@@ -22,6 +22,7 @@ THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"
 EGRESS_SUMMARIZER="$SCRIPT_DIR/utils/summarize-external-egress.py"
 BOUNDARY_SUMMARIZER="$SCRIPT_DIR/utils/summarize-throughput-boundaries.py"
 UDP_SOCKET_EVIDENCE="$SCRIPT_DIR/utils/udp-socket-evidence.py"
+TTL_PCAP_VERIFIER="$SCRIPT_DIR/utils/verify-icmp-time-exceeded-pcap.py"
 THROUGHPUT_TRIAL_SECONDS="${QF_E2E_THROUGHPUT_TRIAL_SECONDS:-10}"
 THROUGHPUT_RATE_BPS="${QF_E2E_THROUGHPUT_RATE_BPS:-15000000}"
 EXTERNAL_EGRESS_CAPTURE="${QF_E2E_EXTERNAL_EGRESS_CAPTURE:-0}"
@@ -688,10 +689,40 @@ prove_fanout() {
 }
 
 prove_icmp_boundaries() {
-  ip netns exec "${CLIENT_NS[0]}" ip route replace 198.51.100.1/32 dev "$TUN_NAME"
-  local ttl_output
-  ttl_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -t 1 -I 10.0.1.2 198.51.100.1 2>&1 || true)"
-  grep -qi 'Time to live exceeded' <<<"$ttl_output" || fail 'IPv4 TTL-expiry response was not observed'
+  local ttl_destination=198.51.100.1
+  ip netns exec "${CLIENT_NS[0]}" ip route replace "$ttl_destination/32" dev "$TUN_NAME"
+  local ttl_output ttl_pcap capture_pid
+  ttl_pcap="$ARTIFACT_DIR/icmp-ttl-client.pcap"
+  fetch_metrics ttl-before
+  ip netns exec "${CLIENT_NS[0]}" timeout 5 tcpdump -U -nn -s 0 -i "$TUN_NAME" \
+    -w "$ttl_pcap" \
+    "icmp and ((src host 10.0.1.2 and dst host $ttl_destination) or (src host 10.0.1.1 and dst host 10.0.1.2))" \
+    >"$ARTIFACT_DIR/icmp-ttl-capture.log" 2>&1 &
+  capture_pid="$!"
+  CAPTURE_PIDS+=("$capture_pid")
+  sleep 0.5
+  kill -0 "$capture_pid" 2>/dev/null || fail 'IPv4 TTL-expiry capture did not remain active'
+  ttl_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -t 1 \
+    -I 10.0.1.2 "$ttl_destination" 2>&1 || true)"
+  wait "$capture_pid" 2>/dev/null || true
+  CAPTURE_PIDS=()
+  printf '%s\n' "$ttl_output" >"$ARTIFACT_DIR/icmp-ttl.txt"
+  fetch_metrics ttl-after
+  python3 "$TTL_PCAP_VERIFIER" \
+    --pcap "$ttl_pcap" \
+    --request-source 10.0.1.2 \
+    --request-destination "$ttl_destination" \
+    --response-source 10.0.1.1 \
+    --response-destination 10.0.1.2 \
+    --request-ttl 1 \
+    --response-ttl 128 \
+    --output "$ARTIFACT_DIR/icmp-ttl-verification.json" || \
+    fail 'IPv4 TTL-expiry pcap did not satisfy the server response contract'
+  local ttl_before ttl_after
+  ttl_before="$(routing_metric_value ttl-before time_exceeded)"
+  ttl_after="$(routing_metric_value ttl-after time_exceeded)"
+  ((ttl_after >= ttl_before + 1)) || \
+    fail "IPv4 TTL-expiry probe did not increment server time_exceeded metric: before=$ttl_before after=$ttl_after"
 
   ip netns exec "$SERVER_NS" ip link add qf523ptb type dummy
   ip netns exec "$SERVER_NS" ip addr add 192.0.2.1/32 dev qf523ptb
@@ -1055,6 +1086,7 @@ main() {
   [[ -r "$EGRESS_SUMMARIZER" ]] || fail "external egress summarizer is unreadable: $EGRESS_SUMMARIZER"
   [[ -r "$BOUNDARY_SUMMARIZER" ]] || fail "throughput boundary summarizer is unreadable: $BOUNDARY_SUMMARIZER"
   [[ -r "$UDP_SOCKET_EVIDENCE" ]] || fail "UDP socket evidence helper is unreadable: $UDP_SOCKET_EVIDENCE"
+  [[ -r "$TTL_PCAP_VERIFIER" ]] || fail "TTL pcap verifier is unreadable: $TTL_PCAP_VERIFIER"
   if [[ ! "$THROUGHPUT_TRIAL_SECONDS" =~ ^[0-9]+$ ]] \
     || ((THROUGHPUT_TRIAL_SECONDS < 5)); then
     fail 'QF_E2E_THROUGHPUT_TRIAL_SECONDS must be an integer of at least 5'

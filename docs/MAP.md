@@ -5,6 +5,7 @@ It is maintained as the current architecture and repository index, with a curate
 
 ## High-Level Architecture and Wiring
 
+- Native IPv4 TTL-expiry proof: `scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh::prove_icmp_boundaries()` captures the client-TUN request and server `TIME_EXCEEDED` response into a pcap, then `scripts/tests/utils/verify-icmp-time-exceeded-pcap.py` checks endpoints, TTLs, ICMP type/code, IPv4 and ICMP checksums, and the exact 28-byte quoted request; before/after metrics require a positive `time_exceeded` delta. The corrected-source rerun `30826363327`, job `91728986360`, reached `time_exceeded=1` before the independent backpressure-quiescence failure, so the enhanced native proof remains open under TODO-806.
 - Runtime core: Rust crate under `src/` with entrypoints in `src/main.rs` and `src/lib.rs`.
 - Unified configuration boundary: `config/quicfuscate.toml` -> strict `EngineConfig` parse -> complete section validation -> dedicated transport/client/server projections. `AppConfig` retains only validated FEC, stealth, optimization, and anti-replay runtime state; transport policies and startup-owned sections remain on their canonical owners, and invalid or unknown submitted values fail before admin persistence or runtime construction.
 - Data path wiring: app or TUN ingress -> core/transport -> stealth shaping -> crypto -> FEC -> network I/O.
