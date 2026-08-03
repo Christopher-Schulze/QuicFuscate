@@ -163,7 +163,7 @@ fn bench_morus_encrypt(total_bytes: usize, iters: usize) {
     let iv = [0u8; 12];
     let nonce = [0u8; 16];
     let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv);
+    let morus = MorusAead::new(&key, &iv).expect("validated benchmark key and IV lengths");
     let mut buffer = vec![0u8; total_bytes];
     let mut sink: u8 = 0;
 
@@ -193,7 +193,7 @@ fn bench_morus_decrypt(total_bytes: usize, iters: usize) {
     let iv = [0x5Au8; 12];
     let nonce = [0u8; 16];
     let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv);
+    let morus = MorusAead::new(&key, &iv).expect("validated benchmark key and IV lengths");
 
     let mut plaintext = vec![0u8; total_bytes];
     for (idx, byte) in plaintext.iter_mut().enumerate() {

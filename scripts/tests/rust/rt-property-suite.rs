@@ -64,10 +64,10 @@ proptest! {
         let mut buf = vec![0u8; plaintext.len() + 16];
         buf[..plaintext.len()].copy_from_slice(&plaintext);
 
-        let seal = ChaCha20Poly1305::new(&key, &nonce);
+        let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let sealed_len =
             seal.seal_with_u64_counter(counter, &aad, &mut buf, plaintext.len(), None).expect("seal");
-        let open = ChaCha20Poly1305::new(&key, &nonce);
+        let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let opened_len = open.open_with_u64_counter(counter, &aad, &mut buf).expect("open");
 
         prop_assert_eq!(sealed_len, plaintext.len() + 16);
@@ -88,7 +88,8 @@ proptest! {
         let mut baseline_cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
         baseline_cfg.force_aead = "aegis-128l".to_string();
         install_data_aead_config(&baseline_cfg);
-        let (baseline_seal, baseline_open) = select_data_aead(&key, &iv);
+        let (baseline_seal, baseline_open) =
+            select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
         let mut baseline_buf = vec![0u8; plaintext.len() + 16];
         baseline_buf[..plaintext.len()].copy_from_slice(&plaintext);
         baseline_seal
@@ -103,7 +104,7 @@ proptest! {
             let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
             cfg.force_aead = alias.to_string();
             install_data_aead_config(&cfg);
-            let (seal, open) = select_data_aead(&key, &iv);
+            let (seal, open) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
             let mut buf = vec![0u8; plaintext.len() + 16];
             buf[..plaintext.len()].copy_from_slice(&plaintext);
             seal
@@ -134,7 +135,8 @@ proptest! {
         let mut baseline_cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
         baseline_cfg.force_aead = "aegis-128l".to_string();
         install_data_aead_config(&baseline_cfg);
-        let (baseline_seal, _) = select_data_aead(&key, &iv);
+        let (baseline_seal, _) =
+            select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
         let mut baseline_buf = vec![0u8; plaintext.len() + 16];
         baseline_buf[..plaintext.len()].copy_from_slice(&plaintext);
         let baseline_len = baseline_seal
@@ -145,7 +147,7 @@ proptest! {
             let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
             cfg.force_aead = alias.to_string();
             install_data_aead_config(&cfg);
-            let (seal, _) = select_data_aead(&key, &iv);
+            let (seal, _) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
             let mut buf = vec![0u8; plaintext.len() + 16];
             buf[..plaintext.len()].copy_from_slice(&plaintext);
             let alias_len = seal
@@ -175,7 +177,7 @@ proptest! {
         let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
         cfg.force_aead = "morus".to_string();
         install_data_aead_config(&cfg);
-        let (seal, open) = select_data_aead(&key, &iv);
+        let (seal, open) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
         let mut buf = vec![0u8; plaintext.len() + 16];
         buf[..plaintext.len()].copy_from_slice(&plaintext);
         let sealed = seal
@@ -330,7 +332,7 @@ proptest! {
         let mut buf = vec![0u8; ct_len];
         buf[..plaintext.len()].copy_from_slice(&plaintext);
 
-        let seal = ChaCha20Poly1305::new(&key, &nonce);
+        let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let sealed_len = seal
             .seal_with_u64_counter(counter, &aad, &mut buf, plaintext.len(), None)
             .expect("seal");
@@ -340,7 +342,7 @@ proptest! {
         let bit_pos = (bit_index / sealed_len) % 8;
         buf[byte_pos] ^= 1u8 << bit_pos;
 
-        let open = ChaCha20Poly1305::new(&key, &nonce);
+        let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let result = open.open_with_u64_counter(counter, &aad, &mut buf);
         prop_assert!(result.is_err(), "tampered ciphertext must fail authentication");
     }

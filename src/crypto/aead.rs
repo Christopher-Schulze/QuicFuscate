@@ -1,5 +1,72 @@
 use zeroize::Zeroize;
 
+/// Invalid key, IV, nonce, or header-protection secret length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMaterialError {
+    /// The material has an invalid exact or minimum length.
+    Length {
+        algorithm: &'static str,
+        material: &'static str,
+        expected: usize,
+        actual: usize,
+        minimum: bool,
+    },
+}
+
+impl std::fmt::Display for KeyMaterialError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Length { algorithm, material, expected, actual, minimum } if *minimum => write!(
+                formatter,
+                "{algorithm} {material} must be at least {expected} bytes, got {actual}"
+            ),
+            Self::Length { algorithm, material, expected, actual, .. } => write!(
+                formatter,
+                "{algorithm} {material} must be exactly {expected} bytes, got {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for KeyMaterialError {}
+
+pub(crate) fn require_exact_length(
+    algorithm: &'static str,
+    material: &'static str,
+    expected: usize,
+    actual: usize,
+) -> Result<(), KeyMaterialError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(KeyMaterialError::Length { algorithm, material, expected, actual, minimum: false })
+    }
+}
+
+pub(crate) fn require_minimum_length(
+    algorithm: &'static str,
+    material: &'static str,
+    expected: usize,
+    actual: usize,
+) -> Result<(), KeyMaterialError> {
+    if actual >= expected {
+        Ok(())
+    } else {
+        Err(KeyMaterialError::Length { algorithm, material, expected, actual, minimum: true })
+    }
+}
+
+pub(crate) fn require_exact_key_iv(
+    algorithm: &'static str,
+    key: &[u8],
+    key_len: usize,
+    iv: &[u8],
+    iv_len: usize,
+) -> Result<(), KeyMaterialError> {
+    require_exact_length(algorithm, "key", key_len, key.len())?;
+    require_exact_length(algorithm, "IV", iv_len, iv.len())
+}
+
 /// QUIC packet protection algorithm identifier.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -118,10 +185,15 @@ pub struct AesHp {
 
 impl AesHp {
     /// Create a new header protector from the first 16 bytes of `secret`.
-    pub fn new(secret: &[u8]) -> Self {
+    pub fn new(secret: &[u8]) -> Result<Self, KeyMaterialError> {
+        require_minimum_length("AES-128-HP", "secret", 16, secret.len())?;
         let mut key = [0u8; 16];
-        key.copy_from_slice(&secret[..16.min(secret.len())]);
-        Self { key }
+        key.copy_from_slice(&secret[..16]);
+        Ok(Self { key })
+    }
+
+    pub(crate) fn from_key(key: &[u8; 16]) -> Self {
+        Self { key: *key }
     }
 }
 

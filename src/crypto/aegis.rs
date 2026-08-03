@@ -4,7 +4,9 @@
 //! Internal consolidated implementation with hardware-dispatched AES rounds.
 //! No external crate dependency.
 
-use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
+use crate::crypto::aead::{
+    require_exact_key_iv, AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem, KeyMaterialError,
+};
 use std::sync::atomic::Ordering;
 use zeroize::Zeroize;
 
@@ -14,19 +16,19 @@ pub struct Aegis128LAead {
     iv: [u8; 12],
 }
 
-/// Generate a `new(aead_key, iv)` constructor that copies key/IV bytes into
-/// fixed-size arrays. All Aegis variants share identical field layout so one
-/// macro covers all three.
 impl Aegis128LAead {
-    /// Create a new AEGIS-128L AEAD instance with copied key and IV material.
-    pub fn new(aead_key: &[u8], iv: &[u8]) -> Self {
-        let mut k = [0u8; 16];
-        let klen = aead_key.len().min(16);
-        k[..klen].copy_from_slice(&aead_key[..klen]);
-        let mut v = [0u8; 12];
-        let vlen = iv.len().min(12);
-        v[..vlen].copy_from_slice(&iv[..vlen]);
-        Self { key: k, iv: v }
+    /// Create a new AEGIS-128L AEAD instance with exact key and IV material.
+    pub fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, KeyMaterialError> {
+        require_exact_key_iv("AEGIS-128L", aead_key, 16, iv, 12)?;
+        let mut key = [0u8; 16];
+        key.copy_from_slice(aead_key);
+        let mut iv_array = [0u8; 12];
+        iv_array.copy_from_slice(iv);
+        Ok(Self::from_arrays(&key, &iv_array))
+    }
+
+    pub(crate) fn from_arrays(aead_key: &[u8; 16], iv: &[u8; 12]) -> Self {
+        Self { key: *aead_key, iv: *iv }
     }
 }
 
@@ -36,14 +38,18 @@ pub(crate) struct Aegis128X4Aead {
 }
 
 impl Aegis128X4Aead {
-    pub(crate) fn new(aead_key: &[u8], iv: &[u8]) -> Self {
-        let mut k = [0u8; 16];
-        let klen = aead_key.len().min(16);
-        k[..klen].copy_from_slice(&aead_key[..klen]);
-        let mut v = [0u8; 12];
-        let vlen = iv.len().min(12);
-        v[..vlen].copy_from_slice(&iv[..vlen]);
-        Self { key: k, iv: v }
+    #[allow(dead_code)]
+    pub(crate) fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, KeyMaterialError> {
+        require_exact_key_iv("AEGIS-128X4", aead_key, 16, iv, 12)?;
+        let mut key = [0u8; 16];
+        key.copy_from_slice(aead_key);
+        let mut iv_array = [0u8; 12];
+        iv_array.copy_from_slice(iv);
+        Ok(Self::from_arrays(&key, &iv_array))
+    }
+
+    pub(crate) fn from_arrays(aead_key: &[u8; 16], iv: &[u8; 12]) -> Self {
+        Self { key: *aead_key, iv: *iv }
     }
 }
 
@@ -53,14 +59,18 @@ pub(crate) struct Aegis128X8Aead {
 }
 
 impl Aegis128X8Aead {
-    pub(crate) fn new(aead_key: &[u8], iv: &[u8]) -> Self {
-        let mut k = [0u8; 16];
-        let klen = aead_key.len().min(16);
-        k[..klen].copy_from_slice(&aead_key[..klen]);
-        let mut v = [0u8; 12];
-        let vlen = iv.len().min(12);
-        v[..vlen].copy_from_slice(&iv[..vlen]);
-        Self { key: k, iv: v }
+    #[allow(dead_code)]
+    pub(crate) fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, KeyMaterialError> {
+        require_exact_key_iv("AEGIS-128X8", aead_key, 16, iv, 12)?;
+        let mut key = [0u8; 16];
+        key.copy_from_slice(aead_key);
+        let mut iv_array = [0u8; 12];
+        iv_array.copy_from_slice(iv);
+        Ok(Self::from_arrays(&key, &iv_array))
+    }
+
+    pub(crate) fn from_arrays(aead_key: &[u8; 16], iv: &[u8; 12]) -> Self {
+        Self { key: *aead_key, iv: *iv }
     }
 }
 
@@ -100,6 +110,10 @@ impl Drop for Aegis128X8Aead {
 pub enum AegisError {
     /// Authentication tag verification failed during decryption.
     InvalidTag,
+    /// The supplied key has an invalid length.
+    InvalidKeyLength { expected: usize, actual: usize },
+    /// The supplied nonce has an invalid length.
+    InvalidNonceLength { expected: usize, actual: usize },
 }
 
 #[cfg(feature = "std")]
@@ -107,6 +121,12 @@ impl std::fmt::Display for AegisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AegisError::InvalidTag => write!(f, "Invalid tag"),
+            AegisError::InvalidKeyLength { expected, actual } => {
+                write!(f, "AEGIS key must be exactly {expected} bytes, got {actual}")
+            }
+            AegisError::InvalidNonceLength { expected, actual } => {
+                write!(f, "AEGIS nonce must be exactly {expected} bytes, got {actual}")
+            }
         }
     }
 }
@@ -528,8 +548,17 @@ fn aegis128l_update(state: &mut [AesBlock; 8], d0: AesBlock, d1: AesBlock) {
 }
 
 fn aegis128l_init_state(key: &[u8], nonce: &[u8]) -> Result<[AesBlock; 8], AegisError> {
-    if key.len() != Aegis128L::KEY_SIZE || nonce.len() != Aegis128L::NONCE_SIZE {
-        return Err(AegisError::InvalidTag);
+    if key.len() != Aegis128L::KEY_SIZE {
+        return Err(AegisError::InvalidKeyLength {
+            expected: Aegis128L::KEY_SIZE,
+            actual: key.len(),
+        });
+    }
+    if nonce.len() != Aegis128L::NONCE_SIZE {
+        return Err(AegisError::InvalidNonceLength {
+            expected: Aegis128L::NONCE_SIZE,
+            actual: nonce.len(),
+        });
     }
 
     let mut key_arr = [0u8; 16];
@@ -2235,7 +2264,7 @@ mod tests {
         let iv = [0x88u8; 12];
         let ad = b"batch-ad";
         let pt = b"homogeneous-payload!!";
-        let seal = Aegis128X4Aead::new(&key, &iv);
+        let seal = Aegis128X4Aead::from_arrays(&key, &iv);
 
         let mut batch_bufs = (0..4u64)
             .map(|_| {
@@ -2275,8 +2304,8 @@ mod tests {
         let iv = [0xAAu8; 12];
         let ad = b"open-batch";
         let pt = b"decrypt-me-please!!";
-        let seal = Aegis128X8Aead::new(&key, &iv);
-        let open = Aegis128X8Aead::new(&key, &iv);
+        let seal = Aegis128X8Aead::from_arrays(&key, &iv);
+        let open = Aegis128X8Aead::from_arrays(&key, &iv);
 
         let mut sealed = vec![0u8; pt.len() + 16];
         sealed[..pt.len()].copy_from_slice(pt);
@@ -2344,8 +2373,8 @@ mod tests {
         let ad = b"diff-ad";
         let pt = b"reinit-state-reuse-payload";
 
-        let seal = Aegis128LAead::new(&key, &iv);
-        let open = Aegis128LAead::new(&key, &iv);
+        let seal = Aegis128LAead::from_arrays(&key, &iv);
+        let open = Aegis128LAead::from_arrays(&key, &iv);
 
         for counter in 1u64..=64 {
             // Reference: fresh cipher per packet (baseline).
@@ -2387,9 +2416,9 @@ mod tests {
         let key = [0xA5u8; 16];
         let iv = [0x5Au8; 12];
         for seal in [
-            Box::new(Aegis128LAead::new(&key, &iv)) as Box<dyn AeadSeal + Send + Sync>,
-            Box::new(Aegis128X4Aead::new(&key, &iv)),
-            Box::new(Aegis128X8Aead::new(&key, &iv)),
+            Box::new(Aegis128LAead::from_arrays(&key, &iv)) as Box<dyn AeadSeal + Send + Sync>,
+            Box::new(Aegis128X4Aead::from_arrays(&key, &iv)),
+            Box::new(Aegis128X8Aead::from_arrays(&key, &iv)),
         ] {
             let mut buffer = vec![0xC3u8; 48];
             seal.seal_with_u64_counter(7, b"drop-proof", &mut buffer, 32, None)
@@ -2428,19 +2457,19 @@ mod tests {
             observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
         }));
 
-        let mut retained = Some(Aegis128LAead::new(&[0x3C; 16], &[0xC3; 12]));
+        let mut retained = Some(Aegis128LAead::from_arrays(&[0x3C; 16], &[0xC3; 12]));
         let mut buffer = vec![0xA7; 48];
         retained
             .as_ref()
             .expect("retained wrapper")
             .seal_with_u64_counter(9, b"replacement-proof", &mut buffer, 32, None)
             .expect("initialize retained wrapper state");
-        drop(retained.replace(Aegis128LAead::new(&[0x6D; 16], &[0xD6; 12])));
-        drop(Aegis128LAead::new(&[0xD4; 7], &[0x4D; 5]));
+        drop(retained.replace(Aegis128LAead::from_arrays(&[0x6D; 16], &[0xD6; 12])));
+        assert!(Aegis128LAead::new(&[0xD4; 7], &[0x4D; 5]).is_err());
 
         let events = events.lock().expect("erasure events");
         for (label, expected_count) in
-            [("aegis_l_wrapper_key", 2), ("aegis_l_wrapper_iv", 2), ("aegis_l_inner_state", 1)]
+            [("aegis_l_wrapper_key", 1), ("aegis_l_wrapper_iv", 1), ("aegis_l_inner_state", 1)]
         {
             let matching =
                 events.iter().filter(|(event_label, _)| *event_label == label).collect::<Vec<_>>();
@@ -2469,7 +2498,7 @@ mod tests {
         let iv = [0x24u8; 12];
         let ad = b"concurrent-aegis";
         let plaintext = b"same-wrapper-independent-state";
-        let seal = Arc::new(Aegis128LAead::new(&key, &iv));
+        let seal = Arc::new(Aegis128LAead::from_arrays(&key, &iv));
         let handles = (1u64..=8)
             .map(|counter| {
                 let seal = Arc::clone(&seal);

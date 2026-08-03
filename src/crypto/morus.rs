@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use crate::crypto::aead::{AeadOpen, AeadSeal};
+use crate::crypto::aead::{require_exact_key_iv, AeadOpen, AeadSeal, KeyMaterialError};
 use zeroize::Zeroize;
 
 // MORUS-1280-128 AEAD cipher implementation
@@ -1031,16 +1031,17 @@ pub enum AeadError {
 
 impl MorusAead {
     /// Create a new MORUS-1280-128 instance from a 16-byte key and 12-byte IV.
-    pub fn new(aead_key: &[u8], iv: &[u8]) -> Self {
-        let mut k = [0u8; 16];
-        for (i, kb) in k.iter_mut().enumerate() {
-            *kb = aead_key.get(i).copied().unwrap_or(0);
-        }
-        let mut v = [0u8; 12];
-        for (i, vb) in v.iter_mut().enumerate() {
-            *vb = iv.get(i).copied().unwrap_or(0);
-        }
-        Self { key: k, iv: v }
+    pub fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, KeyMaterialError> {
+        require_exact_key_iv("MORUS-1280-128", aead_key, 16, iv, 12)?;
+        let mut key = [0u8; 16];
+        key.copy_from_slice(aead_key);
+        let mut iv_array = [0u8; 12];
+        iv_array.copy_from_slice(iv);
+        Ok(Self::from_arrays(&key, &iv_array))
+    }
+
+    pub(crate) fn from_arrays(aead_key: &[u8; 16], iv: &[u8; 12]) -> Self {
+        Self { key: *aead_key, iv: *iv }
     }
 
     #[cfg(test)]
@@ -1734,7 +1735,7 @@ mod morus_tests {
         let plaintext = b"";
         let ad = b"";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, tag) = morus.encrypt_native(plaintext, ad, &nonce);
         let decrypted = morus.decrypt_native(&ciphertext, &tag, ad, &nonce).unwrap();
 
@@ -1749,7 +1750,7 @@ mod morus_tests {
         let plaintext = b"A";
         let ad = b"associated";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, tag) = morus.encrypt_native(plaintext, ad, &nonce);
         let decrypted = morus.decrypt_native(&ciphertext, &tag, ad, &nonce).unwrap();
 
@@ -1765,7 +1766,7 @@ mod morus_tests {
         let plaintext = b"0123456789ABCDEF";
         let ad = b"additional_data";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, tag) = morus.encrypt_native(plaintext, ad, &nonce);
         let decrypted = morus.decrypt_native(&ciphertext, &tag, ad, &nonce).unwrap();
 
@@ -1781,7 +1782,7 @@ mod morus_tests {
         let plaintext = b"0123456789ABCDEFG";
         let ad = b"";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, tag) = morus.encrypt_native(plaintext, ad, &nonce);
         let decrypted = morus.decrypt_native(&ciphertext, &tag, ad, &nonce).unwrap();
 
@@ -1796,7 +1797,7 @@ mod morus_tests {
         let plaintext = b"0123456789ABCDEF0123456789ABCDEF";
         let ad = b"long_associated_data_for_testing";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, tag) = morus.encrypt_native(plaintext, ad, &nonce);
         let decrypted = morus.decrypt_native(&ciphertext, &tag, ad, &nonce).unwrap();
 
@@ -1811,7 +1812,7 @@ mod morus_tests {
         let plaintext = b"0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
         let ad = b"associated_data_64_byte_boundary_test";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, tag) = morus.encrypt_native(plaintext, ad, &nonce);
         let decrypted = morus.decrypt_native(&ciphertext, &tag, ad, &nonce).unwrap();
 
@@ -1826,7 +1827,7 @@ mod morus_tests {
         let plaintext = vec![0x5Au8; 1337]; // Prime number for good measure
         let ad = b"large_buffer_test_with_simd_optimization";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, tag) = morus.encrypt_optimized(&plaintext, ad, &nonce);
         let decrypted = morus.decrypt_optimized(&ciphertext, &tag, ad, &nonce).unwrap();
 
@@ -1842,7 +1843,7 @@ mod morus_tests {
         let plaintext = b"secret_message";
         let ad = b"authenticated_data";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (mut ciphertext, tag) = morus.encrypt_optimized(plaintext, ad, &nonce);
 
         // Corrupt ciphertext
@@ -1860,7 +1861,7 @@ mod morus_tests {
         let plaintext = b"another_secret";
         let ad = b"more_auth_data";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, mut tag) = morus.encrypt_optimized(plaintext, ad, &nonce);
 
         // Corrupt tag
@@ -1879,8 +1880,8 @@ mod morus_tests {
         let plaintext = b"cross_key_test";
         let ad = b"";
 
-        let morus1 = MorusAead::new(&key1, &iv);
-        let morus2 = MorusAead::new(&key2, &iv);
+        let morus1 = MorusAead::from_arrays(&key1, &iv);
+        let morus2 = MorusAead::from_arrays(&key2, &iv);
 
         let (ciphertext, tag) = morus1.encrypt_optimized(plaintext, ad, &nonce);
         let result = morus2.decrypt_optimized(&ciphertext, &tag, ad, &nonce);
@@ -1896,7 +1897,7 @@ mod morus_tests {
         let plaintext = b"simd_scalar_consistency_test_with_longer_message_for_coverage";
         let ad = b"associated_data_for_consistency";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
 
         // Test that optimized path can decrypt its own output (self-consistency)
         let (ct_opt, tag_opt) = morus.encrypt_optimized(plaintext, ad, &nonce);
@@ -1925,7 +1926,7 @@ mod morus_tests {
 
         for nonce_seed in 0u8..4 {
             let nonce = [nonce_seed.wrapping_mul(11).wrapping_add(7); 16];
-            let morus = MorusAead::new(&key, &iv);
+            let morus = MorusAead::from_arrays(&key, &iv);
 
             for &ad_len in &ad_lengths {
                 let mut ad = vec![0u8; ad_len];
@@ -1965,25 +1966,10 @@ mod morus_tests {
     }
 
     #[test]
-    fn test_morus_new_short_key_padded() {
-        let short_key = [0xABu8; 8]; // Only 8 bytes - should be zero-padded to 16
+    fn test_morus_new_rejects_short_key() {
+        let short_key = [0xABu8; 8];
         let iv = [0x10u8; 12];
-        let nonce = [0x20u8; 16];
-        let plaintext = b"short key padding test";
-        let ad = b"some ad";
-
-        let morus = MorusAead::new(&short_key, &iv);
-        let (ciphertext, tag) = morus.encrypt_native(plaintext, ad, &nonce);
-        let decrypted = morus.decrypt_native(&ciphertext, &tag, ad, &nonce).unwrap();
-        assert_eq!(plaintext, &decrypted[..]);
-
-        // Verify that it matches a manually zero-padded 16-byte key
-        let mut padded_key = [0u8; 16];
-        padded_key[..8].copy_from_slice(&short_key);
-        let morus_padded = MorusAead::new(&padded_key, &iv);
-        let (ct2, tag2) = morus_padded.encrypt_native(plaintext, ad, &nonce);
-        assert_eq!(ciphertext, ct2);
-        assert_eq!(tag, tag2);
+        assert!(MorusAead::new(&short_key, &iv).is_err());
     }
 
     #[test]
@@ -1995,7 +1981,7 @@ mod morus_tests {
         let plaintext = b"nonce sensitivity test payload";
         let ad = b"";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ct_a, tag_a) = morus.encrypt_native(plaintext, ad, &nonce_a);
         let (ct_b, tag_b) = morus.encrypt_native(plaintext, ad, &nonce_b);
 
@@ -2013,7 +1999,7 @@ mod morus_tests {
         let ad_a = b"associated data A";
         let ad_b = b"associated data B";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ct_a, tag_a) = morus.encrypt_native(plaintext, ad_a, &nonce);
         let (ct_b, tag_b) = morus.encrypt_native(plaintext, ad_b, &nonce);
 
@@ -2035,7 +2021,7 @@ mod morus_tests {
         let plaintext = b"determinism check payload";
         let ad = b"determinism ad";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ct1, tag1) = morus.encrypt_native(plaintext, ad, &nonce);
         let (ct2, tag2) = morus.encrypt_native(plaintext, ad, &nonce);
 
@@ -2051,7 +2037,7 @@ mod morus_tests {
         let plaintext = b"error type check";
         let ad = b"";
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ciphertext, _tag) = morus.encrypt_native(plaintext, ad, &nonce);
 
         // Provide a wrong tag
@@ -2062,27 +2048,14 @@ mod morus_tests {
     }
 
     #[test]
-    fn test_morus_oversized_key_uses_first_16() {
+    fn test_morus_new_rejects_oversized_key() {
         let full_key = [
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
             0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
             0x1D, 0x1E, 0x1F, 0x20,
         ]; // 32 bytes
-        let short_key = &full_key[..16]; // First 16 bytes only
         let iv = [0x30u8; 12];
-        let nonce = [0x40u8; 16];
-        let plaintext = b"oversized key test";
-        let ad = b"extra";
-
-        let morus_full = MorusAead::new(&full_key, &iv);
-        let morus_short = MorusAead::new(short_key, &iv);
-
-        let (ct_full, tag_full) = morus_full.encrypt_native(plaintext, ad, &nonce);
-        let (ct_short, tag_short) = morus_short.encrypt_native(plaintext, ad, &nonce);
-
-        // new() copies only the first 16 bytes, so both must produce identical output
-        assert_eq!(ct_full, ct_short, "32-byte key must use only first 16 bytes");
-        assert_eq!(tag_full, tag_short, "32-byte key must produce same tag as first-16 key");
+        assert!(MorusAead::new(&full_key, &iv).is_err());
     }
 
     #[test]
@@ -2096,7 +2069,7 @@ mod morus_tests {
             *byte = (idx as u8).wrapping_mul(31);
         }
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (expected_ct, expected_tag) = morus.encrypt_native(&plaintext, ad, &nonce);
 
         let mut in_place_buf = plaintext.clone();
@@ -2141,7 +2114,7 @@ mod morus_tests {
             0x74, 0x18,
         ];
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
         let (ct, tag) = morus.encrypt_native(&pt, &ad, &nonce);
         assert_eq!(ct, expected_ct);
         assert_eq!(tag, expected_tag);
@@ -2163,7 +2136,7 @@ mod morus_tests {
         let ad = b"trait-path-ad";
         let pt: Vec<u8> = (0u8..200).map(|i| i.wrapping_mul(7)).collect();
 
-        let morus = MorusAead::new(&key, &iv);
+        let morus = MorusAead::from_arrays(&key, &iv);
 
         for counter in 1u64..=16 {
             let nonce16 = super::super::make_nonce16(&iv, counter);

@@ -16,8 +16,8 @@ fn aegis128l_roundtrip() {
 
     buf.resize(buf.len() + 16, 0);
 
-    let seal = Aegis128LAead::new(&key, &iv);
-    let open = Aegis128LAead::new(&key, &iv);
+    let seal = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
+    let open = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
 
     let pt_len = buf.len() - 16;
     let ct_len = seal.seal_with_u64_counter(7, ad, &mut buf, pt_len, None).expect("seal");
@@ -36,8 +36,8 @@ fn aes_gcm_roundtrip() {
     let mut buf = b"aes gcm payload".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = AesGcm128::new(&key, &iv);
-    let open = AesGcm128::new(&key, &iv);
+    let seal = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
+    let open = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
 
     let ad = b"aad";
     let pt_len = buf.len() - 16;
@@ -57,8 +57,8 @@ fn morus_roundtrip() {
     let mut buf = b"morus stream data".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = MorusAead::new(&key, &iv);
-    let open = MorusAead::new(&key, &iv);
+    let seal = MorusAead::new(&key, &iv).expect("exact MORUS fixture lengths");
+    let open = MorusAead::new(&key, &iv).expect("exact MORUS fixture lengths");
 
     let ad = b"morus aad";
     let pt_len = buf.len() - 16;
@@ -78,8 +78,8 @@ fn aegis128l_rejects_tampered_tag() {
     let mut buf = b"tamper aegis".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = Aegis128LAead::new(&key, &iv);
-    let open = Aegis128LAead::new(&key, &iv);
+    let seal = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
+    let open = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
     let ad = b"aad";
     let pt_len = buf.len() - 16;
     let ct_len = seal.seal_with_u64_counter(9, ad, &mut buf, pt_len, None).expect("seal");
@@ -98,8 +98,8 @@ fn aes_gcm_rejects_tampered_tag() {
     let mut buf = b"tamper gcm".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = AesGcm128::new(&key, &iv);
-    let open = AesGcm128::new(&key, &iv);
+    let seal = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
+    let open = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
     let ad = b"aad";
     let pt_len = buf.len() - 16;
     let ct_len = seal.seal_with_u64_counter(42, ad, &mut buf, pt_len, None).expect("seal");

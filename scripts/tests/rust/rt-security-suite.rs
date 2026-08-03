@@ -136,11 +136,11 @@ fn timing_attack_tag_mismatch_rejected() {
     let nonce = [0x22u8; 12];
     let mut buf = vec![0u8; 64 + 16];
     buf[..64].copy_from_slice(&[0xAB; 64]);
-    let seal = ChaCha20Poly1305::new(&key, &nonce);
+    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let out_len = seal.seal_with_u64_counter(0, b"aad", &mut buf, 64, None).expect("seal");
     assert_eq!(out_len, 80);
     buf[79] ^= 0x01;
-    let open = ChaCha20Poly1305::new(&key, &nonce);
+    let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let err = open.open_with_u64_counter(0, b"aad", &mut buf).expect_err("tamper must fail");
     assert!(matches!(err, ConnectionError::CryptoError(_)));
 }
@@ -181,10 +181,10 @@ fn crypto_properties_roundtrip() {
     let plaintext = b"quicfuscate-crypto-roundtrip";
     let mut buf = vec![0u8; plaintext.len() + 16];
     buf[..plaintext.len()].copy_from_slice(plaintext);
-    let seal = ChaCha20Poly1305::new(&key, &nonce);
+    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let sealed_len =
         seal.seal_with_u64_counter(7, b"ad", &mut buf, plaintext.len(), None).expect("seal");
-    let open = ChaCha20Poly1305::new(&key, &nonce);
+    let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let opened_len = open.open_with_u64_counter(7, b"ad", &mut buf).expect("open");
     assert_eq!(sealed_len, plaintext.len() + 16);
     assert_eq!(opened_len, plaintext.len());
@@ -198,7 +198,7 @@ fn seal_and_open_via_selected_aead(force_aead: &str, plaintext: &[u8], aad: &[u8
 
     let key = [0x42u8; 16];
     let iv = [0x24u8; 12];
-    let (seal, open) = select_data_aead(&key, &iv);
+    let (seal, open) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
     let mut buf = vec![0u8; plaintext.len() + 16];
     buf[..plaintext.len()].copy_from_slice(plaintext);
     let sealed = seal.seal_with_u64_counter(9, aad, &mut buf, plaintext.len(), None).expect("seal");
@@ -229,7 +229,7 @@ fn data_aead_aliases_handle_unaligned_tail_payloads() {
     let aad = b"unaligned-tail-ad";
     let payload = b"tail-heavy-payload-with-nonmultiple-length";
 
-    let direct = Aegis128LAead::new(&key, &iv);
+    let direct = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
     let mut baseline_buf = vec![0u8; payload.len() + 16];
     baseline_buf[..payload.len()].copy_from_slice(payload);
     let baseline_len = direct

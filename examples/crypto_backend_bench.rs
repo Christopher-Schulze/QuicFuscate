@@ -45,13 +45,14 @@ fn backend_counter_value(backend: BenchDataAeadBackend) -> u64 {
 }
 
 fn bench_backend(backend: BenchDataAeadBackend, total_bytes: usize, iters: usize) {
-    let key = [0x5Au8; 32];
-    let iv = [0xA5u8; 16];
+    let key = [0x5Au8; 16];
+    let iv = [0xA5u8; 12];
     let ad = b"crypto-backend-bench";
     let mut sink = 0u8;
 
     let counter_before = backend_counter_value(backend);
-    let (seal, open) = build_data_aead_for_benches(backend, &key, &iv);
+    let (seal, open) = build_data_aead_for_benches(backend, &key, &iv)
+        .expect("validated benchmark key and IV lengths");
     let counter_after = backend_counter_value(backend);
 
     let mut plaintext = vec![0u8; total_bytes.max(1)];

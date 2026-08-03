@@ -33,12 +33,12 @@ fn chacha20poly1305_rfc8439_vector() {
     let mut buffer = plaintext.clone();
     buffer.resize(plaintext.len() + 16, 0);
 
-    let seal = ChaCha20Poly1305::new(&key, &nonce);
+    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("valid ChaCha20-Poly1305 material");
     let out_len =
         seal.seal_with_u64_counter(0, &[], buffer.as_mut_slice(), plaintext.len(), None).unwrap();
     assert_eq!(out_len, plaintext.len() + 16);
 
-    let open = ChaCha20Poly1305::new(&key, &nonce);
+    let open = ChaCha20Poly1305::new(&key, &nonce).expect("valid ChaCha20-Poly1305 material");
     let pt_len = open.open_with_u64_counter(0, &[], buffer.as_mut_slice()).unwrap();
     assert_eq!(pt_len, plaintext.len());
     assert_eq!(&buffer[..pt_len], plaintext.as_slice());
@@ -288,14 +288,14 @@ fn aes_gcm128_matches_nist_single_block_vector() {
         "ab6e47d42cec13bdf53a67b21257bddf",
     ));
 
-    let seal = super::AesGcm128::new(&key, &iv);
+    let seal = super::AesGcm128::new(&key, &iv).expect("valid AES-128-GCM material");
     let sealed_len = seal
         .seal_with_u64_counter(0, &[], &mut buffer, 16, None)
         .expect("NIST AES-GCM sealing must succeed");
     assert_eq!(sealed_len, expected.len());
     assert_eq!(buffer.as_slice(), expected.as_slice());
 
-    let open = super::AesGcm128::new(&key, &iv);
+    let open = super::AesGcm128::new(&key, &iv).expect("valid AES-128-GCM material");
     let plaintext_len =
         open.open_with_u64_counter(0, &[], &mut buffer).expect("NIST AES-GCM opening must succeed");
     assert_eq!(plaintext_len, 16);
@@ -313,7 +313,7 @@ fn aes_hp_matches_fips197_block_vector() {
         hex_to_bytes("000102030405060708090a0b0c0d0e0f").try_into().expect("16-byte key");
     let sample: [u8; 16] =
         hex_to_bytes("00112233445566778899aabbccddeeff").try_into().expect("16-byte sample");
-    let hp = AesHp::new(&key);
+    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
 
     assert_eq!(hp.new_mask(&sample), [0x69, 0xc4, 0xe0, 0xd8, 0x6a]);
 }
@@ -324,7 +324,7 @@ fn aes_hp_new_mask_deterministic() {
     use crate::transport::packet::HeaderProtector;
 
     let key = [0x42u8; 16];
-    let hp = AesHp::new(&key);
+    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
     let sample = [0x01u8; 16];
 
     let mask1 = hp.new_mask(&sample);
@@ -340,7 +340,7 @@ fn aes_hp_different_samples_produce_different_masks() {
     use crate::transport::packet::HeaderProtector;
 
     let key = [0xABu8; 16];
-    let hp = AesHp::new(&key);
+    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
 
     let mask_a = hp.new_mask(&[0x01; 16]);
     let mask_b = hp.new_mask(&[0x02; 16]);
@@ -353,7 +353,7 @@ fn aes_hp_apply_remove_roundtrip() {
     use crate::crypto::aead::HeaderProtector;
 
     let key = [0x55u8; 16];
-    let hp = AesHp::new(&key);
+    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
     let sample = [0x99u8; 16];
 
     let original = [0x11, 0x22, 0x33, 0x44, 0x55];
@@ -369,11 +369,42 @@ fn aes_hp_different_keys_produce_different_masks() {
     use crate::crypto::aead::AesHp;
     use crate::transport::packet::HeaderProtector;
 
-    let hp_a = AesHp::new(&[0x11; 16]);
-    let hp_b = AesHp::new(&[0x22; 16]);
+    let hp_a = AesHp::new(&[0x11; 16]).expect("valid AES-128-HP secret");
+    let hp_b = AesHp::new(&[0x22; 16]).expect("valid AES-128-HP secret");
     let sample = [0x00; 16];
 
     let mask_a = hp_a.new_mask(&sample);
     let mask_b = hp_b.new_mask(&sample);
     assert_ne!(mask_a, mask_b, "different keys must produce different masks");
+}
+
+#[test]
+fn crypto_constructors_reject_invalid_key_and_iv_lengths() {
+    assert!(ChaCha20Poly1305::new(&[0u8; 31], &[0u8; 12]).is_err());
+    assert!(ChaCha20Poly1305::new(&[0u8; 33], &[0u8; 12]).is_err());
+    assert!(ChaCha20Poly1305::new(&[0u8; 32], &[0u8; 11]).is_err());
+    assert!(ChaCha20Poly1305::new(&[0u8; 32], &[0u8; 13]).is_err());
+
+    assert!(super::AesGcm128::new(&[0u8; 15], &[0u8; 12]).is_err());
+    assert!(super::AesGcm128::new(&[0u8; 17], &[0u8; 12]).is_err());
+    assert!(super::AesGcm128::new(&[0u8; 16], &[0u8; 11]).is_err());
+    assert!(super::AesGcm128::new(&[0u8; 16], &[0u8; 13]).is_err());
+
+    assert!(super::Aegis128LAead::new(&[0u8; 15], &[0u8; 12]).is_err());
+    assert!(super::Aegis128LAead::new(&[0u8; 17], &[0u8; 12]).is_err());
+    assert!(super::Aegis128X4Aead::new(&[0u8; 16], &[0u8; 11]).is_err());
+    assert!(super::Aegis128X8Aead::new(&[0u8; 16], &[0u8; 13]).is_err());
+
+    assert!(super::MorusAead::new(&[0u8; 15], &[0u8; 12]).is_err());
+    assert!(super::MorusAead::new(&[0u8; 17], &[0u8; 12]).is_err());
+    assert!(super::MorusAead::new(&[0u8; 16], &[0u8; 11]).is_err());
+    assert!(super::MorusAead::new(&[0u8; 16], &[0u8; 13]).is_err());
+
+    assert!(super::aegis::Aegis128L::new(&[0u8; 15], &[0u8; 16]).is_err());
+    assert!(super::aegis::Aegis128L::new(&[0u8; 16], &[0u8; 15]).is_err());
+    assert!(super::aead::AesHp::new(&[0u8; 15]).is_err());
+    assert!(super::aead::AesHp::new(&[0u8; 32]).is_ok());
+
+    assert!(super::select_data_aead(&[0u8; 15], &[0u8; 12]).is_err());
+    assert!(super::select_data_aead(&[0u8; 16], &[0u8; 13]).is_err());
 }

@@ -525,7 +525,8 @@ fn encrypt_v1(plaintext: &[u8], key: &RegistryKey) -> Result<Vec<u8>, QKeyRegist
         return Err(QKeyRegistryError::Encryption("registry payload length overflow".to_string()));
     }
     sealed.as_mut_slice()[..plaintext.len()].copy_from_slice(plaintext);
-    let cipher = crate::crypto::ChaCha20Poly1305::new(key.bytes.as_slice(), &nonce);
+    let cipher = crate::crypto::ChaCha20Poly1305::new(key.bytes.as_slice(), &nonce)
+        .map_err(|error| QKeyRegistryError::Encryption(error.to_string()))?;
     let written = cipher
         .seal_with_u64_counter(0, &header, sealed.as_mut_slice(), plaintext.len(), None)
         .map_err(|error| QKeyRegistryError::Encryption(error.to_string()))?;
@@ -547,7 +548,8 @@ fn decrypt(
         return Err(QKeyRegistryError::Corrupt("ciphertext is truncated"));
     }
     let mut plaintext = SecretBytes::new(ciphertext.to_vec(), label);
-    let cipher = crate::crypto::ChaCha20Poly1305::new(key.bytes.as_slice(), nonce);
+    let cipher = crate::crypto::ChaCha20Poly1305::new(key.bytes.as_slice(), nonce)
+        .map_err(|_| QKeyRegistryError::Corrupt("invalid registry key material"))?;
     let plaintext_len = cipher
         .open_with_u64_counter(0, associated_data, plaintext.as_mut_slice())
         .map_err(|_| QKeyRegistryError::Corrupt("authentication failed"))?;
@@ -1024,7 +1026,8 @@ mod tests {
                 .expect("legacy key");
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&[0x91; NONCE_LEN]);
-        let cipher = crate::crypto::ChaCha20Poly1305::new(key.bytes.as_slice(), &nonce);
+        let cipher = crate::crypto::ChaCha20Poly1305::new(key.bytes.as_slice(), &nonce)
+            .expect("validated legacy registry key material");
         let mut ciphertext = PLAINTEXT.to_vec();
         ciphertext.resize(PLAINTEXT.len() + TAG_LEN, 0);
         let plaintext_len = PLAINTEXT.len();

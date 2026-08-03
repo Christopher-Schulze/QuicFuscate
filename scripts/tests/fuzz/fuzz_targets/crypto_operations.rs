@@ -19,12 +19,15 @@ fuzz_target!(|data: &[u8]| {
     let mut buf = vec![0u8; payload_len + 16];
     buf[..payload_len].copy_from_slice(&data[44..44 + payload_len]);
 
-    let seal = ChaCha20Poly1305::new(&key, &nonce);
+    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("fuzz fixture uses exact key and IV lengths");
     let sealed = seal.seal_with_u64_counter(1, b"ad", &mut buf, payload_len, None);
     if sealed.is_err() {
         return;
     }
-    if let Ok(opened) = ChaCha20Poly1305::new(&key, &nonce).open_with_u64_counter(1, b"ad", &mut buf) {
+    if let Ok(opened) = ChaCha20Poly1305::new(&key, &nonce)
+        .expect("fuzz fixture uses exact key and IV lengths")
+        .open_with_u64_counter(1, b"ad", &mut buf)
+    {
         let _ = opened;
     } else {
         let _ = ConnectionError::CryptoError("crypto failure".into());
@@ -43,7 +46,8 @@ fuzz_target!(|data: &[u8]| {
 
     let key16: [u8; 16] = data[..16].try_into().expect("key16");
     let iv: [u8; 12] = data[32..44].try_into().expect("iv");
-    let (seal, open) = select_data_aead(&key16, &iv);
+    let (seal, open) = select_data_aead(&key16, &iv)
+        .expect("fuzz fixture uses exact data-plane key and IV lengths");
     let mut data_aead_buf = vec![0u8; payload_len + 16];
     data_aead_buf[..payload_len].copy_from_slice(&data[44..44 + payload_len]);
     if seal

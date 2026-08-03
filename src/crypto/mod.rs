@@ -98,16 +98,17 @@ pub(crate) mod chacha20poly1305 {
 
     impl ChaCha20Poly1305 {
         /// Create a new instance from a 32-byte key and 12-byte IV/nonce.
-        pub fn new(key: &[u8], iv: &[u8]) -> Self {
-            let mut k = [0u8; 32];
-            let mut n = [0u8; 12];
-            for (i, kb) in k.iter_mut().enumerate() {
-                *kb = key.get(i).copied().unwrap_or(0);
-            }
-            for (i, nb) in n.iter_mut().enumerate() {
-                *nb = iv.get(i).copied().unwrap_or(0);
-            }
-            Self { key: k, nonce: n }
+        pub fn new(key: &[u8], iv: &[u8]) -> Result<Self, crate::crypto::aead::KeyMaterialError> {
+            crate::crypto::aead::require_exact_key_iv("ChaCha20-Poly1305", key, 32, iv, 12)?;
+            let mut key_array = [0u8; 32];
+            key_array.copy_from_slice(key);
+            let mut iv_array = [0u8; 12];
+            iv_array.copy_from_slice(iv);
+            Ok(Self::from_arrays(&key_array, &iv_array))
+        }
+
+        pub(crate) fn from_arrays(key: &[u8; 32], iv: &[u8; 12]) -> Self {
+            Self { key: *key, nonce: *iv }
         }
 
         #[inline(always)]
@@ -412,15 +413,18 @@ pub struct AesGcm128 {
 
 impl AesGcm128 {
     /// Create a new AES-128-GCM instance from a 16-byte key and 12-byte IV.
-    pub fn new(aead_key: &[u8], iv: &[u8]) -> Self {
-        let mut k = [0u8; 16];
-        for (i, kb) in k.iter_mut().enumerate() {
-            *kb = aead_key.get(i).copied().unwrap_or(0);
-        }
-        let mut v = [0u8; 12];
-        for (i, vb) in v.iter_mut().enumerate() {
-            *vb = iv.get(i).copied().unwrap_or(0);
-        }
+    pub fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, crate::crypto::aead::KeyMaterialError> {
+        crate::crypto::aead::require_exact_key_iv("AES-128-GCM", aead_key, 16, iv, 12)?;
+        let mut key = [0u8; 16];
+        key.copy_from_slice(aead_key);
+        let mut iv_array = [0u8; 12];
+        iv_array.copy_from_slice(iv);
+        Ok(Self::from_arrays(&key, &iv_array))
+    }
+
+    pub(crate) fn from_arrays(aead_key: &[u8; 16], iv: &[u8; 12]) -> Self {
+        let k = *aead_key;
+        let v = *iv;
         // SAFETY: AES-NI feature checked before calling expand_aes128_schedule.
         // k is [u8; 16] - valid 128-bit key. expand_aes128_schedule requires AES-NI.
         #[cfg(target_arch = "x86_64")]
@@ -630,16 +634,16 @@ fn build_aegis_data_aead(
 ) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
     match plan {
         CryptoAeadPlan::Aegis128L => (
-            Box::new(Aegis128LAead::new(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-            Box::new(Aegis128LAead::new(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
+            Box::new(Aegis128LAead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
+            Box::new(Aegis128LAead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
         ),
         CryptoAeadPlan::Aegis128X4 => (
-            Box::new(Aegis128X4Aead::new(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-            Box::new(Aegis128X4Aead::new(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
+            Box::new(Aegis128X4Aead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
+            Box::new(Aegis128X4Aead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
         ),
         CryptoAeadPlan::Aegis128X8 => (
-            Box::new(Aegis128X8Aead::new(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-            Box::new(Aegis128X8Aead::new(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
+            Box::new(Aegis128X8Aead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
+            Box::new(Aegis128X8Aead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
         ),
         CryptoAeadPlan::Morus => unreachable!("MORUS is built through build_morus_data_aead"),
     }
@@ -651,8 +655,8 @@ fn build_morus_data_aead(
     iv: &[u8; 12],
 ) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
     (
-        Box::new(MorusAead::new(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-        Box::new(MorusAead::new(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
+        Box::new(MorusAead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
+        Box::new(MorusAead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
     )
 }
 
@@ -668,10 +672,10 @@ impl DataAead {
     #[inline(always)]
     fn new(plan: CryptoAeadPlan, key: &[u8; 16], iv: &[u8; 12]) -> Self {
         match plan {
-            CryptoAeadPlan::Aegis128L => Self::Aegis128L(Aegis128LAead::new(key, iv)),
-            CryptoAeadPlan::Aegis128X4 => Self::Aegis128X4(Aegis128X4Aead::new(key, iv)),
-            CryptoAeadPlan::Aegis128X8 => Self::Aegis128X8(Aegis128X8Aead::new(key, iv)),
-            CryptoAeadPlan::Morus => Self::Morus(MorusAead::new(key, iv)),
+            CryptoAeadPlan::Aegis128L => Self::Aegis128L(Aegis128LAead::from_arrays(key, iv)),
+            CryptoAeadPlan::Aegis128X4 => Self::Aegis128X4(Aegis128X4Aead::from_arrays(key, iv)),
+            CryptoAeadPlan::Aegis128X8 => Self::Aegis128X8(Aegis128X8Aead::from_arrays(key, iv)),
+            CryptoAeadPlan::Morus => Self::Morus(MorusAead::from_arrays(key, iv)),
         }
     }
 }
@@ -931,48 +935,51 @@ pub fn build_data_aead_for_benches(
     backend: BenchDataAeadBackend,
     key: &[u8],
     iv: &[u8],
-) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
+) -> Result<
+    (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>),
+    crate::crypto::aead::KeyMaterialError,
+> {
+    crate::crypto::aead::require_exact_key_iv("data-plane AEAD", key, 16, iv, 12)?;
     let mut k16 = [0u8; 16];
-    k16.copy_from_slice(&key[..16]);
+    k16.copy_from_slice(key);
     let mut iv12 = [0u8; 12];
-    iv12.copy_from_slice(&iv[..12]);
+    iv12.copy_from_slice(iv);
     let plan = match backend {
         BenchDataAeadBackend::Aegis128L => CryptoAeadPlan::Aegis128L,
         BenchDataAeadBackend::Aegis128X4 => CryptoAeadPlan::Aegis128X4,
         BenchDataAeadBackend::Aegis128X8 => CryptoAeadPlan::Aegis128X8,
         BenchDataAeadBackend::Morus => CryptoAeadPlan::Morus,
     };
-    build_data_aead(plan, &k16, &iv12)
+    Ok(build_data_aead(plan, &k16, &iv12))
 }
 
 /// Selects the optimal data-plane AEAD backend and returns a seal/open pair.
 pub fn select_data_aead(
     key: &[u8],
     iv: &[u8],
-) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
+) -> Result<
+    (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>),
+    crate::crypto::aead::KeyMaterialError,
+> {
+    crate::crypto::aead::require_exact_key_iv("data-plane AEAD", key, 16, iv, 12)?;
     let mut k16 = [0u8; 16];
-    for (i, b) in key.iter().take(16).enumerate() {
-        k16[i] = *b;
-    }
+    k16.copy_from_slice(key);
     let mut iv12 = [0u8; 12];
-    for (i, b) in iv.iter().take(12).enumerate() {
-        iv12[i] = *b;
-    }
+    iv12.copy_from_slice(iv);
 
     let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
-    build_data_aead(plan, &k16, &iv12)
+    Ok(build_data_aead(plan, &k16, &iv12))
 }
 
 /// Selects the data-plane AEAD backend for packet hot paths without boxed dispatch.
-pub(crate) fn select_packet_data_aead(key: &[u8], iv: &[u8]) -> (PacketAeadSeal, PacketAeadOpen) {
+pub(crate) fn select_packet_data_aead(
+    key: &[u8; 32],
+    iv: &[u8; 12],
+) -> (PacketAeadSeal, PacketAeadOpen) {
     let mut k16 = [0u8; 16];
-    for (i, b) in key.iter().take(16).enumerate() {
-        k16[i] = *b;
-    }
+    k16.copy_from_slice(&key[..16]);
     let mut iv12 = [0u8; 12];
-    for (i, b) in iv.iter().take(12).enumerate() {
-        iv12[i] = *b;
-    }
+    iv12.copy_from_slice(iv);
 
     let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
     build_packet_data_aead(plan, &k16, &iv12)

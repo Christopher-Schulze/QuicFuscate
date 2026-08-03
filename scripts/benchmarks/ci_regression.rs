@@ -95,7 +95,7 @@ fn bench_morus_encrypt(c: &mut Criterion) {
     let iv = [0u8; 12];
     let nonce = [0u8; 16];
     let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv);
+    let morus = MorusAead::new(&key, &iv).expect("exact MORUS benchmark fixture lengths");
 
     for size in [64, 1024, 8192] {
         let mut buffer = vec![0u8; size];
@@ -126,7 +126,7 @@ fn bench_morus_decrypt(c: &mut Criterion) {
     let iv = [0x5Au8; 12];
     let nonce = [0u8; 16];
     let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv);
+    let morus = MorusAead::new(&key, &iv).expect("exact MORUS benchmark fixture lengths");
 
     for size in [64, 1024, 8192] {
         let plaintext = vec![0u8; size];
@@ -175,7 +175,8 @@ fn bench_data_aead_backends(c: &mut Criterion) {
         let mut single_seal = c.benchmark_group("data_aead_single_seal_batch");
         single_seal.throughput(Throughput::Bytes(size as u64));
         for backend in backends {
-            let (seal, _) = build_data_aead_for_benches(backend, &key, &iv);
+            let (seal, _) = build_data_aead_for_benches(backend, &key, &iv)
+                .expect("exact data-plane benchmark fixture lengths");
             let mut counter = 1u64;
             let mut buf = vec![0u8; size + 16];
             single_seal.bench_function(format!("{}_{}B", backend.as_str(), size), |b| {
@@ -198,7 +199,8 @@ fn bench_data_aead_backends(c: &mut Criterion) {
         let mut single_open = c.benchmark_group("data_aead_single_open_batch");
         single_open.throughput(Throughput::Bytes(size as u64));
         for backend in backends {
-            let (seal, open) = build_data_aead_for_benches(backend, &key, &iv);
+            let (seal, open) = build_data_aead_for_benches(backend, &key, &iv)
+                .expect("exact data-plane benchmark fixture lengths");
             let mut sealed = vec![0xA5u8; size + 16];
             let mut seal_item =
                 AeadSealItem { counter: 7, ad, buf: sealed.as_mut_slice(), plaintext_len: size };
@@ -220,7 +222,8 @@ fn bench_data_aead_backends(c: &mut Criterion) {
         let mut batch_seal = c.benchmark_group("data_aead_batch8_seal");
         batch_seal.throughput(Throughput::Bytes((size * BATCH) as u64));
         for backend in backends {
-            let (seal, _) = build_data_aead_for_benches(backend, &key, &iv);
+            let (seal, _) = build_data_aead_for_benches(backend, &key, &iv)
+                .expect("exact data-plane benchmark fixture lengths");
             let mut counter = 100u64;
             let mut bufs = vec![vec![0u8; size + 16]; BATCH];
             batch_seal.bench_function(format!("{}_{}B", backend.as_str(), size), |b| {
@@ -287,7 +290,8 @@ fn bench_data_aead_backends(c: &mut Criterion) {
         let mut batch_open = c.benchmark_group("data_aead_batch8_open");
         batch_open.throughput(Throughput::Bytes((size * BATCH) as u64));
         for backend in backends {
-            let (seal, open) = build_data_aead_for_benches(backend, &key, &iv);
+            let (seal, open) = build_data_aead_for_benches(backend, &key, &iv)
+                .expect("exact data-plane benchmark fixture lengths");
             let mut frozen = vec![vec![0x5Au8; size + 16]; BATCH];
             {
                 let bufs: &mut [Vec<u8>; BATCH] =
