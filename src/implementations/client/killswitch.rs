@@ -127,14 +127,47 @@ impl KillSwitch {
         }
     }
 
+    fn finalize_enable_failure(
+        enabled: &AtomicBool,
+        vpn_connected: &AtomicBool,
+        activation_error: KillSwitchError,
+        rollback: Result<(), KillSwitchError>,
+    ) -> KillSwitchError {
+        vpn_connected.store(false, Ordering::SeqCst);
+        match rollback {
+            Ok(()) => {
+                enabled.store(false, Ordering::SeqCst);
+                activation_error
+            }
+            Err(rollback_error) => {
+                // The backend state is unknown after a failed rollback. Keep
+                // the outer policy enabled so Drop retains the fail-closed
+                // ownership contract and explicit cleanup remains available.
+                enabled.store(true, Ordering::SeqCst);
+                KillSwitchError::CommandFailed(format!(
+                    "kill-switch activation failed: {activation_error}; fail-closed rollback failed: {rollback_error}; owned firewall state is retained for explicit cleanup"
+                ))
+            }
+        }
+    }
+
     /// Enable the kill switch.
     pub fn enable(&self) -> Result<(), KillSwitchError> {
-        // Mark enabled before touching the firewall so a partial backend
-        // failure can never trigger Drop-based cleanup of already-installed
-        // fail-closed rules.
-        self.enabled.store(true, Ordering::SeqCst);
-        self.backend.block_traffic()?;
+        if self.enabled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        if let Err(activation_error) = self.backend.block_traffic() {
+            let rollback = self.backend.allow_traffic();
+            return Err(Self::finalize_enable_failure(
+                &self.enabled,
+                &self.vpn_connected,
+                activation_error,
+                rollback,
+            ));
+        }
         self.vpn_connected.store(false, Ordering::SeqCst);
+        self.enabled.store(true, Ordering::SeqCst);
 
         log::info!("Kill switch enabled");
         Ok(())
@@ -802,6 +835,17 @@ impl MacOSKillSwitch {
         stdout.contains("Status: Enabled")
     }
 
+    fn main_ruleset_references_anchor(rules: &str, anchor: &str) -> bool {
+        let exact_anchor = format!("\"{anchor}\"");
+        rules.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next() != Some("anchor") {
+                return false;
+            }
+            matches!(fields.next(), Some(candidate) if candidate == exact_anchor || candidate == "\"com.quicfuscate/*\"")
+        })
+    }
+
     /// Enable pf if not already enabled, tracking whether we did it.
     fn ensure_pf_enabled(&self) -> Result<(), KillSwitchError> {
         use std::process::Command;
@@ -810,9 +854,19 @@ impl MacOSKillSwitch {
             .args(["-sr"])
             .output()
             .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        if !rules.status.success() {
+            return Err(KillSwitchError::CommandFailed(format!(
+                "pfctl -sr returned status {}: {}",
+                rules.status,
+                String::from_utf8_lossy(&rules.stderr).trim()
+            )));
+        }
         let rules = String::from_utf8_lossy(&rules.stdout);
-        if !rules.contains(&self.anchor_name) && !rules.contains("com.quicfuscate/*") {
-            return Err(KillSwitchError::NotSupported);
+        if !Self::main_ruleset_references_anchor(&rules, &self.anchor_name) {
+            return Err(KillSwitchError::CommandFailed(format!(
+                "pf main ruleset does not reference owned anchor {}; add an anchor \"{}\" or \"com.quicfuscate/*\" reference before enabling the kill switch",
+                self.anchor_name, self.anchor_name
+            )));
         }
 
         if self.is_pf_enabled() {
@@ -836,11 +890,13 @@ impl MacOSKillSwitch {
             &["-a", &self.anchor_name, "-f", &self.config_path],
             "pfctl kill-switch anchor load",
         )?;
+        self.rules_active.store(true, Ordering::SeqCst);
 
         // Enable pf only if not already enabled
-        self.ensure_pf_enabled()?;
+        if let Err(error) = self.ensure_pf_enabled() {
+            return Err(self.rollback_loaded_anchor(error));
+        }
 
-        self.rules_active.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -889,12 +945,27 @@ impl MacOSKillSwitch {
             &["-a", &self.anchor_name, "-f", &self.config_path],
             "pfctl kill-switch policy load",
         )?;
+        self.rules_active.store(true, Ordering::SeqCst);
 
         // Ensure pf is enabled (idempotent)
-        self.ensure_pf_enabled()?;
+        if let Err(error) = self.ensure_pf_enabled() {
+            return Err(self.rollback_loaded_anchor(error));
+        }
 
-        self.rules_active.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn rollback_loaded_anchor(&self, activation_error: KillSwitchError) -> KillSwitchError {
+        match self.cleanup() {
+            Ok(()) => activation_error,
+            Err(rollback_error) => {
+                self.rules_active.store(true, Ordering::SeqCst);
+                KillSwitchError::CommandFailed(format!(
+                    "{activation_error}; failed to roll back just-loaded PF anchor {}: {rollback_error}; owned firewall state is retained for explicit cleanup",
+                    self.anchor_name
+                ))
+            }
+        }
     }
 
     fn cleanup(&self) -> Result<(), KillSwitchError> {
@@ -988,6 +1059,63 @@ mod tests {
         assert!(!ks.is_enabled());
         // enable() requires root on Linux/macOS, so we just test the flag
         // The actual firewall rules are tested in integration tests
+    }
+
+    #[test]
+    fn failed_enable_clears_policy_state_after_successful_rollback() {
+        let enabled = AtomicBool::new(false);
+        let vpn_connected = AtomicBool::new(true);
+        let error = KillSwitch::finalize_enable_failure(
+            &enabled,
+            &vpn_connected,
+            KillSwitchError::CommandFailed("activation failed".to_string()),
+            Ok(()),
+        );
+
+        assert!(matches!(error, KillSwitchError::CommandFailed(_)));
+        assert!(!enabled.load(Ordering::SeqCst));
+        assert!(!vpn_connected.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn failed_enable_retains_fail_closed_state_when_rollback_fails() {
+        let enabled = AtomicBool::new(false);
+        let vpn_connected = AtomicBool::new(true);
+        let error = KillSwitch::finalize_enable_failure(
+            &enabled,
+            &vpn_connected,
+            KillSwitchError::CommandFailed("activation failed".to_string()),
+            Err(KillSwitchError::CommandFailed("rollback failed".to_string())),
+        );
+
+        let KillSwitchError::CommandFailed(message) = error else {
+            panic!("failed rollback must return a diagnostic command error");
+        };
+        assert!(message.contains("fail-closed rollback failed"));
+        assert!(enabled.load(Ordering::SeqCst));
+        assert!(!vpn_connected.load(Ordering::SeqCst));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pf_main_ruleset_reference_requires_an_anchor_statement() {
+        let anchor = "com.quicfuscate.killswitch";
+        assert!(MacOSKillSwitch::main_ruleset_references_anchor(
+            "anchor \"com.quicfuscate.killswitch\" all\n",
+            anchor
+        ));
+        assert!(MacOSKillSwitch::main_ruleset_references_anchor(
+            "anchor \"com.quicfuscate/*\" all\n",
+            anchor
+        ));
+        assert!(!MacOSKillSwitch::main_ruleset_references_anchor(
+            "# anchor \"com.quicfuscate.killswitch\"\n",
+            anchor
+        ));
+        assert!(!MacOSKillSwitch::main_ruleset_references_anchor(
+            "anchor \"com.quicfuscate.killswitch-other\" all\n",
+            anchor
+        ));
     }
 
     #[test]
