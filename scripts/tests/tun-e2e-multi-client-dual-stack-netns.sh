@@ -408,17 +408,25 @@ prove_client_local_ptb() {
   ip netns exec "${CLIENT_NS[0]}" ip route replace 198.51.100.2/32 dev "$TUN_NAME"
   ip netns exec "${CLIENT_NS[0]}" ip -6 route replace 2001:db8::2/128 dev "$TUN_NAME"
 
-  local ipv4_output ipv6_output
+  # Keep the client TUN at 1500 while the server remains at the phase MTU
+  # floor. The non-DF packet must reach server allow_client_uplink whole;
+  # otherwise the client kernel could fragment it before the tunnel boundary.
+  local ipv4_output ipv4_non_df_output ipv6_output
   ipv4_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'do' -s 1350 \
+    -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
+  ipv4_non_df_output="$(ip netns exec "${CLIENT_NS[0]}" ping -4 -c 1 -W 2 -M 'dont' -s 1350 \
     -I "${CLIENT_V4[0]}" 198.51.100.2 2>&1 || true)"
   ipv6_output="$(ip netns exec "${CLIENT_NS[0]}" ping -6 -c 1 -W 2 -s 1320 \
     -I "${CLIENT_V6[0]}" 2001:db8::2 2>&1 || true)"
   printf '%s\n' "$ipv4_output" >"$ARTIFACT_DIR/client-local-ptb4.txt"
+  printf '%s\n' "$ipv4_non_df_output" >"$ARTIFACT_DIR/client-server-ptb4-non-df.txt"
   printf '%s\n' "$ipv6_output" >"$ARTIFACT_DIR/client-local-ptb6.txt"
 
   ip netns exec "${CLIENT_NS[0]}" ip link set "$TUN_NAME" mtu 1280
   grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_output" || \
     fail 'client-local IPv4 PTB response was not observed'
+  grep -Eqi 'message too long|mtu[ =]+1280|Frag needed' <<<"$ipv4_non_df_output" || \
+    fail 'server IPv4 PTB response for DF=0 was not observed'
   grep -Eqi 'message too long|mtu[ =]+1280|Packet too big' <<<"$ipv6_output" || \
     fail 'client-local IPv6 PTB response was not observed'
 }

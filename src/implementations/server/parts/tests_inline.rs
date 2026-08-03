@@ -492,6 +492,67 @@ mod tests {
     }
 
     #[test]
+    fn oversized_ipv4_packets_get_ptb_before_any_tun_write_for_both_df_states() {
+        let server_ip = Ipv4Addr::new(10, 0, 1, 1);
+        let client_ip = Ipv4Addr::new(10, 0, 1, 2);
+        let destination_ip = Ipv4Addr::new(198, 51, 100, 2);
+        let forwarding_policy =
+            ClientIsolationManager::with_network(server_ip, Ipv4Addr::new(255, 255, 255, 0), false);
+        let assigned = AssignedClientIps { ipv4: client_ip, ipv6: None };
+        forwarding_policy.assign_client("client", assigned);
+        let payload = vec![0xAB; 1_400];
+
+        for dont_fragment in [false, true] {
+            let metrics = Metrics::new();
+            let responses =
+                Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(8, 4096)));
+            let mut packet =
+                test_ipv4_udp_packet(client_ip, destination_ip, 40_000, 53, &payload);
+            if dont_fragment {
+                packet[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+            }
+            assert_eq!(packet.len(), 1_428);
+
+            let route = allow_client_uplink(
+                &forwarding_policy,
+                &metrics,
+                Some(assigned),
+                &packet,
+                OsFingerprintProfile::Linux,
+                ServerTunIps { ipv4: server_ip, ipv6: None },
+                1_400,
+                &responses,
+            );
+
+            assert!(route.is_none(), "DF={dont_fragment} must not reach a TUN write");
+            assert_eq!(metrics.routing_internet.load(Ordering::Relaxed), 1);
+            assert_eq!(metrics.routing_packet_too_big.load(Ordering::Relaxed), 1);
+
+            let response = responses
+                .lock()
+                .expect("response queue must not be poisoned")
+                .pop_front()
+                .expect("oversized IPv4 packet must enqueue PTB");
+            assert_eq!(response.len(), 56);
+            assert_eq!(response[0] >> 4, 4);
+            assert_eq!(response[8], OsFingerprintProfile::Linux.ttl());
+            assert_eq!(response[9], 1);
+            assert_eq!(&response[12..16], &server_ip.octets());
+            assert_eq!(&response[16..20], &client_ip.octets());
+            assert_eq!(response[20], icmp::icmp_type::DESTINATION_UNREACHABLE);
+            assert_eq!(response[21], icmp::icmp_code::FRAGMENTATION_NEEDED);
+            assert_eq!(u16::from_be_bytes([response[26], response[27]]), 1_400);
+            assert_eq!(&response[28..], &packet[..28]);
+            assert_eq!(ones_complement_checksum(&response[..20]), 0);
+            assert_eq!(ones_complement_checksum(&response[20..]), 0);
+            assert!(responses
+                .lock()
+                .expect("response queue must not be poisoned")
+                .is_empty());
+        }
+    }
+
+    #[test]
     fn test_server_config_default() {
         let config = ServerConfig::default();
         assert_eq!(config.max_clients, 100);

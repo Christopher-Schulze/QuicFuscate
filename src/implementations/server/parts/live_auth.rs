@@ -808,20 +808,20 @@ fn allow_client_uplink(
     }
 
     if packet.len() > usize::from(tun_mtu) && packet.first().is_some_and(|byte| byte >> 4 == 4) {
-        let dont_fragment = u16::from_be_bytes([packet[6], packet[7]]) & 0x4000 != 0;
-        if dont_fragment {
-            let response = icmp::build_icmpv4_error_with_ttl(
-                packet,
-                server_ips.ipv4,
-                icmp::icmp_type::DESTINATION_UNREACHABLE,
-                icmp::icmp_code::FRAGMENTATION_NEEDED,
-                Some(tun_mtu),
-                fingerprint_profile.ttl(),
-            );
-            enqueue_routing_response(response_queue, metrics, response);
-            metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
-            return None;
-        }
+        // Reject both DF states before either TUN write path. The server does
+        // not perform userspace IPv4 fragmentation, so the packet must never
+        // reach a platform-specific oversized-write boundary.
+        let response = icmp::build_icmpv4_error_with_ttl(
+            packet,
+            server_ips.ipv4,
+            icmp::icmp_type::DESTINATION_UNREACHABLE,
+            icmp::icmp_code::FRAGMENTATION_NEEDED,
+            Some(tun_mtu),
+            fingerprint_profile.ttl(),
+        );
+        enqueue_routing_response(response_queue, metrics, response);
+        metrics.record_routing_outcome(RoutingOutcome::PacketTooBig);
+        return None;
     }
     if packet.len() > usize::from(tun_mtu) && packet.first().is_some_and(|byte| byte >> 4 == 6) {
         if let Some(server_ipv6) = server_ips.ipv6 {
