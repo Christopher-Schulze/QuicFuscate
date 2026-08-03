@@ -325,13 +325,12 @@ pub mod notify {
 
 /// Health check HTTP server.
 pub mod health {
+    use super::super::http::{read_request, RequestReadError, MAX_CONCURRENT_CONNECTIONS};
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    const MAX_REQUEST_BYTES: usize = 8192;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
 
     fn parse_request_line(req: &str) -> Option<(&str, &str)> {
         let mut lines = req.lines();
@@ -348,6 +347,7 @@ pub mod health {
             400 => "Bad Request",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            413 => "Payload Too Large",
             _ => "Internal Server Error",
         };
         format!(
@@ -357,6 +357,44 @@ pub mod health {
             body.len(),
             body
         )
+    }
+
+    async fn handle_connection(mut socket: TcpStream) {
+        let response = match read_request(&mut socket).await {
+            Ok(Some(request)) => {
+                let req_str = String::from_utf8_lossy(&request);
+                let (status, body) = match parse_request_line(&req_str) {
+                    Some(("GET", "/health" | "/ready" | "/live")) => (200, "{\"status\":\"ok\"}"),
+                    Some(("GET", _)) => (404, "{\"error\":\"not_found\"}"),
+                    Some((_, _)) => (405, "{\"error\":\"method_not_allowed\"}"),
+                    None => (400, "{\"error\":\"bad_request\"}"),
+                };
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    http_response(status, body)
+                } else {
+                    http_response(400, "{\"error\":\"bad_request\"}")
+                }
+            }
+            Ok(None) => return,
+            Err(RequestReadError::Incomplete) => http_response(400, "{\"error\":\"bad_request\"}"),
+            Err(RequestReadError::TooLarge) => {
+                http_response(413, "{\"error\":\"request_too_large\"}")
+            }
+            Err(RequestReadError::TimedOut) => {
+                log::debug!("Health server request read timed out");
+                return;
+            }
+            Err(RequestReadError::Io(error)) => {
+                log::debug!("Health server request read failed: {}", error);
+                return;
+            }
+        };
+        if let Err(error) = socket.write_all(response.as_bytes()).await {
+            log::debug!("Health server response write failed: {}", error);
+        }
+        if let Err(error) = socket.shutdown().await {
+            log::debug!("Health server socket shutdown failed: {}", error);
+        }
     }
 
     /// Health check server.
@@ -384,11 +422,9 @@ pub mod health {
             self.shutdown.store(true, Ordering::SeqCst);
         }
 
-        /// Run the health check server.
-        pub async fn run(&self) -> std::io::Result<()> {
-            let listener = TcpListener::bind(self.addr).await?;
-            log::info!("Health check server listening on {}", self.addr);
-
+        async fn run_listener(&self, listener: TcpListener) -> std::io::Result<()> {
+            let connection_slots =
+                Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
             while !self.shutdown.load(Ordering::Relaxed) {
                 match tokio::time::timeout(
                     tokio::time::Duration::from_millis(100),
@@ -396,49 +432,65 @@ pub mod health {
                 )
                 .await
                 {
-                    Ok(Ok((mut socket, _addr))) => {
-                        let mut req = Vec::with_capacity(1024);
-                        let mut chunk = [0u8; 1024];
-                        loop {
-                            match socket.read(&mut chunk).await {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    req.extend_from_slice(&chunk[..n]);
-                                    if req.windows(4).any(|w| w == b"\r\n\r\n")
-                                        || req.len() >= MAX_REQUEST_BYTES
-                                    {
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-
-                        let req_str = String::from_utf8_lossy(&req);
-                        let (status, body) = match parse_request_line(&req_str) {
-                            Some(("GET", "/health" | "/ready" | "/live")) => {
-                                (200, "{\"status\":\"ok\"}")
-                            }
-                            Some(("GET", _)) => (404, "{\"error\":\"not_found\"}"),
-                            Some((_, _)) => (405, "{\"error\":\"method_not_allowed\"}"),
-                            None => (400, "{\"error\":\"bad_request\"}"),
+                    Ok(Ok((socket, _addr))) => {
+                        let permit = match connection_slots.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => continue,
                         };
-                        let response = http_response(status, body);
-                        if let Err(e) = socket.write_all(response.as_bytes()).await {
-                            log::debug!("Health server response write failed: {}", e);
-                        }
+                        tokio::spawn(async move {
+                            handle_connection(socket).await;
+                            drop(permit);
+                        });
                     }
                     Ok(Err(e)) => {
                         log::warn!("Health server accept error: {}", e);
                     }
                     Err(_) => {
-                        // Timeout, check shutdown
+                        // Timeout, check shutdown.
                     }
                 }
             }
-
-            log::info!("Health check server stopped");
             Ok(())
+        }
+
+        /// Run the health check server.
+        pub async fn run(&self) -> std::io::Result<()> {
+            let listener = TcpListener::bind(self.addr).await?;
+            log::info!("Health check server listening on {}", self.addr);
+
+            let result = self.run_listener(listener).await;
+            log::info!("Health check server stopped");
+            result
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt as _;
+
+        #[tokio::test]
+        async fn half_open_connection_does_not_block_next_health_probe() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let server = HealthServer { addr, shutdown: shutdown.clone() };
+            let server_task = tokio::spawn(async move { server.run_listener(listener).await });
+
+            let stalled = TcpStream::connect(addr).await.unwrap();
+            let mut valid = TcpStream::connect(addr).await.unwrap();
+            valid.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(Duration::from_secs(1), valid.read_to_end(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+            drop(stalled);
+            shutdown.store(true, Ordering::SeqCst);
+            server_task.await.unwrap().unwrap();
         }
     }
 }

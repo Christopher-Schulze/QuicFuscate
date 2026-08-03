@@ -25,6 +25,7 @@ pub mod bandwidth;
 mod ddos;
 #[doc(hidden)]
 pub mod fsutil;
+mod http;
 pub mod icmp;
 mod ip_pool;
 pub mod isolation;

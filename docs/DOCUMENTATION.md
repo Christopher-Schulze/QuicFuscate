@@ -4181,6 +4181,8 @@ Telemetry and metrics endpoints are exposed by different runtime surfaces:
 - `GET /telemetry`: text snapshot from `telemetry::export_telemetry_text()` served by `src/metrics.rs` (`spawn_telemetry_server`, bind via `QUICFUSCATE_METRICS_ADDR`, default `127.0.0.1:9898`).
 - `GET /metrics` and `GET /health`: server metrics/health exposed by `implementations::server::metrics::MetricsServer` when server metrics are enabled.
 
+The server metrics and systemd health surfaces use the shared bounded HTTP reader in `src/implementations/server/http.rs`: request headers are read incrementally up to 8 KiB with a five-second per-read deadline, oversized unterminated requests receive an explicit 413 response, and each accept loop admits at most 32 connection workers. This does not change the explicit `MetricsServer::new(port, metrics)` bind contract or the environment-configured telemetry endpoint.
+
 `GlobalMetricsServer` (same module) is currently retained only for test/compat coverage around global instrumentation export and is not part of the active CLI/runtime metrics path.
 
 #### Server `/metrics` families (default server runtime)
@@ -4740,7 +4742,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 
 - **Server fan-out and MTU:** The shared broadcast/multicast queue finding is resolved by TODO-612; its bounded admission, drop telemetry, and housekeeping work budget are reconciled below. TODO-613 is closed: the selected contract returns IPv4 Fragmentation Needed for both DF states before either server TUN write and intentionally does not perform userspace fragmentation. The later native IPv4 TTL-expiry failure is closed by TODO-806; the independent backpressure-quiescence finding remains separate.
 - **Rate and session contracts:** `src/implementations/server/limits.rs` now defines the byte burst as `ceil(max_bps * effective_burst / max_pps)`, preserving the packet-token burst duration while keeping `refill_interval` as refill cadence. TODO-614 retains the focused implementation and runtime-admission verification boundary. `src/implementations/server/session.rs` does not reject duplicate lookup keys or duplicate session IDs transactionally, and remote-address rebinding removes the old index before validating the new one. Tracked in TODO-616.
-- **HTTP control surfaces:** `systemd::HealthServer` and the active `MetricsServer` process connections serially without read deadlines; `MetricsServer` also classifies a single partial 1024-byte read. Tracked in TODO-615. The separate telemetry server already has a five-second read timeout, a 32-connection semaphore, and `QUICFUSCATE_METRICS_ADDR`; the test-only `GlobalMetricsServer` is not an active production surface.
+- **HTTP control surfaces:** TODO-615 closes the HealthServer, active MetricsServer, and retained test-only GlobalMetricsServer sequential-read gap with bounded incremental request framing, a five-second per-read deadline, an 8 KiB header cap, and a 32-worker connection limit. The separate telemetry server remains an independent active surface with its existing five-second read timeout, 32-connection semaphore, and `QUICFUSCATE_METRICS_ADDR` bind.
 - **Unix admin socket:** `AdminServer` relies on umask for socket permissions, reads an unbounded newline-delimited command without a deadline, and removes any existing path before checking that it is a stale owned socket. Tracked in TODO-617.
 
 ### Build Verification

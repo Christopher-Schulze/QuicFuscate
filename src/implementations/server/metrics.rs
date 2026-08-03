@@ -2,11 +2,12 @@
 //!
 //! Exports metrics in Prometheus text format at /metrics endpoint.
 
+use super::http::{read_request, RequestReadError, MAX_CONCURRENT_CONNECTIONS};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 
 use super::isolation::{UplinkDrop, UplinkRoute};
 use super::{BandwidthDecision, BandwidthDirection};
@@ -1128,6 +1129,117 @@ impl Default for Metrics {
     }
 }
 
+fn parse_request_line(request: &[u8]) -> Option<(&str, &str)> {
+    let line = request.split(|byte| *byte == b'\n').next()?;
+    let line = std::str::from_utf8(line).ok()?.trim_end_matches('\r');
+    let mut parts = line.split_whitespace();
+    Some((parts.next()?, parts.next()?))
+}
+
+fn route_path(path: &str) -> &str {
+    path.split('?').next().unwrap_or(path)
+}
+
+fn bad_request_response() -> String {
+    "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+}
+
+fn too_large_response() -> String {
+    "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+}
+
+fn not_found_response() -> String {
+    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+}
+
+fn metrics_body_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    )
+}
+
+fn health_body_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    )
+}
+
+fn metrics_response(request: &[u8], metrics: &Metrics) -> String {
+    let Some((method, path)) = parse_request_line(request) else {
+        return bad_request_response();
+    };
+
+    match (method, route_path(path)) {
+        ("GET", "/metrics") => metrics_body_response(&metrics.export()),
+        ("GET", "/health") => health_body_response(&metrics.export_health()),
+        _ => not_found_response(),
+    }
+}
+
+fn global_metrics_response(request: &[u8]) -> String {
+    let Some((method, path)) = parse_request_line(request) else {
+        return bad_request_response();
+    };
+    let global = crate::instrumentation::global();
+
+    match (method, route_path(path)) {
+        ("GET", "/metrics") => metrics_body_response(&global.export_prometheus()),
+        ("GET", "/health") => health_body_response(&global.export_health()),
+        _ => not_found_response(),
+    }
+}
+
+async fn handle_metrics_connection(mut socket: TcpStream, metrics: Arc<Metrics>) {
+    let response = match read_request(&mut socket).await {
+        Ok(Some(request)) => metrics_response(&request, &metrics),
+        Ok(None) => return,
+        Err(RequestReadError::Incomplete) => bad_request_response(),
+        Err(RequestReadError::TooLarge) => too_large_response(),
+        Err(RequestReadError::TimedOut) => {
+            log::debug!("Metrics server request read timed out");
+            return;
+        }
+        Err(RequestReadError::Io(error)) => {
+            log::debug!("Metrics server request read failed: {}", error);
+            return;
+        }
+    };
+
+    if let Err(error) = socket.write_all(response.as_bytes()).await {
+        log::debug!("Metrics response write failed: {}", error);
+    }
+    if let Err(error) = socket.shutdown().await {
+        log::debug!("Metrics socket shutdown failed: {}", error);
+    }
+}
+
+#[cfg(any(test, feature = "rust-tests"))]
+async fn handle_global_metrics_connection(mut socket: TcpStream) {
+    let response = match read_request(&mut socket).await {
+        Ok(Some(request)) => global_metrics_response(&request),
+        Ok(None) => return,
+        Err(RequestReadError::Incomplete) => bad_request_response(),
+        Err(RequestReadError::TooLarge) => too_large_response(),
+        Err(RequestReadError::TimedOut) => {
+            log::debug!("Global metrics server request read timed out");
+            return;
+        }
+        Err(RequestReadError::Io(error)) => {
+            log::debug!("Global metrics server request read failed: {}", error);
+            return;
+        }
+    };
+
+    if let Err(error) = socket.write_all(response.as_bytes()).await {
+        log::debug!("Global metrics response write failed: {}", error);
+    }
+    if let Err(error) = socket.shutdown().await {
+        log::debug!("Global metrics socket shutdown failed: {}", error);
+    }
+}
+
 /// Metrics HTTP server.
 pub struct MetricsServer {
     addr: std::net::SocketAddr,
@@ -1155,57 +1267,22 @@ impl MetricsServer {
         self.shutdown.store(true, Ordering::SeqCst);
     }
 
-    /// Run the metrics server.
-    pub async fn run(&self) -> std::io::Result<()> {
-        let listener = TcpListener::bind(self.addr).await?;
-        log::info!("Metrics server listening on http://{}", self.addr);
-
+    async fn run_listener(&self, listener: TcpListener) -> std::io::Result<()> {
+        let connection_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
         while !self.shutdown.load(Ordering::Relaxed) {
             match tokio::time::timeout(tokio::time::Duration::from_millis(100), listener.accept())
                 .await
             {
-                Ok(Ok((mut socket, _addr))) => {
-                    let mut buf = [0u8; 1024];
-                    if let Err(e) = socket.read(&mut buf).await {
-                        log::debug!("Metrics request read failed: {}", e);
-                        continue;
-                    }
-
-                    let request = String::from_utf8_lossy(&buf);
-
-                    // Parse request path
-                    let response = if request.contains("GET /metrics") {
-                        let body = self.metrics.export();
-                        format!(
-                            "HTTP/1.1 200 OK\r\n\
-                             Content-Type: text/plain; version=0.0.4\r\n\
-                             Content-Length: {}\r\n\
-                             \r\n\
-                             {}",
-                            body.len(),
-                            body
-                        )
-                    } else if request.contains("GET /health") {
-                        let body = self.metrics.export_health();
-                        format!(
-                            "HTTP/1.1 200 OK\r\n\
-                             Content-Type: application/json\r\n\
-                             Content-Length: {}\r\n\
-                             \r\n\
-                             {}",
-                            body.len(),
-                            body
-                        )
-                    } else {
-                        "HTTP/1.1 404 Not Found\r\n\
-                         Content-Length: 0\r\n\
-                         \r\n"
-                            .to_string()
+                Ok(Ok((socket, _addr))) => {
+                    let permit = match connection_slots.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => continue,
                     };
-
-                    if let Err(e) = socket.write_all(response.as_bytes()).await {
-                        log::debug!("Metrics response write failed: {}", e);
-                    }
+                    let metrics = Arc::clone(&self.metrics);
+                    tokio::spawn(async move {
+                        handle_metrics_connection(socket, metrics).await;
+                        drop(permit);
+                    });
                 }
                 Ok(Err(e)) => {
                     log::warn!("Metrics server accept error: {}", e);
@@ -1216,8 +1293,17 @@ impl MetricsServer {
             }
         }
 
-        log::info!("Metrics server stopped");
         Ok(())
+    }
+
+    /// Run the metrics server.
+    pub async fn run(&self) -> std::io::Result<()> {
+        let listener = TcpListener::bind(self.addr).await?;
+        log::info!("Metrics server listening on http://{}", self.addr);
+
+        let result = self.run_listener(listener).await;
+        log::info!("Metrics server stopped");
+        result
     }
 }
 
@@ -1250,58 +1336,21 @@ impl GlobalMetricsServer {
         self.shutdown.store(true, Ordering::SeqCst);
     }
 
-    /// Run the metrics server.
-    pub async fn run(&self) -> std::io::Result<()> {
-        let listener = TcpListener::bind(self.addr).await?;
-        log::info!("Global metrics server listening on http://{}", self.addr);
-
+    async fn run_listener(&self, listener: TcpListener) -> std::io::Result<()> {
+        let connection_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
         while !self.shutdown.load(Ordering::Relaxed) {
             match tokio::time::timeout(tokio::time::Duration::from_millis(100), listener.accept())
                 .await
             {
-                Ok(Ok((mut socket, _addr))) => {
-                    let mut buf = [0u8; 1024];
-                    if let Err(e) = socket.read(&mut buf).await {
-                        log::debug!("Global metrics request read failed: {}", e);
-                        continue;
-                    }
-
-                    let request = String::from_utf8_lossy(&buf);
-                    let global = crate::instrumentation::global();
-
-                    // Parse request path
-                    let response = if request.contains("GET /metrics") {
-                        let body = global.export_prometheus();
-                        format!(
-                            "HTTP/1.1 200 OK\r\n\
-                             Content-Type: text/plain; version=0.0.4\r\n\
-                             Content-Length: {}\r\n\
-                             \r\n\
-                             {}",
-                            body.len(),
-                            body
-                        )
-                    } else if request.contains("GET /health") {
-                        let body = global.export_health();
-                        format!(
-                            "HTTP/1.1 200 OK\r\n\
-                             Content-Type: application/json\r\n\
-                             Content-Length: {}\r\n\
-                             \r\n\
-                             {}",
-                            body.len(),
-                            body
-                        )
-                    } else {
-                        "HTTP/1.1 404 Not Found\r\n\
-                         Content-Length: 0\r\n\
-                         \r\n"
-                            .to_string()
+                Ok(Ok((socket, _addr))) => {
+                    let permit = match connection_slots.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => continue,
                     };
-
-                    if let Err(e) = socket.write_all(response.as_bytes()).await {
-                        log::debug!("Global metrics response write failed: {}", e);
-                    }
+                    tokio::spawn(async move {
+                        handle_global_metrics_connection(socket).await;
+                        drop(permit);
+                    });
                 }
                 Ok(Err(e)) => {
                     log::warn!("Global metrics server accept error: {}", e);
@@ -1312,14 +1361,72 @@ impl GlobalMetricsServer {
             }
         }
 
-        log::info!("Global metrics server stopped");
         Ok(())
+    }
+
+    /// Run the metrics server.
+    pub async fn run(&self) -> std::io::Result<()> {
+        let listener = TcpListener::bind(self.addr).await?;
+        log::info!("Global metrics server listening on http://{}", self.addr);
+
+        let result = self.run_listener(listener).await;
+        log::info!("Global metrics server stopped");
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt as _;
+
+    #[tokio::test]
+    async fn metrics_server_serves_next_request_while_first_reader_is_silent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server =
+            MetricsServer { addr, metrics: Arc::new(Metrics::new()), shutdown: shutdown.clone() };
+        let server_task = tokio::spawn(async move { server.run_listener(listener).await });
+
+        let stalled = TcpStream::connect(addr).await.unwrap();
+        let mut valid = TcpStream::connect(addr).await.unwrap();
+        valid.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), valid.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+        drop(stalled);
+        shutdown.store(true, Ordering::SeqCst);
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn global_metrics_server_uses_the_same_bounded_connection_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = GlobalMetricsServer { addr, shutdown: shutdown.clone() };
+        let server_task = tokio::spawn(async move { server.run_listener(listener).await });
+
+        let stalled = TcpStream::connect(addr).await.unwrap();
+        let mut valid = TcpStream::connect(addr).await.unwrap();
+        valid.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), valid.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+        drop(stalled);
+        shutdown.store(true, Ordering::SeqCst);
+        server_task.await.unwrap().unwrap();
+    }
 
     #[test]
     fn test_metrics_export() {
