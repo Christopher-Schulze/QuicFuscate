@@ -69,8 +69,7 @@ jobs:
       - name: Install Playwright Chromium
         shell: bash
         working-directory: apps/svelte-admin
-        run: |
-          bunx playwright install --with-deps chromium
+        run: bun run test:e2e:install -- --with-deps
 
       - name: Svelte admin full E2E suite
         shell: bash

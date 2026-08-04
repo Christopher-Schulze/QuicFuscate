@@ -26,9 +26,14 @@ done
 }
 
 EXPECTED_BUN_VERSION="$(sed -n 's/^BUN_VERSION="\([^"]*\)"$/\1/p' "$VERSIONS_FILE")"
+EXPECTED_PLAYWRIGHT_VERSION="$(sed -n 's/^PLAYWRIGHT_VERSION="\([^"]*\)"$/\1/p' "$VERSIONS_FILE")"
 ACTUAL_BUN_VERSION="$(bun --version)"
 if [[ -z "$EXPECTED_BUN_VERSION" || "$ACTUAL_BUN_VERSION" != "$EXPECTED_BUN_VERSION" ]]; then
   echo "error: Bun version mismatch: expected $EXPECTED_BUN_VERSION, got $ACTUAL_BUN_VERSION" >&2
+  exit 1
+fi
+if [[ -z "$EXPECTED_PLAYWRIGHT_VERSION" ]]; then
+  echo "error: PLAYWRIGHT_VERSION is missing from $VERSIONS_FILE" >&2
   exit 1
 fi
 
@@ -74,6 +79,7 @@ python3 - \
   "$TEMP_ROOT/audit.stderr" \
   "$TEMP_ROOT/scan.log" \
   "$EXPECTED_BUN_VERSION" \
+  "$EXPECTED_PLAYWRIGHT_VERSION" \
   "$LOCK_HASH_AFTER" \
   "$INSTALL_STATUS" \
   "$UNTRUSTED_STATUS" \
@@ -85,8 +91,8 @@ from pathlib import Path
 
 
 (project_root, versions_file, install_log, untrusted_log, audit_path,
- audit_stderr, scan_log, bun_version, lock_hash, install_status,
- untrusted_status, audit_status, scan_status) = sys.argv[1:]
+ audit_stderr, scan_log, bun_version, playwright_version, lock_hash,
+ install_status, untrusted_status, audit_status, scan_status) = sys.argv[1:]
 
 project_root = Path(project_root)
 errors = []
@@ -145,12 +151,14 @@ expected_overrides = {
 }
 expected_workspace_versions = {
     "apps/svelte-admin/package.json": {
+        "@playwright/test": playwright_version,
         "@sveltejs/kit": "^2.70.2",
         "svelte": "^5.56.8",
         "vite": "^7.3.6",
         "vitest": "^4.1.10",
     },
     "apps/svelte-desktop/package.json": {
+        "@playwright/test": playwright_version,
         "@sveltejs/kit": "^2.70.2",
         "svelte": "^5.56.8",
         "vite": "^7.3.6",
@@ -190,6 +198,7 @@ payload = {
         "source": "bun audit --json",
     },
     "bun_version": bun_version,
+    "playwright_version": playwright_version,
     "frozen_install": "PASS" if install_status == "0" else "FAIL",
     "lifecycle_scripts": "PASS" if untrusted_status == "0" and "Found 0 untrusted dependencies with scripts." in untrusted_text else "FAIL",
     "lock_sha256": lock_hash,

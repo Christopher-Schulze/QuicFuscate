@@ -22,7 +22,7 @@ for command_name in bun cargo rustc python3; do
 done
 
 python3 - "$PROJECT_ROOT" "$VERSIONS_FILE" \
-  "$BUN_VERSION" "$RUST_TOOLCHAIN" "$RUST_NIGHTLY_TOOLCHAIN" \
+  "$BUN_VERSION" "$PLAYWRIGHT_VERSION" "$RUST_TOOLCHAIN" "$RUST_NIGHTLY_TOOLCHAIN" \
   "$TAURI_CLI_VERSION" "$CARGO_AUDIT_VERSION" "$CARGO_DENY_VERSION" \
   "$CARGO_FUZZ_VERSION" \
   "$CRITCMP_VERSION" <<'PY'
@@ -34,7 +34,7 @@ from pathlib import Path
 
 project_root = Path(sys.argv[1])
 versions_file = Path(sys.argv[2])
-bun_version, rust_toolchain, rust_nightly, tauri_cli, cargo_audit, cargo_deny, cargo_fuzz, critcmp = sys.argv[3:]
+bun_version, playwright_version, rust_toolchain, rust_nightly, tauri_cli, cargo_audit, cargo_deny, cargo_fuzz, critcmp = sys.argv[3:]
 
 
 def fail(message):
@@ -172,6 +172,13 @@ for manifest in (project_root / "Cargo.toml", project_root / "apps/tauri/src-tau
     if first != second:
         fail(f"Cargo resolution changed between consecutive locked metadata runs: {manifest}")
 
+for relative_path in ("apps/svelte-admin/package.json", "apps/svelte-desktop/package.json"):
+    manifest_path = project_root / relative_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    actual = manifest.get("devDependencies", {}).get("@playwright/test")
+    if actual != playwright_version:
+        fail(f"{manifest_path}: @playwright/test={actual!r}, expected {playwright_version!r}")
+
 bun_hashes = []
 for _ in range(2):
     run(["bun", "install", "--frozen-lockfile", "--dry-run", "--no-progress"])
@@ -188,6 +195,7 @@ if bun_runtime_version != bun_version:
 
 print(f"tool_versions_file={versions_file.relative_to(project_root)}")
 print(f"bun_version={bun_runtime_version}")
+print(f"playwright_version={playwright_version}")
 print(f"rust_toolchain={rust_toolchain}")
 print(f"bun_lock_hash={bun_hashes[0]}")
 print("cargo_metadata_runs=2 per manifest")

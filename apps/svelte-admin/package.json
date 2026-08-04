@@ -12,9 +12,11 @@
     "test": "bun run test:unit",
     "test:unit": "vitest run --config vitest.config.ts --pool=forks",
     "test:unit:watch": "vitest --config vitest.config.ts --watch",
-    "test:e2e": "NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test",
-    "test:e2e:ui": "NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test --ui",
-    "test:e2e:debug": "NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test --debug"
+    "test:e2e:install": "bunx playwright install chromium",
+    "test:e2e:preflight": "bash ../../scripts/tests/frontend/verify-playwright-browser.sh apps/svelte-admin",
+    "test:e2e": "bun run test:e2e:preflight && NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test",
+    "test:e2e:ui": "bun run test:e2e:preflight && NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test --ui",
+    "test:e2e:debug": "bun run test:e2e:preflight && NODE_PATH=./node_modules env -u NO_COLOR -u FORCE_COLOR playwright test --debug"
   },
   "dependencies": {
     "@quicfuscate/theme": "workspace:*",
@@ -25,7 +27,7 @@
     "tailwind-merge": "^3.0.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
+    "@playwright/test": "1.58.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/svelte": "^5.2.8",
     "@sveltejs/adapter-static": "^3.0.0",

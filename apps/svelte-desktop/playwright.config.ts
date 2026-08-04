@@ -15,6 +15,7 @@ export default defineConfig({
   reporter: wantHtmlReport ? [["html", { open: "never" }]] : [["list"]],
   use: {
     baseURL: "http://localhost:4173",
+    channel: "chromium",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },

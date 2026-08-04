@@ -35,9 +35,11 @@ JSON_FIRST_RUN=1
 
 print_system_banner
 info "Running Web Admin UI smoke test"
+run bash "$PROJECT_ROOT/scripts/tests/frontend/verify-playwright-browser.sh" apps/svelte-admin
 run bash -lc "cd '$PROJECT_ROOT/apps/svelte-admin' && env -u NO_COLOR -u FORCE_COLOR NODE_PATH='./node_modules' bunx playwright test smoke-ui.pw.ts --config=playwright.config.ts --project=chromium --workers=1 --reporter=list"
 
 info "Running Desktop UI smoke test"
+run bash "$PROJECT_ROOT/scripts/tests/frontend/verify-playwright-browser.sh" apps/svelte-desktop
 run bash -lc "cd '$PROJECT_ROOT/apps/svelte-desktop' && env -u NO_COLOR -u FORCE_COLOR NODE_PATH='./node_modules' bunx playwright test smoke-ui.pw.ts --config=playwright.config.ts --project=chromium --workers=1 --reporter=list"
 
 info "UI smoke tests completed successfully"
