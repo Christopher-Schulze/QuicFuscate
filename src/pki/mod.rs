@@ -13,12 +13,17 @@
 //! All certificates use ECDSA P-256 (prime256v1) for modern compatibility.
 
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Error type for PKI operations.
 #[derive(Debug)]
 pub enum PkiError {
     /// Certificate generation failed.
     GenerationFailed(String),
+    /// The system clock could not provide a representable PKI timestamp.
+    ClockError(String),
+    /// A certificate validity interval is not strictly ordered.
+    InvalidValidity(String),
     /// Certificate parsing failed.
     ParseFailed(String),
     /// Chain validation failed.
@@ -33,6 +38,8 @@ impl std::fmt::Display for PkiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::GenerationFailed(s) => write!(f, "cert generation failed: {s}"),
+            Self::ClockError(s) => write!(f, "PKI clock error: {s}"),
+            Self::InvalidValidity(s) => write!(f, "invalid certificate validity: {s}"),
             Self::ParseFailed(s) => write!(f, "cert parse failed: {s}"),
             Self::ValidationFailed(s) => write!(f, "chain validation failed: {s}"),
             Self::IoError(e) => write!(f, "I/O error: {e}"),
@@ -59,6 +66,59 @@ impl From<rcgen::Error> for PkiError {
 pub const ROOT_CA_VALIDITY_DAYS: u32 = 3650; // 10 years
 pub const INTERMEDIATE_CA_VALIDITY_DAYS: u32 = 1825; // 5 years
 pub const SERVER_LEAF_VALIDITY_DAYS: u32 = 365; // 1 year
+
+/// One checked instant shared by PKI generation, validation, and quarantine.
+#[derive(Debug, Clone, Copy)]
+struct PkiTime {
+    since_epoch: Duration,
+    unix_time: rustls::pki_types::UnixTime,
+}
+
+trait PkiClock {
+    fn now_system(&self) -> SystemTime;
+}
+
+struct CanonicalPkiClock;
+
+impl PkiClock for CanonicalPkiClock {
+    fn now_system(&self) -> SystemTime {
+        crate::time_source::now_system()
+    }
+}
+
+impl PkiTime {
+    fn capture() -> Result<Self, PkiError> {
+        Self::capture_from(&CanonicalPkiClock)
+    }
+
+    fn capture_from(clock: &dyn PkiClock) -> Result<Self, PkiError> {
+        Self::from_system_time(clock.now_system())
+    }
+
+    fn from_system_time(now: SystemTime) -> Result<Self, PkiError> {
+        let since_epoch = now.duration_since(UNIX_EPOCH).map_err(|error| {
+            PkiError::ClockError(format!("system clock predates Unix epoch: {error}"))
+        })?;
+        Ok(Self {
+            since_epoch,
+            unix_time: rustls::pki_types::UnixTime::since_unix_epoch(since_epoch),
+        })
+    }
+
+    #[cfg(feature = "rcgen")]
+    fn offset_datetime(self) -> Result<time::OffsetDateTime, PkiError> {
+        let timestamp_nanos = i128::try_from(self.since_epoch.as_nanos()).map_err(|_| {
+            PkiError::ClockError("system clock timestamp exceeds the checked range".into())
+        })?;
+        time::OffsetDateTime::from_unix_timestamp_nanos(timestamp_nanos).map_err(|error| {
+            PkiError::ClockError(format!("system clock timestamp is not representable: {error}"))
+        })
+    }
+
+    fn quarantine_stamp(self) -> u128 {
+        self.since_epoch.as_nanos()
+    }
+}
 
 /// A generated certificate + its private key (DER-encoded).
 ///
@@ -94,10 +154,21 @@ pub fn generate_hierarchy(
     server_hostname: &str,
     organization: &str,
 ) -> Result<CaHierarchy, PkiError> {
+    let pki_time = PkiTime::capture()?;
+    generate_hierarchy_at(server_hostname, organization, pki_time)
+}
+
+#[cfg(feature = "rcgen")]
+fn generate_hierarchy_at(
+    server_hostname: &str,
+    organization: &str,
+    pki_time: PkiTime,
+) -> Result<CaHierarchy, PkiError> {
     use rcgen::{
         CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
         KeyUsagePurpose, SanType,
     };
+    let now = pki_time.offset_datetime()?;
 
     // --- Root CA ---
     let mut root_params = CertificateParams::new(vec![])?;
@@ -111,9 +182,13 @@ pub fn generate_hierarchy(
         KeyUsagePurpose::CrlSign,
         KeyUsagePurpose::DigitalSignature,
     ];
-    root_params.not_after =
-        time::OffsetDateTime::now_utc() + time::Duration::days(ROOT_CA_VALIDITY_DAYS as i64);
-    root_params.not_before = time::OffsetDateTime::now_utc();
+    let root_validity = checked_validity_window(
+        now,
+        time::Duration::days(i64::from(ROOT_CA_VALIDITY_DAYS)),
+        "root CA",
+    )?;
+    root_params.not_before = root_validity.not_before;
+    root_params.not_after = root_validity.not_after;
     let root_key = rcgen::KeyPair::generate()
         .map_err(|e| PkiError::GenerationFailed(format!("root key gen: {e}")))?;
     let root_cert = root_params
@@ -134,9 +209,13 @@ pub fn generate_hierarchy(
         KeyUsagePurpose::CrlSign,
         KeyUsagePurpose::DigitalSignature,
     ];
-    inter_params.not_after = time::OffsetDateTime::now_utc()
-        + time::Duration::days(INTERMEDIATE_CA_VALIDITY_DAYS as i64);
-    inter_params.not_before = time::OffsetDateTime::now_utc();
+    let intermediate_validity = checked_validity_window(
+        now,
+        time::Duration::days(i64::from(INTERMEDIATE_CA_VALIDITY_DAYS)),
+        "intermediate CA",
+    )?;
+    inter_params.not_before = intermediate_validity.not_before;
+    inter_params.not_after = intermediate_validity.not_after;
     let inter_key = rcgen::KeyPair::generate()
         .map_err(|e| PkiError::GenerationFailed(format!("intermediate key gen: {e}")))?;
     let inter_cert = inter_params
@@ -166,9 +245,13 @@ pub fn generate_hierarchy(
         vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
     leaf_params.key_usages =
         vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
-    leaf_params.not_after =
-        time::OffsetDateTime::now_utc() + time::Duration::days(SERVER_LEAF_VALIDITY_DAYS as i64);
-    leaf_params.not_before = time::OffsetDateTime::now_utc();
+    let leaf_validity = checked_validity_window(
+        now,
+        time::Duration::days(i64::from(SERVER_LEAF_VALIDITY_DAYS)),
+        "server leaf",
+    )?;
+    leaf_params.not_before = leaf_validity.not_before;
+    leaf_params.not_after = leaf_validity.not_after;
     let leaf_key = rcgen::KeyPair::generate()
         .map_err(|e| PkiError::GenerationFailed(format!("leaf key gen: {e}")))?;
     let leaf_cert = leaf_params
@@ -189,6 +272,30 @@ pub fn generate_hierarchy(
             key_der: leaf_key.serialize_der(),
         },
     })
+}
+
+#[cfg(feature = "rcgen")]
+#[derive(Debug, Clone, Copy)]
+struct CertificateValidity {
+    not_before: time::OffsetDateTime,
+    not_after: time::OffsetDateTime,
+}
+
+#[cfg(feature = "rcgen")]
+fn checked_validity_window(
+    not_before: time::OffsetDateTime,
+    duration: time::Duration,
+    label: &str,
+) -> Result<CertificateValidity, PkiError> {
+    let not_after = not_before.checked_add(duration).ok_or_else(|| {
+        PkiError::InvalidValidity(format!("{label} validity exceeds the representable range"))
+    })?;
+    if not_before >= not_after {
+        return Err(PkiError::InvalidValidity(format!(
+            "{label} not_before must precede not_after"
+        )));
+    }
+    Ok(CertificateValidity { not_before, not_after })
 }
 
 /// Generate a full CA hierarchy (stub when rcgen is not enabled).
@@ -289,12 +396,17 @@ fn parse_certificates(
     Ok(certificates)
 }
 
-fn validate_existing_pki(pki_dir: &Path, server_hostname: &str) -> Result<(), PkiError> {
+fn validate_existing_pki_at(
+    pki_dir: &Path,
+    server_hostname: &str,
+    pki_time: PkiTime,
+) -> Result<(), PkiError> {
     use rustls::client::danger::ServerCertVerifier;
     use rustls::client::WebPkiServerVerifier;
-    use rustls::pki_types::{pem::PemObject, PrivateKeyDer, ServerName, UnixTime};
+    use rustls::pki_types::{pem::PemObject, PrivateKeyDer, ServerName};
     use rustls::RootCertStore;
     use std::sync::Arc;
+    let validation_time = pki_time.unix_time;
 
     let server_cert_path = pki_dir.join("server.crt");
     let server_key_path = pki_dir.join("server.key");
@@ -354,7 +466,7 @@ fn validate_existing_pki(pki_dir: &Path, server_hostname: &str) -> Result<(), Pk
             &server_chain[1..],
             &server_name,
             &[],
-            UnixTime::now(),
+            validation_time,
         )
         .map_err(|error| PkiError::ValidationFailed(format!("server chain: {error}")))?;
 
@@ -373,18 +485,9 @@ fn validate_existing_pki(pki_dir: &Path, server_hostname: &str) -> Result<(), Pk
 fn quarantine_existing_pki(
     pki_dir: &Path,
     paths: &[&Path],
+    pki_time: PkiTime,
 ) -> Result<std::path::PathBuf, PkiError> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| {
-            PkiError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("system clock predates Unix epoch: {error}"),
-            ))
-        })?;
+    let stamp = pki_time.quarantine_stamp();
     let quarantine_dir = pki_dir.join(format!(".invalid-pki-{stamp}-{}", std::process::id()));
     if quarantine_dir.exists() {
         return Err(PkiError::IoError(std::io::Error::new(
@@ -430,6 +533,16 @@ pub fn ensure_pki(
     server_hostname: &str,
     organization: &str,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), PkiError> {
+    let pki_time = PkiTime::capture()?;
+    ensure_pki_at(pki_dir, server_hostname, organization, pki_time)
+}
+
+fn ensure_pki_at(
+    pki_dir: &Path,
+    server_hostname: &str,
+    organization: &str,
+    pki_time: PkiTime,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), PkiError> {
     let root_ca_path = pki_dir.join("ca-root.crt");
     let intermediate_ca_path = pki_dir.join("ca-intermediate.crt");
     let server_cert_path = pki_dir.join("server.crt");
@@ -441,11 +554,10 @@ pub fn ensure_pki(
         server_cert_path.as_path(),
         server_key_path.as_path(),
     ];
-
     // Existing material is reusable only after parsing, key matching, hostname,
     // expiry, and full chain validation against the local root CA.
     if server_cert_path.exists() && server_key_path.exists() {
-        match validate_existing_pki(pki_dir, server_hostname) {
+        match validate_existing_pki_at(pki_dir, server_hostname, pki_time) {
             Ok(()) => {
                 log::info!(
                     "PKI: Using existing validated server certificate at {}",
@@ -462,7 +574,7 @@ pub fn ensure_pki(
     }
 
     if pki_paths.iter().any(|path| path.exists()) {
-        let quarantine_dir = quarantine_existing_pki(pki_dir, &pki_paths)?;
+        let quarantine_dir = quarantine_existing_pki(pki_dir, &pki_paths, pki_time)?;
         log::warn!("PKI: Moved invalid or incomplete material to {}", quarantine_dir.display());
     }
 
@@ -472,6 +584,9 @@ pub fn ensure_pki(
         server_hostname
     );
 
+    #[cfg(feature = "rcgen")]
+    let mut hierarchy = generate_hierarchy_at(server_hostname, organization, pki_time)?;
+    #[cfg(not(feature = "rcgen"))]
     let mut hierarchy = generate_hierarchy(server_hostname, organization)?;
 
     // Write root CA.
@@ -494,6 +609,12 @@ pub fn ensure_pki(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_directory(name: &str) -> std::path::PathBuf {
+        static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let sequence = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("qf_pki-{name}-{}-{sequence}", std::process::id()))
+    }
 
     #[test]
     fn test_der_to_pem() {
@@ -528,14 +649,87 @@ mod tests {
         assert_ne!(hierarchy.intermediate_ca.cert_der, hierarchy.server_leaf.cert_der);
     }
 
+    #[test]
+    fn test_pki_time_rejects_pre_epoch_clock() {
+        let error = PkiTime::from_system_time(UNIX_EPOCH - Duration::from_secs(1))
+            .expect_err("pre-epoch time must be rejected");
+        assert!(matches!(error, PkiError::ClockError(_)));
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_checked_validity_window_enforces_order_and_boundaries() {
+        let not_before = time::OffsetDateTime::UNIX_EPOCH;
+        let validity = checked_validity_window(not_before, time::Duration::days(1), "test")
+            .expect("positive validity must be accepted");
+        assert_eq!(validity.not_before, not_before);
+        assert_eq!(validity.not_after, not_before + time::Duration::days(1));
+        assert!(validity.not_before < validity.not_after);
+
+        let error = checked_validity_window(not_before, time::Duration::ZERO, "test")
+            .expect_err("zero-length validity must be rejected");
+        assert!(matches!(error, PkiError::InvalidValidity(_)));
+    }
+
+    #[cfg(feature = "rcgen")]
+    struct CountingPkiClock {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        system_now: SystemTime,
+    }
+
+    #[cfg(feature = "rcgen")]
+    impl PkiClock for CountingPkiClock {
+        fn now_system(&self) -> SystemTime {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.system_now
+        }
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_generate_hierarchy_captures_one_checked_instant() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let clock = CountingPkiClock {
+            calls: calls.clone(),
+            system_now: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        };
+
+        let pki_time = PkiTime::capture_from(&clock).unwrap();
+        let hierarchy = generate_hierarchy_at("vpn.example.com", "TestOrg", pki_time).unwrap();
+        assert!(!hierarchy.server_leaf.cert_der.is_empty());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_generate_hierarchy_propagates_checked_clock_failure() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let clock = CountingPkiClock {
+            calls: calls.clone(),
+            system_now: UNIX_EPOCH - Duration::from_secs(1),
+        };
+
+        let result = PkiTime::capture_from(&clock)
+            .and_then(|pki_time| generate_hierarchy_at("vpn.example.com", "TestOrg", pki_time));
+        assert!(matches!(result, Err(PkiError::ClockError(_))));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn test_generate_hierarchy_accepts_unix_epoch_boundary() {
+        let pki_time = PkiTime::from_system_time(UNIX_EPOCH).unwrap();
+        let hierarchy = generate_hierarchy_at("vpn.example.com", "TestOrg", pki_time)
+            .expect("Unix epoch is a representable certificate boundary");
+        assert!(!hierarchy.root_ca.cert_der.is_empty());
+        assert!(!hierarchy.intermediate_ca.cert_der.is_empty());
+        assert!(!hierarchy.server_leaf.cert_der.is_empty());
+    }
+
     #[cfg(feature = "rcgen")]
     #[test]
     fn test_ensure_pki_chain_contains_leaf_and_intermediate() {
-        let dir = std::env::temp_dir().join(format!(
-            "qf_pki_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = test_directory("chain");
         std::fs::create_dir_all(&dir).unwrap();
 
         let (cert_path, key_path) = ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
@@ -585,7 +779,10 @@ mod tests {
             KeyUsagePurpose, SanType,
         };
 
-        let now = time::OffsetDateTime::now_utc();
+        let now = PkiTime::from_system_time(UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+            .unwrap()
+            .offset_datetime()
+            .unwrap();
 
         let mut root_params = CertificateParams::new(vec![]).unwrap();
         root_params.distinguished_name = DistinguishedName::new();
@@ -636,22 +833,20 @@ mod tests {
     #[cfg(feature = "rcgen")]
     #[test]
     fn test_ensure_pki_regenerates_corrupted_existing_certificate() {
-        let dir = std::env::temp_dir().join(format!(
-            "qf_pki_corrupt_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let pki_time =
+            PkiTime::from_system_time(UNIX_EPOCH + Duration::from_secs(1_800_000_000)).unwrap();
+        let dir = test_directory("corrupt");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let (cert_path, _) = ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+        let (cert_path, _) = ensure_pki_at(&dir, "vpn.example.com", "TestOrg", pki_time).unwrap();
         std::fs::write(&cert_path, b"corrupted certificate").unwrap();
 
-        ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+        ensure_pki_at(&dir, "vpn.example.com", "TestOrg", pki_time).unwrap();
 
         let certificates =
             parse_certificates(&std::fs::read(&cert_path).unwrap(), &cert_path).unwrap();
         assert_eq!(certificates.len(), 2);
-        validate_existing_pki(&dir, "vpn.example.com").unwrap();
+        validate_existing_pki_at(&dir, "vpn.example.com", pki_time).unwrap();
         assert!(std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -663,20 +858,18 @@ mod tests {
     #[cfg(feature = "rcgen")]
     #[test]
     fn test_ensure_pki_regenerates_expired_certificate() {
-        let dir = std::env::temp_dir().join(format!(
-            "qf_pki_expired_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let pki_time =
+            PkiTime::from_system_time(UNIX_EPOCH + Duration::from_secs(1_800_000_000)).unwrap();
+        let dir = test_directory("expired");
         std::fs::create_dir_all(&dir).unwrap();
         write_expired_hierarchy(&dir);
         let expired_certificate = std::fs::read(dir.join("server.crt")).unwrap();
 
-        ensure_pki(&dir, "vpn.example.com", "TestOrg").unwrap();
+        ensure_pki_at(&dir, "vpn.example.com", "TestOrg", pki_time).unwrap();
 
         let regenerated_certificate = std::fs::read(dir.join("server.crt")).unwrap();
         assert_ne!(regenerated_certificate, expired_certificate);
-        validate_existing_pki(&dir, "vpn.example.com").unwrap();
+        validate_existing_pki_at(&dir, "vpn.example.com", pki_time).unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
     }
