@@ -1,7 +1,9 @@
-#![cfg(all(target_arch = "x86_64", feature = "rust-tests"))]
+#![cfg(feature = "rust-tests")]
 
+#[cfg(target_arch = "x86_64")]
 use quicfuscate::optimize::x86_sse2::{xor_repeating_key32_sse2, xor_repeating_sse2};
 
+#[cfg(target_arch = "x86_64")]
 fn xor_scalar(dst: &mut [u8], key: &[u8]) {
     if key.is_empty() {
         return;
@@ -12,6 +14,7 @@ fn xor_scalar(dst: &mut [u8], key: &[u8]) {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn sse2_xor_repeating_key32_matches_scalar() {
     if !std::is_x86_feature_detected!("sse2") {
         return;
@@ -34,6 +37,7 @@ fn sse2_xor_repeating_key32_matches_scalar() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn sse2_xor_repeating_matches_scalar_varied_keys() {
     if !std::is_x86_feature_detected!("sse2") {
         return;
@@ -59,3 +63,8 @@ fn sse2_xor_repeating_matches_scalar_varied_keys() {
         }
     }
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+#[test]
+#[ignore = "SKIP: target requires x86_64"]
+fn skip_xor_sse2_parity_on_non_x86_64() {}

@@ -1,5 +1,10 @@
 #![cfg(feature = "rust-tests")]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "rt-io-hotpath-kernel-integration requires Linux; use test-transport.sh for an explicit SKIP"
+);
+
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 #[cfg(target_os = "linux")]
@@ -11,10 +16,6 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use quicfuscate::optimize::zc_batch;
-
-#[test]
-#[cfg(not(target_os = "linux"))]
-fn io_hotpath_kernel_integration_is_linux_only() {}
 
 #[test]
 #[cfg(target_os = "linux")]

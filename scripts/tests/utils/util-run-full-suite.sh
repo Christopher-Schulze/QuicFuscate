@@ -110,8 +110,9 @@ fi
 
 # Linux-specific paths
 if [[ "$(detect_os 2>/dev/null || echo unknown)" == linux ]]; then
-  run_cargo test --release --features io_uring --test rt-transport-uring -- --nocapture
-  run_cargo test --release --test rt-transport-xdp -- --nocapture
+  run_cargo test --release --features io_uring,rust-tests --test rt-transport-uring -- --nocapture
+  run_cargo test --release --features rust-tests,internal_af_xdp_experimental \
+    --test rt-transport-xdp -- --nocapture
 fi
 
 # 6) Matrices (optional but sequential)

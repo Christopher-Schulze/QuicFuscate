@@ -1,7 +1,8 @@
+#![cfg(feature = "orchestrator")]
+
 #[cfg(feature = "orchestrator")]
 use quicfuscate::brain::{DeepIntegrationOrchestrator, StealthBrainConfig};
 
-#[cfg(feature = "orchestrator")]
 #[test]
 fn test_orchestrator_runtime_activation_and_signal_flow() {
     let cfg = StealthBrainConfig::default();
@@ -27,7 +28,6 @@ fn test_orchestrator_runtime_activation_and_signal_flow() {
     );
 }
 
-#[cfg(feature = "orchestrator")]
 #[test]
 fn test_orchestrator_trigger_matrix_loss_cpu_mem_bw() {
     let cfg = StealthBrainConfig::default();
@@ -66,10 +66,4 @@ fn test_orchestrator_trigger_matrix_loss_cpu_mem_bw() {
         true,
     );
     assert!(!orchestrator.should_trigger_server_push());
-}
-
-#[cfg(not(feature = "orchestrator"))]
-#[test]
-fn test_orchestrator_feature_disabled_compiles_clean() {
-    let _runtime_probe = std::env::var_os("QUICFUSCATE_RUNTIME_PROBE");
 }

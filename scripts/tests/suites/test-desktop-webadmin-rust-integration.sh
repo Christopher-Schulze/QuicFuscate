@@ -37,20 +37,44 @@ echo "  - Desktop Check"
 echo "  - Desktop Unit"
 echo "  - Web-Admin Check"
 echo "  - Web-Admin Unit"
-echo "  - Rust Integration (5 targeted tests)"
+echo "  - Rust Integration (5 targeted targets)"
 echo "==============================================================="
 echo "Output: $OUTPUT_DIR"
+
+run_verified_rust_target() {
+  local target="$1"
+  local expected_test_name="$2"
+  local feature_set="$3"
+  qf_cargo_test_run_expect \
+    "$OUTPUT_DIR/${target}.log" "test:${target}" "$feature_set" \
+    "$expected_test_name" "$expected_test_name" \
+    --test "$target" -- --nocapture
+}
 
 run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-desktop\" && bun run check"
 run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-desktop\" && bun run test:unit"
 run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-admin\" && bun run check"
 run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-admin\" && bun run test:unit"
-run cargo test --features rust-tests \
-  --test it-engine-control-plane \
-  --test it-interface-capabilities \
-  --test it-orchestrator-runtime-activation \
-  --test it-qkey-auth-integration \
-  --test it-stealth-mode-matrix
+run_verified_rust_target \
+  it-engine-control-plane \
+  test_control_plane_getters_and_runtime_setters \
+  rust-tests
+run_verified_rust_target \
+  it-interface-capabilities \
+  test_tun_capabilities_report_matches_target \
+  rust-tests
+run_verified_rust_target \
+  it-orchestrator-runtime-activation \
+  test_orchestrator_runtime_activation_and_signal_flow \
+  rust-tests,orchestrator
+run_verified_rust_target \
+  it-qkey-auth-integration \
+  qkey_http3_auth_accepts_valid_and_rejects_invalid_token \
+  rust-tests
+run_verified_rust_target \
+  it-stealth-mode-matrix \
+  test_mode_feature_matrix_core_expectations \
+  rust-tests
 
 echo
 echo "[OK] Targeted validation suite passed. Log: $LOG_FILE"

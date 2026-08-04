@@ -1,7 +1,7 @@
-#![cfg(target_arch = "x86_64")]
 #![cfg(feature = "rust-tests")]
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn header_validate_avx512_matches_scalar() {
     if !std::is_x86_feature_detected!("avx512f") {
         return;
@@ -29,6 +29,7 @@ fn header_validate_avx512_matches_scalar() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn header_validate_sse2_matches_scalar() {
     if !std::is_x86_feature_detected!("sse2") {
         return;
@@ -52,3 +53,8 @@ fn header_validate_sse2_matches_scalar() {
     short_bad[0] = 0x58; // 0b0101_1000: fixed=1, reserved!=0
     assert!(!quicfuscate::simd::validate_header_sse2_for_rust_tests(&short_bad));
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+#[test]
+#[ignore = "SKIP: target requires x86_64"]
+fn skip_header_validate_parity_on_non_x86_64() {}

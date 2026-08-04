@@ -819,6 +819,37 @@ qf_cargo_test_run() {
   qf_cargo_test_classify_output run "$output_file" "$command_status" "$target" "$effective_features" "$filter" "$command"
 }
 
+# Run one Cargo test target and require one named test body to report success.
+# This keeps a target with an accidentally disabled crate-level cfg from becoming
+# a green aggregate result with no intended test execution.
+qf_cargo_test_run_expect() {
+  local output_file="$1"
+  local target="$2"
+  local feature_set="$3"
+  local filter="$4"
+  local expected_test_name="$5"
+  shift 5
+
+  local command_status=0
+  if qf_cargo_test_run "$output_file" "$target" "$feature_set" "$filter" "$@"; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+
+  if [[ "$QF_CARGO_TEST_STATUS" != "PASS" ]]; then
+    [[ "$command_status" -ne 0 ]] || command_status=1
+    return "$command_status"
+  fi
+
+  if ! grep -Fq "test ${expected_test_name} ... ok" "$output_file"; then
+    QF_CARGO_TEST_STATUS="FAIL"
+    QF_CARGO_TEST_REASON="expected_test_not_executed:${expected_test_name}"
+    return 1
+  fi
+  return 0
+}
+
 usage_common_flags() {
   cat <<USAGE
   Common flags:

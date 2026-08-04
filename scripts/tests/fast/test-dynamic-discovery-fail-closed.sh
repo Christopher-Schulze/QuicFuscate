@@ -79,6 +79,42 @@ run_execution_probe() {
   fi
 }
 
+run_feature_disabled_target_probe() {
+  local name="$1"
+  local target="$2"
+  local provided_features="$3"
+  local missing_feature="$4"
+  local output_file="$OUTPUT_DIR/${name}.txt"
+  local command_status=0
+  if cargo test --no-default-features --features "$provided_features" \
+    --test "$target" >"$output_file" 2>&1; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  cat "$output_file"
+
+  [[ "$command_status" -ne 0 ]] || die "$name unexpectedly exited successfully"
+  grep -Fq "requires the features" "$output_file" || \
+    die "$name did not report Cargo's required-features contract"
+  grep -Fq "$missing_feature" "$output_file" || \
+    die "$name did not identify the missing feature: $missing_feature"
+  if grep -Eq 'running[[:space:]]+0[[:space:]]+tests?|test result: ok\.' "$output_file"; then
+    die "$name exposed a green zero-test result"
+  fi
+
+  qf_json_append_object "$RESULTS_JSON" \
+    "name=$name" \
+    "status=ok" \
+    "result=PASS" \
+    "reason=required_feature_rejected_before_test_execution" \
+    "target=test:$target" \
+    "feature_set=$provided_features" \
+    "missing_feature=$missing_feature" \
+    "command_status=int:$command_status" \
+    "raw_output=$output_file"
+}
+
 run_discovery_probe "positive_lib_discovery" "PASS" "$OUTPUT_DIR/positive-lib-list.txt" \
   "lib" "rust-tests" --release --lib
 [[ "$QF_CARGO_TEST_COUNT" -gt 0 ]] || die "positive discovery returned zero tests"
@@ -107,6 +143,17 @@ run_execution_probe "zero_test_execution" "FAIL" "$OUTPUT_DIR/zero-test-run.txt"
   "lib" "rust-tests" "quicfuscate_zero_test_dynamic_discovery_pattern" \
   --release --features rust-tests --lib quicfuscate_zero_test_dynamic_discovery_pattern -- --nocapture
 [[ "$QF_CARGO_TEST_COUNT" -eq 0 ]] || die "zero-test execution reported tests"
+
+run_feature_disabled_target_probe \
+  "simd_target_missing_rust_tests" \
+  "rt-simd-selfcheck" \
+  "simd-selfcheck" \
+  "rust-tests"
+run_feature_disabled_target_probe \
+  "orchestrator_target_missing_orchestrator" \
+  "it-orchestrator-runtime-activation" \
+  "rust-tests" \
+  "orchestrator"
 
 json_end "$RESULTS_JSON"
 echo "[PASS] dynamic discovery fail-closed contract: result=$RESULTS_JSON"

@@ -1,8 +1,9 @@
-#![cfg(target_arch = "x86_64")]
 #![cfg(feature = "rust-tests")]
 
+#[cfg(target_arch = "x86_64")]
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
+#[cfg(target_arch = "x86_64")]
 fn scalar_merge(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     ranges.sort_by_key(|r| r.0);
     let mut out = Vec::with_capacity(ranges.len());
@@ -19,6 +20,7 @@ fn scalar_merge(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn avx2_matches_scalar_random() {
     if !std::is_x86_feature_detected!("avx2") {
         return;
@@ -40,6 +42,7 @@ fn avx2_matches_scalar_random() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn avx512_matches_scalar_random() {
     if !(std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl")) {
         return;
@@ -59,3 +62,8 @@ fn avx512_matches_scalar_random() {
         }
     }
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+#[test]
+#[ignore = "SKIP: target requires x86_64"]
+fn skip_ack_merge_parity_on_non_x86_64() {}

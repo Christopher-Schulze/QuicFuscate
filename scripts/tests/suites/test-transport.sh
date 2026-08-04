@@ -28,6 +28,57 @@ JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "tests_transport_comprehensi
 URING_PROOF_FAILURE=0
 URING_PROOF_TIMEOUT_SECONDS=900
 
+record_platform_skip() {
+  local name="$1"
+  local reason="$2"
+  local target="${3:-not_applicable}"
+  local feature_set="${4:-rust-tests}"
+  qf_json_append_object "$JSON" \
+    "name=$name" \
+    "status=SKIP" \
+    "result=SKIP" \
+    "reason=$reason" \
+    "target=$target" \
+    "feature_set=$feature_set" \
+    "command_status=int:0" \
+    "raw_output="
+  echo "[SKIP] $name: $reason"
+}
+
+run_verified_target() {
+  local target="$1"
+  local expected_test_name="$2"
+  local feature_set="$3"
+  local output_file="$OUTPUT_DIR/${target}.log"
+  if qf_cargo_test_run_expect \
+    "$output_file" "test:${target}" "$feature_set" "$expected_test_name" \
+    "$expected_test_name" --release --test "$target" -- --nocapture; then
+    qf_json_append_object "$JSON" \
+      "name=$target" \
+      "status=PASS" \
+      "result=PASS" \
+      "reason=expected_test_executed" \
+      "target=test:${target}" \
+      "feature_set=$(qf_cargo_test_feature_set "$feature_set")" \
+      "test_count=int:$QF_CARGO_TEST_COUNT" \
+      "command_status=int:0" \
+      "raw_output=$output_file"
+    return 0
+  fi
+  local command_status="$?"
+  qf_json_append_object "$JSON" \
+    "name=$target" \
+    "status=FAIL" \
+    "result=FAIL" \
+    "reason=$QF_CARGO_TEST_REASON" \
+    "target=$QF_CARGO_TEST_TARGET" \
+    "feature_set=$QF_CARGO_TEST_FEATURE_SET" \
+    "test_count=int:$QF_CARGO_TEST_COUNT" \
+    "command_status=int:$command_status" \
+    "raw_output=$output_file"
+  return "$command_status"
+}
+
 write_uring_proof_evidence() {
   local name="$1"
   local status="$2"
@@ -132,9 +183,9 @@ run_cargo test --release --lib transport:: -- --nocapture
 echo -e "\n> Testing io_uring UDP Fast Path..."
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     QUICFUSCATE_FASTPATH=auto \
-    run_cargo test --release --features io_uring --test rt-transport-uring -- --nocapture
+    run_verified_target rt-transport-uring uring_batch_sender_initialises io_uring,rust-tests
 else
-    echo "  Skipping (Linux only)"
+    record_platform_skip "rt-transport-uring" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
 fi
 
 echo -e "\n> Testing io_uring zero-length receive rearm proof..."
@@ -149,7 +200,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         echo "[FAIL] io_uring zero-length receive rearm proof did not pass" >&2
     fi
 else
-    echo "  Skipping (Linux only)"
+    record_platform_skip "uring-rearm" "host_os_not_linux" "lib" "io_uring,rust-tests"
 fi
 
 echo -e "\n> Testing opt-in io_uring SendMsgZc completion proof..."
@@ -165,23 +216,33 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         echo "[FAIL] opt-in io_uring SendMsgZc proof did not pass" >&2
     fi
 else
-    echo "  Skipping (Linux only)"
+    record_platform_skip "uring-zc" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
 fi
 
 echo -e "\n> Testing Linux Kernel Hotpath Smoke..."
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     QUICFUSCATE_FASTPATH=auto \
-    run_cargo test --release --features io_uring --test rt-io-hotpath-kernel-integration -- --nocapture
+    run_verified_target \
+      rt-io-hotpath-kernel-integration \
+      zc_batch_sendmmsg_kernel_path_sends_all_datagrams \
+      io_uring,rust-tests
 else
-    echo "  Skipping (Linux only)"
+    record_platform_skip \
+      "rt-io-hotpath-kernel-integration" "host_os_not_linux" \
+      "test:rt-io-hotpath-kernel-integration" "io_uring,rust-tests"
 fi
 
 # Test XDP fast path (Linux)
 echo -e "\n> Testing XDP Fast Path..."
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    run_cargo test --release --test rt-transport-xdp -- --nocapture
+    run_verified_target \
+      rt-transport-xdp \
+      xdp_rejects_zero_frame_size \
+      rust-tests,internal_af_xdp_experimental
 else
-    echo "  Skipping (Linux only)"
+    record_platform_skip \
+      "rt-transport-xdp" "host_os_not_linux" "test:rt-transport-xdp" \
+      "rust-tests,internal_af_xdp_experimental"
 fi
 
 echo -e "\n> Testing Anti-Replay Strike Register..."
@@ -191,19 +252,17 @@ echo -e "\n> Testing Congestion Control Algorithms..."
 run_cargo test --features rust-tests --test rt-cc-algorithms -- --nocapture
 
 echo -e "\n> Testing Transport Integration Targets..."
-run_cargo test --release \
-  --test rt-transport-connection \
-  --test rt-transport-config \
-  --test rt-transport-batch-processor \
-  --test rt-transport-frames-roundtrip \
-  --test rt-transport-packet-headers \
-  --test rt-transport-recovery \
-  --test rt-transport-udpfast \
-  --test rt-transport-h3 \
-  --test rt-pnspace-ack-policy \
-  --test rt-udp-batch-send \
-  --test rt-harness-udpfast \
-  -- --nocapture
+run_verified_target rt-transport-connection connection_datagram_queues_and_thresholds rust-tests
+run_verified_target rt-transport-config config_accepts_known_version rust-tests
+run_verified_target rt-transport-batch-processor batch_processor_init_acceleration_is_ok rust-tests
+run_verified_target rt-transport-frames-roundtrip roundtrip_basic_frames rust-tests
+run_verified_target rt-transport-packet-headers short_header_roundtrip rust-tests
+run_verified_target rt-transport-recovery recovery_counters_and_pto_progression rust-tests
+run_verified_target rt-transport-udpfast aligned_buffer_is_cacheline_aligned rust-tests
+run_verified_target rt-transport-h3 h3_send_request_returns_stream_id rust-tests
+run_verified_target rt-pnspace-ack-policy ack_elicitation_threshold_and_ranges rust-tests
+run_verified_target rt-udp-batch-send udpfast_send_batch_sends_all_packets rust-tests
+run_verified_target rt-harness-udpfast harness_udpfast_loopback_smoke rust-tests
 
 json_end "$JSON"
 if [[ "$URING_PROOF_FAILURE" -ne 0 ]]; then

@@ -1,7 +1,11 @@
 // Integration test for io_uring batch UDP sender.
 //
 // Requires: Linux, feature = "io_uring", kernel >= 5.1.
-// On macOS / non-Linux this test is a no-op placeholder.
+
+#![cfg(feature = "rust-tests")]
+
+#[cfg(not(target_os = "linux"))]
+compile_error!("rt-transport-uring requires Linux; use test-transport.sh for an explicit SKIP");
 
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
@@ -18,10 +22,6 @@ use quicfuscate::optimize::uring_batch::{
 };
 #[cfg(target_os = "linux")]
 use quicfuscate::telemetry::{IO_URING_ZC_NOTIFS, IO_URING_ZC_SENDS};
-
-#[test]
-#[cfg(not(target_os = "linux"))]
-fn io_uring_tests_are_linux_only() {}
 
 #[test]
 #[cfg(target_os = "linux")]

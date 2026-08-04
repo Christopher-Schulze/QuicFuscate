@@ -1,6 +1,6 @@
-#![cfg(target_arch = "x86_64")]
 #![cfg(feature = "rust-tests")]
 
+#[cfg(target_arch = "x86_64")]
 fn run_ghash_with_override(mode: &str, aad: &[u8], ct: &[u8]) -> [u8; 16] {
     quicfuscate::crypto::gcm::__test_set_ghash_override(Some(mode));
     let result = quicfuscate::crypto::gcm::ghash([0x11; 16], aad, ct);
@@ -9,6 +9,7 @@ fn run_ghash_with_override(mode: &str, aad: &[u8], ct: &[u8]) -> [u8; 16] {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn ghash_sse_matches_scalar_when_available() {
     if !std::arch::is_x86_feature_detected!("ssse3")
         || !std::arch::is_x86_feature_detected!("sse4.1")
@@ -31,3 +32,8 @@ fn ghash_sse_matches_scalar_when_available() {
 
     assert_eq!(hw, sw, "SSE GHASH diverged from scalar reference");
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+#[test]
+#[ignore = "SKIP: target requires x86_64"]
+fn skip_ghash_sse_parity_on_non_x86_64() {}

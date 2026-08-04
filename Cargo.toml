@@ -232,6 +232,7 @@ path = "examples/engine_basic.rs"
 [[test]]
 name = "rt-ack-merge-parity"
 path = "scripts/tests/rust/rt-ack-merge-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-admin-http-contract"
@@ -245,234 +246,292 @@ required-features = ["rust-tests"]
 [[test]]
 name = "rt-argsort-parity"
 path = "scripts/tests/rust/rt-argsort-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-base64-decode-parity"
 path = "scripts/tests/rust/rt-base64-decode-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-baseline-oracles"
 path = "scripts/tests/rust/rt-baseline-oracles.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-bitmap-range-parity"
 path = "scripts/tests/rust/rt-bitmap-range-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-bitstream-parity"
 path = "scripts/tests/rust/rt-bitstream-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-brain-activation-parity"
 path = "scripts/tests/rust/rt-brain-activation-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-brain-histogram"
 path = "scripts/tests/rust/rt-brain-histogram.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-chacha-x16-parity"
 path = "scripts/tests/rust/rt-chacha-x16-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-chacha-x4-parity"
 path = "scripts/tests/rust/rt-chacha-x4-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-cli-help"
 path = "scripts/tests/rust/rt-cli-help.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-compress-preprocessor"
 path = "scripts/tests/rust/rt-compress-preprocessor.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-core-connection-basics"
 path = "scripts/tests/rust/rt-core-connection-basics.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-ecn-popcount"
 path = "scripts/tests/rust/rt-ecn-popcount.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-fake-hmac"
 path = "scripts/tests/rust/rt-fake-hmac.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-tls-cover-cipher"
 path = "scripts/tests/rust/rt-tls-cover-cipher.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-ghash-sse-parity"
 path = "scripts/tests/rust/rt-ghash-sse-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-harness-cli"
 path = "scripts/tests/rust/rt-harness-cli.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-harness-udpfast"
 path = "scripts/tests/rust/rt-harness-udpfast.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-header-validate-parity"
 path = "scripts/tests/rust/rt-header-validate-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-interface"
 path = "scripts/tests/rust/rt-interface.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-iter-reduction-telemetry"
 path = "scripts/tests/rust/rt-iter-reduction-telemetry.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-iter-reductions"
 path = "scripts/tests/rust/rt-iter-reductions.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-moving-average-parity"
 path = "scripts/tests/rust/rt-moving-average-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-packet-number-parity"
 path = "scripts/tests/rust/rt-packet-number-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-pnspace-ack-policy"
 path = "scripts/tests/rust/rt-pnspace-ack-policy.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-probe-detection"
 path = "scripts/tests/rust/rt-probe-detection.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-profile-aegis-selection"
 path = "scripts/tests/rust/rt-profile-aegis-selection.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-profile-fuzz-parity"
 path = "scripts/tests/rust/rt-profile-fuzz-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-profile-overrides"
 path = "scripts/tests/rust/rt-profile-overrides.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-qftls-profiles"
 path = "scripts/tests/rust/rt-qftls-profiles.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-random-aes-ctr"
 path = "scripts/tests/rust/rt-random-aes-ctr.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-reality-targets"
 path = "scripts/tests/rust/rt-reality-targets.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-stealth-runtime-lifecycle"
 path = "scripts/tests/rust/rt-stealth-runtime-lifecycle.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-ring-buffer-parity"
 path = "scripts/tests/rust/rt-ring-buffer-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-security-suite"
 path = "scripts/tests/rust/rt-security-suite.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-shuffle-parity"
 path = "scripts/tests/rust/rt-shuffle-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-simd-selfcheck"
 path = "scripts/tests/rust/rt-simd-selfcheck.rs"
+required-features = ["rust-tests", "simd-selfcheck"]
 
 [[test]]
 name = "rt-stealth-ascii-count"
 path = "scripts/tests/rust/rt-stealth-ascii-count.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-stealth-config-toml"
 path = "scripts/tests/rust/rt-stealth-config-toml.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-stealth-persona-headers"
 path = "scripts/tests/rust/rt-stealth-persona-headers.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-telemetry-counters"
 path = "scripts/tests/rust/rt-telemetry-counters.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-telemetry-http"
 path = "scripts/tests/rust/rt-telemetry-http.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-batch-processor"
 path = "scripts/tests/rust/rt-transport-batch-processor.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-config"
 path = "scripts/tests/rust/rt-transport-config.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-connection"
 path = "scripts/tests/rust/rt-transport-connection.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-frames-roundtrip"
 path = "scripts/tests/rust/rt-transport-frames-roundtrip.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-packet-headers"
 path = "scripts/tests/rust/rt-transport-packet-headers.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-recovery"
 path = "scripts/tests/rust/rt-transport-recovery.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-h3"
 path = "scripts/tests/rust/rt-transport-h3.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-udpfast"
 path = "scripts/tests/rust/rt-transport-udpfast.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-transport-xdp"
 path = "scripts/tests/rust/rt-transport-xdp.rs"
+required-features = ["rust-tests", "internal_af_xdp_experimental"]
 
 [[test]]
 name = "rt-transpose-parity"
 path = "scripts/tests/rust/rt-transpose-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-udp-batch-send"
 path = "scripts/tests/rust/rt-udp-batch-send.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-io-hotpath-kernel-integration"
 path = "scripts/tests/rust/rt-io-hotpath-kernel-integration.rs"
+required-features = ["rust-tests", "io_uring"]
 
 [[test]]
 name = "rt-varint-roundtrip"
 path = "scripts/tests/rust/rt-varint-roundtrip.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-xor-repeating-parity"
 path = "scripts/tests/rust/rt-xor-repeating-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-xor-parity"
 path = "scripts/tests/rust/rt-xor-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-xor-sse2-parity"
 path = "scripts/tests/rust/rt-xor-sse2-parity.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "rt-cc-algorithms"
@@ -481,6 +540,7 @@ path = "scripts/tests/rust/rt-cc-algorithms.rs"
 [[test]]
 name = "rt-property-suite"
 path = "scripts/tests/rust/rt-property-suite.rs"
+required-features = ["rust-tests"]
 
 [[test]]
 name = "it-engine-control-plane"
@@ -502,6 +562,7 @@ required-features = ["rust-tests"]
 [[test]]
 name = "it-orchestrator-runtime-activation"
 path = "scripts/tests/rust/integration/orchestrator_runtime_activation.rs"
+required-features = ["rust-tests", "orchestrator"]
 
 [[test]]
 name = "it-qkey-auth-integration"
@@ -516,7 +577,7 @@ required-features = ["rust-tests"]
 [[test]]
 name = "rt-transport-uring"
 path = "scripts/tests/rust/rt-transport-uring.rs"
-required-features = ["io_uring"]
+required-features = ["rust-tests", "io_uring"]
 
 [[bench]]
 name = "ci_regression"

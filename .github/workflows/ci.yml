@@ -335,11 +335,20 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.features }}" = "simd-selfcheck" ]; then
-            cargo test --workspace --features simd-selfcheck --test rt-simd-selfcheck
+            simd_output="${RUNNER_TEMP}/quicfuscate-simd-selfcheck.log"
+            if ! cargo test --workspace \
+              --features rust-tests,simd-selfcheck \
+              --test rt-simd-selfcheck -- --nocapture >"$simd_output" 2>&1; then
+              cat "$simd_output"
+              exit 1
+            fi
+            cat "$simd_output"
+            grep -Fq "test varint_roundtrip_and_consistency ... ok" "$simd_output"
           elif [ -n "${{ matrix.features }}" ]; then
-            cargo test --workspace --all-targets --features "${{ matrix.features }}"
+            cargo test --workspace --all-targets \
+              --features "rust-tests,${{ matrix.features }}"
           else
-            cargo test --workspace --all-targets
+            cargo test --workspace --all-targets --features rust-tests
           fi
 
   linux-fastpath-gates:
