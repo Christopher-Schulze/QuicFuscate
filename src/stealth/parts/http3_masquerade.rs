@@ -298,7 +298,7 @@ impl Http3Masquerade {
                 None
             };
         let cookie_owned = if self.should_include_cookies(host) {
-            Some(self.generate_realistic_cookies())
+            self.generate_realistic_cookies()
         } else {
             None
         };
@@ -484,12 +484,16 @@ impl Http3Masquerade {
                 || host_contains(host, ".com"))
     }
 
-    /// Generates realistic cookies with dynamic timestamps
-    fn generate_realistic_cookies(&self) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        self.generate_realistic_cookies_at(timestamp)
+    /// Generates realistic cookies from the canonical wall clock.
+    ///
+    /// A pre-Unix-epoch value cannot produce a valid browser timestamp, so the
+    /// optional cookie is omitted instead of emitting a deterministic zero.
+    fn generate_realistic_cookies(&self) -> Option<String> {
+        let timestamp = crate::time_source::now_system()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some(self.generate_realistic_cookies_at(timestamp))
     }
 
     /// Deterministic cookie rendering helper (exposed for testing/benchmarks).

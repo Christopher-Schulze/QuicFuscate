@@ -1,10 +1,12 @@
 use std::io;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 #[cfg(test)]
-static TEST_FORCE_SECURE_ENTROPY_FAILURE: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static TEST_FORCE_SECURE_ENTROPY_FAILURE: Cell<bool> = const { Cell::new(false) };
+}
 
 /// Fill a buffer with cryptographically secure random bytes from the OS.
 ///
@@ -12,7 +14,7 @@ static TEST_FORCE_SECURE_ENTROPY_FAILURE: AtomicBool = AtomicBool::new(false);
 #[inline(always)]
 pub fn fill_secure(buf: &mut [u8]) -> io::Result<()> {
     #[cfg(test)]
-    if TEST_FORCE_SECURE_ENTROPY_FAILURE.load(Ordering::SeqCst) {
+    if TEST_FORCE_SECURE_ENTROPY_FAILURE.with(Cell::get) {
         return Err(io::Error::other("forced secure entropy failure"));
     }
 
@@ -52,7 +54,7 @@ pub fn secure_hex(bytes_len: usize, context: &str) -> String {
 
 #[cfg(test)]
 pub fn test_force_secure_entropy_failure(enabled: bool) -> bool {
-    TEST_FORCE_SECURE_ENTROPY_FAILURE.swap(enabled, Ordering::SeqCst)
+    TEST_FORCE_SECURE_ENTROPY_FAILURE.with(|state| state.replace(enabled))
 }
 
 #[cfg(test)]

@@ -751,6 +751,47 @@ mod stealth_coverage_tests {
         assert_eq!(site, "none");
     }
 
+    struct FixedSystemTimeSource {
+        system_now: std::time::SystemTime,
+    }
+
+    impl crate::time_source::TimeSource for FixedSystemTimeSource {
+        fn now_instant(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+
+        fn now_system(&self) -> std::time::SystemTime {
+            self.system_now
+        }
+    }
+
+    #[test]
+    fn http3_masquerade_cookie_uses_canonical_system_time() {
+        let timestamp = 1_700_000_000_u64;
+        let _time_guard = crate::time_source::install_for_test(Arc::new(FixedSystemTimeSource {
+            system_now: std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp),
+        }));
+        let profile = FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows);
+        let masq = Http3Masquerade::new(profile);
+
+        let headers = masq.generate_headers("www.google.com", "/");
+        let cookie = headers.iter().find(|h| h.name() == b"cookie").expect("cookie header");
+        assert_eq!(cookie.value(), masq.generate_realistic_cookies_at(timestamp).as_bytes());
+    }
+
+    #[test]
+    fn http3_masquerade_omits_cookie_before_unix_epoch() {
+        let _time_guard = crate::time_source::install_for_test(Arc::new(FixedSystemTimeSource {
+            system_now: std::time::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        }));
+        let profile = FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows);
+        let masq = Http3Masquerade::new(profile);
+
+        let headers = masq.generate_headers("www.google.com", "/");
+        assert!(!headers.iter().any(|h| h.name() == b"cookie"));
+        assert!(headers.iter().any(|h| h.name() == b"user-agent"));
+    }
+
     // =========================================================================
     // 13. ActiveProbeDetector
     // =========================================================================
