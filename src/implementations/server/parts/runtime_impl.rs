@@ -727,6 +727,7 @@ impl ServerRuntime {
         addr: std::net::SocketAddr,
         web_root: std::path::PathBuf,
         max_connections: usize,
+        operation_timeout_ms: u64,
         admin_web_user: Option<String>,
         admin_web_password: Option<String>,
     ) -> std::io::Result<()> {
@@ -742,6 +743,7 @@ impl ServerRuntime {
             addr,
             web_root,
             max_connections,
+            operation_timeout_ms,
             admin_web_user,
             admin_web_password,
             config_path.as_deref(),
@@ -772,6 +774,7 @@ impl ServerRuntime {
                 addr,
                 config.admin_web_root,
                 config.admin_web_max_connections,
+                config.admin_web_operation_timeout_ms,
                 config.admin_web_user,
                 config.admin_web_password,
             )?;

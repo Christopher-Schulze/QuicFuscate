@@ -4,14 +4,58 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
-    use std::sync::{Mutex as StdMutex, OnceLock};
+    use std::sync::{atomic::AtomicBool, Mutex as StdMutex, OnceLock};
     use std::thread;
 
     #[derive(Clone)]
-    struct TestHandler;
+    struct TestHandler {
+        status_delay: Duration,
+        panic_on_status: bool,
+        config_delay: Duration,
+        config_completed: Option<Arc<AtomicBool>>,
+    }
+
+    impl TestHandler {
+        fn new(status_delay: Duration) -> Self {
+            Self {
+                status_delay,
+                panic_on_status: false,
+                config_delay: Duration::ZERO,
+                config_completed: None,
+            }
+        }
+
+        fn with_config_delay(delay: Duration) -> (Self, Arc<AtomicBool>) {
+            let completed = Arc::new(AtomicBool::new(false));
+            (
+                Self {
+                    status_delay: Duration::ZERO,
+                    panic_on_status: false,
+                    config_delay: delay,
+                    config_completed: Some(Arc::clone(&completed)),
+                },
+                completed,
+            )
+        }
+
+        fn panicking() -> Self {
+            Self {
+                status_delay: Duration::ZERO,
+                panic_on_status: true,
+                config_delay: Duration::ZERO,
+                config_completed: None,
+            }
+        }
+    }
 
     impl AdminHttpHandler for TestHandler {
         fn handle_status(&self) -> AdminResponse {
+            if !self.status_delay.is_zero() {
+                thread::sleep(self.status_delay);
+            }
+            if self.panic_on_status {
+                panic!("test admin handler panic");
+            }
             AdminResponse::ok()
         }
         fn handle_list_clients(&self) -> Vec<ClientInfo> {
@@ -67,6 +111,12 @@ mod tests {
             AdminResponse::ok_with_data(serde_json::json!({ "config": "[x]\n" }))
         }
         fn handle_write_config(&self, _contents: &str) -> AdminResponse {
+            if !self.config_delay.is_zero() {
+                thread::sleep(self.config_delay);
+            }
+            if let Some(completed) = self.config_completed.as_ref() {
+                completed.store(true, Ordering::Release);
+            }
             AdminResponse::ok()
         }
         fn handle_metrics_text(&self) -> String {
@@ -316,7 +366,20 @@ mod tests {
     }
 
     fn test_handler() -> Arc<dyn AdminHttpHandler> {
-        Arc::new(TestHandler)
+        Arc::new(TestHandler::new(Duration::ZERO))
+    }
+
+    fn slow_test_handler(delay: Duration) -> Arc<dyn AdminHttpHandler> {
+        Arc::new(TestHandler::new(delay))
+    }
+
+    fn slow_persistence_test_handler(delay: Duration) -> (Arc<dyn AdminHttpHandler>, Arc<AtomicBool>) {
+        let (handler, completed) = TestHandler::with_config_delay(delay);
+        (Arc::new(handler), completed)
+    }
+
+    fn panicking_test_handler() -> Arc<dyn AdminHttpHandler> {
+        Arc::new(TestHandler::panicking())
     }
 
     fn test_auth_root(label: &str) -> std::path::PathBuf {
@@ -1678,6 +1741,23 @@ mod tests {
             )
             .is_err()
         );
+        assert_eq!(
+            validate_admin_web_operation_timeout_ms(DEFAULT_ADMIN_WEB_OPERATION_TIMEOUT_MS)
+                .unwrap(),
+            Duration::from_millis(DEFAULT_ADMIN_WEB_OPERATION_TIMEOUT_MS)
+        );
+        assert_eq!(
+            validate_admin_web_operation_timeout_ms(MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS - 1)
+                .unwrap_err()
+                .to_string(),
+            "admin web operation timeout must be at least 50 ms"
+        );
+        assert_eq!(
+            validate_admin_web_operation_timeout_ms(MAX_ADMIN_WEB_OPERATION_TIMEOUT_MS + 1)
+                .unwrap_err()
+                .to_string(),
+            "admin web operation timeout must not exceed 120000 ms"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1756,6 +1836,271 @@ mod tests {
         assert_eq!(final_snapshot.active_connections, 0);
         assert_eq!(final_snapshot.pending_connections, 0);
         assert_eq!(final_snapshot.completed_total, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_web_operation_timeout_owns_slow_worker_and_shutdown_drain() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind admin test listener");
+        let addr = listener.local_addr().expect("admin test listener address");
+        drop(listener);
+
+        let server = Arc::new(
+            AdminHttpServer::new_with_max_connections_and_operation_timeout(
+                addr,
+                std::env::temp_dir(),
+                None,
+                None,
+                slow_test_handler(Duration::from_millis(1_200)),
+                1,
+                MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS,
+            )
+            .expect("admin server"),
+        );
+        let shutdown = server.shutdown_signal();
+        let diagnostics = server.operation_diagnostics();
+        let runner = Arc::clone(&server);
+        let task = tokio::spawn(async move { runner.run().await });
+
+        let mut stream = None;
+        for _ in 0..100 {
+            match TcpStream::connect(addr).await {
+                Ok(candidate) => {
+                    stream = Some(candidate);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        let mut stream = stream.expect("admin listener must accept the operation connection");
+        stream
+            .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("request write");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .expect("timed-out operation must return before connection grace expires")
+            .expect("timed-out operation response must be readable");
+        let response = String::from_utf8_lossy(&response);
+        assert_eq!(parse_status(&response), 504);
+        assert!(response.contains("Admin operation timed out"));
+
+        for _ in 0..100 {
+            if server.admission_snapshot().active_connections == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(server.admission_snapshot().active_connections, 0);
+
+        let mut follow_up = TcpStream::connect(addr)
+            .await
+            .expect("permit must be released after timeout response");
+        follow_up
+            .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("follow-up request write");
+        let mut follow_up_response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), follow_up.read_to_end(&mut follow_up_response))
+            .await
+            .expect("follow-up response must be bounded")
+            .expect("follow-up response must be readable");
+        assert_eq!(
+            parse_status(&String::from_utf8_lossy(&follow_up_response)),
+            200
+        );
+
+        let before_shutdown = diagnostics.snapshot();
+        assert_eq!(before_shutdown.timeout_ms, MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS);
+        assert_eq!(before_shutdown.started_total, 2);
+        assert_eq!(before_shutdown.timeout_total, 1);
+        assert_eq!(before_shutdown.active_operations, 1);
+
+        shutdown.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("admin server shutdown must be bounded")
+            .expect("admin server task must not panic")
+            .expect("admin server shutdown must be clean");
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = diagnostics.snapshot();
+                if snapshot.active_operations == 0 {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("started blocking operation must eventually release its owner");
+        assert_eq!(completed.active_operations, 0);
+        assert_eq!(completed.completed_total, 2);
+        assert_eq!(completed.completed_after_deadline_total, 1);
+        assert_eq!(completed.panic_total, 0);
+        assert_eq!(completed.shutdown_expired_total, 1);
+        assert_eq!(server.admission_snapshot().active_connections, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_web_operation_timeout_covers_slow_persistence_worker() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind admin test listener");
+        let addr = listener.local_addr().expect("admin test listener address");
+        drop(listener);
+
+        let (handler, persistence_completed) =
+            slow_persistence_test_handler(Duration::from_millis(150));
+        let server = Arc::new(
+            AdminHttpServer::new_with_max_connections_and_operation_timeout(
+                addr,
+                std::env::temp_dir(),
+                None,
+                None,
+                handler,
+                1,
+                MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS,
+            )
+            .expect("admin server"),
+        );
+        let shutdown = server.shutdown_signal();
+        let diagnostics = server.operation_diagnostics();
+        let runner = Arc::clone(&server);
+        let task = tokio::spawn(async move { runner.run().await });
+
+        let mut stream = None;
+        for _ in 0..100 {
+            match TcpStream::connect(addr).await {
+                Ok(candidate) => {
+                    stream = Some(candidate);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        let mut stream = stream.expect("admin listener must accept the operation connection");
+        let request = config_post(r#"{"config":"[x]\\n"}"#);
+        stream.write_all(request.as_bytes()).await.expect("request write");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .expect("timed-out persistence operation must return promptly")
+            .expect("timed-out persistence response must be readable");
+        let response = String::from_utf8_lossy(&response);
+        assert_eq!(parse_status(&response), 504);
+        assert!(!persistence_completed.load(Ordering::Acquire));
+
+        let before_completion = diagnostics.snapshot();
+        assert_eq!(before_completion.started_total, 1);
+        assert_eq!(before_completion.timeout_total, 1);
+        assert_eq!(before_completion.active_operations, 1);
+
+        let completed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if persistence_completed.load(Ordering::Acquire) {
+                    let snapshot = diagnostics.snapshot();
+                    if snapshot.active_operations == 0 {
+                        break snapshot;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("slow persistence worker must eventually finish");
+        assert_eq!(completed.completed_total, 1);
+        assert_eq!(completed.completed_after_deadline_total, 1);
+        assert_eq!(completed.cancelled_total, 0);
+
+        shutdown.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("admin server shutdown must be bounded")
+            .expect("admin server task must not panic")
+            .expect("admin server shutdown must be clean");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_web_operation_cancellation_is_counted() {
+        let diagnostics = AdminHttpOperationDiagnostics::new(MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS)
+            .expect("operation diagnostics");
+        let state = diagnostics.begin(tokio::time::Instant::now() + Duration::from_secs(1));
+        state.finish_cancelled();
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.active_operations, 0);
+        assert_eq!(snapshot.cancelled_total, 1);
+        assert_eq!(snapshot.completed_total, 0);
+        assert_eq!(snapshot.timeout_total, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_web_operation_worker_panic_is_converted_and_counted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind admin test listener");
+        let addr = listener.local_addr().expect("admin test listener address");
+        drop(listener);
+
+        let server = Arc::new(
+            AdminHttpServer::new_with_max_connections_and_operation_timeout(
+                addr,
+                std::env::temp_dir(),
+                None,
+                None,
+                panicking_test_handler(),
+                1,
+                MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS,
+            )
+            .expect("admin server"),
+        );
+        let shutdown = server.shutdown_signal();
+        let diagnostics = server.operation_diagnostics();
+        let runner = Arc::clone(&server);
+        let task = tokio::spawn(async move { runner.run().await });
+
+        let mut stream = None;
+        for _ in 0..100 {
+            match TcpStream::connect(addr).await {
+                Ok(candidate) => {
+                    stream = Some(candidate);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        let mut stream = stream.expect("admin listener must accept the panic connection");
+        stream
+            .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("request write");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .expect("panic response must close promptly")
+            .expect("panic response must be readable");
+        assert_eq!(parse_status(&String::from_utf8_lossy(&response)), 500);
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.active_operations, 0);
+        assert_eq!(snapshot.started_total, 1);
+        assert_eq!(snapshot.completed_total, 1);
+        assert_eq!(snapshot.panic_total, 1);
+        assert_eq!(snapshot.timeout_total, 0);
+
+        shutdown.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("admin server shutdown must be bounded")
+            .expect("admin server task must not panic")
+            .expect("admin server shutdown must be clean");
+        assert_eq!(server.admission_snapshot().active_connections, 0);
     }
 
     #[tokio::test]

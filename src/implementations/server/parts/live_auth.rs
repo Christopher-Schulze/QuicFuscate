@@ -75,6 +75,7 @@ pub fn start_standalone_admin_service(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_standalone_admin_web_service(
     runtime: &mut ServerRuntime,
     addr: std::net::SocketAddr,
@@ -82,15 +83,19 @@ pub(crate) fn start_standalone_admin_web_service(
     auth: AdminAuth,
     auth_path: std::path::PathBuf,
     max_connections: usize,
+    operation_timeout_ms: u64,
     handler: ServerAdminHttpRuntimeHandler,
+    operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
 ) -> std::io::Result<()> {
-    let server = AdminHttpServer::new_with_max_connections(
+    let server = AdminHttpServer::new_with_max_connections_and_operation_timeout_and_diagnostics(
         addr,
         web_root,
         Some(auth),
         Some(auth_path),
         Arc::new(handler),
         max_connections,
+        operation_timeout_ms,
+        operation_diagnostics,
     )?;
     runtime.register_admin_web_shutdown(server.shutdown_signal());
     // JoinHandle intentionally not stored: graceful shutdown via registered signal.
@@ -108,15 +113,18 @@ pub fn start_configured_standalone_admin_web_service(
     addr: std::net::SocketAddr,
     web_root: std::path::PathBuf,
     max_connections: usize,
+    operation_timeout_ms: u64,
     admin_web_user: Option<String>,
     admin_web_password: Option<String>,
     config_path: Option<&std::path::Path>,
     blocked_ips_path: Option<std::path::PathBuf>,
     initial_logging_mode: String,
-    admin_core: ServerAdminCore,
+    mut admin_core: ServerAdminCore,
     admin_log_buffer: Arc<self::admin_logs::AdminLogBuffer>,
 ) -> std::io::Result<()> {
     let auth = resolve_admin_web_auth(admin_web_user, admin_web_password)?;
+    let operation_diagnostics = AdminHttpOperationDiagnostics::new(operation_timeout_ms)?;
+    admin_core.set_admin_http_operation_diagnostics(Arc::clone(&operation_diagnostics));
     let logging_mode = Arc::new(parking_lot::RwLock::new(initial_logging_mode));
     let handler = ServerAdminHttpRuntimeHandler::new(
         admin_core,
@@ -133,7 +141,9 @@ pub fn start_configured_standalone_admin_web_service(
         auth,
         auth_path,
         max_connections,
+        operation_timeout_ms,
         handler,
+        operation_diagnostics,
     )?;
     Ok(())
 }

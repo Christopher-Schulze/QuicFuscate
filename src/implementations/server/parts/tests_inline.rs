@@ -2281,7 +2281,7 @@ mod tests {
         let client_snapshots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let (tx, _rx) = mpsc::unbounded_channel::<AdminAction>();
         let qkeys = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
-        let core = ServerAdminCore::new(
+        let mut core = ServerAdminCore::new(
             metrics,
             blocked_ips.clone(),
             client_snapshots,
@@ -2295,6 +2295,18 @@ mod tests {
             },
             #[cfg(feature = "rate_limiter")]
             GeoIpStatus::Disabled,
+        );
+
+        let diagnostics = AdminHttpOperationDiagnostics::new(MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS)
+            .expect("admin HTTP diagnostics");
+        core.set_admin_http_operation_diagnostics(diagnostics);
+        assert_eq!(
+            core.base_status_json()["admin_http"]["timeout_ms"],
+            MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS
+        );
+        assert_eq!(
+            core.health_json()["admin_http"]["timeout_ms"],
+            MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS
         );
 
         #[cfg(feature = "rate_limiter")]

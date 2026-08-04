@@ -794,6 +794,7 @@ async fn run_server(
     metrics_port: Option<u16>,
     admin_web: Option<std::net::SocketAddr>,
     admin_web_max_connections: usize,
+    admin_web_operation_timeout_ms: u64,
     admin_web_root: PathBuf,
     admin_web_user: Option<String>,
     admin_web_password: Option<String>,
@@ -810,6 +811,9 @@ async fn run_server(
     let config_path_ref = config_path.map(PathBuf::as_path);
     quicfuscate::implementations::server::validate_admin_web_max_connections(
         admin_web_max_connections,
+    )?;
+    quicfuscate::implementations::server::validate_admin_web_operation_timeout_ms(
+        admin_web_operation_timeout_ms,
     )?;
     #[cfg(not(target_os = "linux"))]
     let _ = (no_drop_privileges, drop_user, drop_group);
@@ -1058,6 +1062,7 @@ async fn run_server(
             admin_socket,
             admin_web,
             admin_web_max_connections,
+            admin_web_operation_timeout_ms,
             admin_web_root,
             admin_web_user,
             admin_web_password,

@@ -52,8 +52,11 @@ pub use admin::{
     ClientInfo, ClientSnapshot,
 };
 pub use admin_http::{
-    validate_admin_web_max_connections, AdminHttpAdmissionSnapshot, AdminHttpHandler,
-    AdminHttpServer, DEFAULT_ADMIN_WEB_MAX_CONNECTIONS, MAX_ADMIN_WEB_CONNECTIONS,
+    validate_admin_web_max_connections, validate_admin_web_operation_timeout_ms,
+    AdminHttpAdmissionSnapshot, AdminHttpHandler, AdminHttpOperationDiagnostics,
+    AdminHttpOperationSnapshot, AdminHttpServer, DEFAULT_ADMIN_WEB_MAX_CONNECTIONS,
+    DEFAULT_ADMIN_WEB_OPERATION_TIMEOUT_MS, MAX_ADMIN_WEB_CONNECTIONS,
+    MAX_ADMIN_WEB_OPERATION_TIMEOUT_MS, MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS,
 };
 pub use bandwidth::{
     BandwidthDecision, BandwidthDirection, BandwidthLimiter, BandwidthPolicy, BandwidthStats,

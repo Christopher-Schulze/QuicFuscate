@@ -937,6 +937,7 @@ struct SharedArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Runs the client
     Client {
@@ -1008,6 +1009,10 @@ enum Commands {
         /// Maximum simultaneous admin web connections (default: 16, maximum: 1024)
         #[clap(long, value_name = "COUNT", default_value_t = quicfuscate::implementations::server::DEFAULT_ADMIN_WEB_MAX_CONNECTIONS)]
         admin_web_max_connections: usize,
+
+        /// Maximum time for one admin web request operation in milliseconds (default: 30000, range: 50..=120000)
+        #[clap(long, value_name = "MILLISECONDS", default_value_t = quicfuscate::implementations::server::DEFAULT_ADMIN_WEB_OPERATION_TIMEOUT_MS)]
+        admin_web_operation_timeout_ms: u64,
 
         /// Admin web static root (default: assets/web-admin)
         #[clap(long, value_name = "PATH", default_value = "assets/web-admin")]

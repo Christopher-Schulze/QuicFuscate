@@ -725,6 +725,8 @@ pub struct ServerAdminCore {
     client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     sessions: Arc<RwLock<SessionManager>>,
     control_plane: ServerAdminControlPlane,
+    admin_http_diagnostics:
+        Option<Arc<crate::implementations::server::AdminHttpOperationDiagnostics>>,
     #[cfg(feature = "rate_limiter")]
     geoip_status: crate::implementations::server::limits::GeoIpStatus,
 }
@@ -747,6 +749,7 @@ impl ServerAdminCore {
             client_snapshots,
             sessions,
             control_plane,
+            admin_http_diagnostics: None,
             #[cfg(feature = "rate_limiter")]
             geoip_status,
         }
@@ -766,6 +769,13 @@ impl ServerAdminCore {
 
     pub fn qkeys(&self) -> &Arc<std::sync::Mutex<QKeyRegistry>> {
         &self.control_plane.qkeys
+    }
+
+    pub fn set_admin_http_operation_diagnostics(
+        &mut self,
+        diagnostics: Arc<crate::implementations::server::AdminHttpOperationDiagnostics>,
+    ) {
+        self.admin_http_diagnostics = Some(diagnostics);
     }
 
     #[cfg(feature = "rate_limiter")]
@@ -801,6 +811,9 @@ impl ServerAdminCore {
                 data["blacklist_sync"] = health["blacklist_sync"].clone();
             }
         }
+        if let Some(diagnostics) = self.admin_http_diagnostics.as_ref() {
+            data["admin_http"] = serde_json::json!(diagnostics.snapshot());
+        }
         data
     }
 
@@ -812,6 +825,9 @@ impl ServerAdminCore {
             if let Ok(health) = serde_json::from_str::<serde_json::Value>(&self.metrics.export_health()) {
                 data["blacklist_sync"] = health["blacklist_sync"].clone();
             }
+        }
+        if let Some(diagnostics) = self.admin_http_diagnostics.as_ref() {
+            data["admin_http"] = serde_json::json!(diagnostics.snapshot());
         }
         data
     }

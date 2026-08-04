@@ -41,13 +41,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinSet};
 
 use super::admin::{AdminResponse, ClientInfo};
@@ -473,6 +475,18 @@ pub const DEFAULT_ADMIN_WEB_MAX_CONNECTIONS: usize = 16;
 /// Hard upper bound for the CLI-configured admin HTTP connection capacity.
 pub const MAX_ADMIN_WEB_CONNECTIONS: usize = 1024;
 
+/// Default deadline for one admin HTTP request operation.
+pub const DEFAULT_ADMIN_WEB_OPERATION_TIMEOUT_MS: u64 = 30_000;
+
+/// Smallest accepted admin HTTP operation deadline.
+pub const MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS: u64 = 50;
+
+/// Largest accepted admin HTTP operation deadline.
+pub const MAX_ADMIN_WEB_OPERATION_TIMEOUT_MS: u64 = 120_000;
+
+const ADMIN_HTTP_RESPONSE_GRACE: Duration = Duration::from_secs(1);
+const ADMIN_HTTP_OPERATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Validate the standalone admin-web connection capacity before any listener or
 /// authentication state is published.
 pub fn validate_admin_web_max_connections(max_connections: usize) -> std::io::Result<usize> {
@@ -492,6 +506,256 @@ pub fn validate_admin_web_max_connections(max_connections: usize) -> std::io::Re
         ));
     }
     Ok(max_connections)
+}
+
+/// Validate the bounded deadline applied to body collection and one synchronous
+/// admin operation.
+pub fn validate_admin_web_operation_timeout_ms(timeout_ms: u64) -> std::io::Result<Duration> {
+    if timeout_ms < MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "admin web operation timeout must be at least {} ms",
+                MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS
+            ),
+        ));
+    }
+    if timeout_ms > MAX_ADMIN_WEB_OPERATION_TIMEOUT_MS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "admin web operation timeout must not exceed {} ms",
+                MAX_ADMIN_WEB_OPERATION_TIMEOUT_MS
+            ),
+        ));
+    }
+    Ok(Duration::from_millis(timeout_ms))
+}
+
+/// Observable operation deadline and worker lifecycle state for one admin-web
+/// server lifetime.
+#[derive(Clone, Debug, Serialize)]
+pub struct AdminHttpOperationSnapshot {
+    /// Effective configured operation deadline in milliseconds.
+    pub timeout_ms: u64,
+    /// Operations whose owner has not reached a terminal state.
+    pub active_operations: usize,
+    /// Operations admitted to the worker protocol.
+    pub started_total: u64,
+    /// Operations that produced a worker or direct result before/after the deadline.
+    pub completed_total: u64,
+    /// Operations whose deadline was observed before terminal completion.
+    pub timeout_total: u64,
+    /// Operations abandoned before a worker result was delivered.
+    pub cancelled_total: u64,
+    /// Worker operations that panicked and were converted to HTTP 500.
+    pub panic_total: u64,
+    /// Worker/direct results that completed after the effective deadline.
+    pub completed_after_deadline_total: u64,
+    /// Shutdown drains that exceeded the bounded worker wait.
+    pub shutdown_expired_total: u64,
+}
+
+/// Shared diagnostics for the owned admin HTTP operation protocol.
+pub struct AdminHttpOperationDiagnostics {
+    timeout_ms: u64,
+    active_operations: std::sync::atomic::AtomicUsize,
+    started_total: AtomicU64,
+    completed_total: AtomicU64,
+    timeout_total: AtomicU64,
+    cancelled_total: AtomicU64,
+    panic_total: AtomicU64,
+    completed_after_deadline_total: AtomicU64,
+    shutdown_expired_total: AtomicU64,
+}
+
+impl AdminHttpOperationDiagnostics {
+    pub fn new(timeout_ms: u64) -> std::io::Result<Arc<Self>> {
+        validate_admin_web_operation_timeout_ms(timeout_ms)?;
+        Ok(Arc::new(Self {
+            timeout_ms,
+            active_operations: std::sync::atomic::AtomicUsize::new(0),
+            started_total: AtomicU64::new(0),
+            completed_total: AtomicU64::new(0),
+            timeout_total: AtomicU64::new(0),
+            cancelled_total: AtomicU64::new(0),
+            panic_total: AtomicU64::new(0),
+            completed_after_deadline_total: AtomicU64::new(0),
+            shutdown_expired_total: AtomicU64::new(0),
+        }))
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    pub fn snapshot(&self) -> AdminHttpOperationSnapshot {
+        AdminHttpOperationSnapshot {
+            timeout_ms: self.timeout_ms,
+            active_operations: self.active_operations.load(Ordering::Relaxed),
+            started_total: self.started_total.load(Ordering::Relaxed),
+            completed_total: self.completed_total.load(Ordering::Relaxed),
+            timeout_total: self.timeout_total.load(Ordering::Relaxed),
+            cancelled_total: self.cancelled_total.load(Ordering::Relaxed),
+            panic_total: self.panic_total.load(Ordering::Relaxed),
+            completed_after_deadline_total: self
+                .completed_after_deadline_total
+                .load(Ordering::Relaxed),
+            shutdown_expired_total: self.shutdown_expired_total.load(Ordering::Relaxed),
+        }
+    }
+
+    fn begin(self: &Arc<Self>, deadline: tokio::time::Instant) -> Arc<AdminHttpOperationState> {
+        self.active_operations.fetch_add(1, Ordering::Relaxed);
+        self.started_total.fetch_add(1, Ordering::Relaxed);
+        Arc::new(AdminHttpOperationState {
+            deadline,
+            diagnostics: Arc::clone(self),
+            timed_out: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+        })
+    }
+
+    fn record_timeout(&self) {
+        self.timeout_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_cancelled(&self) {
+        self.cancelled_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_completed(&self) {
+        self.completed_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_panic(&self) {
+        self.panic_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_completed_after_deadline(&self) {
+        self.completed_after_deadline_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_shutdown_expired(&self) {
+        self.shutdown_expired_total.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct AdminHttpOperationState {
+    deadline: tokio::time::Instant,
+    diagnostics: Arc<AdminHttpOperationDiagnostics>,
+    timed_out: AtomicBool,
+    finished: AtomicBool,
+}
+
+impl AdminHttpOperationState {
+    fn mark_timeout(&self) {
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
+        if !self.timed_out.swap(true, Ordering::AcqRel) {
+            self.diagnostics.record_timeout();
+        }
+    }
+
+    fn mark_late_completion(&self) -> bool {
+        if tokio::time::Instant::now() >= self.deadline {
+            if !self.timed_out.swap(true, Ordering::AcqRel) {
+                self.diagnostics.record_timeout();
+            }
+            return true;
+        }
+        self.timed_out.load(Ordering::Acquire)
+    }
+
+    fn finish_direct(&self) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.mark_late_completion() {
+            self.diagnostics.record_completed_after_deadline();
+        }
+        self.diagnostics.record_completed();
+        self.diagnostics.active_operations.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn finish_timeout_without_worker(&self) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.diagnostics.active_operations.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn finish_cancelled(&self) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.diagnostics.record_cancelled();
+        self.diagnostics.active_operations.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn finish_worker(&self, panicked: bool) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if panicked {
+            self.diagnostics.record_panic();
+        }
+        if self.mark_late_completion() {
+            self.diagnostics.record_completed_after_deadline();
+        }
+        self.diagnostics.record_completed();
+        self.diagnostics.active_operations.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn record_abandoned_result(&self) {
+        if !self.timed_out.load(Ordering::Acquire) {
+            self.diagnostics.record_cancelled();
+        }
+    }
+}
+
+impl Drop for AdminHttpOperationState {
+    fn drop(&mut self) {
+        if !self.finished.swap(true, Ordering::AcqRel) {
+            if !self.timed_out.load(Ordering::Acquire) {
+                self.diagnostics.record_cancelled();
+            }
+            self.diagnostics.active_operations.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+type AdminHttpOperationWork = Box<dyn FnOnce() -> Response<Full<Bytes>> + Send + 'static>;
+
+struct AdminHttpOperationCommand {
+    work: AdminHttpOperationWork,
+    response_tx: oneshot::Sender<Response<Full<Bytes>>>,
+    state: Arc<AdminHttpOperationState>,
+}
+
+fn run_admin_http_operation(command: AdminHttpOperationCommand) {
+    let AdminHttpOperationCommand { work, response_tx, state } = command;
+    let result = catch_unwind(AssertUnwindSafe(work));
+    let panicked = result.is_err();
+    let response = result.unwrap_or_else(|_| text_response(500, "Internal Server Error"));
+    state.finish_worker(panicked);
+    if response_tx.send(response).is_err() {
+        state.record_abandoned_result();
+    }
+}
+
+fn log_operation_task_result(result: Result<(), JoinError>) {
+    let Err(error) = result else {
+        return;
+    };
+    if error.is_cancelled() {
+        log::debug!("admin web operation worker cancelled during shutdown");
+    } else if error.is_panic() {
+        log::error!("admin web operation worker panicked: {}", error);
+    } else {
+        log::warn!("admin web operation worker failed to join: {}", error);
+    }
 }
 
 /// Observable admission counters for one admin-web server lifetime.
@@ -580,10 +844,6 @@ fn log_connection_task_result(result: Result<(), JoinError>) {
     }
 }
 
-/// Per-connection timeout. Connections that exceed this duration are dropped,
-/// mitigating Slowloris-style attacks without thread-per-connection overhead.
-const CONNECTION_TIMEOUT_SECS: u64 = 30;
-
 /// HTTP admin server.
 pub struct AdminHttpServer {
     addr: SocketAddr,
@@ -596,6 +856,11 @@ pub struct AdminHttpServer {
     rate_limiter: Arc<Mutex<LoginRateLimiter>>,
     conn_semaphore: Arc<tokio::sync::Semaphore>,
     admission: Arc<AdminHttpAdmissionState>,
+    operation_tx: mpsc::Sender<AdminHttpOperationCommand>,
+    operation_receiver:
+        std::sync::Mutex<Option<mpsc::Receiver<AdminHttpOperationCommand>>>,
+    operation_timeout: Duration,
+    operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
 }
 
 impl AdminHttpServer {
@@ -624,6 +889,82 @@ impl AdminHttpServer {
         handler: Arc<dyn AdminHttpHandler>,
         max_connections: usize,
     ) -> std::io::Result<Self> {
+        Self::new_with_max_connections_and_operation_timeout(
+            addr,
+            web_root,
+            auth,
+            auth_path,
+            handler,
+            max_connections,
+            DEFAULT_ADMIN_WEB_OPERATION_TIMEOUT_MS,
+        )
+    }
+
+    pub fn new_with_max_connections_and_operation_timeout(
+        addr: SocketAddr,
+        web_root: PathBuf,
+        auth: Option<AdminAuth>,
+        auth_path: Option<PathBuf>,
+        handler: Arc<dyn AdminHttpHandler>,
+        max_connections: usize,
+        operation_timeout_ms: u64,
+    ) -> std::io::Result<Self> {
+        let operation_timeout = validate_admin_web_operation_timeout_ms(operation_timeout_ms)?;
+        let operation_diagnostics =
+            AdminHttpOperationDiagnostics::new(operation_timeout_ms)?;
+        Self::new_with_operation_timeout_and_diagnostics(
+            addr,
+            web_root,
+            auth,
+            auth_path,
+            handler,
+            max_connections,
+            operation_timeout,
+            operation_diagnostics,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_max_connections_and_operation_timeout_and_diagnostics(
+        addr: SocketAddr,
+        web_root: PathBuf,
+        auth: Option<AdminAuth>,
+        auth_path: Option<PathBuf>,
+        handler: Arc<dyn AdminHttpHandler>,
+        max_connections: usize,
+        operation_timeout_ms: u64,
+        operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+    ) -> std::io::Result<Self> {
+        let operation_timeout = validate_admin_web_operation_timeout_ms(operation_timeout_ms)?;
+        if operation_diagnostics.timeout_ms() != operation_timeout_ms {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "admin web operation diagnostics timeout does not match server timeout",
+            ));
+        }
+        Self::new_with_operation_timeout_and_diagnostics(
+            addr,
+            web_root,
+            auth,
+            auth_path,
+            handler,
+            max_connections,
+            operation_timeout,
+            operation_diagnostics,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_operation_timeout_and_diagnostics(
+        addr: SocketAddr,
+        web_root: PathBuf,
+        auth: Option<AdminAuth>,
+        auth_path: Option<PathBuf>,
+        handler: Arc<dyn AdminHttpHandler>,
+        max_connections: usize,
+        operation_timeout: Duration,
+        operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+    ) -> std::io::Result<Self> {
         let max_connections = validate_admin_web_max_connections(max_connections)?;
         let mut loaded_from_disk = false;
         let auth_loaded = if let Some(path) = auth_path.as_ref() {
@@ -651,6 +992,7 @@ impl AdminHttpServer {
                 persist_auth_file(path, &guard)?;
             }
         }
+        let (operation_tx, operation_receiver) = mpsc::channel(max_connections);
         Ok(Self {
             addr,
             web_root,
@@ -665,6 +1007,10 @@ impl AdminHttpServer {
             ),
             conn_semaphore: Arc::new(tokio::sync::Semaphore::new(max_connections)),
             admission: Arc::new(AdminHttpAdmissionState::new(max_connections)),
+            operation_tx,
+            operation_receiver: std::sync::Mutex::new(Some(operation_receiver)),
+            operation_timeout,
+            operation_diagnostics,
         })
     }
 
@@ -676,109 +1022,158 @@ impl AdminHttpServer {
         self.admission.snapshot()
     }
 
+    pub fn operation_diagnostics(&self) -> Arc<AdminHttpOperationDiagnostics> {
+        Arc::clone(&self.operation_diagnostics)
+    }
+
     pub async fn run(&self) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
         log::info!("admin web server listening on http://{}", self.addr);
         let mut connection_tasks = JoinSet::new();
+        let mut operation_receiver = self
+            .operation_receiver
+            .lock()
+            .map_err(|_| std::io::Error::other("admin web operation receiver lock poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "admin web server run called more than once",
+                )
+            })?;
+        let mut operation_tasks = JoinSet::new();
 
         loop {
             while let Some(result) = connection_tasks.try_join_next() {
                 self.admission.record_completed();
                 log_connection_task_result(result);
             }
+            while let Some(result) = operation_tasks.try_join_next() {
+                log_operation_task_result(result);
+            }
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            let (stream, peer_addr) =
-                match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
-                    Ok(Ok(conn)) => conn,
-                    Ok(Err(e)) => {
-                        log::warn!("admin web accept error: {}", e);
-                        continue;
+            tokio::select! {
+                Some(command) = operation_receiver.recv() => {
+                    operation_tasks.spawn_blocking(move || run_admin_http_operation(command));
+                }
+                accepted = tokio::time::timeout(Duration::from_millis(100), listener.accept()) => {
+                    let (stream, peer_addr) = match accepted {
+                        Ok(Ok(conn)) => conn,
+                        Ok(Err(e)) => {
+                            log::warn!("admin web accept error: {}", e);
+                            continue;
+                        }
+                        Err(_) => continue,
+                    };
+                    if self.shutdown.load(Ordering::Relaxed) {
+                        break;
                     }
-                    Err(_) => continue,
-                };
-            if self.shutdown.load(Ordering::Relaxed) {
-                break;
+                    let permit = match self.conn_semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            self.admission.record_rejected();
+                            log::debug!(
+                                "admin web connection rejected at capacity {}",
+                                self.admission.max_connections
+                            );
+                            continue;
+                        }
+                    };
+                    if self.shutdown.load(Ordering::Relaxed) {
+                        drop(permit);
+                        break;
+                    }
+                    let handler = self.handler.clone();
+                    let web_root = self.web_root.clone();
+                    let auth = self.auth.clone();
+                    let auth_path = self.auth_path.clone();
+                    let shutdown = self.shutdown.clone();
+                    let sessions = self.sessions.clone();
+                    let rate_limiter = self.rate_limiter.clone();
+                    let operation_tx = self.operation_tx.clone();
+                    let operation_diagnostics = self.operation_diagnostics.clone();
+                    let operation_timeout = self.operation_timeout;
+                    let admission_guard = self.admission.record_admitted();
+                    let peer = Some(peer_addr);
+                    connection_tasks.spawn(async move {
+                        let _admission_guard = admission_guard;
+                        if shutdown.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let connection_deadline =
+                            tokio::time::Instant::now() + operation_timeout;
+                        let io = TokioIo::new(stream);
+                        let svc = service_fn(move |req: Request<Incoming>| {
+                            let web_root = web_root.clone();
+                            let auth = auth.clone();
+                            let auth_path = auth_path.clone();
+                            let sessions = sessions.clone();
+                            let rate_limiter = rate_limiter.clone();
+                            let handler = handler.clone();
+                            let operation_tx = operation_tx.clone();
+                            let operation_diagnostics = operation_diagnostics.clone();
+                            async move {
+                                Ok::<_, std::convert::Infallible>(
+                                    handle_request_with_deadline(
+                                        req,
+                                        web_root,
+                                        auth,
+                                        auth_path,
+                                        sessions,
+                                        rate_limiter,
+                                        handler,
+                                        peer,
+                                        operation_tx,
+                                        operation_diagnostics,
+                                        connection_deadline,
+                                    )
+                                    .await,
+                                )
+                            }
+                        });
+                        let conn = http1::Builder::new()
+                            .max_buf_size(MAX_HEADER_BYTES)
+                            .keep_alive(false)
+                            .serve_connection(io, svc);
+                        let connection_timeout = operation_timeout + ADMIN_HTTP_RESPONSE_GRACE;
+                        match tokio::time::timeout(connection_timeout, conn).await {
+                            Ok(Err(e)) => {
+                                log::debug!("admin web connection error: {}", e);
+                            }
+                            Err(_elapsed) => {
+                                log::debug!(
+                                    "admin web connection exceeded operation deadline plus response grace: {} ms",
+                                    operation_timeout.as_millis()
+                                );
+                            }
+                            Ok(Ok(())) => {}
+                        }
+                        drop(permit);
+                    });
+                }
             }
-            let permit = match self.conn_semaphore.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    self.admission.record_rejected();
-                    log::debug!(
-                        "admin web connection rejected at capacity {}",
-                        self.admission.max_connections
-                    );
-                    continue;
-                }
-            };
-            if self.shutdown.load(Ordering::Relaxed) {
-                drop(permit);
-                break;
-            }
-            let handler = self.handler.clone();
-            let web_root = self.web_root.clone();
-            let auth = self.auth.clone();
-            let auth_path = self.auth_path.clone();
-            let shutdown = self.shutdown.clone();
-            let sessions = self.sessions.clone();
-            let rate_limiter = self.rate_limiter.clone();
-            let admission_guard = self.admission.record_admitted();
-            let peer = Some(peer_addr);
-            connection_tasks.spawn(async move {
-                let _admission_guard = admission_guard;
-                if shutdown.load(Ordering::Relaxed) {
-                    return;
-                }
-                let io = TokioIo::new(stream);
-                let svc = service_fn(move |req: Request<Incoming>| {
-                    let web_root = web_root.clone();
-                    let auth = auth.clone();
-                    let auth_path = auth_path.clone();
-                    let sessions = sessions.clone();
-                    let rate_limiter = rate_limiter.clone();
-                    let handler = handler.clone();
-                    async move {
-                        Ok::<_, std::convert::Infallible>(
-                            handle_request(
-                                req,
-                                &web_root,
-                                auth,
-                                auth_path,
-                                sessions,
-                                rate_limiter,
-                                handler,
-                                peer,
-                            )
-                            .await,
-                        )
-                    }
-                });
-                let conn = http1::Builder::new()
-                    .max_buf_size(MAX_HEADER_BYTES)
-                    .keep_alive(false)
-                    .serve_connection(io, svc);
-                let timeout = Duration::from_secs(CONNECTION_TIMEOUT_SECS);
-                match tokio::time::timeout(timeout, conn).await {
-                    Ok(Err(e)) => {
-                        log::debug!("admin web connection error: {}", e);
-                    }
-                    Err(_elapsed) => {
-                        log::debug!(
-                            "admin web connection timed out after {}s",
-                            CONNECTION_TIMEOUT_SECS
-                        );
-                    }
-                    Ok(Ok(())) => {}
-                }
-                drop(permit);
-            });
         }
 
         connection_tasks.abort_all();
         while let Some(result) = connection_tasks.join_next().await {
             self.admission.record_completed();
             log_connection_task_result(result);
+        }
+        operation_tasks.abort_all();
+        let drain = tokio::time::timeout(ADMIN_HTTP_OPERATION_SHUTDOWN_TIMEOUT, async {
+            while let Some(result) = operation_tasks.join_next().await {
+                log_operation_task_result(result);
+            }
+        })
+        .await;
+        if drain.is_err() {
+            self.operation_diagnostics.record_shutdown_expired();
+            log::warn!(
+                "admin web operation shutdown drain exceeded {} ms; started blocking workers may still finish",
+                ADMIN_HTTP_OPERATION_SHUTDOWN_TIMEOUT.as_millis()
+            );
         }
         Ok(())
     }
@@ -985,7 +1380,124 @@ fn file_response(path: &Path, extra_headers: &[(String, String)]) -> Response<Fu
     build_response_with_headers(200, mime, data, extra_headers)
 }
 
+async fn collect_http_request(
+    req: Request<Incoming>,
+) -> Result<HttpRequest, Response<Full<Bytes>>> {
+    // Reject paths containing backslashes (path traversal guard).
+    let path = req.uri().path();
+    if path.contains('\\') {
+        return Err(text_response(400, "Bad Request"));
+    }
+
+    // Reject requests with oversized headers (hyper max_buf_size is a soft guard;
+    // enforce an explicit limit so the exact 431 status is guaranteed).
+    let header_size: usize = req
+        .headers()
+        .iter()
+        .map(|(k, v)| k.as_str().len() + v.len() + 4)
+        .sum();
+    if header_size > MAX_HEADER_BYTES {
+        return Err(text_response(431, "Request Header Fields Too Large"));
+    }
+
+    // Check Content-Length before collecting body.
+    let content_length: usize = req
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if content_length > MAX_BODY_BYTES {
+        return Err(text_response(413, "Payload Too Large"));
+    }
+
+    let (parts, body) = req.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes().to_vec(),
+        Err(_) => return Err(text_response(400, "Bad Request")),
+    };
+    if body_bytes.len() > MAX_BODY_BYTES {
+        return Err(text_response(413, "Payload Too Large"));
+    }
+
+    Ok(hyper_to_http_request(&parts, body_bytes))
+}
+
+fn admin_operation_timeout_response() -> Response<Full<Bytes>> {
+    text_response(504, "Admin operation timed out")
+}
+
 #[allow(clippy::too_many_arguments)]
+async fn handle_request_with_deadline(
+    req: Request<Incoming>,
+    web_root: PathBuf,
+    auth: Option<Arc<RwLock<AdminAuth>>>,
+    auth_path: Option<PathBuf>,
+    sessions: Arc<Mutex<SessionStore>>,
+    rate_limiter: Arc<Mutex<LoginRateLimiter>>,
+    handler: Arc<dyn AdminHttpHandler>,
+    peer: Option<SocketAddr>,
+    operation_tx: mpsc::Sender<AdminHttpOperationCommand>,
+    operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+    deadline: tokio::time::Instant,
+) -> Response<Full<Bytes>> {
+    let state = operation_diagnostics.begin(deadline);
+    let request = match tokio::time::timeout_at(deadline, collect_http_request(req)).await {
+        Ok(Ok(request)) => request,
+        Ok(Err(response)) => {
+            state.finish_direct();
+            return response;
+        }
+        Err(_) => {
+            state.mark_timeout();
+            state.finish_timeout_without_worker();
+            return text_response(408, "Request body timed out");
+        }
+    };
+
+    let (response_tx, response_rx) = oneshot::channel();
+    let state_for_command = Arc::clone(&state);
+    let command = AdminHttpOperationCommand {
+        work: Box::new(move || {
+            handle_http_request_sync(
+                request,
+                &web_root,
+                auth,
+                auth_path,
+                sessions,
+                rate_limiter,
+                handler,
+                peer,
+            )
+        }),
+        response_tx,
+        state: state_for_command,
+    };
+    if let Err(error) = operation_tx.try_send(command) {
+        match error {
+            tokio::sync::mpsc::error::TrySendError::Full(command)
+            | tokio::sync::mpsc::error::TrySendError::Closed(command) => {
+                command.state.finish_cancelled();
+            }
+        }
+        return text_response(503, "Admin operation queue unavailable");
+    }
+
+    match tokio::time::timeout_at(deadline, response_rx).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => {
+            state.finish_cancelled();
+            text_response(500, "Admin operation worker unavailable")
+        }
+        Err(_) => {
+            state.mark_timeout();
+            admin_operation_timeout_response()
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+#[cfg(test)]
 async fn handle_request(
     req: Request<Incoming>,
     web_root: &Path,
@@ -996,46 +1508,24 @@ async fn handle_request(
     handler: Arc<dyn AdminHttpHandler>,
     peer: Option<SocketAddr>,
 ) -> Response<Full<Bytes>> {
-    // Reject paths containing backslashes (path traversal guard).
-    let path = req.uri().path();
-    if path.contains('\\') {
-        return text_response(400, "Bad Request");
-    }
-
-    // Reject requests with oversized headers (hyper max_buf_size is a soft guard;
-    // enforce an explicit limit so the exact 431 status is guaranteed).
-    {
-        let header_size: usize = req
-            .headers()
-            .iter()
-            .map(|(k, v)| k.as_str().len() + v.len() + 4) // ": " + "\r\n"
-            .sum();
-        if header_size > MAX_HEADER_BYTES {
-            return text_response(431, "Request Header Fields Too Large");
-        }
-    }
-
-    // Check Content-Length before collecting body
-    let content_length: usize = req
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    if content_length > MAX_BODY_BYTES {
-        return text_response(413, "Payload Too Large");
-    }
-
-    let (parts, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes().to_vec(),
-        Err(_) => return text_response(400, "Bad Request"),
+    let req = match collect_http_request(req).await {
+        Ok(req) => req,
+        Err(response) => return response,
     };
-    if body_bytes.len() > MAX_BODY_BYTES {
-        return text_response(413, "Payload Too Large");
-    }
+    handle_http_request_sync(req, web_root, auth, auth_path, sessions, rate_limiter, handler, peer)
+}
 
-    let req = hyper_to_http_request(&parts, body_bytes);
+#[allow(clippy::too_many_arguments)]
+fn handle_http_request_sync(
+    req: HttpRequest,
+    web_root: &Path,
+    auth: Option<Arc<RwLock<AdminAuth>>>,
+    auth_path: Option<PathBuf>,
+    sessions: Arc<Mutex<SessionStore>>,
+    rate_limiter: Arc<Mutex<LoginRateLimiter>>,
+    handler: Arc<dyn AdminHttpHandler>,
+    peer: Option<SocketAddr>,
+) -> Response<Full<Bytes>> {
 
     if req.path.starts_with("/api/") {
         if req.path == "/api/login" {
