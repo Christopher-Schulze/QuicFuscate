@@ -309,7 +309,7 @@ pub struct RealityConfig {
     pub cover_port: u16,
     /// Cache TTL in seconds before background refresh (default: 3600).
     pub cache_ttl: u64,
-    /// If true, fall back to synthetic TlsClientHelloSpoofer on cache miss.
+    /// If true, allow the normal synthetic TLS fallback on cache miss.
     /// If false, reject connections when cache is empty.
     pub fallback_to_synthetic: bool,
 }

@@ -316,27 +316,14 @@ fn deterministic_client_hello_cipher_suites(record: &[u8]) -> Vec<u16> {
 }
 
 #[test]
-fn apply_utls_profile_client_hello_excludes_chacha_for_chrome_and_firefox() {
-    use super::{BrowserProfile, OsProfile};
+fn deterministic_client_hello_metadata_excludes_chacha_for_chrome_and_firefox() {
+    use super::{BrowserProfile, FingerprintProfile, OsProfile};
 
     for (browser, os) in
         [(BrowserProfile::Chrome, OsProfile::Windows), (BrowserProfile::Firefox, OsProfile::Linux)]
     {
-        let mut stealth_config = StealthConfig::stealth();
-        stealth_config.initial_browser = browser;
-        stealth_config.initial_os = os;
-        let manager = StealthManager::new(
-            stealth_config,
-            Arc::new(OptimizationManager::new()),
-            Arc::new(CryptoManager::new()),
-        );
-        let mut transport_config =
-            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
-                .expect("transport config");
-
-        manager.apply_utls_profile(&mut transport_config, None);
-
-        let hello = transport_config.chlo_template.as_ref().expect("ClientHello template");
+        let profile = FingerprintProfile::new(browser, os);
+        let hello = profile.client_hello.as_ref().expect("ClientHello metadata");
         let suites = deterministic_client_hello_cipher_suites(hello);
         assert!(
             !suites.iter().any(|suite| matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9)),

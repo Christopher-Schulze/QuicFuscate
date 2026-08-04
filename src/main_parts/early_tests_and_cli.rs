@@ -14,7 +14,7 @@ use quicfuscate::optimize::OptimizeConfig;
 #[cfg(unix)]
 use quicfuscate::optimize::ZeroCopyBuffer;
 use quicfuscate::stealth::StealthConfig;
-use quicfuscate::stealth::TlsClientHelloSpoofer;
+use quicfuscate::stealth::TlsClientHelloProfileCatalog;
 use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use quicfuscate::stealth::StealthRuntimeOwner;
 use quicfuscate::telemetry;

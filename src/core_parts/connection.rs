@@ -509,7 +509,7 @@ impl QuicFuscateConnection {
         ));
 
         if use_utls {
-            stealth_manager.apply_utls_profile(&mut config, None);
+            stealth_manager.apply_utls_profile(&mut config);
         }
 
         // Each client connection should use a fresh, unpredictable SCID to avoid linkability.

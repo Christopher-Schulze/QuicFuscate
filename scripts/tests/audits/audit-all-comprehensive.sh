@@ -473,6 +473,18 @@ else
     log_critical "Generated web-admin publish contract failed with rc=$WEB_ADMIN_PUBLISH_CONTRACT_RC (see $WEB_ADMIN_PUBLISH_CONTRACT_LOG)"
 fi
 
+TLS_CLIENTHELLO_CONTRACT_LOG="$OUTPUT_DIR/tls-clienthello-contract.log"
+set +e
+"$PROJECT_ROOT/scripts/audits/verify-tls-clienthello-contract.sh" >"$TLS_CLIENTHELLO_CONTRACT_LOG" 2>&1
+TLS_CLIENTHELLO_CONTRACT_RC=$?
+set -e
+record_command_check "tls_clienthello_contract" "$TLS_CLIENTHELLO_CONTRACT_RC" "artifact=$TLS_CLIENTHELLO_CONTRACT_LOG"
+if [ "$TLS_CLIENTHELLO_CONTRACT_RC" -eq 0 ]; then
+    log_info "TLS ClientHello ownership contract passed"
+else
+    log_critical "TLS ClientHello ownership contract failed with rc=$TLS_CLIENTHELLO_CONTRACT_RC (see $TLS_CLIENTHELLO_CONTRACT_LOG)"
+fi
+
 echo -e "\n> Checking allocations in hot paths..."
 HOT_PATH_ALLOC_LOG="$OUTPUT_DIR/hot-path-allocation.log"
 set +e

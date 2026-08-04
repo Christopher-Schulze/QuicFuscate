@@ -486,7 +486,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - Client CA ownership: `transport::Config::load_verify_locations_from_file()` reads, PEM-parses, and Rustls-validates every configured certificate before retaining the path on that transport configuration. `enable_tls()` passes the path into the connection-local provider, including version-negotiation and profile/SNI rebuilds; no process-global client CA state exists. Missing, unreadable, empty, malformed, or invalid-DER bundles fail before standalone kill-switch publication, and error messages expose the path without certificate contents.
 - TLS Cover: cover provider in `qftls::CombinedProvider` is enabled by default and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Generates synthetic QUIC `CRYPTO` frames during the TLS handshake phase only (correct QUIC behavior per RFC 9001 - CRYPTO frames do not appear post-handshake in real QUIC). Post-handshake cover is provided by QUIC Cover PINGs, H3-framed cover requests and Server Push/WebTransport, plus transport TrafficPadding. Raw random bytes are never injected into an H3 stream. The canonical runtime cover mode now comes from the active `StealthManager::runtime_tls_profile(...)`: `off`, `performance`, and `intelligent` drive the cover layer into performance mode, while stealth-heavy modes keep timing/jitter enabled. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) enables TLS Cover extras in the stealth manager (ticket manager and cert chain emulator) but does not control the cover provider itself. Cipher selection is automatic (`auto`) and prefers AES-128-GCM when hardware AES (AESNI/VAES/SVE AES) is available, otherwise falls back to ChaCha20-Poly1305. Each provider obtains fresh OS entropy and derives connection-local key/IV material through domain-separated HKDF. `CryptoContext::install_tls_cover_cipher` is the single install/rotation contract: exact active material is an idempotent no-op that preserves sequence numbers, fresh material retires the previous identity and resets both directions, retired material is rejected, and sequence exhaustion fails closed with `AeadLimitReached`. Cover-frame generation never performs lazy reinstallation. On x86 the ChaCha keystream dispatches AVX-512 -> AVX2 -> AVX -> SSE4.1/SSSE3 -> Scalar with telemetry (`CHACHA20_X4_AVX2_OPS`, `CHACHA20_X4_AVX_OPS`, `CHACHA20_X4_SSE41_OPS`, `CHACHA20_X4_SCALAR_OPS`). Override via `QUICFUSCATE_TLS_COVER_CIPHER=auto|chacha|aes`.
 - Ownership split: `qftls::CombinedProvider` provides a single runtime interface that keeps rustls as the security-critical protocol owner and composes the cover layer for observable mimicry behavior where enabled.
-- ClientHello boundary: `TlsCoverProvider` emits synthetic decoy records and reports no ClientHello-override support. Real ClientHello protocol/configuration remains owned by rustls. `TlsClientHelloSpoofer` generates deterministic persona templates for compatibility and audit inspection, but `transport::Config::chlo_template` is write-only in the active source and cannot override the wire; TODO-766 owns removal or proper wiring of that API. TODO-598 closes the real-TLS ChaCha policy gap and removes the dead advanced builder.
+- ClientHello boundary: `TlsCoverProvider` emits synthetic decoy records and reports no ClientHello-override support. Real ClientHello protocol/configuration remains owned by rustls. `TlsClientHelloProfileCatalog` exposes deterministic persona combinations, while `FingerprintProfile::client_hello` is compatibility/audit metadata only. The transport configuration has no ClientHello template setter or wire override storage; TODO-766 owns this removal. TODO-598 closes the real-TLS ChaCha policy gap and removes the dead advanced builder.
 - Fork boundary: rustls/TLS Cover governs the TLS-visible handshake story only. The custom 1-RTT data-plane AEAD posture in `src/crypto/` and `src/transport/*` is a separate fork-specific transport decision, valid only under the explicit full-fork assumption, and must not be interpreted as a TLS cipher-suite or upstream interoperability claim.
 - Risk/Tradeoff: enabling TLS Cover increases cover-byte volume and per-packet processing work.
 - Certificate tooling: development certificates enabled by feature `dev-certs` (rcgen); production uses PEM chain via `--cert/--key` (server) and CA bundle via `--ca-file` (client).
@@ -495,7 +495,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 
 #### Fingerprint Source Model
 - Primary runtime path: `TlsProfile` selection and rustls `ClientConfig` construction from the active `BrowserProfile` and `OsProfile` persona.
-- Compatibility/audit path: deterministic in-memory ClientHello synthesis via `TlsClientHelloSpoofer`; the resulting bytes are stored as metadata and are not consumed by the active rustls connection builder.
+- Compatibility/audit path: deterministic in-memory ClientHello synthesis via `TlsCover` and `FingerprintProfile`; the resulting bytes are stored as metadata and are not consumed by the active rustls connection builder.
 - Optional external path: top-level `browser_profiles/*.chlo` or `*.chlo.b64` dumps for strict byte-level replay and audit/regression workflows.
 - The `qftls` browser profile extension-order metadata keeps unique IANA-registered extension IDs plus intentional GREASE; Chrome's `renegotiation_info` and `compress_certificate` values are covered by regression tests (TODO-595).
 - Provider path: `RustlsProvider::rebuild_client_connection` constructs the real client handshake with the shared filtered provider; `create_server_connection` uses the same provider policy.
@@ -513,7 +513,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - `QUICFUSCATE_CHACHA20_X4=auto|avx2|avx|sse|scalar` - override the TLS Cover ChaCha20 backend for diagnostics.
 - `QUICFUSCATE_PQ_HYBRID=1` - Removed. PQ-hybrid code was deleted (TODO-286). This variable is no longer recognized.
 - `QUICFUSCATE_ALLOW_INVALID_CERTS=1|true|yes|on` - accept invalid peer certificates (development/testing only).
-- `QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE=<name>` - forward a ClientHello override template to TLS providers that support CH overrides.
+- `QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE=<name>` - forward a template name only to a TLS provider that advertises ClientHello override support; the current rustls and TLS Cover providers report unsupported, so no override is applied.
 - `QUICFUSCATE_TRACE_TLS=1` - enable additional TLS handshake/key-change diagnostic logging in qftls and transport packet parsing.
 
 Example (RealTLS configuration)
@@ -2133,6 +2133,7 @@ Benchmarks
 - `scripts/audits/verify-simd-feature-contract.sh` is run by the CI feature matrix, the strict Clippy matrix, and the comprehensive audit. It proves that no hardware ISA name is declared as a Cargo feature, that `rust-tests,simd-selfcheck` remains a valid positive test contract, that `--all-features` remains metadata-valid, and that each removed hardware/meta selector is rejected by Cargo rather than silently accepted as hardware proof.
 - `scripts/audits/verify-cargo-feature-taxonomy.sh` is run beside the SIMD gate by CI, the strict Clippy matrix, and the comprehensive audit. It checks the exact 27-entry manifest taxonomy, the 30-selector Cargo metadata surface including implicit optional-dependency selectors, every Rust cfg and target `required-features` reference, positive aggregate build profiles, and rejection of TODO-176's retired feature-group names.
 - `scripts/audits/verify-web-admin-publish-contract.sh` is run by the CI release-contract job, the release version-contract job, and the comprehensive audit. It proves that `assets/web-admin/` is generated and ignored, checks the build/release/installer/E2E prerequisite ordering, and runs a bounded missing-`index.html` bundle negative probe without building or modifying UI sources.
+- `scripts/audits/verify-tls-clienthello-contract.sh` is run by the CI release-contract job, the release version-contract job, and the comprehensive audit. It proves that the retired transport ClientHello storage/setters and injection helpers are absent, deterministic bytes remain metadata-only, rustls remains the wire owner, and canonical docs/tests describe the same boundary.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo metadata --locked`, `cargo check --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` in `apps/tauri/src-tauri`.
 - The `windows-core-checks` job caps Cargo at two jobs, checks and lints `tun-windows,rust-tests`, compiles its unit-test binary, provisions the integrity-checked upstream DLL beside that binary, executes ordinary tests plus serial privileged Wintun adapter/I/O/close and WFP packet-outcome/process-exit suites, independently verifies zero managed WFP objects even after a failed behavior step, rejects owned adapter or legacy firewall-rule residue, and uploads provenance plus Windows-build evidence. Run `30508948149`, job `90764941801` proves commit `afe46e0` with the complete native Wintun and WFP lifecycle green. Manual Windows-Omega runs `30535603045` and `30536002374` add two consecutive authenticated dual-stack Wintun/WFP data-plane proofs against one unchanged ARM64 server process. The `release-contract` job runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
@@ -3280,7 +3281,7 @@ Environment parsing is not one universal live-reload contract. `src/env_utils.rs
 
 **TLS Provider (qftls):**
 - `QUICFUSCATE_ALLOW_INVALID_CERTS=1|true|yes|on` - Accept invalid peer certificates (development/testing only)
-- `QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE=<name>` - Forward ClientHello template override names to providers that support `supports_ch_override()`
+- `QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE=<name>` - Forward a template name only when the active provider returns `supports_ch_override() == true`; current providers return false.
 - `QUICFUSCATE_TRACE_TLS=1` - Enable additional TLS handshake/key-change diagnostics in qftls/transport
 
 **Global toggles:**
@@ -3595,9 +3596,9 @@ The current control additionally samples exact process CPU/RSS and standalone al
 
 This section is an operational view; canonical behavior is defined in "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model".
 
-QuicFuscate performs native TLS handshake profile selection using `TlsProfile` values selected by `--profile` and `--os`; rustls constructs the real wire ClientHello. Deterministic in-memory ClientHello templates remain available for compatibility and audit inspection. Runtime operation does not require on-disk profile dumps.
+QuicFuscate performs native TLS handshake profile selection using `TlsProfile` values selected by `--profile` and `--os`; rustls constructs the real wire ClientHello. Deterministic in-memory ClientHello metadata remains available for compatibility and audit inspection, but is not a transport override. Runtime operation does not require on-disk profile dumps.
 
-Generated compatibility ClientHello templates are cached in memory for reuse across connections.
+Generated compatibility ClientHello metadata is attached to the in-memory fingerprint profile used by compatibility and audit paths.
 
 If you maintain external profile dumps for audit/regression purposes, place them under `browser_profiles/` and use the TLS utilities to inspect and verify them.
 Example:
@@ -3624,7 +3625,7 @@ Notes
 
 ### TLS Cover Exchange
 
-TLS Cover is a lightweight synthetic exchange for stealth shaping and traffic realism. It derives profile-scoped cover-record material from the active fingerprint profile and emits synthesized reply artifacts with shorter message sizing than a full handshake. It does not generate or replace a real ClientHello. Real ClientHello bytes are owned by rustls; compatibility templates stored by `TlsClientHelloSpoofer` are not consumed on the wire.
+TLS Cover is a lightweight synthetic exchange for stealth shaping and traffic realism. It derives profile-scoped cover-record material from the active fingerprint profile and emits synthesized reply artifacts with shorter message sizing than a full handshake. It does not generate or replace a real ClientHello. Real ClientHello bytes are owned by rustls; deterministic compatibility metadata is not consumed on the wire.
 
 TLS Cover is optional and does not replace native TLS security semantics.
 

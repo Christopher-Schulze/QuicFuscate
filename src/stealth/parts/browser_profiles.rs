@@ -95,7 +95,7 @@ pub struct FingerprintProfile {
     pub initial_max_streams_bidi: u64,
     /// QUIC max_idle_timeout transport parameter (milliseconds).
     pub max_idle_timeout: u64,
-    /// Pre-built ClientHello bytes for TLS fingerprint injection.
+    /// Pre-built deterministic ClientHello bytes for compatibility and audit metadata.
     pub client_hello: Option<Vec<u8>>,
     /// Synthetic ServerHello parameters for TLS Cover parity.
     pub server_hello: Option<ServerHelloParamsOwned>,

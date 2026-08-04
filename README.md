@@ -120,8 +120,8 @@ Rule of thumb:
 ## Core Features
 
 ### Stealth Techniques
-- **Curated Browser Fingerprints**: Curated browser/OS persona metadata (Chrome, Firefox, Safari, Edge) drives the real rustls ClientHello; deterministic in-memory templates remain available for compatibility and audit inspection without an on-disk profile requirement<br>
-- **Native TLS handshake profile injection + TLS Cover**: Applies native fingerprint-aligned TLS profiles and can emit a lightweight synthetic TLS Cover exchange for stealth traffic shaping<br>
+- **Curated Browser Fingerprints**: Curated browser/OS persona metadata (Chrome, Firefox, Safari, Edge) drives the real rustls ClientHello; deterministic in-memory metadata remains available for compatibility and audit inspection without an on-disk profile requirement<br>
+- **Native TLS handshake profile selection + TLS Cover**: Applies native fingerprint-aligned TLS profiles and can emit a lightweight synthetic TLS Cover exchange for stealth traffic shaping<br>
 - **Domain Fronting**: Masks traffic by routing through trusted CDN providers
   - Rotates across vetted provider domains to decouple the visible SNI from the true origin<br>
   - Risk/Tradeoff: effectiveness depends on current provider policy and regional filtering behavior<br>
@@ -131,18 +131,18 @@ Rule of thumb:
   - Selected by an active TUN bridge or Intelligent-mode escalation; the retired standalone manager is not part of the runtime<br>
 - **Traffic Obfuscation**: XOR-based obfuscation layer (compatibility-only, not part of the default runtime)
   - Sealed QUIC datagrams remain unmodified to preserve AEAD/FEC integrity<br>
-- **TLS Profile Cache**: Generated compatibility ClientHello templates are cached in memory for reuse across connections<br>
+- **TLS Profile Metadata**: Deterministic compatibility ClientHello metadata remains available in memory for audit and compatibility inspection; rustls owns the wire handshake<br>
 - **DNS-over-HTTPS (DoH)**: Resolves DNS via HTTPS to hide queries from on-path resolvers<br>
 - **QPACK Header Shaping**: Encodes realistic HTTP/3 headers with QPACK for indistinguishable request patterns<br>
 - **Active Probe Detection + Reality Fallback**: Detects probe-like traffic patterns and relays suspicious flows through a legitimate upstream path to preserve realistic network behavior under active scanning<br>
 - **Server Push Cover Traffic**: Emits realistic HTTP/3 PUSH_PROMISE/DATA cover bursts with configurable intensity, base path, and burst interval for traffic-shaping realism<br>
 - **Profile Cycling**: Optional rotation across browser/OS profiles on an interval to diversify observable fingerprints<br>
-- **Cross-Layer Profile Coherence**: One active browser/OS profile coordinates TLS handshake injection, HTTP/3/QPACK shaping, MASQUE behavior, and fronting decisions for a homogeneous observable fingerprint<br>
+- **Cross-Layer Profile Coherence**: One active browser/OS profile coordinates TLS handshake selection, HTTP/3/QPACK shaping, MASQUE behavior, and fronting decisions for a homogeneous observable fingerprint<br>
 - **Spin Bit Controls**: Configuration-level controls exist; runtime wiring is currently partial and intentionally gated
 
-Native TLS handshake profile injection (RealTLS) is the primary handshake path and provides the cryptographic security layer.
+Native TLS handshake profile selection (RealTLS) is the primary handshake path and provides the cryptographic security layer.
 TLS Cover is an optional lightweight synthetic exchange for stealth shaping and traffic realism - it does not replace native TLS security.
-When TLS Cover is disabled, the stack uses native TLS handshake profile injection only.
+When TLS Cover is disabled, the stack uses native TLS handshake profile selection only.
 Risk/Tradeoff: enabling TLS Cover adds cover-byte volume and processing overhead.
 
 ### Next-Gen Hardware-Accelerated AEAD Cryptography

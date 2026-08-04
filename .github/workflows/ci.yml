@@ -634,6 +634,10 @@ jobs:
         shell: bash
         run: bash scripts/audits/verify-web-admin-publish-contract.sh
 
+      - name: Verify TLS ClientHello ownership contract
+        shell: bash
+        run: bash scripts/audits/verify-tls-clienthello-contract.sh
+
   fuzz-targets:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

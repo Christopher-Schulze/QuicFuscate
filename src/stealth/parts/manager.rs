@@ -100,7 +100,7 @@ impl StealthManager {
 
         let domain_fronting = Self::domain_fronting_for_config(&config);
 
-        let profile_pool = Arc::new(TlsClientHelloSpoofer::available_profiles());
+        let profile_pool = Arc::new(TlsClientHelloProfileCatalog::available_profiles());
 
         let probe_detector = if config.dynamic_enabled
             || config.enable_traffic_padding
@@ -405,16 +405,10 @@ impl StealthManager {
         format!("{:?}/{:?}", fingerprint.browser, fingerprint.os)
     }
 
-    /// Applies the configured TLS fingerprint to the transport configuration.
-    /// The deterministic ClientHello bytes are retained as compatibility metadata;
-    /// the real wire ClientHello is emitted by the rustls provider during
-    /// `configure_tls`, where the shared cipher policy is enforced.
-    pub(crate) fn apply_utls_profile(
-        &self,
-        config: &mut crate::transport::Config,
-        preferred: Option<u16>,
-    ) {
-        let mut fingerprint = match self.fingerprint.lock() {
+    /// Applies the configured browser/OS persona's QUIC parameters to the
+    /// transport configuration. Rustls owns the real wire ClientHello.
+    pub(crate) fn apply_utls_profile(&self, config: &mut crate::transport::Config) {
+        let fingerprint = match self.fingerprint.lock() {
             Ok(g) => g,
             Err(p) => {
                 warn!("fingerprint mutex poisoned; recovering");
@@ -422,26 +416,6 @@ impl StealthManager {
             }
         };
         info!("Applying uTLS fingerprint for: {:?}/{:?}", fingerprint.browser, fingerprint.os);
-
-        // Retain the deterministic persona bytes for compatibility and audit
-        // inspection. The transport config has no active wire consumer for this
-        // field; rustls owns the real ClientHello and its cipher policy.
-        if preferred.is_some() {
-            // Preference is applied by the active runtime TLS profile. The retained
-            // compatibility bytes are not a wire-level override.
-        }
-        if fingerprint.client_hello.is_none() {
-            fingerprint.client_hello =
-                TlsClientHelloSpoofer::load_client_hello(fingerprint.browser, fingerprint.os);
-        }
-        if let Some(ref hello) = fingerprint.client_hello {
-            TlsClientHelloSpoofer::inject_bytes(config, hello);
-        } else {
-            error!(
-                "Missing ClientHello profile for {:?}/{:?}",
-                fingerprint.browser, fingerprint.os
-            );
-        }
 
         if let Err(e) = config.set_application_protos(crate::transport::h3::APPLICATION_PROTOCOL) {
             warn!("Failed to set HTTP/3 application protos: {}", e);
@@ -569,34 +543,6 @@ impl StealthManager {
         } else {
             config.set_stealth_mimic_bias(bias_default);
         }
-    }
-
-    /// Changes the active fingerprint profile before a connection is materialized.
-    /// Runtime session rotation deliberately avoids this path to keep TLS,
-    /// QUIC, QPACK and header persona state coherent for the full session.
-    #[allow(dead_code)]
-    fn set_fingerprint_profile(
-        &self,
-        profile: FingerprintProfile,
-        cfg: Option<&mut crate::transport::Config>,
-    ) {
-        let mut p = profile;
-        if p.client_hello.is_none() {
-            p.client_hello = TlsClientHelloSpoofer::load_client_hello(p.browser, p.os);
-        }
-
-        if let (Some(ref hello), Some(c)) = (&p.client_hello, cfg) {
-            TlsClientHelloSpoofer::inject_bytes(c, hello);
-        }
-
-        let mut fp = match self.fingerprint.lock() {
-            Ok(g) => g,
-            Err(p) => {
-                warn!("fingerprint mutex poisoned; recovering");
-                p.into_inner()
-            }
-        };
-        *fp = p;
     }
 
     /// Registers profile rotation as a next-session policy.

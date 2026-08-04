@@ -70,8 +70,8 @@ Rules-File Guard (Stealth Module)
   thread-safety and deterministic semantics.
 - Stealth state transitions must remain concurrency-safe and free of dead
   compatibility paths; no stubs.
-- TLS ClientHello spoofing must call safe FFI shims only; when symbols are
-  absent, fall back is a no-op without panicking.
+- Deterministic ClientHello metadata must never be presented as a wire override;
+  the real handshake remains owned by rustls.
 - After edits: run `cargo check` and `cargo doc` to validate.
 ===============================================================================
 */
@@ -81,7 +81,7 @@ use crate::accelerate::stealth::AsciiSimdBackend;
 use crate::crypto::hkdf::{hkdf_expand, hkdf_extract};
 use log::{debug, error, info, warn};
 // use of sha2 replaced with centralized SIMD dispatch
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -172,7 +172,8 @@ pub use fingerprint::{
     PacketNormalizer,
 };
 
-// Legacy external TLS FFI removed: native TLS fingerprint injection is used exclusively.
+// Legacy external TLS FFI removed: rustls owns the real handshake and the
+// deterministic profile catalog is retained only for compatibility/audit work.
 
 include!("parts/browser_profiles.rs");
 include!("parts/http3_masquerade.rs");

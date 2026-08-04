@@ -125,8 +125,8 @@ async fn async_main(
     // One-time validation of consolidated in-memory profiles.
     // Logs warnings for any profile that doesn't pass the sanity checks.
     {
-        // Validate profiles using stealth module's TlsClientHelloSpoofer
-        let results = quicfuscate::stealth::TlsClientHelloSpoofer::available_profiles()
+        // Validate profiles using the deterministic ClientHello profile catalog.
+        let results = quicfuscate::stealth::TlsClientHelloProfileCatalog::available_profiles()
             .into_iter()
             .map(|(b, o)| {
                 // Simple validation - check if we can generate a ClientHello
@@ -1357,7 +1357,7 @@ async fn run_client(
 
     if list_fingerprints {
         info!("Available browser fingerprints:");
-        for (b, o) in TlsClientHelloSpoofer::available_profiles() {
+        for (b, o) in TlsClientHelloProfileCatalog::available_profiles() {
             info!("- {}@{}", format!("{:?}", b).to_lowercase(), format!("{:?}", o).to_lowercase());
         }
         return Ok(());

@@ -390,6 +390,7 @@ impl TlsCover {
     }
 
     /// Builds a minimal ClientHello record using the provided parameters.
+    #[cfg(test)]
     pub(super) fn client_hello_custom(params: ClientHelloParams) -> Vec<u8> {
         Self::client_hello_custom_with_sid(params, None)
     }

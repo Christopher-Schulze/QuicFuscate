@@ -449,8 +449,6 @@ pub struct Config {
     pub(crate) pmtu_policy: PmtuPolicy,
     pub(crate) disable_dcid_reuse: bool,
     pub(crate) track_unknown_transport_params: Option<usize>,
-    // Real-TLS knobs
-    pub(crate) chlo_template: Option<Vec<u8>>,
     // Pacing / Hystart / Initial CWND / Initial RTT
     pub(crate) pacing: bool,
     pub(crate) max_pacing_rate: Option<u64>,
@@ -613,7 +611,6 @@ impl Config {
             pmtu_policy: PmtuPolicy::default(),
             disable_dcid_reuse: false,
             track_unknown_transport_params: None,
-            chlo_template: None,
             pacing: true,
             max_pacing_rate: None,
             hystart: true,
@@ -1202,20 +1199,6 @@ impl Config {
         self.verify_locations_directory = Some(dir.to_string());
         Ok(())
     }
-    /// Stores a deterministic ClientHello template for compatibility and audit
-    /// inspection. The active rustls connection builder does not consume this
-    /// field; real wire ClientHello construction is owned by the TLS provider.
-    pub fn set_chlo_template(&mut self, tmpl: &[u8]) -> Result<(), crate::error::ConnectionError> {
-        self.chlo_template = Some(tmpl.to_vec());
-        Ok(())
-    }
-    /// Stores a deterministic ClientHello template (alias for `set_chlo_template`).
-    pub fn apply_deterministic_tls_hello_template(
-        &mut self,
-        tmpl: &[u8],
-    ) -> Result<(), crate::error::ConnectionError> {
-        self.set_chlo_template(tmpl)
-    }
     /// Installs a TLS session ticket encryption key (test helper).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn set_ticket_key(&mut self, _key: &[u8]) -> Result<(), crate::error::ConnectionError> {
@@ -1227,11 +1210,6 @@ impl Config {
         Ok(())
     }
     // duplicate removed: enable_early_data
-    /// Sets a raw ClientHello template for TLS cover (test helper).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn set_custom_tls(&mut self, hello: &[u8]) {
-        let _ = self.set_chlo_template(hello);
-    }
     // qlog / session controls
     /// Configures qlog output at default verbosity (test helper).
     #[cfg(any(test, feature = "rust-tests"))]
