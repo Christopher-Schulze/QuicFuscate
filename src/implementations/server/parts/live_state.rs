@@ -316,6 +316,227 @@ impl PendingTunDownlinks {
     }
 }
 
+#[cfg(feature = "rate_limiter")]
+const BLACKLIST_SYNC_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(feature = "rate_limiter")]
+const BLACKLIST_SYNC_REAP_INTERVAL: Duration = Duration::from_millis(2);
+#[cfg(feature = "rate_limiter")]
+const BLACKLIST_SYNC_RETRY_BASE: Duration = Duration::from_secs(5);
+#[cfg(feature = "rate_limiter")]
+const BLACKLIST_SYNC_RETRY_MAX: Duration = Duration::from_secs(300);
+
+#[cfg(feature = "rate_limiter")]
+struct BlacklistSyncTask {
+    handle: tokio::task::JoinHandle<Result<usize, crate::implementations::server::limits::BlacklistError>>,
+    cancellation: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "rate_limiter")]
+struct BlacklistSyncState {
+    closed: bool,
+    next_due: Option<Instant>,
+    retry_attempts: u32,
+    interval: Duration,
+    task: Option<BlacklistSyncTask>,
+}
+
+#[cfg(feature = "rate_limiter")]
+struct BlacklistSyncOwner {
+    state: Arc<Mutex<BlacklistSyncState>>,
+}
+
+#[cfg(feature = "rate_limiter")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlacklistSyncClaim {
+    Claimed,
+    NotDue,
+    InFlight,
+    Closed,
+}
+
+#[cfg(feature = "rate_limiter")]
+impl BlacklistSyncOwner {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(BlacklistSyncState {
+                closed: false,
+                next_due: None,
+                retry_attempts: 0,
+                interval: Duration::ZERO,
+                task: None,
+            })),
+        }
+    }
+
+    fn claim_and_spawn(
+        &self,
+        blacklist: Arc<crate::implementations::server::limits::BlacklistSync>,
+        interval: Duration,
+    ) -> BlacklistSyncClaim {
+        let mut state = self.state.lock();
+        if state.closed {
+            return BlacklistSyncClaim::Closed;
+        }
+        if state.task.is_some() {
+            return BlacklistSyncClaim::InFlight;
+        }
+        if state.next_due.is_some_and(|next_due| Instant::now() < next_due) {
+            return BlacklistSyncClaim::NotDue;
+        }
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation_for_task = Arc::clone(&cancellation);
+        let handle = tokio::spawn(async move { blacklist.sync_with_cancel(cancellation_for_task).await });
+        state.next_due = None;
+        state.interval = interval;
+        state.task = Some(BlacklistSyncTask { handle, cancellation });
+        BlacklistSyncClaim::Claimed
+    }
+
+    fn close(&self) {
+        self.state.lock().closed = true;
+    }
+
+    fn take_finished(&self) -> Option<BlacklistSyncTask> {
+        let mut state = self.state.lock();
+        if state.task.as_ref().is_some_and(|task| task.handle.is_finished()) {
+            state.task.take()
+        } else {
+            None
+        }
+    }
+
+    fn take_task(&self) -> Option<BlacklistSyncTask> {
+        self.state.lock().task.take()
+    }
+
+    fn has_task(&self) -> bool {
+        self.state.lock().task.is_some()
+    }
+
+    async fn observe_finished(&self, metrics: &Metrics) {
+        let Some(task) = self.take_finished() else {
+            return;
+        };
+        let retry = Self::observe_join_result(metrics, task.handle.await);
+        let mut state = self.state.lock();
+        if state.closed {
+            return;
+        }
+        if retry {
+            let attempt = state.retry_attempts;
+            state.retry_attempts = state.retry_attempts.saturating_add(1);
+            state.next_due = Some(Instant::now() + retry_delay(attempt));
+            metrics.record_blacklist_sync_event(
+                crate::implementations::server::metrics::BlacklistSyncEvent::RetryScheduled,
+            );
+        } else {
+            state.retry_attempts = 0;
+            state.next_due = Some(Instant::now() + state.interval);
+        }
+    }
+
+    fn observe_join_result(
+        metrics: &Metrics,
+        result: Result<Result<usize, crate::implementations::server::limits::BlacklistError>, tokio::task::JoinError>,
+    ) -> bool {
+        match result {
+            Ok(Ok(count)) => {
+                metrics.record_blacklist_sync_success(count);
+                log::info!("Blacklist: synced {count} IPs from external feed");
+                false
+            }
+            Ok(Err(crate::implementations::server::limits::BlacklistError::Cancelled)) => {
+                metrics.record_blacklist_sync_event(
+                    crate::implementations::server::metrics::BlacklistSyncEvent::Cancelled,
+                );
+                log::debug!("Blacklist: synchronization cancelled by runtime owner");
+                true
+            }
+            Ok(Err(error)) => {
+                metrics.record_blacklist_sync_event(
+                    crate::implementations::server::metrics::BlacklistSyncEvent::Failed,
+                );
+                log::warn!("Blacklist: sync failed (using last-known-good set): {error}");
+                true
+            }
+            Err(error) if error.is_cancelled() => {
+                metrics.record_blacklist_sync_event(
+                    crate::implementations::server::metrics::BlacklistSyncEvent::Cancelled,
+                );
+                log::debug!("Blacklist: synchronization task cancelled by runtime owner");
+                true
+            }
+            Err(error) => {
+                metrics.record_blacklist_sync_event(
+                    crate::implementations::server::metrics::BlacklistSyncEvent::Failed,
+                );
+                log::warn!("Blacklist: synchronization task join failed: {error}");
+                true
+            }
+        }
+    }
+
+    async fn shutdown(&self, metrics: &Metrics) {
+        self.close();
+        let Some(task) = self.take_task() else {
+            return;
+        };
+        task.cancellation.store(true, Ordering::Release);
+        let mut handle = task.handle;
+        match tokio::time::timeout(BLACKLIST_SYNC_SHUTDOWN_TIMEOUT, &mut handle).await {
+            Ok(result) => {
+                Self::observe_join_result(metrics, result);
+            }
+            Err(_) => {
+                handle.abort();
+                let _ = tokio::time::timeout(BLACKLIST_SYNC_REAP_INTERVAL, handle).await;
+                metrics.record_blacklist_sync_event(
+                    crate::implementations::server::metrics::BlacklistSyncEvent::ShutdownExpired,
+                );
+                log::warn!(
+                    "Blacklist synchronization exceeded the bounded shutdown deadline; task was abandoned"
+                );
+            }
+        }
+    }
+
+    fn abandon(&self, metrics: &Metrics) {
+        self.close();
+        let Some(task) = self.take_task() else {
+            return;
+        };
+        task.cancellation.store(true, Ordering::Release);
+        task.handle.abort();
+        metrics.record_blacklist_sync_event(
+            crate::implementations::server::metrics::BlacklistSyncEvent::Cancelled,
+        );
+    }
+
+    fn has_task_for_cleanup(&self) -> bool {
+        self.has_task()
+    }
+}
+
+#[cfg(feature = "rate_limiter")]
+fn retry_delay(attempt: u32) -> Duration {
+    let multiplier = 1_u64 << attempt.min(6);
+    Duration::from_secs(BLACKLIST_SYNC_RETRY_BASE.as_secs().saturating_mul(multiplier))
+        .min(BLACKLIST_SYNC_RETRY_MAX)
+}
+
+#[cfg(feature = "rate_limiter")]
+impl Drop for BlacklistSyncOwner {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        state.closed = true;
+        if let Some(task) = state.task.take() {
+            task.cancellation.store(true, Ordering::Release);
+            task.handle.abort();
+        }
+    }
+}
+
 pub struct LiveServerState {
     clients: std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
     path_candidates: std::collections::HashMap<SocketAddr, SocketAddr>,
@@ -332,16 +553,9 @@ pub struct LiveServerState {
     revocation_manager: Arc<crate::implementations::server::revocation::RevocationManager>,
     qkey_tracker: Arc<crate::implementations::server::revocation::QKeyConnectionTracker>,
     next_stats_log: Instant,
-    /// Last time the external blacklist feed sync was *started*. Used by
-    /// `run_housekeeping_tick` to trigger periodic re-syncs at the
-    /// configured `sync_interval`. `None` = sync never started yet.
-    /// Shared via `Arc<Mutex<>>` so the background sync task spawned via
-    /// `tokio::spawn` can update it without holding the `LiveServerState`
-    /// borrow. The timestamp is recorded *before* spawning the sync task
-    /// so overlapping syncs are prevented even if a prior sync is still
-    /// in flight.
+    /// Owned external blacklist synchronizer task and atomic due/in-flight claim.
     #[cfg(feature = "rate_limiter")]
-    last_blacklist_sync: Arc<parking_lot::Mutex<Option<Instant>>>,
+    blacklist_sync: BlacklistSyncOwner,
     /// Optional runtime-owned blocking executor for outbound io_uring sends.
     uring_worker: Option<Arc<LiveUringWorker>>,
 }
@@ -918,7 +1132,7 @@ impl LiveServerState {
             qkey_tracker,
             next_stats_log: Instant::now(),
             #[cfg(feature = "rate_limiter")]
-            last_blacklist_sync: Arc::new(parking_lot::Mutex::new(None)),
+            blacklist_sync: BlacklistSyncOwner::new(),
             uring_worker: None,
         })
     }
@@ -989,58 +1203,52 @@ impl LiveServerState {
         self.domain.prune_rate_limits_if_due(metrics);
     }
 
-    /// Periodically sync the external blacklist feed if a sync URL is
-    /// configured and the sync interval has elapsed since the last sync.
-    ///
-    /// The sync is an async HTTPS fetch with a 30s timeout. To avoid
-    /// blocking the 5ms housekeeping tick (and thus all UDP packet
-    /// processing, TUN forwarding, and client flushing), the actual fetch
-    /// is dispatched via `tokio::spawn` as a background task. The
-    /// `last_blacklist_sync` timestamp is recorded *before* spawning so
-    /// overlapping syncs are prevented - if a sync is still in flight when
-    /// the next interval elapses, the new tick sees a recent timestamp and
-    /// skips. The background task updates the shared `BlacklistSync` (via
-    /// its `Arc`) in place; `replace_list` takes the internal write lock,
-    /// so concurrent `is_blocked` reads remain safe. Errors are logged and
-    /// non-fatal - the blacklist continues to use the last-known-good set.
+    /// Periodically synchronize the external blacklist feed under an owned,
+    /// atomic due/in-flight claim. Fetching and cache publication remain
+    /// outside the housekeeping future; completion is observed here so the
+    /// runtime can publish success, failure, and cancellation telemetry.
     #[cfg(feature = "rate_limiter")]
-    fn maybe_sync_blacklist(&self) {
+    async fn maybe_sync_blacklist(&mut self, metrics: &Metrics) {
+        self.blacklist_sync.observe_finished(metrics).await;
         let blacklist = self.domain.blacklist();
         if !blacklist.has_sync_url() {
             return;
         }
         let interval = blacklist.sync_interval();
-        let should_sync = {
-            let guard = self.last_blacklist_sync.lock();
-            match *guard {
-                None => true,
-                Some(last) => last.elapsed() >= interval,
+        match self.blacklist_sync.claim_and_spawn(blacklist, interval) {
+            BlacklistSyncClaim::Claimed => {
+                metrics.record_blacklist_sync_event(
+                    crate::implementations::server::metrics::BlacklistSyncEvent::Started,
+                );
+                log::debug!("Blacklist: dispatching owned background sync from external feed");
             }
-        };
-        if !should_sync {
-            return;
-        }
-        // Record the sync start time *before* spawning so that subsequent
-        // ticks do not spawn overlapping syncs while this one is in flight.
-        {
-            let mut guard = self.last_blacklist_sync.lock();
-            *guard = Some(Instant::now());
-        }
-        log::debug!("Blacklist: dispatching background sync from external feed");
-        // Spawn the sync as a detached background task. The task owns a
-        // clone of the `Arc<BlacklistSync>` and performs the HTTPS fetch
-        // without holding any borrow on `LiveServerState`. The result is
-        // logged; the blacklist is updated in place via `replace_list`.
-        tokio::spawn(async move {
-            match blacklist.sync().await {
-                Ok(count) => {
-                    log::info!("Blacklist: synced {count} IPs from external feed");
-                }
-                Err(e) => {
-                    log::warn!("Blacklist: sync failed (using last-known-good set): {e}");
-                }
+            BlacklistSyncClaim::InFlight => {
+                metrics.record_blacklist_sync_event(
+                    crate::implementations::server::metrics::BlacklistSyncEvent::SkippedInFlight,
+                );
             }
-        });
+            BlacklistSyncClaim::NotDue | BlacklistSyncClaim::Closed => {}
+        }
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    fn close_blacklist_sync(&self) {
+        self.blacklist_sync.close();
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    pub(crate) async fn shutdown_blacklist_sync(&self, metrics: &Metrics) {
+        self.blacklist_sync.shutdown(metrics).await;
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    pub(crate) fn abandon_blacklist_sync(&self, metrics: &Metrics) {
+        self.blacklist_sync.abandon(metrics);
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    pub(crate) fn blacklist_sync_has_task(&self) -> bool {
+        self.blacklist_sync.has_task_for_cleanup()
     }
 
     fn values_mut(&mut self) -> impl Iterator<Item = &mut QuicFuscateConnection> {
@@ -1294,13 +1502,8 @@ impl LiveServerState {
         #[cfg(feature = "rate_limiter")]
         {
             self.prune_rate_limits_if_due(metrics);
-            // Periodically dispatch a background blacklist sync. The sync
-            // is an async HTTPS fetch (30s timeout) but is spawned via
-            // `tokio::spawn` so it never blocks the 5ms housekeeping tick.
-            // The dispatch only fires when the configured sync_interval has
-            // elapsed (default: 3600s), so the per-tick cost is just an
-            // `Instant::now()` comparison under a short-lived lock.
-            self.maybe_sync_blacklist();
+            // Periodically dispatch and observe the owned blacklist worker.
+            self.maybe_sync_blacklist(metrics).await;
         }
         self.drain_client_fanout(metrics);
         let client_snapshots = Arc::clone(self.domain.client_snapshots());

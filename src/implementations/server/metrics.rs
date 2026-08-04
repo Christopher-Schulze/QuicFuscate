@@ -6,6 +6,7 @@ use super::http::{read_request, RequestReadError, MAX_CONCURRENT_CONNECTIONS};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -97,6 +98,43 @@ impl DnsInterceptWorkerEvent {
     }
 }
 
+/// Lifecycle outcomes for the owned external blacklist synchronizer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlacklistSyncEvent {
+    Started,
+    Succeeded,
+    CacheLoaded,
+    Failed,
+    Cancelled,
+    SkippedInFlight,
+    RetryScheduled,
+    ShutdownExpired,
+}
+
+impl BlacklistSyncEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Succeeded => "succeeded",
+            Self::CacheLoaded => "cache_loaded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::SkippedInFlight => "skipped_in_flight",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::ShutdownExpired => "shutdown_expired",
+        }
+    }
+}
+
+const BLACKLIST_SYNC_STATUS_DISABLED: u8 = 0;
+const BLACKLIST_SYNC_STATUS_PENDING: u8 = 1;
+const BLACKLIST_SYNC_STATUS_IN_FLIGHT: u8 = 2;
+const BLACKLIST_SYNC_STATUS_SUCCEEDED: u8 = 3;
+const BLACKLIST_SYNC_STATUS_FAILED: u8 = 4;
+const BLACKLIST_SYNC_STATUS_CANCELLED: u8 = 5;
+const BLACKLIST_SYNC_STATUS_SHUTDOWN_EXPIRED: u8 = 6;
+const BLACKLIST_SYNC_TIME_UNKNOWN: u64 = u64::MAX;
+
 /// Server metrics collector.
 #[derive(Debug)]
 pub struct Metrics {
@@ -177,6 +215,21 @@ pub struct Metrics {
     pub dns_intercept_worker_started_cancellation: AtomicU64,
     pub dns_intercept_worker_shutdown_expired: AtomicU64,
     pub dns_intercept_worker_join_error: AtomicU64,
+    pub blacklist_sync_started: AtomicU64,
+    pub blacklist_sync_succeeded: AtomicU64,
+    pub blacklist_sync_cache_loaded: AtomicU64,
+    pub blacklist_sync_failed: AtomicU64,
+    pub blacklist_sync_cancelled: AtomicU64,
+    pub blacklist_sync_skipped_in_flight: AtomicU64,
+    pub blacklist_sync_retry_scheduled: AtomicU64,
+    pub blacklist_sync_shutdown_expired: AtomicU64,
+    pub blacklist_sync_active_entries: AtomicU64,
+    pub blacklist_sync_in_flight: AtomicU64,
+    pub blacklist_sync_enabled: AtomicU64,
+    pub blacklist_sync_interval_secs: AtomicU64,
+    pub blacklist_sync_status: AtomicU8,
+    blacklist_sync_last_success_uptime: AtomicU64,
+    blacklist_sync_last_failure_uptime: AtomicU64,
     pub client_fanout_dropped: AtomicU64,
 
     // Stealth metrics
@@ -289,6 +342,21 @@ impl Metrics {
             dns_intercept_worker_started_cancellation: AtomicU64::new(0),
             dns_intercept_worker_shutdown_expired: AtomicU64::new(0),
             dns_intercept_worker_join_error: AtomicU64::new(0),
+            blacklist_sync_started: AtomicU64::new(0),
+            blacklist_sync_succeeded: AtomicU64::new(0),
+            blacklist_sync_cache_loaded: AtomicU64::new(0),
+            blacklist_sync_failed: AtomicU64::new(0),
+            blacklist_sync_cancelled: AtomicU64::new(0),
+            blacklist_sync_skipped_in_flight: AtomicU64::new(0),
+            blacklist_sync_retry_scheduled: AtomicU64::new(0),
+            blacklist_sync_shutdown_expired: AtomicU64::new(0),
+            blacklist_sync_active_entries: AtomicU64::new(0),
+            blacklist_sync_in_flight: AtomicU64::new(0),
+            blacklist_sync_enabled: AtomicU64::new(0),
+            blacklist_sync_interval_secs: AtomicU64::new(0),
+            blacklist_sync_status: AtomicU8::new(BLACKLIST_SYNC_STATUS_DISABLED),
+            blacklist_sync_last_success_uptime: AtomicU64::new(BLACKLIST_SYNC_TIME_UNKNOWN),
+            blacklist_sync_last_failure_uptime: AtomicU64::new(BLACKLIST_SYNC_TIME_UNKNOWN),
             client_fanout_dropped: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
@@ -425,6 +493,70 @@ impl Metrics {
             DnsInterceptWorkerEvent::JoinError => &self.dns_intercept_worker_join_error,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn configure_blacklist_sync(&self, enabled: bool, interval: Duration) {
+        self.blacklist_sync_enabled.store(u64::from(enabled), Ordering::Release);
+        self.blacklist_sync_interval_secs.store(interval.as_secs(), Ordering::Release);
+        self.blacklist_sync_status.store(
+            if enabled { BLACKLIST_SYNC_STATUS_PENDING } else { BLACKLIST_SYNC_STATUS_DISABLED },
+            Ordering::Release,
+        );
+    }
+
+    pub(crate) fn record_blacklist_sync_event(&self, event: BlacklistSyncEvent) {
+        let counter = match event {
+            BlacklistSyncEvent::Started => &self.blacklist_sync_started,
+            BlacklistSyncEvent::Succeeded => &self.blacklist_sync_succeeded,
+            BlacklistSyncEvent::CacheLoaded => &self.blacklist_sync_cache_loaded,
+            BlacklistSyncEvent::Failed => &self.blacklist_sync_failed,
+            BlacklistSyncEvent::Cancelled => &self.blacklist_sync_cancelled,
+            BlacklistSyncEvent::SkippedInFlight => &self.blacklist_sync_skipped_in_flight,
+            BlacklistSyncEvent::RetryScheduled => &self.blacklist_sync_retry_scheduled,
+            BlacklistSyncEvent::ShutdownExpired => &self.blacklist_sync_shutdown_expired,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        let status = match event {
+            BlacklistSyncEvent::Started => BLACKLIST_SYNC_STATUS_IN_FLIGHT,
+            BlacklistSyncEvent::Succeeded | BlacklistSyncEvent::CacheLoaded => {
+                BLACKLIST_SYNC_STATUS_SUCCEEDED
+            }
+            BlacklistSyncEvent::Failed => BLACKLIST_SYNC_STATUS_FAILED,
+            BlacklistSyncEvent::Cancelled => BLACKLIST_SYNC_STATUS_CANCELLED,
+            BlacklistSyncEvent::SkippedInFlight => return,
+            BlacklistSyncEvent::RetryScheduled => BLACKLIST_SYNC_STATUS_PENDING,
+            BlacklistSyncEvent::ShutdownExpired => BLACKLIST_SYNC_STATUS_SHUTDOWN_EXPIRED,
+        };
+        self.blacklist_sync_status.store(status, Ordering::Release);
+        self.blacklist_sync_in_flight
+            .store(u64::from(matches!(event, BlacklistSyncEvent::Started)), Ordering::Release);
+        match event {
+            BlacklistSyncEvent::Succeeded | BlacklistSyncEvent::CacheLoaded => {
+                self.blacklist_sync_last_success_uptime
+                    .store(self.uptime_secs(), Ordering::Release);
+            }
+            BlacklistSyncEvent::Failed => {
+                self.blacklist_sync_last_failure_uptime
+                    .store(self.uptime_secs(), Ordering::Release);
+            }
+            BlacklistSyncEvent::Cancelled | BlacklistSyncEvent::ShutdownExpired => {
+                self.blacklist_sync_last_failure_uptime
+                    .store(self.uptime_secs(), Ordering::Release);
+            }
+            BlacklistSyncEvent::Started
+            | BlacklistSyncEvent::SkippedInFlight
+            | BlacklistSyncEvent::RetryScheduled => {}
+        }
+    }
+
+    pub(crate) fn record_blacklist_sync_success(&self, count: usize) {
+        self.blacklist_sync_active_entries.store(count as u64, Ordering::Release);
+        self.record_blacklist_sync_event(BlacklistSyncEvent::Succeeded);
+    }
+
+    pub(crate) fn record_blacklist_cache_loaded(&self, count: usize) {
+        self.blacklist_sync_active_entries.store(count as u64, Ordering::Release);
+        self.record_blacklist_sync_event(BlacklistSyncEvent::CacheLoaded);
     }
 
     pub fn record_client_fanout_drop(&self) {
@@ -1000,6 +1132,62 @@ impl Metrics {
         }
         out.push('\n');
         out.push_str(
+            "# HELP quicfuscate_blacklist_sync_events_total External blacklist synchronizer lifecycle outcomes\n",
+        );
+        out.push_str("# TYPE quicfuscate_blacklist_sync_events_total counter\n");
+        for event in [
+            BlacklistSyncEvent::Started,
+            BlacklistSyncEvent::Succeeded,
+            BlacklistSyncEvent::CacheLoaded,
+            BlacklistSyncEvent::Failed,
+            BlacklistSyncEvent::Cancelled,
+            BlacklistSyncEvent::SkippedInFlight,
+            BlacklistSyncEvent::RetryScheduled,
+            BlacklistSyncEvent::ShutdownExpired,
+        ] {
+            let value = match event {
+                BlacklistSyncEvent::Started => self.blacklist_sync_started.load(Ordering::Relaxed),
+                BlacklistSyncEvent::Succeeded => {
+                    self.blacklist_sync_succeeded.load(Ordering::Relaxed)
+                }
+                BlacklistSyncEvent::CacheLoaded => {
+                    self.blacklist_sync_cache_loaded.load(Ordering::Relaxed)
+                }
+                BlacklistSyncEvent::Failed => self.blacklist_sync_failed.load(Ordering::Relaxed),
+                BlacklistSyncEvent::Cancelled => {
+                    self.blacklist_sync_cancelled.load(Ordering::Relaxed)
+                }
+                BlacklistSyncEvent::SkippedInFlight => {
+                    self.blacklist_sync_skipped_in_flight.load(Ordering::Relaxed)
+                }
+                BlacklistSyncEvent::RetryScheduled => {
+                    self.blacklist_sync_retry_scheduled.load(Ordering::Relaxed)
+                }
+                BlacklistSyncEvent::ShutdownExpired => {
+                    self.blacklist_sync_shutdown_expired.load(Ordering::Relaxed)
+                }
+            };
+            write_metric!(
+                "quicfuscate_blacklist_sync_events_total{{event=\"{}\"}} {}\n",
+                event.as_str(),
+                value
+            );
+        }
+        out.push_str("# HELP quicfuscate_blacklist_sync_in_flight Active feed synchronizer task\n");
+        out.push_str("# TYPE quicfuscate_blacklist_sync_in_flight gauge\n");
+        write_metric!(
+            "quicfuscate_blacklist_sync_in_flight {}\n",
+            self.blacklist_sync_in_flight.load(Ordering::Acquire)
+        );
+        out.push_str(
+            "# HELP quicfuscate_blacklist_sync_active_entries Current active feed entries\n",
+        );
+        out.push_str("# TYPE quicfuscate_blacklist_sync_active_entries gauge\n");
+        write_metric!(
+            "quicfuscate_blacklist_sync_active_entries {}\n\n",
+            self.blacklist_sync_active_entries.load(Ordering::Acquire)
+        );
+        out.push_str(
             "# HELP quicfuscate_client_fanout_dropped_total Broadcast/multicast packets dropped before fan-out queue admission\n",
         );
         out.push_str("# TYPE quicfuscate_client_fanout_dropped_total counter\n");
@@ -1258,23 +1446,51 @@ impl Metrics {
 
     /// Export as JSON for health endpoint.
     pub fn export_health(&self) -> String {
-        let status = self.geoip_status();
-        let health = if status == crate::implementations::server::limits::GeoIpStatus::Failed
+        let geoip_status = self.geoip_status();
+        let uptime = self.uptime_secs();
+        let health = if geoip_status == crate::implementations::server::limits::GeoIpStatus::Failed
             || self.tun_data_plane_ready.load(Ordering::Acquire) == 0
         {
             "not_ready"
         } else {
             "ok"
         };
-        format!(
-            r#"{{"status":"{}","version":"{}","uptime":{},"clients":{},"geoip_status":"{}","tun_data_plane_ready":{}}}"#,
-            health,
-            env!("CARGO_PKG_VERSION"),
-            self.uptime_secs(),
-            self.clients_active.load(Ordering::Relaxed),
-            status.as_str(),
-            self.tun_data_plane_ready.load(Ordering::Acquire)
-        )
+        let enabled = self.blacklist_sync_enabled.load(Ordering::Acquire) != 0;
+        let last_success = self.blacklist_sync_last_success_uptime.load(Ordering::Acquire);
+        let last_failure = self.blacklist_sync_last_failure_uptime.load(Ordering::Acquire);
+        let interval = self.blacklist_sync_interval_secs.load(Ordering::Acquire);
+        let stale = enabled
+            && (last_success == BLACKLIST_SYNC_TIME_UNKNOWN
+                || uptime.saturating_sub(last_success) > interval);
+        let status = match self.blacklist_sync_status.load(Ordering::Acquire) {
+            BLACKLIST_SYNC_STATUS_PENDING => "pending",
+            BLACKLIST_SYNC_STATUS_IN_FLIGHT => "in_flight",
+            BLACKLIST_SYNC_STATUS_SUCCEEDED => "succeeded",
+            BLACKLIST_SYNC_STATUS_FAILED => "failed",
+            BLACKLIST_SYNC_STATUS_CANCELLED => "cancelled",
+            BLACKLIST_SYNC_STATUS_SHUTDOWN_EXPIRED => "shutdown_expired",
+            _ => "disabled",
+        };
+        serde_json::json!({
+            "status": health,
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime": uptime,
+            "clients": self.clients_active.load(Ordering::Relaxed),
+            "geoip_status": geoip_status.as_str(),
+            "tun_data_plane_ready": self.tun_data_plane_ready.load(Ordering::Acquire),
+            "blacklist_sync": {
+                "enabled": enabled,
+                "status": status,
+                "in_flight": self.blacklist_sync_in_flight.load(Ordering::Acquire),
+                "active_entries": self.blacklist_sync_active_entries.load(Ordering::Acquire),
+                "stale": stale,
+                "last_success_age_secs": (last_success != BLACKLIST_SYNC_TIME_UNKNOWN)
+                    .then_some(uptime.saturating_sub(last_success)),
+                "last_failure_age_secs": (last_failure != BLACKLIST_SYNC_TIME_UNKNOWN)
+                    .then_some(uptime.saturating_sub(last_failure)),
+            },
+        })
+        .to_string()
     }
 }
 
@@ -1757,6 +1973,23 @@ mod tests {
             "quicfuscate_dns_intercept_worker_events_total{event=\"queue_rejected_byte_capacity\"} 1"
         ));
         assert_eq!(metrics.rate_limited.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn blacklist_sync_events_and_health_freshness_are_exported() {
+        let metrics = Metrics::new();
+        metrics.configure_blacklist_sync(true, Duration::from_secs(60));
+        metrics.record_blacklist_sync_event(BlacklistSyncEvent::Started);
+        metrics.record_blacklist_sync_success(3);
+
+        let output = metrics.export();
+        assert!(output.contains("quicfuscate_blacklist_sync_events_total{event=\"started\"} 1"));
+        assert!(output.contains("quicfuscate_blacklist_sync_events_total{event=\"succeeded\"} 1"));
+        assert!(output.contains("quicfuscate_blacklist_sync_active_entries 3"));
+        let health = metrics.export_health();
+        assert!(health.contains("\"blacklist_sync\""));
+        assert!(health.contains("\"stale\":false"));
+        assert!(health.contains("\"active_entries\":3"));
     }
 
     #[test]

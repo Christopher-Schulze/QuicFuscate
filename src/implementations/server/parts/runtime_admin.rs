@@ -797,6 +797,9 @@ impl ServerAdminCore {
                 "status": self.geoip_status.as_str(),
                 "active": self.geoip_status == crate::implementations::server::limits::GeoIpStatus::Active,
             });
+            if let Ok(health) = serde_json::from_str::<serde_json::Value>(&self.metrics.export_health()) {
+                data["blacklist_sync"] = health["blacklist_sync"].clone();
+            }
         }
         data
     }
@@ -806,6 +809,9 @@ impl ServerAdminCore {
         #[cfg(feature = "rate_limiter")]
         {
             data["geoip_status"] = serde_json::Value::String(self.geoip_status.as_str().to_string());
+            if let Ok(health) = serde_json::from_str::<serde_json::Value>(&self.metrics.export_health()) {
+                data["blacklist_sync"] = health["blacklist_sync"].clone();
+            }
         }
         data
     }

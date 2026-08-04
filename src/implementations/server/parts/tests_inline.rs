@@ -1231,6 +1231,33 @@ mod tests {
 
     #[cfg(feature = "rate_limiter")]
     #[test]
+    fn blacklist_config_rejects_values_above_absolute_resource_caps() {
+        let mut config = BlacklistConfig::default();
+        config.default_ttl_secs =
+            crate::implementations::server::limits::MAX_BLACKLIST_TTL_SECS + 1;
+        assert!(config.validate().is_err());
+
+        let mut config = BlacklistConfig::default();
+        config.sync_interval_secs =
+            crate::implementations::server::limits::MAX_BLACKLIST_SYNC_INTERVAL_SECS + 1;
+        assert!(config.validate().is_err());
+
+        let mut config = BlacklistConfig::default();
+        config.max_body_bytes = crate::implementations::server::limits::MAX_BLACKLIST_BODY_BYTES + 1;
+        assert!(config.validate().is_err());
+
+        let mut config = BlacklistConfig::default();
+        config.max_entries = crate::implementations::server::limits::MAX_BLACKLIST_ENTRIES + 1;
+        assert!(config.validate().is_err());
+
+        let mut config = BlacklistConfig::default();
+        config.request_timeout_secs =
+            crate::implementations::server::limits::MAX_BLACKLIST_REQUEST_TIMEOUT_SECS + 1;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    #[test]
     fn test_shared_server_domain_uses_configured_blacklist() {
         // When ServerConfig has a blacklist sync URL, SharedServerDomain
         // should construct a BlacklistSync with that URL (has_sync_url=true).
@@ -1249,6 +1276,64 @@ mod tests {
             .unwrap_or_else(|error| panic!("shared server domain construction failed: {error}"));
         assert!(domain.blacklist.has_sync_url());
         assert_eq!(domain.blacklist.sync_interval(), Duration::from_secs(300));
+    }
+
+    #[cfg(feature = "rate_limiter")]
+    #[tokio::test]
+    async fn blacklist_worker_owner_claims_once_and_cancels_on_stop() {
+        let metrics = Metrics::new();
+        metrics.configure_blacklist_sync(true, Duration::from_secs(60));
+        let owner = BlacklistSyncOwner::new();
+        let blacklist = Arc::new(BlacklistSync::manual_only(Duration::from_secs(60)));
+
+        assert_eq!(
+            owner.claim_and_spawn(Arc::clone(&blacklist), Duration::from_secs(60)),
+            BlacklistSyncClaim::Claimed
+        );
+        assert_eq!(
+            owner.claim_and_spawn(blacklist, Duration::from_secs(60)),
+            BlacklistSyncClaim::InFlight
+        );
+        owner.abandon(&metrics);
+
+        assert!(!owner.has_task());
+        assert_eq!(metrics.blacklist_sync_cancelled.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.blacklist_sync_in_flight.load(Ordering::Acquire), 0);
+
+        let completing_owner = BlacklistSyncOwner::new();
+        let completing_blacklist = Arc::new(BlacklistSync::manual_only(Duration::from_secs(60)));
+        assert_eq!(
+            completing_owner
+                .claim_and_spawn(completing_blacklist, Duration::from_secs(60)),
+            BlacklistSyncClaim::Claimed
+        );
+        tokio::task::yield_now().await;
+        completing_owner.observe_finished(&metrics).await;
+        assert_eq!(metrics.blacklist_sync_failed.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.blacklist_sync_retry_scheduled.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            completing_owner.claim_and_spawn(
+                Arc::new(BlacklistSync::manual_only(Duration::from_secs(60))),
+                Duration::from_secs(60),
+            ),
+            BlacklistSyncClaim::NotDue
+        );
+        assert!(!completing_owner.has_task());
+
+        let shutdown_owner = BlacklistSyncOwner::new();
+        assert_eq!(
+            shutdown_owner.claim_and_spawn(
+                Arc::new(BlacklistSync::manual_only(Duration::from_secs(60))),
+                Duration::from_secs(60),
+            ),
+            BlacklistSyncClaim::Claimed
+        );
+        shutdown_owner.shutdown(&metrics).await;
+        assert!(!shutdown_owner.has_task());
+        assert_eq!(shutdown_owner.claim_and_spawn(
+            Arc::new(BlacklistSync::manual_only(Duration::from_secs(60))),
+            Duration::from_secs(60),
+        ), BlacklistSyncClaim::Closed);
     }
 
     #[cfg(feature = "rate_limiter")]

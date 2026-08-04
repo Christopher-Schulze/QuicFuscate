@@ -264,7 +264,15 @@ impl ServerRuntime {
 
         let metrics = Arc::new(Metrics::new());
         #[cfg(feature = "rate_limiter")]
-        metrics.set_geoip_status(live_state.geoip_status());
+        {
+            metrics.set_geoip_status(live_state.geoip_status());
+            let blacklist = live_state.domain.blacklist();
+            metrics.configure_blacklist_sync(blacklist.has_sync_url(), blacklist.sync_interval());
+            let cached_entries = blacklist.len();
+            if blacklist.has_sync_url() && cached_entries > 0 {
+                metrics.record_blacklist_cache_loaded(cached_entries);
+            }
+        }
         runtime.live = Some(ServerLiveRuntime {
             live_state,
             accept_loop: AcceptLoop::new(accept_config),
@@ -444,6 +452,10 @@ impl ServerRuntime {
     /// Stop the server.
     pub fn stop(&mut self) -> Result<(), EngineError> {
         self.stealth_runtime.request_shutdown();
+        #[cfg(feature = "rate_limiter")]
+        if let Some(live) = self.live.as_ref() {
+            live.live_state.abandon_blacklist_sync(&live.metrics);
+        }
         if let Some(dns_workers) = self.dns_intercept_workers.take() {
             dns_workers.abandon();
         }
@@ -1597,6 +1609,10 @@ impl ServerRuntime {
         if let Some(dns_workers) = self.dns_intercept_workers.as_ref() {
             dns_workers.close_admission();
         }
+        #[cfg(feature = "rate_limiter")]
+        if let Some(live) = self.live.as_ref() {
+            live.live_state.close_blacklist_sync();
+        }
         let live = self.live_mut();
         live.accept_loop.shutdown();
         log::info!(
@@ -1645,6 +1661,8 @@ impl ServerRuntime {
         if let Some(dns_workers) = dns_workers {
             dns_workers.shutdown().await;
         }
+        #[cfg(feature = "rate_limiter")]
+        live.live_state.shutdown_blacklist_sync(metrics).await;
         live.service_signals.shutdown_all();
     }
 
@@ -1664,6 +1682,10 @@ impl ServerRuntime {
 
     pub fn shutdown_live(&mut self, reason: &'static [u8]) {
         let _ = self.initiate_drain(reason);
+        #[cfg(feature = "rate_limiter")]
+        if let Some(live) = self.live.as_ref() {
+            live.live_state.abandon_blacklist_sync(&live.metrics);
+        }
         let live = self.live_mut();
         live.live_state.shutdown_all(reason, None);
         live.service_signals.shutdown_all();
@@ -1677,6 +1699,16 @@ impl Drop for ServerRuntime {
                 || live.tun_reader_handle.is_some()
                 || live.tun_reader_shutdown.is_some()
                 || live.routing.is_some()
+                || {
+                    #[cfg(feature = "rate_limiter")]
+                    {
+                        live.live_state.blacklist_sync_has_task()
+                    }
+                    #[cfg(not(feature = "rate_limiter"))]
+                    {
+                        false
+                    }
+                }
         });
         if self.state != ServerState::Stopped || live_needs_cleanup {
             if let Err(e) = self.stop() {

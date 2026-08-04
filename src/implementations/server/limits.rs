@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Default global server-wide packet rate cap (packets per second across all IPs).
@@ -14,6 +15,16 @@ pub const DEFAULT_GLOBAL_RATE_LIMIT_PPS: u64 = 50_000;
 /// control cannot manufacture transport loss under legitimate throughput.
 pub const DEFAULT_PER_SOURCE_RATE_LIMIT_PPS: u64 = 10_000;
 const MAX_BLACKLIST_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
+/// Absolute maximum feed and serialized-cache body size.
+pub const MAX_BLACKLIST_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Absolute maximum number of unique blocked addresses retained per feed.
+pub const MAX_BLACKLIST_ENTRIES: usize = 250_000;
+/// Absolute maximum TTL for an externally synchronized address.
+pub const MAX_BLACKLIST_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// Absolute maximum interval between external synchronization attempts.
+pub const MAX_BLACKLIST_SYNC_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
+/// Absolute maximum HTTPS request duration.
+pub const MAX_BLACKLIST_REQUEST_TIMEOUT_SECS: u64 = 300;
 
 /// Rate limit configuration.
 #[derive(Clone, Debug)]
@@ -1385,6 +1396,8 @@ fn map_geoip_database_error(
 pub enum BlacklistError {
     /// No sync URL configured.
     NoSyncUrl,
+    /// Synchronization was cancelled by the owning runtime.
+    Cancelled,
     /// HTTP fetch failed.
     FetchError(String),
     /// Bounded cache read or write failed.
@@ -1397,6 +1410,7 @@ impl std::fmt::Display for BlacklistError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoSyncUrl => write!(f, "no blacklist sync URL configured"),
+            Self::Cancelled => write!(f, "blacklist synchronization cancelled"),
             Self::FetchError(s) => write!(f, "blacklist fetch error: {s}"),
             Self::CacheError(s) => write!(f, "blacklist cache error: {s}"),
             Self::InvalidData(s) => write!(f, "invalid blacklist data: {s}"),
@@ -1458,7 +1472,7 @@ fn load_blacklist_ca_bundle(
 /// method fetches a plain-text IP list (one IP per line, lines starting with
 /// `#` are comments) from the configured URL and replaces the blocked set.
 pub struct BlacklistSync {
-    blocked: parking_lot::RwLock<HashMap<IpAddr, Instant>>,
+    blocked: Arc<parking_lot::RwLock<HashMap<IpAddr, Instant>>>,
     default_ttl: Duration,
     sync_url: Option<String>,
     sync_interval: Duration,
@@ -1477,8 +1491,8 @@ impl BlacklistSync {
             sync_url,
             sync_interval,
             Duration::from_secs(30),
-            16 * 1024 * 1024,
-            250_000,
+            MAX_BLACKLIST_BODY_BYTES,
+            MAX_BLACKLIST_ENTRIES,
             None,
         )
         .expect("legacy blacklist defaults must be valid")
@@ -1527,6 +1541,31 @@ impl BlacklistSync {
                 "TTL, sync interval, timeout, body cap, and entry cap must be nonzero".to_string(),
             ));
         }
+        if default_ttl > Duration::from_secs(MAX_BLACKLIST_TTL_SECS) {
+            return Err(BlacklistError::InvalidData(format!(
+                "TTL exceeds {MAX_BLACKLIST_TTL_SECS} seconds"
+            )));
+        }
+        if sync_interval > Duration::from_secs(MAX_BLACKLIST_SYNC_INTERVAL_SECS) {
+            return Err(BlacklistError::InvalidData(format!(
+                "sync interval exceeds {MAX_BLACKLIST_SYNC_INTERVAL_SECS} seconds"
+            )));
+        }
+        if request_timeout > Duration::from_secs(MAX_BLACKLIST_REQUEST_TIMEOUT_SECS) {
+            return Err(BlacklistError::InvalidData(format!(
+                "request timeout exceeds {MAX_BLACKLIST_REQUEST_TIMEOUT_SECS} seconds"
+            )));
+        }
+        if max_body_bytes > MAX_BLACKLIST_BODY_BYTES {
+            return Err(BlacklistError::InvalidData(format!(
+                "body cap exceeds {MAX_BLACKLIST_BODY_BYTES} bytes"
+            )));
+        }
+        if max_entries > MAX_BLACKLIST_ENTRIES {
+            return Err(BlacklistError::InvalidData(format!(
+                "entry cap exceeds {MAX_BLACKLIST_ENTRIES} entries"
+            )));
+        }
         if sync_url.as_ref().is_some_and(|url| !url.starts_with("https://")) {
             return Err(BlacklistError::InvalidData(
                 "blacklist sync URL must use HTTPS".to_string(),
@@ -1537,7 +1576,7 @@ impl BlacklistSync {
             None => Vec::new(),
         };
         let synchronizer = Self {
-            blocked: parking_lot::RwLock::new(HashMap::new()),
+            blocked: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             default_ttl,
             sync_url,
             sync_interval,
@@ -1575,6 +1614,7 @@ impl BlacklistSync {
 
     /// Add an IP to the blacklist with a custom TTL.
     pub fn add_with_ttl(&self, ip: IpAddr, ttl: Duration) {
+        let ttl = ttl.min(Duration::from_secs(MAX_BLACKLIST_TTL_SECS));
         let expiry = Instant::now() + ttl;
         self.blocked.write().insert(ip, expiry);
     }
@@ -1587,13 +1627,7 @@ impl BlacklistSync {
     /// Replace the entire blocked set from an external feed (bulk sync).
     /// Each entry is seeded with the default TTL.
     pub fn replace_list(&self, ips: &[IpAddr]) {
-        let expiry = Instant::now() + self.default_ttl;
-        let mut guard = self.blocked.write();
-        guard.clear();
-        guard.reserve(ips.len());
-        for ip in ips {
-            guard.insert(*ip, expiry);
-        }
+        replace_blacklist_entries(&self.blocked, self.default_ttl, ips);
     }
 
     /// Number of currently-blocked (non-expired) IPs.
@@ -1629,10 +1663,9 @@ impl BlacklistSync {
     /// or empty lines are ignored) from the configured URL via HTTPS and
     /// replaces the blocked set. Each entry is seeded with the default TTL.
     ///
-    /// The response body is capped at `MAX_FEED_BODY_BYTES` (16 MiB) to
-    /// prevent memory exhaustion from a compromised or misconfigured feed
-    /// endpoint. Both the `Content-Length` header and the actual byte count
-    /// are checked.
+    /// The response body is capped at the configured bound, which is itself
+    /// validated against `MAX_BLACKLIST_BODY_BYTES`. Both the `Content-Length`
+    /// header and the actual byte count are checked.
     ///
     /// Async because the server's housekeeping loop runs inside a Tokio
     /// runtime; using the async `reqwest::Client` avoids the
@@ -1641,10 +1674,21 @@ impl BlacklistSync {
     /// context should wrap this in `tokio::task::spawn_blocking` + a
     /// `Runtime::block_on`, or use a dedicated runtime.
     pub async fn sync(&self) -> Result<usize, BlacklistError> {
+        self.sync_with_cancel(Arc::new(AtomicBool::new(false))).await
+    }
+
+    /// Synchronize the feed while honoring the owning worker's cancellation flag.
+    pub(crate) async fn sync_with_cancel(
+        &self,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<usize, BlacklistError> {
         let url = match &self.sync_url {
             Some(u) => u.clone(),
             None => return Err(BlacklistError::NoSyncUrl),
         };
+        if cancellation.load(Ordering::Acquire) {
+            return Err(BlacklistError::Cancelled);
+        }
 
         let mut client_builder = reqwest::Client::builder()
             .timeout(self.request_timeout)
@@ -1691,6 +1735,9 @@ impl BlacklistSync {
             .await
             .map_err(|error| BlacklistError::FetchError(format!("body read: {error}")))?
         {
+            if cancellation.load(Ordering::Acquire) {
+                return Err(BlacklistError::Cancelled);
+            }
             if body.len().saturating_add(chunk.len()) > self.max_body_bytes {
                 return Err(BlacklistError::FetchError(format!(
                     "feed body exceeds {} bytes",
@@ -1700,47 +1747,45 @@ impl BlacklistSync {
             body.extend_from_slice(&chunk);
         }
 
-        let count = self.apply_feed(&body)?;
+        if cancellation.load(Ordering::Acquire) {
+            return Err(BlacklistError::Cancelled);
+        }
+
+        let max_body_bytes = self.max_body_bytes;
+        let max_entries = self.max_entries;
+        let default_ttl = self.default_ttl;
+        let cache_path = self.cache_path.clone();
+        let blocked = Arc::clone(&self.blocked);
+        let cancellation_for_blocking = Arc::clone(&cancellation);
+        let ips = tokio::task::spawn_blocking(move || {
+            if cancellation_for_blocking.load(Ordering::Acquire) {
+                return Err(BlacklistError::Cancelled);
+            }
+            let ips = parse_blacklist_feed(&body, max_body_bytes, max_entries)?;
+            if cancellation_for_blocking.load(Ordering::Acquire) {
+                return Err(BlacklistError::Cancelled);
+            }
+            persist_blacklist_cache(cache_path.as_deref(), default_ttl, max_body_bytes, &ips)?;
+            if cancellation_for_blocking.load(Ordering::Acquire) {
+                return Err(BlacklistError::Cancelled);
+            }
+            replace_blacklist_entries(&blocked, default_ttl, &ips);
+            Ok(ips.len())
+        })
+        .await
+        .map_err(|error| BlacklistError::CacheError(format!("blocking publication: {error}")))??;
+
+        let count = ips;
         log::info!("Blacklist sync: loaded {count} IPs from {url}");
         Ok(count)
     }
 
+    #[cfg(test)]
     fn parse_feed(&self, body: &[u8]) -> Result<Vec<IpAddr>, BlacklistError> {
-        if body.len() > self.max_body_bytes {
-            return Err(BlacklistError::InvalidData(format!(
-                "feed body exceeds {} bytes",
-                self.max_body_bytes
-            )));
-        }
-        let body_text = std::str::from_utf8(body)
-            .map_err(|error| BlacklistError::InvalidData(format!("feed is not UTF-8: {error}")))?;
-        let mut unique = HashSet::new();
-        for (line_index, line) in body_text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let ip_str = line.split('#').next().unwrap_or(line).trim();
-            let ip = ip_str.parse::<IpAddr>().map_err(|error| {
-                BlacklistError::InvalidData(format!(
-                    "line {} is not an IP address: {error}",
-                    line_index + 1
-                ))
-            })?;
-            unique.insert(ip);
-            if unique.len() > self.max_entries {
-                return Err(BlacklistError::InvalidData(format!(
-                    "feed exceeds {} unique entries",
-                    self.max_entries
-                )));
-            }
-        }
-
-        let mut ips: Vec<IpAddr> = unique.into_iter().collect();
-        ips.sort();
-        Ok(ips)
+        parse_blacklist_feed(body, self.max_body_bytes, self.max_entries)
     }
 
+    #[cfg(test)]
     fn apply_feed(&self, body: &[u8]) -> Result<usize, BlacklistError> {
         let ips = self.parse_feed(body)?;
         let count = ips.len();
@@ -1783,6 +1828,9 @@ impl BlacklistSync {
         if cache.expires_at_secs <= now {
             return Err(BlacklistError::CacheError("cache is stale".to_string()));
         }
+        if cache.expires_at_secs.saturating_sub(now) > MAX_BLACKLIST_TTL_SECS {
+            return Err(BlacklistError::CacheError("cache TTL exceeds absolute bound".to_string()));
+        }
         let mut unique: HashSet<IpAddr> = cache.ips.into_iter().collect();
         if unique.len() > self.max_entries {
             return Err(BlacklistError::CacheError("cache entry bound exceeded".to_string()));
@@ -1795,31 +1843,97 @@ impl BlacklistSync {
         Ok(count)
     }
 
+    #[cfg(test)]
     fn persist_cache(&self, ips: &[IpAddr]) -> Result<(), BlacklistError> {
-        let Some(path) = self.cache_path.as_ref() else {
-            return Ok(());
-        };
-        let cache = BlacklistCache {
-            version: 1,
-            expires_at_secs: current_epoch_secs().saturating_add(self.default_ttl.as_secs()),
-            ips: ips.to_vec(),
-        };
-        let bytes = serde_json::to_vec(&cache)
-            .map_err(|error| BlacklistError::CacheError(format!("serialize: {error}")))?;
-        if bytes.len() > self.max_body_bytes {
-            return Err(BlacklistError::CacheError(format!(
-                "serialized cache exceeds {} bytes",
-                self.max_body_bytes
+        persist_blacklist_cache(
+            self.cache_path.as_deref(),
+            self.default_ttl,
+            self.max_body_bytes,
+            ips,
+        )
+    }
+}
+
+fn parse_blacklist_feed(
+    body: &[u8],
+    max_body_bytes: usize,
+    max_entries: usize,
+) -> Result<Vec<IpAddr>, BlacklistError> {
+    if body.len() > max_body_bytes {
+        return Err(BlacklistError::InvalidData(format!(
+            "feed body exceeds {max_body_bytes} bytes"
+        )));
+    }
+    let body_text = std::str::from_utf8(body)
+        .map_err(|error| BlacklistError::InvalidData(format!("feed is not UTF-8: {error}")))?;
+    let mut unique = HashSet::new();
+    for (line_index, line) in body_text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let ip_str = line.split('#').next().unwrap_or(line).trim();
+        let ip = ip_str.parse::<IpAddr>().map_err(|error| {
+            BlacklistError::InvalidData(format!(
+                "line {} is not an IP address: {error}",
+                line_index + 1
+            ))
+        })?;
+        unique.insert(ip);
+        if unique.len() > max_entries {
+            return Err(BlacklistError::InvalidData(format!(
+                "feed exceeds {max_entries} unique entries"
             )));
         }
-        crate::implementations::server::fsutil::atomic_write_file(
-            path,
-            &bytes,
-            Some(0o600),
-            "server::blacklist_cache_tmp_nonce",
-        )
-        .map_err(|error| BlacklistError::CacheError(format!("atomic write: {error}")))
     }
+
+    let mut ips: Vec<IpAddr> = unique.into_iter().collect();
+    ips.sort();
+    Ok(ips)
+}
+
+fn replace_blacklist_entries(
+    blocked: &parking_lot::RwLock<HashMap<IpAddr, Instant>>,
+    default_ttl: Duration,
+    ips: &[IpAddr],
+) {
+    let expiry = Instant::now() + default_ttl;
+    let mut guard = blocked.write();
+    guard.clear();
+    guard.reserve(ips.len());
+    for ip in ips {
+        guard.insert(*ip, expiry);
+    }
+}
+
+fn persist_blacklist_cache(
+    path: Option<&std::path::Path>,
+    default_ttl: Duration,
+    max_body_bytes: usize,
+    ips: &[IpAddr],
+) -> Result<(), BlacklistError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let cache = BlacklistCache {
+        version: 1,
+        expires_at_secs: current_epoch_secs().saturating_add(default_ttl.as_secs()),
+        ips: ips.to_vec(),
+    };
+    let bytes = serde_json::to_vec(&cache)
+        .map_err(|error| BlacklistError::CacheError(format!("serialize: {error}")))?;
+    if bytes.len() > max_body_bytes {
+        return Err(BlacklistError::CacheError(format!(
+            "serialized cache exceeds {max_body_bytes} bytes"
+        )));
+    }
+    crate::implementations::server::fsutil::atomic_write_file(
+        path,
+        &bytes,
+        Some(0o600),
+        "server::blacklist_cache_tmp_nonce",
+    )
+    .map_err(|error| BlacklistError::CacheError(format!("atomic write: {error}")))
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -2748,6 +2862,46 @@ mod tests {
             Duration::from_secs(1),
             1,
             1,
+            None,
+        )
+        .is_err());
+        assert!(BlacklistSync::new_bounded(
+            Duration::from_secs(MAX_BLACKLIST_TTL_SECS + 1),
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            1,
+            1,
+            None,
+        )
+        .is_err());
+        assert!(BlacklistSync::new_bounded(
+            Duration::from_secs(1),
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(MAX_BLACKLIST_REQUEST_TIMEOUT_SECS + 1),
+            MAX_BLACKLIST_BODY_BYTES,
+            MAX_BLACKLIST_ENTRIES,
+            None,
+        )
+        .is_err());
+        assert!(BlacklistSync::new_bounded(
+            Duration::from_secs(1),
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            MAX_BLACKLIST_BODY_BYTES + 1,
+            MAX_BLACKLIST_ENTRIES,
+            None,
+        )
+        .is_err());
+        assert!(BlacklistSync::new_bounded(
+            Duration::from_secs(1),
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            MAX_BLACKLIST_BODY_BYTES,
+            MAX_BLACKLIST_ENTRIES + 1,
             None,
         )
         .is_err());

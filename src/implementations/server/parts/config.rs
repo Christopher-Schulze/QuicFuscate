@@ -110,8 +110,8 @@ impl Default for BlacklistConfig {
             sync_url: None,
             sync_interval_secs: 3600,
             request_timeout_secs: 30,
-            max_body_bytes: 16 * 1024 * 1024,
-            max_entries: 250_000,
+            max_body_bytes: limits::MAX_BLACKLIST_BODY_BYTES,
+            max_entries: limits::MAX_BLACKLIST_ENTRIES,
             cache_path: Some(std::path::PathBuf::from(
                 "config/local/blacklist-cache.json",
             )),
@@ -133,6 +133,36 @@ impl BlacklistConfig {
                 "blacklist TTL, interval, timeout, body cap, and entry cap must be nonzero"
                     .to_string(),
             );
+        }
+        if self.default_ttl_secs > limits::MAX_BLACKLIST_TTL_SECS {
+            return Err(format!(
+                "blacklist TTL exceeds {} seconds",
+                limits::MAX_BLACKLIST_TTL_SECS
+            ));
+        }
+        if self.sync_interval_secs > limits::MAX_BLACKLIST_SYNC_INTERVAL_SECS {
+            return Err(format!(
+                "blacklist sync interval exceeds {} seconds",
+                limits::MAX_BLACKLIST_SYNC_INTERVAL_SECS
+            ));
+        }
+        if self.request_timeout_secs > limits::MAX_BLACKLIST_REQUEST_TIMEOUT_SECS {
+            return Err(format!(
+                "blacklist request timeout exceeds {} seconds",
+                limits::MAX_BLACKLIST_REQUEST_TIMEOUT_SECS
+            ));
+        }
+        if self.max_body_bytes > limits::MAX_BLACKLIST_BODY_BYTES {
+            return Err(format!(
+                "blacklist body cap exceeds {} bytes",
+                limits::MAX_BLACKLIST_BODY_BYTES
+            ));
+        }
+        if self.max_entries > limits::MAX_BLACKLIST_ENTRIES {
+            return Err(format!(
+                "blacklist entry cap exceeds {} entries",
+                limits::MAX_BLACKLIST_ENTRIES
+            ));
         }
         if self.sync_url.as_ref().is_some_and(|url| !url.starts_with("https://")) {
             return Err("blacklist sync URL must use HTTPS".to_string());
