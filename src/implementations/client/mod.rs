@@ -351,6 +351,20 @@ impl ClientRuntime {
         self.state = ClientState::Stopping;
         self.shutdown.store(true, Ordering::SeqCst);
 
+        if let Some(io_driver) = self.io_driver.as_ref() {
+            io_driver.shutdown();
+        }
+        let worker_join_error: Option<String> = {
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            {
+                self.io_driver.as_ref().and_then(|io_driver| io_driver.join_io_uring_worker().err())
+            }
+            #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+            {
+                None
+            }
+        };
+
         // Close connection first
         if let Some(mut conn) = self.connection.take() {
             conn.close(0, b"Client shutdown");
@@ -387,9 +401,15 @@ impl ClientRuntime {
             log::info!("Closing TUN interface: {}", name);
         }
 
+        if let Some(error) = worker_join_error {
+            self.state = ClientState::Error;
+            return Err(EngineError::Internal(format!(
+                "Client io_uring worker join failed: {error}"
+            )));
+        }
+
         self.state = ClientState::Stopped;
         log::info!("Client runtime stopped");
-
         Ok(())
     }
 
@@ -414,6 +434,12 @@ impl ClientRuntime {
                     }
                 }
             });
+        }
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        if let Some(io_driver) = self.io_driver.as_ref() {
+            if let Err(error) = io_driver.join_io_uring_worker() {
+                log::warn!("Client io_uring worker join failed during connect rollback: {error}");
+            }
         }
         if let Some(mut connection) = self.connection.take() {
             connection.close(0, b"Connect setup failed");
@@ -640,6 +666,16 @@ impl ClientRuntime {
                 }
             });
         }
+        let worker_join_error: Option<String> = {
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            {
+                self.io_driver.as_ref().and_then(|io_driver| io_driver.join_io_uring_worker().err())
+            }
+            #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+            {
+                None
+            }
+        };
         if let Some(mut conn) = self.connection.take() {
             conn.close(0, b"Disconnect requested");
             log::info!("Disconnected from server");
@@ -648,7 +684,10 @@ impl ClientRuntime {
         self.io_driver = None;
 
         self.state = ClientState::Running;
-        Ok(())
+        worker_join_error.map_or(Ok(()), |error| {
+            self.state = ClientState::Error;
+            Err(EngineError::Internal(format!("Client io_uring worker join failed: {error}")))
+        })
     }
 
     /// Check if connected.

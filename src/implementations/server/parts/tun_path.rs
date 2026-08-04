@@ -14,6 +14,7 @@ struct ServerRuntimeLiveParts<'a> {
     tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     tun_notify: Arc<tokio::sync::Notify>,
     shutdown: Arc<AtomicBool>,
+    uring_worker: Option<Arc<LiveUringWorker>>,
 }
 
 struct ServerLiveRuntime {

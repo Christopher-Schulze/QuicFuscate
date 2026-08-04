@@ -364,12 +364,27 @@ pub fn validate_tun_runtime_requirements() -> Result<(), TunError> {
     Ok(())
 }
 
+/// Execution contract for a backend's single-packet read operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunReadContract {
+    /// `read()` returns promptly with data, `WouldBlock`, or another result.
+    NonBlocking,
+    /// `read()` may wait for device input and must have a dedicated reader owner.
+    Blocking,
+}
+
 /// Basic TUN device contract.
 pub trait TunDevice: Send + Sync {
     /// Returns the OS-level device name (e.g., "utun3", "quicfuse0").
     fn name(&self) -> &str;
     /// Returns the configured MTU for this device.
     fn mtu(&self) -> u16;
+    /// Declares whether `read()` is safe to call from an async-owned loop.
+    /// Custom backends default to `Blocking` and must use an owned reader
+    /// thread or explicitly implement the nonblocking contract.
+    fn read_contract(&self) -> TunReadContract {
+        TunReadContract::Blocking
+    }
     /// Applies a new MTU to the live device. A successful implementation must
     /// make the new value observable through `mtu()` before returning.
     fn set_mtu(&self, mtu: u16) -> io::Result<()> {
@@ -561,6 +576,11 @@ impl TunInterface {
     /// Returns the configured layer-3 MTU.
     pub fn mtu(&self) -> u16 {
         self.configured_mtu.load(Ordering::Acquire)
+    }
+
+    /// Returns the backend read contract used by generic client loops.
+    pub fn read_contract(&self) -> TunReadContract {
+        self.dev.read_contract()
     }
 
     /// Atomically applies and publishes a new live layer-3 MTU.
@@ -1304,6 +1324,9 @@ mod linux_tun {
         fn mtu(&self) -> u16 {
             self.mtu.load(Ordering::Acquire)
         }
+        fn read_contract(&self) -> TunReadContract {
+            TunReadContract::NonBlocking
+        }
         fn set_mtu(&self, mtu: u16) -> io::Result<()> {
             let mtu_text = mtu.to_string();
             Self::run_ip(&["link", "set", "dev", self.name(), "mtu", &mtu_text])?;
@@ -1377,6 +1400,12 @@ mod linux_tun {
     mod tests {
         use super::*;
         use std::net::{Ipv4Addr, Ipv6Addr};
+
+        #[test]
+        fn linux_backend_declares_nonblocking_read_contract() {
+            let tun = LinuxTun { name: Arc::from("test-tun"), fd: -1, mtu: AtomicU16::new(1500) };
+            assert_eq!(tun.read_contract(), TunReadContract::NonBlocking);
+        }
 
         #[test]
         fn netmask_prefix_accepts_contiguous_masks() {
@@ -1606,6 +1635,9 @@ mod macos_tun {
         }
         fn mtu(&self) -> u16 {
             self.mtu.load(Ordering::Acquire)
+        }
+        fn read_contract(&self) -> TunReadContract {
+            TunReadContract::NonBlocking
         }
         fn set_mtu(&self, mtu: u16) -> io::Result<()> {
             Self::set_device_mtu(self.name(), mtu)?;
@@ -1927,6 +1959,19 @@ mod tests {
         let (block, len) = tun.read_block().expect("read_block must succeed");
         assert_eq!(len, packet.len());
         assert_eq!(&block[..len], packet.as_slice());
+    }
+
+    #[test]
+    fn custom_backend_defaults_to_owned_blocking_reader_contract() {
+        let device = DummyTun::with_reads(Vec::new());
+        assert_eq!(device.read_contract(), TunReadContract::Blocking);
+
+        let tun = TunInterface::from_device_for_test(
+            Box::new(device),
+            crate::optimize::global_pool(),
+            false,
+        );
+        assert_eq!(tun.read_contract(), TunReadContract::Blocking);
     }
 
     #[test]

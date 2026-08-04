@@ -342,6 +342,8 @@ pub struct LiveServerState {
     /// in flight.
     #[cfg(feature = "rate_limiter")]
     last_blacklist_sync: Arc<parking_lot::Mutex<Option<Instant>>>,
+    /// Optional runtime-owned blocking executor for outbound io_uring sends.
+    uring_worker: Option<Arc<LiveUringWorker>>,
 }
 
 pub struct LiveClientInit {
@@ -917,6 +919,34 @@ impl LiveServerState {
             next_stats_log: Instant::now(),
             #[cfg(feature = "rate_limiter")]
             last_blacklist_sync: Arc::new(parking_lot::Mutex::new(None)),
+            uring_worker: None,
+        })
+    }
+
+    /// Create the bounded outbound io_uring owner for a standalone runtime.
+    pub(crate) fn enable_uring_worker(&mut self) {
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        {
+            self.uring_worker = LiveUringWorker::with_defaults().map(Arc::new);
+            if self.uring_worker.is_some() {
+                log::info!("server io_uring batch worker initialised");
+            }
+        }
+    }
+
+    /// Request and join the outbound io_uring owner during runtime teardown.
+    pub(crate) fn stop_uring_worker(&mut self) -> Option<String> {
+        self.uring_worker.take().and_then(|worker| {
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            {
+                worker.request_shutdown();
+                return worker.join().err();
+            }
+            #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+            {
+                let _ = worker;
+                None
+            }
         })
     }
 
@@ -1275,6 +1305,7 @@ impl LiveServerState {
         self.drain_client_fanout(metrics);
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
         let addresses = self.key_addrs();
+        let uring_worker = self.uring_worker.clone();
         for addr in addresses {
             let session_stats = self.domain.session_stats_by_remote(addr);
             let session_id = self.domain.session_id_by_remote(addr);
@@ -1289,6 +1320,7 @@ impl LiveServerState {
                     &client_snapshots,
                     session_stats,
                     session_id,
+                    uring_worker.as_deref(),
                 )
                 .await?;
                 conn.update_state();
@@ -1578,6 +1610,7 @@ impl LiveServerState {
     ) {
         self.shutdown_all(reason, Some(metrics));
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
+        let uring_worker = self.uring_worker.clone();
         for addr in self.key_addrs() {
             let session_stats = self.domain.session_stats_by_remote(addr);
             let session_id = self.domain.session_id_by_remote(addr);
@@ -1591,6 +1624,7 @@ impl LiveServerState {
                     &client_snapshots,
                     session_stats,
                     session_id,
+                    uring_worker.as_deref(),
                 )
                 .await
                 {

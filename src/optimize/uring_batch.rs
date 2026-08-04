@@ -7,13 +7,26 @@
 
 use std::net::SocketAddr;
 use std::os::fd::RawFd;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::optimize::{AlignedBox, MemoryPool};
 use io_uring::{opcode, types::CancelBuilder, IoUring, Probe};
 
 /// Default submission queue depth (must be power of two).
 const DEFAULT_QUEUE_DEPTH: u32 = 256;
+
+/// Maximum number of packets admitted by one public sender call.
+pub const MAX_BATCH_PACKETS: usize = DEFAULT_QUEUE_DEPTH as usize;
+/// Maximum aggregate payload bytes admitted by one public sender call.
+///
+/// The bound matches the sender's normal per-slot warm capacity (2 KiB) across
+/// the default 256 slots. Larger individual datagrams remain valid, but a
+/// caller must not make the sender materialise an unbounded aggregate.
+pub const MAX_BATCH_PAYLOAD_BYTES: usize = MAX_BATCH_PACKETS * 2048;
+const BLOCKING_WORKER_OPERATION_TIMEOUT: Duration = Duration::from_millis(250);
+const BLOCKING_WORKER_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// `IORING_CQE_F_NOTIF`: this is a buffer-release notification CQE (SendMsgZc ZC done).
 const CQE_F_NOTIF: u32 = 1 << 3;
@@ -22,10 +35,11 @@ const CQE_F_MORE: u32 = 1 << 1;
 
 /// Batch UDP sender backed by a reusable io_uring instance.
 ///
-/// Created once per `IoDriver` lifetime and shared across send batches.
-/// If the kernel does not support io_uring (old kernel, unprivileged
-/// container, etc.) construction returns `None` and the caller falls
-/// through to `sendmmsg`.
+/// A synchronous compatibility primitive for one owner and one send batch.
+/// Runtime paths use `UringBatchWorker` below so the blocking completion
+/// boundary is isolated from Tokio. If the kernel does not support io_uring
+/// (old kernel, unprivileged container, etc.) construction returns `None` and
+/// the caller falls through to `sendmmsg`.
 ///
 /// `iovecs`, `msgs`, `sockaddrs`, and payload slots are retained at
 /// `queue_depth` capacity after warm-up. Payloads are copied into those owned
@@ -89,6 +103,11 @@ struct SubmitOutcome {
     sent: usize,
 }
 
+struct SendControl<'a> {
+    shutdown: &'a AtomicBool,
+    deadline: Instant,
+}
+
 impl UringBatchSender {
     /// Try to create a sender with the given queue depth.
     ///
@@ -101,6 +120,10 @@ impl UringBatchSender {
     /// Returns `None` when io_uring cannot be initialised (kernel too old,
     /// seccomp filter, missing permissions, etc.).
     pub fn new(queue_depth: u32) -> Option<Self> {
+        Self::new_inner(queue_depth, true)
+    }
+
+    fn new_inner(queue_depth: u32, allow_zc: bool) -> Option<Self> {
         let depth = queue_depth.max(4).checked_next_power_of_two()?;
 
         // Try SQPOLL mode first: the kernel thread polls the SQ, eliminating
@@ -137,7 +160,7 @@ impl UringBatchSender {
                 matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
             })
             .unwrap_or(false);
-        let zc_supported = zc_probe_supported && zc_opt_in;
+        let zc_supported = allow_zc && zc_probe_supported && zc_opt_in;
 
         if sqpoll_active {
             crate::telemetry::IO_URING_SQPOLL_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -196,8 +219,41 @@ impl UringBatchSender {
     }
 
     fn prepare_payload_slots(&mut self, count: usize) {
+        debug_assert!(count <= MAX_BATCH_PACKETS);
         self.payloads.truncate(count);
         self.payloads.resize_with(count, || Vec::with_capacity(2048));
+    }
+
+    fn validate_batch_admission(count: usize, payload_bytes: usize) -> std::io::Result<()> {
+        if count > MAX_BATCH_PACKETS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("io_uring batch admits at most {MAX_BATCH_PACKETS} packets, got {count}"),
+            ));
+        }
+        if payload_bytes > MAX_BATCH_PAYLOAD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "io_uring batch admits at most {MAX_BATCH_PAYLOAD_BYTES} payload bytes, got {payload_bytes}"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn checked_payload_bytes<'a, I>(payloads: I) -> std::io::Result<usize>
+    where
+        I: Iterator<Item = &'a [u8]>,
+    {
+        payloads.try_fold(0usize, |total, payload| {
+            total.checked_add(payload.len()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "io_uring batch payload byte count overflow",
+                )
+            })
+        })
     }
 
     fn quarantine(&mut self, error: std::io::Error) -> std::io::Error {
@@ -239,10 +295,27 @@ impl UringBatchSender {
     /// Payloads that exceed the submission queue capacity are sent in
     /// chunks (flush-and-refill).
     pub fn send_batch(&mut self, fd: RawFd, payloads: &[&[u8]]) -> std::io::Result<usize> {
+        self.send_batch_with_wait(fd, payloads, None)
+    }
+
+    fn send_batch_with_wait(
+        &mut self,
+        fd: RawFd,
+        payloads: &[&[u8]],
+        control: Option<&SendControl<'_>>,
+    ) -> std::io::Result<usize> {
         self.ensure_usable()?;
         if payloads.is_empty() {
             return Ok(0);
         }
+        if control.is_some() && self.zc_supported {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "controlled io_uring sends do not permit SendMsgZc notification ownership",
+            ));
+        }
+        let payload_bytes = Self::checked_payload_bytes(payloads.iter().copied())?;
+        Self::validate_batch_admission(payloads.len(), payload_bytes)?;
 
         // Keep every kernel-visible payload alive inside the sender. This is
         // required for the submit-error quarantine and for SendMsgZc's later
@@ -297,7 +370,8 @@ impl UringBatchSender {
             let mut chunk_start = 0usize;
             while chunk_start < self.msgs.len() {
                 let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
-                let outcome = self.submit_chunk(fd, chunk_start, chunk_end - chunk_start)?;
+                let outcome =
+                    self.submit_chunk(fd, chunk_start, chunk_end - chunk_start, control)?;
                 chunk_start += outcome.queued;
                 total_sent += outcome.sent;
                 if outcome.sent < outcome.queued {
@@ -321,10 +395,28 @@ impl UringBatchSender {
         fd: RawFd,
         packets: &[(SocketAddr, &[u8])],
     ) -> std::io::Result<usize> {
+        self.send_batch_to_with_wait(fd, packets, None)
+    }
+
+    fn send_batch_to_with_wait(
+        &mut self,
+        fd: RawFd,
+        packets: &[(SocketAddr, &[u8])],
+        control: Option<&SendControl<'_>>,
+    ) -> std::io::Result<usize> {
         self.ensure_usable()?;
         if packets.is_empty() {
             return Ok(0);
         }
+        if control.is_some() && self.zc_supported {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "controlled io_uring sends do not permit SendMsgZc notification ownership",
+            ));
+        }
+        let payload_bytes =
+            Self::checked_payload_bytes(packets.iter().map(|(_, payload)| *payload))?;
+        Self::validate_batch_admission(packets.len(), payload_bytes)?;
 
         // Copy payloads into sender-owned slots before any raw pointer is
         // published to io_uring. The input staging vector can be dropped as
@@ -376,7 +468,7 @@ impl UringBatchSender {
         let mut chunk_start = 0usize;
         while chunk_start < self.msgs.len() {
             let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
-            let outcome = self.submit_chunk(fd, chunk_start, chunk_end - chunk_start)?;
+            let outcome = self.submit_chunk(fd, chunk_start, chunk_end - chunk_start, control)?;
             chunk_start += outcome.queued;
             total_sent += outcome.sent;
             if outcome.sent < outcome.queued {
@@ -395,6 +487,7 @@ impl UringBatchSender {
         fd: RawFd,
         start: usize,
         count: usize,
+        control: Option<&SendControl<'_>>,
     ) -> std::io::Result<SubmitOutcome> {
         let fd = io_uring::types::Fd(fd);
 
@@ -434,8 +527,14 @@ impl UringBatchSender {
             ));
         }
 
-        // Single syscall: submit all queued SQEs and wait for all completions.
-        self.submit_and_wait(queued)?;
+        // The public compatibility API uses one blocking submit-and-wait. The
+        // runtime-owned worker uses a submit-and-poll boundary so shutdown and
+        // the operation deadline remain observable without blocking Tokio.
+        if let Some(control) = control {
+            self.submit_and_poll(queued, control)?;
+        } else {
+            self.submit_and_wait(queued)?;
+        }
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
         // Reap completions. An error CQE is still a completion and must be
@@ -492,6 +591,29 @@ impl UringBatchSender {
         let sent = self.send_success.iter().take_while(|&&ok| ok).count();
 
         Ok(SubmitOutcome { queued, sent })
+    }
+
+    fn submit_and_poll(&mut self, queued: usize, control: &SendControl<'_>) -> std::io::Result<()> {
+        self.ring.submit().map_err(|error| self.quarantine(error))?;
+        loop {
+            if self.ring.completion().count() >= queued {
+                return Ok(());
+            }
+            if control.shutdown.load(Ordering::Acquire) {
+                return Err(self.quarantine(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "io_uring blocking worker shutdown requested",
+                )));
+            }
+            if Instant::now() >= control.deadline {
+                return Err(self.quarantine(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "io_uring batch completion deadline exceeded",
+                )));
+            }
+            self.ring.submit().map_err(|error| self.quarantine(error))?;
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// Push one chunk of `SendMsgZc` SQEs and reap primary + notification CQEs.
@@ -703,6 +825,224 @@ impl Drop for UringBatchSender {
     }
 }
 
+enum WorkerRequest {
+    Connected {
+        fd: RawFd,
+        payloads: Vec<Vec<u8>>,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<usize>>,
+    },
+    To {
+        fd: RawFd,
+        packets: Vec<(SocketAddr, Vec<u8>)>,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<usize>>,
+    },
+}
+
+/// Runtime-owned blocking executor for synchronous io_uring sends.
+///
+/// Exactly one OS thread owns the sender and at most one request waits in its
+/// bounded Tokio channel. The worker disables SendMsgZc because a delayed
+/// notification must never outlive the operation deadline or the runtime
+/// shutdown owner. A controlled sender operation polls CQEs with a deadline,
+/// quarantines the ring on cancellation/timeout, and retains pointer-bearing
+/// storage until the worker terminates.
+pub struct UringBatchWorker {
+    request_tx: Mutex<Option<tokio::sync::mpsc::Sender<WorkerRequest>>>,
+    shutdown: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    join: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl UringBatchWorker {
+    /// Start one bounded worker with the default sender depth.
+    pub fn with_defaults() -> Option<Self> {
+        Self::new(DEFAULT_QUEUE_DEPTH)
+    }
+
+    /// Start one bounded worker with a sender queue depth.
+    pub fn new(queue_depth: u32) -> Option<Self> {
+        let sender = UringBatchSender::new_inner(queue_depth, false)?;
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
+        let shutdown_for_worker = Arc::clone(&shutdown);
+        let failed_for_worker = Arc::clone(&failed);
+        let join = std::thread::Builder::new()
+            .name("qf-io-uring-send".to_string())
+            .spawn(move || {
+                let mut sender = sender;
+                while let Some(request) = request_rx.blocking_recv() {
+                    match request {
+                        WorkerRequest::Connected { fd, payloads, reply } => {
+                            if shutdown_for_worker.load(Ordering::Acquire) {
+                                let _ = reply.send(Err(worker_shutdown_error()));
+                                continue;
+                            }
+                            let payload_refs: Vec<&[u8]> =
+                                payloads.iter().map(Vec::as_slice).collect();
+                            let control = SendControl {
+                                shutdown: &shutdown_for_worker,
+                                deadline: Instant::now() + BLOCKING_WORKER_OPERATION_TIMEOUT,
+                            };
+                            let result =
+                                sender.send_batch_with_wait(fd, &payload_refs, Some(&control));
+                            if worker_operation_failed(&result) {
+                                failed_for_worker.store(true, Ordering::Release);
+                            }
+                            let _ = reply.send(result);
+                        }
+                        WorkerRequest::To { fd, packets, reply } => {
+                            if shutdown_for_worker.load(Ordering::Acquire) {
+                                let _ = reply.send(Err(worker_shutdown_error()));
+                                continue;
+                            }
+                            let packet_refs: Vec<(SocketAddr, &[u8])> = packets
+                                .iter()
+                                .map(|(addr, payload)| (*addr, payload.as_slice()))
+                                .collect();
+                            let control = SendControl {
+                                shutdown: &shutdown_for_worker,
+                                deadline: Instant::now() + BLOCKING_WORKER_OPERATION_TIMEOUT,
+                            };
+                            let result =
+                                sender.send_batch_to_with_wait(fd, &packet_refs, Some(&control));
+                            if worker_operation_failed(&result) {
+                                failed_for_worker.store(true, Ordering::Release);
+                            }
+                            let _ = reply.send(result);
+                        }
+                    }
+                }
+            })
+            .ok()?;
+
+        Some(Self {
+            request_tx: Mutex::new(Some(request_tx)),
+            shutdown,
+            failed,
+            join: Mutex::new(Some(join)),
+        })
+    }
+
+    /// True while the worker can accept a new request.
+    pub fn is_available(&self) -> bool {
+        !self.shutdown.load(Ordering::Acquire) && !self.failed.load(Ordering::Acquire)
+    }
+
+    async fn submit_request(
+        &self,
+        request: WorkerRequest,
+        reply: tokio::sync::oneshot::Receiver<std::io::Result<usize>>,
+    ) -> std::io::Result<usize> {
+        if !self.is_available() {
+            return Err(worker_shutdown_error());
+        }
+        let request_tx = self
+            .request_tx
+            .lock()
+            .map_err(|_| std::io::Error::other("io_uring worker state lock poisoned"))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(worker_shutdown_error)?;
+        match request_tx.try_send(request) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "io_uring blocking worker queue is full",
+                ));
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Err(worker_shutdown_error());
+            }
+        }
+        match tokio::time::timeout(BLOCKING_WORKER_RESPONSE_TIMEOUT, reply).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "io_uring blocking worker dropped the request response",
+            )),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "io_uring blocking worker response deadline exceeded",
+            )),
+        }
+    }
+
+    /// Submit a connected-socket batch without blocking the caller's executor.
+    pub async fn send_batch(&self, fd: RawFd, payloads: &[&[u8]]) -> std::io::Result<usize> {
+        let payload_bytes = UringBatchSender::checked_payload_bytes(payloads.iter().copied())?;
+        UringBatchSender::validate_batch_admission(payloads.len(), payload_bytes)?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let owned_payloads = payloads.iter().map(|payload| payload.to_vec()).collect();
+        self.submit_request(
+            WorkerRequest::Connected { fd, payloads: owned_payloads, reply: reply_tx },
+            reply_rx,
+        )
+        .await
+    }
+
+    /// Submit an unconnected-socket batch without blocking the caller's executor.
+    pub async fn send_batch_to(
+        &self,
+        fd: RawFd,
+        packets: &[(SocketAddr, &[u8])],
+    ) -> std::io::Result<usize> {
+        let payload_bytes =
+            UringBatchSender::checked_payload_bytes(packets.iter().map(|(_, payload)| *payload))?;
+        UringBatchSender::validate_batch_admission(packets.len(), payload_bytes)?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let owned_packets =
+            packets.iter().map(|(addr, payload)| (*addr, payload.to_vec())).collect();
+        self.submit_request(
+            WorkerRequest::To { fd, packets: owned_packets, reply: reply_tx },
+            reply_rx,
+        )
+        .await
+    }
+
+    /// Stop admission and make the owned worker observable to its join owner.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Ok(mut request_tx) = self.request_tx.lock() {
+            request_tx.take();
+        }
+    }
+
+    /// Join the worker after its async callers have stopped submitting.
+    pub fn join(&self) -> Result<(), String> {
+        self.request_shutdown();
+        let join =
+            self.join.lock().map_err(|_| "io_uring worker join lock poisoned".to_string())?.take();
+        if let Some(join) = join {
+            join.join().map_err(|_| "io_uring worker thread panicked".to_string())?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for UringBatchWorker {
+    fn drop(&mut self) {
+        self.request_shutdown();
+        if let Ok(mut join) = self.join.lock() {
+            if let Some(join) = join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+fn worker_shutdown_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "io_uring blocking worker is shut down")
+}
+
+fn worker_operation_failed(result: &std::io::Result<usize>) -> bool {
+    match result {
+        Ok(_) => false,
+        Err(error) => error.kind() != std::io::ErrorKind::WouldBlock,
+    }
+}
+
 fn checked_slot_index(user_data: u64, depth: usize) -> std::io::Result<usize> {
     let idx = usize::try_from(user_data).map_err(|_| {
         std::io::Error::new(
@@ -759,18 +1099,17 @@ fn fill_sockaddr(addr: SocketAddr, storage: &mut libc::sockaddr_storage) {
     }
 }
 
-// Per-thread io_uring sender for the server outbound path.
-//
-// Avoids struct changes to the server runtime. The server's flush loop calls
-// `server_send_batch_to()` directly. The `RefCell` borrow is never held across
-// `await` points (collection and io_uring submission are both synchronous).
+// Synchronous compatibility owner for callers outside the runtime-owned async
+// server path. The canonical server flush path receives `UringBatchWorker`
+// explicitly. The `RefCell` borrow is never held across await points because
+// this compatibility helper is fully synchronous.
 thread_local! {
     static SERVER_URING_SENDER: std::cell::RefCell<Option<UringBatchSender>> =
         std::cell::RefCell::new(UringBatchSender::with_defaults());
 }
 
 /// Send a batch of `(addr, payload)` pairs on an **unconnected** server UDP
-/// socket via the thread-local io_uring sender.
+/// socket via the thread-local synchronous compatibility sender.
 ///
 /// Returns `Some(sent_count)` when at least one packet was sent, `None` when
 /// io_uring is unavailable or no progress was made.

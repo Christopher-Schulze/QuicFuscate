@@ -91,8 +91,9 @@ impl ServerRuntime {
     ) -> std::io::Result<Self> {
         let mut runtime =
             Self::new(engine_config, server_config.clone()).map_err(std::io::Error::other)?;
-        let live_state =
+        let mut live_state =
             LiveServerState::try_new(server_config.clone()).map_err(std::io::Error::other)?;
+        live_state.enable_uring_worker();
 
         let std_socket = std::net::UdpSocket::bind(server_config.listen)?;
         let socket_ref = socket2::SockRef::from(&std_socket);
@@ -447,10 +448,17 @@ impl ServerRuntime {
             dns_workers.abandon();
         }
         let tun_reader_error = self.stop_tun_reader().err();
+        let uring_worker_error = self
+            .live
+            .as_mut()
+            .and_then(|live| live.live_state.stop_uring_worker());
         if self.state == ServerState::Stopped {
             let mut cleanup_errors = Vec::new();
             if let Some(error) = tun_reader_error {
                 cleanup_errors.push(error);
+            }
+            if let Some(error) = uring_worker_error {
+                cleanup_errors.push(format!("server io_uring worker cleanup failed: {error}"));
             }
             if let Some(routing) = self.live.as_mut().and_then(|live| live.routing.take()) {
                 if let Err(error) = teardown_routing(routing) {
@@ -474,6 +482,9 @@ impl ServerRuntime {
         let mut cleanup_errors = Vec::new();
         if let Some(error) = tun_reader_error {
             cleanup_errors.push(error);
+        }
+        if let Some(error) = uring_worker_error {
+            cleanup_errors.push(format!("server io_uring worker cleanup failed: {error}"));
         }
         if let Some(resources) = self.host_resources.take() {
             if let Err(error) = resources.teardown() {
@@ -778,6 +789,7 @@ impl ServerRuntime {
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {
         let shutdown = Arc::clone(&self.shutdown);
         let live = self.live_mut();
+        let uring_worker = live.live_state.uring_worker.clone();
         ServerRuntimeLiveParts {
             live_state: &mut live.live_state,
             accept_loop: &live.accept_loop,
@@ -790,6 +802,7 @@ impl ServerRuntime {
             tun_fault: Arc::clone(&live.tun_fault),
             tun_notify: Arc::clone(&live.tun_notify),
             shutdown,
+            uring_worker,
         }
     }
 
@@ -1105,6 +1118,7 @@ impl ServerRuntime {
                                 Arc::clone(&runtime_parts.tun_fault),
                                 Arc::clone(&runtime_parts.tun_notify),
                                 Arc::clone(&runtime_parts.shutdown),
+                                runtime_parts.uring_worker.as_deref(),
                             ).await {
                                 Ok(result) => result,
                                 Err(fault) => {

@@ -1,3 +1,8 @@
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+type LiveUringWorker = crate::optimize::uring_batch::UringBatchWorker;
+#[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+type LiveUringWorker = ();
+
 pub fn load_server_identity(
     config: &mut crate::transport::Config,
     cert_path: &std::path::Path,
@@ -521,6 +526,7 @@ pub async fn flush_live_server_outgoing(
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     session_stats: Option<Arc<SessionStats>>,
     session_id: Option<SessionId>,
+    uring_worker: Option<&LiveUringWorker>,
 ) -> Result<(u64, u64), DataPlaneFault> {
     let mut bytes_sent = 0u64;
     let mut packets_sent = 0u64;
@@ -570,9 +576,22 @@ pub async fn flush_live_server_outgoing(
                 let fd = socket.as_raw_fd();
                 let packets: Vec<(SocketAddr, &[u8])> =
                     staging.iter().map(|(target, packet)| (*target, packet.as_slice())).collect();
-                crate::optimize::uring_batch::server_send_batch_to(fd, &packets)
-                    .unwrap_or(0)
-                    .min(staging.len())
+                match uring_worker {
+                    Some(worker) => match worker.send_batch_to(fd, &packets).await {
+                        Ok(sent) => sent.min(staging.len()),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            log::debug!("io_uring server worker busy, using async tail: {error}");
+                            0
+                        }
+                        Err(error) => {
+                            return Err(DataPlaneFault::TransportSend {
+                                component: "server io_uring blocking worker".to_string(),
+                                error: error.to_string(),
+                            });
+                        }
+                    },
+                    None => 0,
+                }
             }
 
             #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
@@ -580,6 +599,8 @@ pub async fn flush_live_server_outgoing(
                 0usize
             }
         };
+        #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+        let _ = uring_worker;
         if already_sent == staging.len() {
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             {
@@ -960,6 +981,7 @@ async fn process_live_server_client_datagram(
     tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     tun_notify: Arc<tokio::sync::Notify>,
     runtime_shutdown: Arc<AtomicBool>,
+    uring_worker: Option<&LiveUringWorker>,
 ) -> Result<LiveClientDatagramResult, DataPlaneFault> {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -1238,6 +1260,7 @@ async fn process_live_server_client_datagram(
         client_snapshots,
         session_stats,
         session_id,
+        uring_worker,
     )
     .await?;
 

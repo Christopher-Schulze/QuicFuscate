@@ -12,6 +12,8 @@ use tokio::net::UdpSocket;
 use crate::core::QuicFuscateConnection;
 use crate::engine::{DataPlaneFault, EngineError};
 use crate::interface::TunInterface;
+#[cfg(target_os = "linux")]
+use crate::interface::TunReadContract;
 
 #[inline]
 fn profile_prefers_wide_batches(profile: crate::optimize::CpuProfile) -> bool {
@@ -248,7 +250,7 @@ pub struct IoDriver {
     #[cfg(target_os = "linux")]
     hotpath_adapter: Arc<dyn IoHotpathAdapter>,
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
-    uring_sender: parking_lot::Mutex<Option<crate::optimize::uring_batch::UringBatchSender>>,
+    uring_worker: Option<crate::optimize::uring_batch::UringBatchWorker>,
     /// Cached at construction: true when io_uring init succeeded.
     /// Avoids a Mutex lock just to check availability on every hot-path iteration.
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
@@ -281,12 +283,12 @@ impl IoDriver {
             Arc::new(SystemIoHotpathAdapter::default());
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         let (uring_sender, uring_available) = {
-            let sender = crate::optimize::uring_batch::UringBatchSender::with_defaults();
-            let available = sender.is_some();
+            let worker = crate::optimize::uring_batch::UringBatchWorker::with_defaults();
+            let available = worker.is_some();
             if available {
-                log::info!("io_uring batch sender initialised");
+                log::info!("io_uring batch worker initialised");
             }
-            (parking_lot::Mutex::new(sender), available)
+            (worker, available)
         };
         let profile = crate::optimize::FeatureDetector::instance().profile();
         crate::optimize::telemetry::publish_cpu_profile_mask(profile);
@@ -298,7 +300,7 @@ impl IoDriver {
             #[cfg(target_os = "linux")]
             hotpath_adapter,
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
-            uring_sender,
+            uring_worker: uring_sender,
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             uring_available,
             wide_batch_cpu,
@@ -321,6 +323,7 @@ impl IoDriver {
     #[inline(always)]
     fn has_uring(&self) -> bool {
         self.uring_available
+            && self.uring_worker.as_ref().is_some_and(|worker| worker.is_available())
     }
 
     /// Get shutdown signal.
@@ -331,6 +334,16 @@ impl IoDriver {
     /// Request shutdown.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        if let Some(worker) = self.uring_worker.as_ref() {
+            worker.request_shutdown();
+        }
+    }
+
+    /// Join the owned io_uring blocking worker after its async loops stopped.
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    pub fn join_io_uring_worker(&self) -> Result<(), String> {
+        self.uring_worker.as_ref().map_or(Ok(()), |worker| worker.join())
     }
 
     /// Get stats reference.
@@ -490,6 +503,19 @@ impl IoDriver {
         socket: Arc<UdpSocket>,
     ) -> Result<(), EngineError> {
         #[cfg(target_os = "linux")]
+        {
+            let read_contract = tun.lock().read_contract();
+            if read_contract != TunReadContract::NonBlocking {
+                return Err(self.reader_stopped_error(
+                    "client outbound TUN reader",
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "generic client I/O requires a nonblocking TUN backend; use an owned reader for blocking backends",
+                    ),
+                ));
+            }
+        }
+        #[cfg(target_os = "linux")]
         let mut send_buf = vec![0u8; 65535];
         #[cfg(target_os = "linux")]
         let batch_cap = self.normalized_batch_size();
@@ -498,8 +524,7 @@ impl IoDriver {
             (0..batch_cap).map(|_| Vec::with_capacity(2048)).collect();
         #[cfg(target_os = "linux")]
         while !self.shutdown.load(Ordering::Relaxed) {
-            // Read from TUN - returns (block, len)
-            // TUN read path is blocking; loop structure keeps the behavior explicit.
+            // Read from the validated nonblocking TUN backend - returns (block, len).
             let read_result = {
                 let tun_guard = tun.lock();
                 tun_guard.read_block()
@@ -562,17 +587,27 @@ impl IoDriver {
                         // io_uring batch path (preferred when available).
                         #[cfg(feature = "io_uring")]
                         if matches!(dispatch, OutboundDispatch::IoUringBatch) {
-                            let mut guard = self.uring_sender.lock();
-                            if let Some(ref mut uring) = *guard {
-                                match uring.send_batch(socket_fd, &batch_refs) {
+                            if let Some(worker) = self.uring_worker.as_ref() {
+                                match worker.send_batch(socket_fd, &batch_refs).await {
                                     Ok(n) => {
                                         already_sent = n.min(queued);
                                         crate::telemetry::IO_URING_SUBMIT_PACKETS
                                             .inc_by(already_sent as u64);
                                     }
-                                    Err(e) => {
-                                        log::debug!("io_uring batch failed, falling back: {}", e);
+                                    Err(error)
+                                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                                    {
+                                        log::debug!(
+                                            "io_uring worker busy, falling back: {}",
+                                            error
+                                        );
                                         crate::telemetry::IO_URING_FALLBACKS.inc();
+                                    }
+                                    Err(error) => {
+                                        return Err(self.transport_send_error(
+                                            "client io_uring blocking worker",
+                                            error,
+                                        ));
                                     }
                                 }
                             }

@@ -13,7 +13,9 @@ use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use quicfuscate::optimize::uring_batch::UringBatchSender;
+use quicfuscate::optimize::uring_batch::{
+    UringBatchSender, UringBatchWorker, MAX_BATCH_PACKETS, MAX_BATCH_PAYLOAD_BYTES,
+};
 #[cfg(target_os = "linux")]
 use quicfuscate::telemetry::{IO_URING_ZC_NOTIFS, IO_URING_ZC_SENDS};
 
@@ -94,6 +96,114 @@ fn uring_batch_invalid_fd_returns_error() {
     if let Ok(n) = result {
         assert_eq!(n, 0, "invalid fd should send nothing");
     }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_batch_admission_rejects_packet_count_before_copying() {
+    let mut sender = match UringBatchSender::new(4) {
+        Some(s) => s,
+        None => {
+            eprintln!("skipping: io_uring not available");
+            return;
+        }
+    };
+    let payloads = vec![b"admission".as_slice(); MAX_BATCH_PACKETS + 1];
+    let error = sender
+        .send_batch(-1, &payloads)
+        .expect_err("packet count above the admission bound must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("packets"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_batch_admission_rejects_aggregate_bytes_before_copying() {
+    let mut sender = match UringBatchSender::new(4) {
+        Some(s) => s,
+        None => {
+            eprintln!("skipping: io_uring not available");
+            return;
+        }
+    };
+    let payload = vec![0xA5; MAX_BATCH_PAYLOAD_BYTES + 1];
+    let error = sender
+        .send_batch(-1, &[payload.as_slice()])
+        .expect_err("aggregate payload bytes above the admission bound must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("payload bytes"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_batch_to_admission_rejects_packet_count_before_copying() {
+    let mut sender = match UringBatchSender::new(4) {
+        Some(s) => s,
+        None => {
+            eprintln!("skipping: io_uring not available");
+            return;
+        }
+    };
+    let destination: std::net::SocketAddr = "127.0.0.1:9".parse().expect("destination");
+    let packets = vec![(destination, b"admission".as_slice()); MAX_BATCH_PACKETS + 1];
+    let error = sender
+        .send_batch_to(-1, &packets)
+        .expect_err("packet count above the send_batch_to bound must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("packets"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_batch_worker_sends_and_joins_without_executor_blocking() {
+    let worker = match UringBatchWorker::new(8) {
+        Some(worker) => worker,
+        None => {
+            eprintln!("skipping: io_uring not available");
+            return;
+        }
+    };
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver.set_read_timeout(Some(Duration::from_secs(2))).expect("set timeout");
+    let recv_addr = receiver.local_addr().expect("receiver address");
+    let sender_socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    sender_socket.connect(recv_addr).expect("connect sender");
+    let payloads: &[&[u8]] = &[b"worker-alpha", b"worker-beta"];
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+    let sent = runtime
+        .block_on(worker.send_batch(sender_socket.as_raw_fd(), payloads))
+        .expect("worker send");
+    assert_eq!(sent, payloads.len());
+
+    for expected in payloads {
+        let mut buffer = [0u8; 256];
+        let (length, _) = receiver.recv_from(&mut buffer).expect("receive worker datagram");
+        assert_eq!(&buffer[..length], *expected);
+    }
+
+    let server_socket = UdpSocket::bind("127.0.0.1:0").expect("bind unconnected sender");
+    let destinations: Vec<(std::net::SocketAddr, &[u8])> =
+        payloads.iter().map(|payload| (recv_addr, *payload)).collect();
+    let sent_to = runtime
+        .block_on(worker.send_batch_to(server_socket.as_raw_fd(), &destinations))
+        .expect("worker send_batch_to");
+    assert_eq!(sent_to, destinations.len());
+    for expected in payloads {
+        let mut buffer = [0u8; 256];
+        let (length, _) = receiver.recv_from(&mut buffer).expect("receive worker target datagram");
+        assert_eq!(&buffer[..length], *expected);
+    }
+
+    worker.request_shutdown();
+    worker.join().expect("join worker");
+    let error = runtime
+        .block_on(worker.send_batch(sender_socket.as_raw_fd(), payloads))
+        .expect_err("shutdown must close worker admission");
+    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
 }
 
 #[test]
