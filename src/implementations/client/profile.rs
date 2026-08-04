@@ -6,11 +6,16 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::engine::qkey;
 
 const PROFILE_ID_BYTES: usize = 16;
+const PROFILE_FILE_MODE: u32 = 0o600;
+const TEMPORARY_FILE_NAME_ATTEMPTS: usize = 8;
 
 /// A saved VPN profile.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,16 +159,12 @@ impl ProfileManager {
             return Ok(());
         }
 
-        // Ensure parent directory exists
-        if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ProfileError::Io(e.to_string()))?;
-        }
-
-        let profiles: Vec<&Profile> = self.profiles.values().collect();
+        let mut profiles: Vec<&Profile> = self.profiles.values().collect();
+        profiles.sort_unstable_by(|left, right| left.id.cmp(&right.id));
         let content = serde_json::to_string_pretty(&profiles)
             .map_err(|e| ProfileError::Parse(e.to_string()))?;
 
-        std::fs::write(&self.storage_path, content).map_err(|e| ProfileError::Io(e.to_string()))?;
+        atomic_write_profile(&self.storage_path, content.as_bytes())?;
 
         self.dirty = false;
         Ok(())
@@ -269,6 +270,196 @@ impl std::fmt::Display for ProfileError {
 
 impl std::error::Error for ProfileError {}
 
+struct TemporaryFileGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TemporaryFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, committed: false }
+    }
+
+    fn mark_committed(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TemporaryFileGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn atomic_write_profile(path: &Path, bytes: &[u8]) -> Result<(), ProfileError> {
+    let parent = parent_directory(path);
+    fs::create_dir_all(parent).map_err(|error| profile_io("parent creation", parent, error))?;
+
+    let (temporary_path, file) = create_temporary_profile_file(path)?;
+    let mut temporary_file_guard = TemporaryFileGuard::new(temporary_path.clone());
+
+    write_temporary_profile(&temporary_path, file, bytes)?;
+
+    #[cfg(test)]
+    test_failpoint::before(AtomicWriteStage::Replace)
+        .map_err(|error| profile_io("atomic replace", path, error))?;
+
+    replace_profile_file(&temporary_path, path)
+        .map_err(|error| profile_io("atomic replace", path, error))?;
+    temporary_file_guard.mark_committed();
+
+    sync_profile_parent(path).map_err(|error| profile_io("parent sync", parent, error))
+}
+
+fn write_temporary_profile(
+    temporary_path: &Path,
+    mut file: File,
+    bytes: &[u8],
+) -> Result<(), ProfileError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temporary_path, fs::Permissions::from_mode(PROFILE_FILE_MODE))
+            .map_err(|error| profile_io("temporary permission set", temporary_path, error))?;
+    }
+
+    #[cfg(test)]
+    test_failpoint::before(AtomicWriteStage::TemporaryWrite)
+        .map_err(|error| profile_io("temporary write", temporary_path, error))?;
+
+    file.write_all(bytes).map_err(|error| profile_io("temporary write", temporary_path, error))?;
+    file.sync_all().map_err(|error| profile_io("temporary sync", temporary_path, error))?;
+    Ok(())
+}
+
+fn create_temporary_profile_file(path: &Path) -> Result<(PathBuf, File), ProfileError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(PROFILE_FILE_MODE);
+    }
+
+    for _ in 0..TEMPORARY_FILE_NAME_ATTEMPTS {
+        let temporary_path = temporary_profile_path(path)?;
+        match options.open(&temporary_path) {
+            Ok(file) => return Ok((temporary_path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(profile_io("temporary create", &temporary_path, error)),
+        }
+    }
+
+    Err(ProfileError::Io(format!(
+        "temporary create: exhausted unique names for {}",
+        path.display()
+    )))
+}
+
+fn temporary_profile_path(path: &Path) -> Result<PathBuf, ProfileError> {
+    let mut nonce = [0u8; 8];
+    crate::rng::fill_secure(&mut nonce)
+        .map_err(|error| profile_io("temporary name entropy", path, error))?;
+
+    let mut suffix = String::with_capacity(nonce.len() * 2);
+    for byte in nonce {
+        crate::rng::push_hex_byte(&mut suffix, byte);
+    }
+
+    let mut file_name = path.file_name().map(OsString::from).unwrap_or_else(|| "profile".into());
+    file_name.push(format!(".tmp-{suffix}"));
+    Ok(path.with_file_name(file_name))
+}
+
+fn profile_io(operation: &str, path: &Path, error: io::Error) -> ProfileError {
+    ProfileError::Io(format!("{operation} {}: {error}", path.display()))
+}
+
+fn parent_directory(path: &Path) -> &Path {
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(windows)]
+fn replace_profile_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both paths are stable, NUL-terminated UTF-16 buffers for the duration of the call.
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_profile_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(unix)]
+fn sync_profile_parent(path: &Path) -> io::Result<()> {
+    File::open(parent_directory(path))?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_profile_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtomicWriteStage {
+    TemporaryWrite,
+    Replace,
+}
+
+#[cfg(test)]
+mod test_failpoint {
+    use super::AtomicWriteStage;
+    use std::cell::Cell;
+    use std::io;
+
+    thread_local! {
+        static FAIL_STAGE: Cell<Option<AtomicWriteStage>> = const { Cell::new(None) };
+    }
+
+    pub(super) struct Guard {
+        previous: Option<AtomicWriteStage>,
+    }
+
+    pub(super) fn install(stage: AtomicWriteStage) -> Guard {
+        let previous = FAIL_STAGE.with(|state| state.replace(Some(stage)));
+        Guard { previous }
+    }
+
+    pub(super) fn before(stage: AtomicWriteStage) -> io::Result<()> {
+        if FAIL_STAGE.with(|state| state.get() == Some(stage)) {
+            return Err(io::Error::other("injected profile persistence failure"));
+        }
+        Ok(())
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            FAIL_STAGE.with(|state| state.set(self.previous));
+        }
+    }
+}
+
 fn validate_profile_id(id: &str) -> Result<(), ProfileError> {
     if id.trim().is_empty() {
         return Err(ProfileError::InvalidId("profile ID must not be empty".to_string()));
@@ -321,6 +512,28 @@ mod tests {
         let sequence = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir()
             .join(format!("quicfuscate-profile-{name}-{}-{sequence}.json", std::process::id()))
+    }
+
+    fn temporary_paths(path: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.tmp-", path.file_name().unwrap().to_string_lossy());
+        std::fs::read_dir(parent_directory(path))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .map(|name| name.to_string_lossy().starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn cleanup_storage(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        for temporary_path in temporary_paths(path) {
+            let _ = std::fs::remove_file(temporary_path);
+        }
     }
 
     #[test]
@@ -461,6 +674,153 @@ mod tests {
         let mut loaded = ProfileManager::new(&path);
         loaded.load().unwrap();
         assert!(loaded.get("legacy-short-id").is_some());
-        std::fs::remove_file(path).unwrap();
+        cleanup_storage(&path);
+    }
+
+    #[test]
+    fn save_load_round_trip_is_atomic_and_deterministic() {
+        let first_path = test_storage_path("round-trip-first");
+        let second_path = test_storage_path("round-trip-second");
+
+        let mut first = ProfileManager::new(&first_path);
+        first.add(test_profile("profile-b", "B")).unwrap();
+        first.add(test_profile("profile-a", "A")).unwrap();
+        first.save().unwrap();
+
+        let mut second = ProfileManager::new(&second_path);
+        second.add(test_profile("profile-a", "A")).unwrap();
+        second.add(test_profile("profile-b", "B")).unwrap();
+        second.save().unwrap();
+
+        assert_eq!(std::fs::read(&first_path).unwrap(), std::fs::read(&second_path).unwrap());
+
+        let mut loaded = ProfileManager::new(&first_path);
+        loaded.load().unwrap();
+        assert_eq!(loaded.count(), 2);
+        assert_eq!(loaded.get("profile-a").map(|profile| profile.name.as_str()), Some("A"));
+        assert_eq!(loaded.get("profile-b").map(|profile| profile.name.as_str()), Some("B"));
+
+        cleanup_storage(&first_path);
+        cleanup_storage(&second_path);
+    }
+
+    #[test]
+    fn save_serializes_bearer_token_and_applies_sensitive_file_mode() {
+        let path = test_storage_path("bearer");
+        let token = "b".repeat(64);
+        let qkey = qkey::QKeyConfig::new("192.168.1.1:4433", "example.com").with_token(&token);
+        let profile = Profile::from_qkey("Bearer", &qkey::generate(&qkey)).unwrap();
+        let id = profile.id.clone();
+
+        let mut manager = ProfileManager::new(&path);
+        manager.add(profile).unwrap();
+        manager.save().unwrap();
+
+        let encoded: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(encoded[0]["token"].as_str(), Some(token.as_str()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, PROFILE_FILE_MODE);
+        }
+
+        let mut loaded = ProfileManager::new(&path);
+        loaded.load().unwrap();
+        assert_eq!(
+            loaded.get(&id).and_then(|profile| profile.token.as_ref()).map(|token| token.as_ref()),
+            Some(token.as_str())
+        );
+
+        cleanup_storage(&path);
+    }
+
+    #[test]
+    fn failed_write_preserves_previous_file_keeps_dirty_and_cleans_temporary() {
+        let path = test_storage_path("failed-write");
+        let mut manager = ProfileManager::new(&path);
+        manager.add(test_profile("old", "old")).unwrap();
+        manager.save().unwrap();
+        let previous = std::fs::read(&path).unwrap();
+
+        manager.add(test_profile("new", "new")).unwrap();
+        let failure = test_failpoint::install(AtomicWriteStage::TemporaryWrite);
+        let error = manager.save().unwrap_err();
+        drop(failure);
+
+        assert!(matches!(error, ProfileError::Io(message) if message.contains("temporary write")));
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert!(temporary_paths(&path).is_empty());
+
+        manager.save().unwrap();
+        let mut loaded = ProfileManager::new(&path);
+        loaded.load().unwrap();
+        assert_eq!(loaded.count(), 2);
+
+        cleanup_storage(&path);
+    }
+
+    #[test]
+    fn failed_replace_preserves_previous_file_keeps_dirty_and_cleans_temporary() {
+        let path = test_storage_path("failed-replace");
+        let mut manager = ProfileManager::new(&path);
+        manager.add(test_profile("old", "old")).unwrap();
+        manager.save().unwrap();
+        let previous = std::fs::read(&path).unwrap();
+
+        manager.add(test_profile("new", "new")).unwrap();
+        let failure = test_failpoint::install(AtomicWriteStage::Replace);
+        let error = manager.save().unwrap_err();
+        drop(failure);
+
+        assert!(matches!(error, ProfileError::Io(message) if message.contains("atomic replace")));
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert!(temporary_paths(&path).is_empty());
+
+        manager.save().unwrap();
+        let mut loaded = ProfileManager::new(&path);
+        loaded.load().unwrap();
+        assert_eq!(loaded.count(), 2);
+
+        cleanup_storage(&path);
+    }
+
+    #[test]
+    fn real_replace_failure_preserves_destination_and_cleans_temporary() {
+        let path = test_storage_path("real-replace-failure");
+        std::fs::create_dir(&path).unwrap();
+
+        let mut manager = ProfileManager::new(&path);
+        manager.add(test_profile("profile", "profile")).unwrap();
+        let error = manager.save().unwrap_err();
+
+        assert!(matches!(error, ProfileError::Io(message) if message.contains("atomic replace")));
+        assert!(path.is_dir());
+        assert!(temporary_paths(&path).is_empty());
+        let _ = std::fs::remove_dir(&path);
+    }
+
+    #[test]
+    fn interrupted_temporary_artifact_is_ignored_by_load() {
+        let path = test_storage_path("interrupted");
+        let mut manager = ProfileManager::new(&path);
+        manager.add(test_profile("stable", "stable")).unwrap();
+        manager.save().unwrap();
+
+        let interrupted_path = path.with_file_name(format!(
+            "{}.tmp-interrupted",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&interrupted_path, b"incomplete profile data").unwrap();
+
+        let mut loaded = ProfileManager::new(&path);
+        loaded.load().unwrap();
+        assert_eq!(loaded.count(), 1);
+        assert!(loaded.get("stable").is_some());
+        assert!(interrupted_path.exists());
+
+        cleanup_storage(&path);
     }
 }
