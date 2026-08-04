@@ -548,9 +548,10 @@ fn lookup_buffer<T>(
     let mut size = 16 * 1024usize;
     loop {
         let mut value = std::mem::MaybeUninit::<T>::uninit();
+        let output = value.as_mut_ptr();
         let mut result = std::ptr::null_mut();
         let mut buffer = vec![0 as libc::c_char; size];
-        let status = lookup(value.as_mut_ptr(), buffer.as_mut_ptr(), buffer.len(), &mut result);
+        let status = lookup(output, buffer.as_mut_ptr(), buffer.len(), &mut result);
         if status == libc::ERANGE && size < 1024 * 1024 {
             size *= 2;
             continue;
@@ -567,8 +568,15 @@ fn lookup_buffer<T>(
                 errno: 0,
             });
         }
-        // SAFETY: the reentrant lookup returned success and a non-null result
-        // pointing at the caller-owned output object.
+        if result != output {
+            return Err(DropError::AccountLookupFailed {
+                selector: selector.to_string(),
+                errno: libc::EINVAL,
+            });
+        }
+        // SAFETY: the successful lookup contract initializes the caller-owned
+        // output object and returns that exact pointer. The status, null, and
+        // pointer-identity checks above establish those preconditions.
         return Ok((unsafe { value.assume_init() }, buffer));
     }
 }
@@ -581,7 +589,7 @@ fn resolve_user(selector: &str) -> Result<(u32, String), DropError> {
         .then(|| CString::new(selector).map_err(|_| DropError::InvalidIdentity(selector.into())))
         .transpose()?;
     let name_ptr = name.as_ref().map_or(std::ptr::null(), |value| value.as_ptr());
-    let (pwd, _buffer) = lookup_buffer(selector, |output, buffer, len, result| unsafe {
+    let (pwd, buffer) = lookup_buffer(selector, |output, buffer, len, result| unsafe {
         match numeric {
             Some(uid) => libc::getpwuid_r(uid, output, buffer, len, result),
             None => libc::getpwnam_r(name_ptr, output, buffer, len, result),
@@ -593,8 +601,9 @@ fn resolve_user(selector: &str) -> Result<(u32, String), DropError> {
         }
         other => other,
     })?;
-    // SAFETY: pw_name points into `_buffer`, which remains alive in this scope.
+    // SAFETY: pw_name points into the live lookup buffer returned with `pwd`.
     let canonical = unsafe { CStr::from_ptr(pwd.pw_name) }.to_string_lossy().into_owned();
+    drop(buffer);
     Ok((pwd.pw_uid, canonical))
 }
 
@@ -606,7 +615,7 @@ fn resolve_group(selector: &str) -> Result<(u32, String), DropError> {
         .then(|| CString::new(selector).map_err(|_| DropError::InvalidIdentity(selector.into())))
         .transpose()?;
     let name_ptr = name.as_ref().map_or(std::ptr::null(), |value| value.as_ptr());
-    let (grp, _buffer) = lookup_buffer(selector, |output, buffer, len, result| unsafe {
+    let (grp, buffer) = lookup_buffer(selector, |output, buffer, len, result| unsafe {
         match numeric {
             Some(gid) => libc::getgrgid_r(gid, output, buffer, len, result),
             None => libc::getgrnam_r(name_ptr, output, buffer, len, result),
@@ -618,8 +627,9 @@ fn resolve_group(selector: &str) -> Result<(u32, String), DropError> {
         }
         other => other,
     })?;
-    // SAFETY: gr_name points into `_buffer`, which remains alive in this scope.
+    // SAFETY: gr_name points into the live lookup buffer returned with `grp`.
     let canonical = unsafe { CStr::from_ptr(grp.gr_name) }.to_string_lossy().into_owned();
+    drop(buffer);
     Ok((grp.gr_gid, canonical))
 }
 
@@ -970,6 +980,87 @@ mod tests {
         assert_eq!(parse_numeric_selector("123", "user").unwrap(), Some(123));
         assert_eq!(parse_numeric_selector("alice", "user").unwrap(), None);
         assert!(parse_numeric_selector("", "user").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_buffer_rejects_nonzero_status_before_extraction() {
+        let result =
+            lookup_buffer::<u32>("status-failure", |_output, _buffer, _len, _result| libc::EIO);
+
+        assert!(matches!(
+            result,
+            Err(DropError::AccountLookupFailed { errno, .. }) if errno == libc::EIO
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_buffer_retries_and_grows_after_erange() {
+        let mut calls = 0;
+        let (value, buffer) =
+            lookup_buffer::<u32>("erange-retry", |output, _buffer, len, result| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert_eq!(len, 16 * 1024);
+                        libc::ERANGE
+                    }
+                    2 => {
+                        assert_eq!(len, 32 * 1024);
+                        unsafe {
+                            output.write(7);
+                            *result = output;
+                        }
+                        0
+                    }
+                    _ => unreachable!("lookup callback called after successful retry"),
+                }
+            })
+            .expect("ERANGE retry must succeed");
+
+        assert_eq!(calls, 2);
+        assert_eq!(value, 7);
+        assert_eq!(buffer.len(), 32 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_buffer_rejects_null_result_before_extraction() {
+        let result = lookup_buffer::<u32>("null-result", |_output, _buffer, _len, _result| 0);
+
+        assert!(matches!(
+            result,
+            Err(DropError::AccountLookupFailed { errno, .. }) if errno == 0
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_buffer_rejects_result_pointer_not_owned_by_output() {
+        let mut foreign = std::mem::MaybeUninit::<u32>::new(11);
+        let foreign_pointer = foreign.as_mut_ptr();
+        let result = lookup_buffer::<u32>("pointer-mismatch", |_output, _buffer, _len, result| {
+            unsafe {
+                *result = foreign_pointer;
+            }
+            0
+        });
+
+        assert!(matches!(
+            result,
+            Err(DropError::AccountLookupFailed { errno, .. }) if errno == libc::EINVAL
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_unknown_user_and_group_are_reported_as_not_found() {
+        let user_selector = "__quicfuscate_missing_user_5f4d8e2a__";
+        let group_selector = "__quicfuscate_missing_group_5f4d8e2a__";
+
+        assert!(matches!(resolve_user(user_selector), Err(DropError::UserNotFound(_))));
+        assert!(matches!(resolve_group(group_selector), Err(DropError::GroupNotFound(_))));
     }
 
     #[cfg(any(
