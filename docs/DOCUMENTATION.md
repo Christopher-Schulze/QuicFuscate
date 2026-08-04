@@ -384,7 +384,7 @@ This document provides comprehensive technical documentation for the system arch
 
 - Developer Harness: `src/harness.rs` provides a central CLI used by scripts. Unit tests still exist in the codebase, but the harness is the main entry point for scripted internal tooling.
 - Desktop App: `apps/svelte-desktop` (SvelteKit + Svelte 5 + bits-ui + Tailwind v4, packaged through Tauri) is the canonical native desktop client with tunnel management, settings, logs, and hardware detection. State is persisted via Tauri `invoke` commands with debounced writes. The selected tunnel surface supports direct `Set QKey` / `Change QKey`, exposes compact live diagnostics (token, loss, recovered packets, policy source), and the shell restores keyboard shortcuts for navigation/tunnel actions plus a fatal-error recovery screen for true hard UI faults.
-- Web admin: `apps/svelte-admin` (SvelteKit + Svelte 5 + bits-ui + Tailwind v4) is the canonical admin/control surface that builds into `assets/web-admin/` via `scripts/build/build-web-admin.sh`. It provides dashboard, configuration, QKey management, logging views, and an explicit route-level crash fallback for render/load failures.
+- Web admin: `apps/svelte-admin` (SvelteKit + Svelte 5 + bits-ui + Tailwind v4) is the canonical admin/control surface. Its static publish output is generated into the ignored `assets/web-admin/` path by `scripts/build/build-web-admin.sh`; a fresh checkout must run that step before serving or bundling the admin root. It provides dashboard, configuration, QKey management, logging views, and an explicit route-level crash fallback for render/load failures.
 - Shared UI packages: `packages/ui` (shared Svelte 5 components: Switch, Select, Toast, ConfirmDialog, Skeleton, GlassCard, ErrorBoundary, SettingRow, AboutContent; plus ripple action, cn utility, toast store, and `createCopyFeedback` hook for clipboard-write + timed visual feedback). `ErrorBoundary` is a real Svelte boundary wrapper that can catch child render failures and render a supplied fallback. `packages/ui` has its own vitest config with 82 unit tests (9 files) under `scripts/tests/frontend/shared-ui/unit/`. `packages/theme` provides the shared CSS layer (glass morphism, layout, tokens, buttons, animations, login, scrollbar).
 - QKey: server-issued connection key string (`QKey-...`) that embeds connection parameters (remote, SNI), optional policy presets (stealth/FEC), and a bearer token. QKeys are generated in the Web Admin UI and must be treated like passwords.
 - Raw QKeys are one-time reveal credentials: the server returns the full credential at issuance time, but registry/list surfaces remain metadata-only and do not reconstruct raw QKey material later.
@@ -2132,6 +2132,7 @@ Benchmarks
 - The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, the release-version contract, app backend checks, release compilation and tests, fuzz target checks, non-duplicated feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
 - `scripts/audits/verify-simd-feature-contract.sh` is run by the CI feature matrix, the strict Clippy matrix, and the comprehensive audit. It proves that no hardware ISA name is declared as a Cargo feature, that `rust-tests,simd-selfcheck` remains a valid positive test contract, that `--all-features` remains metadata-valid, and that each removed hardware/meta selector is rejected by Cargo rather than silently accepted as hardware proof.
 - `scripts/audits/verify-cargo-feature-taxonomy.sh` is run beside the SIMD gate by CI, the strict Clippy matrix, and the comprehensive audit. It checks the exact 27-entry manifest taxonomy, the 30-selector Cargo metadata surface including implicit optional-dependency selectors, every Rust cfg and target `required-features` reference, positive aggregate build profiles, and rejection of TODO-176's retired feature-group names.
+- `scripts/audits/verify-web-admin-publish-contract.sh` is run by the CI release-contract job, the release version-contract job, and the comprehensive audit. It proves that `assets/web-admin/` is generated and ignored, checks the build/release/installer/E2E prerequisite ordering, and runs a bounded missing-`index.html` bundle negative probe without building or modifying UI sources.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo metadata --locked`, `cargo check --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` in `apps/tauri/src-tauri`.
 - The `windows-core-checks` job caps Cargo at two jobs, checks and lints `tun-windows,rust-tests`, compiles its unit-test binary, provisions the integrity-checked upstream DLL beside that binary, executes ordinary tests plus serial privileged Wintun adapter/I/O/close and WFP packet-outcome/process-exit suites, independently verifies zero managed WFP objects even after a failed behavior step, rejects owned adapter or legacy firewall-rule residue, and uploads provenance plus Windows-build evidence. Run `30508948149`, job `90764941801` proves commit `afe46e0` with the complete native Wintun and WFP lifecycle green. Manual Windows-Omega runs `30535603045` and `30536002374` add two consecutive authenticated dual-stack Wintun/WFP data-plane proofs against one unchanged ARM64 server process. The `release-contract` job runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
@@ -2682,7 +2683,7 @@ Server Options (selected):
                             Maximum simultaneous admin web connections (default: 16, maximum: 1024)
     --admin-web-operation-timeout-ms <milliseconds>
                             Per-request operation deadline (default: 30000, range: 50..=120000)
-    --admin-web-root <dir>  Static root for the web admin bundle (default: assets/web-admin)
+    --admin-web-root <dir>  Static root for the generated web admin bundle (default: assets/web-admin; build first)
     --admin-web-user <user> Admin username (or env QUICFUSCATE_ADMIN_USER)
     --admin-web-password <pass> Admin password (or env QUICFUSCATE_ADMIN_PASSWORD, minimum 6 characters)
     --qkey-ttl-secs <secs> Default QKey TTL in seconds (0 disables expiration; env QUICFUSCATE_QKEY_TTL_SECS)
@@ -2904,14 +2905,14 @@ cd apps/tauri/src-tauri && cargo check
 
 ### Web Admin
 
-The active web admin UI lives in `apps/svelte-admin/`. `scripts/build/build-web-admin.sh` builds the Svelte bundle and copies it into `assets/web-admin/`. Server startup with `--admin-web` is a separate runtime step:
+The active web admin UI lives in `apps/svelte-admin/`. `assets/web-admin/` is generated output, not a tracked runtime input. `scripts/build/build-web-admin.sh` performs the frozen Bun install, builds the Svelte bundle, and copies it into that ignored path. A fresh checkout must run this step before server startup with `--admin-web`, local E2E, or server-bundle creation:
 
 ```
 scripts/build/build-web-admin.sh
 ```
 
-The bundle output layout is the SvelteKit static adapter publish tree: `assets/web-admin/index.html`, `assets/web-admin/robots.txt`, and `assets/web-admin/_app/immutable/*` for hashed JS/CSS/assets.
-Keep `--admin-web-root` pointing at `assets/web-admin` so `/_app/...` paths resolve correctly.
+The bundle output layout is the SvelteKit static adapter publish tree: `assets/web-admin/index.html`, `assets/web-admin/robots.txt`, and `assets/web-admin/_app/immutable/*` for hashed JS/CSS/assets. `build-server-bundle.sh` and `install-server-linux.sh` fail closed when `index.html` is missing; local E2E rebuilds the ignored tree when needed. Release Linux jobs build the generated tree before calling `build-server-bundle.sh`.
+Keep `--admin-web-root` pointing at `assets/web-admin` so `/_app/...` paths resolve correctly after the generated tree exists.
 
 Admin HTTP contract notes:
 - JSON endpoints respond with `AdminResponse { success, message, data }` and `/api/clients` is wrapped.
@@ -3881,7 +3882,7 @@ This section is the authoritative build/packaging script reference in this docum
 For the broader script inventory and repository-wide file index, use `docs/MAP.md`.
 
 #### Build and Packaging (`scripts/build/`)
-- `build-web-admin.sh` - Builds `apps/svelte-admin` and publishes bundle to `assets/web-admin/`.
+- `build-web-admin.sh` - Builds `apps/svelte-admin` with frozen Bun dependencies and publishes generated output to ignored `assets/web-admin/`.
 - `build-server-bundle.sh` - Produces a server bundle into `scripts/out/build/` for deployment packaging.
 
 #### Build (`scripts/tests/build/`)
@@ -3892,7 +3893,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 #### Build (`scripts/build/`)
 - `build-pgo-release.sh` - Isolated PGO release build with run-scoped profiles, workload/merge validation, final binary hash, and `quicfuscate.pgo-release.v1` provenance manifest under `scripts/out/build/pgo-<UTC>-<random>/`
 - `build-server-bundle.sh` - Server deployment bundle (binary + assets + systemd unit)
-- `build-web-admin.sh` - SvelteKit admin UI static build to `assets/web-admin/`
+- `build-web-admin.sh` - SvelteKit admin UI static build to ignored generated output `assets/web-admin/`
 
 #### Analysis (`scripts/tests/analysis/`)
 - `analysis-coverage-summary.sh` - Coverage summary (JSON/text); `--fast` emits the bounded static function/test inventory, while `--full` runs the complete coverage path

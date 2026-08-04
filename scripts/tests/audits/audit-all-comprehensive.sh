@@ -461,6 +461,18 @@ else
     log_critical "Cargo feature taxonomy contract failed with rc=$CARGO_FEATURE_TAXONOMY_RC (see $CARGO_FEATURE_TAXONOMY_LOG)"
 fi
 
+WEB_ADMIN_PUBLISH_CONTRACT_LOG="$OUTPUT_DIR/web-admin-publish-contract.log"
+set +e
+"$PROJECT_ROOT/scripts/audits/verify-web-admin-publish-contract.sh" >"$WEB_ADMIN_PUBLISH_CONTRACT_LOG" 2>&1
+WEB_ADMIN_PUBLISH_CONTRACT_RC=$?
+set -e
+record_command_check "web_admin_publish_contract" "$WEB_ADMIN_PUBLISH_CONTRACT_RC" "artifact=$WEB_ADMIN_PUBLISH_CONTRACT_LOG"
+if [ "$WEB_ADMIN_PUBLISH_CONTRACT_RC" -eq 0 ]; then
+    log_info "Generated web-admin publish contract passed"
+else
+    log_critical "Generated web-admin publish contract failed with rc=$WEB_ADMIN_PUBLISH_CONTRACT_RC (see $WEB_ADMIN_PUBLISH_CONTRACT_LOG)"
+fi
+
 echo -e "\n> Checking allocations in hot paths..."
 HOT_PATH_ALLOC_LOG="$OUTPUT_DIR/hot-path-allocation.log"
 set +e

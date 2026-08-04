@@ -251,7 +251,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 12. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister` with SHA-256 fingerprints, Bloom fast-negative, FIFO ring eviction) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection/` `recv()` gate -> silent discard on replay
 13. Desktop native host path: `apps/tauri/src-tauri/src/main.rs` -> Tauri commands -> engine/control runtime
 14. Web-admin path: `apps/svelte-admin/src/lib/api.ts` -> Vite dev proxy (`/api` -> `127.0.0.1:9000`) -> admin HTTP endpoints -> server runtime state
-15. Build publish path: `scripts/build/build-web-admin.sh` -> `assets/web-admin/` consumed by `--admin-web-root`
+15. Generated build publish path: `apps/svelte-admin/build/` -> `scripts/build/build-web-admin.sh` -> ignored `assets/web-admin/` -> `--admin-web-root`
 16. Shared packages path: `packages/ui` (Svelte 5 components) + `packages/theme` (CSS tokens/glass/layout) -> consumed by both Svelte apps
 17. GitHub CI app backend gate: `.github/workflows/ci.yml` `app-backend-checks` -> `apps/svelte-desktop` build output -> `apps/tauri/src-tauri` `cargo check` / `cargo test`
 18. NAT traversal path discovery: `src/engine/config.rs` `[nat_traversal]` -> `src/transport/config.rs` `NatTraversalConfig` -> `src/transport/nat.rs` `NatPathDiscovery` -> path-management consumers when policy permits discovery.
@@ -281,7 +281,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 
 ## ASCII Repository Tree (curated tracked-source snapshot)
 
-This snapshot intentionally excludes gitignored paths and local generated directories. `assets/web-admin/` remains included because it is a tracked publish artifact consumed directly by the server runtime.
+This snapshot intentionally excludes gitignored paths and local generated directories. `assets/web-admin/` is generated output and is intentionally absent; `scripts/build/build-web-admin.sh` creates it before local server or release-bundle use.
 
 ```text
 .
@@ -456,14 +456,6 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |-- QuicFuscate.png
 |   |   |-- QuicFuscate_clean.png
 |   |   `-- QuicFuscate_hf.png
-|   `-- web-admin
-|       |-- _app
-|       |   |-- env.js
-|       |   |-- immutable
-|       |   |   `-- ...
-|       |   `-- version.json
-|       |-- index.html
-|       `-- robots.txt
 |-- build.rs
 |-- bun.lock
 |-- config
@@ -1554,3 +1546,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - `scripts/audits/verify-cargo-feature-taxonomy.sh` owns the exact declaration/dependency matrix, validates all Rust `cfg(feature = ...)` and Cargo target `required-features` references, compiles the valid server/client, throughput, test-suite, and experimental profiles, and rejects the retired TODO-176 groups `cpu-simd`, `stealth`, `fec`, `crypto`, `transport`, `test-crypto`, and `simd-all`.
 - TODO-176 is explicitly re-scoped: the current architecture retains local runtime, platform, internal, and test selectors plus four small convenience meta-features (`default`, `throughput`, `test-suite`, `experimental`). No broad `cpu-simd`, `stealth`, `fec`, or crypto hierarchy is claimed. TODO-734 owns test-target non-vacuity, TODO-709 owns CI feature-lane coverage, TODO-754 owns tracker/schema truth, and TODO-760 owns hardware/SIMD semantics.
 - `.github/workflows/ci.yml`, `.github/workflows/clippy-matrix.yml`, and `scripts/tests/audits/audit-all-comprehensive.sh` execute both the taxonomy gate and the narrower SIMD gate. The reconciliation changes no Rust product behavior, frontend/UI surface, Omega checkout, or remote state.
+
+## Web-Admin Generated Publish Wiring (2026-08-04, TODO-764)
+
+- `apps/svelte-admin/build/` -> `scripts/build/build-web-admin.sh` -> ignored `assets/web-admin/` -> server `--admin-web-root` -> `index.html`/SvelteKit `_app/immutable/*`; the publish tree is not a tracked release input.
+- `scripts/audits/verify-web-admin-publish-contract.sh` proves the ignored/generated ownership, frozen Bun build source and destination, server default/static-index contract, local helper and E2E prerequisites, release build-before-bundle ordering, installer/bundle missing-asset guards, and a bounded missing-`index.html` negative bundle probe.
+- `.github/workflows/ci.yml` release-contract, `.github/workflows/release.yml` release-version-contract, and `scripts/tests/audits/audit-all-comprehensive.sh` execute the gate. A fresh checkout must build the admin tree before local serving or server-bundle creation; the gate deliberately does not build or modify protected UI sources.
