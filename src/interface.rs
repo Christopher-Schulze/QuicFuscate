@@ -638,7 +638,7 @@ impl TunInterface {
         }
 
         // Extract fields with BMI2
-        let header = *(packet.as_ptr() as *const u32);
+        let header = std::ptr::read_unaligned(packet.as_ptr().cast::<u32>());
 
         // Extract version and header length with PEXT
         let ver_ihl = _pext_u32(header, 0xFF);
@@ -2086,6 +2086,64 @@ mod tests {
         let payload = vec![0u8; expected_len];
         let written = tun.write_packet(&payload).expect("write_packet must succeed");
         assert_eq!(written, expected_len);
+    }
+
+    #[test]
+    fn write_packet_accepts_intentionally_unaligned_ipv4_slice() {
+        let pool = crate::optimize::global_pool();
+        let mut tun = TunInterface::from_device_for_test(
+            Box::new(DummyTun::with_reads(Vec::new())),
+            pool,
+            false,
+        );
+        let mut backing = [0u8; 64];
+        let base = backing.as_ptr() as usize;
+        let offset = (1..4)
+            .find(|candidate| !(base + *candidate).is_multiple_of(std::mem::align_of::<u32>()))
+            .expect("an offset must produce an unaligned u32 address");
+        let packet = &mut backing[offset..];
+        packet[..20].copy_from_slice(&[
+            0x45, 0x03, 0x00, 0x3c, 0, 0, 0, 0, 64, 17, 0, 0, 192, 0, 2, 1, 198, 51, 100, 1,
+        ]);
+        let before =
+            crate::optimize::telemetry::IP_V4_PACKETS.load(std::sync::atomic::Ordering::Relaxed);
+
+        let written = tun.write_packet(packet).expect("unaligned packet must be writable");
+
+        assert_eq!(written, packet.len());
+        assert!(
+            crate::optimize::telemetry::IP_V4_PACKETS.load(std::sync::atomic::Ordering::Relaxed)
+                > before,
+            "unaligned IPv4 packet must reach header telemetry"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn bmi2_parser_accepts_intentionally_unaligned_ipv4_slice_when_supported() {
+        if !is_x86_feature_detected!("bmi2") {
+            return;
+        }
+
+        let pool = crate::optimize::global_pool();
+        let tun = TunInterface::from_device_for_test(
+            Box::new(DummyTun::with_reads(Vec::new())),
+            pool,
+            false,
+        );
+        let mut backing = [0u8; 64];
+        let base = backing.as_ptr() as usize;
+        let offset = (1..4)
+            .find(|candidate| !(base + *candidate).is_multiple_of(std::mem::align_of::<u32>()))
+            .expect("an offset must produce an unaligned u32 address");
+        let packet = &mut backing[offset..];
+        packet[..20].copy_from_slice(&[
+            0x45, 0x03, 0x00, 0x3c, 0, 0, 0, 0, 64, 17, 0, 0, 192, 0, 2, 1, 198, 51, 100, 1,
+        ]);
+
+        // SAFETY: The runtime check above proves BMI2 support for this call,
+        // and the parser uses an alignment-safe four-byte load.
+        unsafe { tun.parse_ip_header_bmi2(packet) };
     }
 
     #[test]
