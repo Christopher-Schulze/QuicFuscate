@@ -1973,6 +1973,68 @@ mod tests {
         assert_eq!(runtime.state, ServerState::Stopped);
     }
 
+    #[tokio::test]
+    async fn test_dns_workers_close_before_standalone_drain_finishes() {
+        let server_config =
+            ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let mut runtime = ServerRuntime::new_standalone_default(
+            EngineConfig::default(),
+            server_config,
+            None,
+            crate::optimize::OptimizeConfig::default(),
+            blocked_ips,
+            qkey_registry,
+            StandaloneAdminWebBootstrap::default(),
+        )
+        .unwrap();
+        runtime.start().expect("standalone runtime must start");
+
+        let metrics = runtime.standalone_metrics();
+        let owner = Arc::new(DnsInterceptWorkerOwner::new(Arc::clone(&metrics)));
+        runtime.dns_intercept_workers = Some(Arc::clone(&owner));
+        let queue = Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(
+            1, 1024,
+        )));
+        let worker_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_worker = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_state = Arc::clone(&owner.state);
+        let worker_queue = Arc::clone(&queue);
+        let worker_started_for_worker = Arc::clone(&worker_started);
+        let release_worker_for_worker = Arc::clone(&release_worker);
+        owner
+            .spawn(move || {
+                worker_started_for_worker.store(true, std::sync::atomic::Ordering::Release);
+                while !release_worker_for_worker.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                publish_dns_intercept_response(&worker_state, &worker_queue, vec![7, 8, 9])
+            })
+            .expect("standalone DNS worker must be accepted");
+        while !worker_started.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(runtime.initiate_drain(b"test_dns_worker_drain"));
+        release_worker.store(true, std::sync::atomic::Ordering::Release);
+        let socket = runtime.socket();
+        let mut out = [0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
+        runtime
+            .finish_drain(socket.as_ref(), &mut out, metrics.as_ref(), b"test_dns_worker_drain")
+            .await;
+
+        assert_eq!(
+            metrics
+                .dns_intercept_worker_late_publication
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(queue.lock().unwrap().len(), 0);
+        assert!(runtime.dns_intercept_workers.is_none());
+        runtime.stop().expect("standalone runtime must stop");
+    }
+
     // --- Session lifecycle tests ---
 
     #[test]

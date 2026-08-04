@@ -375,12 +375,264 @@ impl DnsInterceptAdmission {
     }
 }
 
+const DNS_INTERCEPT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+const DNS_INTERCEPT_WORKER_REAP_INTERVAL: Duration = Duration::from_millis(2);
+const DNS_INTERCEPT_WORKER_QUEUED_CANCEL_TIMEOUT: Duration = Duration::from_millis(25);
+
+#[derive(Debug)]
+enum DnsInterceptWorkerResult {
+    ResponseQueued,
+    EmptyResponse,
+    ResponseBuildFailed,
+    LatePublication,
+    QueueRejected(crate::core::MasqueDownlinkQueueReject),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DnsInterceptWorkerSpawnError {
+    Closed,
+}
+
+struct DnsInterceptWorkerTask {
+    handle: tokio::task::JoinHandle<DnsInterceptWorkerResult>,
+    started: Arc<AtomicBool>,
+}
+
+struct DnsInterceptWorkerState {
+    closed: bool,
+    tasks: Vec<DnsInterceptWorkerTask>,
+}
+
+/// Owns accepted DNS blocking operations and closes the publication gate before drain.
+struct DnsInterceptWorkerOwner {
+    state: Arc<Mutex<DnsInterceptWorkerState>>,
+    metrics: Arc<Metrics>,
+}
+
+impl DnsInterceptWorkerOwner {
+    fn new(metrics: Arc<Metrics>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(DnsInterceptWorkerState {
+                closed: false,
+                tasks: Vec::new(),
+            })),
+            metrics,
+        }
+    }
+
+    fn close_admission(&self) {
+        self.state.lock().closed = true;
+    }
+
+    fn spawn<F>(&self, operation: F) -> Result<(), DnsInterceptWorkerSpawnError>
+    where
+        F: FnOnce() -> DnsInterceptWorkerResult + Send + 'static,
+    {
+        let mut state = self.state.lock();
+        if state.closed {
+            return Err(DnsInterceptWorkerSpawnError::Closed);
+        }
+
+        let started = Arc::new(AtomicBool::new(false));
+        let started_for_worker = Arc::clone(&started);
+        let metrics = Arc::clone(&self.metrics);
+        let handle = tokio::task::spawn_blocking(move || {
+            started_for_worker.store(true, Ordering::Release);
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
+                Ok(result) => {
+                    record_dns_intercept_worker_result(&metrics, &result);
+                    result
+                }
+                Err(payload) => {
+                    metrics.record_dns_intercept_worker_event(
+                        crate::implementations::server::metrics::DnsInterceptWorkerEvent::Panic,
+                    );
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        });
+        state.tasks.push(DnsInterceptWorkerTask { handle, started });
+        Ok(())
+    }
+
+    fn take_finished(&self) -> Vec<DnsInterceptWorkerTask> {
+        let mut state = self.state.lock();
+        let mut finished = Vec::new();
+        let mut index = 0;
+        while index < state.tasks.len() {
+            if state.tasks[index].handle.is_finished() {
+                finished.push(state.tasks.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        finished
+    }
+
+    fn take_all(&self) -> Vec<DnsInterceptWorkerTask> {
+        std::mem::take(&mut self.state.lock().tasks)
+    }
+
+    fn has_tasks(&self) -> bool {
+        !self.state.lock().tasks.is_empty()
+    }
+
+    async fn observe_finished(&self) {
+        for task in self.take_finished() {
+            Self::observe_join_result(&self.metrics, task.started, task.handle.await);
+        }
+    }
+
+    fn observe_join_result(
+        metrics: &Metrics,
+        started: Arc<AtomicBool>,
+        result: Result<DnsInterceptWorkerResult, tokio::task::JoinError>,
+    ) {
+        if let Err(error) = result {
+            if error.is_cancelled() {
+                let event = if started.load(Ordering::Acquire) {
+                    crate::implementations::server::metrics::DnsInterceptWorkerEvent::StartedCancellation
+                } else {
+                    crate::implementations::server::metrics::DnsInterceptWorkerEvent::QueuedCancellation
+                };
+                metrics.record_dns_intercept_worker_event(event);
+            } else if !error.is_panic() {
+                metrics.record_dns_intercept_worker_event(
+                    crate::implementations::server::metrics::DnsInterceptWorkerEvent::JoinError,
+                );
+            }
+        }
+    }
+
+    async fn shutdown(&self) {
+        self.close_admission();
+        let deadline = Instant::now() + DNS_INTERCEPT_WORKER_SHUTDOWN_TIMEOUT;
+        loop {
+            self.observe_finished().await;
+            if !self.has_tasks() {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::time::sleep(remaining.min(DNS_INTERCEPT_WORKER_REAP_INTERVAL)).await;
+        }
+        self.observe_finished().await;
+
+        for task in self.take_all() {
+            let DnsInterceptWorkerTask { handle, started } = task;
+            if handle.is_finished() {
+                Self::observe_join_result(&self.metrics, started, handle.await);
+                continue;
+            }
+
+            handle.abort();
+            if started.load(Ordering::Acquire) {
+                self.metrics.record_dns_intercept_worker_event(
+                    crate::implementations::server::metrics::DnsInterceptWorkerEvent::ShutdownExpired,
+                );
+                log::warn!(
+                    "DNS intercept worker exceeded the bounded shutdown deadline; operation was deliberately abandoned"
+                );
+                continue;
+            }
+
+            match tokio::time::timeout(DNS_INTERCEPT_WORKER_QUEUED_CANCEL_TIMEOUT, handle).await {
+                Ok(result) => Self::observe_join_result(&self.metrics, started, result),
+                Err(_) => {
+                    let event = if started.load(Ordering::Acquire) {
+                        crate::implementations::server::metrics::DnsInterceptWorkerEvent::ShutdownExpired
+                    } else {
+                        crate::implementations::server::metrics::DnsInterceptWorkerEvent::QueuedCancellation
+                    };
+                    self.metrics.record_dns_intercept_worker_event(event);
+                }
+            }
+        }
+    }
+
+    fn abandon(&self) {
+        self.close_admission();
+        for task in self.take_all() {
+            if task.handle.is_finished() {
+                drop(task.handle);
+                continue;
+            }
+            task.handle.abort();
+            let event = if task.started.load(Ordering::Acquire) {
+                crate::implementations::server::metrics::DnsInterceptWorkerEvent::ShutdownExpired
+            } else {
+                crate::implementations::server::metrics::DnsInterceptWorkerEvent::QueuedCancellation
+            };
+            self.metrics.record_dns_intercept_worker_event(event);
+        }
+    }
+}
+
+impl Drop for DnsInterceptWorkerOwner {
+    fn drop(&mut self) {
+        self.state.lock().closed = true;
+        for task in std::mem::take(&mut self.state.lock().tasks) {
+            task.handle.abort();
+        }
+    }
+}
+
+fn record_dns_intercept_worker_result(metrics: &Metrics, result: &DnsInterceptWorkerResult) {
+    let event = match result {
+        DnsInterceptWorkerResult::ResponseQueued => {
+            crate::implementations::server::metrics::DnsInterceptWorkerEvent::ResponseQueued
+        }
+        DnsInterceptWorkerResult::EmptyResponse => {
+            crate::implementations::server::metrics::DnsInterceptWorkerEvent::EmptyResponse
+        }
+        DnsInterceptWorkerResult::ResponseBuildFailed => {
+            crate::implementations::server::metrics::DnsInterceptWorkerEvent::ResponseBuildFailed
+        }
+        DnsInterceptWorkerResult::LatePublication => {
+            crate::implementations::server::metrics::DnsInterceptWorkerEvent::LatePublication
+        }
+        DnsInterceptWorkerResult::QueueRejected(reason) => match reason {
+            crate::core::MasqueDownlinkQueueReject::PacketCapacity => {
+                metrics.record_masque_downlink_response_drop(*reason);
+                crate::implementations::server::metrics::DnsInterceptWorkerEvent::QueueRejectedPacketCapacity
+            }
+            crate::core::MasqueDownlinkQueueReject::ByteCapacity => {
+                metrics.record_masque_downlink_response_drop(*reason);
+                crate::implementations::server::metrics::DnsInterceptWorkerEvent::QueueRejectedByteCapacity
+            }
+        },
+    };
+    metrics.record_dns_intercept_worker_event(event);
+}
+
+fn publish_dns_intercept_response(
+    state: &Arc<Mutex<DnsInterceptWorkerState>>,
+    downlink_queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
+    packet: Vec<u8>,
+) -> DnsInterceptWorkerResult {
+    let state_guard = state.lock();
+    if state_guard.closed {
+        return DnsInterceptWorkerResult::LatePublication;
+    }
+    let admission = match downlink_queue.lock() {
+        Ok(mut guard) => guard.enqueue(packet),
+        Err(poisoned) => poisoned.into_inner().enqueue(packet),
+    };
+    match admission {
+        Ok(()) => DnsInterceptWorkerResult::ResponseQueued,
+        Err(reason) => DnsInterceptWorkerResult::QueueRejected(reason),
+    }
+}
+
 fn spawn_dns_intercept(
     pkt: &[u8],
     upstream_resolvers: Arc<Vec<Ipv4Addr>>,
     downlink_queue: Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
     metrics: Arc<Metrics>,
     admission: Arc<DnsInterceptAdmission>,
+    workers: Arc<DnsInterceptWorkerOwner>,
     fingerprint_profile: OsFingerprintProfile,
 ) -> bool {
     let parsed = parse_ipv4_udp_dns_query(pkt)
@@ -450,22 +702,23 @@ fn spawn_dns_intercept(
             return true;
         }
     };
-    tokio::task::spawn_blocking(move || {
+    let worker_state = Arc::clone(&workers.state);
+    let spawn_result = workers.spawn(move || {
         let _permit = permit;
         let response = resolve_dns_query_via_upstream(&payload, upstream_resolvers.as_slice());
         if response.is_empty() {
-            return;
+            return DnsInterceptWorkerResult::EmptyResponse;
         }
-        if let Some(packet) = build_response_packet(&response) {
-            let admission = match downlink_queue.lock() {
-                Ok(mut guard) => guard.enqueue(packet),
-                Err(poisoned) => poisoned.into_inner().enqueue(packet),
-            };
-            if let Err(reason) = admission {
-                metrics.record_masque_downlink_response_drop(reason);
-            }
-        }
+        let Some(packet) = build_response_packet(&response) else {
+            return DnsInterceptWorkerResult::ResponseBuildFailed;
+        };
+        publish_dns_intercept_response(&worker_state, &downlink_queue, packet)
     });
+    if matches!(spawn_result, Err(DnsInterceptWorkerSpawnError::Closed)) {
+        metrics.record_dns_intercept_worker_event(
+            crate::implementations::server::metrics::DnsInterceptWorkerEvent::ClosedBeforeSpawn,
+        );
+    }
     true
 }
 
@@ -534,6 +787,153 @@ mod dns_intercept_admission_tests {
             global.try_acquire(second_source),
             Err(DnsInterceptAdmissionDrop::GlobalRate)
         ));
+    }
+}
+
+#[cfg(test)]
+mod dns_intercept_worker_tests {
+    use super::*;
+
+    fn worker_test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("worker lifecycle test runtime must build")
+    }
+
+    #[test]
+    fn worker_owner_reaps_completion_and_panic() {
+        let runtime = worker_test_runtime();
+        runtime.block_on(async {
+            let metrics = Arc::new(Metrics::new());
+            let owner = DnsInterceptWorkerOwner::new(Arc::clone(&metrics));
+            owner
+                .spawn(|| DnsInterceptWorkerResult::ResponseQueued)
+                .expect("completion worker must be accepted");
+            owner.spawn(|| panic!("intentional worker panic")).expect("panic worker must be accepted");
+
+            for _ in 0..100 {
+                owner.observe_finished().await;
+                if !owner.has_tasks() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            assert!(!owner.has_tasks());
+            assert_eq!(
+                metrics
+                    .dns_intercept_worker_response_queued
+                    .load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(metrics.dns_intercept_worker_panic.load(Ordering::Relaxed), 1);
+
+            owner.close_admission();
+            assert_eq!(
+                owner.spawn(|| DnsInterceptWorkerResult::ResponseQueued),
+                Err(DnsInterceptWorkerSpawnError::Closed)
+            );
+        });
+    }
+
+    #[test]
+    fn worker_owner_cancels_queued_work_and_bounds_started_shutdown() {
+        let runtime = worker_test_runtime();
+        runtime.block_on(async {
+            let metrics = Arc::new(Metrics::new());
+            let owner = DnsInterceptWorkerOwner::new(Arc::clone(&metrics));
+            let first_started = Arc::new(AtomicBool::new(false));
+            let release_first = Arc::new(AtomicBool::new(false));
+            let first_started_for_worker = Arc::clone(&first_started);
+            let release_first_for_worker = Arc::clone(&release_first);
+            owner
+                .spawn(move || {
+                    first_started_for_worker.store(true, Ordering::Release);
+                    while !release_first_for_worker.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                    DnsInterceptWorkerResult::ResponseQueued
+                })
+                .expect("started blocking worker must be accepted");
+
+            while !first_started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+
+            let second_started = Arc::new(AtomicBool::new(false));
+            let second_started_for_worker = Arc::clone(&second_started);
+            owner
+                .spawn(move || {
+                    second_started_for_worker.store(true, Ordering::Release);
+                    DnsInterceptWorkerResult::ResponseQueued
+                })
+                .expect("queued blocking worker must be accepted");
+
+            let shutdown_started = Instant::now();
+            owner.shutdown().await;
+            assert!(shutdown_started.elapsed() < Duration::from_secs(1));
+            assert!(!second_started.load(Ordering::Acquire));
+            assert_eq!(
+                metrics
+                    .dns_intercept_worker_queued_cancellation
+                    .load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                metrics
+                    .dns_intercept_worker_shutdown_expired
+                    .load(Ordering::Relaxed),
+                1
+            );
+
+            release_first.store(true, Ordering::Release);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+    }
+
+    #[test]
+    fn worker_owner_closes_publication_before_teardown() {
+        let runtime = worker_test_runtime();
+        runtime.block_on(async {
+            let metrics = Arc::new(Metrics::new());
+            let owner = DnsInterceptWorkerOwner::new(Arc::clone(&metrics));
+            let queue = Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(
+                1, 1024,
+            )));
+            let worker_started = Arc::new(AtomicBool::new(false));
+            let release_worker = Arc::new(AtomicBool::new(false));
+            let worker_state = Arc::clone(&owner.state);
+            let worker_queue = Arc::clone(&queue);
+            let worker_started_for_worker = Arc::clone(&worker_started);
+            let release_worker_for_worker = Arc::clone(&release_worker);
+            owner
+                .spawn(move || {
+                    worker_started_for_worker.store(true, Ordering::Release);
+                    while !release_worker_for_worker.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                    publish_dns_intercept_response(&worker_state, &worker_queue, vec![1, 2, 3])
+                })
+                .expect("publication worker must be accepted");
+
+            while !worker_started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+            owner.close_admission();
+            release_worker.store(true, Ordering::Release);
+            owner.shutdown().await;
+
+            assert_eq!(
+                metrics
+                    .dns_intercept_worker_late_publication
+                    .load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(queue.lock().expect("queue mutex must remain healthy").len(), 0);
+        });
     }
 }
 

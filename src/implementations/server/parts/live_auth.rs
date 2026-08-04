@@ -940,6 +940,7 @@ async fn process_live_server_client_datagram(
     tun_enable: bool,
     dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
     dns_intercept_admission: Arc<DnsInterceptAdmission>,
+    dns_intercept_workers: Arc<DnsInterceptWorkerOwner>,
     tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     tun_notify: Arc<tokio::sync::Notify>,
     runtime_shutdown: Arc<AtomicBool>,
@@ -1018,6 +1019,7 @@ async fn process_live_server_client_datagram(
             let masque_metrics = Arc::clone(metrics);
             let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
             let dns_admission = Arc::clone(&dns_intercept_admission);
+            let dns_workers = Arc::clone(&dns_intercept_workers);
             let dns_downlink_queue = conn
                 .masque_downlink_queue()
                 .expect("MASQUE downlink queue installed before callback");
@@ -1064,6 +1066,7 @@ async fn process_live_server_client_datagram(
                         Arc::clone(&dns_downlink_queue),
                         Arc::clone(&masque_metrics),
                         Arc::clone(&dns_admission),
+                        Arc::clone(&dns_workers),
                         fingerprint_profile,
                     ) {
                         return;

@@ -61,6 +61,42 @@ pub enum TunDownlinkBackpressureDrop {
     Shutdown,
 }
 
+/// Observable lifecycle and terminal outcomes for accepted DNS intercept workers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DnsInterceptWorkerEvent {
+    ClosedBeforeSpawn,
+    ResponseQueued,
+    EmptyResponse,
+    ResponseBuildFailed,
+    LatePublication,
+    QueueRejectedPacketCapacity,
+    QueueRejectedByteCapacity,
+    Panic,
+    QueuedCancellation,
+    StartedCancellation,
+    ShutdownExpired,
+    JoinError,
+}
+
+impl DnsInterceptWorkerEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClosedBeforeSpawn => "closed_before_spawn",
+            Self::ResponseQueued => "response_queued",
+            Self::EmptyResponse => "empty_response",
+            Self::ResponseBuildFailed => "response_build_failed",
+            Self::LatePublication => "late_publication",
+            Self::QueueRejectedPacketCapacity => "queue_rejected_packet_capacity",
+            Self::QueueRejectedByteCapacity => "queue_rejected_byte_capacity",
+            Self::Panic => "panic",
+            Self::QueuedCancellation => "queued_cancellation",
+            Self::StartedCancellation => "started_cancellation",
+            Self::ShutdownExpired => "shutdown_expired",
+            Self::JoinError => "join_error",
+        }
+    }
+}
+
 /// Server metrics collector.
 #[derive(Debug)]
 pub struct Metrics {
@@ -129,6 +165,18 @@ pub struct Metrics {
     pub masque_downlink_response_drop_terminal_transport_error: AtomicU64,
     pub masque_downlink_response_drop_shutdown: AtomicU64,
     pub dns_intercept_dropped: AtomicU64,
+    pub dns_intercept_worker_closed_before_spawn: AtomicU64,
+    pub dns_intercept_worker_response_queued: AtomicU64,
+    pub dns_intercept_worker_empty_response: AtomicU64,
+    pub dns_intercept_worker_response_build_failed: AtomicU64,
+    pub dns_intercept_worker_late_publication: AtomicU64,
+    pub dns_intercept_worker_queue_rejected_packet_capacity: AtomicU64,
+    pub dns_intercept_worker_queue_rejected_byte_capacity: AtomicU64,
+    pub dns_intercept_worker_panic: AtomicU64,
+    pub dns_intercept_worker_queued_cancellation: AtomicU64,
+    pub dns_intercept_worker_started_cancellation: AtomicU64,
+    pub dns_intercept_worker_shutdown_expired: AtomicU64,
+    pub dns_intercept_worker_join_error: AtomicU64,
     pub client_fanout_dropped: AtomicU64,
 
     // Stealth metrics
@@ -229,6 +277,18 @@ impl Metrics {
             masque_downlink_response_drop_terminal_transport_error: AtomicU64::new(0),
             masque_downlink_response_drop_shutdown: AtomicU64::new(0),
             dns_intercept_dropped: AtomicU64::new(0),
+            dns_intercept_worker_closed_before_spawn: AtomicU64::new(0),
+            dns_intercept_worker_response_queued: AtomicU64::new(0),
+            dns_intercept_worker_empty_response: AtomicU64::new(0),
+            dns_intercept_worker_response_build_failed: AtomicU64::new(0),
+            dns_intercept_worker_late_publication: AtomicU64::new(0),
+            dns_intercept_worker_queue_rejected_packet_capacity: AtomicU64::new(0),
+            dns_intercept_worker_queue_rejected_byte_capacity: AtomicU64::new(0),
+            dns_intercept_worker_panic: AtomicU64::new(0),
+            dns_intercept_worker_queued_cancellation: AtomicU64::new(0),
+            dns_intercept_worker_started_cancellation: AtomicU64::new(0),
+            dns_intercept_worker_shutdown_expired: AtomicU64::new(0),
+            dns_intercept_worker_join_error: AtomicU64::new(0),
             client_fanout_dropped: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
@@ -335,6 +395,36 @@ impl Metrics {
     pub fn record_dns_intercept_drop(&self) {
         self.dns_intercept_dropped.fetch_add(1, Ordering::Relaxed);
         self.record_rate_limited();
+    }
+
+    pub(crate) fn record_dns_intercept_worker_event(&self, event: DnsInterceptWorkerEvent) {
+        let counter = match event {
+            DnsInterceptWorkerEvent::ClosedBeforeSpawn => {
+                &self.dns_intercept_worker_closed_before_spawn
+            }
+            DnsInterceptWorkerEvent::ResponseQueued => &self.dns_intercept_worker_response_queued,
+            DnsInterceptWorkerEvent::EmptyResponse => &self.dns_intercept_worker_empty_response,
+            DnsInterceptWorkerEvent::ResponseBuildFailed => {
+                &self.dns_intercept_worker_response_build_failed
+            }
+            DnsInterceptWorkerEvent::LatePublication => &self.dns_intercept_worker_late_publication,
+            DnsInterceptWorkerEvent::QueueRejectedPacketCapacity => {
+                &self.dns_intercept_worker_queue_rejected_packet_capacity
+            }
+            DnsInterceptWorkerEvent::QueueRejectedByteCapacity => {
+                &self.dns_intercept_worker_queue_rejected_byte_capacity
+            }
+            DnsInterceptWorkerEvent::Panic => &self.dns_intercept_worker_panic,
+            DnsInterceptWorkerEvent::QueuedCancellation => {
+                &self.dns_intercept_worker_queued_cancellation
+            }
+            DnsInterceptWorkerEvent::StartedCancellation => {
+                &self.dns_intercept_worker_started_cancellation
+            }
+            DnsInterceptWorkerEvent::ShutdownExpired => &self.dns_intercept_worker_shutdown_expired,
+            DnsInterceptWorkerEvent::JoinError => &self.dns_intercept_worker_join_error,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_client_fanout_drop(&self) {
@@ -844,6 +934,71 @@ impl Metrics {
             "quicfuscate_dns_intercept_dropped_total {}\n\n",
             self.dns_intercept_dropped.load(Ordering::Relaxed)
         );
+        out.push_str(
+            "# HELP quicfuscate_dns_intercept_worker_events_total DNS intercept worker lifecycle and terminal outcomes\n",
+        );
+        out.push_str("# TYPE quicfuscate_dns_intercept_worker_events_total counter\n");
+        for (event, value) in [
+            DnsInterceptWorkerEvent::ClosedBeforeSpawn,
+            DnsInterceptWorkerEvent::ResponseQueued,
+            DnsInterceptWorkerEvent::EmptyResponse,
+            DnsInterceptWorkerEvent::ResponseBuildFailed,
+            DnsInterceptWorkerEvent::LatePublication,
+            DnsInterceptWorkerEvent::QueueRejectedPacketCapacity,
+            DnsInterceptWorkerEvent::QueueRejectedByteCapacity,
+            DnsInterceptWorkerEvent::Panic,
+            DnsInterceptWorkerEvent::QueuedCancellation,
+            DnsInterceptWorkerEvent::StartedCancellation,
+            DnsInterceptWorkerEvent::ShutdownExpired,
+            DnsInterceptWorkerEvent::JoinError,
+        ]
+        .into_iter()
+        .map(|event| {
+            let value = match event {
+                DnsInterceptWorkerEvent::ClosedBeforeSpawn => {
+                    self.dns_intercept_worker_closed_before_spawn.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::ResponseQueued => {
+                    self.dns_intercept_worker_response_queued.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::EmptyResponse => {
+                    self.dns_intercept_worker_empty_response.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::ResponseBuildFailed => {
+                    self.dns_intercept_worker_response_build_failed.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::LatePublication => {
+                    self.dns_intercept_worker_late_publication.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::QueueRejectedPacketCapacity => {
+                    self.dns_intercept_worker_queue_rejected_packet_capacity.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::QueueRejectedByteCapacity => {
+                    self.dns_intercept_worker_queue_rejected_byte_capacity.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::Panic => {
+                    self.dns_intercept_worker_panic.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::QueuedCancellation => {
+                    self.dns_intercept_worker_queued_cancellation.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::StartedCancellation => {
+                    self.dns_intercept_worker_started_cancellation.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::ShutdownExpired => {
+                    self.dns_intercept_worker_shutdown_expired.load(Ordering::Relaxed)
+                }
+                DnsInterceptWorkerEvent::JoinError => {
+                    self.dns_intercept_worker_join_error.load(Ordering::Relaxed)
+                }
+            };
+            (event.as_str(), value)
+        }) {
+            write_metric!(
+                "quicfuscate_dns_intercept_worker_events_total{{event=\"{event}\"}} {value}\n"
+            );
+        }
+        out.push('\n');
         out.push_str(
             "# HELP quicfuscate_client_fanout_dropped_total Broadcast/multicast packets dropped before fan-out queue admission\n",
         );
@@ -1580,6 +1735,28 @@ mod tests {
 
         assert!(output.contains("quicfuscate_dns_intercept_dropped_total 1"));
         assert_eq!(metrics.dns_intercept_dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn dns_intercept_worker_events_are_exported_without_rate_limit_side_effects() {
+        let metrics = Metrics::new();
+        metrics.record_dns_intercept_worker_event(DnsInterceptWorkerEvent::QueuedCancellation);
+        metrics.record_dns_intercept_worker_event(DnsInterceptWorkerEvent::ShutdownExpired);
+        metrics
+            .record_dns_intercept_worker_event(DnsInterceptWorkerEvent::QueueRejectedByteCapacity);
+
+        let output = metrics.export();
+
+        assert!(output.contains(
+            "quicfuscate_dns_intercept_worker_events_total{event=\"queued_cancellation\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_dns_intercept_worker_events_total{event=\"shutdown_expired\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_dns_intercept_worker_events_total{event=\"queue_rejected_byte_capacity\"} 1"
+        ));
+        assert_eq!(metrics.rate_limited.load(Ordering::Relaxed), 0);
     }
 
     #[test]

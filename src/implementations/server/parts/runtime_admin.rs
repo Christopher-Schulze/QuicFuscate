@@ -20,6 +20,8 @@ pub struct ServerRuntime {
     stats: Arc<ServerStats>,
     /// Optional standalone live UDP runtime state.
     live: Option<ServerLiveRuntime>,
+    /// Owner for accepted standalone DNS interception blocking operations.
+    dns_intercept_workers: Option<Arc<DnsInterceptWorkerOwner>>,
     /// Shared owner for all stealth background workers of this generation.
     stealth_runtime: Arc<StealthRuntimeOwner>,
 }

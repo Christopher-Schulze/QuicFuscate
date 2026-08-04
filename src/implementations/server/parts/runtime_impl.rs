@@ -73,6 +73,7 @@ impl ServerRuntime {
             state: ServerState::Stopped,
             stats: Arc::new(ServerStats::default()),
             live: None,
+            dns_intercept_workers: None,
             stealth_runtime,
         })
     }
@@ -442,6 +443,9 @@ impl ServerRuntime {
     /// Stop the server.
     pub fn stop(&mut self) -> Result<(), EngineError> {
         self.stealth_runtime.request_shutdown();
+        if let Some(dns_workers) = self.dns_intercept_workers.take() {
+            dns_workers.abandon();
+        }
         let tun_reader_error = self.stop_tun_reader().err();
         if self.state == ServerState::Stopped {
             let mut cleanup_errors = Vec::new();
@@ -837,6 +841,8 @@ impl ServerRuntime {
         let local_addr = self.local_addr();
         let blocked_ips = self.blocked_ips().clone();
         let qkey_registry = self.qkey_registry().clone();
+        let dns_intercept_workers = Arc::new(DnsInterceptWorkerOwner::new(Arc::clone(&metrics)));
+        self.dns_intercept_workers = Some(Arc::clone(&dns_intercept_workers));
         let Some(mut admin_actions_rx) = self.live_mut().admin_actions_rx.take() else {
             if let Err(stop_error) = self.stop() {
                 return Err(std::io::Error::other(format!(
@@ -1092,6 +1098,7 @@ impl ServerRuntime {
                                 tun_enable,
                                 Arc::clone(&dns_upstream_resolvers),
                                 Arc::clone(&dns_intercept_admission),
+                                Arc::clone(&dns_intercept_workers),
                                 Arc::clone(&runtime_parts.tun_fault),
                                 Arc::clone(&runtime_parts.tun_notify),
                                 Arc::clone(&runtime_parts.shutdown),
@@ -1124,6 +1131,7 @@ impl ServerRuntime {
                     }
                 }
                 _ = housekeeping.tick() => {
+                    dns_intercept_workers.observe_finished().await;
                     if let Some(fault) = tun_fault.lock().clone() {
                         runtime_fault = Some(fault);
                         break;
@@ -1569,6 +1577,9 @@ impl ServerRuntime {
         }
         self.state = ServerState::Draining;
         let grace_ms = self.graceful_shutdown.grace().as_millis();
+        if let Some(dns_workers) = self.dns_intercept_workers.as_ref() {
+            dns_workers.close_admission();
+        }
         let live = self.live_mut();
         live.accept_loop.shutdown();
         log::info!(
@@ -1600,6 +1611,7 @@ impl ServerRuntime {
         metrics: &Metrics,
         reason: &'static [u8],
     ) {
+        let dns_workers = self.dns_intercept_workers.take();
         let live = self.live_mut();
         if tokio::time::timeout(
             FINAL_CLOSE_FLUSH_TIMEOUT,
@@ -1612,6 +1624,9 @@ impl ServerRuntime {
                 "Final shutdown frame flush exceeded {} ms; continuing teardown",
                 FINAL_CLOSE_FLUSH_TIMEOUT.as_millis()
             );
+        }
+        if let Some(dns_workers) = dns_workers {
+            dns_workers.shutdown().await;
         }
         live.service_signals.shutdown_all();
     }
