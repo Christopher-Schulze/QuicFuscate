@@ -8,6 +8,7 @@ exec python3 - "$PROJECT_ROOT" <<'PY'
 from __future__ import annotations
 
 import collections
+import json
 import re
 import subprocess
 import sys
@@ -374,15 +375,98 @@ def validate_coverage(manifest_categories: set[str]) -> tuple[int, int, int, col
     return len(tracked), len(ignored), len(untracked), ignored_counts
 
 
+def validate_graphify_evidence() -> str:
+    """Validate the latest run-scoped Graphify evidence contract if present."""
+    graph_path = ROOT / "graphify-out/graph.json"
+    candidates = sorted((ROOT / "scripts/out/audits").glob("graphify-*/graphify-evidence.json"))
+    if not candidates:
+        if graph_path.is_file():
+            fail("legacy Graphify graph exists without a run-scoped evidence manifest")
+        return "absent"
+
+    manifest_path = candidates[-1]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"Graphify evidence manifest is unreadable: {manifest_path.relative_to(ROOT)} ({exc})")
+    required = {
+        "schema",
+        "status",
+        "provenance",
+        "scope",
+        "detection",
+        "extraction",
+        "semantic",
+        "health",
+        "unsupported_surfaces",
+        "legacy_artifacts",
+        "artifacts",
+    }
+    missing = required - manifest.keys()
+    if missing:
+        fail(f"Graphify evidence manifest is missing fields: {sorted(missing)}")
+    if manifest["schema"] != "quicfuscate.graphify-evidence.v1":
+        fail(f"unknown Graphify evidence schema: {manifest['schema']!r}")
+    if manifest["status"] not in {"PASS", "BLOCKED", "UNAVAILABLE", "FAIL"}:
+        fail(f"unknown Graphify evidence status: {manifest['status']!r}")
+
+    provenance = manifest["provenance"]
+    if not isinstance(provenance, dict):
+        fail("Graphify evidence provenance is not an object")
+    current_revision = git_lines("rev-parse", "HEAD")[0]
+    if provenance.get("source_revision") != current_revision:
+        fail("Graphify evidence manifest is stale relative to the current Git revision")
+    scope_hash = provenance.get("source_scope_sha256", "")
+    if not isinstance(scope_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", scope_hash):
+        fail("Graphify evidence has no valid source-scope SHA-256")
+    if not provenance.get("generated_at_utc") or not provenance.get("graphify_version"):
+        fail("Graphify evidence provenance is incomplete")
+
+    detection = manifest["detection"]
+    if not isinstance(detection, dict) or not isinstance(detection.get("category_counts"), dict):
+        fail("Graphify evidence detection summary is malformed")
+    extraction = manifest["extraction"]
+    if not isinstance(extraction, dict):
+        fail("Graphify evidence extraction summary is malformed")
+    health = manifest["health"]
+    normalized = health.get("normalized") if isinstance(health, dict) else None
+    if not isinstance(normalized, dict):
+        fail("Graphify evidence normalized health summary is missing")
+    if normalized.get("dangling_edges") != 0:
+        fail("Graphify normalized evidence still contains dangling edges")
+    if normalized.get("stable_node_ids") is not True or normalized.get("relative_source_files") is not True:
+        fail("Graphify normalized evidence does not prove stable relative source identity")
+
+    semantic = manifest["semantic"]
+    if not isinstance(semantic, dict) or semantic.get("status") not in {"PASS", "PARTIAL", "UNAVAILABLE", "BLOCKED"}:
+        fail("Graphify semantic availability is not explicitly classified")
+    unsupported = manifest["unsupported_surfaces"]
+    if not isinstance(unsupported, dict):
+        fail("Graphify unsupported-surface manifest is not an object")
+
+    artifacts = manifest["artifacts"]
+    for key in ("raw_ast", "normalized_ast", "report"):
+        relative = artifacts.get(key) if isinstance(artifacts, dict) else None
+        if not isinstance(relative, str) or not (ROOT / relative).is_file():
+            fail(f"Graphify evidence artifact is missing: {key}")
+    legacy = manifest["legacy_artifacts"]
+    if graph_path.is_file() and (not isinstance(legacy, dict) or legacy.get("stale") is not True):
+        fail("legacy Graphify graph is present but not marked stale/currently attributable")
+    print(f"graphify evidence={manifest['status']} manifest={manifest_path.relative_to(ROOT)}")
+    return manifest["status"]
+
+
 registered, sections, section_counts = validate_tracker()
 current_count, current_unique, missing_current = validate_todo_corpus(registered, sections)
 done_count, archive_exception_count = validate_archive(registered)
 coverage_categories = validate_coverage_manifest()
 tracked_count, ignored_count, untracked_count, _ = validate_coverage(coverage_categories)
+graphify_status = validate_graphify_evidence()
 print(
     "PASS: audit completeness "
     f"tracker={len(registered)} sections={dict(section_counts)} "
     f"current_details={current_count}/{current_unique} missing_current={missing_current} "
-    f"done_archive={done_count} explicit_archive_exceptions={archive_exception_count}"
+    f"done_archive={done_count} explicit_archive_exceptions={archive_exception_count} "
+    f"graphify={graphify_status}"
 )
 PY
