@@ -703,6 +703,7 @@ impl ServerRuntime {
         &mut self,
         addr: std::net::SocketAddr,
         web_root: std::path::PathBuf,
+        max_connections: usize,
         admin_web_user: Option<String>,
         admin_web_password: Option<String>,
     ) -> std::io::Result<()> {
@@ -717,6 +718,7 @@ impl ServerRuntime {
             self,
             addr,
             web_root,
+            max_connections,
             admin_web_user,
             admin_web_password,
             config_path.as_deref(),
@@ -746,6 +748,7 @@ impl ServerRuntime {
             self.start_admin_web_service(
                 addr,
                 config.admin_web_root,
+                config.admin_web_max_connections,
                 config.admin_web_user,
                 config.admin_web_password,
             )?;

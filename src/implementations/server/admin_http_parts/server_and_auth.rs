@@ -48,6 +48,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
+use tokio::task::{JoinError, JoinSet};
 
 use super::admin::{AdminResponse, ClientInfo};
 use super::BandwidthPolicy;
@@ -465,9 +466,119 @@ pub trait AdminHttpHandler: Send + Sync {
     fn handle_clear_logs(&self) -> AdminResponse;
 }
 
-/// Maximum number of concurrent admin HTTP connections.
+/// Default maximum number of concurrent admin HTTP connections.
 /// Limits memory pressure and mitigates connection-exhaustion DoS.
-const MAX_CONCURRENT_CONNECTIONS: usize = 16;
+pub const DEFAULT_ADMIN_WEB_MAX_CONNECTIONS: usize = 16;
+
+/// Hard upper bound for the CLI-configured admin HTTP connection capacity.
+pub const MAX_ADMIN_WEB_CONNECTIONS: usize = 1024;
+
+/// Validate the standalone admin-web connection capacity before any listener or
+/// authentication state is published.
+pub fn validate_admin_web_max_connections(max_connections: usize) -> std::io::Result<usize> {
+    if max_connections == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "admin web max connections must be at least 1",
+        ));
+    }
+    if max_connections > MAX_ADMIN_WEB_CONNECTIONS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "admin web max connections must not exceed {}",
+                MAX_ADMIN_WEB_CONNECTIONS
+            ),
+        ));
+    }
+    Ok(max_connections)
+}
+
+/// Observable admission counters for one admin-web server lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdminHttpAdmissionSnapshot {
+    /// Configured active-connection capacity.
+    pub max_connections: usize,
+    /// Currently running connection tasks holding an admission permit.
+    pub active_connections: usize,
+    /// User-space pending connection tasks. This is always zero because excess
+    /// sockets are rejected before spawning and no pending queue is retained.
+    pub pending_connections: usize,
+    /// Total connections admitted before task creation.
+    pub admitted_total: u64,
+    /// Total accepted sockets rejected before task creation because capacity was full.
+    pub rejected_total: u64,
+    /// Total admitted connection tasks that completed or were cancelled and joined.
+    pub completed_total: u64,
+}
+
+struct AdminHttpAdmissionState {
+    max_connections: usize,
+    active_connections: std::sync::atomic::AtomicUsize,
+    admitted_total: std::sync::atomic::AtomicU64,
+    rejected_total: std::sync::atomic::AtomicU64,
+    completed_total: std::sync::atomic::AtomicU64,
+}
+
+impl AdminHttpAdmissionState {
+    fn new(max_connections: usize) -> Self {
+        Self {
+            max_connections,
+            active_connections: std::sync::atomic::AtomicUsize::new(0),
+            admitted_total: std::sync::atomic::AtomicU64::new(0),
+            rejected_total: std::sync::atomic::AtomicU64::new(0),
+            completed_total: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn record_admitted(self: &Arc<Self>) -> AdminHttpAdmissionGuard {
+        self.active_connections.fetch_add(1, Ordering::Relaxed);
+        self.admitted_total.fetch_add(1, Ordering::Relaxed);
+        AdminHttpAdmissionGuard { state: Arc::clone(self) }
+    }
+
+    fn record_rejected(&self) {
+        self.rejected_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_completed(&self) {
+        self.completed_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> AdminHttpAdmissionSnapshot {
+        AdminHttpAdmissionSnapshot {
+            max_connections: self.max_connections,
+            active_connections: self.active_connections.load(Ordering::Relaxed),
+            pending_connections: 0,
+            admitted_total: self.admitted_total.load(Ordering::Relaxed),
+            rejected_total: self.rejected_total.load(Ordering::Relaxed),
+            completed_total: self.completed_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct AdminHttpAdmissionGuard {
+    state: Arc<AdminHttpAdmissionState>,
+}
+
+impl Drop for AdminHttpAdmissionGuard {
+    fn drop(&mut self) {
+        self.state.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn log_connection_task_result(result: Result<(), JoinError>) {
+    let Err(error) = result else {
+        return;
+    };
+    if error.is_cancelled() {
+        log::debug!("admin web connection task cancelled during shutdown");
+    } else if error.is_panic() {
+        log::error!("admin web connection task panicked: {}", error);
+    } else {
+        log::warn!("admin web connection task failed to join: {}", error);
+    }
+}
 
 /// Per-connection timeout. Connections that exceed this duration are dropped,
 /// mitigating Slowloris-style attacks without thread-per-connection overhead.
@@ -484,6 +595,7 @@ pub struct AdminHttpServer {
     sessions: Arc<Mutex<SessionStore>>,
     rate_limiter: Arc<Mutex<LoginRateLimiter>>,
     conn_semaphore: Arc<tokio::sync::Semaphore>,
+    admission: Arc<AdminHttpAdmissionState>,
 }
 
 impl AdminHttpServer {
@@ -494,6 +606,25 @@ impl AdminHttpServer {
         auth_path: Option<PathBuf>,
         handler: Arc<dyn AdminHttpHandler>,
     ) -> std::io::Result<Self> {
+        Self::new_with_max_connections(
+            addr,
+            web_root,
+            auth,
+            auth_path,
+            handler,
+            DEFAULT_ADMIN_WEB_MAX_CONNECTIONS,
+        )
+    }
+
+    pub fn new_with_max_connections(
+        addr: SocketAddr,
+        web_root: PathBuf,
+        auth: Option<AdminAuth>,
+        auth_path: Option<PathBuf>,
+        handler: Arc<dyn AdminHttpHandler>,
+        max_connections: usize,
+    ) -> std::io::Result<Self> {
+        let max_connections = validate_admin_web_max_connections(max_connections)?;
         let mut loaded_from_disk = false;
         let auth_loaded = if let Some(path) = auth_path.as_ref() {
             match load_auth_file(path.as_path())? {
@@ -532,7 +663,8 @@ impl AdminHttpServer {
                 LOGIN_RATE_LIMIT_ATTEMPTS,
                 LOGIN_RATE_LIMIT_WINDOW_SECS,
             ),
-            conn_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
+            conn_semaphore: Arc::new(tokio::sync::Semaphore::new(max_connections)),
+            admission: Arc::new(AdminHttpAdmissionState::new(max_connections)),
         })
     }
 
@@ -540,11 +672,20 @@ impl AdminHttpServer {
         self.shutdown.clone()
     }
 
+    pub fn admission_snapshot(&self) -> AdminHttpAdmissionSnapshot {
+        self.admission.snapshot()
+    }
+
     pub async fn run(&self) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
         log::info!("admin web server listening on http://{}", self.addr);
+        let mut connection_tasks = JoinSet::new();
 
         loop {
+            while let Some(result) = connection_tasks.try_join_next() {
+                self.admission.record_completed();
+                log_connection_task_result(result);
+            }
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
@@ -560,6 +701,21 @@ impl AdminHttpServer {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
+            let permit = match self.conn_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    self.admission.record_rejected();
+                    log::debug!(
+                        "admin web connection rejected at capacity {}",
+                        self.admission.max_connections
+                    );
+                    continue;
+                }
+            };
+            if self.shutdown.load(Ordering::Relaxed) {
+                drop(permit);
+                break;
+            }
             let handler = self.handler.clone();
             let web_root = self.web_root.clone();
             let auth = self.auth.clone();
@@ -567,13 +723,10 @@ impl AdminHttpServer {
             let shutdown = self.shutdown.clone();
             let sessions = self.sessions.clone();
             let rate_limiter = self.rate_limiter.clone();
-            let semaphore = self.conn_semaphore.clone();
+            let admission_guard = self.admission.record_admitted();
             let peer = Some(peer_addr);
-            tokio::spawn(async move {
-                let _permit = match semaphore.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
+            connection_tasks.spawn(async move {
+                let _admission_guard = admission_guard;
                 if shutdown.load(Ordering::Relaxed) {
                     return;
                 }
@@ -618,7 +771,14 @@ impl AdminHttpServer {
                     }
                     Ok(Ok(())) => {}
                 }
+                drop(permit);
             });
+        }
+
+        connection_tasks.abort_all();
+        while let Some(result) = connection_tasks.join_next().await {
+            self.admission.record_completed();
+            log_connection_task_result(result);
         }
         Ok(())
     }

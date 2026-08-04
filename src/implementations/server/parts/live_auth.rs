@@ -76,10 +76,17 @@ pub(crate) fn start_standalone_admin_web_service(
     web_root: std::path::PathBuf,
     auth: AdminAuth,
     auth_path: std::path::PathBuf,
+    max_connections: usize,
     handler: ServerAdminHttpRuntimeHandler,
 ) -> std::io::Result<()> {
-    let server =
-        AdminHttpServer::new(addr, web_root, Some(auth), Some(auth_path), Arc::new(handler))?;
+    let server = AdminHttpServer::new_with_max_connections(
+        addr,
+        web_root,
+        Some(auth),
+        Some(auth_path),
+        Arc::new(handler),
+        max_connections,
+    )?;
     runtime.register_admin_web_shutdown(server.shutdown_signal());
     // JoinHandle intentionally not stored: graceful shutdown via registered signal.
     tokio::spawn(async move {
@@ -95,6 +102,7 @@ pub fn start_configured_standalone_admin_web_service(
     runtime: &mut ServerRuntime,
     addr: std::net::SocketAddr,
     web_root: std::path::PathBuf,
+    max_connections: usize,
     admin_web_user: Option<String>,
     admin_web_password: Option<String>,
     config_path: Option<&std::path::Path>,
@@ -113,7 +121,15 @@ pub fn start_configured_standalone_admin_web_service(
         admin_log_buffer,
     );
     let auth_path = resolve_admin_auth_store_path(config_path);
-    start_standalone_admin_web_service(runtime, addr, web_root, auth, auth_path, handler)?;
+    start_standalone_admin_web_service(
+        runtime,
+        addr,
+        web_root,
+        auth,
+        auth_path,
+        max_connections,
+        handler,
+    )?;
     Ok(())
 }
 

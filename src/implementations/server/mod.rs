@@ -51,7 +51,10 @@ pub use admin::{
     snapshots_to_client_info, AdminCommand, AdminHandler, AdminResponse, ClientIdentity,
     ClientInfo, ClientSnapshot,
 };
-pub use admin_http::{AdminHttpHandler, AdminHttpServer};
+pub use admin_http::{
+    validate_admin_web_max_connections, AdminHttpAdmissionSnapshot, AdminHttpHandler,
+    AdminHttpServer, DEFAULT_ADMIN_WEB_MAX_CONNECTIONS, MAX_ADMIN_WEB_CONNECTIONS,
+};
 pub use bandwidth::{
     BandwidthDecision, BandwidthDirection, BandwidthLimiter, BandwidthPolicy, BandwidthStats,
     PerClientBandwidthManager, QuotaPeriod, QuotaTracker,

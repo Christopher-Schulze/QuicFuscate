@@ -1647,6 +1647,117 @@ mod tests {
         assert_eq!(normalize_qkey_id("a1b2c3d4e5g6"), None);
     }
 
+    #[test]
+    fn admin_web_capacity_validation_is_bounded_and_defaulted() {
+        assert_eq!(
+            validate_admin_web_max_connections(DEFAULT_ADMIN_WEB_MAX_CONNECTIONS).unwrap(),
+            DEFAULT_ADMIN_WEB_MAX_CONNECTIONS
+        );
+        assert_eq!(
+            validate_admin_web_max_connections(MAX_ADMIN_WEB_CONNECTIONS).unwrap(),
+            MAX_ADMIN_WEB_CONNECTIONS
+        );
+        assert_eq!(
+            validate_admin_web_max_connections(0).unwrap_err().to_string(),
+            "admin web max connections must be at least 1"
+        );
+        assert_eq!(
+            validate_admin_web_max_connections(MAX_ADMIN_WEB_CONNECTIONS + 1)
+                .unwrap_err()
+                .to_string(),
+            "admin web max connections must not exceed 1024"
+        );
+        assert!(
+            AdminHttpServer::new_with_max_connections(
+                "127.0.0.1:0".parse().unwrap(),
+                std::env::temp_dir(),
+                None,
+                None,
+                test_handler(),
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_web_admission_rejects_before_spawn_and_joins_on_shutdown() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpStream;
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind admin test listener");
+        let addr = listener.local_addr().expect("admin test listener address");
+        drop(listener);
+
+        let server = Arc::new(
+            AdminHttpServer::new_with_max_connections(
+                addr,
+                std::env::temp_dir(),
+                None,
+                None,
+                test_handler(),
+                1,
+            )
+            .expect("admin server"),
+        );
+        let shutdown = server.shutdown_signal();
+        let runner = Arc::clone(&server);
+        let task = tokio::spawn(async move { runner.run().await });
+
+        let mut active = None;
+        for _ in 0..100 {
+            match TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    active = Some(stream);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        let mut active = active.expect("admin listener must accept the active connection");
+
+        for _ in 0..100 {
+            if server.admission_snapshot().active_connections == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let active_snapshot = server.admission_snapshot();
+        assert_eq!(active_snapshot.active_connections, 1);
+        assert_eq!(active_snapshot.pending_connections, 0);
+        assert_eq!(active_snapshot.admitted_total, 1);
+
+        let _rejected = TcpStream::connect(addr).await.expect("capacity probe connection");
+        for _ in 0..100 {
+            if server.admission_snapshot().rejected_total == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let saturated_snapshot = server.admission_snapshot();
+        assert_eq!(saturated_snapshot.active_connections, 1);
+        assert_eq!(saturated_snapshot.pending_connections, 0);
+        assert_eq!(saturated_snapshot.admitted_total, 1);
+        assert_eq!(saturated_snapshot.rejected_total, 1);
+
+        shutdown.store(true, Ordering::SeqCst);
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("admin server shutdown must join within one second")
+            .expect("admin server task must not panic");
+        assert!(result.is_ok(), "admin server shutdown must be clean: {result:?}");
+
+        let mut closed_bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), active.read_to_end(&mut closed_bytes))
+            .await
+            .expect("active connection must close after server join")
+            .expect("active connection close must be readable");
+        let final_snapshot = server.admission_snapshot();
+        assert_eq!(final_snapshot.active_connections, 0);
+        assert_eq!(final_snapshot.pending_connections, 0);
+        assert_eq!(final_snapshot.completed_total, 1);
+    }
+
     #[tokio::test]
     async fn idle_admin_server_observes_shutdown_without_new_connection() {
         let server = AdminHttpServer::new(

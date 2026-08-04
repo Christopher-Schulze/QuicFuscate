@@ -1005,6 +1005,10 @@ enum Commands {
         #[clap(long)]
         admin_web: Option<std::net::SocketAddr>,
 
+        /// Maximum simultaneous admin web connections (default: 16, maximum: 1024)
+        #[clap(long, value_name = "COUNT", default_value_t = quicfuscate::implementations::server::DEFAULT_ADMIN_WEB_MAX_CONNECTIONS)]
+        admin_web_max_connections: usize,
+
         /// Admin web static root (default: assets/web-admin)
         #[clap(long, value_name = "PATH", default_value = "assets/web-admin")]
         admin_web_root: PathBuf,
