@@ -1,5 +1,7 @@
 // --- 4. Domain Fronting ---
 
+const DEFAULT_FRONTING_DOMAIN: &str = "cdn.cloudflare.com";
+
 /// Supported CDN providers for domain fronting with advanced rotation strategies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CdnProvider {
@@ -57,16 +59,18 @@ impl CdnProvider {
 
 /// Manages domain fronting by rotating through configured domains.
 ///
-/// Provides both round-robin and random selection strategies. Rotation is
-/// thread-safe via an `AtomicUsize` index. Callers must ensure that the
-/// domain list is non-empty before requesting a domain.
+/// `get_fronted_domain` provides strict round-robin selection. `random_domain`
+/// is a separate explicit random-selection path. Rotation is thread-safe via
+/// an `AtomicUsize` index; serial calls have a deterministic sequence, while
+/// concurrent completion order follows thread scheduling.
 ///
 /// - Integration: used when `StealthConfig::enable_domain_fronting` is true.
 ///   Domains may come from `StealthConfig.fronting_domains` or be derived
 ///   from built-in [`CdnProvider`]s (via [`DomainFrontingManager::from_providers`]).
-/// - Concurrency: selection (`&self`) is lock-free using atomics; mutation is
-///   via [`DomainFrontingManager::set_domains`] which requires `&mut self`.
-/// - Panics: requesting a round-robin domain with an empty list will panic.
+/// - Concurrency: selection (`&self`) is lock-free using atomics. Concurrent
+///   calls reserve unique sequence slots, but their completion order is not
+///   deterministic.
+/// - Empty input: both selection methods return `cdn.cloudflare.com`.
 pub(crate) struct DomainFrontingManager {
     domains: Arc<[String]>,
     index: AtomicUsize,
@@ -107,41 +111,34 @@ impl DomainFrontingManager {
         ])
     }
 
-    /// Selects the next domain using sophisticated time-based rotation with jitter.
-    /// This prevents predictable patterns that could be detected by DPI.
+    /// Selects the next domain using strict round-robin rotation.
     ///
-    /// Uses a monotonically increasing atomic counter to choose the next index.
-    /// The internal list must be non-empty.
-    ///
-    /// Panics
-    /// -----
-    /// Panics if `self.domains` is empty (modulo by zero).
+    /// Serial calls are deterministic. Concurrent calls reserve unique slots,
+    /// but the order in which callers observe their results is scheduling-
+    /// dependent. An empty manager returns `cdn.cloudflare.com`.
     ///
     /// Examples
     /// --------
     ///
     /// ```text
     /// // Constructed elsewhere via explicit domains or from providers.
-    /// // let mut df = DomainFrontingManager::new(vec!["a.example".into(), "b.example".into()]);
-    /// // assert!(matches!(df.get_fronted_domain().as_str(), "a.example" | "b.example"));
+    /// // let df = DomainFrontingManager::new(vec!["a.example".into(), "b.example".into()]);
+    /// // assert_eq!(df.get_fronted_domain(), "a.example");
+    /// // assert_eq!(df.get_fronted_domain(), "b.example");
     /// ```
     #[inline]
     pub fn get_fronted_domain(&self) -> String {
-        use rand::Rng;
         if self.domains.is_empty() {
-            return "cdn.cloudflare.com".to_string();
+            return DEFAULT_FRONTING_DOMAIN.to_string();
         }
-        let mut rng = rand::rng();
-
-        let jitter = rng.random_range(0..3);
-        let current = self.index.fetch_add(1 + jitter, Ordering::Relaxed);
+        let current = self.index.fetch_add(1, Ordering::Relaxed);
         let idx = current % self.domains.len();
         self.domains[idx].clone()
     }
 
     /// Randomly chooses a domain. Useful when deterministic rotation is undesired.
     ///
-    /// Falls back to "cdn.cloudflare.com" if the list is empty.
+    /// Falls back to `cdn.cloudflare.com` if the list is empty.
     /// This does not implicitly enable domain fronting; callers should check
     /// `StealthConfig.enable_domain_fronting` before using the value.
     ///
@@ -165,6 +162,6 @@ impl DomainFrontingManager {
             .as_ref()
             .choose(&mut rng)
             .cloned()
-            .unwrap_or_else(|| "cdn.cloudflare.com".to_string())
+            .unwrap_or_else(|| DEFAULT_FRONTING_DOMAIN.to_string())
     }
 }

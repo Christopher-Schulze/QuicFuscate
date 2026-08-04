@@ -3778,16 +3778,20 @@ for (a, b) in decoded.iter().zip(headers.iter()) {
 }
 ```
 
-### Domain Fronting API (allocation-free getters)
+### Domain Fronting API
 
-- __DomainFrontingManager::get_fronted_domain_ref(&self) -> &str__
-  - Returns the current front domain as a string slice without allocation.
-- __DomainFrontingManager::random_domain_ref(&self) -> &str__
-  - Returns a random front domain as a string slice without allocation.
-
-Notes:
-- Existing methods (`get_fronted_domain`, `random_domain`) remain for backward compatibility.
-- Internally, domains are stored as `Arc<[String]>` to reduce cloning and enable zero-copy access.
+- `DomainFrontingManager::get_fronted_domain(&self) -> String` uses strict
+  round-robin selection. Serial calls are deterministic; concurrent calls
+  reserve unique sequence slots but their completion order follows scheduling.
+- `DomainFrontingManager::random_domain(&self) -> String` is the explicit
+  unpredictable selection path and is not selected by configuration implicitly.
+- Both methods return `cdn.cloudflare.com` when the manager has no domains.
+- Production cover-scheduler initialization, SNI/Host fronting, and
+  WebTransport cover consume strict round-robin. MASQUE proxy authority stays
+  on the first configured domain plus `:443` as a stable connection endpoint.
+- Domains are stored as `Arc<[String]>`; the current public selection methods
+  return owned `String` values and therefore retain their existing clone
+  contract.
 
 ## Verification Harness Contracts
 
@@ -5064,3 +5068,12 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - **Test isolation:** The canonical RNG failure hook is thread-local under `cfg(test)`, so forced entropy tests cannot alter parallel tests that exercise normal secure randomness.
 - **Verification status:** The focused H3 filter passes 9/9, the external persona-header target passes 13/13, and the complete stealth filter passes 268/268. Workspace all-target checking and strict library Clippy pass. The no-fail-fast workspace matrix executes every target: the library passes 2,216/2,218, with unchanged TODO-807 DNS and TODO-768 Rustls failures, and the `quicfuscate` binary passes 41/43, with the two existing TODO-800 PMTU fixture failures.
 - **Global gate boundary:** Workspace all-target strict Clippy reports only the three pre-existing client backend/DNS-runtime diagnostics. Authorized Omega/native proof remains unavailable because the local SSH client fails with `No user exists for uid 501`; the GitHub push remains unavailable because `github.com` DNS resolution fails.
+
+## Implementation Reconciliation (2026-08-04, domain-fronting selection semantics)
+
+- **Primary contract:** `DomainFrontingManager::get_fronted_domain()` now advances exactly one atomic sequence slot per non-empty call and returns strict round-robin order. Serial calls are deterministic; concurrent calls preserve slot coverage while completion order remains scheduler-dependent.
+- **Random boundary:** `random_domain()` remains the explicit unpredictable selection method. No seed, jitter flag, engine field, standalone TOML field, environment variable, or runtime policy was added.
+- **Empty input:** Both selection methods return `cdn.cloudflare.com` without panicking. The owned `String` return contract remains unchanged; nonexistent `_ref` and `set_domains` API claims were removed from the documentation.
+- **Consumers:** Cover scheduler initialization, SNI/Host fronting, and WebTransport cover use manager round-robin. MASQUE proxy authority intentionally remains the first configured domain plus `:443` as a stable connection endpoint.
+- **Regression surface:** Serial exact-sequence and concurrent-coverage tests replace the previous probabilistic jitter assertion. The focused domain-fronting filter passes 9/9, the complete stealth filter passes 269/269, the standalone stealth-config target passes 9/9, and the stealth-mode integration target passes 7/7. Workspace all-target checking and strict library Clippy pass. The no-fail-fast workspace matrix executes every target: the library passes 2,217/2,219 with unchanged TODO-807 DNS and TODO-768 Rustls failures, and the `quicfuscate` binary passes 41/43 with the two unchanged TODO-800 runtime-reload PMTU fixture failures. Workspace all-target strict Clippy retains only the three known client backend/DNS-runtime diagnostics.
+- **External boundary:** Authorized Omega SSH proof remains unavailable because the local client reports `No user exists for uid 501`; GitHub publication remains unavailable because DNS cannot resolve `github.com`.

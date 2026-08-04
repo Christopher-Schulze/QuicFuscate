@@ -203,7 +203,8 @@ Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - d
 ### Stealth Components - Test Coverage (Session 23, 2026-03-24)
 All 15 stealth technologies in `src/stealth/` have unit test coverage in `src/stealth/tests.rs`:
 - RateChoker: token-bucket shape(), full-bucket=ZERO, deficit=positive-wait
-- DomainFrontingManager: get_fronted_domain() membership + ultra_stealth() smoke
+- DomainFrontingManager: strict serial round-robin, concurrent coverage,
+  explicit random fallback, and ultra_stealth() smoke
 - Http3Masquerade: generate_headers() pseudo-headers, browser-profile UA divergence
 - FingerprintRotation (via StealthManager): Fixed mode stable, All-mode no-panic guard path
 - ActiveProbeDetector: GFW_TLS_Probe detection; legacy DPI_QUIC_Scan response selector retained without a matching pattern; benign-ignored; 60-second history has no hard cap (TODO-644)
@@ -1474,3 +1475,12 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Test isolation:** The forced secure-entropy hook is thread-local under `cfg(test)`, keeping parallel normal-randomness tests independent.
 - **Scope boundary:** This reconciliation is limited to HTTP/3 masquerade cookie timestamps; TODO-677 retains the broader direct-clock inventory.
 - **Global gate boundary:** Workspace all-target strict Clippy retains only the three existing client backend/DNS-runtime diagnostics. Omega/native proof is unavailable because SSH fails with `No user exists for uid 501`; GitHub push remains unavailable because `github.com` DNS resolution fails.
+
+## Implementation Reconciliation (2026-08-04, domain-fronting selection semantics)
+
+- **Selection wiring:** `get_fronted_domain()` uses one `AtomicUsize::fetch_add(1)` per non-empty call, so serial consumers receive exact round-robin order without random jitter.
+- **Concurrency wiring:** Concurrent callers reserve unique sequence slots; tests assert balanced domain coverage, while no completion-order guarantee is claimed.
+- **Boundary wiring:** `random_domain()` remains an explicit random opt-in. Cover scheduler, SNI/Host, and WebTransport consume round-robin; MASQUE keeps its fixed first configured authority by design.
+- **Empty/API wiring:** Empty managers return `cdn.cloudflare.com`; the actual owned-`String` methods are documented and stale allocation-free `_ref` claims are removed.
+- **Verification status:** Exact serial/concurrent tests are added; the focused domain-fronting filter passes 9/9, the complete stealth filter 269/269, the stealth-config target 9/9, and the stealth-mode integration target 7/7. Workspace all-target checking and strict library Clippy pass. The no-fail-fast workspace matrix executes every target: the library passes 2,217/2,219 with unchanged TODO-807 DNS and TODO-768 Rustls failures, and the `quicfuscate` binary passes 41/43 with the two unchanged TODO-800 runtime-reload PMTU fixture failures. Workspace all-target strict Clippy retains only the three known client backend/DNS-runtime diagnostics.
+- **External boundary:** Authorized Omega SSH proof remains unavailable because the local client reports `No user exists for uid 501`; GitHub publication remains unavailable because DNS cannot resolve `github.com`.

@@ -378,23 +378,52 @@ mod stealth_coverage_tests {
     // =========================================================================
 
     #[test]
-    fn domain_fronting_round_robin_cycles() {
+    fn domain_fronting_round_robin_is_exact_in_serial_calls() {
         let df = DomainFrontingManager::new(vec![
             "a.example".into(),
             "b.example".into(),
             "c.example".into(),
         ]);
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..30 {
-            seen.insert(df.get_fronted_domain());
+        let expected = [
+            "a.example",
+            "b.example",
+            "c.example",
+            "a.example",
+            "b.example",
+            "c.example",
+        ];
+        for domain in expected {
+            assert_eq!(df.get_fronted_domain(), domain);
         }
-        // With jitter, all 3 should eventually be visited
-        assert!(seen.len() >= 2, "round-robin should visit multiple domains, got {:?}", seen);
+    }
+
+    #[test]
+    fn domain_fronting_round_robin_preserves_concurrent_coverage() {
+        let df = Arc::new(DomainFrontingManager::new(vec![
+            "a.example".into(),
+            "b.example".into(),
+            "c.example".into(),
+        ]));
+        let handles = (0..12)
+            .map(|_| {
+                let df = Arc::clone(&df);
+                std::thread::spawn(move || df.get_fronted_domain())
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("fronting selection thread must join"))
+            .collect::<Vec<_>>();
+
+        for domain in ["a.example", "b.example", "c.example"] {
+            assert_eq!(results.iter().filter(|selected| selected.as_str() == domain).count(), 4);
+        }
     }
 
     #[test]
     fn domain_fronting_random_domain_fallback() {
         let df = DomainFrontingManager::new(Vec::new());
+        assert_eq!(df.get_fronted_domain(), "cdn.cloudflare.com");
         let d = df.random_domain();
         assert_eq!(d, "cdn.cloudflare.com");
     }
