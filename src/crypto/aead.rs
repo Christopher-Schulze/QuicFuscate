@@ -174,8 +174,18 @@ pub trait HeaderProtector {
 
 /// Callbacks for TLS key schedule events (secret installation).
 pub trait KeyScheduleHooks {
-    fn set_read_secret(&mut self, level: Level, alg: Algorithm, secret: &[u8]);
-    fn set_write_secret(&mut self, level: Level, alg: Algorithm, secret: &[u8]);
+    fn set_read_secret(
+        &mut self,
+        level: Level,
+        alg: Algorithm,
+        secret: &[u8],
+    ) -> Result<(), crate::error::ConnectionError>;
+    fn set_write_secret(
+        &mut self,
+        level: Level,
+        alg: Algorithm,
+        secret: &[u8],
+    ) -> Result<(), crate::error::ConnectionError>;
 }
 
 /// AES-based QUIC header protection using single-block AES encryption.

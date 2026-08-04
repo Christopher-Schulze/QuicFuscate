@@ -7,16 +7,16 @@ use std::sync::Arc;
 // no direct varint helpers used here
 
 /// Derive 16-byte header protection key from TLS secret (RFC 9001 compliant)
-pub fn derive_hp_key(secret: &[u8]) -> [u8; 16] {
+pub fn derive_hp_key(secret: &[u8]) -> Result<[u8; 16], ConnectionError> {
     derive_hp_key_for_version(secret, crate::transport::PROTOCOL_VERSION)
 }
 
 /// Derives a version-specific 16-byte header protection key.
-pub fn derive_hp_key_for_version(secret: &[u8], version: u32) -> [u8; 16] {
-    let hp_vec = crate::crypto::kdf::derive_hdr_key_for_version(secret, 16, version);
+pub fn derive_hp_key_for_version(secret: &[u8], version: u32) -> Result<[u8; 16], ConnectionError> {
+    let hp_vec = crate::crypto::kdf::derive_hdr_key_for_version(secret, 16, version)?;
     let mut hp = [0u8; 16];
-    hp.copy_from_slice(&hp_vec[..16]);
-    hp
+    hp.copy_from_slice(&hp_vec);
+    Ok(hp)
 }
 
 /// Long header form bit (0x80) - set for long headers, clear for short headers.
@@ -1003,9 +1003,10 @@ mod tests {
             crate::crypto::aead::Level::OneRTT,
             crate::crypto::aead::Algorithm::AES128_GCM,
             &secret,
-        );
+        )
+        .expect("valid read secret");
         for _ in 0..(ONE_RTT_READ_KEY_WINDOW + 3) {
-            assert!(crypto.key_update_1rtt_read());
+            assert!(crypto.key_update_1rtt_read().expect("valid read key update"));
         }
         assert_eq!(crypto.previous_read_1rtt.len(), ONE_RTT_READ_KEY_WINDOW);
     }
@@ -1019,13 +1020,15 @@ mod tests {
             crate::crypto::aead::Level::OneRTT,
             crate::crypto::aead::Algorithm::AES128_GCM,
             &secret,
-        );
+        )
+        .expect("valid read secret");
         crate::crypto::aead::KeyScheduleHooks::set_write_secret(
             &mut crypto,
             crate::crypto::aead::Level::OneRTT,
             crate::crypto::aead::Algorithm::AES128_GCM,
             &secret,
-        );
+        )
+        .expect("valid write secret");
 
         let header = Header {
             ty: PacketType::Short,
@@ -1058,7 +1061,7 @@ mod tests {
         )
         .expect("seal");
 
-        assert!(crypto.key_update_1rtt_read());
+        assert!(crypto.key_update_1rtt_read().expect("valid read key update"));
 
         let mut incoming = packet[..used].to_vec();
         let (_hdr, aad_len, pt_len) =
@@ -1641,27 +1644,33 @@ pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], version: u32) -> Result<(),
 }
 
 /// HKDF-based key/iv derivation for AEAD from TLS secrets (RFC 9001 compliant)
-pub fn derive_key_iv(secret: &[u8]) -> ([u8; 32], [u8; 12]) {
+pub fn derive_key_iv(secret: &[u8]) -> Result<([u8; 32], [u8; 12]), ConnectionError> {
     derive_key_iv_for_version(secret, crate::transport::PROTOCOL_VERSION)
 }
 
 /// Derives version-specific packet key and IV material.
-pub fn derive_key_iv_for_version(secret: &[u8], version: u32) -> ([u8; 32], [u8; 12]) {
-    let key_vec = crate::crypto::kdf::derive_pkt_key_for_version(secret, 32, version);
-    let iv_vec = crate::crypto::kdf::derive_pkt_iv_for_version(secret, 12, version);
+pub fn derive_key_iv_for_version(
+    secret: &[u8],
+    version: u32,
+) -> Result<([u8; 32], [u8; 12]), ConnectionError> {
+    let key_vec = crate::crypto::kdf::derive_pkt_key_for_version(secret, 32, version)?;
+    let iv_vec = crate::crypto::kdf::derive_pkt_iv_for_version(secret, 12, version)?;
     let mut key = [0u8; 32];
-    key.copy_from_slice(&key_vec[..32]);
+    key.copy_from_slice(&key_vec);
     let mut iv = [0u8; 12];
-    iv.copy_from_slice(&iv_vec[..12]);
-    (key, iv)
+    iv.copy_from_slice(&iv_vec);
+    Ok((key, iv))
 }
 
 /// Derive Initial secrets from destination connection ID (RFC 9001 compliant)
-pub fn derive_initial_secrets(dcid: &[u8], version: u32) -> (Vec<u8>, Vec<u8>) {
+pub fn derive_initial_secrets(
+    dcid: &[u8],
+    version: u32,
+) -> Result<(Vec<u8>, Vec<u8>), ConnectionError> {
     let initial_secret = crate::crypto::kdf::derive_initial_secret(dcid, version);
-    let client_secret = crate::crypto::kdf::derive_client_initial_secret(&initial_secret);
-    let server_secret = crate::crypto::kdf::derive_server_initial_secret(&initial_secret);
-    (client_secret, server_secret)
+    let client_secret = crate::crypto::kdf::derive_client_initial_secret(&initial_secret)?;
+    let server_secret = crate::crypto::kdf::derive_server_initial_secret(&initial_secret)?;
+    Ok((client_secret, server_secret))
 }
 
 /// Apply header protection mask (for encryption)
@@ -2209,18 +2218,23 @@ impl CryptoContext {
     }
 
     /// Installs 0-RTT read and write keys from the given TLS secrets.
-    pub fn install_0rtt_keys(&mut self, read_secret: &[u8], write_secret: &[u8]) {
-        self.zero_rtt_enabled = true;
-        let (read_key, read_iv) = derive_key_iv(read_secret);
-        let (write_key, write_iv) = derive_key_iv(write_secret);
+    pub fn install_0rtt_keys(
+        &mut self,
+        read_secret: &[u8],
+        write_secret: &[u8],
+    ) -> Result<(), ConnectionError> {
+        let (read_key, read_iv) = derive_key_iv(read_secret)?;
+        let (write_key, write_iv) = derive_key_iv(write_secret)?;
+        let write_hp = derive_hp_key(write_secret)?;
+        let read_hp = derive_hp_key(read_secret)?;
         let (_, open) = select_packet_data_aead(&read_key, &read_iv);
         let (seal, _) = select_packet_data_aead(&write_key, &write_iv);
+        self.zero_rtt_enabled = true;
         self.open_0rtt = Some(open);
         self.seal_0rtt = Some(seal);
-        let write_hp = derive_hp_key(write_secret);
-        let read_hp = derive_hp_key(read_secret);
         self.hp_0rtt = Some(Box::new(crate::crypto::aead::AesHp::from_key(&write_hp)));
         self.hp_0rtt_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&read_hp)));
+        Ok(())
     }
 }
 
@@ -2316,11 +2330,11 @@ impl CryptoContext {
         read_secret: &[u8],
         write_secret: &[u8],
         version: u32,
-    ) {
-        let rkey = crate::crypto::kdf::derive_pkt_key_for_version(read_secret, 16, version);
-        let wkey = crate::crypto::kdf::derive_pkt_key_for_version(write_secret, 16, version);
-        let riv = crate::crypto::kdf::derive_pkt_iv_for_version(read_secret, 12, version);
-        let wiv = crate::crypto::kdf::derive_pkt_iv_for_version(write_secret, 12, version);
+    ) -> Result<(), ConnectionError> {
+        let rkey = crate::crypto::kdf::derive_pkt_key_for_version(read_secret, 16, version)?;
+        let wkey = crate::crypto::kdf::derive_pkt_key_for_version(write_secret, 16, version)?;
+        let riv = crate::crypto::kdf::derive_pkt_iv_for_version(read_secret, 12, version)?;
+        let wiv = crate::crypto::kdf::derive_pkt_iv_for_version(write_secret, 12, version)?;
         let mut k16 = [0u8; 16];
         let mut iv12 = [0u8; 12];
         k16.copy_from_slice(&wkey);
@@ -2330,11 +2344,12 @@ impl CryptoContext {
         iv12.copy_from_slice(&riv);
         self.open_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv12)));
         // HP can be installed later when header protection keys are derived
+        Ok(())
     }
 
     /// Install AES-GCM for Handshake packets (compatibility path)
-    pub fn install_aes_gcm_handshake(&mut self, secret: &[u8]) {
-        let (key, iv) = derive_key_iv(secret);
+    pub fn install_aes_gcm_handshake(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
+        let (key, iv) = derive_key_iv(secret)?;
         let mut k16 = [0u8; 16];
         k16.copy_from_slice(&key[..16]);
         let seal = AesGcm128::from_arrays(&k16, &iv);
@@ -2342,38 +2357,48 @@ impl CryptoContext {
         self.seal_handshake = Some(Box::new(seal));
         self.open_handshake = Some(Box::new(open));
         // HP can be installed later when header protection keys are derived
+        Ok(())
     }
 
     /// Install AES-based Header Protection for Initial packets.
     /// QUIC header protection is direction-specific, so we accept read/write secrets separately.
-    pub fn install_hp_initial(&mut self, read_secret: &[u8], write_secret: &[u8], version: u32) {
-        let hp_key_w = derive_hp_key_for_version(write_secret, version);
-        let hp_key_r = derive_hp_key_for_version(read_secret, version);
+    pub fn install_hp_initial(
+        &mut self,
+        read_secret: &[u8],
+        write_secret: &[u8],
+        version: u32,
+    ) -> Result<(), ConnectionError> {
+        let hp_key_w = derive_hp_key_for_version(write_secret, version)?;
+        let hp_key_r = derive_hp_key_for_version(read_secret, version)?;
         self.hp_initial = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key_w)));
         self.hp_initial_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key_r)));
+        Ok(())
     }
 
     /// Install AES-based Header Protection for Handshake packets
-    pub fn install_hp_handshake(&mut self, secret: &[u8]) {
-        let hp_key = derive_hp_key(secret);
+    pub fn install_hp_handshake(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
+        let hp_key = derive_hp_key(secret)?;
         self.hp_handshake = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
         self.hp_handshake_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+        Ok(())
     }
 
-    fn install_read_1rtt_secret(&mut self, secret: &[u8]) {
-        let (key, iv) = derive_key_iv(secret);
+    fn install_read_1rtt_secret(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
+        let (key, iv) = derive_key_iv(secret)?;
         let (_, open) = select_packet_data_aead(&key, &iv);
+        let hp_key = derive_hp_key(secret)?;
         self.open_1rtt = Some(Arc::new(open));
-        let hp_key = derive_hp_key(secret);
         self.hp_1rtt_open = Some(Arc::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+        Ok(())
     }
 
-    fn install_write_1rtt_secret(&mut self, secret: &[u8]) {
-        let (key, iv) = derive_key_iv(secret);
+    fn install_write_1rtt_secret(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
+        let (key, iv) = derive_key_iv(secret)?;
         let (seal, _) = select_packet_data_aead(&key, &iv);
+        let hp_key = derive_hp_key(secret)?;
         self.seal_1rtt = Some(Arc::new(seal));
-        let hp_key = derive_hp_key(secret);
         self.hp_1rtt = Some(Arc::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+        Ok(())
     }
 
     fn push_previous_read_key(&mut self, open: Arc<crate::crypto::PacketAeadOpen>) {
@@ -2407,42 +2432,42 @@ impl CryptoContext {
     }
 
     /// Derives the next 1-RTT read secret and rotates the opener.
-    pub fn key_update_1rtt_read(&mut self) -> bool {
+    pub fn key_update_1rtt_read(&mut self) -> Result<bool, ConnectionError> {
         let Some(cur) = self.read_secret_1rtt.as_deref() else {
-            return false;
+            return Ok(false);
         };
-        let next = crate::crypto::kdf::derive_next_secret(cur);
+        let next = crate::crypto::kdf::derive_next_secret(cur)?;
+        let (key, iv) = derive_key_iv(&next)?;
+        let (_, open) = select_packet_data_aead(&key, &iv);
         if let Some(prev_open) = self.open_1rtt.take() {
             self.push_previous_read_key(prev_open);
         }
-        let (key, iv) = derive_key_iv(&next);
-        let (_, open) = select_packet_data_aead(&key, &iv);
         self.open_1rtt = Some(Arc::new(open));
         self.read_secret_1rtt = Some(crate::secret::SecretBytes::new(next, "tls_1rtt_read_secret"));
         self.read_generation_1rtt = self.read_generation_1rtt.saturating_add(1);
-        true
+        Ok(true)
     }
 
     /// Derives the next 1-RTT write secret and rotates the sealer.
-    pub fn key_update_1rtt_write(&mut self) -> bool {
+    pub fn key_update_1rtt_write(&mut self) -> Result<bool, ConnectionError> {
         let Some(cur) = self.write_secret_1rtt.as_deref() else {
-            return false;
+            return Ok(false);
         };
-        let next = crate::crypto::kdf::derive_next_secret(cur);
-        let (key, iv) = derive_key_iv(&next);
+        let next = crate::crypto::kdf::derive_next_secret(cur)?;
+        let (key, iv) = derive_key_iv(&next)?;
         let (seal, _) = select_packet_data_aead(&key, &iv);
         self.seal_1rtt = Some(Arc::new(seal));
         self.write_secret_1rtt =
             Some(crate::secret::SecretBytes::new(next, "tls_1rtt_write_secret"));
         self.write_generation_1rtt = self.write_generation_1rtt.saturating_add(1);
-        true
+        Ok(true)
     }
 
     /// Backwards-compatible helper for call sites that still update both directions together.
-    pub fn key_update_1rtt(&mut self) -> bool {
-        let write = self.key_update_1rtt_write();
-        let read = self.key_update_1rtt_read();
-        write || read
+    pub fn key_update_1rtt(&mut self) -> Result<bool, ConnectionError> {
+        let write = self.key_update_1rtt_write()?;
+        let read = self.key_update_1rtt_read()?;
+        Ok(write || read)
     }
 }
 
@@ -2453,8 +2478,8 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
         level: crate::crypto::aead::Level,
         alg: crate::crypto::aead::Algorithm,
         secret: &[u8],
-    ) {
-        let (key, iv) = derive_key_iv(secret);
+    ) -> Result<(), ConnectionError> {
+        let (key, iv) = derive_key_iv(secret)?;
         match level {
             crate::crypto::aead::Level::Initial => {
                 match alg {
@@ -2464,7 +2489,7 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                         self.open_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
                     }
                 }
-                let hp_key = derive_hp_key(secret);
+                let hp_key = derive_hp_key(secret)?;
                 self.hp_initial_open =
                     Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
             }
@@ -2476,7 +2501,7 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                         self.open_handshake = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
                     }
                 }
-                let hp_key = derive_hp_key(secret);
+                let hp_key = derive_hp_key(secret)?;
                 self.hp_handshake_open =
                     Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
             }
@@ -2484,27 +2509,28 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                 if self.zero_rtt_enabled {
                     let (_, open) = select_packet_data_aead(&key, &iv);
                     self.open_0rtt = Some(open);
-                    let hp_key = derive_hp_key(secret);
+                    let hp_key = derive_hp_key(secret)?;
                     self.hp_0rtt_open =
                         Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
                 }
             }
             crate::crypto::aead::Level::OneRTT => {
+                self.install_read_1rtt_secret(secret)?;
                 self.read_secret_1rtt =
                     Some(crate::secret::SecretBytes::new(secret.to_vec(), "tls_1rtt_read_secret"));
                 self.read_generation_1rtt = 0;
                 self.previous_read_1rtt.clear();
-                self.install_read_1rtt_secret(secret);
             }
         }
+        Ok(())
     }
     fn set_write_secret(
         &mut self,
         level: crate::crypto::aead::Level,
         alg: crate::crypto::aead::Algorithm,
         secret: &[u8],
-    ) {
-        let (key, iv) = derive_key_iv(secret);
+    ) -> Result<(), ConnectionError> {
+        let (key, iv) = derive_key_iv(secret)?;
         match level {
             crate::crypto::aead::Level::Initial => {
                 match alg {
@@ -2514,7 +2540,7 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                         self.seal_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
                     }
                 }
-                let hp_key = derive_hp_key(secret);
+                let hp_key = derive_hp_key(secret)?;
                 self.hp_initial = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
             }
             crate::crypto::aead::Level::Handshake => {
@@ -2525,24 +2551,25 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                         self.seal_handshake = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
                     }
                 }
-                let hp_key = derive_hp_key(secret);
+                let hp_key = derive_hp_key(secret)?;
                 self.hp_handshake = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
             }
             crate::crypto::aead::Level::ZeroRTT => {
                 if self.zero_rtt_enabled {
                     let (seal, _) = select_packet_data_aead(&key, &iv);
                     self.seal_0rtt = Some(seal);
-                    let hp_key = derive_hp_key(secret);
+                    let hp_key = derive_hp_key(secret)?;
                     self.hp_0rtt = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
                 }
             }
             crate::crypto::aead::Level::OneRTT => {
+                self.install_write_1rtt_secret(secret)?;
                 self.write_secret_1rtt =
                     Some(crate::secret::SecretBytes::new(secret.to_vec(), "tls_1rtt_write_secret"));
                 self.write_generation_1rtt = 0;
-                self.install_write_1rtt_secret(secret);
             }
         }
+        Ok(())
     }
 }
 
@@ -2562,10 +2589,18 @@ mod secret_erasure_tests {
 
         {
             let mut crypto = CryptoContext::default();
-            crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x11; 32]);
-            crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x22; 32]);
-            crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x33; 32]);
-            crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x44; 32]);
+            crypto
+                .set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x11; 32])
+                .expect("valid read secret");
+            crypto
+                .set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x22; 32])
+                .expect("valid read secret");
+            crypto
+                .set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x33; 32])
+                .expect("valid write secret");
+            crypto
+                .set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &[0x44; 32])
+                .expect("valid write secret");
             crypto.read_secret_1rtt = None;
             drop(crate::crypto::aead::AesHp::from_key(&[0x55; 16]));
         }

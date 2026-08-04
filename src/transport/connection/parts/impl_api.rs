@@ -84,7 +84,7 @@ impl Connection {
     pub fn key_update(&mut self) -> Result<(), crate::error::ConnectionError> {
         let result = if let Some(provider) = self.tls_provider.as_mut() {
             provider.key_update_write()
-        } else if self.crypto.write().key_update_1rtt_write() {
+        } else if self.crypto.write().key_update_1rtt_write()? {
             Ok(())
         } else {
             Err(crate::error::ConnectionError::KeyUpdateError)

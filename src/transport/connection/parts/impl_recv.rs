@@ -69,12 +69,12 @@ impl Connection {
                     }
                     self.config.initial_token = retry_hdr.token.clone();
                     let (client_secret, server_secret) =
-                        packet::derive_initial_secrets(self.dcid.as_ref(), self.config.version);
+                        packet::derive_initial_secrets(self.dcid.as_ref(), self.config.version)?;
                     let (read_secret, write_secret) =
                         (server_secret.as_slice(), client_secret.as_slice());
                     let mut crypto = self.crypto.write();
-                    crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version);
-                    crypto.install_hp_initial(read_secret, write_secret, self.config.version);
+                    crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version)?;
+                    crypto.install_hp_initial(read_secret, write_secret, self.config.version)?;
                     drop(crypto);
                     self.refresh_short_header_tag_reserve();
                     self.next_send_pn_by_space[0] = 0;
@@ -130,20 +130,35 @@ impl Connection {
                     pre_parsed_hdr.take(),
                 )
             };
+            let should_try_key_update = matches!(
+                &decrypt,
+                Err(ConnectionError::Done) | Err(ConnectionError::CryptoError(_))
+            );
+            if should_try_key_update
+                && pre_ty == PacketType::Short
+                && rx_key_advances < MAX_RX_KEY_UPDATE_ADVANCE
+            {
+                match self.try_advance_read_keys() {
+                    Ok(true) => {
+                        rx_key_advances += 1;
+                        // Re-parse for the next retry iteration.
+                        if pre_parsed_hdr.is_none() {
+                            pre_parsed_hdr = packet::parse_header(buf, short_dcid_len).ok();
+                        }
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.record_local_error(error.clone());
+                        if let Some(err) = self.local_error.clone() {
+                            return Err(err);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
             match decrypt {
                 Ok(v) => break v,
-                Err(ConnectionError::Done) | Err(ConnectionError::CryptoError(_))
-                    if pre_ty == PacketType::Short
-                        && rx_key_advances < MAX_RX_KEY_UPDATE_ADVANCE
-                        && self.try_advance_read_keys() =>
-                {
-                    rx_key_advances += 1;
-                    // Re-parse for the next retry iteration.
-                    if pre_parsed_hdr.is_none() {
-                        pre_parsed_hdr = packet::parse_header(buf, short_dcid_len).ok();
-                    }
-                    continue;
-                }
                 Err(ConnectionError::Done) => return Err(ConnectionError::Done),
                 Err(e) => {
                     self.record_local_error(e);

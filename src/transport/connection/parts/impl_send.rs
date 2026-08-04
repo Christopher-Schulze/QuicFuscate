@@ -675,23 +675,20 @@ impl Connection {
         }
     }
 
-    fn try_advance_read_keys(&mut self) -> bool {
-        let provider_updated = self
-            .tls_provider
-            .as_mut()
-            .map(|provider| provider.key_update_read().is_ok())
-            .unwrap_or(false);
-        if provider_updated {
-            // The rustls provider rotated the read key inside CryptoContext.
-            // Sync the lock-free ArcSwap so the hot path picks up the new key.
-            self.sync_1rtt();
-            return true;
+    fn try_advance_read_keys(&mut self) -> Result<bool, crate::error::ConnectionError> {
+        if let Some(provider) = self.tls_provider.as_mut() {
+            if provider.key_update_read().is_ok() {
+                // The rustls provider rotated the read key inside CryptoContext.
+                // Sync the lock-free ArcSwap so the hot path picks up the new key.
+                self.sync_1rtt();
+                return Ok(true);
+            }
         }
-        let updated = self.crypto.write().key_update_1rtt_read();
+        let updated = self.crypto.write().key_update_1rtt_read()?;
         if updated {
             self.sync_1rtt();
         }
-        updated
+        Ok(updated)
     }
 
 }

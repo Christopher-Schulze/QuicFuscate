@@ -1,5 +1,21 @@
 use super::hkdf::{hkdf_expand, hkdf_extract};
 
+const TRAFFIC_SECRET_LEN: usize = 32;
+
+fn traffic_secret_array(
+    secret: &[u8],
+) -> Result<[u8; TRAFFIC_SECRET_LEN], super::aead::KeyMaterialError> {
+    super::aead::require_exact_length(
+        "QUIC KDF",
+        "traffic secret",
+        TRAFFIC_SECRET_LEN,
+        secret.len(),
+    )?;
+    let mut secret_array = [0u8; TRAFFIC_SECRET_LEN];
+    secret_array.copy_from_slice(secret);
+    Ok(secret_array)
+}
+
 fn hkdf_expand_label(prk: &[u8; 32], label: &[u8], out_len: usize) -> Vec<u8> {
     let full_label_len = b"tls13 ".len() + label.len();
     let mut info = Vec::with_capacity(2 + 1 + full_label_len + 1);
@@ -40,110 +56,88 @@ pub fn derive_initial_secret(dcid: &[u8], version: u32) -> [u8; 32] {
     hkdf_extract(salt, dcid)
 }
 
-/// Derive client initial secret from initial secret
-pub fn derive_client_initial_secret(initial_secret: &[u8]) -> Vec<u8> {
-    let prk = if initial_secret.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(initial_secret);
-        arr
-    } else {
-        let mut arr = [0u8; 32];
-        arr[..initial_secret.len().min(32)]
-            .copy_from_slice(&initial_secret[..initial_secret.len().min(32)]);
-        arr
-    };
-    hkdf_expand_label(&prk, b"client in", 32)
+/// Derive client initial secret from an exact 32-byte initial secret.
+pub fn derive_client_initial_secret(
+    initial_secret: &[u8],
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
+    let prk = traffic_secret_array(initial_secret)?;
+    Ok(hkdf_expand_label(&prk, b"client in", TRAFFIC_SECRET_LEN))
 }
 
-/// Derive server initial secret from initial secret
-pub fn derive_server_initial_secret(initial_secret: &[u8]) -> Vec<u8> {
-    let prk = if initial_secret.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(initial_secret);
-        arr
-    } else {
-        let mut arr = [0u8; 32];
-        arr[..initial_secret.len().min(32)]
-            .copy_from_slice(&initial_secret[..initial_secret.len().min(32)]);
-        arr
-    };
-    hkdf_expand_label(&prk, b"server in", 32)
+/// Derive server initial secret from an exact 32-byte initial secret.
+pub fn derive_server_initial_secret(
+    initial_secret: &[u8],
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
+    let prk = traffic_secret_array(initial_secret)?;
+    Ok(hkdf_expand_label(&prk, b"server in", TRAFFIC_SECRET_LEN))
 }
 
-/// Derive packet protection key from secret
-pub fn derive_pkt_key(secret: &[u8], key_len: usize) -> Vec<u8> {
+/// Derive packet protection key from an exact 32-byte traffic secret.
+pub fn derive_pkt_key(
+    secret: &[u8],
+    key_len: usize,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     derive_pkt_key_for_version(secret, key_len, 0x00000001)
 }
 
 /// Derive a version-specific QUIC packet protection key.
-pub fn derive_pkt_key_for_version(secret: &[u8], key_len: usize, version: u32) -> Vec<u8> {
-    let prk = if secret.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(secret);
-        arr
-    } else {
-        let mut arr = [0u8; 32];
-        arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
-        arr
-    };
-    hkdf_expand_label(&prk, packet_labels(version).0, key_len)
+pub fn derive_pkt_key_for_version(
+    secret: &[u8],
+    key_len: usize,
+    version: u32,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
+    let prk = traffic_secret_array(secret)?;
+    Ok(hkdf_expand_label(&prk, packet_labels(version).0, key_len))
 }
 
-/// Derive packet protection IV from secret
-pub fn derive_pkt_iv(secret: &[u8], iv_len: usize) -> Vec<u8> {
+/// Derive packet protection IV from an exact 32-byte traffic secret.
+pub fn derive_pkt_iv(
+    secret: &[u8],
+    iv_len: usize,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     derive_pkt_iv_for_version(secret, iv_len, 0x00000001)
 }
 
 /// Derive a version-specific QUIC packet protection IV.
-pub fn derive_pkt_iv_for_version(secret: &[u8], iv_len: usize, version: u32) -> Vec<u8> {
-    let prk = if secret.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(secret);
-        arr
-    } else {
-        let mut arr = [0u8; 32];
-        arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
-        arr
-    };
-    hkdf_expand_label(&prk, packet_labels(version).1, iv_len)
+pub fn derive_pkt_iv_for_version(
+    secret: &[u8],
+    iv_len: usize,
+    version: u32,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
+    let prk = traffic_secret_array(secret)?;
+    Ok(hkdf_expand_label(&prk, packet_labels(version).1, iv_len))
 }
 
-/// Derive header protection key from secret
-pub fn derive_hdr_key(secret: &[u8], key_len: usize) -> Vec<u8> {
+/// Derive header protection key from an exact 32-byte traffic secret.
+pub fn derive_hdr_key(
+    secret: &[u8],
+    key_len: usize,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     derive_hdr_key_for_version(secret, key_len, 0x00000001)
 }
 
 /// Derive a version-specific QUIC header protection key.
-pub fn derive_hdr_key_for_version(secret: &[u8], key_len: usize, version: u32) -> Vec<u8> {
-    let prk = if secret.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(secret);
-        arr
-    } else {
-        let mut arr = [0u8; 32];
-        arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
-        arr
-    };
-    hkdf_expand_label(&prk, packet_labels(version).2, key_len)
+pub fn derive_hdr_key_for_version(
+    secret: &[u8],
+    key_len: usize,
+    version: u32,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
+    let prk = traffic_secret_array(secret)?;
+    Ok(hkdf_expand_label(&prk, packet_labels(version).2, key_len))
 }
 
-/// Derive next secret for key update (RFC 9001, Section 6)
-pub fn derive_next_secret(secret: &[u8]) -> Vec<u8> {
+/// Derive next secret for key update from an exact 32-byte traffic secret (RFC 9001, Section 6).
+pub fn derive_next_secret(secret: &[u8]) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     derive_next_secret_for_version(secret, 0x00000001)
 }
 
 /// Derive the next traffic secret with the version-specific QUIC label.
-pub fn derive_next_secret_for_version(secret: &[u8], version: u32) -> Vec<u8> {
-    let prk = if secret.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(secret);
-        arr
-    } else {
-        let mut arr = [0u8; 32];
-        arr[..secret.len().min(32)].copy_from_slice(&secret[..secret.len().min(32)]);
-        arr
-    };
-    hkdf_expand_label(&prk, packet_labels(version).3, 32)
+pub fn derive_next_secret_for_version(
+    secret: &[u8],
+    version: u32,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
+    let prk = traffic_secret_array(secret)?;
+    Ok(hkdf_expand_label(&prk, packet_labels(version).3, TRAFFIC_SECRET_LEN))
 }
 
 /// Helper to derive all keys from a secret at once
@@ -156,18 +150,24 @@ pub struct DerivedKeys {
     pub hp: Vec<u8>,
 }
 
-/// Derive all keys (key, iv, hp) from a secret
-pub fn derive_keys(secret: &[u8], key_len: usize, iv_len: usize, hp_len: usize) -> DerivedKeys {
-    DerivedKeys {
-        key: derive_pkt_key(secret, key_len),
-        iv: derive_pkt_iv(secret, iv_len),
-        hp: derive_hdr_key(secret, hp_len),
-    }
+/// Derive all keys (key, iv, hp) from an exact 32-byte traffic secret.
+pub fn derive_keys(
+    secret: &[u8],
+    key_len: usize,
+    iv_len: usize,
+    hp_len: usize,
+) -> Result<DerivedKeys, super::aead::KeyMaterialError> {
+    Ok(DerivedKeys {
+        key: derive_pkt_key(secret, key_len)?,
+        iv: derive_pkt_iv(secret, iv_len)?,
+        hp: derive_hdr_key(secret, hp_len)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::aead::KeyMaterialError;
 
     // ---------------------------------------------------------------
     // RFC 9001 Appendix A - Initial Secrets test vector
@@ -200,7 +200,8 @@ mod tests {
     #[test]
     fn client_initial_secret_deterministic_snapshot() {
         let initial_secret = derive_initial_secret(&RFC9001_DCID, 0x00000001);
-        let client_secret = derive_client_initial_secret(&initial_secret);
+        let client_secret =
+            derive_client_initial_secret(&initial_secret).expect("valid initial secret");
         assert_eq!(
             hex::encode(client_secret),
             "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea"
@@ -210,7 +211,8 @@ mod tests {
     #[test]
     fn server_initial_secret_deterministic_snapshot() {
         let initial_secret = derive_initial_secret(&RFC9001_DCID, 0x00000001);
-        let server_secret = derive_server_initial_secret(&initial_secret);
+        let server_secret =
+            derive_server_initial_secret(&initial_secret).expect("valid initial secret");
         assert_eq!(
             hex::encode(server_secret),
             "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b"
@@ -220,8 +222,8 @@ mod tests {
     #[test]
     fn client_server_secrets_differ() {
         let initial_secret = derive_initial_secret(&RFC9001_DCID, 0x00000001);
-        let client = derive_client_initial_secret(&initial_secret);
-        let server = derive_server_initial_secret(&initial_secret);
+        let client = derive_client_initial_secret(&initial_secret).expect("valid initial secret");
+        let server = derive_server_initial_secret(&initial_secret).expect("valid initial secret");
         assert_ne!(client, server, "client and server secrets must differ");
     }
 
@@ -262,22 +264,28 @@ mod tests {
             hex::encode(initial),
             "2062e8b3cd8d52092614b8071d0aa1fb7c2e3ac193f78b280e72d8f5751f6aba"
         );
-        let client = derive_client_initial_secret(&initial);
-        let server = derive_server_initial_secret(&initial);
+        let client = derive_client_initial_secret(&initial).expect("valid initial secret");
+        let server = derive_server_initial_secret(&initial).expect("valid initial secret");
         assert_eq!(
             hex::encode(&client),
             "14ec9d6eb9fd7af83bf5a668bc17a7e283766aade7ecd0891f70f9ff7f4bf47b"
         );
         assert_eq!(
-            hex::encode(derive_pkt_key_for_version(&client, 16, 0x6b3343cf)),
+            hex::encode(
+                derive_pkt_key_for_version(&client, 16, 0x6b3343cf).expect("valid client secret"),
+            ),
             "8b1a0bc121284290a29e0971b5cd045d"
         );
         assert_eq!(
-            hex::encode(derive_pkt_iv_for_version(&client, 12, 0x6b3343cf)),
+            hex::encode(
+                derive_pkt_iv_for_version(&client, 12, 0x6b3343cf).expect("valid client secret"),
+            ),
             "91f73e2351d8fa91660e909f"
         );
         assert_eq!(
-            hex::encode(derive_hdr_key_for_version(&client, 16, 0x6b3343cf)),
+            hex::encode(
+                derive_hdr_key_for_version(&client, 16, 0x6b3343cf).expect("valid client secret"),
+            ),
             "45b95e15235d6f45a6b19cbcb0294ba9"
         );
         assert_eq!(
@@ -285,15 +293,21 @@ mod tests {
             "0263db1782731bf4588e7e4d93b7463907cb8cd8200b5da55a8bd488eafc37c1"
         );
         assert_eq!(
-            hex::encode(derive_pkt_key_for_version(&server, 16, 0x6b3343cf)),
+            hex::encode(
+                derive_pkt_key_for_version(&server, 16, 0x6b3343cf).expect("valid server secret"),
+            ),
             "82db637861d55e1d011f19ea71d5d2a7"
         );
         assert_eq!(
-            hex::encode(derive_pkt_iv_for_version(&server, 12, 0x6b3343cf)),
+            hex::encode(
+                derive_pkt_iv_for_version(&server, 12, 0x6b3343cf).expect("valid server secret"),
+            ),
             "dd13c276499c0249d3310652"
         );
         assert_eq!(
-            hex::encode(derive_hdr_key_for_version(&server, 16, 0x6b3343cf)),
+            hex::encode(
+                derive_hdr_key_for_version(&server, 16, 0x6b3343cf).expect("valid server secret"),
+            ),
             "edf6d05c83121201b436e16877593c3a"
         );
     }
@@ -305,31 +319,31 @@ mod tests {
     #[test]
     fn derive_pkt_key_length_aes128() {
         let secret = derive_initial_secret(&RFC9001_DCID, 1);
-        let client_secret = derive_client_initial_secret(&secret);
-        let key = derive_pkt_key(&client_secret, 16);
+        let client_secret = derive_client_initial_secret(&secret).expect("valid initial secret");
+        let key = derive_pkt_key(&client_secret, 16).expect("valid client secret");
         assert_eq!(key.len(), 16, "AES-128-GCM key must be 16 bytes");
     }
 
     #[test]
     fn derive_pkt_key_length_aes256() {
         let secret = [0xABu8; 32];
-        let key = derive_pkt_key(&secret, 32);
+        let key = derive_pkt_key(&secret, 32).expect("valid secret");
         assert_eq!(key.len(), 32, "AES-256-GCM key must be 32 bytes");
     }
 
     #[test]
     fn derive_pkt_iv_length() {
         let secret = derive_initial_secret(&RFC9001_DCID, 1);
-        let client_secret = derive_client_initial_secret(&secret);
-        let iv = derive_pkt_iv(&client_secret, 12);
+        let client_secret = derive_client_initial_secret(&secret).expect("valid initial secret");
+        let iv = derive_pkt_iv(&client_secret, 12).expect("valid client secret");
         assert_eq!(iv.len(), 12, "AEAD nonce/IV must be 12 bytes");
     }
 
     #[test]
     fn derive_hdr_key_length() {
         let secret = derive_initial_secret(&RFC9001_DCID, 1);
-        let client_secret = derive_client_initial_secret(&secret);
-        let hp = derive_hdr_key(&client_secret, 16);
+        let client_secret = derive_client_initial_secret(&secret).expect("valid initial secret");
+        let hp = derive_hdr_key(&client_secret, 16).expect("valid client secret");
         assert_eq!(hp.len(), 16, "header protection key must be 16 bytes");
     }
 
@@ -342,8 +356,8 @@ mod tests {
         // Derive full key material from client initial secret and verify
         // correct sizes and that key/iv/hp are all distinct material.
         let initial = derive_initial_secret(&RFC9001_DCID, 1);
-        let client_secret = derive_client_initial_secret(&initial);
-        let keys = derive_keys(&client_secret, 16, 12, 16);
+        let client_secret = derive_client_initial_secret(&initial).expect("valid initial secret");
+        let keys = derive_keys(&client_secret, 16, 12, 16).expect("valid client secret");
 
         assert_eq!(keys.key.len(), 16, "client key must be 16 bytes");
         assert_eq!(keys.iv.len(), 12, "client IV must be 12 bytes");
@@ -356,7 +370,7 @@ mod tests {
         assert_ne!(keys.key, keys.hp, "key and hp must differ");
 
         // Deterministic
-        let keys2 = derive_keys(&client_secret, 16, 12, 16);
+        let keys2 = derive_keys(&client_secret, 16, 12, 16).expect("valid client secret");
         assert_eq!(keys.key, keys2.key);
         assert_eq!(keys.iv, keys2.iv);
         assert_eq!(keys.hp, keys2.hp);
@@ -365,11 +379,11 @@ mod tests {
     #[test]
     fn server_initial_keys_differ_from_client() {
         let initial = derive_initial_secret(&RFC9001_DCID, 1);
-        let client_secret = derive_client_initial_secret(&initial);
-        let server_secret = derive_server_initial_secret(&initial);
+        let client_secret = derive_client_initial_secret(&initial).expect("valid initial secret");
+        let server_secret = derive_server_initial_secret(&initial).expect("valid initial secret");
 
-        let client_keys = derive_keys(&client_secret, 16, 12, 16);
-        let server_keys = derive_keys(&server_secret, 16, 12, 16);
+        let client_keys = derive_keys(&client_secret, 16, 12, 16).expect("valid client secret");
+        let server_keys = derive_keys(&server_secret, 16, 12, 16).expect("valid server secret");
 
         assert_ne!(client_keys.key, server_keys.key, "client and server packet keys must differ");
         assert_ne!(client_keys.iv, server_keys.iv, "client and server IVs must differ");
@@ -383,10 +397,10 @@ mod tests {
     #[test]
     fn derive_keys_matches_individual_calls() {
         let secret = [0x42u8; 32];
-        let keys = derive_keys(&secret, 16, 12, 16);
-        assert_eq!(keys.key, derive_pkt_key(&secret, 16));
-        assert_eq!(keys.iv, derive_pkt_iv(&secret, 12));
-        assert_eq!(keys.hp, derive_hdr_key(&secret, 16));
+        let keys = derive_keys(&secret, 16, 12, 16).expect("valid secret");
+        assert_eq!(keys.key, derive_pkt_key(&secret, 16).expect("valid secret"));
+        assert_eq!(keys.iv, derive_pkt_iv(&secret, 12).expect("valid secret"));
+        assert_eq!(keys.hp, derive_hdr_key(&secret, 16).expect("valid secret"));
     }
 
     // ---------------------------------------------------------------
@@ -396,8 +410,8 @@ mod tests {
     #[test]
     fn derive_next_secret_changes_value() {
         let initial = derive_initial_secret(&RFC9001_DCID, 1);
-        let client = derive_client_initial_secret(&initial);
-        let next = derive_next_secret(&client);
+        let client = derive_client_initial_secret(&initial).expect("valid initial secret");
+        let next = derive_next_secret(&client).expect("valid client secret");
         assert_ne!(next.as_slice(), client.as_slice(), "key update must produce different secret");
         assert_eq!(next.len(), 32, "next secret must be 32 bytes");
     }
@@ -405,20 +419,20 @@ mod tests {
     #[test]
     fn derive_next_secret_deterministic() {
         let secret = [0xBBu8; 32];
-        let n1 = derive_next_secret(&secret);
-        let n2 = derive_next_secret(&secret);
+        let n1 = derive_next_secret(&secret).expect("valid secret");
+        let n2 = derive_next_secret(&secret).expect("valid secret");
         assert_eq!(n1, n2, "same input must yield same next secret");
     }
 
     #[test]
     fn key_update_chain_produces_unique_secrets() {
         let initial = derive_initial_secret(&RFC9001_DCID, 1);
-        let client = derive_client_initial_secret(&initial);
+        let client = derive_client_initial_secret(&initial).expect("valid initial secret");
         let mut current = client.clone();
         let mut seen = std::collections::HashSet::new();
         seen.insert(current.clone());
         for _ in 0..10 {
-            current = derive_next_secret(&current);
+            current = derive_next_secret(&current).expect("valid key update secret");
             assert!(
                 seen.insert(current.clone()),
                 "key update chain must produce unique secrets at each step"
@@ -437,24 +451,47 @@ mod tests {
     }
 
     #[test]
-    fn short_secret_input_handled() {
-        // derive_pkt_key/iv/hp pad short secrets to 32 bytes internally
-        let short = [0xAA; 4];
-        let key = derive_pkt_key(&short, 16);
-        assert_eq!(key.len(), 16, "short secret must still produce correct key length");
-        let iv = derive_pkt_iv(&short, 12);
-        assert_eq!(iv.len(), 12);
-        let hp = derive_hdr_key(&short, 16);
-        assert_eq!(hp.len(), 16);
+    fn invalid_secret_lengths_are_rejected() {
+        fn assert_invalid_secret<T>(result: Result<T, KeyMaterialError>, actual: usize) {
+            let error = match result {
+                Ok(_) => panic!("invalid traffic secret length was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                KeyMaterialError::Length {
+                    algorithm: "QUIC KDF",
+                    material: "traffic secret",
+                    expected: 32,
+                    actual,
+                    minimum: false,
+                }
+            );
+        }
+
+        for actual in [0, 4, 31, 33] {
+            let secret = vec![0xAA; actual];
+            assert_invalid_secret(derive_client_initial_secret(&secret), actual);
+            assert_invalid_secret(derive_server_initial_secret(&secret), actual);
+            assert_invalid_secret(derive_pkt_key(&secret, 16), actual);
+            assert_invalid_secret(derive_pkt_key_for_version(&secret, 16, 0x00000001), actual);
+            assert_invalid_secret(derive_pkt_iv(&secret, 12), actual);
+            assert_invalid_secret(derive_pkt_iv_for_version(&secret, 12, 0x00000001), actual);
+            assert_invalid_secret(derive_hdr_key(&secret, 16), actual);
+            assert_invalid_secret(derive_hdr_key_for_version(&secret, 16, 0x00000001), actual);
+            assert_invalid_secret(derive_next_secret(&secret), actual);
+            assert_invalid_secret(derive_next_secret_for_version(&secret, 0x00000001), actual);
+            assert_invalid_secret(derive_keys(&secret, 16, 12, 16), actual);
+        }
     }
 
     #[test]
     fn exact_32_byte_secret() {
         let exact = [0xFFu8; 32];
-        let key = derive_pkt_key(&exact, 16);
+        let key = derive_pkt_key(&exact, 16).expect("valid exact secret");
         assert_eq!(key.len(), 16);
         // Ensure it takes the fast path (exact copy) and produces valid output
-        let key2 = derive_pkt_key(&exact, 16);
+        let key2 = derive_pkt_key(&exact, 16).expect("valid exact secret");
         assert_eq!(key, key2, "exact-32-byte path must be deterministic");
     }
 
@@ -463,8 +500,8 @@ mod tests {
         // TLS 1.3 encodes the requested output length in HkdfLabel, so the
         // 16-byte and 32-byte derivations intentionally use different info.
         let secret = [0xCCu8; 32];
-        let key16 = derive_pkt_key(&secret, 16);
-        let key32 = derive_pkt_key(&secret, 32);
+        let key16 = derive_pkt_key(&secret, 16).expect("valid secret");
+        let key32 = derive_pkt_key(&secret, 32).expect("valid secret");
         assert_ne!(&key32[..16], key16.as_slice());
         assert_ne!(&key32[16..], &[0u8; 16], "extended key material must not be all zeros");
     }
@@ -472,9 +509,9 @@ mod tests {
     #[test]
     fn key_iv_hp_are_all_different() {
         let secret = [0x11u8; 32];
-        let key = derive_pkt_key(&secret, 16);
-        let iv = derive_pkt_iv(&secret, 16); // same length for comparison
-        let hp = derive_hdr_key(&secret, 16);
+        let key = derive_pkt_key(&secret, 16).expect("valid secret");
+        let iv = derive_pkt_iv(&secret, 16).expect("valid secret"); // same length for comparison
+        let hp = derive_hdr_key(&secret, 16).expect("valid secret");
         assert_ne!(key, iv, "key and iv labels differ - output must differ");
         assert_ne!(key, hp, "key and hp labels differ - output must differ");
         assert_ne!(iv, hp, "iv and hp labels differ - output must differ");

@@ -2306,14 +2306,14 @@ mod rustls_provider {
         }
         fn key_update_read(&mut self) -> Result<(), ConnectionError> {
             self.ensure_1rtt_ready()?;
-            if self.crypto.write().key_update_1rtt_read() {
+            if self.crypto.write().key_update_1rtt_read()? {
                 return Ok(());
             }
             self.update_read_from_rustls_chain()
         }
         fn key_update_write(&mut self) -> Result<(), ConnectionError> {
             self.ensure_1rtt_ready()?;
-            if self.crypto.write().key_update_1rtt_write() {
+            if self.crypto.write().key_update_1rtt_write()? {
                 return Ok(());
             }
             self.update_write_from_rustls_chain()

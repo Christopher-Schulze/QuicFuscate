@@ -47,14 +47,22 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
 
     {
         let mut crypto = client.crypto.write();
-        crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
-        crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
+        crypto
+            .set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write)
+            .expect("valid client write secret");
+        crypto
+            .set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write)
+            .expect("valid server read secret");
     }
     client.refresh_short_header_tag_reserve();
     {
         let mut crypto = server.crypto.write();
-        crypto.set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write);
-        crypto.set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write);
+        crypto
+            .set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &server_write)
+            .expect("valid server write secret");
+        crypto
+            .set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &client_write)
+            .expect("valid client read secret");
     }
     server.refresh_short_header_tag_reserve();
 

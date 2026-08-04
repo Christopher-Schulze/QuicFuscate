@@ -178,6 +178,11 @@ pub mod error {
             ConnectionError::Transport(s.to_string())
         }
     }
+    impl From<crate::crypto::aead::KeyMaterialError> for ConnectionError {
+        fn from(error: crate::crypto::aead::KeyMaterialError) -> Self {
+            ConnectionError::CryptoError(error.to_string())
+        }
+    }
     impl From<crate::transport::h3::Error> for ConnectionError {
         fn from(e: crate::transport::h3::Error) -> Self {
             match e {

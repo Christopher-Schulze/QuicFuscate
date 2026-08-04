@@ -1053,7 +1053,7 @@ impl Connection {
             self.dcid.as_ref()
         };
         let (client_secret, server_secret) =
-            packet::derive_initial_secrets(initial_dcid, self.config.version);
+            packet::derive_initial_secrets(initial_dcid, self.config.version)?;
         {
             let (read_secret, write_secret) = if self.is_server {
                 (client_secret.as_slice(), server_secret.as_slice())
@@ -1061,8 +1061,8 @@ impl Connection {
                 (server_secret.as_slice(), client_secret.as_slice())
             };
             let mut crypto = self.crypto.write();
-            crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version);
-            crypto.install_hp_initial(read_secret, write_secret, self.config.version);
+            crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version)?;
+            crypto.install_hp_initial(read_secret, write_secret, self.config.version)?;
         }
 
         Ok(())
