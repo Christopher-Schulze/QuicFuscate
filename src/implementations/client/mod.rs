@@ -116,6 +116,18 @@ impl From<ClientState> for EngineState {
     }
 }
 
+fn client_tun_config(config: &EngineConfig) -> Result<TunConfig, EngineError> {
+    let addresses = config.interface.client_tunnel_addresses().map_err(|error| {
+        EngineError::Config(format!("Invalid client tunnel address configuration: {error}"))
+    })?;
+    let name = if config.interface.tun_name.is_empty() {
+        None
+    } else {
+        Some(config.interface.tun_name.clone())
+    };
+    Ok(addresses.to_tun_config(name, config.interface.tun_mtu, config.interface.zero_copy))
+}
+
 impl ClientRuntime {
     /// Create a new client runtime from configuration.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
@@ -171,19 +183,13 @@ impl ClientRuntime {
             return Err(EngineError::Tun(format!("{:?}", e)));
         }
 
-        // Open TUN interface
-        let tun_config = TunConfig {
-            name: if self.config.interface.tun_name.is_empty() {
-                None
-            } else {
-                Some(self.config.interface.tun_name.clone())
-            },
-            ip: self.config.interface.tun_ip,
-            netmask: self.config.interface.tun_netmask,
-            mtu: self.config.interface.tun_mtu,
-            zero_copy: self.config.interface.zero_copy,
-            ip6: None,
-            prefix6: None,
+        // Open TUN interface from the canonical typed address projection.
+        let tun_config = match client_tun_config(&self.config) {
+            Ok(config) => config,
+            Err(error) => {
+                self.state = ClientState::Error;
+                return Err(error);
+            }
         };
 
         let tun = match TunInterface::open(tun_config, self.pool.clone()) {
@@ -864,6 +870,35 @@ impl Drop for ClientRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_runtime_projects_dual_stack_tun_addresses() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip = Some("10.20.30.40".parse().expect("IPv4 address"));
+        config.interface.tun_netmask = Some("255.255.255.0".parse().expect("IPv4 netmask"));
+        config.interface.tun_ip6 = Some("fd00::42".parse().expect("IPv6 address"));
+        config.interface.tun_prefix6 = Some(64);
+
+        let tun_config = client_tun_config(&config).expect("dual-stack projection");
+        assert_eq!(tun_config.ip, Some("10.20.30.40".parse().expect("IPv4 address")));
+        assert_eq!(tun_config.netmask, Some("255.255.255.0".parse().expect("IPv4 netmask")));
+        assert_eq!(tun_config.ip6, Some("fd00::42".parse().expect("IPv6 address")));
+        assert_eq!(tun_config.prefix6, Some(64));
+        assert_eq!(tun_config.mtu, 1500);
+    }
+
+    #[test]
+    fn client_runtime_projects_ipv6_only_tun_addresses() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip6 = Some("fd00::42".parse().expect("IPv6 address"));
+        config.interface.tun_prefix6 = Some(64);
+
+        let tun_config = client_tun_config(&config).expect("IPv6-only projection");
+        assert_eq!(tun_config.ip, None);
+        assert_eq!(tun_config.netmask, None);
+        assert_eq!(tun_config.ip6, Some("fd00::42".parse().expect("IPv6 address")));
+        assert_eq!(tun_config.prefix6, Some(64));
+    }
 
     #[test]
     fn test_client_runtime_new() {

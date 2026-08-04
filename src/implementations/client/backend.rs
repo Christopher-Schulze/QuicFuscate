@@ -102,7 +102,12 @@ impl From<EngineError> for BackendError {
     }
 }
 
-/// Unified cross-platform client backend.
+/// Unified cross-platform compatibility client backend.
+///
+/// This API intentionally remains single-family because its public
+/// [`TunDeviceConfig`] contains one address and one prefix. The generic
+/// [`crate::implementations::client::ClientRuntime`] owns the canonical
+/// dual-stack TUN projection.
 pub struct ClientBackend {
     /// Platform-specific backend
     platform: Box<dyn PlatformBackend>,
@@ -181,6 +186,13 @@ fn default_tun_gateway(address: IpAddr, prefix: u8) -> IpAddr {
 }
 
 fn effective_tun_network(config: &EngineConfig) -> Result<EffectiveTunNetwork, BackendError> {
+    if config.interface.tun_ip6.is_some() || config.interface.tun_prefix6.is_some() {
+        return Err(BackendError::Config(
+            "ClientBackend compatibility API is single-family; use ClientRuntime for canonical dual-stack TUN configuration"
+                .to_string(),
+        ));
+    }
+
     match (config.interface.tun_ip, config.interface.tun_netmask) {
         (Some(_), None) | (None, Some(_)) => {
             return Err(BackendError::Config(
@@ -813,6 +825,24 @@ mod tests {
         }));
 
         backend.disconnect().expect("IPv6 backend disconnect");
+    }
+
+    #[test]
+    fn client_backend_rejects_canonical_ipv6_fields_without_silent_drop() {
+        let (mut backend, tun_config, routes) = config_capture_backend();
+        let mut config = test_backend_config();
+        config.interface.tun_ip = Some("10.20.30.40".parse().expect("TUN IPv4 address"));
+        config.interface.tun_netmask = Some("255.255.255.0".parse().expect("TUN IPv4 netmask"));
+        config.interface.tun_ip6 = Some("fd00::42".parse().expect("TUN IPv6 address"));
+        config.interface.tun_prefix6 = Some(64);
+
+        let error = backend
+            .connect(&config)
+            .expect_err("single-family compatibility backend must reject dual-stack config");
+        assert!(error.to_string().contains("single-family"));
+        assert!(tun_config.lock().unwrap().is_none());
+        assert!(routes.lock().unwrap().is_empty());
+        assert_eq!(backend.state(), ConnectionState::Disconnected);
     }
 
     #[test]

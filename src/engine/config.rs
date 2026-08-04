@@ -14,8 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -670,6 +670,86 @@ pub enum AeadPreference {
 // INTERFACE SECTION
 // ============================================================================
 
+/// Canonical IPv4 address assigned to a client TUN interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientTunnelIpv4 {
+    /// Client-side IPv4 address.
+    pub address: Ipv4Addr,
+    /// Contiguous IPv4 prefix length.
+    pub prefix: u8,
+}
+
+/// Canonical IPv6 address assigned to a client TUN interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientTunnelIpv6 {
+    /// Client-side IPv6 address.
+    pub address: Ipv6Addr,
+    /// IPv6 prefix length.
+    pub prefix: u8,
+}
+
+/// Canonical client tunnel address model.
+///
+/// Each family is optional, so the model represents IPv4-only, IPv6-only, and
+/// dual-stack client interfaces without overloading the IPv4 fields in
+/// [`crate::interface::TunConfig`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClientTunnelAddresses {
+    /// Optional IPv4 client address and prefix.
+    pub ipv4: Option<ClientTunnelIpv4>,
+    /// Optional IPv6 client address and prefix.
+    pub ipv6: Option<ClientTunnelIpv6>,
+}
+
+impl ClientTunnelAddresses {
+    /// Project the canonical address model into the native TUN configuration.
+    pub(crate) fn to_tun_config(
+        self,
+        name: Option<String>,
+        mtu: u16,
+        zero_copy: bool,
+    ) -> crate::interface::TunConfig {
+        crate::interface::TunConfig {
+            name,
+            ip: self.ipv4.map(|address| IpAddr::V4(address.address)),
+            netmask: self.ipv4.map(|address| IpAddr::V4(ipv4_prefix_to_netmask(address.prefix))),
+            mtu,
+            zero_copy,
+            ip6: self.ipv6.map(|address| address.address),
+            prefix6: self.ipv6.map(|address| address.prefix),
+        }
+    }
+}
+
+fn ipv4_prefix_to_netmask(prefix: u8) -> Ipv4Addr {
+    let raw = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    Ipv4Addr::from(raw)
+}
+
+fn ipv4_netmask_prefix(mask: Ipv4Addr) -> Result<u8, ConfigError> {
+    let raw = u32::from(mask);
+    let prefix = raw.leading_ones() as u8;
+    let canonical = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    if raw != canonical {
+        return Err(ConfigError::Validation(format!(
+            "interface.tun_netmask is not a contiguous IPv4 netmask: {mask}"
+        )));
+    }
+    Ok(prefix)
+}
+
+fn ipv6_netmask_prefix(mask: Ipv6Addr) -> Result<u8, ConfigError> {
+    let raw = u128::from(mask);
+    let prefix = raw.leading_ones() as u8;
+    let canonical = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+    if raw != canonical {
+        return Err(ConfigError::Validation(format!(
+            "interface.tun_netmask is not a contiguous IPv6 netmask: {mask}"
+        )));
+    }
+    Ok(prefix)
+}
+
 /// TUN/TAP interface configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -685,6 +765,10 @@ pub struct InterfaceConfig {
     pub tun_ip: Option<IpAddr>,
     /// Optional static TUN netmask
     pub tun_netmask: Option<IpAddr>,
+    /// Optional static IPv6 TUN address for the canonical generic client path
+    pub tun_ip6: Option<Ipv6Addr>,
+    /// Optional IPv6 TUN prefix for the canonical generic client path
+    pub tun_prefix6: Option<u8>,
     /// Enable zero-copy preference on TUN runtime path
     pub zero_copy: bool,
     /// Enable GSO
@@ -711,6 +795,8 @@ impl Default for InterfaceConfig {
             tun_mtu: 1500,
             tun_ip: None,
             tun_netmask: None,
+            tun_ip6: None,
+            tun_prefix6: None,
             zero_copy: true,
             enable_gso: true,
             enable_gro: true,
@@ -727,6 +813,77 @@ impl Default for InterfaceConfig {
 }
 
 impl InterfaceConfig {
+    /// Resolve legacy and canonical fields into one typed client address model.
+    pub fn client_tunnel_addresses(&self) -> Result<ClientTunnelAddresses, ConfigError> {
+        let legacy_ipv4_or_ipv6 = match (self.tun_ip, self.tun_netmask) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ConfigError::Validation(
+                    "interface.tun_ip and interface.tun_netmask must be configured together"
+                        .to_string(),
+                ));
+            }
+            (Some(ip), Some(mask)) if ip.is_ipv4() != mask.is_ipv4() => {
+                return Err(ConfigError::Validation(
+                    "interface.tun_ip and interface.tun_netmask must use the same address family"
+                        .to_string(),
+                ));
+            }
+            pair => pair,
+        };
+
+        let mut ipv4 = None;
+        let mut legacy_ipv6 = None;
+        match legacy_ipv4_or_ipv6 {
+            (Some(IpAddr::V4(address)), Some(IpAddr::V4(mask))) => {
+                ipv4 = Some(ClientTunnelIpv4 { address, prefix: ipv4_netmask_prefix(mask)? });
+            }
+            (Some(IpAddr::V6(address)), Some(IpAddr::V6(mask))) => {
+                legacy_ipv6 =
+                    Some(ClientTunnelIpv6 { address, prefix: ipv6_netmask_prefix(mask)? });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ConfigError::Validation(
+                    "interface.tun_ip and interface.tun_netmask must use the same address family"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let canonical_ipv6 = match (self.tun_ip6, self.tun_prefix6) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ConfigError::Validation(
+                    "interface.tun_ip6 and interface.tun_prefix6 must be configured together"
+                        .to_string(),
+                ));
+            }
+            (Some(_address), Some(prefix)) if prefix > 128 => {
+                return Err(ConfigError::Validation(format!(
+                    "interface.tun_prefix6 must be at most 128, got {prefix}"
+                )));
+            }
+            (Some(address), Some(prefix)) => Some(ClientTunnelIpv6 { address, prefix }),
+            (None, None) => None,
+        };
+
+        if legacy_ipv6.is_some() && canonical_ipv6.is_some() {
+            return Err(ConfigError::Validation(
+                "legacy IPv6 interface.tun_ip/tun_netmask cannot be combined with canonical interface.tun_ip6/tun_prefix6"
+                    .to_string(),
+            ));
+        }
+
+        let ipv6 = canonical_ipv6.or(legacy_ipv6);
+        if ipv6.is_some() && self.tun_mtu < 1280 {
+            return Err(ConfigError::Validation(format!(
+                "interface.tun_mtu must be at least 1280 when IPv6 TUN addressing is configured, got {}",
+                self.tun_mtu
+            )));
+        }
+
+        Ok(ClientTunnelAddresses { ipv4, ipv6 })
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.tun_mtu < 576 {
             return Err(ConfigError::Validation(format!(
@@ -734,19 +891,7 @@ impl InterfaceConfig {
                 self.tun_mtu
             )));
         }
-        match (self.tun_ip, self.tun_netmask) {
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(ConfigError::Validation(
-                    "tun_ip and tun_netmask must be configured together".to_string(),
-                ));
-            }
-            (Some(ip), Some(mask)) if ip.is_ipv4() != mask.is_ipv4() => {
-                return Err(ConfigError::Validation(
-                    "tun_ip and tun_netmask must use the same address family".to_string(),
-                ));
-            }
-            _ => {}
-        }
+        self.client_tunnel_addresses()?;
         Ok(())
     }
 }
@@ -2088,6 +2233,114 @@ mode = "roaming"
         config.interface.tun_ip = Some("10.8.0.1".parse().unwrap());
         config.interface.tun_netmask = Some("ffff:ffff:ffff:ffff::".parse().unwrap());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn client_tunnel_addresses_project_ipv4_ipv6_and_roundtrip() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip = Some("10.20.30.40".parse().expect("IPv4 address"));
+        config.interface.tun_netmask = Some("255.255.255.0".parse().expect("IPv4 netmask"));
+        config.interface.tun_ip6 = Some("fd00::42".parse().expect("IPv6 address"));
+        config.interface.tun_prefix6 = Some(64);
+
+        let addresses =
+            config.interface.client_tunnel_addresses().expect("dual-stack address model");
+        assert_eq!(
+            addresses.ipv4,
+            Some(ClientTunnelIpv4 {
+                address: "10.20.30.40".parse().expect("IPv4 address"),
+                prefix: 24,
+            })
+        );
+        assert_eq!(
+            addresses.ipv6,
+            Some(ClientTunnelIpv6 {
+                address: "fd00::42".parse().expect("IPv6 address"),
+                prefix: 64,
+            })
+        );
+
+        let encoded = toml::to_string(&config).expect("serialize dual-stack config");
+        let decoded = EngineConfig::from_toml(&encoded).expect("parse dual-stack config");
+        assert_eq!(decoded.interface.tun_ip6, config.interface.tun_ip6);
+        assert_eq!(decoded.interface.tun_prefix6, config.interface.tun_prefix6);
+        decoded.validate().expect("round-tripped dual-stack config validates");
+    }
+
+    #[test]
+    fn client_tunnel_addresses_accept_legacy_ipv6_single_family() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip = Some("2001:db8:42::2".parse().expect("IPv6 address"));
+        config.interface.tun_netmask = Some("ffff:ffff:ffff:ffff::".parse().expect("IPv6 netmask"));
+
+        let addresses =
+            config.interface.client_tunnel_addresses().expect("legacy IPv6 address model");
+        assert_eq!(addresses.ipv4, None);
+        assert_eq!(
+            addresses.ipv6,
+            Some(ClientTunnelIpv6 {
+                address: "2001:db8:42::2".parse().expect("IPv6 address"),
+                prefix: 64,
+            })
+        );
+    }
+
+    #[test]
+    fn client_tunnel_addresses_reject_non_contiguous_legacy_netmasks() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip = Some("10.20.30.40".parse().expect("IPv4 address"));
+        config.interface.tun_netmask = Some("255.0.255.0".parse().expect("IPv4 netmask"));
+        assert!(config
+            .interface
+            .client_tunnel_addresses()
+            .expect_err("non-contiguous IPv4 netmask must fail")
+            .to_string()
+            .contains("contiguous IPv4"));
+
+        config.interface.tun_ip = Some("2001:db8:42::2".parse().expect("IPv6 address"));
+        config.interface.tun_netmask = Some("ffff:ffff:ffff:fffd::".parse().expect("IPv6 netmask"));
+        assert!(config
+            .interface
+            .client_tunnel_addresses()
+            .expect_err("non-contiguous IPv6 netmask must fail")
+            .to_string()
+            .contains("contiguous IPv6"));
+    }
+
+    #[test]
+    fn validation_rejects_partial_canonical_ipv6_addressing() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip6 = Some("fd00::42".parse().expect("IPv6 address"));
+        assert!(config.validate().is_err());
+
+        config.interface.tun_ip6 = None;
+        config.interface.tun_prefix6 = Some(64);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_invalid_canonical_ipv6_prefix_and_mtu() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip6 = Some("fd00::42".parse().expect("IPv6 address"));
+        config.interface.tun_prefix6 = Some(129);
+        assert!(config.validate().is_err());
+
+        config.interface.tun_prefix6 = Some(64);
+        config.interface.tun_mtu = 1279;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_two_ipv6_address_sources() {
+        let mut config = EngineConfig::default();
+        config.interface.tun_ip = Some("2001:db8:42::2".parse().expect("legacy IPv6 address"));
+        config.interface.tun_netmask =
+            Some("ffff:ffff:ffff:ffff::".parse().expect("legacy IPv6 netmask"));
+        config.interface.tun_ip6 = Some("fd00::42".parse().expect("canonical IPv6 address"));
+        config.interface.tun_prefix6 = Some(64);
+
+        let error = config.validate().expect_err("duplicate IPv6 source must fail closed");
+        assert!(error.to_string().contains("cannot be combined"));
     }
 
     #[test]

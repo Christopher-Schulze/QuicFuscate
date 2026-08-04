@@ -433,6 +433,14 @@ type = "tun"
 tun_name = "quicfuse0"
 tun_mtu = 1500
 
+# Optional static client tunnel addresses for the generic EngineConfig path.
+# The IPv4 pair is the legacy source and can be combined with the canonical
+# IPv6 fields for dual-stack configuration.
+# tun_ip = "10.8.0.2"
+# tun_netmask = "255.255.255.0"
+# tun_ip6 = "fd00::2"
+# tun_prefix6 = 64
+
 # Enable packet coalescing
 # Wired: UdpFastPath::new_with_flags() accepts GSO/GRO toggles. The main server runtime
 # uses tokio UdpSocket (not UdpFastPath) so these flags affect the harness/xdp fallback
