@@ -2,6 +2,7 @@ pub fn load_server_identity(
     config: &mut crate::transport::Config,
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
+    lock_memory: bool,
 ) -> std::io::Result<()> {
     let cert_str = cert_path.to_str().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid certificate path")
@@ -25,9 +26,9 @@ pub fn load_server_identity(
         ));
     }
 
-    crate::qftls::preload_tls_server_identity(cert_str, key_str).map_err(|error| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-    })?;
+    let preload_status = crate::qftls::preload_tls_server_identity(cert_str, key_str, lock_memory)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+    log::info!("Preloaded TLS server identity: {:?}", preload_status);
     Ok(())
 }
 

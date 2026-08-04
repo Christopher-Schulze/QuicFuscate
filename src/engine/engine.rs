@@ -197,6 +197,7 @@ fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, Engin
             &mut transport,
             Path::new(&config.connection.cert_file),
             Path::new(&config.connection.key_file),
+            config.security.lock_memory,
         )
         .map_err(|error| {
             EngineError::Transport(format!("server identity setup failed: {error}"))

@@ -16,15 +16,152 @@ static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_SERVER_IDENTITY_OVERRIDE: OnceLock<PreloadedServerIdentity> = OnceLock::new();
 static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
+static PROCESS_MEMORY_LOCK_COVERS_FUTURE: AtomicBool = AtomicBool::new(false);
 /// Configurable max early data size for server TLS config.
 /// RFC 9001 §4.6.1: QUIC requires this to be either 0 (no 0-RTT) or 0xFFFF_FFFF (0-RTT enabled).
 /// Default is u32::MAX (0-RTT offered). Set to 0 to disable 0-RTT.
 /// Set via `set_max_early_data_size()` before server connection creation.
 static MAX_EARLY_DATA_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
 
+/// Reports the ownership state of the preloaded TLS private-key memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsKeyLockStatus {
+    /// The configured security policy disabled individual key locking.
+    Disabled,
+    /// This key buffer owns a successful individual `mlock` call.
+    Locked,
+    /// A successful process-wide `mlockall(MCL_FUTURE)` call owns future pages.
+    CoveredByProcess,
+    /// The requested individual lock was not available on this host or failed.
+    Unavailable,
+}
+
+/// Reports the result of publishing a preloaded server identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsIdentityPreloadStatus {
+    /// This call published the process-lifetime identity owner.
+    Loaded { key_lock: TlsKeyLockStatus },
+    /// The exact same certificate and key were already published.
+    AlreadyLoaded,
+}
+
+struct LockedKeyMaterial {
+    bytes: Zeroizing<Vec<u8>>,
+    status: TlsKeyLockStatus,
+}
+
+impl LockedKeyMaterial {
+    fn new(bytes: Zeroizing<Vec<u8>>, lock_memory: bool) -> Self {
+        let status = if !lock_memory {
+            TlsKeyLockStatus::Disabled
+        } else if PROCESS_MEMORY_LOCK_COVERS_FUTURE.load(Ordering::Acquire) {
+            TlsKeyLockStatus::CoveredByProcess
+        } else {
+            try_lock_key_material(bytes.as_slice())
+        };
+        Self { bytes, status }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    fn status(&self) -> TlsKeyLockStatus {
+        self.status
+    }
+}
+
+impl Drop for LockedKeyMaterial {
+    fn drop(&mut self) {
+        self.bytes.as_mut_slice().fill(0);
+        if self.status == TlsKeyLockStatus::Locked {
+            unlock_key_material(self.bytes.as_ptr(), self.bytes.len());
+        }
+    }
+}
+
 struct PreloadedServerIdentity {
     cert_pem: Vec<u8>,
-    key_pem: Zeroizing<Vec<u8>>,
+    key_pem: LockedKeyMaterial,
+}
+
+impl PreloadedServerIdentity {
+    fn new(cert_pem: Vec<u8>, key_pem: Zeroizing<Vec<u8>>, lock_memory: bool) -> Self {
+        Self { cert_pem, key_pem: LockedKeyMaterial::new(key_pem, lock_memory) }
+    }
+
+    fn matches(&self, cert_pem: &[u8], key_pem: &[u8]) -> bool {
+        self.cert_pem == cert_pem && self.key_pem.as_slice() == key_pem
+    }
+}
+
+#[cfg(unix)]
+fn try_lock_key_material(bytes: &[u8]) -> TlsKeyLockStatus {
+    // SAFETY: `bytes` is a live allocation owned by `LockedKeyMaterial` for the
+    // complete duration of the syscall and has the exact length passed here.
+    if unsafe { libc::mlock(bytes.as_ptr().cast(), bytes.len()) } == 0 {
+        TlsKeyLockStatus::Locked
+    } else {
+        let error = std::io::Error::last_os_error();
+        log::warn!("Failed to lock preloaded TLS private key in memory: {error}");
+        TlsKeyLockStatus::Unavailable
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock_key_material(_bytes: &[u8]) -> TlsKeyLockStatus {
+    log::debug!("Individual TLS private-key memory locking is unsupported on this platform");
+    TlsKeyLockStatus::Unavailable
+}
+
+#[cfg(unix)]
+fn unlock_key_material(ptr: *const u8, len: usize) {
+    // SAFETY: the pointer and length are the exact allocation range previously
+    // locked by this guard, and the allocation remains alive during the call.
+    if unsafe { libc::munlock(ptr.cast(), len) } != 0 {
+        log::error!(
+            "Failed to unlock preloaded TLS private-key memory ({} bytes): {}",
+            len,
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn unlock_key_material(_ptr: *const u8, _len: usize) {}
+
+/// Tell the qftls owner whether process-wide locking covers future allocations.
+///
+/// Standalone startup calls this only after a successful
+/// `mlockall(MCL_CURRENT | MCL_FUTURE)` operation. `MCL_CURRENT` alone is not
+/// sufficient because a later TLS key allocation still needs its own lock.
+#[doc(hidden)]
+pub fn set_process_memory_lock_covers_future_allocations(enabled: bool) {
+    PROCESS_MEMORY_LOCK_COVERS_FUTURE.store(enabled, Ordering::Release);
+}
+
+fn publish_preloaded_identity(
+    slot: &OnceLock<PreloadedServerIdentity>,
+    identity: PreloadedServerIdentity,
+) -> Result<TlsIdentityPreloadStatus, ConnectionError> {
+    let key_lock = identity.key_pem.status();
+    match slot.set(identity) {
+        Ok(()) => Ok(TlsIdentityPreloadStatus::Loaded { key_lock }),
+        Err(rejected) => {
+            let same_identity = slot.get().is_some_and(|existing| {
+                existing.matches(&rejected.cert_pem, rejected.key_pem.as_slice())
+            });
+            drop(rejected);
+            if same_identity {
+                Ok(TlsIdentityPreloadStatus::AlreadyLoaded)
+            } else {
+                Err(ConnectionError::TlsError(
+                    "TLS server identity already preloaded with a different certificate or private key"
+                        .to_string(),
+                ))
+            }
+        }
+    }
 }
 
 /// Set the maximum early data size for new server TLS connections.
@@ -67,7 +204,18 @@ pub fn set_tls_cert_key_paths(cert_path: &str, key_path: &str) {
 ///
 /// New server connections use this in-memory copy instead of reopening a
 /// root-owned private-key file after the process drops to its runtime UID.
-pub fn preload_tls_server_identity(cert_path: &str, key_path: &str) -> Result<(), ConnectionError> {
+///
+/// `lock_memory` is the canonical security policy for the individual key
+/// buffer. Lock failure is best-effort for compatibility with finite
+/// `RLIMIT_MEMLOCK`; the returned status and startup warning make degradation
+/// observable. The accepted identity is process-lifetime-owned by the static
+/// `OnceLock`; rejected duplicate/conflicting values are dropped through the
+/// exact-range guard and therefore unlock their own successful `mlock` call.
+pub fn preload_tls_server_identity(
+    cert_path: &str,
+    key_path: &str,
+    lock_memory: bool,
+) -> Result<TlsIdentityPreloadStatus, ConnectionError> {
     let cert_pem = std::fs::read(cert_path).map_err(|error| {
         ConnectionError::TlsError(format!("Cert read failed ({cert_path}): {error}"))
     })?;
@@ -76,19 +224,22 @@ pub fn preload_tls_server_identity(cert_path: &str, key_path: &str) -> Result<()
     })?);
     rustls_provider::validate_server_identity_pem(&cert_pem, key_pem.as_slice())?;
 
-    #[cfg(unix)]
-    if unsafe { libc::mlock(key_pem.as_ptr().cast(), key_pem.len()) } != 0 {
-        log::warn!(
-            "Failed to lock preloaded TLS private key in memory: {}",
-            std::io::Error::last_os_error()
-        );
+    if let Some(existing) = TLS_SERVER_IDENTITY_OVERRIDE.get() {
+        if existing.matches(&cert_pem, key_pem.as_slice()) {
+            return Ok(TlsIdentityPreloadStatus::AlreadyLoaded);
+        }
+        return Err(ConnectionError::TlsError(
+            "TLS server identity already preloaded with a different certificate or private key"
+                .to_string(),
+        ));
     }
 
-    if TLS_SERVER_IDENTITY_OVERRIDE.set(PreloadedServerIdentity { cert_pem, key_pem }).is_err() {
-        log::debug!("TLS server identity already preloaded, keeping existing value");
+    let identity = PreloadedServerIdentity::new(cert_pem, key_pem, lock_memory);
+    let status = publish_preloaded_identity(&TLS_SERVER_IDENTITY_OVERRIDE, identity)?;
+    if matches!(status, TlsIdentityPreloadStatus::Loaded { .. }) {
+        set_tls_cert_key_paths(cert_path, key_path);
     }
-    set_tls_cert_key_paths(cert_path, key_path);
-    Ok(())
+    Ok(status)
 }
 
 // ===============================
@@ -367,6 +518,144 @@ pub fn profile_from_fingerprint(fp: &crate::stealth::FingerprintProfile) -> TlsP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "rcgen")]
+    struct IdentityFixture {
+        directory: std::path::PathBuf,
+        cert_path: std::path::PathBuf,
+        key_path: std::path::PathBuf,
+    }
+
+    #[cfg(feature = "rcgen")]
+    impl IdentityFixture {
+        fn new(label: &str) -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock must be after the Unix epoch")
+                .as_nanos();
+            let directory = std::env::temp_dir()
+                .join(format!("quicfuscate-qftls-identity-{}-{label}-{stamp}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("create TLS identity fixture directory");
+            let cert_path = directory.join("server.crt");
+            let key_path = directory.join("server.key");
+            let mut hierarchy =
+                crate::pki::generate_hierarchy("localhost", label).expect("generate TLS fixture");
+            crate::pki::write_cert_chain_pem(
+                &hierarchy.server_leaf.cert_der,
+                &hierarchy.intermediate_ca.cert_der,
+                &cert_path,
+            )
+            .expect("write TLS certificate fixture");
+            crate::pki::write_key_pem(&mut hierarchy.server_leaf.key_der, &key_path)
+                .expect("write TLS private-key fixture");
+            Self { directory, cert_path, key_path }
+        }
+    }
+
+    #[cfg(feature = "rcgen")]
+    impl Drop for IdentityFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[cfg(feature = "rcgen")]
+    #[test]
+    fn preload_identity_duplicate_and_conflict_contract_is_isolated() {
+        const CHILD_ENV: &str = "QUICFUSCATE_QFTLS_PRELOAD_CHILD";
+        const TEST_NAME: &str =
+            "qftls::tests::preload_identity_duplicate_and_conflict_contract_is_isolated";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let first = IdentityFixture::new("first");
+            let first_status = preload_tls_server_identity(
+                first.cert_path.to_str().expect("fixture certificate path is UTF-8"),
+                first.key_path.to_str().expect("fixture key path is UTF-8"),
+                true,
+            )
+            .expect("first TLS identity must preload");
+            assert!(matches!(
+                first_status,
+                TlsIdentityPreloadStatus::Loaded {
+                    key_lock: TlsKeyLockStatus::Locked
+                        | TlsKeyLockStatus::CoveredByProcess
+                        | TlsKeyLockStatus::Unavailable
+                }
+            ));
+
+            let same_status = preload_tls_server_identity(
+                first.cert_path.to_str().expect("fixture certificate path is UTF-8"),
+                first.key_path.to_str().expect("fixture key path is UTF-8"),
+                true,
+            )
+            .expect("same TLS identity must be idempotent");
+            assert_eq!(same_status, TlsIdentityPreloadStatus::AlreadyLoaded);
+
+            let conflict = IdentityFixture::new("conflict");
+            let error = preload_tls_server_identity(
+                conflict.cert_path.to_str().expect("fixture certificate path is UTF-8"),
+                conflict.key_path.to_str().expect("fixture key path is UTF-8"),
+                true,
+            )
+            .expect_err("a different TLS identity must be rejected");
+            assert!(matches!(
+                error,
+                ConnectionError::TlsError(message)
+                    if message.contains("different certificate or private key")
+            ));
+            return;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("resolve qftls test executable"),
+        )
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .env("RUST_TEST_THREADS", "1")
+        .output()
+        .expect("spawn isolated qftls preload test");
+        assert!(
+            output.status.success(),
+            "isolated qftls preload test failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn preloaded_identity_publication_releases_rejected_values() {
+        let slot = OnceLock::new();
+        let first = PreloadedServerIdentity::new(
+            b"first-cert".to_vec(),
+            Zeroizing::new(b"first-key".to_vec()),
+            true,
+        );
+        assert!(matches!(
+            publish_preloaded_identity(&slot, first),
+            Ok(TlsIdentityPreloadStatus::Loaded { .. })
+        ));
+
+        let same = PreloadedServerIdentity::new(
+            b"first-cert".to_vec(),
+            Zeroizing::new(b"first-key".to_vec()),
+            true,
+        );
+        assert_eq!(
+            publish_preloaded_identity(&slot, same),
+            Ok(TlsIdentityPreloadStatus::AlreadyLoaded)
+        );
+
+        let conflict = PreloadedServerIdentity::new(
+            b"other-cert".to_vec(),
+            Zeroizing::new(b"other-key".to_vec()),
+            true,
+        );
+        assert!(matches!(
+            publish_preloaded_identity(&slot, conflict),
+            Err(ConnectionError::TlsError(message))
+                if message.contains("different certificate or private key")
+        ));
+    }
 
     fn client_hello_cipher_suites(frame: &[u8]) -> Vec<u16> {
         assert!(frame.len() >= 4, "ClientHello handshake header is truncated");

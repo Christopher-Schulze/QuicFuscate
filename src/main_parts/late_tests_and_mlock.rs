@@ -684,8 +684,12 @@ fn lock_process_memory() -> std::io::Result<MemoryLockOutcome> {
 
 #[cfg(unix)]
 fn apply_process_memory_lock() {
+    quicfuscate::qftls::set_process_memory_lock_covers_future_allocations(false);
     match lock_process_memory() {
         Ok(outcome) => {
+            quicfuscate::qftls::set_process_memory_lock_covers_future_allocations(
+                outcome.flags & libc::MCL_FUTURE != 0,
+            );
             match outcome.current_limit {
                 Some(limit) if outcome.flags == libc::MCL_CURRENT => {
                     log::warn!(
@@ -703,6 +707,7 @@ fn apply_process_memory_lock() {
             info!("Process memory locked against swap (mlockall flags={})", outcome.flags);
         }
         Err(error) => {
+            quicfuscate::qftls::set_process_memory_lock_covers_future_allocations(false);
             log::warn!(
                 "mlockall failed: {}. Process memory may be swapped to disk. \
                  Set LimitMEMLOCK=infinity in systemd or run with CAP_IPC_LOCK.",
@@ -980,7 +985,12 @@ async fn run_server(
         }
     };
     apply_runtime_transport_defaults(&mut config, cc_algorithm);
-    quicfuscate::implementations::server::load_server_identity(&mut config, cert_path, key_path)?;
+    quicfuscate::implementations::server::load_server_identity(
+        &mut config,
+        cert_path,
+        key_path,
+        lock_memory,
+    )?;
 
     if let Some(cfg_path) = config_path.as_ref() {
         quicfuscate::implementations::server::apply_transport_overrides_from_file(
