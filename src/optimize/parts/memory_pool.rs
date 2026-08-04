@@ -8,6 +8,8 @@
 #[derive(Debug)]
 pub struct MemoryPool {
     id: usize,
+    lock_blocks: bool,
+    lock_ledger: Arc<BlockLockLedger>,
     pools: Vec<Arc<SegQueue<AlignedBox<[u8]>>>>,
     block_size: usize,
     num_nodes: usize,
@@ -20,13 +22,57 @@ pub struct MemoryPool {
 /// Global flag controlling whether MemoryPool blocks are mlocked against swap
 /// (TODO-516). Set once during server startup via [`MemoryPool::set_lock_blocks`].
 /// When true, every block allocated in [`MemoryPool::alloc_numa_block`] is
-/// locked with `mlock(2)`. Pages are released back to the kernel when the
-/// block is deallocated. On non-Unix targets this is a no-op.
+/// locked with `mlock(2)` and tracked until its owning pool release path calls
+/// `munlock(2)`. On non-Unix targets this is a no-op.
 static LOCK_BLOCKS: AtomicBool = AtomicBool::new(false);
 static NEXT_MEMORY_POOL_ID: AtomicUsize = AtomicUsize::new(1);
 const DEFAULT_AUTO_TUNE_MAX_CAPACITY: usize = 1024;
 const DEFAULT_POOL_MAX_BYTES: usize = 64 * 1024 * 1024;
-type ThreadLocalPoolCaches = Vec<(usize, Vec<AlignedBox<[u8]>>)>;
+
+#[cfg(test)]
+static LOCK_BLOCKS_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Debug, Default)]
+struct BlockLockLedger {
+    locked: std::sync::Mutex<HashSet<usize>>,
+}
+
+impl BlockLockLedger {
+    fn record(&self, ptr: *mut u8) {
+        let mut locked = self.locked.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        locked.insert(ptr as usize);
+    }
+
+    fn release(&self, ptr: *mut u8, len: usize) {
+        let was_locked = {
+            let mut locked = self.locked.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            locked.remove(&(ptr as usize))
+        };
+        if was_locked {
+            let _ = munlock_block(ptr, len);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.locked.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
+    }
+}
+
+struct ThreadLocalPoolCache {
+    id: usize,
+    lock_ledger: Arc<BlockLockLedger>,
+    blocks: Vec<AlignedBox<[u8]>>,
+}
+
+type ThreadLocalPoolCaches = Vec<ThreadLocalPoolCache>;
+
+impl Drop for ThreadLocalPoolCache {
+    fn drop(&mut self) {
+        while let Some(block) = self.blocks.pop() {
+            release_locked_block(block, &self.lock_ledger);
+        }
+    }
+}
 
 struct AutoTunerHandle {
     stop: Arc<AtomicBool>,
@@ -43,29 +89,62 @@ fn default_hard_max_capacity(initial_capacity: usize, block_size: usize) -> usiz
 }
 
 /// Lock a memory region against swap with `mlock(2)` (TODO-516).
-/// Best-effort: logs a warning on failure but does not panic.
+/// Best-effort: logs a debug message on failure but does not panic.
 /// No-op on non-Unix targets.
 #[cfg(unix)]
-fn mlock_block(ptr: *mut u8, len: usize) {
+fn mlock_block(ptr: *mut u8, len: usize) -> bool {
     // SAFETY: ptr points to a valid allocated region of `len` bytes.
     // mlock is a kernel syscall that does not dereference userspace
     // pointers beyond pinning the pages.
     let result = unsafe { libc::mlock(ptr as *const libc::c_void, len) };
-    if result != 0 {
-        let err = std::io::Error::last_os_error();
-        // EAGAIN (insufficient RLIMIT_MEMLOCK) is common in unprivileged
-        // contexts. Log once at debug to avoid spamming.
-        log::debug!(
-            "mlock failed for MemoryPool block ({} bytes): {} — \
-             consider raising RLIMIT_MEMLOCK or LimitMEMLOCK in systemd",
-            len,
-            err
-        );
+    if result == 0 {
+        return true;
     }
+    let err = std::io::Error::last_os_error();
+    // EAGAIN (insufficient RLIMIT_MEMLOCK) is common in unprivileged
+    // contexts. Log once at debug to avoid spamming.
+    log::debug!(
+        "mlock failed for MemoryPool block ({} bytes): {} - \
+         consider raising RLIMIT_MEMLOCK or LimitMEMLOCK in systemd",
+        len,
+        err
+    );
+    false
+}
+
+/// Unlock a successfully locked MemoryPool region before its allocation is dropped.
+/// No-op on non-Unix targets.
+#[cfg(unix)]
+fn munlock_block(ptr: *mut u8, len: usize) -> bool {
+    // SAFETY: ptr points to a valid allocated region of `len` bytes owned by the
+    // release path that removed it from the lock ledger.
+    let result = unsafe { libc::munlock(ptr as *const libc::c_void, len) };
+    if result == 0 {
+        return true;
+    }
+    log::debug!(
+        "munlock failed for MemoryPool block ({} bytes): {}",
+        len,
+        std::io::Error::last_os_error()
+    );
+    false
 }
 
 #[cfg(not(unix))]
-fn mlock_block(_ptr: *mut u8, _len: usize) {}
+fn mlock_block(_ptr: *mut u8, _len: usize) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn munlock_block(_ptr: *mut u8, _len: usize) -> bool {
+    false
+}
+
+fn release_locked_block(mut block: AlignedBox<[u8]>, lock_ledger: &BlockLockLedger) {
+    block.as_mut().fill(0);
+    lock_ledger.release(block.as_mut_ptr(), block.len());
+    drop(block);
+}
 
 impl MemoryPool {
     /// Enable or disable mlock on MemoryPool blocks (TODO-516).
@@ -100,11 +179,15 @@ impl MemoryPool {
     fn with_tls_cache<R>(&self, operation: impl FnOnce(&mut Vec<AlignedBox<[u8]>>) -> R) -> R {
         Self::TLS_CACHES.with(|caches| {
             let mut caches = caches.borrow_mut();
-            let index = caches.iter().position(|(id, _)| *id == self.id).unwrap_or_else(|| {
-                caches.push((self.id, Vec::new()));
+            let index = caches.iter().position(|cache| cache.id == self.id).unwrap_or_else(|| {
+                caches.push(ThreadLocalPoolCache {
+                    id: self.id,
+                    lock_ledger: Arc::clone(&self.lock_ledger),
+                    blocks: Vec::new(),
+                });
                 caches.len() - 1
             });
-            operation(&mut caches[index].1)
+            operation(&mut caches[index].blocks)
         })
     }
 
@@ -180,18 +263,22 @@ impl MemoryPool {
         if block_size < 2048 {
             block_size = 2048;
         }
+        let lock_blocks = Self::lock_blocks_enabled();
+        let lock_ledger = Arc::new(BlockLockLedger::default());
         let nodes = numa::num_nodes();
         let mut pools = Vec::with_capacity(nodes);
         for n in 0..nodes {
             let node_cap = capacity / nodes + if n < capacity % nodes { 1 } else { 0 };
             let q = Arc::new(SegQueue::new());
             for _ in 0..node_cap {
-                q.push(Self::alloc_numa_block(block_size, n));
+                q.push(Self::alloc_numa_block(block_size, n, lock_blocks, &lock_ledger));
             }
             pools.push(q);
         }
         let pool = Self {
             id: NEXT_MEMORY_POOL_ID.fetch_add(1, Ordering::Relaxed),
+            lock_blocks,
+            lock_ledger,
             pools,
             block_size,
             num_nodes: nodes,
@@ -286,7 +373,12 @@ impl MemoryPool {
         self.in_use.fetch_add(1, Ordering::Relaxed);
     }
     /// Allocate a 64-byte aligned block bound to the given NUMA node.
-    fn alloc_numa_block(block_size: usize, node: usize) -> AlignedBox<[u8]> {
+    fn alloc_numa_block(
+        block_size: usize,
+        node: usize,
+        lock_blocks: bool,
+        lock_ledger: &BlockLockLedger,
+    ) -> AlignedBox<[u8]> {
         // Use manual aligned allocation to guarantee exact length = block_size.
         let layout = match std::alloc::Layout::from_size_align(block_size.max(1), 64) {
             Ok(l) => l,
@@ -356,8 +448,8 @@ impl MemoryPool {
             let _ = node; // silence unused parameter warning on non-Linux
         }
         // Lock block against swap if enabled (TODO-516).
-        if Self::lock_blocks_enabled() {
-            mlock_block(block.as_mut_ptr(), block_size);
+        if lock_blocks && mlock_block(block.as_mut_ptr(), block_size) {
+            lock_ledger.record(block.as_mut_ptr());
         }
         block
     }
@@ -376,7 +468,12 @@ impl MemoryPool {
                 if self.capacity.load(Ordering::Relaxed) >= target {
                     break;
                 }
-                q.push(Self::alloc_numa_block(self.block_size, n));
+                q.push(Self::alloc_numa_block(
+                    self.block_size,
+                    n,
+                    self.lock_blocks,
+                    &self.lock_ledger,
+                ));
                 self.available.fetch_add(1, Ordering::Relaxed);
                 self.capacity.fetch_add(1, Ordering::Relaxed);
             }
@@ -423,7 +520,9 @@ impl MemoryPool {
             } else {
                 // Remove from available as it left TLS, but do not count as in-use
                 self.dec_available();
-                // Drop mismatched block; continue to slow-path to obtain a correct block
+                // Release mismatched blocks owned by this pool before dropping them.
+                release_locked_block(b, &self.lock_ledger);
+                // Continue to the slow path to obtain a correct block.
             }
         }
 
@@ -509,7 +608,12 @@ impl MemoryPool {
         let cap_now = self.capacity.load(Ordering::Relaxed);
         let limit2 = self.hard_max_capacity;
         if cap_now < limit2 {
-            let b = Self::alloc_numa_block(self.block_size, node);
+            let b = Self::alloc_numa_block(
+                self.block_size,
+                node,
+                self.lock_blocks,
+                &self.lock_ledger,
+            );
             self.capacity.fetch_add(1, Ordering::Relaxed);
             self.in_use.fetch_add(1, Ordering::Relaxed);
             self.update_metrics();
@@ -520,14 +624,21 @@ impl MemoryPool {
         // an ephemeral block but do not touch counters; free() will drop it if pool is full.
         crate::optimize::telemetry::MEM_POOL_ALLOC_EPHEMERAL.inc();
         {
-            let b = Self::alloc_numa_block(self.block_size, node);
+            let b = Self::alloc_numa_block(
+                self.block_size,
+                node,
+                self.lock_blocks,
+                &self.lock_ledger,
+            );
             prefetch(b.as_ptr(), PrefetchHint::T0);
             b
         }
     }
 
     /// Returns a memory block to the pool.
-    /// If the pool is full, the block is dropped.
+    /// If the pool is full, the block is zeroized, unlocked when applicable, and dropped.
+    /// Callers own the return boundary and must use this method instead of dropping a pooled
+    /// block directly.
     #[inline(always)]
     pub fn free(&self, mut block: AlignedBox<[u8]>) {
         // Drop foreign/mismatched sized blocks instead of re-caching them
@@ -554,9 +665,14 @@ impl MemoryPool {
         if self.available.load(Ordering::Relaxed) < self.capacity.load(Ordering::Relaxed) {
             if let Some(q) = self.pools.get(node) {
                 q.push(block);
+                self.available.fetch_add(1, Ordering::Relaxed);
+                self.in_use.fetch_sub(1, Ordering::Relaxed);
+                self.update_metrics();
+                self.check_invariants();
+                return;
             }
-            self.available.fetch_add(1, Ordering::Relaxed);
         }
+        release_locked_block(block, &self.lock_ledger);
         self.in_use.fetch_sub(1, Ordering::Relaxed);
         self.update_metrics();
         self.check_invariants();
@@ -578,7 +694,8 @@ impl MemoryPool {
                     if diff == 0 {
                         break;
                     }
-                    if q.pop().is_some() {
+                    if let Some(block) = q.pop() {
+                        release_locked_block(block, &self.lock_ledger);
                         self.available.fetch_sub(1, Ordering::Relaxed);
                         self.capacity.fetch_sub(1, Ordering::Relaxed);
                         diff -= 1;
@@ -732,6 +849,32 @@ impl MemoryPool {
         handle.thread.thread().unpark();
         if handle.thread.join().is_err() {
             warn!(target: "memory_pool", "auto-tuner thread terminated with a panic");
+        }
+    }
+}
+
+impl Drop for MemoryPool {
+    fn drop(&mut self) {
+        for queue in &self.pools {
+            while let Some(block) = queue.pop() {
+                release_locked_block(block, &self.lock_ledger);
+            }
+        }
+
+        Self::TLS_CACHES.with(|caches| {
+            let mut caches = caches.borrow_mut();
+            if let Some(index) = caches.iter().position(|cache| cache.id == self.id) {
+                caches.swap_remove(index);
+            }
+        });
+
+        let remaining = self.lock_ledger.len();
+        if remaining != 0 {
+            log::debug!(
+                target: "memory_pool",
+                "MemoryPool dropped with {} checked-out locked block(s); callers must return them through MemoryPool::free",
+                remaining
+            );
         }
     }
 }
@@ -1035,7 +1178,7 @@ impl<'a> Drop for ZeroCopyBuffer<'a> {
 
 #[cfg(test)]
 mod memory_pool_growth_tests {
-    use super::{default_hard_max_capacity, DEFAULT_POOL_MAX_BYTES};
+    use super::{default_hard_max_capacity, MemoryPool, LOCK_BLOCKS_TEST_MUTEX, DEFAULT_POOL_MAX_BYTES};
 
     #[test]
     fn default_growth_limit_is_byte_bounded_and_never_below_initial_capacity() {
@@ -1066,5 +1209,27 @@ mod memory_pool_growth_tests {
 
         let first_block_again = first_pool.alloc();
         assert_eq!(first_block_again.as_ptr(), first_pointer);
+    }
+
+    #[test]
+    fn capacity_shrink_releases_locked_queue_blocks() {
+        let _guard = LOCK_BLOCKS_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = MemoryPool::lock_blocks_enabled();
+        MemoryPool::set_lock_blocks(true);
+        {
+            let pool = MemoryPool::new(1, 2_048);
+            let block = pool.alloc();
+            pool.free(block);
+
+            let cached = pool.with_tls_cache(|cache| cache.pop());
+            if let Some(block) = cached {
+                pool.pools[0].push(block);
+            }
+            pool.set_capacity(0);
+            assert_eq!(pool.lock_ledger.len(), 0);
+        }
+        MemoryPool::set_lock_blocks(original);
     }
 }

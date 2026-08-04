@@ -628,12 +628,10 @@ fn make_nonce16(iv: &[u8; 12], counter: u64) -> [u8; 16] {
     nonce16
 }
 
+type BoxedDataAeadPair = (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>);
+
 #[inline(always)]
-fn build_aegis_data_aead(
-    plan: CryptoAeadPlan,
-    key: &[u8; 16],
-    iv: &[u8; 12],
-) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
+fn build_aegis_data_aead(plan: CryptoAeadPlan, key: &[u8; 16], iv: &[u8; 12]) -> BoxedDataAeadPair {
     match plan {
         CryptoAeadPlan::Aegis128L => (
             Box::new(Aegis128LAead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
@@ -652,10 +650,7 @@ fn build_aegis_data_aead(
 }
 
 #[inline(always)]
-fn build_morus_data_aead(
-    key: &[u8; 16],
-    iv: &[u8; 12],
-) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
+fn build_morus_data_aead(key: &[u8; 16], iv: &[u8; 12]) -> BoxedDataAeadPair {
     (
         Box::new(MorusAead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
         Box::new(MorusAead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
@@ -904,11 +899,7 @@ fn resolve_data_aead_plan(default_workload_len: usize) -> CryptoAeadPlan {
 }
 
 #[inline(always)]
-fn build_data_aead(
-    plan: CryptoAeadPlan,
-    key: &[u8; 16],
-    iv: &[u8; 12],
-) -> (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>) {
+fn build_data_aead(plan: CryptoAeadPlan, key: &[u8; 16], iv: &[u8; 12]) -> BoxedDataAeadPair {
     record_data_aead_plan(plan);
     match plan {
         CryptoAeadPlan::Morus => build_morus_data_aead(key, iv),
@@ -937,10 +928,7 @@ pub fn build_data_aead_for_benches(
     backend: BenchDataAeadBackend,
     key: &[u8],
     iv: &[u8],
-) -> Result<
-    (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>),
-    crate::crypto::aead::KeyMaterialError,
-> {
+) -> Result<BoxedDataAeadPair, crate::crypto::aead::KeyMaterialError> {
     crate::crypto::aead::require_exact_key_iv("data-plane AEAD", key, 16, iv, 12)?;
     let mut k16 = [0u8; 16];
     k16.copy_from_slice(key);
@@ -959,10 +947,7 @@ pub fn build_data_aead_for_benches(
 pub fn select_data_aead(
     key: &[u8],
     iv: &[u8],
-) -> Result<
-    (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>),
-    crate::crypto::aead::KeyMaterialError,
-> {
+) -> Result<BoxedDataAeadPair, crate::crypto::aead::KeyMaterialError> {
     crate::crypto::aead::require_exact_key_iv("data-plane AEAD", key, 16, iv, 12)?;
     let mut k16 = [0u8; 16];
     k16.copy_from_slice(key);

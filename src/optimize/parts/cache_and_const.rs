@@ -230,6 +230,9 @@ mod mlock_tests {
 
     #[test]
     fn test_set_and_check_lock_blocks_flag() {
+        let _guard = LOCK_BLOCKS_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Save original state
         let original = MemoryPool::lock_blocks_enabled();
         // Enable
@@ -244,22 +247,30 @@ mod mlock_tests {
 
     #[test]
     fn test_pool_alloc_with_lock_blocks_enabled() {
+        let _guard = LOCK_BLOCKS_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Enable lock_blocks and verify pool allocation still works.
         // mlock may fail (EAGAIN) in unprivileged test environments, but
-        // the allocation must succeed regardless — mlock is best-effort.
+        // the allocation must succeed regardless - mlock is best-effort.
         MemoryPool::set_lock_blocks(true);
         let pool = MemoryPool::new(4, 4096);
         let block = pool.alloc();
         assert_eq!(block.len(), 4096);
+        pool.free(block);
         // Clean up
         MemoryPool::set_lock_blocks(false);
     }
 
     #[test]
     fn test_pool_alloc_with_lock_blocks_disabled() {
+        let _guard = LOCK_BLOCKS_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         MemoryPool::set_lock_blocks(false);
         let pool = MemoryPool::new(4, 4096);
         let block = pool.alloc();
         assert_eq!(block.len(), 4096);
+        pool.free(block);
     }
 }
