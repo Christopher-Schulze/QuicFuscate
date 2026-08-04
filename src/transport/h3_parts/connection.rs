@@ -1164,6 +1164,11 @@ impl Connection {
         }
     }
 
+    /// Return the Flow-ID bound to one active CONNECT-UDP stream.
+    pub fn masque_flow_id(&self, stream_id: u64) -> Option<u64> {
+        self.masque_flow.get(&stream_id).copied()
+    }
+
     /// Send a MASQUE capsule (raw) on the given CONNECT-UDP stream.
     pub fn send_capsule(
         &mut self,

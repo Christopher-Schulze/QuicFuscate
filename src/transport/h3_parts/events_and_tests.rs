@@ -979,6 +979,8 @@ mod tests {
         assert!(matches!(st._stream_type, StreamType::Masque));
         let flow_id = h3.enable_masque_datagram(&mut conn, sid).expect("enable datagram");
         assert_eq!(Some(&flow_id), h3.masque_flow.get(&sid));
+        assert_eq!(h3.masque_flow_id(sid), Some(0));
+        assert_eq!(h3.masque_flow_id(sid + 4), None);
         assert_eq!(0, conn.dgram_send_queue_len());
 
         h3.send_masque_datagram(&mut conn, sid, &[0xAA, 0xBB, 0xCC]).expect("datagram enqueue");

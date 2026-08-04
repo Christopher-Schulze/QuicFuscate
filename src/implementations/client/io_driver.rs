@@ -1222,6 +1222,36 @@ mod tests {
     }
 
     #[test]
+    fn client_tunnel_ingress_rejects_malformed_and_bounds_payloads() {
+        let ingress = ClientTunnelIngress::new();
+        assert!(!ingress.push(&[]));
+        assert!(!ingress.push(&[0x30, 0x00]));
+
+        let payload = vec![0x45; 65_000];
+        for _ in 0..6 {
+            assert!(ingress.push(&payload));
+        }
+        assert!(!ingress.push(&payload));
+        assert_eq!(ingress.drain().len(), 6);
+    }
+
+    #[test]
+    fn client_tunnel_ingress_is_bounded_fifo_and_reusable() {
+        let ingress = ClientTunnelIngress::new();
+        for index in 0..MAX_CLIENT_INGRESS_PACKETS {
+            assert!(ingress.push(&[if index % 2 == 0 { 0x45 } else { 0x60 }, index as u8]));
+        }
+        assert!(!ingress.push(&[0x45, 0xff]));
+
+        let packets = ingress.drain();
+        assert_eq!(packets.len(), MAX_CLIENT_INGRESS_PACKETS);
+        assert_eq!(packets.first(), Some(&vec![0x45, 0]));
+        assert_eq!(packets.last(), Some(&vec![0x60, 255]));
+        assert!(ingress.push(&[0x45, 1]));
+        assert_eq!(ingress.drain(), vec![vec![0x45, 1]]);
+    }
+
+    #[test]
     fn test_io_driver_stats() {
         let stats = IoDriverStats::default();
         stats.tun_packets_read.fetch_add(10, Ordering::Relaxed);

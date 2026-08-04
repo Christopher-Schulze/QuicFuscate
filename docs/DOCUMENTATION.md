@@ -434,6 +434,15 @@ and derives the payload from that session's allocated `AssignedClientIps` and se
 settings. Generic client ingress and standalone/live ingress use the same Core H3/MASQUE carrier;
 generic downlink handoff is bounded before the native TUN write.
 
+The carrier contract has one active CONNECT-UDP Flow-ID per QUIC connection. Core decodes the
+MASQUE Flow-ID varint, accepts it only when it matches the Flow-ID registered for the active
+CONNECT-UDP stream, then applies the shared tunnel normalizer before dispatch. The canonical
+production Flow-ID is `0`; unbound or missing-flow datagrams are drained and dropped. Data
+capsule type `0x00` is the decoded raw-IP path, assignment capsule type `0x40` is control-only,
+and H3 stream fallback uses the `QFT1` magic plus a bounded big-endian 16-bit packet length.
+The framed fallback is decoded before any TUN callback, so a MASQUE flow-id, control capsule,
+raw IP payload, and malformed stream bytes cannot be confused by a native boundary.
+
 The standalone client does not negotiate an assignment when TUN bridging is disabled. Its
 legacy local `--tun-*` address and MTU overrides are rejected when TUN is enabled so the server
 assignment remains the sole address/configuration source. Native privileged Linux/macOS/Windows

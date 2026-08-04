@@ -684,6 +684,14 @@ mod tests {
     }
 
     #[test]
+    fn assignment_receiver_does_not_confuse_data_or_context_with_assignment() {
+        let mut receiver = AssignmentReceiver::new(11).expect("receiver");
+        assert_eq!(receiver.receive(0x00, &[0x45, 0, 0, 20]), Ok(AssignmentReceipt::Ignored));
+        assert_eq!(receiver.receive(0x30, &[0, 0]), Ok(AssignmentReceipt::Ignored));
+        assert!(receiver.assignment().is_none());
+    }
+
+    #[test]
     fn stale_generation_is_rejected_before_state_change() {
         let assignment = ClientAssignment::enabled(
             7,

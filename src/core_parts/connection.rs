@@ -843,13 +843,7 @@ impl QuicFuscateConnection {
         crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
 
         match h3.enable_masque_datagram(&mut self.conn, sid) {
-            Ok(_) => {
-                if let Err(e) = h3.register_datagram_context(&mut self.conn, sid, 1, 0) {
-                    warn!("MASQUE DATAGRAM context registration failed: {:?}", e);
-                } else {
-                    debug!("MASQUE DATAGRAM enabled (flow-id=1, ctx=0)");
-                }
-            }
+            Ok(flow_id) => debug!("MASQUE DATAGRAM enabled (flow-id={flow_id}, ctx=0)"),
             Err(e) => {
                 warn!("MASQUE DATAGRAM enable failed: {:?}", e);
             }
@@ -1237,6 +1231,10 @@ impl QuicFuscateConnection {
                     Err(crate::transport::h3::Error::Done) => break,
                     Err(e) => return Err(e.into()),
                 }
+                let expected_flow_id = self
+                    .masque_stream_id
+                    .or(self.masque_peer_stream_id)
+                    .and_then(|stream_id| h3.masque_flow_id(stream_id));
                 Self::drain_masque_datagrams(
                     h3,
                     &mut self.conn,
@@ -1244,6 +1242,7 @@ impl QuicFuscateConnection {
                     &bindings.masque_datagram_cb,
                     &bindings.masque_cb,
                     &self.tunnel_ingress_normalizer,
+                    expected_flow_id,
                 );
             }
             // Always drain MASQUE datagrams after the H3 event loop exits.
@@ -1253,6 +1252,10 @@ impl QuicFuscateConnection {
             // uplink packets would be silently dropped whenever the H3 event
             // queue is empty (the common case after handshake).
             if let Some(ref mut h3) = self.h3_conn {
+                let expected_flow_id = self
+                    .masque_stream_id
+                    .or(self.masque_peer_stream_id)
+                    .and_then(|stream_id| h3.masque_flow_id(stream_id));
                 Self::drain_masque_datagrams(
                     h3,
                     &mut self.conn,
@@ -1260,6 +1263,7 @@ impl QuicFuscateConnection {
                     &bindings.masque_datagram_cb,
                     &bindings.masque_cb,
                     &self.tunnel_ingress_normalizer,
+                    expected_flow_id,
                 );
             }
             log::trace!("HTTP/3 events processed in {} ms", start.elapsed().as_millis());
@@ -1405,6 +1409,7 @@ impl QuicFuscateConnection {
         masque_datagram_cb: &Option<DatagramHandler>,
         masque_cb: &Option<CapsuleHandler>,
         normalizer: &PacketNormalizer,
+        expected_flow_id: Option<u64>,
     ) {
         // Drain whenever a sink is present (TUN bridge) or the stealth runtime
         // explicitly enabled MASQUE datagrams. Without this, MASQUE-framed
@@ -1412,7 +1417,15 @@ impl QuicFuscateConnection {
         // or consumed as corrupted raw bytes by a bare dgram_recv loop.
         let has_sink = masque_datagram_cb.is_some() || masque_cb.is_some();
         if stealth_manager.masque_datagram_enabled() || has_sink {
-            while let Some((_fid, mut payload)) = h3.try_recv_masque_datagram(conn) {
+            while let Some((flow_id, mut payload)) = h3.try_recv_masque_datagram(conn) {
+                if expected_flow_id != Some(flow_id) {
+                    log::debug!(
+                        "dropping MASQUE datagram with unbound flow-id={} expected={:?}",
+                        flow_id,
+                        expected_flow_id
+                    );
+                    continue;
+                }
                 if normalizer.normalize_tunnel_ingress_vec(&mut payload)
                     != NormalizeResult::Dropped
                 {

@@ -185,6 +185,25 @@ mod tests {
     }
 
     #[test]
+    fn h3_tunnel_decoder_rejects_empty_non_ip_and_oversized_input() {
+        let mut decoder = H3TunnelFrameDecoder::default();
+        let empty = framed_tunnel_packet(&[]);
+        assert_eq!(decoder.push(&empty, |_| {}).unwrap_err(), "empty H3 tunnel packet");
+
+        let non_ip = framed_tunnel_packet(&[0x30, 1, 2]);
+        assert_eq!(
+            decoder.push(&non_ip, |_| {}).unwrap_err(),
+            "H3 tunnel frame does not contain an IP packet"
+        );
+
+        let oversized = vec![0u8; MAX_H3_TUNNEL_PENDING_LEN + 1];
+        assert_eq!(
+            decoder.push(&oversized, |_| {}).unwrap_err(),
+            "H3 tunnel frame buffer exceeded its bounded capacity"
+        );
+    }
+
+    #[test]
     fn masque_downlink_queue_bounds_bytes_and_preserves_fifo() {
         let mut queue = MasqueDownlinkQueue::new(2, 4);
         queue.enqueue(vec![1, 2]).unwrap();
