@@ -2,6 +2,98 @@
 // Gradual Stealth Escalation State (TODO-416)
 // =============================================================================
 
+const PROBE_WINDOW_L1_MS: u64 = 60_000;
+const PROBE_WINDOW_L2_MS: u64 = 120_000;
+const MAX_PROBE_TIMESTAMP_BUCKETS: usize = 120_001;
+
+#[derive(Clone, Copy)]
+struct ProbeTimestampBucket {
+    timestamp: u64,
+    count: u32,
+    in_l1_window: bool,
+}
+
+struct ProbeHistory {
+    buckets: VecDeque<ProbeTimestampBucket>,
+    count_60s: u32,
+    count_120s: u32,
+}
+
+impl ProbeHistory {
+    fn new() -> Self {
+        Self {
+            buckets: VecDeque::with_capacity(32),
+            count_60s: 0,
+            count_120s: 0,
+        }
+    }
+
+    fn record(&mut self, now: u64) {
+        self.prune(now);
+
+        if let Some(bucket) = self.buckets.back_mut() {
+            if bucket.timestamp == now {
+                bucket.count = bucket.count.saturating_add(1);
+                self.count_60s = self.count_60s.saturating_add(1);
+                self.count_120s = self.count_120s.saturating_add(1);
+                return;
+            }
+        }
+
+        if self.buckets.len() >= MAX_PROBE_TIMESTAMP_BUCKETS {
+            self.remove_oldest();
+        }
+
+        self.buckets.push_back(ProbeTimestampBucket {
+            timestamp: now,
+            count: 1,
+            in_l1_window: true,
+        });
+        self.count_60s = self.count_60s.saturating_add(1);
+        self.count_120s = self.count_120s.saturating_add(1);
+    }
+
+    fn prune(&mut self, now: u64) {
+        let cutoff_120s = now.saturating_sub(PROBE_WINDOW_L2_MS);
+        while let Some(&bucket) = self.buckets.front() {
+            if bucket.timestamp < cutoff_120s {
+                self.remove_oldest();
+            } else {
+                break;
+            }
+        }
+
+        let cutoff_60s = now.saturating_sub(PROBE_WINDOW_L1_MS);
+        let mut expired_60s: u32 = 0;
+        for bucket in &mut self.buckets {
+            if bucket.timestamp >= cutoff_60s {
+                break;
+            }
+            if bucket.in_l1_window {
+                expired_60s = expired_60s.saturating_add(bucket.count);
+                bucket.in_l1_window = false;
+            }
+        }
+        self.count_60s = self.count_60s.saturating_sub(expired_60s);
+    }
+
+    fn remove_oldest(&mut self) {
+        if let Some(bucket) = self.buckets.pop_front() {
+            self.count_120s = self.count_120s.saturating_sub(bucket.count);
+            if bucket.in_l1_window {
+                self.count_60s = self.count_60s.saturating_sub(bucket.count);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.buckets.clear();
+        self.count_60s = 0;
+        self.count_120s = 0;
+    }
+}
+
 /// Probe-count-based escalation state machine for Intelligent stealth mode.
 ///
 /// Tracks probe detection timestamps in a sliding window and escalates/de-escalates
@@ -15,8 +107,8 @@
 struct EscalationState {
     /// Current escalation level (0=Performance, 1=Stealth, 2=AntiDpi).
     current_level: AtomicU8,
-    /// Sliding window of probe detection timestamps (epoch millis).
-    probe_timestamps: Mutex<VecDeque<u64>>,
+    /// Bounded millisecond buckets for the independent 60/120-second windows.
+    probe_timestamps: Mutex<ProbeHistory>,
     /// Time of the last probe detection (epoch millis, 0 = none).
     last_probe_detection_time: AtomicU64,
     /// Time of the last level change (epoch millis, 0 = none).
@@ -45,7 +137,7 @@ impl EscalationState {
         .max(threshold_l1);
         Self {
             current_level: AtomicU8::new(0),
-            probe_timestamps: Mutex::new(VecDeque::with_capacity(32)),
+            probe_timestamps: Mutex::new(ProbeHistory::new()),
             last_probe_detection_time: AtomicU64::new(0),
             last_level_change_time: AtomicU64::new(0),
             level_hints,
@@ -77,23 +169,11 @@ impl EscalationState {
         let now = Self::now_millis();
         self.last_probe_detection_time.store(now, Ordering::Relaxed);
 
-        let mut timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
-        timestamps.push_back(now);
+        let mut history = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
+        history.record(now);
 
-        // Prune entries older than 120 seconds (the L2 window).
-        let cutoff_120s = now.saturating_sub(120_000);
-        while let Some(&front) = timestamps.front() {
-            if front < cutoff_120s {
-                timestamps.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        let count_120s = timestamps.len() as u32;
-        // Count probes within the 60-second window for L1 threshold.
-        let cutoff_60s = now.saturating_sub(60_000);
-        let count_60s = timestamps.iter().filter(|&&t| t >= cutoff_60s).count() as u32;
+        let count_120s = history.count_120s;
+        let count_60s = history.count_60s;
 
         let current = self.current_level.load(Ordering::Relaxed);
         let new_level = match current {
@@ -156,16 +236,60 @@ impl EscalationState {
         self.last_probe_detection_time.store(0, Ordering::Relaxed);
         self.last_level_change_time.store(0, Ordering::Relaxed);
         self.level_hints.set_probe_level(0);
-        let mut timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
-        timestamps.clear();
+        let mut history = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
+        history.clear();
     }
 
     /// Number of probes in the 60-second window (test-only).
     #[cfg(test)]
     fn probe_count_60s(&self) -> u32 {
         let now = Self::now_millis();
-        let cutoff = now.saturating_sub(60_000);
-        let timestamps = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
-        timestamps.iter().filter(|&&t| t >= cutoff).count() as u32
+        let mut history = self.probe_timestamps.lock().unwrap_or_else(|p| p.into_inner());
+        history.prune(now);
+        history.count_60s
+    }
+}
+
+#[cfg(test)]
+mod escalation_history_tests {
+    use super::{ProbeHistory, MAX_PROBE_TIMESTAMP_BUCKETS};
+
+    #[test]
+    fn same_millisecond_probes_share_one_bucket_and_preserve_count() {
+        let mut history = ProbeHistory::new();
+
+        for _ in 0..1024 {
+            history.record(10_000);
+        }
+
+        assert_eq!(history.buckets.len(), 1);
+        assert_eq!(history.buckets.front().expect("probe bucket").count, 1024);
+        assert_eq!(history.count_60s, 1024);
+        assert_eq!(history.count_120s, 1024);
+    }
+
+    #[test]
+    fn timestamp_bucket_storage_has_a_fixed_hard_bound() {
+        let mut history = ProbeHistory::new();
+
+        for timestamp in 0..(MAX_PROBE_TIMESTAMP_BUCKETS as u64 + 256) {
+            history.record(timestamp);
+            assert!(history.buckets.len() <= MAX_PROBE_TIMESTAMP_BUCKETS);
+        }
+
+        assert_eq!(history.buckets.len(), MAX_PROBE_TIMESTAMP_BUCKETS);
+    }
+
+    #[test]
+    fn l1_and_l2_counts_expire_at_their_independent_boundaries() {
+        let mut history = ProbeHistory::new();
+        let now = 200_000;
+
+        history.record(now - 60_001);
+        history.record(now - 59_999);
+        history.record(now);
+
+        assert_eq!(history.count_60s, 2);
+        assert_eq!(history.count_120s, 3);
     }
 }

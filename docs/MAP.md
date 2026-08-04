@@ -167,14 +167,14 @@ One owner is created per client/server runtime generation, including `main_parts
 
 ### EscalationState (src/stealth/parts/escalation.rs) - TODO-416
 Probe-count-based escalation state machine on `StealthManager`.
-- `record_probe()`: records timestamp, checks the ladder thresholds (≥3 in 60s → L1, then ≥8 in 120s → L2); a fresh level-0 state cannot jump directly to L2.
+- `record_probe()`: records epoch-millisecond probe buckets, checks the ladder thresholds (≥3 in 60s → L1, then ≥8 in 120s → L2), aggregates same-millisecond probes, and enforces a maximum of 120,001 retained timestamp buckets; a fresh level-0 state cannot jump directly to L2.
 - `check_de_escalation()`: drops at most one level per configurable quiet period (default 300s), measured from the latest probe or level change.
 - `on_probe_detected()` uses `EscalationState` instead of immediate binary escalation.
 - `sync_intelligent_level()` calls `check_de_escalation()` on each tick.
 - Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (3), `_L2` (8),
   `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (50).
 - `on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode).
-- `probe_timestamps` uses `VecDeque::with_capacity(32)` but has no hard count bound during the 120-second retention window (TODO-808).
+- `probe_timestamps` is a bounded `ProbeHistory` with independent 60-/120-second counters, same-millisecond aggregation, and a hard maximum of 120,001 millisecond buckets; it remains separate from the detector history (TODO-644).
 
 ### IntelligentStealthInputs.level_hint (src/stealth/parts/manager.rs)
 Brain and `EscalationState` publish separate connection-local levels through `IntelligentLevelHints`; consumers use the maximum and pass it as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.
@@ -207,7 +207,7 @@ All 15 stealth technologies in `src/stealth/` have unit test coverage in `src/st
   explicit random fallback, and ultra_stealth() smoke
 - Http3Masquerade: generate_headers() pseudo-headers, browser-profile UA divergence
 - FingerprintRotation (via StealthManager): Fixed mode stable, All-mode no-panic guard path
-- ActiveProbeDetector: GFW_TLS_Probe detection; legacy DPI_QUIC_Scan response selector retained without a matching pattern; benign-ignored; bounded `VecDeque<Instant>` with `max(threshold, 1)` FIFO history limit and 60-second retention. `EscalationState` owns a separate 120-second timestamp window (TODO-808)
+- ActiveProbeDetector: GFW_TLS_Probe detection; legacy DPI_QUIC_Scan response selector retained without a matching pattern; benign-ignored; bounded `VecDeque<Instant>` with `max(threshold, 1)` FIFO history limit and 60-second retention. `EscalationState` owns a separate bounded 120-second millisecond-bucket history (TODO-808)
 - ServerPushState: observe_server_push_burst resets interval, disabled=None plan
 - FlowShaper: jitter range, min-clamp, variation (existing)
 - TlsCover: ClientHello structure, Firefox no-session-id, Chrome session-id (existing)
