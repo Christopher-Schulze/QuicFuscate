@@ -717,6 +717,25 @@ impl ClientRuntime {
         self.config.fec.mode = mode;
     }
 
+    /// Replace the validated configuration projection used by the next
+    /// connection or reconnect. The active connection keeps its immutable
+    /// transport and stealth construction snapshot, except for explicit
+    /// active FEC control handled by the engine.
+    pub(crate) fn update_next_config(&mut self, config: &EngineConfig) -> Result<(), EngineError> {
+        config.validate().map_err(|error| {
+            EngineError::Config(format!("Invalid engine configuration: {error}"))
+        })?;
+        self.config = config.clone();
+        Ok(())
+    }
+
+    /// Expose the next-connection projection to crate-level control-plane
+    /// tests without exposing mutable runtime configuration.
+    #[cfg(test)]
+    pub(crate) fn next_config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     /// Return the policy that will construct the next connection.
     pub fn next_fec_mode(&self) -> crate::engine::FecMode {
         self.config.fec.mode
@@ -857,6 +876,30 @@ mod tests {
 
         runtime.stop().expect("failed connect must remain stoppable");
         assert_eq!(runtime.state(), ClientState::Stopped);
+    }
+
+    #[test]
+    fn updated_next_config_is_consumed_by_the_following_connect_attempt() {
+        let blocker = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind UDP blocker");
+        let blocked_addr = blocker.local_addr().expect("read UDP blocker address");
+        let mut config = EngineConfig::default();
+        config.connection.local = blocked_addr.to_string();
+
+        let mut runtime = ClientRuntime::new(EngineConfig::default()).expect("client runtime");
+        runtime.update_next_config(&config).expect("update next connection config");
+        runtime.runtime = Some(
+            runtime::create_shared_runtime(&runtime::RuntimeConfig::default())
+                .expect("client runtime executor"),
+        );
+        runtime.state = ClientState::Running;
+
+        let error = runtime
+            .connect()
+            .expect_err("the following connect must use the updated local address");
+        assert!(matches!(error, EngineError::Io(message) if message.contains("UDP bind failed")));
+        assert_eq!(runtime.state(), ClientState::Running);
+        assert!(runtime.connection().is_none());
     }
 
     #[test]

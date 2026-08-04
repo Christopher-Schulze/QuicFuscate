@@ -269,6 +269,28 @@ fn build_server_runtime_profiles(
     Ok((fec_cfg, stealth_cfg))
 }
 
+fn reject_started_client_config_changes(
+    current: &EngineConfig,
+    candidate: &EngineConfig,
+    state: EngineState,
+) -> Result<(), EngineError> {
+    if current.engine != candidate.engine
+        || current.interface != candidate.interface
+        || current.telemetry != candidate.telemetry
+        || current.logging != candidate.logging
+        || current.audit != candidate.audit
+        || current.crypto != candidate.crypto
+        || current.optimization != candidate.optimization
+        || current.security != candidate.security
+    {
+        return Err(EngineError::InvalidState(
+            state,
+            "configuration update (engine startup-owned sections require a stopped client)",
+        ));
+    }
+    Ok(())
+}
+
 /// The main QuicFuscate engine providing full lifecycle control.
 ///
 /// # Example
@@ -687,6 +709,18 @@ impl QuicFuscateEngine {
         Self::new(config)
     }
 
+    /// Reload and validate a complete engine configuration from a TOML file.
+    ///
+    /// A created or stopped engine replaces its complete configuration. A
+    /// running client accepts only changes that can be projected to the next
+    /// connection; its active connection remains immutable except for the
+    /// existing FEC control contract. A running generic server rejects this
+    /// API because standalone server reload owns that runtime boundary.
+    pub fn reload_config_from_file(&mut self, path: impl AsRef<Path>) -> Result<(), EngineError> {
+        let candidate = EngineConfig::from_file(path)?;
+        self.apply_config_candidate(candidate)
+    }
+
     /// Create a new engine from a configuration struct.
     ///
     /// # Arguments
@@ -789,16 +823,13 @@ impl QuicFuscateEngine {
                 self.set_cc_algorithm(cc).map(|_| EngineCommandResult::State(self.state()))
             }
             EngineCommand::SetTrafficPadding(enable) => {
-                self.set_traffic_padding(enable);
-                Ok(EngineCommandResult::Ack)
+                self.set_traffic_padding(enable).map(|_| EngineCommandResult::Ack)
             }
             EngineCommand::SetTimingObfuscation(enable) => {
-                self.set_timing_obfuscation(enable);
-                Ok(EngineCommandResult::Ack)
+                self.set_timing_obfuscation(enable).map(|_| EngineCommandResult::Ack)
             }
             EngineCommand::SetZeroRtt(enable) => {
-                self.set_0rtt(enable);
-                Ok(EngineCommandResult::Ack)
+                self.set_0rtt(enable).map(|_| EngineCommandResult::Ack)
             }
             EngineCommand::GetTunCapabilities => {
                 Ok(EngineCommandResult::TunCapabilities(crate::interface::tun_capabilities()))
@@ -1386,8 +1417,10 @@ impl QuicFuscateEngine {
 
     /// Set the stealth mode at runtime.
     ///
-    /// This allows changing the stealth level without restarting the engine.
-    /// Changes take effect for new packets immediately.
+    /// For a client, the validated mode is retained for the next connection or
+    /// reconnect. An established connection keeps its construction snapshot.
+    /// A running generic server rejects this mutation because standalone reload
+    /// owns its next-connection policy.
     ///
     /// # Arguments
     ///
@@ -1397,7 +1430,9 @@ impl QuicFuscateEngine {
         mode: super::config::StealthMode,
     ) -> Result<(), EngineError> {
         let old_mode = self.config.stealth.mode as u8;
-        self.config.stealth.mode = mode;
+        let mut candidate = self.config.clone();
+        candidate.stealth.mode = mode;
+        self.apply_config_candidate(candidate)?;
         self.stats.stealth_mode.store(mode as u64, Ordering::Relaxed);
 
         // Notify callbacks of stealth escalation
@@ -1516,11 +1551,17 @@ impl QuicFuscateEngine {
 
     /// Update the congestion control algorithm at runtime.
     ///
+    /// The change applies to the next client connection or reconnect. Existing
+    /// connections keep their transport controller. A running generic server
+    /// rejects the mutation.
+    ///
     /// # Arguments
     ///
     /// * `cc` - The new congestion control algorithm
     pub fn set_cc_algorithm(&mut self, cc: super::config::CcAlgorithm) -> Result<(), EngineError> {
-        self.config.transport.cc_algorithm = cc;
+        let mut candidate = self.config.clone();
+        candidate.transport.cc_algorithm = cc;
+        self.apply_config_candidate(candidate)?;
 
         // Log the congestion control change
         log::info!("Congestion control algorithm changed to {:?}", cc);
@@ -1536,7 +1577,10 @@ impl QuicFuscateEngine {
     /// Update multiple configuration values at once.
     ///
     /// This method applies a closure to modify the configuration.
-    /// Use this for batch updates to avoid multiple change notifications.
+    /// Use this for batch updates to avoid multiple change notifications. A
+    /// running client accepts only next-connection fields plus the existing
+    /// active/next FEC policy; startup-owned sections require a stopped engine.
+    /// A running generic server rejects the update.
     ///
     /// # Example
     ///
@@ -1552,9 +1596,35 @@ impl QuicFuscateEngine {
     {
         let mut candidate = self.config.clone();
         updater(&mut candidate);
+        self.apply_config_candidate(candidate)
+    }
+
+    fn apply_config_candidate(&mut self, candidate: EngineConfig) -> Result<(), EngineError> {
         candidate.validate()?;
+        let state = self.state();
+        let started = matches!(
+            state,
+            EngineState::Starting
+                | EngineState::Running
+                | EngineState::Connecting
+                | EngineState::Connected
+        );
+
+        if started && self.config.engine.mode == EngineMode::Server {
+            return Err(EngineError::InvalidState(
+                state,
+                "configuration update (running generic server is standalone-reload-owned)",
+            ));
+        }
+        if started {
+            reject_started_client_config_changes(&self.config, &candidate, state)?;
+        }
+
         if candidate.fec.mode != self.config.fec.mode {
             self.set_fec_mode(candidate.fec.mode)?;
+        }
+        if let Some(runtime) = self.client_runtime.as_mut() {
+            runtime.update_next_config(&candidate)?;
         }
         self.config = candidate;
 
@@ -1566,19 +1636,31 @@ impl QuicFuscateEngine {
         Ok(())
     }
 
-    /// Enable or disable traffic padding.
-    pub fn set_traffic_padding(&mut self, enable: bool) {
-        self.config.stealth.enable_traffic_padding = enable;
+    /// Enable or disable traffic padding for the next client connection or
+    /// reconnect. Existing connections keep their immutable construction
+    /// snapshot. Returns an error for a running generic server.
+    pub fn set_traffic_padding(&mut self, enable: bool) -> Result<(), EngineError> {
+        let mut candidate = self.config.clone();
+        candidate.stealth.enable_traffic_padding = enable;
+        self.apply_config_candidate(candidate)
     }
 
-    /// Enable or disable timing obfuscation.
-    pub fn set_timing_obfuscation(&mut self, enable: bool) {
-        self.config.stealth.enable_timing_obfuscation = enable;
+    /// Enable or disable timing obfuscation for the next client connection or
+    /// reconnect. Existing connections keep their immutable construction
+    /// snapshot. Returns an error for a running generic server.
+    pub fn set_timing_obfuscation(&mut self, enable: bool) -> Result<(), EngineError> {
+        let mut candidate = self.config.clone();
+        candidate.stealth.enable_timing_obfuscation = enable;
+        self.apply_config_candidate(candidate)
     }
 
-    /// Enable or disable 0-RTT early data.
-    pub fn set_0rtt(&mut self, enable: bool) {
-        self.config.connection.enable_0rtt = enable;
+    /// Enable or disable 0-RTT early data for the next client connection or
+    /// reconnect. Existing connections keep their immutable transport
+    /// snapshot. Returns an error for a running generic server.
+    pub fn set_0rtt(&mut self, enable: bool) -> Result<(), EngineError> {
+        let mut candidate = self.config.clone();
+        candidate.connection.enable_0rtt = enable;
+        self.apply_config_candidate(candidate)
     }
 
     /// Get whether the engine is in client mode.
@@ -1825,6 +1907,107 @@ mod tests {
 
         assert_eq!(result.scope, FecPolicyCommandScope::NextConnection);
         assert_eq!(engine.client_runtime.as_ref().expect("runtime").next_fec_mode(), FecMode::Off);
+    }
+
+    #[test]
+    fn started_client_setters_update_the_next_connection_projection() {
+        let config = EngineConfig::default();
+        let runtime = ClientRuntime::new(config.clone()).expect("client runtime");
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        engine.client_runtime = Some(runtime);
+        engine.state = EngineState::Running;
+
+        engine.set_stealth_mode(crate::engine::StealthMode::AntiDpi).expect("stealth update");
+        engine
+            .set_cc_algorithm(crate::engine::CcAlgorithm::Cubic)
+            .expect("congestion-control update");
+        engine.set_traffic_padding(true).expect("padding update");
+        engine.set_timing_obfuscation(true).expect("timing update");
+        engine.set_0rtt(false).expect("0-RTT update");
+
+        let next = engine.client_runtime.as_ref().expect("client runtime").next_config();
+        assert_eq!(next.stealth.mode, crate::engine::StealthMode::AntiDpi);
+        assert_eq!(next.transport.cc_algorithm, crate::engine::CcAlgorithm::Cubic);
+        assert!(next.stealth.enable_traffic_padding);
+        assert!(next.stealth.enable_timing_obfuscation);
+        assert!(!next.connection.enable_0rtt);
+    }
+
+    #[test]
+    fn started_client_rejects_startup_owned_config_changes() {
+        let config = EngineConfig::default();
+        let runtime = ClientRuntime::new(config.clone()).expect("client runtime");
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        engine.client_runtime = Some(runtime);
+        engine.state = EngineState::Running;
+        let before = toml::to_string(engine.config()).expect("serialize config");
+
+        let error = engine
+            .update_config(|candidate| candidate.interface.tun_mtu = 1400)
+            .expect_err("started client must reject TUN replacement");
+
+        assert!(matches!(error, EngineError::InvalidState(EngineState::Running, _)));
+        assert_eq!(toml::to_string(engine.config()).expect("serialize config"), before);
+        assert_eq!(
+            toml::to_string(engine.client_runtime.as_ref().expect("client runtime").next_config())
+                .expect("serialize next config"),
+            before
+        );
+    }
+
+    #[test]
+    fn running_generic_server_rejects_control_plane_config_mutation() {
+        let mut config = EngineConfig::default();
+        config.engine.mode = EngineMode::Server;
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        engine.state = EngineState::Running;
+
+        let error = engine
+            .set_traffic_padding(true)
+            .expect_err("running generic server must reject client-style mutation");
+
+        assert!(matches!(error, EngineError::InvalidState(EngineState::Running, _)));
+        assert!(!engine.config().stealth.enable_traffic_padding);
+    }
+
+    #[test]
+    fn file_reload_replaces_created_config_and_rejects_invalid_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "quicfuscate-engine-reload-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let valid_path = root.with_extension("valid.toml");
+        let invalid_path = root.with_extension("invalid.toml");
+
+        let mut replacement = EngineConfig::default();
+        replacement.connection.remote = "127.0.0.1:9443".to_string();
+        replacement.stealth.enable_traffic_padding = true;
+        std::fs::write(&valid_path, toml::to_string(&replacement).expect("serialize valid config"))
+            .expect("write valid config");
+
+        let mut engine = QuicFuscateEngine::new(EngineConfig::default()).expect("engine");
+        engine.reload_config_from_file(&valid_path).expect("valid reload");
+        assert_eq!(engine.config().connection.remote, "127.0.0.1:9443");
+        assert!(engine.config().stealth.enable_traffic_padding);
+
+        let before_invalid = toml::to_string(engine.config()).expect("serialize current config");
+        std::fs::write(&invalid_path, "[transport]\nmtu = 100\n").expect("write invalid config");
+        assert!(engine.reload_config_from_file(&invalid_path).is_err());
+        assert_eq!(
+            toml::to_string(engine.config()).expect("serialize current config"),
+            before_invalid
+        );
+
+        let missing_path = root.with_extension("missing.toml");
+        assert!(engine.reload_config_from_file(&missing_path).is_err());
+        assert_eq!(
+            toml::to_string(engine.config()).expect("serialize current config"),
+            before_invalid
+        );
+
+        let _ = std::fs::remove_file(valid_path);
+        let _ = std::fs::remove_file(invalid_path);
     }
 
     #[test]

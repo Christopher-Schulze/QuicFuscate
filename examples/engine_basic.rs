@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Enable traffic padding
     println!("   Enabling traffic padding...");
-    engine.set_traffic_padding(true);
+    engine.set_traffic_padding(true)?;
 
     // Update multiple settings at once
     println!("   Batch updating config...");

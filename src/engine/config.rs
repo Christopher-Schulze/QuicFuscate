@@ -139,7 +139,7 @@ impl std::error::Error for ConfigError {}
 // ============================================================================
 
 /// Engine lifecycle and mode settings.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct EngineSection {
     /// Engine operation mode: "client" or "server"
@@ -611,7 +611,7 @@ pub enum CcAlgorithm {
 // ============================================================================
 
 /// Cryptographic configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CryptoConfig {
     /// AEAD cipher preference
@@ -671,7 +671,7 @@ pub enum AeadPreference {
 // ============================================================================
 
 /// TUN/TAP interface configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct InterfaceConfig {
     /// Interface type
@@ -785,7 +785,7 @@ pub enum XdpMode {
 // ============================================================================
 
 /// Telemetry and metrics configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TelemetryConfig {
     /// Enable telemetry collection
@@ -875,7 +875,7 @@ pub enum LogFormat {
 }
 
 /// Logging configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     /// Logging mode (verbose | normal | minimal | no-log)
@@ -1010,7 +1010,7 @@ impl LoggingConfig {
 }
 
 /// Bounded security audit persistence configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditConfig {
     /// Maximum accepted events waiting for the single audit writer.
@@ -1456,7 +1456,7 @@ pub enum RotationMode {
 // ============================================================================
 
 /// Performance optimization configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct OptimizationConfig {
     /// Memory pool size (bytes). 0 = auto-detect based on available RAM.
@@ -1619,7 +1619,7 @@ impl AntiReplaySection {
 // ============================================================================
 
 /// Security settings: kill switch, leak prevention, connection-loss detection.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Enable kill switch (blocks all non-VPN traffic when disconnected).
@@ -1673,7 +1673,7 @@ impl SecurityConfig {
 /// Controls whether QuicFuscate uses `iptables` or `nftables` for kill switch
 /// and NAT/routing rules on Linux. On macOS and Windows this setting has no
 /// effect (pf / Windows Firewall are used unconditionally).
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct FirewallConfig {
     /// Explicit backend selection. `None` (default) auto-detects at runtime,
