@@ -844,6 +844,97 @@ fn initial_client_packet_sent(
     Ok(InitialClientPacketEvidence { constructed_bytes, sent_bytes: constructed_bytes })
 }
 
+/// Complete the standalone client's authenticated assignment barrier before
+/// opening a native TUN device. The control capsule and MASQUE readiness are
+/// accepted only for the current reconnect generation.
+async fn negotiate_standalone_assignment(
+    conn: &mut QuicFuscateConnection,
+    socket: &tokio::net::UdpSocket,
+    recv_buf: &mut [u8],
+    send_buf: &mut [u8],
+    generation: u64,
+) -> std::io::Result<quicfuscate::control_plane::ClientAssignment> {
+    let reception = Arc::new(parking_lot::Mutex::new(
+        quicfuscate::control_plane::AssignmentReception::new(generation)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    ));
+    let callback_state = Arc::clone(&reception);
+    conn.set_client_connection_generation(generation);
+    conn.set_masque_control_cb(Arc::new(std::sync::Mutex::new(Box::new(
+        move |capsule_type: u64, payload: &[u8]| {
+            callback_state.lock().receive(capsule_type, payload);
+        },
+    ))));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut control_started = false;
+    while Instant::now() < deadline {
+        flush_connected_outgoing(socket, conn, send_buf, None)
+            .await
+            .map_err(|fault| std::io::Error::other(fault.to_string()))?;
+
+        {
+            let state = reception.lock();
+            if let Some(error) = state.failure() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("authenticated client assignment rejected: {error}"),
+                ));
+            }
+            if let Some(assignment) = state.assignment() {
+                if conn.masque_tunnel_established() {
+                    return Ok(assignment.clone());
+                }
+            }
+        }
+
+        if conn.conn.is_closed() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "server closed the connection before assignment readiness",
+            ));
+        }
+
+        if conn.conn.is_established() && !control_started {
+            conn.begin_masque_control_tunnel().map_err(|error| {
+                std::io::Error::other(format!("MASQUE assignment tunnel failed: {error}"))
+            })?;
+            control_started = true;
+            continue;
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(Duration::from_millis(100));
+        if wait.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(wait, recv_connected_datagram(socket, recv_buf)).await {
+            Ok(Ok(length)) if length > 0 => {
+                conn.recv(&recv_buf[..length]).map_err(|error| {
+                    std::io::Error::other(format!("assignment QUIC receive failed: {error}"))
+                })?;
+                if control_started {
+                    conn.poll_http3().map_err(|error| {
+                        std::io::Error::other(format!("assignment H3 poll failed: {error}"))
+                    })?;
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                return Err(std::io::Error::other(format!(
+                    "assignment UDP receive failed: {error}"
+                )));
+            }
+            Err(_) => {}
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "timed out waiting for authenticated server assignment",
+    ))
+}
+
 fn client_startup_error_with_cleanup(
     primary: std::io::Error,
     cleanup_errors: Vec<String>,
@@ -1272,6 +1363,19 @@ async fn run_client(
         return Ok(());
     }
 
+    if tun_enable
+        && (tun_mtu.is_some()
+            || tun_ip.is_some()
+            || tun_netmask.is_some()
+            || tun_ip6.is_some()
+            || tun_prefix6.is_some())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "standalone client TUN address and MTU flags are server-assigned; remove --tun-mtu/--tun-ip/--tun-netmask/--tun-ip6/--tun-prefix6",
+        ));
+    }
+
     let target = resolve_client_target(url, remote_addr_str)?;
     let server_addr = target.transport_destination;
     let alternate_server_ip = target.alternate_transport_ip;
@@ -1515,12 +1619,61 @@ async fn run_client(
 
     let mut request_sent = false;
     let mut kill_switch_connected = false;
-    let requested_tun_mtu = tun_mtu.unwrap_or(1500);
     let client_receive_diagnostics_enabled =
         quicfuscate::env_utils::env_flag(CLIENT_RECV_DIAGNOSTICS_ENV, false);
     if client_receive_diagnostics_enabled {
         info!("Client receive diagnostics enabled for this process");
     }
+
+    let assignment = if tun_enable {
+        match negotiate_standalone_assignment(&mut conn, &socket, &mut buf, &mut out, 1).await {
+            Ok(assignment) => {
+                info!(
+                    "Accepted authenticated client assignment: session_id={} generation={} mode={:?} ipv4={:?} ipv6={:?} mtu={} dns_servers={:?}",
+                    assignment.session_id,
+                    assignment.generation,
+                    assignment.mode,
+                    assignment.ipv4,
+                    assignment.ipv6,
+                    assignment.mtu,
+                    assignment.dns_servers
+                );
+                Some(assignment)
+            }
+            Err(error) => {
+                error!("Standalone client assignment negotiation failed: {error}");
+                return Err(
+                    cleanup_client_startup_failure(
+                        &mut conn,
+                        &stealth_runtime,
+                        kill_switch.as_ref(),
+                        error,
+                        b"authenticated client assignment negotiation failed",
+                    )
+                    .await,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let negotiated_tun_mtu = assignment.as_ref().map_or(1500, |value| value.mtu);
+    let connected_firewall_policy = if let Some(assignment) = assignment.as_ref() {
+        quicfuscate::implementations::client::VpnFirewallPolicy::new(
+            tun_name_str.clone(),
+            server_addr,
+            alternate_server_ip,
+            assignment.dns_servers.iter().copied(),
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("server-assigned firewall DNS policy invalid: {error}"),
+            )
+        })?
+    } else {
+        firewall_policy.clone()
+    };
 
     // Optional TUN bridging setup
     let tun_notify = Arc::new(tokio::sync::Notify::new());
@@ -1535,16 +1688,17 @@ async fn run_client(
         Option<std::thread::JoinHandle<()>>,
     )> = if tun_enable {
         let effective_tun_mtu =
-            requested_tun_mtu.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
-        let tcfg = quicfuscate::interface::TunConfig {
-            name: tun_name,
-            ip: tun_ip.and_then(|s| s.parse().ok()),
-            netmask: tun_netmask.and_then(|s| s.parse().ok()),
-            mtu: effective_tun_mtu,
-            ip6: tun_ip6.as_ref().and_then(|s| s.parse().ok()),
-            prefix6: tun_prefix6,
-            ..Default::default()
-        };
+            negotiated_tun_mtu.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
+        let assignment = assignment.as_ref().ok_or_else(|| {
+            std::io::Error::other("client TUN activation requires a negotiated assignment")
+        })?;
+        let mut tcfg = quicfuscate::implementations::client::tun_config_from_assignment(
+            assignment,
+            tun_name,
+            true,
+        )
+        .map_err(|error| std::io::Error::other(format!("invalid server assignment: {error}")))?;
+        tcfg.mtu = effective_tun_mtu;
         let optm = OptimizationManager::from_cfg(opt_params);
         let pool = optm.memory_pool();
         match quicfuscate::interface::TunInterface::open(tcfg, pool.clone()) {
@@ -2046,7 +2200,7 @@ async fn run_client(
                 if data_plane_ready && !kill_switch_connected {
                     let policy_started = std::time::Instant::now();
                     if let Some(ref ks) = kill_switch {
-                        if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
+                        if let Err(error) = ks.on_vpn_connected(&connected_firewall_policy) {
                             break ExitReason::SocketError(format!(
                                 "kill switch connected policy failed: {error}"
                             ));
@@ -2138,7 +2292,7 @@ async fn run_client(
                 }
                 if let Some(tun) = tun_writer.as_ref() {
                     if let Err(error) =
-                        synchronize_client_tun_mtu(&conn, tun, requested_tun_mtu)
+                        synchronize_client_tun_mtu(&conn, tun, negotiated_tun_mtu)
                     {
                         break ExitReason::SocketError(format!(
                             "client TUN MTU synchronization failed: {error}"

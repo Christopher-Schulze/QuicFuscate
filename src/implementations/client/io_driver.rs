@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 use crate::core::QuicFuscateConnection;
@@ -92,6 +92,53 @@ pub struct IoDriverStatsSnapshot {
     pub udp_packets_received: u64,
     pub errors: u64,
     pub data_plane_faults: u64,
+}
+
+const MAX_CLIENT_INGRESS_PACKETS: usize = 256;
+const MAX_CLIENT_INGRESS_BYTES: usize = 384 * 1024;
+
+#[derive(Default)]
+struct ClientTunnelIngressState {
+    packets: std::collections::VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+/// Bounded handoff shared by H3/MASQUE callbacks and the client TUN writer.
+#[derive(Clone, Default)]
+pub struct ClientTunnelIngress {
+    state: Arc<parking_lot::Mutex<ClientTunnelIngressState>>,
+}
+
+impl ClientTunnelIngress {
+    /// Create an empty bounded ingress queue.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue one validated-looking IP payload without allowing unbounded growth.
+    pub fn push(&self, payload: &[u8]) -> bool {
+        if payload.is_empty()
+            || !matches!(payload.first().map(|byte| byte >> 4), Some(4 | 6))
+            || payload.len() > u16::MAX as usize
+        {
+            return false;
+        }
+        let mut state = self.state.lock();
+        if state.packets.len() >= MAX_CLIENT_INGRESS_PACKETS
+            || state.bytes.saturating_add(payload.len()) > MAX_CLIENT_INGRESS_BYTES
+        {
+            return false;
+        }
+        state.bytes = state.bytes.saturating_add(payload.len());
+        state.packets.push_back(payload.to_vec());
+        true
+    }
+
+    fn drain(&self) -> Vec<Vec<u8>> {
+        let mut state = self.state.lock();
+        state.bytes = 0;
+        state.packets.drain(..).collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,7 +427,6 @@ impl IoDriver {
         })
     }
 
-    #[cfg(all(target_os = "linux", feature = "io_uring"))]
     fn tun_write_error(&self, component: &str, error: impl std::fmt::Display) -> EngineError {
         self.data_plane_error(DataPlaneFault::TunWrite {
             component: component.to_string(),
@@ -446,6 +492,96 @@ impl IoDriver {
         Ok(())
     }
 
+    /// Drive QUIC and H3 until the authenticated server assignment arrives.
+    /// No TUN handle is needed or opened during this phase.
+    pub async fn negotiate_assignment(
+        &self,
+        conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
+        socket: &Arc<UdpSocket>,
+        generation: u64,
+        deadline: Instant,
+    ) -> Result<crate::control_plane::ClientAssignment, EngineError> {
+        let reception = Arc::new(parking_lot::Mutex::new(
+            crate::control_plane::AssignmentReception::new(generation)
+                .map_err(|error| EngineError::Connection(error.to_string()))?,
+        ));
+        {
+            let callback_state = Arc::clone(&reception);
+            let mut guard = conn.lock();
+            guard.set_client_connection_generation(generation);
+            guard.set_masque_control_cb(Arc::new(std::sync::Mutex::new(Box::new(
+                move |capsule_type: u64, payload: &[u8]| {
+                    let mut state = callback_state.lock();
+                    state.receive(capsule_type, payload);
+                },
+            ))));
+        }
+
+        let mut recv_buf = vec![0u8; 65_535];
+        let mut send_buf = vec![0u8; 65_535];
+        let mut control_started = false;
+        while Instant::now() < deadline {
+            self.flush_outbound(conn, socket, &mut send_buf).await?;
+            let (failure, assignment) = {
+                let state = reception.lock();
+                (state.failure().cloned(), state.assignment().cloned())
+            };
+            if let Some(error) = failure {
+                return Err(EngineError::Connection(format!(
+                    "client assignment control plane rejected: {error}"
+                )));
+            }
+            if let Some(assignment) = assignment {
+                if conn.lock().masque_tunnel_established() {
+                    return Ok(assignment);
+                }
+            }
+
+            let established = { conn.lock().conn.is_established() };
+            if established && !control_started {
+                conn.lock()
+                    .begin_masque_control_tunnel()
+                    .map_err(|error| EngineError::Connection(error.to_string()))?;
+                control_started = true;
+                continue;
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let wait = remaining.min(Duration::from_millis(100));
+            if wait.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(wait, socket.recv(&mut recv_buf)).await {
+                Ok(Ok(length)) if length > 0 => {
+                    let mut guard = conn.lock();
+                    guard.recv(&recv_buf[..length]).map_err(|error| {
+                        self.transport_receive_error("client assignment QUIC receive", error)
+                    })?;
+                    if control_started {
+                        guard.poll_http3().map_err(|error| {
+                            self.transport_receive_error("client assignment H3 poll", error)
+                        })?;
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    return Err(
+                        self.transport_receive_error("client assignment UDP receive", error)
+                    );
+                }
+                Err(_) => {}
+            }
+            if conn.lock().conn.is_closed() {
+                return Err(EngineError::Connection(
+                    "client closed before receiving server assignment".to_string(),
+                ));
+            }
+        }
+        Err(EngineError::Connection(
+            "timed out waiting for authenticated server assignment".to_string(),
+        ))
+    }
+
     #[cfg(target_os = "linux")]
     fn poll_connection_send(
         &self,
@@ -466,12 +602,13 @@ impl IoDriver {
         conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: &Arc<UdpSocket>,
         out: &mut [u8],
+        tunnel_stream_id: u64,
         packet: &[u8],
     ) -> Result<(), EngineError> {
         loop {
             let result = {
                 let mut conn_guard = conn.lock();
-                conn_guard.conn.dgram_send(packet)
+                conn_guard.send_tunnel_packet(tunnel_stream_id, packet)
             };
             match result {
                 Ok(()) => return Ok(()),
@@ -501,6 +638,7 @@ impl IoDriver {
         tun: Arc<parking_lot::Mutex<TunInterface>>,
         conn: Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: Arc<UdpSocket>,
+        tunnel_stream_id: u64,
     ) -> Result<(), EngineError> {
         #[cfg(target_os = "linux")]
         {
@@ -533,7 +671,14 @@ impl IoDriver {
                 Ok((block, len)) if len > 0 => {
                     self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
-                    self.enqueue_tun_datagram(&conn, &socket, &mut send_buf, &block[..len]).await?;
+                    self.enqueue_tun_datagram(
+                        &conn,
+                        &socket,
+                        &mut send_buf,
+                        tunnel_stream_id,
+                        &block[..len],
+                    )
+                    .await?;
 
                     let mut queued = 0usize;
                     while queued < batch_cap {
@@ -709,7 +854,7 @@ impl IoDriver {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (tun, conn, socket);
+            let _ = (tun, conn, socket, tunnel_stream_id);
             Err(EngineError::Transport(
                 "outbound Linux TUN loop is only available on Linux".to_string(),
             ))
@@ -729,6 +874,7 @@ impl IoDriver {
         tun: Arc<parking_lot::Mutex<TunInterface>>,
         conn: Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: Arc<UdpSocket>,
+        ingress: ClientTunnelIngress,
         handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
     ) -> Result<(), EngineError> {
         // Try io_uring recv path on Linux.
@@ -740,6 +886,7 @@ impl IoDriver {
                         tun,
                         conn,
                         socket,
+                        ingress,
                         handshake_event,
                         &mut uring_recv,
                         async_efd,
@@ -749,7 +896,7 @@ impl IoDriver {
         }
 
         // Fallback: standard Tokio recv path.
-        self.run_inbound_standard(tun, conn, socket, handshake_event).await
+        self.run_inbound_standard(tun, conn, socket, ingress, handshake_event).await
     }
 
     /// Standard inbound path using Tokio async recv + try_recv drain loop.
@@ -758,10 +905,10 @@ impl IoDriver {
         tun: Arc<parking_lot::Mutex<TunInterface>>,
         conn: Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: Arc<UdpSocket>,
+        ingress: ClientTunnelIngress,
         handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
     ) -> Result<(), EngineError> {
         let mut recv_buf = vec![0u8; 65535];
-        let mut stream_buf = vec![0u8; 65535];
         let mut send_buf = vec![0u8; 65535];
         let batch_cap = self.normalized_batch_size();
         let mut inbound_batch: Vec<Vec<u8>> =
@@ -814,14 +961,7 @@ impl IoDriver {
                             .fetch_add((queued - 1) as u64, Ordering::Relaxed);
                     }
 
-                    Self::process_inbound_batch(
-                        &self.stats,
-                        &conn,
-                        &tun,
-                        &mut stream_buf,
-                        &inbound_batch,
-                        queued,
-                    )?;
+                    self.process_inbound_batch(&conn, &tun, &ingress, &inbound_batch, queued)?;
                 }
                 Ok(Ok(_)) => {}
             }
@@ -850,11 +990,11 @@ impl IoDriver {
         tun: Arc<parking_lot::Mutex<TunInterface>>,
         conn: Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         socket: Arc<UdpSocket>,
+        ingress: ClientTunnelIngress,
         handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
         uring_recv: &mut crate::optimize::uring_batch::UringRecvBatch,
         async_efd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     ) -> Result<(), EngineError> {
-        let mut stream_buf = vec![0u8; 65535];
         let mut send_buf = vec![0u8; 65535];
         let mut handshake_signaled = false;
 
@@ -928,31 +1068,8 @@ impl IoDriver {
                                 }
                             }
 
-                            // Drain datagrams to TUN.
-                            loop {
-                                let read_len = {
-                                    let mut conn_guard = conn.lock();
-                                    match conn_guard.conn.dgram_recv(&mut stream_buf) {
-                                        Ok(n) if n > 0 => n,
-                                        Ok(_) => break,
-                                        Err(crate::error::ConnectionError::Done) => break,
-                                        Err(e) => {
-                                            log::debug!("Datagram recv error: {:?}", e);
-                                            return Err(self.transport_receive_error(
-                                                "client io_uring datagram receive",
-                                                e,
-                                            ));
-                                        }
-                                    }
-                                };
-                                let mut tun_guard = tun.lock();
-                                if let Err(e) = tun_guard.write_packet(&stream_buf[..read_len]) {
-                                    log::warn!("TUN write error: {:?}", e);
-                                    return Err(self.tun_write_error("client io_uring downlink", e));
-                                } else {
-                                    self.stats.tun_packets_written.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
+                            self.poll_http3_to_ingress(&conn, &ingress)?;
+                            self.drain_ingress_to_tun(&tun, &ingress)?;
                         }
                     }
                 }
@@ -1029,17 +1146,47 @@ impl IoDriver {
         Some((uring_recv, async_efd))
     }
 
-    /// Process a batch of received inbound packets through the QUIC connection and TUN.
+    fn poll_http3_to_ingress(
+        &self,
+        conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
+        ingress: &ClientTunnelIngress,
+    ) -> Result<(), EngineError> {
+        let sink = ingress.clone();
+        let result = conn.lock().poll_http3_with(|data| {
+            if !sink.push(data) {
+                log::debug!("client H3/MASQUE ingress queue rejected {} bytes", data.len());
+            }
+        });
+        result.map_err(|error| self.transport_receive_error("client H3 poll", error))
+    }
+
+    fn drain_ingress_to_tun(
+        &self,
+        tun: &Arc<parking_lot::Mutex<TunInterface>>,
+        ingress: &ClientTunnelIngress,
+    ) -> Result<(), EngineError> {
+        for packet in ingress.drain() {
+            let mut tun_guard = tun.lock();
+            if let Err(error) = tun_guard.write_packet(&packet) {
+                log::warn!("TUN write error: {:?}", error);
+                return Err(self.tun_write_error("client H3/MASQUE downlink", error));
+            }
+            self.stats.tun_packets_written.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Process a batch of received inbound packets through QUIC, H3/MASQUE, and TUN.
     fn process_inbound_batch(
-        stats: &Arc<IoDriverStats>,
+        &self,
         conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
         tun: &Arc<parking_lot::Mutex<TunInterface>>,
-        stream_buf: &mut [u8],
+        ingress: &ClientTunnelIngress,
         batch: &[Vec<u8>],
         count: usize,
     ) -> Result<(), EngineError> {
         for payload in batch.iter().take(count) {
-            stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
+            self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
             let global = crate::instrumentation::global();
             global.transport.record_bytes_in(payload.len() as u64);
             global.transport.record_packet_in();
@@ -1048,42 +1195,15 @@ impl IoDriver {
                 let mut conn_guard = conn.lock();
                 if let Err(e) = conn_guard.recv(payload) {
                     log::debug!("Connection recv error: {:?}", e);
-                    stats.errors.fetch_add(1, Ordering::Relaxed);
+                    self.stats.errors.fetch_add(1, Ordering::Relaxed);
                     return Err(EngineError::DataPlane(DataPlaneFault::TransportReceive {
                         component: "client QUIC receive".to_string(),
                         error: e.to_string(),
                     }));
                 }
             }
-
-            loop {
-                let read_len = {
-                    let mut conn_guard = conn.lock();
-                    match conn_guard.conn.dgram_recv(stream_buf) {
-                        Ok(n) if n > 0 => n,
-                        Ok(_) => break,
-                        Err(crate::error::ConnectionError::Done) => break,
-                        Err(e) => {
-                            log::debug!("Datagram recv error: {:?}", e);
-                            return Err(EngineError::DataPlane(DataPlaneFault::TransportReceive {
-                                component: "client datagram receive".to_string(),
-                                error: e.to_string(),
-                            }));
-                        }
-                    }
-                };
-                let mut tun_guard = tun.lock();
-                if let Err(e) = tun_guard.write_packet(&stream_buf[..read_len]) {
-                    log::warn!("TUN write error: {:?}", e);
-                    stats.errors.fetch_add(1, Ordering::Relaxed);
-                    return Err(EngineError::DataPlane(DataPlaneFault::TunWrite {
-                        component: "client standard downlink".to_string(),
-                        error: e.to_string(),
-                    }));
-                } else {
-                    stats.tun_packets_written.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            self.poll_http3_to_ingress(conn, ingress)?;
+            self.drain_ingress_to_tun(tun, ingress)?;
         }
         Ok(())
     }

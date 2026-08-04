@@ -4,6 +4,8 @@ pub struct ServerRuntime {
     engine_config: EngineConfig,
     /// Server-specific configuration
     server_config: ServerConfig,
+    /// Validated assignment settings used by every live client session.
+    assignment_settings: ServerAssignmentSettings,
     /// Memory pool
     pool: Arc<MemoryPool>,
     /// Embedded host resources

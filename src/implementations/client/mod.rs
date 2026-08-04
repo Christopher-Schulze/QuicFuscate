@@ -58,6 +58,12 @@ pub struct ClientRuntime {
     pool: Arc<MemoryPool>,
     /// TUN interface handle
     tun: Option<Arc<parking_lot::Mutex<TunInterface>>>,
+    /// Assignment accepted for the active authenticated connection.
+    assignment: Option<crate::control_plane::ClientAssignment>,
+    /// Monotonic client-side reconnect generation.
+    connection_generation: u64,
+    /// H3 stream that owns framed tunnel fallback packets.
+    tunnel_stream_id: Option<u64>,
     /// QUIC connection handle
     connection: Option<ClientConnection>,
     /// UDP socket
@@ -116,6 +122,30 @@ impl From<ClientState> for EngineState {
     }
 }
 
+pub fn tun_config_from_assignment(
+    assignment: &crate::control_plane::ClientAssignment,
+    name: Option<String>,
+    zero_copy: bool,
+) -> Result<TunConfig, EngineError> {
+    if assignment.mode != crate::control_plane::AssignmentMode::Enabled {
+        return Err(EngineError::Tun(
+            "server explicitly disabled client TUN activation".to_string(),
+        ));
+    }
+    let addresses = crate::engine::ClientTunnelAddresses {
+        ipv4: assignment.ipv4.map(|address| crate::engine::ClientTunnelIpv4 {
+            address: address.address,
+            prefix: address.prefix,
+        }),
+        ipv6: assignment.ipv6.map(|address| crate::engine::ClientTunnelIpv6 {
+            address: address.address,
+            prefix: address.prefix,
+        }),
+    };
+    Ok(addresses.to_tun_config(name, assignment.mtu, zero_copy))
+}
+
+#[cfg(test)]
 fn client_tun_config(config: &EngineConfig) -> Result<TunConfig, EngineError> {
     let addresses = config.interface.client_tunnel_addresses().map_err(|error| {
         EngineError::Config(format!("Invalid client tunnel address configuration: {error}"))
@@ -126,6 +156,18 @@ fn client_tun_config(config: &EngineConfig) -> Result<TunConfig, EngineError> {
         Some(config.interface.tun_name.clone())
     };
     Ok(addresses.to_tun_config(name, config.interface.tun_mtu, config.interface.zero_copy))
+}
+
+fn client_tun_config_from_assignment(
+    config: &EngineConfig,
+    assignment: &crate::control_plane::ClientAssignment,
+) -> Result<TunConfig, EngineError> {
+    let name = if config.interface.tun_name.is_empty() {
+        None
+    } else {
+        Some(config.interface.tun_name.clone())
+    };
+    tun_config_from_assignment(assignment, name, config.interface.zero_copy)
 }
 
 impl ClientRuntime {
@@ -150,6 +192,9 @@ impl ClientRuntime {
             config,
             pool,
             tun: None,
+            assignment: None,
+            connection_generation: 0,
+            tunnel_stream_id: None,
             connection: None,
             socket: None,
             subsystems: None,
@@ -169,7 +214,7 @@ impl ClientRuntime {
         })
     }
 
-    /// Start the client runtime (opens TUN, initializes subsystems).
+    /// Start the client runtime and initialize subsystems without opening TUN.
     pub fn start(&mut self) -> Result<(), EngineError> {
         if self.state != ClientState::Stopped {
             return Err(EngineError::InvalidState(self.state.into(), "start (not stopped)"));
@@ -183,32 +228,11 @@ impl ClientRuntime {
             return Err(EngineError::Tun(format!("{:?}", e)));
         }
 
-        // Open TUN interface from the canonical typed address projection.
-        let tun_config = match client_tun_config(&self.config) {
-            Ok(config) => config,
-            Err(error) => {
-                self.state = ClientState::Error;
-                return Err(error);
-            }
-        };
-
-        let tun = match TunInterface::open(tun_config, self.pool.clone()) {
-            Ok(tun) => tun,
-            Err(e) => {
-                self.state = ClientState::Error;
-                return Err(EngineError::Tun(format!("{:?}", e)));
-            }
-        };
-
-        log::info!("TUN interface opened: {}", tun.name());
-        self.tun = Some(Arc::new(parking_lot::Mutex::new(tun)));
-
         if self.runtime.is_none() {
             let runtime = match runtime::create_shared_runtime(&runtime::RuntimeConfig::default()) {
                 Ok(rt) => rt,
                 Err(e) => {
                     self.subsystems = None;
-                    self.tun = None;
                     self.state = ClientState::Error;
                     return Err(EngineError::Internal(format!("Runtime init failed: {}", e)));
                 }
@@ -225,7 +249,6 @@ impl ClientRuntime {
                     owner
                 }
                 Err(error) => {
-                    self.tun = None;
                     self.state = ClientState::Error;
                     return Err(EngineError::Config(format!("Invalid Reality config: {error}")));
                 }
@@ -239,7 +262,6 @@ impl ClientRuntime {
         ) {
             Ok(subsystems) => Some(subsystems),
             Err(e) => {
-                self.tun = None;
                 self.state = ClientState::Error;
                 return Err(e);
             }
@@ -248,7 +270,6 @@ impl ClientRuntime {
         let Some(runtime) = self.runtime.as_ref().cloned() else {
             runtime_owner.request_shutdown();
             self.subsystems = None;
-            self.tun = None;
             self.state = ClientState::Error;
             return Err(EngineError::Internal(
                 "Runtime disappeared before stealth worker start".to_string(),
@@ -453,7 +474,24 @@ impl ClientRuntime {
         }
         self.socket = None;
         self.io_driver = None;
+        self.tunnel_stream_id = None;
+        self.assignment = None;
+        if let Some(tun) = self.tun.take() {
+            log::info!("Closing TUN interface after failed connect: {}", tun.lock().name());
+        }
         self.state = ClientState::Running;
+    }
+
+    fn next_connection_generation(&mut self) -> Result<u64, EngineError> {
+        let generation = self
+            .connection_generation
+            .checked_add(1)
+            .filter(|generation| *generation != 0)
+            .ok_or_else(|| {
+                EngineError::Internal("client connection generation exhausted".to_string())
+            })?;
+        self.connection_generation = generation;
+        Ok(generation)
     }
 
     /// Connect to the remote server.
@@ -464,6 +502,7 @@ impl ClientRuntime {
 
         *self.loss_reason.lock() = None;
         *self.data_plane_fault.lock() = None;
+        let generation = self.next_connection_generation()?;
 
         // Create QUIC connection
         let conn =
@@ -507,11 +546,6 @@ impl ClientRuntime {
 
                 let io_driver = Arc::new(IoDriver::new(io_config));
                 self.io_driver = Some(io_driver.clone());
-                let tun = self
-                    .tun
-                    .as_ref()
-                    .ok_or_else(|| EngineError::Tun("TUN not initialized".to_string()))?
-                    .clone();
                 let shared_conn = self
                     .connection
                     .as_ref()
@@ -520,6 +554,56 @@ impl ClientRuntime {
                     })?
                     .shared();
 
+                {
+                    let (lock, _) = &*self.handshake_event;
+                    *lock.lock() = false;
+                }
+                let assignment = runtime.block_on(io_driver.negotiate_assignment(
+                    &shared_conn,
+                    &socket,
+                    generation,
+                    std::time::Instant::now() + std::time::Duration::from_secs(10),
+                ))?;
+                let mut tun_config = client_tun_config_from_assignment(&self.config, &assignment)?;
+                let effective_transport_mtu = {
+                    let conn_guard = shared_conn.lock();
+                    u16::try_from(conn_guard.effective_tunnel_mtu()).unwrap_or(u16::MAX)
+                };
+                tun_config.mtu = tun_config.mtu.min(effective_transport_mtu);
+                let tun = TunInterface::open(tun_config, self.pool.clone()).map_err(|error| {
+                    EngineError::Tun(format!("server-assigned TUN open failed: {error:?}"))
+                })?;
+                log::info!("TUN interface opened from server assignment: {}", tun.name());
+                let tun = Arc::new(parking_lot::Mutex::new(tun));
+                self.tun = Some(tun.clone());
+                self.assignment = Some(assignment);
+
+                let ingress = ClientTunnelIngress::new();
+                let tunnel_stream_id = {
+                    let mut conn_guard = shared_conn.lock();
+                    if !conn_guard.masque_tunnel_established() {
+                        return Err(EngineError::Connection(
+                            "server assignment arrived before MASQUE readiness".to_string(),
+                        ));
+                    }
+                    let stream_id = conn_guard.open_http3_stream_post("/tun").map_err(|error| {
+                        EngineError::Connection(format!("client /tun stream open failed: {error}"))
+                    })?;
+                    let ingress_for_callback = ingress.clone();
+                    conn_guard.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
+                        move |payload: &[u8]| {
+                            if !ingress_for_callback.push(payload) {
+                                log::debug!(
+                                    "client MASQUE ingress queue rejected {} bytes",
+                                    payload.len()
+                                );
+                            }
+                        },
+                    ))));
+                    stream_id
+                };
+                self.tunnel_stream_id = Some(tunnel_stream_id);
+
                 let outbound = runtime.spawn({
                     let io_driver = io_driver.clone();
                     let tun = tun.clone();
@@ -527,26 +611,26 @@ impl ClientRuntime {
                     let socket = socket.clone();
                     let data_plane_fault = self.data_plane_fault.clone();
                     async move {
-                        if let Err(e) = io_driver.run_outbound(tun, conn, socket).await {
+                        if let Err(e) =
+                            io_driver.run_outbound(tun, conn, socket, tunnel_stream_id).await
+                        {
                             log::warn!("Client outbound I/O task exited with error: {:?}", e);
                             publish_data_plane_fault(&data_plane_fault, &io_driver, e);
                         }
                     }
                 });
-                // Reset handshake event for new connection attempt.
-                {
-                    let (lock, _) = &*self.handshake_event;
-                    *lock.lock() = false;
-                }
                 let inbound = runtime.spawn({
                     let io_driver = io_driver.clone();
                     let tun = tun.clone();
                     let conn = shared_conn.clone();
                     let socket = socket.clone();
+                    let ingress = ingress.clone();
                     let hs_event = self.handshake_event.clone();
                     let data_plane_fault = self.data_plane_fault.clone();
                     async move {
-                        if let Err(e) = io_driver.run_inbound(tun, conn, socket, hs_event).await {
+                        if let Err(e) =
+                            io_driver.run_inbound(tun, conn, socket, ingress, hs_event).await
+                        {
                             log::warn!("Client inbound I/O task exited with error: {:?}", e);
                             publish_data_plane_fault(&data_plane_fault, &io_driver, e);
                         }
@@ -688,6 +772,11 @@ impl ClientRuntime {
         }
         self.socket = None;
         self.io_driver = None;
+        self.tunnel_stream_id = None;
+        self.assignment = None;
+        if let Some(tun) = self.tun.take() {
+            log::info!("Closing TUN interface: {}", tun.lock().name());
+        }
 
         self.state = ClientState::Running;
         worker_join_error.map_or(Ok(()), |error| {
@@ -730,6 +819,16 @@ impl ClientRuntime {
     /// Get connection reference (if connected).
     pub fn connection(&self) -> Option<&ClientConnection> {
         self.connection.as_ref()
+    }
+
+    /// Return a copy of the authenticated assignment for the active connection.
+    pub fn assignment(&self) -> Option<crate::control_plane::ClientAssignment> {
+        self.assignment.clone()
+    }
+
+    /// Return server-provided DNS servers for the active assignment.
+    pub fn assigned_dns_servers(&self) -> Option<Vec<std::net::IpAddr>> {
+        self.assignment.as_ref().map(|assignment| assignment.dns_servers.clone())
     }
 
     /// Return the automatic connection-loss reason, if the watchdog fired.
@@ -898,6 +997,42 @@ mod tests {
         assert_eq!(tun_config.netmask, None);
         assert_eq!(tun_config.ip6, Some("fd00::42".parse().expect("IPv6 address")));
         assert_eq!(tun_config.prefix6, Some(64));
+    }
+
+    #[test]
+    fn client_runtime_projects_server_assignment_before_tun_open() {
+        let assignment = crate::control_plane::ClientAssignment::enabled(
+            7,
+            3,
+            Some(crate::control_plane::AssignedIpv4 {
+                address: "10.8.0.2".parse().expect("IPv4 address"),
+                prefix: 24,
+            }),
+            Some(crate::control_plane::AssignedIpv6 {
+                address: "fd00::42".parse().expect("IPv6 address"),
+                prefix: 64,
+            }),
+            1400,
+            vec!["2001:4860:4860::8888".parse().expect("DNS address")],
+        )
+        .expect("assignment");
+        let tun_config = tun_config_from_assignment(&assignment, Some("qf0".to_string()), true)
+            .expect("assignment projection");
+        assert_eq!(tun_config.name.as_deref(), Some("qf0"));
+        assert_eq!(tun_config.ip, Some("10.8.0.2".parse().expect("IPv4 address")));
+        assert_eq!(tun_config.netmask, Some("255.255.255.0".parse().expect("netmask")));
+        assert_eq!(tun_config.ip6, Some("fd00::42".parse().expect("IPv6 address")));
+        assert_eq!(tun_config.prefix6, Some(64));
+        assert_eq!(tun_config.mtu, 1400);
+    }
+
+    #[test]
+    fn client_runtime_rejects_disabled_server_assignment_before_tun_open() {
+        let assignment =
+            crate::control_plane::ClientAssignment::disabled(7, 3).expect("disabled assignment");
+        let error = tun_config_from_assignment(&assignment, None, true)
+            .expect_err("disabled assignment must not open TUN");
+        assert!(matches!(error, EngineError::Tun(_)));
     }
 
     #[test]

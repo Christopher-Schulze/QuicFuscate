@@ -11,6 +11,7 @@ struct ServerRuntimeLiveParts<'a> {
     accept_max_clients: usize,
     server_tun: Option<&'a Arc<TunInterface>>,
     server_ips: ServerTunIps,
+    assignment_settings: ServerAssignmentSettings,
     tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     tun_notify: Arc<tokio::sync::Notify>,
     shutdown: Arc<AtomicBool>,

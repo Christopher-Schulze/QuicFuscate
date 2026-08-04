@@ -4,6 +4,14 @@ struct ServerTunIps {
     ipv6: Option<Ipv6Addr>,
 }
 
+#[derive(Clone, Debug)]
+struct ServerAssignmentSettings {
+    ipv4_prefix: u8,
+    ipv6_prefix: u8,
+    mtu: u16,
+    dns_servers: Vec<IpAddr>,
+}
+
 #[cfg(unix)]
 fn record_systemd_notification(state: &str, result: std::io::Result<()>) {
     if let Err(error) = result {
@@ -209,6 +217,50 @@ impl Default for ServerConfig {
             #[cfg(feature = "rate_limiter")]
             blacklist: BlacklistConfig::default(),
         }
+    }
+}
+
+impl ServerConfig {
+    fn assignment_settings(&self, mtu: u16) -> Result<ServerAssignmentSettings, String> {
+        let raw_mask = u32::from(self.server_netmask);
+        let ipv4_prefix = raw_mask.leading_ones() as u8;
+        let canonical_mask = if ipv4_prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - ipv4_prefix)
+        };
+        if raw_mask != canonical_mask {
+            return Err(format!(
+                "server_netmask is not a contiguous IPv4 netmask: {}",
+                self.server_netmask
+            ));
+        }
+        if self.ipv6_prefix_len > 128 {
+            return Err(format!(
+                "ipv6_prefix_len must be at most 128, got {}",
+                self.ipv6_prefix_len
+            ));
+        }
+        if mtu < 576 {
+            return Err(format!("server TUN MTU must be at least 576, got {mtu}"));
+        }
+        if self.ipv6_server_ip.is_some() && mtu < 1280 {
+            return Err(format!(
+                "server TUN MTU must be at least 1280 for IPv6, got {mtu}"
+            ));
+        }
+        let mut dns_servers = Vec::with_capacity(
+            self.dns_servers.len().saturating_add(self.ipv6_dns_servers.len()),
+        );
+        dns_servers.extend(self.dns_servers.iter().copied().map(IpAddr::V4));
+        dns_servers.extend(self.ipv6_dns_servers.iter().copied().map(IpAddr::V6));
+        if dns_servers.len() > crate::control_plane::MAX_CLIENT_ASSIGNMENT_DNS_SERVERS {
+            return Err(format!(
+                "server assignment supports at most {} DNS servers",
+                crate::control_plane::MAX_CLIENT_ASSIGNMENT_DNS_SERVERS
+            ));
+        }
+        Ok(ServerAssignmentSettings { ipv4_prefix, ipv6_prefix: self.ipv6_prefix_len, mtu, dns_servers })
     }
 }
 

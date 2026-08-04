@@ -957,6 +957,79 @@ fn drain_masque_downlink_responses(
     }
 }
 
+fn send_client_assignment(
+    conn: &mut QuicFuscateConnection,
+    session_id: Option<SessionId>,
+    assigned_ips: Option<AssignedClientIps>,
+    settings: &ServerAssignmentSettings,
+    tun_enabled: bool,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let Some(generation) = conn.masque_peer_generation() else {
+        log::warn!(
+            "authenticated MASQUE client {} did not provide a valid connection generation",
+            session_id
+        );
+        return;
+    };
+    let assignment = if tun_enabled {
+        let Some(assigned_ips) = assigned_ips else {
+            log::warn!("authenticated MASQUE client {} has no assigned IPs", session_id);
+            return;
+        };
+        crate::control_plane::ClientAssignment::enabled(
+            session_id.as_u64(),
+            generation,
+            Some(crate::control_plane::AssignedIpv4 {
+                address: assigned_ips.ipv4,
+                prefix: settings.ipv4_prefix,
+            }),
+            assigned_ips.ipv6.map(|address| crate::control_plane::AssignedIpv6 {
+                address,
+                prefix: settings.ipv6_prefix,
+            }),
+            settings.mtu,
+            settings.dns_servers.clone(),
+        )
+    } else {
+        crate::control_plane::ClientAssignment::disabled(session_id.as_u64(), generation)
+    };
+    let assignment = match assignment {
+        Ok(assignment) => assignment,
+        Err(error) => {
+            log::warn!("client assignment for {} rejected locally: {}", session_id, error);
+            return;
+        }
+    };
+    let payload = match assignment.encode() {
+        Ok(payload) => payload,
+        Err(error) => {
+            log::warn!("client assignment for {} could not be encoded: {}", session_id, error);
+            return;
+        }
+    };
+    match conn.send_masque_control_once(
+        crate::control_plane::CLIENT_ASSIGNMENT_CAPSULE_TYPE,
+        &payload,
+    ) {
+        Ok(true) => log::info!(
+            "authenticated client assignment sent: session={} generation={} enabled={}",
+            session_id,
+            generation,
+            tun_enabled
+        ),
+        Ok(false) => {}
+        Err(error) => log::warn!(
+            "client assignment send failed: session={} generation={} error={:?}",
+            session_id,
+            generation,
+            error
+        ),
+    }
+}
+
 fn record_live_tun_fault(
     fault_slot: &Arc<Mutex<Option<DataPlaneFault>>>,
     notify: &Arc<tokio::sync::Notify>,
@@ -984,6 +1057,7 @@ async fn process_live_server_client_datagram(
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     server_tun: Option<&Arc<TunInterface>>,
     server_ips: ServerTunIps,
+    assignment_settings: ServerAssignmentSettings,
     tun_enable: bool,
     dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
     dns_intercept_admission: Arc<DnsInterceptAdmission>,
@@ -1237,12 +1311,25 @@ async fn process_live_server_client_datagram(
     // the caller commits bandwidth ownership synchronously before receiving the
     // client's next datagram.
     if should_close.get().is_none() && auth_gate.load(AtomicOrdering::Relaxed) {
-        match conn.accept_peer_masque_tunnel() {
-            Ok(true) => log::info!("Authenticated MASQUE data plane accepted for {}", addr),
-            Ok(false) => {}
+        let masque_ready = match conn.accept_peer_masque_tunnel() {
+            Ok(true) => {
+                log::info!("Authenticated MASQUE data plane accepted for {}", addr);
+                true
+            }
+            Ok(false) => conn.masque_flow_active(),
             Err(error) => {
                 log::warn!("MASQUE CONNECT response failed for {}: {:?}", addr, error);
+                false
             }
+        };
+        if masque_ready {
+            send_client_assignment(
+                conn,
+                session_id,
+                assigned_ips,
+                &assignment_settings,
+                tun_enable && server_tun.is_some(),
+            );
         }
     }
 

@@ -1235,9 +1235,21 @@ impl QuicFuscateEngine {
 
         log::info!("Connecting to {} in client mode", remote);
 
+        let connected_firewall_policy = VpnFirewallPolicy::new(
+            if self.config.interface.tun_name.is_empty() {
+                "tun0"
+            } else {
+                &self.config.interface.tun_name
+            },
+            remote,
+            None,
+            runtime.assigned_dns_servers().unwrap_or_default(),
+        )
+        .map_err(|error| EngineError::Config(error.to_string()))?;
+
         // Notify kill switch that VPN is connected
         if let Some(ref ks) = self.kill_switch {
-            if let Err(error) = ks.on_vpn_connected(&firewall_policy) {
+            if let Err(error) = ks.on_vpn_connected(&connected_firewall_policy) {
                 if let Err(disconnect_error) = runtime.disconnect() {
                     log::warn!(
                         "Client runtime cleanup after kill-switch policy failure failed: {}",

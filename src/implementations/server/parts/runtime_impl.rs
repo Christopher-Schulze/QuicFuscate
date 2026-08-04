@@ -35,6 +35,9 @@ impl ServerRuntime {
         server_config: ServerConfig,
     ) -> Result<Self, EngineError> {
         engine_config.validate().map_err(EngineError::from)?;
+        let assignment_settings = server_config
+            .assignment_settings(engine_config.interface.tun_mtu)
+            .map_err(EngineError::Config)?;
         server_config.auth_policy.validate().map_err(EngineError::Config)?;
         server_config.validate_revocation_retention().map_err(EngineError::Config)?;
         server_config.bandwidth_policy.validate().map_err(EngineError::Config)?;
@@ -66,6 +69,7 @@ impl ServerRuntime {
             )),
             engine_config,
             server_config,
+            assignment_settings,
             pool,
             host_resources: None,
             domain,
@@ -803,8 +807,12 @@ impl ServerRuntime {
 
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {
         let shutdown = Arc::clone(&self.shutdown);
+        let mut assignment_settings = self.assignment_settings.clone();
         let live = self.live_mut();
         let uring_worker = live.live_state.uring_worker.clone();
+        if let Some(tun) = live.server_tun.as_ref() {
+            assignment_settings.mtu = tun.mtu();
+        }
         ServerRuntimeLiveParts {
             live_state: &mut live.live_state,
             accept_loop: &live.accept_loop,
@@ -814,6 +822,7 @@ impl ServerRuntime {
                 ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
                 ipv6: live.server_tun_ipv6,
             },
+            assignment_settings,
             tun_fault: Arc::clone(&live.tun_fault),
             tun_notify: Arc::clone(&live.tun_notify),
             shutdown,
@@ -1126,6 +1135,7 @@ impl ServerRuntime {
                                 &client_snapshots,
                                 runtime_parts.server_tun,
                                 runtime_parts.server_ips,
+                                runtime_parts.assignment_settings.clone(),
                                 tun_enable,
                                 Arc::clone(&dns_upstream_resolvers),
                                 Arc::clone(&dns_intercept_admission),

@@ -308,6 +308,8 @@ pub struct QuicFuscateConnection {
     local_addr: SocketAddr,
     host_header: String,
     qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+    /// Client-selected generation echoed by the server assignment capsule.
+    client_connection_generation: Option<u64>,
 
     // Core Modules
     fec: AdaptiveFec,
@@ -357,6 +359,10 @@ pub struct QuicFuscateConnection {
     /// Peer-initiated MASQUE CONNECT-UDP stream id (server side: the client opened
     /// the flow; we reuse its stream id for downlink datagram sends).
     masque_peer_stream_id: Option<u64>,
+    /// Client generation parsed from the peer CONNECT-UDP request.
+    masque_peer_generation: Option<u64>,
+    /// One-shot guard for server control messages on the peer MASQUE flow.
+    masque_control_sent: bool,
     #[cfg(feature = "orchestrator")]
     runtime_cpu_percent: u32,
     #[cfg(feature = "orchestrator")]
@@ -640,6 +646,7 @@ impl QuicFuscateConnection {
             local_addr: params.local_addr,
             host_header: params.host_header,
             qkey_auth_token_hex: params.qkey_auth_token_hex,
+            client_connection_generation: None,
             fec: AdaptiveFec::new(params.fec_config),
             stealth_manager: params.stealth_manager,
             optimization_manager: params.optimization_manager,
@@ -673,6 +680,8 @@ impl QuicFuscateConnection {
             masque_control_cb: None,
             masque_stream_id: None,
             masque_peer_stream_id: None,
+            masque_peer_generation: None,
+            masque_control_sent: false,
             #[cfg(feature = "orchestrator")]
             runtime_cpu_percent: 0,
             #[cfg(feature = "orchestrator")]
@@ -794,13 +803,21 @@ impl QuicFuscateConnection {
         &mut self,
         host: &str,
     ) -> Result<Option<u64>, crate::transport::h3::Error> {
+        self.ensure_masque_tunnel_with_requirement(host, false)
+    }
+
+    fn ensure_masque_tunnel_with_requirement(
+        &mut self,
+        host: &str,
+        required: bool,
+    ) -> Result<Option<u64>, crate::transport::h3::Error> {
         // When TUN bridging is active (a MASQUE datagram sink is installed),
         // always use MASQUE CONNECT-UDP as the tunnel transport regardless of
         // the stealth escalation state. Without this, TUN traffic would fall
         // back to H3 DATA frames (Option B) and the downlink MASQUE path would
         // be inconsistent with the uplink.
         let tun_bridging = self.masque_datagram_cb.is_some();
-        if !self.stealth_manager.masque_preferred_runtime() && !tun_bridging {
+        if !required && !self.stealth_manager.masque_preferred_runtime() && !tun_bridging {
             return Ok(None);
         }
 
@@ -905,6 +922,15 @@ impl QuicFuscateConnection {
     pub fn begin_masque_tunnel(&mut self) -> Result<u64, crate::error::ConnectionError> {
         self.ensure_http3_initialized()?;
         self.ensure_masque_tunnel_for_send()?.ok_or_else(|| "MASQUE tunnel unavailable".into())
+    }
+
+    /// Starts the canonical MASQUE flow required for authenticated control exchange.
+    pub fn begin_masque_control_tunnel(&mut self) -> Result<u64, crate::error::ConnectionError> {
+        self.ensure_http3_initialized()?;
+        let host = self.host_header.clone();
+        self.ensure_masque_tunnel_with_requirement(&host, true)?.ok_or_else(|| {
+            crate::error::ConnectionError::Transport("MASQUE control tunnel unavailable".to_string())
+        })
     }
 
     /// Returns true only after the peer acknowledged CONNECT-UDP with a 2xx response.
@@ -1016,6 +1042,14 @@ impl QuicFuscateConnection {
         headers.insert(0, crate::transport::h3::Header::new(b":scheme", b"https"));
         headers.insert(0, crate::transport::h3::Header::new(b":method", method));
         Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut headers);
+        if let Some(generation) = self.client_connection_generation {
+            let value = generation.to_string();
+            headers.retain(|header| header.name() != b"x-qf-generation");
+            headers.push(crate::transport::h3::Header::new(
+                b"x-qf-generation",
+                value.as_bytes(),
+            ));
+        }
         headers
     }
 
@@ -1069,6 +1103,8 @@ impl QuicFuscateConnection {
                             && self.masque_peer_stream_id.is_none()
                         {
                             self.masque_peer_stream_id = Some(sid);
+                            self.masque_peer_generation = Self::peer_generation(&list);
+                            self.masque_control_sent = false;
                             let _ = h3.enable_masque_datagram(&mut self.conn, sid);
                             crate::telemetry::MASQUE_ACTIVE
                                 .store(1, std::sync::atomic::Ordering::Relaxed);
@@ -1152,6 +1188,11 @@ impl QuicFuscateConnection {
                     Ok(Some((sid, crate::transport::h3::Event::Reset(err)))) => {
                         self.h3_tunnel_rx.remove(&sid);
                         self.h3_tunnel_response_started.remove(&sid);
+                        if self.masque_peer_stream_id == Some(sid) {
+                            self.masque_peer_stream_id = None;
+                            self.masque_peer_generation = None;
+                            self.masque_control_sent = false;
+                        }
                         crate::optimize::telemetry::STEALTH_SIGNAL_RST
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if verbose_events {
@@ -1171,6 +1212,11 @@ impl QuicFuscateConnection {
                     Ok(Some((sid, crate::transport::h3::Event::Finished))) => {
                         self.h3_tunnel_rx.remove(&sid);
                         self.h3_tunnel_response_started.remove(&sid);
+                        if self.masque_peer_stream_id == Some(sid) {
+                            self.masque_peer_stream_id = None;
+                            self.masque_peer_generation = None;
+                            self.masque_control_sent = false;
+                        }
                         if self.h3_peer_tunnel_stream_id == Some(sid) {
                             self.h3_peer_tunnel_stream_id = None;
                         }
@@ -1394,6 +1440,24 @@ impl QuicFuscateConnection {
             }
         }
         method_connect && protocol_connect_udp
+    }
+
+    fn peer_generation(headers: &[crate::transport::h3::Header]) -> Option<u64> {
+        let mut generation = None;
+        for header in headers {
+            if !header.name().eq_ignore_ascii_case(b"x-qf-generation") {
+                continue;
+            }
+            if generation.is_some() || header.value().len() > 20 {
+                return None;
+            }
+            let value = std::str::from_utf8(header.value()).ok()?.parse::<u64>().ok()?;
+            if value == 0 {
+                return None;
+            }
+            generation = Some(value);
+        }
+        generation
     }
 
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
@@ -2380,6 +2444,44 @@ impl QuicFuscateConnection {
         self.masque_datagram_cb = Some(cb);
     }
 
+    /// Installs a sink for authenticated MASQUE control capsules.
+    pub fn set_masque_control_cb(&mut self, cb: CapsuleHandler) {
+        self.masque_control_cb = Some(cb);
+    }
+
+    /// Bind subsequent client H3 requests to one reconnect generation.
+    pub fn set_client_connection_generation(&mut self, generation: u64) {
+        self.client_connection_generation = (generation != 0).then_some(generation);
+    }
+
+    /// Return the generation supplied by a peer CONNECT-UDP request.
+    pub fn masque_peer_generation(&self) -> Option<u64> {
+        self.masque_peer_generation
+    }
+
+    /// Send one server control capsule on the authenticated peer MASQUE flow.
+    ///
+    /// The one-shot guard prevents duplicate assignment emission when the server
+    /// processes several UDP packets for the same connection. QUIC stream
+    /// retransmission provides delivery without application-level replay.
+    pub fn send_masque_control_once(
+        &mut self,
+        capsule_type: u64,
+        payload: &[u8],
+    ) -> Result<bool, crate::error::ConnectionError> {
+        if self.masque_control_sent {
+            return Ok(false);
+        }
+        let stream_id = self
+            .masque_peer_stream_id
+            .ok_or(crate::error::ConnectionError::Done)?;
+        let capsule = crate::transport::h3::Connection::encode_capsule(capsule_type, payload);
+        let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
+        h3.send_capsule(&mut self.conn, stream_id, &capsule, false)?;
+        self.masque_control_sent = true;
+        Ok(true)
+    }
+
     /// Returns true if a MASQUE datagram sink has been installed.
     pub fn has_masque_datagram_cb(&self) -> bool {
         self.masque_datagram_cb.is_some()
@@ -2623,6 +2725,8 @@ impl QuicFuscateConnection {
                 crate::telemetry::MASQUE_ACTIVE.store(0, std::sync::atomic::Ordering::Relaxed);
                 self.masque_stream_id = None;
                 self.masque_peer_stream_id = None;
+                self.masque_peer_generation = None;
+                self.masque_control_sent = false;
             }
         });
 

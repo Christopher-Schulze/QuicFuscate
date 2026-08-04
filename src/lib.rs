@@ -216,6 +216,8 @@ pub mod error {
 pub mod brain;
 /// Packet compression utilities (LZ4/zstd integration for payload reduction).
 pub mod compress;
+/// Versioned authenticated control-plane payloads for the canonical MASQUE carrier.
+pub mod control_plane;
 /// Forward Error Correction - adaptive Reed-Solomon with PID controller and Kalman filter.
 pub mod fec;
 /// Firewall backend abstraction (iptables / nftables) for kill switch and NAT routing.

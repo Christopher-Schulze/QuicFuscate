@@ -416,6 +416,30 @@ Control and observability are explicit through typed channels:
 
 This keeps CLI and embedded control planes aligned on one runtime mutation path.
 
+#### Authenticated Client Assignment and Carrier
+
+`src/control_plane.rs` owns the versioned, bounded client-assignment capsule carried on the
+authenticated Core MASQUE CONNECT-UDP flow. The capsule binds the server session identity to
+the client reconnect generation and carries explicit IPv4/IPv6 family order, prefixes, DNS, MTU,
+and an explicit disabled state. The receiver rejects unsupported versions, unknown flags,
+malformed or oversized payloads, stale generations, and conflicting assignments before any
+native TUN state is changed; an identical retransmission is harmless.
+
+`ClientRuntime` and the standalone CLI client both set the generation before opening the local
+MASQUE control flow, wait for the authenticated assignment and confirmed CONNECT-UDP response,
+then project the accepted addresses and MTU into the native TUN open contract. A failed
+negotiation or projection rolls back the connection without opening or retaining a stale TUN.
+The server emits one assignment only after the QKey/authenticated peer MASQUE flow is accepted
+and derives the payload from that session's allocated `AssignedClientIps` and server assignment
+settings. Generic client ingress and standalone/live ingress use the same Core H3/MASQUE carrier;
+generic downlink handoff is bounded before the native TUN write.
+
+The standalone client does not negotiate an assignment when TUN bridging is disabled. Its
+legacy local `--tun-*` address and MTU overrides are rejected when TUN is enabled so the server
+assignment remains the sole address/configuration source. Native privileged Linux/macOS/Windows
+proof and authenticated live client/server evidence remain separate gates owned by TODO-866 and
+TODO-867.
+
 ### Cohesive Stealth Stack (Hard to Classify)
 The stealth design is one coherent browser-like H3/MASQUE flow, not a pile of unrelated
 stealth toggles. TODO-464 through TODO-471 are complete and define the production policy.
