@@ -12,25 +12,38 @@ use quicfuscate::engine::{
 use quicfuscate::interface::{register_tun_factory, TunConfig, TunDevice};
 
 fn parse_args() -> Result<(String, u64, u64, bool), String> {
+    match parse_args_from(std::env::args().skip(1))? {
+        Some(args) => Ok(args),
+        None => std::process::exit(0),
+    }
+}
+
+fn parse_u64_arg<I>(args: &mut I, flag: &str) -> Result<u64, String>
+where
+    I: Iterator<Item = String>,
+{
+    let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
+    if value.starts_with("--") {
+        return Err(format!("missing value for {flag}"));
+    }
+    value.parse::<u64>().map_err(|_| format!("{flag} must be an unsigned integer"))
+}
+
+fn parse_args_from<I>(arguments: I) -> Result<Option<(String, u64, u64, bool)>, String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut qkey_value: Option<String> = None;
     let mut timeout_ms: u64 = 8000;
     let mut hold_ms: u64 = 1500;
     let mut no_tun = false;
 
-    let mut args = std::env::args().skip(1);
+    let mut args = arguments.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--qkey" => qkey_value = args.next(),
-            "--timeout-ms" => {
-                if let Some(v) = args.next() {
-                    timeout_ms = v.parse::<u64>().unwrap_or(timeout_ms);
-                }
-            }
-            "--hold-ms" => {
-                if let Some(v) = args.next() {
-                    hold_ms = v.parse::<u64>().unwrap_or(hold_ms);
-                }
-            }
+            "--timeout-ms" => timeout_ms = parse_u64_arg(&mut args, "--timeout-ms")?,
+            "--hold-ms" => hold_ms = parse_u64_arg(&mut args, "--hold-ms")?,
             "--no-tun" => {
                 no_tun = true;
             }
@@ -38,14 +51,14 @@ fn parse_args() -> Result<(String, u64, u64, bool), String> {
                 println!(
                     "Usage: qf-e2e-desktop --qkey QKEY [--timeout-ms MS] [--hold-ms MS] [--no-tun]"
                 );
-                std::process::exit(0);
+                return Ok(None);
             }
             other => return Err(format!("Unknown arg: {other}")),
         }
     }
 
     let qkey_value = qkey_value.ok_or_else(|| "missing --qkey".to_string())?;
-    Ok((qkey_value, timeout_ms, hold_ms, no_tun))
+    Ok(Some((qkey_value, timeout_ms, hold_ms, no_tun)))
 }
 
 fn map_stealth_mode(value: &str) -> StealthMode {
@@ -163,4 +176,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.stop().map_err(|e| format!("engine stop failed: {e}"))?;
     println!("disconnected");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_args_from;
+
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn probe_duration_flags_reject_malformed_values() {
+        for flag in ["--timeout-ms", "--hold-ms"] {
+            let result = parse_args_from(arguments(&[flag, "not-a-number"]));
+            assert_eq!(result, Err(format!("{flag} must be an unsigned integer")));
+        }
+    }
+
+    #[test]
+    fn probe_duration_flags_reject_missing_values() {
+        assert_eq!(
+            parse_args_from(arguments(&["--timeout-ms"])),
+            Err("missing value for --timeout-ms".to_owned())
+        );
+        assert_eq!(
+            parse_args_from(arguments(&["--hold-ms", "--timeout-ms", "1"])),
+            Err("missing value for --hold-ms".to_owned())
+        );
+    }
+
+    #[test]
+    fn probe_duration_flags_accept_zero_and_preserve_last_value() {
+        let parsed =
+            parse_args_from(arguments(&["--qkey", "test", "--timeout-ms", "0", "--hold-ms", "0"]))
+                .unwrap()
+                .unwrap();
+        assert_eq!(parsed.1, 0);
+        assert_eq!(parsed.2, 0);
+
+        let parsed = parse_args_from(arguments(&[
+            "--qkey",
+            "test",
+            "--timeout-ms",
+            "1",
+            "--timeout-ms",
+            "2",
+            "--hold-ms",
+            "3",
+            "--hold-ms",
+            "4",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.1, 2);
+        assert_eq!(parsed.2, 4);
+    }
 }

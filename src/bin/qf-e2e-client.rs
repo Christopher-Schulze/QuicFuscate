@@ -313,7 +313,36 @@ fn hold_established_connection(
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, PartialEq, Eq)]
+struct CliArgs {
+    qkey_value: Option<String>,
+    timeout_ms: u64,
+    hold_ms: u64,
+    local_addr: Option<String>,
+    bearer_token: Option<String>,
+    initial_token: Option<String>,
+    initial_only: bool,
+    initial_count: u64,
+    initial_interval_us: u64,
+    ca_file: Option<String>,
+    migration_local: Option<String>,
+}
+
+fn parse_u64_arg<I>(args: &mut I, flag: &str) -> Result<u64, String>
+where
+    I: Iterator<Item = String>,
+{
+    let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
+    if value.starts_with("--") {
+        return Err(format!("missing value for {flag}"));
+    }
+    value.parse::<u64>().map_err(|_| format!("{flag} must be an unsigned integer"))
+}
+
+fn parse_args_from<I>(arguments: I) -> Result<Option<CliArgs>, String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut qkey_value: Option<String> = None;
     let mut timeout_ms: u64 = 8000;
     let mut hold_ms: u64 = 0;
@@ -326,36 +355,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ca_file: Option<String> = None;
     let mut migration_local: Option<String> = None;
 
-    let mut args = std::env::args().skip(1);
+    let mut args = arguments.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--qkey" => qkey_value = args.next(),
-            "--timeout-ms" => {
-                if let Some(v) = args.next() {
-                    timeout_ms = v.parse::<u64>().unwrap_or(timeout_ms);
-                }
-            }
-            "--hold-ms" => {
-                if let Some(v) = args.next() {
-                    hold_ms = v.parse::<u64>().unwrap_or(hold_ms);
-                }
-            }
+            "--timeout-ms" => timeout_ms = parse_u64_arg(&mut args, "--timeout-ms")?,
+            "--hold-ms" => hold_ms = parse_u64_arg(&mut args, "--hold-ms")?,
             "--local" => local_addr = args.next(),
             "--bearer-token" => bearer_token = args.next(),
             "--initial-token" => initial_token = args.next(),
             "--initial-only" => initial_only = true,
             "--initial-count" => {
-                let value = args.next().ok_or("missing value for --initial-count")?;
-                initial_count =
-                    value.parse::<u64>().map_err(|_| "--initial-count must be an integer")?;
+                initial_count = parse_u64_arg(&mut args, "--initial-count")?;
                 if initial_count == 0 {
                     return Err("--initial-count must be greater than zero".into());
                 }
             }
             "--initial-interval-us" => {
-                let value = args.next().ok_or("missing value for --initial-interval-us")?;
-                initial_interval_us =
-                    value.parse::<u64>().map_err(|_| "--initial-interval-us must be an integer")?;
+                initial_interval_us = parse_u64_arg(&mut args, "--initial-interval-us")?;
             }
             "--ca-file" => ca_file = args.next(),
             "--migration-local" => migration_local = args.next(),
@@ -363,14 +380,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "Usage: qf-e2e-client --qkey QKEY [--timeout-ms MS] [--hold-ms MS] [--local ADDR] [--bearer-token HEX] [--initial-token HEX] [--initial-only] [--initial-count COUNT] [--initial-interval-us US] [--ca-file PATH] [--migration-local ADDR]"
                 );
-                return Ok(());
+                return Ok(None);
             }
-            other => {
-                eprintln!("Unknown arg: {}", other);
-                return Err("invalid args".into());
-            }
+            other => return Err(format!("unknown argument: {other}")),
         }
     }
+
+    Ok(Some(CliArgs {
+        qkey_value,
+        timeout_ms,
+        hold_ms,
+        local_addr,
+        bearer_token,
+        initial_token,
+        initial_only,
+        initial_count,
+        initial_interval_us,
+        ca_file,
+        migration_local,
+    }))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(CliArgs {
+        qkey_value,
+        timeout_ms,
+        hold_ms,
+        local_addr,
+        bearer_token,
+        initial_token,
+        initial_only,
+        initial_count,
+        initial_interval_us,
+        ca_file,
+        migration_local,
+    }) = parse_args_from(std::env::args().skip(1))
+        .map_err(|error| format!("argument parse failed: {error}"))?
+    else {
+        return Ok(());
+    };
 
     let qkey_value = qkey_value.ok_or("missing --qkey")?;
     let qkey_cfg = qkey::parse(&qkey_value).map_err(|e| format!("QKey parse failed: {e}"))?;
@@ -577,8 +625,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_migration_finalization, ratio_ppm, MigrationFinalization};
+    use super::{
+        classify_migration_finalization, parse_args_from, ratio_ppm, MigrationFinalization,
+    };
     use quicfuscate::error::ConnectionError;
+
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn probe_duration_flags_reject_malformed_values() {
+        for flag in ["--timeout-ms", "--hold-ms"] {
+            let result = parse_args_from(arguments(&[flag, "not-a-number"]));
+            assert_eq!(result, Err(format!("{flag} must be an unsigned integer")));
+        }
+    }
+
+    #[test]
+    fn probe_duration_flags_reject_missing_values() {
+        assert_eq!(
+            parse_args_from(arguments(&["--timeout-ms"])),
+            Err("missing value for --timeout-ms".to_owned())
+        );
+        assert_eq!(
+            parse_args_from(arguments(&["--hold-ms", "--timeout-ms", "1"])),
+            Err("missing value for --hold-ms".to_owned())
+        );
+    }
+
+    #[test]
+    fn probe_duration_flags_accept_zero_and_preserve_last_value() {
+        let parsed =
+            parse_args_from(arguments(&["--timeout-ms", "0", "--hold-ms", "0"])).unwrap().unwrap();
+        assert_eq!(parsed.timeout_ms, 0);
+        assert_eq!(parsed.hold_ms, 0);
+
+        let parsed = parse_args_from(arguments(&[
+            "--timeout-ms",
+            "1",
+            "--timeout-ms",
+            "2",
+            "--hold-ms",
+            "3",
+            "--hold-ms",
+            "4",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.timeout_ms, 2);
+        assert_eq!(parsed.hold_ms, 4);
+    }
 
     #[test]
     fn migration_finalization_accepts_new_fin() {
