@@ -239,10 +239,10 @@ impl TransportObserver for FecTransportObserver {
 }
 
 /// Thin public wrapper exposing the GF(2^8) streaming decoder for transport integration.
-#[cfg(any(test, feature = "rust-tests"))]
+#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
 pub struct FecDecoder8(Decoder8);
 
-#[cfg(any(test, feature = "rust-tests"))]
+#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
 impl FecDecoder8 {
     /// Create a new GF(2^8) decoder with the given source block size.
     pub fn new(k: usize, pool: Arc<MemoryPool>) -> Self {

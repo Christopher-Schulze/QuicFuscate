@@ -22,7 +22,7 @@ struct Decoder8 {
     mem_pool: Arc<MemoryPool>,
     decoder_policy: String,
     known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
-    equations: Vec<Equation8>,
+    equations: VecDeque<Equation8>,
     emit_q: VecDeque<FecPacket>,
     /// Interleave depth (1 = non-interleaved, >1 = interleaved mode).
     /// Source IDs in a block's window are spaced `depth` apart.
@@ -52,7 +52,7 @@ impl Decoder8 {
             mem_pool: pool,
             decoder_policy: policy.decoder_policy.clone(),
             known: HashMap::new(),
-            equations: Vec::new(),
+            equations: VecDeque::new(),
             emit_q: VecDeque::new(),
             depth,
         }
@@ -107,7 +107,7 @@ impl Decoder8 {
                     self.try_peel_all();
                     return;
                 }
-                self.equations.push(equation);
+                self.equations.push_back(equation);
                 let _ = self.try_eliminate();
             }
         }
@@ -190,18 +190,17 @@ impl Decoder8 {
     }
 
     fn try_peel_all(&mut self) {
-        let mut i = 0;
+        let mut pass = 0;
         'outer: loop {
             let mut progress = false;
-            let mut j = 0;
-            while j < self.equations.len() {
-                // Borrow mut eq by temporarily taking ownership
-                let mut e = self.equations.remove(j);
+            let equations_in_pass = self.equations.len();
+            for _ in 0..equations_in_pass {
+                let Some(mut e) = self.equations.pop_front() else {
+                    break;
+                };
                 let solved = self.try_solve_equation(&mut e);
                 if !solved {
-                    // Keep reduced equation
-                    self.equations.insert(j, e);
-                    j += 1;
+                    self.equations.push_back(e);
                 } else {
                     progress = true;
                 }
@@ -211,8 +210,8 @@ impl Decoder8 {
                 let _ = self.try_eliminate();
                 break 'outer;
             }
-            i += 1;
-            if i > 4 * self.k {
+            pass += 1;
+            if pass > 4 * self.k {
                 break 'outer;
             }
         }
@@ -715,7 +714,7 @@ struct Decoder4 {
     k: usize,
     mem_pool: Arc<MemoryPool>,
     known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
-    equations: Vec<Equation4>,
+    equations: VecDeque<Equation4>,
     emit_q: VecDeque<FecPacket>,
     /// Interleave depth (1 = non-interleaved).
     depth: usize,
@@ -728,7 +727,7 @@ impl Decoder4 {
             k,
             mem_pool: pool,
             known: HashMap::new(),
-            equations: Vec::new(),
+            equations: VecDeque::new(),
             emit_q: VecDeque::new(),
             depth: 1,
         }
@@ -739,7 +738,7 @@ impl Decoder4 {
             k,
             mem_pool: pool,
             known: HashMap::new(),
-            equations: Vec::new(),
+            equations: VecDeque::new(),
             emit_q: VecDeque::new(),
             depth,
         }
@@ -779,7 +778,7 @@ impl Decoder4 {
                 data: data_buf,
                 len: n,
             };
-            self.equations.push(eq);
+            self.equations.push_back(eq);
             self.try_peel_all();
         }
     }
@@ -788,14 +787,15 @@ impl Decoder4 {
         let mut progress = true;
         while progress {
             progress = false;
-            let mut i = 0;
-            while i < self.equations.len() {
-                let mut equation = self.equations.remove(i);
+            let equations_in_pass = self.equations.len();
+            for _ in 0..equations_in_pass {
+                let Some(mut equation) = self.equations.pop_front() else {
+                    break;
+                };
                 if self.try_solve_equation(&mut equation) {
                     progress = true;
                 } else {
-                    self.equations.insert(i, equation);
-                    i += 1;
+                    self.equations.push_back(equation);
                 }
             }
         }
@@ -900,7 +900,7 @@ struct Decoder16 {
     k: usize,
     mem_pool: Arc<MemoryPool>,
     known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
-    equations: Vec<Equation16>,
+    equations: VecDeque<Equation16>,
     emit_q: VecDeque<FecPacket>,
     /// Interleave depth (1 = non-interleaved).
     depth: usize,
@@ -913,7 +913,7 @@ impl Decoder16 {
             k,
             mem_pool: pool,
             known: HashMap::new(),
-            equations: Vec::new(),
+            equations: VecDeque::new(),
             emit_q: VecDeque::new(),
             depth: 1,
         }
@@ -924,7 +924,7 @@ impl Decoder16 {
             k,
             mem_pool: pool,
             known: HashMap::new(),
-            equations: Vec::new(),
+            equations: VecDeque::new(),
             emit_q: VecDeque::new(),
             depth,
         }
@@ -973,7 +973,7 @@ impl Decoder16 {
                 self.try_peel_all();
                 return;
             }
-            self.equations.push(equation);
+            self.equations.push_back(equation);
             let _ = self.try_eliminate();
         }
     }
@@ -1084,14 +1084,15 @@ impl Decoder16 {
         let mut progress = true;
         while progress {
             progress = false;
-            let mut i = 0;
-            while i < self.equations.len() {
-                let mut eq = self.equations.remove(i);
+            let equations_in_pass = self.equations.len();
+            for _ in 0..equations_in_pass {
+                let Some(mut eq) = self.equations.pop_front() else {
+                    break;
+                };
                 if self.try_solve_equation(&mut eq) {
                     progress = true;
                 } else {
-                    self.equations.insert(i, eq);
-                    i += 1;
+                    self.equations.push_back(eq);
                 }
             }
             if !progress {

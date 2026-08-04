@@ -13,7 +13,9 @@
 
 use aligned_box::AlignedBox;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use quicfuscate::fec::{wire, AdaptiveFec, FecConfig, FecControlPolicy, FecMode, FecPacket};
+use quicfuscate::fec::{
+    wire, AdaptiveFec, FecConfig, FecControlPolicy, FecDecoder8, FecMode, FecPacket,
+};
 use quicfuscate::optimize::global_pool;
 use std::sync::Arc;
 
@@ -342,6 +344,79 @@ fn bench_fec_decode_compat_alloc(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 2c. Direct GF(2^8) peeling representation: k=256
+//
+// Repairs intentionally form 128 disjoint two-source equations. Feeding the
+// first 128 sources then forces repeated full peeling passes while keeping the
+// system underdetermined, isolating equation-store traversal from elimination.
+// ---------------------------------------------------------------------------
+
+const PEEL_BENCH_K: usize = 256;
+const PEEL_BENCH_EQUATIONS: usize = PEEL_BENCH_K / 2;
+const PEEL_BENCH_SYMBOL_LEN: usize = 64;
+
+fn make_peeling_benchmark_batch(
+    pool: &Arc<quicfuscate::optimize::MemoryPool>,
+) -> (FecDecoder8, Vec<FecPacket>) {
+    let decoder = FecDecoder8::new(PEEL_BENCH_K, Arc::clone(pool));
+    let mut packets = Vec::with_capacity(PEEL_BENCH_EQUATIONS + PEEL_BENCH_EQUATIONS);
+
+    for equation_index in 0..PEEL_BENCH_EQUATIONS {
+        let mut data = pool.alloc();
+        data[..PEEL_BENCH_SYMBOL_LEN].fill(equation_index as u8);
+        let mut coefficients = pool.alloc();
+        coefficients[..PEEL_BENCH_K].fill(0);
+        coefficients[equation_index] = 1;
+        coefficients[equation_index + PEEL_BENCH_EQUATIONS] = 1;
+        packets.push(FecPacket::new(
+            (PEEL_BENCH_K - 1) as u64,
+            Some(data),
+            PEEL_BENCH_SYMBOL_LEN,
+            false,
+            Some(coefficients),
+            PEEL_BENCH_K,
+            Arc::clone(pool),
+        ));
+    }
+
+    for source_id in 0..PEEL_BENCH_EQUATIONS {
+        let mut data = pool.alloc();
+        data[..PEEL_BENCH_SYMBOL_LEN].fill(source_id as u8);
+        packets.push(FecPacket::new(
+            source_id as u64,
+            Some(data),
+            PEEL_BENCH_SYMBOL_LEN,
+            true,
+            None,
+            0,
+            Arc::clone(pool),
+        ));
+    }
+
+    (decoder, packets)
+}
+
+fn bench_fec_peeling_k256(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fec_peeling");
+    group.throughput(Throughput::Elements((PEEL_BENCH_EQUATIONS * 2) as u64));
+    group.bench_function("gf8_k256_linear_equation_traversal", |b| {
+        let pool = global_pool();
+        let _ = AdaptiveFec::new(FecConfig::product_default());
+        b.iter_batched(
+            || make_peeling_benchmark_batch(&pool),
+            |(mut decoder, packets)| {
+                for packet in packets {
+                    decoder.take_packet(packet);
+                }
+                black_box(decoder.poll_recovered().len());
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // 3. Mode transition overhead: measure block-boundary switch cost
 // ---------------------------------------------------------------------------
 
@@ -646,6 +721,7 @@ criterion_group!(
     bench_fec_off_policy_fast_path,
     bench_fec_decode_pipeline,
     bench_fec_decode_compat_alloc,
+    bench_fec_peeling_k256,
     bench_fec_mode_transition,
     bench_fec_streaming_repair,
     bench_fec_lazy_fast_path,
