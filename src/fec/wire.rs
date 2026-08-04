@@ -212,6 +212,10 @@ impl WirePacketMeta {
                 return Err(WireError::SourceOutsideWindow);
             }
         } else {
+            // Fountain keeps `sequence` as the sender's global deterministic symbol ID so
+            // both endpoints regenerate the same rateless source set. `repair_index` is the
+            // bounded per-window ordinal and is bound to exactly one sequence by ReceiveWindow;
+            // this is the admission boundary for untrusted Fountain repairs.
             let repair_ordinal = (self.repair_index as u32)
                 .saturating_mul(self.profile.interleave_depth as u32)
                 .saturating_add(self.block_index as u32);
@@ -441,6 +445,8 @@ struct ReceiveWindow {
     seen_repairs: HashSet<RepairKey>,
     seen_repair_order: VecDeque<RepairKey>,
     seen_repairs_limit: usize,
+    fountain_repair_ids: Vec<Option<u64>>,
+    fountain_symbol_ids: HashSet<u64>,
     mem_pool: Arc<MemoryPool>,
 }
 
@@ -453,6 +459,8 @@ impl ReceiveWindow {
         fountain_seed: u64,
     ) -> Self {
         let seen_repairs_limit = (profile.total_count - profile.source_count) as usize;
+        let fountain_repair_limit =
+            if profile.codec == WireCodec::Fountain { seen_repairs_limit } else { 0 };
         Self {
             profile,
             window,
@@ -466,8 +474,30 @@ impl ReceiveWindow {
             seen_repairs: HashSet::with_capacity(seen_repairs_limit),
             seen_repair_order: VecDeque::with_capacity(seen_repairs_limit),
             seen_repairs_limit,
+            fountain_repair_ids: vec![None; fountain_repair_limit],
+            fountain_symbol_ids: HashSet::with_capacity(fountain_repair_limit),
             mem_pool,
         }
+    }
+
+    fn fountain_repair_seen(&self, meta: WirePacketMeta) -> bool {
+        let ordinal = meta.repair_index as usize;
+        self.fountain_repair_ids.get(ordinal).and_then(|symbol_id| *symbol_id).is_some()
+            || self.fountain_symbol_ids.contains(&meta.sequence)
+    }
+
+    fn remember_fountain_repair(&mut self, meta: WirePacketMeta) -> bool {
+        if self.fountain_repair_seen(meta) {
+            crate::telemetry::FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS.inc();
+            return false;
+        }
+        let ordinal = meta.repair_index as usize;
+        let Some(slot) = self.fountain_repair_ids.get_mut(ordinal) else {
+            return false;
+        };
+        *slot = Some(meta.sequence);
+        self.fountain_symbol_ids.insert(meta.sequence);
+        true
     }
 
     fn remember_repair(&mut self, key: RepairKey) -> bool {
@@ -641,13 +671,27 @@ impl ReceiveWindow {
         if !systematic && self.seen_repairs.contains(&repair_key) {
             return Ok(report);
         }
+        if !systematic
+            && meta.profile.codec == WireCodec::Fountain
+            && self.fountain_repair_seen(meta)
+        {
+            crate::telemetry::FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS.inc();
+            return Ok(report);
+        }
         let packet = if systematic {
             self.source_packet(meta, payload)?
         } else {
             self.repair_packet(meta, payload)?
         };
         if !systematic {
-            let _ = self.remember_repair(repair_key);
+            let admitted = if meta.profile.codec == WireCodec::Fountain {
+                self.remember_fountain_repair(meta)
+            } else {
+                self.remember_repair(repair_key)
+            };
+            if !admitted {
+                return Ok(report);
+            }
         }
 
         self.decoder.take_packet(packet);
@@ -812,6 +856,40 @@ mod tests {
             assert!(window.seen_repair_order.len() <= limit);
         }
         assert_eq!(window.seen_repairs.len(), limit);
+    }
+
+    #[test]
+    fn fountain_admission_binds_global_ids_to_bounded_ordinals() {
+        let pool = crate::optimize::global_pool();
+        let policy = FecRuntimePolicy::detect();
+        let profile = WireProfile {
+            epoch: 7,
+            codec: WireCodec::Fountain,
+            source_count: 4,
+            total_count: 36,
+            interleave_depth: 1,
+        };
+        let limit = (profile.total_count - profile.source_count) as usize;
+        let mut window = ReceiveWindow::new(profile, 0, pool, &policy, DEFAULT_FOUNTAIN_SEED);
+
+        for symbol_id in 0..100_000u64 {
+            let meta = WirePacketMeta {
+                profile,
+                window: 0,
+                sequence: symbol_id,
+                repair_index: (symbol_id as usize % limit) as u16,
+                block_index: 0,
+                systematic: false,
+            };
+            if symbol_id < limit as u64 {
+                assert!(window.remember_fountain_repair(meta));
+            } else {
+                assert!(!window.remember_fountain_repair(meta));
+            }
+        }
+
+        assert_eq!(window.fountain_symbol_ids.len(), limit);
+        assert_eq!(window.fountain_repair_ids.iter().flatten().count(), limit);
     }
 
     #[test]

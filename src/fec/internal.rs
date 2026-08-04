@@ -296,6 +296,7 @@ impl DecoderVariant {
         policy: &super::FecRuntimePolicy,
         depth: usize,
         seed: u64,
+        fountain_repair_limit: usize,
     ) -> Self {
         match codec {
             wire::WireCodec::Gf4 => DecoderVariant::GF4(Decoder4::new_with_depth(k, pool, depth)),
@@ -305,12 +306,15 @@ impl DecoderVariant {
             wire::WireCodec::Gf16 => {
                 DecoderVariant::GF16(Decoder16::new_with_depth(k, pool, depth))
             }
-            wire::WireCodec::Fountain => DecoderVariant::Fountain(FountainDecoder::new_with_seed(
-                k,
-                policy.fountain_symbol_size,
-                pool,
-                seed,
-            )),
+            wire::WireCodec::Fountain => {
+                DecoderVariant::Fountain(FountainDecoder::new_with_repair_limit(
+                    k,
+                    policy.fountain_symbol_size,
+                    pool,
+                    seed,
+                    fountain_repair_limit,
+                ))
+            }
         }
     }
 
@@ -546,9 +550,18 @@ impl LazyDecoder {
         policy: &FecRuntimePolicy,
         depth: usize,
         seed: u64,
+        fountain_repair_limit: usize,
     ) -> Self {
         Self {
-            inner: DecoderVariant::new_for_wire(codec, k, pool, policy, depth, seed),
+            inner: DecoderVariant::new_for_wire(
+                codec,
+                k,
+                pool,
+                policy,
+                depth,
+                seed,
+                fountain_repair_limit,
+            ),
             pending_sources: VecDeque::with_capacity(k.max(1)),
             pending_repairs: VecDeque::with_capacity(32),
             seen_seqs: HashSet::new(),
@@ -949,6 +962,7 @@ impl InterleavedDecoder {
     ) -> Self {
         let depth = profile.interleave_depth as usize;
         let block_k = profile.block_source_count() as usize;
+        let fountain_repair_limit = (profile.total_count - profile.source_count) as usize;
         let blocks = (0..depth)
             .map(|_| {
                 LazyDecoder::new_for_wire(
@@ -958,6 +972,7 @@ impl InterleavedDecoder {
                     policy,
                     depth,
                     seed,
+                    fountain_repair_limit,
                 )
             })
             .collect();
@@ -1706,6 +1721,7 @@ mod tests {
             &policy,
             profile.interleave_depth as usize,
             DEFAULT_FOUNTAIN_SEED,
+            0,
         );
 
         {

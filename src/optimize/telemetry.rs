@@ -378,6 +378,21 @@ pub fn export_telemetry_text() -> String {
             "quicfuscate_fec_decoder_dedup_evictions_total {}",
             FEC_DECODER_DEDUP_EVICTIONS.get()
         );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_fountain_decoder_evictions_total {}",
+            FEC_FOUNTAIN_DECODER_EVICTIONS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_fountain_decoder_admission_rejections_total {}",
+            FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_fountain_decoder_propagation_work_total {}",
+            FEC_FOUNTAIN_DECODER_PROPAGATION_WORK.get()
+        );
     } // end fec
 
     // MASQUE
@@ -1257,6 +1272,12 @@ pub static FEC_DECODER_SOLVE_SUCCESSES: Counter = Counter::new();
 pub static FEC_DECODER_SOLVE_TIME_NS: Counter = Counter::new();
 /// Receive-window repair dedup entries evicted at the bounded FIFO limit.
 pub static FEC_DECODER_DEDUP_EVICTIONS: Counter = Counter::new();
+/// Fountain decoder equations evicted at the bounded FIFO limit.
+pub static FEC_FOUNTAIN_DECODER_EVICTIONS: Counter = Counter::new();
+/// Fountain repair symbols rejected by decoder state or admission limits.
+pub static FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS: Counter = Counter::new();
+/// Fountain decoder dependency entries examined during propagation.
+pub static FEC_FOUNTAIN_DECODER_PROPAGATION_WORK: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
     let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1998,6 +2019,9 @@ mod tests {
             "quicfuscate_fec_decoder_solve_success_ratio_ppm ",
             "quicfuscate_fec_decoder_solve_time_ns_total ",
             "quicfuscate_fec_decoder_dedup_evictions_total ",
+            "quicfuscate_fec_fountain_decoder_evictions_total ",
+            "quicfuscate_fec_fountain_decoder_admission_rejections_total ",
+            "quicfuscate_fec_fountain_decoder_propagation_work_total ",
         ] {
             assert!(text.contains(metric), "missing FEC decoder telemetry metric: {metric}");
         }

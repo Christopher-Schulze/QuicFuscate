@@ -1,8 +1,9 @@
 use super::{MemoryPool, DEFAULT_FOUNTAIN_SEED};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 const SPLITMIX64_GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
+const MAX_FOUNTAIN_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 #[inline]
 fn splitmix64_next(state: &mut u64) -> u64 {
@@ -163,12 +164,20 @@ impl LTEncoder {
 /// **Belief Propagation Decoder** for LT codes
 pub struct LTDecoder {
     k: usize,
-    #[cfg(test)]
     symbol_size: usize,
     received_symbols: HashMap<u64, Vec<u8>>,
     decoded_symbols: Vec<Option<Vec<u8>>>,
     symbol_degrees: HashMap<u64, HashSet<usize>>,
-    degree_one_queue: Vec<u64>,
+    degree_one_queue: VecDeque<u64>,
+    queued_symbol_ids: HashSet<u64>,
+    symbol_order: VecDeque<u64>,
+    max_symbols: usize,
+    max_payload_bytes: usize,
+    max_queue_len: usize,
+    max_propagation_work: usize,
+    retained_payload_bytes: usize,
+    propagation_work: usize,
+    propagation_budget_exhausted: bool,
     degree_dist: Vec<f64>,
     rng_seed: u64,
     pub(crate) mem_pool: Arc<MemoryPool>,
@@ -193,20 +202,120 @@ impl LTDecoder {
         mem_pool: Arc<MemoryPool>,
         rng_seed: u64,
     ) -> Self {
-        #[cfg(not(test))]
-        let _ = symbol_size;
+        let max_symbols = k.saturating_mul(5).saturating_add(4);
+        Self::new_with_repair_limit(k, symbol_size, mem_pool, rng_seed, max_symbols)
+    }
+
+    /// Create a decoder with a per-window repair admission limit.
+    pub(crate) fn new_with_repair_limit(
+        k: usize,
+        symbol_size: usize,
+        mem_pool: Arc<MemoryPool>,
+        rng_seed: u64,
+        requested_max_symbols: usize,
+    ) -> Self {
+        let max_symbols = requested_max_symbols.max(1).min(super::wire::MAX_TOTAL_COUNT as usize);
+        let max_payload_bytes =
+            max_symbols.saturating_mul(symbol_size).clamp(1, MAX_FOUNTAIN_PAYLOAD_BYTES);
+        let max_propagation_work = max_symbols.saturating_mul(k.max(1));
         Self {
             k,
-            #[cfg(test)]
             symbol_size,
             received_symbols: HashMap::new(),
             decoded_symbols: vec![None; k],
             symbol_degrees: HashMap::new(),
-            degree_one_queue: Vec::new(),
+            degree_one_queue: VecDeque::new(),
+            queued_symbol_ids: HashSet::new(),
+            symbol_order: VecDeque::new(),
+            max_symbols,
+            max_payload_bytes,
+            max_queue_len: max_symbols,
+            max_propagation_work,
+            retained_payload_bytes: 0,
+            propagation_work: 0,
+            propagation_budget_exhausted: false,
             degree_dist: LTEncoder::robust_soliton_distribution(k),
             rng_seed,
             mem_pool,
         }
+    }
+
+    fn reject_symbol(&self, reason: &str) -> bool {
+        crate::telemetry::FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS.inc();
+        log::debug!("Fountain decoder rejected symbol: {reason}");
+        false
+    }
+
+    fn remove_queued_symbol(&mut self, symbol_id: u64) {
+        if self.queued_symbol_ids.remove(&symbol_id) {
+            self.degree_one_queue.retain(|queued_id| *queued_id != symbol_id);
+        }
+    }
+
+    fn remove_symbol_state(&mut self, symbol_id: u64) {
+        if let Some(data) = self.received_symbols.remove(&symbol_id) {
+            self.retained_payload_bytes = self.retained_payload_bytes.saturating_sub(data.len());
+        }
+        self.symbol_degrees.remove(&symbol_id);
+        self.symbol_order.retain(|queued_id| *queued_id != symbol_id);
+        self.remove_queued_symbol(symbol_id);
+    }
+
+    fn evict_oldest_symbol(&mut self) -> bool {
+        while let Some(symbol_id) = self.symbol_order.pop_front() {
+            if self.received_symbols.contains_key(&symbol_id) {
+                self.remove_symbol_state(symbol_id);
+                crate::telemetry::FEC_FOUNTAIN_DECODER_EVICTIONS.inc();
+                log::debug!(
+                    "Fountain decoder evicted symbol id={symbol_id} retained_symbols={} retained_payload_bytes={}",
+                    self.received_symbols.len(),
+                    self.retained_payload_bytes
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    fn make_room_for_symbol(&mut self, data_len: usize) -> bool {
+        if data_len > self.symbol_size || data_len > self.max_payload_bytes {
+            return self.reject_symbol("payload exceeds configured symbol or byte limit");
+        }
+        while self.received_symbols.len() >= self.max_symbols
+            || self.retained_payload_bytes.saturating_add(data_len) > self.max_payload_bytes
+        {
+            if !self.evict_oldest_symbol() {
+                return self.reject_symbol("decoder state limit cannot be satisfied");
+            }
+        }
+        true
+    }
+
+    fn insert_symbol(&mut self, symbol_id: u64, data: Vec<u8>) -> bool {
+        if self.received_symbols.contains_key(&symbol_id) {
+            return self.reject_symbol("duplicate symbol id");
+        }
+        if !self.make_room_for_symbol(data.len()) {
+            return false;
+        }
+        self.retained_payload_bytes = self.retained_payload_bytes.saturating_add(data.len());
+        self.symbol_order.push_back(symbol_id);
+        self.received_symbols.insert(symbol_id, data);
+        true
+    }
+
+    fn enqueue_degree_one(&mut self, symbol_id: u64) -> bool {
+        if !self.queued_symbol_ids.insert(symbol_id) {
+            return true;
+        }
+        if self.degree_one_queue.len() >= self.max_queue_len {
+            self.queued_symbol_ids.remove(&symbol_id);
+            crate::telemetry::FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS.inc();
+            log::debug!("Fountain decoder dropped degree-one queue entry id={symbol_id}");
+            return false;
+        }
+        self.degree_one_queue.push_back(symbol_id);
+        true
     }
 
     pub fn add_source_symbol(&mut self, source_index: usize, data: Vec<u8>) -> bool {
@@ -217,7 +326,7 @@ impl LTDecoder {
             return false;
         }
         self.decoded_symbols[source_index] = Some(data.clone());
-        self.propagate_decoded_symbol(source_index, &data);
+        let _ = self.propagate_decoded_symbol(source_index, &data);
         true
     }
 
@@ -234,7 +343,7 @@ impl LTDecoder {
     /// Add received symbol for decoding (no degree info available)
     #[cfg(test)]
     pub fn add_received_symbol(&mut self, symbol_id: u64, data: Vec<u8>) {
-        self.received_symbols.insert(symbol_id, data);
+        let _ = self.insert_symbol(symbol_id, data);
         // Without source index set we cannot peel immediately. We rely on
         // additional encoded symbols with indices to trigger peeling.
     }
@@ -246,11 +355,19 @@ impl LTDecoder {
         data: Vec<u8>,
         source_indices: HashSet<usize>,
     ) -> bool {
-        self.received_symbols.insert(symbol_id, data);
+        if source_indices.is_empty()
+            || source_indices.len() > self.k
+            || source_indices.iter().any(|&index| index >= self.k)
+        {
+            return self.reject_symbol("invalid source-index set");
+        }
+        if !self.insert_symbol(symbol_id, data) {
+            return false;
+        }
         self.symbol_degrees.insert(symbol_id, source_indices.clone());
 
         if source_indices.len() == 1 {
-            self.degree_one_queue.push(symbol_id);
+            let _ = self.enqueue_degree_one(symbol_id);
         }
 
         self.belief_propagation_step()
@@ -259,7 +376,8 @@ impl LTDecoder {
     /// Execute one round of belief propagation peeling, returning true if progress was made.
     pub fn belief_propagation_step(&mut self) -> bool {
         let mut progressed = false;
-        while let Some(symbol_id) = self.degree_one_queue.pop() {
+        while let Some(symbol_id) = self.degree_one_queue.pop_back() {
+            self.queued_symbol_ids.remove(&symbol_id);
             if let Some(indices) = self.symbol_degrees.get(&symbol_id).cloned() {
                 if indices.len() == 1 {
                     let Some(&source_idx) = indices.iter().next() else {
@@ -270,8 +388,12 @@ impl LTDecoder {
                             let decoded = encoded_data.clone();
                             self.decoded_symbols[source_idx] = Some(decoded.clone());
                             // Update all other encoded symbols
-                            self.propagate_decoded_symbol(source_idx, &decoded);
+                            let propagation_complete =
+                                self.propagate_decoded_symbol(source_idx, &decoded);
                             progressed = true;
+                            if !propagation_complete {
+                                break;
+                            }
                         }
                     }
                 }
@@ -307,10 +429,18 @@ impl LTDecoder {
     // Removed is_complete; use decoding_progress() or get_decoded_symbols()
 
     /// XOR a decoded symbol out of all dependent encoded symbols and enqueue new degree-1 entries.
-    pub fn propagate_decoded_symbol(&mut self, decoded_idx: usize, decoded_data: &[u8]) {
+    ///
+    /// The returned flag is false only when the per-window propagation budget was exhausted.
+    pub fn propagate_decoded_symbol(&mut self, decoded_idx: usize, decoded_data: &[u8]) -> bool {
         let mut to_update = Vec::new();
 
         for (&symbol_id, indices) in &self.symbol_degrees {
+            if self.propagation_work >= self.max_propagation_work {
+                self.propagation_budget_exhausted = true;
+                break;
+            }
+            self.propagation_work = self.propagation_work.saturating_add(1);
+            crate::telemetry::FEC_FOUNTAIN_DECODER_PROPAGATION_WORK.inc();
             if indices.contains(&decoded_idx) {
                 to_update.push(symbol_id);
             }
@@ -323,14 +453,21 @@ impl LTDecoder {
                 super::fast_xor_inplace(&decoded_data[..sl], &mut encoded_data[..sl]);
             }
 
-            if let Some(indices) = self.symbol_degrees.get_mut(&symbol_id) {
-                indices.remove(&decoded_idx);
+            let (became_empty, became_degree_one) =
+                if let Some(indices) = self.symbol_degrees.get_mut(&symbol_id) {
+                    indices.remove(&decoded_idx);
+                    (indices.is_empty(), indices.len() == 1)
+                } else {
+                    (false, false)
+                };
 
-                if indices.len() == 1 {
-                    self.degree_one_queue.push(symbol_id);
-                }
+            if became_empty {
+                self.remove_symbol_state(symbol_id);
+            } else if became_degree_one {
+                let _ = self.enqueue_degree_one(symbol_id);
             }
         }
+        !self.propagation_budget_exhausted
     }
 
     /// Return all decoded source symbols if decoding is complete, None otherwise.
@@ -350,6 +487,9 @@ impl LTDecoder {
 
     /// Return fraction of source symbols decoded (0.0 to 1.0).
     pub fn decoding_progress(&self) -> f32 {
+        if self.k == 0 {
+            return 1.0;
+        }
         let decoded_count = self.decoded_symbols.iter().filter(|s| s.is_some()).count();
         decoded_count as f32 / self.k as f32
     }
@@ -706,6 +846,39 @@ mod tests {
             0.0,
             "received symbol without indices cannot trigger decode"
         );
+    }
+
+    #[test]
+    fn decoder_bounds_unique_repair_symbol_flood() {
+        let pool = make_pool();
+        let mut dec = LTDecoder::new(4, 8, pool);
+        let indices = HashSet::from([0usize, 1usize]);
+
+        for symbol_id in 0..100_000u64 {
+            let _ = dec.add_encoded_symbol(symbol_id, vec![symbol_id as u8; 8], indices.clone());
+        }
+
+        assert!(dec.received_symbols.len() <= dec.max_symbols);
+        assert!(dec.symbol_degrees.len() <= dec.max_symbols);
+        assert!(dec.symbol_order.len() <= dec.max_symbols);
+        assert!(dec.degree_one_queue.len() <= dec.max_queue_len);
+        assert!(dec.retained_payload_bytes <= dec.max_payload_bytes);
+        assert!(dec.propagation_work <= dec.max_propagation_work);
+        assert!(!dec.received_symbols.contains_key(&0));
+        assert!(dec.received_symbols.contains_key(&99_999));
+    }
+
+    #[test]
+    fn decoder_rejects_invalid_indices_and_oversized_payloads() {
+        let pool = make_pool();
+        let mut dec = LTDecoder::new(2, 8, pool);
+
+        assert!(!dec.add_encoded_symbol(1, vec![0; 8], HashSet::new()));
+        assert!(!dec.add_encoded_symbol(2, vec![0; 8], HashSet::from([2usize])));
+        assert!(!dec.add_encoded_symbol(3, vec![0; 9], HashSet::from([0usize])));
+        assert!(dec.received_symbols.is_empty());
+        assert!(dec.symbol_degrees.is_empty());
+        assert_eq!(dec.retained_payload_bytes, 0);
     }
 
     // ---------------------------------------------------------------
