@@ -40,7 +40,7 @@ The design favors consolidation into well-organized module directories (`src/fec
 
 ## Getting Started
 Prerequisites:
-- Rust stable (selected by `rust-toolchain.toml`)
+- Pinned Rust `1.97.1` (selected by `rust-toolchain.toml`; no MSRV is promised)
 - Git, Bash
 - bun (for frontend apps under `apps/` and shared packages under `packages/`)
 - python3 (required by some scripts, for example `scripts/tests/suites/test-e2e-admin-web.sh`)

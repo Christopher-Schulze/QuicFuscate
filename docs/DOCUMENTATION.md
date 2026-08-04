@@ -157,7 +157,7 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - Last fully verified release checkpoint: `bf929bfddd1ca129c21d480f2ece31fb03a37c42` (`v0.4.4` tag).
 - GitHub `CI` run `30611849921`, `Clippy Matrix` run `30611849920`, and Release Build run `30612996058` are green on `bf929bfddd1ca129c21d480f2ece31fb03a37c42`.
 - `cargo audit` clean: 0 vulnerabilities, 0 warnings (crossbeam-epoch RUSTSEC-2026-0204 patched: 0.9.18 → 0.9.20).
-- The repository owns its release and CI Rust toolchain through `rust-toolchain.toml`, pinned to `1.97.1`; nightly is used only by the explicit fuzz lane.
+- The repository owns its release and CI Rust toolchain through `rust-toolchain.toml`, pinned to `1.97.1`; nightly is used only by the explicit fuzz lane. This is a pinned stable baseline, not an MSRV promise; no older Rust compatibility is currently supported or claimed.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs locked metadata, check, Clippy, and test gates in `apps/tauri/src-tauri` on macOS.
 - The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
 - **TODO-412 DONE**: Real-world QUIC connection over the internet verified: Mac (ARM64) → Broderick (Oracle Cloud, ARM64, 92.5.226.155:4433). TLS handshake successful, RTT 0ms, Loss 0.00%, FEC NEON SIMD active, stealth uTLS+TLS Cover active. Oracle Cloud Security List is now open for UDP 4433. Server RSS 3.1 MB at idle.
@@ -1704,6 +1704,10 @@ Current Rust compilation boundaries are spread across the following workflow fam
 
 Cache keys include one or more Cargo.lock files and, in several jobs, the runner OS. They do not constitute a single toolchain-aware sccache key or prove cross-platform hit correctness. Cargo's own fingerprints and the locked build commands remain the current correctness boundary. The repository therefore makes no current claim for compiler-cache hit rate, false-hit absence, cache failure propagation, or the historical 30% improvement claim from TODO-155. That historical claim is retired by TODO-761; the archived task body is retained and labeled historical.
 
+### Rust Toolchain Support Policy
+
+QuicFuscate follows a pinned-stable-only support policy. `rust-toolchain.toml` and `config/tool-versions.env` select Rust `1.97.1` for the root crate, CI, release checks, and the Tauri host. The root and Tauri manifests intentionally omit `rust-version`, and no MSRV CI lane exists; consumers must use the pinned baseline or a newer compatible stable compiler at their own risk. The fuzz manifest uses the separate nightly lane and is not MSRV evidence. The source uses modern standard-library APIs including `OnceLock`, `LazyLock`, `std::io::Error::other`, `Option::{is_some_and,is_none_or}`, and integer `is_multiple_of`, so an older compiler floor must not be inferred from the 2021 edition or dependency metadata. The unresolved fuzz manifest path remains owned by TODO-758.
+
 Build/runtime behavior for TLS fingerprint inputs is documented in the TLS boundary section; see "TLS Boundary: rustls protocol with optional cover overlay -> Fingerprint Source Model".
 
 ### Building Binaries (macOS, Linux, Windows)
@@ -1764,7 +1768,7 @@ cargo test
 ```
 
 #### Step-by-Step Guide
-1. Install prerequisites: Rust stable with cargo.
+1. Install prerequisites: the pinned Rust `1.97.1` toolchain with Cargo.
 2. Run the test script: `./scripts/tests/suites/test-crypto.sh`.
 3. Manual invocation (in repo root):
    - `cargo test`
@@ -2201,7 +2205,7 @@ Step-by-step guide for deploying QuicFuscate on a Linux server.
 #### System Requirements
 - Linux server (Ubuntu 22.04+ / Debian 12+ / RHEL 9+ recommended)
 - Minimum 2 CPU cores, 2 GB RAM (4+ cores recommended for production)
-- Rust stable toolchain (for building from source)
+- Pinned Rust `1.97.1` toolchain (for building from source)
 - Root or sudo access for TUN device and firewall configuration
 
 **System dependencies (Ubuntu/Debian):**
@@ -5163,7 +5167,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 ## Implementation Reconciliation (2026-08-04, reproducible dependency resolution)
 
-- **Version ownership:** `config/tool-versions.env` is the source-owned version contract for Bun `1.3.14`, Rust `1.97.1`, the explicit nightly lane, Tauri CLI `2.11.4`, Cargo Audit `0.22.2`, Cargo Fuzz `0.13.2`, and Critcmp `0.1.8`. `rust-toolchain.toml` pins the default Cargo toolchain to `1.97.1`.
+- **Version ownership:** `config/tool-versions.env` is the source-owned version contract for Bun `1.3.14`, Rust `1.97.1`, the explicit nightly lane, Tauri CLI `2.11.4`, Cargo Audit `0.22.2`, Cargo Fuzz `0.13.2`, and Critcmp `0.1.8`. `rust-toolchain.toml` pins the default Cargo toolchain to `1.97.1`; this exact baseline is not an MSRV declaration.
 - **Lock ownership:** CI and release workflows use `bun install --frozen-lockfile`; release-critical Cargo builds, checks, tests, Clippy, metadata, and Tauri packaging forward `--locked`. The Tauri host lockfile was reconciled against `apps/tauri/src-tauri/Cargo.toml` without an intentional dependency upgrade.
 - **Action ownership:** Mutable `dtolnay/rust-toolchain@master` references were removed. Stable workflow lanes declare `1.97.1`, the fuzz lane declares `nightly`, and release-critical installed tools use exact versions plus `--locked`.
 - **Reproducibility gate:** `scripts/audits/verify-reproducible-dependencies.sh` statically audits all workflow files, runs two locked Cargo metadata resolutions for each manifest, runs two frozen Bun dry-run resolutions with identical `bun pm hash`, and validates the active Bun/Rust versions. The local result is `RESULT: PASS - dependency and toolchain resolution is reproducible` with Bun lock hash `10111F769AB0DF7E-c8bf34ac712c2681-9B1E6056451B6CA1-bfc42866eebd8464`.

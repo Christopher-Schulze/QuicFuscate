@@ -1413,7 +1413,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - TODO-799 repaired the completeness validator's canonical tracker contract. It now accepts and validates `Active`/`ACTIVE|IN_PROGRESS`, `Blocked`/`BLOCKED`, `Queue`/`OPEN|QUEUED|AUDIT_COMPLETE`, and `Completed`/`DONE|SCRAP|COMPLETE|COMPLETED|CLOSED|AUDIT_COMPLETE`, enforces section order and presence, and derives the global status allowlist from the same contract.
 - The live validator passes: tracker `769` headings across Active `1`, Blocked `3`, Queue `190`, and Completed `575`; current details `411/411`; archived Markdown files `393` with `36` explicit exceptions; tracked paths `927`; ignored paths `37,803`; untracked paths `0`. The fixture suite covers a valid blocked/audit-status register plus malformed section, duplicate ID, missing detail, and status mismatch failures.
-- TODO-754 is active again. This closes the register/schema/Git-scope gate only; TODO-730, TODO-734, TODO-749, TODO-758, TODO-759, TODO-760, TODO-761, TODO-762, TODO-763, TODO-764, TODO-782, TODO-798, TODO-804, TODO-805, and the other named native/runtime/external owners remain open.
+- TODO-754 is active again. This closes the register/schema/Git-scope gate only; TODO-730, TODO-734, TODO-749, TODO-758, TODO-759, TODO-760, TODO-763, TODO-764, TODO-782, TODO-798, TODO-804, TODO-805, and the other named native/runtime/external owners remain open. TODO-761 and TODO-762 are completed audit reconciliations.
 
 ## Audit Infrastructure Wiring (2026-08-04, TODO-730)
 
@@ -1505,7 +1505,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Implementation Reconciliation (2026-08-04, reproducible dependency resolution)
 
-- **Ownership path:** `config/tool-versions.env` owns the exact CI/release versions; `rust-toolchain.toml` pins Rust `1.97.1`. Bun, Cargo, Tauri CLI, audit, fuzz, and benchmark inputs are now reviewed against that source-owned contract.
+- **Ownership path:** `config/tool-versions.env` owns the exact CI/release versions; `rust-toolchain.toml` pins Rust `1.97.1`. Bun, Cargo, Tauri CLI, audit, fuzz, and benchmark inputs are now reviewed against that source-owned contract. The project policy is pinned-stable-only with no declared or tested MSRV; the nightly fuzz lane and its unresolved manifest path are separate TODO-758 evidence.
 - **Workflow path:** `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.github/workflows/clippy-matrix.yml`, and `.github/workflows/windows-omega-e2e.yml` use frozen Bun installs, locked Cargo operations, exact Rust action toolchains, and exact locked installs for release tools. The release Tauri jobs run locked metadata/check/Clippy before forwarding `--locked` to packaging.
 - **Verification path:** `scripts/audits/verify-reproducible-dependencies.sh` performs static workflow checks plus two-run Cargo and Bun resolution probes. The local gate passes with the stable Bun lock hash `10111F769AB0DF7E-c8bf34ac712c2681-9B1E6056451B6CA1-bfc42866eebd8464`.
 - **Native boundary:** The Tauri host locked check, all-target strict Clippy, and 41-test host suite pass on ARM64 macOS. Linux/Windows packaging, updater signing, hosted CI, and remote release publication remain external evidence gates; no UI or remote state was changed.
