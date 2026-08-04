@@ -1,0 +1,9 @@
+scope	pattern	category	disposition	owner
+tracked	.gitignore	root-governance-or-manifest	in_scope	TODO-1
+tracked	docs/todo.md	documentation	in_scope	TODO-1
+tracked	docs/todo/todo-1-active.md	documentation	in_scope	TODO-1
+tracked	docs/todo/todo-2-blocked.md	documentation	in_scope	TODO-2
+tracked	docs/todo/todo-3-queued.md	documentation	in_scope	TODO-3
+tracked	docs/todo/todo-4-done.md	documentation	in_scope	TODO-4
+tracked	docs/todo/todo-754-reconciliation-manifest.tsv	documentation	evidence	TODO-1
+tracked	docs/todo/todo-754-coverage-manifest.tsv	documentation	evidence	TODO-1

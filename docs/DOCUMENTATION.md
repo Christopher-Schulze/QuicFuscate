@@ -3957,6 +3957,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `audit-all-comprehensive.sh` - Consolidated audit (security/dependencies/quality/performance) with clear exit codes
 - `audit-readiness-gates.sh` - Readiness gate checks for release and CI quality thresholds
 - `verify-audit-completeness.sh` - Fail-closed TODO register, archive reconciliation, schema, dependency, and Git-scope coverage gate
+- `test-verify-audit-completeness.sh` - Positive and negative fixture coverage for the completeness validator
 
 Guardrail remediation playbook:
 - `Critical` failure: treat as contract drift or structural regression. Fix code/docs first, then rerun `audit-runtime-guardrails.sh`.
@@ -4950,6 +4951,12 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
   build, test, native architecture probe, privileged run, commit, or push was
   performed for TODO-689. Completion means audit coverage and ownership are
   recorded, not that remediation or runtime proof is closed.
+
+## Audit Register Reconciliation (2026-08-04, TODO-799 complete)
+
+- TODO-799 repaired the completeness validator's canonical tracker contract. It now accepts and validates `Active`/`ACTIVE|IN_PROGRESS`, `Blocked`/`BLOCKED`, `Queue`/`OPEN|QUEUED|AUDIT_COMPLETE`, and `Completed`/`DONE|SCRAP|COMPLETE|COMPLETED|CLOSED|AUDIT_COMPLETE`, enforces section order and presence, and derives the global status allowlist from the same contract.
+- The live validator passes with tracker `769` headings across Active `1`, Blocked `3`, Queue `190`, and Completed `575`; current details `411/411`; archived Markdown files `393` with `36` explicit exceptions; tracked paths `927`; ignored paths `37,803`; and zero non-ignored untracked paths. The fixture suite passes the valid blocked/audit-status corpus and fails closed for malformed sections, duplicate IDs, missing details, and status mismatches.
+- TODO-754 is active again. This closes the register/schema/Git-scope gate only; the broader target, runtime, native, feature, Graphify, frontend, Omega, and external-evidence boundaries remain with their existing owners. No production Rust or UI code was changed.
 
 ## Implementation Reconciliation (2026-08-03, crypto key and IV constructor boundaries)
 

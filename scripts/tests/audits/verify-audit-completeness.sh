@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PROJECT_ROOT="${QF_AUDIT_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 
 exec python3 - "$PROJECT_ROOT" <<'PY'
 from __future__ import annotations
@@ -18,9 +18,16 @@ ROOT = Path(sys.argv[1]).resolve()
 TRACKER = ROOT / "docs/todo.md"
 ARCHIVE_MANIFEST = ROOT / "docs/todo/todo-754-reconciliation-manifest.tsv"
 COVERAGE_MANIFEST = ROOT / "docs/todo/todo-754-coverage-manifest.tsv"
-ALLOWED_SECTIONS = {"Active", "Queue", "Completed"}
+SECTION_STATUS_RULES = {
+    "Active": {"ACTIVE", "IN_PROGRESS"},
+    "Blocked": {"BLOCKED"},
+    "Queue": {"OPEN", "QUEUED", "AUDIT_COMPLETE"},
+    "Completed": {"DONE", "SCRAP", "COMPLETE", "COMPLETED", "CLOSED", "AUDIT_COMPLETE"},
+}
+SECTION_ORDER = tuple(SECTION_STATUS_RULES)
+ALLOWED_SECTIONS = set(SECTION_STATUS_RULES)
 REQUIRED_FIELDS = {"id", "title", "severity", "phase", "priority", "status", "created"}
-ALLOWED_STATUSES = {"DONE", "SCRAP", "OPEN", "COMPLETE", "COMPLETED", "ACTIVE", "CLOSED", "QUEUED"}
+ALLOWED_STATUSES = set().union(*SECTION_STATUS_RULES.values())
 SCHEMA_EXCEPTION = "missing_depends_on"
 
 
@@ -152,6 +159,8 @@ def ignored_class(path: str) -> str | None:
 def validate_tracker() -> tuple[set[str], dict[str, str], collections.Counter[str]]:
     lines = TRACKER.read_text(encoding="utf-8").splitlines()
     section: str | None = None
+    seen_sections: set[str] = set()
+    last_section_index = -1
     entries: list[dict[str, object]] = []
     headings: dict[str, int] = {}
     section_counts: collections.Counter[str] = collections.Counter()
@@ -160,6 +169,13 @@ def validate_tracker() -> tuple[set[str], dict[str, str], collections.Counter[st
             section = line[3:].strip()
             if section not in ALLOWED_SECTIONS:
                 fail(f"unexpected tracker section {section!r} at line {line_no}")
+            if section in seen_sections:
+                fail(f"duplicate tracker section {section!r} at line {line_no}")
+            section_index = SECTION_ORDER.index(section)
+            if section_index < last_section_index:
+                fail(f"tracker sections are out of order at line {line_no}: {section!r}")
+            seen_sections.add(section)
+            last_section_index = section_index
         heading = re.match(r"^### (TODO-\d+)\s+(.+)$", line)
         if heading:
             if section is None:
@@ -182,6 +198,9 @@ def validate_tracker() -> tuple[set[str], dict[str, str], collections.Counter[st
             details.append(detail.group(1))
     if not entries:
         fail("tracker contains no TODO headings")
+    missing_sections = set(SECTION_ORDER) - seen_sections
+    if missing_sections:
+        fail(f"tracker is missing canonical sections: {sorted(missing_sections)}")
     for entry in entries:
         details = entry["details"]
         assert isinstance(details, list)
@@ -229,12 +248,10 @@ def validate_todo_corpus(registered: set[str], sections: dict[str, str]) -> tupl
         section = sections.get(ident)
         if section is None:
             fail(f"current detail is not registered: {ident}")
-        if section == "Active" and status != "ACTIVE":
-            fail(f"Active tracker entry {ident} has status {status}, expected ACTIVE")
-        if section == "Queue" and status not in {"OPEN", "QUEUED"}:
-            fail(f"Queue tracker entry {ident} has status {status}")
-        if section == "Completed" and status not in {"DONE", "SCRAP", "COMPLETE", "COMPLETED", "CLOSED"}:
-            fail(f"Completed tracker entry {ident} has status {status}")
+        expected_statuses = SECTION_STATUS_RULES[section]
+        if status not in expected_statuses:
+            expected = ", ".join(sorted(expected_statuses))
+            fail(f"{section} tracker entry {ident} has status {status}, expected one of {expected}")
     missing_current = current_ids - registered
     if missing_current:
         fail(f"unregistered current TODO IDs: {', '.join(sorted(missing_current))}")

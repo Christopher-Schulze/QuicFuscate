@@ -574,6 +574,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- audit-all-comprehensive.sh
 |   |   |   |-- audit-readiness-gates.sh
 |   |   |   |-- verify-audit-completeness.sh
+|   |   |   |-- test-verify-audit-completeness.sh
 |   |   |   `-- audit-runtime-guardrails.sh
 |   |   |-- build
 |   |   |   |-- build-check.sh
@@ -1403,3 +1404,9 @@ The audit remains open. These reconciliations document current evidence and owne
   privileged run, commit, or push was performed for TODO-689. Completion means
   audit coverage and ownership are recorded, not that any remediation or
   runtime proof is closed.
+
+## Audit Register Reconciliation (2026-08-04, TODO-799 complete)
+
+- TODO-799 repaired the completeness validator's canonical tracker contract. It now accepts and validates `Active`/`ACTIVE|IN_PROGRESS`, `Blocked`/`BLOCKED`, `Queue`/`OPEN|QUEUED|AUDIT_COMPLETE`, and `Completed`/`DONE|SCRAP|COMPLETE|COMPLETED|CLOSED|AUDIT_COMPLETE`, enforces section order and presence, and derives the global status allowlist from the same contract.
+- The live validator passes: tracker `769` headings across Active `1`, Blocked `3`, Queue `190`, and Completed `575`; current details `411/411`; archived Markdown files `393` with `36` explicit exceptions; tracked paths `927`; ignored paths `37,803`; untracked paths `0`. The fixture suite covers a valid blocked/audit-status register plus malformed section, duplicate ID, missing detail, and status mismatch failures.
+- TODO-754 is active again. This closes the register/schema/Git-scope gate only; TODO-730, TODO-734, TODO-749, TODO-758, TODO-759, TODO-760, TODO-761, TODO-762, TODO-763, TODO-764, TODO-782, TODO-798, TODO-804, TODO-805, and the other named native/runtime/external owners remain open.
