@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Description: Runtime guardrails for fastpath/runtime contract drift.
+# shellcheck source=scripts/tests/lib/lib-common.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,7 +33,6 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 JSON="$OUTPUT_DIR/results.json"
 json_begin "$JSON" "audit_runtime_guardrails"
-JSON_FIRST_RUN=1
 
 critical=0
 warnings=0
@@ -363,8 +363,8 @@ TUN_E2E_GLOBAL_PROCESS_REAPER="$(rg -n --no-messages 'pkill.*quicfuscate|killall
 if [[ -n "$TUN_E2E_GLOBAL_PROCESS_REAPER" ]]; then
   fail_critical "Base TUN E2E harness retained a global QuicFuscate process reaper"
   append_item "tun_e2e_owned_process_cleanup" "fail" "$TUN_E2E_GLOBAL_PROCESS_REAPER"
-elif rg -n --no-messages '^SERVER_PID=\$!$' scripts/tests/tun-e2e-netns.sh >/dev/null \
-  && rg -n --no-messages '^CLIENT_PID=\$!$' scripts/tests/tun-e2e-netns.sh >/dev/null \
+elif rg -n --no-messages '^[[:space:]]*SERVER_PID=\$![[:space:]]*$' scripts/tests/tun-e2e-netns.sh >/dev/null \
+  && rg -n --no-messages '^[[:space:]]*CLIENT_PID=\$![[:space:]]*$' scripts/tests/tun-e2e-netns.sh >/dev/null \
   && rg -n --no-messages 'stop_owned_process "\$CLIENT_PID"' scripts/tests/tun-e2e-netns.sh >/dev/null \
   && rg -n --no-messages 'stop_owned_process "\$SERVER_PID"' scripts/tests/tun-e2e-netns.sh >/dev/null \
   && rg -n --no-messages '^trap cleanup_on_exit EXIT$' scripts/tests/tun-e2e-netns.sh >/dev/null \

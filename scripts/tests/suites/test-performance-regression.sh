@@ -80,6 +80,32 @@ fi
 LTO_FLAG=""
 BENCH_RUSTFLAGS="-C target-cpu=native -C opt-level=3 ${LTO_FLAG} ${EXTRA_RUSTFLAGS} ${BASE_RUSTFLAGS}"
 
+append_performance_record() {
+  local name="$1" metric="$2" value="$3" legacy_status="$4" result="$5" reason="$6"
+  local target="$8" feature_set="$9" discovered_count="${10:-null}"
+  local executed_count="${11:-null}" command_status="${12:-null}"
+  local discovery_status="${13:-not_applicable}" raw_output="${14:-}"
+  local environment_json="${COMMAND_ENVIRONMENT_JSON:-}"
+  [[ -n "$environment_json" ]] || environment_json='{}'
+  qf_json_append_object "$SUMMARY_JSON" "name=$name" "metric=$metric" "value=$value" \
+    "status=$legacy_status" "result=$result" "reason=$reason" \
+    "argv=json:${COMMAND_ARGV_JSON:-[]}" \
+    "environment=json:$environment_json" \
+    "target=$target" "feature_set=$feature_set" \
+    "discovered_test_count=json:$discovered_count" "executed_test_count=json:$executed_count" \
+    "command_status=json:$command_status" "discovery_status=$discovery_status" \
+    "raw_output=$raw_output" "duration_sec=null"
+}
+
+if [[ "${QUICFUSCATE_JSON_CONTRACT_TEST:-0}" == "1" ]]; then
+  COMMAND_ARGV_JSON='["json-contract-fixture"]'
+  COMMAND_ENVIRONMENT_JSON='{"fixture":"non-empty"}'
+  append_performance_record "json-contract-fixture" "contract" "0" "ok" "PASS" \
+    "structured_environment_contract" "not_recorded" "fixture" "benches" null null null "not_applicable" ""
+  json_end "$SUMMARY_JSON"
+  exit 0
+fi
+
 # Detect benchmark harness availability
 detect_bench_targets() {
   if command -v cargo >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -149,20 +175,6 @@ PY
   fi
   warn "Missing bc/python3; cannot compare thresholds"
   echo "0"
-}
-
-append_performance_record() {
-  local name="$1" metric="$2" value="$3" legacy_status="$4" result="$5" reason="$6"
-  local target="$8" feature_set="$9" discovered_count="${10:-null}"
-  local executed_count="${11:-null}" command_status="${12:-null}"
-  local discovery_status="${13:-not_applicable}" raw_output="${14:-}"
-  qf_json_append_object "$SUMMARY_JSON" "name=$name" "metric=$metric" "value=$value" \
-    "status=$legacy_status" "result=$result" "reason=$reason" \
-    "argv=json:${COMMAND_ARGV_JSON:-[]}" "environment=json:${COMMAND_ENVIRONMENT_JSON:-{}}" \
-    "target=$target" "feature_set=$feature_set" \
-    "discovered_test_count=json:$discovered_count" "executed_test_count=json:$executed_count" \
-    "command_status=json:$command_status" "discovery_status=$discovery_status" \
-    "raw_output=$raw_output" "duration_sec=null"
 }
 
 ensure_test_list() {

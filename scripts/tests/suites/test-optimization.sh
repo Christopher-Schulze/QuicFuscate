@@ -48,13 +48,24 @@ append_json_record() {
   local target="$7" feature_set="$8" discovered_count="${9:-null}"
   local executed_count="${10:-null}" command_status="${11:-null}"
   local discovery_status="${12:-not_applicable}" raw_output="${13:-}"
+  local environment_json="${COMMAND_ENVIRONMENT_JSON:-}"
+  [[ -n "$environment_json" ]] || environment_json='{}'
   qf_json_append_object "$RESULTS_JSON" "name=$name" "status=$legacy_status" \
     "result=$result" "reason=$reason" "argv=json:${COMMAND_ARGV_JSON:-[]}" \
-    "environment=json:${COMMAND_ENVIRONMENT_JSON:-{}}" "target=$target" \
+    "environment=json:$environment_json" "target=$target" \
     "feature_set=$feature_set" "discovered_test_count=json:$discovered_count" \
     "executed_test_count=json:$executed_count" "command_status=json:$command_status" \
     "discovery_status=$discovery_status" "raw_output=$raw_output" "duration_sec=int:$dur"
 }
+
+if [[ "${QUICFUSCATE_JSON_CONTRACT_TEST:-0}" == "1" ]]; then
+  COMMAND_ARGV_JSON='["json-contract-fixture"]'
+  COMMAND_ENVIRONMENT_JSON='{"fixture":"non-empty"}'
+  append_json_record "json-contract-fixture" "ok" 0 "PASS" "structured_environment_contract" \
+    "not_recorded" "fixture" "rust-tests" null null null "not_applicable" ""
+  json_end "$RESULTS_JSON"
+  exit 0
+fi
 
 append_json() {
   local name="$1" status="$2" dur="$3"

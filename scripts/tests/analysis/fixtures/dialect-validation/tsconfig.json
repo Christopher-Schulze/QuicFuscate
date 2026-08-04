@@ -1,0 +1,6 @@
+{
+  // JSONC comments are accepted by the TypeScript consumer.
+  "compilerOptions": {
+    "strict": true,
+  },
+}

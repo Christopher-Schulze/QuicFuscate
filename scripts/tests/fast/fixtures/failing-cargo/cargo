@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+if [[ "${1:-}" == "bench" ]]; then
+  printf '%s\n' 'fixture cargo bench failure' >&2
+  exit 42
+fi
+printf '%s\n' 'unexpected fixture cargo invocation' >&2
+exit 43

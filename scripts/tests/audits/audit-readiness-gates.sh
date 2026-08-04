@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Description: Release readiness gate runner (clippy + audit + deny + geiger).
+# shellcheck source=scripts/tests/lib/lib-common.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +9,8 @@ cd "$PROJECT_ROOT"
 SCRIPT_NAME="$(basename "$0" .sh)"
 
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
+# Readiness commands retain their own status records; avoid duplicate ERR-trap noise.
+trap - ERR
 OUTPUT_DIR=""
 STRICT_GEIGER=0
 
@@ -37,12 +40,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_cmd cargo
-require_cmd cargo-audit
-require_cmd cargo-deny
-require_cmd cargo-geiger
-require_cmd jq
-
 TS="$(date +%Y%m%d_%H%M%S)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$PROJECT_ROOT/scripts/out/audits/$SCRIPT_NAME-$TS"
 mkdir -p "$OUTPUT_DIR"
@@ -56,11 +53,22 @@ DENY_LOG="$LOG_DIR/cargo-deny.log"
 GEIGER_JSON="$LOG_DIR/cargo-geiger.json"
 GEIGER_LOG="$LOG_DIR/cargo-geiger.log"
 SUMMARY="$OUTPUT_DIR/summary.txt"
+READINESS_JSON="$OUTPUT_DIR/results.json"
 
 touch "$SUMMARY"
+json_begin "$READINESS_JSON" "audit_readiness_gates"
 
 TOTAL_CHECKS=0
 FAILED_CHECKS=0
+UNAVAILABLE_CHECKS=0
+GEIGER_UNSAFE_DEPS=0
+GEIGER_UNSAFE_PACKAGES_JSON='[]'
+
+readiness_record() {
+  local check="$1" status="$2" details="$3"
+  qf_json_append_object "$READINESS_JSON" \
+    "name=$check" "status=$status" "evidence=$details"
+}
 
 logkpi() {
   local check="$1"
@@ -74,6 +82,13 @@ logkpi() {
     echo "[FAIL] $check: $details"
   fi
   printf '%s\t%s\t%s\n' "$check" "$status" "$details" >> "$SUMMARY"
+  case "$status" in
+    PASS) readiness_record "$check" PASS "$details";;
+    WARN)
+      ((UNAVAILABLE_CHECKS += 1))
+      readiness_record "$check" UNAVAILABLE "$details";;
+    FAIL) readiness_record "$check" FAIL "$details";;
+  esac
 }
 
 run_success_or_fail() {
@@ -93,6 +108,11 @@ run_success_or_fail() {
   return "$rc"
 }
 
+advisory_database_unavailable() {
+  local log_path="$1"
+  grep -Eqi 'advisory database|failed to prepare fetch|couldn.t fetch|IO error|network' "$log_path"
+}
+
 echo "==============================================================="
 echo "  Quicfuscate upload-readiness gate"
 echo "  Output: $OUTPUT_DIR"
@@ -106,6 +126,27 @@ echo "==============================================================="
   echo "---------------------------------------------------------------"
 } > "$SUMMARY"
 
+for required_command in cargo cargo-audit cargo-deny cargo-geiger jq; do
+  ((TOTAL_CHECKS += 1))
+  if command -v "$required_command" >/dev/null 2>&1; then
+    logkpi "preflight:$required_command" "PASS" "command available"
+  else
+    logkpi "preflight:$required_command" "WARN" "command unavailable"
+  fi
+done
+if [[ "$UNAVAILABLE_CHECKS" -gt 0 ]]; then
+  qf_json_append_object "$READINESS_JSON" \
+    "name=readiness_summary" "status=UNAVAILABLE" \
+    "geiger_policy=$([[ "$STRICT_GEIGER" -eq 1 ]] && echo strict || echo deny-only)" \
+    "geiger_dependency_unsafe_count=int:$GEIGER_UNSAFE_DEPS" \
+    "geiger_dependency_unsafe_packages=json:$GEIGER_UNSAFE_PACKAGES_JSON" \
+    "total_checks=int:$TOTAL_CHECKS" "failed_checks=int:$FAILED_CHECKS" \
+    "unavailable_checks=int:$UNAVAILABLE_CHECKS"
+  json_end "$READINESS_JSON"
+  cat "$SUMMARY"
+  exit 1
+fi
+
 # 1) Clippy strict
 echo "[RUN] cargo clippy strict"
 run_success_or_fail "ClippyStrict" "$CLIPPY_LOG" cargo clippy --all-targets --all-features -- -D warnings || true
@@ -118,8 +159,12 @@ AUDIT_RC=$?
 set -e
 ((TOTAL_CHECKS += 1))
 if [[ $AUDIT_RC -ne 0 ]]; then
-  ((FAILED_CHECKS += 1))
-  logkpi "CargoAudit" "FAIL" "audit command returned rc=$AUDIT_RC"
+  if advisory_database_unavailable "$AUDIT_LOG"; then
+    logkpi "CargoAudit" "WARN" "advisory database unavailable; command rc=$AUDIT_RC"
+  else
+    ((FAILED_CHECKS += 1))
+    logkpi "CargoAudit" "FAIL" "audit command returned rc=$AUDIT_RC"
+  fi
 else
   if ! jq -e . "$AUDIT_JSON" >/dev/null 2>&1; then
     ((FAILED_CHECKS += 1))
@@ -154,7 +199,19 @@ cat "$AUDIT_JSON" >> "$AUDIT_LOG"
 
 # 3) deny
 echo "[RUN] cargo deny check"
-run_success_or_fail "CargoDeny" "$DENY_LOG" cargo deny check || true
+set +e
+cargo deny check > "$DENY_LOG" 2>&1
+DENY_RC=$?
+set -e
+((TOTAL_CHECKS += 1))
+if [[ $DENY_RC -eq 0 ]]; then
+  logkpi "CargoDeny" "PASS" "command returned 0"
+elif advisory_database_unavailable "$DENY_LOG"; then
+  logkpi "CargoDeny" "WARN" "advisory database unavailable; command rc=$DENY_RC"
+else
+  ((FAILED_CHECKS += 1))
+  logkpi "CargoDeny" "FAIL" "command returned rc=$DENY_RC"
+fi
 
 # 4) geiger deterministic
 echo "[RUN] cargo geiger strict"
@@ -177,6 +234,7 @@ else
   else
     GEIGER_ROOT_UNSAFE="$(jq -r '[.packages[] | select(.package.id.name == "quicfuscate")] | first | .forbids_unsafe // false' "$GEIGER_JSON")"
     GEIGER_UNSAFE_DEPS="$(jq -r '[.packages[] | select(.forbids_unsafe and .package.id.name != "quicfuscate")] | length' "$GEIGER_JSON")"
+    GEIGER_UNSAFE_PACKAGES_JSON="$(jq -c '[.packages[] | select(.forbids_unsafe and .package.id.name != "quicfuscate") | .package.id.name] | unique | sort' "$GEIGER_JSON" || printf '%s' '[]')"
     if [[ "$GEIGER_ROOT_UNSAFE" == "true" ]]; then
       ((FAILED_CHECKS += 1))
       logkpi "CargoGeiger" "FAIL" "root crate allows unsafe-by-design"
@@ -196,12 +254,19 @@ cat "$GEIGER_JSON" >> "$GEIGER_LOG"
   date
   echo "Total checks: $TOTAL_CHECKS"
   echo "Failed: $FAILED_CHECKS"
-  if [[ "$FAILED_CHECKS" -eq 0 ]]; then
-    echo "Result: PASS"
-  elif [[ "$FAILED_CHECKS" -lt "$TOTAL_CHECKS" ]]; then
-    echo "Result: PARTIAL"
+  echo "Unavailable: $UNAVAILABLE_CHECKS"
+  if [[ "$STRICT_GEIGER" -eq 1 ]]; then
+    echo "Geiger policy: strict"
   else
+    echo "Geiger policy: deny-only"
+  fi
+  echo "Geiger dependency unsafe count: $GEIGER_UNSAFE_DEPS"
+  if [[ "$FAILED_CHECKS" -ne 0 ]]; then
     echo "Result: FAIL"
+  elif [[ "$UNAVAILABLE_CHECKS" -ne 0 ]]; then
+    echo "Result: UNAVAILABLE"
+  else
+    echo "Result: PASS"
   fi
   echo "---------------------------------------------------------------"
 } >> "$SUMMARY"
@@ -209,6 +274,22 @@ cat "$GEIGER_JSON" >> "$GEIGER_LOG"
 cat "$SUMMARY"
 
 if [[ "$FAILED_CHECKS" -ne 0 ]]; then
+  READINESS_STATUS=FAIL
+elif [[ "$UNAVAILABLE_CHECKS" -ne 0 ]]; then
+  READINESS_STATUS=UNAVAILABLE
+else
+  READINESS_STATUS=PASS
+fi
+qf_json_append_object "$READINESS_JSON" \
+  "name=readiness_summary" "status=$READINESS_STATUS" \
+  "geiger_policy=$([[ "$STRICT_GEIGER" -eq 1 ]] && echo strict || echo deny-only)" \
+  "geiger_dependency_unsafe_count=int:$GEIGER_UNSAFE_DEPS" \
+  "geiger_dependency_unsafe_packages=json:$GEIGER_UNSAFE_PACKAGES_JSON" \
+  "total_checks=int:$TOTAL_CHECKS" "failed_checks=int:$FAILED_CHECKS" \
+  "unavailable_checks=int:$UNAVAILABLE_CHECKS"
+json_end "$READINESS_JSON"
+
+if [[ "$READINESS_STATUS" != "PASS" ]]; then
   exit 1
 fi
 

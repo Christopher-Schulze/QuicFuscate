@@ -13,7 +13,7 @@ while [[ $# -gt 0 ]]; do
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --fast) FAST=1;;
     --full) FAST=0;;
-    --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
+    --verbose) export QUICFUSCATE_DEBUG_SCRIPTS=1;;
     --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--fast] [--full]"; exit 0;;
     *) break;;
   esac; shift
@@ -23,7 +23,36 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$OUTPUT_DIR"
 
 log "Running full suite into $OUTPUT_DIR"
-JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "utils_full_suite"; JSON_FIRST_RUN=1
+JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "utils_full_suite"
+
+run_stealth_bench_preflight() {
+  local log_path="$1"
+  set +e
+  cargo bench --no-run --features benches >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    qf_json_append_object "$JSON" \
+      "name=bench-stealth-preflight" "status=PASS" "result=PASS" \
+      "command_rc=int:$rc" "evidence=$log_path"
+    return 0
+  fi
+  qf_json_append_object "$JSON" \
+    "name=bench-stealth-preflight" "status=FAIL" "result=FAIL" \
+    "command_rc=int:$rc" "evidence=$log_path"
+  warn "Stealth benchmark preflight failed with rc=$rc; see $log_path"
+  return 1
+}
+
+if [[ "${QUICFUSCATE_BENCH_PREFLIGHT_CONTRACT_TEST:-0}" == "1" ]]; then
+  BENCH_STEALTH_PREFLIGHT_LOG="$OUTPUT_DIR/bench-stealth-preflight.log"
+  if run_stealth_bench_preflight "$BENCH_STEALTH_PREFLIGHT_LOG"; then
+    json_end "$JSON"
+    exit 0
+  fi
+  json_end "$JSON"
+  exit 1
+fi
 
 # 1) Build/lint checks (short by default)
 if (( FAST )); then
@@ -104,16 +133,18 @@ run "$SCRIPT_DIR/../suites/test-performance-regression.sh" --output-dir "$OUTPUT
 
 # 9) Audits + analysis (full profile only)
 if (( ! FAST )); then
-  run "$SCRIPT_DIR/../audits/audit-all-comprehensive.sh" --output-dir "$OUTPUT_DIR/audit"
+  run "$SCRIPT_DIR/../audits/audit-all-comprehensive.sh" --strict --output-dir "$OUTPUT_DIR/audit"
   run "$SCRIPT_DIR/../../utils/util-analyze-codebase.sh" > "$OUTPUT_DIR/analysis.txt"
 fi
 
 # 10) Dedicated benches (full profile only)
 if (( ! FAST )); then
-  if cargo bench --no-run --features benches >/dev/null 2>&1; then
+  BENCH_STEALTH_PREFLIGHT_LOG="$OUTPUT_DIR/bench-stealth-preflight.log"
+  if run_stealth_bench_preflight "$BENCH_STEALTH_PREFLIGHT_LOG"; then
     run "$SCRIPT_DIR/../../benchmarks/suites/bench-stealth.sh" --output-dir "$OUTPUT_DIR/bench-stealth"
   else
-    warn "Skipping stealth benches"
+    json_end "$JSON"
+    exit 1
   fi
   run "$SCRIPT_DIR/../../benchmarks/suites/bench-fec-simulation.sh" --output-dir "$OUTPUT_DIR/bench-fec-sim"
   run "$SCRIPT_DIR/../../benchmarks/suites/bench-stealth-brain.sh" --output-dir "$OUTPUT_DIR/bench-stealth-brain"

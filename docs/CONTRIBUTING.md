@@ -49,7 +49,7 @@ Bootstrap build & verify via scripts:
 ```bash
 ./scripts/tests/build/build-check.sh
 ./scripts/tests/utils/util-run-full-suite.sh
-./scripts/tests/audits/audit-all-comprehensive.sh
+./scripts/tests/audits/audit-all-comprehensive.sh --strict
 ```
 Build the crate:
 ```bash
@@ -62,7 +62,7 @@ cargo build
 - Tests: `cargo test --features rust-tests`
 - Lints: `cargo clippy --workspace --all-targets -- -D warnings`
 - Crypto suite: `./scripts/tests/suites/test-crypto.sh`
-- Static hardening audit: run via `./scripts/tests/audits/audit-all-comprehensive.sh`
+- Static hardening audit: run via `./scripts/tests/audits/audit-all-comprehensive.sh --strict`; use `--advisory` only for a non-blocking report.
 
 If a workflow fails, check `scripts/out/` for logs/reports and re-run the appropriate script.
 
@@ -105,7 +105,7 @@ Before opening a PR, all of the following must be true:
 - `cargo test --features rust-tests` clean
 - `cargo clippy --workspace --all-targets -- -D warnings` clean
 - Crypto suite: `./scripts/tests/suites/test-crypto.sh`
-- Static hardening audit: run via `./scripts/tests/audits/audit-all-comprehensive.sh`
+- Static hardening audit: run via `./scripts/tests/audits/audit-all-comprehensive.sh --strict`; use `--advisory` only for a non-blocking report.
 - CI builds on Linux/macOS/Windows (GitHub Actions)
 
 
@@ -177,7 +177,7 @@ Please verify before opening a PR:
 - [ ] Code compiles on all targets supported by CI
 - [ ] `cargo test --features rust-tests` passes locally
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes locally
-- [ ] Static hardening audit passes via `./scripts/tests/audits/audit-all-comprehensive.sh`; no `unwrap/expect/dbg!/println!/panic!/todo!/unimplemented!`
+- [ ] Static hardening audit passes via `./scripts/tests/audits/audit-all-comprehensive.sh --strict`; `--advisory` output is not a gate and must not be treated as one; no `unwrap/expect/dbg!/println!/panic!/todo!/unimplemented!`
   - [ ] `docs/DOCUMENTATION.md` updated (flags, env, config, behavior)
   - [ ] `docs/todo.md`, relevant TODO detail files, and `docs/MAP.md` updated when task status, release gates, architecture, or wiring truth changed
   - [ ] `config/quicfuscate.toml` updated if config changed

@@ -8,18 +8,17 @@ cd "$PROJECT_ROOT"
 # shellcheck disable=SC1091
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "error: missing required command: rg" >&2
-  exit 2
-fi
-
 OUT_DIR=""
+STRICT=1
+MODE="strict"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUT_DIR="${2:-}"; shift 2 ;;
+    --strict) STRICT=1; MODE="strict"; shift ;;
+    --advisory) STRICT=0; MODE="advisory"; shift ;;
     -h|--help|help)
       cat <<'EOF'
-Usage: analysis-scripts-quality.sh [--output-dir DIR]
+Usage: analysis-scripts-quality.sh [--strict|--advisory] [--output-dir DIR]
 
 Scans scripts/*.sh (excluding scripts/out/*) and reports:
 - missing shebang
@@ -42,7 +41,16 @@ mkdir -p "$OUT_DIR"
 REPORT="$OUT_DIR/report.txt"
 JSON="$OUT_DIR/results.json"
 json_begin "$JSON" "analysis_scripts_quality"
-JSON_FIRST_RUN=1
+
+if ! command -v rg >/dev/null 2>&1; then
+  qf_json_append_object "$JSON" "name=analysis_summary" "status=UNAVAILABLE" \
+    "mode=$MODE" "reason=missing-rg"
+  json_end "$JSON"
+  if [[ "$STRICT" -eq 1 ]]; then
+    exit 1
+  fi
+  exit 0
+fi
 
 total=0
 missing_shebang=0
@@ -52,6 +60,7 @@ missing_help=0
 invalid_name=0
 missing_usage_line=0
 bad_unknown_arg=0
+intentional_exceptions=0
 
 NAME_SCHEME='^(audit|analysis|bench|build|fast|install|lib|micro|smoke|test|util|wrap)-[a-z0-9-]+\.sh$'
 
@@ -63,10 +72,17 @@ NAME_SCHEME='^(audit|analysis|bench|build|fast|install|lib|micro|smoke|test|util
 
 while IFS= read -r f; do
   total=$((total + 1))
-  rel="${f#$PROJECT_ROOT/}"
+  rel="${f#"$PROJECT_ROOT"/}"
   base="$(basename "$f")"
   is_lib=0
   [[ "$rel" == "scripts/tests/lib/lib-common.sh" ]] && is_lib=1
+  is_exception=0
+  [[ "$rel" == "scripts/tests/audits/verify-audit-completeness.sh" ]] && is_exception=1
+  if [[ "$is_lib" -eq 1 || "$is_exception" -eq 1 ]]; then
+    intentional_exceptions=$((intentional_exceptions + 1))
+    echo "INTENTIONAL_EXCEPTION $rel generic-script-contract" >> "$REPORT"
+    continue
+  fi
 
   head1="$(head -n 1 "$f" 2>/dev/null || true)"
   if [[ ! "$head1" =~ ^#! ]]; then
@@ -132,8 +148,20 @@ qf_json_append_object "$JSON" \
   "total=int:$total" "missing_shebang=int:$missing_shebang" \
   "missing_strict=int:$missing_strict" "missing_desc=int:$missing_desc" \
   "missing_help=int:$missing_help" "invalid_name=int:$invalid_name" \
-  "missing_usage_line=int:$missing_usage_line" "bad_unknown_arg=int:$bad_unknown_arg"
+  "missing_usage_line=int:$missing_usage_line" "bad_unknown_arg=int:$bad_unknown_arg" \
+  "intentional_exceptions=int:$intentional_exceptions"
+findings=$((missing_shebang + missing_strict + missing_desc + missing_help + invalid_name + missing_usage_line + bad_unknown_arg))
+status="PASS"
+if [[ "$findings" -gt 0 ]]; then
+  status="FAIL"
+fi
+qf_json_append_object "$JSON" "name=analysis_summary" "status=$status" "mode=$MODE" \
+  "findings=int:$findings" "intentional_exceptions=int:$intentional_exceptions"
 json_end "$JSON"
 
 echo "report: $REPORT"
 echo "json:   $JSON"
+
+if [[ "$findings" -gt 0 && "$STRICT" -eq 1 ]]; then
+  exit 1
+fi

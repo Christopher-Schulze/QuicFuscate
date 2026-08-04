@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck disable=SC1091
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
 # Flags
@@ -12,7 +13,7 @@ OUTPUT_DIR=""; QUICFUSCATE_DEBUG_SCRIPTS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
-    --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1; set -x;;
+    --verbose) export QUICFUSCATE_DEBUG_SCRIPTS=1; set -x;;
     --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--rustflags STR] [--dry-run] [--verbose]"; exit 0;;
     *) break;;
   esac
@@ -25,7 +26,7 @@ BASE_NAME="$(basename "$0" .sh)"
 mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
-JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "analysis_dead_code"; JSON_FIRST_RUN=1
+JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "analysis_dead_code"
 [[ -n "${RUSTFLAGS_EXTRA:-}" ]] && export RUSTFLAGS="${RUSTFLAGS_EXTRA} ${RUSTFLAGS:-}"
 
 count_lines() {
@@ -184,7 +185,22 @@ done
 echo -e "\n${YELLOW}=== Unused Dependencies Check ===${NC}"
 echo "Analyzing Cargo.toml dependencies..."
 
-deps=$(sed -n '/^\[.*dependencies/,/^\[/{ /^[a-z][a-z0-9_-]* *=/s/ *=.*//p }' Cargo.toml | sort -u)
+deps=$(awk '
+  /^\[[^]]*dependencies[^]]*\][[:space:]]*$/ {
+    in_dependencies = 1
+    next
+  }
+  /^\[/ {
+    in_dependencies = 0
+    next
+  }
+  in_dependencies && /^[[:space:]]*[A-Za-z0-9_.-]+[[:space:]]*=/ {
+    name = $0
+    sub(/[[:space:]]*=.*/, "", name)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+    print name
+  }
+' Cargo.toml | sort -u)
 
 for dep in $deps; do
     usage=$(count_lines "use $dep|extern crate $dep|$dep::" src/ --glob '*.rs')
@@ -229,4 +245,5 @@ echo "  - Public API that external users depend on"
 
 echo -e "\n${GREEN}[OK] Dead Code Analysis Complete${NC}"
 qf_json_append_object "$JSON" "total_dead_code_markers=int:$total_dead_code"
+qf_json_append_object "$JSON" "name=analysis_summary" "status=PASS" "result=REPORT" "total_dead_code_markers=int:$total_dead_code"
 json_end "$JSON"
