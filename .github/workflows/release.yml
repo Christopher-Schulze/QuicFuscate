@@ -36,6 +36,10 @@ jobs:
         shell: bash
         run: bash scripts/audits/verify-reproducible-dependencies.sh
 
+      - name: Verify locked frontend dependency security
+        shell: bash
+        run: bash scripts/audits/verify-frontend-dependencies.sh
+
       - name: Install dependency audit tools
         shell: bash
         run: |
