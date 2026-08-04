@@ -2054,36 +2054,42 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 - Stealth hotpaths (header/QPACK building and persona-driven shaping) prefer SIMD kernels with safe scalar fallback; mutex/atomic usage is minimized in hotpaths.
 
 #### Feature Matrix (Crypto)
-- Cargo features:
-  - Product/default runtime:
-    - `client`
-    - `server`
-  - Product/runtime opt-in:
-    - `io_uring`
-    - `zero_copy_dgram`
-    - `compression_zstd_ffi`
-  - Platform integration:
-    - `tun-windows`
-    - `tun-ios`
-  - Test/validation:
-    - `rust-tests`
-    - `benches`
-    - `simd-selfcheck`
-    - `dev-certs`
-    - `masque-tests`
-    - `tun-tests`
-  - Internal-only:
-    - `internal_af_xdp_experimental`
-    - `internal_avx10_preview`
-    - `internal_wiedemann`
-  - Runtime/build knobs:
-    - `aggressive_inline`
-    - `orchestrator`
-    - `prefetch`
-    - `rate_limiter`
-    - `std`
-    - `stream_ring_buffer`
-    - `unsafe_rust`
+- The root manifest declares exactly 27 direct feature entries. Cargo metadata exposes 30 effective selectors because the optional dependencies `rcgen`, `time`, and `maxminddb` also remain available as implicit dependency selectors. Those three selectors are implementation dependencies, not user-facing product groups.
+- Canonical feature taxonomy and consumer semantics:
+
+| Class | Feature | Dependencies | Consumer or owner semantics |
+| --- | --- | --- | --- |
+| meta | `default` | `client`, `server`, `rate_limiter` | Canonical product build profile |
+| product | `client` | none | Client role and CLI profile |
+| product | `server` | `rcgen`, `time`, `maxminddb` | Server role, certificate generation, and GeoIP support |
+| runtime | `io_uring` | `dep:io-uring` | Linux client/server async I/O path |
+| runtime | `aggressive_inline` | none | Explicit optimization build knob |
+| runtime | `compression_zstd_ffi` | `dep:zstd-sys` | Optional zstd FFI compression path |
+| runtime | `orchestrator` | none | Brain/connection/stealth orchestration path |
+| runtime | `prefetch` | none | Cache and transport prefetch hints |
+| runtime | `rate_limiter` | none | Server admission and rate-limiting path |
+| runtime | `std` | none | AEGIS standard-library compatibility branch |
+| runtime | `stream_ring_buffer` | none | Stream transport ring-buffer path |
+| meta | `throughput` | `stream_ring_buffer`, `prefetch`, `aggressive_inline` | Throughput-oriented runtime profile |
+| runtime | `unsafe_rust` | none | Explicit unsafe optimization/build lane |
+| runtime | `zero_copy_dgram` | none | Datagram buffer ownership fast path |
+| test | `dev-certs` | `rcgen`, `time` | Development certificate generation |
+| platform | `tun-windows` | none | Windows Wintun/WFP integration |
+| platform | `tun-ios` | none | Reserved iOS platform selector; no current Rust consumer |
+| internal | `internal_af_xdp_experimental` | none | Internal Linux AF_XDP experiment |
+| internal | `internal_wiedemann` | none | Internal FEC Wiedemann policy |
+| internal | `internal_avx10_preview` | none | Internal AVX10 preview dispatch branch |
+| test | `rust-tests` | none | Rust integration and feature-gated test targets |
+| test | `benches` | none | Criterion and benchmark target compilation |
+| test | `masque-tests` | none | MASQUE-specific test branches |
+| test | `tun-tests` | none | TUN example/test target contract |
+| test | `simd-selfcheck` | none | SIMD parity and telemetry self-check target |
+| meta | `test-suite` | `rust-tests`, `benches` | Aggregate test and benchmark compilation profile |
+| meta | `experimental` | `internal_af_xdp_experimental`, `internal_wiedemann`, `internal_avx10_preview` | Aggregate internal-only profile |
+| runtime dependency | `rcgen` | `dep:rcgen` | Implicit selector enabled by `server` or `dev-certs`; do not select directly |
+| runtime dependency | `time` | `dep:time` | Implicit selector enabled by `server` or `dev-certs`; do not select directly |
+| runtime dependency | `maxminddb` | `dep:maxminddb` | Implicit selector enabled by `server`; do not select directly |
+- TODO-176's proposed public groups `cpu-simd`, `stealth`, `fec`, `crypto`, `transport`, and `test-crypto`, plus the historical `simd-all` selector, are retired and are not current Cargo features. Cargo must reject direct selection of each name. TODO-760 owns the separate hardware/SIMD semantics; this matrix makes no hardware proof or broad subsystem meta-feature claim.
 - Product posture notes:
   - The canonical product contract is still the default `client`/`server` runtime.
   - Internal features must not be advertised as normal deployment knobs.
@@ -2125,6 +2131,7 @@ Benchmarks
 #### Automated Build and CI/CD
 - The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, the release-version contract, app backend checks, release compilation and tests, fuzz target checks, non-duplicated feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
 - `scripts/audits/verify-simd-feature-contract.sh` is run by the CI feature matrix, the strict Clippy matrix, and the comprehensive audit. It proves that no hardware ISA name is declared as a Cargo feature, that `rust-tests,simd-selfcheck` remains a valid positive test contract, that `--all-features` remains metadata-valid, and that each removed hardware/meta selector is rejected by Cargo rather than silently accepted as hardware proof.
+- `scripts/audits/verify-cargo-feature-taxonomy.sh` is run beside the SIMD gate by CI, the strict Clippy matrix, and the comprehensive audit. It checks the exact 27-entry manifest taxonomy, the 30-selector Cargo metadata surface including implicit optional-dependency selectors, every Rust cfg and target `required-features` reference, positive aggregate build profiles, and rejection of TODO-176's retired feature-group names.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo metadata --locked`, `cargo check --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` in `apps/tauri/src-tauri`.
 - The `windows-core-checks` job caps Cargo at two jobs, checks and lints `tun-windows,rust-tests`, compiles its unit-test binary, provisions the integrity-checked upstream DLL beside that binary, executes ordinary tests plus serial privileged Wintun adapter/I/O/close and WFP packet-outcome/process-exit suites, independently verifies zero managed WFP objects even after a failed behavior step, rejects owned adapter or legacy firewall-rule residue, and uploads provenance plus Windows-build evidence. Run `30508948149`, job `90764941801` proves commit `afe46e0` with the complete native Wintun and WFP lifecycle green. Manual Windows-Omega runs `30535603045` and `30536002374` add two consecutive authenticated dual-stack Wintun/WFP data-plane proofs against one unchanged ARM64 server process. The `release-contract` job runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
