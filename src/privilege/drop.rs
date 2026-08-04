@@ -105,6 +105,11 @@ pub enum DropError {
         selector: String,
         errno: i32,
     },
+    MalformedAccountRecord {
+        selector: String,
+        field: &'static str,
+        reason: &'static str,
+    },
     StateInspectionFailed(String),
     MissingCapabilities(String),
     SystemCallFailed {
@@ -125,6 +130,9 @@ impl std::fmt::Display for DropError {
             Self::UnsafeTarget(detail) => write!(f, "unsafe privilege-drop target: {detail}"),
             Self::AccountLookupFailed { selector, errno } => {
                 write!(f, "account lookup failed for {selector:?} (errno {errno})")
+            }
+            Self::MalformedAccountRecord { selector, field, reason } => {
+                write!(f, "malformed account record for {selector:?}: {field} {reason}")
             }
             Self::StateInspectionFailed(detail) => {
                 write!(f, "privilege-state inspection failed: {detail}")
@@ -582,6 +590,43 @@ fn lookup_buffer<T>(
 }
 
 #[cfg(unix)]
+fn copy_bounded_cstr_field(
+    selector: &str,
+    field: &'static str,
+    pointer: *const libc::c_char,
+    buffer: &[libc::c_char],
+) -> Result<String, DropError> {
+    let malformed = |reason| DropError::MalformedAccountRecord {
+        selector: selector.to_string(),
+        field,
+        reason,
+    };
+    if pointer.is_null() {
+        return Err(malformed("pointer is null"));
+    }
+
+    let buffer_start = buffer.as_ptr() as usize;
+    let buffer_end = buffer_start
+        .checked_add(buffer.len())
+        .ok_or_else(|| malformed("buffer address range overflow"))?;
+    let field_address = pointer as usize;
+    if field_address < buffer_start || field_address >= buffer_end {
+        return Err(malformed("pointer is outside the lookup buffer"));
+    }
+
+    let offset = field_address - buffer_start;
+    let nul_offset = buffer[offset..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| malformed("field has no NUL terminator in the lookup buffer"))?;
+    let end = offset + nul_offset + 1;
+    let bytes = buffer[offset..end].iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+    let value = CStr::from_bytes_with_nul(&bytes)
+        .map_err(|_| malformed("field is not a valid NUL-terminated byte string"))?;
+    Ok(value.to_string_lossy().into_owned())
+}
+
+#[cfg(unix)]
 fn resolve_user(selector: &str) -> Result<(u32, String), DropError> {
     let numeric = parse_numeric_selector(selector, "user")?;
     let name = numeric
@@ -601,8 +646,7 @@ fn resolve_user(selector: &str) -> Result<(u32, String), DropError> {
         }
         other => other,
     })?;
-    // SAFETY: pw_name points into the live lookup buffer returned with `pwd`.
-    let canonical = unsafe { CStr::from_ptr(pwd.pw_name) }.to_string_lossy().into_owned();
+    let canonical = copy_bounded_cstr_field(selector, "pw_name", pwd.pw_name, &buffer)?;
     drop(buffer);
     Ok((pwd.pw_uid, canonical))
 }
@@ -627,8 +671,7 @@ fn resolve_group(selector: &str) -> Result<(u32, String), DropError> {
         }
         other => other,
     })?;
-    // SAFETY: gr_name points into the live lookup buffer returned with `grp`.
-    let canonical = unsafe { CStr::from_ptr(grp.gr_name) }.to_string_lossy().into_owned();
+    let canonical = copy_bounded_cstr_field(selector, "gr_name", grp.gr_name, &buffer)?;
     drop(buffer);
     Ok((grp.gr_gid, canonical))
 }
@@ -1061,6 +1104,64 @@ mod tests {
 
         assert!(matches!(resolve_user(user_selector), Err(DropError::UserNotFound(_))));
         assert!(matches!(resolve_group(group_selector), Err(DropError::GroupNotFound(_))));
+    }
+
+    #[cfg(unix)]
+    fn c_char_buffer(bytes: &[u8]) -> Vec<libc::c_char> {
+        bytes.iter().map(|byte| *byte as libc::c_char).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_cstr_field_accepts_nul_terminated_pointer_inside_buffer() {
+        let buffer = c_char_buffer(b"prefix\0alice\0");
+        let pointer = buffer.as_ptr().wrapping_add("prefix\0".len());
+
+        let value = copy_bounded_cstr_field("normal", "pw_name", pointer, &buffer)
+            .expect("bounded account name must be copied");
+
+        assert_eq!(value, "alice");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_cstr_field_rejects_null_pointer() {
+        let buffer = c_char_buffer(b"alice\0");
+        let result = copy_bounded_cstr_field("null", "pw_name", std::ptr::null(), &buffer);
+
+        assert!(matches!(
+            result,
+            Err(DropError::MalformedAccountRecord { field, reason, .. })
+                if field == "pw_name" && reason == "pointer is null"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_cstr_field_rejects_pointer_outside_buffer() {
+        let buffer = c_char_buffer(b"alice\0");
+        let pointer = buffer.as_ptr().wrapping_add(buffer.len());
+        let result = copy_bounded_cstr_field("outside", "gr_name", pointer, &buffer);
+
+        assert!(matches!(
+            result,
+            Err(DropError::MalformedAccountRecord { field, reason, .. })
+                if field == "gr_name" && reason == "pointer is outside the lookup buffer"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_cstr_field_rejects_missing_nul_terminator() {
+        let buffer = c_char_buffer(b"alice");
+        let result = copy_bounded_cstr_field("unterminated", "pw_name", buffer.as_ptr(), &buffer);
+
+        assert!(matches!(
+            result,
+            Err(DropError::MalformedAccountRecord { field, reason, .. })
+                if field == "pw_name"
+                    && reason == "field has no NUL terminator in the lookup buffer"
+        ));
     }
 
     #[cfg(any(
