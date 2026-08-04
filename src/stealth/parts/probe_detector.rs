@@ -4,10 +4,12 @@
 pub struct ActiveProbeDetector {
     /// Probe patterns database.
     patterns: Vec<ProbePattern>,
-    /// Detection history.
-    history: Arc<Mutex<Vec<ProbeEvent>>>,
+    /// Bounded matching-probe timestamps retained for the detector threshold.
+    history: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
     /// Detection threshold.
     threshold: usize,
+    /// Maximum number of matching timestamps retained at once.
+    history_limit: usize,
     /// Response mode.
     response_mode: ProbeResponseMode,
 }
@@ -22,18 +24,6 @@ struct ProbePattern {
     mask: Option<Vec<u8>>,
     /// Severity level (1-10).
     _severity: u8,
-}
-
-#[derive(Clone)]
-struct ProbeEvent {
-    /// Timestamp.
-    _timestamp: std::time::Instant,
-    /// Source address.
-    _source: std::net::SocketAddr,
-    /// Detected pattern.
-    _pattern: String,
-    /// Response taken.
-    _response: ProbeResponseMode,
 }
 
 /// Action to take when an active probe is detected.
@@ -52,10 +42,14 @@ pub enum ProbeResponseMode {
 impl ActiveProbeDetector {
     /// Create a new probe detector.
     pub fn new(threshold: usize, response_mode: ProbeResponseMode) -> Self {
+        let history_limit = threshold.max(1);
         Self {
             patterns: Self::load_probe_patterns(),
-            history: Arc::new(Mutex::new(Vec::with_capacity(100))),
+            history: Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(
+                history_limit,
+            ))),
             threshold,
+            history_limit,
             response_mode,
         }
     }
@@ -96,17 +90,10 @@ impl ActiveProbeDetector {
             if self.matches_pattern(packet, pattern) {
                 warn!("Active probe detected: {} from {}", pattern.name, source);
 
-                // Record event
-                let event = ProbeEvent {
-                    _timestamp: std::time::Instant::now(),
-                    _source: source,
-                    _pattern: pattern.name.clone(),
-                    _response: self.response_mode,
-                };
+                let timestamp = std::time::Instant::now();
 
                 if let Ok(mut history) = self.history.lock() {
-                    history.retain(|e| e._timestamp.elapsed().as_secs() < 60);
-                    history.push(event);
+                    record_probe_timestamp(&mut history, timestamp, self.history_limit);
 
                     let recent_count = history.len();
 
@@ -157,5 +144,108 @@ impl ActiveProbeDetector {
                 vec![0x00, 0x00, 0x00, 0x00]
             }
         }
+    }
+}
+
+const PROBE_HISTORY_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn prune_probe_history(
+    history: &mut std::collections::VecDeque<std::time::Instant>,
+    now: std::time::Instant,
+) {
+    history.retain(|timestamp| now.saturating_duration_since(*timestamp) < PROBE_HISTORY_RETENTION);
+}
+
+fn record_probe_timestamp(
+    history: &mut std::collections::VecDeque<std::time::Instant>,
+    timestamp: std::time::Instant,
+    history_limit: usize,
+) {
+    let history_limit = history_limit.max(1);
+    prune_probe_history(history, timestamp);
+    if history.len() >= history_limit {
+        let _ = history.pop_front();
+    }
+    history.push_back(timestamp);
+}
+
+#[cfg(test)]
+mod probe_detector_tests {
+    use super::{record_probe_timestamp, ActiveProbeDetector, ProbeResponseMode};
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    fn probe_packet() -> [u8; 6] {
+        [0x16, 0x03, 0x01, 0x00, 0x00, 0xff]
+    }
+
+    fn source() -> std::net::SocketAddr {
+        "127.0.0.1:4433".parse().expect("valid probe source")
+    }
+
+    #[test]
+    fn sustained_matching_probes_are_bounded_by_threshold() {
+        let detector = ActiveProbeDetector::new(3, ProbeResponseMode::Fake);
+
+        for _ in 0..128 {
+            let _ = detector.check_packet(&probe_packet(), source());
+        }
+
+        let history = detector.history.lock().expect("probe history lock");
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn history_evicts_oldest_timestamp_at_limit() {
+        let base = Instant::now();
+        let mut history = VecDeque::new();
+
+        for offset in 0..4 {
+            record_probe_timestamp(
+                &mut history,
+                base + Duration::from_secs(offset),
+                3,
+            );
+        }
+
+        let expected = VecDeque::from([
+            base + Duration::from_secs(1),
+            base + Duration::from_secs(2),
+            base + Duration::from_secs(3),
+        ]);
+        assert_eq!(history, expected);
+    }
+
+    #[test]
+    fn history_prunes_expired_timestamps_before_insertion() {
+        let now = Instant::now();
+        let mut history = VecDeque::from([
+            now - Duration::from_secs(61),
+            now - Duration::from_secs(59),
+        ]);
+
+        record_probe_timestamp(&mut history, now, 3);
+
+        let expected = VecDeque::from([now - Duration::from_secs(59), now]);
+        assert_eq!(history, expected);
+    }
+
+    #[test]
+    fn zero_threshold_switches_on_first_match() {
+        let detector = ActiveProbeDetector::new(0, ProbeResponseMode::Ignore);
+
+        assert_eq!(
+            detector.check_packet(&probe_packet(), source()),
+            Some(ProbeResponseMode::Switch)
+        );
+    }
+
+    #[test]
+    fn benign_packets_do_not_enter_history() {
+        let detector = ActiveProbeDetector::new(3, ProbeResponseMode::Fake);
+        let benign = [0x40, 0x01, 0x02, 0x03, 0x04, 0x05];
+
+        assert_eq!(detector.check_packet(&benign, source()), None);
+        assert!(detector.history.lock().expect("probe history lock").is_empty());
     }
 }

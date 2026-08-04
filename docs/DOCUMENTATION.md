@@ -3362,8 +3362,9 @@ let scheduler = CoverTrafficScheduler::new("example.com", 5000);
 ```rust
 pub struct ActiveProbeDetector {
     patterns: Vec<ProbePattern>,   // GFW_TLS_Probe; DPI_QUIC_Scan remains response-selector compatibility only
-    history: Arc<Mutex<Vec<ProbeEvent>>>,
+    history: Arc<Mutex<VecDeque<Instant>>>,
     threshold: usize,
+    history_limit: usize,          // max(threshold, 1)
     response_mode: ProbeResponseMode,
 }
 
@@ -3373,7 +3374,7 @@ if let Some(mode) = detector.check_packet(&packet, source_addr) {
     // mode is Ignore | Fake | Switch | Block
 }
 ```
-`check_packet` records matching probes in a rolling 60-second history. Below the configured threshold it returns the configured response mode; once the recent matching count reaches the threshold it returns `Switch` for escalation. The current `StealthManager` path uses a threshold of 5 when dynamic stealth, traffic padding, or timing obfuscation is enabled. The current `Vec::with_capacity(100)` is only an initial allocation hint, not a hard bound; the detector history cap is tracked in TODO-644. The downstream `EscalationState` has an independent 120-second timestamp window and separate bound finding in TODO-808.
+`check_packet` records matching probes as timestamps in a bounded rolling 60-second history. The history limit is `max(threshold, 1)`, so the detector retains enough entries to preserve the configured threshold while sustained matching traffic evicts the oldest timestamp. Below the configured threshold it returns the configured response mode; once the recent matching count reaches the threshold it returns `Switch` for escalation. The current `StealthManager` path uses a threshold of 5 when dynamic stealth, traffic padding, or timing obfuscation is enabled. The downstream `EscalationState` has an independent 120-second timestamp window and separate bound finding in TODO-808.
 
 #### Flow Shaping
 ```rust
@@ -4720,7 +4721,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **GHASH test override in production**: `src/crypto/gcm.rs` exposes an env-var-activated test override in release builds. Tracked in TODO-630.
 - **TLS cover zero keys**: `src/stealth/parts/tls_cover_provider.rs` falls back to all-zero keys on RNG failure. Tracked in TODO-642.
 - **Reality session map cleanup**: `src/reality.rs` now sweeps stale sessions on the owner timer as well as on probe traffic, so sustained probes cannot bypass `MAX_SESSIONS` cleanup. Resolved by TODO-570.
-- **Probe and escalation history bounds**: `src/stealth/parts/probe_detector.rs` has no hard cap before the 60-second retention window (TODO-644), and `src/stealth/parts/escalation.rs` uses an initial-capacity-only `VecDeque` for its 120-second timestamp window (TODO-808).
+- **Probe and escalation history bounds**: `src/stealth/parts/probe_detector.rs` retains only a bounded `VecDeque<Instant>` with limit `max(threshold, 1)` and FIFO eviction inside its 60-second window; `src/stealth/parts/escalation.rs` still uses an initial-capacity-only `VecDeque` for its independent 120-second timestamp window (TODO-808).
 - **SecretString UTF-8 invariant**: TODO-651 now stores UTF-8 secrets in a private `String` owner, removes the unchecked conversion, and adds a checked `SecretBytes -> SecretString` boundary that rejects malformed bytes before ownership transfer. `SecretString` transfers its string buffer to the existing zeroizing `SecretBytes` owner on drop, preserving erasure observation and exact initialized lengths. Focused tests cover valid construction, cloning, owned erasure, checked acceptance, and malformed-byte rejection; the caller audit confirms arbitrary byte secrets remain `SecretBytes`.
 - **Privilege drop FFI boundary**: TODO-652 keeps libc status, null-result, and exact returned-pointer identity checks adjacent to `MaybeUninit::assume_init`, retains the lookup buffer until `passwd`/`group` names are copied, and adds deterministic status, `ERANGE`, null, pointer-mismatch, and unknown-account tests. TODO-653 replaces both raw account-name scans with a bounded buffer-range and NUL check before `CStr::from_bytes_with_nul`, covering normal, null, out-of-buffer, and unterminated records. The completed TODO-684 audit additionally found a forgeable public identity boundary, a Windows `CurrentIds` compile failure, incomplete filesystem-ID and partial-transition proof, warning-only process-lock failure, embedded lock-policy divergence, and first-wins TLS identity lifecycle gaps. TODO-849 through TODO-854 own the remaining remediation; native privilege proof remains environment-specific.
 - **TUN unsafe read**: `src/interface.rs` now loads the BMI2 IP-header word with `std::ptr::read_unaligned`, and the local test surface adds an intentionally unaligned IPv4 subslice. Linux and macOS `fcntl` setup paths check their return values; TODO-654 owns this alignment proof, while TODO-843 through TODO-848 own the separate BMI2 feature-dispatch and platform-FFI findings from the completed TODO-683 audit.
