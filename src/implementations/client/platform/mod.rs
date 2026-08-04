@@ -20,7 +20,7 @@ mod windows;
 pub use traits::*;
 
 #[cfg(target_os = "linux")]
-pub use linux::LinuxPlatform as NativePlatform;
+pub use linux::{LinuxPlatform, LinuxPlatform as NativePlatform, LinuxResolverPaths};
 #[cfg(target_os = "macos")]
 pub use macos::MacOSPlatform as NativePlatform;
 #[cfg(target_os = "windows")]
