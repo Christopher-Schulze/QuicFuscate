@@ -906,7 +906,7 @@ The compression module (`src/compress.rs`) provides adaptive zstd payload compre
 - **`CompressionConfig`**: Configuration with minimum length thresholds and compression levels
 - **`CompressionPolicy`**: Runtime policy control for adaptive compression decisions
 - **`CompressionAnalysis`**: SIMD-powered preprocessing (ASCII/newline/null/high-bit counters + chunk hashing) feeding telemetry (`COMPRESS_PREPROC_*`) and influencing encoder tuning.
-- Pool-backed compression writes compressed zstd frames directly into `MemoryPool` / body-pool blocks with `compress_to_buffer`, avoiding an intermediate compressed `Vec` copy while preserving H3 payload semantics and wire headers.
+- Pool-backed compression writes compressed zstd frames directly into `MemoryPool` / body-pool blocks with `compress_to_buffer`, avoiding an intermediate compressed `Vec` copy while preserving H3 payload semantics and wire headers. The body pool uses the explicit `MemoryPool::new` contract, so its configured block size and effective allocation size match after the 2 KiB minimum clamp.
 - H3 content-type compression uses the policy allow/deny lists centrally; explicit denies override allows, MIME parameters are ignored for matching, and payloads without a content type still require the textuality heuristic.
 
 #### Supported Algorithms
@@ -1107,8 +1107,11 @@ coverage, not as a normal consumer-facing API promise.
 ```rust
 use quicfuscate::optimize::MemoryPool;
 
-// Create a memory pool with configurable parameters
-let pool = MemoryPool::new(1024, 65536)?; // 1024 blocks of 64KB each
+// Create a pool with an explicit block-size contract
+let pool = MemoryPool::new(1024, 65536); // 1024 blocks of 64 KiB each
+
+// Use MTU-based sizing only through the explicitly adaptive constructor
+let packet_pool = MemoryPool::new_adaptive(512, 65536);
 ```
 
 #### Zero-Copy Memory Architecture
@@ -1118,6 +1121,8 @@ let pool = MemoryPool::new(1024, 65536)?; // 1024 blocks of 64KB each
 - NUMA-aware allocation with node affinity
 - Huge pages support (2MB/1GB) for TLB optimization
 - Thread-local caching to minimize contention
+- `MemoryPool::new(capacity, block_size)` preserves the requested block size subject only to the 2048-byte minimum; every returned block has the effective `block_size()` length.
+- `MemoryPool::new_adaptive(capacity, block_size)` is the separate MTU-based packet-pool constructor. `global_pool()` and the default `OptimizationManager::new()` use this adaptive path; configured engine pools and `body_pool()` use the explicit path.
 - Minimum block size is clamped to 2048 bytes for safety; mismatch-sized blocks are dropped on return to preserve invariants.
 - The process-wide auto-tuner owns a stop flag and join handle; callers can terminate it explicitly with `MemoryPool::shutdown_auto_tuner()` and the stop path wakes the parked thread immediately.
 - Unsafe pool copies require a live, aligned block pointer owned by the pool, validate the block-length bound through a bounded destination slice, and document non-overlap and lifetime invariants.
@@ -3258,7 +3263,7 @@ Environment parsing is not one universal live-reload contract. `src/env_utils.rs
 - `QUICFUSCATE_COMPRESS_ALLOW`: comma-separated content-types to allow (e.g., `text/*,application/json`)
 - `QUICFUSCATE_COMPRESS_DENY`: comma-separated content-types to deny (e.g., `image/*,video/*`)
 - `QUICFUSCATE_BODYPOOL_CAP`: integer - Body pool capacity (blocks)
-- `QUICFUSCATE_BODYPOOL_BLOCK`: integer - Body pool block size (bytes)
+- `QUICFUSCATE_BODYPOOL_BLOCK`: integer - Explicit body-pool block size (bytes), with the `2048`-byte minimum; telemetry reports the effective value.
 - `QUICFUSCATE_DICT_DIR`: path - Dictionary cache directory
 
 **Core H3/MASQUE controls:**
@@ -3335,7 +3340,7 @@ Environment parsing is not one universal live-reload contract. `src/env_utils.rs
 #### Memory Pool (Optimization) Environment Overrides
 
 - `QUICFUSCATE_POOL_CAPACITY` - Initial pool capacity (blocks). Default: `512`.
-- `QUICFUSCATE_POOL_BLOCK_SIZE` - Block size in bytes. Default: `65536` (64 KiB). A minimum of `2048` bytes is enforced.
+- `QUICFUSCATE_POOL_BLOCK_SIZE` - Requested block size in bytes for the lazy adaptive global packet pool. Default request: `65536` (64 KiB). With adaptive sizing enabled, the effective size is selected from `QUICFUSCATE_MTU_HINT`; `quicfuscate_mem_pool_block_size_bytes` and `MemoryPool::block_size()` expose the effective size. Set `QUICFUSCATE_POOL_ADAPTIVE_BLOCK=0` to make the global request explicit. A minimum of `2048` bytes is enforced.
 - `QUICFUSCATE_POOL_HARD_MAX_CAP` - Explicit hard upper limit for capacity growth in blocks. The default is the greater of the configured initial capacity and 64 MiB divided by the effective block size.
 - `QUICFUSCATE_POOL_AUTO_TUNE` - `0|1|false|true` to enable auto-tuner. Default: `true`.
 - `QUICFUSCATE_POOL_MIN_CAP` - Minimum capacity for auto-tuner. Default: `64`.
@@ -3346,7 +3351,7 @@ Environment parsing is not one universal live-reload contract. `src/env_utils.rs
 - `QUICFUSCATE_POOL_UTIL_LOW` - Utilization percent that triggers shrink (default: `30`).
 - `QUICFUSCATE_TLS_HIGH` - TLS cache size under high utilization after explicit TLS-cache opt-in (default: `48`).
 - `QUICFUSCATE_TLS_LOW` - TLS cache size under low utilization after explicit TLS-cache opt-in (default: `24`).
-- `QUICFUSCATE_POOL_ADAPTIVE_BLOCK` - `0|1|false|true` to enable adaptive block sizing (default: `true`). If enabled, block size is selected from MTU hints: `<=1500 -> 4096`, `<=9000 -> 16384`, otherwise `65536`.
+- `QUICFUSCATE_POOL_ADAPTIVE_BLOCK` - `0|1|false|true` for the explicitly adaptive packet-pool constructors (default: `true`). If enabled, block size is selected from MTU hints: `<=1500 -> 4096`, `<=9000 -> 16384`, otherwise `65536`. It does not override `MemoryPool::new()` or `QUICFUSCATE_BODYPOOL_BLOCK`.
 - `QUICFUSCATE_MTU_HINT` - Integer hint for typical link MTU used by adaptive block sizing (default: `1500`).
 - `QUICFUSCATE_TLS_CACHE` - Per-thread cache size for pooled blocks (default: `0`). The active `MemoryPool` cache is actual thread-local storage keyed by pool identity, but pool lifetime and capacity accounting for cached blocks remain open under TODO-827. The separate feature-gated `UnsafeMemoryPool` cache is not covered by this guarantee and is tracked under TODO-826.
 - `QUICFUSCATE_POOL_DEBUG_SLACK` / `QUICFUSCATE_POOL_DEBUG_GRACE` - Debug-only invariants slack to reduce spurious warnings under bursty workloads.
@@ -4712,7 +4717,7 @@ num_worker_threads = 0   # 0 = auto (uses default of 8 threads)
 ```
 
 #### Memory Pool
-The engine memory pool auto-scales to 5% of system RAM (clamped 16-64 MB). `optimization.memory_pool_size = 0` selects this same automatic size. Runtime adapters derive a minimum 64 KiB block size from `memory_pool_alignment` and compute capacity from the resolved byte size, with a minimum of one block. Override the automatic size via environment variable:
+The engine memory pool auto-scales to 5% of system RAM (clamped 16-64 MB). `optimization.memory_pool_size = 0` selects this same automatic size. Runtime adapters derive an explicit minimum 64 KiB block size from `memory_pool_alignment` and compute capacity from the resolved byte size, with a minimum of one block. Override the automatic size via environment variable:
 ```bash
 export QUICFUSCATE_MEMORY_POOL_MB=128
 ```

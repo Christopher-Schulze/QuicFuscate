@@ -5,9 +5,9 @@ pub struct OptimizationManager {
 }
 
 impl OptimizationManager {
-    /// Creates a new optimization manager.
+    /// Creates a new optimization manager with the adaptive packet-pool default.
     pub fn new() -> Self {
-        Self { memory_pool: Arc::new(MemoryPool::new(1024, 4096)) }
+        Self { memory_pool: Arc::new(MemoryPool::new_adaptive(1024, 4096)) }
     }
 
     /// Creates a new optimization manager with explicit pool capacity and block size.

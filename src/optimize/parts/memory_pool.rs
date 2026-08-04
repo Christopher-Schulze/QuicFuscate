@@ -28,6 +28,7 @@ static LOCK_BLOCKS: AtomicBool = AtomicBool::new(false);
 static NEXT_MEMORY_POOL_ID: AtomicUsize = AtomicUsize::new(1);
 const DEFAULT_AUTO_TUNE_MAX_CAPACITY: usize = 1024;
 const DEFAULT_POOL_MAX_BYTES: usize = 64 * 1024 * 1024;
+const MIN_POOL_BLOCK_SIZE: usize = 2048;
 
 #[cfg(test)]
 static LOCK_BLOCKS_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -255,14 +256,24 @@ impl MemoryPool {
         });
     }
 
-    /// Creates a new memory pool with a specified capacity and block size.
-    /// All allocated blocks are 64-byte aligned.
+    /// Creates a pool with an explicit block-size contract.
+    ///
+    /// The requested block size is retained, subject only to the minimum safe
+    /// size. Use [`MemoryPool::new_adaptive`] when MTU-based sizing is desired.
     pub fn new(capacity: usize, block_size: usize) -> Self {
-        // Adaptive block size based on traffic profile and enforce a sane lower bound
-        let mut block_size = Self::adaptive_block_size(block_size);
-        if block_size < 2048 {
-            block_size = 2048;
-        }
+        Self::new_with_effective_block_size(capacity, block_size)
+    }
+
+    /// Creates a pool whose block size follows the configured MTU profile.
+    ///
+    /// `QUICFUSCATE_POOL_ADAPTIVE_BLOCK=0|false` disables the MTU selection and
+    /// retains the requested size, subject to the minimum safe size.
+    pub fn new_adaptive(capacity: usize, block_size: usize) -> Self {
+        Self::new_with_effective_block_size(capacity, Self::adaptive_block_size(block_size))
+    }
+
+    fn new_with_effective_block_size(capacity: usize, block_size: usize) -> Self {
+        let block_size = block_size.max(MIN_POOL_BLOCK_SIZE);
         let lock_blocks = Self::lock_blocks_enabled();
         let lock_ledger = Arc::new(BlockLockLedger::default());
         let nodes = numa::num_nodes();
@@ -454,7 +465,7 @@ impl MemoryPool {
         block
     }
 
-    /// Returns the configured block size of the pool.
+    /// Returns the effective block size used by every allocation from the pool.
     #[inline]
     pub fn block_size(&self) -> usize {
         self.block_size
@@ -715,7 +726,7 @@ impl MemoryPool {
     /// Background auto-tuner: periodically adjusts capacity based on usage.
     /// Controlled by env QUICFUSCATE_POOL_AUTO_TUNE (default true),
     /// QUICFUSCATE_POOL_MIN_CAP, QUICFUSCATE_POOL_MAX_CAP, QUICFUSCATE_POOL_TICK_MS.
-    /// Determine optimal block size based on ENV hints and MTU
+    /// Determine an adaptive block size based on environment hints and MTU.
     fn adaptive_block_size(requested: usize) -> usize {
         if let Ok(v) = std::env::var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK") {
             if v == "0" || v.eq_ignore_ascii_case("false") {
@@ -727,6 +738,10 @@ impl MemoryPool {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1500);
+        Self::adaptive_block_size_for_mtu(mtu_hint)
+    }
+
+    fn adaptive_block_size_for_mtu(mtu_hint: usize) -> usize {
         if mtu_hint <= 1500 {
             // Standard Ethernet: use 4KB blocks
             4096
@@ -1190,6 +1205,27 @@ mod memory_pool_growth_tests {
             "an explicitly larger initial pool remains valid"
         );
         assert_eq!(DEFAULT_POOL_MAX_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn explicit_constructor_preserves_requested_block_size() {
+        let pool = MemoryPool::new(1, 128 * 1024);
+        assert_eq!(pool.block_size(), 128 * 1024);
+        assert_eq!(pool.alloc().len(), 128 * 1024);
+    }
+
+    #[test]
+    fn explicit_constructor_applies_only_the_minimum_block_size() {
+        let pool = MemoryPool::new(1, 1);
+        assert_eq!(pool.block_size(), 2048);
+        assert_eq!(pool.alloc().len(), 2048);
+    }
+
+    #[test]
+    fn adaptive_block_profiles_remain_explicitly_selectable() {
+        assert_eq!(MemoryPool::adaptive_block_size_for_mtu(1500), 4096);
+        assert_eq!(MemoryPool::adaptive_block_size_for_mtu(9000), 16_384);
+        assert_eq!(MemoryPool::adaptive_block_size_for_mtu(9001), 65_536);
     }
 
     #[test]

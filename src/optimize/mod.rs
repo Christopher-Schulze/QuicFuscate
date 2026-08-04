@@ -216,8 +216,11 @@ mod numa {
 // ----------------------------------------------------------------------------
 static GLOBAL_POOL: OnceLock<Arc<MemoryPool>> = OnceLock::new();
 
-/// Returns a process-wide shared MemoryPool instance. Initializes lazily on
-/// first use with conservative defaults.
+/// Returns a process-wide shared adaptive packet MemoryPool instance.
+///
+/// The configured block size is the adaptive request when MTU-based sizing is
+/// enabled. `MemoryPool::block_size()` and the exported block-size gauge report
+/// the effective size returned by allocations.
 #[inline]
 pub fn global_pool() -> Arc<MemoryPool> {
     GLOBAL_POOL
@@ -230,8 +233,8 @@ pub fn global_pool() -> Arc<MemoryPool> {
             let block_size = std::env::var("QUICFUSCATE_POOL_BLOCK_SIZE")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(65536); // 64KB blocks for better performance
-            let pool = Arc::new(MemoryPool::new(capacity, block_size));
+                .unwrap_or(65536); // 64 KiB adaptive request for packet buffers
+            let pool = Arc::new(MemoryPool::new_adaptive(capacity, block_size));
             // Start auto-tuner thread if enabled
             MemoryPool::start_auto_tuner(Arc::clone(&pool));
             pool
@@ -239,9 +242,9 @@ pub fn global_pool() -> Arc<MemoryPool> {
         .clone()
 }
 
-/// Initializes the global pool explicitly with custom parameters. Subsequent
-/// calls to `global_pool()` will return this instance. Returns `false` if an
-/// instance was already initialized.
+/// Initializes the global pool with an explicit capacity and block-size contract.
+/// Subsequent calls to `global_pool()` return this instance. Returns `false` if
+/// an instance was already initialized.
 pub fn init_global_pool(capacity: usize, block_size: usize) -> bool {
     GLOBAL_POOL.set(Arc::new(MemoryPool::new(capacity, block_size))).is_ok()
 }

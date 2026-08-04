@@ -746,12 +746,12 @@ pub fn body_pool() -> Arc<MemoryPool> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(64 * 1024);
-            // Telemetry
+            let pool = Arc::new(MemoryPool::new(cap, blk));
             crate::optimize::telemetry::BODY_POOL_BLOCK_SIZE
-                .store(blk as u64, std::sync::atomic::Ordering::Relaxed);
+                .store(pool.block_size() as u64, std::sync::atomic::Ordering::Relaxed);
             crate::optimize::telemetry::BODY_POOL_CAPACITY
                 .store(cap as u64, std::sync::atomic::Ordering::Relaxed);
-            Arc::new(MemoryPool::new(cap, blk))
+            pool
         })
         .clone()
 }
@@ -1004,39 +1004,10 @@ mod tests {
         assert_eq!(&decompressed[..decompressed_len], payload.as_slice());
     }
 
-    struct AdaptiveBlockGuard {
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl AdaptiveBlockGuard {
-        fn disable() -> Self {
-            let previous = std::env::var_os("QUICFUSCATE_POOL_ADAPTIVE_BLOCK");
-            unsafe {
-                std::env::set_var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK", "0");
-            }
-            Self { previous }
-        }
-    }
-
-    impl Drop for AdaptiveBlockGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe {
-                    std::env::set_var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK", value);
-                },
-                None => unsafe {
-                    std::env::remove_var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK");
-                },
-            }
-        }
-    }
-
     #[test]
     fn compress_with_dict_roundtrip_handles_payload_larger_than_64k() {
-        let adaptive_block_guard = AdaptiveBlockGuard::disable();
         let pool = Arc::new(MemoryPool::new(2, 128 * 1024));
         assert_eq!(pool.block_size(), 128 * 1024);
-        drop(adaptive_block_guard);
         let dict = b"header:value\ncontent-type:text/plain\nhello hello hello\n";
         let mut payload = Vec::with_capacity(96 * 1024);
         for index in 0..1024 {
@@ -1088,5 +1059,17 @@ mod tests {
         let mut wrong_header = compressed[..used].to_vec();
         wrong_header[1..5].copy_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
         assert!(manager.decompress_to_pool(&pool, &wrong_header).is_none());
+    }
+
+    #[test]
+    fn body_pool_telemetry_reports_the_effective_block_size() {
+        let pool = body_pool();
+        let reported = crate::optimize::telemetry::BODY_POOL_BLOCK_SIZE
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(reported as usize, pool.block_size());
+
+        let block = pool.alloc();
+        assert_eq!(block.len(), reported as usize);
+        pool.free(block);
     }
 }
