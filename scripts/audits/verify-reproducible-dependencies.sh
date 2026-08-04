@@ -23,7 +23,8 @@ done
 
 python3 - "$PROJECT_ROOT" "$VERSIONS_FILE" \
   "$BUN_VERSION" "$RUST_TOOLCHAIN" "$RUST_NIGHTLY_TOOLCHAIN" \
-  "$TAURI_CLI_VERSION" "$CARGO_AUDIT_VERSION" "$CARGO_FUZZ_VERSION" \
+  "$TAURI_CLI_VERSION" "$CARGO_AUDIT_VERSION" "$CARGO_DENY_VERSION" \
+  "$CARGO_FUZZ_VERSION" \
   "$CRITCMP_VERSION" <<'PY'
 import json
 import subprocess
@@ -33,7 +34,7 @@ from pathlib import Path
 
 project_root = Path(sys.argv[1])
 versions_file = Path(sys.argv[2])
-bun_version, rust_toolchain, rust_nightly, tauri_cli, cargo_audit, cargo_fuzz, critcmp = sys.argv[3:]
+bun_version, rust_toolchain, rust_nightly, tauri_cli, cargo_audit, cargo_deny, cargo_fuzz, critcmp = sys.argv[3:]
 
 
 def fail(message):
@@ -88,6 +89,7 @@ for path, text in workflow_text.items():
 tool_install_versions = {
     "tauri-cli": tauri_cli,
     "cargo-audit": cargo_audit,
+    "cargo-deny": cargo_deny,
     "cargo-fuzz": cargo_fuzz,
     "critcmp": critcmp,
 }

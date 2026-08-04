@@ -551,6 +551,8 @@ jobs:
 
   security-audit:
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v7
 
@@ -562,8 +564,15 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --version "0.22.2" --locked
 
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version "0.19.0" --locked
+
       - name: Run cargo audit
         run: cargo audit --deny warnings
+
+      - name: Run locked Tauri dependency gates
+        shell: bash
+        run: bash scripts/audits/verify-tauri-dependencies.sh
 
   release-contract:
     runs-on: ubuntu-latest

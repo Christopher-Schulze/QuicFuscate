@@ -8,6 +8,8 @@ on:
 jobs:
   release-version-contract:
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v7
 
@@ -33,6 +35,16 @@ jobs:
       - name: Dependency reproducibility audit
         shell: bash
         run: bash scripts/audits/verify-reproducible-dependencies.sh
+
+      - name: Install dependency audit tools
+        shell: bash
+        run: |
+          cargo install cargo-audit --version "0.22.2" --locked
+          cargo install cargo-deny --version "0.19.0" --locked
+
+      - name: Verify locked Tauri dependency security
+        shell: bash
+        run: bash scripts/audits/verify-tauri-dependencies.sh
 
   linux-server-bundle:
     needs: release-version-contract

@@ -1,0 +1,96 @@
+[graph]
+targets = []
+all-features = true
+no-default-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+unsound = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  "Zlib",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unlicense",
+  "OpenSSL",
+  "MIT-0",
+]
+
+[bans]
+multiple-versions = "deny"
+wildcards = "allow"
+highlight = "all"
+skip = [
+  # Root protocol and Tauri dependency graphs intentionally retain these
+  # cross-version requirements; TODO-755 owns their review.
+  { crate = "rand_core" },
+  { crate = "base64" },
+  { crate = "core-foundation" },
+  { crate = "crypto-common" },
+  { crate = "getrandom" },
+  { crate = "socket2" },
+  { crate = "webpki-roots" },
+  { crate = "windows-link" },
+  { crate = "windows-result" },
+  { crate = "windows-strings" },
+  { crate = "windows-sys" },
+  { crate = "windows-targets" },
+  { crate = "windows_aarch64_gnullvm" },
+  { crate = "windows_aarch64_msvc" },
+  { crate = "windows_i686_gnu" },
+  { crate = "windows_i686_gnullvm" },
+  { crate = "windows_i686_msvc" },
+  { crate = "windows_x86_64_gnu" },
+  { crate = "windows_x86_64_gnullvm" },
+  { crate = "windows_x86_64_msvc" },
+  # Tauri's GTK3/webview and legacy parser stacks retain these disjoint
+  # versions alongside the root protocol graph.
+  { crate = "bitflags" },
+  { crate = "dirs" },
+  { crate = "dirs-sys" },
+  { crate = "hashbrown" },
+  { crate = "heck" },
+  { crate = "indexmap" },
+  { crate = "phf" },
+  { crate = "phf_codegen" },
+  { crate = "phf_generator" },
+  { crate = "phf_macros" },
+  { crate = "phf_shared" },
+  { crate = "png" },
+  { crate = "proc-macro-crate" },
+  { crate = "rand" },
+  { crate = "rand_chacha" },
+  { crate = "redox_users" },
+  { crate = "reqwest" },
+  { crate = "security-framework" },
+  { crate = "serde_spanned" },
+  { crate = "siphasher" },
+  { crate = "syn" },
+  { crate = "thiserror" },
+  { crate = "thiserror-impl" },
+  { crate = "toml" },
+  { crate = "toml_datetime" },
+  { crate = "toml_edit" },
+  { crate = "wasi" },
+  { crate = "winnow" },
+  { crate = "winreg" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
