@@ -20,10 +20,10 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.2.21"
+          bun-version: "1.3.14"
 
       - name: Install workspace dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Svelte desktop check + unit tests
         shell: bash
@@ -47,10 +47,10 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.2.21"
+          bun-version: "1.3.14"
 
       - name: Install workspace dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Install Playwright Chromium
         shell: bash
@@ -90,11 +90,13 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.2.21"
+          bun-version: "1.3.14"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -106,7 +108,7 @@ jobs:
           key: ${{ runner.os }}-app-backend-${{ hashFiles('apps/tauri/src-tauri/Cargo.lock', 'Cargo.lock') }}
 
       - name: Install workspace dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Build desktop frontend bundle for Tauri context
         shell: bash
@@ -117,12 +119,19 @@ jobs:
       - name: Check Tauri host backend
         shell: bash
         working-directory: apps/tauri/src-tauri
-        run: cargo check
+        run: |
+          cargo metadata --locked --no-deps --format-version 1
+          cargo check --locked
+
+      - name: Lint Tauri host backend
+        shell: bash
+        working-directory: apps/tauri/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test Tauri host backend
         shell: bash
         working-directory: apps/tauri/src-tauri
-        run: cargo test
+        run: cargo test --locked
 
   build-test:
     runs-on: ${{ matrix.os }}
@@ -137,9 +146,9 @@ jobs:
           submodules: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
 
       - name: Cache cargo registry
@@ -156,17 +165,17 @@ jobs:
       - name: Run Clippy
         shell: bash
         run: |
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Verify release compilation
         shell: bash
         run: |
-          cargo build --workspace --release
+          cargo build --workspace --release --locked
 
       - name: Run tests
         shell: bash
         run: |
-          cargo test --workspace --all-targets --features rust-tests
+          cargo test --workspace --all-targets --features rust-tests --locked
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -191,6 +200,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.97.1"
           components: clippy
 
       - name: Cache cargo registry
@@ -203,13 +213,13 @@ jobs:
           key: windows-core-${{ hashFiles('Cargo.lock') }}
 
       - name: Check Windows Wintun core library
-        run: cargo check --lib --features tun-windows,rust-tests
+        run: cargo check --locked --lib --features tun-windows,rust-tests
 
       - name: Compile Windows Wintun tests
-        run: cargo test --lib --features tun-windows,rust-tests --no-run
+        run: cargo test --locked --lib --features tun-windows,rust-tests --no-run
 
       - name: Build Windows Wintun CLI
-        run: cargo build --bin quicfuscate --features tun-windows
+        run: cargo build --locked --bin quicfuscate --features tun-windows
 
       - name: Provision verified upstream Wintun
         shell: pwsh
@@ -239,24 +249,24 @@ jobs:
             -Encoding utf8
 
       - name: Test Windows Wintun core library
-        run: cargo test --lib --features tun-windows,rust-tests
+        run: cargo test --locked --lib --features tun-windows,rust-tests
 
       - name: Test privileged Wintun adapter lifecycle
         run: >-
-          cargo test --lib --features tun-windows,rust-tests
+          cargo test --locked --lib --features tun-windows,rust-tests
           interface::wintun::tests::native_
           -- --ignored --nocapture --test-threads=1
 
       - name: Test privileged Windows WFP kill switch
         run: >-
-          cargo test --lib --features tun-windows,rust-tests
+          cargo test --locked --lib --features tun-windows,rust-tests
           interface::wintun::tests::wfp_native_packet_policy_and_cleanup
           -- --ignored --exact --nocapture --test-threads=1
 
       - name: Verify zero Windows WFP object residue
         if: always()
         run: >-
-          cargo test --lib --features tun-windows,rust-tests
+          cargo test --locked --lib --features tun-windows,rust-tests
           implementations::client::killswitch::windows::tests::native_wfp_managed_objects_are_absent
           -- --ignored --exact --nocapture --test-threads=1
 
@@ -290,7 +300,7 @@ jobs:
             -Encoding utf8
 
       - name: Lint Windows Wintun core library
-        run: cargo clippy --lib --features tun-windows,rust-tests -- -D warnings
+        run: cargo clippy --locked --lib --features tun-windows,rust-tests -- -D warnings
 
       - name: Upload native Wintun evidence
         uses: actions/upload-artifact@v7
@@ -321,6 +331,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -336,7 +348,7 @@ jobs:
         run: |
           if [ "${{ matrix.features }}" = "simd-selfcheck" ]; then
             simd_output="${RUNNER_TEMP}/quicfuscate-simd-selfcheck.log"
-            if ! cargo test --workspace \
+            if ! cargo test --workspace --locked \
               --features rust-tests,simd-selfcheck \
               --test rt-simd-selfcheck -- --nocapture >"$simd_output" 2>&1; then
               cat "$simd_output"
@@ -345,10 +357,10 @@ jobs:
             cat "$simd_output"
             grep -Fq "test varint_roundtrip_and_consistency ... ok" "$simd_output"
           elif [ -n "${{ matrix.features }}" ]; then
-            cargo test --workspace --all-targets \
+            cargo test --workspace --all-targets --locked \
               --features "rust-tests,${{ matrix.features }}"
           else
-            cargo test --workspace --all-targets --features rust-tests
+            cargo test --workspace --all-targets --features rust-tests --locked
           fi
 
   linux-fastpath-gates:
@@ -361,9 +373,9 @@ jobs:
           submodules: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -399,6 +411,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -413,7 +427,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y iproute2 netcat-openbsd tcpdump
 
       - name: Build exact traffic-analysis artifact
-        run: cargo build --release --bin quicfuscate
+        run: cargo build --locked --release --bin quicfuscate
 
       - name: Prove fail-closed Linux TUN provisioning and rollback
         shell: bash
@@ -499,7 +513,7 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.2.21"
+          bun-version: "1.3.14"
 
       - name: Install native installer proof dependencies
         run: |
@@ -517,7 +531,7 @@ jobs:
         shell: bash
         working-directory: apps/svelte-admin
         run: |
-          bun install --no-progress
+          bun install --frozen-lockfile --no-progress
           bun run build
 
       - name: Prove AlmaLinux and Debian installer lifecycles
@@ -541,12 +555,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version "0.22.2" --locked
 
       - name: Run cargo audit
         run: cargo audit --deny warnings
@@ -556,9 +570,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
       - name: Release version consistency audit
         shell: bash
         run: bash scripts/audits/verify-release-version.sh
+
+      - name: Dependency reproducibility audit
+        shell: bash
+        run: bash scripts/audits/verify-reproducible-dependencies.sh
 
   fuzz-targets:
     runs-on: ubuntu-latest
@@ -568,9 +596,11 @@ jobs:
 
       - name: Set up nightly Rust
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version "0.13.2" --locked
 
       - name: Link fuzz crate for cargo-fuzz
         run: ln -sfn scripts/tests/fuzz fuzz
@@ -622,6 +652,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache cargo registry + criterion baselines
         uses: actions/cache@v6
@@ -635,7 +667,7 @@ jobs:
             bench-
 
       - name: Install critcmp
-        run: cargo install critcmp --locked
+        run: cargo install critcmp --version "0.1.8" --locked
 
       - name: Run baseline benchmarks (main)
         run: |

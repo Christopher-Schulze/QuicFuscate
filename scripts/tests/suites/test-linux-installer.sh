@@ -6,7 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 OUTPUT_DIR=""
-RUST_TOOLCHAIN="1.97.1"
+TOOL_VERSIONS_FILE="$PROJECT_ROOT/config/tool-versions.env"
+if [[ ! -f "$TOOL_VERSIONS_FILE" ]]; then
+  echo "FAIL: missing tool-version owner: $TOOL_VERSIONS_FILE" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$TOOL_VERSIONS_FILE"
+RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.97.1}"
 ASSETS_DIR="$PROJECT_ROOT/assets/web-admin"
 PREBUILT_BINARY=""
 ARTIFACT_ORIGIN="almalinux-9-build"

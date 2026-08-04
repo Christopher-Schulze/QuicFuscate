@@ -16,6 +16,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -28,8 +30,8 @@ jobs:
 
       - name: Build native Wintun client and residue verifier
         run: |
-          cargo build --bin quicfuscate --features tun-windows
-          cargo test --lib --features tun-windows,rust-tests --no-run
+          cargo build --locked --bin quicfuscate --features tun-windows
+          cargo test --locked --lib --features tun-windows,rust-tests --no-run
 
       - name: Provision verified upstream Wintun
         shell: pwsh
@@ -55,7 +57,7 @@ jobs:
       - name: Verify zero Windows WFP object residue
         if: always()
         run: >-
-          cargo test --lib --features tun-windows,rust-tests
+          cargo test --locked --lib --features tun-windows,rust-tests
           implementations::client::killswitch::windows::tests::native_wfp_managed_objects_are_absent
           -- --ignored --exact --nocapture --test-threads=1
 

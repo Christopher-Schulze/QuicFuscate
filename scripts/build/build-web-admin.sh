@@ -50,7 +50,7 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 
 cd "$SVELTE_APP_DIR"
-bun install --no-progress
+bun install --frozen-lockfile --no-progress
 bun run build
 SOURCE="$SVELTE_APP_DIR/build"
 DEST="$PROJECT_ROOT/assets/web-admin"

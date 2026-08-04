@@ -37,6 +37,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
+        toolchain: "1.97.1"
         components: clippy
         
     - name: Cache dependencies
@@ -53,7 +54,7 @@ jobs:
     - name: "Run clippy check (features: ${{ matrix.features }})"
       run: |
         if [ -n "${{ matrix.features }}" ]; then
-          cargo clippy --all-targets --features "${{ matrix.features }}" -- -D warnings
+          cargo clippy --locked --all-targets --features "${{ matrix.features }}" -- -D warnings
         else
-          cargo clippy --all-targets -- -D warnings
+          cargo clippy --locked --all-targets -- -D warnings
         fi
