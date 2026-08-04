@@ -16,7 +16,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use quicfuscate::fec::{
     wire, AdaptiveFec, FecConfig, FecControlPolicy, FecDecoder8, FecMode, FecPacket,
 };
-use quicfuscate::optimize::global_pool;
+use quicfuscate::optimize::{global_pool, telemetry};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -417,6 +417,108 @@ fn bench_fec_peeling_k256(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 2d. Wiedemann scratch allocation profile: high-loss k=128/256
+//
+// Every repair equation has two non-zero coefficients, so it remains queued
+// until the full system is available. Zero-valued payloads make the existing
+// solver validation succeed without entering Gaussian fallback, isolating the
+// Wiedemann byte-parallel path and its scratch ownership.
+// ---------------------------------------------------------------------------
+
+const WIEDEMANN_BENCH_SYMBOL_LEN: usize = 32;
+const WIEDEMANN_BENCH_K_VALUES: [usize; 2] = [128, 256];
+
+fn make_wiedemann_benchmark_batch(
+    k: usize,
+    pool: &Arc<quicfuscate::optimize::MemoryPool>,
+) -> (FecDecoder8, Vec<FecPacket>) {
+    let decoder = FecDecoder8::new_with_decoder_policy(k, Arc::clone(pool), "wiedemann");
+    let mut packets = Vec::with_capacity(k);
+
+    for equation_index in 0..k {
+        let mut data = pool.alloc();
+        data[..WIEDEMANN_BENCH_SYMBOL_LEN].fill(0);
+        let mut coefficients = pool.alloc();
+        coefficients[..k].fill(0);
+        coefficients[equation_index] = 1;
+        let next_index = (equation_index + 1) % k;
+        coefficients[next_index] = if next_index == 0 { 2 } else { 1 };
+        packets.push(FecPacket::new(
+            (k - 1) as u64,
+            Some(data),
+            WIEDEMANN_BENCH_SYMBOL_LEN,
+            false,
+            Some(coefficients),
+            k,
+            Arc::clone(pool),
+        ));
+    }
+
+    (decoder, packets)
+}
+
+fn run_wiedemann_benchmark_batch(k: usize, pool: &Arc<quicfuscate::optimize::MemoryPool>) -> usize {
+    let (mut decoder, packets) = make_wiedemann_benchmark_batch(k, pool);
+    for packet in packets {
+        decoder.take_packet(packet);
+    }
+    decoder.poll_recovered().len()
+}
+
+fn bench_fec_wiedemann_allocations(c: &mut Criterion) {
+    let pool = global_pool();
+    let _ = AdaptiveFec::new(FecConfig::product_default());
+    let mut group = c.benchmark_group("fec_wiedemann_allocations");
+
+    for &k in &WIEDEMANN_BENCH_K_VALUES {
+        let column_before = telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS.get();
+        let accumulator_before = telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.get();
+        let matrix_rhs_before = telemetry::WIEDEMANN_MATRIX_RHS_ALLOCS.get();
+        let krylov_before = telemetry::WIEDEMANN_KRYLOV_ALLOCS.get();
+        let iteration_before = telemetry::WIEDEMANN_ITERATION_ALLOCS.get();
+        let candidate_before = telemetry::WIEDEMANN_CANDIDATE_ALLOCS.get();
+        let amx_before = telemetry::WIEDEMANN_AMX_SCRATCH_ALLOCS.get();
+        let usage_before = telemetry::WIEDEMANN_USAGE.get();
+        let recovered = run_wiedemann_benchmark_batch(k, &pool);
+        let column_after = telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS.get();
+        let accumulator_after = telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.get();
+        let matrix_rhs_after = telemetry::WIEDEMANN_MATRIX_RHS_ALLOCS.get();
+        let krylov_after = telemetry::WIEDEMANN_KRYLOV_ALLOCS.get();
+        let iteration_after = telemetry::WIEDEMANN_ITERATION_ALLOCS.get();
+        let candidate_after = telemetry::WIEDEMANN_CANDIDATE_ALLOCS.get();
+        let amx_after = telemetry::WIEDEMANN_AMX_SCRATCH_ALLOCS.get();
+        let usage_after = telemetry::WIEDEMANN_USAGE.get();
+        eprintln!(
+            "fec_wiedemann_profile k={k} recovered={recovered} solver_calls={} column_buffers={} spmv_accumulators={} matrix_rhs={} krylov={} iterations={} candidates={} amx_scratch={}",
+            usage_after - usage_before,
+            column_after - column_before,
+            accumulator_after - accumulator_before,
+            matrix_rhs_after - matrix_rhs_before,
+            krylov_after - krylov_before,
+            iteration_after - iteration_before,
+            candidate_after - candidate_before,
+            amx_after - amx_before,
+        );
+
+        group.throughput(Throughput::Elements((k * WIEDEMANN_BENCH_SYMBOL_LEN) as u64));
+        group.bench_with_input(BenchmarkId::new("high_loss", k), &k, |b, &k| {
+            b.iter_batched(
+                || make_wiedemann_benchmark_batch(k, &pool),
+                |(mut decoder, packets)| {
+                    for packet in packets {
+                        decoder.take_packet(packet);
+                    }
+                    black_box(decoder.poll_recovered().len());
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // 3. Mode transition overhead: measure block-boundary switch cost
 // ---------------------------------------------------------------------------
 
@@ -722,6 +824,7 @@ criterion_group!(
     bench_fec_decode_pipeline,
     bench_fec_decode_compat_alloc,
     bench_fec_peeling_k256,
+    bench_fec_wiedemann_allocations,
     bench_fec_mode_transition,
     bench_fec_streaming_repair,
     bench_fec_lazy_fast_path,

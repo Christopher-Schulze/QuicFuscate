@@ -17,6 +17,94 @@ struct Equation8 {
     len: usize,
 }
 
+struct WiedemannScratch {
+    #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
+    column_buffers: Vec<Vec<u8>>,
+    #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
+    spmv_acc: Vec<u8>,
+}
+
+impl WiedemannScratch {
+    fn from_lookup(eq_coeff_lookup: &[Vec<Option<u8>>], n: usize) -> Self {
+        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
+        {
+            let row_limit = eq_coeff_lookup.len().min(n);
+            let column_buffers = if row_limit > 0 && n > 0 {
+                (0..n)
+                    .map(|col| {
+                        let mut column = vec![0u8; row_limit];
+                        for row in 0..row_limit {
+                            column[row] = eq_coeff_lookup[row]
+                                .get(col)
+                                .copied()
+                                .flatten()
+                                .unwrap_or(0);
+                        }
+                        column
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let spmv_acc = if row_limit > 0 { vec![0u8; row_limit] } else { Vec::new() };
+            if !column_buffers.is_empty() {
+                crate::telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS
+                    .inc_by(column_buffers.len() as u64);
+            }
+            if !spmv_acc.is_empty() {
+                crate::telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.inc();
+            }
+            Self { column_buffers, spmv_acc }
+        }
+        #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
+        {
+            let _ = (eq_coeff_lookup, n);
+            Self {}
+        }
+    }
+
+    #[cfg(test)]
+    fn from_matrix(matrix: &[Vec<u8>], n: usize) -> Self {
+        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
+        {
+            let row_limit = matrix.len().min(n);
+            let column_buffers = if row_limit > 0 && n > 0 {
+                (0..n)
+                    .map(|col| {
+                        let mut column = vec![0u8; row_limit];
+                        for row in 0..row_limit {
+                            column[row] = matrix[row].get(col).copied().unwrap_or(0);
+                        }
+                        column
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let spmv_acc = if row_limit > 0 { vec![0u8; row_limit] } else { Vec::new() };
+            if !column_buffers.is_empty() {
+                crate::telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS
+                    .inc_by(column_buffers.len() as u64);
+            }
+            if !spmv_acc.is_empty() {
+                crate::telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.inc();
+            }
+            Self { column_buffers, spmv_acc }
+        }
+        #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
+        {
+            let _ = (matrix, n);
+            Self {}
+        }
+    }
+
+    #[inline]
+    fn clear_spmv_acc(&mut self) {
+        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
+        self.spmv_acc.fill(0);
+    }
+}
+
 struct Decoder8 {
     k: usize,
     mem_pool: Arc<MemoryPool>,
@@ -437,33 +525,53 @@ impl Decoder8 {
         let mut solutions = vec![vec![0u8; min_len]; n];
 
         // Parallel byte-wise solve with Rayon (without mutable capture)
-        let byte_solutions: Vec<Option<Vec<u8>>> = (0..min_len)
+        let equation_count = self.equations.len();
+        let rayon_workers = rayon::current_num_threads().max(1);
+        let byte_chunk_len = min_len.div_ceil(rayon_workers).max(1);
+        let byte_indices: Vec<usize> = (0..min_len).collect();
+        let byte_solutions: Vec<Option<Vec<u8>>> = byte_indices
             .into_par_iter()
-            .map(|byte_idx| {
-                // Build matrix for this byte
-                let mut matrix = vec![vec![0u8; n]; self.equations.len()];
-                let mut rhs = vec![0u8; self.equations.len()];
+            .chunks(byte_chunk_len)
+            .map_init(
+                || WiedemannScratch::from_lookup(&eq_coeff_lookup, n),
+                |scratch, byte_indices| {
+                    byte_indices
+                        .into_iter()
+                        .map(|byte_idx| {
+                            // Build matrix for this byte
+                            let mut matrix = vec![vec![0u8; n]; equation_count];
+                            let mut rhs = vec![0u8; equation_count];
+                            crate::telemetry::WIEDEMANN_MATRIX_RHS_ALLOCS
+                                .inc_by((equation_count + 1) as u64);
 
-                for (i, eq) in self.equations.iter().enumerate() {
-                    if byte_idx < eq.len {
-                        rhs[i] = eq.data[byte_idx];
-                        for (j, _uid) in unknowns.iter().enumerate() {
-                            if let Some(coeff) = eq_coeff_lookup[i][j] {
-                                matrix[i][j] = coeff;
+                            for (i, eq) in self.equations.iter().enumerate() {
+                                if byte_idx < eq.len {
+                                    rhs[i] = eq.data[byte_idx];
+                                    for (j, _uid) in unknowns.iter().enumerate() {
+                                        if let Some(coeff) = eq_coeff_lookup[i][j] {
+                                            matrix[i][j] = coeff;
+                                        }
+                                    }
+                                }
                             }
-                        }
-                    }
-                }
 
-                // Wiedemann solver with Berlekamp-Massey
-                let solution = self.solve_wiedemann_system(&matrix, &rhs, n)?;
-                let valid = matrix.iter().zip(&rhs).all(|(row, expected)| {
-                    row.iter().zip(&solution).fold(0u8, |acc, (&coefficient, &value)| {
-                        acc ^ gf_tables::gf_mul_table(coefficient, value)
-                    }) == *expected
-                });
-                valid.then_some(solution)
-            })
+                            // Wiedemann solver with Berlekamp-Massey
+                            let solution =
+                                self.solve_wiedemann_system(&matrix, &rhs, n, scratch)?;
+                            let valid = matrix.iter().zip(&rhs).all(|(row, expected)| {
+                                row.iter().zip(&solution).fold(
+                                    0u8,
+                                    |acc, (&coefficient, &value)| {
+                                        acc ^ gf_tables::gf_mul_table(coefficient, value)
+                                    },
+                                ) == *expected
+                            });
+                            valid.then_some(solution)
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .flatten()
             .collect();
 
         for (byte_idx, column) in byte_solutions.into_iter().enumerate() {
@@ -503,10 +611,16 @@ impl Decoder8 {
         true
     }
 
-    fn solve_wiedemann_system(&self, matrix: &[Vec<u8>], rhs: &[u8], n: usize) -> Option<Vec<u8>> {
+    fn solve_wiedemann_system(
+        &self,
+        matrix: &[Vec<u8>],
+        rhs: &[u8],
+        n: usize,
+        scratch: &mut WiedemannScratch,
+    ) -> Option<Vec<u8>> {
         // Wiedemann algorithm with Berlekamp-Massey
         let m = matrix.len();
-        if m < n {
+        if n == 0 || m < n {
             return None;
         }
 
@@ -524,6 +638,7 @@ impl Decoder8 {
         let seq_len = 2 * n + 64;
         let mut sequence = vec![0u8; seq_len];
         let mut av = v.clone();
+        crate::telemetry::WIEDEMANN_KRYLOV_ALLOCS.inc_by(4);
 
         crate::telemetry::WIEDEMANN_USAGE.inc();
 
@@ -551,6 +666,7 @@ impl Decoder8 {
                     flat_matrix[i * n + j] = val;
                 }
             }
+            crate::telemetry::WIEDEMANN_AMX_SCRATCH_ALLOCS.inc_by(3);
             crate::telemetry::WIEDEMANN_AMX_OPS.inc();
             Some(AmxBuffers { flat_matrix, result: vec![0u8; m], av_col: vec![0u8; n] })
         } else {
@@ -558,36 +674,6 @@ impl Decoder8 {
         };
 
         let row_limit = matrix.len().min(n);
-        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
-        let (column_buffers, mut spmv_acc) = if !use_amx && row_limit > 0 && n > 0 {
-            let column_buffers = (0..n)
-                .map(|col| {
-                    let mut column = vec![0u8; row_limit];
-                    for row in 0..row_limit {
-                        column[row] = *matrix[row].get(col).unwrap_or(&0);
-                    }
-                    column
-                })
-                .collect();
-            (column_buffers, vec![0u8; row_limit])
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
-        let (_column_buffers, _spmv_acc) = if !use_amx && row_limit > 0 && n > 0 {
-            let column_buffers = (0..n)
-                .map(|col| {
-                    let mut column = vec![0u8; row_limit];
-                    for row in 0..row_limit {
-                        column[row] = *matrix[row].get(col).unwrap_or(&0);
-                    }
-                    column
-                })
-                .collect::<Vec<_>>();
-            (column_buffers, vec![0u8; row_limit])
-        } else {
-            (Vec::new(), Vec::new())
-        };
 
         if !use_amx {
             crate::telemetry::WIEDEMANN_SCALAR_OPS.inc();
@@ -602,6 +688,7 @@ impl Decoder8 {
             *slot = s;
 
             // av = A * av (Matrix-Vector multiply)
+            crate::telemetry::WIEDEMANN_ITERATION_ALLOCS.inc();
             #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
             let mut next_av = vec![0u8; n];
             #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
@@ -627,24 +714,23 @@ impl Decoder8 {
                     next_av[..copy_len].copy_from_slice(&buffers.result[..copy_len]);
                 }
             } else {
-                if row_limit == 0 || column_buffers.is_empty() {
+                if row_limit == 0 || scratch.column_buffers.is_empty() {
                     next_av.fill(0);
                 } else {
-                    spmv_acc.fill(0);
-                    let limit = column_buffers.len().min(av.len());
-                    for col_idx in 0..limit {
-                        let coeff = av[col_idx];
+                    scratch.clear_spmv_acc();
+                    let limit = scratch.column_buffers.len().min(av.len());
+                    for (col_idx, &coeff) in av.iter().enumerate().take(limit) {
                         if coeff != 0 {
                             gf_tables::gf_mul_scalar_slice(
                                 coeff,
-                                &column_buffers[col_idx],
-                                &mut spmv_acc,
+                                &scratch.column_buffers[col_idx],
+                                &mut scratch.spmv_acc,
                             );
                         }
                     }
                     let copy = row_limit.min(next_av.len());
                     if copy > 0 {
-                        next_av[..copy].copy_from_slice(&spmv_acc[..copy]);
+                        next_av[..copy].copy_from_slice(&scratch.spmv_acc[..copy]);
                     }
                     if next_av.len() > copy {
                         next_av[copy..].fill(0);
@@ -653,24 +739,23 @@ impl Decoder8 {
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                if row_limit == 0 || column_buffers.is_empty() {
+                if row_limit == 0 || scratch.column_buffers.is_empty() {
                     next_av.fill(0);
                 } else {
-                    spmv_acc.fill(0);
-                    let limit = column_buffers.len().min(av.len());
-                    for col_idx in 0..limit {
-                        let coeff = av[col_idx];
+                    scratch.clear_spmv_acc();
+                    let limit = scratch.column_buffers.len().min(av.len());
+                    for (col_idx, &coeff) in av.iter().enumerate().take(limit) {
                         if coeff != 0 {
                             gf_tables::gf_mul_scalar_slice(
                                 coeff,
-                                &column_buffers[col_idx],
-                                &mut spmv_acc,
+                                &scratch.column_buffers[col_idx],
+                                &mut scratch.spmv_acc,
                             );
                         }
                     }
                     let copy = row_limit.min(next_av.len());
                     if copy > 0 {
-                        next_av[..copy].copy_from_slice(&spmv_acc[..copy]);
+                        next_av[..copy].copy_from_slice(&scratch.spmv_acc[..copy]);
                     }
                     if next_av.len() > copy {
                         next_av[copy..].fill(0);
@@ -688,6 +773,7 @@ impl Decoder8 {
         }
 
         // Solve using the minimal polynomial
+        crate::telemetry::WIEDEMANN_CANDIDATE_ALLOCS.inc_by(2);
         let mut x = vec![0u8; n];
         let temp = rhs.to_vec();
 

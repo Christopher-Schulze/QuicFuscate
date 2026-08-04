@@ -205,6 +205,41 @@ pub fn export_telemetry_text() -> String {
     let _ = writeln!(out, "quicfuscate_wiedemann_usage {}", WIEDEMANN_USAGE.get());
     let _ = writeln!(out, "quicfuscate_wiedemann_amx_ops {}", WIEDEMANN_AMX_OPS.get());
     let _ = writeln!(out, "quicfuscate_wiedemann_scalar_ops {}", WIEDEMANN_SCALAR_OPS.get());
+    let _ = writeln!(
+        out,
+        "quicfuscate_wiedemann_column_buffer_allocations_total {}",
+        WIEDEMANN_COLUMN_BUFFER_ALLOCS.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_wiedemann_spmv_accumulator_allocations_total {}",
+        WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_wiedemann_matrix_rhs_allocations_total {}",
+        WIEDEMANN_MATRIX_RHS_ALLOCS.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_wiedemann_krylov_allocations_total {}",
+        WIEDEMANN_KRYLOV_ALLOCS.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_wiedemann_iteration_allocations_total {}",
+        WIEDEMANN_ITERATION_ALLOCS.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_wiedemann_candidate_allocations_total {}",
+        WIEDEMANN_CANDIDATE_ALLOCS.get()
+    );
+    let _ = writeln!(
+        out,
+        "quicfuscate_wiedemann_amx_scratch_allocations_total {}",
+        WIEDEMANN_AMX_SCRATCH_ALLOCS.get()
+    );
     if fec {
         for &(mode_id, mode_name) in &FEC_MODE_MAPPING {
             let active = FEC_ACTIVE_CONNECTIONS_BY_MODE[mode_id as usize].load(Ordering::Relaxed);
@@ -1199,6 +1234,20 @@ pub static WIEDEMANN_USAGE: Counter = Counter::new();
 pub static WIEDEMANN_AMX_OPS: Counter = Counter::new();
 /// Wiedemann solver operations via scalar fallback.
 pub static WIEDEMANN_SCALAR_OPS: Counter = Counter::new();
+/// Logical column-vector scratch allocations for Wiedemann scalar SpMV.
+pub static WIEDEMANN_COLUMN_BUFFER_ALLOCS: Counter = Counter::new();
+/// Logical accumulator scratch allocations for Wiedemann scalar SpMV.
+pub static WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS: Counter = Counter::new();
+/// Logical matrix and RHS scratch allocations in the per-byte solve.
+pub static WIEDEMANN_MATRIX_RHS_ALLOCS: Counter = Counter::new();
+/// Logical Krylov-vector scratch allocations in a solve.
+pub static WIEDEMANN_KRYLOV_ALLOCS: Counter = Counter::new();
+/// Logical per-iteration vector allocations in a solve.
+pub static WIEDEMANN_ITERATION_ALLOCS: Counter = Counter::new();
+/// Logical candidate and temporary-result allocations in a solve.
+pub static WIEDEMANN_CANDIDATE_ALLOCS: Counter = Counter::new();
+/// Logical AMX matrix/vector scratch allocations in a solve.
+pub static WIEDEMANN_AMX_SCRATCH_ALLOCS: Counter = Counter::new();
 /// Stable public FEC codec mode mapping used by every telemetry export.
 pub const FEC_MODE_MAPPING: [(u8, &str); 9] = [
     (0, "zero"),
@@ -2022,6 +2071,13 @@ mod tests {
             "quicfuscate_fec_fountain_decoder_evictions_total ",
             "quicfuscate_fec_fountain_decoder_admission_rejections_total ",
             "quicfuscate_fec_fountain_decoder_propagation_work_total ",
+            "quicfuscate_wiedemann_column_buffer_allocations_total ",
+            "quicfuscate_wiedemann_spmv_accumulator_allocations_total ",
+            "quicfuscate_wiedemann_matrix_rhs_allocations_total ",
+            "quicfuscate_wiedemann_krylov_allocations_total ",
+            "quicfuscate_wiedemann_iteration_allocations_total ",
+            "quicfuscate_wiedemann_candidate_allocations_total ",
+            "quicfuscate_wiedemann_amx_scratch_allocations_total ",
         ] {
             assert!(text.contains(metric), "missing FEC decoder telemetry metric: {metric}");
         }

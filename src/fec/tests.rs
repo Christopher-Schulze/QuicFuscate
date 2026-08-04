@@ -1006,6 +1006,7 @@ fn test_streaming_repairs_have_nonzero_coeffs() {
 #[test]
 fn test_wiedemann_scalar_telemetry_increments() {
     let _env_lock = acquire_env_lock();
+    super::gf_tables::init_tables();
     let pool = make_pool();
     let decoder = Decoder8::new(2, pool.clone());
 
@@ -1014,18 +1015,50 @@ fn test_wiedemann_scalar_telemetry_increments() {
 
     let usage_before = telemetry::WIEDEMANN_USAGE.get();
     let scalar_before = telemetry::WIEDEMANN_SCALAR_OPS.get();
+    let krylov_before = telemetry::WIEDEMANN_KRYLOV_ALLOCS.get();
+    let iteration_before = telemetry::WIEDEMANN_ITERATION_ALLOCS.get();
+    let candidate_before = telemetry::WIEDEMANN_CANDIDATE_ALLOCS.get();
+    let mut scratch = super::WiedemannScratch::from_matrix(&matrix, 2);
 
     let solution = decoder
-        .solve_wiedemann_system(&matrix, &rhs, 2)
+        .solve_wiedemann_system(&matrix, &rhs, 2, &mut scratch)
         .expect("identity system should be solvable");
 
     assert_eq!(solution, rhs, "identity system must return RHS");
 
     let usage_after = telemetry::WIEDEMANN_USAGE.get();
     let scalar_after = telemetry::WIEDEMANN_SCALAR_OPS.get();
+    let krylov_after = telemetry::WIEDEMANN_KRYLOV_ALLOCS.get();
+    let iteration_after = telemetry::WIEDEMANN_ITERATION_ALLOCS.get();
+    let candidate_after = telemetry::WIEDEMANN_CANDIDATE_ALLOCS.get();
 
     assert!(usage_after > usage_before, "usage counter should increase");
     assert!(scalar_after > scalar_before, "scalar counter should increase");
+    assert!(krylov_after >= krylov_before + 4, "Krylov allocation accounting should increase");
+    assert!(iteration_after > iteration_before, "iteration allocation accounting should increase");
+    assert!(
+        candidate_after >= candidate_before + 2,
+        "candidate allocation accounting should increase"
+    );
+}
+
+#[test]
+fn test_wiedemann_scratch_storage_is_dimension_bounded_and_resettable() {
+    let matrix = vec![vec![0u8; 5]; 4];
+    let mut scratch = super::WiedemannScratch::from_matrix(&matrix, 3);
+
+    #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
+    {
+        assert_eq!(scratch.column_buffers.len(), 3);
+        assert!(scratch.column_buffers.iter().all(|column| column.len() == 3));
+        assert_eq!(scratch.spmv_acc.len(), 3);
+        scratch.spmv_acc.fill(0xFF);
+        scratch.clear_spmv_acc();
+        assert!(scratch.spmv_acc.iter().all(|&value| value == 0));
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
+    assert_eq!(std::mem::size_of_val(&scratch), 0);
 }
 
 #[test]
@@ -1047,12 +1080,14 @@ fn test_wiedemann_amx_telemetry_increments() {
     }
 
     let rhs = vec![0xAAu8; dim];
+    let mut scratch = super::WiedemannScratch::from_matrix(&matrix, dim);
 
     let usage_before = telemetry::WIEDEMANN_USAGE.get();
     let amx_before = telemetry::WIEDEMANN_AMX_OPS.get();
 
-    let solution =
-        decoder.solve_wiedemann_system(&matrix, &rhs, dim).expect("AMX solve should succeed");
+    let solution = decoder
+        .solve_wiedemann_system(&matrix, &rhs, dim, &mut scratch)
+        .expect("AMX solve should succeed");
     assert_eq!(solution, rhs, "AMX path must match RHS for identity matrix");
 
     let usage_after = telemetry::WIEDEMANN_USAGE.get();

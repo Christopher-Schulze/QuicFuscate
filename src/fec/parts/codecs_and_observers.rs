@@ -248,6 +248,17 @@ impl FecDecoder8 {
     pub fn new(k: usize, pool: Arc<MemoryPool>) -> Self {
         Self(Decoder8::new(k, pool))
     }
+    /// Create a benchmark decoder with an explicit decoder policy snapshot.
+    #[cfg(feature = "benches")]
+    pub fn new_with_decoder_policy(
+        k: usize,
+        pool: Arc<MemoryPool>,
+        decoder_policy: &str,
+    ) -> Self {
+        let mut policy = FecRuntimePolicy::detect();
+        policy.decoder_policy = decoder_policy.to_string();
+        Self(Decoder8::new_with_policy(k, pool, &policy))
+    }
     /// Feed a received FEC packet (source or repair) into the decoder.
     pub fn take_packet(&mut self, p: FecPacket) {
         self.0.take_packet(p)
