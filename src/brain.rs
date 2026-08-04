@@ -1377,7 +1377,9 @@ impl TransportObserver for StealthBrain {
             stealth_delta.timing_rate = Some(stealth_policy.timing_rate);
         }
         if intelligent_runtime {
-            conn.apply_brain_stealth_runtime_delta(stealth_delta);
+            if let Err(error) = conn.apply_brain_stealth_runtime_delta(stealth_delta) {
+                trace!("brain stealth runtime delta could not activate CC shaping: {}", error);
+            }
         }
 
         if cooldown_ok && self.cfg.explore_prob > 0.0 {
@@ -1759,6 +1761,29 @@ mod time_source_tests {
         assert!(conn.external_pacing_enabled());
         // Level 0 (clean path, no pressure) disables padding to keep Intelligent near-zero overhead.
         assert!(!conn.stealth_padding_enabled_for_test());
+    }
+
+    #[test]
+    fn brain_keeps_base_cc_when_stealth_seed_fails() {
+        let base_instant = Instant::now();
+        let base_system = UNIX_EPOCH + Duration::from_secs(35);
+        let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
+        let _time_guard = crate::time_source::install_for_test(manual.clone());
+
+        let brain = StealthBrain::new(StealthBrainConfig::default());
+        let mut conn = test_connection(4463, 4464);
+        conn.set_intelligent_stealth_runtime_for_test(true);
+
+        let previous = crate::rng::test_force_secure_entropy_failure(true);
+        manual.advance(Duration::from_millis(400));
+        brain.apply_policy(&mut conn);
+        crate::rng::test_force_secure_entropy_failure(previous);
+
+        assert!(conn.intelligent_stealth_runtime_enabled_for_test());
+        assert!(
+            !conn.stealth_cc_active_for_test(),
+            "Brain-driven seed failure must retain the base congestion controller"
+        );
     }
 
     #[test]

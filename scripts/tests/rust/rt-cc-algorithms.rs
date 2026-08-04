@@ -134,12 +134,13 @@ fn stealth_wrapping_works_for_all_algorithms() {
         r.on_packet_sent(1, 1200, now);
 
         // Enable stealth
-        r.set_stealth_mode(true, BrowserProfile::Chrome);
+        r.set_stealth_mode(true, BrowserProfile::Chrome).expect("secure entropy must be available");
         r.on_ack(1200, now);
         assert!(r.cwnd > 0, "cwnd must stay positive after stealth wrap ({algo:?})");
 
         // Switch profile
-        r.set_stealth_mode(true, BrowserProfile::Firefox);
+        r.set_stealth_mode(true, BrowserProfile::Firefox)
+            .expect("secure entropy must be available");
         r.on_packet_sent(2, 1200, now);
         r.on_ack(1200, now);
         assert!(r.cwnd > 0, "cwnd must stay positive after profile switch ({algo:?})");
@@ -152,17 +153,18 @@ fn stealth_disable_reenable_cycle() {
     let now = Instant::now();
     r.on_packet_sent(1, 1200, now);
 
-    r.set_stealth_mode(true, BrowserProfile::Safari);
+    r.set_stealth_mode(true, BrowserProfile::Safari).expect("secure entropy must be available");
     r.on_ack(1200, now);
     let cwnd_stealth = r.cwnd;
 
-    r.set_stealth_mode(false, BrowserProfile::Safari);
+    r.set_stealth_mode(false, BrowserProfile::Safari)
+        .expect("disabling stealth mode must not require entropy");
     r.on_packet_sent(2, 1200, now);
     r.on_ack(1200, now);
     assert!(r.cwnd > 0);
 
     // Re-enable
-    r.set_stealth_mode(true, BrowserProfile::Edge);
+    r.set_stealth_mode(true, BrowserProfile::Edge).expect("secure entropy must be available");
     r.on_packet_sent(3, 1200, now);
     r.on_ack(1200, now);
     assert!(r.cwnd > 0);

@@ -4,6 +4,9 @@
 //! specific pacing gain tables and timing jitter injection. The underlying CC
 //! algorithm is unmodified - stealth only post-processes the pacing rate output.
 
+use std::error::Error;
+use std::fmt;
+use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +26,63 @@ pub enum BrowserProfile {
     Safari,
     /// Microsoft Edge congestion signature (same gain table as Chrome).
     Edge,
+}
+
+/// Failure returned when randomized stealth shaping cannot obtain its seed.
+///
+/// The seed is non-cryptographic runtime state, but deterministic jitter would
+/// make the advertised stealth behavior false. Callers must retain the base
+/// congestion controller when this error is returned.
+#[derive(Debug)]
+pub struct StealthShaperError {
+    source: io::Error,
+}
+
+impl fmt::Display for StealthShaperError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "secure non-cryptographic stealth RNG seed unavailable: {}", self.source)
+    }
+}
+
+impl Error for StealthShaperError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Construction error that returns ownership of the unwrapped controller.
+pub struct StealthShaperInitError<T> {
+    inner: T,
+    error: StealthShaperError,
+}
+
+impl<T> fmt::Debug for StealthShaperInitError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StealthShaperInitError").field("error", &self.error).finish_non_exhaustive()
+    }
+}
+
+impl<T> StealthShaperInitError<T> {
+    fn new(inner: T, error: StealthShaperError) -> Self {
+        Self { inner, error }
+    }
+
+    /// Recover the original controller and the seed failure.
+    pub fn into_parts(self) -> (T, StealthShaperError) {
+        (self.inner, self.error)
+    }
+}
+
+impl<T> fmt::Display for StealthShaperInitError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl<T> Error for StealthShaperInitError<T> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
 }
 
 // Browser-specific pacing gain tables.
@@ -110,40 +170,36 @@ pub struct StealthShaper<T: CongestionController> {
     profile: BrowserProfile,
     timing_jitter_us: u32,
     flow_shaper_active: bool,
-    rng: Xoshiro256pp,
+    rng: Option<Xoshiro256pp>,
 }
 
 impl<T: CongestionController> StealthShaper<T> {
     /// Wrap a controller with stealth shaping.
-    pub fn new(inner: T, profile: BrowserProfile) -> Self {
+    pub fn new(inner: T, profile: BrowserProfile) -> Result<Self, StealthShaperInitError<T>> {
         let mut seed = [0u8; 32];
-        if let Err(e) = crate::rng::fill_secure(&mut seed) {
-            log::debug!("StealthShaper RNG seed failed, using mixed fallback: {}", e);
+        if let Err(source) = crate::rng::fill_secure(&mut seed) {
+            return Err(StealthShaperInitError::new(inner, StealthShaperError { source }));
         }
-        Self {
+        Ok(Self {
             inner,
             enabled: true,
             profile,
             timing_jitter_us: jitter_us(profile),
             flow_shaper_active: false,
-            rng: Xoshiro256pp::from_seed(seed),
-        }
+            rng: Some(Xoshiro256pp::from_seed(seed)),
+        })
     }
 
     /// Enable or disable stealth shaping.
     pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-        if !enabled {
-            self.timing_jitter_us = 0;
-        } else {
-            self.timing_jitter_us = jitter_us(self.profile);
-        }
+        self.enabled = enabled && self.rng.is_some();
+        self.timing_jitter_us = if self.enabled { jitter_us(self.profile) } else { 0 };
     }
 
     /// Switch browser profile.
     pub fn set_profile(&mut self, profile: BrowserProfile) {
         self.profile = profile;
-        if self.enabled {
+        if self.enabled && self.rng.is_some() {
             self.timing_jitter_us = jitter_us(profile);
         }
     }
@@ -163,10 +219,28 @@ impl<T: CongestionController> StealthShaper<T> {
         if !self.enabled || self.timing_jitter_us == 0 || base_rate == 0 {
             return base_rate;
         }
+        let Some(rng) = self.rng.as_mut() else {
+            return base_rate;
+        };
         let jitter_frac = self.timing_jitter_us as f64 / 1_000_000.0;
         let jitter = jitter_frac * base_rate as f64;
-        let perturbed = base_rate as f64 + jitter * (self.rng.next_f64() * 2.0 - 1.0);
+        let perturbed = base_rate as f64 + jitter * (rng.next_f64() * 2.0 - 1.0);
         perturbed.max(0.0) as u64
+    }
+}
+
+impl StealthShaper<super::reno::Reno> {
+    /// Wrap Reno without requesting entropy because Reno has no randomized
+    /// pacing or gain post-processing path.
+    pub fn new_without_rng(inner: super::reno::Reno, profile: BrowserProfile) -> Self {
+        Self {
+            inner,
+            enabled: false,
+            profile,
+            timing_jitter_us: 0,
+            flow_shaper_active: false,
+            rng: None,
+        }
     }
 }
 
@@ -312,10 +386,15 @@ mod tests {
     use crate::transport::cc::cubic::Cubic;
     use crate::transport::cc::reno::Reno;
 
+    fn seeded<T: CongestionController>(inner: T, profile: BrowserProfile) -> StealthShaper<T> {
+        StealthShaper::new(inner, profile)
+            .unwrap_or_else(|_| panic!("secure entropy must be available for this test"))
+    }
+
     #[test]
     fn stealth_wraps_reno() {
         let reno = Reno::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(reno, BrowserProfile::Chrome);
+        let mut stealth = StealthShaper::new_without_rng(reno, BrowserProfile::Chrome);
         let now = Instant::now();
         stealth.on_packet_sent(1, 1200, now);
         stealth.on_ack(1200, now);
@@ -325,7 +404,7 @@ mod tests {
     #[test]
     fn stealth_wraps_bbr2() {
         let bbr2 = Bbr2::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(bbr2, BrowserProfile::Chrome);
+        let mut stealth = seeded(bbr2, BrowserProfile::Chrome);
         let now = Instant::now();
         stealth.on_packet_sent(1, 1200, now);
         stealth.on_ack(1200, now);
@@ -336,7 +415,7 @@ mod tests {
     #[test]
     fn stealth_wraps_bbr3() {
         let bbr = Bbr3::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(bbr, BrowserProfile::Firefox);
+        let mut stealth = seeded(bbr, BrowserProfile::Firefox);
         let now = Instant::now();
         stealth.on_packet_sent(1, 1200, now);
         stealth.on_ack(1200, now);
@@ -347,7 +426,7 @@ mod tests {
     #[test]
     fn stealth_wraps_paced_cubic() {
         let cubic = Cubic::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(cubic, BrowserProfile::Chrome);
+        let mut stealth = seeded(cubic, BrowserProfile::Chrome);
         let now = Instant::now();
         stealth.update_rtt(Duration::from_millis(100));
         stealth.on_packet_sent(1, 1200, now);
@@ -359,7 +438,7 @@ mod tests {
     #[test]
     fn jitter_within_bounds() {
         let bbr = Bbr3::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(bbr, BrowserProfile::Chrome);
+        let mut stealth = seeded(bbr, BrowserProfile::Chrome);
         let base = 1_000_000u64;
         // Chrome jitter = 750us, so max perturbation = 750/1_000_000 * base = 750.
         let max_delta = (750.0 / 1_000_000.0 * base as f64) as u64;
@@ -373,7 +452,7 @@ mod tests {
     #[test]
     fn disabled_stealth_no_jitter() {
         let bbr = Bbr3::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(bbr, BrowserProfile::Safari);
+        let mut stealth = seeded(bbr, BrowserProfile::Safari);
         stealth.set_enabled(false);
         let base = 1_000_000u64;
         assert_eq!(stealth.jitter_rate(base), base);
@@ -381,8 +460,8 @@ mod tests {
 
     #[test]
     fn profile_switch() {
-        let reno = Reno::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(reno, BrowserProfile::Chrome);
+        let bbr = Bbr3::new(12_000, 1200);
+        let mut stealth = seeded(bbr, BrowserProfile::Chrome);
         assert_eq!(stealth.timing_jitter_us, 750);
         stealth.set_profile(BrowserProfile::Firefox);
         assert_eq!(stealth.timing_jitter_us, 1000);
@@ -393,7 +472,7 @@ mod tests {
     #[test]
     fn flow_shaper_reduces_bbr3_pacing_rate_by_two_percent() {
         let bbr = Bbr3::new(50_000, 1200);
-        let mut stealth = StealthShaper::new(bbr, BrowserProfile::Chrome);
+        let mut stealth = seeded(bbr, BrowserProfile::Chrome);
         // Inject a known pacing rate to test dampening deterministically
         let raw = 1_000_000u64;
         stealth.inner_mut().set_pacing_rate(raw);
@@ -414,7 +493,7 @@ mod tests {
     #[test]
     fn flow_shaper_reduces_bbr2_pacing_rate_by_two_percent() {
         let bbr2 = Bbr2::new(50_000, 1200);
-        let mut stealth = StealthShaper::new(bbr2, BrowserProfile::Chrome);
+        let mut stealth = seeded(bbr2, BrowserProfile::Chrome);
         let raw = 1_000_000u64;
         stealth.inner_mut().set_pacing_rate(raw);
         stealth.set_flow_shaper(true);
@@ -434,7 +513,7 @@ mod tests {
     #[test]
     fn flow_shaper_reduces_cubic_pacing_rate_by_two_percent() {
         let cubic = Cubic::new(50_000, 1200);
-        let mut stealth = StealthShaper::new(cubic, BrowserProfile::Chrome);
+        let mut stealth = seeded(cubic, BrowserProfile::Chrome);
         stealth.inner_mut().update_rtt(Duration::from_millis(100));
         let raw = stealth.inner_mut().raw_pacing_rate();
         stealth.set_flow_shaper(true);
@@ -446,7 +525,7 @@ mod tests {
     #[test]
     fn apply_stealth_post_ack_disabled_is_noop_bbr3() {
         let bbr = Bbr3::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(bbr, BrowserProfile::Chrome);
+        let mut stealth = seeded(bbr, BrowserProfile::Chrome);
         stealth.inner_mut().set_pacing_rate(500_000);
         stealth.set_enabled(false);
         stealth.set_flow_shaper(true);
@@ -458,7 +537,7 @@ mod tests {
     #[test]
     fn apply_stealth_post_ack_disabled_is_noop_bbr2() {
         let bbr2 = Bbr2::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(bbr2, BrowserProfile::Chrome);
+        let mut stealth = seeded(bbr2, BrowserProfile::Chrome);
         stealth.inner_mut().set_pacing_rate(500_000);
         stealth.set_enabled(false);
         stealth.set_flow_shaper(true);
@@ -469,7 +548,7 @@ mod tests {
     #[test]
     fn disabling_stealth_restores_cubic_pacing() {
         let cubic = Cubic::new(50_000, 1200);
-        let mut stealth = StealthShaper::new(cubic, BrowserProfile::Chrome);
+        let mut stealth = seeded(cubic, BrowserProfile::Chrome);
         stealth.inner_mut().update_rtt(Duration::from_millis(100));
         let raw = stealth.inner_mut().raw_pacing_rate();
         stealth.inner_mut().set_pacing_rate_override(raw / 2);
@@ -480,8 +559,8 @@ mod tests {
 
     #[test]
     fn edge_profile_uses_chrome_jitter_magnitude() {
-        let reno = Reno::new(12_000, 1200);
-        let stealth = StealthShaper::new(reno, BrowserProfile::Edge);
+        let bbr = Bbr3::new(12_000, 1200);
+        let stealth = seeded(bbr, BrowserProfile::Edge);
         // Edge uses the same 750us jitter as Chrome
         assert_eq!(stealth.timing_jitter_us, 750);
     }
@@ -489,7 +568,7 @@ mod tests {
     #[test]
     fn inner_mut_allows_direct_controller_access() {
         let reno = Reno::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(reno, BrowserProfile::Chrome);
+        let mut stealth = StealthShaper::new_without_rng(reno, BrowserProfile::Chrome);
         let now = Instant::now();
         stealth.inner_mut().on_packet_sent(1, 1200, now);
         assert_eq!(stealth.bytes_in_flight(), 1200);
@@ -498,7 +577,7 @@ mod tests {
     #[test]
     fn jitter_produces_variation_over_many_calls() {
         let bbr = Bbr3::new(12_000, 1200);
-        let mut stealth = StealthShaper::new(bbr, BrowserProfile::Firefox);
+        let mut stealth = seeded(bbr, BrowserProfile::Firefox);
         let base = 2_000_000u64;
         let mut distinct = std::collections::HashSet::new();
         for _ in 0..50 {
@@ -506,5 +585,22 @@ mod tests {
         }
         // Xoshiro256++ must produce varied values, not all identical
         assert!(distinct.len() > 1, "jitter must produce variation, not constant output");
+    }
+
+    #[test]
+    fn secure_entropy_failure_is_reported_without_deterministic_fallback() {
+        let previous = crate::rng::test_force_secure_entropy_failure(true);
+        let result = StealthShaper::new(Bbr3::new(12_000, 1200), BrowserProfile::Chrome);
+        crate::rng::test_force_secure_entropy_failure(previous);
+
+        let error = match result {
+            Ok(_) => panic!("stealth shaping must reject a failed secure seed"),
+            Err(error) => error,
+        };
+        let (inner, error) = error.into_parts();
+        assert!(inner.cwnd() > 0, "the original controller must be recoverable");
+        assert!(error
+            .to_string()
+            .contains("secure non-cryptographic stealth RNG seed unavailable"));
     }
 }

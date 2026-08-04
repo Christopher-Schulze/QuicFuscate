@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub use super::cc::stealth_shaper::BrowserProfile;
+pub use super::cc::stealth_shaper::{BrowserProfile, StealthShaperError};
 use super::cc::{self, CcImpl, CongestionController, PathChangeEvent, PathChangeKind};
 use super::config::{MigrationPolicy, MigrationProbeTarget};
 
@@ -349,19 +349,25 @@ impl Recovery {
     ///
     /// When enabled, wraps the current CC in a [`StealthShaper`](super::cc::stealth_shaper::StealthShaper).
     /// When disabled on an already-wrapped CC, the stealth layer is deactivated.
-    pub fn set_stealth_mode(&mut self, enabled: bool, profile: BrowserProfile) {
+    pub fn set_stealth_mode(
+        &mut self,
+        enabled: bool,
+        profile: BrowserProfile,
+    ) -> Result<(), StealthShaperError> {
         match &mut self.cc {
             CcImpl::StealthBbr3(ref mut shaper) => {
                 shaper.set_enabled(enabled);
                 if enabled {
                     shaper.set_profile(profile);
                 }
+                return Ok(());
             }
             CcImpl::StealthReno(ref mut shaper) => {
                 shaper.set_enabled(enabled);
                 if enabled {
                     shaper.set_profile(profile);
                 }
+                return Ok(());
             }
             CcImpl::StealthCubic(ref mut shaper) => {
                 shaper.set_enabled(enabled);
@@ -370,48 +376,76 @@ impl Recovery {
                 } else {
                     shaper.inner_mut().clear_pacing_rate_override();
                 }
+                return Ok(());
             }
             CcImpl::StealthBbr2(ref mut shaper) => {
                 shaper.set_enabled(enabled);
                 if enabled {
                     shaper.set_profile(profile);
                 }
-            }
-            CcImpl::Bbr3(_) if enabled => {
-                let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
-                let old = std::mem::replace(&mut self.cc, placeholder);
-                if let CcImpl::Bbr3(inner) = old {
-                    self.cc =
-                        CcImpl::StealthBbr3(cc::stealth_shaper::StealthShaper::new(inner, profile));
-                }
-            }
-            CcImpl::Bbr2(_) if enabled => {
-                let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
-                let old = std::mem::replace(&mut self.cc, placeholder);
-                if let CcImpl::Bbr2(inner) = old {
-                    self.cc =
-                        CcImpl::StealthBbr2(cc::stealth_shaper::StealthShaper::new(inner, profile));
-                }
-            }
-            CcImpl::Reno(_) if enabled => {
-                let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
-                let old = std::mem::replace(&mut self.cc, placeholder);
-                if let CcImpl::Reno(inner) = old {
-                    self.cc =
-                        CcImpl::StealthReno(cc::stealth_shaper::StealthShaper::new(inner, profile));
-                }
-            }
-            CcImpl::Cubic(_) if enabled => {
-                let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
-                let old = std::mem::replace(&mut self.cc, placeholder);
-                if let CcImpl::Cubic(inner) = old {
-                    self.cc = CcImpl::StealthCubic(cc::stealth_shaper::StealthShaper::new(
-                        inner, profile,
-                    ));
-                }
+                return Ok(());
             }
             _ => {}
         }
+
+        if !enabled {
+            return Ok(());
+        }
+
+        let placeholder = CcImpl::Reno(cc::reno::Reno::new(self.cwnd, self.mss));
+        let old = std::mem::replace(&mut self.cc, placeholder);
+        let outcome = match old {
+            CcImpl::Bbr3(inner) => match cc::stealth_shaper::StealthShaper::new(inner, profile) {
+                Ok(shaper) => Ok(CcImpl::StealthBbr3(shaper)),
+                Err(error) => {
+                    let (inner, error) = error.into_parts();
+                    Err((CcImpl::Bbr3(inner), error))
+                }
+            },
+            CcImpl::Bbr2(inner) => match cc::stealth_shaper::StealthShaper::new(inner, profile) {
+                Ok(shaper) => Ok(CcImpl::StealthBbr2(shaper)),
+                Err(error) => {
+                    let (inner, error) = error.into_parts();
+                    Err((CcImpl::Bbr2(inner), error))
+                }
+            },
+            CcImpl::Reno(inner) => Ok(CcImpl::StealthReno(
+                cc::stealth_shaper::StealthShaper::new_without_rng(inner, profile),
+            )),
+            CcImpl::Cubic(inner) => match cc::stealth_shaper::StealthShaper::new(inner, profile) {
+                Ok(shaper) => Ok(CcImpl::StealthCubic(shaper)),
+                Err(error) => {
+                    let (inner, error) = error.into_parts();
+                    Err((CcImpl::Cubic(inner), error))
+                }
+            },
+            other => Ok(other),
+        };
+
+        match outcome {
+            Ok(cc) => {
+                self.cc = cc;
+                Ok(())
+            }
+            Err((cc, error)) => {
+                self.cc = cc;
+                log::warn!(
+                    "stealth congestion shaping activation rejected; base congestion controller retained: {}",
+                    error
+                );
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn stealth_mode_active(&self) -> bool {
+        matches!(
+            &self.cc,
+            CcImpl::StealthBbr3(_)
+                | CcImpl::StealthReno(_)
+                | CcImpl::StealthCubic(_)
+                | CcImpl::StealthBbr2(_)
+        )
     }
 
     /// Registers FEC integration callbacks for send and loss events.
@@ -1322,9 +1356,40 @@ mod tests {
         let mut recovery = Recovery::new(12_000, 1200);
         let now = Instant::now();
         recovery.on_packet_sent(1, 1200, now);
-        recovery.set_stealth_mode(true, super::BrowserProfile::Firefox);
+        recovery
+            .set_stealth_mode(true, super::BrowserProfile::Firefox)
+            .expect("secure entropy must be available");
         recovery.on_ack(1200, now);
         assert!(recovery.cwnd > 0);
+    }
+
+    #[test]
+    fn stealth_seed_failure_retains_each_paced_controller() {
+        let previous = crate::rng::test_force_secure_entropy_failure(true);
+        for algorithm in
+            [super::cc::Algorithm::Bbr3, super::cc::Algorithm::Bbr2, super::cc::Algorithm::Cubic]
+        {
+            let mut recovery = Recovery::with_algorithm(12_000, 1200, algorithm);
+            assert!(recovery.set_stealth_mode(true, super::BrowserProfile::Chrome).is_err());
+            match (algorithm, &recovery.cc) {
+                (super::cc::Algorithm::Bbr3, super::cc::CcImpl::Bbr3(_))
+                | (super::cc::Algorithm::Bbr2, super::cc::CcImpl::Bbr2(_))
+                | (super::cc::Algorithm::Cubic, super::cc::CcImpl::Cubic(_)) => {}
+                _ => panic!("failed stealth activation must retain the base controller"),
+            }
+        }
+        crate::rng::test_force_secure_entropy_failure(previous);
+    }
+
+    #[test]
+    fn reno_stealth_wrapper_does_not_require_entropy() {
+        let previous = crate::rng::test_force_secure_entropy_failure(true);
+        let mut recovery = Recovery::with_algorithm(12_000, 1200, super::cc::Algorithm::Reno);
+        let result = recovery.set_stealth_mode(true, super::BrowserProfile::Chrome);
+        crate::rng::test_force_secure_entropy_failure(previous);
+
+        assert!(result.is_ok(), "Reno has no randomized stealth post-processing path");
+        assert!(matches!(recovery.cc, super::cc::CcImpl::StealthReno(_)));
     }
 
     #[test]

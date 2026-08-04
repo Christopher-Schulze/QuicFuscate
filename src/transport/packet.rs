@@ -130,7 +130,9 @@ pub fn connect(
     config.set_application_protos(&[b"h3"])?;
     // BBR3 with browser-specific tuning
     let browser_profile = crate::transport::recovery::BrowserProfile::Chrome;
-    conn.recovery_mut().set_stealth_mode(false, browser_profile);
+    conn.recovery_mut()
+        .set_stealth_mode(false, browser_profile)
+        .expect("disabling stealth mode must not require entropy");
 
     Ok(conn)
 }
@@ -162,7 +164,9 @@ pub fn accept(
     config.set_application_protos(&[b"h3"])?;
     // BBR3 with browser-specific tuning
     let browser_profile = crate::transport::recovery::BrowserProfile::Chrome;
-    conn.recovery_mut().set_stealth_mode(false, browser_profile);
+    conn.recovery_mut()
+        .set_stealth_mode(false, browser_profile)
+        .expect("disabling stealth mode must not require entropy");
 
     Ok(conn)
 }

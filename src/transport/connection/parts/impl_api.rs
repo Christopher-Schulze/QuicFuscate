@@ -702,6 +702,12 @@ impl Connection {
         self.intelligent_stealth_runtime
     }
 
+    /// Whether a stealth congestion-control wrapper is currently installed.
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn stealth_cc_active_for_test(&self) -> bool {
+        self.recovery.stealth_mode_active()
+    }
+
     /// Current Brain runtime permission set (test accessor).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn brain_runtime_permissions_for_test(&self) -> crate::transport::BrainRuntimePermissions {
@@ -813,7 +819,7 @@ impl Connection {
     pub(crate) fn apply_brain_stealth_runtime_delta(
         &mut self,
         delta: crate::transport::StealthRuntimeDelta,
-    ) {
+    ) -> Result<(), crate::transport::recovery::StealthShaperError> {
         if let Some(pacing) = delta.external_pacing {
             self.set_external_pacing(pacing);
         }
@@ -827,7 +833,7 @@ impl Connection {
             self.set_stealth_adaptive_granularity(granularity);
         }
         if let Some(profile) = delta.cc_profile {
-            self.set_cc_stealth_profile(true, profile);
+            self.set_cc_stealth_profile(true, profile)?;
         }
         if let Some((enabled, strategy, max_size)) = delta.padding {
             self.set_stealth_padding(enabled, strategy, max_size);
@@ -838,14 +844,15 @@ impl Connection {
         if let Some(rate) = delta.timing_rate {
             self.set_stealth_timing_rate(rate);
         }
+        Ok(())
     }
     /// Configure CC stealth profile to shape pacing like common browsers
     pub fn set_cc_stealth_profile(
         &mut self,
         enabled: bool,
         profile: crate::transport::recovery::BrowserProfile,
-    ) {
-        self.recovery.set_stealth_mode(enabled, profile);
+    ) -> Result<(), crate::transport::recovery::StealthShaperError> {
+        self.recovery.set_stealth_mode(enabled, profile)
     }
     /// Force AdaptiveFec into streaming mode for minimal latency
     pub fn force_fec_streaming(&mut self) {

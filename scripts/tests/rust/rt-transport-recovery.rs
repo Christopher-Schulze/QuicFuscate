@@ -46,6 +46,7 @@ fn recovery_counters_and_pto_progression() {
 #[test]
 fn recovery_stealth_mode_is_safe() {
     let mut rec = Recovery::new(1200, 1200);
-    rec.set_stealth_mode(true, BrowserProfile::Firefox);
-    rec.set_stealth_mode(false, BrowserProfile::Chrome);
+    rec.set_stealth_mode(true, BrowserProfile::Firefox).expect("secure entropy must be available");
+    rec.set_stealth_mode(false, BrowserProfile::Chrome)
+        .expect("disabling stealth mode must not require entropy");
 }
