@@ -270,9 +270,10 @@ pub fn parse(qkey: &str) -> Result<QKeyConfig, QKeyError> {
         return Err(QKeyError::TooLarge);
     }
 
-    // Parse JSON
+    // Parse JSON only after the bounded decoded bytes pass the UTF-8 secret boundary.
+    let decoded = SecretString::try_from_bytes(decoded).map_err(|_| QKeyError::InvalidJson)?;
     let config: QKeyConfig =
-        serde_json::from_slice(&decoded).map_err(|_| QKeyError::InvalidJson)?;
+        serde_json::from_str(decoded.as_str()).map_err(|_| QKeyError::InvalidJson)?;
 
     // Validate checksum
     if !config.validate() {
@@ -436,6 +437,14 @@ mod tests {
     fn test_qkey_invalid_json() {
         // Valid base64, invalid JSON.
         let encoded = BASE64_URLSAFE.encode(b"not-json");
+        let bad = format!("{}{}", QKEY_PREFIX, encoded);
+        let err = parse(&bad).unwrap_err();
+        assert_eq!(err, QKeyError::InvalidJson);
+    }
+
+    #[test]
+    fn test_qkey_invalid_utf8_payload_is_rejected_as_invalid_json() {
+        let encoded = BASE64_URLSAFE.encode(vec![0xff_u8, 0xfe]);
         let bad = format!("{}{}", QKEY_PREFIX, encoded);
         let err = parse(&bad).unwrap_err();
         assert_eq!(err, QKeyError::InvalidJson);

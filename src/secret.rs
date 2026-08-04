@@ -59,24 +59,47 @@ impl Drop for SecretBytes {
     }
 }
 
-/// UTF-8 secret backed by [`SecretBytes`].
-pub(crate) struct SecretString(SecretBytes);
+/// Error returned when raw secret bytes are not valid UTF-8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SecretStringUtf8Error;
+
+/// UTF-8 secret backed by a private [`String`] owner.
+pub(crate) struct SecretString {
+    value: String,
+    label: &'static str,
+}
 
 impl SecretString {
     pub(crate) fn new(value: String, label: &'static str) -> Self {
-        Self(SecretBytes::new(value.into_bytes(), label))
+        Self { value, label }
+    }
+
+    /// Construct a UTF-8 secret from a byte owner without retaining invalid input.
+    pub(crate) fn try_from_bytes(bytes: SecretBytes) -> Result<Self, SecretStringUtf8Error> {
+        let label = bytes.label;
+        let value = match std::str::from_utf8(bytes.as_slice()) {
+            Ok(value) => value.to_owned(),
+            Err(_) => return Err(SecretStringUtf8Error),
+        };
+        drop(bytes);
+        Ok(Self { value, label })
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        // SAFETY: construction consumes a valid String, and the inner bytes are
-        // never exposed mutably through SecretString.
-        unsafe { std::str::from_utf8_unchecked(self.0.as_slice()) }
+        self.value.as_str()
     }
 }
 
 impl Clone for SecretString {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self::new(self.value.clone(), self.label)
+    }
+}
+
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        let value = std::mem::take(&mut self.value);
+        drop(SecretBytes::new(value.into_bytes(), self.label));
     }
 }
 
@@ -91,6 +114,81 @@ impl Deref for SecretString {
 impl AsRef<str> for SecretString {
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SecretBytes, SecretString, SecretStringUtf8Error};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn secret_string_preserves_valid_utf8_and_clone() {
+        let secret = SecretString::new("pässwörd".to_owned(), "secret_string_valid");
+        let clone = secret.clone();
+
+        assert_eq!(secret.as_str(), "pässwörd");
+        assert_eq!(clone.as_str(), "pässwörd");
+    }
+
+    #[test]
+    fn secret_string_erases_owned_utf8_bytes() {
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = super::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        {
+            let secret = SecretString::new("secret".to_owned(), "secret_string_owned");
+            assert_eq!(secret.as_str(), "secret");
+        }
+
+        let events = events.lock().expect("erasure events");
+        assert_eq!(events.as_slice(), &[("secret_string_owned", vec![0; 6])]);
+    }
+
+    #[test]
+    fn secret_string_rejects_invalid_utf8_and_erases_rejected_bytes() {
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = super::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        let result = SecretString::try_from_bytes(SecretBytes::new(
+            vec![0xff, 0xfe],
+            "secret_string_invalid",
+        ));
+
+        assert!(matches!(result, Err(SecretStringUtf8Error)));
+        let events = events.lock().expect("erasure events");
+        assert_eq!(events.as_slice(), &[("secret_string_invalid", vec![0; 2])]);
+    }
+
+    #[test]
+    fn secret_string_checked_boundary_accepts_utf8_and_erases_source_owner() {
+        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
+        let observed = Arc::clone(&events);
+        let _observer = super::test_observation::install(Arc::new(move |label, bytes| {
+            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
+        }));
+
+        let secret = SecretString::try_from_bytes(SecretBytes::new(
+            "päss".as_bytes().to_vec(),
+            "secret_string_checked",
+        ))
+        .expect("valid UTF-8 must be accepted");
+        assert_eq!(secret.as_str(), "päss");
+        drop(secret);
+
+        let events = events.lock().expect("erasure events");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|(label, bytes)| {
+            *label == "secret_string_checked"
+                && bytes.len() == "päss".len()
+                && bytes.iter().all(|byte| *byte == 0)
+        }));
     }
 }
 
