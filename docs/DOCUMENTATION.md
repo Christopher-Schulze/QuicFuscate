@@ -1687,7 +1687,22 @@ Key pointers:
 ---
 ## Build & Dependencies (Current)
 
-There is no external vendor workflow. All functionality (transport, stealth, FEC, crypto) is implemented under `src/` and built with Cargo. CI uses `.github/workflows/ci.yml` exclusively.
+There is no external vendor workflow. All functionality (transport, stealth, FEC, crypto) is implemented under `src/` and built with Cargo. The primary Rust validation workflow is `.github/workflows/ci.yml`; Clippy Matrix, Windows Omega, and Release Build are separate workflow surfaces.
+
+### CI Compilation Caching Contract
+
+The current workflows do not configure sccache or any equivalent compiler-result cache. No workflow sets `RUSTC_WRAPPER`, `SCCACHE_GHA_ENABLED`, or a compiler-cache action. Existing `actions/cache@v6` steps cache Cargo registries, Git dependencies, selected `target/` directories, and Criterion baselines; these are directory caches and are not evidence of reusable compiler results.
+
+Current Rust compilation boundaries are spread across the following workflow families:
+
+| Workflow family | Rust work | Current cache contract |
+| --- | --- | --- |
+| `ci.yml` application, build, Windows, feature, fastpath, traffic, security, fuzz, and benchmark jobs | Cargo metadata/check, Clippy, debug and release builds, tests, fuzz targets, audits, and benchmarks | Registry/Git/selected `target/` or Criterion caches in selected jobs; no compiler cache |
+| `clippy-matrix.yml` | Locked all-target Clippy over the feature matrix | Registry/Git/`target/` directory cache; no compiler cache |
+| `windows-omega-e2e.yml` | Windows Wintun build, test compilation, and native tests | Registry/Git/`target/` directory cache; no compiler cache |
+| `release.yml` server and desktop jobs | Linux and ARM64 server builds plus macOS/Linux/Windows Tauri check, Clippy, and packaging | Registry/Git/`target/` cache for server bundles; desktop packaging has no compiler cache setup |
+
+Cache keys include one or more Cargo.lock files and, in several jobs, the runner OS. They do not constitute a single toolchain-aware sccache key or prove cross-platform hit correctness. Cargo's own fingerprints and the locked build commands remain the current correctness boundary. The repository therefore makes no current claim for compiler-cache hit rate, false-hit absence, cache failure propagation, or the historical 30% improvement claim from TODO-155. That historical claim is retired by TODO-761; the archived task body is retained and labeled historical.
 
 Build/runtime behavior for TLS fingerprint inputs is documented in the TLS boundary section; see "TLS Boundary: rustls protocol with optional cover overlay -> Fingerprint Source Model".
 
