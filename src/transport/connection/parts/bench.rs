@@ -78,6 +78,47 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
 }
 
 #[cfg(feature = "benches")]
+/// Client and authenticated Retry packet for receive-path Criterion benchmarks.
+pub struct BenchRetryCase {
+    pub client: Connection,
+    pub packet: Vec<u8>,
+    pub recv_info: RecvInfo,
+}
+
+#[cfg(feature = "benches")]
+/// Build a client and valid Retry packet without opening a socket.
+pub fn bench_retry_case() -> BenchRetryCase {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 29111));
+    let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 29112));
+    let config = Config::new_with_version(crate::transport::PROTOCOL_VERSION).expect("bench config");
+    let mut client = Connection::new_client(b"retry-client", local, peer, config);
+    let original_dcid = ConnectionId::from_ref(b"retry-original");
+    client.set_initial_dcid(original_dcid);
+
+    let header = packet::Header {
+        ty: PacketType::Retry,
+        version: crate::transport::PROTOCOL_VERSION,
+        dcid: client.scid.as_ref().to_vec(),
+        scid: b"retry-server".to_vec(),
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: Some(vec![0x10, 0x20, 0x30, 0x40]),
+        versions: None,
+        key_phase: false,
+    };
+    let mut storage = [0u8; 256];
+    let header_len = packet::format_header(&header, &mut storage).expect("format Retry header");
+    let mut packet = storage[..header_len].to_vec();
+    packet::append_retry_tag(&mut packet, original_dcid.as_ref(), crate::transport::PROTOCOL_VERSION)
+        .expect("append Retry integrity tag");
+
+    let recv_info = RecvInfo { from: peer, to: local, ecn: None };
+    BenchRetryCase { client, packet, recv_info }
+}
+
+#[cfg(feature = "benches")]
 impl Connection {
     /// Configure stealth padding for transport-padding benchmarks.
     pub fn bench_set_stealth_padding(

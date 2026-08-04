@@ -170,6 +170,45 @@ mod tests {
     }
 
     #[test]
+    fn valid_retry_moves_token_adopts_cid_and_resets_initial_space() {
+        let mut client = make_conn();
+        let original_dcid = ConnectionId::from_ref(b"original-dcid");
+        let retry_scid = b"retry-scid";
+        let token = vec![0x10, 0x20, 0x30, 0x40];
+        client.set_initial_dcid(original_dcid);
+        client.next_send_pn_by_space[0] = 9;
+        assert!(client.pkt_spaces[0].on_packet_recv(9));
+
+        let header = packet::Header {
+            ty: PacketType::Retry,
+            version: PROTOCOL_VERSION,
+            dcid: client.scid.as_ref().to_vec(),
+            scid: retry_scid.to_vec(),
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token: Some(token.clone()),
+            versions: None,
+            key_phase: false,
+        };
+        let mut storage = [0u8; 256];
+        let header_len = packet::format_header(&header, &mut storage).expect("format Retry header");
+        let mut retry = storage[..header_len].to_vec();
+        packet::append_retry_tag(&mut retry, original_dcid.as_ref(), PROTOCOL_VERSION)
+            .expect("append Retry integrity tag");
+
+        let retry_len = retry.len();
+        assert_eq!(client.recv(&mut retry, &recv_info()), Ok(retry_len));
+
+        let expected_dcid = ConnectionId::from_ref(retry_scid);
+        assert_eq!(client.config.initial_token, Some(token));
+        assert_eq!(client.dcid, expected_dcid);
+        assert!(client.dest_cids.contains(&expected_dcid));
+        assert_eq!(client.next_send_pn_by_space[0], 0);
+        assert!(client.pkt_spaces[0].largest_recv.is_none());
+        assert!(!client.pkt_spaces[0].contains(9));
+    }
+
+    #[test]
     fn spoofed_or_original_version_vn_is_ignored() {
         let mut client = make_v2_client();
         let original_dcid = client.initial_dcid;

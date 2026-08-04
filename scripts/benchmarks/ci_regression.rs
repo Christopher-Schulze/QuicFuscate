@@ -512,6 +512,66 @@ fn bench_transport_stealth_padding_decision(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Transport: authenticated Retry receive
+// ---------------------------------------------------------------------------
+fn bench_transport_retry_receive(c: &mut Criterion) {
+    use quicfuscate::transport::{bench_retry_case, BenchRetryCase};
+
+    let mut group = c.benchmark_group("transport_retry_receive");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("authenticated_retry", |b| {
+        b.iter_batched(
+            bench_retry_case,
+            |BenchRetryCase { mut client, mut packet, recv_info }| {
+                black_box(
+                    client
+                        .recv(&mut packet, &recv_info)
+                        .expect("authenticated Retry benchmark packet"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Transport: inline destination connection ID tracking
+// ---------------------------------------------------------------------------
+fn bench_transport_connection_id_set(c: &mut Criterion) {
+    use quicfuscate::transport::pn::cid::ConnectionIdSet;
+    use quicfuscate::transport::ConnectionId;
+
+    let ids = (1u8..=16).map(|value| ConnectionId::from_ref(&[value; 8])).collect::<Vec<_>>();
+    let mut group = c.benchmark_group("transport_connection_id_set");
+    group.throughput(Throughput::Elements(ids.len() as u64));
+    group.bench_function("insert_inline_ids", |b| {
+        b.iter_batched(
+            ConnectionIdSet::new,
+            |mut set| {
+                for id in &ids {
+                    set.insert(black_box(id));
+                }
+                black_box(set);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("contains_inline_ids", |b| {
+        let mut set = ConnectionIdSet::new();
+        for id in &ids {
+            set.insert(id);
+        }
+        b.iter(|| {
+            for id in &ids {
+                black_box(set.contains(black_box(id)));
+            }
+        });
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Transport: packet number encode
 // ---------------------------------------------------------------------------
 fn bench_pkt_num_encode(c: &mut Criterion) {
@@ -908,6 +968,8 @@ criterion_group!(
     bench_rng_fill,
     bench_pkt_num_encode,
     bench_transport_stealth_padding_decision,
+    bench_transport_retry_receive,
+    bench_transport_connection_id_set,
     bench_connection_1rtt_send_recv,
     bench_ack_sent_byte_accounting,
     bench_connection_1rtt_stealth_compare,

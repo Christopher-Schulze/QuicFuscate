@@ -151,7 +151,7 @@ pub mod cid {
     /// Set of active QUIC connection IDs backed by a HashSet.
     #[derive(Debug, Clone)]
     pub struct ConnectionIdSet {
-        inner: HashSet<Vec<u8>>,
+        inner: HashSet<ConnectionId>,
     }
 
     impl ConnectionIdSet {
@@ -162,18 +162,39 @@ pub mod cid {
 
         /// Inserts a connection ID into the set.
         pub fn insert(&mut self, id: &ConnectionId) {
-            self.inner.insert(id.as_ref().to_vec());
+            self.inner.insert(*id);
         }
 
         /// Returns true if the set contains the given connection ID.
         pub fn contains(&self, id: &ConnectionId) -> bool {
-            self.inner.contains(id.as_ref())
+            self.inner.contains(id)
         }
     }
 
     impl Default for ConnectionIdSet {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tracks_inline_connection_ids_by_value() {
+            let first = ConnectionId::from_ref(b"first-dcid");
+            let second = ConnectionId::from_ref(b"second-dcid");
+            let mut set = ConnectionIdSet::new();
+
+            assert!(!set.contains(&first));
+            set.insert(&first);
+            set.insert(&second);
+            set.insert(&first);
+
+            assert!(set.contains(&first));
+            assert!(set.contains(&second));
+            assert!(!set.contains(&ConnectionId::from_ref(b"other-dcid")));
         }
     }
 }

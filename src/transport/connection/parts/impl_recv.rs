@@ -63,23 +63,24 @@ impl Connection {
             // Client-side Retry handling: adopt token/DCID and re-derive Initial keys.
             // Reuse the pre-parsed header instead of re-parsing (TODO-391).
             if !self.is_server {
-                if let Some((retry_hdr, _)) = pre_parsed_hdr.as_ref() {
-                    if !retry_hdr.scid.is_empty() {
-                        self.set_destination_cid(ConnectionId::from_ref(&retry_hdr.scid));
-                    }
-                    self.config.initial_token = retry_hdr.token.clone();
-                    let (client_secret, server_secret) =
-                        packet::derive_initial_secrets(self.dcid.as_ref(), self.config.version)?;
-                    let (read_secret, write_secret) =
-                        (server_secret.as_slice(), client_secret.as_slice());
-                    let mut crypto = self.crypto.write();
-                    crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version)?;
-                    crypto.install_hp_initial(read_secret, write_secret, self.config.version)?;
-                    drop(crypto);
-                    self.refresh_short_header_tag_reserve();
-                    self.next_send_pn_by_space[0] = 0;
-                    self.pkt_spaces[0] = pnspace::PktNumSpace::default();
+                let Some((retry_hdr, _)) = pre_parsed_hdr.take() else {
+                    return Ok(buf.len());
+                };
+                if !retry_hdr.scid.is_empty() {
+                    self.set_destination_cid(ConnectionId::from_ref(&retry_hdr.scid));
                 }
+                self.config.initial_token = retry_hdr.token;
+                let (client_secret, server_secret) =
+                    packet::derive_initial_secrets(self.dcid.as_ref(), self.config.version)?;
+                let (read_secret, write_secret) =
+                    (server_secret.as_slice(), client_secret.as_slice());
+                let mut crypto = self.crypto.write();
+                crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version)?;
+                crypto.install_hp_initial(read_secret, write_secret, self.config.version)?;
+                drop(crypto);
+                self.refresh_short_header_tag_reserve();
+                self.next_send_pn_by_space[0] = 0;
+                self.pkt_spaces[0] = pnspace::PktNumSpace::default();
             }
             // For Retry we do not parse further.
             self.received_non_vn_packet = true;

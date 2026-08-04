@@ -50,7 +50,8 @@ pub use config::{
 pub use connection::StreamRingBuffer;
 #[cfg(feature = "benches")]
 pub use connection::{
-    bench_paired_1rtt_connections, bench_paired_1rtt_connections_stealth, BenchConnectionPair,
+    bench_paired_1rtt_connections, bench_paired_1rtt_connections_stealth, bench_retry_case,
+    BenchConnectionPair, BenchRetryCase,
 };
 pub use connection::{Connection, PathEvent};
 pub use nat::{IceAgent, NatPathDiscovery, StunClient, TurnClient};
