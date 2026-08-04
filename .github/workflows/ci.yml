@@ -323,6 +323,23 @@ jobs:
           path: scripts/out/tests/wintun-native/
           if-no-files-found: error
 
+  simd-feature-contract:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Verify truthful Cargo SIMD feature contract
+        run: bash scripts/audits/verify-simd-feature-contract.sh
+
   feature-matrix:
     runs-on: ${{ matrix.os }}
     strategy:

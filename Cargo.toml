@@ -103,23 +103,10 @@ default = ["client", "server", "rate_limiter"]
 client = []
 server = ["rcgen", "time", "maxminddb"]
 
-# --- CPU / SIMD features ---
-aes = []
-avx2 = []
-avx512f = []
-avx512vbmi2 = []
-fma = []
-gfni = []
-neon = []
-sse2 = []
-sve2 = []
-vaes = []
-
 # --- Runtime / transport features ---
 io_uring = ["dep:io-uring"]
 aggressive_inline = []
 compression_zstd_ffi = ["dep:zstd-sys"]
-crc = []
 orchestrator = []
 prefetch = []
 rate_limiter = []
@@ -153,7 +140,6 @@ tun-tests = []
 simd-selfcheck = []
 
 # --- Meta-features for convenience ---
-simd-all = ["avx2", "avx512f", "avx512vbmi2", "aes", "sse2"]
 test-suite = ["rust-tests", "benches"]
 experimental = ["internal_af_xdp_experimental", "internal_wiedemann", "internal_avx10_preview"]
 

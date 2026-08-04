@@ -437,6 +437,18 @@ else
     log_info "Good SIMD coverage: $SIMD_FEATURES feature conditionals"
 fi
 
+SIMD_FEATURE_CONTRACT_LOG="$OUTPUT_DIR/simd-feature-contract.log"
+set +e
+"$PROJECT_ROOT/scripts/audits/verify-simd-feature-contract.sh" >"$SIMD_FEATURE_CONTRACT_LOG" 2>&1
+SIMD_FEATURE_CONTRACT_RC=$?
+set -e
+record_command_check "simd_feature_contract" "$SIMD_FEATURE_CONTRACT_RC" "artifact=$SIMD_FEATURE_CONTRACT_LOG"
+if [ "$SIMD_FEATURE_CONTRACT_RC" -eq 0 ]; then
+    log_info "Cargo SIMD feature contract passed"
+else
+    log_critical "Cargo SIMD feature contract failed with rc=$SIMD_FEATURE_CONTRACT_RC (see $SIMD_FEATURE_CONTRACT_LOG)"
+fi
+
 echo -e "\n> Checking allocations in hot paths..."
 HOT_PATH_ALLOC_LOG="$OUTPUT_DIR/hot-path-allocation.log"
 set +e

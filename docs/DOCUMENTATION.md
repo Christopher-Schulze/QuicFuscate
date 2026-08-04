@@ -2027,7 +2027,7 @@ Not applicable. AEGIS is a symmetric AEAD and does not expose TLS handshake hook
 See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for canonical runtime and optional external-dump behavior.
 
 #### Advanced Optimizations
-- Crypto hotpaths use target-feature gated intrinsics (`aes`, `sse2`, `avx2`, `vaes`, `neon`); runtime dispatch via `cpufeatures` selects the best backend.
+- Crypto hotpaths use Rust `#[target_feature]` gated intrinsics (`aes`, `sse2`, `avx2`, `vaes`, `neon`); runtime dispatch via `cpufeatures` and `FeatureDetector` selects the best backend. Hardware ISA names are not Cargo features and must not be used as hardware-proof selectors.
 - AEGIS/MORUS implementations include unsafe blocks for SIMD lanes where necessary; all sensitive operations remain constant-time by design.
 - Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7), pool-backed compression buffers, and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` submits batch `SendMsg` work through the runtime-owned `UringBatchWorker` before falling back to `sendmmsg`; direct `UringBatchSender` remains the synchronous compatibility primitive. The client also uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy. In FEC Zero mode, receive keeps the payload uniquely owned so the core avoids the copy-on-mutate fallback.
 - Frame parsing is zero-copy: `Frame<'a>` uses `Cow<'a, [u8]>` for data fields, borrowing directly from the decrypted packet buffer in `from_bytes()`. Combined with the in-order Stream fast path (sequential data copies directly to recv_buf, skipping the recv_frags BTreeMap), the common-case receive path avoids heap allocation entirely. Vec-backed stream send flushes use `frames::write_stream_frame()` to encode directly from `send_buf` into the packet buffer, avoiding a temporary owned `Frame::Stream` payload allocation.
@@ -2057,29 +2057,20 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
     - `internal_af_xdp_experimental`
     - `internal_avx10_preview`
     - `internal_wiedemann`
-  - Backend/build knobs retained for dispatch or specialized integration:
-    - `aes`
+  - Runtime/build knobs:
     - `aggressive_inline`
-    - `avx2`
-    - `avx512f`
-    - `avx512vbmi2`
-    - `crc`
-    - `fma`
-    - `gfni`
-    - `neon`
     - `orchestrator`
     - `prefetch`
     - `rate_limiter`
-    - `sse2`
     - `std`
     - `stream_ring_buffer`
-    - `sve2`
     - `unsafe_rust`
-    - `vaes`
 - Product posture notes:
   - The canonical product contract is still the default `client`/`server` runtime.
   - Internal features must not be advertised as normal deployment knobs.
   - Decoder policy such as Wiedemann remains an internal FEC/runtime policy concern, not a top-level product identity.
+  - Hardware selection is intentionally split into three contracts: Rust `#[target_feature]`/`#[target_feature(enable = ...)]` controls compiled ISA bodies; `RUSTFLAGS` with `-C target-feature=...` or `-C target-cpu=...` controls the build target; and `FeatureDetector`/`cpufeatures` controls runtime dispatch. No Cargo feature enables an ISA, and the feature matrix must not be used as hardware proof.
+  - `simd-selfcheck` is a test-only Cargo feature for the `rt-simd-selfcheck` target. It validates parity and telemetry on the active build; it does not claim that a particular ISA was compiled or selected.
 
 Examples
 ```bash
@@ -2089,7 +2080,12 @@ cargo build --release
 
 #### Runtime Dispatch (Selector)
 
-At runtime, the data-plane AEAD plan is selected based on CPU features and measured backend policy (via `cpufeatures`, the internal `FeatureDetector`, and `simd::planner`):
+At runtime, the data-plane AEAD plan is selected based on CPU features and measured backend policy (via `cpufeatures`, the internal `FeatureDetector`, and `simd::planner`). The build must select a target CPU or explicit Rust target features separately when an ISA-specific binary is required:
+
+```bash
+RUSTFLAGS="-C target-feature=+avx2" cargo build --release
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
 
 ```rust
 use quicfuscate::simd::CryptoAeadPlan;
@@ -2109,6 +2105,7 @@ Benchmarks
 
 #### Automated Build and CI/CD
 - The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, the release-version contract, app backend checks, release compilation and tests, fuzz target checks, non-duplicated feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
+- `scripts/audits/verify-simd-feature-contract.sh` is run by the CI feature matrix, the strict Clippy matrix, and the comprehensive audit. It proves that no hardware ISA name is declared as a Cargo feature, that `rust-tests,simd-selfcheck` remains a valid positive test contract, that `--all-features` remains metadata-valid, and that each removed hardware/meta selector is rejected by Cargo rather than silently accepted as hardware proof.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo metadata --locked`, `cargo check --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` in `apps/tauri/src-tauri`.
 - The `windows-core-checks` job caps Cargo at two jobs, checks and lints `tun-windows,rust-tests`, compiles its unit-test binary, provisions the integrity-checked upstream DLL beside that binary, executes ordinary tests plus serial privileged Wintun adapter/I/O/close and WFP packet-outcome/process-exit suites, independently verifies zero managed WFP objects even after a failed behavior step, rejects owned adapter or legacy firewall-rule residue, and uploads provenance plus Windows-build evidence. Run `30508948149`, job `90764941801` proves commit `afe46e0` with the complete native Wintun and WFP lifecycle green. Manual Windows-Omega runs `30535603045` and `30536002374` add two consecutive authenticated dual-stack Wintun/WFP data-plane proofs against one unchanged ARM64 server process. The `release-contract` job runs `scripts/audits/verify-release-version.sh` on pushes and pull requests.
 - `.github/workflows/clippy-matrix.yml` runs the Rust clippy feature matrix on stable Rust with `-D warnings`.
