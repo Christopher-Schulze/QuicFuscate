@@ -78,17 +78,22 @@ fn parse_ipv4_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv4DnsQuery<'_>> {
         return None;
     }
     let total_len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
-    if total_len < ihl + 8 || total_len > pkt.len() {
+    if total_len < ihl + 8 || total_len != pkt.len() {
+        return None;
+    }
+    if ones_complement_checksum_raw(&pkt[..ihl]) != 0 {
         return None;
     }
     let flags_fragment = u16::from_be_bytes([pkt[6], pkt[7]]);
-    if flags_fragment & 0x1fff != 0 {
+    if flags_fragment & 0x3fff != 0 {
         return None;
     }
     if pkt[9] != 17 {
         return None;
     }
 
+    let src_ip = Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
+    let dst_ip = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
     let udp = &pkt[ihl..total_len];
     let src_port = u16::from_be_bytes([udp[0], udp[1]]);
     let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
@@ -96,7 +101,11 @@ fn parse_ipv4_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv4DnsQuery<'_>> {
         return None;
     }
     let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
-    if udp_len < 8 || udp_len > udp.len() {
+    if udp_len < 8 || udp_len != udp.len() {
+        return None;
+    }
+    let udp_checksum = u16::from_be_bytes([udp[6], udp[7]]);
+    if udp_checksum != 0 && !ipv4_udp_checksum_is_valid(src_ip, dst_ip, udp) {
         return None;
     }
     let payload = &udp[8..udp_len];
@@ -105,8 +114,8 @@ fn parse_ipv4_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv4DnsQuery<'_>> {
     }
 
     Some(InterceptedIpv4DnsQuery {
-        src_ip: Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]),
-        dst_ip: Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]),
+        src_ip,
+        dst_ip,
         src_port,
         dst_port,
         ttl: pkt[8],
@@ -119,7 +128,7 @@ fn parse_ipv6_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv6DnsQuery<'_>> {
         return None;
     }
     let payload_len = u16::from_be_bytes([pkt[4], pkt[5]]) as usize;
-    if payload_len < 8 || 40usize.checked_add(payload_len)? > pkt.len() {
+    if payload_len < 8 || 40usize.checked_add(payload_len)? != pkt.len() {
         return None;
     }
     if pkt[6] != 17 {
@@ -133,21 +142,27 @@ fn parse_ipv6_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv6DnsQuery<'_>> {
         return None;
     }
     let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
-    if udp_len < 8 || udp_len > udp.len() {
+    if udp_len < 8 || udp_len != udp.len() {
+        return None;
+    }
+    let mut src = [0u8; 16];
+    src.copy_from_slice(&pkt[8..24]);
+    let mut dst = [0u8; 16];
+    dst.copy_from_slice(&pkt[24..40]);
+    let src_ip = Ipv6Addr::from(src);
+    let dst_ip = Ipv6Addr::from(dst);
+    if u16::from_be_bytes([udp[6], udp[7]]) == 0
+        || !ipv6_udp_checksum_is_valid(src_ip, dst_ip, udp)
+    {
         return None;
     }
     let payload = &udp[8..udp_len];
     if !crate::dns::is_dns_query(payload) {
         return None;
     }
-
-    let mut src = [0u8; 16];
-    src.copy_from_slice(&pkt[8..24]);
-    let mut dst = [0u8; 16];
-    dst.copy_from_slice(&pkt[24..40]);
     Some(InterceptedIpv6DnsQuery {
-        src_ip: Ipv6Addr::from(src),
-        dst_ip: Ipv6Addr::from(dst),
+        src_ip,
+        dst_ip,
         src_port,
         dst_port,
         hop_limit: pkt[7],
@@ -155,7 +170,7 @@ fn parse_ipv6_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv6DnsQuery<'_>> {
     })
 }
 
-fn ones_complement_checksum(data: &[u8]) -> u16 {
+fn ones_complement_checksum_raw(data: &[u8]) -> u16 {
     let mut sum = 0u32;
     let mut chunks = data.chunks_exact(2);
     for chunk in &mut chunks {
@@ -168,6 +183,10 @@ fn ones_complement_checksum(data: &[u8]) -> u16 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
     !(sum as u16)
+}
+
+fn ones_complement_checksum(data: &[u8]) -> u16 {
+    ones_complement_checksum_raw(data)
 }
 
 fn ipv4_udp_checksum(src: Ipv4Addr, dst: Ipv4Addr, udp_packet: &[u8]) -> u16 {
@@ -186,6 +205,17 @@ fn ipv4_udp_checksum(src: Ipv4Addr, dst: Ipv4Addr, udp_packet: &[u8]) -> u16 {
     }
 }
 
+fn ipv4_udp_checksum_is_valid(src: Ipv4Addr, dst: Ipv4Addr, udp_packet: &[u8]) -> bool {
+    let mut pseudo = Vec::with_capacity(12 + udp_packet.len());
+    pseudo.extend_from_slice(&src.octets());
+    pseudo.extend_from_slice(&dst.octets());
+    pseudo.push(0);
+    pseudo.push(17);
+    pseudo.extend_from_slice(&(udp_packet.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(udp_packet);
+    ones_complement_checksum_raw(&pseudo) == 0
+}
+
 fn ipv6_udp_checksum(src: Ipv6Addr, dst: Ipv6Addr, udp_packet: &[u8]) -> u16 {
     let mut pseudo = Vec::with_capacity(40 + udp_packet.len());
     pseudo.extend_from_slice(&src.octets());
@@ -200,6 +230,17 @@ fn ipv6_udp_checksum(src: Ipv6Addr, dst: Ipv6Addr, udp_packet: &[u8]) -> u16 {
     } else {
         checksum
     }
+}
+
+fn ipv6_udp_checksum_is_valid(src: Ipv6Addr, dst: Ipv6Addr, udp_packet: &[u8]) -> bool {
+    let mut pseudo = Vec::with_capacity(40 + udp_packet.len());
+    pseudo.extend_from_slice(&src.octets());
+    pseudo.extend_from_slice(&dst.octets());
+    pseudo.extend_from_slice(&(udp_packet.len() as u32).to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0]);
+    pseudo.push(17);
+    pseudo.extend_from_slice(udp_packet);
+    ones_complement_checksum_raw(&pseudo) == 0
 }
 
 fn build_ipv4_udp_dns_response_packet(

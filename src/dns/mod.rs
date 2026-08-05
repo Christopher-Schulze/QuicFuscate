@@ -33,6 +33,11 @@ pub const DNS_FORWARDING_DEADLINE: Duration = Duration::from_secs(5);
 const DNS_FLAG_QR: u16 = 0x8000;
 const DNS_FLAG_OPCODE_MASK: u16 = 0x7800;
 const DNS_OPCODE_QUERY: u16 = 0;
+const DNS_FLAG_AA: u16 = 0x0400;
+const DNS_FLAG_TC: u16 = 0x0200;
+const DNS_FLAG_RA: u16 = 0x0080;
+const DNS_FLAG_Z: u16 = 0x0040;
+const DNS_FLAG_RCODE_MASK: u16 = 0x000f;
 const DNS_FLAG_RD: u16 = 0x0100;
 const DNS_FLAG_CD: u16 = 0x0010;
 const DNS_RCODE_NOERROR: u8 = 0;
@@ -519,10 +524,14 @@ pub struct DnsQuery {
     pub id: u16,
     pub flags: u16,
     pub qname: String,
+    /// Expanded, byte-preserving QNAME used for answer owner names.
+    pub qname_wire: Vec<u8>,
     pub qtype: DnsQType,
     /// Original wire QTYPE, retained when `qtype` is `Unknown`.
     pub raw_qtype: u16,
     pub qclass: u16,
+    /// Exact original question section bytes, including compression and casing.
+    pub question_wire: Vec<u8>,
 }
 
 /// A DNS response ready to send back to the client.
@@ -534,72 +543,154 @@ pub struct DnsResponse {
 
 /// Parse a raw DNS query packet (UDP, port 53).
 pub fn parse_dns_query(pkt: &[u8]) -> Option<DnsQuery> {
-    if pkt.len() < 12 {
-        return None;
-    }
+    validate_dns_query_size(pkt).ok()?;
     let id = u16::from_be_bytes([pkt[0], pkt[1]]);
     let flags = u16::from_be_bytes([pkt[2], pkt[3]]);
-    if flags & DNS_FLAG_QR != 0 {
+    if !valid_dns_query_flags(flags) {
         return None;
     }
     let qdcount = u16::from_be_bytes([pkt[4], pkt[5]]);
-    if qdcount == 0 {
+    if qdcount != 1 {
         return None;
     }
-    // Parse the first question.
-    let mut pos = 12;
-    let qname = parse_name(pkt, &mut pos)?;
-    if pos + 4 > pkt.len() {
-        return None;
+
+    let parsed_name = parse_dns_name(pkt, DNS_HEADER_SIZE)?;
+    let fields_end = parsed_name.end.checked_add(4)?;
+    let fields = pkt.get(parsed_name.end..fields_end)?;
+    let question_wire = pkt.get(DNS_HEADER_SIZE..fields_end)?.to_vec();
+    let raw_qtype = u16::from_be_bytes([fields[0], fields[1]]);
+    let qclass = u16::from_be_bytes([fields[2], fields[3]]);
+    Some(DnsQuery {
+        id,
+        flags,
+        qname: parsed_name.display,
+        qname_wire: parsed_name.wire,
+        qtype: DnsQType::from_u16(raw_qtype),
+        raw_qtype,
+        qclass,
+        question_wire,
+    })
+}
+
+fn valid_dns_query_flags(flags: u16) -> bool {
+    flags
+        & (DNS_FLAG_QR
+            | DNS_FLAG_OPCODE_MASK
+            | DNS_FLAG_AA
+            | DNS_FLAG_TC
+            | DNS_FLAG_RA
+            | DNS_FLAG_Z
+            | DNS_FLAG_RCODE_MASK)
+        == 0
+}
+
+struct ParsedDnsName {
+    display: String,
+    wire: Vec<u8>,
+    end: usize,
+}
+
+/// Parse a bounded DNS name while preserving its expanded wire bytes.
+fn parse_dns_name(pkt: &[u8], start: usize) -> Option<ParsedDnsName> {
+    let mut labels: Vec<Vec<u8>> = Vec::new();
+    let mut wire = Vec::with_capacity(32);
+    let mut cursor = start;
+    let mut consumed_end = None;
+    let mut pointer_count = 0;
+
+    loop {
+        let length = *pkt.get(cursor)?;
+        match length & 0xc0 {
+            0x00 => {
+                let label_length = usize::from(length);
+                if label_length == 0 {
+                    let end = cursor.checked_add(1)?;
+                    if wire.len().checked_add(1)? > DNS_MAX_NAME_WIRE_SIZE {
+                        return None;
+                    }
+                    wire.push(0);
+                    let display = labels
+                        .iter()
+                        .map(|label| String::from_utf8_lossy(label).into_owned())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    return Some(ParsedDnsName { display, wire, end: consumed_end.unwrap_or(end) });
+                }
+                if label_length > 63 {
+                    return None;
+                }
+                let label_start = cursor.checked_add(1)?;
+                let label_end = label_start.checked_add(label_length)?;
+                if wire.len().checked_add(label_length + 1)? > DNS_MAX_NAME_WIRE_SIZE {
+                    return None;
+                }
+                let label = pkt.get(label_start..label_end)?.to_vec();
+                wire.push(length);
+                wire.extend_from_slice(&label);
+                labels.push(label);
+                cursor = label_end;
+            }
+            0xc0 => {
+                let pointer_end = cursor.checked_add(2)?;
+                let pointer = pkt.get(cursor..pointer_end)?;
+                let target = (usize::from(pointer[0] & 0x3f) << 8) | usize::from(pointer[1]);
+                if target < DNS_HEADER_SIZE || target >= cursor {
+                    return None;
+                }
+                pointer_count += 1;
+                if pointer_count > DNS_MAX_NAME_POINTERS {
+                    return None;
+                }
+                if consumed_end.is_none() {
+                    consumed_end = Some(pointer_end);
+                }
+                cursor = target;
+            }
+            _ => return None,
+        }
     }
-    let qtype = u16::from_be_bytes([pkt[pos], pkt[pos + 1]]);
-    let qclass = u16::from_be_bytes([pkt[pos + 2], pkt[pos + 3]]);
-    Some(DnsQuery { id, flags, qname, qtype: DnsQType::from_u16(qtype), raw_qtype: qtype, qclass })
 }
 
 /// Parse a DNS name (RFC 1035 §3.1, label encoding).
+#[cfg(test)]
 fn parse_name(pkt: &[u8], pos: &mut usize) -> Option<String> {
-    let mut labels = Vec::new();
-    let mut jumped = false;
-    let mut jump_pos = 0;
-    let mut iterations = 0;
+    let parsed = parse_dns_name(pkt, *pos)?;
+    *pos = parsed.end;
+    Some(parsed.display)
+}
 
-    loop {
-        if *pos >= pkt.len() || iterations > 128 {
-            return None;
-        }
-        let len = pkt[*pos];
-        if len == 0 {
-            *pos += 1;
-            break;
-        }
-        if len & 0xC0 == 0xC0 {
-            // Compression pointer.
-            if *pos + 1 >= pkt.len() {
-                return None;
-            }
-            if !jumped {
-                jump_pos = *pos + 2;
-            }
-            *pos = ((len as usize & 0x3F) << 8) | (pkt[*pos + 1] as usize);
-            jumped = true;
-            iterations += 1;
-            continue;
-        }
-        let label_len = len as usize;
-        *pos += 1;
-        if *pos + label_len > pkt.len() {
-            return None;
-        }
-        labels.push(String::from_utf8_lossy(&pkt[*pos..*pos + label_len]).to_string());
-        *pos += label_len;
-        iterations += 1;
+fn append_qname(query: &DnsQuery, out: &mut Vec<u8>) {
+    if query.qname_wire.is_empty() {
+        encode_name(&query.qname, out);
+    } else {
+        out.extend_from_slice(&query.qname_wire);
     }
+}
 
-    if jumped {
-        *pos = jump_pos;
+fn append_question(query: &DnsQuery, pkt: &mut Vec<u8>) {
+    if !query.question_wire.is_empty() {
+        pkt.extend_from_slice(&query.question_wire);
+    } else {
+        encode_name(&query.qname, pkt);
+        pkt.extend_from_slice(&query.raw_qtype.to_be_bytes());
+        pkt.extend_from_slice(&query.qclass.to_be_bytes());
     }
-    Some(labels.join("."))
+}
+
+fn response_flags(request_flags: u16, rcode: u8) -> u16 {
+    DNS_FLAG_QR | (request_flags & (DNS_FLAG_RD | DNS_FLAG_CD)) | u16::from(rcode & 0x0f)
+}
+
+fn build_dns_error(query: &DnsQuery, rcode: u8) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(64);
+    pkt.extend_from_slice(&query.id.to_be_bytes());
+    pkt.extend_from_slice(&response_flags(query.flags, rcode).to_be_bytes());
+    pkt.extend_from_slice(&1u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    append_question(query, &mut pkt);
+    pkt
 }
 
 /// Encode a DNS name into wire format (RFC 1035 §3.1).
@@ -613,30 +704,6 @@ fn encode_name(name: &str, out: &mut Vec<u8>) {
         out.extend_from_slice(&label.as_bytes()[..len]);
     }
     out.push(0); // Root terminator.
-}
-
-fn response_flags(request_flags: u16, rcode: u8) -> u16 {
-    DNS_FLAG_QR
-        | (request_flags & (DNS_FLAG_OPCODE_MASK | DNS_FLAG_RD | DNS_FLAG_CD))
-        | u16::from(rcode & 0x0f)
-}
-
-fn append_question(query: &DnsQuery, pkt: &mut Vec<u8>) {
-    encode_name(&query.qname, pkt);
-    pkt.extend_from_slice(&query.raw_qtype.to_be_bytes());
-    pkt.extend_from_slice(&query.qclass.to_be_bytes());
-}
-
-fn build_dns_error(query: &DnsQuery, rcode: u8) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(64);
-    pkt.extend_from_slice(&query.id.to_be_bytes());
-    pkt.extend_from_slice(&response_flags(query.flags, rcode).to_be_bytes());
-    pkt.extend_from_slice(&1u16.to_be_bytes());
-    pkt.extend_from_slice(&0u16.to_be_bytes());
-    pkt.extend_from_slice(&0u16.to_be_bytes());
-    pkt.extend_from_slice(&0u16.to_be_bytes());
-    append_question(query, &mut pkt);
-    pkt
 }
 
 /// Build a DNS response packet with the given answer records.
@@ -656,7 +723,7 @@ pub fn build_dns_response_a(query: &DnsQuery, answers: &[Ipv4Addr]) -> Vec<u8> {
     append_question(query, &mut pkt);
     // Answer section.
     for ip in answers {
-        encode_name(&query.qname, &mut pkt);
+        append_qname(query, &mut pkt);
         pkt.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
         pkt.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
         pkt.extend_from_slice(&30u32.to_be_bytes()); // TTL 30s
@@ -677,7 +744,7 @@ pub fn build_dns_response_aaaa(query: &DnsQuery, answers: &[Ipv6Addr]) -> Vec<u8
     pkt.extend_from_slice(&0u16.to_be_bytes());
     append_question(query, &mut pkt);
     for ip in answers {
-        encode_name(&query.qname, &mut pkt);
+        append_qname(query, &mut pkt);
         pkt.extend_from_slice(&28u16.to_be_bytes());
         pkt.extend_from_slice(&1u16.to_be_bytes());
         pkt.extend_from_slice(&30u32.to_be_bytes());
@@ -1093,11 +1160,15 @@ fn parse_doh_question_identity(
     let id = u16::from_be_bytes([packet[0], packet[1]]);
     let flags = u16::from_be_bytes([packet[2], packet[3]]);
     let has_response_flag = flags & DNS_FLAG_QR != 0;
-    if has_response_flag != response {
-        return Err(if response { "response QR flag is not set" } else { "query QR flag is set" });
-    }
-    if flags & DNS_FLAG_OPCODE_MASK != DNS_OPCODE_QUERY {
-        return Err("DNS message uses an unsupported opcode");
+    if response {
+        if !has_response_flag {
+            return Err("response QR flag is not set");
+        }
+        if flags & DNS_FLAG_OPCODE_MASK != DNS_OPCODE_QUERY {
+            return Err("DNS message uses an unsupported opcode");
+        }
+    } else if !valid_dns_query_flags(flags) {
+        return Err("DNS query uses an unsupported flag combination");
     }
 
     let question_count = u16::from_be_bytes([packet[4], packet[5]]);
@@ -1125,58 +1196,25 @@ fn parse_doh_question_identity(
 /// the RFC 1035 255-byte wire limit. Answer and additional sections remain
 /// opaque to preserve valid compression and EDNS records.
 fn parse_doh_name(packet: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
-    let mut canonical = Vec::with_capacity(32);
-    let mut cursor = start;
-    let mut consumed_end = None;
-    let mut pointer_count = 0;
-
-    loop {
-        let length = *packet.get(cursor)?;
-        match length & 0xc0 {
-            0x00 => {
-                let label_length = usize::from(length);
-                if label_length == 0 {
-                    let end = cursor.checked_add(1)?;
-                    canonical.push(0);
-                    return Some((canonical, consumed_end.unwrap_or(end)));
-                }
-                if label_length > 63 {
-                    return None;
-                }
-                let label_start = cursor.checked_add(1)?;
-                let label_end = label_start.checked_add(label_length)?;
-                let canonical_length = canonical.len().checked_add(label_length + 1)?;
-                if canonical_length > DNS_MAX_NAME_WIRE_SIZE {
-                    return None;
-                }
-                let label = packet.get(label_start..label_end)?;
-                canonical.push(length);
-                for byte in label {
-                    let lower =
-                        if byte.is_ascii_uppercase() { *byte + (b'a' - b'A') } else { *byte };
-                    canonical.push(lower);
-                }
-                cursor = label_end;
-            }
-            0xc0 => {
-                let pointer_end = cursor.checked_add(2)?;
-                let pointer = packet.get(cursor..pointer_end)?;
-                let target = (usize::from(pointer[0] & 0x3f) << 8) | usize::from(pointer[1]);
-                if target < DNS_HEADER_SIZE || target >= cursor {
-                    return None;
-                }
-                pointer_count += 1;
-                if pointer_count > DNS_MAX_NAME_POINTERS {
-                    return None;
-                }
-                if consumed_end.is_none() {
-                    consumed_end = Some(pointer_end);
-                }
-                cursor = target;
-            }
-            _ => return None,
+    let parsed = parse_dns_name(packet, start)?;
+    let mut canonical = parsed.wire;
+    let mut cursor = 0;
+    while cursor < canonical.len() {
+        let label_length = usize::from(canonical[cursor]);
+        if label_length == 0 {
+            break;
         }
+        let label_start = cursor.checked_add(1)?;
+        let label_end = label_start.checked_add(label_length)?;
+        let label = canonical.get_mut(label_start..label_end)?;
+        for byte in label {
+            if byte.is_ascii_uppercase() {
+                *byte += b'a' - b'A';
+            }
+        }
+        cursor = label_end;
     }
+    Some((canonical, parsed.end))
 }
 
 fn validate_doh_response_semantics(query: &[u8], response: &[u8]) -> Result<(), DnsProxyError> {
@@ -1634,15 +1672,64 @@ mod tests {
     }
 
     #[test]
-    fn test_synthesized_response_preserves_opcode_rd_and_cd() {
-        let pkt = make_dns_query_packet_with_flags("example.com", 1, 0x2910);
+    fn test_synthesized_response_preserves_rd_and_cd() {
+        let pkt = make_dns_query_packet_with_flags("example.com", 1, 0x0110);
         let query = parse_dns_query(&pkt).expect("query should parse");
         let response = build_dns_servfail(&query);
         assert_eq!(
             u16::from_be_bytes([response[2], response[3]]),
-            0xa912,
-            "response must set QR, preserve opcode/RD/CD, and set SERVFAIL"
+            0x8112,
+            "response must set QR, preserve RD/CD, and set SERVFAIL"
         );
+    }
+
+    #[test]
+    fn test_parse_dns_query_rejects_unsupported_header_semantics() {
+        for flags in [0x0800, 0x0400, 0x0200, 0x0080, 0x0040, 0x0001] {
+            let packet = make_dns_query_packet_with_flags("example.com", 1, flags);
+            assert!(parse_dns_query(&packet).is_none(), "flags {flags:#06x} must be rejected");
+        }
+
+        let mut multiple = make_dns_query_packet("example.com", 1);
+        multiple[4..6].copy_from_slice(&2u16.to_be_bytes());
+        assert!(parse_dns_query(&multiple).is_none());
+    }
+
+    #[test]
+    fn test_parse_dns_query_rejects_reserved_name_prefixes_and_bad_pointers() {
+        let mut reserved = make_dns_query_packet("example.com", 1);
+        reserved[12] = 0x40;
+        assert!(parse_dns_query(&reserved).is_none());
+
+        let mut forward_pointer = make_dns_query_packet("example.com", 1);
+        forward_pointer[12..14].copy_from_slice(&[0xc0, 0x20]);
+        assert!(parse_dns_query(&forward_pointer).is_none());
+
+        let mut header_pointer = make_dns_query_packet("example.com", 1);
+        header_pointer[12..14].copy_from_slice(&[0xc0, 0x00]);
+        assert!(parse_dns_query(&header_pointer).is_none());
+    }
+
+    #[test]
+    fn test_parse_dns_query_preserves_question_wire_and_non_utf8_bytes() {
+        let mut packet = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        packet.extend_from_slice(&[
+            3, b'W', b'W', b'W', 7, b'E', b'x', b'a', b'm', b'p', b'l', b'e', 0, 0xff, 0x01, 0, 1,
+        ]);
+
+        let query = parse_dns_query(&packet).expect("question must parse");
+        assert_eq!(query.qname, "WWW.Example");
+        assert_eq!(query.raw_qtype, 0xff01);
+        assert_eq!(query.question_wire, packet[DNS_HEADER_SIZE..]);
+
+        let response = build_dns_servfail(&query);
+        assert_eq!(&response[DNS_HEADER_SIZE..], &packet[DNS_HEADER_SIZE..]);
+
+        let mut non_utf8 = vec![0x56, 0x78, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        non_utf8.extend_from_slice(&[1, 0xff, 0, 0, 1, 0, 1]);
+        let query = parse_dns_query(&non_utf8).expect("non-UTF-8 label must remain parseable");
+        assert_eq!(&query.question_wire, &non_utf8[DNS_HEADER_SIZE..]);
+        assert_eq!(&build_dns_servfail(&query)[DNS_HEADER_SIZE..], &non_utf8[DNS_HEADER_SIZE..]);
     }
 
     #[tokio::test]
@@ -1660,9 +1747,11 @@ mod tests {
             id: 42,
             flags: 0x0100,
             qname: "test.com".into(),
+            qname_wire: Vec::new(),
             qtype: DnsQType::A,
             raw_qtype: 1,
             qclass: 1,
+            question_wire: Vec::new(),
         };
         let ips = vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)];
         let response = build_dns_response_a(&query, &ips);
@@ -1678,9 +1767,11 @@ mod tests {
             id: 99,
             flags: 0x0100,
             qname: "nonexistent.invalid".into(),
+            qname_wire: Vec::new(),
             qtype: DnsQType::A,
             raw_qtype: 1,
             qclass: 1,
+            question_wire: Vec::new(),
         };
         let response = build_dns_nxdomain(&query);
         assert_eq!(u16::from_be_bytes([response[0], response[1]]), 99);

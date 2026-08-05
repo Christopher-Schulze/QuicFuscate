@@ -740,6 +740,12 @@ mod tests {
         pkt
     }
 
+    fn refresh_ipv4_header_checksum(pkt: &mut [u8]) {
+        pkt[10..12].fill(0);
+        let checksum = ones_complement_checksum(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&checksum.to_be_bytes());
+    }
+
     #[test]
     fn test_parse_ipv4_udp_dns_query_detects_port_53_payload() {
         let payload = test_dns_query_payload();
@@ -773,6 +779,76 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ipv4_udp_dns_query_rejects_fragment_length_trailing_and_checksum_errors() {
+        let payload = test_dns_query_payload();
+        let base = test_ipv4_udp_packet(
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(1, 1, 1, 1),
+            53000,
+            53,
+            &payload,
+        );
+
+        let mut fragmented = base.clone();
+        fragmented[6..8].copy_from_slice(&0x2000u16.to_be_bytes());
+        refresh_ipv4_header_checksum(&mut fragmented);
+        assert!(parse_ipv4_udp_dns_query(&fragmented).is_none());
+
+        let mut offset_fragment = base.clone();
+        offset_fragment[6..8].copy_from_slice(&1u16.to_be_bytes());
+        refresh_ipv4_header_checksum(&mut offset_fragment);
+        assert!(parse_ipv4_udp_dns_query(&offset_fragment).is_none());
+
+        let mut bad_ip_checksum = base.clone();
+        bad_ip_checksum[10] ^= 0x01;
+        assert!(parse_ipv4_udp_dns_query(&bad_ip_checksum).is_none());
+
+        let mut bad_udp_checksum = base.clone();
+        bad_udp_checksum[26] ^= 0x01;
+        assert!(parse_ipv4_udp_dns_query(&bad_udp_checksum).is_none());
+
+        let mut bad_udp_length = base.clone();
+        bad_udp_length[24..26].copy_from_slice(&((8 + payload.len() - 1) as u16).to_be_bytes());
+        assert!(parse_ipv4_udp_dns_query(&bad_udp_length).is_none());
+
+        let mut bad_total_length = base.clone();
+        bad_total_length[2..4].copy_from_slice(&((base.len() - 1) as u16).to_be_bytes());
+        assert!(parse_ipv4_udp_dns_query(&bad_total_length).is_none());
+
+        let mut trailing = base.clone();
+        trailing.push(0);
+        assert!(parse_ipv4_udp_dns_query(&trailing).is_none());
+
+        let mut omitted_udp_checksum = base;
+        omitted_udp_checksum[26..28].fill(0);
+        assert!(parse_ipv4_udp_dns_query(&omitted_udp_checksum).is_some());
+    }
+
+    #[test]
+    fn test_parse_ipv6_udp_dns_query_rejects_length_and_checksum_errors() {
+        let payload = test_dns_query_payload();
+        let src_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        let dst_ip = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let base = test_ipv6_udp_packet(src_ip, dst_ip, 53000, 53, &payload);
+
+        let mut bad_checksum = base.clone();
+        bad_checksum[46] ^= 0x01;
+        assert!(parse_ipv6_udp_dns_query(&bad_checksum).is_none());
+
+        let mut zero_checksum = base.clone();
+        zero_checksum[46..48].fill(0);
+        assert!(parse_ipv6_udp_dns_query(&zero_checksum).is_none());
+
+        let mut bad_udp_length = base.clone();
+        bad_udp_length[44..46].copy_from_slice(&((8 + payload.len() - 1) as u16).to_be_bytes());
+        assert!(parse_ipv6_udp_dns_query(&bad_udp_length).is_none());
+
+        let mut trailing = base.clone();
+        trailing.push(0);
+        assert!(parse_ipv6_udp_dns_query(&trailing).is_none());
+    }
+
+    #[test]
     fn test_build_ipv4_udp_dns_response_packet_swaps_tuple() {
         let payload = test_dns_query_payload();
         let pkt = test_ipv4_udp_packet(
@@ -795,6 +871,12 @@ mod tests {
         );
         assert_eq!(u16::from_be_bytes([response[20], response[21]]), 53);
         assert_eq!(u16::from_be_bytes([response[22], response[23]]), 53000);
+        assert_eq!(ones_complement_checksum_raw(&response[..20]), 0);
+        assert!(ipv4_udp_checksum_is_valid(
+            Ipv4Addr::new(1, 1, 1, 1),
+            Ipv4Addr::new(10, 8, 0, 2),
+            &response[20..]
+        ));
         assert_eq!(&response[28..], dns_response.as_slice());
     }
 
@@ -814,6 +896,7 @@ mod tests {
         assert_eq!(Ipv6Addr::from(<[u8; 16]>::try_from(&response[8..24]).unwrap()), dst_ip);
         assert_eq!(u16::from_be_bytes([response[40], response[41]]), 53);
         assert_eq!(u16::from_be_bytes([response[42], response[43]]), 53000);
+        assert!(ipv6_udp_checksum_is_valid(dst_ip, src_ip, &response[40..]));
         assert_eq!(&response[48..], dns_response.as_slice());
     }
 
