@@ -18,91 +18,99 @@ struct Equation8 {
 }
 
 struct WiedemannScratch {
-    #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
     column_buffers: Vec<Vec<u8>>,
-    #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
     spmv_acc: Vec<u8>,
 }
 
 impl WiedemannScratch {
     fn from_lookup(eq_coeff_lookup: &[Vec<Option<u8>>], n: usize) -> Self {
-        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
-        {
-            let row_limit = eq_coeff_lookup.len().min(n);
-            let column_buffers = if row_limit > 0 && n > 0 {
-                (0..n)
-                    .map(|col| {
-                        let mut column = vec![0u8; row_limit];
-                        for row in 0..row_limit {
-                            column[row] = eq_coeff_lookup[row]
-                                .get(col)
-                                .copied()
-                                .flatten()
-                                .unwrap_or(0);
-                        }
-                        column
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let spmv_acc = if row_limit > 0 { vec![0u8; row_limit] } else { Vec::new() };
-            if !column_buffers.is_empty() {
-                crate::telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS
-                    .inc_by(column_buffers.len() as u64);
-            }
-            if !spmv_acc.is_empty() {
-                crate::telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.inc();
-            }
-            Self { column_buffers, spmv_acc }
+        let row_limit = eq_coeff_lookup.len().min(n);
+        let column_buffers = if row_limit > 0 && n > 0 {
+            (0..n)
+                .map(|col| {
+                    let mut column = vec![0u8; row_limit];
+                    for row in 0..row_limit {
+                        column[row] = eq_coeff_lookup[row]
+                            .get(col)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(0);
+                    }
+                    column
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let spmv_acc = if row_limit > 0 { vec![0u8; row_limit] } else { Vec::new() };
+        if !column_buffers.is_empty() {
+            crate::telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS
+                .inc_by(column_buffers.len() as u64);
         }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
-        {
-            let _ = (eq_coeff_lookup, n);
-            Self {}
+        if !spmv_acc.is_empty() {
+            crate::telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.inc();
         }
+        Self { column_buffers, spmv_acc }
     }
 
     #[cfg(test)]
     fn from_matrix(matrix: &[Vec<u8>], n: usize) -> Self {
-        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
-        {
-            let row_limit = matrix.len().min(n);
-            let column_buffers = if row_limit > 0 && n > 0 {
-                (0..n)
-                    .map(|col| {
-                        let mut column = vec![0u8; row_limit];
-                        for row in 0..row_limit {
-                            column[row] = matrix[row].get(col).copied().unwrap_or(0);
-                        }
-                        column
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let spmv_acc = if row_limit > 0 { vec![0u8; row_limit] } else { Vec::new() };
-            if !column_buffers.is_empty() {
-                crate::telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS
-                    .inc_by(column_buffers.len() as u64);
-            }
-            if !spmv_acc.is_empty() {
-                crate::telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.inc();
-            }
-            Self { column_buffers, spmv_acc }
+        let row_limit = matrix.len().min(n);
+        let column_buffers = if row_limit > 0 && n > 0 {
+            (0..n)
+                .map(|col| {
+                    let mut column = vec![0u8; row_limit];
+                    for row in 0..row_limit {
+                        column[row] = matrix[row].get(col).copied().unwrap_or(0);
+                    }
+                    column
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let spmv_acc = if row_limit > 0 { vec![0u8; row_limit] } else { Vec::new() };
+        if !column_buffers.is_empty() {
+            crate::telemetry::WIEDEMANN_COLUMN_BUFFER_ALLOCS
+                .inc_by(column_buffers.len() as u64);
         }
-        #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
-        {
-            let _ = (matrix, n);
-            Self {}
+        if !spmv_acc.is_empty() {
+            crate::telemetry::WIEDEMANN_SPMV_ACCUMULATOR_ALLOCS.inc();
         }
+        Self { column_buffers, spmv_acc }
     }
 
     #[inline]
     fn clear_spmv_acc(&mut self) {
-        #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
         self.spmv_acc.fill(0);
     }
+}
+
+#[inline]
+fn multiply_gf256_with_scratch(
+    scratch: &mut WiedemannScratch,
+    vector: &[u8],
+    output: &mut [u8],
+) {
+    output.fill(0);
+    if scratch.column_buffers.is_empty() || scratch.spmv_acc.is_empty() {
+        return;
+    }
+
+    scratch.clear_spmv_acc();
+    let limit = scratch.column_buffers.len().min(vector.len());
+    for (col_idx, &coeff) in vector.iter().enumerate().take(limit) {
+        if coeff != 0 {
+            gf_tables::gf_mul_scalar_slice(
+                coeff,
+                &scratch.column_buffers[col_idx],
+                &mut scratch.spmv_acc,
+            );
+        }
+    }
+
+    let copy = scratch.spmv_acc.len().min(output.len());
+    output[..copy].copy_from_slice(&scratch.spmv_acc[..copy]);
 }
 
 struct Decoder8 {
@@ -642,42 +650,7 @@ impl Decoder8 {
 
         crate::telemetry::WIEDEMANN_USAGE.inc();
 
-        #[cfg(target_arch = "x86_64")]
-        #[allow(dead_code)]
-        struct AmxBuffers {
-            flat_matrix: Vec<u8>,
-            result: Vec<u8>,
-            av_col: Vec<u8>,
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        let use_amx = {
-            let plans = crate::simd::planner::AccelerationPlanner::global();
-            plans.features.amx_tile && plans.features.amx_int8 && m >= 64 && n >= 64
-        };
-        #[cfg(not(target_arch = "x86_64"))]
-        let use_amx = false;
-
-        #[cfg(target_arch = "x86_64")]
-        let mut _amx_buffers = if use_amx {
-            let mut flat_matrix = vec![0u8; m * n];
-            for (i, row) in matrix.iter().enumerate().take(m) {
-                for (j, &val) in row.iter().enumerate().take(n) {
-                    flat_matrix[i * n + j] = val;
-                }
-            }
-            crate::telemetry::WIEDEMANN_AMX_SCRATCH_ALLOCS.inc_by(3);
-            crate::telemetry::WIEDEMANN_AMX_OPS.inc();
-            Some(AmxBuffers { flat_matrix, result: vec![0u8; m], av_col: vec![0u8; n] })
-        } else {
-            None
-        };
-
-        let row_limit = matrix.len().min(n);
-
-        if !use_amx {
-            crate::telemetry::WIEDEMANN_SCALAR_OPS.inc();
-        }
+        crate::telemetry::WIEDEMANN_SCALAR_OPS.inc();
 
         for slot in sequence.iter_mut().take(seq_len) {
             // s_i = u^T * av
@@ -689,79 +662,8 @@ impl Decoder8 {
 
             // av = A * av (Matrix-Vector multiply)
             crate::telemetry::WIEDEMANN_ITERATION_ALLOCS.inc();
-            #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
             let mut next_av = vec![0u8; n];
-            #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
-            let next_av = vec![0u8; n];
-
-            #[cfg(all(target_arch = "x86_64", target_feature = "amx-tile"))]
-            if use_amx {
-                if let Some(buffers) = _amx_buffers.as_mut() {
-                    let copy_len = buffers.av_col.len().min(av.len());
-                    buffers.av_col[..copy_len].copy_from_slice(&av[..copy_len]);
-                    buffers.result.fill(0);
-                    unsafe {
-                        crate::simd::amx::matmul_gf256_amx(
-                            &buffers.flat_matrix,
-                            &buffers.av_col,
-                            &mut buffers.result,
-                            m,
-                            n,
-                            1,
-                        );
-                    }
-                    let copy_len = next_av.len().min(buffers.result.len());
-                    next_av[..copy_len].copy_from_slice(&buffers.result[..copy_len]);
-                }
-            } else {
-                if row_limit == 0 || scratch.column_buffers.is_empty() {
-                    next_av.fill(0);
-                } else {
-                    scratch.clear_spmv_acc();
-                    let limit = scratch.column_buffers.len().min(av.len());
-                    for (col_idx, &coeff) in av.iter().enumerate().take(limit) {
-                        if coeff != 0 {
-                            gf_tables::gf_mul_scalar_slice(
-                                coeff,
-                                &scratch.column_buffers[col_idx],
-                                &mut scratch.spmv_acc,
-                            );
-                        }
-                    }
-                    let copy = row_limit.min(next_av.len());
-                    if copy > 0 {
-                        next_av[..copy].copy_from_slice(&scratch.spmv_acc[..copy]);
-                    }
-                    if next_av.len() > copy {
-                        next_av[copy..].fill(0);
-                    }
-                }
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                if row_limit == 0 || scratch.column_buffers.is_empty() {
-                    next_av.fill(0);
-                } else {
-                    scratch.clear_spmv_acc();
-                    let limit = scratch.column_buffers.len().min(av.len());
-                    for (col_idx, &coeff) in av.iter().enumerate().take(limit) {
-                        if coeff != 0 {
-                            gf_tables::gf_mul_scalar_slice(
-                                coeff,
-                                &scratch.column_buffers[col_idx],
-                                &mut scratch.spmv_acc,
-                            );
-                        }
-                    }
-                    let copy = row_limit.min(next_av.len());
-                    if copy > 0 {
-                        next_av[..copy].copy_from_slice(&scratch.spmv_acc[..copy]);
-                    }
-                    if next_av.len() > copy {
-                        next_av[copy..].fill(0);
-                    }
-                }
-            }
+            multiply_gf256_with_scratch(scratch, &av, &mut next_av);
 
             av = next_av;
         }

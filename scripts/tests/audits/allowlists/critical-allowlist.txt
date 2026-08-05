@@ -8,5 +8,3 @@
 # Keep this file tight. Only add entries that are intentional and reviewed.
 
 panic|^src/optimize/unsafe\.rs:[0-9]+:
-static_mut|^src/fec\.rs:[0-9]+:.*static mut (LOG_TABLE|EXP_TABLE)
-static_mut|^src/simd\.rs:[0-9]+:.*static mut (LENS32|TILE_CONFIG)

@@ -1,10 +1,3 @@
-#[cfg(all(target_arch = "x86_64", target_feature = "amx-int8"))]
-fn has_amx_runtime() -> bool {
-    std::arch::is_x86_feature_detected!("amx_int8")
-        && std::arch::is_x86_feature_detected!("amx_tile")
-        && std::arch::is_x86_feature_detected!("amx_bf16")
-}
-
 use super::test_support::*;
 use super::{
     continuous_fec_target, low_cost_block_uses_gf4, mode_for_target, target_from_mode, target_rank,
@@ -12,7 +5,7 @@ use super::{
     FecConfig, FecMode, FecObserverPlatformHints, FecObserverProfilePolicy, FecPacket,
     FecRuntimePlan, FecRuntimePolicy, FecTransportObserver, SimdLevel, TransportProfile,
 };
-use crate::optimize::telemetry;
+use crate::{fec::gf_tables, optimize::telemetry};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -1047,31 +1040,24 @@ fn test_wiedemann_scratch_storage_is_dimension_bounded_and_resettable() {
     let matrix = vec![vec![0u8; 5]; 4];
     let mut scratch = super::WiedemannScratch::from_matrix(&matrix, 3);
 
-    #[cfg(any(not(target_arch = "x86_64"), target_feature = "amx-tile"))]
-    {
-        assert_eq!(scratch.column_buffers.len(), 3);
-        assert!(scratch.column_buffers.iter().all(|column| column.len() == 3));
-        assert_eq!(scratch.spmv_acc.len(), 3);
-        scratch.spmv_acc.fill(0xFF);
-        scratch.clear_spmv_acc();
-        assert!(scratch.spmv_acc.iter().all(|&value| value == 0));
-    }
+    assert_eq!(scratch.column_buffers.len(), 3);
+    assert!(scratch.column_buffers.iter().all(|column| column.len() == 3));
+    assert_eq!(scratch.spmv_acc.len(), 3);
+    scratch.spmv_acc.fill(0xFF);
+    scratch.clear_spmv_acc();
+    assert!(scratch.spmv_acc.iter().all(|&value| value == 0));
 
-    #[cfg(all(target_arch = "x86_64", not(target_feature = "amx-tile")))]
-    assert_eq!(std::mem::size_of_val(&scratch), 0);
+    let empty = super::WiedemannScratch::from_matrix(&[], 0);
+    assert!(empty.column_buffers.is_empty());
+    assert!(empty.spmv_acc.is_empty());
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", target_feature = "amx-int8"))]
-fn test_wiedemann_amx_telemetry_increments() {
-    if !has_amx_runtime() {
-        println!("AMX runtime support not available; skipping test");
-        return;
-    }
-
+fn test_wiedemann_large_system_uses_scalar_fallback() {
     let _env_lock = acquire_env_lock();
+    gf_tables::init_tables();
     let pool = make_pool();
-    let mut decoder = Decoder8::new(64, pool.clone());
+    let decoder = Decoder8::new(64, pool.clone());
 
     let dim = 64;
     let mut matrix = vec![vec![0u8; dim]; dim];
@@ -1083,64 +1069,51 @@ fn test_wiedemann_amx_telemetry_increments() {
     let mut scratch = super::WiedemannScratch::from_matrix(&matrix, dim);
 
     let usage_before = telemetry::WIEDEMANN_USAGE.get();
+    let scalar_before = telemetry::WIEDEMANN_SCALAR_OPS.get();
     let amx_before = telemetry::WIEDEMANN_AMX_OPS.get();
 
     let solution = decoder
         .solve_wiedemann_system(&matrix, &rhs, dim, &mut scratch)
-        .expect("AMX solve should succeed");
-    assert_eq!(solution, rhs, "AMX path must match RHS for identity matrix");
+        .expect("scalar fallback solve should succeed");
+    assert_eq!(solution, rhs, "identity matrix must preserve the RHS");
 
     let usage_after = telemetry::WIEDEMANN_USAGE.get();
+    let scalar_after = telemetry::WIEDEMANN_SCALAR_OPS.get();
     let amx_after = telemetry::WIEDEMANN_AMX_OPS.get();
 
     assert!(usage_after >= usage_before + 1, "usage counter should increase");
-    assert!(amx_after >= amx_before + 1, "amx counter should increase");
+    assert!(scalar_after >= scalar_before + 1, "scalar fallback counter should increase");
+    assert_eq!(amx_after, amx_before, "inactive AMX path must not claim an operation");
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", target_feature = "amx-int8"))]
-fn test_amx_matmul_matches_scalar() {
-    if !std::arch::is_x86_feature_detected!("amx_int8")
-        || !std::arch::is_x86_feature_detected!("amx_tile")
-    {
-        println!("AMX runtime support unavailable; skipping test");
-        return;
+fn test_wiedemann_scalar_spmv_matches_reference_for_full_and_partial_matrix_shapes() {
+    gf_tables::init_tables();
+    for (rows, cols) in [(16usize, 64usize), (17, 65)] {
+        let matrix = (0..rows)
+            .map(|row| {
+                (0..cols)
+                    .map(|col| ((row * 29 + col * 7 + (row ^ col)) & 0xFF) as u8)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let vector =
+            (0..cols).map(|col| (col as u8).wrapping_mul(53).wrapping_add(11)).collect::<Vec<_>>();
+        let mut scratch = super::WiedemannScratch::from_matrix(&matrix, cols);
+        let mut actual = vec![0u8; rows];
+        super::multiply_gf256_with_scratch(&mut scratch, &vector, &mut actual);
+
+        let expected = matrix
+            .iter()
+            .map(|row| {
+                row.iter().zip(&vector).fold(0u8, |acc, (&coefficient, &value)| {
+                    acc ^ gf_tables::gf_mul_table(coefficient, value)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected, "scalar GF(256) SpMV mismatch for {rows}x{cols}");
     }
-
-    use crate::simd::amx::matmul_gf256_amx;
-
-    const ROWS: usize = 64;
-    const COLS: usize = 64;
-
-    let mut matrix = vec![0u8; ROWS * COLS];
-    for r in 0..ROWS {
-        for c in 0..COLS {
-            matrix[r * COLS + c] = ((r * 29 + c * 7 + (r ^ c)) & 0xFF) as u8;
-        }
-    }
-    let mut vector = vec![0u8; COLS];
-    for c in 0..COLS {
-        vector[c] = (c as u8).wrapping_mul(53).wrapping_add(11);
-    }
-
-    let mut amx_out = vec![0u8; ROWS];
-    let mut scalar_out = vec![0u8; ROWS];
-
-    unsafe { matmul_gf256_amx(&matrix, &vector, &mut amx_out, ROWS, COLS, 1) };
-
-    for r in 0..ROWS {
-        let mut acc = 0u8;
-        for c in 0..COLS {
-            let a = matrix[r * COLS + c];
-            let b = vector[c];
-            if a != 0 && b != 0 {
-                acc ^= gf_tables::gf_mul_table(a, b);
-            }
-        }
-        scalar_out[r] = acc;
-    }
-
-    assert_eq!(amx_out, scalar_out, "AMX matmul must match scalar reference");
 }
 
 #[test]

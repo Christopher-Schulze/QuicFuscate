@@ -455,7 +455,9 @@ pub mod string;
 pub mod h3;
 
 // ============================================================================
-// INTEL AMX IMPLEMENTATIONS
+// INTEL AMX INTEGRATION BOUNDARY
+// The active FEC path remains on the checked scalar fallback until TODO-818
+// proves a real AMX arithmetic kernel and its compiler/runtime contract.
 // ============================================================================
 
 #[cfg(all(target_arch = "x86_64", target_feature = "amx-tile"))]

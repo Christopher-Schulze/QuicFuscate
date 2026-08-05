@@ -1230,7 +1230,10 @@ pub static BYTES_RECEIVED: Counter = Counter::new();
 pub static DECODING_TIME_MS: AtomicU64 = AtomicU64::new(0);
 /// Wiedemann solver invocations for FEC recovery.
 pub static WIEDEMANN_USAGE: Counter = Counter::new();
-/// Wiedemann solver operations via AMX (Apple).
+/// Wiedemann solver operations via a verified AMX arithmetic backend.
+///
+/// The current production path deliberately keeps this at zero until TODO-818
+/// supplies a real AMX GF(256) kernel and compiler/runtime proof.
 pub static WIEDEMANN_AMX_OPS: Counter = Counter::new();
 /// Wiedemann solver operations via scalar fallback.
 pub static WIEDEMANN_SCALAR_OPS: Counter = Counter::new();
@@ -1247,6 +1250,9 @@ pub static WIEDEMANN_ITERATION_ALLOCS: Counter = Counter::new();
 /// Logical candidate and temporary-result allocations in a solve.
 pub static WIEDEMANN_CANDIDATE_ALLOCS: Counter = Counter::new();
 /// Logical AMX matrix/vector scratch allocations in a solve.
+///
+/// Reserved for the verified AMX backend; the current scalar fallback does not
+/// allocate or report AMX scratch.
 pub static WIEDEMANN_AMX_SCRATCH_ALLOCS: Counter = Counter::new();
 /// Stable public FEC codec mode mapping used by every telemetry export.
 pub const FEC_MODE_MAPPING: [(u8, &str); 9] = [
