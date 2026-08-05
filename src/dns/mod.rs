@@ -32,6 +32,7 @@ pub const DNS_FORWARDING_DEADLINE: Duration = Duration::from_secs(5);
 
 const DNS_FLAG_QR: u16 = 0x8000;
 const DNS_FLAG_OPCODE_MASK: u16 = 0x7800;
+const DNS_OPCODE_QUERY: u16 = 0;
 const DNS_FLAG_RD: u16 = 0x0100;
 const DNS_FLAG_CD: u16 = 0x0010;
 const DNS_RCODE_NOERROR: u8 = 0;
@@ -45,6 +46,8 @@ const DNS_ADMISSION_MAX_IDENTITIES: usize = 65_536;
 const DNS_ADMISSION_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const DNS_ADMISSION_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 const DNS_MAX_SPOOFED_REJECTIONS: u32 = 8;
+const DNS_MAX_NAME_WIRE_SIZE: usize = 255;
+const DNS_MAX_NAME_POINTERS: usize = 128;
 
 /// Validated admission policy for DNS work at a concrete caller boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1038,20 +1041,11 @@ pub async fn resolve_via_doh_with_client(
         return Err(DnsProxyError::DohError("DoH response too short for DNS packet".into()));
     }
 
-    // Verify the DNS transaction ID matches. RFC 8484 §4.2.1 says the ID
-    // "SHOULD be set to 0" in DoH, but in practice all major providers
-    // (Cloudflare, Google, Quad9) echo the query ID. We enforce a match as
-    // a spoofing/injection defense: an attacker who cannot see the query
-    // cannot guess the 16-bit ID. If a strict RFC 8484 server returns ID=0
-    // for a non-zero query ID, this check will reject it — but no known
-    // production DoH server does this.
-    let query_id = u16::from_be_bytes([query[0], query[1]]);
-    let response_id = u16::from_be_bytes([body[0], body[1]]);
-    if query_id != response_id {
-        return Err(DnsProxyError::DohError(format!(
-            "DoH response ID mismatch: expected {query_id}, got {response_id}"
-        )));
-    }
+    // RFC 8484 §4.2.1 says the ID "SHOULD be set to 0" in DoH, but
+    // configured providers echo the query ID. Keep that correlation check
+    // and bind it to the complete bounded question tuple; otherwise a
+    // same-ID response for another query could cross this boundary.
+    validate_doh_response_semantics(query, &body)?;
 
     Ok(body)
 }
@@ -1077,6 +1071,143 @@ fn append_bounded_dns_response(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), D
         });
     }
     body.extend_from_slice(chunk);
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DnsQuestionIdentity {
+    id: u16,
+    qname: Vec<u8>,
+    qtype: u16,
+    qclass: u16,
+}
+
+fn parse_doh_question_identity(
+    packet: &[u8],
+    response: bool,
+) -> Result<DnsQuestionIdentity, &'static str> {
+    if packet.len() < DNS_HEADER_SIZE {
+        return Err("DNS message is shorter than its header");
+    }
+
+    let id = u16::from_be_bytes([packet[0], packet[1]]);
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    let has_response_flag = flags & DNS_FLAG_QR != 0;
+    if has_response_flag != response {
+        return Err(if response { "response QR flag is not set" } else { "query QR flag is set" });
+    }
+    if flags & DNS_FLAG_OPCODE_MASK != DNS_OPCODE_QUERY {
+        return Err("DNS message uses an unsupported opcode");
+    }
+
+    let question_count = u16::from_be_bytes([packet[4], packet[5]]);
+    if question_count != 1 {
+        return Err("DNS message must contain exactly one question");
+    }
+
+    let (qname, question_end) =
+        parse_doh_name(packet, DNS_HEADER_SIZE).ok_or("DNS question name is malformed")?;
+    let fields_end = question_end.checked_add(4).ok_or("DNS question field offset overflow")?;
+    let fields = packet.get(question_end..fields_end).ok_or("DNS question fields are truncated")?;
+
+    Ok(DnsQuestionIdentity {
+        id,
+        qname,
+        qtype: u16::from_be_bytes([fields[0], fields[1]]),
+        qclass: u16::from_be_bytes([fields[2], fields[3]]),
+    })
+}
+
+/// Parse one bounded DNS name into a canonical, case-insensitive wire form.
+///
+/// The caller only uses this for the first question. The pointer rules still
+/// reject forward references, reserved label prefixes, loops, and names above
+/// the RFC 1035 255-byte wire limit. Answer and additional sections remain
+/// opaque to preserve valid compression and EDNS records.
+fn parse_doh_name(packet: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    let mut canonical = Vec::with_capacity(32);
+    let mut cursor = start;
+    let mut consumed_end = None;
+    let mut pointer_count = 0;
+
+    loop {
+        let length = *packet.get(cursor)?;
+        match length & 0xc0 {
+            0x00 => {
+                let label_length = usize::from(length);
+                if label_length == 0 {
+                    let end = cursor.checked_add(1)?;
+                    canonical.push(0);
+                    return Some((canonical, consumed_end.unwrap_or(end)));
+                }
+                if label_length > 63 {
+                    return None;
+                }
+                let label_start = cursor.checked_add(1)?;
+                let label_end = label_start.checked_add(label_length)?;
+                let canonical_length = canonical.len().checked_add(label_length + 1)?;
+                if canonical_length > DNS_MAX_NAME_WIRE_SIZE {
+                    return None;
+                }
+                let label = packet.get(label_start..label_end)?;
+                canonical.push(length);
+                for byte in label {
+                    let lower =
+                        if byte.is_ascii_uppercase() { *byte + (b'a' - b'A') } else { *byte };
+                    canonical.push(lower);
+                }
+                cursor = label_end;
+            }
+            0xc0 => {
+                let pointer_end = cursor.checked_add(2)?;
+                let pointer = packet.get(cursor..pointer_end)?;
+                let target = (usize::from(pointer[0] & 0x3f) << 8) | usize::from(pointer[1]);
+                if target < DNS_HEADER_SIZE || target >= cursor {
+                    return None;
+                }
+                pointer_count += 1;
+                if pointer_count > DNS_MAX_NAME_POINTERS {
+                    return None;
+                }
+                if consumed_end.is_none() {
+                    consumed_end = Some(pointer_end);
+                }
+                cursor = target;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn validate_doh_response_semantics(query: &[u8], response: &[u8]) -> Result<(), DnsProxyError> {
+    let expected = parse_doh_question_identity(query, false).map_err(|reason| {
+        DnsProxyError::DohError(format!("DoH query semantic validation failed: {reason}"))
+    })?;
+    let actual = parse_doh_question_identity(response, true).map_err(|reason| {
+        DnsProxyError::DohError(format!("DoH response semantic validation failed: {reason}"))
+    })?;
+
+    if expected.id != actual.id {
+        return Err(DnsProxyError::DohError(format!(
+            "DoH response ID mismatch: expected {}, got {}",
+            expected.id, actual.id
+        )));
+    }
+    if expected.qname != actual.qname {
+        return Err(DnsProxyError::DohError("DoH response QNAME mismatch".into()));
+    }
+    if expected.qtype != actual.qtype {
+        return Err(DnsProxyError::DohError(format!(
+            "DoH response QTYPE mismatch: expected {}, got {}",
+            expected.qtype, actual.qtype
+        )));
+    }
+    if expected.qclass != actual.qclass {
+        return Err(DnsProxyError::DohError(format!(
+            "DoH response QCLASS mismatch: expected {}, got {}",
+            expected.qclass, actual.qclass
+        )));
+    }
     Ok(())
 }
 
@@ -1337,6 +1468,8 @@ pub async fn process_dns_query_with_admission(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn make_dns_query_packet(domain: &str, qtype: u16) -> Vec<u8> {
         make_dns_query_packet_with_flags(domain, qtype, 0x0100)
@@ -1359,6 +1492,70 @@ mod tests {
         pkt.extend_from_slice(&qtype.to_be_bytes());
         pkt.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
         pkt
+    }
+
+    fn response_from_question_packet(question: &[u8], flags: u16) -> Vec<u8> {
+        let mut response = question[..DNS_HEADER_SIZE].to_vec();
+        response[2..4].copy_from_slice(&flags.to_be_bytes());
+        response[4..6].copy_from_slice(&1u16.to_be_bytes());
+        response[6..12].fill(0);
+        response.extend_from_slice(&question[DNS_HEADER_SIZE..]);
+        response
+    }
+
+    fn valid_doh_response(query: &[u8]) -> Vec<u8> {
+        let mut response = response_from_question_packet(query, DNS_FLAG_QR | DNS_FLAG_RD | 0x0080);
+        response[6..8].copy_from_slice(&1u16.to_be_bytes());
+        response[10..12].copy_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&[0xc0, 0x0c]);
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&30u32.to_be_bytes());
+        response.extend_from_slice(&4u16.to_be_bytes());
+        response.extend_from_slice(&[192, 0, 2, 1]);
+        response.extend_from_slice(&[0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0]);
+        response
+    }
+
+    fn malformed_doh_response(query: &[u8]) -> Vec<u8> {
+        let mut response = query[..DNS_HEADER_SIZE].to_vec();
+        response[2..4].copy_from_slice(&(DNS_FLAG_QR | DNS_FLAG_RD).to_be_bytes());
+        response[4..6].copy_from_slice(&1u16.to_be_bytes());
+        response[6..12].fill(0);
+        response.extend_from_slice(&[3, b'e']);
+        response
+    }
+
+    async fn resolve_against_local_response(
+        query: &[u8],
+        body: Vec<u8>,
+        status: &str,
+        content_type: &str,
+    ) -> Result<Vec<u8>, DnsProxyError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind DoH test listener");
+        let address = listener.local_addr().expect("DoH test listener address");
+        let status = status.to_owned();
+        let content_type = content_type.to_owned();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept DoH test request");
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request).await.expect("read DoH test request");
+            let headers = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.expect("write DoH test headers");
+            stream.write_all(&body).await.expect("write DoH test body");
+        });
+        let client = reqwest::Client::builder()
+            .http1_only()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build local DoH test client");
+        let endpoint = format!("http://{address}/dns-query");
+        let result = resolve_via_doh_with_client(query, &endpoint, &client).await;
+        server.await.expect("DoH test server task");
+        result
     }
 
     #[test]
@@ -1408,6 +1605,18 @@ mod tests {
         let mut pkt = make_dns_query_packet("example.com", 1);
         pkt[2] |= 0x80;
         assert!(parse_dns_query(&pkt).is_none());
+    }
+
+    #[test]
+    fn doh_name_matching_accepts_case_insensitive_bounded_compression() {
+        let mut packet = vec![0u8; DNS_HEADER_SIZE];
+        packet.extend_from_slice(&[3, b'w', b'w', b'w', 0]);
+        let compressed_start = packet.len();
+        packet.extend_from_slice(&[3, b'W', b'W', b'W', 0xc0, 0x0c]);
+
+        let (name, end) = parse_doh_name(&packet, compressed_start).expect("compressed name");
+        assert_eq!(name, vec![3, b'w', b'w', b'w', 3, b'w', b'w', b'w', 0]);
+        assert_eq!(end, packet.len());
     }
 
     #[test]
@@ -1589,6 +1798,96 @@ mod tests {
                 .await
                 .expect_err("oversized query must be rejected before network I/O");
         assert!(matches!(large, DnsProxyError::QuerySize(DnsQuerySizeError::TooLarge { .. })));
+    }
+
+    #[tokio::test]
+    async fn doh_response_contract_accepts_valid_compressed_answer_and_edns() {
+        let query = make_dns_query_packet("example.com", 1);
+        let expected = valid_doh_response(&query);
+        let actual = resolve_against_local_response(
+            &query,
+            expected.clone(),
+            "200 OK",
+            "application/dns-message; charset=binary",
+        )
+        .await
+        .expect("valid DoH response");
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn doh_response_contract_rejects_semantic_and_transport_mismatches() {
+        let query = make_dns_query_packet("example.com", 1);
+        let wrong_name = make_dns_query_packet("wrong.example.com", 1);
+        let wrong_type = make_dns_query_packet("example.com", 28);
+        let mut wrong_class = make_dns_query_packet("example.com", 1);
+        let class_start = wrong_class.len() - 2;
+        wrong_class[class_start..].copy_from_slice(&3u16.to_be_bytes());
+
+        let semantic_cases = [
+            ("wrong-name", response_from_question_packet(&wrong_name, DNS_FLAG_QR | DNS_FLAG_RD)),
+            ("wrong-type", response_from_question_packet(&wrong_type, DNS_FLAG_QR | DNS_FLAG_RD)),
+            ("wrong-class", response_from_question_packet(&wrong_class, DNS_FLAG_QR | DNS_FLAG_RD)),
+            ("qr-clear", response_from_question_packet(&query, DNS_FLAG_RD)),
+            (
+                "unsupported-opcode",
+                response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD | 0x0800),
+            ),
+            ("multiple-questions", {
+                let mut response = response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD);
+                response[4..6].copy_from_slice(&2u16.to_be_bytes());
+                response
+            }),
+            ("malformed-question", malformed_doh_response(&query)),
+            ("wrong-id", {
+                let mut response = valid_doh_response(&query);
+                response[0..2].copy_from_slice(&54321u16.to_be_bytes());
+                response
+            }),
+        ];
+
+        for (label, response) in semantic_cases {
+            let result = resolve_against_local_response(
+                &query,
+                response,
+                "200 OK",
+                "application/dns-message",
+            )
+            .await;
+            assert!(matches!(result, Err(DnsProxyError::DohError(_))), "case {label}");
+        }
+
+        let status = resolve_against_local_response(
+            &query,
+            valid_doh_response(&query),
+            "500 Internal Server Error",
+            "application/dns-message",
+        )
+        .await;
+        assert!(matches!(status, Err(DnsProxyError::DohError(_))));
+
+        let content_type = resolve_against_local_response(
+            &query,
+            valid_doh_response(&query),
+            "200 OK",
+            "application/json",
+        )
+        .await;
+        assert!(matches!(content_type, Err(DnsProxyError::DohError(_))));
+
+        let oversized = resolve_against_local_response(
+            &query,
+            vec![0u8; DNS_MESSAGE_MAX_SIZE + 1],
+            "200 OK",
+            "application/dns-message",
+        )
+        .await;
+        assert!(matches!(
+            oversized,
+            Err(DnsProxyError::ResponseTooLarge { actual, maximum })
+                if actual == (DNS_MESSAGE_MAX_SIZE + 1) as u64
+                    && maximum == DNS_MESSAGE_MAX_SIZE
+        ));
     }
 
     #[test]
