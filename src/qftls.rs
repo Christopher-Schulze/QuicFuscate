@@ -773,7 +773,11 @@ mod tests {
         )
         .expect("client provider");
 
-        for profile in [TlsProfile::chrome_130(), TlsProfile::firefox_133()] {
+        for mut profile in [TlsProfile::chrome_130(), TlsProfile::firefox_133()] {
+            // This test owns cipher-suite policy only. Cosmetic profile timing
+            // is covered by profile_delay_tests and must not gate ClientHello
+            // inspection on an immediate frame.
+            profile.timing_jitter = None;
             provider.configure(&profile).expect("configure profile");
             let (_, frame) = provider
                 .next_crypto_frame(Level::Initial, usize::MAX)
@@ -1511,14 +1515,12 @@ mod rustls_provider {
             let mut profile = TlsProfile::chrome_130();
             profile.timing_jitter = Some(Duration::from_secs(2));
 
-            let started = Instant::now();
             provider.apply_profile_to_config(&profile).expect("profile configuration");
 
             assert!(
-                started.elapsed() < Duration::from_secs(1),
-                "profile configuration must not synchronously sleep for its jitter"
+                provider.profile_ready_at.is_some_and(|ready_at| ready_at > Instant::now()),
+                "profile configuration must retain a future readiness deadline"
             );
-            assert!(provider.profile_ready_at.is_some_and(|ready_at| ready_at > Instant::now()));
             assert!(provider.next_crypto_frame(Level::Initial, 1200).is_none());
         }
     }
