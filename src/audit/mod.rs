@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -54,6 +54,12 @@ pub const MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES: usize = 8 * 1024;
 const DEFAULT_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(DEFAULT_AUDIT_FLUSH_TIMEOUT_MS);
 const MAX_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(MAX_AUDIT_FLUSH_TIMEOUT_MS);
 const AUDIT_FILE_MODE: u32 = 0o600;
+const AUDIT_ADMISSION_STATE_MASK: usize = 0b11;
+const AUDIT_ADMISSION_OPEN: usize = 0;
+const AUDIT_ADMISSION_CLOSING: usize = 1;
+const AUDIT_ADMISSION_CLOSED: usize = 2;
+const AUDIT_ADMISSION_COUNT_SHIFT: usize = 2;
+const AUDIT_ADMISSION_COUNT_UNIT: usize = 1 << AUDIT_ADMISSION_COUNT_SHIFT;
 
 /// Security-relevant audit event types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +279,7 @@ pub struct AuditLog {
     dropped_events: Arc<AtomicU64>,
     payload_rejections: Arc<AtomicU64>,
     persistence_errors: Arc<AtomicU64>,
+    admission_state: AtomicUsize,
     worker: Mutex<Option<JoinHandle<()>>>,
     flush_timeout: Duration,
 }
@@ -426,6 +433,18 @@ struct PendingAuditEvent {
     reason: Option<String>,
 }
 
+/// Guard for one producer admitted before the shutdown linearization point.
+struct AuditAdmissionGuard<'a> {
+    state: &'a AtomicUsize,
+}
+
+impl Drop for AuditAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        let previous = self.state.fetch_sub(AUDIT_ADMISSION_COUNT_UNIT, Ordering::Release);
+        debug_assert!(previous >= AUDIT_ADMISSION_COUNT_UNIT);
+    }
+}
+
 enum AuditCommand {
     Event(PendingAuditEvent),
     Flush(Sender<Result<(), String>>),
@@ -457,7 +476,7 @@ impl AuditPayloadField {
 /// Observable bounded audit-persistence outcomes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AuditStats {
-    /// Events rejected before persistence because the queue was full or disconnected.
+    /// Events rejected before persistence because admission was full, closing, or disconnected.
     pub dropped_events: u64,
     /// Events rejected before queue admission because a dynamic payload bound was exceeded.
     pub payload_rejections: u64,
@@ -473,6 +492,7 @@ pub enum AuditError {
     InvalidOptions(String),
     PayloadTooLarge { field: AuditPayloadField, encoded_bytes: usize, max_encoded_bytes: usize },
     QueueFull,
+    WorkerClosing,
     WorkerDisconnected,
     WorkerSpawnError(std::io::Error),
     FlushTimeout(String),
@@ -491,6 +511,7 @@ impl std::fmt::Display for AuditError {
                 field = field.as_str()
             ),
             Self::QueueFull => write!(f, "audit queue is full"),
+            Self::WorkerClosing => write!(f, "audit worker is closing"),
             Self::WorkerDisconnected => write!(f, "audit worker is disconnected"),
             Self::WorkerSpawnError(e) => write!(f, "audit worker spawn error: {e}"),
             Self::FlushTimeout(error) => write!(f, "audit flush failed: {error}"),
@@ -568,6 +589,7 @@ impl AuditLog {
             dropped_events,
             payload_rejections,
             persistence_errors,
+            admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
             worker: Mutex::new(Some(worker)),
             flush_timeout: options.flush_timeout,
         })
@@ -592,6 +614,73 @@ impl AuditLog {
         )
     }
 
+    /// Reserve one producer admission while the lifecycle is still open.
+    ///
+    /// The successful CAS increments the in-flight admission count. Shutdown
+    /// changes the low state bits to `CLOSING` with a CAS and waits for this
+    /// count to reach zero before sending its final flush barrier. This keeps
+    /// the producer path non-blocking while giving close a single
+    /// linearization point.
+    fn begin_event_admission(&self) -> Result<AuditAdmissionGuard<'_>, AuditError> {
+        let mut state = self.admission_state.load(Ordering::Acquire);
+        loop {
+            match state & AUDIT_ADMISSION_STATE_MASK {
+                AUDIT_ADMISSION_OPEN => {
+                    if state > usize::MAX - AUDIT_ADMISSION_COUNT_UNIT {
+                        return Err(AuditError::WorkerClosing);
+                    }
+                    let next = state + AUDIT_ADMISSION_COUNT_UNIT;
+                    match self.admission_state.compare_exchange_weak(
+                        state,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return Ok(AuditAdmissionGuard { state: &self.admission_state }),
+                        Err(observed) => state = observed,
+                    }
+                }
+                AUDIT_ADMISSION_CLOSING => return Err(AuditError::WorkerClosing),
+                AUDIT_ADMISSION_CLOSED => return Err(AuditError::WorkerDisconnected),
+                _ => unreachable!("invalid audit admission state"),
+            }
+        }
+    }
+
+    /// Close producer admission and wait for already-admitted producers.
+    fn close_event_admission_and_wait(&self) {
+        let mut state = self.admission_state.load(Ordering::Acquire);
+        loop {
+            match state & AUDIT_ADMISSION_STATE_MASK {
+                AUDIT_ADMISSION_OPEN => {
+                    match self.admission_state.compare_exchange_weak(
+                        state,
+                        state | AUDIT_ADMISSION_CLOSING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => break,
+                        Err(observed) => state = observed,
+                    }
+                }
+                AUDIT_ADMISSION_CLOSING | AUDIT_ADMISSION_CLOSED => break,
+                _ => unreachable!("invalid audit admission state"),
+            }
+        }
+        while self.admission_state.load(Ordering::Acquire) >> AUDIT_ADMISSION_COUNT_SHIFT != 0 {
+            std::thread::yield_now();
+        }
+    }
+
+    /// Publish the terminal state after the worker has stopped.
+    fn mark_event_admission_closed(&self) {
+        debug_assert_eq!(
+            self.admission_state.load(Ordering::Acquire) >> AUDIT_ADMISSION_COUNT_SHIFT,
+            0
+        );
+        self.admission_state.store(AUDIT_ADMISSION_CLOSED, Ordering::Release);
+    }
+
     /// Enqueue one fully typed audit event.
     pub fn log_typed(
         &self,
@@ -606,6 +695,13 @@ impl AuditLog {
             self.payload_rejections.fetch_add(1, Ordering::Relaxed);
             return Err(error);
         }
+        let _admission = match self.begin_event_admission() {
+            Ok(admission) => admission,
+            Err(error) => {
+                self.dropped_events.fetch_add(1, Ordering::Relaxed);
+                return Err(error);
+            }
+        };
         let event = PendingAuditEvent {
             event_type,
             severity,
@@ -655,8 +751,11 @@ impl AuditLog {
     pub fn shutdown(&self) -> Result<(), AuditError> {
         let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
         if worker.is_none() {
+            self.close_event_admission_and_wait();
+            self.mark_event_admission_closed();
             return Ok(());
         }
+        self.close_event_admission_and_wait();
         let flush_result = self.flush();
         let _ = self.sender.send_timeout(AuditCommand::Shutdown, self.flush_timeout);
         let mut join_result = Ok(());
@@ -665,6 +764,7 @@ impl AuditLog {
                 join_result = Err(AuditError::WorkerDisconnected);
             }
         }
+        self.mark_event_admission_closed();
         match (flush_result, join_result) {
             (Err(error), _) => Err(error),
             (Ok(()), Err(error)) => Err(error),
@@ -2001,6 +2101,90 @@ mod tests {
     }
 
     #[test]
+    fn test_shutdown_closes_admission_before_final_barrier() {
+        let tmp = audit_test_path("shutdown-admission");
+        remove_audit_set(&tmp);
+        let log = Arc::new(AuditLog::open(tmp.clone()).unwrap());
+        let admission = log.begin_event_admission().unwrap();
+        let shutdown_log = log.clone();
+        let shutdown = std::thread::spawn(move || shutdown_log.shutdown());
+
+        let reached_closing = (0..100_000).any(|_| {
+            let state = log.admission_state.load(Ordering::Acquire);
+            if state & AUDIT_ADMISSION_STATE_MASK == AUDIT_ADMISSION_CLOSING {
+                true
+            } else {
+                std::thread::yield_now();
+                false
+            }
+        });
+        if reached_closing {
+            assert!(matches!(
+                log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "closing"),
+                Err(AuditError::WorkerClosing)
+            ));
+        }
+        drop(admission);
+        shutdown.join().unwrap().unwrap();
+        assert!(reached_closing, "shutdown must publish Closing before its final barrier");
+        assert!(matches!(
+            log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "closed"),
+            Err(AuditError::WorkerDisconnected)
+        ));
+        drop(log);
+        remove_audit_set(&tmp);
+    }
+
+    #[test]
+    fn test_concurrent_shutdown_preserves_every_accepted_event() {
+        let tmp = audit_test_path("shutdown-race");
+        remove_audit_set(&tmp);
+        let options = AuditOptions {
+            queue_capacity: MAX_AUDIT_QUEUE_CAPACITY,
+            max_segment_bytes: 8 * 1024 * 1024,
+            max_segments: 4,
+            flush_timeout: ROTATION_DURABILITY_TEST_TIMEOUT,
+        };
+        let log = Arc::new(AuditLog::open_with_options(tmp.clone(), options).unwrap());
+        let accepted = Arc::new(AtomicU64::new(0));
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let producer_log = log.clone();
+        let producer_accepted = accepted.clone();
+        let producer_start = start.clone();
+        let producer = std::thread::spawn(move || {
+            producer_start.wait();
+            for event in 0..10_000u64 {
+                match producer_log.log(
+                    AuditEventType::AdminAction,
+                    AuditSeverity::Info,
+                    None,
+                    None,
+                    &format!("shutdown race event={event}"),
+                ) {
+                    Ok(()) => {
+                        producer_accepted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(AuditError::WorkerClosing | AuditError::WorkerDisconnected) => {}
+                    Err(error) => panic!("unexpected concurrent audit result: {error}"),
+                }
+                if event % 8 == 0 {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        start.wait();
+        std::thread::yield_now();
+        log.shutdown().unwrap();
+        producer.join().unwrap();
+
+        let persisted = std::fs::read_to_string(&tmp).unwrap().lines().count() as u64;
+        assert_eq!(persisted, accepted.load(Ordering::Relaxed));
+        AuditLog::verify_chain(&tmp).unwrap();
+        drop(log);
+        remove_audit_set(&tmp);
+    }
+
+    #[test]
     fn test_rotation_retention_restart_and_checkpoint_integrity() {
         let tmp = audit_test_path("rotation");
         remove_audit_set(&tmp);
@@ -2151,6 +2335,7 @@ mod tests {
             dropped_events: Arc::new(AtomicU64::new(0)),
             payload_rejections: Arc::new(AtomicU64::new(0)),
             persistence_errors: Arc::new(AtomicU64::new(0)),
+            admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
             worker: Mutex::new(None),
             flush_timeout: Duration::ZERO,
         };
@@ -2239,6 +2424,7 @@ mod tests {
             dropped_events: Arc::new(AtomicU64::new(0)),
             payload_rejections: Arc::new(AtomicU64::new(0)),
             persistence_errors: Arc::new(AtomicU64::new(0)),
+            admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
             worker: Mutex::new(None),
             flush_timeout: Duration::ZERO,
         };

@@ -1492,7 +1492,7 @@ impl Metrics {
         );
         let audit = crate::audit::stats();
         out.push_str(
-            "\n# HELP quicfuscate_audit_dropped_events_total Audit events rejected by the bounded writer queue\n",
+            "\n# HELP quicfuscate_audit_dropped_events_total Audit events rejected by bounded writer admission\n",
         );
         out.push_str("# TYPE quicfuscate_audit_dropped_events_total counter\n");
         write_metric!("quicfuscate_audit_dropped_events_total {}\n\n", audit.dropped_events);
