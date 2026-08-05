@@ -1600,6 +1600,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Bounded admission:** `AuditLog::log_typed()` validates exact JSON-encoded UTF-8 sizes for source IP, client ID, reason, and message before any dynamic string clone or channel operation. The ceilings are 128, 512, 512, and 8,192 bytes per field, with an 8,192-byte combined dynamic payload ceiling.
 - **Typed outcome:** Over-limit input returns `AuditError::PayloadTooLarge`; `AuditStats.payload_rejections`, Prometheus, and `qf-audit-probe` expose the rejection separately from queue drops and persistence failures. A rejected event consumes no queue slot.
 - **Scope boundary:** Existing-file payload/read limits remain TODO-727; terminal producer admission remains TODO-726; shutdown ordering remains TODO-815. Schema-v1/v2 parsing and hash-chain verification are unchanged.
+- **Final proof:** The exact pushed Omega checkout at `495d12d8f5ac4450fc281560298f9179bd4d5607` passes the complete library suite `2403/2403`, strict library Clippy with `-D warnings`, and the audit probe `3/3`. The post-push Graphify manifest remains explicitly fail-closed at `scripts/out/audits/graphify-20260805T165808Z/graphify-evidence.json`.
 
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 

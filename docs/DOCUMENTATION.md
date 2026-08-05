@@ -5017,7 +5017,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - **Admission contract:** `AuditLog::log_typed()` measures source IP, client ID, reason, and message strings as their exact JSON-encoded UTF-8 size, including quotes and escapes, before cloning any dynamic field or touching the bounded queue. The individual ceilings are 128, 512, 512, and 8,192 bytes; the combined dynamic payload ceiling is 8,192 bytes.
 - **Failure and observability:** An oversized field returns typed `AuditError::PayloadTooLarge` with the field and measured/maximum sizes. Rejections increment `AuditStats.payload_rejections` and `quicfuscate_audit_payload_rejections_total`, never increment queue drops, and never consume a queue slot. The probe exposes the counter and all five ceilings in its JSON output.
-- **Regression proof:** Audit payload-boundary tests cover exact field limits, over-limit field errors, combined-payload rejection, UTF-8, control characters, and queue interaction. Existing typed schema-v1/v2 and hash-chain tests remain in the same audit suite; local Rust gates and strict targeted Clippy remain required before publication.
+- **Regression proof:** Audit payload-boundary tests cover exact field limits, over-limit field errors, combined-payload rejection, UTF-8, control characters, and queue interaction. Existing typed schema-v1/v2 and hash-chain tests remain in the same audit suite; the exact pushed Omega source closes the full Rust gate while the local macOS full build remains disk-limited.
+- **Final proof:** The exact pushed Omega checkout at `495d12d8f5ac4450fc281560298f9179bd4d5607` passes the complete library suite `2403/2403`, strict library Clippy with `-D warnings`, and the audit probe `3/3`; post-push Graphify remains explicitly fail-closed at `scripts/out/audits/graphify-20260805T165808Z/graphify-evidence.json`.
 
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 
