@@ -175,6 +175,30 @@ pub fn flush() -> io::Result<()> {
     control.flush()
 }
 
+/// Force the active file sink through the owned writer thread.
+///
+/// The acknowledgement is delivered only after every earlier queued record has
+/// been written and the active file has been flushed and rotated. A logger
+/// without a file sink cannot satisfy this request and returns `NotFound`.
+pub fn rotate() -> io::Result<()> {
+    let control = LOGGER_CONTROL.get().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotConnected, "production logger is not initialized")
+    })?;
+    control.rotate()
+}
+
+/// Reopen the active file sink through the owned writer thread.
+///
+/// Reopen is the external logrotate contract: after a pathname rename or
+/// copytruncate, SIGHUP closes the old handle, opens the current pathname, and
+/// refreshes tracked size before acknowledging the request.
+pub fn reopen() -> io::Result<()> {
+    let control = LOGGER_CONTROL.get().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotConnected, "production logger is not initialized")
+    })?;
+    control.reopen()
+}
+
 /// Current bounded-worker counters.
 pub fn stats() -> LoggerStats {
     LOGGER_CONTROL.get().map_or(LoggerStats::default(), LoggerControl::stats)
@@ -218,14 +242,29 @@ struct LoggerControl {
 }
 
 impl LoggerControl {
-    fn flush(&self) -> io::Result<()> {
+    fn request(
+        &self,
+        command: impl FnOnce(Sender<io::Result<()>>) -> LogCommand,
+    ) -> io::Result<()> {
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
         self.sender
-            .send_timeout(LogCommand::Flush(ack_tx), FLUSH_TIMEOUT)
+            .send_timeout(command(ack_tx), FLUSH_TIMEOUT)
             .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error.to_string()))?;
         ack_rx
             .recv_timeout(FLUSH_TIMEOUT)
             .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error.to_string()))?
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.request(LogCommand::Flush)
+    }
+
+    fn rotate(&self) -> io::Result<()> {
+        self.request(LogCommand::Rotate)
+    }
+
+    fn reopen(&self) -> io::Result<()> {
+        self.request(LogCommand::Reopen)
     }
 
     fn stats(&self) -> LoggerStats {
@@ -326,6 +365,8 @@ struct OwnedRecord {
 enum LogCommand {
     Record(OwnedRecord),
     Flush(Sender<io::Result<()>>),
+    Rotate(Sender<io::Result<()>>),
+    Reopen(Sender<io::Result<()>>),
     Shutdown,
 }
 
@@ -394,6 +435,20 @@ impl WriterSinks {
         }
         first_error.map_or(Ok(()), Err)
     }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        let Some(app) = &mut self.file else {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no file log sink configured"));
+        };
+        app.rotate()
+    }
+
+    fn reopen(&mut self) -> io::Result<()> {
+        let Some(app) = &mut self.file else {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no file log sink configured"));
+        };
+        app.reopen()
+    }
 }
 
 fn run_writer(receiver: Receiver<LogCommand>, mut sinks: WriterSinks, sink_errors: &AtomicU64) {
@@ -407,6 +462,20 @@ fn run_writer(receiver: Receiver<LogCommand>, mut sinks: WriterSinks, sink_error
             }
             LogCommand::Flush(ack) => {
                 let result = sinks.flush();
+                if result.is_err() {
+                    sink_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = ack.send(result);
+            }
+            LogCommand::Rotate(ack) => {
+                let result = sinks.rotate();
+                if result.is_err() {
+                    sink_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = ack.send(result);
+            }
+            LogCommand::Reopen(ack) => {
+                let result = sinks.reopen();
                 if result.is_err() {
                     sink_errors.fetch_add(1, Ordering::Relaxed);
                 }
@@ -479,10 +548,11 @@ impl SizeRotatingAppender {
         if self.file.is_none() {
             self.file = Some(open_log_file(&self.path, false)?);
         }
-        Ok(self.file.as_mut().expect("file opened"))
+        self.file.as_mut().ok_or_else(|| io::Error::other("log file handle unavailable after open"))
     }
 
     fn rotate(&mut self) -> io::Result<()> {
+        self.flush()?;
         // Close the active handle so rename succeeds on all platforms.
         self.file = None;
 
@@ -513,6 +583,16 @@ impl SizeRotatingAppender {
         let first = rotated_path(&self.path, 1);
         std::fs::rename(&self.path, &first)?;
         self.current_size = 0;
+        Ok(())
+    }
+
+    fn reopen(&mut self) -> io::Result<()> {
+        self.flush()?;
+        self.file = None;
+        let file = open_log_file(&self.path, false)?;
+        let current_size = file.metadata()?.len();
+        self.current_size = current_size;
+        self.file = Some(file);
         Ok(())
     }
 }
@@ -778,6 +858,11 @@ mod tests {
         assert!(line.contains('Z'));
     }
 
+    fn unique_log_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_nanos();
+        std::env::temp_dir().join(format!("qf-log-{label}-{}-{nanos}", std::process::id()))
+    }
+
     #[test]
     fn syslog_format_follows_rfc5424() {
         let line = format_rfc5424("host01", "quicfuscate", "4242", Level::Error, "boom");
@@ -865,6 +950,183 @@ mod tests {
         assert!(rotated_path(&path, 2).exists());
         assert!(!rotated_path(&path, 3).exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reopen_rebinds_after_external_rename() {
+        let dir = unique_log_dir("rename");
+        fs::create_dir_all(&dir).expect("create log test directory");
+        let path = dir.join("app.log");
+        let renamed = dir.join("app.log.20260805");
+
+        let mut app = SizeRotatingAppender::new(&path, 1024, 2).expect("create appender");
+        app.write_line(b"before\n").expect("write before rename");
+        app.flush().expect("flush before rename");
+        fs::rename(&path, &renamed).expect("external rename");
+
+        app.reopen().expect("reopen renamed sink");
+        app.write_line(b"after\n").expect("write after reopen");
+        app.flush().expect("flush after reopen");
+
+        assert_eq!(fs::read_to_string(&renamed).expect("read renamed file"), "before\n");
+        assert_eq!(fs::read_to_string(&path).expect("read reopened active file"), "after\n");
+        assert_eq!(app.current_size(), 6);
+        fs::remove_dir_all(&dir).expect("remove log test directory");
+    }
+
+    #[test]
+    fn reopen_refreshes_size_after_external_copytruncate() {
+        let dir = unique_log_dir("copytruncate");
+        fs::create_dir_all(&dir).expect("create log test directory");
+        let path = dir.join("app.log");
+
+        let mut app = SizeRotatingAppender::new(&path, 1024, 2).expect("create appender");
+        app.write_line(b"before\n").expect("write before copytruncate");
+        app.flush().expect("flush before copytruncate");
+        OpenOptions::new().write(true).truncate(true).open(&path).expect("truncate active file");
+
+        app.reopen().expect("reopen truncated sink");
+        assert_eq!(app.current_size(), 0);
+        app.write_line(b"after\n").expect("write after reopen");
+        app.flush().expect("flush after reopen");
+
+        assert_eq!(fs::read_to_string(&path).expect("read active file"), "after\n");
+        assert_eq!(app.current_size(), 6);
+        fs::remove_dir_all(&dir).expect("remove log test directory");
+    }
+
+    #[test]
+    fn writer_rotate_ack_follows_queued_record_and_flushes_before_rename() {
+        let dir = unique_log_dir("writer-rotate");
+        fs::create_dir_all(&dir).expect("create log test directory");
+        let path = dir.join("app.log");
+        let app = SizeRotatingAppender::new(&path, 1024, 2).expect("create appender");
+        let sinks = WriterSinks {
+            file: Some(app),
+            to_stderr: false,
+            syslog: None,
+            format: LogFormat::Text,
+            hostname: "localhost".to_string(),
+            app_name: "quicfuscate".to_string(),
+            procid: "test".to_string(),
+        };
+        let (sender, receiver) = crossbeam_channel::bounded(8);
+        let sink_errors = Arc::new(AtomicU64::new(0));
+        let worker_errors = Arc::clone(&sink_errors);
+        let worker = std::thread::spawn(move || run_writer(receiver, sinks, &worker_errors));
+
+        sender
+            .send(LogCommand::Record(OwnedRecord {
+                level: Level::Info,
+                target: "test".to_string(),
+                message: "before-rotate".to_string(),
+                file: None,
+                line: None,
+            }))
+            .expect("send record before rotation");
+        let (rotate_tx, rotate_rx) = crossbeam_channel::bounded(1);
+        sender.send(LogCommand::Rotate(rotate_tx)).expect("send rotation command");
+        assert!(rotate_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive rotation acknowledgement")
+            .is_ok());
+
+        sender
+            .send(LogCommand::Record(OwnedRecord {
+                level: Level::Info,
+                target: "test".to_string(),
+                message: "after-rotate".to_string(),
+                file: None,
+                line: None,
+            }))
+            .expect("send record after rotation");
+        let (flush_tx, flush_rx) = crossbeam_channel::bounded(1);
+        sender.send(LogCommand::Flush(flush_tx)).expect("send flush command");
+        assert!(flush_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive flush acknowledgement")
+            .is_ok());
+        sender.send(LogCommand::Shutdown).expect("send shutdown command");
+        worker.join().expect("join logging worker");
+
+        assert_eq!(sink_errors.load(Ordering::Relaxed), 0);
+        assert!(fs::read_to_string(rotated_path(&path, 1))
+            .expect("read rotated file")
+            .contains("before-rotate"));
+        assert!(fs::read_to_string(&path).expect("read active file").contains("after-rotate"));
+        fs::remove_dir_all(&dir).expect("remove log test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_reopen_ack_rebinds_after_external_rename() {
+        let dir = unique_log_dir("writer-reopen");
+        fs::create_dir_all(&dir).expect("create log test directory");
+        let path = dir.join("app.log");
+        let renamed = dir.join("app.log.20260805");
+        let app = SizeRotatingAppender::new(&path, 1024, 2).expect("create appender");
+        let sinks = WriterSinks {
+            file: Some(app),
+            to_stderr: false,
+            syslog: None,
+            format: LogFormat::Text,
+            hostname: "localhost".to_string(),
+            app_name: "quicfuscate".to_string(),
+            procid: "test".to_string(),
+        };
+        let (sender, receiver) = crossbeam_channel::bounded(8);
+        let sink_errors = Arc::new(AtomicU64::new(0));
+        let worker_errors = Arc::clone(&sink_errors);
+        let worker = std::thread::spawn(move || run_writer(receiver, sinks, &worker_errors));
+
+        sender
+            .send(LogCommand::Record(OwnedRecord {
+                level: Level::Info,
+                target: "test".to_string(),
+                message: "before-reopen".to_string(),
+                file: None,
+                line: None,
+            }))
+            .expect("send record before reopen");
+        let (flush_tx, flush_rx) = crossbeam_channel::bounded(1);
+        sender.send(LogCommand::Flush(flush_tx)).expect("send pre-reopen flush");
+        assert!(flush_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive pre-reopen flush acknowledgement")
+            .is_ok());
+        fs::rename(&path, &renamed).expect("external rename");
+
+        let (reopen_tx, reopen_rx) = crossbeam_channel::bounded(1);
+        sender.send(LogCommand::Reopen(reopen_tx)).expect("send reopen command");
+        assert!(reopen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive reopen acknowledgement")
+            .is_ok());
+        sender
+            .send(LogCommand::Record(OwnedRecord {
+                level: Level::Info,
+                target: "test".to_string(),
+                message: "after-reopen".to_string(),
+                file: None,
+                line: None,
+            }))
+            .expect("send record after reopen");
+        let (post_flush_tx, post_flush_rx) = crossbeam_channel::bounded(1);
+        sender.send(LogCommand::Flush(post_flush_tx)).expect("send post-reopen flush");
+        assert!(post_flush_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive post-reopen flush acknowledgement")
+            .is_ok());
+        sender.send(LogCommand::Shutdown).expect("send shutdown command");
+        worker.join().expect("join logging worker");
+
+        assert_eq!(sink_errors.load(Ordering::Relaxed), 0);
+        assert!(fs::read_to_string(&renamed).expect("read renamed file").contains("before-reopen"));
+        assert!(fs::read_to_string(&path)
+            .expect("read reopened active file")
+            .contains("after-reopen"));
+        fs::remove_dir_all(&dir).expect("remove log test directory");
     }
 
     #[cfg(unix)]

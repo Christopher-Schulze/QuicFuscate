@@ -1014,6 +1014,42 @@ impl ServerRuntime {
                         }
                         ServerSignalEvent::Reload => {
                             self.reload_standalone_runtime(runtime_config, "SIGHUP");
+                            match crate::logging::reopen() {
+                                Ok(()) => {
+                                    log::info!(
+                                        "SIGHUP reopened the operational log sink after configuration reload"
+                                    );
+                                    crate::audit::audit_typed(
+                                        crate::audit::AuditEventType::AdminAction,
+                                        crate::audit::AuditSeverity::Info,
+                                        None,
+                                        None,
+                                        crate::audit::AuditContext {
+                                            actor: crate::audit::AuditActor::System,
+                                            target: crate::audit::AuditTarget::System,
+                                            outcome: crate::audit::AuditOutcome::Succeeded,
+                                            reason: Some("sighup_log_reopen"),
+                                        },
+                                        "SIGHUP reopened the operational log sink",
+                                    );
+                                }
+                                Err(error) => {
+                                    log::error!("SIGHUP log sink reopen failed: {}", error);
+                                    crate::audit::audit_typed(
+                                        crate::audit::AuditEventType::AdminAction,
+                                        crate::audit::AuditSeverity::Warning,
+                                        None,
+                                        None,
+                                        crate::audit::AuditContext {
+                                            actor: crate::audit::AuditActor::System,
+                                            target: crate::audit::AuditTarget::System,
+                                            outcome: crate::audit::AuditOutcome::Failed,
+                                            reason: Some("sighup_log_reopen_failed"),
+                                        },
+                                        &format!("SIGHUP log sink reopen failed: {error}"),
+                                    );
+                                }
+                            }
                         }
                     }
                 }

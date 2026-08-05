@@ -137,6 +137,9 @@ mod tests {
         fn handle_clear_logs(&self) -> AdminResponse {
             AdminResponse::ok_with_message("Logs cleared")
         }
+        fn handle_rotate_logs(&self) -> AdminResponse {
+            AdminResponse::ok_with_message("Log rotation requested")
+        }
     }
 
     fn read_all(mut s: StdTcpStream) -> String {
@@ -207,6 +210,15 @@ mod tests {
 
     fn authenticated_get(login: &AdminLoginSession, path: &str) -> String {
         format!("GET {} HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n", path, login.cookie_header)
+    }
+
+    fn authenticated_post(login: &AdminLoginSession, path: &str) -> String {
+        format!(
+            "POST {} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: 0\r\n{}\r\n{}\r\n\r\n",
+            path,
+            login.cookie_header,
+            login.csrf_header(),
+        )
     }
 
     fn login_post(username: &str, password: &str) -> String {
@@ -989,6 +1001,17 @@ mod tests {
         let resp = send_req(addr, &req);
         assert_eq!(parse_status(&resp), 400);
         assert!(resp.contains("Invalid JSON"));
+    }
+
+    #[test]
+    fn authenticated_log_rotation_route_reaches_handler() {
+        let web_root = std::env::temp_dir();
+        let (addr, _thr) = start_server_with_auth(2, web_root, test_auth("123", false), 5);
+        let login = login_admin(addr, "123");
+
+        let response = send_req(addr, &authenticated_post(&login, "/api/logs/rotate"));
+        assert_eq!(parse_status(&response), 200);
+        assert!(response.contains("Log rotation requested"));
     }
 
     #[test]

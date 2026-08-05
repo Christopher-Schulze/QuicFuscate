@@ -1329,4 +1329,34 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
         self.log_buffer.clear();
         AdminResponse::ok_with_message("Logs cleared")
     }
+
+    fn handle_rotate_logs(&self) -> AdminResponse {
+        let result = crate::logging::rotate();
+        let (outcome, severity, response) = match result {
+            Ok(()) => (
+                crate::audit::AuditOutcome::Succeeded,
+                crate::audit::AuditSeverity::Info,
+                AdminResponse::ok_with_message("Log rotation completed"),
+            ),
+            Err(error) => (
+                crate::audit::AuditOutcome::Failed,
+                crate::audit::AuditSeverity::Warning,
+                AdminResponse::error(format!("Log rotation failed: {error}")),
+            ),
+        };
+        crate::audit::audit_typed(
+            crate::audit::AuditEventType::AdminAction,
+            severity,
+            None,
+            None,
+            crate::audit::AuditContext {
+                actor: crate::audit::AuditActor::Administrator,
+                target: crate::audit::AuditTarget::System,
+                outcome,
+                reason: Some("admin_log_rotation"),
+            },
+            "Authenticated admin requested operational log rotation",
+        );
+        response
+    }
 }

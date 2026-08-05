@@ -575,6 +575,9 @@ pub trait AdminHttpHandler: Send + Sync {
     fn handle_set_logging_config(&self, mode: &str) -> AdminResponse;
     fn handle_get_logs(&self, cursor: u64) -> AdminResponse;
     fn handle_clear_logs(&self) -> AdminResponse;
+    fn handle_rotate_logs(&self) -> AdminResponse {
+        AdminResponse::error("Log rotation unavailable")
+    }
 }
 
 /// Default maximum number of concurrent admin HTTP connections.

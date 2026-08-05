@@ -238,6 +238,11 @@ fn handle_api(
             }
             admin_json_response(&resp)
         }
+        ("POST", "/api/logs/rotate") => {
+            let resp = handler.handle_rotate_logs();
+            log_action(peer, "logs-rotate", "-", resp.success);
+            admin_json_response(&resp)
+        }
         _ => text_response(404, "Not Found"),
     }
 }
