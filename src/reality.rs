@@ -290,17 +290,39 @@ fn load_targets() -> Vec<String> {
 
 fn load_targets_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Vec<String> {
     if let Some(raw) = environment.first(["QUICFUSCATE_REALITY_TARGETS"]) {
-        let parsed: Vec<String> = raw
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        if !parsed.is_empty() {
+        let parsed: Vec<String> = raw.split(',').map(|s| s.trim()).map(|s| s.to_string()).collect();
+        if !parsed.is_empty() && parsed.iter().all(|target| valid_reality_target(target)) {
             return parsed;
         }
+        log::warn!(
+            "QUICFUSCATE_REALITY_TARGETS contains an empty or malformed target; retaining the built-in target set"
+        );
     }
     TARGETS.iter().map(|s| s.to_string()).collect()
+}
+
+fn valid_reality_target(target: &str) -> bool {
+    let Some((host, port)) = target.rsplit_once(':') else {
+        return false;
+    };
+    let host = host.trim();
+    let host = if host.starts_with('[') || host.ends_with(']') {
+        let Some(host) = host.strip_prefix('[').and_then(|value| value.strip_suffix(']')) else {
+            return false;
+        };
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        host
+    } else {
+        if host.contains(':') {
+            return false;
+        }
+        host
+    };
+    !host.is_empty()
+        && !host.chars().any(char::is_whitespace)
+        && port.parse::<u16>().is_ok_and(|value| value > 0)
 }
 
 // =============================================================================
@@ -875,6 +897,52 @@ mod tests {
         assert!(targets.contains(&"1.1.1.1:443".to_string()));
         assert!(targets.contains(&"8.8.8.8:443".to_string()));
         assert!(targets.contains(&"9.9.9.9:443".to_string()));
+    }
+
+    #[test]
+    fn malformed_target_override_retains_the_complete_default_set() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_REALITY_TARGETS",
+            "1.1.1.1:443,not-a-target",
+        )]);
+        let targets = load_targets_with_snapshot(&environment);
+        assert_eq!(targets, TARGETS.iter().map(|target| target.to_string()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn target_override_accepts_trimmed_host_port_entries() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_REALITY_TARGETS",
+            "  cover.example:443, [::1]:8443 ",
+        )]);
+        assert_eq!(
+            load_targets_with_snapshot(&environment),
+            vec!["cover.example:443".to_string(), "[::1]:8443".to_string()]
+        );
+    }
+
+    #[test]
+    fn unbracketed_ipv6_target_is_rejected() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_REALITY_TARGETS",
+            "::1:8443",
+        )]);
+        assert_eq!(
+            load_targets_with_snapshot(&environment),
+            TARGETS.iter().map(|target| target.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mismatched_ipv6_brackets_are_rejected() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_REALITY_TARGETS",
+            "[::1:8443",
+        )]);
+        assert_eq!(
+            load_targets_with_snapshot(&environment),
+            TARGETS.iter().map(|target| target.to_string()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

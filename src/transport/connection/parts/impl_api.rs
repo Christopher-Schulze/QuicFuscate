@@ -598,6 +598,11 @@ impl Connection {
         self.rtt
     }
 
+    /// Return the immutable environment generation owned by this connection.
+    pub(crate) fn environment_snapshot(&self) -> &crate::env_utils::EnvSnapshot {
+        self.environment.as_ref()
+    }
+
     /// Confirmed packetization-layer MTU for the active path.
     pub fn effective_path_mtu(&self) -> usize {
         self.pmtu.effective_mtu().min(self.dgram_send_max_size)

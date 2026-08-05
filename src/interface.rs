@@ -325,7 +325,13 @@ impl FastpathMode {
 
     /// Read fastpath mode from the QUICFUSCATE_FASTPATH environment variable.
     pub fn from_env() -> Self {
-        let raw = std::env::var("QUICFUSCATE_FASTPATH").unwrap_or_else(|_| "auto".to_string());
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::from_env_with_snapshot(&environment)
+    }
+
+    /// Read fastpath mode from one immutable environment generation.
+    pub(crate) fn from_env_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
+        let raw = environment.first(["QUICFUSCATE_FASTPATH"]).unwrap_or_else(|| "auto".to_string());
         let mode = Self::parse(&raw);
         if mode == Self::Auto && !raw.trim().eq_ignore_ascii_case("auto") {
             log::warn!(

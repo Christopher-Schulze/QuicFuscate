@@ -628,7 +628,13 @@ mod tests {
                 body: Vec::new(),
             };
             let peer: SocketAddr = "127.0.0.1:5555".parse().expect("peer");
-            assert_eq!(client_ip_for_rate_limit(Some(peer), &req), "127.0.0.1");
+            let environment = AdminHttpEnvironment::from_snapshot(
+                &crate::env_utils::EnvSnapshot::capture(),
+            );
+            assert_eq!(
+                client_ip_for_rate_limit(Some(peer), &req, &environment),
+                "127.0.0.1"
+            );
         });
     }
 
@@ -642,7 +648,13 @@ mod tests {
                 body: Vec::new(),
             };
             let peer: SocketAddr = "127.0.0.1:5555".parse().expect("peer");
-            assert_eq!(client_ip_for_rate_limit(Some(peer), &req), "1.2.3.4");
+            let environment = AdminHttpEnvironment::from_snapshot(
+                &crate::env_utils::EnvSnapshot::capture(),
+            );
+            assert_eq!(
+                client_ip_for_rate_limit(Some(peer), &req, &environment),
+                "1.2.3.4"
+            );
         });
     }
 
@@ -656,8 +668,26 @@ mod tests {
                 body: Vec::new(),
             };
             let peer: SocketAddr = "127.0.0.1:5555".parse().expect("peer");
-            assert_eq!(client_ip_for_rate_limit(Some(peer), &req), "127.0.0.1");
+            let environment = AdminHttpEnvironment::from_snapshot(
+                &crate::env_utils::EnvSnapshot::capture(),
+            );
+            assert_eq!(
+                client_ip_for_rate_limit(Some(peer), &req, &environment),
+                "127.0.0.1"
+            );
         });
+    }
+
+    #[test]
+    fn malformed_trusted_proxy_list_fails_closed_as_one_snapshot() {
+        let environment = AdminHttpEnvironment::from_snapshot(
+            &crate::env_utils::EnvSnapshot::from_pairs([
+                ("QUICFUSCATE_TRUST_PROXY", "true"),
+                ("QUICFUSCATE_TRUSTED_PROXY_IPS", "127.0.0.1,not-an-ip"),
+            ]),
+        );
+        let peer: SocketAddr = "127.0.0.1:5555".parse().expect("peer");
+        assert!(!peer_is_trusted_proxy(Some(peer), &environment));
     }
 
     #[test]
@@ -680,12 +710,15 @@ mod tests {
                 body: Vec::new(),
             };
 
-            let c1 = build_session_cookie("sid", &https);
+            let environment = AdminHttpEnvironment::from_snapshot(
+                &crate::env_utils::EnvSnapshot::capture(),
+            );
+            let c1 = build_session_cookie("sid", &https, &environment);
             assert!(c1.contains("HttpOnly"));
             assert!(c1.contains("SameSite=Strict"));
             assert!(c1.contains("; Secure"));
 
-            let c2 = build_session_cookie("sid", &http);
+            let c2 = build_session_cookie("sid", &http, &environment);
             assert!(!c2.contains("; Secure"));
         });
     }
@@ -710,14 +743,17 @@ mod tests {
                 body: Vec::new(),
             };
 
-            let c1 = build_expired_cookie(&https);
+            let environment = AdminHttpEnvironment::from_snapshot(
+                &crate::env_utils::EnvSnapshot::capture(),
+            );
+            let c1 = build_expired_cookie(&https, &environment);
             assert!(c1.contains("HttpOnly"));
             assert!(c1.contains("SameSite=Strict"));
             assert!(c1.contains("; Secure"));
             assert!(c1.contains("Max-Age=0"));
             assert!(c1.contains("Expires="));
 
-            let c2 = build_expired_cookie(&http);
+            let c2 = build_expired_cookie(&http, &environment);
             assert!(!c2.contains("; Secure"));
         });
     }
@@ -1170,6 +1206,7 @@ mod tests {
             &sessions,
             test_rate_limiter(5),
             None,
+            &AdminHttpEnvironment::from_snapshot(&crate::env_utils::EnvSnapshot::capture()),
         );
 
         assert_eq!(response.status().as_u16(), 500);
@@ -1200,6 +1237,7 @@ mod tests {
             &sessions,
             test_rate_limiter(5),
             None,
+            &AdminHttpEnvironment::from_snapshot(&crate::env_utils::EnvSnapshot::capture()),
         );
 
         assert_eq!(response.status().as_u16(), 200);
@@ -1232,6 +1270,7 @@ mod tests {
             &test_sessions(),
             test_rate_limiter(5),
             None,
+            &AdminHttpEnvironment::from_snapshot(&crate::env_utils::EnvSnapshot::capture()),
         );
         assert_eq!(response.status().as_u16(), 500);
 
@@ -1798,6 +1837,7 @@ mod tests {
             Arc::clone(&sessions),
             Arc::clone(&rate_limiter),
             None,
+            &AdminHttpEnvironment::from_snapshot(&crate::env_utils::EnvSnapshot::capture()),
         );
         assert_eq!(first.status().as_u16(), 200);
 
@@ -1807,6 +1847,7 @@ mod tests {
             Arc::clone(&sessions),
             Arc::clone(&rate_limiter),
             None,
+            &AdminHttpEnvironment::from_snapshot(&crate::env_utils::EnvSnapshot::capture()),
         );
         assert_eq!(second.status().as_u16(), 429);
 

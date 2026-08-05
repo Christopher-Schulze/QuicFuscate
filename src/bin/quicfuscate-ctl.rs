@@ -5,6 +5,8 @@
 use std::io::{BufRead, Write};
 use std::os::unix::net::UnixStream;
 
+use quicfuscate::env_utils::EnvSnapshot;
+
 const DEFAULT_SOCKET: &str = "/var/run/quicfuscate/ctl.sock";
 const MAX_RESPONSE_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -24,8 +26,9 @@ fn main() {
         std::process::exit(1);
     }
 
+    let environment = EnvSnapshot::capture();
     let socket_path =
-        std::env::var("QUICFUSCATE_CTL_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
+        environment.first(["QUICFUSCATE_CTL_SOCKET"]).unwrap_or_else(|| DEFAULT_SOCKET.to_string());
 
     let cmd = &args[1];
 

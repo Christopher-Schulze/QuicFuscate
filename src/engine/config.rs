@@ -1635,15 +1635,16 @@ fn scaled_memory_pool_size(total_ram: usize) -> usize {
 /// 2. Auto-scale: 5% of total system RAM (clamped to 16 MB..64 MB)
 /// 3. Fallback: 64 MB (if sysinfo detection fails)
 fn auto_memory_pool_size() -> usize {
+    let environment = crate::env_utils::EnvSnapshot::capture();
+    auto_memory_pool_size_with_snapshot(&environment)
+}
+
+fn auto_memory_pool_size_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> usize {
     // Priority 1: environment variable override
-    if let Ok(val) = std::env::var("QUICFUSCATE_MEMORY_POOL_MB") {
-        if let Ok(mb) = val.trim().parse::<usize>() {
-            if mb > 0 {
-                let bytes = mb.saturating_mul(1024 * 1024);
-                log::info!("Memory pool size from QUICFUSCATE_MEMORY_POOL_MB: {} MB", mb);
-                return bytes;
-            }
-        }
+    if let Some(mb) = environment.parse_positive_usize("QUICFUSCATE_MEMORY_POOL_MB") {
+        let bytes = mb.saturating_mul(1024 * 1024);
+        log::info!("Memory pool size from QUICFUSCATE_MEMORY_POOL_MB: {} MB", mb);
+        return bytes;
     }
 
     // Priority 2: auto-scale based on system RAM

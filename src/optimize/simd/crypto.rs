@@ -24,7 +24,11 @@ fn chacha20_x4_override() -> Option<String> {
     }
 
     CHACHA20_X4_OVERRIDE
-        .get_or_init(|| std::env::var("QUICFUSCATE_CHACHA20_X4").ok().map(|v| v.to_lowercase()))
+        .get_or_init(|| {
+            crate::env_utils::EnvSnapshot::capture()
+                .first(["QUICFUSCATE_CHACHA20_X4"])
+                .map(|value| value.to_ascii_lowercase())
+        })
         .clone()
 }
 

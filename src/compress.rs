@@ -1,4 +1,5 @@
 use crate::accelerate::compress::classify as classify_bytes;
+use crate::env_utils::EnvSnapshot;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -377,8 +378,14 @@ static GLOBAL_POLICY: OnceLock<Mutex<CompressionPolicy>> = OnceLock::new();
 
 /// Return the global compression policy (lazily initialized from environment).
 pub fn global_policy() -> CompressionPolicy {
+    let environment = EnvSnapshot::capture();
+    global_policy_with_snapshot(&environment)
+}
+
+/// Return the global compression policy using the caller's immutable environment generation.
+pub(crate) fn global_policy_with_snapshot(environment: &EnvSnapshot) -> CompressionPolicy {
     GLOBAL_POLICY
-        .get_or_init(|| Mutex::new(CompressionPolicy::from_env()))
+        .get_or_init(|| Mutex::new(CompressionPolicy::from_env_with_snapshot(environment)))
         .lock()
         .unwrap_or_else(|p| {
             // Recover from poisoned mutex
@@ -415,22 +422,29 @@ impl CompressionPolicy {
 
     /// Build a compression policy from QUICFUSCATE_COMPRESS_* environment variables.
     pub fn from_env() -> Self {
+        let environment = EnvSnapshot::capture();
+        Self::from_env_with_snapshot(&environment)
+    }
+
+    /// Build a compression policy from one immutable environment generation.
+    pub(crate) fn from_env_with_snapshot(environment: &EnvSnapshot) -> Self {
         let mut p = CompressionPolicy::default();
-        if let Ok(v) = std::env::var("QUICFUSCATE_COMPRESS") {
-            p.enabled = !(v == "0" || v.eq_ignore_ascii_case("false"));
+        p.enabled = environment.flag("QUICFUSCATE_COMPRESS", p.enabled);
+        if let Some(n) = environment.parse::<usize>("QUICFUSCATE_COMPRESS_MIN") {
+            p.min_len = n;
         }
-        if let Ok(v) = std::env::var("QUICFUSCATE_COMPRESS_MIN") {
-            if let Ok(n) = v.parse() {
-                p.min_len = n;
+        if let Some(level) = environment.parse::<i32>("QUICFUSCATE_COMPRESS_LEVEL") {
+            if (1..=22).contains(&level) {
+                p.level = level;
+            } else {
+                log::warn!(
+                    "QUICFUSCATE_COMPRESS_LEVEL must be between 1 and 22; retaining default {}",
+                    p.level
+                );
             }
         }
-        if let Ok(v) = std::env::var("QUICFUSCATE_COMPRESS_LEVEL") {
-            if let Ok(n) = v.parse() {
-                p.level = n;
-            }
-        }
-        if let Ok(v) = std::env::var("QUICFUSCATE_COMPRESS_ALLOW") {
-            p.allow = v
+        if let Some(raw) = environment.first(["QUICFUSCATE_COMPRESS_ALLOW"]) {
+            p.allow = raw
                 .split(',')
                 .filter_map(|s| {
                     let trimmed = s.trim();
@@ -442,8 +456,8 @@ impl CompressionPolicy {
                 })
                 .collect();
         }
-        if let Ok(v) = std::env::var("QUICFUSCATE_COMPRESS_DENY") {
-            p.deny = v
+        if let Some(raw) = environment.first(["QUICFUSCATE_COMPRESS_DENY"]) {
+            p.deny = raw
                 .split(',')
                 .filter_map(|s| {
                     let trimmed = s.trim();
@@ -738,15 +752,11 @@ static BODY_POOL: OnceLock<Arc<MemoryPool>> = OnceLock::new();
 pub fn body_pool() -> Arc<MemoryPool> {
     BODY_POOL
         .get_or_init(|| {
-            let cap = std::env::var("QUICFUSCATE_BODYPOOL_CAP")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(256);
-            let blk = std::env::var("QUICFUSCATE_BODYPOOL_BLOCK")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(64 * 1024);
-            let pool = Arc::new(MemoryPool::new(cap, blk));
+            let environment = EnvSnapshot::capture();
+            let cap = environment.parse_positive_usize("QUICFUSCATE_BODYPOOL_CAP").unwrap_or(256);
+            let blk =
+                environment.parse_positive_usize("QUICFUSCATE_BODYPOOL_BLOCK").unwrap_or(64 * 1024);
+            let pool = Arc::new(MemoryPool::new_with_snapshot(cap, blk, &environment));
             crate::optimize::telemetry::BODY_POOL_BLOCK_SIZE
                 .store(pool.block_size() as u64, std::sync::atomic::Ordering::Relaxed);
             crate::optimize::telemetry::BODY_POOL_CAPACITY
@@ -759,10 +769,17 @@ pub fn body_pool() -> Arc<MemoryPool> {
 // -------------------- Persistenz: Dictionaries auf Disk --------------------
 
 use std::path::PathBuf;
+static DICT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
 fn dict_dir() -> PathBuf {
-    std::env::var("QUICFUSCATE_DICT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("dict_cache"))
+    DICT_DIR
+        .get_or_init(|| {
+            EnvSnapshot::capture()
+                .first(["QUICFUSCATE_DICT_DIR"])
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("dict_cache"))
+        })
+        .clone()
 }
 
 fn class_str(c: ContentClass) -> &'static str {
@@ -1047,6 +1064,25 @@ mod tests {
             ..policy
         };
         assert!(!deny_precedence.allows_content_type(Some("IMAGE/PNG")));
+    }
+
+    #[test]
+    fn compression_policy_snapshot_warns_and_retains_safe_defaults() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_COMPRESS", "maybe"),
+            ("QUICFUSCATE_COMPRESS_MIN", " 512 "),
+            ("QUICFUSCATE_COMPRESS_LEVEL", "99"),
+            ("QUICFUSCATE_COMPRESS_ALLOW", " text/*, "),
+            ("QUICFUSCATE_COMPRESS_DENY", " image/*, "),
+        ]);
+        let policy = CompressionPolicy::from_env_with_snapshot(&environment);
+        let defaults = CompressionPolicy::default();
+
+        assert_eq!(policy.enabled, defaults.enabled);
+        assert_eq!(policy.min_len, 512);
+        assert_eq!(policy.level, defaults.level);
+        assert_eq!(policy.allow, vec!["text/*"]);
+        assert_eq!(policy.deny, vec!["image/*"]);
     }
 
     #[test]

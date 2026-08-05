@@ -17,6 +17,84 @@ pub struct MemoryPool {
     hard_max_capacity: usize,
     in_use: AtomicUsize,
     available: AtomicUsize,
+    runtime: Arc<MemoryPoolRuntimeConfig>,
+}
+
+#[derive(Debug)]
+struct MemoryPoolRuntimeConfig {
+    tls_cache_limit: AtomicUsize,
+    debug_slack: usize,
+    debug_grace: usize,
+    madvise_hugepage: bool,
+    auto_tune: bool,
+    min_capacity: usize,
+    max_capacity: usize,
+    tick_ms: u64,
+    utilization_low: usize,
+    utilization_high: usize,
+    tls_low: usize,
+    tls_high: usize,
+}
+
+impl MemoryPoolRuntimeConfig {
+    fn from_snapshot(environment: &EnvSnapshot) -> Self {
+        let utilization_high = parse_percent(environment, "QUICFUSCATE_POOL_UTIL_HIGH", 80, 5, 95);
+        let configured_low = parse_percent(environment, "QUICFUSCATE_POOL_UTIL_LOW", 30, 1, 89);
+        let utilization_low = if configured_low + 5 >= utilization_high {
+            utilization_high.saturating_sub(10).max(1)
+        } else {
+            configured_low
+        };
+        Self {
+            tls_cache_limit: AtomicUsize::new(
+                environment.parse::<usize>("QUICFUSCATE_TLS_CACHE").unwrap_or(0),
+            ),
+            debug_slack: environment
+                .parse::<usize>("QUICFUSCATE_POOL_DEBUG_SLACK")
+                .unwrap_or(256),
+            debug_grace: environment
+                .parse::<usize>("QUICFUSCATE_POOL_DEBUG_GRACE")
+                .unwrap_or(64),
+            madvise_hugepage: environment.flag("QUICFUSCATE_MADVISE_HUGEPAGE", true),
+            auto_tune: environment.flag("QUICFUSCATE_POOL_AUTO_TUNE", true),
+            min_capacity: environment
+                .parse_positive_usize("QUICFUSCATE_POOL_MIN_CAP")
+                .unwrap_or(64),
+            max_capacity: environment
+                .parse_positive_usize("QUICFUSCATE_POOL_MAX_CAP")
+                .unwrap_or(DEFAULT_AUTO_TUNE_MAX_CAPACITY),
+            tick_ms: environment
+                .parse_positive_u64("QUICFUSCATE_POOL_TICK_MS")
+                .unwrap_or(1000),
+            utilization_low,
+            utilization_high,
+            tls_low: environment
+                .parse_positive_usize("QUICFUSCATE_TLS_LOW")
+                .unwrap_or(24),
+            tls_high: environment
+                .parse_positive_usize("QUICFUSCATE_TLS_HIGH")
+                .unwrap_or(48),
+        }
+    }
+}
+
+fn parse_percent(environment: &EnvSnapshot, name: &str, default: usize, min: usize, max: usize) -> usize {
+    match environment.parse::<usize>(name) {
+        None => default,
+        Some(value) => {
+            let clamped = value.clamp(min, max);
+            if clamped != value {
+                log::warn!(
+                    "{} must be between {} and {}; clamping override to {}",
+                    name,
+                    min,
+                    max,
+                    clamped
+                );
+            }
+            clamped
+        }
+    }
 }
 
 /// Global flag controlling whether MemoryPool blocks are mlocked against swap
@@ -160,17 +238,6 @@ impl MemoryPool {
         LOCK_BLOCKS.load(Ordering::Relaxed)
     }
 
-    #[inline]
-    fn tls_limit_cell() -> &'static AtomicUsize {
-        static TLS_LIMIT_RUNTIME: OnceLock<AtomicUsize> = OnceLock::new();
-        TLS_LIMIT_RUNTIME.get_or_init(|| {
-            let default = std::env::var("QUICFUSCATE_TLS_CACHE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            AtomicUsize::new(default)
-        })
-    }
     // Thread-local small cache of blocks to reduce contention on queues
     thread_local! {
         static TLS_CACHES: RefCell<ThreadLocalPoolCaches> = const { RefCell::new(Vec::new()) };
@@ -208,37 +275,37 @@ impl MemoryPool {
     }
 
     #[inline]
-    fn configured_hard_max_capacity(initial_capacity: usize, block_size: usize) -> usize {
-        let configured = std::env::var("QUICFUSCATE_POOL_HARD_MAX_CAP")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|capacity| *capacity > 0);
+    fn configured_hard_max_capacity(
+        initial_capacity: usize,
+        block_size: usize,
+        environment: &EnvSnapshot,
+    ) -> usize {
+        let configured = environment.parse_positive_usize("QUICFUSCATE_POOL_HARD_MAX_CAP");
         configured
             .map(|capacity| capacity.max(initial_capacity))
             .unwrap_or_else(|| default_hard_max_capacity(initial_capacity, block_size))
     }
 
     #[inline]
-    fn tls_limit() -> usize {
-        Self::tls_limit_cell().load(Ordering::Relaxed)
+    fn tls_limit(&self) -> usize {
+        self.runtime.tls_cache_limit.load(Ordering::Relaxed)
     }
 
     #[inline]
-    fn bump_tls_limit(suggested: usize) {
-        let cell = Self::tls_limit_cell();
-        let cur = cell.load(Ordering::Relaxed);
+    fn bump_tls_limit(&self, suggested: usize) {
+        let cur = self.runtime.tls_cache_limit.load(Ordering::Relaxed);
         if cur == 0 {
             return;
         }
         if suggested != cur {
-            cell.store(suggested, Ordering::Relaxed);
+            self.runtime.tls_cache_limit.store(suggested, Ordering::Relaxed);
         }
     }
 
     #[inline]
     fn flush_tls_to_queue(&self, node: usize, max: usize) {
         self.with_tls_cache(|cache| {
-            let limit = Self::tls_limit();
+            let limit = self.tls_limit();
             let len = cache.len();
             if len > limit {
                 let mut to_flush = core::cmp::min(len - limit, max);
@@ -261,7 +328,17 @@ impl MemoryPool {
     /// The requested block size is retained, subject only to the minimum safe
     /// size. Use [`MemoryPool::new_adaptive`] when MTU-based sizing is desired.
     pub fn new(capacity: usize, block_size: usize) -> Self {
-        Self::new_with_effective_block_size(capacity, block_size)
+        let environment = EnvSnapshot::capture();
+        Self::new_with_snapshot(capacity, block_size, &environment)
+    }
+
+    /// Creates a pool using one immutable environment generation.
+    pub(crate) fn new_with_snapshot(
+        capacity: usize,
+        block_size: usize,
+        environment: &EnvSnapshot,
+    ) -> Self {
+        Self::new_with_effective_block_size(capacity, block_size, environment)
     }
 
     /// Creates a pool whose block size follows the configured MTU profile.
@@ -269,20 +346,47 @@ impl MemoryPool {
     /// `QUICFUSCATE_POOL_ADAPTIVE_BLOCK=0|false` disables the MTU selection and
     /// retains the requested size, subject to the minimum safe size.
     pub fn new_adaptive(capacity: usize, block_size: usize) -> Self {
-        Self::new_with_effective_block_size(capacity, Self::adaptive_block_size(block_size))
+        let environment = EnvSnapshot::capture();
+        Self::new_adaptive_with_snapshot(capacity, block_size, &environment)
     }
 
-    fn new_with_effective_block_size(capacity: usize, block_size: usize) -> Self {
+    /// Creates an adaptive pool using one immutable environment generation.
+    pub(crate) fn new_adaptive_with_snapshot(
+        capacity: usize,
+        block_size: usize,
+        environment: &EnvSnapshot,
+    ) -> Self {
+        Self::new_with_effective_block_size(
+            capacity,
+            Self::adaptive_block_size_with_snapshot(block_size, environment),
+            environment,
+        )
+    }
+
+    fn new_with_effective_block_size(
+        capacity: usize,
+        block_size: usize,
+        environment: &EnvSnapshot,
+    ) -> Self {
         let block_size = block_size.max(MIN_POOL_BLOCK_SIZE);
         let lock_blocks = Self::lock_blocks_enabled();
         let lock_ledger = Arc::new(BlockLockLedger::default());
+        let runtime = Arc::new(MemoryPoolRuntimeConfig::from_snapshot(environment));
+        #[cfg(target_os = "linux")]
+        crate::optimize::initialize_numa_policy(environment);
         let nodes = numa::num_nodes();
         let mut pools = Vec::with_capacity(nodes);
         for n in 0..nodes {
             let node_cap = capacity / nodes + if n < capacity % nodes { 1 } else { 0 };
             let q = Arc::new(SegQueue::new());
             for _ in 0..node_cap {
-                q.push(Self::alloc_numa_block(block_size, n, lock_blocks, &lock_ledger));
+                q.push(Self::alloc_numa_block(
+                    block_size,
+                    n,
+                    lock_blocks,
+                    &lock_ledger,
+                    runtime.madvise_hugepage,
+                ));
             }
             pools.push(q);
         }
@@ -294,9 +398,10 @@ impl MemoryPool {
             block_size,
             num_nodes: nodes,
             capacity: AtomicUsize::new(capacity),
-            hard_max_capacity: Self::configured_hard_max_capacity(capacity, block_size),
+            hard_max_capacity: Self::configured_hard_max_capacity(capacity, block_size, environment),
             in_use: AtomicUsize::new(0),
             available: AtomicUsize::new(capacity),
+            runtime,
         };
         // Telemetry init
         crate::optimize::telemetry::MEM_POOL_CAPACITY.store(capacity as u64, Ordering::Relaxed);
@@ -315,16 +420,10 @@ impl MemoryPool {
         let cap = self.capacity.load(Ordering::Acquire);
         let in_use = self.in_use.load(Ordering::Acquire);
         let avail = self.available.load(Ordering::Acquire);
-        // Allow transient slack due to non-atomic pair updates of (available,in_use)
-        // Make slack configurable for stress-heavy tests; default increased conservatively.
-        let slack: usize = std::env::var("QUICFUSCATE_POOL_DEBUG_SLACK")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(256);
-        let grace: usize = std::env::var("QUICFUSCATE_POOL_DEBUG_GRACE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(64);
+        // Allow transient slack due to non-atomic pair updates of (available,in_use).
+        // These diagnostic bounds belong to the pool's construction snapshot.
+        let slack = self.runtime.debug_slack;
+        let grace = self.runtime.debug_grace;
         if in_use > cap.saturating_add(slack).saturating_add(grace)
             || avail > cap.saturating_add(slack).saturating_add(grace)
         {
@@ -389,7 +488,10 @@ impl MemoryPool {
         node: usize,
         lock_blocks: bool,
         lock_ledger: &BlockLockLedger,
+        madvise_hugepage: bool,
     ) -> AlignedBox<[u8]> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = madvise_hugepage;
         // Use manual aligned allocation to guarantee exact length = block_size.
         let layout = match std::alloc::Layout::from_size_align(block_size.max(1), 64) {
             Ok(l) => l,
@@ -420,11 +522,8 @@ impl MemoryPool {
         let mut block = unsafe { AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
         // Hint huge pages on Linux if enabled
         #[cfg(target_os = "linux")]
-        unsafe {
-            let hp = std::env::var("QUICFUSCATE_MADVISE_HUGEPAGE")
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                .unwrap_or(true);
-            if hp {
+        if madvise_hugepage {
+            unsafe {
                 let _ = libc::madvise(
                     block.as_mut_ptr() as *mut libc::c_void,
                     block_size,
@@ -435,7 +534,7 @@ impl MemoryPool {
         #[cfg(target_os = "linux")]
         {
             if numa::is_available() {
-                let policy = *NUMA_POLICY.get_or_init(resolve_numa_policy);
+                let policy = *NUMA_POLICY.get_or_init(|| NumaPolicy::Local);
                 let nodes = numa::num_nodes().max(1);
                 let target = match policy {
                     NumaPolicy::Local => node,
@@ -484,6 +583,7 @@ impl MemoryPool {
                     n,
                     self.lock_blocks,
                     &self.lock_ledger,
+                    self.runtime.madvise_hugepage,
                 ));
                 self.available.fetch_add(1, Ordering::Relaxed);
                 self.capacity.fetch_add(1, Ordering::Relaxed);
@@ -624,6 +724,7 @@ impl MemoryPool {
                 node,
                 self.lock_blocks,
                 &self.lock_ledger,
+                self.runtime.madvise_hugepage,
             );
             self.capacity.fetch_add(1, Ordering::Relaxed);
             self.in_use.fetch_add(1, Ordering::Relaxed);
@@ -640,6 +741,7 @@ impl MemoryPool {
                 node,
                 self.lock_blocks,
                 &self.lock_ledger,
+                self.runtime.madvise_hugepage,
             );
             prefetch(b.as_ptr(), PrefetchHint::T0);
             b
@@ -660,7 +762,7 @@ impl MemoryPool {
         // Zeroize efficiently; allows vectorized memset
         block.as_mut().fill(0);
         // Try to place into TLS cache
-        let limit = Self::tls_limit();
+        let limit = self.tls_limit();
         let block = match self.try_cache_block(block, limit) {
             Ok(()) => {
                 self.available.fetch_add(1, Ordering::Relaxed);
@@ -727,16 +829,16 @@ impl MemoryPool {
     /// Controlled by env QUICFUSCATE_POOL_AUTO_TUNE (default true),
     /// QUICFUSCATE_POOL_MIN_CAP, QUICFUSCATE_POOL_MAX_CAP, QUICFUSCATE_POOL_TICK_MS.
     /// Determine an adaptive block size based on environment hints and MTU.
-    fn adaptive_block_size(requested: usize) -> usize {
-        if let Ok(v) = std::env::var("QUICFUSCATE_POOL_ADAPTIVE_BLOCK") {
-            if v == "0" || v.eq_ignore_ascii_case("false") {
-                return requested;
-            }
+    fn adaptive_block_size_with_snapshot(
+        requested: usize,
+        environment: &EnvSnapshot,
+    ) -> usize {
+        if !environment.flag("QUICFUSCATE_POOL_ADAPTIVE_BLOCK", true) {
+            return requested;
         }
         // Auto-tune based on common MTU patterns
-        let mtu_hint = std::env::var("QUICFUSCATE_MTU_HINT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+        let mtu_hint = environment
+            .parse_positive_usize("QUICFUSCATE_MTU_HINT")
             .unwrap_or(1500);
         Self::adaptive_block_size_for_mtu(mtu_hint)
     }
@@ -756,10 +858,7 @@ impl MemoryPool {
 
     /// Spawns a background thread that periodically adjusts pool capacity based on utilization.
     pub fn start_auto_tuner(pool: Arc<MemoryPool>) {
-        let enabled = std::env::var("QUICFUSCATE_POOL_AUTO_TUNE")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true);
-        if !enabled {
+        if !pool.runtime.auto_tune {
             return;
         }
 
@@ -773,49 +872,18 @@ impl MemoryPool {
         let thread = match std::thread::Builder::new()
             .name("quicfuscate-pool-auto-tuner".to_owned())
             .spawn(move || {
-                let min_cap = std::env::var("QUICFUSCATE_POOL_MIN_CAP")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(64);
-                let max_cap = std::env::var("QUICFUSCATE_POOL_MAX_CAP")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(DEFAULT_AUTO_TUNE_MAX_CAPACITY);
-                let tick_ms = std::env::var("QUICFUSCATE_POOL_TICK_MS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1000u64);
+                let min_cap = pool.runtime.min_capacity;
+                let max_cap = pool.runtime.max_capacity.max(min_cap);
+                let tick_ms = pool.runtime.tick_ms;
                 loop {
                     if thread_stop.load(Ordering::Acquire) {
                         break;
                     }
 
-                    // Allow runtime-configurable utilization thresholds
-                    let util_high = std::env::var("QUICFUSCATE_POOL_UTIL_HIGH")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .map(|v| v.clamp(5, 95))
-                        .unwrap_or(80);
-                    let util_low = std::env::var("QUICFUSCATE_POOL_UTIL_LOW")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .map(|v| v.clamp(1, 89))
-                        .unwrap_or(30);
-                    // Ensure logical ordering
-                    let (util_low, util_high) = if util_low + 5 >= util_high {
-                        (util_high.saturating_sub(10).max(1), util_high)
-                    } else {
-                        (util_low, util_high)
-                    };
-
-                    let tls_high = std::env::var("QUICFUSCATE_TLS_HIGH")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(48);
-                    let tls_low = std::env::var("QUICFUSCATE_TLS_LOW")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(24);
+                    let util_high = pool.runtime.utilization_high;
+                    let util_low = pool.runtime.utilization_low;
+                    let tls_high = pool.runtime.tls_high;
+                    let tls_low = pool.runtime.tls_low;
 
                     let cap = pool.capacity.load(Ordering::Relaxed);
                     let in_use = pool.in_use.load(Ordering::Relaxed);
@@ -824,11 +892,11 @@ impl MemoryPool {
                     if util > util_high {
                         target = core::cmp::min(cap.saturating_mul(2), max_cap);
                         // Under high utilization, raise TLS cache to reduce contention
-                        MemoryPool::bump_tls_limit(tls_high);
+                        pool.bump_tls_limit(tls_high);
                     } else if util < util_low {
                         target = core::cmp::max(cap / 2, min_cap);
                         // Under low utilization, shrink TLS cache for footprint
-                        MemoryPool::bump_tls_limit(tls_low);
+                        pool.bump_tls_limit(tls_low);
                     }
                     if target != cap {
                         pool.set_capacity(target);
@@ -1193,7 +1261,10 @@ impl<'a> Drop for ZeroCopyBuffer<'a> {
 
 #[cfg(test)]
 mod memory_pool_growth_tests {
-    use super::{default_hard_max_capacity, MemoryPool, LOCK_BLOCKS_TEST_MUTEX, DEFAULT_POOL_MAX_BYTES};
+    use super::{
+        default_hard_max_capacity, MemoryPool, MemoryPoolRuntimeConfig, LOCK_BLOCKS_TEST_MUTEX,
+        DEFAULT_POOL_MAX_BYTES,
+    };
 
     #[test]
     fn default_growth_limit_is_byte_bounded_and_never_below_initial_capacity() {
@@ -1226,6 +1297,32 @@ mod memory_pool_growth_tests {
         assert_eq!(MemoryPool::adaptive_block_size_for_mtu(1500), 4096);
         assert_eq!(MemoryPool::adaptive_block_size_for_mtu(9000), 16_384);
         assert_eq!(MemoryPool::adaptive_block_size_for_mtu(9001), 65_536);
+    }
+
+    #[test]
+    fn runtime_policy_is_validated_once_from_one_snapshot() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_POOL_AUTO_TUNE", "off"),
+            ("QUICFUSCATE_POOL_MIN_CAP", "0"),
+            ("QUICFUSCATE_POOL_MAX_CAP", "invalid"),
+            ("QUICFUSCATE_POOL_TICK_MS", " 250 "),
+            ("QUICFUSCATE_POOL_UTIL_LOW", "0"),
+            ("QUICFUSCATE_POOL_UTIL_HIGH", "110"),
+            ("QUICFUSCATE_TLS_CACHE", "8"),
+            ("QUICFUSCATE_TLS_LOW", "0"),
+            ("QUICFUSCATE_TLS_HIGH", "64"),
+        ]);
+        let runtime = MemoryPoolRuntimeConfig::from_snapshot(&environment);
+
+        assert!(!runtime.auto_tune);
+        assert_eq!(runtime.min_capacity, 64);
+        assert_eq!(runtime.max_capacity, super::DEFAULT_AUTO_TUNE_MAX_CAPACITY);
+        assert_eq!(runtime.tick_ms, 250);
+        assert_eq!(runtime.utilization_low, 1);
+        assert_eq!(runtime.utilization_high, 95);
+        assert_eq!(runtime.tls_cache_limit.load(std::sync::atomic::Ordering::Relaxed), 8);
+        assert_eq!(runtime.tls_low, 24);
+        assert_eq!(runtime.tls_high, 64);
     }
 
     #[test]

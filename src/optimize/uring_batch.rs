@@ -125,6 +125,7 @@ impl UringBatchSender {
 
     fn new_inner(queue_depth: u32, allow_zc: bool) -> Option<Self> {
         let depth = queue_depth.max(4).checked_next_power_of_two()?;
+        let environment = crate::env_utils::EnvSnapshot::capture();
 
         // Try SQPOLL mode first: the kernel thread polls the SQ, eliminating
         // io_uring_enter() syscalls while it is active.  Falls back on EPERM
@@ -155,11 +156,7 @@ impl UringBatchSender {
             ring.submitter().register_probe(&mut probe).is_ok()
                 && probe.is_supported(opcode::SendMsgZc::CODE)
         };
-        let zc_opt_in = std::env::var("QUICFUSCATE_IO_URING_ZC")
-            .map(|value| {
-                matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false);
+        let zc_opt_in = environment.flag("QUICFUSCATE_IO_URING_ZC", false);
         let zc_supported = allow_zc && zc_probe_supported && zc_opt_in;
 
         if sqpoll_active {

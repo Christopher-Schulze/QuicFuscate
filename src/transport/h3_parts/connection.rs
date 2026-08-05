@@ -446,7 +446,7 @@ impl Connection {
             Arc<crate::optimize::MemoryPool>,
         )> = None;
         // Policy & Dictionary
-        let pol = crate::compress::global_policy();
+        let pol = crate::compress::global_policy_with_snapshot(conn.environment_snapshot());
         if pol.enabled {
             // Extract content-type header from stream state
             let ctype = stream_state._headers.iter().find_map(|h| {
@@ -1238,7 +1238,7 @@ impl Connection {
         conn: &super::Connection,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
-        let pol = crate::compress::global_policy();
+        let pol = crate::compress::global_policy_with_snapshot(conn.environment_snapshot());
         if !pol.enabled || payload.len() < pol.min_len {
             return None;
         }

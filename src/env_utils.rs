@@ -93,6 +93,32 @@ impl EnvSnapshot {
         }
     }
 
+    /// Parse a strictly positive `usize`, rejecting zero as an invalid override.
+    pub fn parse_positive_usize(&self, name: &str) -> Option<usize> {
+        let value = self.parse::<usize>(name)?;
+        if value > 0 {
+            Some(value)
+        } else {
+            log::warn!(
+                "Invalid non-positive integer environment variable {name}; ignoring override"
+            );
+            None
+        }
+    }
+
+    /// Parse a strictly positive `u64`, rejecting zero as an invalid override.
+    pub fn parse_positive_u64(&self, name: &str) -> Option<u64> {
+        let value = self.parse::<u64>(name)?;
+        if value > 0 {
+            Some(value)
+        } else {
+            log::warn!(
+                "Invalid non-positive integer environment variable {name}; ignoring override"
+            );
+            None
+        }
+    }
+
     /// Return the first non-empty trimmed value from an ordered alias list.
     pub fn first<const N: usize>(&self, names: [&str; N]) -> Option<String> {
         names.into_iter().find_map(|name| {
@@ -360,6 +386,20 @@ mod tests {
         assert_eq!(snapshot.parse_positive_f32("TEST_ENV_ZERO"), None);
         assert_eq!(snapshot.parse_positive_f32("TEST_ENV_NEGATIVE"), None);
         assert_eq!(snapshot.parse_positive_f32("TEST_ENV_POSITIVE"), Some(0.25));
+    }
+
+    #[test]
+    fn positive_integer_parser_rejects_zero() {
+        let snapshot = EnvSnapshot::from_pairs([
+            ("TEST_ENV_ZERO_USIZE", "0"),
+            ("TEST_ENV_POSITIVE_USIZE", "7"),
+            ("TEST_ENV_ZERO_U64", "0"),
+            ("TEST_ENV_POSITIVE_U64", "9"),
+        ]);
+        assert_eq!(snapshot.parse_positive_usize("TEST_ENV_ZERO_USIZE"), None);
+        assert_eq!(snapshot.parse_positive_usize("TEST_ENV_POSITIVE_USIZE"), Some(7));
+        assert_eq!(snapshot.parse_positive_u64("TEST_ENV_ZERO_U64"), None);
+        assert_eq!(snapshot.parse_positive_u64("TEST_ENV_POSITIVE_U64"), Some(9));
     }
 
     #[test]

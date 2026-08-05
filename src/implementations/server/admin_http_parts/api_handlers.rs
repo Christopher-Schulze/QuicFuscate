@@ -3,6 +3,7 @@ fn handle_api(
     req: HttpRequest,
     handler: Arc<dyn AdminHttpHandler>,
     peer: Option<SocketAddr>,
+    environment: &AdminHttpEnvironment,
 ) -> Response<Full<Bytes>> {
     if let Some(rest) = req.path.strip_prefix("/api/clients/") {
         let operation = if let Some(id) = rest.strip_suffix("/kick") {
@@ -109,7 +110,7 @@ fn handle_api(
             admin_json_response(&resp)
         }
         ("POST", "/api/drain") => {
-            if !admin_shutdown_enabled() {
+            if !admin_shutdown_enabled(environment) {
                 return text_response(404, "Not Found");
             }
             let resp = handler.handle_drain();
@@ -186,7 +187,7 @@ fn handle_api(
             admin_json_response(&resp)
         }
         ("POST", "/api/shutdown") => {
-            if !admin_shutdown_enabled() {
+            if !admin_shutdown_enabled(environment) {
                 return text_response(404, "Not Found");
             }
             let resp = handler.handle_shutdown();
@@ -261,30 +262,34 @@ fn get_cookie(req: &HttpRequest, name: &str) -> Option<String> {
     None
 }
 
-fn build_session_cookie(session_id: &str, req: &HttpRequest) -> String {
+fn build_session_cookie(
+    session_id: &str,
+    req: &HttpRequest,
+    environment: &AdminHttpEnvironment,
+) -> String {
     let mut cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
         SESSION_COOKIE, session_id, SESSION_TTL_SECS
     );
-    if is_secure_request(req) {
+    if is_secure_request(req, environment) {
         cookie.push_str("; Secure");
     }
     cookie
 }
 
-fn build_expired_cookie(req: &HttpRequest) -> String {
+fn build_expired_cookie(req: &HttpRequest, environment: &AdminHttpEnvironment) -> String {
     let mut cookie = format!(
         "{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
         SESSION_COOKIE
     );
-    if is_secure_request(req) {
+    if is_secure_request(req, environment) {
         cookie.push_str("; Secure");
     }
     cookie
 }
 
-fn is_secure_request(req: &HttpRequest) -> bool {
-    if !trust_proxy_enabled() {
+fn is_secure_request(req: &HttpRequest, environment: &AdminHttpEnvironment) -> bool {
+    if !environment.trust_proxy {
         return false;
     }
     req.headers.iter().any(|(k, v)| {
@@ -292,10 +297,8 @@ fn is_secure_request(req: &HttpRequest) -> bool {
     })
 }
 
-fn admin_shutdown_enabled() -> bool {
-    std::env::var("QUICFUSCATE_ENABLE_ADMIN_SHUTDOWN")
-        .map(|v| v.trim() == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+fn admin_shutdown_enabled(environment: &AdminHttpEnvironment) -> bool {
+    environment.admin_shutdown_enabled
 }
 
 fn admin_response_status(resp: &AdminResponse) -> u16 {

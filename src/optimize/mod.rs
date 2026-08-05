@@ -44,6 +44,7 @@ pub use aligned_box::AlignedBox;
 #[cfg(all(test, feature = "unsafe_rust"))]
 #[doc(hidden)]
 pub(crate) mod r#unsafe;
+use crate::env_utils::EnvSnapshot;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
 use log::{error, warn};
@@ -75,9 +76,9 @@ enum NumaPolicy {
 static NUMA_POLICY: OnceLock<NumaPolicy> = OnceLock::new();
 
 #[cfg(target_os = "linux")]
-fn resolve_numa_policy() -> NumaPolicy {
-    if let Ok(val) = std::env::var("QUICFUSCATE_NUMA_POLICY") {
-        let v = val.to_lowercase();
+fn resolve_numa_policy_with_snapshot(environment: &EnvSnapshot) -> NumaPolicy {
+    if let Some(value) = environment.first(["QUICFUSCATE_NUMA_POLICY"]) {
+        let v = value.to_ascii_lowercase();
         if v == "local" {
             return NumaPolicy::Local;
         }
@@ -91,6 +92,11 @@ fn resolve_numa_policy() -> NumaPolicy {
         }
     }
     NumaPolicy::Local
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn initialize_numa_policy(environment: &EnvSnapshot) {
+    NUMA_POLICY.get_or_init(|| resolve_numa_policy_with_snapshot(environment));
 }
 
 #[cfg(target_os = "linux")]
@@ -225,16 +231,18 @@ static GLOBAL_POOL: OnceLock<Arc<MemoryPool>> = OnceLock::new();
 pub fn global_pool() -> Arc<MemoryPool> {
     GLOBAL_POOL
         .get_or_init(|| {
-            // Use larger pool for better performance
-            let capacity = std::env::var("QUICFUSCATE_POOL_CAPACITY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(512); // Increased default
-            let block_size = std::env::var("QUICFUSCATE_POOL_BLOCK_SIZE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(65536); // 64 KiB adaptive request for packet buffers
-            let pool = Arc::new(MemoryPool::new_adaptive(capacity, block_size));
+            let environment = EnvSnapshot::capture();
+            // Use larger pool for better performance. Both values belong to the
+            // same construction snapshot as the adaptive pool policy.
+            let capacity =
+                environment.parse_positive_usize("QUICFUSCATE_POOL_CAPACITY").unwrap_or(512);
+            let block_size =
+                environment.parse_positive_usize("QUICFUSCATE_POOL_BLOCK_SIZE").unwrap_or(65536);
+            let pool = Arc::new(MemoryPool::new_adaptive_with_snapshot(
+                capacity,
+                block_size,
+                &environment,
+            ));
             // Start auto-tuner thread if enabled
             MemoryPool::start_auto_tuner(Arc::clone(&pool));
             pool

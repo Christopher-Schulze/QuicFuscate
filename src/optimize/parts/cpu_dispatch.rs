@@ -1651,7 +1651,9 @@ where
             } else {
                 FEC_KERNEL_OVERRIDE
                     .get_or_init(|| {
-                        std::env::var("QUICFUSCATE_FEC_KERNEL").ok().map(|v| v.to_lowercase())
+                        crate::env_utils::EnvSnapshot::capture()
+                            .first(["QUICFUSCATE_FEC_KERNEL"])
+                            .map(|value| value.to_ascii_lowercase())
                     })
                     .clone()
             }
@@ -1660,7 +1662,9 @@ where
         {
             FEC_KERNEL_OVERRIDE
                 .get_or_init(|| {
-                    std::env::var("QUICFUSCATE_FEC_KERNEL").ok().map(|v| v.to_lowercase())
+                    crate::env_utils::EnvSnapshot::capture()
+                        .first(["QUICFUSCATE_FEC_KERNEL"])
+                        .map(|value| value.to_ascii_lowercase())
                 })
                 .clone()
         }

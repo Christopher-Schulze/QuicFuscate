@@ -73,6 +73,55 @@ const REPLAY_FINGERPRINT_WINDOW: Duration = Duration::from_secs(REPLAY_FINGERPRI
 const MAX_QKEY_TTL_SECS: u64 = 60 * 60 * 24 * 365 * 10; // 10 years
 const ADMIN_CSP: &str = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'";
 
+#[derive(Clone, Debug)]
+struct AdminHttpEnvironment {
+    trust_proxy: bool,
+    trusted_proxy_ips: Vec<std::net::IpAddr>,
+    admin_shutdown_enabled: bool,
+}
+
+impl AdminHttpEnvironment {
+    fn from_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
+        let trusted_proxy_ips = environment
+            .first(["QUICFUSCATE_TRUSTED_PROXY_IPS"])
+            .map(|raw| {
+                let mut invalid = false;
+                let ips = raw
+                    .split(',')
+                    .map(str::trim)
+                    .map(|value| {
+                        if value.is_empty() {
+                            invalid = true;
+                            None
+                        } else {
+                            match value.parse::<std::net::IpAddr>() {
+                                Ok(ip) => Some(ip),
+                                Err(_) => {
+                                    invalid = true;
+                                    None
+                                }
+                            }
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if invalid || ips.is_none() {
+                    log::warn!(
+                        "QUICFUSCATE_TRUSTED_PROXY_IPS contains an empty or malformed IP; ignoring the complete proxy allowlist"
+                    );
+                    Vec::new()
+                } else {
+                    ips.unwrap_or_default()
+                }
+            })
+            .unwrap_or_default();
+        Self {
+            trust_proxy: environment.flag("QUICFUSCATE_TRUST_PROXY", false),
+            trusted_proxy_ips,
+            admin_shutdown_enabled: environment.flag("QUICFUSCATE_ENABLE_ADMIN_SHUTDOWN", false),
+        }
+    }
+}
+
 fn shared_session_store(ttl: Duration) -> Arc<Mutex<SessionStore>> {
     Arc::new(Mutex::new(SessionStore::new(ttl)))
 }
@@ -976,6 +1025,7 @@ pub struct AdminHttpServer {
         std::sync::Mutex<Option<mpsc::Receiver<AdminHttpOperationCommand>>>,
     operation_timeout: Duration,
     operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+    environment: Arc<AdminHttpEnvironment>,
 }
 
 impl AdminHttpServer {
@@ -1108,6 +1158,9 @@ impl AdminHttpServer {
             }
         }
         let (operation_tx, operation_receiver) = mpsc::channel(max_connections);
+        let environment = Arc::new(AdminHttpEnvironment::from_snapshot(
+            &crate::env_utils::EnvSnapshot::capture(),
+        ));
         Ok(Self {
             addr,
             web_root,
@@ -1126,6 +1179,7 @@ impl AdminHttpServer {
             operation_receiver: std::sync::Mutex::new(Some(operation_receiver)),
             operation_timeout,
             operation_diagnostics,
+            environment,
         })
     }
 
@@ -1214,6 +1268,7 @@ impl AdminHttpServer {
                     let operation_tx = self.operation_tx.clone();
                     let operation_diagnostics = self.operation_diagnostics.clone();
                     let operation_timeout = self.operation_timeout;
+                    let environment = self.environment.clone();
                     let admission_guard = self.admission.record_admitted();
                     let peer = Some(peer_addr);
                     connection_tasks.spawn(async move {
@@ -1233,6 +1288,7 @@ impl AdminHttpServer {
                             let handler = handler.clone();
                             let operation_tx = operation_tx.clone();
                             let operation_diagnostics = operation_diagnostics.clone();
+                            let environment = environment.clone();
                             async move {
                                 Ok::<_, std::convert::Infallible>(
                                     handle_request_with_deadline(
@@ -1246,6 +1302,7 @@ impl AdminHttpServer {
                                         peer,
                                         operation_tx,
                                         operation_diagnostics,
+                                        environment,
                                         connection_deadline,
                                     )
                                     .await,
@@ -1559,6 +1616,7 @@ async fn handle_request_with_deadline(
     peer: Option<SocketAddr>,
     operation_tx: mpsc::Sender<AdminHttpOperationCommand>,
     operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+    environment: Arc<AdminHttpEnvironment>,
     deadline: tokio::time::Instant,
 ) -> Response<Full<Bytes>> {
     let state = operation_diagnostics.begin(deadline);
@@ -1588,6 +1646,7 @@ async fn handle_request_with_deadline(
                 rate_limiter,
                 handler,
                 peer,
+                environment.as_ref(),
             )
         }),
         response_tx,
@@ -1632,7 +1691,20 @@ async fn handle_request(
         Ok(req) => req,
         Err(response) => return response,
     };
-    handle_http_request_sync(req, web_root, auth, auth_path, sessions, rate_limiter, handler, peer)
+    let environment = AdminHttpEnvironment::from_snapshot(
+        &crate::env_utils::EnvSnapshot::capture(),
+    );
+    handle_http_request_sync(
+        req,
+        web_root,
+        auth,
+        auth_path,
+        sessions,
+        rate_limiter,
+        handler,
+        peer,
+        &environment,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1645,14 +1717,22 @@ fn handle_http_request_sync(
     rate_limiter: Arc<Mutex<LoginRateLimiter>>,
     handler: Arc<dyn AdminHttpHandler>,
     peer: Option<SocketAddr>,
+    environment: &AdminHttpEnvironment,
 ) -> Response<Full<Bytes>> {
 
     if req.path.starts_with("/api/") {
         if req.path == "/api/login" {
-            return handle_login(req, auth.as_ref(), sessions, rate_limiter, peer);
+            return handle_login(
+                req,
+                auth.as_ref(),
+                sessions,
+                rate_limiter,
+                peer,
+                environment,
+            );
         }
         if req.path == "/api/logout" {
-            return handle_logout(&req, auth.as_ref(), &sessions, peer);
+            return handle_logout(&req, auth.as_ref(), &sessions, peer, environment);
         }
         // Unauthenticated health probe for external liveness/readiness checks.
         // The runtime handler includes actual policy activation state.
@@ -1700,9 +1780,10 @@ fn handle_http_request_sync(
                 &sessions,
                 rate_limiter,
                 peer,
+                environment,
             );
         }
-        return handle_api(req, handler, peer);
+        return handle_api(req, handler, peer, environment);
     }
 
     if req.method != "GET" {
@@ -1771,32 +1852,12 @@ fn format_peer(peer: Option<SocketAddr>) -> String {
     peer.map(|addr| addr.ip().to_string()).unwrap_or_else(|| "-".to_string())
 }
 
-fn trust_proxy_enabled() -> bool {
-    std::env::var("QUICFUSCATE_TRUST_PROXY")
-        .map(|v| v.trim() == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-fn trusted_proxy_ips() -> Vec<std::net::IpAddr> {
-    std::env::var("QUICFUSCATE_TRUSTED_PROXY_IPS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            trimmed.parse::<std::net::IpAddr>().ok()
-        })
-        .collect()
-}
-
-fn peer_is_trusted_proxy(peer: Option<SocketAddr>) -> bool {
+fn peer_is_trusted_proxy(peer: Option<SocketAddr>, environment: &AdminHttpEnvironment) -> bool {
     let peer_ip = match peer {
         Some(addr) => addr.ip(),
         None => return false,
     };
-    let trusted = trusted_proxy_ips();
+    let trusted = &environment.trusted_proxy_ips;
     if trusted.is_empty() {
         // TRUST_PROXY is set but no trusted proxy IPs configured - unsafe, reject XFF
         log::warn!(
@@ -1820,8 +1881,12 @@ fn first_forwarded_ip(raw: &str) -> Option<String> {
     Some(ip.to_string())
 }
 
-fn client_ip_for_rate_limit(peer: Option<SocketAddr>, req: &HttpRequest) -> String {
-    if trust_proxy_enabled() && peer_is_trusted_proxy(peer) {
+fn client_ip_for_rate_limit(
+    peer: Option<SocketAddr>,
+    req: &HttpRequest,
+    environment: &AdminHttpEnvironment,
+) -> String {
+    if environment.trust_proxy && peer_is_trusted_proxy(peer, environment) {
         if let Some(v) = header_value(req, "x-forwarded-for").and_then(first_forwarded_ip) {
             return v;
         }
@@ -1864,6 +1929,7 @@ fn handle_login(
     sessions: Arc<Mutex<SessionStore>>,
     rate_limiter: Arc<Mutex<LoginRateLimiter>>,
     peer: Option<SocketAddr>,
+    environment: &AdminHttpEnvironment,
 ) -> Response<Full<Bytes>> {
     let Some(auth) = auth else {
         return json_response(500, &AdminResponse::error("Authentication not configured"));
@@ -1871,7 +1937,7 @@ fn handle_login(
     if req.method != "POST" {
         return text_response(405, "Method Not Allowed");
     }
-    let peer_ip = client_ip_for_rate_limit(peer, &req);
+    let peer_ip = client_ip_for_rate_limit(peer, &req, environment);
     let key = limiter_key("login", &peer_ip);
     let rate_limited = {
         let mut limiter = rate_limiter.lock();
@@ -1930,7 +1996,7 @@ fn handle_login(
             }
         }
     };
-    let cookie = build_session_cookie(&session_id, &req);
+    let cookie = build_session_cookie(&session_id, &req, environment);
     log_action(peer, "login", &format!("user={}", username), true);
     let requires_password_change = auth.read().requires_password_change();
     json_response_with_headers(
@@ -1948,6 +2014,7 @@ fn handle_logout(
     auth: Option<&Arc<RwLock<AdminAuth>>>,
     sessions: &Arc<Mutex<SessionStore>>,
     peer: Option<SocketAddr>,
+    environment: &AdminHttpEnvironment,
 ) -> Response<Full<Bytes>> {
     if auth.is_none() {
         return admin_json_response(&AdminResponse::ok_with_message("Logged out"));
@@ -1956,7 +2023,7 @@ fn handle_logout(
         let mut store = sessions.lock();
         store.remove(&session_id);
     }
-    let cookie = build_expired_cookie(req);
+    let cookie = build_expired_cookie(req, environment);
     log_action(peer, "logout", "-", true);
     json_response_with_headers(
         200,
@@ -1981,6 +2048,7 @@ fn handle_admin_auth(
     sessions: &Arc<Mutex<SessionStore>>,
     rate_limiter: Arc<Mutex<LoginRateLimiter>>,
     peer: Option<SocketAddr>,
+    environment: &AdminHttpEnvironment,
 ) -> Response<Full<Bytes>> {
     let Some(auth) = auth else {
         return json_response(500, &AdminResponse::error("Authentication not configured"));
@@ -2013,7 +2081,7 @@ fn handle_admin_auth(
 
     // Rate limit admin-auth attempts (password changes) to slow brute forcing.
     // This uses the same limiter state as login, but with a separate key namespace.
-    let peer_ip = client_ip_for_rate_limit(peer, &req);
+    let peer_ip = client_ip_for_rate_limit(peer, &req, environment);
     let key = limiter_key("admin-auth", &peer_ip);
     let rate_limited = {
         let mut limiter = rate_limiter.lock();
@@ -2119,7 +2187,7 @@ fn handle_admin_auth(
         store.clear_all();
     }
 
-    let cookie = build_expired_cookie(&req);
+    let cookie = build_expired_cookie(&req, environment);
     log_action(peer, "admin-auth", &format!("user={}", old_user), true);
     json_response_with_headers(
         200,

@@ -51,10 +51,7 @@ static GHASH_PMULL_ENABLED: OnceLock<bool> = OnceLock::new();
 #[inline(always)]
 fn ghash_pmull_enabled() -> bool {
     *GHASH_PMULL_ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QUICFUSCATE_GHASH_PMULL").ok().as_deref(),
-            Some("0") | Some("false") | Some("FALSE") | Some("off") | Some("OFF")
-        )
+        crate::env_utils::EnvSnapshot::capture().flag("QUICFUSCATE_GHASH_PMULL", true)
     })
 }
 
@@ -151,7 +148,7 @@ fn ghash_override_value() -> Option<GhashOverride> {
 
     GHASH_OVERRIDE
         .get_or_init(|| {
-            std::env::var("QUICFUSCATE_GHASH").ok().map(|raw| {
+            crate::env_utils::EnvSnapshot::capture().first(["QUICFUSCATE_GHASH"]).map(|raw| {
                 let mode = parse_ghash_override(&raw);
                 if mode == GhashOverride::Unknown {
                     log::warn!("unknown GHASH override '{}'; falling back to auto", raw);

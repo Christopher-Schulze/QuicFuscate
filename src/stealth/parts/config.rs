@@ -992,7 +992,7 @@ impl StealthConfig {
         }
 
         // Compression policy overrides
-        let mut pol = crate::compress::global_policy();
+        let mut pol = crate::compress::global_policy_with_snapshot(environment);
         Self::apply_compression_env_overrides(&mut pol, environment);
         crate::compress::set_global_policy(pol);
 

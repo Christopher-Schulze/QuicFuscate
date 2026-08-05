@@ -31,6 +31,9 @@ use std::slice;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "compression_zstd_ffi")]
+use crate::env_utils::EnvSnapshot;
+
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
@@ -881,39 +884,87 @@ pub mod unsafe_compress {
     static MANUAL_CFG: std::sync::OnceLock<ManualCfg> = std::sync::OnceLock::new();
 
     #[cfg(feature = "compression_zstd_ffi")]
+    static ZSTD_ENVIRONMENT: std::sync::OnceLock<EnvSnapshot> = std::sync::OnceLock::new();
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    #[inline]
+    fn zstd_environment() -> &'static EnvSnapshot {
+        ZSTD_ENVIRONMENT.get_or_init(EnvSnapshot::capture)
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
     #[inline]
     fn manual_cfg() -> ManualCfg {
         *MANUAL_CFG.get_or_init(|| {
-            let enabled = std::env::var("QUICFUSCATE_ZSTD_MODE")
-                .map(|v| v.eq_ignore_ascii_case("manual"))
-                .unwrap_or(false);
-            let level = std::env::var("QUICFUSCATE_ZSTD_LEVEL")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3);
-            let workers = std::env::var("QUICFUSCATE_ZSTD_WORKERS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(2);
-            let block = std::env::var("QUICFUSCATE_ZSTD_TARGET_BLOCK")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(64 * 1024);
+            let environment = zstd_environment();
+            let enabled = match environment.first(["QUICFUSCATE_ZSTD_MODE"]) {
+                None => false,
+                Some(value) if value.eq_ignore_ascii_case("manual") => true,
+                Some(value) if value.eq_ignore_ascii_case("auto") => false,
+                Some(value) => {
+                    log::warn!(
+                        "Invalid QUICFUSCATE_ZSTD_MODE value '{}'; retaining automatic mode",
+                        value
+                    );
+                    false
+                }
+            };
+            let level = zstd_i32_in_range("QUICFUSCATE_ZSTD_LEVEL", 1, 22, 3);
+            let workers = zstd_i32_min("QUICFUSCATE_ZSTD_WORKERS", 0, 2);
+            let block = zstd_i32_min("QUICFUSCATE_ZSTD_TARGET_BLOCK", 1, 64 * 1024);
             ManualCfg { enabled, level, workers, block }
         })
     }
 
     #[cfg(feature = "compression_zstd_ffi")]
     #[inline]
+    fn zstd_i32_in_range(name: &str, min: i32, max: i32, default: i32) -> i32 {
+        match zstd_environment().parse::<i32>(name) {
+            None => default,
+            Some(value) if (min..=max).contains(&value) => value,
+            Some(value) => {
+                log::warn!(
+                    "{}={} is outside {}..={}; retaining {}",
+                    name,
+                    value,
+                    min,
+                    max,
+                    default
+                );
+                default
+            }
+        }
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    #[inline]
+    fn zstd_i32_min(name: &str, min: i32, default: i32) -> i32 {
+        match zstd_environment().parse::<i32>(name) {
+            None => default,
+            Some(value) if value >= min => value,
+            Some(value) => {
+                log::warn!("{}={} must be at least {}; retaining {}", name, value, min, default);
+                default
+            }
+        }
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    #[inline]
     fn choose_strategy(len: usize) -> zstd_sys::ZSTD_strategy {
-        if let Ok(s) = std::env::var("QUICFUSCATE_ZSTD_STRATEGY") {
+        if let Some(s) = zstd_environment().first(["QUICFUSCATE_ZSTD_STRATEGY"]) {
             match s.to_ascii_lowercase().as_str() {
                 "fast" => return zstd_sys::ZSTD_strategy::ZSTD_fast,
                 "dfast" => return zstd_sys::ZSTD_strategy::ZSTD_dfast,
                 "greedy" => return zstd_sys::ZSTD_strategy::ZSTD_greedy,
                 "lazy2" => return zstd_sys::ZSTD_strategy::ZSTD_lazy2,
                 "btopt" => return zstd_sys::ZSTD_strategy::ZSTD_btlazy2,
-                _ => {}
+                _ => {
+                    log::warn!(
+                        "Invalid QUICFUSCATE_ZSTD_STRATEGY value '{}'; retaining the length-based default",
+                        s
+                    );
+                }
             }
         }
         if len <= 8 * 1024 {
@@ -930,9 +981,8 @@ pub mod unsafe_compress {
     #[cfg(feature = "compression_zstd_ffi")]
     #[inline]
     fn choose_window_log(len: usize) -> i32 {
-        if let Ok(w) = std::env::var("QUICFUSCATE_ZSTD_WINDOW_LOG")
-            .and_then(|v| v.parse::<i32>().map_err(|_| std::env::VarError::NotPresent))
-        {
+        let w = zstd_i32_in_range("QUICFUSCATE_ZSTD_WINDOW_LOG", 10, 31, 0);
+        if w != 0 {
             return w;
         }
         if len <= 64 * 1024 {
@@ -946,14 +996,32 @@ pub mod unsafe_compress {
 
     #[cfg(feature = "compression_zstd_ffi")]
     #[inline]
+    fn zstd_binary_flag(name: &str) -> i32 {
+        zstd_i32_in_range(name, 0, 1, 0)
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    #[inline]
     fn choose_checksum_flag() -> i32 {
-        std::env::var("QUICFUSCATE_ZSTD_CHECKSUM").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        zstd_binary_flag("QUICFUSCATE_ZSTD_CHECKSUM")
     }
 
     #[cfg(feature = "compression_zstd_ffi")]
     #[inline]
     fn choose_content_size_flag() -> i32 {
-        std::env::var("QUICFUSCATE_ZSTD_CONTENTSIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        zstd_binary_flag("QUICFUSCATE_ZSTD_CONTENTSIZE")
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    #[inline]
+    fn zstd_workers() -> i32 {
+        zstd_i32_min("QUICFUSCATE_ZSTD_WORKERS", 0, 2)
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    #[inline]
+    fn zstd_target_block() -> i32 {
+        zstd_i32_min("QUICFUSCATE_ZSTD_TARGET_BLOCK", 1, 64 * 1024)
     }
 
     /// Direct compression context using zstd C API
@@ -995,20 +1063,14 @@ pub mod unsafe_compress {
                 #[cfg(feature = "compression_zstd_ffi")]
                 {
                     // nbWorkers: from env or default 2 (reasonable for networking workloads)
-                    let workers: i32 = std::env::var("QUICFUSCATE_ZSTD_WORKERS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(2);
+                    let workers = zstd_workers();
                     let _ = zstd_sys::ZSTD_CCtx_setParameter(
                         ctx as *mut zstd_sys::ZSTD_CCtx,
                         zstd_sys::ZSTD_cParameter::ZSTD_c_nbWorkers,
                         workers,
                     );
                     // Target block size (bytes) to reduce latency for network packets
-                    let target_block: i32 = std::env::var("QUICFUSCATE_ZSTD_TARGET_BLOCK")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(64 * 1024);
+                    let target_block = zstd_target_block();
                     let _ = zstd_sys::ZSTD_CCtx_setParameter(
                         ctx as *mut zstd_sys::ZSTD_CCtx,
                         zstd_sys::ZSTD_cParameter::ZSTD_c_targetCBlockSize,

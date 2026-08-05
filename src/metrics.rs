@@ -49,8 +49,9 @@ fn is_telemetry_request(req: &[u8]) -> bool {
 /// Spawn a minimal HTTP server that exposes a telemetry snapshot on /telemetry.
 /// Address is taken from QUICFUSCATE_METRICS_ADDR (default 127.0.0.1:9898).
 pub fn spawn_telemetry_server() {
+    let environment = crate::env_utils::EnvSnapshot::capture();
     let addr =
-        std::env::var("QUICFUSCATE_METRICS_ADDR").unwrap_or_else(|_| "127.0.0.1:9898".into());
+        environment.first(["QUICFUSCATE_METRICS_ADDR"]).unwrap_or_else(|| "127.0.0.1:9898".into());
     tokio::spawn(async move {
         let semaphore =
             std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_METRICS_CONNECTIONS));
