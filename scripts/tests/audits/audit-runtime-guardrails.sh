@@ -235,6 +235,19 @@ else
   append_item "amx_detector_process_free" "fail" "$AMX_EXTERNAL_DETECTOR_REFS"
 fi
 
+AMX_PROOF_CONTRACT_LOG="$OUTPUT_DIR/amx-proof-contract.log"
+set +e
+"$PROJECT_ROOT/scripts/audits/verify-amx-proof-contract.sh" >"$AMX_PROOF_CONTRACT_LOG" 2>&1
+AMX_PROOF_CONTRACT_RC=$?
+set -e
+if [[ "$AMX_PROOF_CONTRACT_RC" -eq 0 ]]; then
+  pass "AMX build/runtime proof contract is wired and fail-closed"
+  append_item "amx_proof_contract" "ok" "artifact=$AMX_PROOF_CONTRACT_LOG"
+else
+  fail_critical "AMX build/runtime proof contract is incomplete"
+  append_item "amx_proof_contract" "fail" "artifact=$AMX_PROOF_CONTRACT_LOG rc=$AMX_PROOF_CONTRACT_RC"
+fi
+
 # 2) Public fastpath mode space must be narrowed to auto and off.
 if rg -n --no-messages 'QUICFUSCATE_FASTPATH.*auto\\|off|QUICFUSCATE_FASTPATH.*off\\|auto|FastpathMode::Auto|FastpathMode::Off' README.md docs/DOCUMENTATION.md src/interface.rs >/dev/null \
   && ! rg -n --no-messages 'FastpathMode::Uring|QUICFUSCATE_FASTPATH.*uring' README.md docs/DOCUMENTATION.md src/interface.rs >/dev/null; then

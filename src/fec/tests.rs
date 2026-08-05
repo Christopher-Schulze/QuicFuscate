@@ -1117,6 +1117,70 @@ fn test_wiedemann_scalar_spmv_matches_reference_for_full_and_partial_matrix_shap
 }
 
 #[test]
+fn test_wiedemann_rejects_invalid_dimensions() {
+    gf_tables::init_tables();
+    let pool = make_pool();
+    let decoder = Decoder8::new(4, Arc::clone(&pool));
+
+    let empty: Vec<Vec<u8>> = Vec::new();
+    let mut empty_scratch = super::WiedemannScratch::from_matrix(&empty, 0);
+    assert!(decoder.solve_wiedemann_system(&empty, &[], 0, &mut empty_scratch).is_none());
+
+    let rectangular = vec![vec![1u8, 0], vec![0, 1], vec![1, 1]];
+    let mut rectangular_scratch = super::WiedemannScratch::from_matrix(&rectangular, 2);
+    assert!(decoder
+        .solve_wiedemann_system(&rectangular, &[1, 2, 3], 2, &mut rectangular_scratch)
+        .is_none());
+
+    let ragged = vec![vec![1u8, 0], vec![0]];
+    let mut ragged_scratch = super::WiedemannScratch::from_matrix(&ragged, 2);
+    assert!(decoder.solve_wiedemann_system(&ragged, &[1, 2], 2, &mut ragged_scratch).is_none());
+
+    let square = vec![vec![1u8, 0], vec![0, 1]];
+    let mut rhs_scratch = super::WiedemannScratch::from_matrix(&square, 2);
+    assert!(decoder.solve_wiedemann_system(&square, &[1], 2, &mut rhs_scratch).is_none());
+}
+
+#[test]
+fn test_wiedemann_scalar_solver_is_concurrent_and_amx_free() {
+    let _env_lock = acquire_env_lock();
+    gf_tables::init_tables();
+    let dim = 64usize;
+    let pool = make_pool();
+    let decoder = Arc::new(Decoder8::new(dim, pool));
+    let matrix = Arc::new(
+        (0..dim)
+            .map(|row| {
+                (0..dim).map(|column| if row == column { 1u8 } else { 0u8 }).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+    );
+    let rhs = Arc::new(vec![0x5Au8; dim]);
+    let amx_before = telemetry::WIEDEMANN_AMX_OPS.get();
+    let amx_scratch_before = telemetry::WIEDEMANN_AMX_SCRATCH_ALLOCS.get();
+    let scalar_before = telemetry::WIEDEMANN_SCALAR_OPS.get();
+
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let decoder = Arc::clone(&decoder);
+            let matrix = Arc::clone(&matrix);
+            let rhs = Arc::clone(&rhs);
+            scope.spawn(move || {
+                let mut scratch = super::WiedemannScratch::from_matrix(matrix.as_ref(), dim);
+                let solution = decoder
+                    .solve_wiedemann_system(matrix.as_ref(), rhs.as_ref(), dim, &mut scratch)
+                    .expect("concurrent scalar solver must accept a valid square system");
+                assert_eq!(solution.as_slice(), rhs.as_slice());
+            });
+        }
+    });
+
+    assert_eq!(telemetry::WIEDEMANN_AMX_OPS.get(), amx_before);
+    assert_eq!(telemetry::WIEDEMANN_AMX_SCRATCH_ALLOCS.get(), amx_scratch_before);
+    assert!(telemetry::WIEDEMANN_SCALAR_OPS.get() >= scalar_before + 4);
+}
+
+#[test]
 fn test_streaming_emit_every_n() {
     // QUICFUSCATE_FEC_STREAM_EVERY is read during AdaptiveFec::new
     let _env_lock = acquire_env_lock();

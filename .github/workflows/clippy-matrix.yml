@@ -77,5 +77,8 @@ jobs:
       - name: Verify truthful Cargo SIMD feature contract
         run: bash scripts/audits/verify-simd-feature-contract.sh
 
+      - name: Verify AMX build/runtime proof wiring
+        run: bash scripts/audits/verify-amx-proof-contract.sh
+
       - name: Verify Cargo feature taxonomy contract
         run: bash scripts/audits/verify-cargo-feature-taxonomy.sh

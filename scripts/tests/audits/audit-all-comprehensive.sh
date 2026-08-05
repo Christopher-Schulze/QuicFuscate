@@ -449,6 +449,38 @@ else
     log_critical "Cargo SIMD feature contract failed with rc=$SIMD_FEATURE_CONTRACT_RC (see $SIMD_FEATURE_CONTRACT_LOG)"
 fi
 
+AMX_PROOF_CONTRACT_LOG="$OUTPUT_DIR/amx-proof-contract.log"
+set +e
+"$PROJECT_ROOT/scripts/audits/verify-amx-proof-contract.sh" >"$AMX_PROOF_CONTRACT_LOG" 2>&1
+AMX_PROOF_CONTRACT_RC=$?
+set -e
+record_command_check "amx_proof_contract" "$AMX_PROOF_CONTRACT_RC" "artifact=$AMX_PROOF_CONTRACT_LOG"
+if [ "$AMX_PROOF_CONTRACT_RC" -eq 0 ]; then
+    log_info "AMX build/runtime proof contract passed"
+else
+    log_critical "AMX build/runtime proof contract failed with rc=$AMX_PROOF_CONTRACT_RC (see $AMX_PROOF_CONTRACT_LOG)"
+fi
+
+AMX_PROOF_OUTPUT_DIR="$OUTPUT_DIR/amx-proof"
+set +e
+"$PROJECT_ROOT/scripts/tests/suites/test-amx-proof.sh" --output-dir "$AMX_PROOF_OUTPUT_DIR"
+AMX_PROOF_RC=$?
+set -e
+case "$AMX_PROOF_RC" in
+    0)
+        record_check "amx_proof_lane" PASS "$AMX_PROOF_RC" "artifact=$AMX_PROOF_OUTPUT_DIR/results.json"
+        log_info "AMX build/runtime proof lane passed"
+        ;;
+    2)
+        record_check "amx_proof_lane" UNAVAILABLE "$AMX_PROOF_RC" "artifact=$AMX_PROOF_OUTPUT_DIR/results.json"
+        log_warning "AMX build/runtime proof lane is explicitly unavailable on this host"
+        ;;
+    *)
+        record_check "amx_proof_lane" FAIL "$AMX_PROOF_RC" "artifact=$AMX_PROOF_OUTPUT_DIR/results.json"
+        log_critical "AMX build/runtime proof lane failed with rc=$AMX_PROOF_RC"
+        ;;
+esac
+
 CARGO_FEATURE_TAXONOMY_LOG="$OUTPUT_DIR/cargo-feature-taxonomy.log"
 set +e
 "$PROJECT_ROOT/scripts/audits/verify-cargo-feature-taxonomy.sh" >"$CARGO_FEATURE_TAXONOMY_LOG" 2>&1

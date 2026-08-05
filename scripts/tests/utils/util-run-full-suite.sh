@@ -44,6 +44,36 @@ run_stealth_bench_preflight() {
   return 1
 }
 
+run_amx_proof_lane() {
+  local output_dir="$1"
+  local rc=0
+  set +e
+  "$SCRIPT_DIR/../suites/test-amx-proof.sh" --output-dir "$output_dir"
+  rc=$?
+  set -e
+  case "$rc" in
+    0)
+      qf_json_append_object "$JSON" \
+        "name=amx-proof-lane" "status=PASS" "result=PASS" \
+        "command_rc=int:$rc" "evidence=$output_dir/results.json"
+      return 0
+      ;;
+    2)
+      qf_json_append_object "$JSON" \
+        "name=amx-proof-lane" "status=UNAVAILABLE" "result=UNAVAILABLE" \
+        "command_rc=int:$rc" "evidence=$output_dir/results.json"
+      warn "AMX proof lane is explicitly unavailable on this host; see $output_dir/results.json"
+      return 0
+      ;;
+    *)
+      qf_json_append_object "$JSON" \
+        "name=amx-proof-lane" "status=FAIL" "result=FAIL" \
+        "command_rc=int:$rc" "evidence=$output_dir/results.json"
+      return "$rc"
+      ;;
+  esac
+}
+
 if [[ "${QUICFUSCATE_BENCH_PREFLIGHT_CONTRACT_TEST:-0}" == "1" ]]; then
   BENCH_STEALTH_PREFLIGHT_LOG="$OUTPUT_DIR/bench-stealth-preflight.log"
   if run_stealth_bench_preflight "$BENCH_STEALTH_PREFLIGHT_LOG"; then
@@ -95,6 +125,10 @@ else
 fi
 run "$SCRIPT_DIR/../suites/test-crypto.sh" --output-dir "$OUTPUT_DIR/tests-crypto" $([[ $FAST -eq 1 ]] && echo --fast)
 run "$SCRIPT_DIR/../suites/test-optimization.sh" --output-dir "$OUTPUT_DIR/tests-optimization" $([[ $FAST -eq 1 ]] && echo --fast)
+if ! run_amx_proof_lane "$OUTPUT_DIR/tests-amx-proof"; then
+  json_end "$JSON"
+  exit 1
+fi
 
 if (( FAST )); then
   # Explicit fast helpers stay in sync with dedicated quick lanes.

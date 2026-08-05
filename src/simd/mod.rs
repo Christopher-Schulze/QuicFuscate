@@ -460,7 +460,7 @@ pub mod h3;
 // proves a real AMX arithmetic kernel and its compiler/runtime contract.
 // ============================================================================
 
-#[cfg(all(target_arch = "x86_64", target_feature = "amx-tile"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "amx-tile", target_feature = "amx-int8"))]
 pub mod amx;
 
 // ============================================================================

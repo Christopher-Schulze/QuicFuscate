@@ -6,3 +6,9 @@
 //! register contract. The production Wiedemann path therefore uses its
 //! checked scalar GF(256) fallback and reports no AMX operations. TODO-818
 //! owns a future AMX implementation and its compiler/runtime proof lane.
+
+/// Compile-time marker for the product AMX backend.
+///
+/// This remains false until a verified arithmetic implementation, tile-state
+/// ownership contract, and parity proof are committed behind this module.
+pub(crate) const VERIFIED_BACKEND: bool = false;

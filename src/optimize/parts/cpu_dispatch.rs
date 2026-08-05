@@ -203,6 +203,8 @@ pub struct AmxCapability {
     pub compiler_target_int8: bool,
     /// Whether AMX-BF16 was enabled in the compiler target features.
     pub compiler_target_bf16: bool,
+    /// Whether the repository contains a verified AMX arithmetic backend.
+    pub verified_backend: bool,
     /// Whether the product has a verified, eligible AMX dispatch path.
     pub product_dispatch_eligible: bool,
 }
@@ -235,22 +237,61 @@ impl AmxCapability {
             compiler_target_tile: signals.compiler_target_tile,
             compiler_target_int8: signals.compiler_target_int8,
             compiler_target_bf16: signals.compiler_target_bf16,
+            verified_backend: signals.verified_backend,
             product_dispatch_eligible,
         }
     }
 }
 
+#[cfg(all(target_arch = "x86_64", target_feature = "amx-tile", target_feature = "amx-int8"))]
+fn amx_backend_verified() -> bool {
+    crate::simd::amx::VERIFIED_BACKEND
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_feature = "amx-tile", target_feature = "amx-int8")))]
+fn amx_backend_verified() -> bool {
+    false
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn probe_amx_os_tile_state(cpu_tile: bool, cpu_int8: bool) -> Option<bool> {
+    if !cpu_tile || !cpu_int8 {
+        return None;
+    }
+
+    // Linux grants AMX tile state to the current thread through arch_prctl.
+    // The request is idempotent and does not execute an AMX instruction.
+    const ARCH_REQ_XCOMP_PERM: libc::c_long = 0x1023;
+    const XFEATURE_XTILEDATA: libc::c_long = 18;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_arch_prctl as libc::c_long,
+            ARCH_REQ_XCOMP_PERM,
+            XFEATURE_XTILEDATA,
+        )
+    };
+    Some(result == 0)
+}
+
+#[cfg(all(target_arch = "x86_64", not(target_os = "linux")))]
+fn probe_amx_os_tile_state(_cpu_tile: bool, _cpu_int8: bool) -> Option<bool> {
+    None
+}
+
 #[cfg(target_arch = "x86_64")]
 fn detect_amx_capability() -> AmxCapability {
+    let cpu_tile = std::arch::is_x86_feature_detected!("amx-tile");
+    let cpu_int8 = std::arch::is_x86_feature_detected!("amx-int8");
+    let cpu_bf16 = std::arch::is_x86_feature_detected!("amx-bf16");
     AmxCapability::from_signals(AmxSignals {
-        cpu_tile: std::arch::is_x86_feature_detected!("amx-tile"),
-        cpu_int8: std::arch::is_x86_feature_detected!("amx-int8"),
-        cpu_bf16: std::arch::is_x86_feature_detected!("amx-bf16"),
-        os_tile_state_permitted: None,
+        cpu_tile,
+        cpu_int8,
+        cpu_bf16,
+        os_tile_state_permitted: probe_amx_os_tile_state(cpu_tile, cpu_int8),
         compiler_target_tile: cfg!(target_feature = "amx-tile"),
         compiler_target_int8: cfg!(target_feature = "amx-int8"),
         compiler_target_bf16: cfg!(target_feature = "amx-bf16"),
-        verified_backend: false,
+        verified_backend: amx_backend_verified(),
     })
 }
 
@@ -264,7 +305,7 @@ fn detect_amx_capability() -> AmxCapability {
         compiler_target_tile: false,
         compiler_target_int8: false,
         compiler_target_bf16: false,
-        verified_backend: false,
+        verified_backend: amx_backend_verified(),
     })
 }
 
@@ -523,7 +564,7 @@ impl FeatureDetector {
 
                 let amx = detector.amx_capability;
                 log::info!(
-                    "  AMX contract: cpu_tile={}, cpu_int8={}, cpu_bf16={}, os_tile_state_permitted={:?}, compiler_target_tile={}, compiler_target_int8={}, compiler_target_bf16={}, product_dispatch_eligible={}",
+                    "  AMX contract: cpu_tile={}, cpu_int8={}, cpu_bf16={}, os_tile_state_permitted={:?}, compiler_target_tile={}, compiler_target_int8={}, compiler_target_bf16={}, verified_backend={}, product_dispatch_eligible={}",
                     amx.cpu_tile,
                     amx.cpu_int8,
                     amx.cpu_bf16,
@@ -531,6 +572,7 @@ impl FeatureDetector {
                     amx.compiler_target_tile,
                     amx.compiler_target_int8,
                     amx.compiler_target_bf16,
+                    amx.verified_backend,
                     amx.product_dispatch_eligible,
                 );
             }
@@ -1962,7 +2004,13 @@ mod tests {
         let detector = FeatureDetector::instance();
         let capability = detector.amx_capability();
 
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        if capability.cpu_tile && capability.cpu_int8 {
+            assert!(capability.os_tile_state_permitted.is_some());
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
         assert_eq!(capability.os_tile_state_permitted, None);
+        assert!(!capability.verified_backend);
         assert!(!capability.product_dispatch_eligible);
         assert_eq!(detector.features_full().amx_tile, capability.cpu_tile);
         assert_eq!(detector.features_full().amx_int8, capability.cpu_int8);
@@ -1982,6 +2030,22 @@ mod tests {
             verified_backend: true,
         });
         assert!(all_proven.product_dispatch_eligible);
+
+        let without_bf16 = AmxCapability::from_signals(AmxSignals {
+            cpu_bf16: false,
+            compiler_target_bf16: false,
+            ..AmxSignals {
+                cpu_tile: true,
+                cpu_int8: true,
+                cpu_bf16: true,
+                os_tile_state_permitted: Some(true),
+                compiler_target_tile: true,
+                compiler_target_int8: true,
+                compiler_target_bf16: true,
+                verified_backend: true,
+            }
+        });
+        assert!(without_bf16.product_dispatch_eligible);
 
         let missing_os = AmxCapability::from_signals(AmxSignals {
             os_tile_state_permitted: None,

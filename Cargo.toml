@@ -419,6 +419,11 @@ path = "scripts/tests/rust/rt-simd-selfcheck.rs"
 required-features = ["rust-tests", "simd-selfcheck"]
 
 [[test]]
+name = "rt-amx-proof"
+path = "scripts/tests/rust/rt-amx-proof.rs"
+required-features = ["rust-tests"]
+
+[[test]]
 name = "rt-stealth-ascii-count"
 path = "scripts/tests/rust/rt-stealth-ascii-count.rs"
 required-features = ["rust-tests"]

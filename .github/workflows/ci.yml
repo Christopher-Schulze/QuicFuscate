@@ -340,8 +340,63 @@ jobs:
       - name: Verify truthful Cargo SIMD feature contract
         run: bash scripts/audits/verify-simd-feature-contract.sh
 
+      - name: Verify AMX build/runtime proof wiring
+        run: bash scripts/audits/verify-amx-proof-contract.sh
+
       - name: Verify Cargo feature taxonomy contract
         run: bash scripts/audits/verify-cargo-feature-taxonomy.sh
+
+  amx-proof-lane:
+    name: AMX Build and Runtime Proof Lane
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Run AMX proof lane
+        shell: bash
+        run: |
+          set +e
+          bash scripts/tests/suites/test-amx-proof.sh --output-dir scripts/out/tests/amx-proof
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+            exit "$rc"
+          fi
+          echo "AMX proof lane completed with explicit status rc=$rc"
+
+      - name: Validate AMX proof artifact
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("scripts/out/tests/amx-proof/results.json")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          assert payload["schema"] == "quicfuscate.v1"
+          summary = next(item for item in payload["items"] if item.get("name") == "amx_proof_summary")
+          assert summary["status"] in {"PASS", "UNAVAILABLE"}
+          assert all(item.get("status") != "SKIP" for item in payload["items"])
+          print(f"AMX proof artifact status: {summary['status']}")
+          PY
+
+      - name: Upload AMX proof evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: amx-proof-evidence
+          path: scripts/out/tests/amx-proof/
+          if-no-files-found: error
 
   feature-matrix:
     runs-on: ${{ matrix.os }}

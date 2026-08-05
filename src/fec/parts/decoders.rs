@@ -628,7 +628,11 @@ impl Decoder8 {
     ) -> Option<Vec<u8>> {
         // Wiedemann algorithm with Berlekamp-Massey
         let m = matrix.len();
-        if n == 0 || m < n {
+        if n == 0
+            || m != n
+            || rhs.len() != m
+            || matrix.iter().any(|row| row.len() != n)
+        {
             return None;
         }
 
