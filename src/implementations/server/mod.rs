@@ -48,8 +48,9 @@ pub use admin::AdminServer;
 #[cfg(any(test, feature = "rust-tests"))]
 pub use admin::DefaultAdminHandler;
 pub use admin::{
+    encode_admin_command, normalize_admin_client_id, normalize_admin_command, normalize_admin_ip,
     snapshots_to_client_info, AdminCommand, AdminHandler, AdminResponse, ClientIdentity,
-    ClientInfo, ClientSnapshot,
+    ClientInfo, ClientSnapshot, MAX_ADMIN_COMMAND_BYTES, MAX_ADMIN_COMMAND_VALUE_BYTES,
 };
 pub use admin_http::{
     validate_admin_web_max_connections, validate_admin_web_operation_timeout_ms,

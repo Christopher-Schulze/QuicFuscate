@@ -979,8 +979,11 @@ impl ServerAdminCore {
     }
 
     pub fn kick_client(&self, id: &str) -> AdminResponse {
+        let Some(id) = crate::implementations::server::admin::normalize_admin_client_id(id) else {
+            return AdminResponse::error("Invalid client id");
+        };
         self.dispatch_action(
-            AdminAction::Kick(id.to_string()),
+            AdminAction::Kick(id.clone()),
             format!("Client {} scheduled for disconnect", id),
         )
     }
@@ -1005,12 +1008,18 @@ impl ServerAdminCore {
     }
 
     pub fn block_ip(&self, ip: &str) -> AdminResponse {
-        self.blocked_ips.write().insert(ip.to_string());
+        let Some(ip) = crate::implementations::server::admin::normalize_admin_ip(ip) else {
+            return AdminResponse::error("Invalid IP");
+        };
+        self.blocked_ips.write().insert(ip.clone());
         AdminResponse::ok_with_message(format!("IP {} blocked", ip))
     }
 
     pub fn unblock_ip(&self, ip: &str) -> AdminResponse {
-        if self.blocked_ips.write().remove(ip) {
+        let Some(ip) = crate::implementations::server::admin::normalize_admin_ip(ip) else {
+            return AdminResponse::error("Invalid IP");
+        };
+        if self.blocked_ips.write().remove(&ip) {
             AdminResponse::ok_with_message(format!("IP {} unblocked", ip))
         } else {
             AdminResponse::error(format!("IP {} was not blocked", ip))

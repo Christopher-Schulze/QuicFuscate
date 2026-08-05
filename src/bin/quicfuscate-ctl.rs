@@ -2,15 +2,20 @@
 //!
 //! Command-line interface for managing the QuicFuscate server.
 
-use std::io::{BufRead, Write};
+use std::io::BufRead;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
+#[cfg(unix)]
 use quicfuscate::env_utils::EnvSnapshot;
+use quicfuscate::implementations::server::{encode_admin_command, AdminCommand};
 
 const DEFAULT_SOCKET: &str = "/var/run/quicfuscate/ctl.sock";
 const MAX_RESPONSE_FRAME_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpectedResponse {
     Status,
     Clients,
@@ -18,76 +23,132 @@ enum ExpectedResponse {
     QKey,
 }
 
+struct PreparedCommand {
+    command: AdminCommand,
+    expected: ExpectedResponse,
+}
+
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() < 2 {
-        print_usage();
-        std::process::exit(1);
-    }
+    let prepared = match prepare_command(args.get(1..).unwrap_or_default()) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("Error: {}", error);
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let frame = match encode_admin_command(prepared.command) {
+        Ok(frame) => frame,
+        Err(error) => {
+            eprintln!("Error: {}", error);
+            std::process::exit(1);
+        }
+    };
 
     let environment = EnvSnapshot::capture();
     let socket_path =
         environment.first(["QUICFUSCATE_CTL_SOCKET"]).unwrap_or_else(|| DEFAULT_SOCKET.to_string());
 
-    let cmd = &args[1];
+    if let Err(error) = send_command(&socket_path, &frame, prepared.expected) {
+        eprintln!("Error: {}", error);
+        std::process::exit(1);
+    }
+}
 
-    let result = match cmd.as_str() {
-        "status" => send_command(&socket_path, r#"{"cmd":"status"}"#, ExpectedResponse::Status),
-        "clients" => send_command(&socket_path, r#"{"cmd":"clients"}"#, ExpectedResponse::Clients),
-        "kick" => {
-            if args.len() < 3 {
-                eprintln!("Usage: quicfuscate-ctl kick <client_id>");
-                std::process::exit(1);
-            }
-            send_command(
-                &socket_path,
-                &format!(r#"{{"cmd":"kick","id":"{}"}}"#, args[2]),
-                ExpectedResponse::Message,
-            )
-        }
-        "block" => {
-            if args.len() < 3 {
-                eprintln!("Usage: quicfuscate-ctl block <ip>");
-                std::process::exit(1);
-            }
-            send_command(
-                &socket_path,
-                &format!(r#"{{"cmd":"block","ip":"{}"}}"#, args[2]),
-                ExpectedResponse::Message,
-            )
-        }
-        "unblock" => {
-            if args.len() < 3 {
-                eprintln!("Usage: quicfuscate-ctl unblock <ip>");
-                std::process::exit(1);
-            }
-            send_command(
-                &socket_path,
-                &format!(r#"{{"cmd":"unblock","ip":"{}"}}"#, args[2]),
-                ExpectedResponse::Message,
-            )
-        }
-        "reload" => send_command(&socket_path, r#"{"cmd":"reload"}"#, ExpectedResponse::Message),
-        "qkey" => send_command(&socket_path, r#"{"cmd":"qkey"}"#, ExpectedResponse::QKey),
-        "shutdown" => {
-            send_command(&socket_path, r#"{"cmd":"shutdown"}"#, ExpectedResponse::Message)
-        }
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("quicfuscate-ctl is only available on Unix platforms");
+    std::process::exit(1);
+}
+
+fn prepare_command(arguments: &[String]) -> Result<Option<PreparedCommand>, String> {
+    let Some(command) = arguments.first() else {
+        return Err("missing command".to_string());
+    };
+
+    let prepared = match command.as_str() {
+        "status" => prepare_no_argument_command(
+            arguments,
+            "status",
+            AdminCommand::Status,
+            ExpectedResponse::Status,
+        )?,
+        "clients" => prepare_no_argument_command(
+            arguments,
+            "clients",
+            AdminCommand::ListClients,
+            ExpectedResponse::Clients,
+        )?,
+        "kick" => prepare_value_command(arguments, "kick", |value| AdminCommand::Kick {
+            id: value.to_string(),
+        })?,
+        "block" => prepare_value_command(arguments, "block", |value| AdminCommand::Block {
+            ip: value.to_string(),
+        })?,
+        "unblock" => prepare_value_command(arguments, "unblock", |value| AdminCommand::Unblock {
+            ip: value.to_string(),
+        })?,
+        "reload" => prepare_no_argument_command(
+            arguments,
+            "reload",
+            AdminCommand::Reload,
+            ExpectedResponse::Message,
+        )?,
+        "qkey" => prepare_no_argument_command(
+            arguments,
+            "qkey",
+            AdminCommand::GenerateQKey,
+            ExpectedResponse::QKey,
+        )?,
+        "shutdown" => prepare_no_argument_command(
+            arguments,
+            "shutdown",
+            AdminCommand::Shutdown,
+            ExpectedResponse::Message,
+        )?,
         "help" | "--help" | "-h" => {
+            if arguments.len() != 1 {
+                return Err(format!("invalid arguments for {}", command));
+            }
             print_usage();
-            Ok(())
+            return Ok(None);
         }
         _ => {
-            eprintln!("Unknown command: {}", cmd);
-            print_usage();
-            std::process::exit(1);
+            return Err(format!("unknown command: {}", command));
         }
     };
 
-    if let Err(e) = result {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+    Ok(Some(prepared))
+}
+
+fn prepare_no_argument_command(
+    arguments: &[String],
+    command: &str,
+    admin_command: AdminCommand,
+    expected: ExpectedResponse,
+) -> Result<PreparedCommand, String> {
+    if arguments.len() != 1 {
+        return Err(format!("invalid arguments for {}", command));
     }
+    Ok(PreparedCommand { command: admin_command, expected })
+}
+
+fn prepare_value_command<F>(
+    arguments: &[String],
+    command: &str,
+    build: F,
+) -> Result<PreparedCommand, String>
+where
+    F: FnOnce(&str) -> AdminCommand,
+{
+    if arguments.len() != 2 {
+        return Err(format!("invalid arguments for {}", command));
+    }
+    Ok(PreparedCommand { command: build(&arguments[1]), expected: ExpectedResponse::Message })
 }
 
 fn print_usage() {
@@ -355,16 +416,17 @@ fn decode_response(
     }
 }
 
+#[cfg(unix)]
 fn send_command(
     socket_path: &str,
-    cmd: &str,
+    frame: &[u8],
     expected: ExpectedResponse,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| format!("Cannot connect to server: {} (is it running?)", e))?;
 
-    // Send command
-    writeln!(stream, "{}", cmd)?;
+    // Send one preflight-validated frame. The newline is part of the frame.
+    stream.write_all(frame)?;
     stream.flush()?;
 
     // Read response
@@ -462,6 +524,55 @@ mod tests {
     fn valid_qkey() -> String {
         let config = quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com");
         quicfuscate::engine::qkey::generate(&config)
+    }
+
+    #[test]
+    fn request_builder_enforces_exact_command_arity() {
+        let no_arguments: Vec<String> = Vec::new();
+        assert!(prepare_command(&no_arguments).is_err());
+
+        let status_extra = vec!["status".to_string(), "unexpected".to_string()];
+        assert!(prepare_command(&status_extra).is_err());
+
+        let kick_missing = vec!["kick".to_string()];
+        assert!(prepare_command(&kick_missing).is_err());
+
+        let kick_extra = vec!["kick".to_string(), "session:7".to_string(), "extra".to_string()];
+        assert!(prepare_command(&kick_extra).is_err());
+
+        let help_extra = vec!["help".to_string(), "extra".to_string()];
+        assert!(prepare_command(&help_extra).is_err());
+    }
+
+    #[test]
+    fn request_builder_and_encoder_share_the_unix_command_contract() {
+        let arguments = vec!["kick".to_string(), "session:Session-42".to_string()];
+        let prepared = prepare_command(&arguments).expect("valid CLI arguments").expect("command");
+        assert_eq!(prepared.expected, ExpectedResponse::Message);
+        let frame = encode_admin_command(prepared.command).expect("valid command frame");
+        assert_eq!(
+            frame,
+            br#"{"cmd":"kick","id":"session:42"}
+"#
+        );
+
+        let parsed: AdminCommand = serde_json::from_slice(&frame[..frame.len() - 1])
+            .expect("CLI frame must be valid AdminCommand JSON");
+        assert_eq!(parsed, AdminCommand::Kick { id: "session:42".to_string() });
+    }
+
+    #[test]
+    fn request_encoder_rejects_injection_control_and_oversized_values_before_socket_io() {
+        let control = AdminCommand::Kick { id: "session:4\n2".to_string() };
+        let control_error = encode_admin_command(control).expect_err("control byte must fail");
+        assert!(control_error.contains("invalid client id"));
+
+        let oversized = AdminCommand::Block {
+            ip: "1".repeat(quicfuscate::implementations::server::MAX_ADMIN_COMMAND_VALUE_BYTES + 1),
+        };
+        let oversized_error =
+            encode_admin_command(oversized).expect_err("oversized value must fail");
+        assert!(oversized_error.contains("invalid IP"));
     }
 
     fn valid_status_response() -> String {

@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
@@ -48,8 +48,10 @@ use super::metrics::Metrics;
 
 #[cfg(unix)]
 const ADMIN_SOCKET_MODE: u32 = 0o600;
-#[cfg(unix)]
-const MAX_ADMIN_COMMAND_BYTES: usize = 8 * 1024;
+/// Maximum serialized size of one admin command frame, including its newline.
+pub const MAX_ADMIN_COMMAND_BYTES: usize = 8 * 1024;
+/// Maximum raw byte length of a command value before trimming and normalization.
+pub const MAX_ADMIN_COMMAND_VALUE_BYTES: usize = 256;
 #[cfg(unix)]
 const ADMIN_COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -204,10 +206,13 @@ where
 
         let newline = chunk[..count].iter().position(|byte| *byte == b'\n');
         let prefix_len = newline.unwrap_or(count);
-        if command.len().saturating_add(prefix_len) > MAX_ADMIN_COMMAND_BYTES {
+        let terminator_len = usize::from(newline.is_some());
+        if command.len().saturating_add(prefix_len).saturating_add(terminator_len)
+            > MAX_ADMIN_COMMAND_BYTES
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("admin command exceeds {} bytes", MAX_ADMIN_COMMAND_BYTES),
+                format!("admin command frame exceeds {} bytes", MAX_ADMIN_COMMAND_BYTES),
             ));
         }
         command.extend_from_slice(&chunk[..prefix_len]);
@@ -228,7 +233,7 @@ where
 }
 
 /// Admin command types.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "cmd")]
 pub enum AdminCommand {
     /// Get server status
@@ -262,6 +267,114 @@ pub enum AdminCommand {
     /// Shutdown server
     #[serde(rename = "shutdown")]
     Shutdown,
+}
+
+impl<'de> Deserialize<'de> for AdminCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("admin command must be a JSON object"))?;
+        let command = object
+            .get("cmd")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom("admin command requires a string cmd"))?;
+        let allowed_fields: &[&str] = match command {
+            "status" | "clients" | "reload" | "qkey" | "shutdown" => &["cmd"],
+            "kick" => &["cmd", "id"],
+            "block" | "unblock" => &["cmd", "ip"],
+            _ => return Err(serde::de::Error::custom("unknown admin command")),
+        };
+        if let Some(field) = object.keys().find(|field| !allowed_fields.contains(&field.as_str())) {
+            return Err(serde::de::Error::custom(format!(
+                "unknown field `{field}` in admin command"
+            )));
+        }
+
+        match command {
+            "status" => Ok(Self::Status),
+            "clients" => Ok(Self::ListClients),
+            "kick" => {
+                Ok(Self::Kick { id: required_admin_command_string(object, "id")?.to_string() })
+            }
+            "block" => {
+                Ok(Self::Block { ip: required_admin_command_string(object, "ip")?.to_string() })
+            }
+            "unblock" => {
+                Ok(Self::Unblock { ip: required_admin_command_string(object, "ip")?.to_string() })
+            }
+            "reload" => Ok(Self::Reload),
+            "qkey" => Ok(Self::GenerateQKey),
+            "shutdown" => Ok(Self::Shutdown),
+            _ => Err(serde::de::Error::custom("unknown admin command")),
+        }
+    }
+}
+
+fn required_admin_command_string<'a, E>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<&'a str, E>
+where
+    E: serde::de::Error,
+{
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| E::custom(format!("admin command requires a string `{field}`")))
+}
+
+fn bounded_admin_value(raw: &str) -> Option<&str> {
+    if raw.len() > MAX_ADMIN_COMMAND_VALUE_BYTES
+        || raw.chars().any(|character| character.is_control())
+    {
+        return None;
+    }
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Normalize an admin IP value using the same canonical representation as the runtime policy.
+pub fn normalize_admin_ip(raw: &str) -> Option<String> {
+    bounded_admin_value(raw)?.parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+/// Normalize an admin client identity using the shared session/remote grammar.
+pub fn normalize_admin_client_id(raw: &str) -> Option<String> {
+    let value = bounded_admin_value(raw)?;
+    ClientIdentity::parse(value).map(|identity| identity.to_string())
+}
+
+/// Validate and canonicalize all value-bearing admin commands before dispatch.
+pub fn normalize_admin_command(command: AdminCommand) -> Result<AdminCommand, String> {
+    match command {
+        AdminCommand::Kick { id } => normalize_admin_client_id(&id)
+            .map(|id| AdminCommand::Kick { id })
+            .ok_or_else(|| "invalid client id".to_string()),
+        AdminCommand::Block { ip } => normalize_admin_ip(&ip)
+            .map(|ip| AdminCommand::Block { ip })
+            .ok_or_else(|| "invalid IP".to_string()),
+        AdminCommand::Unblock { ip } => normalize_admin_ip(&ip)
+            .map(|ip| AdminCommand::Unblock { ip })
+            .ok_or_else(|| "invalid IP".to_string()),
+        command => Ok(command),
+    }
+}
+
+/// Encode one normalized admin command as one bounded newline-terminated frame.
+pub fn encode_admin_command(command: AdminCommand) -> Result<Vec<u8>, String> {
+    let command = normalize_admin_command(command)?;
+    let mut frame = serde_json::to_vec(&command)
+        .map_err(|error| format!("serialize admin command failed: {error}"))?;
+    let frame_len = frame.len().saturating_add(1);
+    if frame_len > MAX_ADMIN_COMMAND_BYTES {
+        return Err(format!("admin command frame exceeds {} bytes", MAX_ADMIN_COMMAND_BYTES));
+    }
+    frame.push(b'\n');
+    Ok(frame)
 }
 
 /// Admin response.
@@ -637,31 +750,35 @@ impl AdminServer {
         };
 
         let response = match serde_json::from_str::<AdminCommand>(&line) {
-            Ok(cmd) => {
-                log::debug!("Admin command: {:?}", cmd);
-                match cmd {
-                    AdminCommand::Status => handler.handle_status(),
-                    AdminCommand::ListClients => {
-                        let clients = handler.handle_list_clients();
-                        match serde_json::to_value(clients) {
-                            Ok(data) => AdminResponse::ok_with_data(data),
-                            Err(err) => {
-                                AdminResponse::error(format!("Serialize clients failed: {}", err))
+            Ok(command) => match normalize_admin_command(command) {
+                Ok(command) => {
+                    log::debug!("Admin command: {:?}", command);
+                    match command {
+                        AdminCommand::Status => handler.handle_status(),
+                        AdminCommand::ListClients => {
+                            let clients = handler.handle_list_clients();
+                            match serde_json::to_value(clients) {
+                                Ok(data) => AdminResponse::ok_with_data(data),
+                                Err(err) => AdminResponse::error(format!(
+                                    "Serialize clients failed: {}",
+                                    err
+                                )),
                             }
                         }
+                        AdminCommand::Kick { id } => handler.handle_kick(&id),
+                        AdminCommand::Block { ip } => handler.handle_block(&ip),
+                        AdminCommand::Unblock { ip } => handler.handle_unblock(&ip),
+                        AdminCommand::Reload => handler.handle_reload(),
+                        AdminCommand::GenerateQKey => {
+                            let qkey = handler.handle_qkey();
+                            AdminResponse::ok_with_data(serde_json::json!({ "qkey": qkey }))
+                        }
+                        AdminCommand::Shutdown => handler.handle_shutdown(),
                     }
-                    AdminCommand::Kick { id } => handler.handle_kick(&id),
-                    AdminCommand::Block { ip } => handler.handle_block(&ip),
-                    AdminCommand::Unblock { ip } => handler.handle_unblock(&ip),
-                    AdminCommand::Reload => handler.handle_reload(),
-                    AdminCommand::GenerateQKey => {
-                        let qkey = handler.handle_qkey();
-                        AdminResponse::ok_with_data(serde_json::json!({ "qkey": qkey }))
-                    }
-                    AdminCommand::Shutdown => handler.handle_shutdown(),
                 }
-            }
-            Err(e) => AdminResponse::error(format!("Invalid command: {}", e)),
+                Err(error) => AdminResponse::error(format!("Invalid command: {error}")),
+            },
+            Err(error) => AdminResponse::error(format!("Invalid command: {error}")),
         };
 
         let json = serde_json::to_string(&response)?;
@@ -711,6 +828,40 @@ mod tests {
     }
 
     #[test]
+    fn admin_command_values_are_bounded_and_canonicalized() {
+        assert_eq!(normalize_admin_ip(" 2001:0DB8:0:0:0:0:0:1 "), Some("2001:db8::1".to_string()));
+        assert_eq!(normalize_admin_ip("127.0.0.1\n"), None);
+        assert_eq!(
+            normalize_admin_client_id(" session:Session-42 "),
+            Some("session:42".to_string())
+        );
+        assert_eq!(normalize_admin_client_id("session:4\n2"), None);
+
+        let oversized = "a".repeat(MAX_ADMIN_COMMAND_VALUE_BYTES + 1);
+        assert!(normalize_admin_client_id(&oversized).is_none());
+        assert!(normalize_admin_ip(&oversized).is_none());
+    }
+
+    #[test]
+    fn admin_command_encoding_is_typed_bounded_and_terminated() {
+        let frame =
+            encode_admin_command(AdminCommand::Kick { id: "session:Session-42".to_string() })
+                .expect("canonical kick command should encode");
+        assert_eq!(frame, b"{\"cmd\":\"kick\",\"id\":\"session:42\"}\n");
+
+        let oversized = AdminCommand::Block { ip: "1".repeat(MAX_ADMIN_COMMAND_VALUE_BYTES + 1) };
+        let error = encode_admin_command(oversized).expect_err("oversized value must be rejected");
+        assert!(error.contains("invalid IP"));
+    }
+
+    #[test]
+    fn admin_command_unknown_fields_are_rejected() {
+        let error = serde_json::from_str::<AdminCommand>(r#"{"cmd":"status","extra":true}"#)
+            .expect_err("unknown admin fields must be rejected");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
     fn test_admin_response() {
         let resp = AdminResponse::ok();
         assert!(resp.success);
@@ -735,6 +886,33 @@ mod tests {
         let resp = handler.handle_unblock("1.2.3.4");
         assert!(resp.success);
         assert!(!handler.is_blocked("1.2.3.4"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_admin_dispatch_normalizes_values_and_rejects_invalid_commands() {
+        async fn exchange(json: &str) -> (serde_json::Value, Arc<DefaultAdminHandler>) {
+            let (mut client, server) = UnixStream::pair().expect("create Unix stream pair");
+            let handler = Arc::new(DefaultAdminHandler::new(Arc::new(Metrics::new())));
+            let observed = Arc::clone(&handler);
+            let task = tokio::spawn(AdminServer::handle_connection(server, handler));
+            client.write_all(json.as_bytes()).await.expect("write admin command");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.expect("read admin response");
+            task.await.expect("join admin handler").expect("admin handler succeeds");
+            (serde_json::from_slice(&response).expect("decode admin response"), observed)
+        }
+
+        let (response, handler) =
+            exchange("{\"cmd\":\"block\",\"ip\":\" 2001:0DB8:0:0:0:0:0:1 \"}\n").await;
+        assert_eq!(response["success"], true);
+        assert!(handler.is_blocked("2001:db8::1"));
+
+        let (response, _) = exchange("{\"cmd\":\"block\",\"ip\":\"not-an-ip\"}\n").await;
+        assert_eq!(response["success"], false);
+
+        let (response, _) = exchange("{\"cmd\":\"status\",\"extra\":true}\n").await;
+        assert_eq!(response["success"], false);
     }
 
     #[test]

@@ -52,7 +52,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinSet};
 
-use super::admin::{AdminResponse, ClientInfo};
+use super::admin::{normalize_admin_client_id, normalize_admin_ip, AdminResponse, ClientInfo};
 use super::BandwidthPolicy;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -1902,16 +1902,11 @@ fn limiter_key(prefix: &str, ip: &str) -> String {
 }
 
 fn normalize_ip_for_policy(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    // Canonicalize so block/unblock semantics match runtime `from.ip().to_string()`.
-    trimmed.parse::<std::net::IpAddr>().ok().map(|ip| ip.to_string())
+    normalize_admin_ip(raw)
 }
 
 fn normalize_client_id(raw: &str) -> Option<String> {
-    super::admin::ClientIdentity::parse(raw).map(|id| id.to_string())
+    normalize_admin_client_id(raw)
 }
 
 fn log_action(peer: Option<SocketAddr>, action: &str, detail: &str, success: bool) {

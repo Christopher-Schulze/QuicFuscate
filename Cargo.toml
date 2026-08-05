@@ -162,6 +162,10 @@ name = "quicfuscate"
 path = "src/main.rs"
 
 [[bin]]
+name = "quicfuscate-ctl"
+path = "src/bin/quicfuscate-ctl.rs"
+
+[[bin]]
 name = "qf-privilege-probe"
 path = "src/bin/qf-privilege-probe.rs"
 required-features = ["rust-tests"]
