@@ -179,6 +179,95 @@ pub struct CpuFeatures {
     pub cache_line: usize,
 }
 
+/// Evidence collected for Intel AMX without enabling a product dispatch path.
+///
+/// CPU instruction support, OS tile-state permission, compiler target features,
+/// and product eligibility are intentionally separate. `None` for
+/// `os_tile_state_permitted` means that no platform-specific permission probe
+/// has established tile-state access. Product dispatch therefore remains
+/// fail-closed until a verified backend and permission proof exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmxCapability {
+    /// CPU-reported AMX-TILE support from in-process feature detection.
+    pub cpu_tile: bool,
+    /// CPU-reported AMX-INT8 support from in-process feature detection.
+    pub cpu_int8: bool,
+    /// CPU-reported AMX-BF16 support from in-process feature detection.
+    pub cpu_bf16: bool,
+    /// OS tile-state permission: `Some(true)` proven, `Some(false)` denied,
+    /// or `None` not probed.
+    pub os_tile_state_permitted: Option<bool>,
+    /// Whether AMX-TILE was enabled in the compiler target features.
+    pub compiler_target_tile: bool,
+    /// Whether AMX-INT8 was enabled in the compiler target features.
+    pub compiler_target_int8: bool,
+    /// Whether AMX-BF16 was enabled in the compiler target features.
+    pub compiler_target_bf16: bool,
+    /// Whether the product has a verified, eligible AMX dispatch path.
+    pub product_dispatch_eligible: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AmxSignals {
+    cpu_tile: bool,
+    cpu_int8: bool,
+    cpu_bf16: bool,
+    os_tile_state_permitted: Option<bool>,
+    compiler_target_tile: bool,
+    compiler_target_int8: bool,
+    compiler_target_bf16: bool,
+    verified_backend: bool,
+}
+
+impl AmxCapability {
+    fn from_signals(signals: AmxSignals) -> Self {
+        let product_dispatch_eligible = signals.verified_backend
+            && signals.cpu_tile
+            && signals.cpu_int8
+            && signals.compiler_target_tile
+            && signals.compiler_target_int8
+            && signals.os_tile_state_permitted == Some(true);
+        Self {
+            cpu_tile: signals.cpu_tile,
+            cpu_int8: signals.cpu_int8,
+            cpu_bf16: signals.cpu_bf16,
+            os_tile_state_permitted: signals.os_tile_state_permitted,
+            compiler_target_tile: signals.compiler_target_tile,
+            compiler_target_int8: signals.compiler_target_int8,
+            compiler_target_bf16: signals.compiler_target_bf16,
+            product_dispatch_eligible,
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn detect_amx_capability() -> AmxCapability {
+    AmxCapability::from_signals(AmxSignals {
+        cpu_tile: std::arch::is_x86_feature_detected!("amx-tile"),
+        cpu_int8: std::arch::is_x86_feature_detected!("amx-int8"),
+        cpu_bf16: std::arch::is_x86_feature_detected!("amx-bf16"),
+        os_tile_state_permitted: None,
+        compiler_target_tile: cfg!(target_feature = "amx-tile"),
+        compiler_target_int8: cfg!(target_feature = "amx-int8"),
+        compiler_target_bf16: cfg!(target_feature = "amx-bf16"),
+        verified_backend: false,
+    })
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn detect_amx_capability() -> AmxCapability {
+    AmxCapability::from_signals(AmxSignals {
+        cpu_tile: false,
+        cpu_int8: false,
+        cpu_bf16: false,
+        os_tile_state_permitted: None,
+        compiler_target_tile: false,
+        compiler_target_int8: false,
+        compiler_target_bf16: false,
+        verified_backend: false,
+    })
+}
+
 /// CPU Performance Profile for optimized dispatch
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
 #[allow(non_camel_case_types)]
@@ -390,6 +479,7 @@ pub enum CpuFeature {
 pub struct FeatureDetector {
     features: HashSet<CpuFeature>,
     features_full: CpuFeatures,
+    amx_capability: AmxCapability,
     cache_line_size: usize,
     has_avx512: bool,
     optimal_simd_width: usize,
@@ -430,6 +520,19 @@ impl FeatureDetector {
                 if detector.features_full.avx512vbmi2 {
                     log::info!("  AVX-512 VBMI2: accelerated pattern matching available");
                 }
+
+                let amx = detector.amx_capability;
+                log::info!(
+                    "  AMX contract: cpu_tile={}, cpu_int8={}, cpu_bf16={}, os_tile_state_permitted={:?}, compiler_target_tile={}, compiler_target_int8={}, compiler_target_bf16={}, product_dispatch_eligible={}",
+                    amx.cpu_tile,
+                    amx.cpu_int8,
+                    amx.cpu_bf16,
+                    amx.os_tile_state_permitted,
+                    amx.compiler_target_tile,
+                    amx.compiler_target_int8,
+                    amx.compiler_target_bf16,
+                    amx.product_dispatch_eligible,
+                );
             }
 
             #[cfg(target_arch = "aarch64")]
@@ -457,6 +560,7 @@ impl FeatureDetector {
     fn detect() -> Self {
         let mut features = HashSet::new();
         let mut features_full = CpuFeatures::default();
+        let amx_capability = detect_amx_capability();
         #[cfg(target_arch = "aarch64")]
         let cache_line_size: usize = 128;
         #[cfg(not(target_arch = "aarch64"))]
@@ -620,23 +724,19 @@ impl FeatureDetector {
                 features_full.avx_vnni = true;
             }
 
-            // AMX Tile Extensions - Intel 4th Gen Xeon and beyond!
-            // Note: AMX detection requires special OS support and may not be available via is_x86_feature_detected!
-            // For now, we detect based on CPU model and OS support
-            if let Ok(cpuid) = std::process::Command::new("cpuid").output() {
-                let output = String::from_utf8_lossy(&cpuid.stdout);
-                if output.contains("AMX-TILE") || output.contains("amx_tile") {
-                    features.insert(CpuFeature::AMX_TILE);
-                    features_full.amx_tile = true;
-                }
-                if output.contains("AMX-INT8") || output.contains("amx_int8") {
-                    features.insert(CpuFeature::AMX_INT8);
-                    features_full.amx_int8 = true;
-                }
-                if output.contains("AMX-BF16") || output.contains("amx_bf16") {
-                    features.insert(CpuFeature::AMX_BF16);
-                    features_full.amx_bf16 = true;
-                }
+            // AMX instruction support is detected in-process. OS tile-state
+            // permission and a verified product backend remain separate gates.
+            if amx_capability.cpu_tile {
+                features.insert(CpuFeature::AMX_TILE);
+                features_full.amx_tile = true;
+            }
+            if amx_capability.cpu_int8 {
+                features.insert(CpuFeature::AMX_INT8);
+                features_full.amx_int8 = true;
+            }
+            if amx_capability.cpu_bf16 {
+                features.insert(CpuFeature::AMX_BF16);
+                features_full.amx_bf16 = true;
             }
 
             if is_x86_feature_detected!("fma") {
@@ -825,12 +925,24 @@ impl FeatureDetector {
         let has_avx512 =
             features.contains(&CpuFeature::AVX512F) || features.contains(&CpuFeature::AVX10_1_512);
 
-        Self { features, features_full, cache_line_size, has_avx512, optimal_simd_width }
+        Self {
+            features,
+            features_full,
+            amx_capability,
+            cache_line_size,
+            has_avx512,
+            optimal_simd_width,
+        }
     }
 
     /// Get full CPU features struct
     pub fn features_full(&self) -> &CpuFeatures {
         &self.features_full
+    }
+
+    /// Returns the separated CPU, OS, compiler, and product AMX evidence.
+    pub fn amx_capability(&self) -> AmxCapability {
+        self.amx_capability
     }
 
     /// Get optimal SIMD width in bytes
@@ -1800,8 +1912,8 @@ fn with_override<T>(val: Option<&str>, f: impl FnOnce() -> T) -> T {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        bitslice_policy_tag, dispatch_bitslice, with_override, PROFILE_OVERRIDE,
-        TEST_FEC_KERNEL_OVERRIDE,
+        bitslice_policy_tag, dispatch_bitslice, with_override, AmxCapability, AmxSignals,
+        PROFILE_OVERRIDE, TEST_FEC_KERNEL_OVERRIDE,
     };
     use crate::simd::{CpuFeature, FeatureDetector};
     use std::sync::{Arc, Barrier};
@@ -1843,6 +1955,78 @@ mod tests {
         barrier.wait();
         assert_eq!(PROFILE_OVERRIDE.with(std::cell::Cell::get), 0);
         assert_eq!(child.join().expect("profile override thread"), crate::simd::CpuProfile::Scalar);
+    }
+
+    #[test]
+    fn amx_detection_is_process_free_and_product_fail_closed() {
+        let detector = FeatureDetector::instance();
+        let capability = detector.amx_capability();
+
+        assert_eq!(capability.os_tile_state_permitted, None);
+        assert!(!capability.product_dispatch_eligible);
+        assert_eq!(detector.features_full().amx_tile, capability.cpu_tile);
+        assert_eq!(detector.features_full().amx_int8, capability.cpu_int8);
+        assert_eq!(detector.features_full().amx_bf16, capability.cpu_bf16);
+    }
+
+    #[test]
+    fn amx_product_eligibility_requires_cpu_os_compiler_and_backend_proof() {
+        let all_proven = AmxCapability::from_signals(AmxSignals {
+            cpu_tile: true,
+            cpu_int8: true,
+            cpu_bf16: true,
+            os_tile_state_permitted: Some(true),
+            compiler_target_tile: true,
+            compiler_target_int8: true,
+            compiler_target_bf16: true,
+            verified_backend: true,
+        });
+        assert!(all_proven.product_dispatch_eligible);
+
+        let missing_os = AmxCapability::from_signals(AmxSignals {
+            os_tile_state_permitted: None,
+            ..AmxSignals {
+                cpu_tile: true,
+                cpu_int8: true,
+                cpu_bf16: true,
+                os_tile_state_permitted: Some(true),
+                compiler_target_tile: true,
+                compiler_target_int8: true,
+                compiler_target_bf16: true,
+                verified_backend: true,
+            }
+        });
+        assert!(!missing_os.product_dispatch_eligible);
+
+        let missing_compiler = AmxCapability::from_signals(AmxSignals {
+            compiler_target_tile: false,
+            ..AmxSignals {
+                cpu_tile: true,
+                cpu_int8: true,
+                cpu_bf16: true,
+                os_tile_state_permitted: Some(true),
+                compiler_target_tile: true,
+                compiler_target_int8: true,
+                compiler_target_bf16: true,
+                verified_backend: true,
+            }
+        });
+        assert!(!missing_compiler.product_dispatch_eligible);
+
+        let missing_backend = AmxCapability::from_signals(AmxSignals {
+            verified_backend: false,
+            ..AmxSignals {
+                cpu_tile: true,
+                cpu_int8: true,
+                cpu_bf16: true,
+                os_tile_state_permitted: Some(true),
+                compiler_target_tile: true,
+                compiler_target_int8: true,
+                compiler_target_bf16: true,
+                verified_backend: true,
+            }
+        });
+        assert!(!missing_backend.product_dispatch_eligible);
     }
 
     #[test]

@@ -226,6 +226,15 @@ else
   append_item "simd_x86_backend_internalization" "fail" "$SIMD_X86_UNSAFE_VISIBILITY_REFS"
 fi
 
+AMX_EXTERNAL_DETECTOR_REFS=$(rg -n --no-messages 'Command::new\("cpuid"\)|\bcpuid\b' src/optimize/parts/cpu_dispatch.rs || true)
+if [[ -z "$AMX_EXTERNAL_DETECTOR_REFS" ]]; then
+  pass "AMX capability detection stays in-process and has no cpuid helper dependency"
+  append_item "amx_detector_process_free" "ok" "cpu_dispatch uses in-process AMX feature detection"
+else
+  fail_critical "AMX capability detection still depends on the cpuid helper"
+  append_item "amx_detector_process_free" "fail" "$AMX_EXTERNAL_DETECTOR_REFS"
+fi
+
 # 2) Public fastpath mode space must be narrowed to auto and off.
 if rg -n --no-messages 'QUICFUSCATE_FASTPATH.*auto\\|off|QUICFUSCATE_FASTPATH.*off\\|auto|FastpathMode::Auto|FastpathMode::Off' README.md docs/DOCUMENTATION.md src/interface.rs >/dev/null \
   && ! rg -n --no-messages 'FastpathMode::Uring|QUICFUSCATE_FASTPATH.*uring' README.md docs/DOCUMENTATION.md src/interface.rs >/dev/null; then
