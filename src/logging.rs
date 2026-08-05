@@ -128,7 +128,7 @@ pub fn init(config: &LoggingConfig) -> Result<(), LogInitError> {
     let sink_errors = Arc::new(AtomicU64::new(0));
     let (sender, receiver) = crossbeam_channel::bounded(LOG_QUEUE_CAPACITY);
     let worker_errors = sink_errors.clone();
-    std::thread::Builder::new()
+    let worker = std::thread::Builder::new()
         .name("qf-log-writer".to_string())
         .spawn(move || {
             run_writer(
@@ -161,7 +161,7 @@ pub fn init(config: &LoggingConfig) -> Result<(), LogInitError> {
             Ok(())
         }
         Err(_) => {
-            let _ = sender.send(LogCommand::Shutdown);
+            shutdown_and_join_worker(&sender, worker);
             Err(LogInitError::LoggerAlreadyInstalled)
         }
     }
@@ -449,6 +449,11 @@ impl WriterSinks {
         };
         app.reopen()
     }
+}
+
+fn shutdown_and_join_worker(sender: &Sender<LogCommand>, worker: std::thread::JoinHandle<()>) {
+    let _ = sender.send(LogCommand::Shutdown);
+    let _ = worker.join();
 }
 
 fn run_writer(receiver: Receiver<LogCommand>, mut sinks: WriterSinks, sink_errors: &AtomicU64) {
@@ -1232,5 +1237,68 @@ mod tests {
     fn resolve_file_path_none_when_disabled() {
         let cfg = LoggingConfig { file_path: None, log_to_file: false, ..Default::default() };
         assert_eq!(resolve_file_path(&cfg), None);
+    }
+
+    struct PreinstalledLogger;
+
+    impl Log for PreinstalledLogger {
+        fn enabled(&self, _metadata: &Metadata) -> bool {
+            false
+        }
+
+        fn log(&self, _record: &Record) {}
+
+        fn flush(&self) {}
+    }
+
+    static PREINSTALLED_LOGGER: PreinstalledLogger = PreinstalledLogger;
+
+    #[test]
+    fn failed_installation_joins_worker_before_returning() {
+        assert!(LOGGER_CONTROL.get().is_none(), "logger control must be uninitialized");
+        let _ = log::set_logger(&PREINSTALLED_LOGGER);
+
+        let directory = unique_log_dir("failed-installation");
+        fs::create_dir_all(&directory).expect("create failed-installation directory");
+        let path = directory.join("app.log");
+        let config = LoggingConfig {
+            log_to_stdout: false,
+            file_path: Some(path.clone()),
+            max_file_size_bytes: 1024,
+            max_files: 1,
+            ..Default::default()
+        };
+
+        assert!(matches!(init(&config), Err(LogInitError::LoggerAlreadyInstalled)));
+        assert!(path.exists(), "failed initialization should create its configured sink");
+        fs::remove_file(&path).expect("failed initialization must release its file sink");
+        fs::remove_dir_all(&directory).expect("remove failed-installation directory");
+    }
+
+    #[test]
+    fn shutdown_and_join_waits_for_worker_completion() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let (shutdown_seen_tx, shutdown_seen_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let worker = std::thread::spawn(move || {
+            assert!(matches!(receiver.recv(), Ok(LogCommand::Shutdown)));
+            shutdown_seen_tx.send(()).expect("report shutdown receipt");
+            release_rx.recv().expect("wait for join assertion");
+        });
+
+        let (cleanup_done_tx, cleanup_done_rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            shutdown_and_join_worker(&sender, worker);
+            cleanup_done_tx.send(()).expect("report joined worker");
+        });
+
+        shutdown_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker must receive shutdown before cleanup returns");
+        assert!(cleanup_done_rx.try_recv().is_err(), "cleanup returned before worker exit");
+        release_tx.send(()).expect("release worker for join");
+        cleanup_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cleanup must return after joining worker");
     }
 }
