@@ -582,3 +582,9 @@ name = "fingerprint_normalizer"
 path = "benches/fingerprint_normalizer.rs"
 harness = false
 required-features = ["benches"]
+
+[[bench]]
+name = "dns_forwarding"
+path = "benches/dns_forwarding.rs"
+harness = false
+required-features = ["benches"]

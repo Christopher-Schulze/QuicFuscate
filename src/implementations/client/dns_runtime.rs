@@ -12,11 +12,10 @@ use super::platform::{self, DnsConfig, PlatformBackend};
 use super::runtime::SharedRuntime;
 use crate::dns::{
     process_dns_query_with_admission, DnsAdmission, DnsAdmissionIdentity, DnsAdmissionSnapshot,
-    DnsProxyConfig, DnsProxyError,
+    DnsProxyConfig, DnsProxyError, DNS_MESSAGE_MAX_SIZE,
 };
 use crate::engine::{EngineConfig, EngineError};
 
-const DNS_PACKET_LIMIT: usize = 4096;
 const DNS_LISTEN_PORT: u16 = 53;
 const LOCAL_DNS_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -253,7 +252,7 @@ async fn serve_listener(
     shutdown: Arc<Notify>,
     admission: Arc<DnsAdmission>,
 ) {
-    let mut buffer = [0u8; DNS_PACKET_LIMIT];
+    let mut buffer = [0u8; DNS_MESSAGE_MAX_SIZE];
     loop {
         let received = tokio::select! {
             _ = shutdown.notified() => break,
@@ -291,7 +290,7 @@ async fn serve_listener(
                 continue;
             }
         };
-        if response.len() > DNS_PACKET_LIMIT {
+        if response.len() > DNS_MESSAGE_MAX_SIZE {
             log::warn!(
                 "Client DNS response exceeded the UDP proxy limit: {} bytes",
                 response.len()
@@ -376,7 +375,7 @@ mod tests {
             client.send_to(&query, listener_addr).await.expect("first query");
             client.send_to(&query, listener_addr).await.expect("second query");
 
-            let mut response = [0u8; DNS_PACKET_LIMIT];
+            let mut response = [0u8; DNS_MESSAGE_MAX_SIZE];
             let (length, _) = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 client.recv_from(&mut response),
