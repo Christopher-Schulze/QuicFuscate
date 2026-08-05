@@ -906,6 +906,142 @@ mod tests {
     }
 
     #[test]
+    fn server_runtime_accepts_matching_embedded_tun_override() {
+        let mut engine_config = EngineConfig::default();
+        engine_config.interface.tun_ip = Some(IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1)));
+        engine_config.interface.tun_netmask = Some(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)));
+        engine_config.interface.tun_ip6 = Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        engine_config.interface.tun_prefix6 = Some(64);
+
+        let server_config = ServerConfig::default();
+        let runtime = ServerRuntime::new(engine_config, server_config.clone())
+            .expect("matching embedded server TUN override must be accepted");
+        let tun_config = server_config.server_tun_config(Some("qfserver0".to_string()), 1500, true);
+        assert_eq!(tun_config.ip, Some(IpAddr::V4(server_config.server_ip)));
+        assert_eq!(tun_config.netmask, Some(IpAddr::V4(server_config.server_netmask)));
+        assert_eq!(tun_config.ip6, server_config.ipv6_server_ip);
+        assert_eq!(tun_config.prefix6, Some(server_config.ipv6_prefix_len));
+
+        let (_, _, assigned) = runtime
+            .domain
+            .accept("127.0.0.1:54323".parse().unwrap())
+            .expect("default client pool must allocate on the effective network");
+        assert_eq!(assigned.ipv4, server_config.ip_pool_start);
+        assert_eq!(assigned.ipv6, server_config.ipv6_pool_start);
+    }
+
+    #[test]
+    fn server_runtime_rejects_conflicting_embedded_tun_override_before_start() {
+        let mut engine_config = EngineConfig::default();
+        engine_config.interface.tun_ip = Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)));
+        engine_config.interface.tun_netmask = Some(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)));
+
+        let error = match ServerRuntime::new(engine_config, ServerConfig::default()) {
+            Ok(_) => panic!("conflicting embedded server TUN override must fail closed"),
+            Err(error) => error,
+        };
+        match error {
+            EngineError::Config(message) => {
+                assert!(message.contains("server TUN IPv4 conflict"));
+                assert!(message.contains("ServerConfig is authoritative"));
+            }
+            other => panic!("unexpected error for conflicting embedded TUN: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_runtime_rejects_conflicting_embedded_ipv6_tun_override_before_start() {
+        let mut engine_config = EngineConfig::default();
+        engine_config.interface.tun_ip6 = Some(Ipv6Addr::new(0xfd00, 0, 0, 1, 0, 0, 0, 1));
+        engine_config.interface.tun_prefix6 = Some(64);
+
+        let error = match ServerRuntime::new(engine_config, ServerConfig::default()) {
+            Ok(_) => panic!("conflicting embedded IPv6 TUN override must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, EngineError::Config(message) if message.contains("server TUN IPv6 conflict")));
+    }
+
+    #[test]
+    fn standalone_tun_config_is_reconciled_to_server_network() {
+        let server_config = ServerConfig::default();
+        let tun_config = server_config
+            .reconcile_standalone_tun_config(TunConfig {
+                name: Some("qfserver0".to_string()),
+                ip: Some(IpAddr::V4(server_config.server_ip)),
+                netmask: Some(IpAddr::V4(server_config.server_netmask)),
+                mtu: 1500,
+                ip6: server_config.ipv6_server_ip,
+                prefix6: server_config.ipv6_server_ip.map(|_| server_config.ipv6_prefix_len),
+                ..TunConfig::default()
+            })
+            .expect("standalone TUN config without address overrides must inherit ServerConfig");
+        assert_eq!(tun_config.ip, Some(IpAddr::V4(server_config.server_ip)));
+        assert_eq!(tun_config.netmask, Some(IpAddr::V4(server_config.server_netmask)));
+        assert_eq!(tun_config.ip6, server_config.ipv6_server_ip);
+        assert_eq!(tun_config.prefix6, Some(server_config.ipv6_prefix_len));
+    }
+
+    #[test]
+    fn standalone_lifecycle_rejects_conflicting_tun_config_before_open() {
+        let server_config = ServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            ..ServerConfig::default()
+        };
+        let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let error = match ServerRuntime::new_standalone_default(
+            EngineConfig::default(),
+            server_config,
+            Some(TunConfig {
+                ip: Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1))),
+                netmask: Some(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0))),
+                ..TunConfig::default()
+            }),
+            crate::optimize::OptimizeConfig::default(),
+            blocked_ips,
+            qkey_registry,
+            StandaloneAdminWebBootstrap::default(),
+        ) {
+            Ok(_) => panic!("conflicting standalone TUN override must fail before opening TUN"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("standalone server TUN IPv4 conflict"));
+    }
+
+    #[test]
+    fn server_runtime_rejects_ipv4_pool_outside_effective_tun_network() {
+        let server_config = ServerConfig {
+            ip_pool_start: Ipv4Addr::new(10, 9, 0, 2),
+            ip_pool_end: Ipv4Addr::new(10, 9, 0, 254),
+            ..ServerConfig::default()
+        };
+        let error = match ServerRuntime::new(EngineConfig::default(), server_config) {
+            Ok(_) => panic!("client pool outside the server TUN network must fail closed"),
+            Err(EngineError::Config(error)) => error,
+            Err(other) => panic!("unexpected pool validation error: {other:?}"),
+        };
+        assert!(error.contains("IPv4 client pool"));
+        assert!(error.contains("outside server network"));
+    }
+
+    #[test]
+    fn server_runtime_rejects_ipv6_pool_outside_effective_tun_network() {
+        let server_config = ServerConfig {
+            ipv6_pool_start: Some("fd01::2".parse().unwrap()),
+            ipv6_pool_end: Some("fd01::fe".parse().unwrap()),
+            ..ServerConfig::default()
+        };
+        let error = match ServerRuntime::new(EngineConfig::default(), server_config) {
+            Ok(_) => panic!("IPv6 client pool outside the server TUN network must fail closed"),
+            Err(EngineError::Config(error)) => error,
+            Err(other) => panic!("unexpected IPv6 pool validation error: {other:?}"),
+        };
+        assert!(error.contains("IPv6 client pool"));
+        assert!(error.contains("outside server network"));
+    }
+
+    #[test]
     fn test_server_runtime_rejects_invalid_engine_projection() {
         let mut engine_config = EngineConfig::default();
         engine_config.stealth.padding_strategy = "invalid".to_string();

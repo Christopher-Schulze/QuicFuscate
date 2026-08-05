@@ -241,6 +241,7 @@ impl ServerConfig {
                 self.ipv6_prefix_len
             ));
         }
+        self.validate_address_pools(ipv4_prefix)?;
         if mtu < 576 {
             return Err(format!("server TUN MTU must be at least 576, got {mtu}"));
         }
@@ -261,6 +262,200 @@ impl ServerConfig {
             ));
         }
         Ok(ServerAssignmentSettings { ipv4_prefix, ipv6_prefix: self.ipv6_prefix_len, mtu, dns_servers })
+    }
+
+    fn validate_address_pools(&self, ipv4_prefix: u8) -> Result<(), String> {
+        let ipv4_network = u32::from(self.server_ip) & u32::from(self.server_netmask);
+        let ipv4_broadcast = ipv4_network | !u32::from(self.server_netmask);
+        let ipv4_first_client = ipv4_network.checked_add(1).ok_or_else(|| {
+            "server IPv4 network has no usable client address range".to_string()
+        })?;
+        let ipv4_last_client = ipv4_broadcast.checked_sub(1).ok_or_else(|| {
+            "server IPv4 network has no usable client address range".to_string()
+        })?;
+        let pool_start = u32::from(self.ip_pool_start);
+        let pool_end = u32::from(self.ip_pool_end);
+        if pool_start > pool_end {
+            return Err(format!(
+                "IPv4 client pool is reversed: {} > {}",
+                self.ip_pool_start, self.ip_pool_end
+            ));
+        }
+        if pool_start < ipv4_first_client || pool_end > ipv4_last_client {
+            return Err(format!(
+                "IPv4 client pool {}-{} is outside server network {}/{}",
+                self.ip_pool_start, self.ip_pool_end, self.server_ip, ipv4_prefix
+            ));
+        }
+        let server_ip = u32::from(self.server_ip);
+        if (pool_start..=pool_end).contains(&server_ip) {
+            return Err(format!(
+                "IPv4 client pool {}-{} contains the server TUN address {}",
+                self.ip_pool_start, self.ip_pool_end, self.server_ip
+            ));
+        }
+
+        match (self.ipv6_server_ip, self.ipv6_pool_start, self.ipv6_pool_end) {
+            (None, None, None) => {}
+            (None, _, _) => {
+                return Err(
+                    "IPv6 server address and IPv6 client pool must be enabled together"
+                        .to_string(),
+                );
+            }
+            (Some(server_ip), Some(pool_start), Some(pool_end)) => {
+                if self.ipv6_prefix_len == 0 {
+                    return Err("ipv6_prefix_len must be at least 1 when IPv6 is enabled".to_string());
+                }
+                let mask = u128::MAX << (128 - self.ipv6_prefix_len);
+                let network = u128::from(server_ip) & mask;
+                let last = network | !mask;
+                let first_client = network.checked_add(1).ok_or_else(|| {
+                    "server IPv6 network has no usable client address range".to_string()
+                })?;
+                let pool_start = u128::from(pool_start);
+                let pool_end = u128::from(pool_end);
+                if pool_start > pool_end {
+                    return Err(format!(
+                        "IPv6 client pool is reversed: {} > {}",
+                        Ipv6Addr::from(pool_start),
+                        Ipv6Addr::from(pool_end)
+                    ));
+                }
+                if pool_start < first_client || pool_end > last {
+                    return Err(format!(
+                        "IPv6 client pool {}-{} is outside server network {}/{}",
+                        Ipv6Addr::from(pool_start),
+                        Ipv6Addr::from(pool_end),
+                        server_ip,
+                        self.ipv6_prefix_len
+                    ));
+                }
+                let server_ip = u128::from(server_ip);
+                if (pool_start..=pool_end).contains(&server_ip) {
+                    return Err(format!(
+                        "IPv6 client pool {}-{} contains the server TUN address {}",
+                        Ipv6Addr::from(pool_start),
+                        Ipv6Addr::from(pool_end),
+                        Ipv6Addr::from(server_ip)
+                    ));
+                }
+            }
+            (Some(_), None, None)
+            | (Some(_), None, Some(_))
+            | (Some(_), Some(_), None) => {
+                return Err(
+                    "IPv6 server address and IPv6 client pool start/end must be configured together"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn server_tun_config(&self, name: Option<String>, mtu: u16, zero_copy: bool) -> TunConfig {
+        TunConfig {
+            name,
+            ip: Some(IpAddr::V4(self.server_ip)),
+            netmask: Some(IpAddr::V4(self.server_netmask)),
+            mtu,
+            zero_copy,
+            ip6: self.ipv6_server_ip,
+            prefix6: self.ipv6_server_ip.map(|_| self.ipv6_prefix_len),
+        }
+    }
+
+    fn validate_engine_interface_alignment(
+        &self,
+        interface: &crate::engine::InterfaceConfig,
+    ) -> Result<(), String> {
+        let addresses = interface
+            .client_tunnel_addresses()
+            .map_err(|error| format!("invalid engine interface address contract: {error}"))?;
+        let expected_ipv4_prefix = u32::from(self.server_netmask).leading_ones() as u8;
+        if let Some(ipv4) = addresses.ipv4 {
+            if ipv4.address != self.server_ip || ipv4.prefix != expected_ipv4_prefix {
+                return Err(format!(
+                    "server TUN IPv4 conflict: EngineConfig.interface requests {}/{} but ServerConfig is authoritative at {}/{}",
+                    ipv4.address,
+                    ipv4.prefix,
+                    self.server_ip,
+                    expected_ipv4_prefix
+                ));
+            }
+        }
+        if let Some(ipv6) = addresses.ipv6 {
+            match self.ipv6_server_ip {
+                Some(server_ip)
+                    if ipv6.address == server_ip && ipv6.prefix == self.ipv6_prefix_len => {}
+                Some(server_ip) => {
+                    return Err(format!(
+                        "server TUN IPv6 conflict: EngineConfig.interface requests {}/{} but ServerConfig is authoritative at {}/{}",
+                        ipv6.address, ipv6.prefix, server_ip, self.ipv6_prefix_len
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "server TUN IPv6 conflict: EngineConfig.interface requests {}/{} but ServerConfig disables IPv6",
+                        ipv6.address, ipv6.prefix
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_standalone_tun_config(
+        &self,
+        mut tun_config: TunConfig,
+    ) -> Result<TunConfig, String> {
+        match (tun_config.ip, tun_config.netmask) {
+            (None, None) => {}
+            (Some(IpAddr::V4(ip)), Some(IpAddr::V4(netmask)))
+                if ip == self.server_ip && netmask == self.server_netmask => {}
+            (Some(IpAddr::V4(ip)), Some(IpAddr::V4(netmask))) => {
+                return Err(format!(
+                    "standalone server TUN IPv4 conflict: TunConfig requests {ip}/{netmask} but ServerConfig is authoritative at {}/{}",
+                    self.server_ip, self.server_netmask
+                ));
+            }
+            _ => {
+                return Err(
+                    "standalone server TUN IPv4 address and netmask must be an IPv4 pair matching ServerConfig"
+                        .to_string(),
+                );
+            }
+        }
+
+        match (tun_config.ip6, tun_config.prefix6) {
+            (None, None) => {}
+            (Some(ip), Some(prefix)) => match self.ipv6_server_ip {
+                Some(server_ip) if ip == server_ip && prefix == self.ipv6_prefix_len => {}
+                Some(server_ip) => {
+                    return Err(format!(
+                        "standalone server TUN IPv6 conflict: TunConfig requests {ip}/{prefix} but ServerConfig is authoritative at {server_ip}/{}",
+                        self.ipv6_prefix_len
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "standalone server TUN IPv6 conflict: TunConfig requests {ip}/{prefix} but ServerConfig disables IPv6"
+                    ));
+                }
+            },
+            _ => {
+                return Err(
+                    "standalone server TUN IPv6 address and prefix must be configured together"
+                        .to_string(),
+                );
+            }
+        }
+
+        tun_config.ip = Some(IpAddr::V4(self.server_ip));
+        tun_config.netmask = Some(IpAddr::V4(self.server_netmask));
+        tun_config.ip6 = self.ipv6_server_ip;
+        tun_config.prefix6 = self.ipv6_server_ip.map(|_| self.ipv6_prefix_len);
+        Ok(tun_config)
     }
 }
 

@@ -4670,6 +4670,22 @@ legacy IPv6 pair remains accepted for single-family compatibility. Canonical `tu
 IPv6 sources and malformed prefixes fail validation. The public compatibility `ClientBackend`
 remains intentionally single-family and rejects canonical IPv6 fields instead of dropping them.
 
+Server TUN network authority is separate and explicit. `ServerConfig.server_ip`/
+`server_netmask` and `ipv6_server_ip`/`ipv6_prefix_len` are the single effective IPv4/IPv6
+server-network source for TUN provisioning, Linux routing and firewall subnets,
+`ClientIsolationManager`, live local-address handling, and IPv4/IPv6 client pools. Embedded
+`EngineConfig.interface` addresses are optional compatibility assertions: matching values are
+accepted, while a mismatch fails with typed configuration error before host resources or a TUN
+are opened. Embedded TUN creation projects the validated `ServerConfig` network directly.
+Standalone `TunConfig` address fields follow the same contract: missing addresses inherit the
+validated server network, matching explicit values are retained, and conflicting or malformed
+overrides fail before TUN open. Server startup rejects reversed, out-of-network, or server-owned
+client-pool ranges so firewall subnet, TUN address/prefix, local ICMP/source ownership, and
+allocated client addresses cannot describe different networks.
+Local regression coverage proves matching embedded and standalone projections, conflicting
+IPv4/IPv6 rejection before host/TUN startup, and out-of-network pool rejection. Privileged Linux
+TUN/routing/firewall execution and authenticated live-wire proof remain external runtime gates.
+
 Server-side `client_ipv6` assignment is still consumed only by server routing/session ownership
 and is not currently propagated to the generic client through a tunnel-configuration
 control-plane message. TODO-663 closes the static schema and projection boundary; TODO-866 owns

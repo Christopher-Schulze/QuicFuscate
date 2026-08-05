@@ -35,6 +35,9 @@ impl ServerRuntime {
         server_config: ServerConfig,
     ) -> Result<Self, EngineError> {
         engine_config.validate().map_err(EngineError::from)?;
+        server_config
+            .validate_engine_interface_alignment(&engine_config.interface)
+            .map_err(EngineError::Config)?;
         let assignment_settings = server_config
             .assignment_settings(engine_config.interface.tun_mtu)
             .map_err(EngineError::Config)?;
@@ -95,6 +98,10 @@ impl ServerRuntime {
     ) -> std::io::Result<Self> {
         let mut runtime =
             Self::new(engine_config, server_config.clone()).map_err(std::io::Error::other)?;
+        let tun_config = tun_config
+            .map(|config| server_config.reconcile_standalone_tun_config(config))
+            .transpose()
+            .map_err(std::io::Error::other)?;
         let mut live_state =
             LiveServerState::try_new(server_config.clone()).map_err(std::io::Error::other)?;
         live_state.enable_uring_worker();

@@ -302,18 +302,11 @@ impl ServerHostResources {
         server_config: &ServerConfig,
         pool: Arc<MemoryPool>,
     ) -> Result<Self, EngineError> {
-        let tun_config = TunConfig {
-            name: Some("qfserver0".to_string()),
-            ip: engine_config.interface.tun_ip.or(Some(server_config.server_ip.into())),
-            netmask: engine_config
-                .interface
-                .tun_netmask
-                .or(Some(server_config.server_netmask.into())),
-            mtu: engine_config.interface.tun_mtu,
-            zero_copy: engine_config.interface.zero_copy,
-            ip6: server_config.ipv6_server_ip,
-            prefix6: server_config.ipv6_server_ip.map(|_| server_config.ipv6_prefix_len),
-        };
+        let tun_config = server_config.server_tun_config(
+            Some("qfserver0".to_string()),
+            engine_config.interface.tun_mtu,
+            engine_config.interface.zero_copy,
+        );
 
         #[cfg(target_os = "linux")]
         {
