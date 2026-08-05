@@ -1,8 +1,10 @@
 use clap::Parser;
 use quicfuscate::audit::{
     AuditActor, AuditContext, AuditEventType, AuditLog, AuditOptions, AuditOutcome, AuditSeverity,
-    AuditTarget, MAX_AUDIT_FLUSH_TIMEOUT_MS, MAX_AUDIT_QUEUE_CAPACITY, MAX_AUDIT_SEGMENTS,
-    MAX_AUDIT_SEGMENT_BYTES,
+    AuditTarget, MAX_AUDIT_CLIENT_ID_ENCODED_BYTES, MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES,
+    MAX_AUDIT_FLUSH_TIMEOUT_MS, MAX_AUDIT_MESSAGE_ENCODED_BYTES, MAX_AUDIT_QUEUE_CAPACITY,
+    MAX_AUDIT_REASON_ENCODED_BYTES, MAX_AUDIT_SEGMENTS, MAX_AUDIT_SEGMENT_BYTES,
+    MAX_AUDIT_SOURCE_IP_ENCODED_BYTES,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,7 +53,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if accepted != arguments.events {
         return Err(format!("accepted {accepted} of {} requested events", arguments.events).into());
     }
-    if first_stats.dropped_events != 0 || first_stats.persistence_errors != 0 {
+    if first_stats.dropped_events != 0
+        || first_stats.payload_rejections != 0
+        || first_stats.persistence_errors != 0
+    {
         return Err(format!("unexpected audit worker counters: {first_stats:?}").into());
     }
     AuditLog::verify_chain(&arguments.path)?;
@@ -73,6 +78,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     restarted.shutdown()?;
     let restart_stats = restarted.stats();
     drop(restarted);
+    if restart_stats.dropped_events != 0
+        || restart_stats.payload_rejections != 0
+        || restart_stats.persistence_errors != 0
+    {
+        return Err(format!("unexpected restarted audit counters: {restart_stats:?}").into());
+    }
     AuditLog::verify_chain(&arguments.path)?;
 
     let producer_seconds = producer_elapsed.as_secs_f64();
@@ -109,14 +120,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "max_segment_bytes": MAX_AUDIT_SEGMENT_BYTES,
                 "max_segments": MAX_AUDIT_SEGMENTS,
                 "max_flush_timeout_ms": MAX_AUDIT_FLUSH_TIMEOUT_MS,
+                "max_source_ip_encoded_bytes": MAX_AUDIT_SOURCE_IP_ENCODED_BYTES,
+                "max_client_id_encoded_bytes": MAX_AUDIT_CLIENT_ID_ENCODED_BYTES,
+                "max_reason_encoded_bytes": MAX_AUDIT_REASON_ENCODED_BYTES,
+                "max_message_encoded_bytes": MAX_AUDIT_MESSAGE_ENCODED_BYTES,
+                "max_event_payload_encoded_bytes": MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES,
             },
             "producer_accepted_events_per_second": producer_accepted_per_second,
             "durable_accepted_events_per_second": durable_accepted_per_second,
             "producer_elapsed_micros": producer_elapsed.as_micros(),
             "durable_elapsed_micros": durable_elapsed.as_micros(),
             "dropped_events": first_stats.dropped_events,
+            "payload_rejections": first_stats.payload_rejections,
             "persistence_errors": first_stats.persistence_errors,
             "restart_dropped_events": restart_stats.dropped_events,
+            "restart_payload_rejections": restart_stats.payload_rejections,
             "restart_persistence_errors": restart_stats.persistence_errors,
             "restart_verified": true,
         })

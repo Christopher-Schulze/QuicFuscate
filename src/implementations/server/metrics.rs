@@ -1497,6 +1497,14 @@ impl Metrics {
         out.push_str("# TYPE quicfuscate_audit_dropped_events_total counter\n");
         write_metric!("quicfuscate_audit_dropped_events_total {}\n\n", audit.dropped_events);
         out.push_str(
+            "# HELP quicfuscate_audit_payload_rejections_total Audit events rejected before queue admission because a dynamic payload bound was exceeded\n",
+        );
+        out.push_str("# TYPE quicfuscate_audit_payload_rejections_total counter\n");
+        write_metric!(
+            "quicfuscate_audit_payload_rejections_total {}\n\n",
+            audit.payload_rejections
+        );
+        out.push_str(
             "# HELP quicfuscate_audit_persistence_errors_total Audit writer or durability-checkpoint failures\n",
         );
         out.push_str("# TYPE quicfuscate_audit_persistence_errors_total counter\n");
@@ -1882,6 +1890,7 @@ mod tests {
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"internet\"} 1"));
         assert!(output.contains("quicfuscate_routing_packets_total{outcome=\"drop_malformed\"} 1"));
         assert!(output.contains("quicfuscate_audit_dropped_events_total"));
+        assert!(output.contains("quicfuscate_audit_payload_rejections_total"));
         assert!(output.contains("quicfuscate_audit_persistence_errors_total"));
     }
 

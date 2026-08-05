@@ -41,6 +41,16 @@ pub const MAX_AUDIT_SEGMENTS: usize = 64;
 pub const DEFAULT_AUDIT_FLUSH_TIMEOUT_MS: u64 = 5_000;
 /// Hard upper bound for a flush or shutdown barrier in milliseconds.
 pub const MAX_AUDIT_FLUSH_TIMEOUT_MS: u64 = 60_000;
+/// Maximum JSON-encoded UTF-8 size of the optional source IP string.
+pub const MAX_AUDIT_SOURCE_IP_ENCODED_BYTES: usize = 128;
+/// Maximum JSON-encoded UTF-8 size of the optional client ID string.
+pub const MAX_AUDIT_CLIENT_ID_ENCODED_BYTES: usize = 512;
+/// Maximum JSON-encoded UTF-8 size of the optional machine-readable reason.
+pub const MAX_AUDIT_REASON_ENCODED_BYTES: usize = 512;
+/// Maximum JSON-encoded UTF-8 size of the human-readable message.
+pub const MAX_AUDIT_MESSAGE_ENCODED_BYTES: usize = 8 * 1024;
+/// Maximum combined JSON-encoded UTF-8 size of all dynamic event strings.
+pub const MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES: usize = 8 * 1024;
 const DEFAULT_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(DEFAULT_AUDIT_FLUSH_TIMEOUT_MS);
 const MAX_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(MAX_AUDIT_FLUSH_TIMEOUT_MS);
 const AUDIT_FILE_MODE: u32 = 0o600;
@@ -261,6 +271,7 @@ pub struct AuditEntry {
 pub struct AuditLog {
     sender: Sender<AuditCommand>,
     dropped_events: Arc<AtomicU64>,
+    payload_rejections: Arc<AtomicU64>,
     persistence_errors: Arc<AtomicU64>,
     worker: Mutex<Option<JoinHandle<()>>>,
     flush_timeout: Duration,
@@ -355,6 +366,54 @@ impl AuditOptions {
     }
 }
 
+fn json_encoded_string_len(value: &str) -> usize {
+    let mut length = 2usize;
+    for byte in value.bytes() {
+        length = length.saturating_add(match byte {
+            b'"' | b'\\' | 0x08 | 0x0c | b'\n' | b'\r' | b'\t' => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        });
+    }
+    length
+}
+
+fn validate_audit_payload(
+    source_ip: Option<&str>,
+    client_id: Option<&str>,
+    context: AuditContext<'_>,
+    message: &str,
+) -> Result<(), AuditError> {
+    let fields = [
+        (AuditPayloadField::SourceIp, source_ip, MAX_AUDIT_SOURCE_IP_ENCODED_BYTES),
+        (AuditPayloadField::ClientId, client_id, MAX_AUDIT_CLIENT_ID_ENCODED_BYTES),
+        (AuditPayloadField::Reason, context.reason, MAX_AUDIT_REASON_ENCODED_BYTES),
+        (AuditPayloadField::Message, Some(message), MAX_AUDIT_MESSAGE_ENCODED_BYTES),
+    ];
+    let mut total = 0usize;
+    for (field, value, max_encoded_bytes) in fields {
+        if let Some(value) = value {
+            let encoded_bytes = json_encoded_string_len(value);
+            if encoded_bytes > max_encoded_bytes {
+                return Err(AuditError::PayloadTooLarge {
+                    field,
+                    encoded_bytes,
+                    max_encoded_bytes,
+                });
+            }
+            total = total.saturating_add(encoded_bytes);
+        }
+    }
+    if total > MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES {
+        return Err(AuditError::PayloadTooLarge {
+            field: AuditPayloadField::EventPayload,
+            encoded_bytes: total,
+            max_encoded_bytes: MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES,
+        });
+    }
+    Ok(())
+}
+
 struct PendingAuditEvent {
     event_type: AuditEventType,
     severity: AuditSeverity,
@@ -373,11 +432,35 @@ enum AuditCommand {
     Shutdown,
 }
 
+/// Dynamic audit payload component rejected by the producer-side size guard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditPayloadField {
+    SourceIp,
+    ClientId,
+    Reason,
+    Message,
+    EventPayload,
+}
+
+impl AuditPayloadField {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceIp => "source_ip",
+            Self::ClientId => "client_id",
+            Self::Reason => "reason",
+            Self::Message => "message",
+            Self::EventPayload => "event_payload",
+        }
+    }
+}
+
 /// Observable bounded audit-persistence outcomes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AuditStats {
     /// Events rejected before persistence because the queue was full or disconnected.
     pub dropped_events: u64,
+    /// Events rejected before queue admission because a dynamic payload bound was exceeded.
+    pub payload_rejections: u64,
     /// File write or durability-flush failures observed by the worker.
     pub persistence_errors: u64,
 }
@@ -388,6 +471,7 @@ pub enum AuditError {
     IoError(std::io::Error),
     HashError(String),
     InvalidOptions(String),
+    PayloadTooLarge { field: AuditPayloadField, encoded_bytes: usize, max_encoded_bytes: usize },
     QueueFull,
     WorkerDisconnected,
     WorkerSpawnError(std::io::Error),
@@ -401,6 +485,11 @@ impl std::fmt::Display for AuditError {
             Self::IoError(e) => write!(f, "audit I/O error: {e}"),
             Self::HashError(s) => write!(f, "audit hash error: {s}"),
             Self::InvalidOptions(s) => write!(f, "invalid audit options: {s}"),
+            Self::PayloadTooLarge { field, encoded_bytes, max_encoded_bytes } => write!(
+                f,
+                "audit {field} payload is {encoded_bytes} JSON-encoded bytes, maximum is {max_encoded_bytes}",
+                field = field.as_str()
+            ),
             Self::QueueFull => write!(f, "audit queue is full"),
             Self::WorkerDisconnected => write!(f, "audit worker is disconnected"),
             Self::WorkerSpawnError(e) => write!(f, "audit worker spawn error: {e}"),
@@ -448,6 +537,7 @@ impl AuditLog {
         let rotated_segments = discover_rotated_segments(&path)?;
 
         let dropped_events = Arc::new(AtomicU64::new(0));
+        let payload_rejections = Arc::new(AtomicU64::new(0));
         let persistence_errors = Arc::new(AtomicU64::new(0));
         let (sender, receiver) = crossbeam_channel::bounded(options.queue_capacity);
         let worker_errors = persistence_errors.clone();
@@ -476,6 +566,7 @@ impl AuditLog {
         Ok(Self {
             sender,
             dropped_events,
+            payload_rejections,
             persistence_errors,
             worker: Mutex::new(Some(worker)),
             flush_timeout: options.flush_timeout,
@@ -511,6 +602,10 @@ impl AuditLog {
         context: AuditContext<'_>,
         message: &str,
     ) -> Result<(), AuditError> {
+        if let Err(error) = validate_audit_payload(source_ip, client_id, context, message) {
+            self.payload_rejections.fetch_add(1, Ordering::Relaxed);
+            return Err(error);
+        }
         let event = PendingAuditEvent {
             event_type,
             severity,
@@ -551,6 +646,7 @@ impl AuditLog {
     pub fn stats(&self) -> AuditStats {
         AuditStats {
             dropped_events: self.dropped_events.load(Ordering::Relaxed),
+            payload_rejections: self.payload_rejections.load(Ordering::Relaxed),
             persistence_errors: self.persistence_errors.load(Ordering::Relaxed),
         }
     }
@@ -2053,6 +2149,7 @@ mod tests {
         let log = AuditLog {
             sender,
             dropped_events: Arc::new(AtomicU64::new(0)),
+            payload_rejections: Arc::new(AtomicU64::new(0)),
             persistence_errors: Arc::new(AtomicU64::new(0)),
             worker: Mutex::new(None),
             flush_timeout: Duration::ZERO,
@@ -2062,6 +2159,103 @@ mod tests {
             log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "dropped"),
             Err(AuditError::QueueFull)
         ));
+        assert_eq!(log.stats().dropped_events, 1);
+        drop(receiver);
+        drop(log);
+    }
+
+    #[test]
+    fn test_audit_payload_bounds_use_encoded_utf8_and_control_size() {
+        let context = AuditContext {
+            actor: AuditActor::System,
+            target: AuditTarget::Server,
+            outcome: AuditOutcome::Started,
+            reason: None,
+        };
+        assert_eq!(json_encoded_string_len("\"\\\n\t"), 10);
+        assert_eq!(json_encoded_string_len("é"), 4);
+
+        let source = "s".repeat(MAX_AUDIT_SOURCE_IP_ENCODED_BYTES - 2);
+        assert!(validate_audit_payload(Some(&source), None, context, "m").is_ok());
+        let source_over = "s".repeat(MAX_AUDIT_SOURCE_IP_ENCODED_BYTES - 1);
+        assert!(matches!(
+            validate_audit_payload(Some(&source_over), None, context, "m"),
+            Err(AuditError::PayloadTooLarge { field, encoded_bytes, max_encoded_bytes })
+                if field == AuditPayloadField::SourceIp
+                    && encoded_bytes == MAX_AUDIT_SOURCE_IP_ENCODED_BYTES + 1
+                    && max_encoded_bytes == MAX_AUDIT_SOURCE_IP_ENCODED_BYTES
+        ));
+
+        let client = "c".repeat(MAX_AUDIT_CLIENT_ID_ENCODED_BYTES - 2);
+        assert!(validate_audit_payload(None, Some(&client), context, "m").is_ok());
+        let client_over = "c".repeat(MAX_AUDIT_CLIENT_ID_ENCODED_BYTES - 1);
+        assert!(matches!(
+            validate_audit_payload(None, Some(&client_over), context, "m"),
+            Err(AuditError::PayloadTooLarge { field, encoded_bytes, max_encoded_bytes })
+                if field == AuditPayloadField::ClientId
+                    && encoded_bytes == MAX_AUDIT_CLIENT_ID_ENCODED_BYTES + 1
+                    && max_encoded_bytes == MAX_AUDIT_CLIENT_ID_ENCODED_BYTES
+        ));
+
+        let reason = "r".repeat(MAX_AUDIT_REASON_ENCODED_BYTES - 2);
+        let reason_context = AuditContext { reason: Some(&reason), ..context };
+        assert!(validate_audit_payload(None, None, reason_context, "m").is_ok());
+        let reason_over = "r".repeat(MAX_AUDIT_REASON_ENCODED_BYTES - 1);
+        let reason_over_context = AuditContext { reason: Some(&reason_over), ..context };
+        assert!(matches!(
+            validate_audit_payload(None, None, reason_over_context, "m"),
+            Err(AuditError::PayloadTooLarge { field, encoded_bytes, max_encoded_bytes })
+                if field == AuditPayloadField::Reason
+                    && encoded_bytes == MAX_AUDIT_REASON_ENCODED_BYTES + 1
+                    && max_encoded_bytes == MAX_AUDIT_REASON_ENCODED_BYTES
+        ));
+
+        let message = "m".repeat(MAX_AUDIT_MESSAGE_ENCODED_BYTES - 2);
+        assert!(validate_audit_payload(None, None, context, &message).is_ok());
+        let message_over = "m".repeat(MAX_AUDIT_MESSAGE_ENCODED_BYTES - 1);
+        assert!(matches!(
+            validate_audit_payload(None, None, context, &message_over),
+            Err(AuditError::PayloadTooLarge { field, encoded_bytes, max_encoded_bytes })
+                if field == AuditPayloadField::Message
+                    && encoded_bytes == MAX_AUDIT_MESSAGE_ENCODED_BYTES + 1
+                    && max_encoded_bytes == MAX_AUDIT_MESSAGE_ENCODED_BYTES
+        ));
+
+        let message_at_total_limit = "m".repeat(MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES - 2);
+        assert!(matches!(
+            validate_audit_payload(Some("x"), None, context, &message_at_total_limit),
+            Err(AuditError::PayloadTooLarge { field, encoded_bytes, max_encoded_bytes })
+                if field == AuditPayloadField::EventPayload
+                    && encoded_bytes == MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES + 3
+                    && max_encoded_bytes == MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES
+        ));
+    }
+
+    #[test]
+    fn test_oversized_payload_is_rejected_before_queue_admission() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let log = AuditLog {
+            sender,
+            dropped_events: Arc::new(AtomicU64::new(0)),
+            payload_rejections: Arc::new(AtomicU64::new(0)),
+            persistence_errors: Arc::new(AtomicU64::new(0)),
+            worker: Mutex::new(None),
+            flush_timeout: Duration::ZERO,
+        };
+        let oversized = "x".repeat(MAX_AUDIT_MESSAGE_ENCODED_BYTES - 1);
+        assert!(matches!(
+            log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, &oversized,),
+            Err(AuditError::PayloadTooLarge { field: AuditPayloadField::Message, .. })
+        ));
+        assert_eq!(log.stats().payload_rejections, 1);
+        assert_eq!(log.stats().dropped_events, 0);
+
+        log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "accepted").unwrap();
+        assert!(matches!(
+            log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "full"),
+            Err(AuditError::QueueFull)
+        ));
+        assert_eq!(log.stats().payload_rejections, 1);
         assert_eq!(log.stats().dropped_events, 1);
         drop(receiver);
         drop(log);
