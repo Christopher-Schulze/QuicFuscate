@@ -881,15 +881,22 @@ impl QuicFuscateEngine {
             }
         };
         let firewall_backend = if firewall_required {
-            crate::firewall::resolve_backend(self.config.security.firewall.backend)
-                .map_err(|error| EngineError::Config(error.to_string()))?
+            match crate::firewall::resolve_backend(self.config.security.firewall.backend) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    return Err(self.fail_start(old_state, EngineError::Config(error.to_string())))
+                }
+            }
         } else {
             self.config.security.firewall.backend.unwrap_or_default()
         };
         if self.config.engine.mode == EngineMode::Client && self.config.security.kill_switch {
-            KillSwitch::cleanup_stale_rules().map_err(|error| {
-                EngineError::Internal(format!("Kill switch stale cleanup failed: {error}"))
-            })?;
+            if let Err(error) = KillSwitch::cleanup_stale_rules() {
+                return Err(self.fail_start(
+                    old_state,
+                    EngineError::Internal(format!("Kill switch stale cleanup failed: {error}")),
+                ));
+            }
         }
 
         let start_result = (|| -> Result<(), EngineError> {
@@ -1026,16 +1033,18 @@ impl QuicFuscateEngine {
         })();
 
         if let Err(e) = start_result {
-            self.set_state(EngineState::Error);
-            self.notify_state_change(old_state, EngineState::Error);
-            return Err(e);
+            return Err(self.fail_start(old_state, e));
         }
 
         // Initialize kill switch for client mode if enabled
         if self.config.engine.mode == EngineMode::Client && self.config.security.kill_switch {
             let ks = Arc::new(KillSwitch::new_with_backend(firewall_backend));
-            ks.enable()
-                .map_err(|e| EngineError::Internal(format!("Kill switch enable failed: {}", e)))?;
+            if let Err(error) = ks.enable() {
+                return Err(self.fail_start(
+                    old_state,
+                    EngineError::Internal(format!("Kill switch enable failed: {error}")),
+                ));
+            }
             self.kill_switch = Some(ks);
             log::info!("Kill switch enabled (firewall blocking until VPN connects)");
         }
@@ -1777,6 +1786,12 @@ impl QuicFuscateEngine {
 
     fn set_state(&mut self, state: EngineState) {
         self.state = state;
+    }
+
+    fn fail_start(&mut self, old_state: EngineState, error: EngineError) -> EngineError {
+        self.set_state(EngineState::Error);
+        self.notify_state_change(old_state, EngineState::Error);
+        error
     }
 
     fn notify_state_change(&self, old: EngineState, new: EngineState) {

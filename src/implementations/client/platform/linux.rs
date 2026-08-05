@@ -902,6 +902,7 @@ mod tests {
             & 0o777;
         assert_eq!(mode, RESOLVER_PRIVATE_FILE_MODE);
         platform.release_resolver_lock().expect("release resolver lock");
+        std::fs::remove_file(platform.resolver_paths.lock()).expect("remove resolver lock file");
         std::fs::remove_dir(&directory).expect("remove resolver lock test directory");
     }
 }
