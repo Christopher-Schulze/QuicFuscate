@@ -331,6 +331,10 @@ impl LoginRateLimiter {
 struct SessionStore {
     sessions: HashMap<String, SessionRecord>,
     ttl: Duration,
+    max_sessions: usize,
+    created_total: u64,
+    capacity_rejected_total: u64,
+    expired_total: u64,
 }
 
 #[derive(Debug)]
@@ -345,6 +349,25 @@ struct SessionRecord {
 struct ReplayFingerprint {
     fingerprint: u64,
     seen_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionCreateError {
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct AdminHttpSessionSnapshot {
+    /// Maximum number of live sessions admitted by the store.
+    pub max_sessions: usize,
+    /// Current live session count after expiry pruning.
+    pub active_sessions: usize,
+    /// Successful session creations since store initialization.
+    pub created_total: u64,
+    /// Login attempts rejected because the live-session cap was full.
+    pub capacity_rejected_total: u64,
+    /// Sessions removed by expiry pruning.
+    pub expired_total: u64,
 }
 
 impl SessionRecord {
@@ -367,11 +390,26 @@ impl SessionRecord {
 
 impl SessionStore {
     fn new(ttl: Duration) -> Self {
-        Self { sessions: HashMap::new(), ttl }
+        Self::new_with_capacity(ttl, DEFAULT_ADMIN_WEB_MAX_SESSIONS)
     }
 
-    fn create(&mut self) -> (String, String) {
+    fn new_with_capacity(ttl: Duration, max_sessions: usize) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            ttl,
+            max_sessions,
+            created_total: 0,
+            capacity_rejected_total: 0,
+            expired_total: 0,
+        }
+    }
+
+    fn create(&mut self) -> Result<(String, String), SessionCreateError> {
         self.prune();
+        if self.sessions.len() >= self.max_sessions {
+            self.capacity_rejected_total = self.capacity_rejected_total.saturating_add(1);
+            return Err(SessionCreateError::Capacity);
+        }
         let mut buf = [0u8; 32];
         crate::rng::fill_secure_or_abort(&mut buf, "admin_http::session_id");
         let id = URL_SAFE_NO_PAD.encode(buf);
@@ -393,7 +431,8 @@ impl SessionStore {
                 replay_fingerprint_set: HashSet::new(),
             },
         );
-        (id, csrf_token)
+        self.created_total = self.created_total.saturating_add(1);
+        Ok((id, csrf_token))
     }
 
     fn is_valid(&mut self, id: &str) -> bool {
@@ -477,15 +516,33 @@ impl SessionStore {
         self.sessions.clear();
     }
 
+    fn snapshot(&mut self) -> AdminHttpSessionSnapshot {
+        self.prune();
+        AdminHttpSessionSnapshot {
+            max_sessions: self.max_sessions,
+            active_sessions: self.sessions.len(),
+            created_total: self.created_total,
+            capacity_rejected_total: self.capacity_rejected_total,
+            expired_total: self.expired_total,
+        }
+    }
+
     fn prune(&mut self) {
         self.prune_at(Instant::now());
     }
 
     fn prune_at(&mut self, now: Instant) {
-        self.sessions.retain(|_, record| record.expires_at > now);
-        for record in self.sessions.values_mut() {
-            record.prune_replay_fingerprints(now);
-        }
+        let mut expired_count = 0_u64;
+        self.sessions.retain(|_, record| {
+            if record.expires_at <= now {
+                expired_count = expired_count.saturating_add(1);
+                false
+            } else {
+                record.prune_replay_fingerprints(now);
+                true
+            }
+        });
+        self.expired_total = self.expired_total.saturating_add(expired_count);
     }
 }
 
@@ -523,6 +580,9 @@ pub trait AdminHttpHandler: Send + Sync {
 /// Default maximum number of concurrent admin HTTP connections.
 /// Limits memory pressure and mitigates connection-exhaustion DoS.
 pub const DEFAULT_ADMIN_WEB_MAX_CONNECTIONS: usize = 16;
+
+/// Maximum number of live authenticated admin sessions retained by one server.
+pub const DEFAULT_ADMIN_WEB_MAX_SESSIONS: usize = 256;
 
 /// Hard upper bound for the CLI-configured admin HTTP connection capacity.
 pub const MAX_ADMIN_WEB_CONNECTIONS: usize = 1024;
@@ -1074,6 +1134,10 @@ impl AdminHttpServer {
         self.admission.snapshot()
     }
 
+    pub fn session_snapshot(&self) -> AdminHttpSessionSnapshot {
+        self.sessions.lock().snapshot()
+    }
+
     pub fn operation_diagnostics(&self) -> Arc<AdminHttpOperationDiagnostics> {
         Arc::clone(&self.operation_diagnostics)
     }
@@ -1227,6 +1291,7 @@ impl AdminHttpServer {
                 ADMIN_HTTP_OPERATION_SHUTDOWN_TIMEOUT.as_millis()
             );
         }
+        self.sessions.lock().clear_all();
         Ok(())
     }
 }
@@ -1849,7 +1914,18 @@ fn handle_login(
     }
     let (session_id, csrf_token) = {
         let mut store = sessions.lock();
-        store.create()
+        match store.create() {
+            Ok(session) => session,
+            Err(SessionCreateError::Capacity) => {
+                log_action(peer, "login", "SESSION_CAPACITY", false);
+                return json_response(
+                    429,
+                    &AdminResponse::error(
+                        "Maximum active admin sessions reached. Log out or wait for expiry.",
+                    ),
+                );
+            }
+        }
     };
     let cookie = build_session_cookie(&session_id, &req);
     log_action(peer, "login", &format!("user={}", username), true);

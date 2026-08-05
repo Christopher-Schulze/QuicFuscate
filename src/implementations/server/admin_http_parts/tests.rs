@@ -1141,7 +1141,7 @@ mod tests {
         let failed_target = root.join("auth-target-directory");
         std::fs::create_dir(&failed_target).expect("failure target");
         let sessions = test_sessions();
-        let (session_id, _) = sessions.lock().create();
+        let (session_id, _) = sessions.lock().create().expect("session capacity");
         let response = handle_admin_auth(
             admin_auth_request(r#"{"current_password":"123456","new_password":"abcdef"}"#),
             Some(auth.clone()),
@@ -1171,7 +1171,7 @@ mod tests {
         persist_auth_file(&auth_path, &initial).expect("initial auth persistence");
         let auth = Arc::new(RwLock::new(initial));
         let sessions = test_sessions();
-        let (session_id, _) = sessions.lock().create();
+        let (session_id, _) = sessions.lock().create().expect("session capacity");
         let response = handle_admin_auth(
             admin_auth_request(r#"{"current_password":"123456","new_username":"root"}"#),
             Some(auth.clone()),
@@ -1679,7 +1679,7 @@ mod tests {
     #[test]
     fn session_replay_fingerprints_prune_one_oldest_entry_per_insert() {
         let mut store = SessionStore::new(Duration::from_secs(60));
-        let (session_id, csrf_token) = store.create();
+        let (session_id, csrf_token) = store.create().expect("session capacity");
 
         for fingerprint in 0..=MAX_REPLAY_FINGERPRINTS as u64 {
             assert!(store
@@ -1697,7 +1697,7 @@ mod tests {
     #[test]
     fn session_replay_fingerprint_is_rejected_within_window_and_accepted_after_expiry() {
         let mut store = SessionStore::new(Duration::from_secs(3600));
-        let (session_id, csrf_token) = store.create();
+        let (session_id, csrf_token) = store.create().expect("session capacity");
         let first_seen = Instant::now();
 
         assert!(store
@@ -1731,7 +1731,7 @@ mod tests {
     #[test]
     fn session_replay_fingerprint_history_limit_allows_post_eviction_reuse() {
         let mut store = SessionStore::new(Duration::from_secs(3600));
-        let (session_id, csrf_token) = store.create();
+        let (session_id, csrf_token) = store.create().expect("session capacity");
         let first_seen = Instant::now();
 
         for fingerprint in 0..=MAX_REPLAY_FINGERPRINTS as u64 {
@@ -1754,6 +1754,93 @@ mod tests {
         assert_eq!(record.replay_fingerprint_set.len(), MAX_REPLAY_FINGERPRINTS);
         assert!(record.replay_fingerprint_set.contains(&0));
         assert!(!record.replay_fingerprint_set.contains(&1));
+    }
+
+    #[test]
+    fn session_store_rejects_successful_login_at_capacity_without_eviction() {
+        let auth = test_auth("123", false).expect("auth fixture");
+        let sessions = Arc::new(Mutex::new(SessionStore::new_with_capacity(
+            Duration::from_secs(3600),
+            1,
+        )));
+        let rate_limiter = test_rate_limiter(5);
+        let login_request = || HttpRequest {
+            method: "POST".to_string(),
+            path: "/api/login".to_string(),
+            headers: Vec::new(),
+            body: br#"{"username":"admin","password":"123"}"#.to_vec(),
+        };
+
+        let first = handle_login(
+            login_request(),
+            Some(&auth),
+            Arc::clone(&sessions),
+            Arc::clone(&rate_limiter),
+            None,
+        );
+        assert_eq!(first.status().as_u16(), 200);
+
+        let second = handle_login(
+            login_request(),
+            Some(&auth),
+            Arc::clone(&sessions),
+            Arc::clone(&rate_limiter),
+            None,
+        );
+        assert_eq!(second.status().as_u16(), 429);
+
+        let snapshot = sessions.lock().snapshot();
+        assert_eq!(snapshot.max_sessions, 1);
+        assert_eq!(snapshot.active_sessions, 1);
+        assert_eq!(snapshot.created_total, 1);
+        assert_eq!(snapshot.capacity_rejected_total, 1);
+    }
+
+    #[test]
+    fn session_store_prunes_expired_records_before_capacity_admission() {
+        let mut store = SessionStore::new_with_capacity(Duration::from_secs(60), 1);
+        let (session_id, _) = store.create().expect("session capacity");
+        store
+            .sessions
+            .get_mut(&session_id)
+            .expect("session must exist")
+            .expires_at = Instant::now() - Duration::from_secs(1);
+
+        let expired_snapshot = store.snapshot();
+        assert_eq!(expired_snapshot.active_sessions, 0);
+        assert_eq!(expired_snapshot.expired_total, 1);
+
+        store.create().expect("expired session must release capacity");
+        let admitted_snapshot = store.snapshot();
+        assert_eq!(admitted_snapshot.active_sessions, 1);
+        assert_eq!(admitted_snapshot.created_total, 2);
+        assert_eq!(admitted_snapshot.capacity_rejected_total, 0);
+        assert_eq!(admitted_snapshot.expired_total, 1);
+    }
+
+    #[test]
+    fn admin_http_shutdown_clears_live_sessions() {
+        let server = AdminHttpServer::new(
+            "127.0.0.1:0".parse().expect("address"),
+            std::env::temp_dir(),
+            Some(AdminAuth::new("admin".to_string(), "123".to_string(), false).expect("auth")),
+            None,
+            test_handler(),
+        )
+        .expect("admin server");
+        server.sessions.lock().create().expect("session capacity");
+        assert_eq!(server.session_snapshot().active_sessions, 1);
+        server.shutdown_signal().store(true, Ordering::Relaxed);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(server.run()).expect("shutdown must complete");
+
+        let snapshot = server.session_snapshot();
+        assert_eq!(snapshot.active_sessions, 0);
+        assert_eq!(snapshot.created_total, 1);
     }
 
     #[test]
