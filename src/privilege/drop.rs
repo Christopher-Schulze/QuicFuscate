@@ -620,7 +620,7 @@ fn copy_bounded_cstr_field(
         .position(|byte| *byte == 0)
         .ok_or_else(|| malformed("field has no NUL terminator in the lookup buffer"))?;
     let end = offset + nul_offset + 1;
-    let bytes = buffer[offset..end].iter().map(|byte| *byte).collect::<Vec<_>>();
+    let bytes = buffer[offset..end].iter().copied().collect::<Vec<_>>();
     let value = CStr::from_bytes_with_nul(&bytes)
         .map_err(|_| malformed("field is not a valid NUL-terminated byte string"))?;
     Ok(value.to_string_lossy().into_owned())
