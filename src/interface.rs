@@ -970,13 +970,10 @@ mod linux_tun {
                     "Linux TUN interface name must not be empty",
                 ));
             }
-            if name.as_bytes().len() > 15 {
+            if name.len() > 15 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "Linux TUN interface name is {} bytes; maximum is 15",
-                        name.as_bytes().len()
-                    ),
+                    format!("Linux TUN interface name is {} bytes; maximum is 15", name.len()),
                 ));
             }
             if name.contains('/') || name.contains('\0') {

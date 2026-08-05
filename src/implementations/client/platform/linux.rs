@@ -5,8 +5,7 @@ use super::dns_restore::{
     mark_ownership_written_at, mark_resolv_conf_written, owner_marker, ownership_path,
     path_entry_exists, persist_ownership_at, remove_ownership_at, restore_persisted_resolv_conf_at,
     restore_resolv_conf_at, source_has_owner_marker, verify_resolv_conf_write_target,
-    write_resolver_file_at, ProcessIdentity, ResolvConfRestoreState, ResolverPathKind,
-    RESOLVER_PRIVATE_FILE_MODE,
+    write_resolver_file_at, ProcessIdentity, ResolvConfRestoreState, RESOLVER_PRIVATE_FILE_MODE,
 };
 use super::traits::*;
 use std::fs::File;
@@ -269,13 +268,13 @@ impl LinuxPlatform {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(RESOLVER_PRIVATE_FILE_MODE);
         }
-        let file = options.open(&path).map_err(|error| {
+        let file = options.open(path).map_err(|error| {
             PlatformError::DnsError(format!("open resolver lock {}: {error}", path.display()))
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
                 |error| {
                     PlatformError::DnsError(format!(
                         "secure resolver lock {}: {error}",
@@ -316,7 +315,7 @@ impl LinuxPlatform {
         let source = self.resolver_paths.source();
         let backup = self.resolver_paths.backup();
         let state_path = self.resolver_paths.state();
-        let Some(state) = load_ownership_at(&state_path)? else {
+        let Some(state) = load_ownership_at(state_path)? else {
             if path_entry_exists(backup)? {
                 return Err(PlatformError::DnsError(format!(
                     "orphaned resolver backup {} has no ownership state; refusing to overwrite DNS state",
@@ -342,7 +341,7 @@ impl LinuxPlatform {
                 _ => false,
             };
             if !source_is_still_managed {
-                return remove_ownership_at(&state_path);
+                return remove_ownership_at(state_path);
             }
         }
         if Self::linux_process_start_time(state.owner_pid)? == Some(state.owner_start_time) {
@@ -464,10 +463,10 @@ impl PlatformBackend for LinuxPlatform {
         use std::os::unix::io::IntoRawFd;
 
         if let Some(requested_name) = config.name.as_deref() {
-            if requested_name.is_empty() || requested_name.as_bytes().len() > 15 {
+            if requested_name.is_empty() || requested_name.len() > 15 {
                 return Err(PlatformError::DeviceError(format!(
                     "Interface name must contain 1-15 bytes, got {}",
-                    requested_name.as_bytes().len()
+                    requested_name.len()
                 )));
             }
             if requested_name.contains('/') || requested_name.contains('\0') {

@@ -975,7 +975,7 @@ impl RoutingManager {
                         );
                     }
                     crate::firewall::FirewallBackend::Iptables => {
-                        self.setup_ip6tables(&v6_subnet)?;
+                        self.setup_ip6tables(v6_subnet)?;
                         log::info!(
                             "IPv6 routing configured (ip6tables): {} via {}",
                             v6_subnet,
