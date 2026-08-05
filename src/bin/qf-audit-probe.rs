@@ -1,13 +1,16 @@
 use clap::Parser;
 use quicfuscate::audit::{
     AuditActor, AuditContext, AuditEventType, AuditLog, AuditOptions, AuditOutcome, AuditSeverity,
-    AuditTarget,
+    AuditTarget, MAX_AUDIT_FLUSH_TIMEOUT_MS, MAX_AUDIT_QUEUE_CAPACITY, MAX_AUDIT_SEGMENTS,
+    MAX_AUDIT_SEGMENT_BYTES,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MINIMUM_ACCEPTED_EVENTS_PER_SECOND: f64 = 10_000.0;
+const MAX_AUDIT_PROBE_EVENTS: u64 = 1_000_000;
+const MAX_AUDIT_PROBE_PRODUCERS: usize = 64;
 
 #[derive(Debug, Parser)]
 #[command(name = "qf-audit-probe")]
@@ -25,6 +28,8 @@ struct Arguments {
     max_segment_bytes: u64,
     #[arg(long, default_value_t = 16)]
     max_segments: usize,
+    #[arg(long, default_value_t = 10_000)]
+    flush_timeout_ms: u64,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,12 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_arguments(&arguments)?;
     refuse_existing_audit_set(&arguments.path)?;
 
-    let options = AuditOptions {
-        queue_capacity: arguments.queue_capacity,
-        max_segment_bytes: arguments.max_segment_bytes,
-        max_segments: arguments.max_segments,
-        flush_timeout: Duration::from_secs(10),
-    };
+    let options = audit_options(&arguments);
     let log = Arc::new(AuditLog::open_with_options(arguments.path.clone(), options)?);
     let started = Instant::now();
     let accepted = run_producers(log.clone(), arguments.events, arguments.producers)?;
@@ -95,6 +95,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "path": arguments.path,
             "requested_events": arguments.events,
             "accepted_events": accepted,
+            "audit_options": {
+                "queue_capacity": arguments.queue_capacity,
+                "max_segment_bytes": arguments.max_segment_bytes,
+                "max_segments": arguments.max_segments,
+                "flush_timeout_ms": arguments.flush_timeout_ms,
+                "retained_segment_budget_bytes": arguments.max_segment_bytes.saturating_mul(arguments.max_segments as u64),
+            },
+            "limits": {
+                "max_events": MAX_AUDIT_PROBE_EVENTS,
+                "max_producers": MAX_AUDIT_PROBE_PRODUCERS,
+                "max_queue_capacity": MAX_AUDIT_QUEUE_CAPACITY,
+                "max_segment_bytes": MAX_AUDIT_SEGMENT_BYTES,
+                "max_segments": MAX_AUDIT_SEGMENTS,
+                "max_flush_timeout_ms": MAX_AUDIT_FLUSH_TIMEOUT_MS,
+            },
             "producer_accepted_events_per_second": producer_accepted_per_second,
             "durable_accepted_events_per_second": durable_accepted_per_second,
             "producer_elapsed_micros": producer_elapsed.as_micros(),
@@ -113,19 +128,25 @@ fn validate_arguments(arguments: &Arguments) -> Result<(), String> {
     if arguments.events == 0 {
         return Err("--events must be greater than zero".to_string());
     }
+    if arguments.events > MAX_AUDIT_PROBE_EVENTS {
+        return Err(format!("--events must not exceed {MAX_AUDIT_PROBE_EVENTS}"));
+    }
     if arguments.producers == 0 {
         return Err("--producers must be greater than zero".to_string());
     }
-    if arguments.queue_capacity == 0 {
-        return Err("--queue-capacity must be greater than zero".to_string());
+    if arguments.producers > MAX_AUDIT_PROBE_PRODUCERS {
+        return Err(format!("--producers must not exceed {MAX_AUDIT_PROBE_PRODUCERS}"));
     }
-    if arguments.max_segment_bytes == 0 {
-        return Err("--max-segment-bytes must be greater than zero".to_string());
+    audit_options(arguments).validate().map_err(|error| error.to_string())
+}
+
+fn audit_options(arguments: &Arguments) -> AuditOptions {
+    AuditOptions {
+        queue_capacity: arguments.queue_capacity,
+        max_segment_bytes: arguments.max_segment_bytes,
+        max_segments: arguments.max_segments,
+        flush_timeout: Duration::from_millis(arguments.flush_timeout_ms),
     }
-    if arguments.max_segments == 0 {
-        return Err("--max-segments must be greater than zero".to_string());
-    }
-    Ok(())
 }
 
 fn refuse_existing_audit_set(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -194,4 +215,83 @@ fn run_producers(
         accepted += producer.join().map_err(|_| "audit producer thread panicked")??;
     }
     Ok(accepted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn default_arguments() -> Arguments {
+        Arguments {
+            path: PathBuf::from("/tmp/qf-audit-probe-test.jsonl"),
+            events: 10_000,
+            producers: 4,
+            queue_capacity: 16_384,
+            max_segment_bytes: 1_048_576,
+            max_segments: 16,
+            flush_timeout_ms: 10_000,
+        }
+    }
+
+    #[test]
+    fn probe_accepts_exact_shared_and_probe_limits() {
+        let mut arguments = default_arguments();
+        arguments.events = MAX_AUDIT_PROBE_EVENTS;
+        arguments.producers = MAX_AUDIT_PROBE_PRODUCERS;
+        arguments.queue_capacity = MAX_AUDIT_QUEUE_CAPACITY;
+        arguments.max_segment_bytes = MAX_AUDIT_SEGMENT_BYTES;
+        arguments.max_segments = MAX_AUDIT_SEGMENTS;
+        arguments.flush_timeout_ms = MAX_AUDIT_FLUSH_TIMEOUT_MS;
+        assert!(validate_arguments(&arguments).is_ok());
+    }
+
+    #[test]
+    fn probe_rejects_values_above_every_limit_before_opening_a_log() {
+        let mut arguments = default_arguments();
+        arguments.events = MAX_AUDIT_PROBE_EVENTS + 1;
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = default_arguments();
+        arguments.producers = MAX_AUDIT_PROBE_PRODUCERS + 1;
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = default_arguments();
+        arguments.queue_capacity = MAX_AUDIT_QUEUE_CAPACITY + 1;
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = default_arguments();
+        arguments.max_segment_bytes = MAX_AUDIT_SEGMENT_BYTES + 1;
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = default_arguments();
+        arguments.max_segments = MAX_AUDIT_SEGMENTS + 1;
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = default_arguments();
+        arguments.flush_timeout_ms = MAX_AUDIT_FLUSH_TIMEOUT_MS + 1;
+        assert!(validate_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn probe_rejects_zero_values() {
+        let mut arguments = default_arguments();
+        arguments.events = 0;
+        assert!(validate_arguments(&arguments).is_err());
+        arguments.events = 1;
+        arguments.producers = 0;
+        assert!(validate_arguments(&arguments).is_err());
+        arguments.producers = 1;
+        arguments.queue_capacity = 0;
+        assert!(validate_arguments(&arguments).is_err());
+        arguments.queue_capacity = 1;
+        arguments.max_segment_bytes = 0;
+        assert!(validate_arguments(&arguments).is_err());
+        arguments.max_segment_bytes = 1;
+        arguments.max_segments = 0;
+        assert!(validate_arguments(&arguments).is_err());
+        arguments.max_segments = 1;
+        arguments.flush_timeout_ms = 0;
+        assert!(validate_arguments(&arguments).is_err());
+    }
 }

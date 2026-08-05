@@ -18,6 +18,12 @@ use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
+
+use crate::audit::{
+    AuditOptions, DEFAULT_AUDIT_FLUSH_TIMEOUT_MS, DEFAULT_AUDIT_MAX_SEGMENTS,
+    DEFAULT_AUDIT_MAX_SEGMENT_BYTES, DEFAULT_AUDIT_QUEUE_CAPACITY,
+};
 
 // Re-export existing configs for aggregation
 pub use crate::fec::FecConfig;
@@ -1171,37 +1177,29 @@ pub struct AuditConfig {
 impl Default for AuditConfig {
     fn default() -> Self {
         Self {
-            queue_capacity: 16_384,
-            max_segment_bytes: 64 * 1024 * 1024,
-            max_segments: 8,
-            flush_timeout_ms: 5_000,
+            queue_capacity: DEFAULT_AUDIT_QUEUE_CAPACITY,
+            max_segment_bytes: DEFAULT_AUDIT_MAX_SEGMENT_BYTES,
+            max_segments: DEFAULT_AUDIT_MAX_SEGMENTS,
+            flush_timeout_ms: DEFAULT_AUDIT_FLUSH_TIMEOUT_MS,
         }
     }
 }
 
 impl AuditConfig {
+    /// Convert the validated configuration shape to the audit-owner options.
+    pub fn to_audit_options(&self) -> AuditOptions {
+        AuditOptions {
+            queue_capacity: self.queue_capacity,
+            max_segment_bytes: self.max_segment_bytes,
+            max_segments: self.max_segments,
+            flush_timeout: Duration::from_millis(self.flush_timeout_ms),
+        }
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
-        if self.queue_capacity == 0 {
-            return Err(ConfigError::Validation(
-                "audit.queue_capacity must be greater than zero".to_string(),
-            ));
-        }
-        if self.max_segment_bytes == 0 {
-            return Err(ConfigError::Validation(
-                "audit.max_segment_bytes must be greater than zero".to_string(),
-            ));
-        }
-        if self.max_segments == 0 || self.max_segments > 1024 {
-            return Err(ConfigError::Validation(
-                "audit.max_segments must be between 1 and 1024".to_string(),
-            ));
-        }
-        if self.flush_timeout_ms == 0 {
-            return Err(ConfigError::Validation(
-                "audit.flush_timeout_ms must be greater than zero".to_string(),
-            ));
-        }
-        Ok(())
+        self.to_audit_options()
+            .validate()
+            .map_err(|error| ConfigError::Validation(error.to_string()))
     }
 }
 
@@ -2057,21 +2055,46 @@ mode = "roaming"
     }
 
     #[test]
-    fn audit_configuration_rejects_unbounded_or_zero_values() {
+    fn audit_configuration_enforces_shared_audit_option_bounds() {
+        use crate::audit::{
+            MAX_AUDIT_FLUSH_TIMEOUT_MS, MAX_AUDIT_QUEUE_CAPACITY, MAX_AUDIT_SEGMENTS,
+            MAX_AUDIT_SEGMENT_BYTES,
+        };
+
         let mut config = EngineConfig::default();
         config.audit.queue_capacity = 0;
+        assert!(config.validate().is_err());
+
+        config.audit.queue_capacity = MAX_AUDIT_QUEUE_CAPACITY;
+        assert!(config.validate().is_ok());
+        config.audit.queue_capacity = MAX_AUDIT_QUEUE_CAPACITY + 1;
         assert!(config.validate().is_err());
 
         config.audit.queue_capacity = 1;
         config.audit.max_segment_bytes = 0;
         assert!(config.validate().is_err());
 
+        config.audit.max_segment_bytes = MAX_AUDIT_SEGMENT_BYTES;
+        assert!(config.validate().is_ok());
+        config.audit.max_segment_bytes = MAX_AUDIT_SEGMENT_BYTES + 1;
+        assert!(config.validate().is_err());
+
         config.audit.max_segment_bytes = 1;
-        config.audit.max_segments = 1025;
+        config.audit.max_segments = 0;
+        assert!(config.validate().is_err());
+
+        config.audit.max_segments = MAX_AUDIT_SEGMENTS;
+        assert!(config.validate().is_ok());
+        config.audit.max_segments = MAX_AUDIT_SEGMENTS + 1;
         assert!(config.validate().is_err());
 
         config.audit.max_segments = 1;
         config.audit.flush_timeout_ms = 0;
+        assert!(config.validate().is_err());
+
+        config.audit.flush_timeout_ms = MAX_AUDIT_FLUSH_TIMEOUT_MS;
+        assert!(config.validate().is_ok());
+        config.audit.flush_timeout_ms = MAX_AUDIT_FLUSH_TIMEOUT_MS + 1;
         assert!(config.validate().is_err());
     }
 

@@ -25,10 +25,24 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEFAULT_AUDIT_QUEUE_CAPACITY: usize = 16_384;
-const DEFAULT_AUDIT_MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_AUDIT_MAX_SEGMENTS: usize = 8;
-const DEFAULT_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default number of accepted commands waiting for the single audit writer.
+pub const DEFAULT_AUDIT_QUEUE_CAPACITY: usize = 16_384;
+/// Hard upper bound for the audit command queue.
+pub const MAX_AUDIT_QUEUE_CAPACITY: usize = 65_536;
+/// Default active audit segment size before rotation.
+pub const DEFAULT_AUDIT_MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard upper bound for one configured audit segment.
+pub const MAX_AUDIT_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
+/// Default number of retained audit segments, including the active segment.
+pub const DEFAULT_AUDIT_MAX_SEGMENTS: usize = 8;
+/// Hard upper bound for the retained segment count, including the active segment.
+pub const MAX_AUDIT_SEGMENTS: usize = 64;
+/// Default flush timeout in milliseconds.
+pub const DEFAULT_AUDIT_FLUSH_TIMEOUT_MS: u64 = 5_000;
+/// Hard upper bound for a flush or shutdown barrier in milliseconds.
+pub const MAX_AUDIT_FLUSH_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(DEFAULT_AUDIT_FLUSH_TIMEOUT_MS);
+const MAX_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(MAX_AUDIT_FLUSH_TIMEOUT_MS);
 const AUDIT_FILE_MODE: u32 = 0o600;
 
 /// Security-relevant audit event types.
@@ -314,6 +328,33 @@ impl Default for AuditOptions {
     }
 }
 
+impl AuditOptions {
+    /// Validate every resource and lifecycle bound before acquiring ownership.
+    pub fn validate(&self) -> Result<(), AuditError> {
+        if self.queue_capacity == 0 || self.queue_capacity > MAX_AUDIT_QUEUE_CAPACITY {
+            return Err(AuditError::InvalidOptions(format!(
+                "audit.queue_capacity must be between 1 and {MAX_AUDIT_QUEUE_CAPACITY}"
+            )));
+        }
+        if self.max_segment_bytes == 0 || self.max_segment_bytes > MAX_AUDIT_SEGMENT_BYTES {
+            return Err(AuditError::InvalidOptions(format!(
+                "audit.max_segment_bytes must be between 1 and {MAX_AUDIT_SEGMENT_BYTES}"
+            )));
+        }
+        if self.max_segments == 0 || self.max_segments > MAX_AUDIT_SEGMENTS {
+            return Err(AuditError::InvalidOptions(format!(
+                "audit.max_segments must be between 1 and {MAX_AUDIT_SEGMENTS}"
+            )));
+        }
+        if self.flush_timeout.is_zero() || self.flush_timeout > MAX_AUDIT_FLUSH_TIMEOUT {
+            return Err(AuditError::InvalidOptions(format!(
+                "audit.flush_timeout must be between 1 and {MAX_AUDIT_FLUSH_TIMEOUT_MS} milliseconds"
+            )));
+        }
+        Ok(())
+    }
+}
+
 struct PendingAuditEvent {
     event_type: AuditEventType,
     severity: AuditSeverity,
@@ -346,6 +387,7 @@ pub struct AuditStats {
 pub enum AuditError {
     IoError(std::io::Error),
     HashError(String),
+    InvalidOptions(String),
     QueueFull,
     WorkerDisconnected,
     WorkerSpawnError(std::io::Error),
@@ -358,6 +400,7 @@ impl std::fmt::Display for AuditError {
         match self {
             Self::IoError(e) => write!(f, "audit I/O error: {e}"),
             Self::HashError(s) => write!(f, "audit hash error: {s}"),
+            Self::InvalidOptions(s) => write!(f, "invalid audit options: {s}"),
             Self::QueueFull => write!(f, "audit queue is full"),
             Self::WorkerDisconnected => write!(f, "audit worker is disconnected"),
             Self::WorkerSpawnError(e) => write!(f, "audit worker spawn error: {e}"),
@@ -380,21 +423,7 @@ impl AuditLog {
 
     /// Create a new audit owner with explicit bounded persistence settings.
     pub fn open_with_options(path: PathBuf, options: AuditOptions) -> Result<Self, AuditError> {
-        if options.queue_capacity == 0 {
-            return Err(AuditError::HashError(
-                "audit queue capacity must be greater than zero".into(),
-            ));
-        }
-        if options.max_segment_bytes == 0 {
-            return Err(AuditError::HashError(
-                "audit maximum segment size must be greater than zero".into(),
-            ));
-        }
-        if options.max_segments == 0 {
-            return Err(AuditError::HashError(
-                "audit retained segment count must be greater than zero".into(),
-            ));
-        }
+        options.validate()?;
         if path.exists() {
             let metadata = std::fs::symlink_metadata(&path).map_err(AuditError::IoError)?;
             if !metadata.file_type().is_file() {
@@ -847,6 +876,7 @@ pub fn init_audit_log_with_options(
     owner: Option<(u32, u32)>,
     options: AuditOptions,
 ) -> Result<(), AuditError> {
+    options.validate()?;
     if let Some(p) = path {
         // Track whether *we* created the parent dir so we only chown
         // directories we own — never pre-existing system dirs like /var/log.
@@ -1615,6 +1645,85 @@ mod tests {
         let error = unix_timestamp(UNIX_EPOCH - Duration::from_secs(1)).unwrap_err();
         assert!(error.to_string().contains("before Unix epoch"));
         assert_eq!(unix_timestamp(UNIX_EPOCH).unwrap(), 0);
+    }
+
+    #[test]
+    fn audit_options_accept_exact_bounds_and_reject_out_of_range_values() {
+        let mut options = AuditOptions {
+            queue_capacity: 1,
+            max_segment_bytes: 1,
+            max_segments: 1,
+            flush_timeout: Duration::from_millis(1),
+        };
+        assert!(options.validate().is_ok());
+
+        options.queue_capacity = MAX_AUDIT_QUEUE_CAPACITY;
+        options.max_segment_bytes = MAX_AUDIT_SEGMENT_BYTES;
+        options.max_segments = MAX_AUDIT_SEGMENTS;
+        options.flush_timeout = Duration::from_millis(MAX_AUDIT_FLUSH_TIMEOUT_MS);
+        assert!(options.validate().is_ok());
+
+        options.queue_capacity = MAX_AUDIT_QUEUE_CAPACITY + 1;
+        assert!(matches!(options.validate(), Err(AuditError::InvalidOptions(_))));
+        options.queue_capacity = MAX_AUDIT_QUEUE_CAPACITY;
+        options.max_segment_bytes = MAX_AUDIT_SEGMENT_BYTES + 1;
+        assert!(matches!(options.validate(), Err(AuditError::InvalidOptions(_))));
+        options.max_segment_bytes = MAX_AUDIT_SEGMENT_BYTES;
+        options.max_segments = MAX_AUDIT_SEGMENTS + 1;
+        assert!(matches!(options.validate(), Err(AuditError::InvalidOptions(_))));
+        options.max_segments = MAX_AUDIT_SEGMENTS;
+        options.flush_timeout = Duration::from_millis(MAX_AUDIT_FLUSH_TIMEOUT_MS + 1);
+        assert!(matches!(options.validate(), Err(AuditError::InvalidOptions(_))));
+
+        options.flush_timeout = Duration::ZERO;
+        assert!(matches!(options.validate(), Err(AuditError::InvalidOptions(_))));
+    }
+
+    #[test]
+    fn invalid_options_are_rejected_before_audit_path_creation() {
+        let base = AuditOptions::default();
+        let cases = [
+            ("queue", AuditOptions { queue_capacity: MAX_AUDIT_QUEUE_CAPACITY + 1, ..base }),
+            (
+                "segment-bytes",
+                AuditOptions { max_segment_bytes: MAX_AUDIT_SEGMENT_BYTES + 1, ..base },
+            ),
+            ("segments", AuditOptions { max_segments: MAX_AUDIT_SEGMENTS + 1, ..base }),
+            (
+                "timeout",
+                AuditOptions {
+                    flush_timeout: Duration::from_millis(MAX_AUDIT_FLUSH_TIMEOUT_MS + 1),
+                    ..base
+                },
+            ),
+        ];
+
+        for (name, options) in cases {
+            let path = audit_test_path(name);
+            remove_audit_set(&path);
+            assert!(matches!(
+                AuditLog::open_with_options(path.clone(), options),
+                Err(AuditError::InvalidOptions(_))
+            ));
+            assert!(!path.exists(), "invalid {name} options must not create a file");
+        }
+    }
+
+    #[test]
+    fn invalid_options_are_rejected_before_audit_parent_creation() {
+        let parent = audit_test_path("invalid-parent");
+        let path = parent.join("audit.jsonl");
+        let options = AuditOptions {
+            queue_capacity: MAX_AUDIT_QUEUE_CAPACITY + 1,
+            ..AuditOptions::default()
+        };
+        let _ = std::fs::remove_dir_all(&parent);
+
+        assert!(matches!(
+            init_audit_log_with_options(Some(path), None, options),
+            Err(AuditError::InvalidOptions(_))
+        ));
+        assert!(!parent.exists(), "invalid options must not create the parent");
     }
 
     #[test]

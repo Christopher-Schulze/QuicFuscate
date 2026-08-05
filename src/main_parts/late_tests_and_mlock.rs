@@ -908,12 +908,7 @@ async fn run_server(
         privilege_target
             .as_ref()
             .map(|identity| (identity.uid, identity.gid)),
-        quicfuscate::audit::AuditOptions {
-            queue_capacity: audit_config.queue_capacity,
-            max_segment_bytes: audit_config.max_segment_bytes,
-            max_segments: audit_config.max_segments,
-            flush_timeout: std::time::Duration::from_millis(audit_config.flush_timeout_ms),
-        },
+        audit_config.to_audit_options(),
     )
     .map_err(|error| std::io::Error::other(error.to_string()))?;
     let _audit_flush_guard = quicfuscate::audit::AuditFlushGuard::new();

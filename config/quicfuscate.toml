@@ -493,11 +493,14 @@ max_files = 5
 
 [audit]
 # Accepted events wait in one bounded queue; producers never perform file I/O.
+# queue_capacity: 1..=65536 (default 16384).
 queue_capacity = 16384
 # Active NDJSON segment rotation and total retained segment count.
+# max_segment_bytes: 1..=134217728; max_segments: 1..=64, including the active segment.
 max_segment_bytes = 67108864
 max_segments = 8
 # Bounded enqueue plus durability-acknowledgement wait during flush/shutdown.
+# flush_timeout_ms: 1..=60000. Nominal retained-segment budget is at most 8 GiB.
 flush_timeout_ms = 5000
 
 # ==============================================================================
