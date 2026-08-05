@@ -1602,6 +1602,13 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Scope boundary:** Existing-file payload/read limits remain TODO-727; terminal producer admission after writer failure remains TODO-726; shutdown admission ordering is closed by TODO-815. Schema-v1/v2 parsing and hash-chain verification are unchanged.
 - **Final proof:** The exact pushed Omega checkout at `495d12d8f5ac4450fc281560298f9179bd4d5607` passes the complete library suite `2403/2403`, strict library Clippy with `-D warnings`, and the audit probe `3/3`. The post-push Graphify manifest remains explicitly fail-closed at `scripts/out/audits/graphify-20260805T165808Z/graphify-evidence.json`.
 
+## Implementation Reconciliation (2026-08-05, TODO-815 audit shutdown admission)
+
+- **Lifecycle:** `AuditLog` combines `Open`/`Closing`/`Closed` with an in-flight producer count. The CAS from `Open` to `Closing` is the shutdown linearization point; shutdown drains admitted producers before its final flush barrier and writer join.
+- **Outcome and telemetry:** Admission losers receive `WorkerClosing` or `WorkerDisconnected`; lifecycle rejections are counted as dropped events without changing payload-rejection or persistence-error classification. The existing metrics and documentation now describe the full bounded admission contract.
+- **Proof:** Focused audit coverage is `28/28`, metrics `1/1`, probe `3/3`, local full library `2381/2381`, and Omega full library `2405/2405`; strict library Clippy passes locally and on Omega. Local format/diff checks pass; Omega has no installed `rustfmt` component.
+- **Ownership:** TODO-675 retains synchronous durability/cancellation and sticky shutdown-error semantics; TODO-726 retains writer-terminal admission; TODO-727/TODO-728 retain existing-file reads and path binding; TODO-849 retains broader privilege identity and cross-platform FFI work.
+
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 
 - `AuditOptions::validate()` is the shared owner for queue capacity `1..=65,536`, active segment bytes `1..=128 MiB`, retained segments `1..=64`, and flush/shutdown timeout `1..=60,000 ms`. `AuditConfig::to_audit_options()` and `AuditLog::open_with_options()` use that contract before resource acquisition.
