@@ -42,6 +42,9 @@ impl ServerRuntime {
             .assignment_settings(engine_config.interface.tun_mtu)
             .map_err(EngineError::Config)?;
         server_config.auth_policy.validate().map_err(EngineError::Config)?;
+        server_config.dns_admission.validate().map_err(|error| {
+            EngineError::Config(format!("server DNS admission configuration: {error}"))
+        })?;
         server_config.validate_revocation_retention().map_err(EngineError::Config)?;
         server_config.bandwidth_policy.validate().map_err(EngineError::Config)?;
         server_config.validate_downlink_scheduler().map_err(EngineError::Config)?;
@@ -869,7 +872,7 @@ impl ServerRuntime {
         let tun_enable = runtime_config.tun_enable;
         let fingerprint_profile = runtime_config.transport.fingerprint_profile();
         let dns_upstream_resolvers = Arc::new(self.server_config.dns_servers.clone());
-        let dns_intercept_admission = Arc::new(DnsInterceptAdmission::new());
+        let dns_intercept_admission = self.live().live_state.dns_admission();
         if self.state != ServerState::Stopped {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,

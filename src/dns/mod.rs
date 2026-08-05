@@ -9,8 +9,11 @@
 //! parsed, and either resolved via DoH (client-side) or forwarded to
 //! upstream DNS servers (server-side).
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Default upstream DoH providers used when none are configured.
 pub const DEFAULT_DOH_UPSTREAM: &[&str] =
@@ -27,6 +30,392 @@ const DNS_FLAG_CD: u16 = 0x0010;
 const DNS_RCODE_NOERROR: u8 = 0;
 const DNS_RCODE_SERVFAIL: u8 = 2;
 const DNS_RCODE_NXDOMAIN: u8 = 3;
+
+const DNS_ADMISSION_MAX_IN_FLIGHT: usize = 4_096;
+const DNS_ADMISSION_MAX_RATE: u64 = 10_000_000;
+const DNS_ADMISSION_MAX_BURST: u64 = 20_000_000;
+const DNS_ADMISSION_MAX_IDENTITIES: usize = 65_536;
+const DNS_ADMISSION_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const DNS_ADMISSION_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Validated admission policy for DNS work at a concrete caller boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DnsAdmissionConfig {
+    /// Maximum number of upstream exchanges executing concurrently.
+    pub max_in_flight: usize,
+    /// Aggregate accepted query rate across all identities and upstreams.
+    pub global_pps: u64,
+    /// Aggregate initial token burst.
+    pub global_burst: u64,
+    /// Sustained rate for one session or source identity.
+    pub per_identity_pps: u64,
+    /// Initial token burst for one session or source identity.
+    pub per_identity_burst: u64,
+    /// Hard cap on retained identity buckets.
+    pub max_identities: usize,
+    /// Idle duration after which an identity bucket can be removed.
+    pub idle_timeout: Duration,
+}
+
+impl DnsAdmissionConfig {
+    /// Conservative policy for a local client listener shared by localhost processes.
+    pub const fn client_default() -> Self {
+        Self {
+            max_in_flight: 2,
+            global_pps: 100,
+            global_burst: 200,
+            per_identity_pps: 100,
+            per_identity_burst: 200,
+            max_identities: 4,
+            idle_timeout: Duration::from_secs(60),
+        }
+    }
+
+    /// Existing server intercept policy with explicit bounded identity state.
+    pub const fn server_default() -> Self {
+        Self {
+            max_in_flight: 128,
+            global_pps: 2_000,
+            global_burst: 4_000,
+            per_identity_pps: 100,
+            per_identity_burst: 200,
+            max_identities: 1_024,
+            idle_timeout: Duration::from_secs(60),
+        }
+    }
+
+    /// Validate all admission values before a listener or server runtime starts.
+    pub fn validate(&self) -> Result<(), DnsAdmissionConfigError> {
+        if self.max_in_flight == 0 {
+            return Err(DnsAdmissionConfigError::Zero("max_in_flight"));
+        }
+        if self.max_in_flight > DNS_ADMISSION_MAX_IN_FLIGHT {
+            return Err(DnsAdmissionConfigError::TooLarge {
+                field: "max_in_flight",
+                value: self.max_in_flight as u64,
+                maximum: DNS_ADMISSION_MAX_IN_FLIGHT as u64,
+            });
+        }
+        if self.global_pps == 0 {
+            return Err(DnsAdmissionConfigError::Zero("global_pps"));
+        }
+        if self.global_pps > DNS_ADMISSION_MAX_RATE {
+            return Err(DnsAdmissionConfigError::TooLarge {
+                field: "global_pps",
+                value: self.global_pps,
+                maximum: DNS_ADMISSION_MAX_RATE,
+            });
+        }
+        if self.global_burst == 0 {
+            return Err(DnsAdmissionConfigError::Zero("global_burst"));
+        }
+        if self.global_burst > DNS_ADMISSION_MAX_BURST {
+            return Err(DnsAdmissionConfigError::TooLarge {
+                field: "global_burst",
+                value: self.global_burst,
+                maximum: DNS_ADMISSION_MAX_BURST,
+            });
+        }
+        if self.per_identity_pps == 0 {
+            return Err(DnsAdmissionConfigError::Zero("per_identity_pps"));
+        }
+        if self.per_identity_pps > DNS_ADMISSION_MAX_RATE {
+            return Err(DnsAdmissionConfigError::TooLarge {
+                field: "per_identity_pps",
+                value: self.per_identity_pps,
+                maximum: DNS_ADMISSION_MAX_RATE,
+            });
+        }
+        if self.per_identity_burst == 0 {
+            return Err(DnsAdmissionConfigError::Zero("per_identity_burst"));
+        }
+        if self.per_identity_burst > DNS_ADMISSION_MAX_BURST {
+            return Err(DnsAdmissionConfigError::TooLarge {
+                field: "per_identity_burst",
+                value: self.per_identity_burst,
+                maximum: DNS_ADMISSION_MAX_BURST,
+            });
+        }
+        if self.max_identities == 0 {
+            return Err(DnsAdmissionConfigError::Zero("max_identities"));
+        }
+        if self.max_identities > DNS_ADMISSION_MAX_IDENTITIES {
+            return Err(DnsAdmissionConfigError::TooLarge {
+                field: "max_identities",
+                value: self.max_identities as u64,
+                maximum: DNS_ADMISSION_MAX_IDENTITIES as u64,
+            });
+        }
+        if self.idle_timeout.is_zero() {
+            return Err(DnsAdmissionConfigError::Zero("idle_timeout"));
+        }
+        if self.idle_timeout > DNS_ADMISSION_MAX_IDLE_TIMEOUT {
+            return Err(DnsAdmissionConfigError::TooLarge {
+                field: "idle_timeout_secs",
+                value: self.idle_timeout.as_secs(),
+                maximum: DNS_ADMISSION_MAX_IDLE_TIMEOUT.as_secs(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for DnsAdmissionConfig {
+    fn default() -> Self {
+        Self::client_default()
+    }
+}
+
+/// Configuration validation failure for DNS admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DnsAdmissionConfigError {
+    Zero(&'static str),
+    TooLarge { field: &'static str, value: u64, maximum: u64 },
+}
+
+impl std::fmt::Display for DnsAdmissionConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Zero(field) => write!(f, "DNS admission {field} must be nonzero"),
+            Self::TooLarge { field, value, maximum } => {
+                write!(f, "DNS admission {field}={value} exceeds maximum {maximum}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DnsAdmissionConfigError {}
+
+/// Identity used to scope DNS admission state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DnsAdmissionIdentity {
+    /// Authenticated server session. This is the fairness unit for live TUN DNS.
+    Session(u64),
+    /// Source address fallback where no authenticated session identity exists.
+    Source(IpAddr),
+}
+
+/// Reason why a DNS query was rejected before upstream work started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DnsAdmissionReject {
+    InFlight,
+    GlobalRate,
+    IdentityRate,
+    IdentityCapacity,
+}
+
+impl DnsAdmissionReject {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InFlight => "in_flight",
+            Self::GlobalRate => "global_rate",
+            Self::IdentityRate => "identity_rate",
+            Self::IdentityCapacity => "identity_capacity",
+        }
+    }
+}
+
+impl std::fmt::Display for DnsAdmissionReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Read-only DNS admission counters and current bounded state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DnsAdmissionSnapshot {
+    pub max_in_flight: usize,
+    pub active_in_flight: usize,
+    pub global_pps: u64,
+    pub global_burst: u64,
+    pub per_identity_pps: u64,
+    pub per_identity_burst: u64,
+    pub max_identities: usize,
+    pub tracked_identities: usize,
+    pub accepted: u64,
+    pub rejected_in_flight: u64,
+    pub rejected_global_rate: u64,
+    pub rejected_identity_rate: u64,
+    pub rejected_identity_capacity: u64,
+}
+
+struct DnsTokenBucket {
+    tokens: u64,
+    capacity: u64,
+    refill_rate: u64,
+    last_refill: Instant,
+    last_seen: Instant,
+}
+
+impl DnsTokenBucket {
+    fn new(rate: u64, capacity: u64, now: Instant) -> Self {
+        Self { tokens: capacity, capacity, refill_rate: rate, last_refill: now, last_seen: now }
+    }
+
+    fn consume(&mut self, now: Instant) -> bool {
+        self.last_seen = now;
+        let elapsed = now.saturating_duration_since(self.last_refill);
+        if elapsed >= Duration::from_secs(1) {
+            let refill = (elapsed.as_micros() * u128::from(self.refill_rate))
+                .checked_div(1_000_000)
+                .unwrap_or(u128::from(self.capacity));
+            let refill = u64::try_from(refill).unwrap_or(u64::MAX);
+            self.tokens = self.tokens.saturating_add(refill).min(self.capacity);
+            self.last_refill = now;
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
+
+    fn is_idle(&self, now: Instant, timeout: Duration) -> bool {
+        now.saturating_duration_since(self.last_seen) >= timeout
+    }
+}
+
+struct DnsAdmissionState {
+    global: DnsTokenBucket,
+    identities: HashMap<DnsAdmissionIdentity, DnsTokenBucket>,
+    last_prune: Instant,
+}
+
+impl DnsAdmissionState {
+    fn new(config: DnsAdmissionConfig) -> Self {
+        let now = Instant::now();
+        Self {
+            global: DnsTokenBucket::new(config.global_pps, config.global_burst, now),
+            identities: HashMap::new(),
+            last_prune: now,
+        }
+    }
+
+    fn prune_if_due(&mut self, now: Instant, timeout: Duration) {
+        let interval = timeout.min(DNS_ADMISSION_PRUNE_INTERVAL);
+        if now.saturating_duration_since(self.last_prune) < interval {
+            return;
+        }
+        self.last_prune = now;
+        self.identities.retain(|_, bucket| !bucket.is_idle(now, timeout));
+    }
+
+    fn prune_all(&mut self, now: Instant, timeout: Duration) -> usize {
+        let before = self.identities.len();
+        self.identities.retain(|_, bucket| !bucket.is_idle(now, timeout));
+        self.last_prune = now;
+        before.saturating_sub(self.identities.len())
+    }
+}
+
+/// Shared, bounded admission owner for DNS forwarding work.
+pub struct DnsAdmission {
+    config: DnsAdmissionConfig,
+    in_flight: Arc<tokio::sync::Semaphore>,
+    state: parking_lot::Mutex<DnsAdmissionState>,
+    accepted: AtomicU64,
+    rejected_in_flight: AtomicU64,
+    rejected_global_rate: AtomicU64,
+    rejected_identity_rate: AtomicU64,
+    rejected_identity_capacity: AtomicU64,
+}
+
+/// Permit held for the complete upstream exchange and response construction.
+pub struct DnsAdmissionPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl DnsAdmission {
+    pub fn try_new(config: DnsAdmissionConfig) -> Result<Self, DnsAdmissionConfigError> {
+        config.validate()?;
+        Ok(Self {
+            config,
+            in_flight: Arc::new(tokio::sync::Semaphore::new(config.max_in_flight)),
+            state: parking_lot::Mutex::new(DnsAdmissionState::new(config)),
+            accepted: AtomicU64::new(0),
+            rejected_in_flight: AtomicU64::new(0),
+            rejected_global_rate: AtomicU64::new(0),
+            rejected_identity_rate: AtomicU64::new(0),
+            rejected_identity_capacity: AtomicU64::new(0),
+        })
+    }
+
+    pub fn try_acquire(
+        &self,
+        identity: DnsAdmissionIdentity,
+    ) -> Result<DnsAdmissionPermit, DnsAdmissionReject> {
+        let permit = Arc::clone(&self.in_flight)
+            .try_acquire_owned()
+            .map_err(|_| self.reject(DnsAdmissionReject::InFlight))?;
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        state.prune_if_due(now, self.config.idle_timeout);
+        if !state.identities.contains_key(&identity)
+            && state.identities.len() >= self.config.max_identities
+        {
+            drop(state);
+            drop(permit);
+            return Err(self.reject(DnsAdmissionReject::IdentityCapacity));
+        }
+        if !state.global.consume(now) {
+            drop(state);
+            drop(permit);
+            return Err(self.reject(DnsAdmissionReject::GlobalRate));
+        }
+        let bucket = state.identities.entry(identity).or_insert_with(|| {
+            DnsTokenBucket::new(self.config.per_identity_pps, self.config.per_identity_burst, now)
+        });
+        if !bucket.consume(now) {
+            drop(state);
+            drop(permit);
+            return Err(self.reject(DnsAdmissionReject::IdentityRate));
+        }
+        drop(state);
+        self.accepted.fetch_add(1, Ordering::Relaxed);
+        Ok(DnsAdmissionPermit { _permit: permit })
+    }
+
+    pub fn remove_identity(&self, identity: DnsAdmissionIdentity) -> bool {
+        self.state.lock().identities.remove(&identity).is_some()
+    }
+
+    pub fn prune_idle(&self) -> usize {
+        let now = Instant::now();
+        self.state.lock().prune_all(now, self.config.idle_timeout)
+    }
+
+    pub fn snapshot(&self) -> DnsAdmissionSnapshot {
+        let state = self.state.lock();
+        let active_in_flight =
+            self.config.max_in_flight.saturating_sub(self.in_flight.available_permits());
+        DnsAdmissionSnapshot {
+            max_in_flight: self.config.max_in_flight,
+            active_in_flight,
+            global_pps: self.config.global_pps,
+            global_burst: self.config.global_burst,
+            per_identity_pps: self.config.per_identity_pps,
+            per_identity_burst: self.config.per_identity_burst,
+            max_identities: self.config.max_identities,
+            tracked_identities: state.identities.len(),
+            accepted: self.accepted.load(Ordering::Relaxed),
+            rejected_in_flight: self.rejected_in_flight.load(Ordering::Relaxed),
+            rejected_global_rate: self.rejected_global_rate.load(Ordering::Relaxed),
+            rejected_identity_rate: self.rejected_identity_rate.load(Ordering::Relaxed),
+            rejected_identity_capacity: self.rejected_identity_capacity.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reject(&self, reason: DnsAdmissionReject) -> DnsAdmissionReject {
+        let counter = match reason {
+            DnsAdmissionReject::InFlight => &self.rejected_in_flight,
+            DnsAdmissionReject::GlobalRate => &self.rejected_global_rate,
+            DnsAdmissionReject::IdentityRate => &self.rejected_identity_rate,
+            DnsAdmissionReject::IdentityCapacity => &self.rejected_identity_capacity,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        reason
+    }
+}
 
 /// DNS query types (RFC 1035 §3.2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +676,9 @@ pub struct DnsProxyConfig {
     pub use_doh: bool,
     /// Listen port for the DNS proxy (default 53).
     pub listen_port: u16,
+    /// Admission policy owned by the active listener caller. The forwarding
+    /// helper does not consume this policy because it has no caller identity.
+    pub admission: DnsAdmissionConfig,
     /// Cached shared DoH HTTP client (lazily initialized). Cloning the
     /// config clones the `Arc`, sharing the underlying connection pool.
     doh_client: Arc<parking_lot::Mutex<Option<reqwest::Client>>>,
@@ -306,6 +698,7 @@ impl DnsProxyConfig {
             upstream_resolvers: Vec::new(),
             use_doh: true,
             listen_port: 53,
+            admission: DnsAdmissionConfig::client_default(),
             doh_client: Arc::new(parking_lot::Mutex::new(None)),
         };
         config.prepare_doh_client()?;
@@ -354,6 +747,7 @@ impl Default for DnsProxyConfig {
             upstream_resolvers: DEFAULT_DNS_UPSTREAM.to_vec(),
             use_doh: true,
             listen_port: 53,
+            admission: DnsAdmissionConfig::server_default(),
             doh_client: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
@@ -622,6 +1016,7 @@ pub enum DnsProxyError {
     UpstreamError(String),
     ParseError(String),
     ConfigError(String),
+    AdmissionRejected(DnsAdmissionReject),
 }
 
 impl std::fmt::Display for DnsProxyError {
@@ -632,6 +1027,7 @@ impl std::fmt::Display for DnsProxyError {
             Self::UpstreamError(s) => write!(f, "DNS upstream error: {s}"),
             Self::ParseError(s) => write!(f, "DNS parse error: {s}"),
             Self::ConfigError(s) => write!(f, "DNS configuration error: {s}"),
+            Self::AdmissionRejected(reason) => write!(f, "DNS admission rejected: {reason}"),
         }
     }
 }
@@ -650,6 +1046,10 @@ impl From<std::io::Error> for DnsProxyError {
 /// 1. Parses the DNS query.
 /// 2. Forwards to upstream resolver (server-side) or DoH (client-side).
 /// 3. Returns the response packet ready to send back to the client.
+///
+/// Admission is intentionally owned by the active caller boundary, not this
+/// helper: the helper has no stable session or source identity and retained
+/// direct callers must not silently share an implicit global bucket.
 pub async fn process_dns_query(
     pkt: &[u8],
     config: &DnsProxyConfig,
@@ -686,6 +1086,22 @@ pub async fn process_dns_query(
             }
         }
     }
+}
+
+/// Process a DNS query at a caller boundary with explicit admission identity.
+///
+/// This is the supported public entry point for callers that own an upstream
+/// exchange. The permit spans parsing, upstream fallback, and response
+/// construction. [`process_dns_query`] remains a low-level forwarding
+/// primitive for callers that have already performed admission elsewhere.
+pub async fn process_dns_query_with_admission(
+    pkt: &[u8],
+    config: &DnsProxyConfig,
+    admission: &DnsAdmission,
+    identity: DnsAdmissionIdentity,
+) -> Result<Vec<u8>, DnsProxyError> {
+    let _permit = admission.try_acquire(identity).map_err(DnsProxyError::AdmissionRejected)?;
+    process_dns_query(pkt, config).await
 }
 
 #[cfg(test)]
@@ -949,5 +1365,18 @@ mod tests {
         assert!(result.is_ok(), "DoH failure should return SERVFAIL, not error");
         let response = result.unwrap();
         assert_eq!(response[3] & 0x0F, DNS_RCODE_SERVFAIL, "response should be SERVFAIL");
+    }
+
+    #[test]
+    fn dns_admission_defaults_are_explicit_and_invalid_values_fail_closed() {
+        let client = DnsAdmissionConfig::client_default();
+        assert_eq!(client.max_in_flight, 2);
+        assert_eq!(client.global_pps, 100);
+        assert_eq!(client.max_identities, 4);
+        assert!(client.validate().is_ok());
+
+        let mut invalid = client;
+        invalid.max_identities = 0;
+        assert!(matches!(invalid.validate(), Err(DnsAdmissionConfigError::Zero("max_identities"))));
     }
 }

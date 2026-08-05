@@ -203,6 +203,11 @@ pub struct Metrics {
     pub masque_downlink_response_drop_terminal_transport_error: AtomicU64,
     pub masque_downlink_response_drop_shutdown: AtomicU64,
     pub dns_intercept_dropped: AtomicU64,
+    pub dns_intercept_admitted: AtomicU64,
+    pub dns_intercept_admission_rejected_in_flight: AtomicU64,
+    pub dns_intercept_admission_rejected_global_rate: AtomicU64,
+    pub dns_intercept_admission_rejected_identity_rate: AtomicU64,
+    pub dns_intercept_admission_rejected_identity_capacity: AtomicU64,
     pub dns_intercept_worker_closed_before_spawn: AtomicU64,
     pub dns_intercept_worker_response_queued: AtomicU64,
     pub dns_intercept_worker_empty_response: AtomicU64,
@@ -330,6 +335,11 @@ impl Metrics {
             masque_downlink_response_drop_terminal_transport_error: AtomicU64::new(0),
             masque_downlink_response_drop_shutdown: AtomicU64::new(0),
             dns_intercept_dropped: AtomicU64::new(0),
+            dns_intercept_admitted: AtomicU64::new(0),
+            dns_intercept_admission_rejected_in_flight: AtomicU64::new(0),
+            dns_intercept_admission_rejected_global_rate: AtomicU64::new(0),
+            dns_intercept_admission_rejected_identity_rate: AtomicU64::new(0),
+            dns_intercept_admission_rejected_identity_capacity: AtomicU64::new(0),
             dns_intercept_worker_closed_before_spawn: AtomicU64::new(0),
             dns_intercept_worker_response_queued: AtomicU64::new(0),
             dns_intercept_worker_empty_response: AtomicU64::new(0),
@@ -463,6 +473,29 @@ impl Metrics {
     pub fn record_dns_intercept_drop(&self) {
         self.dns_intercept_dropped.fetch_add(1, Ordering::Relaxed);
         self.record_rate_limited();
+    }
+
+    pub fn record_dns_intercept_admitted(&self) {
+        self.dns_intercept_admitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_dns_intercept_admission_reject(&self, reason: crate::dns::DnsAdmissionReject) {
+        self.record_dns_intercept_drop();
+        let counter = match reason {
+            crate::dns::DnsAdmissionReject::InFlight => {
+                &self.dns_intercept_admission_rejected_in_flight
+            }
+            crate::dns::DnsAdmissionReject::GlobalRate => {
+                &self.dns_intercept_admission_rejected_global_rate
+            }
+            crate::dns::DnsAdmissionReject::IdentityRate => {
+                &self.dns_intercept_admission_rejected_identity_rate
+            }
+            crate::dns::DnsAdmissionReject::IdentityCapacity => {
+                &self.dns_intercept_admission_rejected_identity_capacity
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_dns_intercept_worker_event(&self, event: DnsInterceptWorkerEvent) {
@@ -1066,6 +1099,34 @@ impl Metrics {
             "quicfuscate_dns_intercept_dropped_total {}\n\n",
             self.dns_intercept_dropped.load(Ordering::Relaxed)
         );
+        out.push_str(
+            "# HELP quicfuscate_dns_intercept_admission_events_total DNS admission outcomes before upstream work\n",
+        );
+        out.push_str("# TYPE quicfuscate_dns_intercept_admission_events_total counter\n");
+        for (event, value) in [
+            ("admitted", self.dns_intercept_admitted.load(Ordering::Relaxed)),
+            (
+                "rejected_in_flight",
+                self.dns_intercept_admission_rejected_in_flight.load(Ordering::Relaxed),
+            ),
+            (
+                "rejected_global_rate",
+                self.dns_intercept_admission_rejected_global_rate.load(Ordering::Relaxed),
+            ),
+            (
+                "rejected_identity_rate",
+                self.dns_intercept_admission_rejected_identity_rate.load(Ordering::Relaxed),
+            ),
+            (
+                "rejected_identity_capacity",
+                self.dns_intercept_admission_rejected_identity_capacity.load(Ordering::Relaxed),
+            ),
+        ] {
+            write_metric!(
+                "quicfuscate_dns_intercept_admission_events_total{{event=\"{event}\"}} {value}\n"
+            );
+        }
+        out.push('\n');
         out.push_str(
             "# HELP quicfuscate_dns_intercept_worker_events_total DNS intercept worker lifecycle and terminal outcomes\n",
         );
@@ -1951,6 +2012,26 @@ mod tests {
 
         assert!(output.contains("quicfuscate_dns_intercept_dropped_total 1"));
         assert_eq!(metrics.dns_intercept_dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn dns_intercept_admission_outcomes_are_exported_by_reason() {
+        let metrics = Metrics::new();
+        metrics.record_dns_intercept_admitted();
+        metrics.record_dns_intercept_admission_reject(crate::dns::DnsAdmissionReject::InFlight);
+        metrics.record_dns_intercept_admission_reject(crate::dns::DnsAdmissionReject::GlobalRate);
+
+        let output = metrics.export();
+
+        assert!(output
+            .contains("quicfuscate_dns_intercept_admission_events_total{event=\"admitted\"} 1"));
+        assert!(output.contains(
+            "quicfuscate_dns_intercept_admission_events_total{event=\"rejected_in_flight\"} 1"
+        ));
+        assert!(output.contains(
+            "quicfuscate_dns_intercept_admission_events_total{event=\"rejected_global_rate\"} 1"
+        ));
+        assert_eq!(metrics.dns_intercept_dropped.load(Ordering::Relaxed), 2);
     }
 
     #[test]

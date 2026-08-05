@@ -287,94 +287,6 @@ fn resolve_dns_query_via_upstream(query: &[u8], upstream_resolvers: &[Ipv4Addr])
     )
 }
 
-const DNS_INTERCEPT_MAX_IN_FLIGHT: usize = 128;
-const DNS_INTERCEPT_GLOBAL_PPS: u64 = 2_000;
-const DNS_INTERCEPT_GLOBAL_BURST: u64 = 4_000;
-const DNS_INTERCEPT_SOURCE_PPS: u64 = 100;
-const DNS_INTERCEPT_SOURCE_BURST: u64 = 200;
-const DNS_INTERCEPT_BUCKET_IDLE: Duration = Duration::from_secs(60);
-const DNS_INTERCEPT_BUCKET_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DnsInterceptAdmissionDrop {
-    InFlight,
-    GlobalRate,
-    SourceRate,
-}
-
-struct DnsInterceptAdmission {
-    in_flight: Arc<tokio::sync::Semaphore>,
-    global_rate: GlobalRateLimiter,
-    source_rate: RateLimiter,
-    last_prune: Mutex<Instant>,
-}
-
-impl DnsInterceptAdmission {
-    fn new() -> Self {
-        Self::with_limits(
-            DNS_INTERCEPT_MAX_IN_FLIGHT,
-            DNS_INTERCEPT_GLOBAL_PPS,
-            DNS_INTERCEPT_GLOBAL_BURST,
-            DNS_INTERCEPT_SOURCE_PPS,
-            DNS_INTERCEPT_SOURCE_BURST,
-        )
-    }
-
-    fn with_limits(
-        max_in_flight: usize,
-        global_pps: u64,
-        global_burst: u64,
-        source_pps: u64,
-        source_burst: u64,
-    ) -> Self {
-        Self {
-            in_flight: Arc::new(tokio::sync::Semaphore::new(max_in_flight)),
-            global_rate: GlobalRateLimiter::new(global_pps, global_burst),
-            source_rate: RateLimiter::new(RateLimitConfig {
-                max_pps: source_pps,
-                max_bps: 0,
-                refill_interval: Duration::from_secs(1),
-                burst_size: source_burst,
-            }),
-            last_prune: Mutex::new(Instant::now()),
-        }
-    }
-
-    fn try_acquire(
-        &self,
-        source_ip: IpAddr,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, DnsInterceptAdmissionDrop> {
-        self.prune_idle_if_due();
-        let permit = self
-            .in_flight
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| DnsInterceptAdmissionDrop::InFlight)?;
-        if !self.global_rate.check() {
-            return Err(DnsInterceptAdmissionDrop::GlobalRate);
-        }
-        if !self.source_rate.check_packet_ip(source_ip) {
-            return Err(DnsInterceptAdmissionDrop::SourceRate);
-        }
-        Ok(permit)
-    }
-
-    fn prune_idle_if_due(&self) {
-        let should_prune = {
-            let mut last_prune = self.last_prune.lock();
-            if last_prune.elapsed() < DNS_INTERCEPT_BUCKET_PRUNE_INTERVAL {
-                false
-            } else {
-                *last_prune = Instant::now();
-                true
-            }
-        };
-        if should_prune {
-            self.source_rate.prune_idle(DNS_INTERCEPT_BUCKET_IDLE);
-        }
-    }
-}
-
 const DNS_INTERCEPT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 const DNS_INTERCEPT_WORKER_REAP_INTERVAL: Duration = Duration::from_millis(2);
 const DNS_INTERCEPT_WORKER_QUEUED_CANCEL_TIMEOUT: Duration = Duration::from_millis(25);
@@ -626,13 +538,18 @@ fn publish_dns_intercept_response(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The live MASQUE callback passes each ownership boundary explicitly"
+)]
 fn spawn_dns_intercept(
     pkt: &[u8],
     upstream_resolvers: Arc<Vec<Ipv4Addr>>,
     downlink_queue: Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
     metrics: Arc<Metrics>,
-    admission: Arc<DnsInterceptAdmission>,
+    admission: Arc<crate::dns::DnsAdmission>,
     workers: Arc<DnsInterceptWorkerOwner>,
+    session_id: Option<SessionId>,
     fingerprint_profile: OsFingerprintProfile,
 ) -> bool {
     let parsed = parse_ipv4_udp_dns_query(pkt)
@@ -692,16 +609,20 @@ fn spawn_dns_intercept(
     else {
         return false;
     };
-    let permit = match admission.try_acquire(source_ip) {
+    let identity = session_id
+        .map(|id| crate::dns::DnsAdmissionIdentity::Session(id.as_u64()))
+        .unwrap_or(crate::dns::DnsAdmissionIdentity::Source(source_ip));
+    let permit = match admission.try_acquire(identity) {
         Ok(permit) => permit,
         Err(reason) => {
-            metrics.record_dns_intercept_drop();
+            metrics.record_dns_intercept_admission_reject(reason);
             log::debug!(
-                "DNS intercept dropped before upstream resolution for {source_ip}: {reason:?}"
+                "DNS intercept dropped before upstream resolution for {identity:?}: {reason}"
             );
             return true;
         }
     };
+    metrics.record_dns_intercept_admitted();
     let worker_state = Arc::clone(&workers.state);
     let spawn_result = workers.spawn(move || {
         let _permit = permit;
@@ -747,13 +668,24 @@ mod dns_intercept_admission_tests {
 
     #[test]
     fn admission_bounds_concurrent_upstream_work() {
-        let admission = DnsInterceptAdmission::with_limits(1, 100, 100, 100, 100);
-        let source = IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2));
+        let admission = crate::dns::DnsAdmission::try_new(crate::dns::DnsAdmissionConfig {
+            max_in_flight: 1,
+            global_pps: 100,
+            global_burst: 100,
+            per_identity_pps: 100,
+            per_identity_burst: 100,
+            max_identities: 4,
+            idle_timeout: Duration::from_secs(60),
+        })
+        .expect("admission config");
+        let source = crate::dns::DnsAdmissionIdentity::Source(IpAddr::V4(Ipv4Addr::new(
+            10, 8, 0, 2,
+        )));
         let permit = admission.try_acquire(source).expect("first exchange must be admitted");
 
         assert!(matches!(
             admission.try_acquire(source),
-            Err(DnsInterceptAdmissionDrop::InFlight)
+            Err(crate::dns::DnsAdmissionReject::InFlight)
         ));
 
         drop(permit);
@@ -762,31 +694,106 @@ mod dns_intercept_admission_tests {
 
     #[test]
     fn admission_applies_global_and_per_source_caps() {
-        let per_source = DnsInterceptAdmission::with_limits(4, 100, 100, 1, 1);
-        let first_source = IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2));
-        let second_source = IpAddr::V4(Ipv4Addr::new(10, 8, 0, 3));
+        let per_source = crate::dns::DnsAdmission::try_new(crate::dns::DnsAdmissionConfig {
+            max_in_flight: 4,
+            global_pps: 100,
+            global_burst: 100,
+            per_identity_pps: 1,
+            per_identity_burst: 1,
+            max_identities: 4,
+            idle_timeout: Duration::from_secs(60),
+        })
+        .expect("admission config");
+        let first_source = crate::dns::DnsAdmissionIdentity::Source(IpAddr::V4(Ipv4Addr::new(
+            10, 8, 0, 2,
+        )));
+        let second_source = crate::dns::DnsAdmissionIdentity::Source(IpAddr::V4(Ipv4Addr::new(
+            10, 8, 0, 3,
+        )));
         let permit = per_source
             .try_acquire(first_source)
             .expect("first source query must be admitted");
         drop(permit);
         assert!(matches!(
             per_source.try_acquire(first_source),
-            Err(DnsInterceptAdmissionDrop::SourceRate)
+            Err(crate::dns::DnsAdmissionReject::IdentityRate)
         ));
         let other_permit = per_source
             .try_acquire(second_source)
             .expect("a different source must have its own bucket");
         drop(other_permit);
 
-        let global = DnsInterceptAdmission::with_limits(4, 1, 1, 100, 100);
+        let global = crate::dns::DnsAdmission::try_new(crate::dns::DnsAdmissionConfig {
+            max_in_flight: 4,
+            global_pps: 1,
+            global_burst: 1,
+            per_identity_pps: 100,
+            per_identity_burst: 100,
+            max_identities: 4,
+            idle_timeout: Duration::from_secs(60),
+        })
+        .expect("admission config");
         let permit = global
             .try_acquire(first_source)
             .expect("global burst must admit the first query");
         drop(permit);
         assert!(matches!(
             global.try_acquire(second_source),
-            Err(DnsInterceptAdmissionDrop::GlobalRate)
+            Err(crate::dns::DnsAdmissionReject::GlobalRate)
         ));
+    }
+
+    #[test]
+    fn admission_scopes_sessions_independently_and_cleans_released_state() {
+        let admission = crate::dns::DnsAdmission::try_new(crate::dns::DnsAdmissionConfig {
+            max_in_flight: 4,
+            global_pps: 100,
+            global_burst: 100,
+            per_identity_pps: 1,
+            per_identity_burst: 1,
+            max_identities: 1,
+            idle_timeout: Duration::from_secs(60),
+        })
+        .expect("admission config");
+        let first = crate::dns::DnsAdmissionIdentity::Session(41);
+        let replacement = crate::dns::DnsAdmissionIdentity::Session(42);
+        let permit = admission.try_acquire(first).expect("first session query");
+        drop(permit);
+
+        assert!(matches!(
+            admission.try_acquire(replacement),
+            Err(crate::dns::DnsAdmissionReject::IdentityCapacity)
+        ));
+        assert!(admission.remove_identity(first));
+        let permit = admission
+            .try_acquire(replacement)
+            .expect("replacement session must not inherit released state");
+        drop(permit);
+        assert_eq!(admission.snapshot().tracked_identities, 1);
+    }
+
+    #[test]
+    fn admission_uses_session_identity_as_the_fairness_unit() {
+        let admission = crate::dns::DnsAdmission::try_new(crate::dns::DnsAdmissionConfig {
+            max_in_flight: 4,
+            global_pps: 100,
+            global_burst: 100,
+            per_identity_pps: 1,
+            per_identity_burst: 1,
+            max_identities: 4,
+            idle_timeout: Duration::from_secs(60),
+        })
+        .expect("admission config");
+        let first = crate::dns::DnsAdmissionIdentity::Session(41);
+        let second = crate::dns::DnsAdmissionIdentity::Session(42);
+        let permit = admission.try_acquire(first).expect("first session query");
+        drop(permit);
+        assert!(matches!(
+            admission.try_acquire(first),
+            Err(crate::dns::DnsAdmissionReject::IdentityRate)
+        ));
+        let permit = admission.try_acquire(second).expect("second session query");
+        drop(permit);
     }
 }
 

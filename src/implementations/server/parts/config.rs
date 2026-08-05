@@ -1,3 +1,5 @@
+use crate::dns::DnsAdmissionConfig;
+
 #[derive(Clone, Copy, Debug)]
 struct ServerTunIps {
     ipv4: Ipv4Addr,
@@ -46,6 +48,8 @@ pub struct ServerConfig {
     pub server_netmask: Ipv4Addr,
     /// DNS servers to push
     pub dns_servers: Vec<Ipv4Addr>,
+    /// Validated admission policy for intercepted DNS upstream work.
+    pub dns_admission: DnsAdmissionConfig,
     /// WAN interface for NAT
     pub wan_interface: String,
     /// Concrete firewall backend resolved once before server startup.
@@ -193,6 +197,7 @@ impl Default for ServerConfig {
             server_ip: Ipv4Addr::new(10, 8, 0, 1),
             server_netmask: Ipv4Addr::new(255, 255, 255, 0),
             dns_servers: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
+            dns_admission: DnsAdmissionConfig::server_default(),
             wan_interface: "eth0".to_string(),
             firewall_backend: crate::firewall::FirewallBackend::Iptables,
             ipv6_pool_start: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x0002)),
@@ -477,6 +482,7 @@ pub fn server_config_from_listen_addr(
     )?;
     config.validate_revocation_retention()?;
     config.auth_policy = load_auth_policy_config_from_env()?;
+    config.dns_admission = load_dns_admission_config_from_env(config.dns_admission)?;
     config.bandwidth_policy = load_bandwidth_policy_from_env()?;
     (
         config.downlink_scheduler_rate_bytes_per_second,
@@ -525,6 +531,42 @@ fn load_downlink_scheduler_from_env() -> Result<(u64, u64), String> {
         parse_auth_policy_env_u64("QUICFUSCATE_SERVER_DOWNLINK_BURST_BYTES", 0)?;
     validate_downlink_scheduler_pair(rate, burst)?;
     Ok((rate, burst))
+}
+
+fn load_dns_admission_config_from_env(
+    defaults: DnsAdmissionConfig,
+) -> Result<DnsAdmissionConfig, String> {
+    let config = DnsAdmissionConfig {
+        max_in_flight: usize::try_from(parse_auth_policy_env_u64(
+            "QUICFUSCATE_DNS_MAX_IN_FLIGHT",
+            defaults.max_in_flight as u64,
+        )?)
+        .map_err(|_| "QUICFUSCATE_DNS_MAX_IN_FLIGHT exceeds usize".to_string())?,
+        global_pps: parse_auth_policy_env_u64("QUICFUSCATE_DNS_GLOBAL_PPS", defaults.global_pps)?,
+        global_burst: parse_auth_policy_env_u64(
+            "QUICFUSCATE_DNS_GLOBAL_BURST",
+            defaults.global_burst,
+        )?,
+        per_identity_pps: parse_auth_policy_env_u64(
+            "QUICFUSCATE_DNS_PER_CLIENT_PPS",
+            defaults.per_identity_pps,
+        )?,
+        per_identity_burst: parse_auth_policy_env_u64(
+            "QUICFUSCATE_DNS_PER_CLIENT_BURST",
+            defaults.per_identity_burst,
+        )?,
+        max_identities: usize::try_from(parse_auth_policy_env_u64(
+            "QUICFUSCATE_DNS_MAX_IDENTITIES",
+            defaults.max_identities as u64,
+        )?)
+        .map_err(|_| "QUICFUSCATE_DNS_MAX_IDENTITIES exceeds usize".to_string())?,
+        idle_timeout: Duration::from_secs(parse_auth_policy_env_u64(
+            "QUICFUSCATE_DNS_BUCKET_IDLE_SECS",
+            defaults.idle_timeout.as_secs(),
+        )?),
+    };
+    config.validate().map_err(|error| error.to_string())?;
+    Ok(config)
 }
 
 fn load_bandwidth_policy_from_env() -> Result<BandwidthPolicy, String> {

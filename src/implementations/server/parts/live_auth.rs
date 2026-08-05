@@ -1060,7 +1060,7 @@ async fn process_live_server_client_datagram(
     assignment_settings: ServerAssignmentSettings,
     tun_enable: bool,
     dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
-    dns_intercept_admission: Arc<DnsInterceptAdmission>,
+    dns_intercept_admission: Arc<crate::dns::DnsAdmission>,
     dns_intercept_workers: Arc<DnsInterceptWorkerOwner>,
     tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     tun_notify: Arc<tokio::sync::Notify>,
@@ -1189,6 +1189,7 @@ async fn process_live_server_client_datagram(
                         Arc::clone(&masque_metrics),
                         Arc::clone(&dns_admission),
                         Arc::clone(&dns_workers),
+                        session_id,
                         fingerprint_profile,
                     ) {
                         return;

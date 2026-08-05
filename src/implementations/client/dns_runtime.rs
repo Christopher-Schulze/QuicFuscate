@@ -10,7 +10,10 @@ use tokio::task::JoinHandle;
 
 use super::platform::{self, DnsConfig, PlatformBackend};
 use super::runtime::SharedRuntime;
-use crate::dns::{process_dns_query, DnsProxyConfig};
+use crate::dns::{
+    process_dns_query_with_admission, DnsAdmission, DnsAdmissionIdentity, DnsAdmissionSnapshot,
+    DnsProxyConfig, DnsProxyError,
+};
 use crate::engine::{EngineConfig, EngineError};
 
 const DNS_PACKET_LIMIT: usize = 4096;
@@ -21,6 +24,7 @@ const LOCAL_DNS_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub struct ClientDnsRuntime {
     shutdown: Arc<Notify>,
     tasks: Vec<JoinHandle<()>>,
+    admission: Arc<DnsAdmission>,
     platform: Box<dyn PlatformBackend>,
     dns_configured: bool,
 }
@@ -90,6 +94,10 @@ impl ClientDnsRuntime {
                 "client DNS proxy does not accept plain DNS upstream resolvers".to_string(),
             ));
         }
+        let admission =
+            Arc::new(DnsAdmission::try_new(proxy_config.admission).map_err(|error| {
+                EngineError::Config(format!("client DNS admission configuration: {error}"))
+            })?);
         let tun_name = tun_name.trim();
         if tun_name.is_empty() {
             return Err(EngineError::Tun(
@@ -129,10 +137,21 @@ impl ClientDnsRuntime {
         }
 
         let shutdown = Arc::new(Notify::new());
-        let mut tasks =
-            vec![spawn_listener(runtime, ipv4_socket, proxy_config.clone(), Arc::clone(&shutdown))];
+        let mut tasks = vec![spawn_listener(
+            runtime,
+            ipv4_socket,
+            proxy_config.clone(),
+            Arc::clone(&shutdown),
+            Arc::clone(&admission),
+        )];
         if let Some(socket) = ipv6_socket {
-            tasks.push(spawn_listener(runtime, socket, proxy_config, Arc::clone(&shutdown)));
+            tasks.push(spawn_listener(
+                runtime,
+                socket,
+                proxy_config,
+                Arc::clone(&shutdown),
+                Arc::clone(&admission),
+            ));
             log::info!(
                 "Client DoH DNS proxy active on 127.0.0.1:{} and [::1]:{}",
                 listen_port,
@@ -141,7 +160,7 @@ impl ClientDnsRuntime {
         } else {
             log::info!("Client DoH DNS proxy active on 127.0.0.1:{}", listen_port);
         }
-        Ok(Self { shutdown, tasks, platform: platform_backend, dns_configured: true })
+        Ok(Self { shutdown, tasks, admission, platform: platform_backend, dns_configured: true })
     }
 
     /// Restore the prior system resolver and stop the proxy tasks.
@@ -177,6 +196,11 @@ impl ClientDnsRuntime {
         }
         log::info!("Client DoH DNS proxy stopped and system DNS restored");
         Ok(())
+    }
+
+    /// Return listener admission counters for health and local proof.
+    pub fn admission_snapshot(&self) -> DnsAdmissionSnapshot {
+        self.admission.snapshot()
     }
 }
 
@@ -216,13 +240,19 @@ fn spawn_listener(
     socket: UdpSocket,
     config: DnsProxyConfig,
     shutdown: Arc<Notify>,
+    admission: Arc<DnsAdmission>,
 ) -> JoinHandle<()> {
     runtime.spawn(async move {
-        serve_listener(socket, config, shutdown).await;
+        serve_listener(socket, config, shutdown, admission).await;
     })
 }
 
-async fn serve_listener(socket: UdpSocket, config: DnsProxyConfig, shutdown: Arc<Notify>) {
+async fn serve_listener(
+    socket: UdpSocket,
+    config: DnsProxyConfig,
+    shutdown: Arc<Notify>,
+    admission: Arc<DnsAdmission>,
+) {
     let mut buffer = [0u8; DNS_PACKET_LIMIT];
     loop {
         let received = tokio::select! {
@@ -240,8 +270,22 @@ async fn serve_listener(socket: UdpSocket, config: DnsProxyConfig, shutdown: Arc
             continue;
         }
 
-        let response = match process_dns_query(&buffer[..length], &config).await {
+        let identity = DnsAdmissionIdentity::Source(peer.ip());
+        let response = match process_dns_query_with_admission(
+            &buffer[..length],
+            &config,
+            &admission,
+            identity,
+        )
+        .await
+        {
             Ok(response) => response,
+            Err(DnsProxyError::AdmissionRejected(reason)) => {
+                log::debug!(
+                    "Client DNS query dropped before upstream resolution from {peer}: {reason}"
+                );
+                continue;
+            }
             Err(error) => {
                 log::debug!("Client DNS query rejected: {error}");
                 continue;
@@ -292,5 +336,71 @@ mod tests {
         );
 
         assert!(matches!(result, Err(EngineError::Config(_))));
+    }
+
+    #[test]
+    fn listener_drops_excess_queries_and_exports_admission_counters() {
+        let runtime = test_runtime();
+        runtime.block_on(async {
+            let listener = UdpSocket::bind("127.0.0.1:0").await.expect("listener bind");
+            let listener_addr = listener.local_addr().expect("listener address");
+            let client = UdpSocket::bind("127.0.0.1:0").await.expect("client bind");
+            let shutdown = Arc::new(Notify::new());
+            let admission = Arc::new(
+                DnsAdmission::try_new(crate::dns::DnsAdmissionConfig {
+                    max_in_flight: 1,
+                    global_pps: 1,
+                    global_burst: 1,
+                    per_identity_pps: 100,
+                    per_identity_burst: 100,
+                    max_identities: 2,
+                    idle_timeout: std::time::Duration::from_secs(60),
+                })
+                .expect("admission config"),
+            );
+            let mut config = DnsProxyConfig::default();
+            config.doh_endpoints.clear();
+            config.upstream_resolvers.clear();
+            config.use_doh = false;
+            let task = tokio::spawn(serve_listener(
+                listener,
+                config,
+                Arc::clone(&shutdown),
+                Arc::clone(&admission),
+            ));
+            let query = vec![
+                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+                b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
+                0x01,
+            ];
+            client.send_to(&query, listener_addr).await.expect("first query");
+            client.send_to(&query, listener_addr).await.expect("second query");
+
+            let mut response = [0u8; DNS_PACKET_LIMIT];
+            let (length, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client.recv_from(&mut response),
+            )
+            .await
+            .expect("first query response timeout")
+            .expect("first query response");
+            assert_eq!(response[0..2], query[0..2]);
+            assert!(length >= 12);
+            let second = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                client.recv_from(&mut response),
+            )
+            .await;
+            assert!(second.is_err(), "excess query must be dropped without amplification");
+
+            let snapshot = admission.snapshot();
+            assert_eq!(snapshot.accepted, 1);
+            assert_eq!(snapshot.rejected_global_rate, 1);
+            assert_eq!(snapshot.tracked_identities, 1);
+
+            shutdown.notify_waiters();
+            task.abort();
+            let _ = task.await;
+        });
     }
 }
