@@ -68,6 +68,8 @@ const CSRF_TOKEN_BYTES: usize = 16;
 const CSRF_TOKEN_HEADER: &str = "X-CSRF-Token";
 const CSRF_NONCE_HEADER: &str = "X-CSRF-Nonce";
 const MAX_REPLAY_FINGERPRINTS: usize = 4096;
+const REPLAY_FINGERPRINT_WINDOW_SECS: u64 = 5 * 60;
+const REPLAY_FINGERPRINT_WINDOW: Duration = Duration::from_secs(REPLAY_FINGERPRINT_WINDOW_SECS);
 const MAX_QKEY_TTL_SECS: u64 = 60 * 60 * 24 * 365 * 10; // 10 years
 const ADMIN_CSP: &str = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'";
 
@@ -335,8 +337,32 @@ struct SessionStore {
 struct SessionRecord {
     expires_at: Instant,
     csrf_token: String,
-    replay_fingerprints: VecDeque<u64>,
+    replay_fingerprints: VecDeque<ReplayFingerprint>,
     replay_fingerprint_set: HashSet<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReplayFingerprint {
+    fingerprint: u64,
+    seen_at: Instant,
+}
+
+impl SessionRecord {
+    fn prune_replay_fingerprints(&mut self, now: Instant) {
+        loop {
+            let should_expire = self.replay_fingerprints.front().is_some_and(|entry| {
+                now.checked_duration_since(entry.seen_at)
+                    .is_some_and(|age| age >= REPLAY_FINGERPRINT_WINDOW)
+            });
+            if !should_expire {
+                break;
+            }
+            let Some(expired) = self.replay_fingerprints.pop_front() else {
+                break;
+            };
+            self.replay_fingerprint_set.remove(&expired.fingerprint);
+        }
+    }
 }
 
 impl SessionStore {
@@ -398,9 +424,26 @@ impl SessionStore {
         replay_fingerprint: u64,
         enforce_replay_guard: bool,
     ) -> Result<(), &'static str> {
-        self.prune();
+        self.validate_post_guard_at(
+            id,
+            csrf_token,
+            replay_fingerprint,
+            enforce_replay_guard,
+            Instant::now(),
+        )
+    }
+
+    fn validate_post_guard_at(
+        &mut self,
+        id: &str,
+        csrf_token: &str,
+        replay_fingerprint: u64,
+        enforce_replay_guard: bool,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        self.prune_at(now);
         if let Some(record) = self.sessions.get_mut(id) {
-            if record.expires_at <= Instant::now() {
+            if record.expires_at <= now {
                 return Err("Invalid CSRF token");
             }
             if !constant_time_token_eq(&record.csrf_token, csrf_token) {
@@ -410,14 +453,17 @@ impl SessionStore {
                 if !record.replay_fingerprint_set.insert(replay_fingerprint) {
                     return Err("Replay request detected");
                 }
-                record.replay_fingerprints.push_back(replay_fingerprint);
+                record.replay_fingerprints.push_back(ReplayFingerprint {
+                    fingerprint: replay_fingerprint,
+                    seen_at: now,
+                });
                 if record.replay_fingerprints.len() > MAX_REPLAY_FINGERPRINTS {
                     if let Some(evicted) = record.replay_fingerprints.pop_front() {
-                        record.replay_fingerprint_set.remove(&evicted);
+                        record.replay_fingerprint_set.remove(&evicted.fingerprint);
                     }
                 }
             }
-            record.expires_at = Instant::now() + self.ttl;
+            record.expires_at = now + self.ttl;
             return Ok(());
         }
         Err("Invalid CSRF token")
@@ -432,8 +478,14 @@ impl SessionStore {
     }
 
     fn prune(&mut self) {
-        let now = Instant::now();
+        self.prune_at(Instant::now());
+    }
+
+    fn prune_at(&mut self, now: Instant) {
         self.sessions.retain(|_, record| record.expires_at > now);
+        for record in self.sessions.values_mut() {
+            record.prune_replay_fingerprints(now);
+        }
     }
 }
 

@@ -1695,6 +1695,68 @@ mod tests {
     }
 
     #[test]
+    fn session_replay_fingerprint_is_rejected_within_window_and_accepted_after_expiry() {
+        let mut store = SessionStore::new(Duration::from_secs(3600));
+        let (session_id, csrf_token) = store.create();
+        let first_seen = Instant::now();
+
+        assert!(store
+            .validate_post_guard_at(&session_id, &csrf_token, 7, true, first_seen)
+            .is_ok());
+        assert_eq!(
+            store.validate_post_guard_at(
+                &session_id,
+                &csrf_token,
+                7,
+                true,
+                first_seen + REPLAY_FINGERPRINT_WINDOW - Duration::from_millis(1),
+            ),
+            Err("Replay request detected")
+        );
+        assert!(store
+            .validate_post_guard_at(
+                &session_id,
+                &csrf_token,
+                7,
+                true,
+                first_seen + REPLAY_FINGERPRINT_WINDOW + Duration::from_millis(1),
+            )
+            .is_ok());
+
+        let record = store.sessions.get(&session_id).expect("session must exist");
+        assert_eq!(record.replay_fingerprints.len(), 1);
+        assert!(record.replay_fingerprint_set.contains(&7));
+    }
+
+    #[test]
+    fn session_replay_fingerprint_history_limit_allows_post_eviction_reuse() {
+        let mut store = SessionStore::new(Duration::from_secs(3600));
+        let (session_id, csrf_token) = store.create();
+        let first_seen = Instant::now();
+
+        for fingerprint in 0..=MAX_REPLAY_FINGERPRINTS as u64 {
+            assert!(store
+                .validate_post_guard_at(&session_id, &csrf_token, fingerprint, true, first_seen)
+                .is_ok());
+        }
+
+        assert!(store
+            .validate_post_guard_at(
+                &session_id,
+                &csrf_token,
+                0,
+                true,
+                first_seen + Duration::from_secs(1),
+            )
+            .is_ok());
+        let record = store.sessions.get(&session_id).expect("session must exist");
+        assert_eq!(record.replay_fingerprints.len(), MAX_REPLAY_FINGERPRINTS);
+        assert_eq!(record.replay_fingerprint_set.len(), MAX_REPLAY_FINGERPRINTS);
+        assert!(record.replay_fingerprint_set.contains(&0));
+        assert!(!record.replay_fingerprint_set.contains(&1));
+    }
+
+    #[test]
     fn normalize_ttl_maps_zero_and_none_to_none() {
         assert_eq!(normalize_ttl(None), None);
         assert_eq!(normalize_ttl(Some(0)), None);
