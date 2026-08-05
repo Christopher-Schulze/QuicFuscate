@@ -1,7 +1,7 @@
 use super::test_support::{acquire_env_lock, mk_src_packet, EnvGuard};
 use super::{
-    target_from_mode, AdaptiveFec, FecConfig, FecControlPolicy, FecMode, FecSwitchReason,
-    DEFAULT_FOUNTAIN_WINDOW, MAX_FOUNTAIN_REPAIR_BURST, MAX_FOUNTAIN_WINDOW,
+    target_from_mode, AdaptiveFec, FecConfig, FecControlPolicy, FecMode, FecRuntimePolicy,
+    FecSwitchReason, DEFAULT_FOUNTAIN_WINDOW, MAX_FOUNTAIN_REPAIR_BURST, MAX_FOUNTAIN_WINDOW,
 };
 use crate::fec::wire::{WireError, WireReceiveReport};
 
@@ -30,6 +30,31 @@ fn public_mode_mapping_is_exact_and_stable() {
 
     assert_eq!(actual, expected);
     assert_eq!(crate::telemetry::FEC_MODE_MAPPING, expected);
+}
+
+#[test]
+fn invalid_fec_snapshot_values_retain_safe_defaults() {
+    let environment = crate::env_utils::EnvSnapshot::from_pairs([
+        ("QUICFUSCATE_FEC_LAZY", "malformed"),
+        ("QUICFUSCATE_FEC_INTERLEAVE", "malformed"),
+        ("QUICFUSCATE_FEC_AUTO_GF4", "malformed"),
+        ("QUICFUSCATE_FEC_PARTIAL", "malformed"),
+        ("QUICFUSCATE_FEC_DECODER", "unsupported"),
+        ("QUICFUSCATE_FEC_SWITCH_THRESH", "NaN"),
+        ("QUICFUSCATE_KALMAN_Q", "0"),
+        ("QUICFUSCATE_KALMAN_R", "-1"),
+    ]);
+
+    let policy = FecRuntimePolicy::detect_with_snapshot(&environment);
+
+    assert_eq!(policy.decoder_policy, "auto");
+    assert!(policy.lazy_enabled);
+    assert!(policy.interleave_enabled);
+    assert!(policy.auto_gf4_enabled);
+    assert!(policy.partial_enabled);
+    assert!(policy.switch_threshold_override.is_none());
+    assert!(policy.kalman_q_override.is_none());
+    assert!(policy.kalman_r_override.is_none());
 }
 
 #[test]

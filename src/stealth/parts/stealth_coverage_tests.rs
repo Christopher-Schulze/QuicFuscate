@@ -373,6 +373,24 @@ mod stealth_coverage_tests {
         assert_eq!(cfg.max_padding_size, 512);
     }
 
+    #[test]
+    fn snapshot_env_overrides_skip_invalid_aliases_and_retain_defaults() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_STEALTH_PADDING_STRATEGY", "unsupported"),
+            ("QUICFUSCATE_PADDING_STRATEGY", "browser"),
+            ("QUICFUSCATE_STEALTH_PADDING", "malformed"),
+            ("QUICFUSCATE_SERVER_PUSH_INTENSITY", "2.0"),
+        ]);
+        let mut config = StealthConfig::stealth();
+        let default_intensity = config.server_push_intensity;
+
+        config.apply_env_overrides_with_snapshot(&environment);
+
+        assert_eq!(config.padding_strategy, PaddingStrategy::BrowserMimic);
+        assert!(config.enable_traffic_padding);
+        assert_eq!(config.server_push_intensity, default_intensity);
+    }
+
     // =========================================================================
     // 6. DomainFrontingManager
     // =========================================================================

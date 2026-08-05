@@ -634,7 +634,7 @@ mod fastpath_udp_tests {
     use crate::transport::udpfast::MAX_BATCH_SIZE;
     use std::env;
     use std::net::UdpSocket;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
     use std::time::Duration;
 
     struct EnvGuard {
@@ -660,10 +660,8 @@ mod fastpath_udp_tests {
         }
     }
 
-    static UDP_FASTPATH_MUTEX: Mutex<()> = Mutex::new(());
-
     fn udp_fastpath_lock() -> MutexGuard<'static, ()> {
-        UDP_FASTPATH_MUTEX.lock().unwrap_or_else(|error| error.into_inner())
+        crate::env_utils::test_support::acquire_env_lock()
     }
 
     #[test]

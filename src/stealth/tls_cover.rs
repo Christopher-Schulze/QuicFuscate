@@ -215,6 +215,16 @@ impl TlsCover {
         os: super::OsProfile,
         sni: Option<&str>,
     ) -> Vec<u8> {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::generate_client_hello_with_snapshot(browser, os, sni, &environment)
+    }
+
+    pub(crate) fn generate_client_hello_with_snapshot(
+        browser: super::BrowserProfile,
+        os: super::OsProfile,
+        sni: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Vec<u8> {
         let seed = (browser as u16) ^ ((os as u16) << 8);
         let enable_grease = !matches!(browser, super::BrowserProfile::Safari);
 
@@ -335,7 +345,7 @@ impl TlsCover {
         }
 
         // Optional ULTRA extras: ECH-GREASE + padding to smooth lengths
-        let ultra = super::TlsCoverProvider::ultra_enabled();
+        let ultra = super::TlsCoverProvider::ultra_enabled_with_snapshot(environment);
         if ultra {
             exts.extend_from_slice(&ech_grease_ext(seed));
             // Pad to pseudo-random target within a narrow band

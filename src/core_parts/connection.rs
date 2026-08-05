@@ -442,6 +442,7 @@ impl ConnectionStats {
 }
 
 impl QuicFuscateConnection {
+    #[cfg(test)]
     fn env_optional_trimmed(name: &str) -> Option<String> {
         std::env::var(name).ok().and_then(|v| {
             let trimmed = v.trim();
@@ -637,7 +638,8 @@ impl QuicFuscateConnection {
     }
 
     fn new(params: ConnectionParams) -> Self {
-        let obs = FecTransportObserver::new();
+        let environment = params.stealth_manager.environment_snapshot();
+        let obs = FecTransportObserver::new_with_snapshot(&environment);
         let fec_mem_pool = params.optimization_manager.memory_pool().clone();
         let h3_body_buffer = params.optimization_manager.alloc_block();
         let mut s = Self {
@@ -647,7 +649,7 @@ impl QuicFuscateConnection {
             host_header: params.host_header,
             qkey_auth_token_hex: params.qkey_auth_token_hex,
             client_connection_generation: None,
-            fec: AdaptiveFec::new(params.fec_config),
+            fec: AdaptiveFec::new_with_snapshot(params.fec_config, &environment),
             stealth_manager: params.stealth_manager,
             optimization_manager: params.optimization_manager,
             tunnel_ingress_normalizer: params.tunnel_ingress_normalizer,
@@ -688,9 +690,7 @@ impl QuicFuscateConnection {
             runtime_memory_pressure: 0,
             #[cfg(feature = "orchestrator")]
             runtime_system: sysinfo::System::new(),
-            tls_ch_override_template: Self::env_optional_trimmed(
-                "QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE",
-            ),
+            tls_ch_override_template: environment.first(["QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE"]),
             next_packet_release: None,
             outbound_pacer: OutboundPacer::default(),
         };
@@ -700,10 +700,10 @@ impl QuicFuscateConnection {
         // Attach observers to transport for live telemetry callbacks
         // Combine FEC observer with StealthBrain when enabled (default on, disable via QUICFUSCATE_BRAIN=0|false)
         let obs_dyn: Arc<dyn crate::transport::TransportObserver> = obs.clone();
-        let brain_enabled = crate::env_utils::env_flag("QUICFUSCATE_BRAIN", true);
+        let brain_enabled = environment.flag("QUICFUSCATE_BRAIN", true);
         if brain_enabled {
             let brain = StealthBrain::new_with_level_hints(
-                crate::brain::StealthBrainConfig::from_env(),
+                crate::brain::StealthBrainConfig::from_env_with_snapshot(&environment),
                 s.stealth_manager.intelligent_level_hints(),
             );
             obs.attach_brain_hints(brain.fec_hints());
@@ -717,6 +717,7 @@ impl QuicFuscateConnection {
 
         // Enable and configure RealTLS (always on, including Performance mode)
         // Map stealth fingerprint to TLS profile and apply SNI from fronting
+        s.conn.set_environment_snapshot(environment.clone());
         if let Err(e) = s.conn.enable_tls("unified") {
             warn!("Failed to enable unified TLS provider: {:?}", e);
         }
@@ -729,10 +730,10 @@ impl QuicFuscateConnection {
         // Initialize DeepIntegrationOrchestrator if feature enabled
         #[cfg(feature = "orchestrator")]
         {
-            let orchestrator_enabled = crate::env_utils::env_flag("QUICFUSCATE_ORCHESTRATOR", true);
+            let orchestrator_enabled = environment.flag("QUICFUSCATE_ORCHESTRATOR", true);
             if orchestrator_enabled {
                 let orchestrator = DeepIntegrationOrchestrator::new(
-                    crate::brain::StealthBrainConfig::from_env(),
+                    crate::brain::StealthBrainConfig::from_env_with_snapshot(&environment),
                     1024,  // pool capacity
                     65536, // block size
                 );

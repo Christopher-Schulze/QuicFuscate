@@ -30,7 +30,11 @@ impl Connection {
         error
     }
 
-    fn configured_recovery(config: &Config, max_datagram_size: usize) -> recovery::Recovery {
+    fn configured_recovery_with_snapshot(
+        config: &Config,
+        max_datagram_size: usize,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> recovery::Recovery {
         let algorithm = match config.cc_algorithm {
             crate::transport::CongestionControlAlgorithm::Reno => {
                 crate::transport::cc::Algorithm::Reno
@@ -45,7 +49,12 @@ impl Connection {
                 crate::transport::cc::Algorithm::Bbr3
             }
         };
-        recovery::Recovery::with_algorithm(INITIAL_WINDOW, max_datagram_size, algorithm)
+        recovery::Recovery::with_algorithm_with_snapshot(
+            INITIAL_WINDOW,
+            max_datagram_size,
+            algorithm,
+            environment,
+        )
     }
 
     fn rebuild_traffic_analysis_scheduler(&mut self) {
@@ -107,6 +116,25 @@ impl Connection {
         self.dest_cids.insert(&self.dcid);
     }
 
+    /// Replace the construction snapshot before the connection's first TLS provider is enabled.
+    pub(crate) fn set_environment_snapshot(
+        &mut self,
+        environment: Arc<crate::env_utils::EnvSnapshot>,
+    ) {
+        debug_assert!(self.tls_provider.is_none());
+        debug_assert_eq!(self.recovery.bytes_in_flight, 0);
+        let mut recovery = Self::configured_recovery_with_snapshot(
+            &self.config,
+            self.dgram_send_max_size,
+            &environment,
+        );
+        if self.config.initial_rtt_ms != 100 {
+            recovery.set_initial_rtt(Duration::from_millis(self.config.initial_rtt_ms));
+        }
+        self.recovery = recovery;
+        self.environment = environment;
+    }
+
     pub(crate) fn new_with_role(
         scid: &[u8],
         local: SocketAddr,
@@ -120,7 +148,12 @@ impl Connection {
         let pmtu_policy = config.pmtu_policy();
         let traffic_analysis_base_policy = config.traffic_analysis_policy();
         let version_negotiation = super::version::VersionNegotiationState::new(config.version);
-        let recovery = Self::configured_recovery(&config, dgram_send_max_size);
+        let environment = Arc::new(crate::env_utils::EnvSnapshot::capture());
+        let recovery = Self::configured_recovery_with_snapshot(
+            &config,
+            dgram_send_max_size,
+            &environment,
+        );
         let mut conn = Self {
             scid: ConnectionId::from_ref(scid),
             dcid: ConnectionId::default(),
@@ -174,6 +207,7 @@ impl Connection {
             peer_max_data: initial_max_data,
             tls_provider: None,
             tls_profile: None,
+            environment,
             conn_bytes_sent: 0,
             pending_control: VecDeque::new(),
             crypto: Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default())),
@@ -1021,13 +1055,14 @@ impl Connection {
         .encode_parameter()?;
 
         // Create the TLS composition stack (rustls + optional TLS Cover).
-        let provider = crate::qftls::create_provider_for_version_with_ca(
+        let provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot(
             self.is_server,
             crypto_arc.clone(),
             self.config.verify_peer,
             self.config.version,
             &version_information,
             self.config.verify_locations_file.as_deref(),
+            &self.environment,
         )?;
 
         // Store provider
@@ -1468,7 +1503,11 @@ impl Connection {
         self.h3 = None;
         self.pmtu_probe_pn = None;
         self.pmtu_above_floor_pns.clear();
-        self.recovery = Self::configured_recovery(&self.config, self.dgram_send_max_size);
+        self.recovery = Self::configured_recovery_with_snapshot(
+            &self.config,
+            self.dgram_send_max_size,
+            &self.environment,
+        );
         if self.config.initial_rtt_ms != 100 {
             self.recovery.set_initial_rtt(Duration::from_millis(self.config.initial_rtt_ms));
         }

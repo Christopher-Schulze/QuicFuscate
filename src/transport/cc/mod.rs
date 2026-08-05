@@ -16,12 +16,17 @@ use std::time::{Duration, Instant};
 /// Default BBR minimum-RTT filter window.
 pub(crate) const DEFAULT_MIN_RTT_WINDOW: Duration = Duration::from_secs(10);
 
-/// Read the shared BBR minimum-RTT filter window override.
-pub(crate) fn configured_min_rtt_window() -> Duration {
-    crate::env_utils::env_parse::<u64>("QUICFUSCATE_BBR_MIN_RTT_WINDOW_MS")
-        .filter(|millis| *millis > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_MIN_RTT_WINDOW)
+pub(crate) fn configured_min_rtt_window_with_snapshot(
+    environment: &crate::env_utils::EnvSnapshot,
+) -> Duration {
+    match environment.parse::<u64>("QUICFUSCATE_BBR_MIN_RTT_WINDOW_MS") {
+        Some(millis) if millis > 0 => Duration::from_millis(millis),
+        Some(_) => {
+            log::warn!("QUICFUSCATE_BBR_MIN_RTT_WINDOW_MS must be positive; retaining the default");
+            DEFAULT_MIN_RTT_WINDOW
+        }
+        None => DEFAULT_MIN_RTT_WINDOW,
+    }
 }
 
 /// Selectable congestion control algorithm.
@@ -144,13 +149,21 @@ pub(crate) enum CcImpl {
     StealthBbr3(stealth_shaper::StealthShaper<bbr3::Bbr3>),
 }
 
-/// Create a congestion controller for the given algorithm.
-pub(crate) fn create(algo: Algorithm, initial_cwnd: usize, mss: usize) -> CcImpl {
+pub(crate) fn create_with_snapshot(
+    algo: Algorithm,
+    initial_cwnd: usize,
+    mss: usize,
+    environment: &crate::env_utils::EnvSnapshot,
+) -> CcImpl {
     match algo {
         Algorithm::Reno => CcImpl::Reno(reno::Reno::new(initial_cwnd, mss)),
         Algorithm::Cubic => CcImpl::Cubic(cubic::Cubic::new(initial_cwnd, mss)),
-        Algorithm::Bbr2 => CcImpl::Bbr2(bbr2::Bbr2::new(initial_cwnd, mss)),
-        Algorithm::Bbr3 => CcImpl::Bbr3(bbr3::Bbr3::new(initial_cwnd, mss)),
+        Algorithm::Bbr2 => {
+            CcImpl::Bbr2(bbr2::Bbr2::new_with_snapshot(initial_cwnd, mss, environment))
+        }
+        Algorithm::Bbr3 => {
+            CcImpl::Bbr3(bbr3::Bbr3::new_with_snapshot(initial_cwnd, mss, environment))
+        }
     }
 }
 

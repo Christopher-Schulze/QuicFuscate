@@ -106,6 +106,15 @@ pub struct FingerprintProfile {
 impl FingerprintProfile {
     /// Creates a new profile for a given browser and OS combination, with harmonized values.
     pub fn new(browser: BrowserProfile, os: OsProfile) -> Self {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_snapshot(browser, os, &environment)
+    }
+
+    pub(crate) fn new_with_snapshot(
+        browser: BrowserProfile,
+        os: OsProfile,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Self {
         let mut profile = match (browser, os) {
             // --- Windows Profiles ---
             (BrowserProfile::Chrome, OsProfile::Windows) => Self {
@@ -292,20 +301,21 @@ impl FingerprintProfile {
                 certificate: None,
             },
             // --- Fallback Profile ---
-            _ => Self::new(BrowserProfile::Chrome, OsProfile::Windows),
+            _ => Self::new_with_snapshot(BrowserProfile::Chrome, OsProfile::Windows, environment),
         };
 
         // Generate sophisticated ClientHello using browser-specific fingerprinting
-        profile.client_hello = Some(tls_cover::TlsCover::generate_client_hello(
+        profile.client_hello = Some(tls_cover::TlsCover::generate_client_hello_with_snapshot(
             profile.browser,
             profile.os,
             None, // SNI will be added dynamically
+            environment,
         ));
 
         // Generate matching ServerHello using the same cipher resolution as TLS Cover encryption.
         // This ensures the advertised cipher in ServerHello matches the actual cover cipher,
         // preventing DPI fingerprinting via cipher mismatch (TODO-288).
-        let pref = TlsCoverProvider::cipher_preference_from_env();
+        let pref = TlsCoverProvider::cipher_preference_from_env_with_snapshot(environment);
         let cipher_suite = TlsCoverProvider::resolve_cipher_suite(pref).tls_id();
         profile.server_hello = Some(ServerHelloParamsOwned {
             tls_version: 0x0303,

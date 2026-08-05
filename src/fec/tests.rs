@@ -1693,6 +1693,7 @@ fn test_batch_window_cleared_no_extra_repairs() {
 
 #[test]
 fn test_decoder_elimination_paths() {
+    let _env_lock = acquire_env_lock();
     let pool = crate::optimize::global_pool();
     let k = 8;
 
@@ -2163,6 +2164,7 @@ fn test_streaming_dedup_window_bounding() {
 
 #[test]
 fn test_env_guard_unset_functionality() {
+    let _env_lock = acquire_env_lock();
     let test_key = "QUICFUSCATE_TEST_UNSET";
 
     // Set initial value

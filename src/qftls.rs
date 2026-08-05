@@ -1094,13 +1094,35 @@ pub(crate) fn create_provider_for_version_with_ca(
     version_information_parameter: &[u8],
     verify_locations_file: Option<&str>,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    Ok(Box::new(CombinedProvider::new_with_ca(
+    let environment = crate::env_utils::EnvSnapshot::capture();
+    create_provider_for_version_with_ca_with_snapshot(
         is_server,
         crypto,
         verify_peer,
         version,
         version_information_parameter,
         verify_locations_file,
+        &environment,
+    )
+}
+
+pub(crate) fn create_provider_for_version_with_ca_with_snapshot(
+    is_server: bool,
+    crypto: Arc<RwLock<CryptoContext>>,
+    verify_peer: bool,
+    version: u32,
+    version_information_parameter: &[u8],
+    verify_locations_file: Option<&str>,
+    environment: &crate::env_utils::EnvSnapshot,
+) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot(
+        is_server,
+        crypto,
+        verify_peer,
+        version,
+        version_information_parameter,
+        verify_locations_file,
+        environment,
     )?))
 }
 
@@ -1116,8 +1138,12 @@ pub struct CombinedProvider {
 }
 
 impl CombinedProvider {
-    fn env_string(name: &str, default: &str) -> String {
-        std::env::var(name).unwrap_or_else(|_| default.to_string())
+    fn env_string(
+        environment: &crate::env_utils::EnvSnapshot,
+        name: &str,
+        default: &str,
+    ) -> String {
+        environment.first([name]).unwrap_or_else(|| default.to_string())
     }
 
     /// Create a new combined provider (rustls + optional TLS cover).
@@ -1146,23 +1172,49 @@ impl CombinedProvider {
         version_information_parameter: &[u8],
         verify_locations_file: Option<&str>,
     ) -> Result<Self, ConnectionError> {
-        let rustls = RustlsProvider::new_with_ca(
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_ca_with_snapshot(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+            verify_locations_file,
+            &environment,
+        )
+    }
+
+    fn new_with_ca_with_snapshot(
+        is_server: bool,
+        crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        verify_locations_file: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Result<Self, ConnectionError> {
+        let rustls = RustlsProvider::new_with_ca_with_snapshot(
             is_server,
             crypto.clone(),
             verify_peer,
             version,
             version_information_parameter,
             verify_locations_file,
+            environment,
         )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
         // In base/performance mode, cover keeps traffic shape with reduced timing overhead.
-        let cover_enabled = crate::env_utils::env_flag("QUICFUSCATE_TLS_COVER", true);
+        let cover_enabled = environment.flag("QUICFUSCATE_TLS_COVER", true);
         let cover = if cover_enabled {
             // Check stealth mode to determine TLS Cover behavior
-            let stealth_mode = Self::env_string("QUICFUSCATE_STEALTH_MODE", "stealth");
+            let stealth_mode = Self::env_string(environment, "QUICFUSCATE_STEALTH_MODE", "stealth");
 
-            let mut tls_cover = crate::stealth::TlsCoverProvider::new(is_server, crypto.clone())?;
+            let mut tls_cover = crate::stealth::TlsCoverProvider::new_with_snapshot(
+                is_server,
+                crypto.clone(),
+                environment,
+            )?;
 
             // In base/performance mode, TLS Cover still runs but without artificial delays
             if stealth_mode == "base" || stealth_mode == "performance" || stealth_mode == "off" {
@@ -1175,12 +1227,12 @@ impl CombinedProvider {
             }
 
             // Enable profile rotation if requested
-            if crate::env_utils::env_flag("QUICFUSCATE_TLS_COVER_ROTATE", false) {
+            if environment.flag("QUICFUSCATE_TLS_COVER_ROTATE", false) {
                 log::info!("TLS Cover profile rotation enabled");
             }
 
             // Enable telemetry if requested
-            if crate::env_utils::env_flag("QUICFUSCATE_TLS_COVER_TELEMETRY", false) {
+            if environment.flag("QUICFUSCATE_TLS_COVER_TELEMETRY", false) {
                 log::info!("TLS Cover telemetry enabled");
             }
 
@@ -1373,6 +1425,8 @@ mod rustls_provider {
         pub crypto: Arc<RwLock<CryptoContext>>,
         /// True if this is a server-side provider.
         pub is_server: bool,
+        /// Immutable environment generation used by this TLS runtime owner.
+        pub environment: Arc<crate::env_utils::EnvSnapshot>,
         /// Whether the client verifies the server certificate.
         #[cfg(debug_assertions)]
         pub verify_peer: bool,
@@ -1714,6 +1768,7 @@ mod rustls_provider {
     }
 
     impl RustlsProviderImpl {
+        #[cfg(test)]
         pub fn new_with_ca(
             is_server: bool,
             crypto: Arc<RwLock<CryptoContext>>,
@@ -1721,6 +1776,27 @@ mod rustls_provider {
             version: u32,
             version_information_parameter: &[u8],
             client_ca_path: Option<&str>,
+        ) -> Result<Self, ConnectionError> {
+            let environment = crate::env_utils::EnvSnapshot::capture();
+            Self::new_with_ca_with_snapshot(
+                is_server,
+                crypto,
+                verify_peer,
+                version,
+                version_information_parameter,
+                client_ca_path,
+                &environment,
+            )
+        }
+
+        pub fn new_with_ca_with_snapshot(
+            is_server: bool,
+            crypto: Arc<RwLock<CryptoContext>>,
+            verify_peer: bool,
+            version: u32,
+            version_information_parameter: &[u8],
+            client_ca_path: Option<&str>,
+            environment: &crate::env_utils::EnvSnapshot,
         ) -> Result<Self, ConnectionError> {
             let quic_version = Self::map_quic_version(version)?;
             let mut transport_params = Self::default_transport_params();
@@ -1734,12 +1810,14 @@ mod rustls_provider {
                     quic_version,
                     transport_params.clone(),
                     client_ca_path.as_deref(),
+                    environment,
                 )?
             };
             let this = Self {
                 connection,
                 crypto,
                 is_server,
+                environment: Arc::new(environment.clone()),
                 #[cfg(debug_assertions)]
                 verify_peer,
                 client_ca_path,
@@ -1938,6 +2016,7 @@ mod rustls_provider {
             quic_version: rustls::quic::Version,
             transport_params: Vec<u8>,
             ca_path: Option<&str>,
+            environment: &crate::env_utils::EnvSnapshot,
         ) -> Result<rustls::quic::Connection, ConnectionError> {
             #[cfg(not(debug_assertions))]
             let _ = verify_peer;
@@ -1950,8 +2029,8 @@ mod rustls_provider {
                         ConnectionError::TlsError(format!("Protocol version error: {}", e))
                     })?;
             #[cfg(debug_assertions)]
-            let allow_invalid = !verify_peer
-                || crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
+            let allow_invalid =
+                !verify_peer || environment.flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
             #[cfg(not(debug_assertions))]
             let allow_invalid = false;
             let config = if allow_invalid {
@@ -2213,7 +2292,7 @@ mod rustls_provider {
                     })?;
             #[cfg(debug_assertions)]
             let allow_invalid = !self.verify_peer
-                || crate::env_utils::env_flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
+                || self.environment.flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
             #[cfg(not(debug_assertions))]
             let allow_invalid = false;
             let cfg = if allow_invalid {
@@ -2617,21 +2696,23 @@ mod rustls_provider {
         }
     }
 
-    pub(super) fn make_with_ca(
+    pub(super) fn make_with_ca_with_snapshot(
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
         client_ca_path: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
     ) -> Result<RustlsProviderImpl, ConnectionError> {
-        RustlsProviderImpl::new_with_ca(
+        RustlsProviderImpl::new_with_ca_with_snapshot(
             is_server,
             crypto,
             verify_peer,
             version,
             version_information_parameter,
             client_ca_path,
+            environment,
         )
     }
 }
@@ -2666,13 +2747,35 @@ impl RustlsProvider {
         version_information_parameter: &[u8],
         client_ca_path: Option<&str>,
     ) -> Result<Self, ConnectionError> {
-        Ok(Self(rustls_provider::make_with_ca(
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_ca_with_snapshot(
             is_server,
             crypto,
             verify_peer,
             version,
             version_information_parameter,
             client_ca_path,
+            &environment,
+        )
+    }
+
+    fn new_with_ca_with_snapshot(
+        is_server: bool,
+        crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        client_ca_path: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Result<Self, ConnectionError> {
+        Ok(Self(rustls_provider::make_with_ca_with_snapshot(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+            client_ca_path,
+            environment,
         )?))
     }
 }

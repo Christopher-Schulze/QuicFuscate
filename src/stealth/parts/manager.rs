@@ -1,6 +1,8 @@
 /// The main stealth manager that coordinates all obfuscation techniques.
 pub struct StealthManager {
     config: StealthConfig,
+    /// Immutable environment generation used by this runtime owner.
+    env_snapshot: Arc<crate::env_utils::EnvSnapshot>,
     fingerprint: Arc<Mutex<FingerprintProfile>>,
     domain_fronting: Option<DomainFrontingManager>,
     /// Cryptographic manager for key derivation.
@@ -93,9 +95,11 @@ impl StealthManager {
         crypto_manager: Arc<CryptoManager>,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     ) -> Self {
-        let fingerprint = Arc::new(Mutex::new(FingerprintProfile::new(
+        let env_snapshot = Arc::new(crate::env_utils::EnvSnapshot::capture());
+        let fingerprint = Arc::new(Mutex::new(FingerprintProfile::new_with_snapshot(
             config.initial_browser,
             config.initial_os,
+            &env_snapshot,
         )));
 
         let domain_fronting = Self::domain_fronting_for_config(&config);
@@ -153,7 +157,10 @@ impl StealthManager {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let reality_proxy = if config.dynamic_enabled {
             // Enable Reality if Dynamic mode is on
-            Some(Arc::new(crate::reality::RealityProxy::new(tx)))
+            Some(Arc::new(crate::reality::RealityProxy::new_with_snapshot(
+                tx,
+                &env_snapshot,
+            )))
         } else {
             None
         };
@@ -173,7 +180,8 @@ impl StealthManager {
             .as_ref()
             .and_then(|owner| owner.cover_cache())
             .or_else(|| {
-                let reality_config = crate::reality::RealityConfig::from_env();
+                let reality_config =
+                    crate::reality::RealityConfig::from_env_with_snapshot(&env_snapshot);
                 if reality_config.enabled {
                     log::info!(
                         "Cover handshake cache initialized for {} (TTL={}s) without a runtime worker",
@@ -190,6 +198,7 @@ impl StealthManager {
 
         Self {
             config,
+            env_snapshot: Arc::clone(&env_snapshot),
             fingerprint,
             domain_fronting,
             _crypto_manager: crypto_manager,
@@ -206,7 +215,10 @@ impl StealthManager {
             server_push_state,
             server_push_runtime_enabled: std::sync::atomic::AtomicBool::new(false),
             probe_hits: Arc::new(AtomicUsize::new(0)),
-            escalation_state: Arc::new(EscalationState::new(Arc::clone(&intelligent_level_hints))),
+            escalation_state: Arc::new(EscalationState::new(
+                Arc::clone(&intelligent_level_hints),
+                &env_snapshot,
+            )),
             intelligent_level_hints,
             runtime_padding_rate: AtomicU8::new(0),
             runtime_timing_rate: AtomicU8::new(0),
@@ -459,13 +471,15 @@ impl StealthManager {
         }
 
         // ENV overrides (advanced tuning)
-        if let Some(n) = self.config.transport_ack_threshold_override() {
+        if let Some(n) = self.config.transport_ack_threshold_override(&self.env_snapshot) {
             config.set_ack_eliciting_threshold(n);
         }
-        if let Some(ms) = self.config.transport_ack_max_delay_override() {
+        if let Some(ms) = self.config.transport_ack_max_delay_override(&self.env_snapshot) {
             config.set_max_ack_delay(ms);
         }
-        if let Some(enabled) = self.config.transport_external_pacing_override() {
+        if let Some(enabled) =
+            self.config.transport_external_pacing_override(&self.env_snapshot)
+        {
             config.set_external_pacing(enabled);
         }
 
@@ -511,10 +525,12 @@ impl StealthManager {
         // - QUICFUSCATE_STEALTH_PADDING_MAX = <usize>
         // - QUICFUSCATE_STEALTH_PADDING_STRATEGY = random|fixed|adaptive|browser|1..4
         // - QUICFUSCATE_STEALTH_JITTER_US = <u32>
-        if let Some(v) = self.config.transport_padding_max_override() {
+        if let Some(v) = self.config.transport_padding_max_override(&self.env_snapshot) {
             config.set_stealth_padding(self.config.enable_traffic_padding, strategy_code, v);
         }
-        if let Some(strategy) = self.config.transport_padding_strategy_override() {
+        if let Some(strategy) =
+            self.config.transport_padding_strategy_override(&self.env_snapshot)
+        {
             let scode = match strategy {
                 PaddingStrategy::Random => 1,
                 PaddingStrategy::Fixed => 2,
@@ -528,17 +544,19 @@ impl StealthManager {
                 self.config.max_padding_size,
             );
         }
-        if let Some(us) = self.config.transport_jitter_override_us() {
+        if let Some(us) = self.config.transport_jitter_override_us(&self.env_snapshot) {
             if us > 0 {
                 config.set_stealth_timing(true, us);
             } else {
                 config.set_stealth_timing(false, 0);
             }
         }
-        if let Some(gran) = self.config.transport_adaptive_granularity_override() {
+        if let Some(gran) =
+            self.config.transport_adaptive_granularity_override(&self.env_snapshot)
+        {
             config.set_stealth_adaptive_granularity(gran);
         }
-        if let Some(code) = self.config.transport_mimic_bias_override() {
+        if let Some(code) = self.config.transport_mimic_bias_override(&self.env_snapshot) {
             config.set_stealth_mimic_bias(code);
         } else {
             config.set_stealth_mimic_bias(bias_default);
@@ -843,16 +861,44 @@ impl StealthManager {
         matches!(self.config.mode, StealthMode::Intelligent)
     }
 
+    pub(crate) fn environment_snapshot(&self) -> Arc<crate::env_utils::EnvSnapshot> {
+        Arc::clone(&self.env_snapshot)
+    }
+
     /// Computes which transport knobs the brain is allowed to adjust at runtime.
     pub(crate) fn brain_runtime_permissions(&self) -> crate::transport::BrainRuntimePermissions {
-        let ack_locked = self.config.transport_ack_threshold_override().is_some()
-            || self.config.transport_ack_max_delay_override().is_some();
-        let timing_locked = self.config.transport_external_pacing_override().is_some()
-            || self.config.transport_jitter_override_us().is_some();
-        let padding_locked = self.config.transport_padding_max_override().is_some()
-            || self.config.transport_padding_strategy_override().is_some()
-            || self.config.transport_adaptive_granularity_override().is_some()
-            || self.config.transport_mimic_bias_override().is_some();
+        let ack_locked = self
+            .config
+            .transport_ack_threshold_override(&self.env_snapshot)
+            .is_some()
+            || self
+                .config
+                .transport_ack_max_delay_override(&self.env_snapshot)
+                .is_some();
+        let timing_locked = self
+            .config
+            .transport_external_pacing_override(&self.env_snapshot)
+            .is_some()
+            || self
+                .config
+                .transport_jitter_override_us(&self.env_snapshot)
+                .is_some();
+        let padding_locked = self
+            .config
+            .transport_padding_max_override(&self.env_snapshot)
+            .is_some()
+            || self
+                .config
+                .transport_padding_strategy_override(&self.env_snapshot)
+                .is_some()
+            || self
+                .config
+                .transport_adaptive_granularity_override(&self.env_snapshot)
+                .is_some()
+            || self
+                .config
+                .transport_mimic_bias_override(&self.env_snapshot)
+                .is_some();
         let manual_transport_locked = ack_locked || timing_locked || padding_locked;
 
         crate::transport::BrainRuntimePermissions {
@@ -869,6 +915,14 @@ impl StealthManager {
     /// Derives a concrete runtime stealth policy from brain-supplied signal inputs.
     pub(crate) fn derive_intelligent_runtime_policy(
         inputs: IntelligentStealthInputs,
+    ) -> crate::transport::StealthRuntimePolicy {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::derive_intelligent_runtime_policy_with_snapshot(inputs, &environment)
+    }
+
+    pub(crate) fn derive_intelligent_runtime_policy_with_snapshot(
+        inputs: IntelligentStealthInputs,
+        environment: &crate::env_utils::EnvSnapshot,
     ) -> crate::transport::StealthRuntimePolicy {
         let external_pacing = inputs.ce_ratio_recent < 0.01
             && inputs.ack_us < 8_000.0
@@ -942,7 +996,8 @@ impl StealthManager {
         } else {
             match inputs.level_hint {
                 0 => 0u8,
-                1 => crate::env_utils::env_parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
+                1 => environment
+                    .parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
                     .unwrap_or(50),
                 _ => 100u8,
             }
@@ -1048,7 +1103,9 @@ impl StealthManager {
         let current_padding = self.runtime_padding_rate.load(Ordering::Relaxed);
         let target_padding = match level {
             0 => 0u8,
-            1 => crate::env_utils::env_parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
+            1 => self
+                .env_snapshot
+                .parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
                 .unwrap_or(50),
             _ => 100u8,
         };
@@ -1256,7 +1313,9 @@ impl StealthManager {
     pub(crate) fn escalate_to_level(&self, level: u8) {
         let padding_rate = match level {
             0 => 0u8,
-            1 => crate::env_utils::env_parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
+            1 => self
+                .env_snapshot
+                .parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
                 .unwrap_or(50),
             _ => 100u8,
         };
@@ -1373,13 +1432,13 @@ impl StealthManager {
 
     /// Returns true if MASQUE datagram handling should be active.
     pub(crate) fn masque_datagram_enabled(&self) -> bool {
-        StealthConfig::masque_env_flag("QUICFUSCATE_MASQUE_DATAGRAM")
+        StealthConfig::masque_env_flag(&self.env_snapshot, "QUICFUSCATE_MASQUE_DATAGRAM")
     }
 
     /// Determine MASQUE proxy authority to use.
     /// Priority: QUICFUSCATE_MASQUE_PROXY env -> first fronting domain (":443").
     pub(crate) fn masque_proxy(&self) -> Option<String> {
-        if let Some(v) = StealthConfig::masque_proxy_override() {
+        if let Some(v) = StealthConfig::masque_proxy_override(&self.env_snapshot) {
             return Some(v);
         }
         if !self.config.fronting_domains.is_empty() {

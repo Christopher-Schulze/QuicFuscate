@@ -36,8 +36,6 @@ enum TlsCoverCipherPreference {
     Aes128Gcm,
 }
 
-use crate::env_utils;
-
 impl TlsCoverCipherPreference {
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -54,6 +52,7 @@ impl TlsCoverCipherPreference {
 /// Manages synthetic TLS record generation for DPI evasion on a per-connection basis.
 pub(crate) struct TlsCoverProvider {
     crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
+    environment: Arc<crate::env_utils::EnvSnapshot>,
     is_server: bool,
     handshake_complete: bool,
     performance_mode: bool, // When true, disable padding/jitter/timing features
@@ -61,28 +60,39 @@ pub(crate) struct TlsCoverProvider {
 }
 
 impl TlsCoverProvider {
-    fn padding_cap_override() -> Option<usize> {
-        env_utils::env_first(["QUICFUSCATE_STEALTH_PADDING_MAX", "QUICFUSCATE_STEALTH_MAX_PADDING"])
-            .and_then(|v| v.parse::<usize>().ok())
+    fn padding_cap_override(environment: &crate::env_utils::EnvSnapshot) -> Option<usize> {
+        environment.parse_first([
+            "QUICFUSCATE_STEALTH_PADDING_MAX",
+            "QUICFUSCATE_STEALTH_MAX_PADDING",
+        ])
     }
 
-    fn jitter_override_us() -> Option<u64> {
-        env_utils::env_first(["QUICFUSCATE_STEALTH_JITTER_US"]).and_then(|v| v.parse::<u64>().ok())
+    fn jitter_override_us(environment: &crate::env_utils::EnvSnapshot) -> Option<u64> {
+        environment.parse_first(["QUICFUSCATE_STEALTH_JITTER_US"])
     }
 
+    #[cfg(test)]
     fn cipher_preference_from_env() -> TlsCoverCipherPreference {
-        env_utils::env_first(["QUICFUSCATE_TLS_COVER_CIPHER"])
-            .and_then(|value| TlsCoverCipherPreference::parse(&value))
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::cipher_preference_from_env_with_snapshot(&environment)
+    }
+
+    fn cipher_preference_from_env_with_snapshot(
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> TlsCoverCipherPreference {
+        environment
+            .first_with(["QUICFUSCATE_TLS_COVER_CIPHER"], TlsCoverCipherPreference::parse)
             .unwrap_or(TlsCoverCipherPreference::Auto)
     }
 
-    fn tls_cover_profile_name() -> String {
-        env_utils::env_first(["QUICFUSCATE_TLS_COVER_PROFILE"])
+    fn tls_cover_profile_name(environment: &crate::env_utils::EnvSnapshot) -> String {
+        environment
+            .first(["QUICFUSCATE_TLS_COVER_PROFILE"])
             .unwrap_or_else(|| "chrome".to_string())
     }
 
-    fn ultra_enabled() -> bool {
-        env_utils::env_flag("QUICFUSCATE_TLS_COVER_ULTRA", false)
+    fn ultra_enabled_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> bool {
+        environment.flag("QUICFUSCATE_TLS_COVER_ULTRA", false)
     }
 
     fn has_hardware_aes() -> bool {
@@ -114,16 +124,26 @@ impl TlsCoverProvider {
     }
 
     /// Constructs a provider for the given role, deriving cover-traffic key material.
+    #[allow(dead_code)]
     pub(crate) fn new(
         is_server: bool,
         crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
     ) -> Result<Self, crate::error::ConnectionError> {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_snapshot(is_server, crypto, &environment)
+    }
+
+    pub(crate) fn new_with_snapshot(
+        is_server: bool,
+        crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Result<Self, crate::error::ConnectionError> {
         // Load profile from ENV
-        let profile = Self::tls_cover_profile_name();
+        let profile = Self::tls_cover_profile_name(environment);
 
         let (tls_cover_key, tls_cover_iv) = Self::derive_tls_cover_material(&profile, is_server)?;
 
-        let cipher_preference = Self::cipher_preference_from_env();
+        let cipher_preference = Self::cipher_preference_from_env_with_snapshot(environment);
         let cipher_suite = Self::resolve_cipher_suite(cipher_preference);
 
         {
@@ -167,6 +187,7 @@ impl TlsCoverProvider {
 
         Ok(Self {
             crypto,
+            environment: Arc::new(environment.clone()),
             is_server,
             handshake_complete: false,
             performance_mode: false,
@@ -292,7 +313,7 @@ impl TlsCoverProvider {
 
         // Optional extra padding for cover traffic (stealth mode only)
         if !self.performance_mode {
-            let pad_max_env = Self::padding_cap_override().unwrap_or(0);
+            let pad_max_env = Self::padding_cap_override(&self.environment).unwrap_or(0);
             if pad_max_env > 0 {
                 let headroom = max_len.saturating_sub(5).saturating_sub(payload_size);
                 if headroom > 0 {
@@ -352,7 +373,7 @@ impl TlsCoverProvider {
             // Runtime-configurable jitter in microseconds (0 disables).
             // Intentional sync sleep for timing-channel mitigation in stealth mode.
             // This runs on a dedicated sync path, NOT inside an async task.
-            let jitter_us_max = Self::jitter_override_us().unwrap_or(0);
+            let jitter_us_max = Self::jitter_override_us(&self.environment).unwrap_or(0);
             if jitter_us_max > 0 {
                 let jitter = rng.random_range(1..=jitter_us_max);
                 std::thread::sleep(std::time::Duration::from_micros(jitter));

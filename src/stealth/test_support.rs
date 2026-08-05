@@ -1,6 +1,5 @@
 use std::env;
 use std::ffi::OsString;
-use std::sync::Mutex;
 
 pub struct EnvGuard {
     key: &'static str,
@@ -30,14 +29,6 @@ impl Drop for EnvGuard {
     }
 }
 
-static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
 pub fn acquire_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    match ENV_MUTEX.lock() {
-        Ok(g) => g,
-        Err(poisoned) => {
-            log::warn!("stealth ENV_MUTEX poisoned; recovering test env lock");
-            poisoned.into_inner()
-        }
-    }
+    crate::env_utils::test_support::acquire_env_lock()
 }

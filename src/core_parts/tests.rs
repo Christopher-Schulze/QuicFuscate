@@ -567,6 +567,7 @@ mod tests {
 
     #[test]
     fn env_optional_trimmed_trims_whitespace() {
+        let _env_lock = crate::env_utils::test_support::acquire_env_lock();
         let key = "QUICFUSCATE_TEST_TRIM_WS";
         std::env::set_var(key, "  hello  ");
         let result = QuicFuscateConnection::env_optional_trimmed(key);
@@ -576,6 +577,7 @@ mod tests {
 
     #[test]
     fn env_optional_trimmed_returns_none_for_empty() {
+        let _env_lock = crate::env_utils::test_support::acquire_env_lock();
         let key = "QUICFUSCATE_TEST_TRIM_EMPTY";
         std::env::set_var(key, "   ");
         let result = QuicFuscateConnection::env_optional_trimmed(key);

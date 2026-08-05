@@ -10,7 +10,9 @@ use core::cmp::{max, min};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{configured_min_rtt_window, CongestionController, PathChangeEvent, PathChangeKind};
+use super::{
+    configured_min_rtt_window_with_snapshot, CongestionController, PathChangeEvent, PathChangeKind,
+};
 
 // ---------------------------------------------------------------------------
 // Constants (from IETF draft-ietf-ccwg-bbr-04)
@@ -173,6 +175,15 @@ impl Bbr2 {
 
     /// Create a new BBR2 controller with the given initial window and MSS.
     pub fn new(initial_cwnd: usize, mss: usize) -> Self {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_snapshot(initial_cwnd, mss, &environment)
+    }
+
+    pub(crate) fn new_with_snapshot(
+        initial_cwnd: usize,
+        mss: usize,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Self {
         let now = crate::time_source::now_instant();
         let mss = mss.max(1);
         let startup_pacing_floor =
@@ -192,7 +203,7 @@ impl Bbr2 {
             rtt: INITIAL_RTT,
             rtt_var: Duration::ZERO,
             min_rtt_stamp: now,
-            min_rtt_window: configured_min_rtt_window(),
+            min_rtt_window: configured_min_rtt_window_with_snapshot(environment),
             min_rtt_expired: false,
             loss_acked: 0.0,
             loss_lost: 0.0,

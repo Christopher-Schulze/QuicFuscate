@@ -78,6 +78,8 @@ pub struct Connection {
     // Unified TLS provider (rustls + optional TLS Cover)
     tls_provider: Option<Box<dyn crate::qftls::QuicTlsProvider>>,
     tls_profile: Option<crate::qftls::TlsProfile>,
+    /// Immutable environment generation used by all TLS provider rebuilds for this connection.
+    environment: Arc<crate::env_utils::EnvSnapshot>,
     conn_bytes_sent: u64,
     /// Control frames admitted through `queue_control_frame`; bounded and window-update coalesced.
     pending_control: VecDeque<Frame<'static>>,

@@ -77,11 +77,19 @@ impl FecObserverProfilePolicy {
         Self::Ambient(TransportProfile::Desktop)
     }
 
-    fn detect() -> Self {
+    fn detect_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
         let platform_hints = FecObserverPlatformHints::detect();
-        match std::env::var("QUICFUSCATE_PROFILE") {
-            Ok(profile) => Self::from_sources(Some(profile.as_str()), platform_hints),
-            Err(_) => Self::from_sources(None, platform_hints),
+        match environment.first(["QUICFUSCATE_PROFILE"]) {
+            None => Self::from_sources(None, platform_hints),
+            Some(profile) if matches!(profile.as_str(), "mobile" | "server" | "desktop") => {
+                Self::from_sources(Some(profile.as_str()), platform_hints)
+            }
+            Some(profile) => {
+                log::warn!(
+                    "Invalid QUICFUSCATE_PROFILE value '{profile}'; retaining detected platform profile"
+                );
+                Self::from_sources(None, platform_hints)
+            }
         }
     }
 
@@ -110,9 +118,12 @@ impl FecObserverAmbientInputs {
         Self::new(profile, base_stream_interval)
     }
 
-    fn detect() -> Self {
-        let runtime_policy = FecRuntimePolicy::detect();
-        Self::from_runtime_policy(&runtime_policy, FecObserverProfilePolicy::detect())
+    fn detect_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
+        let runtime_policy = FecRuntimePolicy::detect_with_snapshot(environment);
+        Self::from_runtime_policy(
+            &runtime_policy,
+            FecObserverProfilePolicy::detect_with_snapshot(environment),
+        )
     }
 }
 
@@ -124,9 +135,16 @@ pub(crate) struct FecTransportObserver {
 
 impl FecTransportObserver {
     pub(crate) fn new() -> Arc<Self> {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_snapshot(&environment)
+    }
+
+    pub(crate) fn new_with_snapshot(
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: RwLock::new(FecObsState::default()),
-            ambient: FecObserverAmbientInputs::detect(),
+            ambient: FecObserverAmbientInputs::detect_with_snapshot(environment),
             brain_hints: OnceLock::new(),
         })
     }

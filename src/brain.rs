@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::env_utils::env_parse;
+use crate::env_utils::EnvSnapshot;
 
 use crate::accelerate::brain as brain_accel;
 use crate::fec::KalmanFilter;
@@ -189,7 +189,12 @@ impl Default for StealthBrainConfig {
 impl StealthBrainConfig {
     /// Constructs a config by reading environment variable overrides on top of defaults.
     pub fn from_env() -> Self {
-        match Self::try_from_env() {
+        let environment = EnvSnapshot::capture();
+        Self::from_env_with_snapshot(&environment)
+    }
+
+    pub(crate) fn from_env_with_snapshot(environment: &EnvSnapshot) -> Self {
+        match Self::try_from_env_with_snapshot(environment) {
             Ok(cfg) => cfg,
             Err(error) => {
                 log::warn!(
@@ -202,38 +207,55 @@ impl StealthBrainConfig {
 
     /// Constructs and validates a config from environment variable overrides.
     pub fn try_from_env() -> Result<Self, String> {
+        let environment = EnvSnapshot::capture();
+        Self::try_from_env_with_snapshot(&environment)
+    }
+
+    pub(crate) fn try_from_env_with_snapshot(environment: &EnvSnapshot) -> Result<Self, String> {
         let mut cfg = Self::default();
-        if let Some(v) = env_parse("QUICFUSCATE_BRAIN_ACK_MAX") {
+        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_ACK_MAX") {
             cfg.ack_max = v;
         }
-        if let Some(v) = env_parse("QUICFUSCATE_BRAIN_JITTER_MAX_US") {
+        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_JITTER_MAX_US") {
             cfg.jitter_max_us = v;
         }
-        if let Some(v) = env_parse::<usize>("QUICFUSCATE_BRAIN_SIZE_BINS") {
+        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_SIZE_BINS") {
             cfg.size_bins = v.clamp(8, 64);
         }
-        if let Some(v) = env_parse::<usize>("QUICFUSCATE_BRAIN_IAT_BINS") {
+        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_IAT_BINS") {
             cfg.iat_bins = v.clamp(8, 64);
         }
-        if let Some(v) = env_parse::<u32>("QUICFUSCATE_BRAIN_PROBE_MAX_PER_MIN") {
+        if let Some(v) = environment.parse::<u32>("QUICFUSCATE_BRAIN_PROBE_MAX_PER_MIN") {
             cfg.probe_max_per_min = v.min(30);
         }
-        if let Some(v) = env_parse("QUICFUSCATE_BRAIN_PROBE_COOLDOWN_MS") {
+        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_PROBE_COOLDOWN_MS") {
             cfg.probe_cooldown_ms = v;
         }
-        if let Some(v) = env_parse("QUICFUSCATE_BRAIN_POLICY_COOLDOWN_MS") {
+        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_POLICY_COOLDOWN_MS") {
             cfg.policy_cooldown_ms = v;
         }
-        if let Some(v) = env_parse::<f32>("QUICFUSCATE_BRAIN_EXPLORE") {
-            cfg.explore_prob = v.clamp(0.0, 0.25);
+        if let Some(v) = environment.parse_finite_f32("QUICFUSCATE_BRAIN_EXPLORE") {
+            let clamped = v.clamp(0.0, 0.25);
+            if clamped != v {
+                log::warn!(
+                    "QUICFUSCATE_BRAIN_EXPLORE must be between 0.0 and 0.25; clamping override"
+                );
+            }
+            cfg.explore_prob = clamped;
         }
-        if let Some(v) = env_parse::<f32>("QUICFUSCATE_BRAIN_HIST_DECAY") {
-            cfg.hist_decay = v.clamp(0.80, 0.999);
+        if let Some(v) = environment.parse_finite_f32("QUICFUSCATE_BRAIN_HIST_DECAY") {
+            let clamped = v.clamp(0.80, 0.999);
+            if clamped != v {
+                log::warn!(
+                    "QUICFUSCATE_BRAIN_HIST_DECAY must be between 0.80 and 0.999; clamping override"
+                );
+            }
+            cfg.hist_decay = clamped;
         }
-        if let Some(v) = env_parse::<usize>("QUICFUSCATE_BRAIN_PAD_MAX_LOW") {
+        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_PAD_MAX_LOW") {
             cfg.pad_max_low = v.clamp(16, 512);
         }
-        if let Some(v) = env_parse::<usize>("QUICFUSCATE_BRAIN_PAD_MAX_HIGH") {
+        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_PAD_MAX_HIGH") {
             cfg.pad_max_high = v.min(2048);
         }
         cfg.validate()?;
@@ -1645,6 +1667,19 @@ mod intelligent_hysteresis_tests {
         assert!(invalid_padding.validate().is_err());
 
         assert!(StealthBrainConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn brain_snapshot_retains_defaults_for_invalid_numeric_values() {
+        let environment = EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_BRAIN_EXPLORE", "NaN"),
+            ("QUICFUSCATE_BRAIN_HIST_DECAY", "-inf"),
+            ("QUICFUSCATE_BRAIN_ACK_MAX", "not-a-number"),
+        ]);
+        let config = StealthBrainConfig::from_env_with_snapshot(&environment);
+        assert_eq!(config.explore_prob, StealthBrainConfig::default().explore_prob);
+        assert_eq!(config.hist_decay, StealthBrainConfig::default().hist_decay);
+        assert_eq!(config.ack_max, StealthBrainConfig::default().ack_max);
     }
 }
 

@@ -4,7 +4,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
-    use std::sync::{atomic::AtomicBool, Mutex as StdMutex, OnceLock};
+    use std::sync::atomic::AtomicBool;
     use std::thread;
 
     #[derive(Clone)]
@@ -581,9 +581,7 @@ mod tests {
         // Environment variables are process-global. Guard tests that mutate
         // QUICFUSCATE_TRUST_PROXY and QUICFUSCATE_TRUSTED_PROXY_IPS so
         // parallel test execution cannot race.
-        static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        let _guard =
-            ENV_LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::env_utils::test_support::acquire_env_lock();
 
         let prev_trust_proxy = std::env::var("QUICFUSCATE_TRUST_PROXY").ok();
         let prev_trusted_proxy_ips = std::env::var("QUICFUSCATE_TRUSTED_PROXY_IPS").ok();

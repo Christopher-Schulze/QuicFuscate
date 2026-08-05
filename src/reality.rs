@@ -60,12 +60,20 @@ struct SessionHandle {
 impl RealityProxy {
     /// Create a new reality proxy with the given response channel.
     pub fn new(tx: mpsc::Sender<FallbackResponse>) -> Self {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_snapshot(tx, &environment)
+    }
+
+    pub(crate) fn new_with_snapshot(
+        tx: mpsc::Sender<FallbackResponse>,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Self {
         Self {
             tx,
             sessions: Mutex::new(HashMap::new()),
             target_idx: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
-            targets: load_targets(),
+            targets: load_targets_with_snapshot(environment),
             last_cleanup: Mutex::new(crate::time_source::now_instant()),
         }
     }
@@ -274,8 +282,14 @@ impl Drop for RealityProxy {
     }
 }
 
+#[cfg(test)]
 fn load_targets() -> Vec<String> {
-    if let Ok(raw) = std::env::var("QUICFUSCATE_REALITY_TARGETS") {
+    let environment = crate::env_utils::EnvSnapshot::capture();
+    load_targets_with_snapshot(&environment)
+}
+
+fn load_targets_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Vec<String> {
+    if let Some(raw) = environment.first(["QUICFUSCATE_REALITY_TARGETS"]) {
         let parsed: Vec<String> = raw
             .split(',')
             .map(|s| s.trim())
@@ -329,14 +343,37 @@ impl Default for RealityConfig {
 impl RealityConfig {
     /// Parse reality config from environment variables.
     pub fn from_env() -> Self {
-        use crate::env_utils::{env_flag, env_parse};
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::from_env_with_snapshot(&environment)
+    }
+
+    pub(crate) fn from_env_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
+        let cover_port = match environment.parse::<u16>("QUICFUSCATE_REALITY_COVER_PORT") {
+            Some(port) if port > 0 => port,
+            Some(_) => {
+                log::warn!(
+                    "QUICFUSCATE_REALITY_COVER_PORT must be positive; retaining the default"
+                );
+                443
+            }
+            None => 443,
+        };
+        let cache_ttl = match environment.parse::<u64>("QUICFUSCATE_REALITY_CACHE_TTL") {
+            Some(ttl) if ttl > 0 => ttl,
+            Some(_) => {
+                log::warn!("QUICFUSCATE_REALITY_CACHE_TTL must be positive; retaining the default");
+                3600
+            }
+            None => 3600,
+        };
         Self {
-            enabled: env_flag("QUICFUSCATE_REALITY_ENABLED", false),
-            cover_host: std::env::var("QUICFUSCATE_REALITY_COVER_HOST")
-                .unwrap_or_else(|_| "www.cloudflare.com".to_string()),
-            cover_port: env_parse::<u16>("QUICFUSCATE_REALITY_COVER_PORT").unwrap_or(443),
-            cache_ttl: env_parse::<u64>("QUICFUSCATE_REALITY_CACHE_TTL").unwrap_or(3600),
-            fallback_to_synthetic: env_flag("QUICFUSCATE_REALITY_FALLBACK_SYNTHETIC", true),
+            enabled: environment.flag("QUICFUSCATE_REALITY_ENABLED", false),
+            cover_host: environment
+                .first(["QUICFUSCATE_REALITY_COVER_HOST"])
+                .unwrap_or_else(|| "www.cloudflare.com".to_string()),
+            cover_port,
+            cache_ttl,
+            fallback_to_synthetic: environment.flag("QUICFUSCATE_REALITY_FALLBACK_SYNTHETIC", true),
         }
     }
 
@@ -838,6 +875,25 @@ mod tests {
         assert!(targets.contains(&"1.1.1.1:443".to_string()));
         assert!(targets.contains(&"8.8.8.8:443".to_string()));
         assert!(targets.contains(&"9.9.9.9:443".to_string()));
+    }
+
+    #[test]
+    fn reality_snapshot_retains_defaults_for_invalid_values() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_REALITY_ENABLED", "true"),
+            ("QUICFUSCATE_REALITY_FALLBACK_SYNTHETIC", "malformed"),
+            ("QUICFUSCATE_REALITY_COVER_HOST", "  "),
+            ("QUICFUSCATE_REALITY_COVER_PORT", "not-a-port"),
+            ("QUICFUSCATE_REALITY_CACHE_TTL", "not-a-duration"),
+        ]);
+        let config = RealityConfig::from_env_with_snapshot(&environment);
+        let defaults = RealityConfig::default();
+
+        assert!(config.enabled);
+        assert!(config.fallback_to_synthetic);
+        assert_eq!(config.cover_host, defaults.cover_host);
+        assert_eq!(config.cover_port, defaults.cover_port);
+        assert_eq!(config.cache_ttl, defaults.cache_ttl);
     }
 
     #[test]

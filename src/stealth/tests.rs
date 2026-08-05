@@ -1001,11 +1001,8 @@ fn test_eight_probes_in_120s_escalate_to_level_2() {
 /// This test uses a very short quiet period via env override.
 #[test]
 fn test_de_escalation_after_quiet_period() {
-    use std::sync::Mutex;
-
     // Use a 1-second quiet period for testing.
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-    let _guard = ENV_GUARD.lock().unwrap();
+    let _guard = acquire_env_lock();
     std::env::set_var("QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC", "1");
 
     let mgr = StealthManager::new(

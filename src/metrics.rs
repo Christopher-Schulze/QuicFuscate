@@ -116,6 +116,7 @@ mod tests {
 
     #[test]
     fn custom_metrics_addr() {
+        let _env_lock = crate::env_utils::test_support::acquire_env_lock();
         let key = "QUICFUSCATE_METRICS_ADDR_TEST_CUSTOM";
         std::env::set_var(key, "0.0.0.0:1234");
         let addr = std::env::var(key).unwrap_or_else(|_| "127.0.0.1:9898".into());

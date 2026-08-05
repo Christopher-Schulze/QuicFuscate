@@ -244,11 +244,17 @@ impl FecAmbientInputs {
         }
     }
 
+    #[cfg(test)]
     fn detect() -> Self {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::detect_with_snapshot(&environment)
+    }
+
+    fn detect_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
         Self::new(
             crate::optimize::global_pool(),
             FecComputeProfile::detect(),
-            FecRuntimePolicy::detect(),
+            FecRuntimePolicy::detect_with_snapshot(environment),
         )
     }
 }
@@ -372,14 +378,26 @@ impl FecRuntimePlan {
 impl AdaptiveFec {
     /// Create a new adaptive FEC instance from the given configuration.
     pub fn new(config: FecConfig) -> Self {
-        let global_resources = FecGlobalResources::detect();
-        global_resources.initialize();
-        let ambient = FecAmbientInputs::detect();
-        let plan = FecRuntimePlan::resolve(&config, &ambient);
-        Self::from_runtime_plan(config, plan)
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::new_with_snapshot(config, &environment)
     }
 
-    fn from_runtime_plan(config: FecConfig, plan: FecRuntimePlan) -> Self {
+    pub(crate) fn new_with_snapshot(
+        config: FecConfig,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Self {
+        let global_resources = FecGlobalResources::detect_with_snapshot(environment);
+        global_resources.initialize();
+        let ambient = FecAmbientInputs::detect_with_snapshot(environment);
+        let plan = FecRuntimePlan::resolve(&config, &ambient);
+        Self::from_runtime_plan(config, plan, environment)
+    }
+
+    fn from_runtime_plan(
+        config: FecConfig,
+        plan: FecRuntimePlan,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Self {
         let FecRuntimePlan {
             mode,
             control_policy,
@@ -401,8 +419,9 @@ impl AdaptiveFec {
         let telemetry_enabled =
             crate::telemetry::TELEMETRY_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
         let decoder_policy_tunable = runtime_policy.decoder_policy.eq_ignore_ascii_case("auto");
-        let wiedemann_threshold =
-            env_parse::<usize>("QUICFUSCATE_FEC_WIEDEMANN_K").unwrap_or(256);
+        let wiedemann_threshold = environment
+            .parse::<usize>("QUICFUSCATE_FEC_WIEDEMANN_K")
+            .unwrap_or(256);
         let fec = Self {
             config: config.clone(),
             // InterleavedEncoder for burst loss protection

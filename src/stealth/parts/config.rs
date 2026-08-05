@@ -167,23 +167,42 @@ pub enum RotationMode {
 }
 
 impl StealthConfig {
-    fn env_first<const N: usize>(names: [&str; N]) -> Option<String> {
-        env_utils::env_first(names)
+    fn env_first<const N: usize>(
+        environment: &crate::env_utils::EnvSnapshot,
+        names: [&str; N],
+    ) -> Option<String> {
+        environment.first(names)
     }
 
-    fn env_bool_first<const N: usize>(names: [&str; N]) -> Option<bool> {
-        Self::env_first(names).and_then(|value| env_utils::parse_bool(&value))
+    fn env_bool_first<const N: usize>(
+        environment: &crate::env_utils::EnvSnapshot,
+        names: [&str; N],
+    ) -> Option<bool> {
+        environment.flag_first(names)
     }
 
-    fn env_parse_first<T, const N: usize>(names: [&str; N]) -> Option<T>
+    fn env_parse_first<T, const N: usize>(
+        environment: &crate::env_utils::EnvSnapshot,
+        names: [&str; N],
+    ) -> Option<T>
     where
         T: std::str::FromStr,
     {
-        Self::env_first(names).and_then(|value| value.trim().parse::<T>().ok())
+        environment.parse_first(names)
     }
 
-    fn env_csv_first<const N: usize>(names: [&str; N]) -> Option<Vec<String>> {
-        Self::env_first(names).map(|value| {
+    fn env_f32_first<const N: usize>(
+        environment: &crate::env_utils::EnvSnapshot,
+        names: [&str; N],
+    ) -> Option<f32> {
+        environment.parse_finite_f32_first(names)
+    }
+
+    fn env_csv_first<const N: usize>(
+        environment: &crate::env_utils::EnvSnapshot,
+        names: [&str; N],
+    ) -> Option<Vec<String>> {
+        Self::env_first(environment, names).map(|value| {
             value
                 .split(',')
                 .map(|entry| entry.trim().to_string())
@@ -192,49 +211,67 @@ impl StealthConfig {
         })
     }
 
-    fn apply_compression_env_overrides(policy: &mut crate::compress::CompressionPolicy) {
-        if let Some(enabled) = Self::env_bool_first(["QUICFUSCATE_COMPRESS"]) {
+    fn apply_compression_env_overrides(
+        policy: &mut crate::compress::CompressionPolicy,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) {
+        if let Some(enabled) = Self::env_bool_first(environment, ["QUICFUSCATE_COMPRESS"]) {
             policy.enabled = enabled;
         }
-        if let Some(min_len) = Self::env_parse_first(["QUICFUSCATE_COMPRESS_MIN"]) {
+        if let Some(min_len) = Self::env_parse_first(environment, ["QUICFUSCATE_COMPRESS_MIN"]) {
             policy.min_len = min_len;
         }
-        if let Some(level) = Self::env_parse_first(["QUICFUSCATE_COMPRESS_LEVEL"]) {
+        if let Some(level) = Self::env_parse_first(environment, ["QUICFUSCATE_COMPRESS_LEVEL"]) {
             policy.level = level;
         }
-        if let Some(allow) = Self::env_csv_first(["QUICFUSCATE_COMPRESS_ALLOW"]) {
+        if let Some(allow) = Self::env_csv_first(environment, ["QUICFUSCATE_COMPRESS_ALLOW"]) {
             policy.allow = allow;
         }
-        if let Some(deny) = Self::env_csv_first(["QUICFUSCATE_COMPRESS_DENY"]) {
+        if let Some(deny) = Self::env_csv_first(environment, ["QUICFUSCATE_COMPRESS_DENY"]) {
             policy.deny = deny;
         }
     }
 
-    fn transport_ack_threshold_override(&self) -> Option<u64> {
-        Self::env_parse_first(["QUICFUSCATE_ACK_THRESHOLD"]).filter(|n: &u64| *n > 0)
+    fn transport_ack_threshold_override(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<u64> {
+        Self::env_parse_first(environment, ["QUICFUSCATE_ACK_THRESHOLD"])
+            .filter(|n: &u64| *n > 0)
     }
 
-    fn transport_ack_max_delay_override(&self) -> Option<u64> {
-        Self::env_parse_first(["QUICFUSCATE_ACK_MAX_DELAY_MS"])
+    fn transport_ack_max_delay_override(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<u64> {
+        Self::env_parse_first(environment, ["QUICFUSCATE_ACK_MAX_DELAY_MS"])
     }
 
-    fn transport_external_pacing_override(&self) -> Option<bool> {
-        Self::env_bool_first(["QUICFUSCATE_EXTERNAL_PACING"])
+    fn transport_external_pacing_override(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<bool> {
+        Self::env_bool_first(environment, ["QUICFUSCATE_EXTERNAL_PACING"])
     }
 
-    fn transport_padding_max_override(&self) -> Option<usize> {
-        Self::env_parse_first([
+    fn transport_padding_max_override(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<usize> {
+        Self::env_parse_first(environment, [
             "QUICFUSCATE_STEALTH_PADDING_MAX",
             "QUICFUSCATE_STEALTH_MAX_PADDING",
         ])
     }
 
-    fn transport_padding_strategy_override(&self) -> Option<PaddingStrategy> {
-        let value = Self::env_first([
+    fn transport_padding_strategy_override(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<PaddingStrategy> {
+        environment.first_with([
             "QUICFUSCATE_STEALTH_PADDING_STRATEGY",
             "QUICFUSCATE_PADDING_STRATEGY",
-        ])?;
-        match value.trim().to_ascii_lowercase().as_str() {
+        ], |value| match value.to_ascii_lowercase().as_str() {
             "1" | "random" => Some(PaddingStrategy::Random),
             "2" | "fixed" => Some(PaddingStrategy::Fixed),
             "3" | "adaptive" => Some(PaddingStrategy::Adaptive),
@@ -245,26 +282,36 @@ impl StealthConfig {
                 Some(PaddingStrategy::PacketNormalize)
             }
             _ => None,
-        }
+        })
     }
 
-    fn transport_jitter_override_us(&self) -> Option<u32> {
-        Self::env_parse_first(["QUICFUSCATE_STEALTH_JITTER_US"])
+    fn transport_jitter_override_us(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<u32> {
+        Self::env_parse_first(environment, ["QUICFUSCATE_STEALTH_JITTER_US"])
     }
 
-    fn transport_adaptive_granularity_override(&self) -> Option<u16> {
-        Self::env_parse_first(["QUICFUSCATE_STEALTH_ADAPTIVE_GRAN"])
+    fn transport_adaptive_granularity_override(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<u16> {
+        Self::env_parse_first(environment, ["QUICFUSCATE_STEALTH_ADAPTIVE_GRAN"])
     }
 
-    fn transport_mimic_bias_override(&self) -> Option<u8> {
-        let value = Self::env_first(["QUICFUSCATE_STEALTH_MIMIC_BIAS"])?;
-        match value.trim().to_ascii_lowercase().as_str() {
+    fn transport_mimic_bias_override(
+        &self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Option<u8> {
+        environment.first_with(["QUICFUSCATE_STEALTH_MIMIC_BIAS"], |value| {
+            match value.to_ascii_lowercase().as_str() {
             "1" | "very_small" | "safari" => Some(1),
             "2" | "small" | "firefox" => Some(2),
             "4" | "mobile" | "android" => Some(4),
             "3" | "default" | "chromium" | "chrome" | "edge" => Some(3),
             _ => None,
-        }
+            }
+        })
     }
 
     /// Creates Stealth mode - balanced features with minimal overhead (sweetspot).
@@ -563,12 +610,12 @@ impl Default for StealthConfig {
 }
 
 impl StealthConfig {
-    fn masque_env_flag(name: &str) -> bool {
-        Self::env_bool_first([name]).unwrap_or(false)
+    fn masque_env_flag(environment: &crate::env_utils::EnvSnapshot, name: &str) -> bool {
+        Self::env_bool_first(environment, [name]).unwrap_or(false)
     }
 
-    fn masque_proxy_override() -> Option<String> {
-        Self::env_first(["QUICFUSCATE_MASQUE_PROXY"]).filter(|v| !v.is_empty())
+    fn masque_proxy_override(environment: &crate::env_utils::EnvSnapshot) -> Option<String> {
+        Self::env_first(environment, ["QUICFUSCATE_MASQUE_PROXY"])
     }
 
     /// Parses a TOML string and constructs a `StealthConfig` from the
@@ -850,8 +897,16 @@ impl StealthConfig {
     /// - QUICFUSCATE_SERVER_PUSH_BASE_PATH: path
     /// - QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL: integer seconds
     pub fn apply_env_overrides(&mut self) {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        self.apply_env_overrides_with_snapshot(&environment);
+    }
+
+    pub(crate) fn apply_env_overrides_with_snapshot(
+        &mut self,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) {
         // Primary mode override first (sets a known baseline)
-        if let Some(v) = Self::env_first(["QUICFUSCATE_STEALTH_MODE"]) {
+        if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_STEALTH_MODE"]) {
             let m = v.trim().to_ascii_lowercase();
             *self = match m.as_str() {
                 "base" | "performance" => StealthConfig::performance(),
@@ -867,111 +922,109 @@ impl StealthConfig {
             };
         }
 
-        if let Some(v) = Self::env_first(["QUICFUSCATE_BROWSER", "QUICFUSCATE_BROWSER_PROFILE"]) {
-            if let Some(bp) = Self::parse_browser(&v) {
-                self.initial_browser = bp;
-            }
+        if let Some(bp) = environment.first_with(
+            ["QUICFUSCATE_BROWSER", "QUICFUSCATE_BROWSER_PROFILE"],
+            Self::parse_browser,
+        ) {
+            self.initial_browser = bp;
         }
-        if let Some(v) = Self::env_first(["QUICFUSCATE_OS", "QUICFUSCATE_OS_PROFILE"]) {
-            if let Some(os) = Self::parse_os(&v) {
-                self.initial_os = os;
-            }
+        if let Some(os) = environment.first_with(
+            ["QUICFUSCATE_OS", "QUICFUSCATE_OS_PROFILE"],
+            Self::parse_os,
+        ) {
+            self.initial_os = os;
         }
         if let Some(b) =
-            Self::env_bool_first(["QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION"])
+            Self::env_bool_first(environment, ["QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION"])
         {
             self.enable_network_fingerprint_normalization = b;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE"])
+        {
             self.suppress_icmp_unreachable = b;
         }
         if let Some(b) =
-            Self::env_bool_first(["QUICFUSCATE_USE_TLS_COVER_EXTRAS", "QUICFUSCATE_USE_TLS_COVER"])
+            Self::env_bool_first(
+                environment,
+                ["QUICFUSCATE_USE_TLS_COVER_EXTRAS", "QUICFUSCATE_USE_TLS_COVER"],
+            )
         {
             self.use_tls_cover = b;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_DOH", "QUICFUSCATE_DOH_ENABLED"]) {
+        if let Some(b) = Self::env_bool_first(
+            environment,
+            ["QUICFUSCATE_DOH", "QUICFUSCATE_DOH_ENABLED"],
+        ) {
             self.enable_doh = b;
         }
-        if let Some(v) = Self::env_first(["QUICFUSCATE_DOH_PROVIDER"]) {
-            if !v.trim().is_empty() {
-                self.doh_provider = v;
-            }
+        if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_DOH_PROVIDER"]) {
+            self.doh_provider = v;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_FRONTING"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_FRONTING"]) {
             self.enable_domain_fronting = b;
         }
-        if let Some(domains) = Self::env_csv_first(["QUICFUSCATE_FRONTING_DOMAINS"]) {
+        if let Some(domains) = Self::env_csv_first(environment, ["QUICFUSCATE_FRONTING_DOMAINS"]) {
             self.fronting_domains = domains;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_H3_MASQUERADE"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_H3_MASQUERADE"]) {
             self.enable_http3_masquerading = b;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_QPACK"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_QPACK"]) {
             self.use_qpack_headers = b;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_STEALTH_PADDING"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_STEALTH_PADDING"]) {
             self.enable_traffic_padding = b;
         }
-        if let Some(n) = Self::env_parse_first([
+        if let Some(n) = Self::env_parse_first(environment, [
             "QUICFUSCATE_STEALTH_PADDING_MAX",
             "QUICFUSCATE_STEALTH_MAX_PADDING",
         ]) {
             self.max_padding_size = n;
         }
-        if let Some(v) = Self::env_first([
-            "QUICFUSCATE_STEALTH_PADDING_STRATEGY",
-            "QUICFUSCATE_PADDING_STRATEGY",
-        ]) {
-            if let Some(strategy) = match v.trim().to_ascii_lowercase().as_str() {
-                "1" | "random" => Some(PaddingStrategy::Random),
-                "2" | "fixed" => Some(PaddingStrategy::Fixed),
-                "3" | "adaptive" => Some(PaddingStrategy::Adaptive),
-                "4" | "browser" | "browser-mimic" | "browsermimic" => {
-                    Some(PaddingStrategy::BrowserMimic)
-                }
-                _ => None,
-            } {
-                self.padding_strategy = strategy;
-            }
+        if let Some(strategy) = self.transport_padding_strategy_override(environment) {
+            self.padding_strategy = strategy;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_FINGERPRINT_ROTATION"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_FINGERPRINT_ROTATION"]) {
             self.enable_fingerprint_rotation = b;
         }
-        if let Some(n) = Self::env_parse_first(["QUICFUSCATE_FINGERPRINT_ROTATION_INTERVAL"]) {
+        if let Some(n) = Self::env_parse_first(environment, ["QUICFUSCATE_FINGERPRINT_ROTATION_INTERVAL"]) {
             self.fingerprint_rotation_interval = n;
         }
 
         // Compression policy overrides
         let mut pol = crate::compress::global_policy();
-        Self::apply_compression_env_overrides(&mut pol);
+        Self::apply_compression_env_overrides(&mut pol, environment);
         crate::compress::set_global_policy(pol);
 
         // Optional fine-grained overrides
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_CHOKE_ENABLE"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_CHOKE_ENABLE"]) {
             self.enable_realtime_choke = b;
         }
-        if let Some(n) = Self::env_parse_first(["QUICFUSCATE_CHOKE_TARGET_MBPS"]) {
+        if let Some(n) = Self::env_parse_first(environment, ["QUICFUSCATE_CHOKE_TARGET_MBPS"]) {
             self.choke_target_mbps = n;
         }
-        if let Some(n) = Self::env_parse_first(["QUICFUSCATE_CHOKE_BURST_MS"]) {
+        if let Some(n) = Self::env_parse_first(environment, ["QUICFUSCATE_CHOKE_BURST_MS"]) {
             self.choke_burst_ms = n;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_STEALTH_DYNAMIC"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_STEALTH_DYNAMIC"]) {
             self.dynamic_enabled = b;
         }
-        if let Some(b) = Self::env_bool_first(["QUICFUSCATE_SERVER_PUSH_COVER"]) {
+        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_SERVER_PUSH_COVER"]) {
             self.enable_server_push_cover = b;
         }
-        if let Some(n) = Self::env_parse_first(["QUICFUSCATE_SERVER_PUSH_INTENSITY"]) {
-            self.server_push_intensity = n;
-        }
-        if let Some(v) = Self::env_first(["QUICFUSCATE_SERVER_PUSH_BASE_PATH"]) {
-            if !v.trim().is_empty() {
-                self.server_push_base_path = v;
+        if let Some(n) = Self::env_f32_first(environment, ["QUICFUSCATE_SERVER_PUSH_INTENSITY"]) {
+            if (0.0..=1.0).contains(&n) {
+                self.server_push_intensity = n;
+            } else {
+                log::warn!(
+                    "QUICFUSCATE_SERVER_PUSH_INTENSITY must be between 0.0 and 1.0; ignoring override"
+                );
             }
         }
-        if let Some(n) = Self::env_parse_first(["QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL"]) {
+        if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_SERVER_PUSH_BASE_PATH"]) {
+            self.server_push_base_path = v;
+        }
+        if let Some(n) = Self::env_parse_first(environment, ["QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL"]) {
             self.server_push_burst_interval = n;
         }
         self.normalize_protocol_mimicry_bundle();

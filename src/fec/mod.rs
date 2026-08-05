@@ -42,7 +42,7 @@ fn next_repair_id() -> u64 {
     REPAIR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-use crate::env_utils::{env_flag, env_parse};
+use crate::env_utils::EnvSnapshot;
 
 /// Pool-backed payload buffer shared across FEC packet handles via `Arc`.
 #[derive(Clone)]
@@ -103,35 +103,72 @@ struct FecRuntimePolicy {
 
 impl FecRuntimePolicy {
     fn detect() -> Self {
+        let environment = EnvSnapshot::capture();
+        Self::detect_with_snapshot(&environment)
+    }
+
+    fn detect_with_snapshot(environment: &EnvSnapshot) -> Self {
+        let decoder_policy = match environment
+            .first(["QUICFUSCATE_FEC_DECODER"])
+            .map(|value| value.to_ascii_lowercase())
+        {
+            None => "auto".to_string(),
+            Some(value) if matches!(value.as_str(), "auto" | "gauss" | "wiedemann") => value,
+            Some(value) => {
+                log::warn!(
+                    "Invalid QUICFUSCATE_FEC_DECODER value '{value}'; retaining default auto"
+                );
+                "auto".to_string()
+            }
+        };
         Self {
-            decoder_policy: std::env::var("QUICFUSCATE_FEC_DECODER")
-                .unwrap_or_else(|_| "auto".to_string()),
-            lazy_enabled: env_flag("QUICFUSCATE_FEC_LAZY", true),
-            interleave_enabled: env_flag("QUICFUSCATE_FEC_INTERLEAVE", true),
-            switch_threshold_override: env_parse::<f32>("QUICFUSCATE_FEC_SWITCH_THRESH")
-                .map(|value| value.clamp(0.0, 1.0)),
-            switch_min_up_ms: env_parse::<u64>("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS").unwrap_or(120),
-            switch_min_down_ms: env_parse::<u64>("QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS")
+            decoder_policy,
+            lazy_enabled: environment.flag("QUICFUSCATE_FEC_LAZY", true),
+            interleave_enabled: environment.flag("QUICFUSCATE_FEC_INTERLEAVE", true),
+            switch_threshold_override: environment
+                .parse_finite_f32("QUICFUSCATE_FEC_SWITCH_THRESH")
+                .map(|value| {
+                    let clamped = value.clamp(0.0, 1.0);
+                    if clamped != value {
+                        log::warn!(
+                            "QUICFUSCATE_FEC_SWITCH_THRESH must be between 0.0 and 1.0; clamping override"
+                        );
+                    }
+                    clamped
+                }),
+            switch_min_up_ms: environment
+                .parse::<u64>("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS")
+                .unwrap_or(120),
+            switch_min_down_ms: environment
+                .parse::<u64>("QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS")
                 .unwrap_or(450),
-            auto_gf4_enabled: env_flag("QUICFUSCATE_FEC_AUTO_GF4", true),
-            fountain_window: env_parse::<usize>("QUICFUSCATE_FEC_FOUNTAIN_WINDOW")
+            auto_gf4_enabled: environment.flag("QUICFUSCATE_FEC_AUTO_GF4", true),
+            fountain_window: environment
+                .parse::<usize>("QUICFUSCATE_FEC_FOUNTAIN_WINDOW")
                 .unwrap_or(DEFAULT_FOUNTAIN_WINDOW)
                 .clamp(1, MAX_FOUNTAIN_WINDOW),
-            extreme_window: env_parse::<usize>("QUICFUSCATE_FEC_EXTREME_WINDOW").unwrap_or(1024),
-            fountain_symbol_size: resolve_fountain_symbol_size(),
-            stream_every_override: env_parse::<usize>("QUICFUSCATE_FEC_STREAM_EVERY")
+            extreme_window: environment
+                .parse::<usize>("QUICFUSCATE_FEC_EXTREME_WINDOW")
+                .unwrap_or(1024),
+            fountain_symbol_size: resolve_fountain_symbol_size(environment),
+            stream_every_override: environment
+                .parse::<usize>("QUICFUSCATE_FEC_STREAM_EVERY")
                 .map(|value| value.max(1)),
-            interleave_depth_override: env_parse::<usize>("QUICFUSCATE_FEC_INTERLEAVE_DEPTH"),
-            partial_enabled: env_flag("QUICFUSCATE_FEC_PARTIAL", true),
-            kalman_q_override: env_parse::<f32>("QUICFUSCATE_KALMAN_Q"),
-            kalman_r_override: env_parse::<f32>("QUICFUSCATE_KALMAN_R"),
+            interleave_depth_override: environment
+                .parse::<usize>("QUICFUSCATE_FEC_INTERLEAVE_DEPTH"),
+            partial_enabled: environment.flag("QUICFUSCATE_FEC_PARTIAL", true),
+            kalman_q_override: environment.parse_positive_f32("QUICFUSCATE_KALMAN_Q"),
+            kalman_r_override: environment.parse_positive_f32("QUICFUSCATE_KALMAN_R"),
         }
     }
 }
 
-fn resolve_fountain_symbol_size() -> usize {
-    env_parse::<usize>("QUICFUSCATE_FOUNTAIN_SYMBOL")
-        .or_else(|| env_parse::<usize>("QUICFUSCATE_MTU_HINT").map(|mtu| mtu.saturating_sub(80)))
+fn resolve_fountain_symbol_size(environment: &EnvSnapshot) -> usize {
+    environment
+        .parse::<usize>("QUICFUSCATE_FOUNTAIN_SYMBOL")
+        .or_else(|| {
+            environment.parse::<usize>("QUICFUSCATE_MTU_HINT").map(|mtu| mtu.saturating_sub(80))
+        })
         .unwrap_or(1500)
         .clamp(600, 16384)
 }
@@ -575,8 +612,9 @@ enum FecRayonGlobalPolicy {
 }
 
 impl FecRayonGlobalPolicy {
-    fn detect() -> Self {
-        env_parse::<usize>("QUICFUSCATE_RAYON_THREADS")
+    fn detect_with_snapshot(environment: &EnvSnapshot) -> Self {
+        environment
+            .parse::<usize>("QUICFUSCATE_RAYON_THREADS")
             .filter(|threads| *threads > 0)
             .map(Self::ThreadCap)
             .unwrap_or(Self::Default)
@@ -596,8 +634,8 @@ struct FecGlobalResources {
 }
 
 impl FecGlobalResources {
-    fn detect() -> Self {
-        Self { rayon: FecRayonGlobalPolicy::detect() }
+    fn detect_with_snapshot(environment: &EnvSnapshot) -> Self {
+        Self { rayon: FecRayonGlobalPolicy::detect_with_snapshot(environment) }
     }
 
     fn initialize(&self) {

@@ -33,15 +33,8 @@ impl Drop for EnvGuard {
     }
 }
 
-static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn acquire_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    match ENV_MUTEX.lock() {
-        Ok(g) => g,
-        Err(poisoned) => {
-            log::warn!("ENV_MUTEX poisoned; recovering test env lock");
-            poisoned.into_inner()
-        }
-    }
+    crate::env_utils::test_support::acquire_env_lock()
 }
 
 pub fn make_pool() -> Arc<MemoryPool> {

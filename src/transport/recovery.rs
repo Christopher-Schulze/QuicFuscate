@@ -303,6 +303,16 @@ impl Recovery {
 
     /// Creates a new Recovery state with the given algorithm.
     pub fn with_algorithm(initial_cwnd: usize, mss: usize, algo: cc::Algorithm) -> Self {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        Self::with_algorithm_with_snapshot(initial_cwnd, mss, algo, &environment)
+    }
+
+    pub(crate) fn with_algorithm_with_snapshot(
+        initial_cwnd: usize,
+        mss: usize,
+        algo: cc::Algorithm,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Self {
         let mss = mss.max(1);
         Self {
             cwnd: initial_cwnd,
@@ -321,7 +331,7 @@ impl Recovery {
             pacing: true,
             mss,
             batch_size: 16,
-            cc: cc::create(algo, initial_cwnd, mss),
+            cc: cc::create_with_snapshot(algo, initial_cwnd, mss, environment),
             mem_pool: crate::optimize::global_pool(),
             initial_cwnd,
             path_epoch: 0,

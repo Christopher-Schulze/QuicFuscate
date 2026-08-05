@@ -124,17 +124,18 @@ struct EscalationState {
 }
 
 impl EscalationState {
-    fn new(level_hints: Arc<crate::brain::IntelligentLevelHints>) -> Self {
-        let threshold_l1 = crate::env_utils::env_parse::<u32>(
-            "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1",
-        )
-        .unwrap_or(3)
-        .max(1);
-        let threshold_l2 = crate::env_utils::env_parse::<u32>(
-            "QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2",
-        )
-        .unwrap_or(8)
-        .max(threshold_l1);
+    fn new(
+        level_hints: Arc<crate::brain::IntelligentLevelHints>,
+        environment: &crate::env_utils::EnvSnapshot,
+    ) -> Self {
+        let threshold_l1 = environment
+            .parse::<u32>("QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1")
+            .unwrap_or(3)
+            .max(1);
+        let threshold_l2 = environment
+            .parse::<u32>("QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2")
+            .unwrap_or(8)
+            .max(threshold_l1);
         Self {
             current_level: AtomicU8::new(0),
             probe_timestamps: Mutex::new(ProbeHistory::new()),
@@ -143,10 +144,9 @@ impl EscalationState {
             level_hints,
             threshold_l1,
             threshold_l2,
-            quiet_period_secs: crate::env_utils::env_parse::<u64>(
-                "QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC",
-            )
-            .unwrap_or(300),
+            quiet_period_secs: environment
+                .parse::<u64>("QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC")
+                .unwrap_or(300),
         }
     }
 
