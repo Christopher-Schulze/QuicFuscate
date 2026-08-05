@@ -5,7 +5,8 @@ use super::dns_restore::{
     mark_ownership_written_at, mark_resolv_conf_written, owner_marker, ownership_path,
     path_entry_exists, persist_ownership_at, remove_ownership_at, restore_persisted_resolv_conf_at,
     restore_resolv_conf_at, source_has_owner_marker, verify_resolv_conf_write_target,
-    ProcessIdentity, ResolvConfRestoreState, ResolverPathKind,
+    write_resolver_file_at, ProcessIdentity, ResolvConfRestoreState, ResolverPathKind,
+    RESOLVER_PRIVATE_FILE_MODE,
 };
 use super::traits::*;
 use std::fs::File;
@@ -261,14 +262,16 @@ impl LinuxPlatform {
             return Ok(());
         }
         let path = self.resolver_paths.lock();
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)
-            .map_err(|error| {
-                PlatformError::DnsError(format!("open resolver lock {}: {error}", path.display()))
-            })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(RESOLVER_PRIVATE_FILE_MODE);
+        }
+        let file = options.open(&path).map_err(|error| {
+            PlatformError::DnsError(format!("open resolver lock {}: {error}", path.display()))
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -735,9 +738,8 @@ impl PlatformBackend for LinuxPlatform {
             for domain in &config.search_domains {
                 content.push_str(&format!("search {}\n", domain));
             }
-            std::fs::write(source, content).map_err(|e| {
-                PlatformError::DnsError(format!("write resolver file {}: {e}", source.display()))
-            })?;
+            let state = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner());
+            write_resolver_file_at(source, content.as_bytes(), &state)?;
             let managed = {
                 let mut state = self.resolv_conf_backup.lock().unwrap_or_else(|e| e.into_inner());
                 mark_resolv_conf_written(source, &mut state)?
@@ -875,5 +877,31 @@ mod tests {
         )
         .expect_err("derived resolver state collision must be rejected");
         assert!(collision.to_string().contains("must differ"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_lock_is_private_under_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _umask = crate::test_support::permissive_umask();
+        let directory = std::env::temp_dir()
+            .join(format!("quicfuscate-linux-resolver-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create resolver lock test directory");
+        let source = directory.join("resolv.conf");
+        let backup = directory.join("resolv.conf.quicfuscate.bak");
+        let platform = LinuxPlatform::new_with_resolver_paths(source, backup)
+            .expect("construct resolver lock test platform");
+
+        platform.acquire_resolver_lock().expect("acquire resolver lock");
+        let mode = std::fs::metadata(platform.resolver_paths.lock())
+            .expect("read resolver lock metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, RESOLVER_PRIVATE_FILE_MODE);
+        platform.release_resolver_lock().expect("release resolver lock");
+        std::fs::remove_dir(&directory).expect("remove resolver lock test directory");
     }
 }

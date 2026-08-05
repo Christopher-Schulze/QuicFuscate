@@ -303,3 +303,30 @@ pub use crate::engine::EngineConfig;
 
 // Re-export QuicFuscateEngine for convenient access
 pub use crate::engine::QuicFuscateEngine;
+
+#[cfg(all(test, unix))]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static UMASK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub(crate) struct UmaskGuard {
+        previous: libc::mode_t,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    pub(crate) fn permissive_umask() -> UmaskGuard {
+        let lock = UMASK_LOCK.get_or_init(|| Mutex::new(()));
+        let guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = unsafe { libc::umask(0) };
+        UmaskGuard { previous, _lock: guard }
+    }
+
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::umask(self.previous);
+            }
+        }
+    }
+}

@@ -29,6 +29,7 @@ const DEFAULT_AUDIT_QUEUE_CAPACITY: usize = 16_384;
 const DEFAULT_AUDIT_MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_AUDIT_MAX_SEGMENTS: usize = 8;
 const DEFAULT_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+const AUDIT_FILE_MODE: u32 = 0o600;
 
 /// Security-relevant audit event types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -883,7 +884,8 @@ fn secure_audit_file(
     owner: Option<(u32, u32)>,
 ) {
     use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(AUDIT_FILE_MODE))
+    {
         log::warn!("Failed to set audit log permissions on {}: {}", path.display(), e);
     }
     // Only chown the parent dir if we just created it. Never reown a
@@ -1339,9 +1341,18 @@ fn open_private_append_file(path: &Path, create_new: bool) -> std::io::Result<Fi
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(AUDIT_FILE_MODE);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file.metadata()?.permissions().mode() & 0o777;
+        if mode != AUDIT_FILE_MODE {
+            file.set_permissions(std::fs::Permissions::from_mode(AUDIT_FILE_MODE))?;
+        }
+    }
+    Ok(file)
 }
 
 fn atomic_write_checkpoint(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -2128,6 +2139,28 @@ mod tests {
         assert!(AuditLog::verify_chain(&tmp).is_ok(), "audit chain should be valid after emit");
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_audit_file_reasserts_private_mode_before_append() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _umask = crate::test_support::permissive_umask();
+        let path = audit_test_path("reopen-mode");
+        remove_audit_set(&path);
+        let _file =
+            OpenOptions::new().create_new(true).write(true).mode(0o644).open(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+
+        let log = AuditLog::open(path.clone()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, AUDIT_FILE_MODE);
+        log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "reopen mode")
+            .unwrap();
+        log.flush().unwrap();
+        drop(log);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, AUDIT_FILE_MODE);
+        remove_audit_set(&path);
     }
 
     #[cfg(unix)]

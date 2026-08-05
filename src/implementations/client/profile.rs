@@ -706,6 +706,8 @@ mod tests {
 
     #[test]
     fn save_serializes_bearer_token_and_applies_sensitive_file_mode() {
+        #[cfg(unix)]
+        let _umask = crate::test_support::permissive_umask();
         let path = test_storage_path("bearer");
         let token = "b".repeat(64);
         let qkey = qkey::QKeyConfig::new("192.168.1.1:4433", "example.com").with_token(&token);

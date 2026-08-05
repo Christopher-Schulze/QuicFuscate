@@ -10,6 +10,8 @@ use std::time::UNIX_EPOCH;
 
 const RESOLV_CONF_STATE_SCHEMA: u8 = 3;
 const OWNER_MARKER_PREFIX: &str = "# quicfuscate-resolver-owner=";
+pub(super) const RESOLVER_FILE_MODE: u32 = 0o644;
+pub(super) const RESOLVER_PRIVATE_FILE_MODE: u32 = 0o600;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) enum ResolverPathKind {
@@ -310,7 +312,7 @@ fn write_create_new_file(path: &Path, contents: &[u8], purpose: &str) -> Result<
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(RESOLVER_PRIVATE_FILE_MODE);
     }
     let mut file = options.open(path).map_err(|error| {
         PlatformError::DnsError(format!(
@@ -321,7 +323,10 @@ fn write_create_new_file(path: &Path, contents: &[u8], purpose: &str) -> Result<
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        if let Err(error) = std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(RESOLVER_PRIVATE_FILE_MODE),
+        ) {
             let cleanup = std::fs::remove_file(path);
             return Err(match cleanup {
                 Ok(()) => {
@@ -347,6 +352,81 @@ fn write_create_new_file(path: &Path, contents: &[u8], purpose: &str) -> Result<
         });
     }
     Ok(())
+}
+
+fn write_resolver_file_with_mode(
+    path: &Path,
+    contents: &[u8],
+    create_new: bool,
+) -> Result<(), PlatformError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if create_new {
+        options.create_new(true);
+    } else {
+        options.truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(RESOLVER_FILE_MODE);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        PlatformError::DnsError(format!(
+            "open resolver file {} for managed write: {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) =
+            file.set_permissions(std::fs::Permissions::from_mode(RESOLVER_FILE_MODE))
+        {
+            let cleanup = if create_new { std::fs::remove_file(path).err() } else { None };
+            return Err(match cleanup {
+                None => PlatformError::DnsError(format!(
+                    "secure resolver file {}: {error}",
+                    path.display()
+                )),
+                Some(cleanup_error) => PlatformError::DnsError(format!(
+                    "secure resolver file {}: {error}; cleanup failed: {cleanup_error}",
+                    path.display()
+                )),
+            });
+        }
+    }
+    if let Err(error) = file.write_all(contents).and_then(|()| file.sync_all()) {
+        let cleanup = if create_new { std::fs::remove_file(path).err() } else { None };
+        return Err(match cleanup {
+            None => {
+                PlatformError::DnsError(format!("write resolver file {}: {error}", path.display()))
+            }
+            Some(cleanup_error) => PlatformError::DnsError(format!(
+                "write resolver file {}: {error}; cleanup failed: {cleanup_error}",
+                path.display()
+            )),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn write_resolver_file_at(
+    path: &Path,
+    contents: &[u8],
+    state: &Option<ResolvConfRestoreState>,
+) -> Result<(), PlatformError> {
+    let create_new = match state {
+        Some(ResolvConfRestoreState::Absent { managed: None, .. }) => true,
+        Some(ResolvConfRestoreState::Present { .. })
+        | Some(ResolvConfRestoreState::Absent { managed: Some(_), .. }) => false,
+        None => {
+            return Err(PlatformError::DnsError(
+                "resolver write attempted without restore state".to_string(),
+            ))
+        }
+    };
+    write_resolver_file_with_mode(path, contents, create_new)
 }
 
 fn create_backup_file(backup: &Path, contents: &[u8]) -> Result<(), PlatformError> {
@@ -763,7 +843,7 @@ pub(super) fn restore_resolv_conf_at(
                     source.display()
                 )));
             }
-            std::fs::copy(&backup, source).map_err(|error| {
+            write_resolver_file_with_mode(source, &backup_contents, false).map_err(|error| {
                 PlatformError::DnsError(format!(
                     "restore resolver file {} from {}: {error}",
                     source.display(),
@@ -865,6 +945,11 @@ mod tests {
 
     #[test]
     fn absent_resolv_conf_round_trip_removes_written_file() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        #[cfg(unix)]
+        let _umask = crate::test_support::permissive_umask();
         let (directory, source, backup) = dns_test_paths("absent");
         let identity = test_identity(4241);
         let marker = owner_marker(&identity);
@@ -876,14 +961,59 @@ mod tests {
         assert_eq!(state.as_ref().expect("absent restore state").owner_marker(), marker);
         verify_resolv_conf_write_target(&source, &state).expect("verify absent write target");
 
-        std::fs::write(&source, managed_resolver_content(&identity, "nameserver 10.8.0.53\n"))
+        let managed = managed_resolver_content(&identity, "nameserver 10.8.0.53\n");
+        write_resolver_file_at(&source, managed.as_bytes(), &state)
             .expect("write VPN resolver state");
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            RESOLVER_FILE_MODE
+        );
         mark_resolv_conf_written(&source, &mut state).expect("mark resolver write complete");
         restore_resolv_conf_at(&source, &mut state).expect("restore absent resolver state");
 
         assert!(!source.exists(), "resolver file must be removed when originally absent");
         assert!(!backup.exists(), "absent-original restore must not create a backup");
         assert_eq!(state, None);
+        std::fs::remove_dir(&directory).expect("remove DNS restore test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_backup_and_restore_modes_ignore_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _umask = crate::test_support::permissive_umask();
+        let (directory, source, backup) = dns_test_paths("modes");
+        let identity = test_identity(4240);
+        let marker = owner_marker(&identity);
+        let original = b"# host resolver\nnameserver 192.0.2.53\n";
+        std::fs::write(&source, original).expect("write original resolver state");
+        let mut state = None;
+
+        backup_resolv_conf_at(&source, &backup, &marker, &mut state)
+            .expect("backup existing resolver state");
+        assert_eq!(
+            std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            RESOLVER_PRIVATE_FILE_MODE
+        );
+        let managed = managed_resolver_content(&identity, "nameserver 10.8.0.53\n");
+        write_resolver_file_at(&source, managed.as_bytes(), &state)
+            .expect("write managed resolver state");
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            RESOLVER_FILE_MODE
+        );
+        mark_resolv_conf_written(&source, &mut state).expect("publish managed resolver state");
+        restore_resolv_conf_at(&source, &mut state).expect("restore original resolver state");
+
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            RESOLVER_FILE_MODE
+        );
+        assert!(!backup.exists());
+        std::fs::remove_file(&source).expect("remove restored resolver state");
         std::fs::remove_dir(&directory).expect("remove DNS restore test directory");
     }
 

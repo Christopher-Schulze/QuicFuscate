@@ -30,6 +30,8 @@ pub const DEFAULT_MAX_FILES: usize = 5;
 pub const DEFAULT_SYSLOG_FACILITY: u8 = 1;
 /// Bounded producer-to-writer queue. Saturation drops the newest record.
 pub const LOG_QUEUE_CAPACITY: usize = 8192;
+/// POSIX mode for operational log files, including newly opened and reopened files.
+pub const LOG_FILE_MODE: u32 = 0o640;
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Errors returned by [`init`].
@@ -441,7 +443,7 @@ impl SizeRotatingAppender {
     /// restarts.
     pub fn new(path: impl AsRef<Path>, max_size: u64, max_files: usize) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = open_log_file(&path, false)?;
         let current_size = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self { file: Some(file), path, current_size, max_size, max_files })
     }
@@ -475,7 +477,7 @@ impl SizeRotatingAppender {
 
     fn ensure_open(&mut self) -> io::Result<&mut File> {
         if self.file.is_none() {
-            self.file = Some(OpenOptions::new().create(true).append(true).open(&self.path)?);
+            self.file = Some(open_log_file(&self.path, false)?);
         }
         Ok(self.file.as_mut().expect("file opened"))
     }
@@ -487,7 +489,7 @@ impl SizeRotatingAppender {
         let max = self.max_files;
         if max == 0 {
             // No rotated files retained: truncate in place.
-            let _ = OpenOptions::new().write(true).truncate(true).open(&self.path)?;
+            self.file = Some(open_log_file(&self.path, true)?);
             self.current_size = 0;
             return Ok(());
         }
@@ -513,6 +515,27 @@ impl SizeRotatingAppender {
         self.current_size = 0;
         Ok(())
     }
+}
+
+fn open_log_file(path: &Path, truncate: bool) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    if truncate {
+        options.write(true).truncate(true);
+    } else {
+        options.create(true).append(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(LOG_FILE_MODE);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(LOG_FILE_MODE))?;
+    }
+    Ok(file)
 }
 
 /// Build the rotated path `base.<n>`.
@@ -842,6 +865,42 @@ mod tests {
         assert!(rotated_path(&path, 2).exists());
         assert!(!rotated_path(&path, 3).exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn size_rotating_appender_reasserts_mode_across_create_reopen_and_rotation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _umask = crate::test_support::permissive_umask();
+        let dir = std::env::temp_dir().join(format!("qf_log_mode_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+        let mode = || fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+        let app = SizeRotatingAppender::new(&path, 6, 2).unwrap();
+        assert_eq!(mode(), LOG_FILE_MODE);
+
+        drop(app);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut app = SizeRotatingAppender::new(&path, 6, 2).unwrap();
+        assert_eq!(mode(), LOG_FILE_MODE);
+
+        app.file = None;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        app.write_line(b"hello\n").unwrap();
+        assert_eq!(mode(), LOG_FILE_MODE);
+        app.write_line(b"hello\n").unwrap();
+        app.flush().unwrap();
+
+        assert_eq!(mode(), LOG_FILE_MODE);
+        assert_eq!(
+            fs::metadata(rotated_path(&path, 1)).unwrap().permissions().mode() & 0o777,
+            LOG_FILE_MODE
+        );
+        drop(app);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
