@@ -2,6 +2,8 @@
 
 /// Detects and responds to active probing attempts.
 pub struct ActiveProbeDetector {
+    /// Monotonic clock owned by the connection's stealth manager.
+    clock: crate::time_source::ProtocolClock,
     /// Probe patterns database.
     patterns: Vec<ProbePattern>,
     /// Bounded matching-probe timestamps retained for the detector threshold.
@@ -42,8 +44,21 @@ pub enum ProbeResponseMode {
 impl ActiveProbeDetector {
     /// Create a new probe detector.
     pub fn new(threshold: usize, response_mode: ProbeResponseMode) -> Self {
+        Self::new_with_clock(
+            threshold,
+            response_mode,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    pub(crate) fn new_with_clock(
+        threshold: usize,
+        response_mode: ProbeResponseMode,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
         let history_limit = threshold.max(1);
         Self {
+            clock: clock.clone(),
             patterns: Self::load_probe_patterns(),
             history: Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(
                 history_limit,
@@ -90,7 +105,7 @@ impl ActiveProbeDetector {
             if self.matches_pattern(packet, pattern) {
                 warn!("Active probe detected: {} from {}", pattern.name, source);
 
-                let timestamp = std::time::Instant::now();
+                let timestamp = self.clock.now();
 
                 if let Ok(mut history) = self.history.lock() {
                     record_probe_timestamp(&mut history, timestamp, self.history_limit);

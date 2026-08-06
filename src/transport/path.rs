@@ -80,6 +80,23 @@ impl PathState {
         local_addr: Option<SocketAddr>,
         cc: Box<dyn CongestionController>,
     ) -> Self {
+        Self::new_with_clock(
+            id,
+            remote_addr,
+            local_addr,
+            cc,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Creates a path state with an explicit protocol clock.
+    pub fn new_with_clock(
+        id: PathId,
+        remote_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        cc: Box<dyn CongestionController>,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
         let cwnd = cc.cwnd();
         Self {
             id,
@@ -90,7 +107,7 @@ impl PathState {
             bytes_in_flight: 0,
             validated: id == PRIMARY_PATH_ID,
             cc,
-            last_active: Instant::now(),
+            last_active: clock.now(),
         }
     }
 

@@ -1115,7 +1115,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot(
     verify_locations_file: Option<&str>,
     environment: &crate::env_utils::EnvSnapshot,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot(
+    create_provider_for_version_with_ca_with_snapshot_and_clock(
         is_server,
         crypto,
         verify_peer,
@@ -1123,6 +1123,30 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot(
         version_information_parameter,
         verify_locations_file,
         environment,
+        &crate::time_source::ProtocolClock::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
+    is_server: bool,
+    crypto: Arc<RwLock<CryptoContext>>,
+    verify_peer: bool,
+    version: u32,
+    version_information_parameter: &[u8],
+    verify_locations_file: Option<&str>,
+    environment: &crate::env_utils::EnvSnapshot,
+    clock: &crate::time_source::ProtocolClock,
+) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot_and_clock(
+        is_server,
+        crypto,
+        verify_peer,
+        version,
+        version_information_parameter,
+        verify_locations_file,
+        environment,
+        clock,
     )?))
 }
 
@@ -1193,7 +1217,30 @@ impl CombinedProvider {
         verify_locations_file: Option<&str>,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Result<Self, ConnectionError> {
-        let rustls = RustlsProvider::new_with_ca_with_snapshot(
+        Self::new_with_ca_with_snapshot_and_clock(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+            verify_locations_file,
+            environment,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_ca_with_snapshot_and_clock(
+        is_server: bool,
+        crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        verify_locations_file: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Result<Self, ConnectionError> {
+        let rustls = RustlsProvider::new_with_ca_with_snapshot_and_clock(
             is_server,
             crypto.clone(),
             verify_peer,
@@ -1201,6 +1248,7 @@ impl CombinedProvider {
             version_information_parameter,
             verify_locations_file,
             environment,
+            clock,
         )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
@@ -1421,6 +1469,8 @@ mod rustls_provider {
     pub struct RustlsProviderImpl {
         /// Active rustls QUIC connection (client or server side).
         pub connection: rustls::quic::Connection,
+        /// Monotonic clock shared with the owning QUIC connection.
+        pub clock: crate::time_source::ProtocolClock,
         /// Shared crypto context for installing packet protection keys.
         pub crypto: Arc<RwLock<CryptoContext>>,
         /// True if this is a server-side provider.
@@ -1552,7 +1602,7 @@ mod rustls_provider {
     #[cfg(test)]
     mod profile_delay_tests {
         use super::*;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         #[test]
         fn profile_jitter_is_scheduled_without_blocking_configuration() {
@@ -1572,7 +1622,7 @@ mod rustls_provider {
             provider.apply_profile_to_config(&profile).expect("profile configuration");
 
             assert!(
-                provider.profile_ready_at.is_some_and(|ready_at| ready_at > Instant::now()),
+                provider.profile_ready_at.is_some_and(|ready_at| ready_at > provider.clock.now()),
                 "profile configuration must retain a future readiness deadline"
             );
             assert!(provider.next_crypto_frame(Level::Initial, 1200).is_none());
@@ -1789,6 +1839,7 @@ mod rustls_provider {
             )
         }
 
+        #[allow(dead_code)]
         pub fn new_with_ca_with_snapshot(
             is_server: bool,
             crypto: Arc<RwLock<CryptoContext>>,
@@ -1797,6 +1848,29 @@ mod rustls_provider {
             version_information_parameter: &[u8],
             client_ca_path: Option<&str>,
             environment: &crate::env_utils::EnvSnapshot,
+        ) -> Result<Self, ConnectionError> {
+            Self::new_with_ca_with_snapshot_and_clock(
+                is_server,
+                crypto,
+                verify_peer,
+                version,
+                version_information_parameter,
+                client_ca_path,
+                environment,
+                &crate::time_source::ProtocolClock::default(),
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn new_with_ca_with_snapshot_and_clock(
+            is_server: bool,
+            crypto: Arc<RwLock<CryptoContext>>,
+            verify_peer: bool,
+            version: u32,
+            version_information_parameter: &[u8],
+            client_ca_path: Option<&str>,
+            environment: &crate::env_utils::EnvSnapshot,
+            clock: &crate::time_source::ProtocolClock,
         ) -> Result<Self, ConnectionError> {
             let quic_version = Self::map_quic_version(version)?;
             let mut transport_params = Self::default_transport_params();
@@ -1815,6 +1889,7 @@ mod rustls_provider {
             };
             let this = Self {
                 connection,
+                clock: clock.clone(),
                 crypto,
                 is_server,
                 environment: Arc::new(environment.clone()),
@@ -1837,7 +1912,7 @@ mod rustls_provider {
                 crypto_buffer: Vec::with_capacity(4096),
                 frame_buffer: Vec::new(),
                 session_cache: Some(Arc::new(RwLock::new(SessionCache::new(100)))),
-                handshake_start: std::time::Instant::now(),
+                handshake_start: clock.now(),
                 bytes_sent: 0,
                 bytes_received: 0,
             };
@@ -1888,7 +1963,7 @@ mod rustls_provider {
 
         fn flush_handshake_io(&mut self) -> Result<(), ConnectionError> {
             if let Some(ready_at) = self.profile_ready_at {
-                if Instant::now() < ready_at {
+                if self.clock.now() < ready_at {
                     return Ok(());
                 }
                 self.profile_ready_at = None;
@@ -2256,7 +2331,7 @@ mod rustls_provider {
             let profile_ready_at = if profile.cover_performance_mode {
                 None
             } else if let Some(jitter) = profile.timing_jitter {
-                match Instant::now().checked_add(jitter) {
+                match self.clock.checked_deadline_after(jitter) {
                     Some(ready_at) => Some(ready_at),
                     None => {
                         log::warn!(
@@ -2358,7 +2433,7 @@ mod rustls_provider {
             self.bytes_sent = 0;
             self.bytes_received = 0;
             self.frame_buffer.clear();
-            self.handshake_start = std::time::Instant::now();
+            self.handshake_start = self.clock.now();
             Ok(())
         }
     }
@@ -2546,7 +2621,7 @@ mod rustls_provider {
             };
             if !self.handshake_complete && !self.connection.is_handshaking() && have_1rtt {
                 self.handshake_complete = true;
-                let duration = self.handshake_start.elapsed();
+                let duration = self.clock.elapsed_since(self.handshake_start);
                 log::info!(
                     "TLS handshake complete in {:?} with QUIC {:?}",
                     duration,
@@ -2571,7 +2646,7 @@ mod rustls_provider {
                                 digest[..32].to_vec(),
                                 "tls_session_ticket",
                             );
-                            let data = SessionData { ticket, timestamp: std::time::Instant::now() };
+                            let data = SessionData { ticket, timestamp: self.clock.now() };
                             let key = self
                                 .profile
                                 .as_ref()
@@ -2696,6 +2771,7 @@ mod rustls_provider {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn make_with_ca_with_snapshot(
         is_server: bool,
         crypto: Arc<RwLock<CryptoContext>>,
@@ -2705,7 +2781,7 @@ mod rustls_provider {
         client_ca_path: Option<&str>,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Result<RustlsProviderImpl, ConnectionError> {
-        RustlsProviderImpl::new_with_ca_with_snapshot(
+        RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
             is_server,
             crypto,
             verify_peer,
@@ -2713,6 +2789,30 @@ mod rustls_provider {
             version_information_parameter,
             client_ca_path,
             environment,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn make_with_ca_with_snapshot_and_clock(
+        is_server: bool,
+        crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        client_ca_path: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Result<RustlsProviderImpl, ConnectionError> {
+        RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+            client_ca_path,
+            environment,
+            clock,
         )
     }
 }
@@ -2768,7 +2868,7 @@ impl RustlsProvider {
         client_ca_path: Option<&str>,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Result<Self, ConnectionError> {
-        Ok(Self(rustls_provider::make_with_ca_with_snapshot(
+        Self::new_with_ca_with_snapshot_and_clock(
             is_server,
             crypto,
             verify_peer,
@@ -2776,6 +2876,30 @@ impl RustlsProvider {
             version_information_parameter,
             client_ca_path,
             environment,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_ca_with_snapshot_and_clock(
+        is_server: bool,
+        crypto: Arc<RwLock<CryptoContext>>,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        client_ca_path: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Result<Self, ConnectionError> {
+        Ok(Self(rustls_provider::make_with_ca_with_snapshot_and_clock(
+            is_server,
+            crypto,
+            verify_peer,
+            version,
+            version_information_parameter,
+            client_ca_path,
+            environment,
+            clock,
         )?))
     }
 }

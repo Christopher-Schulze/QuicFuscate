@@ -184,7 +184,21 @@ impl Bbr2 {
         mss: usize,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Self {
-        let now = crate::time_source::now_instant();
+        Self::new_with_snapshot_and_clock(
+            initial_cwnd,
+            mss,
+            environment,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    pub(crate) fn new_with_snapshot_and_clock(
+        initial_cwnd: usize,
+        mss: usize,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
+        let now = clock.now();
         let mss = mss.max(1);
         let startup_pacing_floor =
             Self::startup_pacing_rate(initial_cwnd, INITIAL_RTT, STARTUP_PACING_GAIN);
@@ -589,7 +603,14 @@ impl CongestionController for Bbr2 {
     }
 
     fn update_rtt(&mut self, rtt: Duration) {
-        self.update_rtt_at(rtt, crate::time_source::now_instant());
+        // Compatibility callers do not provide a sample timestamp. Preserve
+        // the duration and the non-expiry part of min-RTT tracking without
+        // introducing an ambient clock read.
+        Bbr2::update_rtt_at(self, rtt, self.min_rtt_stamp);
+    }
+
+    fn update_rtt_at(&mut self, rtt: Duration, now: Instant) {
+        Bbr2::update_rtt_at(self, rtt, now);
     }
 
     fn update_rtt_var(&mut self, rtt_var: Duration) {

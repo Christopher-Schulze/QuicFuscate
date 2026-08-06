@@ -2,6 +2,8 @@
 
 /// Advanced flow shaping with jitter and dummy retransmits.
 struct FlowShaper {
+    /// Monotonic clock owned by the connection's stealth manager.
+    clock: crate::time_source::ProtocolClock,
     /// Jitter configuration.
     jitter_min_us: u64,
     jitter_max_us: u64,
@@ -34,9 +36,23 @@ enum StealthPacketClass {
 
 impl FlowShaper {
     /// Create a new flow shaper.
+    #[allow(dead_code)]
     pub fn new(jitter_us: u64, _enable_dummy_retransmits: bool) -> Self {
+        Self::new_with_clock(
+            jitter_us,
+            _enable_dummy_retransmits,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    pub(crate) fn new_with_clock(
+        jitter_us: u64,
+        _enable_dummy_retransmits: bool,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
         let jitter_max_us = jitter_us.max(1);
         Self {
+            clock: clock.clone(),
             jitter_min_us: (jitter_max_us / 2).max(1),
             jitter_max_us,
             packet_history: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
@@ -64,13 +80,14 @@ impl FlowShaper {
 
     /// Records a packet in history and prunes old entries. This reads timestamps, eliminating dead_code warnings.
     fn record_and_prune(&self, size: usize, ty: StealthPacketClass) {
-        use std::time::{Duration, Instant};
-        let now = Instant::now();
+        use std::time::Duration;
+        let now = self.clock.now();
         if let Ok(mut hist) = self.packet_history.lock() {
             hist.push_back(PacketInfo { timestamp: now, _size: size, _packet_type: ty });
             // Keep only recent 2 seconds and limit to 256 entries
             while let Some(front) = hist.front() {
-                if now.duration_since(front.timestamp) > Duration::from_secs(2) || hist.len() > 256
+                if self.clock.elapsed_since(front.timestamp) > Duration::from_secs(2)
+                    || hist.len() > 256
                 {
                     hist.pop_front();
                 } else {

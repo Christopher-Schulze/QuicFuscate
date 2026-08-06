@@ -1,6 +1,8 @@
 /// The main stealth manager that coordinates all obfuscation techniques.
 pub struct StealthManager {
     config: StealthConfig,
+    /// Monotonic clock shared by every protocol-facing stealth child.
+    clock: crate::time_source::ProtocolClock,
     /// Immutable environment generation used by this runtime owner.
     env_snapshot: Arc<crate::env_utils::EnvSnapshot>,
     fingerprint: Arc<Mutex<FingerprintProfile>>,
@@ -71,7 +73,13 @@ impl StealthManager {
         optimization_manager: Arc<OptimizationManager>,
         crypto_manager: Arc<CryptoManager>,
     ) -> Self {
-        Self::new_internal(config, optimization_manager, crypto_manager, None)
+        Self::new_internal(
+            config,
+            optimization_manager,
+            crypto_manager,
+            None,
+            crate::time_source::ProtocolClock::default(),
+        )
     }
 
     /// Creates a stealth manager attached to an explicit runtime owner.
@@ -81,11 +89,29 @@ impl StealthManager {
         crypto_manager: Arc<CryptoManager>,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     ) -> Self {
+        Self::new_with_runtime_owner_and_clock(
+            config,
+            optimization_manager,
+            crypto_manager,
+            runtime_owner,
+            crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Creates a stealth manager attached to an explicit runtime and protocol clock.
+    pub fn new_with_runtime_owner_and_clock(
+        config: StealthConfig,
+        optimization_manager: Arc<OptimizationManager>,
+        crypto_manager: Arc<CryptoManager>,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Self {
         Self::new_internal(
             config,
             optimization_manager,
             crypto_manager,
             runtime_owner,
+            clock,
         )
     }
 
@@ -94,6 +120,7 @@ impl StealthManager {
         optimization_manager: Arc<OptimizationManager>,
         crypto_manager: Arc<CryptoManager>,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        clock: crate::time_source::ProtocolClock,
     ) -> Self {
         let env_snapshot = Arc::new(crate::env_utils::EnvSnapshot::capture());
         let fingerprint = Arc::new(Mutex::new(FingerprintProfile::new_with_snapshot(
@@ -110,7 +137,7 @@ impl StealthManager {
             || config.enable_traffic_padding
             || config.enable_timing_obfuscation
         {
-            Some(ActiveProbeDetector::new(5, ProbeResponseMode::Switch))
+            Some(ActiveProbeDetector::new_with_clock(5, ProbeResponseMode::Switch, &clock))
         } else {
             None
         };
@@ -120,7 +147,11 @@ impl StealthManager {
         // timing gate.
         let flow_shaper = if config.enable_timing_obfuscation || config.dynamic_enabled {
             let jitter_us = if matches!(config.mode, StealthMode::AntiDpi) { 3000 } else { 750 };
-            Some(FlowShaper::new(jitter_us, matches!(config.mode, StealthMode::AntiDpi)))
+            Some(FlowShaper::new_with_clock(
+                jitter_us,
+                matches!(config.mode, StealthMode::AntiDpi),
+                &clock,
+            ))
         } else {
             None
         };
@@ -135,18 +166,21 @@ impl StealthManager {
             } else {
                 "cdn.cloudflare.com".to_string()
             };
-            Some(CoverTrafficScheduler::new(target, 5000)) // 5 second interval
+            Some(CoverTrafficScheduler::new_with_clock(target, 5000, &clock)) // 5 second interval
         } else {
             None
         };
 
         // Initialize rate choker (disabled in Base, enabled in Anti-DPI; Dynamic activates on demand)
-        let rate_choker =
-            Arc::new(Mutex::new(RateChoker::new(config.choke_target_mbps, config.choke_burst_ms)));
+        let rate_choker = Arc::new(Mutex::new(RateChoker::new_with_clock(
+            config.choke_target_mbps,
+            config.choke_burst_ms,
+            &clock,
+        )));
 
         // Initialize Server Push Cover Traffic state
         let server_push_state = Arc::new(Mutex::new(ServerPushState {
-            last_burst: std::time::Instant::now(),
+            last_burst: clock.now(),
             active_promises: 0,
             total_cover_bytes: 0,
             current_intensity: config.server_push_intensity,
@@ -198,11 +232,12 @@ impl StealthManager {
 
         Self {
             config,
+            clock: clock.clone(),
             env_snapshot: Arc::clone(&env_snapshot),
             fingerprint,
             domain_fronting,
             _crypto_manager: crypto_manager,
-            last_rotation: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_rotation: Arc::new(Mutex::new(clock.now())),
             profile_pool,
             profile_index: Arc::new(AtomicUsize::new(0)),
             probe_detector,
@@ -228,7 +263,7 @@ impl StealthManager {
             fallback_rx: Arc::new(Mutex::new(rx)),
             cover_cache,
             _background_owner: runtime_owner,
-            next_cover_ping: parking_lot::Mutex::new(std::time::Instant::now()),
+            next_cover_ping: parking_lot::Mutex::new(clock.now()),
         }
     }
 
@@ -335,10 +370,10 @@ impl StealthManager {
             return;
         }
 
-        let now = std::time::Instant::now();
+        let now = self.clock.now();
         let should_rotate = {
             let last = self.last_rotation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            now.duration_since(*last).as_secs() >= interval
+            self.clock.elapsed_since(*last).as_secs() >= interval
         };
 
         if should_rotate {
@@ -658,7 +693,7 @@ impl StealthManager {
             let mut clear_flag = false;
             if let Ok(mut guard) = self.escalated_until.lock() {
                 if let Some(deadline) = *guard {
-                    if std::time::Instant::now() >= deadline {
+                    if self.clock.now() >= deadline {
                         *guard = None;
                         clear_flag = true;
                     }
@@ -775,8 +810,9 @@ impl StealthManager {
             if level >= 2 {
                 self.escalated.store(true, Ordering::Relaxed);
                 if let Ok(mut guard) = self.escalated_until.lock() {
-                    *guard =
-                        Some(std::time::Instant::now() + std::time::Duration::from_secs(20 * 60));
+                    *guard = self
+                        .clock
+                        .checked_deadline_after(std::time::Duration::from_secs(20 * 60));
                 }
 
                 // Keep the active Browser/OS/TLS/H3 persona stable. Escalation
@@ -788,7 +824,7 @@ impl StealthManager {
                 let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
                 if anti_mode && self.config.enable_realtime_choke {
                     if let Ok(mut guard) = self.rate_choker.lock() {
-                        *guard = RateChoker::new(50, 12);
+                        *guard = RateChoker::new_with_clock(50, 12, &self.clock);
                     }
                 }
             }
@@ -1164,9 +1200,8 @@ impl StealthManager {
     /// Returns the current server-push cover plan only when the burst is due.
     pub(crate) fn server_push_cover_plan(&self) -> Option<(String, f32)> {
         let (last_burst, current_intensity) = self.current_server_push_state()?;
-        let now = std::time::Instant::now();
         let interval = std::time::Duration::from_secs(self.server_push_burst_interval_secs());
-        if now.duration_since(last_burst) < interval {
+        if self.clock.elapsed_since(last_burst) < interval {
             return None;
         }
         Some((self.config.server_push_base_path.clone(), current_intensity))
@@ -1250,13 +1285,13 @@ impl StealthManager {
         reason: ServerPushTriggerReason,
     ) {
         if let Ok(mut state) = self.server_push_state.lock() {
-            let now = std::time::Instant::now();
+            let now = self.clock.now();
             state.last_burst = now;
             state.active_promises = promises_created;
             state.total_cover_bytes += total_bytes;
             state.burst_window.push_back(now);
             while let Some(ts) = state.burst_window.front().copied() {
-                if now.duration_since(ts) > std::time::Duration::from_secs(60) {
+                if self.clock.elapsed_since(ts) > std::time::Duration::from_secs(60) {
                     state.burst_window.pop_front();
                 } else {
                     break;
@@ -1556,9 +1591,9 @@ impl StealthManager {
         }
         let interval = std::time::Duration::from_millis(self.config.cover_ping_interval_ms);
         let mut guard = self.next_cover_ping.lock();
-        let now = std::time::Instant::now();
+        let now = self.clock.now();
         if now >= *guard {
-            *guard = now + interval;
+            *guard = now.checked_add(interval).unwrap_or(now);
             true
         } else {
             false

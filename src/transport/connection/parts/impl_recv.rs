@@ -80,7 +80,7 @@ impl Connection {
                 drop(crypto);
                 self.refresh_short_header_tag_reserve();
                 self.next_send_pn_by_space[0] = 0;
-                self.pkt_spaces[0] = pnspace::PktNumSpace::default();
+                self.pkt_spaces[0] = pnspace::PktNumSpace::new_with_clock(self.clock.clone());
             }
             // For Retry we do not parse further.
             self.received_non_vn_packet = true;
@@ -244,7 +244,7 @@ impl Connection {
                     &hdr_native.scid,
                     payload,
                 );
-                if !strike_register.check_and_insert(&fingerprint, Instant::now()) {
+                if !strike_register.check_and_insert(&fingerprint, self.clock.now()) {
                     crate::telemetry!(
                         crate::optimize::telemetry::ZERO_RTT_REPLAY_REJECT_TOTAL.inc()
                     );
@@ -525,7 +525,7 @@ impl Connection {
                             // previously declared lost (spurious-loss accounting).
                             self.acknowledge_late_stream_packets(&ranges);
                             let space = recovery::PacketSpace::from_index(space_idx);
-                            let now = Instant::now();
+                            let now = self.clock.now();
                             let outcome = self.recovery.on_ack_received(
                                 space,
                                 &ranges,
@@ -584,8 +584,13 @@ impl Connection {
             }
         }
         if ack_eliciting {
+            let now = self.clock.now();
             self.pkt_spaces[space_idx]
-                .note_ack_eliciting(self.config.max_ack_delay, self.config.ack_eliciting_threshold);
+                .note_ack_eliciting_at(
+                    self.config.max_ack_delay,
+                    self.config.ack_eliciting_threshold,
+                    now,
+                );
         }
 
         // Update ECN counters for ACK ECN section (per-datagram)
@@ -603,7 +608,7 @@ impl Connection {
         let len = end;
         self.stats.recv += 1;
         self.stats.recv_bytes += len as u64;
-        self.last_activity = Instant::now();
+        self.last_activity = self.clock.now();
         if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
             self.is_established = true;
         }
@@ -716,7 +721,7 @@ impl Connection {
         mut off: usize,
     ) -> Result<usize, crate::error::ConnectionError> {
         if let Some((ack_delay, ack_ranges)) =
-            self.pkt_spaces[2].take_ack(self.config.ack_delay_exponent)
+            self.pkt_spaces[2].take_ack_at(self.config.ack_delay_exponent, self.clock.now())
         {
             let ecn = if self.ecn_ect0 | self.ecn_ect1 | self.ecn_ce > 0 {
                 Some(EcnCounts { ect0: self.ecn_ect0, ect1: self.ecn_ect1, ce: self.ecn_ce })
@@ -1307,17 +1312,17 @@ impl Connection {
         off += frames::to_bytes(frame, &mut out[off..])?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
+        let now = self.clock.now();
         let info = SendInfo {
             from: send_local,
             to: send_peer,
-            at: Instant::now(),
+            at: now,
             congestion_controlled: true,
             path_control: true,
         };
         self.mark_unvalidated_path_send(send_local, send_peer, off);
         self.stats.sent += 1;
         self.stats.sent_bytes += off as u64;
-        let now = Instant::now();
         self.recovery.on_packet_sent_in_space(
             recovery::PacketSpace::Application,
             pn,

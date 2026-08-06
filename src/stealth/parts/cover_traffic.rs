@@ -2,6 +2,8 @@
 
 /// Generates realistic browser traffic patterns
 struct CoverTrafficScheduler {
+    /// Monotonic clock owned by the connection's stealth manager.
+    clock: crate::time_source::ProtocolClock,
     /// Target domain for cover traffic
     target_domain: String,
     /// Request interval (milliseconds)
@@ -25,11 +27,25 @@ enum CoverRequestType {
 
 impl CoverTrafficScheduler {
     /// Creates a scheduler that emits weighted cover requests at the given interval.
+    #[allow(dead_code)]
     pub fn new(target_domain: String, interval_ms: u64) -> Self {
+        Self::new_with_clock(
+            target_domain,
+            interval_ms,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    pub(crate) fn new_with_clock(
+        target_domain: String,
+        interval_ms: u64,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
         Self {
+            clock: clock.clone(),
             target_domain,
             interval_ms: Arc::new(AtomicU64::new(interval_ms)),
-            last_request: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_request: Arc::new(Mutex::new(clock.now())),
             request_patterns: vec![
                 (CoverRequestType::GetIndex, 30),
                 (CoverRequestType::GetFavicon, 20),
@@ -45,12 +61,12 @@ impl CoverTrafficScheduler {
     /// Generate next cover request if due
     pub fn get_next_request(&self) -> Option<Vec<crate::transport::h3::Header>> {
         if let Ok(mut last) = self.last_request.lock() {
-            let elapsed = last.elapsed().as_millis() as u64;
+            let elapsed = self.clock.elapsed_since(*last).as_millis() as u64;
             let interval = self.interval_ms.load(Ordering::Relaxed);
             if elapsed < interval {
                 return None;
             }
-            *last = std::time::Instant::now();
+            *last = self.clock.now();
         }
 
         // Select request type based on weights

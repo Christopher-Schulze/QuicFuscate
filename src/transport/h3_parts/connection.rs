@@ -158,6 +158,8 @@ const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
 
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
+    /// Monotonic clock shared with the underlying QUIC transport.
+    clock: crate::time_source::ProtocolClock,
     config: Config,
     next_stream_id: u64,
     streams: HashMap<u64, StreamState>,
@@ -281,6 +283,7 @@ impl Connection {
         }
         let masque_buffer_len = conn.max_recv_udp_payload_size().clamp(1, MAX_QUIC_DATAGRAM_SIZE);
         let mut h3_conn = Self {
+            clock: conn.protocol_clock(),
             config: config.clone(),
             next_stream_id: if conn.is_server() { 1 } else { 0 },
             streams: HashMap::new(),
@@ -619,7 +622,7 @@ impl Connection {
             headers,
             state: PushState::Promised,
             cover_payload,
-            scheduled_at: std::time::Instant::now()
+            scheduled_at: self.clock.now()
                 + std::time::Duration::from_millis(
                     50 + (push_id % 200), // Realistic 50-250ms delay
                 ),
@@ -635,7 +638,7 @@ impl Connection {
 
     /// Process scheduled push streams (called from poll)
     fn process_scheduled_push_streams(&mut self, conn: &mut super::Connection) {
-        let now = std::time::Instant::now();
+        let now = self.clock.now();
         let mut ready_streams = Vec::new();
 
         for (&stream_id, promise) in &self.push_streams {

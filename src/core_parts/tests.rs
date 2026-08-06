@@ -12,6 +12,7 @@ mod tests {
             Arc::new(CryptoManager::new()),
         ));
         QuicFuscateConnection::new(ConnectionParams {
+            clock: crate::time_source::ProtocolClock::default(),
             conn: Box::new(pair.client),
             local_addr: "127.0.0.1:29101".parse().unwrap(),
             peer_addr: "127.0.0.1:29102".parse().unwrap(),
@@ -90,6 +91,7 @@ mod tests {
             let mut fec_config = FecConfig::product_default();
             fec_config.apply_engine_mode(crate::engine::FecMode::Off);
             QuicFuscateConnection::new(ConnectionParams {
+                clock: crate::time_source::ProtocolClock::default(),
                 conn: Box::new(conn),
                 local_addr,
                 peer_addr,

@@ -274,6 +274,8 @@ impl OutboundPacer {
 
 /// Parameters for creating a new QuicFuscateConnection.
 pub struct ConnectionParams {
+    /// Monotonic clock shared by transport, H3, stealth, and TLS.
+    pub clock: crate::time_source::ProtocolClock,
     /// Underlying QUIC transport connection.
     pub conn: Box<crate::transport::Connection>,
     /// Local socket address.
@@ -301,6 +303,8 @@ pub struct ConnectionParams {
 
 /// Represents a single QuicFuscate connection and manages its state.
 pub struct QuicFuscateConnection {
+    /// Monotonic clock shared by every protocol-facing child owner.
+    clock: crate::time_source::ProtocolClock,
     /// Underlying QUIC transport connection handle.
     pub conn: Box<crate::transport::Connection>,
     /// Current peer address (may change on migration).
@@ -500,13 +504,15 @@ impl QuicFuscateConnection {
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
         http_authority: Option<&str>,
     ) -> Result<Self, String> {
+        let clock = crate::time_source::ProtocolClock::default();
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
-        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner(
+        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner_and_clock(
             stealth_config,
             optimization_manager.clone(),
             crypto_manager.clone(),
             runtime_owner,
+            clock.clone(),
         ));
 
         if use_utls {
@@ -529,16 +535,18 @@ impl QuicFuscateConnection {
             config.set_initial_token(Some(token_bytes));
         }
 
-        let conn = crate::transport::packet::connect(
+        let conn = crate::transport::packet::connect_with_clock(
             Some(&sni),
             scid.as_ref(),
             local_addr,
             remote_addr,
             &mut config,
+            clock.clone(),
         )
         .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
 
         Ok(Self::new(ConnectionParams {
+            clock,
             conn: Box::new(conn),
             local_addr,
             peer_addr: remote_addr,
@@ -590,6 +598,7 @@ impl QuicFuscateConnection {
         opt_cfg: OptimizeConfig,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     ) -> Result<Self, String> {
+        let clock = crate::time_source::ProtocolClock::default();
         let tunnel_ingress_profile = if !stealth_config.enable_network_fingerprint_normalization
             || matches!(stealth_config.mode, StealthMode::Off)
         {
@@ -604,23 +613,26 @@ impl QuicFuscateConnection {
         };
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
-        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner(
+        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner_and_clock(
             stealth_config,
             optimization_manager.clone(),
             crypto_manager.clone(),
             runtime_owner,
+            clock.clone(),
         ));
 
-        let conn = crate::transport::packet::accept(
+        let conn = crate::transport::packet::accept_with_clock(
             scid.as_ref(),
             initial_key_dcid.as_ref().map(|id| id.as_ref()),
             local_addr,
             remote_addr,
             config,
+            clock.clone(),
         )
         .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
 
         Ok(Self::new(ConnectionParams {
+            clock,
             conn: Box::new(conn),
             local_addr,
             peer_addr: remote_addr,
@@ -638,11 +650,13 @@ impl QuicFuscateConnection {
     }
 
     fn new(params: ConnectionParams) -> Self {
+        let clock = params.clock.clone();
         let environment = params.stealth_manager.environment_snapshot();
         let obs = FecTransportObserver::new_with_snapshot(&environment);
         let fec_mem_pool = params.optimization_manager.memory_pool().clone();
         let h3_body_buffer = params.optimization_manager.alloc_block();
         let mut s = Self {
+            clock: clock.clone(),
             conn: params.conn,
             peer_addr: params.peer_addr,
             local_addr: params.local_addr,
@@ -673,7 +687,7 @@ impl QuicFuscateConnection {
             h3_tunnel_response_started: HashSet::new(),
             h3_tunnel_uplink_fallback_reported: false,
             h3_tunnel_downlink_fallback_reported: false,
-            last_telemetry: std::time::Instant::now(),
+            last_telemetry: clock.now(),
             transport_observer: obs.clone(),
             masque_cb: None,
             masque_datagram_cb: None,
@@ -1072,7 +1086,7 @@ impl QuicFuscateConnection {
         FB: FnMut(u64, &[u8]),
     {
         if self.ensure_http3_ready_for_poll(context) {
-            let start = std::time::Instant::now();
+            let start = self.clock.now();
             let bindings = self.http3_poll_bindings();
             loop {
                 let (intelligent_level, stats) = self.prepare_http3_poll_iteration();
@@ -1267,7 +1281,10 @@ impl QuicFuscateConnection {
                     expected_flow_id,
                 );
             }
-            log::trace!("HTTP/3 events processed in {} ms", start.elapsed().as_millis());
+            log::trace!(
+                "HTTP/3 events processed in {} ms",
+                self.clock.elapsed_since(start).as_millis()
+            );
         }
         Ok(())
     }
@@ -1778,7 +1795,7 @@ impl QuicFuscateConnection {
         &mut self,
         buf: &mut [u8],
     ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
-        let now = Instant::now();
+        let now = self.clock.now();
 
         // --- LOSS/PTO RECOVERY TIMER ---
         // RFC 9002 §6.1.2/§6.2.1: event loops drive the recovery timer.  When the
@@ -2210,13 +2227,13 @@ impl QuicFuscateConnection {
         if let Err(e) = self.ensure_masque_tunnel_for_send() {
             warn!("MASQUE CONNECT-UDP open failed: {:?}", e);
         }
-        let start = std::time::Instant::now();
+        let start = self.clock.now();
         if let Err(e) = self.send_http3_request_headers(b"GET", path, true) {
             crate::optimize::telemetry::STEALTH_SIGNAL_RST
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Err(e);
         }
-        info!("HTTP/3 request sent in {} ms", start.elapsed().as_millis());
+        info!("HTTP/3 request sent in {} ms", self.clock.elapsed_since(start).as_millis());
         Ok(())
     }
 
@@ -2654,6 +2671,7 @@ impl QuicFuscateConnection {
     }
 
     fn run_update_state_phase<T>(
+        clock: &crate::time_source::ProtocolClock,
         diagnostics_enabled: bool,
         phase: &'static str,
         operation: impl FnOnce() -> T,
@@ -2661,9 +2679,9 @@ impl QuicFuscateConnection {
         if !diagnostics_enabled {
             return operation();
         }
-        let started = std::time::Instant::now();
+        let started = clock.now();
         let result = operation();
-        let elapsed = started.elapsed();
+        let elapsed = clock.elapsed_since(started);
         if elapsed >= std::time::Duration::from_millis(100) {
             info!(
                 "Connection update_state slow phase: phase={phase} duration_ms={}",
@@ -2684,7 +2702,8 @@ impl QuicFuscateConnection {
     }
 
     fn update_state_inner(&mut self, diagnostics_enabled: bool) {
-        Self::run_update_state_phase(diagnostics_enabled, "transport-stats", || {
+        let clock = self.clock.clone();
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "transport-stats", || {
             let stats = self.conn.stats();
             self.stats.packets_sent = stats.sent as u64;
             self.stats.rtt =
@@ -2695,16 +2714,16 @@ impl QuicFuscateConnection {
             self.stats.update_congestion(CongestionSample::from_transport_stats(stats));
         });
 
-        Self::run_update_state_phase(diagnostics_enabled, "resource-telemetry", || {
-            if self.last_telemetry.elapsed() >= std::time::Duration::from_secs(1) {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "resource-telemetry", || {
+            if clock.elapsed_since(self.last_telemetry) >= std::time::Duration::from_secs(1) {
                 telemetry!(telemetry::refresh_resource_metrics_if_due());
                 #[cfg(feature = "orchestrator")]
                 self.update_orchestrator_resource_signals();
-                self.last_telemetry = std::time::Instant::now();
+                self.last_telemetry = clock.now();
             }
         });
 
-        Self::run_update_state_phase(diagnostics_enabled, "path-events", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "path-events", || {
             while let Some(event) = self.conn.path_event_next() {
                 match event {
                     crate::transport::PathEvent::New(local, peer) => {
@@ -2732,7 +2751,7 @@ impl QuicFuscateConnection {
             }
         });
 
-        Self::run_update_state_phase(diagnostics_enabled, "masque-state", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "masque-state", || {
             if self.masque_flow_active() {
                 crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
             } else {
@@ -2744,18 +2763,18 @@ impl QuicFuscateConnection {
             }
         });
 
-        Self::run_update_state_phase(diagnostics_enabled, "fec-observer-sync", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-observer-sync", || {
             self.transport_observer.sync_runtime_hints(&mut self.conn);
         });
 
-        Self::run_update_state_phase(diagnostics_enabled, "fec-observer-interval", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-observer-interval", || {
             let interval = self.transport_observer.compute_streaming_interval() as usize;
             if (1..=32).contains(&interval) {
                 self.conn.set_fec_stream_every(interval);
             }
         });
 
-        Self::run_update_state_phase(diagnostics_enabled, "fec-control-delta", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-control-delta", || {
             let delta = self.conn.take_fec_control_delta();
             if let Some(every) = delta.stream_every {
                 self.fec.set_stream_every(every);
@@ -2769,10 +2788,10 @@ impl QuicFuscateConnection {
         });
 
         let (feedback, transport_loss_rate) =
-            Self::run_update_state_phase(diagnostics_enabled, "fec-feedback-read", || {
+            Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-feedback-read", || {
                 (self.conn.take_fec_callback_feedback(), self.conn.recovery_loss_rate())
             });
-        Self::run_update_state_phase(diagnostics_enabled, "fec-feedback-apply", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-feedback-apply", || {
             Self::apply_fec_transport_feedback(
                 &mut self.fec,
                 feedback,
@@ -2780,12 +2799,12 @@ impl QuicFuscateConnection {
                 diagnostics_enabled,
             );
         });
-        Self::run_update_state_phase(diagnostics_enabled, "fec-rtt-hint", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-rtt-hint", || {
             let rtt_ms = self.stats.rtt.max(0.0) as u32;
             self.fec.set_rtt_hint(rtt_ms);
         });
 
-        Self::run_update_state_phase(diagnostics_enabled, "stealth-intelligence", || {
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "stealth-intelligence", || {
             self.stealth_manager.sync_intelligent_level();
             let level = self.stealth_manager.intelligent_runtime_level();
             if let Err(error) = self.conn.apply_intelligent_traffic_analysis_level(level) {

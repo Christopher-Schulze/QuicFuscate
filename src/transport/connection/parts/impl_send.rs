@@ -33,7 +33,7 @@ impl Connection {
         //
         // DPLPMTUD (TODO-451): when enabled, clamp to the *confirmed* path MTU rather
         // than the configured max. Probe packets are sized separately below.
-        let now = Instant::now();
+        let now = self.clock.now();
         // Apply black-hole recovery before deriving this send's packetization
         // budget so the first recovery packet uses the safe floor immediately.
         if self.pmtu.check_black_hole(now) {
@@ -208,7 +208,8 @@ impl Connection {
                 let crypto_range = crypto_frame.as_ref().map(|(o, d)| (*o, d.len() as u64));
 
                 if let Some((ack_delay, ack_ranges)) =
-                    self.pkt_spaces[space_idx].take_ack(self.config.ack_delay_exponent)
+                    self.pkt_spaces[space_idx]
+                        .take_ack_at(self.config.ack_delay_exponent, now)
                 {
                     let ack = Frame::Ack { ack_delay, ranges: ack_ranges, ecn_counts: None };
                     let need = frames::wire_len(&ack);
@@ -282,7 +283,7 @@ impl Connection {
                     true,
                     true,
                     crypto_range,
-                    Instant::now(),
+                    now,
                 );
                 if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
                     self.is_established = true;
@@ -290,7 +291,7 @@ impl Connection {
                 return Ok((
                     used,
                     SendInfo {
-                        at: Instant::now(),
+                        at: now,
                         from: self.local_addr,
                         to: self.peer_addr,
                         congestion_controlled: true,
@@ -513,7 +514,7 @@ impl Connection {
 
         // Mark bytes-in-flight timing start if we actually wrote payload beyond header
         if off > (pn_off + pn_len) && self.bytes_in_flight_started.is_none() {
-            self.bytes_in_flight_started = Some(Instant::now());
+            self.bytes_in_flight_started = Some(now);
         }
         // Maintain minimal paths_count
         self.refresh_path_count();
@@ -525,7 +526,7 @@ impl Connection {
         let info = SendInfo {
             from: self.local_addr,
             to: self.peer_addr,
-            at: Instant::now(),
+            at: now,
             congestion_controlled: wrote_ack_eliciting,
             path_control: false,
         };
@@ -546,7 +547,6 @@ impl Connection {
         // PTO-based loss detection for those packets.
         let is_ack_only = !wrote_ack_eliciting;
         if !is_ack_only {
-            let now = Instant::now();
             if _pmtu_probe_sent && pmtu_probe_bypassed_congestion {
                 self.recovery.on_pmtu_probe_sent_in_space(
                     recovery::PacketSpace::Application,

@@ -2,11 +2,14 @@ use crate::transport::ConnectionId;
 /// QUIC packet number space tracking and ACK generation.
 pub mod pnspace {
     use super::ranges::RangeSet;
+    use crate::time_source::ProtocolClock;
     use std::time::{Duration, Instant};
 
     /// Per-epoch packet number space tracking ACK state and receive history.
-    #[derive(Default, Clone)]
+    #[derive(Clone)]
     pub struct PktNumSpace {
+        /// Clock owned by the enclosing protocol connection.
+        clock: ProtocolClock,
         /// Largest packet number received in this space.
         pub largest_recv: Option<u64>,
         /// Set of received packet number ranges for ACK generation.
@@ -24,11 +27,23 @@ pub mod pnspace {
         ack_deadline: Option<Instant>,
     }
 
+    impl Default for PktNumSpace {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl PktNumSpace {
         /// Creates a new empty packet number space.
-        #[inline(always)]
         pub fn new() -> Self {
+            Self::new_with_clock(ProtocolClock::default())
+        }
+
+        /// Creates a packet number space owned by an explicit protocol clock.
+        #[inline(always)]
+        pub fn new_with_clock(clock: ProtocolClock) -> Self {
             Self {
+                clock,
                 largest_recv: None,
                 ack_ranges: RangeSet::default(),
                 ack_elicited: false,
@@ -78,21 +93,35 @@ pub mod pnspace {
         /// control (RFC 9002 §7.2: ACK-only packets are not congestion-controlled).
         #[inline(always)]
         pub fn has_pending_ack(&self) -> bool {
-            self.ack_elicited
-                || self.ack_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            self.has_pending_ack_at(self.clock.now())
+        }
+
+        /// Returns true if an ACK is pending at an explicit protocol timestamp.
+        #[inline(always)]
+        pub fn has_pending_ack_at(&self, now: Instant) -> bool {
+            self.ack_elicited || self.ack_deadline.is_some_and(|deadline| now >= deadline)
         }
 
         /// Takes an ACK decision and returns (ack_delay, ranges)
         #[inline(always)]
         pub fn take_ack(&mut self, ack_delay_exponent: u64) -> Option<(u64, Vec<(u64, u64)>)> {
-            if !self.has_pending_ack() {
+            self.take_ack_at(ack_delay_exponent, self.clock.now())
+        }
+
+        /// Takes an ACK decision at an explicit protocol timestamp.
+        #[inline(always)]
+        pub fn take_ack_at(
+            &mut self,
+            ack_delay_exponent: u64,
+            now: Instant,
+        ) -> Option<(u64, Vec<(u64, u64)>)> {
+            if !self.has_pending_ack_at(now) {
                 return None;
             }
             self.ack_elicited = false;
             self.recvd_since_ack = 0;
             self.ack_deadline = None;
 
-            let now = Instant::now();
             let delay = if let Some(last) = self.last_recv_time {
                 now.saturating_duration_since(last)
             } else {
@@ -122,7 +151,17 @@ pub mod pnspace {
         /// threshold or delay boundary. ACK-only packets must never call this.
         #[inline(always)]
         pub fn note_ack_eliciting(&mut self, max_ack_delay_ms: u64, ack_threshold: u64) {
-            let now = Instant::now();
+            self.note_ack_eliciting_at(max_ack_delay_ms, ack_threshold, self.clock.now());
+        }
+
+        /// Records an ACK-eliciting packet at an explicit protocol timestamp.
+        #[inline(always)]
+        pub fn note_ack_eliciting_at(
+            &mut self,
+            max_ack_delay_ms: u64,
+            ack_threshold: u64,
+            now: Instant,
+        ) {
             if self.recvd_since_ack == 0 {
                 self.ack_deadline =
                     Some(now.checked_add(Duration::from_millis(max_ack_delay_ms)).unwrap_or(now));
@@ -913,6 +952,29 @@ mod tests {
     use super::rand;
     use super::ranges::RangeSet;
     use super::varint;
+    use crate::time_source::{ProtocolClock, TimeSource};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime};
+
+    struct MutableAckClock {
+        now: Mutex<Instant>,
+    }
+
+    impl TimeSource for MutableAckClock {
+        fn now_instant(&self) -> Instant {
+            *self.now.lock().expect("ack clock mutex must not be poisoned")
+        }
+
+        fn now_system(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
+        }
+    }
+
+    impl MutableAckClock {
+        fn set(&self, now: Instant) {
+            *self.now.lock().expect("ack clock mutex must not be poisoned") = now;
+        }
+    }
 
     // --- RangeSet tests ---
 
@@ -1084,6 +1146,32 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert!(pns.has_pending_ack());
         assert!(pns.take_ack(3).is_some());
+    }
+
+    #[test]
+    fn packet_number_space_uses_owned_clock_for_ack_deadline() {
+        let base = Instant::now();
+        let source = Arc::new(MutableAckClock { now: Mutex::new(base) });
+        let mut pns = PktNumSpace::new_with_clock(ProtocolClock::from_source(source.clone()));
+
+        assert!(pns.on_packet_recv(1));
+        pns.note_ack_eliciting(10, 1);
+        assert!(pns.has_pending_ack());
+        assert!(pns.take_ack(3).is_some());
+
+        source.set(base + Duration::from_millis(1));
+        assert!(pns.on_packet_recv(2));
+        pns.note_ack_eliciting(10, 2);
+        assert!(!pns.has_pending_ack());
+
+        source.set(base + Duration::from_millis(11));
+        assert!(pns.has_pending_ack());
+        assert!(pns.take_ack(3).is_some());
+
+        source.set(base.checked_sub(Duration::from_millis(1)).expect("base must be recent"));
+        assert!(pns.on_packet_recv(3));
+        pns.note_ack_eliciting(10, 2);
+        assert!(!pns.has_pending_ack());
     }
 
     // --- varint tests ---

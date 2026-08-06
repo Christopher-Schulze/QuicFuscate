@@ -1639,3 +1639,11 @@ The audit remains open. These reconciliations document current evidence and owne
 - `src/optimize/brain.rs` has no active matrix-multiplication or AMX caller. Wiedemann remains scalar GF(256) SpMV; AMX operation/scratch telemetry remains reserved and zero.
 - Source comments, Apple startup logging, canonical documentation, and the AMX contract checker now use the same fail-closed capability language. `verify-amx-proof-contract.sh` passes.
 - No AMX backend or profile variant rename was introduced. TODO-676 retains broader dispatch/tile ownership, TODO-818 retains native build/runtime proof, and TODO-690 retains Wiedemann equation correctness.
+
+## Protocol Clock Wiring (2026-08-05, TODO-820)
+
+- `src/time_source.rs::ProtocolClock` -> `transport::Connection` -> packet-number spaces, Recovery, congestion controllers, path/NAT/anti-replay state, ACK/loss/RTT/migration/idle timestamps, and explicit `CongestionController::update_rtt_at()` sample propagation.
+- `transport::Connection::protocol_clock()` -> H3 connection -> push cadence and lifecycle timestamps; `Core` retains the same handle for telemetry, slow-phase diagnostics, HTTP/3 request timing, and engine uptime.
+- `QuicFuscateConnection` creates one clock per client/server connection -> `StealthManager::new_with_runtime_owner_and_clock()` -> rate choker, flow shaping, probe history, cover scheduler, chaff lifecycle, fingerprint rotation, escalation deadlines, and server-push cadence.
+- The same connection clock -> `qftls` provider construction -> handshake start/readiness, profile jitter deadlines, rebuild/reset, handshake duration, and ticket lifecycle timestamps. `SystemTime` producers remain separate wall-clock owners.
+- The only remaining scoped direct monotonic boundary is `src/engine/engine.rs:1235` -> `ClientRuntime::wait_handshake()` at `src/implementations/client/mod.rs:803-816`, where an OS Condvar requires native `std::time::Instant`; TODO-822 owns conversion/injection. TODO-821 owns server/client state, TODO-823 wall clocks, TODO-824 injection/test isolation, and TODO-825 browser clocks.

@@ -49,13 +49,21 @@ pub struct StrikeRegister {
 impl StrikeRegister {
     /// Create a new strike register with the given configuration.
     pub fn new(config: AntiReplayConfig) -> Self {
+        Self::new_with_clock(config, crate::time_source::ProtocolClock::default())
+    }
+
+    /// Create a strike register with an explicit protocol clock owner.
+    pub fn new_with_clock(
+        config: AntiReplayConfig,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
             order: RwLock::new(VecDeque::with_capacity(
                 effective_capacity(config.max_entries).min(4096),
             )),
             bloom: RwLock::new(BloomFilter::for_capacity(config.max_entries)),
-            last_cleanup: RwLock::new(Instant::now()),
+            last_cleanup: RwLock::new(clock.now()),
             config,
         }
     }
@@ -118,7 +126,7 @@ impl StrikeRegister {
     pub fn cleanup(&self, now: Instant) {
         {
             let last = self.last_cleanup.read();
-            if now.duration_since(*last) < self.config.cleanup_interval {
+            if now.saturating_duration_since(*last) < self.config.cleanup_interval {
                 return;
             }
         }
@@ -128,7 +136,7 @@ impl StrikeRegister {
         }
         let max_age = self.config.max_ticket_age;
         let mut entries = self.entries.write();
-        entries.retain(|_, first_seen| now.duration_since(*first_seen) < max_age);
+        entries.retain(|_, first_seen| now.saturating_duration_since(*first_seen) < max_age);
         let mut order = self.order.write();
         order.retain(|fingerprint| entries.contains_key(fingerprint));
         let mut bloom = BloomFilter::for_capacity(self.config.max_entries);

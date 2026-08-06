@@ -90,7 +90,27 @@ impl TrafficAnalysisScheduler {
         idle_timeout: std::time::Duration,
         ramp_down: std::time::Duration,
     ) -> Self {
-        let now = std::time::Instant::now();
+        Self::with_lifecycle_with_clock(
+            rate_pps,
+            chaff_size_bytes,
+            ack_eliciting,
+            constant_rate,
+            idle_timeout,
+            ramp_down,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    pub(crate) fn with_lifecycle_with_clock(
+        rate_pps: u32,
+        chaff_size_bytes: u32,
+        ack_eliciting: bool,
+        constant_rate: bool,
+        idle_timeout: std::time::Duration,
+        ramp_down: std::time::Duration,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
+        let now = clock.now();
         let base = Self::base_interval(rate_pps);
         let next_interval =
             if constant_rate { base } else { Self::jitter_interval(base) };

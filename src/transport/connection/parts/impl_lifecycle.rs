@@ -34,6 +34,7 @@ impl Connection {
         config: &Config,
         max_datagram_size: usize,
         environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
     ) -> recovery::Recovery {
         let algorithm = match config.cc_algorithm {
             crate::transport::CongestionControlAlgorithm::Reno => {
@@ -49,11 +50,12 @@ impl Connection {
                 crate::transport::cc::Algorithm::Bbr3
             }
         };
-        recovery::Recovery::with_algorithm_with_snapshot(
+        recovery::Recovery::with_algorithm_with_snapshot_and_clock(
             INITIAL_WINDOW,
             max_datagram_size,
             algorithm,
             environment,
+            clock,
         )
     }
 
@@ -88,14 +90,17 @@ impl Connection {
             target_size,
             policy.estimated_max_bits_per_second(max_udp_payload_size)
         );
-        self.traffic_analysis = Some(crate::stealth::TrafficAnalysisScheduler::with_lifecycle(
-            rate_pps.get(),
-            target_size,
-            true,
-            constant_rate,
-            Duration::from_millis(policy.idle_timeout_ms),
-            Duration::from_millis(policy.ramp_down_ms),
-        ));
+        self.traffic_analysis = Some(
+            crate::stealth::TrafficAnalysisScheduler::with_lifecycle_with_clock(
+                rate_pps.get(),
+                target_size,
+                true,
+                constant_rate,
+                Duration::from_millis(policy.idle_timeout_ms),
+                Duration::from_millis(policy.ramp_down_ms),
+                &self.clock,
+            ),
+        );
     }
 
     /// Set the Destination Connection ID retained for the Initial packet space.
@@ -127,6 +132,7 @@ impl Connection {
             &self.config,
             self.dgram_send_max_size,
             &environment,
+            &self.clock,
         );
         if self.config.initial_rtt_ms != 100 {
             recovery.set_initial_rtt(Duration::from_millis(self.config.initial_rtt_ms));
@@ -135,12 +141,31 @@ impl Connection {
         self.environment = environment;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_with_role(
         scid: &[u8],
         local: SocketAddr,
         peer: SocketAddr,
         config: Config,
         is_server: bool,
+    ) -> Self {
+        Self::new_with_role_and_clock(
+            scid,
+            local,
+            peer,
+            config,
+            is_server,
+            crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    pub(crate) fn new_with_role_and_clock(
+        scid: &[u8],
+        local: SocketAddr,
+        peer: SocketAddr,
+        config: Config,
+        is_server: bool,
+        clock: crate::time_source::ProtocolClock,
     ) -> Self {
         let dgram_send_max_size = config.max_udp_payload_size as usize;
         let initial_max_data = config.initial_max_data;
@@ -149,12 +174,15 @@ impl Connection {
         let traffic_analysis_base_policy = config.traffic_analysis_policy();
         let version_negotiation = super::version::VersionNegotiationState::new(config.version);
         let environment = Arc::new(crate::env_utils::EnvSnapshot::capture());
+        let initial_now = clock.now();
         let recovery = Self::configured_recovery_with_snapshot(
             &config,
             dgram_send_max_size,
             &environment,
+            &clock,
         );
         let mut conn = Self {
+            clock: clock.clone(),
             scid: ConnectionId::from_ref(scid),
             dcid: ConnectionId::default(),
             initial_dcid: ConnectionId::default(),
@@ -186,9 +214,9 @@ impl Connection {
             last_migration_at: None,
             dest_cids: cid::ConnectionIdSet::new(),
             pkt_spaces: [
-                pnspace::PktNumSpace::default(),
-                pnspace::PktNumSpace::default(),
-                pnspace::PktNumSpace::default(),
+                pnspace::PktNumSpace::new_with_clock(clock.clone()),
+                pnspace::PktNumSpace::new_with_clock(clock.clone()),
+                pnspace::PktNumSpace::new_with_clock(clock.clone()),
             ],
             next_send_pn_by_space: [0, 0, 0],
             key_phase: false,
@@ -201,7 +229,7 @@ impl Connection {
             #[cfg(any(test, feature = "rust-tests"))]
             retired_scids: VecDeque::new(),
             bytes_in_flight_started: None,
-            last_activity: Instant::now(),
+            last_activity: initial_now,
             conn_max_data: initial_max_data,
             conn_bytes_recvd: 0,
             peer_max_data: initial_max_data,
@@ -255,6 +283,7 @@ impl Connection {
         conn
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_client(
         scid: &[u8],
         local: SocketAddr,
@@ -264,6 +293,7 @@ impl Connection {
         Self::new_with_role(scid, local, peer, config, false)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_server(
         scid: &[u8],
         local: SocketAddr,
@@ -763,7 +793,7 @@ impl Connection {
     }
 
     fn pop_targeted_path_frame_for_send(&mut self) -> Option<PendingPathFrame> {
-        self.poll_path_validation_timeout(Instant::now());
+        self.poll_path_validation_timeout(self.clock.now());
 
         if let Some(front) = self.pending_path_frames.front() {
             if let Some(path) = self.pending_path_validation.as_ref() {
@@ -784,7 +814,7 @@ impl Connection {
     /// buffered application/FEC output without bypassing the server amplification
     /// budget enforced by [`Self::pop_targeted_path_frame_for_send`].
     pub fn has_sendable_path_control(&mut self) -> bool {
-        self.poll_path_validation_timeout(Instant::now());
+        self.poll_path_validation_timeout(self.clock.now());
 
         let Some(front) = self.pending_path_frames.front() else {
             return false;
@@ -860,7 +890,7 @@ impl Connection {
         origin: PathValidationOrigin,
         initial_received_bytes: usize,
     ) -> Result<u64, crate::error::ConnectionError> {
-        self.poll_path_validation_timeout(Instant::now());
+        self.poll_path_validation_timeout(self.clock.now());
 
         if self.validated_paths.contains(&(local_addr, peer_addr)) {
             return Ok(self.path_id);
@@ -876,7 +906,7 @@ impl Connection {
         if origin != PathValidationOrigin::PeerPath
             && self
                 .last_migration_at
-                .is_some_and(|last| last.elapsed() < self.config.migration_policy.cooldown)
+                .is_some_and(|last| self.clock.elapsed_since(last) < self.config.migration_policy.cooldown)
         {
             return Err(crate::error::ConnectionError::InvalidState);
         }
@@ -884,7 +914,7 @@ impl Connection {
         let mut challenge = [0u8; 8];
         crate::transport::rand::rand_bytes(&mut challenge);
         let next_path_id = self.path_id.wrapping_add(1);
-        let issued_at = Instant::now();
+        let issued_at = self.clock.now();
         let path = PendingPathValidation {
             path_id: next_path_id,
             old_local_addr: self.local_addr,
@@ -931,7 +961,7 @@ impl Connection {
 
         if self
             .last_migration_at
-            .is_some_and(|last| last.elapsed() < self.config.migration_policy.cooldown)
+            .is_some_and(|last| self.clock.elapsed_since(last) < self.config.migration_policy.cooldown)
         {
             return;
         }
@@ -950,7 +980,7 @@ impl Connection {
         peer_addr: SocketAddr,
         data: [u8; 8],
     ) {
-        self.poll_path_validation_timeout(Instant::now());
+        self.poll_path_validation_timeout(self.clock.now());
 
         let Some(path) = self.pending_path_validation.as_ref() else {
             return;
@@ -962,7 +992,7 @@ impl Connection {
         let Some(path) = self.pending_path_validation.take() else {
             return;
         };
-        let now = Instant::now();
+        let now = self.clock.now();
         self.discard_own_path_challenge(&path);
         self.local_addr = path.local_addr;
         self.peer_addr = path.peer_addr;
@@ -1055,7 +1085,7 @@ impl Connection {
         .encode_parameter()?;
 
         // Create the TLS composition stack (rustls + optional TLS Cover).
-        let provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot(
+        let provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock(
             self.is_server,
             crypto_arc.clone(),
             self.config.verify_peer,
@@ -1063,6 +1093,7 @@ impl Connection {
             &version_information,
             self.config.verify_locations_file.as_deref(),
             &self.environment,
+            &self.clock,
         )?;
 
         // Store provider
@@ -1472,9 +1503,9 @@ impl Connection {
         self.local_error = None;
         self.remote_error = None;
         self.pkt_spaces = [
-            pnspace::PktNumSpace::default(),
-            pnspace::PktNumSpace::default(),
-            pnspace::PktNumSpace::default(),
+            pnspace::PktNumSpace::new_with_clock(self.clock.clone()),
+            pnspace::PktNumSpace::new_with_clock(self.clock.clone()),
+            pnspace::PktNumSpace::new_with_clock(self.clock.clone()),
         ];
         self.next_send_pn_by_space = [0, 0, 0];
         self.pending_control.clear();
@@ -1496,7 +1527,7 @@ impl Connection {
         self.cwnd = INITIAL_WINDOW;
         self.rtt = Duration::ZERO;
         self.timeout_count = 0;
-        self.last_activity = Instant::now();
+        self.last_activity = self.clock.now();
         self.conn_bytes_sent = 0;
         self.conn_bytes_recvd = 0;
         self.peer_max_data = self.config.initial_max_data;
@@ -1507,6 +1538,7 @@ impl Connection {
             &self.config,
             self.dgram_send_max_size,
             &self.environment,
+            &self.clock,
         );
         if self.config.initial_rtt_ms != 100 {
             self.recovery.set_initial_rtt(Duration::from_millis(self.config.initial_rtt_ms));

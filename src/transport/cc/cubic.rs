@@ -111,7 +111,15 @@ pub struct Cubic {
 impl Cubic {
     /// Create a new CUBIC controller with the given initial window and MSS.
     pub fn new(initial_cwnd: usize, mss: usize) -> Self {
-        let now = Instant::now();
+        Self::new_with_clock(initial_cwnd, mss, &crate::time_source::ProtocolClock::default())
+    }
+
+    pub(crate) fn new_with_clock(
+        initial_cwnd: usize,
+        mss: usize,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
+        let now = clock.now();
         let mss = mss.max(1);
         Self {
             cwnd: initial_cwnd,

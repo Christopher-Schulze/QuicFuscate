@@ -111,7 +111,33 @@ pub fn connect(
     peer: std::net::SocketAddr,
     config: &mut crate::transport::Config,
 ) -> Result<crate::transport::Connection, ConnectionError> {
-    let mut conn = crate::transport::Connection::new_client(scid, local, peer, config.clone());
+    connect_with_clock(
+        _sni,
+        scid,
+        local,
+        peer,
+        config,
+        crate::time_source::ProtocolClock::default(),
+    )
+}
+
+/// Creates a client connection using an explicit protocol clock owner.
+pub fn connect_with_clock(
+    _sni: Option<&str>,
+    scid: &[u8],
+    local: std::net::SocketAddr,
+    peer: std::net::SocketAddr,
+    config: &mut crate::transport::Config,
+    clock: crate::time_source::ProtocolClock,
+) -> Result<crate::transport::Connection, ConnectionError> {
+    let mut conn = crate::transport::Connection::new_with_role_and_clock(
+        scid,
+        local,
+        peer,
+        config.clone(),
+        false,
+        clock,
+    );
 
     // Client selects an unpredictable initial DCID (RFC 9000). This DCID is also the ODCID
     // used for Initial key derivation (RFC 9001).
@@ -145,11 +171,37 @@ pub fn accept(
     peer: std::net::SocketAddr,
     config: &mut crate::transport::Config,
 ) -> Result<crate::transport::Connection, ConnectionError> {
+    accept_with_clock(
+        scid,
+        initial_key_dcid,
+        local,
+        peer,
+        config,
+        crate::time_source::ProtocolClock::default(),
+    )
+}
+
+/// Creates a server connection using an explicit protocol clock owner.
+pub fn accept_with_clock(
+    scid: &[u8],
+    initial_key_dcid: Option<&[u8]>,
+    local: std::net::SocketAddr,
+    peer: std::net::SocketAddr,
+    config: &mut crate::transport::Config,
+    clock: crate::time_source::ProtocolClock,
+) -> Result<crate::transport::Connection, ConnectionError> {
     // Create connection with server role
     // Record the Destination Connection ID from this Initial for RFC 9001
     // key derivation. After Retry this is the server's Retry SCID, not the
     // client's original destination connection ID.
-    let mut conn = crate::transport::Connection::new_server(scid, local, peer, config.clone());
+    let mut conn = crate::transport::Connection::new_with_role_and_clock(
+        scid,
+        local,
+        peer,
+        config.clone(),
+        true,
+        clock,
+    );
     if let Some(initial_key_dcid) = initial_key_dcid {
         conn.set_initial_dcid(crate::transport::ConnectionId::from_ref(initial_key_dcid));
     }

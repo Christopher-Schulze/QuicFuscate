@@ -117,6 +117,7 @@ enum ServerPushTriggerReason {
 
 /// Real-time rate choker (token bucket) to smooth observable bitrate without heavy CPU.
 struct RateChoker {
+    clock: crate::time_source::ProtocolClock,
     target_bps: f64,
     capacity_bytes: f64,
     tokens: f64,
@@ -124,24 +125,34 @@ struct RateChoker {
 }
 
 impl RateChoker {
+    #[allow(dead_code)]
     fn new(target_mbps: u32, burst_ms: u32) -> Option<Self> {
+        Self::new_with_clock(target_mbps, burst_ms, &crate::time_source::ProtocolClock::default())
+    }
+
+    fn new_with_clock(
+        target_mbps: u32,
+        burst_ms: u32,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Option<Self> {
         if target_mbps == 0 {
             return None;
         }
         let target_bps = (target_mbps as f64) * 1_000_000.0;
         let capacity_bytes = (target_bps / 8.0) * (burst_ms as f64 / 1000.0);
         Some(Self {
+            clock: clock.clone(),
             target_bps,
             capacity_bytes,
             tokens: capacity_bytes, // start full burst
-            last: std::time::Instant::now(),
+            last: clock.now(),
         })
     }
 
     /// Returns sleep duration needed to respect the target rate for `bytes`.
     fn shape(&mut self, bytes: usize) -> std::time::Duration {
-        let now = std::time::Instant::now();
-        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        let now = self.clock.now();
+        let dt = self.clock.elapsed_since(self.last).as_secs_f64();
         // Refill tokens
         self.tokens = (self.tokens + (self.target_bps / 8.0) * dt).min(self.capacity_bytes);
         self.last = now;

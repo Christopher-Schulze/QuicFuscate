@@ -265,6 +265,10 @@ impl<T: CongestionController> CongestionController for StealthShaper<T> {
         self.inner.update_rtt(rtt);
     }
 
+    fn update_rtt_at(&mut self, rtt: Duration, now: Instant) {
+        self.inner.update_rtt_at(rtt, now);
+    }
+
     fn update_rtt_var(&mut self, rtt_var: Duration) {
         self.inner.update_rtt_var(rtt_var);
     }

@@ -2,8 +2,12 @@
 // QUIC Connection - Core Transport State Machine
 // ============================================================================
 
+use crate::time_source::ProtocolClock;
+
 /// QUIC connection
 pub struct Connection {
+    /// Monotonic clock shared by every protocol-facing transport owner.
+    pub(crate) clock: ProtocolClock,
     // Internal state
     scid: ConnectionId,
     dcid: ConnectionId,
@@ -148,6 +152,11 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Returns the connection-owned protocol clock for child transport owners.
+    pub(crate) fn protocol_clock(&self) -> ProtocolClock {
+        self.clock.clone()
+    }
+
     /// Returns the next packet number only while it remains valid for QUIC's 62-bit
     /// packet-number field. The stateless AEAD primitives rely on this connection-owned
     /// guard to prevent counter reuse after overflow under one traffic-secret/IV epoch.

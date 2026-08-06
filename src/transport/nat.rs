@@ -701,13 +701,22 @@ impl IceAgent {
 pub struct NatPathDiscovery {
     config: NatTraversalConfig,
     ice: IceAgent,
+    clock: crate::time_source::ProtocolClock,
     last_probe: Option<std::time::Instant>,
 }
 
 impl NatPathDiscovery {
     /// Create a controller from a normalized NAT traversal config.
     pub fn new(config: NatTraversalConfig) -> Self {
-        Self { config: config.normalized(), ice: IceAgent::new(), last_probe: None }
+        Self::new_with_clock(config, crate::time_source::ProtocolClock::default())
+    }
+
+    /// Create a controller with an explicit protocol clock.
+    pub fn new_with_clock(
+        config: NatTraversalConfig,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Self {
+        Self { config: config.normalized(), ice: IceAgent::new(), clock, last_probe: None }
     }
 
     /// Borrow the normalized NAT traversal config.
@@ -722,7 +731,7 @@ impl NatPathDiscovery {
         }
         let interval = Duration::from_millis(self.config.probe_interval_ms);
         match self.last_probe {
-            Some(last) => now.duration_since(last) >= interval,
+            Some(last) => now.saturating_duration_since(last) >= interval,
             None => true,
         }
     }
@@ -737,7 +746,7 @@ impl NatPathDiscovery {
         local_addrs: &[SocketAddr],
         reason: NatDiscoveryReason,
     ) -> Vec<IceCandidate> {
-        let now = std::time::Instant::now();
+        let now = self.clock.now();
         if !self.should_probe(reason, now) {
             return Vec::new();
         }

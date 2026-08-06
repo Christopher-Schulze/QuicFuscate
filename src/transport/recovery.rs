@@ -259,6 +259,8 @@ pub struct TimeoutOutcome {
 /// Wraps a pluggable [`CongestionController`] and adds PTO, loss time tracking,
 /// batch size, and memory pool management.
 pub struct Recovery {
+    /// Monotonic clock captured by the owning transport connection.
+    clock: crate::time_source::ProtocolClock,
     /// Current congestion window in bytes (synced from CC after each operation).
     pub cwnd: usize,
     /// Slow-start threshold in bytes.
@@ -313,8 +315,25 @@ impl Recovery {
         algo: cc::Algorithm,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Self {
+        Self::with_algorithm_with_snapshot_and_clock(
+            initial_cwnd,
+            mss,
+            algo,
+            environment,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    pub(crate) fn with_algorithm_with_snapshot_and_clock(
+        initial_cwnd: usize,
+        mss: usize,
+        algo: cc::Algorithm,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
         let mss = mss.max(1);
         Self {
+            clock: clock.clone(),
             cwnd: initial_cwnd,
             ssthresh: usize::MAX / 2,
             bytes_in_flight: 0,
@@ -331,7 +350,7 @@ impl Recovery {
             pacing: true,
             mss,
             batch_size: 16,
-            cc: cc::create_with_snapshot(algo, initial_cwnd, mss, environment),
+            cc: cc::create_with_snapshot_and_clock(algo, initial_cwnd, mss, environment, clock),
             mem_pool: crate::optimize::global_pool(),
             initial_cwnd,
             path_epoch: 0,
@@ -352,7 +371,7 @@ impl Recovery {
     /// Override the initial RTT estimate used before real measurements arrive.
     pub fn set_initial_rtt(&mut self, rtt: Duration) {
         self.rtt = rtt;
-        self.cc.update_rtt(rtt);
+        self.cc.update_rtt_at(rtt, self.clock.now());
     }
 
     /// Enables or disables stealth congestion shaping with the given browser profile.
@@ -546,7 +565,7 @@ impl Recovery {
     ///   SRTT = 7/8 * SRTT + 1/8 * R
     /// Also tracks min_rtt for RACK and BBR.
     pub fn update_rtt(&mut self, rtt: Duration) {
-        self.update_rtt_at(rtt, Instant::now());
+        self.update_rtt_at(rtt, self.clock.now());
     }
 
     /// Applies an RTT sample with its receive timestamp. ACK processing uses
@@ -575,7 +594,7 @@ impl Recovery {
         // The raw sample feeds the CC (BBR keeps a windowed min-filter over raw
         // samples per its model); the EWMA variance is propagated separately so
         // BBR can gate unstable-path behavior on it.
-        self.cc.update_rtt(rtt);
+        self.cc.update_rtt_at(rtt, sampled_at);
         self.cc.update_rtt_var(self.rtt_var);
     }
 

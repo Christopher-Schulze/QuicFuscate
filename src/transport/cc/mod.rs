@@ -85,6 +85,15 @@ pub trait CongestionController: Send {
     /// Update the RTT estimate from a new sample.
     fn update_rtt(&mut self, rtt: Duration);
 
+    /// Update the RTT estimate with the protocol timestamp of the sample.
+    ///
+    /// Controllers with time-sensitive minimum-RTT state override this method.
+    /// The compatibility default preserves controllers that only consume the
+    /// duration while keeping timestamp ownership in the caller.
+    fn update_rtt_at(&mut self, rtt: Duration, _now: Instant) {
+        self.update_rtt(rtt);
+    }
+
     /// Update the EWMA RTT variance (RFC 6298 `rttvar`, propagated by
     /// [`Recovery`](super::recovery::Recovery)). Default no-op: controllers
     /// without variance consumers ignore it.
@@ -149,21 +158,44 @@ pub(crate) enum CcImpl {
     StealthBbr3(stealth_shaper::StealthShaper<bbr3::Bbr3>),
 }
 
+#[allow(dead_code)]
 pub(crate) fn create_with_snapshot(
     algo: Algorithm,
     initial_cwnd: usize,
     mss: usize,
     environment: &crate::env_utils::EnvSnapshot,
 ) -> CcImpl {
+    create_with_snapshot_and_clock(
+        algo,
+        initial_cwnd,
+        mss,
+        environment,
+        &crate::time_source::ProtocolClock::default(),
+    )
+}
+
+pub(crate) fn create_with_snapshot_and_clock(
+    algo: Algorithm,
+    initial_cwnd: usize,
+    mss: usize,
+    environment: &crate::env_utils::EnvSnapshot,
+    clock: &crate::time_source::ProtocolClock,
+) -> CcImpl {
     match algo {
         Algorithm::Reno => CcImpl::Reno(reno::Reno::new(initial_cwnd, mss)),
-        Algorithm::Cubic => CcImpl::Cubic(cubic::Cubic::new(initial_cwnd, mss)),
-        Algorithm::Bbr2 => {
-            CcImpl::Bbr2(bbr2::Bbr2::new_with_snapshot(initial_cwnd, mss, environment))
-        }
-        Algorithm::Bbr3 => {
-            CcImpl::Bbr3(bbr3::Bbr3::new_with_snapshot(initial_cwnd, mss, environment))
-        }
+        Algorithm::Cubic => CcImpl::Cubic(cubic::Cubic::new_with_clock(initial_cwnd, mss, clock)),
+        Algorithm::Bbr2 => CcImpl::Bbr2(bbr2::Bbr2::new_with_snapshot_and_clock(
+            initial_cwnd,
+            mss,
+            environment,
+            clock,
+        )),
+        Algorithm::Bbr3 => CcImpl::Bbr3(bbr3::Bbr3::new_with_snapshot_and_clock(
+            initial_cwnd,
+            mss,
+            environment,
+            clock,
+        )),
     }
 }
 
@@ -198,6 +230,9 @@ impl CongestionController for CcImpl {
     }
     fn update_rtt(&mut self, rtt: Duration) {
         cc_dispatch!(self, update_rtt, rtt);
+    }
+    fn update_rtt_at(&mut self, rtt: Duration, now: Instant) {
+        cc_dispatch!(self, update_rtt_at, rtt, now);
     }
     fn update_rtt_var(&mut self, rtt_var: Duration) {
         cc_dispatch!(self, update_rtt_var, rtt_var);

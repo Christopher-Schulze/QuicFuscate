@@ -973,14 +973,14 @@ impl Connection {
     /// tick would inflate the loss counter and repeatedly collapse the congestion
     /// window for a perfectly healthy connection.
     pub fn idle_timeout_elapsed(&self) -> bool {
-        self.timeout().is_some_and(|window| self.last_activity.elapsed() >= window)
+        self.timeout().is_some_and(|window| self.clock.elapsed_since(self.last_activity) >= window)
     }
 
     /// Returns the duration elapsed since the last inbound packet was received.
     /// Used by the heartbeat watchdog to detect connection loss before the
     /// transport-level idle timeout fires.
     pub fn last_activity_elapsed(&self) -> Duration {
-        self.last_activity.elapsed()
+        self.clock.elapsed_since(self.last_activity)
     }
 
     /// Returns the exact inbound-activity marker used by the heartbeat watchdog.
@@ -997,7 +997,7 @@ impl Connection {
     /// for ACK-only packets (RFC 9002 §7.2).
     #[inline(always)]
     pub fn has_pending_application_ack(&self) -> bool {
-        self.pkt_spaces[2].has_pending_ack()
+        self.pkt_spaces[2].has_pending_ack_at(self.clock.now())
     }
 
     /// Returns the armed traffic-analysis deadline after 1-RTT establishment.
@@ -1111,7 +1111,8 @@ impl Connection {
         // Treat timeout as loss of in-flight bytes (coarse approximation)
         if self.bytes_in_flight > 0 {
             let lost = self.bytes_in_flight;
-            self.recovery.on_loss(lost, Instant::now());
+            let now = self.clock.now();
+            self.recovery.on_loss(lost, now);
             self.stats.lost = self.stats.lost.saturating_add(1);
             self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(lost as u64);
             self.cwnd = self.recovery.cwnd;
@@ -1122,7 +1123,7 @@ impl Connection {
             self.stats.bytes_in_flight_duration = self
                 .stats
                 .bytes_in_flight_duration
-                .saturating_add(Instant::now().saturating_duration_since(start));
+                .saturating_add(self.clock.elapsed_since(start));
         }
         // QUIC idle timeout is terminal and silent: no CONNECTION_CLOSE frame
         // is sent, but runtime owners must be able to reap the connection and
@@ -1295,7 +1296,7 @@ impl Connection {
             return None;
         }
 
-        let now = Instant::now();
+        let now = self.clock.now();
         let rate_bps = self.recovery.get_pacing_rate().or(self.config.max_pacing_rate)?;
         if rate_bps == 0 || self.bytes_in_flight == 0 {
             return Some(now);
@@ -1323,7 +1324,7 @@ impl Connection {
 
     /// Returns the next path event, if any
     pub fn path_event_next(&mut self) -> Option<PathEvent> {
-        self.poll_path_validation_timeout(Instant::now());
+        self.poll_path_validation_timeout(self.clock.now());
         if self.path_events.is_empty() {
             None
         } else {

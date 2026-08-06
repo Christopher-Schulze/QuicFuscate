@@ -312,6 +312,8 @@ fn reject_started_client_config_changes(
 pub struct QuicFuscateEngine {
     /// Engine configuration
     config: EngineConfig,
+    /// Monotonic clock owned by engine lifecycle and statistics state.
+    clock: crate::time_source::ProtocolClock,
     /// Current engine state
     state: EngineState,
     /// Statistics
@@ -737,6 +739,7 @@ impl QuicFuscateEngine {
 
         let engine = Self {
             config,
+            clock: crate::time_source::ProtocolClock::default(),
             state: EngineState::Created,
             stats: Arc::new(EngineStats::default()),
             instrumentation,
@@ -866,7 +869,7 @@ impl QuicFuscateEngine {
 
         let old_state = state;
         self.set_state(EngineState::Starting);
-        self.start_time = Some(Instant::now());
+        self.start_time = Some(self.clock.now());
 
         // Initialize memory pool for optimized memory management
         let _pool = crate::optimize::global_pool();
@@ -1226,7 +1229,9 @@ impl QuicFuscateEngine {
             }
         }
 
-        // Wait for handshake completion via Condvar notification from IO driver.
+        // The Condvar wait is an OS-runtime boundary. Its deadline must remain
+        // in the native Instant domain used by ClientRuntime::wait_handshake;
+        // TODO-822 owns injecting that runtime clock without mixing domains.
         let deadline = Instant::now() + Self::CONNECT_HANDSHAKE_DEADLINE;
         let handshake_ok = runtime.wait_handshake(deadline);
 
@@ -1777,7 +1782,9 @@ impl QuicFuscateEngine {
             }
         }
         if let Some(start) = self.start_time {
-            self.stats.uptime_secs.store(start.elapsed().as_secs(), Ordering::Relaxed);
+            self.stats
+                .uptime_secs
+                .store(self.clock.elapsed_since(start).as_secs(), Ordering::Relaxed);
         }
         self.stats.stealth_mode.store(self.config.stealth.mode as u64, Ordering::Relaxed);
         let effective_fec = self.active_fec_mode().unwrap_or(self.config.fec.mode);
