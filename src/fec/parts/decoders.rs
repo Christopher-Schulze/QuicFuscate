@@ -13,7 +13,7 @@ fn record_decoder_solve(started: std::time::Instant, solved: bool) {
 struct Equation8 {
     base_id: u64,
     coeffs: Vec<u8>,
-    data: AlignedBox<[u8]>,
+    data: PooledBlock,
     len: usize,
 }
 
@@ -117,7 +117,7 @@ struct Decoder8 {
     k: usize,
     mem_pool: Arc<MemoryPool>,
     decoder_policy: String,
-    known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
+    known: HashMap<u64, (PooledBlock, usize)>,
     equations: VecDeque<Equation8>,
     emit_q: VecDeque<FecPacket>,
     /// Interleave depth (1 = non-interleaved, >1 = interleaved mode).
@@ -173,13 +173,12 @@ impl Decoder8 {
     fn take_packet(&mut self, p: FecPacket) {
         if p.is_systematic {
             if let Some(data) = p.payload_slice() {
-                // Store if not already known
-                self.known.entry(p.id).or_insert_with(|| {
-                    let mut buf = self.mem_pool.alloc();
-                    let n = data.len().min(buf.len());
-                    buf[..n].copy_from_slice(&data[..n]);
-                    (buf, n)
-                });
+                if data.len() > self.mem_pool.block_size() || self.known.contains_key(&p.id) {
+                    return;
+                }
+                let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+                buf[..data.len()].copy_from_slice(data);
+                self.known.insert(p.id, (buf, data.len()));
             }
             // New known may peel pending equations
             self.try_peel_all();
@@ -187,17 +186,26 @@ impl Decoder8 {
             // Incoming repair equation
             if let Some(ref coeffs) = p.coefficients {
                 let len = p.data_len;
-                let mut data_buf = self.mem_pool.alloc();
-                let data_len = len.min(data_buf.len());
-                if let Some(d) = p.payload_slice() {
-                    data_buf[..data_len].copy_from_slice(&d[..data_len]);
+                let Some(d) = p.payload_slice() else {
+                    return;
+                };
+                let Some(coeffs) = coeffs.get(..p.coeff_len) else {
+                    return;
+                };
+                if p.coeff_len < self.k
+                    || len > self.mem_pool.block_size()
+                    || d.len() < len
+                {
+                    return;
                 }
+                let mut data_buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+                data_buf[..len].copy_from_slice(&d[..len]);
 
                 let mut equation = Equation8 {
                     base_id: p.id,
-                    coeffs: coeffs[..p.coeff_len].to_vec(),
+                    coeffs: coeffs.to_vec(),
                     data: data_buf,
-                    len: data_len,
+                    len,
                 };
                 if self.try_solve_equation(&mut equation) {
                     self.try_peel_all();
@@ -254,29 +262,31 @@ impl Decoder8 {
         }
         if let Some((_j, sid, cj)) = last_idx {
             // Solve for single unknown sid: x = cj^{-1} * eq.data
+            if self.known.contains_key(&sid) {
+                return false;
+            }
             let inv = gf_tables::gf_inv8(cj);
-            let mut rec = self.mem_pool.alloc();
+            let mut rec = PooledBlock::new(Arc::clone(&self.mem_pool));
             for b in &mut rec[..eq.len] {
                 *b = 0;
             }
             gf_tables::gf_mul_scalar_slice(inv, &eq.data[..eq.len], &mut rec[..eq.len]);
-            // Store known if not present
-            self.known.entry(sid).or_insert_with(|| {
-                let mut rec2 = self.mem_pool.alloc();
-                rec2[..eq.len].copy_from_slice(&rec[..eq.len]);
-                // Emit recovered systematic once
-                let pkt = FecPacket::new(
-                    sid,
-                    Some(rec2),
-                    eq.len,
-                    true,
-                    None,
-                    0,
-                    Arc::clone(&self.mem_pool),
-                );
-                self.emit_q.push_back(pkt);
-                (rec, eq.len)
-            });
+            let mut rec2 = PooledBlock::new(Arc::clone(&self.mem_pool));
+            rec2[..eq.len].copy_from_slice(&rec[..eq.len]);
+            let packet = match FecPacket::from_pooled_blocks(
+                sid,
+                Some(rec2),
+                eq.len,
+                true,
+                None,
+                0,
+                Arc::clone(&self.mem_pool),
+            ) {
+                Ok(packet) => packet,
+                Err(_) => return false,
+            };
+            self.known.insert(sid, (rec, eq.len));
+            self.emit_q.push_back(packet);
             // Equation resolved
             true
         } else {
@@ -348,6 +358,9 @@ impl Decoder8 {
             }
         }
         if unknown_set.is_empty() || min_len == 0 {
+            return false;
+        }
+        if min_len > self.mem_pool.block_size() {
             return false;
         }
         let unknowns: Vec<u64> = unknown_set.into_iter().collect();
@@ -469,15 +482,24 @@ impl Decoder8 {
             if self.known.contains_key(sid) {
                 continue;
             }
-            let mut buf = self.mem_pool.alloc();
-            let n = min_len.min(buf.len());
-            buf[..n].copy_from_slice(&recon[col][..n]);
-            let mut buf2 = self.mem_pool.alloc();
-            buf2[..n].copy_from_slice(&recon[col][..n]);
-            self.known.insert(*sid, (buf, n));
-            let pkt =
-                FecPacket::new(*sid, Some(buf2), n, true, None, 0, Arc::clone(&self.mem_pool));
-            self.emit_q.push_back(pkt);
+            let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+            buf[..min_len].copy_from_slice(&recon[col][..min_len]);
+            let mut buf2 = PooledBlock::new(Arc::clone(&self.mem_pool));
+            buf2[..min_len].copy_from_slice(&recon[col][..min_len]);
+            let packet = match FecPacket::from_pooled_blocks(
+                *sid,
+                Some(buf2),
+                min_len,
+                true,
+                None,
+                0,
+                Arc::clone(&self.mem_pool),
+            ) {
+                Ok(packet) => packet,
+                Err(_) => return false,
+            };
+            self.known.insert(*sid, (buf, min_len));
+            self.emit_q.push_back(packet);
         }
         self.equations.clear();
         true
@@ -493,7 +515,7 @@ impl Decoder8 {
         for eq in &self.equations {
             min_len = core::cmp::min(min_len, eq.len);
             for j in 0..self.k {
-                if eq.coeffs[j] != 0 {
+                if eq.coeffs.get(j).copied().unwrap_or(0) != 0 {
                     let sid = self.source_id_for(eq.base_id, j);
                     if !self.known.contains_key(&sid) {
                         unknown_set.insert(sid);
@@ -591,29 +613,33 @@ impl Decoder8 {
             }
         }
 
+        if min_len > self.mem_pool.block_size() {
+            return false;
+        }
+
         // Store solved unknowns
         for (idx, &sid) in unknowns.iter().enumerate() {
-            use std::collections::hash_map::Entry;
-            match self.known.entry(sid) {
-                Entry::Occupied(_) => {}
-                Entry::Vacant(e) => {
-                    let mut buf = self.mem_pool.alloc();
-                    buf[..min_len].copy_from_slice(&solutions[idx][..min_len]);
-                    let mut buf2 = self.mem_pool.alloc();
-                    buf2[..min_len].copy_from_slice(&solutions[idx][..min_len]);
-                    e.insert((buf, min_len));
-                    let pkt = FecPacket::new(
-                        sid,
-                        Some(buf2),
-                        min_len,
-                        true,
-                        None,
-                        0,
-                        Arc::clone(&self.mem_pool),
-                    );
-                    self.emit_q.push_back(pkt);
-                }
+            if self.known.contains_key(&sid) {
+                continue;
             }
+            let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+            buf[..min_len].copy_from_slice(&solutions[idx][..min_len]);
+            let mut buf2 = PooledBlock::new(Arc::clone(&self.mem_pool));
+            buf2[..min_len].copy_from_slice(&solutions[idx][..min_len]);
+            let packet = match FecPacket::from_pooled_blocks(
+                sid,
+                Some(buf2),
+                min_len,
+                true,
+                None,
+                0,
+                Arc::clone(&self.mem_pool),
+            ) {
+                Ok(packet) => packet,
+                Err(_) => return false,
+            };
+            self.known.insert(sid, (buf, min_len));
+            self.emit_q.push_back(packet);
         }
         self.equations.clear();
         true
@@ -698,14 +724,14 @@ impl Decoder8 {
 struct Equation4 {
     base_id: u64,
     coeffs: Vec<u8>,
-    data: AlignedBox<[u8]>,
+    data: PooledBlock,
     len: usize,
 }
 
 struct Decoder4 {
     k: usize,
     mem_pool: Arc<MemoryPool>,
-    known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
+    known: HashMap<u64, (PooledBlock, usize)>,
     equations: VecDeque<Equation4>,
     emit_q: VecDeque<FecPacket>,
     /// Interleave depth (1 = non-interleaved).
@@ -748,25 +774,32 @@ impl Decoder4 {
     fn take_packet(&mut self, p: FecPacket) {
         if p.is_systematic {
             if let Some(data) = p.payload_slice() {
-                self.known.entry(p.id).or_insert_with(|| {
-                    let mut buf = self.mem_pool.alloc();
-                    let n = data.len().min(buf.len());
-                    buf[..n].copy_from_slice(&data[..n]);
-                    (buf, n)
-                });
+                if data.len() > self.mem_pool.block_size() || self.known.contains_key(&p.id) {
+                    return;
+                }
+                let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+                buf[..data.len()].copy_from_slice(data);
+                self.known.insert(p.id, (buf, data.len()));
             }
             self.try_peel_all();
         } else if let Some(ref coeffs) = p.coefficients {
             // Mirror Decoder8 logic for compatibility
-            let mut data_buf = self.mem_pool.alloc();
-            let n = p.data_len.min(data_buf.len());
-            if let Some(d) = p.payload_slice() {
-                data_buf[..n].copy_from_slice(&d[..n]);
+            let Some(d) = p.payload_slice() else {
+                return;
+            };
+            let Some(coeffs) = coeffs.get(..p.coeff_len) else {
+                return;
+            };
+            let n = p.data_len;
+            if p.coeff_len < self.k || n > self.mem_pool.block_size() || d.len() < n {
+                return;
             }
+            let mut data_buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+            data_buf[..n].copy_from_slice(&d[..n]);
 
             let eq = Equation4 {
                 base_id: p.id,
-                coeffs: coeffs[..p.coeff_len].to_vec(),
+                coeffs: coeffs.to_vec(),
                 data: data_buf,
                 len: n,
             };
@@ -825,12 +858,15 @@ impl Decoder4 {
                 return false;
             };
             let pid = self.source_id_for(eq.base_id, idx);
+            if self.known.contains_key(&pid) {
+                return false;
+            }
             let c = eq.coeffs[idx];
             let inv = GF4_INV[(c & 0xF) as usize];
 
             let sl = eq.len;
             if sl > 0 {
-                let mut rec = self.mem_pool.alloc();
+                let mut rec = PooledBlock::new(Arc::clone(&self.mem_pool));
                 rec[..sl].fill(0);
                 let mut k = 0;
                 while k < sl {
@@ -842,9 +878,9 @@ impl Decoder4 {
                     );
                     k += chunk;
                 }
-                let mut rec_clone = self.mem_pool.alloc();
+                let mut rec_clone = PooledBlock::new(Arc::clone(&self.mem_pool));
                 rec_clone[..sl].copy_from_slice(&rec[..sl]);
-                let pkt = FecPacket::new(
+                let pkt = match FecPacket::from_pooled_blocks(
                     pid,
                     Some(rec_clone),
                     sl,
@@ -852,7 +888,10 @@ impl Decoder4 {
                     None,
                     0,
                     Arc::clone(&self.mem_pool),
-                );
+                ) {
+                    Ok(pkt) => pkt,
+                    Err(_) => return false,
+                };
                 self.emit_q.push_back(pkt);
                 self.known.insert(pid, (rec, sl));
                 return true;
@@ -884,14 +923,14 @@ impl Decoder4 {
 struct Equation16 {
     base_id: u64,
     coeffs: Vec<u16>,
-    data: AlignedBox<[u8]>,
+    data: PooledBlock,
     len: usize,
 }
 
 struct Decoder16 {
     k: usize,
     mem_pool: Arc<MemoryPool>,
-    known: HashMap<u64, (AlignedBox<[u8]>, usize)>,
+    known: HashMap<u64, (PooledBlock, usize)>,
     equations: VecDeque<Equation16>,
     emit_q: VecDeque<FecPacket>,
     /// Interleave depth (1 = non-interleaved).
@@ -934,33 +973,54 @@ impl Decoder16 {
     fn take_packet(&mut self, p: FecPacket) {
         if p.is_systematic {
             if let Some(data) = p.payload_slice() {
-                self.known.entry(p.id).or_insert_with(|| {
-                    let mut buf = self.mem_pool.alloc();
-                    let n = data.len().min(buf.len());
-                    buf[..n].copy_from_slice(&data[..n]);
-                    (buf, n)
-                });
+                if data.len() > self.mem_pool.block_size() || self.known.contains_key(&p.id) {
+                    return;
+                }
+                let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+                buf[..data.len()].copy_from_slice(data);
+                self.known.insert(p.id, (buf, data.len()));
             }
             // Try peeling any pending equations
             self.try_peel_all();
         } else if let Some(ref coeffs_be) = p.coefficients {
             // Parse coefficients as big-endian u16
+            let Some(coeffs_be) = coeffs_be.get(..p.coeff_len) else {
+                return;
+            };
+            let Some(expected_coeff_len) = self.k.checked_mul(2) else {
+                return;
+            };
+            if p.coeff_len != expected_coeff_len {
+                return;
+            }
             let mut coeffs16 = vec![0u16; self.k];
             let mut j = 0usize;
-            while j < self.k && (2 * j + 1) < p.coeff_len {
-                let b0 = coeffs_be[2 * j] as u16;
-                let b1 = coeffs_be[2 * j + 1] as u16;
+            while j < self.k {
+                let Some(offset) = j.checked_mul(2) else {
+                    return;
+                };
+                let Some(end) = offset.checked_add(2) else {
+                    return;
+                };
+                if end > coeffs_be.len() {
+                    break;
+                }
+                let b0 = coeffs_be[offset] as u16;
+                let b1 = coeffs_be[offset + 1] as u16;
                 coeffs16[j] = (b0 << 8) | b1;
                 j += 1;
             }
             let len = p.data_len;
-            let mut data_buf = self.mem_pool.alloc();
-            let data_len = len.min(data_buf.len());
-            if let Some(d) = p.payload_slice() {
-                data_buf[..data_len].copy_from_slice(&d[..data_len]);
+            let Some(d) = p.payload_slice() else {
+                return;
+            };
+            if len > self.mem_pool.block_size() || d.len() < len {
+                return;
             }
+            let mut data_buf = PooledBlock::new(Arc::clone(&self.mem_pool));
+            data_buf[..len].copy_from_slice(&d[..len]);
             let mut equation =
-                Equation16 { base_id: p.id, coeffs: coeffs16, data: data_buf, len: data_len };
+                Equation16 { base_id: p.id, coeffs: coeffs16, data: data_buf, len };
             if self.try_solve_equation(&mut equation) {
                 self.try_peel_all();
                 return;
@@ -974,15 +1034,18 @@ impl Decoder16 {
         if self.is_complete() {
             let mut result = VecDeque::new();
             for (&id, (data, len)) in self.known.iter() {
-                result.push_back(FecPacket::new(
+                let data_block = copy_to_pooled_block(&self.mem_pool, &data[..*len])?;
+                let packet = FecPacket::from_pooled_blocks(
                     id,
-                    Some(self.mem_pool.alloc_from_slice(&data[..*len])),
+                    Some(data_block),
                     *len,
                     true,
                     None,
                     0,
                     Arc::clone(&self.mem_pool),
-                ));
+                )
+                .ok()?;
+                result.push_back(packet);
             }
             Some(result)
         } else {
@@ -1047,8 +1110,11 @@ impl Decoder16 {
             }
         }
         if let Some((_j, sid, cj)) = last {
+            if self.known.contains_key(&sid) {
+                return false;
+            }
             let inv = gf_tables::gf16_inv(cj);
-            let mut rec = self.mem_pool.alloc();
+            let mut rec = PooledBlock::new(Arc::clone(&self.mem_pool));
             let sl = eq.len & !1;
             for b in &mut rec[..sl] {
                 *b = 0;
@@ -1056,16 +1122,24 @@ impl Decoder16 {
             if sl >= 2 {
                 gf16_mul_scalar_slice_u16(inv, &eq.data[..sl], &mut rec[..sl]);
             }
-            self.known.entry(sid).or_insert_with(|| {
-                let mut rec2 = self.mem_pool.alloc();
-                if sl > 0 {
-                    rec2[..sl].copy_from_slice(&rec[..sl]);
-                }
-                let pkt =
-                    FecPacket::new(sid, Some(rec2), sl, true, None, 0, Arc::clone(&self.mem_pool));
-                self.emit_q.push_back(pkt);
-                (rec, sl)
-            });
+            let mut rec2 = PooledBlock::new(Arc::clone(&self.mem_pool));
+            if sl > 0 {
+                rec2[..sl].copy_from_slice(&rec[..sl]);
+            }
+            let packet = match FecPacket::from_pooled_blocks(
+                sid,
+                Some(rec2),
+                sl,
+                true,
+                None,
+                0,
+                Arc::clone(&self.mem_pool),
+            ) {
+                Ok(packet) => packet,
+                Err(_) => return false,
+            };
+            self.known.insert(sid, (rec, sl));
+            self.emit_q.push_back(packet);
             true
         } else {
             false
@@ -1111,6 +1185,9 @@ impl Decoder16 {
             }
         }
         if unknown_set.is_empty() || min_len < 2 {
+            return false;
+        }
+        if min_len > self.mem_pool.block_size() {
             return false;
         }
         let unknowns: Vec<u64> = unknown_set.into_iter().collect();
@@ -1206,18 +1283,31 @@ impl Decoder16 {
             if self.known.contains_key(&sid) {
                 continue;
             }
-            let mut buf = self.mem_pool.alloc();
             let sl = words * 2;
+            if sl > self.mem_pool.block_size() {
+                return false;
+            }
+            let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
             for (w, &val) in solutions[col].iter().enumerate() {
                 buf[2 * w] = (val >> 8) as u8;
                 buf[2 * w + 1] = (val & 0xff) as u8;
             }
-            let mut buf2 = self.mem_pool.alloc();
+            let mut buf2 = PooledBlock::new(Arc::clone(&self.mem_pool));
             buf2[..sl].copy_from_slice(&buf[..sl]);
+            let packet = match FecPacket::from_pooled_blocks(
+                sid,
+                Some(buf2),
+                sl,
+                true,
+                None,
+                0,
+                Arc::clone(&self.mem_pool),
+            ) {
+                Ok(packet) => packet,
+                Err(_) => return false,
+            };
             self.known.insert(sid, (buf, sl));
-            let pkt =
-                FecPacket::new(sid, Some(buf2), sl, true, None, 0, Arc::clone(&self.mem_pool));
-            self.emit_q.push_back(pkt);
+            self.emit_q.push_back(packet);
         }
         self.equations.clear();
         true

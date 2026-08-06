@@ -210,23 +210,27 @@ impl EncoderVariant {
                 let symbol_id = next_repair_id();
                 let (encoded_data, indices) = enc.generate_symbol_with_indices(symbol_id);
                 // Encode indices as u32 big-endian values
-                let mut coeff_block = pool.alloc();
-                let max_u32s = coeff_block.len() / 4;
-                let take = core::cmp::min(indices.len(), max_u32s);
-                for (i, idx) in indices.iter().take(take).enumerate() {
-                    let be = (*idx as u32).to_be_bytes();
+                let coeff_len = indices.len().checked_mul(4)?;
+                if coeff_len > pool.block_size() {
+                    return None;
+                }
+                let data_block = copy_to_pooled_block(pool, &encoded_data)?;
+                let mut coeff_block = PooledBlock::new(Arc::clone(pool));
+                for (i, idx) in indices.iter().enumerate() {
+                    let be = u32::try_from(*idx).ok()?.to_be_bytes();
                     let off = i * 4;
                     coeff_block[off..off + 4].copy_from_slice(&be);
                 }
-                Some(FecPacket::new(
+                FecPacket::from_pooled_blocks(
                     symbol_id,
-                    Some(pool.alloc_from_slice(&encoded_data)),
+                    Some(data_block),
                     encoded_data.len(),
                     false,
                     Some(coeff_block),
-                    take * 4,
+                    coeff_len,
                     Arc::clone(pool),
-                ))
+                )
+                .ok()
             }
         }
     }
@@ -423,15 +427,17 @@ impl DecoderVariant {
                     let mut packets = VecDeque::new();
                     for (source_index, symbol) in symbols {
                         let pool = Arc::clone(&d.mem_pool);
-                        let packet = FecPacket::new(
+                        let data = copy_to_pooled_block(&pool, &symbol)?;
+                        let packet = FecPacket::from_pooled_blocks(
                             source_index as u64,
-                            Some(pool.alloc_from_slice(&symbol)),
+                            Some(data),
                             symbol.len(),
                             true,
                             None,
                             0,
                             pool,
-                        );
+                        )
+                        .ok()?;
                         packets.push_back(packet);
                     }
                     Some(packets)
@@ -470,15 +476,21 @@ impl DecoderVariant {
                 let mut partial = VecDeque::new();
                 for (source_index, symbol) in d.get_partial_indexed() {
                     let pool = Arc::clone(&d.mem_pool);
-                    let packet = FecPacket::new(
+                    let Some(data) = copy_to_pooled_block(&pool, &symbol) else {
+                        continue;
+                    };
+                    let Some(packet) = FecPacket::from_pooled_blocks(
                         source_index as u64,
-                        Some(pool.alloc_from_slice(&symbol)),
+                        Some(data),
                         symbol.len(),
                         true,
                         None,
                         0,
                         pool,
-                    );
+                    )
+                    .ok() else {
+                        continue;
+                    };
                     partial.push_back(packet);
                 }
                 // Update progress gauge with current progress

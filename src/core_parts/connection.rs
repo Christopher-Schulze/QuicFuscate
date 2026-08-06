@@ -2076,14 +2076,9 @@ impl QuicFuscateConnection {
 
         // Transfer the checked-out block only after every pre-FEC fallible operation has passed.
         let send_pool = send_buffer.pool();
-        let Some(send_buffer) = send_buffer.take_block() else {
-            return Err(crate::error::ConnectionError::Transport(
-                "pooled send buffer was already transferred".to_string(),
-            ));
-        };
 
         // Create a source (systematic) FEC packet, passing ownership of the buffer.
-        let mut fec_packet = FecPacket::new(
+        let mut fec_packet = FecPacket::from_pooled_blocks(
             packet_id,
             Some(send_buffer),
             fec_data_len,
@@ -2092,7 +2087,8 @@ impl QuicFuscateConnection {
             0,
             // Use the same pool the buffer was allocated from to avoid cross-pool leaks
             send_pool,
-        );
+        )
+        .map_err(crate::error::ConnectionError::Transport)?;
         fec_packet.seq = packet_id;
 
         // Initial and Handshake datagrams must remain raw because the server parses

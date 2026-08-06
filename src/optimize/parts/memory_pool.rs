@@ -378,6 +378,8 @@ pub enum MemoryPoolError {
     CapacityOverflow,
     /// The allocator or an internal reservation could not provide memory.
     AllocationFailed,
+    /// The requested slice cannot fit in one fixed-size pool block.
+    SliceTooLarge { requested: usize, block_size: usize },
     /// The ownership ledger rejected a newly allocated block.
     OwnershipRejected,
 }
@@ -390,6 +392,9 @@ impl std::fmt::Display for MemoryPoolError {
             Self::InvalidLayout => "memory pool block size cannot form a valid aligned layout",
             Self::CapacityOverflow => "memory pool capacity and block size exceed the addressable byte bound",
             Self::AllocationFailed => "memory pool allocation or reservation failed",
+            Self::SliceTooLarge { requested, block_size } => {
+                return write!(formatter, "memory pool slice length {requested} exceeds block size {block_size}");
+            }
             Self::OwnershipRejected => "memory pool ownership ledger rejected a new block",
         };
         formatter.write_str(message)
@@ -1118,12 +1123,14 @@ impl MemoryPool {
         &self,
         data: &[u8],
     ) -> Result<AlignedBox<[u8]>, MemoryPoolError> {
+        if data.len() > self.block_size {
+            return Err(MemoryPoolError::SliceTooLarge {
+                requested: data.len(),
+                block_size: self.block_size,
+            });
+        }
         let mut buf = self.try_alloc()?;
-        let copy_len = data.len().min(buf.len());
-        debug_assert!(copy_len <= buf.len());
-        buf[..copy_len].copy_from_slice(&data[..copy_len]);
-        // Resize the box to match the actual data length if possible
-        // For now, just return the full buffer - callers should track actual length
+        buf[..data.len()].copy_from_slice(data);
         Ok(buf)
     }
 
@@ -1502,6 +1509,11 @@ impl PooledBlock {
     /// [`MemoryPool::free`].
     pub(crate) fn take_block(&mut self) -> Option<AlignedBox<[u8]>> {
         self.block.take()
+    }
+
+    /// Return whether this guard still owns its checked-out block.
+    pub(crate) fn is_live(&self) -> bool {
+        self.block.is_some()
     }
 }
 
@@ -2232,10 +2244,17 @@ mod memory_pool_growth_tests {
     }
 
     #[test]
-    fn fallible_slice_allocation_copies_and_clamps_data() {
+    fn fallible_slice_allocation_rejects_oversized_data_and_copies_exact_data() {
         let pool = MemoryPool::try_new(1, 2_048).expect("valid fallible pool");
         let data = vec![0xA5; 2_200];
-        let block = pool.try_alloc_from_slice(&data).expect("fallible slice allocation must succeed");
+        assert!(matches!(
+            pool.try_alloc_from_slice(&data),
+            Err(MemoryPoolError::SliceTooLarge { requested: 2_200, block_size: 2_048 })
+        ));
+        let data = vec![0xA5; 2_048];
+        let block = pool
+            .try_alloc_from_slice(&data)
+            .expect("fallible slice allocation must succeed for an exact block");
         assert_eq!(block.len(), 2_048);
         assert!(block.iter().all(|byte| *byte == 0xA5));
         pool.free(block);

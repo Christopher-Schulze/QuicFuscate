@@ -5,7 +5,10 @@
 //! repair ordinal. Source lengths are protected inside each coded symbol so a
 //! recovered variable-length QUIC datagram can be restored exactly.
 
-use super::{FecMode, FecPacket, FecRuntimePolicy, MemoryPool, DEFAULT_FOUNTAIN_SEED};
+use super::{
+    copy_to_pooled_block, FecMode, FecPacket, FecRuntimePolicy, MemoryPool, PooledBlock,
+    DEFAULT_FOUNTAIN_SEED,
+};
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -533,14 +536,14 @@ impl ReceiveWindow {
         if symbol_len > self.mem_pool.block_size() {
             return Err(WireError::ResourceExhausted);
         }
-        let mut symbol = self.mem_pool.alloc();
+        let mut symbol = PooledBlock::new(Arc::clone(&self.mem_pool));
         write_source_symbol(payload, &mut symbol)?;
         let internal_id = if meta.profile.codec == WireCodec::Fountain {
             meta.sequence - self.window_start()
         } else {
             meta.sequence
         };
-        let mut packet = FecPacket::new(
+        let mut packet = FecPacket::from_pooled_blocks(
             internal_id,
             Some(symbol),
             symbol_len,
@@ -548,7 +551,8 @@ impl ReceiveWindow {
             None,
             0,
             Arc::clone(&self.mem_pool),
-        );
+        )
+        .map_err(|_| WireError::ResourceExhausted)?;
         packet.seq = meta.sequence;
         Ok(packet)
     }
@@ -563,11 +567,12 @@ impl ReceiveWindow {
         {
             return Err(WireError::ResourceExhausted);
         }
-        let data = self.mem_pool.alloc_from_slice(payload);
+        let data =
+            copy_to_pooled_block(&self.mem_pool, payload).ok_or(WireError::ResourceExhausted)?;
         let (coefficients, coefficient_len) = if meta.profile.codec == WireCodec::Fountain {
             (None, 0)
         } else {
-            let mut coefficients = self.mem_pool.alloc();
+            let mut coefficients = PooledBlock::new(Arc::clone(&self.mem_pool));
             let coefficient_len = meta.profile.codec.write_repair_coefficients(
                 meta.profile.block_source_count(),
                 meta.repair_index,
@@ -582,6 +587,9 @@ impl ReceiveWindow {
                         .unwrap_or(0)
                         .saturating_add(1)
                         .min(meta.profile.block_source_count() as u64) as usize;
+                if span > coefficient_len {
+                    return Err(WireError::ResourceExhausted);
+                }
                 coefficients[span..coefficient_len].fill(0);
             }
             (Some(coefficients), coefficient_len)
@@ -591,7 +599,7 @@ impl ReceiveWindow {
         } else {
             meta.sequence
         };
-        let mut packet = FecPacket::new(
+        let mut packet = FecPacket::from_pooled_blocks(
             decoder_anchor,
             Some(data),
             payload.len(),
@@ -599,7 +607,8 @@ impl ReceiveWindow {
             coefficients,
             coefficient_len,
             Arc::clone(&self.mem_pool),
-        );
+        )
+        .map_err(|_| WireError::ResourceExhausted)?;
         packet.seq = ((meta.repair_index as u64) << 4) | meta.block_index as u64;
         Ok(packet)
     }
@@ -1002,8 +1011,9 @@ mod tests {
     #[test]
     fn oversized_repair_fails_before_dedup_state_changes() {
         let pool = Arc::new(MemoryPool::new(8, 2048));
+        let before = pool.accounting_snapshot();
         let oversized_payload_len = pool.block_size() + 1;
-        let mut receiver = WireFecReceiver::new(pool);
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
         let meta = WirePacketMeta {
             profile: WireProfile {
                 epoch: 1,
@@ -1032,6 +1042,7 @@ mod tests {
             Err(WireError::ResourceExhausted),
             "failed repairs must not poison duplicate suppression"
         );
+        assert_eq!(pool.accounting_snapshot(), before);
     }
 
     #[test]

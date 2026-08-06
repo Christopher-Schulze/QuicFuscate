@@ -673,7 +673,11 @@ impl Drop for FecPacket {
 }
 
 impl FecPacket {
-    /// Construct a new FEC packet, upsizing buffers if declared lengths exceed capacity.
+    /// Construct a compatibility FEC packet from raw aligned buffers.
+    ///
+    /// New production paths should use [`Self::from_pooled_blocks`]. This compatibility
+    /// constructor accepts pool-origin and foreign buffers; `MemoryPool::free` safely returns
+    /// only recognized pool blocks and directly releases foreign or mismatched buffers.
     pub fn new(
         id: u64,
         data: Option<AlignedBox<[u8]>>,
@@ -687,7 +691,7 @@ impl FecPacket {
         let data = match data {
             Some(d) => {
                 if data_len > d.len() {
-                    match AlignedBox::<[u8]>::slice_from_default(data_len, 64) {
+                    match AlignedBox::<[u8]>::slice_from_default(64, data_len) {
                         Ok(mut bigger) => {
                             let copy = d.len();
                             bigger[..copy].copy_from_slice(&d[..copy]);
@@ -711,7 +715,7 @@ impl FecPacket {
         let coefficients = match coefficients {
             Some(c) => {
                 if coeff_len > c.len() {
-                    match AlignedBox::<[u8]>::slice_from_default(coeff_len, 64) {
+                    match AlignedBox::<[u8]>::slice_from_default(64, coeff_len) {
                         Ok(mut bigger) => {
                             let copy = c.len();
                             bigger[..copy].copy_from_slice(&c[..copy]);
@@ -734,6 +738,8 @@ impl FecPacket {
             None => None,
         };
 
+        let data_len = if data.is_some() { data_len } else { 0 };
+        let coeff_len = if coefficients.is_some() { coeff_len } else { 0 };
         let data = data.map(|buf| SharedFecBuffer::new(buf, Arc::clone(&mem_pool)));
 
         Self {
@@ -747,6 +753,72 @@ impl FecPacket {
             seq: id, // Default: seq = id
             timestamp: std::time::Instant::now(),
         }
+    }
+
+    /// Construct a packet by transferring live pool guards after all lengths are validated.
+    ///
+    /// The guards must originate from `mem_pool`. Any rejected guard remains owned by its
+    /// original pool and is returned automatically, so data and coefficients cannot leak when
+    /// packet construction is rejected.
+    pub(crate) fn from_pooled_blocks(
+        id: u64,
+        data: Option<PooledBlock>,
+        data_len: usize,
+        is_systematic: bool,
+        coefficients: Option<PooledBlock>,
+        coeff_len: usize,
+        mem_pool: Arc<MemoryPool>,
+    ) -> Result<Self, String> {
+        if let Some(block) = data.as_ref() {
+            if !Arc::ptr_eq(&block.pool(), &mem_pool) {
+                return Err("FEC data block belongs to a different memory pool".into());
+            }
+            if !block.is_live() || data_len > block.len() {
+                return Err("FEC data block cannot contain its declared length".into());
+            }
+        } else if data_len != 0 {
+            return Err("FEC data length is nonzero without a data block".into());
+        }
+        if let Some(block) = coefficients.as_ref() {
+            if !Arc::ptr_eq(&block.pool(), &mem_pool) {
+                return Err("FEC coefficient block belongs to a different memory pool".into());
+            }
+            if !block.is_live() || coeff_len > block.len() {
+                return Err("FEC coefficient block cannot contain its declared length".into());
+            }
+        } else if coeff_len != 0 {
+            return Err("FEC coefficient length is nonzero without a coefficient block".into());
+        }
+
+        let mut data_raw = match data {
+            Some(mut block) => match block.take_block() {
+                Some(raw) => Some(raw),
+                None => return Err("FEC data guard was already transferred".into()),
+            },
+            None => None,
+        };
+        let coefficients_raw = match coefficients {
+            Some(mut block) => match block.take_block() {
+                Some(raw) => Some(raw),
+                None => {
+                    if let Some(raw) = data_raw.take() {
+                        mem_pool.free(raw);
+                    }
+                    return Err("FEC coefficient guard was already transferred".into());
+                }
+            },
+            None => None,
+        };
+
+        Ok(Self::new(
+            id,
+            data_raw,
+            data_len,
+            is_systematic,
+            coefficients_raw,
+            coeff_len,
+            mem_pool,
+        ))
     }
 
     /// Payload bytes for this packet (up to `data_len`).
@@ -767,9 +839,12 @@ impl FecPacket {
 
     /// Create a systematic FEC packet from a raw byte block, copying into a pool buffer.
     pub fn from_block(id: u64, block: &[u8], mem_pool: Arc<MemoryPool>) -> Self {
-        let mut dst = mem_pool.alloc();
+        let mut dst = PooledBlock::new(Arc::clone(&mem_pool));
         let n = block.len().min(dst.len());
         dst[..n].copy_from_slice(&block[..n]);
+        let Some(dst) = dst.take_block() else {
+            return Self::new(id, None, 0, true, None, 0, mem_pool);
+        };
         Self::new(id, Some(dst), n, true, None, 0, mem_pool)
     }
 
@@ -805,7 +880,7 @@ impl FecPacket {
         // seq conveys the transport sequence (used by InterleavedDecoder for block routing)
         buf[off..off + 8].copy_from_slice(&self.seq.to_be_bytes());
         off += 8;
-        let coeff_len: u16 = self.coeff_len as u16;
+        let coeff_len = u16::try_from(self.coeff_len).map_err(|_| "CoeffLengthOverflow")?;
         if buf.len() < off + 2 {
             return Err("BufferTooShort".into());
         }
@@ -815,7 +890,10 @@ impl FecPacket {
             if buf.len() < off + self.coeff_len {
                 return Err("BufferTooShort".into());
             }
-            buf[off..off + self.coeff_len].copy_from_slice(&coeffs[..self.coeff_len]);
+            let coeffs = coeffs
+                .get(..self.coeff_len)
+                .ok_or_else(|| "CoefficientLengthInvalid".to_string())?;
+            buf[off..off + self.coeff_len].copy_from_slice(coeffs);
             off += self.coeff_len;
         } else if self.coeff_len > 0 {
             return Err("coeff_len>0 but no coefficients present".into());
@@ -861,10 +939,10 @@ impl FecPacket {
             return Err("BufferTooShort".into());
         }
         let coeffs = if coeff_len > 0 {
-            let mut cbuf = pool.alloc();
-            if cbuf.len() < coeff_len {
+            if coeff_len > pool.block_size() {
                 return Err("CoeffBufferTooSmall".into());
             }
+            let mut cbuf = PooledBlock::new(Arc::clone(&pool));
             cbuf[..coeff_len].copy_from_slice(&input[off..off + coeff_len]);
             off += coeff_len;
             Some(cbuf)
@@ -872,13 +950,20 @@ impl FecPacket {
             None
         };
         let payload_len = input.len().saturating_sub(off);
-        let mut dbuf = pool.alloc();
-        if dbuf.len() < payload_len {
+        if payload_len > pool.block_size() {
             return Err("DataBufferTooSmall".into());
         }
+        let mut dbuf = PooledBlock::new(Arc::clone(&pool));
         dbuf[..payload_len].copy_from_slice(&input[off..]);
-        let mut pkt =
-            Self::new(base_id, Some(dbuf), payload_len, is_systematic, coeffs, coeff_len, pool);
+        let mut pkt = Self::from_pooled_blocks(
+            base_id,
+            Some(dbuf),
+            payload_len,
+            is_systematic,
+            coeffs,
+            coeff_len,
+            pool,
+        )?;
         pkt.seq = seq;
         Ok(pkt)
     }
@@ -897,13 +982,23 @@ impl Clone for FecPacket {
     fn clone(&self) -> Self {
         let data_clone = self.data.clone();
 
-        let coeffs_clone = if let Some(ref coeffs) = self.coefficients {
-            let mut buf = self.mem_pool.alloc();
-            let m = self.coeff_len.min(buf.len());
-            buf[..m].copy_from_slice(&coeffs[..m]);
-            Some(buf)
+        let (coeffs_clone, coeff_len) = if let Some(ref coeffs) = self.coefficients {
+            let mut buf = if self.coeff_len > self.mem_pool.block_size() {
+                match AlignedBox::<[u8]>::slice_from_default(64, self.coeff_len) {
+                    Ok(buf) => buf,
+                    Err(error) => {
+                        log::warn!("FEC coefficient clone fell back to a pool block: {error}");
+                        self.mem_pool.alloc()
+                    }
+                }
+            } else {
+                self.mem_pool.alloc()
+            };
+            let copy_len = self.coeff_len.min(buf.len()).min(coeffs.len());
+            buf[..copy_len].copy_from_slice(&coeffs[..copy_len]);
+            (Some(buf), copy_len)
         } else {
-            None
+            (None, 0)
         };
 
         Self {
@@ -912,7 +1007,7 @@ impl Clone for FecPacket {
             data_len: self.data_len,
             is_systematic: self.is_systematic,
             coefficients: coeffs_clone,
-            coeff_len: self.coeff_len,
+            coeff_len,
             mem_pool: Arc::clone(&self.mem_pool),
             seq: self.seq,
             timestamp: self.timestamp,
@@ -1069,22 +1164,22 @@ impl Encoder<GF8> {
         if max_len == 0 {
             return None;
         }
-        let mut out = pool.alloc();
-        if out.len() < max_len {
+        if max_len > pool.block_size() {
             return None;
         }
+        let block_source_count = u16::try_from(self.k).ok()?;
+        let repair_index = u16::try_from(idx).ok()?;
+        if self.k > pool.block_size() {
+            return None;
+        }
+        let mut out = PooledBlock::new(Arc::clone(pool));
         // Zero initialize target region
         for b in &mut out[..max_len] {
             *b = 0;
         }
 
         // Coefficients (GF(2^8)), length = k
-        let mut coeff_box = pool.alloc();
-        if coeff_box.len() < self.k {
-            return None;
-        }
-        let block_source_count = u16::try_from(self.k).ok()?;
-        let repair_index = u16::try_from(idx).ok()?;
+        let mut coeff_box = PooledBlock::new(Arc::clone(pool));
         wire::WireCodec::Gf8
             .write_repair_coefficients(block_source_count, repair_index, &mut coeff_box)
             .ok()?;
@@ -1108,7 +1203,7 @@ impl Encoder<GF8> {
         // Repair ID must be the window anchor (max source ID in window) for decoder coefficient mapping
         let window_anchor_id = self.window.iter().map(|p| p.id).max().unwrap_or(0);
 
-        Some(FecPacket::new(
+        FecPacket::from_pooled_blocks(
             window_anchor_id,
             Some(out),
             max_len,
@@ -1116,7 +1211,8 @@ impl Encoder<GF8> {
             Some(coeff_box),
             self.k,
             Arc::clone(pool),
-        ))
+        )
+        .ok()
     }
 }
 
@@ -1154,18 +1250,21 @@ impl Encoder<GF4> {
         if max_len == 0 {
             return None;
         }
-        let mut out = pool.alloc();
-        if out.len() < max_len {
+        if max_len > pool.block_size() {
             return None;
         }
+        let block_source_count = u16::try_from(self.k).ok()?;
+        let repair_index = u16::try_from(idx).ok()?;
+        if self.k > pool.block_size() {
+            return None;
+        }
+        let mut out = PooledBlock::new(Arc::clone(pool));
         // Zero initialize target region
         out[..max_len].fill(0);
 
         // Coefficients (GF(2^4))
         // We store them as u8 (1..15)
-        let mut coeff_box = pool.alloc();
-        let block_source_count = u16::try_from(self.k).ok()?;
-        let repair_index = u16::try_from(idx).ok()?;
+        let mut coeff_box = PooledBlock::new(Arc::clone(pool));
         wire::WireCodec::Gf4
             .write_repair_coefficients(block_source_count, repair_index, &mut coeff_box)
             .ok()?;
@@ -1182,7 +1281,7 @@ impl Encoder<GF4> {
         // Repair ID must be the window anchor (max source ID in window) for decoder coefficient mapping
         let window_anchor_id = self.window.iter().map(|p| p.id).max().unwrap_or(0);
 
-        Some(FecPacket::new(
+        FecPacket::from_pooled_blocks(
             window_anchor_id,
             Some(out),
             max_len,
@@ -1190,7 +1289,8 @@ impl Encoder<GF4> {
             Some(coeff_box),
             self.k,
             Arc::clone(pool),
-        ))
+        )
+        .ok()
     }
 }
 
@@ -1218,19 +1318,38 @@ impl Encoder16 {
     }
 
     fn prepare_coeff_rows(&mut self, repair_rows: usize) {
-        let stride = 2 * self.inner.k;
-        self.coeff_stride = stride;
-        let Ok(block_source_count) = u16::try_from(self.inner.k) else {
+        let Some(stride) = self.inner.k.checked_mul(2) else {
+            self.coeff_stride = 0;
             self.coeff_rows.clear();
             return;
         };
         if stride == 0 || repair_rows == 0 || repair_rows > u16::MAX as usize {
+            self.coeff_stride = 0;
             self.coeff_rows.clear();
             return;
         }
-        self.coeff_rows.resize(repair_rows * stride, 0);
+        let Ok(block_source_count) = u16::try_from(self.inner.k) else {
+            self.coeff_stride = 0;
+            self.coeff_rows.clear();
+            return;
+        };
+        self.coeff_stride = stride;
+        let Some(total_len) = repair_rows.checked_mul(stride) else {
+            self.coeff_stride = 0;
+            self.coeff_rows.clear();
+            return;
+        };
+        self.coeff_rows.resize(total_len, 0);
         for idx in 0..repair_rows {
-            let row = &mut self.coeff_rows[idx * stride..(idx + 1) * stride];
+            let Some(start) = idx.checked_mul(stride) else {
+                self.coeff_rows.clear();
+                return;
+            };
+            let Some(end) = start.checked_add(stride) else {
+                self.coeff_rows.clear();
+                return;
+            };
+            let row = &mut self.coeff_rows[start..end];
             let result = wire::WireCodec::Gf16.write_repair_coefficients(
                 block_source_count,
                 idx as u16,
@@ -1241,15 +1360,35 @@ impl Encoder16 {
     }
 
     fn ensure_coeff_row(&mut self, idx: usize) -> bool {
-        if self.coeff_stride != 2 * self.inner.k {
-            self.prepare_coeff_rows(idx.saturating_add(1));
-            return self.coeff_rows.len()
-                >= idx.saturating_add(1).saturating_mul(self.coeff_stride);
+        if idx > u16::MAX as usize {
+            return false;
+        }
+        let Some(expected_stride) = self.inner.k.checked_mul(2) else {
+            return false;
+        };
+        if expected_stride == 0 {
+            return false;
+        }
+        if self.coeff_stride != expected_stride {
+            let Some(row_count) = idx.checked_add(1) else {
+                return false;
+            };
+            self.prepare_coeff_rows(row_count);
+            let Some(required_len) = row_count.checked_mul(self.coeff_stride) else {
+                return false;
+            };
+            return self.coeff_rows.len() >= required_len;
         }
         let rows = self.coeff_rows.len().checked_div(self.coeff_stride).unwrap_or(0);
         if rows <= idx {
             let old_len = self.coeff_rows.len();
-            self.coeff_rows.resize((idx + 1) * self.coeff_stride, 0);
+            let Some(required_len) = idx
+                .checked_add(1)
+                .and_then(|row_count| row_count.checked_mul(self.coeff_stride))
+            else {
+                return false;
+            };
+            self.coeff_rows.resize(required_len, 0);
             let Ok(block_source_count) = u16::try_from(self.inner.k) else {
                 self.coeff_rows.clear();
                 return false;
@@ -1259,8 +1398,15 @@ impl Encoder16 {
                     self.coeff_rows.clear();
                     return false;
                 };
-                let start = row_idx * self.coeff_stride;
-                let row = &mut self.coeff_rows[start..start + self.coeff_stride];
+                let Some(start) = row_idx.checked_mul(self.coeff_stride) else {
+                    self.coeff_rows.clear();
+                    return false;
+                };
+                let Some(end) = start.checked_add(self.coeff_stride) else {
+                    self.coeff_rows.clear();
+                    return false;
+                };
+                let row = &mut self.coeff_rows[start..end];
                 let result = wire::WireCodec::Gf16.write_repair_coefficients(
                     block_source_count,
                     repair_index,
@@ -1283,30 +1429,36 @@ impl Encoder16 {
         }
         // Pad the final GF16 word instead of truncating an odd source byte.
         // The protected source-length prefix removes this zero padding after recovery.
-        let max_len_even = max_len.saturating_add(max_len % 2);
+        let Some(max_len_even) = max_len.checked_add(max_len % 2) else {
+            return None;
+        };
         if max_len_even == 0 {
             return None;
         }
-        let mut out = pool.alloc();
-        if out.len() < max_len_even {
+        let Some(coeff_bytes) = self.inner.k.checked_mul(2) else {
             return None;
-        }
-        for b in &mut out[..max_len_even] {
-            *b = 0;
-        }
-
-        // Coefficients (GF(2^16)) stored as big-endian bytes, length = 2*k
-        let mut coeff_box = pool.alloc();
-        let coeff_bytes = 2 * self.inner.k;
-        if coeff_box.len() < coeff_bytes {
+        };
+        if max_len_even > pool.block_size() || coeff_bytes > pool.block_size() {
             return None;
         }
         if !self.ensure_coeff_row(idx) {
             return None;
         }
-        let row_start = idx * self.coeff_stride;
+        let Some(row_start) = idx.checked_mul(self.coeff_stride) else {
+            return None;
+        };
+        let Some(row_end) = row_start.checked_add(coeff_bytes) else {
+            return None;
+        };
+        let mut out = PooledBlock::new(Arc::clone(pool));
+        for b in &mut out[..max_len_even] {
+            *b = 0;
+        }
+
+        // Coefficients (GF(2^16)) stored as big-endian bytes, length = 2*k
+        let mut coeff_box = PooledBlock::new(Arc::clone(pool));
         coeff_box[..coeff_bytes]
-            .copy_from_slice(&self.coeff_rows[row_start..row_start + coeff_bytes]);
+            .copy_from_slice(&self.coeff_rows[row_start..row_end]);
 
         // Accumulate
         let wlen = self.inner.window.len().min(self.inner.k);
@@ -1371,7 +1523,7 @@ impl Encoder16 {
         }
 
         let id = self.inner.window.back().map(|p| p.id).unwrap_or(0);
-        Some(FecPacket::new(
+        FecPacket::from_pooled_blocks(
             id,
             Some(out),
             max_len_even,
@@ -1379,6 +1531,7 @@ impl Encoder16 {
             Some(coeff_box),
             coeff_bytes,
             Arc::clone(pool),
-        ))
+        )
+        .ok()
     }
 }

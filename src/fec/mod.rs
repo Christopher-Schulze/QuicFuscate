@@ -6,7 +6,7 @@ use crate::accelerate;
 use crate::brain::BrainFecHints;
 #[cfg(target_arch = "x86_64")]
 use crate::fec::gf_tables::prefetch_fec_slice;
-use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
+use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool, PooledBlock};
 use aligned_box::AlignedBox;
 use parking_lot::{Mutex, RwLock};
 
@@ -80,6 +80,19 @@ impl SharedFecBuffer {
     fn strong_count(&self) -> usize {
         std::sync::Arc::strong_count(&self.inner)
     }
+}
+
+/// Copy a FEC symbol into an owned pool block without truncating its logical length.
+///
+/// The caller receives a live guard on success. Oversized symbols fail before allocation, while
+/// every post-allocation failure is covered by the guard's drop path.
+pub(crate) fn copy_to_pooled_block(pool: &Arc<MemoryPool>, data: &[u8]) -> Option<PooledBlock> {
+    if data.len() > pool.block_size() {
+        return None;
+    }
+    let mut block = PooledBlock::new(Arc::clone(pool));
+    block[..data.len()].copy_from_slice(data);
+    Some(block)
 }
 
 #[derive(Clone)]
