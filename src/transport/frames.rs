@@ -331,23 +331,16 @@ pub fn batch_encode_frames(
 fn canonical_ack_blocks(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     #[cfg(target_arch = "x86_64")]
     {
-        if ranges.len() >= 8
-            && crate::optimize::FeatureDetector::instance()
-                .has_feature(crate::optimize::CpuFeature::AVX512F)
-        {
-            #[cfg(target_feature = "avx512f")]
-            unsafe {
-                return crate::simd::x86_ack::canonical_ack_blocks_avx512(ranges);
-            }
+        let matrix =
+            crate::optimize::FeatureDetector::instance().features_full().simd_dispatch_matrix();
+        if ranges.len() >= 8 && matrix.avx512_ack {
+            // SAFETY: `avx512_ack` proves AVX-512F and AVX-512VL at runtime,
+            // matching the callee's target-feature contract.
+            return unsafe { crate::simd::x86_ack::canonical_ack_blocks_avx512(ranges) };
         }
-        if ranges.len() >= 4
-            && crate::optimize::FeatureDetector::instance()
-                .has_feature(crate::optimize::CpuFeature::AVX2)
-        {
-            #[cfg(target_feature = "avx2")]
-            unsafe {
-                return crate::simd::x86_ack::canonical_ack_blocks_avx2(ranges);
-            }
+        if ranges.len() >= 4 && matrix.avx2 {
+            // SAFETY: `avx2` proves the AVX2 target-feature contract.
+            return unsafe { crate::simd::x86_ack::canonical_ack_blocks_avx2(ranges) };
         }
     }
 

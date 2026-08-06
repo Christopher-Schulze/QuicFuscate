@@ -1,8 +1,6 @@
 //! Ultra-sophisticated string acceleration module
 //! SIMD string operations, fast parsing, pattern matching
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use crate::optimize::CpuProfile;
 use crate::optimize::FeatureDetector;
 
 /// Runtime-owned accelerated substring search used by stealth/runtime paths.
@@ -12,47 +10,27 @@ pub fn string_contains(haystack: &str, needle: &str) -> bool {
         return needle.is_empty();
     }
 
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    let profile = FeatureDetector::instance().profile();
-
     #[cfg(target_arch = "x86_64")]
-    match profile {
-        CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => {
-            if let Some(_) = unsafe { string_search_avx512(haystack.as_bytes(), needle.as_bytes()) }
-            {
-                return true;
-            }
-            return false;
+    {
+        let matrix = FeatureDetector::instance().features_full().simd_dispatch_matrix();
+        if matrix.avx512_bw {
+            return unsafe { string_search_avx512(haystack.as_bytes(), needle.as_bytes()) }
+                .is_some();
         }
-        CpuProfile::X86_P2a | CpuProfile::X86_P2b => {
-            if let Some(_) = unsafe { string_search_avx2(haystack.as_bytes(), needle.as_bytes()) } {
-                return true;
-            }
-            return false;
+        if matrix.avx2 {
+            return unsafe { string_search_avx2(haystack.as_bytes(), needle.as_bytes()) }.is_some();
         }
-        _ => {}
     }
 
     #[cfg(target_arch = "aarch64")]
-    match profile {
-        CpuProfile::ARM_A2 => {
-            return unsafe { string_search_sve2(haystack.as_bytes(), needle.as_bytes()) };
+    {
+        let features = FeatureDetector::instance().features_full();
+        if features.sve2 {
+            return string_search_sve2(haystack.as_bytes(), needle.as_bytes());
         }
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => {
+        if features.neon {
             return unsafe { string_search_neon(haystack.as_bytes(), needle.as_bytes()) };
         }
-        _ => {}
     }
 
     haystack.contains(needle)
@@ -64,7 +42,7 @@ unsafe fn string_search_avx512(haystack: &[u8], needle: &[u8]) -> Option<usize> 
     use std::arch::x86_64::*;
 
     if needle.len() > 64 {
-        return string_search_avx2(haystack, needle);
+        return haystack.windows(needle.len()).position(|window| window == needle);
     }
 
     let first = _mm512_set1_epi8(needle[0] as i8);
@@ -157,19 +135,19 @@ unsafe fn string_search_neon(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[cfg(target_arch = "aarch64")]
-unsafe fn string_search_sve2(haystack: &[u8], needle: &[u8]) -> bool {
+fn string_search_sve2(haystack: &[u8], needle: &[u8]) -> bool {
     #[cfg(target_feature = "sve2")]
     {
         if needle.is_empty() {
             return true;
         }
 
-        crate::simd::arm::find_pattern_sve2(haystack, needle).is_some()
+        crate::optimize::simd::compress::find_pattern(haystack, needle).is_some()
     }
 
     #[cfg(not(target_feature = "sve2"))]
     {
-        string_search_neon(haystack, needle)
+        unsafe { string_search_neon(haystack, needle) }
     }
 }
 
@@ -177,22 +155,19 @@ unsafe fn string_search_sve2(haystack: &[u8], needle: &[u8]) -> bool {
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn base64_encode(data: &[u8]) -> String {
-    let _profile = FeatureDetector::instance().profile();
+    #[cfg(target_arch = "aarch64")]
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => {
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
             return unsafe { base64_encode_sve2(data) };
         }
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => {
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
             return unsafe { base64_encode_neon(data) };
         }
-        _ => {}
     }
 
     // Fallback to standard base64
@@ -498,41 +473,31 @@ pub fn base64_decode(data: &str) -> Option<Vec<u8>> {
     }
 
     let bytes = data.as_bytes();
-    let _profile = FeatureDetector::instance().profile();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
-            return base64_decode_avx2(bytes);
-        },
-        CpuProfile::X86_P1a | CpuProfile::X86_P1b | CpuProfile::X86_P1f => unsafe {
-            return base64_decode_sse41(bytes);
-        },
-        _ => {}
+    {
+        if features.simd_dispatch_matrix().avx2 {
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            return unsafe { base64_decode_avx2(bytes) };
+        }
+        if features.sse41 {
+            // SAFETY: the exact SSE4.1 runtime feature is proven above.
+            return unsafe { base64_decode_sse41(bytes) };
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            return base64_decode_sve2(bytes);
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            return base64_decode_neon(bytes);
-        },
-        _ => {}
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            return unsafe { base64_decode_sve2(bytes) };
+        }
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
+            return unsafe { base64_decode_neon(bytes) };
+        }
     }
 
     base64_decode_scalar(data)

@@ -185,42 +185,22 @@ fn argsort_f32(data: &[f32]) -> Vec<usize> {
     if len == 0 {
         return Vec::new();
     }
-    let profile = FeatureDetector::instance().profile();
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
     {
-        if len <= 8
-            && matches!(
-                profile,
-                CpuProfile::X86_P2a
-                    | CpuProfile::X86_P2b
-                    | CpuProfile::X86_P3a
-                    | CpuProfile::X86_P3b
-                    | CpuProfile::X86_P3c
-                    | CpuProfile::X86_P3d
-                    | CpuProfile::X86_P3e
-            )
-        {
+        if len <= 8 && features.simd_dispatch_matrix().avx2 {
             telemetry::ARGSORT_AVX2_OPS.inc();
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
             return unsafe { argsort_f32_avx2_small(data) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if len <= 8
-            && matches!(
-                profile,
-                CpuProfile::ARM_A0
-                    | CpuProfile::ARM_A1a
-                    | CpuProfile::ARM_A1b
-                    | CpuProfile::ARM_A1c
-                    | CpuProfile::ARM_A1d
-                    | CpuProfile::Apple_M
-                    | CpuProfile::ARM_A2
-            )
-        {
+        if len <= 8 && features.neon {
             telemetry::ARGSORT_NEON_OPS.inc();
+            // SAFETY: the exact runtime NEON feature is proven above.
             return unsafe { argsort_f32_neon_small(data) };
         }
     }

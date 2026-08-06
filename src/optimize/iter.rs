@@ -1,58 +1,49 @@
 use crate::optimize::telemetry;
-use crate::optimize::{CpuProfile, FeatureDetector};
+#[cfg(target_arch = "riscv64")]
+use crate::optimize::CpuProfile;
+use crate::optimize::FeatureDetector;
 
 #[inline(always)]
 pub fn sum_f32(data: &[f32]) -> f32 {
     if data.is_empty() {
         return 0.0;
     }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
+    #[cfg(target_arch = "riscv64")]
     let profile = FeatureDetector::instance().profile();
 
     #[cfg(target_arch = "x86_64")]
     {
-        match profile {
-            CpuProfile::X86_P3a
-            | CpuProfile::X86_P3b
-            | CpuProfile::X86_P3c
-            | CpuProfile::X86_P3d
-            | CpuProfile::X86_P3e
-            | CpuProfile::X86_P4a
-            | CpuProfile::X86_P4b => unsafe {
-                telemetry::ITER_SUM_F32_AVX512_OPS.inc();
-                return sum_f32_avx512(data);
-            },
-            CpuProfile::X86_P2a | CpuProfile::X86_P2b | CpuProfile::X86_P1f => unsafe {
-                telemetry::ITER_SUM_F32_AVX2_OPS.inc();
-                return sum_f32_avx2(data);
-            },
-            CpuProfile::X86_P1b
-            | CpuProfile::X86_P1a
-            | CpuProfile::X86_P0b
-            | CpuProfile::X86_P0a => unsafe {
-                telemetry::ITER_SUM_F32_SSE_OPS.inc();
-                return sum_f32_sse(data);
-            },
-            _ => {}
+        let matrix = features.simd_dispatch_matrix();
+        if features.avx512f {
+            telemetry::ITER_SUM_F32_AVX512_OPS.inc();
+            // SAFETY: the exact AVX-512 Foundation runtime feature is proven above.
+            return unsafe { sum_f32_avx512(data) };
+        }
+        if matrix.avx2 {
+            telemetry::ITER_SUM_F32_AVX2_OPS.inc();
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            return unsafe { sum_f32_avx2(data) };
+        }
+        if features.sse2 {
+            telemetry::ITER_SUM_F32_SSE_OPS.inc();
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            return unsafe { sum_f32_sse(data) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        match profile {
-            CpuProfile::ARM_A2 => unsafe {
-                telemetry::ITER_SUM_F32_SVE_OPS.inc();
-                return sum_f32_sve2(data);
-            },
-            CpuProfile::ARM_A0
-            | CpuProfile::ARM_A1a
-            | CpuProfile::ARM_A1b
-            | CpuProfile::ARM_A1c
-            | CpuProfile::ARM_A1d
-            | CpuProfile::Apple_M => unsafe {
-                telemetry::ITER_SUM_F32_NEON_OPS.inc();
-                return sum_f32_neon(data);
-            },
-            _ => {}
+        if features.sve2 {
+            telemetry::ITER_SUM_F32_SVE_OPS.inc();
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            return unsafe { sum_f32_sve2(data) };
+        }
+        if features.neon {
+            telemetry::ITER_SUM_F32_NEON_OPS.inc();
+            // SAFETY: the exact runtime NEON feature is proven above.
+            return unsafe { sum_f32_neon(data) };
         }
     }
 
@@ -78,53 +69,42 @@ pub fn sum_u32(data: &[u32]) -> u64 {
     if data.is_empty() {
         return 0;
     }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
+    #[cfg(target_arch = "riscv64")]
     let profile = FeatureDetector::instance().profile();
 
     #[cfg(target_arch = "x86_64")]
     {
-        match profile {
-            CpuProfile::X86_P3a
-            | CpuProfile::X86_P3b
-            | CpuProfile::X86_P3c
-            | CpuProfile::X86_P3d
-            | CpuProfile::X86_P3e
-            | CpuProfile::X86_P4a
-            | CpuProfile::X86_P4b => unsafe {
-                telemetry::ITER_SUM_U32_AVX512_OPS.inc();
-                return sum_u32_avx512(data);
-            },
-            CpuProfile::X86_P2a | CpuProfile::X86_P2b | CpuProfile::X86_P1f => unsafe {
-                telemetry::ITER_SUM_U32_AVX2_OPS.inc();
-                return sum_u32_avx2(data);
-            },
-            CpuProfile::X86_P1b
-            | CpuProfile::X86_P1a
-            | CpuProfile::X86_P0b
-            | CpuProfile::X86_P0a => unsafe {
-                telemetry::ITER_SUM_U32_SSE_OPS.inc();
-                return sum_u32_sse(data);
-            },
-            _ => {}
+        let matrix = features.simd_dispatch_matrix();
+        if features.avx512f {
+            telemetry::ITER_SUM_U32_AVX512_OPS.inc();
+            // SAFETY: the exact AVX-512 Foundation runtime feature is proven above.
+            return unsafe { sum_u32_avx512(data) };
+        }
+        if matrix.avx2 {
+            telemetry::ITER_SUM_U32_AVX2_OPS.inc();
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            return unsafe { sum_u32_avx2(data) };
+        }
+        if features.sse2 {
+            telemetry::ITER_SUM_U32_SSE_OPS.inc();
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            return unsafe { sum_u32_sse(data) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        match profile {
-            CpuProfile::ARM_A2 => unsafe {
-                telemetry::ITER_SUM_U32_SVE_OPS.inc();
-                return sum_u32_sve2(data);
-            },
-            CpuProfile::ARM_A0
-            | CpuProfile::ARM_A1a
-            | CpuProfile::ARM_A1b
-            | CpuProfile::ARM_A1c
-            | CpuProfile::ARM_A1d
-            | CpuProfile::Apple_M => unsafe {
-                telemetry::ITER_SUM_U32_NEON_OPS.inc();
-                return sum_u32_neon(data);
-            },
-            _ => {}
+        if features.sve2 {
+            telemetry::ITER_SUM_U32_SVE_OPS.inc();
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            return unsafe { sum_u32_sve2(data) };
+        }
+        if features.neon {
+            telemetry::ITER_SUM_U32_NEON_OPS.inc();
+            // SAFETY: the exact runtime NEON feature is proven above.
+            return unsafe { sum_u32_neon(data) };
         }
     }
 
@@ -150,53 +130,42 @@ pub fn sum_u64(data: &[u64]) -> u128 {
     if data.is_empty() {
         return 0;
     }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
+    #[cfg(target_arch = "riscv64")]
     let profile = FeatureDetector::instance().profile();
 
     #[cfg(target_arch = "x86_64")]
     {
-        match profile {
-            CpuProfile::X86_P3a
-            | CpuProfile::X86_P3b
-            | CpuProfile::X86_P3c
-            | CpuProfile::X86_P3d
-            | CpuProfile::X86_P3e
-            | CpuProfile::X86_P4a
-            | CpuProfile::X86_P4b => unsafe {
-                telemetry::ITER_SUM_U64_AVX512_OPS.inc();
-                return sum_u64_avx512(data);
-            },
-            CpuProfile::X86_P2a | CpuProfile::X86_P2b | CpuProfile::X86_P1f => unsafe {
-                telemetry::ITER_SUM_U64_AVX2_OPS.inc();
-                return sum_u64_avx2(data);
-            },
-            CpuProfile::X86_P1b
-            | CpuProfile::X86_P1a
-            | CpuProfile::X86_P0b
-            | CpuProfile::X86_P0a => unsafe {
-                telemetry::ITER_SUM_U64_SSE_OPS.inc();
-                return sum_u64_sse(data);
-            },
-            _ => {}
+        let matrix = features.simd_dispatch_matrix();
+        if features.avx512f {
+            telemetry::ITER_SUM_U64_AVX512_OPS.inc();
+            // SAFETY: the exact AVX-512 Foundation runtime feature is proven above.
+            return unsafe { sum_u64_avx512(data) };
+        }
+        if matrix.avx2 {
+            telemetry::ITER_SUM_U64_AVX2_OPS.inc();
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            return unsafe { sum_u64_avx2(data) };
+        }
+        if features.sse2 {
+            telemetry::ITER_SUM_U64_SSE_OPS.inc();
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            return unsafe { sum_u64_sse(data) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        match profile {
-            CpuProfile::ARM_A2 => unsafe {
-                telemetry::ITER_SUM_U64_SVE_OPS.inc();
-                return sum_u64_sve2(data);
-            },
-            CpuProfile::ARM_A0
-            | CpuProfile::ARM_A1a
-            | CpuProfile::ARM_A1b
-            | CpuProfile::ARM_A1c
-            | CpuProfile::ARM_A1d
-            | CpuProfile::Apple_M => unsafe {
-                telemetry::ITER_SUM_U64_NEON_OPS.inc();
-                return sum_u64_neon(data);
-            },
-            _ => {}
+        if features.sve2 {
+            telemetry::ITER_SUM_U64_SVE_OPS.inc();
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            return unsafe { sum_u64_sve2(data) };
+        }
+        if features.neon {
+            telemetry::ITER_SUM_U64_NEON_OPS.inc();
+            // SAFETY: the exact runtime NEON feature is proven above.
+            return unsafe { sum_u64_neon(data) };
         }
     }
 

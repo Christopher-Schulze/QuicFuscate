@@ -16,17 +16,18 @@ pub fn pack_bits(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     // with internal bounds tracking to prevent out-of-bounds access.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::BMI2) {
+        if features.features_full().bmi2 {
             return unsafe { super::x86::pack_bits_bmi2(src, bit_width, dst) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             return unsafe { super::arm::pack_bits_sve2(src, bit_width, dst) };
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             return unsafe { super::arm::pack_bits_neon(src, bit_width, dst) };
         }
     }
@@ -47,17 +48,18 @@ pub fn unpack_bits(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     // callee's `#[target_feature]`. Callees track bit/byte positions internally.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::BMI2) {
+        if features.features_full().bmi2 {
             return unsafe { super::x86::unpack_bits_bmi2(src, bit_width, dst) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             return unsafe { super::arm::unpack_bits_sve2(src, bit_width, dst) };
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             return unsafe { super::arm::unpack_bits_neon(src, bit_width, dst) };
         }
     }

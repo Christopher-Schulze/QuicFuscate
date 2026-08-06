@@ -618,22 +618,15 @@ impl TunInterface {
 
     /// Write a packet to the TUN device with hardware acceleration
     pub fn write_packet(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Parse IP header with BMI2 on supported x86 profiles, otherwise scalar.
+        // Parse IP headers with BMI2 only when the exact runtime feature is present.
         #[cfg(target_arch = "x86_64")]
         {
-            let profile = crate::optimize::FeatureDetector::instance().profile();
-            match profile {
-                crate::optimize::CpuProfile::X86_P2b
-                | crate::optimize::CpuProfile::X86_P3a
-                | crate::optimize::CpuProfile::X86_P3b
-                | crate::optimize::CpuProfile::X86_P3c
-                | crate::optimize::CpuProfile::X86_P3d
-                | crate::optimize::CpuProfile::X86_P3e
-                | crate::optimize::CpuProfile::X86_P4a
-                | crate::optimize::CpuProfile::X86_P4b => unsafe {
-                    self.parse_ip_header_bmi2(buf);
-                },
-                _ => self.parse_ip_header_scalar(buf),
+            let features = crate::optimize::FeatureDetector::instance().features_full();
+            if features.bmi2 {
+                // SAFETY: the exact runtime BMI2 feature is proven above.
+                unsafe { self.parse_ip_header_bmi2(buf) };
+            } else {
+                self.parse_ip_header_scalar(buf);
             }
         }
 

@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::{Index, IndexMut};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // Explicit rust parity/test-only surface. Not part of the normal runtime API.

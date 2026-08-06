@@ -11,18 +11,18 @@ pub fn encode_varint(val: u64, buf: &mut [u8]) -> usize {
     {
         // SAFETY: Runtime feature detection matches each callee's `#[target_feature]`.
         // Callees validate `buf.len()` and return `None` if too short.
-        let features = FeatureDetector::instance();
-        if features.has_feature(CpuFeature::AVX512F) {
+        let full = FeatureDetector::instance().features_full();
+        if full.avx512f {
             if let Some(len) = unsafe { super::x86::encode_varint_avx512(val, buf) } {
                 return len;
             }
         }
-        if features.has_feature(CpuFeature::AVX2) {
+        if full.simd_dispatch_matrix().avx2 {
             if let Some(len) = unsafe { super::x86::encode_varint_avx2(val, buf) } {
                 return len;
             }
         }
-        if features.has_feature(CpuFeature::SSE2) {
+        if full.sse2 {
             if let Some(len) = unsafe { super::x86::encode_varint_sse2(val, buf) } {
                 return len;
             }
@@ -31,14 +31,14 @@ pub fn encode_varint(val: u64, buf: &mut [u8]) -> usize {
 
     #[cfg(target_arch = "aarch64")]
     {
-        let features = FeatureDetector::instance();
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = FeatureDetector::instance().features_full();
+        if full.sve2 {
             #[cfg(target_feature = "sve2")]
             {
                 return crate::simd::arm_varint::encode_varint_sve2(val, buf);
             }
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             #[cfg(target_feature = "neon")]
             {
                 return crate::simd::arm_varint::encode_varint_neon(val, buf);
@@ -68,23 +68,37 @@ fn encode_varint_scalar(val: u64, buf: &mut [u8]) -> usize {
 }
 
 /// Decode QUIC variable-length integer; returns (value, bytes used).
-#[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
-    crate::simd::arm_varint::decode_varint_sve2(buf)
+    let full = FeatureDetector::instance().features_full();
+
+    if full.sve2 {
+        #[cfg(target_feature = "sve2")]
+        {
+            return crate::simd::arm_varint::decode_varint_sve2(buf);
+        }
+    }
+
+    if full.neon {
+        #[cfg(target_feature = "neon")]
+        {
+            return crate::simd::arm_varint::decode_varint_neon(buf);
+        }
+    }
+
+    decode_varint_scalar(buf)
 }
 
-/// Decode QUIC variable-length integer using NEON (aarch64 without SVE2).
-#[cfg(all(target_arch = "aarch64", not(target_feature = "sve2"), target_feature = "neon"))]
+/// Decode QUIC variable-length integer on non-AArch64 targets.
+#[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
 pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
-    crate::simd::arm_varint::decode_varint_neon(buf)
+    decode_varint_scalar(buf)
 }
 
-/// Decode QUIC variable-length integer (scalar fallback for non-NEON targets).
-#[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
 #[inline(always)]
-pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
+fn decode_varint_scalar(buf: &[u8]) -> Option<(u64, usize)> {
     if buf.is_empty() {
         return None;
     }

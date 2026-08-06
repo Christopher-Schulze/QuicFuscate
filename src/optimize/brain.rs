@@ -2,9 +2,7 @@
 //! No active matrix-multiplication or AMX caller is owned by this module.
 
 use crate::optimize::telemetry;
-use crate::optimize::{CpuFeature, FeatureDetector};
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use crate::simd::CpuProfile;
+use crate::optimize::FeatureDetector;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::__m256;
 
@@ -30,28 +28,29 @@ pub fn decay_histogram(bins: &mut [u64], decay: f64) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        let has_avx512 = detector.has_feature(CpuFeature::AVX512F)
-            && detector.has_feature(CpuFeature::AVX512BW)
-            && detector.has_feature(CpuFeature::AVX512DQ)
-            && detector.has_feature(CpuFeature::AVX2);
-        if has_avx512 {
+        let features = detector.features_full();
+        let matrix = features.simd_dispatch_matrix();
+        if features.avx512f && features.avx512dq && features.avx2 {
             telemetry::BRAIN_HISTOGRAM_AVX512_OPS.inc();
+            // SAFETY: the exact AVX2+AVX-512F+DQ intersection is proven above.
             unsafe {
                 decay_histogram_avx512(bins, decay);
             }
             return;
         }
 
-        if detector.has_feature(CpuFeature::AVX2) {
+        if matrix.avx2 {
             telemetry::BRAIN_HISTOGRAM_AVX2_OPS.inc();
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
             unsafe {
                 decay_histogram_avx2(bins, decay);
             }
             return;
         }
 
-        if detector.has_feature(CpuFeature::SSE41) {
+        if features.sse41 {
             telemetry::BRAIN_HISTOGRAM_SSE_OPS.inc();
+            // SAFETY: the exact SSE4.1 runtime feature is proven above.
             unsafe {
                 decay_histogram_sse41(bins, decay);
             }
@@ -61,16 +60,19 @@ pub fn decay_histogram(bins: &mut [u64], decay: f64) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        if detector.has_feature(CpuFeature::SVE2) {
+        let features = detector.features_full();
+        if features.sve2 {
             telemetry::BRAIN_HISTOGRAM_SVE2_OPS.inc();
+            // SAFETY: the exact runtime SVE2 feature is proven above.
             unsafe {
                 decay_histogram_sve2(bins, decay);
             }
             return;
         }
 
-        if detector.has_feature(CpuFeature::NEON) {
+        if features.neon {
             telemetry::BRAIN_HISTOGRAM_NEON_OPS.inc();
+            // SAFETY: the exact runtime NEON feature is proven above.
             unsafe {
                 decay_histogram_neon(bins, decay);
             }
@@ -98,35 +100,39 @@ pub fn jensen_shannon_divergence(bins: &[u64], total: u64, target: &[f64]) -> f6
 
     #[cfg(target_arch = "x86_64")]
     {
-        let has_avx512 = detector.has_feature(CpuFeature::AVX512F)
-            && detector.has_feature(CpuFeature::AVX512BW)
-            && detector.has_feature(CpuFeature::AVX512DQ)
-            && detector.has_feature(CpuFeature::AVX2);
-        if has_avx512 {
+        let features = detector.features_full();
+        let matrix = features.simd_dispatch_matrix();
+        if features.avx512f && features.avx512dq && features.avx2 {
             telemetry::BRAIN_HISTOGRAM_AVX512_OPS.inc();
+            // SAFETY: the exact AVX2+AVX-512F+DQ intersection is proven above.
             return unsafe { jensen_shannon_avx512(bins, total, target, len) };
         }
 
-        if detector.has_feature(CpuFeature::AVX2) {
+        if matrix.avx2 {
             telemetry::BRAIN_HISTOGRAM_AVX2_OPS.inc();
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
             return unsafe { jensen_shannon_avx2(bins, total, target, len) };
         }
 
-        if detector.has_feature(CpuFeature::SSE41) {
+        if features.sse41 {
             telemetry::BRAIN_HISTOGRAM_SSE_OPS.inc();
+            // SAFETY: the exact SSE4.1 runtime feature is proven above.
             return unsafe { jensen_shannon_sse41(bins, total, target, len) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if detector.has_feature(CpuFeature::SVE2) {
+        let features = detector.features_full();
+        if features.sve2 {
             telemetry::BRAIN_HISTOGRAM_SVE2_OPS.inc();
+            // SAFETY: the exact runtime SVE2 feature is proven above.
             return unsafe { jensen_shannon_sve2(bins, total, target, len) };
         }
 
-        if detector.has_feature(CpuFeature::NEON) {
+        if features.neon {
             telemetry::BRAIN_HISTOGRAM_NEON_OPS.inc();
+            // SAFETY: the exact runtime NEON feature is proven above.
             return unsafe { jensen_shannon_neon(bins, total, target, len) };
         }
     }
@@ -720,42 +726,34 @@ pub fn moving_average(data: &[f32], window: usize) -> Vec<f32> {
         return Vec::new();
     }
 
-    let _profile = FeatureDetector::instance().profile();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => {
+    {
+        let matrix = features.simd_dispatch_matrix();
+        if features.avx512f {
             telemetry::MOVING_AVG_AVX512_OPS.inc();
+            // SAFETY: the exact AVX-512 Foundation runtime feature is proven above.
             return unsafe { moving_average_avx512(data, window) };
         }
-        CpuProfile::X86_P2a | CpuProfile::X86_P2b => {
+        if matrix.avx2 {
             telemetry::MOVING_AVG_AVX2_OPS.inc();
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
             return unsafe { moving_average_avx2(data, window) };
         }
-        CpuProfile::X86_P1f
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1a
-        | CpuProfile::X86_P0b
-        | CpuProfile::X86_P0a => {
+        if features.sse2 {
             telemetry::MOVING_AVG_SSE_OPS.inc();
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
             return unsafe { moving_average_sse2(data, window) };
         }
-        _ => {}
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 | CpuProfile::ARM_A1c | CpuProfile::ARM_A1d | CpuProfile::Apple_M => {
-            telemetry::MOVING_AVG_NEON_OPS.inc();
-            return unsafe { moving_average_neon(data, window) };
-        }
-        _ => {}
+    if features.neon {
+        telemetry::MOVING_AVG_NEON_OPS.inc();
+        // SAFETY: the exact runtime NEON feature is proven above.
+        return unsafe { moving_average_neon(data, window) };
     }
 
     telemetry::MOVING_AVG_SCALAR_OPS.inc();
@@ -996,45 +994,31 @@ pub fn compute_percentile(data: &mut [f32], percentile: f32) -> f32 {
     if data.is_empty() {
         return 0.0;
     }
-    let _profile = FeatureDetector::instance().profile();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => {
+    {
+        if features.simd_dispatch_matrix().avx2 {
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
             return unsafe { compute_percentile_avx2(data, percentile) };
         }
-        CpuProfile::X86_P1f
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1a
-        | CpuProfile::X86_P0b
-        | CpuProfile::X86_P0a => {
+        if features.sse2 {
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
             return unsafe { compute_percentile_sse2(data, percentile) };
         }
-        _ => {}
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            return compute_percentile_sve2(data, percentile);
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            return compute_percentile_neon(data, percentile);
-        },
-        _ => {}
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            return unsafe { compute_percentile_sve2(data, percentile) };
+        }
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
+            return unsafe { compute_percentile_neon(data, percentile) };
+        }
     }
 
     // Scalar fallback - partial sort
@@ -1096,49 +1080,35 @@ unsafe fn compute_percentile_sve2_impl(data: &mut [f32], percentile: f32) -> f32
 /// Activation functions with AVX2 approximation - 4x faster
 #[inline(always)]
 pub fn relu_batch(data: &mut [f32]) {
-    let _profile = FeatureDetector::instance().profile();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
-            relu_batch_avx2(data);
+    {
+        if features.simd_dispatch_matrix().avx2 {
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            unsafe { relu_batch_avx2(data) };
             return;
-        },
-        CpuProfile::X86_P1f
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1a
-        | CpuProfile::X86_P0b
-        | CpuProfile::X86_P0a => unsafe {
-            relu_batch_sse2(data);
+        }
+        if features.sse2 {
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            unsafe { relu_batch_sse2(data) };
             return;
-        },
-        _ => {}
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            relu_batch_sve2(data);
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            unsafe { relu_batch_sve2(data) };
             return;
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            relu_batch_neon(data);
+        }
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
+            unsafe { relu_batch_neon(data) };
             return;
-        },
-        _ => {}
+        }
     }
 
     // Scalar fallback
@@ -1254,49 +1224,35 @@ unsafe fn relu_batch_sve2_impl(data: &mut [f32]) {
 /// Softmax with AVX2 fast exp - 3x faster  
 #[inline(always)]
 pub fn softmax_batch(data: &mut [f32]) {
-    let _profile = FeatureDetector::instance().profile();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
-            softmax_batch_avx2(data);
+    {
+        if features.simd_dispatch_matrix().avx2 {
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            unsafe { softmax_batch_avx2(data) };
             return;
-        },
-        CpuProfile::X86_P1f
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1a
-        | CpuProfile::X86_P0b
-        | CpuProfile::X86_P0a => unsafe {
-            softmax_batch_sse2(data);
+        }
+        if features.sse2 {
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            unsafe { softmax_batch_sse2(data) };
             return;
-        },
-        _ => {}
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            softmax_batch_sve2(data);
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            unsafe { softmax_batch_sve2(data) };
             return;
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            softmax_batch_neon(data);
+        }
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
+            unsafe { softmax_batch_neon(data) };
             return;
-        },
-        _ => {}
+        }
     }
 
     softmax_scalar(data);

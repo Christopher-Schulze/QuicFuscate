@@ -36,7 +36,7 @@ pub(crate) mod arm_stream;
 #[cfg(target_arch = "aarch64")]
 mod arm_varint;
 #[cfg(target_arch = "x86_64")]
-mod x86_ack;
+pub(crate) mod x86_ack;
 #[cfg(target_arch = "x86_64")]
 mod x86_header;
 
@@ -116,6 +116,9 @@ where
 #[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 #[inline(always)]
 pub fn canonical_ack_blocks_avx2_for_rust_tests(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    if !FeatureDetector::instance().features_full().simd_dispatch_matrix().avx2 {
+        return x86_ack::canonical_ack_blocks_scalar(ranges);
+    }
     // SAFETY:
     // - this rust-tests hook is compiled only on x86_64
     // - the callee is a retained parity helper that operates purely on the
@@ -129,6 +132,9 @@ pub fn canonical_ack_blocks_avx2_for_rust_tests(ranges: &[(u64, u64)]) -> Vec<(u
 #[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 #[inline(always)]
 pub fn canonical_ack_blocks_avx512_for_rust_tests(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    if !FeatureDetector::instance().features_full().simd_dispatch_matrix().avx512_ack {
+        return x86_ack::canonical_ack_blocks_scalar(ranges);
+    }
     // SAFETY:
     // - this rust-tests hook is compiled only on x86_64
     // - the underlying helper is retained parity machinery over a borrowed
@@ -141,6 +147,9 @@ pub fn canonical_ack_blocks_avx512_for_rust_tests(ranges: &[(u64, u64)]) -> Vec<
 #[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 #[inline(always)]
 pub fn validate_header_avx512_for_rust_tests(header: &[u8]) -> bool {
+    if !FeatureDetector::instance().features_full().avx512f {
+        return scalar::validate_header(header);
+    }
     // SAFETY:
     // - this rust-tests hook is compiled only on x86_64
     // - the helper only reads the provided header slice and returns a bool
@@ -152,6 +161,9 @@ pub fn validate_header_avx512_for_rust_tests(header: &[u8]) -> bool {
 #[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 #[inline(always)]
 pub fn validate_header_sse2_for_rust_tests(header: &[u8]) -> bool {
+    if !FeatureDetector::instance().features_full().sse2 {
+        return scalar::validate_header(header);
+    }
     // SAFETY:
     // - this rust-tests hook is compiled only on x86_64
     // - the helper only inspects the provided header slice
@@ -360,24 +372,25 @@ impl SimdOps {
 
         #[cfg(target_arch = "x86_64")]
         {
-            if features.has_feature(CpuFeature::AVX512F) {
+            let full = features.features_full();
+            if full.avx512f {
                 return _x86_avx512();
             }
-            if features.has_feature(CpuFeature::AVX2) {
+            if full.simd_dispatch_matrix().avx2 {
                 return _x86_avx2();
             }
-            // SSE2 is not represented in CpuFeature; baseline is SSE4.2 in this codebase
-            if features.has_feature(CpuFeature::SSE42) {
+            if full.sse2 {
                 return _x86_sse();
             }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
-            if features.has_feature(CpuFeature::SVE2) {
+            let full = features.features_full();
+            if full.sve2 {
                 return arm_sve2();
             }
-            if features.has_feature(CpuFeature::NEON) {
+            if full.neon {
                 return arm_neon();
             }
         }

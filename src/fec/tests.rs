@@ -746,27 +746,42 @@ fn test_enable_simd_acceleration_updates_telemetry() {
 
 #[test]
 fn test_simd_dispatch_selection_covers_scalar_avx_neon_sve() {
-    let avx = AdaptiveFec::select_simd_level_from_features(|f| {
+    fn select_test_simd_level<F>(has_feature: F) -> SimdLevel
+    where
+        F: Fn(crate::optimize::CpuFeature) -> bool,
+    {
+        if has_feature(crate::optimize::CpuFeature::AVX512F)
+            && has_feature(crate::optimize::CpuFeature::AVX512VBMI)
+        {
+            SimdLevel::Avx512
+        } else if has_feature(crate::optimize::CpuFeature::AVX2) {
+            SimdLevel::Avx2
+        } else if has_feature(crate::optimize::CpuFeature::SSE2) {
+            SimdLevel::Sse2
+        } else if has_feature(crate::optimize::CpuFeature::SVE2) {
+            SimdLevel::Sve2
+        } else if has_feature(crate::optimize::CpuFeature::NEON) {
+            SimdLevel::Neon
+        } else {
+            SimdLevel::None
+        }
+    }
+
+    let avx = select_test_simd_level(|f| {
         matches!(f, crate::optimize::CpuFeature::AVX512F | crate::optimize::CpuFeature::AVX512VBMI)
     });
     assert_eq!(avx, SimdLevel::Avx512);
 
-    let avx2 = AdaptiveFec::select_simd_level_from_features(|f| {
-        matches!(f, crate::optimize::CpuFeature::AVX2)
-    });
+    let avx2 = select_test_simd_level(|f| matches!(f, crate::optimize::CpuFeature::AVX2));
     assert_eq!(avx2, SimdLevel::Avx2);
 
-    let sve2 = AdaptiveFec::select_simd_level_from_features(|f| {
-        matches!(f, crate::optimize::CpuFeature::SVE2)
-    });
+    let sve2 = select_test_simd_level(|f| matches!(f, crate::optimize::CpuFeature::SVE2));
     assert_eq!(sve2, SimdLevel::Sve2);
 
-    let neon = AdaptiveFec::select_simd_level_from_features(|f| {
-        matches!(f, crate::optimize::CpuFeature::NEON)
-    });
+    let neon = select_test_simd_level(|f| matches!(f, crate::optimize::CpuFeature::NEON));
     assert_eq!(neon, SimdLevel::Neon);
 
-    let scalar = AdaptiveFec::select_simd_level_from_features(|_| false);
+    let scalar = select_test_simd_level(|_| false);
     assert_eq!(scalar, SimdLevel::None);
 }
 

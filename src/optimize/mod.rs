@@ -47,7 +47,7 @@ pub(crate) mod r#unsafe;
 use crate::env_utils::EnvSnapshot;
 #[cfg(unix)]
 use libc::{iovec, msghdr, recvmsg, sendmsg};
-use log::{error, warn};
+use log::warn;
 #[cfg(unix)]
 use smallvec::SmallVec;
 use std::any::Any;

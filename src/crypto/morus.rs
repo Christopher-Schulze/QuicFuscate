@@ -984,23 +984,21 @@ static MORUS_BACKEND: OnceLock<MorusBackend> = OnceLock::new();
 
 fn morus_backend() -> MorusBackend {
     *MORUS_BACKEND.get_or_init(|| {
-        let det = crate::optimize::FeatureDetector::instance();
-
         #[cfg(target_arch = "x86_64")]
         {
-            use crate::optimize::CpuFeature;
-            let has_sse42 = det.has_feature(CpuFeature::SSE42);
-            let has_sse41 = det.has_feature(CpuFeature::SSE41) || has_sse42;
-            if has_sse42 && det.has_feature(CpuFeature::SSSE3) {
+            let features = crate::optimize::FeatureDetector::instance().features_full();
+            let has_sse42 = features.sse42;
+            let has_sse41 = features.sse41 || has_sse42;
+            if has_sse42 && features.ssse3 {
                 return MorusBackend::Sse42;
             }
-            if has_sse41 && det.has_feature(CpuFeature::SSSE3) {
+            if has_sse41 && features.ssse3 {
                 return MorusBackend::Sse41;
             }
-            if det.has_feature(CpuFeature::SSSE3) {
+            if features.ssse3 {
                 return MorusBackend::Ssse3;
             }
-            if det.has_feature(CpuFeature::SSE2) {
+            if features.sse2 {
                 return MorusBackend::Sse2;
             }
             return MorusBackend::Scalar;
@@ -1008,7 +1006,7 @@ fn morus_backend() -> MorusBackend {
 
         #[cfg(target_arch = "aarch64")]
         {
-            if det.has_feature(crate::optimize::CpuFeature::NEON) {
+            if crate::optimize::FeatureDetector::instance().features_full().neon {
                 MorusBackend::Neon
             } else {
                 MorusBackend::Scalar

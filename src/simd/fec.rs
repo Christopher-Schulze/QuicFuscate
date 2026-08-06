@@ -2,36 +2,6 @@
 
 use super::*;
 
-/// Berlekamp-Massey with feature-routed, scalar-verified backends.
-#[inline(always)]
-fn _decode_varint_profile_router_removed(_buf: &[u8]) -> Option<(u64, usize)> {
-    let features = FeatureDetector::instance();
-    let _profile = features.profile();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        match _profile {
-            CpuProfile::X86_P2b
-            | CpuProfile::X86_P3a
-            | CpuProfile::X86_P3b
-            | CpuProfile::X86_P3c
-            | CpuProfile::X86_P3d
-            | CpuProfile::X86_P3e
-            | CpuProfile::X86_P4a
-            | CpuProfile::X86_P4b => {
-                // SAFETY: Profile check guarantees BMI2 feature presence.
-                return unsafe { x86::decode_varint_bmi2(_buf) };
-            }
-            CpuProfile::X86_P2a => {
-                // SAFETY: Profile check guarantees AVX2 feature presence.
-                return unsafe { x86::decode_varint_avx2(_buf) };
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 /// Router: Berlekamp-Massey over GF(256) with best available backend
 #[inline(always)]
 pub fn berlekamp_massey_gf256(syndrome: &[u8], len: usize) -> Vec<u8> {
@@ -41,17 +11,18 @@ pub fn berlekamp_massey_gf256(syndrome: &[u8], len: usize) -> Vec<u8> {
     // return an owned Vec - no aliasing or pointer lifetime concerns.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::GFNI) && features.has_feature(CpuFeature::AVX512F) {
+        let full = features.features_full();
+        if full.gfni && full.avx512f {
             return unsafe { super::x86_extended::berlekamp_massey_gfni(syndrome, len) };
         }
-        if features.has_feature(CpuFeature::AVX2) {
+        if full.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86_extended::berlekamp_massey_avx2(syndrome, len) };
         }
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) && std::arch::is_aarch64_feature_detected!("sve2")
-        {
+        let full = features.features_full();
+        if full.sve2 && std::arch::is_aarch64_feature_detected!("sve2") {
             return unsafe { berlekamp_massey_sve2_dispatch(syndrome, len) };
         }
     }
@@ -93,12 +64,13 @@ pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
     #[cfg(target_arch = "x86_64")]
     {
         let features = FeatureDetector::instance();
+        let full = features.features_full();
         // SAFETY: Runtime feature detection matches the callee's `#[target_feature]`.
         // Both callees validate `buf.len()` internally before raw pointer reads.
-        if features.has_feature(CpuFeature::BMI2) {
+        if full.bmi2 {
             return unsafe { super::x86::varint_decode_bmi2(buf) };
         }
-        if features.has_feature(CpuFeature::SSE2) {
+        if full.sse2 {
             if let Some(res) = unsafe { super::x86::varint_decode_sse2_prefast(buf) } {
                 return Some(res);
             }
@@ -122,23 +94,25 @@ pub fn validate_header(header: &[u8]) -> bool {
     // the header is non-empty. All callees only read from `header` and return bool.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::AVX512F) {
+        let full = features.features_full();
+        if full.avx512f {
             return unsafe { crate::simd::x86_header::validate_header_avx512(header) };
         }
-        if features.has_feature(CpuFeature::AVX2) {
+        if full.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86::validate_header_avx2(header) };
         }
-        if features.has_feature(CpuFeature::SSE42) {
+        if full.sse2 {
             return unsafe { super::x86::validate_header_sse2(header) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             return unsafe { super::arm::validate_header_sve2(header) };
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             return unsafe { super::arm::validate_header_neon(header) };
         }
     }

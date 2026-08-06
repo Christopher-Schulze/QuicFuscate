@@ -1,9 +1,5 @@
 //! SIMD byte classification helpers for compression preprocessing.
 
-#[cfg(target_arch = "x86_64")]
-use crate::optimize::CpuFeature;
-#[cfg(target_arch = "aarch64")]
-use crate::optimize::CpuProfile;
 use crate::optimize::FeatureDetector;
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -38,31 +34,27 @@ pub fn classify(bytes: &[u8]) -> PayloadCounters {
 
     #[cfg(target_arch = "x86_64")]
     {
-        let det = FeatureDetector::instance();
-        if det.has_feature(CpuFeature::AVX512F) && det.has_feature(CpuFeature::AVX512BW) {
+        let features = FeatureDetector::instance().features_full();
+        let matrix = features.simd_dispatch_matrix();
+        if matrix.avx512_bw {
+            // SAFETY: the exact AVX-512F+BW runtime intersection is proven above.
             unsafe { return classify_avx512(bytes) };
         }
-        if det.has_feature(CpuFeature::AVX2) {
+        if matrix.avx2 {
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
             unsafe { return classify_avx2(bytes) };
         }
-        if det.has_feature(CpuFeature::SSE2) {
+        if features.sse2 {
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
             unsafe { return classify_sse2(bytes) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        let profile = FeatureDetector::instance().profile();
-        if matches!(
-            profile,
-            CpuProfile::ARM_A0
-                | CpuProfile::ARM_A1a
-                | CpuProfile::ARM_A1b
-                | CpuProfile::ARM_A1c
-                | CpuProfile::ARM_A1d
-                | CpuProfile::ARM_A2
-                | CpuProfile::Apple_M
-        ) {
+        let features = FeatureDetector::instance().features_full();
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
             unsafe { return classify_neon(bytes) };
         }
     }

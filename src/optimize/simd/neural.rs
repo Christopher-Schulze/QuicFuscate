@@ -1,26 +1,18 @@
 //! optimize::simd::neural (TODO-563).
 
-#[cfg(any(
-    all(target_arch = "x86_64", target_feature = "avx512f"),
-    all(target_arch = "x86_64", target_feature = "fma")
-))]
+#[cfg(target_arch = "x86_64")]
 use super::FeatureDetector;
 
 /// Dot product with best available SIMD
 #[inline(always)]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        let features = FeatureDetector::instance().features_full();
-        if features.avx512f {
+        let matrix = FeatureDetector::instance().features_full().simd_dispatch_matrix();
+        if matrix.neural_avx512 {
             return unsafe { dot_product_avx512(a, b) };
         }
-    }
-
-    #[cfg(all(target_arch = "x86_64", target_feature = "fma"))]
-    {
-        let features = FeatureDetector::instance().features_full();
-        if features.fma {
+        if matrix.neural_avx2 {
             return unsafe { dot_product_avx2(a, b) };
         }
     }
@@ -29,7 +21,8 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Dot product with AVX-512
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,fma")]
 #[inline(always)]
 unsafe fn dot_product_avx512(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
@@ -44,12 +37,16 @@ unsafe fn dot_product_avx512(a: &[f32], b: &[f32]) -> f32 {
         sum = _mm512_fmadd_ps(va, vb, sum);
     }
 
-    // Horizontal sum
-    _mm512_reduce_add_ps(sum)
+    let mut total = _mm512_reduce_add_ps(sum);
+    for i in (chunks * 16)..len {
+        total += a[i] * b[i];
+    }
+    total
 }
 
 /// Dot product with AVX2 + FMA
-#[cfg(all(target_arch = "x86_64", target_feature = "fma"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
 #[inline(always)]
 unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
@@ -67,7 +64,11 @@ unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     // Horizontal sum
     let mut sum_array = [0.0f32; 8];
     _mm256_storeu_ps(sum_array.as_mut_ptr(), sum);
-    sum_array.iter().sum()
+    let mut total: f32 = sum_array.iter().sum();
+    for i in (chunks * 8)..len {
+        total += a[i] * b[i];
+    }
+    total
 }
 
 /// Scalar dot product fallback

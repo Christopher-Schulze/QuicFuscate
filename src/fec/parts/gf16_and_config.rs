@@ -16,8 +16,7 @@ pub(crate) fn gf16_mul_scalar_slice_u16(coeff: u16, src: &[u8], out_xor: &mut [u
         return;
     }
 
-    let profile = FeatureDetector::instance().profile();
-    let vector_threshold = gf16_vector_threshold_words(profile);
+    let vector_threshold = gf16_vector_threshold_words();
 
     // Chunk size for stack buffer (64 u16 = 128 bytes)
     const CHUNK_SIZE: usize = 64;
@@ -86,20 +85,24 @@ fn gf16_mul_scalar_slice_padded(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
 }
 
 #[inline(always)]
-fn gf16_vector_threshold_words(profile: CpuProfile) -> usize {
-    match profile {
-        CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => GF16_VBMI2_MIN_WORDS,
-        CpuProfile::X86_P3a | CpuProfile::X86_P3b => GF16_AVX512_MIN_WORDS,
-        CpuProfile::X86_P2a | CpuProfile::X86_P2b => GF16_AVX2_MIN_WORDS,
-        CpuProfile::X86_P1f | CpuProfile::X86_P1b | CpuProfile::X86_P1a => GF16_SSE2_MIN_WORDS,
-        CpuProfile::ARM_A2 => GF16_SVE2_MIN_WORDS,
-        CpuProfile::ARM_A1c | CpuProfile::ARM_A1d | CpuProfile::Apple_M => GF16_NEON_MIN_WORDS,
-        CpuProfile::ARM_A1b => GF16_NEON_MIN_WORDS,
-        _ => usize::MAX,
+fn gf16_vector_threshold_words() -> usize {
+    let features = FeatureDetector::instance().features_full();
+    let matrix = features.simd_dispatch_matrix();
+
+    if matrix.avx512_vbmi2 {
+        GF16_VBMI2_MIN_WORDS
+    } else if matrix.avx512_vbmi {
+        GF16_AVX512_MIN_WORDS
+    } else if matrix.avx2 {
+        GF16_AVX2_MIN_WORDS
+    } else if features.sse2 {
+        GF16_SSE2_MIN_WORDS
+    } else if matrix.sve2 {
+        GF16_SVE2_MIN_WORDS
+    } else if matrix.neon {
+        GF16_NEON_MIN_WORDS
+    } else {
+        usize::MAX
     }
 }
 
@@ -837,32 +840,25 @@ impl AdaptiveFec {
         log::info!("Forced switch to streaming mode for minimal latency");
     }
 
-    fn select_simd_level_from_features<F>(has_feature: F) -> SimdLevel
-    where
-        F: Fn(crate::optimize::CpuFeature) -> bool,
-    {
-        if has_feature(crate::optimize::CpuFeature::AVX512F)
-            && has_feature(crate::optimize::CpuFeature::AVX512VBMI)
-        {
-            SimdLevel::Avx512
-        } else if has_feature(crate::optimize::CpuFeature::AVX2) {
-            SimdLevel::Avx2
-        } else if has_feature(crate::optimize::CpuFeature::SSE42) {
-            SimdLevel::Sse2
-        } else if has_feature(crate::optimize::CpuFeature::SVE2) {
-            SimdLevel::Sve2
-        } else if has_feature(crate::optimize::CpuFeature::NEON) {
-            SimdLevel::Neon
-        } else {
-            SimdLevel::None
-        }
-    }
-
     /// Enable SIMD acceleration based on CPU features
     pub(crate) fn enable_simd_acceleration(&mut self) {
         // Centralized detection via optimize::FeatureDetector
         let det = crate::optimize::FeatureDetector::instance();
-        self.simd_level = Self::select_simd_level_from_features(|f| det.has_feature(f));
+        let features = det.features_full();
+        let matrix = features.simd_dispatch_matrix();
+        self.simd_level = if matrix.avx512_vbmi {
+            SimdLevel::Avx512
+        } else if matrix.avx2 {
+            SimdLevel::Avx2
+        } else if features.sse2 {
+            SimdLevel::Sse2
+        } else if matrix.sve2 {
+            SimdLevel::Sve2
+        } else if matrix.neon {
+            SimdLevel::Neon
+        } else {
+            SimdLevel::None
+        };
         self.simd_enabled = self.simd_level != SimdLevel::None;
         crate::telemetry::SIMD_ACTIVE
             .store(self.simd_enabled as u64, std::sync::atomic::Ordering::Relaxed);

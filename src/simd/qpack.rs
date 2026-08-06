@@ -8,8 +8,8 @@ use super::*;
 pub fn encode_huff_into(input: &[u8], output: &mut [u8]) -> usize {
     #[cfg(target_arch = "x86_64")]
     {
-        let det = FeatureDetector::instance();
-        if det.has_feature(CpuFeature::AVX2) {
+        let full = FeatureDetector::instance().features_full();
+        if full.simd_dispatch_matrix().avx2 {
             // SAFETY: AVX2 feature verified by runtime detection. Callee reads
             // `input` and writes up to `output.len()` bytes with bounds checks.
             return unsafe { super::x86::qpack_encode_avx2(input, output) };
@@ -17,8 +17,8 @@ pub fn encode_huff_into(input: &[u8], output: &mut [u8]) -> usize {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        let det = FeatureDetector::instance();
-        if det.has_feature(CpuFeature::NEON) {
+        let full = FeatureDetector::instance().features_full();
+        if full.neon {
             return crate::simd::arm::qpack_encode_neon(input, output);
         }
     }

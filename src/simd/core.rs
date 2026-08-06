@@ -13,11 +13,12 @@ pub fn xor_blocks(dst: &mut [u8], src: &[u8]) {
     // beyond what the borrow checker already guarantees.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::AVX512F) {
+        let full = features.features_full();
+        if full.avx512f {
             unsafe { super::x86::xor_blocks_avx512(dst, src) };
             return;
         }
-        if features.has_feature(CpuFeature::AVX2) {
+        if full.simd_dispatch_matrix().avx2 {
             unsafe { super::x86::xor_blocks_avx2(dst, src) };
             return;
         }
@@ -25,11 +26,12 @@ pub fn xor_blocks(dst: &mut [u8], src: &[u8]) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             unsafe { arm::xor_blocks_sve2(dst, src) };
             return;
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             unsafe { arm::xor_blocks_neon(dst, src) };
             return;
         }
@@ -44,7 +46,7 @@ pub fn crc32(data: &[u8], initial: u32) -> u32 {
     #[cfg(target_arch = "aarch64")]
     {
         let features = FeatureDetector::instance();
-        if features.has_feature(CpuFeature::CRC32) {
+        if features.features_full().crc32 {
             // SAFETY: Runtime feature detection matches the callee's target feature.
             // The ARM CRC32 instructions implement the IEEE polynomial used here.
             return unsafe { arm::crc32_arm(data, initial) };
@@ -63,16 +65,17 @@ pub fn popcnt(data: &[u8]) -> usize {
     // SAFETY: Runtime feature check matches the callee's `#[target_feature]`.
     // All callees only read `data` and return a count - no pointer invariants.
     #[cfg(target_arch = "x86_64")]
-    if features.has_feature(CpuFeature::POPCNT) {
+    if features.features_full().popcnt {
         return unsafe { super::x86::popcnt_hw(data) };
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             return unsafe { arm::popcnt_sve2(data) };
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             return unsafe { arm::popcnt_neon(data) };
         }
     }

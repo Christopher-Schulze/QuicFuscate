@@ -5,8 +5,6 @@
 use crate::optimize::telemetry::CONGESTION_NEON_BATCHES;
 #[cfg(target_arch = "x86_64")]
 use crate::optimize::telemetry::{CONGESTION_AVX2_BATCHES, CONGESTION_VNNI_BATCHES};
-#[cfg(any(test, feature = "rust-tests"))]
-use crate::optimize::CpuProfile;
 use crate::optimize::FeatureDetector;
 use crate::transport::Stats;
 #[cfg(target_arch = "x86_64")]
@@ -352,40 +350,33 @@ unsafe fn sum_u32_vnni(values: &[u32]) -> u64 {
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn bitmap_set_range(bitmap: &mut [u64], start: usize, end: usize) {
-    let _profile = FeatureDetector::instance().profile();
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
+    if features.bmi2 {
+        // SAFETY: the exact BMI2 runtime feature is proven above.
+        unsafe {
             bitmap_set_range_bmi2(bitmap, start, end);
             return;
-        },
-        _ => {}
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            bitmap_set_range_sve2(bitmap, start, end);
-            return;
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            bitmap_set_range_neon(bitmap, start, end);
-            return;
-        },
-        _ => {}
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            unsafe {
+                bitmap_set_range_sve2(bitmap, start, end);
+                return;
+            }
+        }
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
+            unsafe {
+                bitmap_set_range_neon(bitmap, start, end);
+                return;
+            }
+        }
     }
 
     // Scalar fallback
@@ -580,41 +571,24 @@ unsafe fn bitmap_set_range_bmi2(bitmap: &mut [u64], start: usize, end: usize) {
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn count_ecn_marks(bitmap: &[u64]) -> u32 {
-    let _profile = FeatureDetector::instance().profile();
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P1a
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1f
-        | CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => {
-            return unsafe { count_ecn_marks_popcnt(bitmap) };
-        }
-        _ => {}
+    if features.popcnt {
+        // SAFETY: the exact POPCNT runtime feature is proven above.
+        return unsafe { count_ecn_marks_popcnt(bitmap) };
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            return count_ecn_marks_sve2(bitmap);
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            return count_ecn_marks_neon(bitmap);
-        },
-        _ => {}
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            return unsafe { count_ecn_marks_sve2(bitmap) };
+        }
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
+            return unsafe { count_ecn_marks_neon(bitmap) };
+        }
     }
 
     // Scalar fallback

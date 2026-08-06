@@ -13,7 +13,7 @@
 //! the canonical runtime providers for the retained data-plane AEAD contract.
 
 #[cfg(target_arch = "x86_64")]
-use crate::optimize::{CpuFeature, FeatureDetector};
+use crate::optimize::FeatureDetector;
 use crate::simd::CryptoAeadPlan;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -219,7 +219,7 @@ fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     // before calling expand_aes128_schedule / aes128_encrypt_block_rk. Both take
     // fixed-size stack values (&[u8; 16]), so no dangling pointers or length mismatches.
     unsafe {
-        if FeatureDetector::instance().has_feature(CpuFeature::AESNI) {
+        if FeatureDetector::instance().features_full().aesni {
             // SAFETY:
             // - runtime feature detection guarantees AESNI before entering the
             //   accelerated round-key path below
@@ -429,7 +429,7 @@ impl AesGcm128 {
         // k is [u8; 16] - valid 128-bit key. expand_aes128_schedule requires AES-NI.
         #[cfg(target_arch = "x86_64")]
         let rk = unsafe {
-            if FeatureDetector::instance().has_feature(CpuFeature::AESNI) {
+            if FeatureDetector::instance().features_full().aesni {
                 Some(expand_aes128_schedule(&k))
             } else {
                 None
@@ -991,13 +991,11 @@ pub fn install_data_aead_config(cfg: &crate::engine::CryptoConfig) {
     let has_hw_aes = {
         #[cfg(target_arch = "x86_64")]
         {
-            crate::optimize::FeatureDetector::instance()
-                .has_feature(crate::optimize::CpuFeature::AESNI)
+            crate::optimize::FeatureDetector::instance().features_full().aesni
         }
         #[cfg(target_arch = "aarch64")]
         {
-            crate::optimize::FeatureDetector::instance()
-                .has_feature(crate::optimize::CpuFeature::AES)
+            crate::optimize::FeatureDetector::instance().features_full().aes
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {

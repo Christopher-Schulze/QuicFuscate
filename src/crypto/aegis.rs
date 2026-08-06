@@ -163,19 +163,12 @@ mod aegis_aes_block {
         *BACKEND.get_or_init(|| {
             #[cfg(target_arch = "x86_64")]
             {
-                if crate::optimize::FeatureDetector::instance()
-                    .has_feature(crate::optimize::CpuFeature::AESNI)
-                {
-                    let det = crate::optimize::FeatureDetector::instance();
-                    if det.has_feature(crate::optimize::CpuFeature::VAES)
-                        && det.has_feature(crate::optimize::CpuFeature::AVX512F)
-                        && det.has_feature(crate::optimize::CpuFeature::AVX512VL)
-                    {
+                let features = crate::optimize::FeatureDetector::instance().features_full();
+                if features.aesni {
+                    if features.vaes && features.avx512f && features.avx512vl {
                         return AesEncBackend::Vaes512;
                     }
-                    if det.has_feature(crate::optimize::CpuFeature::VAES)
-                        && det.has_feature(crate::optimize::CpuFeature::AVX2)
-                    {
+                    if features.vaes && features.avx2 {
                         return AesEncBackend::Vaes256;
                     }
                     return AesEncBackend::Aesni;
@@ -184,9 +177,7 @@ mod aegis_aes_block {
 
             #[cfg(target_arch = "aarch64")]
             {
-                if crate::optimize::FeatureDetector::instance()
-                    .has_feature(crate::optimize::CpuFeature::AES)
-                {
+                if crate::optimize::FeatureDetector::instance().features_full().aes {
                     return AesEncBackend::Aese;
                 }
             }

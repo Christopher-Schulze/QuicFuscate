@@ -260,15 +260,16 @@ pub fn encode_pkt_num(pn: u64, pn_len: usize, out: &mut [u8]) -> Result<usize, C
         // AVX2 optimized path for 4-byte packet numbers
         if pn_len == 4
             && crate::optimize::FeatureDetector::instance()
-                .has_feature(crate::optimize::CpuFeature::AVX2)
+                .features_full()
+                .simd_dispatch_matrix()
+                .avx2
         {
-            let pn_bytes = pn.to_be_bytes();
-            let pn_vec = _mm_set_epi32(0, 0, 0, pn as i32);
-            let shuffled = _mm_shuffle_epi8(
-                pn_vec,
-                _mm_set_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3),
-            );
-            _mm_storeu_si32(out.as_mut_ptr() as *mut i32, shuffled);
+            // Keep the wire representation big-endian. Converting the bytes
+            // to a native integer before the unaligned store preserves their
+            // order on x86_64 and avoids the previous reversed-byte shuffle.
+            let pn_bytes = (pn as u32).to_be_bytes();
+            let pn_vec = _mm_cvtsi32_si128(i32::from_ne_bytes(pn_bytes));
+            _mm_storeu_si32(out.as_mut_ptr() as *mut i32, pn_vec);
             return Ok(4);
         }
     }
@@ -733,6 +734,21 @@ pub fn unprotect_and_decrypt_parsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_number_encoding_is_big_endian_for_all_lengths() {
+        let pn = 0x01_02_03_04u64;
+        for (len, expected) in [
+            (1usize, [0x04u8, 0, 0, 0]),
+            (2, [0x03, 0x04, 0, 0]),
+            (3, [0x02, 0x03, 0x04, 0]),
+            (4, [0x01, 0x02, 0x03, 0x04]),
+        ] {
+            let mut encoded = [0u8; 4];
+            assert_eq!(encode_pkt_num(pn, len, &mut encoded[..len]), Ok(len));
+            assert_eq!(&encoded[..len], &expected[..len]);
+        }
+    }
 
     #[test]
     fn initial_header_token_roundtrip() {

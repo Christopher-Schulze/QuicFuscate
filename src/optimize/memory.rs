@@ -1,10 +1,6 @@
 //! Ultra-sophisticated memory acceleration module
 //! Non-temporal stores, prefetch tuning, cache-aware operations
 
-#[cfg(target_arch = "x86_64")]
-use crate::optimize::CpuProfile;
-#[cfg(target_arch = "aarch64")]
-use crate::optimize::CpuProfile;
 use crate::optimize::FeatureDetector;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -13,55 +9,41 @@ use std::arch::x86_64::*;
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn transpose_matrix<T: Copy>(matrix: &mut [T], rows: usize, cols: usize) {
-    let profile = FeatureDetector::instance().profile();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => {
-            if std::mem::size_of::<T>() == 4 {
-                if rows.is_multiple_of(8) && cols.is_multiple_of(8) {
-                    unsafe {
-                        transpose_matrix_avx2_f32(matrix as *mut _ as *mut f32, rows, cols);
-                        return;
-                    }
-                }
+    if features.simd_dispatch_matrix().avx2 && std::mem::size_of::<T>() == 4 {
+        if rows.is_multiple_of(8) && cols.is_multiple_of(8) {
+            // SAFETY: the exact AVX2 runtime feature is proven above, and the
+            // shape/alignment contract is enforced by this helper's conditions.
+            unsafe {
+                transpose_matrix_avx2_f32(matrix as *mut _ as *mut f32, rows, cols);
+                return;
             }
         }
-        _ => {}
     }
 
     #[cfg(target_arch = "aarch64")]
-    match profile {
-        CpuProfile::ARM_A2 => {
-            if core::mem::size_of::<T>() == 4 {
-                unsafe {
-                    transpose_matrix_sve2_f32(matrix as *mut _ as *mut f32, rows, cols);
-                    return;
-                }
-            }
+    if features.sve2 && core::mem::size_of::<T>() == 4 {
+        // SAFETY: the exact runtime SVE2 feature is proven above.
+        unsafe {
+            transpose_matrix_sve2_f32(matrix as *mut _ as *mut f32, rows, cols);
+            return;
         }
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M
-            if core::mem::size_of::<T>() == 4
-                && rows.is_multiple_of(4)
-                && cols.is_multiple_of(4) =>
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    if features.neon
+        && core::mem::size_of::<T>() == 4
+        && rows.is_multiple_of(4)
+        && cols.is_multiple_of(4)
+    {
+        // SAFETY: the exact runtime NEON feature is proven above.
         unsafe {
             transpose_matrix_neon_f32(matrix as *mut _ as *mut f32, rows, cols);
             return;
-        },
-        _ => {}
+        }
     }
 
     // Cache-aware scalar transpose

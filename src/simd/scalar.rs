@@ -1,7 +1,7 @@
 //! Extracted SIMD `scalar` submodule (TODO-563).
 
 use crate::crypto::{aes, gcm, hkdf};
-use crate::simd::{CpuFeature, FeatureDetector};
+use crate::simd::FeatureDetector;
 /// GF(256) exponentiation for Reed-Solomon generator polynomials.
 pub fn gf_pow(base: u8, exp: u8) -> u8 {
     if exp == 0 {
@@ -214,17 +214,18 @@ pub fn reed_solomon_encode(data: &[u8], parity_shards: usize) -> Vec<u8> {
     // GF(256) multiplication and write to owned Vec output.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::GFNI) && features.has_feature(CpuFeature::AVX512F) {
+        let full = features.features_full();
+        if full.gfni && full.avx512f {
             return unsafe { super::x86::reed_solomon_encode_gfni(data, parity_shards) };
         }
-        if features.has_feature(CpuFeature::AVX2) {
+        if full.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86::reed_solomon_encode_avx2(data, parity_shards) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::NEON) {
+        if features.features_full().neon {
             return unsafe { super::arm::reed_solomon_encode_neon(data, parity_shards) };
         }
     }
@@ -270,10 +271,11 @@ pub fn reed_solomon_decode(shards: &[Vec<u8>], indices: &[usize]) -> Result<Vec<
     #[cfg(target_arch = "x86_64")]
     {
         let features = FeatureDetector::instance();
-        if features.has_feature(CpuFeature::GFNI) && features.has_feature(CpuFeature::AVX512F) {
+        let full = features.features_full();
+        if full.gfni && full.avx512f {
             return unsafe { super::x86::reed_solomon_decode_gfni(shards, indices) };
         }
-        if features.has_feature(CpuFeature::AVX2) {
+        if full.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86::reed_solomon_decode_avx2(shards, indices) };
         }
     }

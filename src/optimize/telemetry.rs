@@ -161,13 +161,11 @@ pub fn export_telemetry_text() -> String {
     let _ = writeln!(out, "quicfuscate_aes_block_scalar_ops {}", AES_BLOCK_SCALAR_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_avx2_ops {}", SHA256_AVX2_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_vnni_ops {}", SHA256_VNNI_OPS.get());
-    let _ = writeln!(out, "quicfuscate_sha256_sha_ops {}", SHA256_SHA_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_neon_ops {}", SHA256_NEON_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_sve2_ops {}", SHA256_SVE2_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_scalar_ops {}", SHA256_SCALAR_OPS.get());
     let _ = writeln!(out, "quicfuscate_hmac_sha256_avx2_ops {}", HMAC_SHA256_AVX2_OPS.get());
     let _ = writeln!(out, "quicfuscate_hmac_sha256_vnni_ops {}", HMAC_SHA256_VNNI_OPS.get());
-    let _ = writeln!(out, "quicfuscate_hmac_sha256_sha_ops {}", HMAC_SHA256_SHA_OPS.get());
     let _ = writeln!(out, "quicfuscate_hmac_sha256_neon_ops {}", HMAC_SHA256_NEON_OPS.get());
     let _ = writeln!(out, "quicfuscate_hmac_sha256_sve2_ops {}", HMAC_SHA256_SVE2_OPS.get());
     let _ = writeln!(out, "quicfuscate_hmac_sha256_scalar_ops {}", HMAC_SHA256_SCALAR_OPS.get());
@@ -958,8 +956,6 @@ pub static AES_BLOCK_SCALAR_OPS: Counter = Counter::new();
 pub static SHA256_AVX2_OPS: Counter = Counter::new();
 /// SHA-256 operations via VNNI backend.
 pub static SHA256_VNNI_OPS: Counter = Counter::new();
-/// SHA-256 operations via hardware SHA extension.
-pub static SHA256_SHA_OPS: Counter = Counter::new();
 /// SHA-256 operations via NEON backend.
 pub static SHA256_NEON_OPS: Counter = Counter::new();
 /// SHA-256 operations via SVE2 backend.
@@ -970,8 +966,6 @@ pub static SHA256_SCALAR_OPS: Counter = Counter::new();
 pub static HMAC_SHA256_AVX2_OPS: Counter = Counter::new();
 /// HMAC-SHA256 operations via VNNI backend.
 pub static HMAC_SHA256_VNNI_OPS: Counter = Counter::new();
-/// HMAC-SHA256 operations via hardware SHA extension.
-pub static HMAC_SHA256_SHA_OPS: Counter = Counter::new();
 /// HMAC-SHA256 operations via NEON backend.
 pub static HMAC_SHA256_NEON_OPS: Counter = Counter::new();
 /// HMAC-SHA256 operations via SVE2 backend.
@@ -1021,8 +1015,6 @@ pub static FEC_GFNI_OPS: Counter = Counter::new();
 pub static GF16_VPCLMUL_OPS: Counter = Counter::new();
 /// GF(2^16) multiplication via PCLMULQDQ for Extreme/Ultra FEC.
 pub static GF16_PCLMUL_OPS: Counter = Counter::new();
-/// GF(2^16) multiplication via PMULL for Extreme/Ultra FEC.
-pub static GF16_PMULL_OPS: Counter = Counter::new();
 /// Pattern matching operations via AVX-512 VBMI2.
 pub static PATTERN_AVX512_VBMI2_OPS: Counter = Counter::new();
 /// Pattern matching operations via AVX-512.

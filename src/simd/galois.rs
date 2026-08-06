@@ -12,28 +12,30 @@ pub fn gf_mul(a: &[u8], b: u8, dst: &mut [u8]) {
     // and handle length clamping internally (`a.len().min(dst.len())`).
     #[cfg(target_arch = "x86_64")]
     {
+        let full = features.features_full();
         // GFNI usage requires AVX-512F+GFNI on x86_64 in this codebase
-        if features.has_feature(CpuFeature::GFNI) && features.has_feature(CpuFeature::AVX512F) {
+        if full.gfni && full.avx512f {
             return unsafe { super::x86::gf_mul_avx512_gfni(a, b, dst) };
         }
-        if features.has_feature(CpuFeature::AVX2) {
+        if full.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86::gf_mul_avx2(a, b, dst) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             unsafe { arm::gf_mul_sve2(a, b, dst) };
             crate::optimize::telemetry::FEC_SVE2_OPS.inc();
             return;
         }
-        if features.has_feature(CpuFeature::PMULL) {
+        if full.neon && full.pmull {
             unsafe { arm::gf_mul_neon_pmull(a, b, dst) };
             crate::optimize::telemetry::FEC_NEON_OPS.inc();
             return;
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             unsafe { arm::gf_mul_neon(a, b, dst) };
             crate::optimize::telemetry::FEC_NEON_OPS.inc();
             return;
@@ -59,7 +61,7 @@ pub fn gf4_mul(a: &[u8], b: u8, dst: &mut [u8]) {
     // internally and only read/write within those bounds.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::AVX2) {
+        if features.features_full().simd_dispatch_matrix().avx2 {
             unsafe { gf4_mul_avx2(a, b_lo, dst) };
             crate::optimize::telemetry::FEC_AVX2_OPS.inc();
             return;
@@ -68,7 +70,7 @@ pub fn gf4_mul(a: &[u8], b: u8, dst: &mut [u8]) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::NEON) {
+        if features.features_full().neon {
             unsafe { gf4_mul_neon(a, b_lo, dst) };
             crate::optimize::telemetry::FEC_NEON_OPS.inc();
             return;
@@ -86,7 +88,7 @@ pub fn gf4_mul_xor(a: &[u8], b: u8, dst: &mut [u8]) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::AVX2) {
+        if features.features_full().simd_dispatch_matrix().avx2 {
             unsafe { gf4_mul_xor_avx2(a, b_lo, dst) };
             crate::optimize::telemetry::FEC_AVX2_OPS.inc();
             return;
@@ -95,7 +97,7 @@ pub fn gf4_mul_xor(a: &[u8], b: u8, dst: &mut [u8]) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::NEON) {
+        if features.features_full().neon {
             unsafe { gf4_mul_xor_neon(a, b_lo, dst) };
             crate::optimize::telemetry::FEC_NEON_OPS.inc();
             return;
@@ -303,32 +305,22 @@ unsafe fn gf4_mul_xor_neon(a: &[u8], b: u8, dst: &mut [u8]) {
 /// Uses polynomial x^16 + x^12 + x^3 + x + 1 (0x1100B)
 #[inline(always)]
 pub fn gf16_mul(a: &[u16], b: u16, dst: &mut [u16]) {
-    let features = FeatureDetector::instance();
-
     // SAFETY: Each branch is guarded by a runtime feature check matching
     // the callee's `#[target_feature]`. Callees clamp to
     // `a.len().min(dst.len())` and stay within bounds.
     #[cfg(target_arch = "x86_64")]
     {
+        let features = FeatureDetector::instance();
+        let matrix = features.features_full().simd_dispatch_matrix();
         // VPCLMULQDQ is the ultimate for GF(2^16)
-        if features.has_feature(CpuFeature::VPCLMULQDQ) && features.has_feature(CpuFeature::AVX512F)
-        {
+        if matrix.gf16_vpclmul {
             unsafe { gf16_mul_vpclmulqdq(a, b, dst) };
             crate::optimize::telemetry::GF16_VPCLMUL_OPS.inc();
             return;
         }
-        if features.has_feature(CpuFeature::PCLMULQDQ) {
+        if matrix.gf16_pclmul {
             unsafe { gf16_mul_pclmulqdq(a, b, dst) };
             crate::optimize::telemetry::GF16_PCLMUL_OPS.inc();
-            return;
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if features.has_feature(CpuFeature::PMULL) {
-            unsafe { gf16_mul_pmull(a, b, dst) };
-            crate::optimize::telemetry::GF16_PMULL_OPS.inc();
             return;
         }
     }
@@ -458,12 +450,4 @@ unsafe fn gf16_mul_pclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
         dst[i] = gf16_mul_single(a[i], b);
         i += 1;
     }
-}
-
-/// ARM PMULL for GF(2^16)
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn gf16_mul_pmull(a: &[u16], b: u16, dst: &mut [u16]) {
-    // For now, use scalar - PMULL is optimized for GF(2^128) not GF(2^16)
-    gf16_mul_scalar(a, b, dst);
 }

@@ -12,20 +12,22 @@ pub fn qpack_encode(input: &[u8], output: &mut [u8]) -> usize {
     // and return the number of bytes written.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::AVX2) {
+        let full = features.features_full();
+        if full.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86::qpack_encode_avx2(input, output) };
         }
-        if features.has_feature(CpuFeature::SSSE3) {
+        if full.ssse3 && full.sse41 {
             return unsafe { super::x86::qpack_encode_ssse3(input, output) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             return super::arm::qpack_encode_sve2(input, output);
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             return super::arm::qpack_encode_neon(input, output);
         }
     }
@@ -42,20 +44,22 @@ pub fn qpack_decode(input: &[u8], output: &mut [u8]) -> usize {
     // Callees read from `input` and write to `output` with bounds checks.
     #[cfg(target_arch = "x86_64")]
     {
-        if features.has_feature(CpuFeature::AVX2) {
+        let full = features.features_full();
+        if full.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86::qpack_decode_avx2(input, output) };
         }
-        if features.has_feature(CpuFeature::SSSE3) {
+        if full.ssse3 {
             return unsafe { super::x86::qpack_decode_ssse3(input, output) };
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if features.has_feature(CpuFeature::SVE2) {
+        let full = features.features_full();
+        if full.sve2 {
             return super::arm::qpack_decode_sve2(input, output);
         }
-        if features.has_feature(CpuFeature::NEON) {
+        if full.neon {
             return super::arm::qpack_decode_neon(input, output);
         }
     }

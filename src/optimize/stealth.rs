@@ -1,8 +1,7 @@
 //! Ultra-sophisticated stealth acceleration module
 //! Complete HW acceleration for pattern injection, entropy mixing, HTTP/TLS mimicry
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use crate::optimize::CpuProfile;
+use crate::optimize::CpuFeatures;
 use crate::optimize::FeatureDetector;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -61,32 +60,32 @@ fn evaluate_stealth_ascii_perf_smoke(
 
 #[derive(Copy, Clone)]
 pub struct AsciiSimdBackend {
-    profile: CpuProfile,
+    features: CpuFeatures,
 }
 
 impl AsciiSimdBackend {
     #[inline(always)]
     pub fn detect() -> Self {
-        Self { profile: FeatureDetector::instance().profile() }
+        Self { features: *FeatureDetector::instance().features_full() }
     }
 
     #[inline(always)]
     pub fn append_bytes(&self, dst: &mut Vec<u8>, src: &[u8]) {
-        append_ascii_with_profile(dst, src, self.profile);
+        append_ascii_with_features(dst, src, self.features);
     }
 
     #[inline(always)]
     pub fn append_decimal(&self, dst: &mut Vec<u8>, value: u64) {
         let mut scratch = [0u8; 32];
         let digits = decimal_to_ascii(value, &mut scratch);
-        append_ascii_with_profile(dst, digits, self.profile);
+        append_ascii_with_features(dst, digits, self.features);
     }
 
     #[inline(always)]
     pub fn append_lower_hex(&self, dst: &mut Vec<u8>, value: u64) {
         let mut scratch = [0u8; 16];
         let digits = lower_hex_to_ascii(value, &mut scratch);
-        append_ascii_with_profile(dst, digits, self.profile);
+        append_ascii_with_features(dst, digits, self.features);
     }
 }
 
@@ -145,52 +144,34 @@ fn lower_hex_to_ascii(value: u64, scratch: &mut [u8; 16]) -> &[u8] {
 }
 
 #[inline(always)]
-fn append_ascii_with_profile(dst: &mut Vec<u8>, src: &[u8], profile: CpuProfile) {
+fn append_ascii_with_features(dst: &mut Vec<u8>, src: &[u8], features: CpuFeatures) {
     if src.is_empty() {
         return;
     }
 
     #[cfg(target_arch = "x86_64")]
-    match profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
+    {
+        let matrix = features.simd_dispatch_matrix();
+        if matrix.avx2 {
             crate::optimize::telemetry::STEALTH_ASCII_SIMD_AVX2_BYTES.inc_by(src.len() as u64);
-            append_ascii_avx2(dst, src);
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            unsafe { append_ascii_avx2(dst, src) };
             return;
-        },
-        CpuProfile::X86_P1f
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1a
-        | CpuProfile::X86_P0b
-        | CpuProfile::X86_P0a => unsafe {
+        }
+        if features.sse2 {
             crate::optimize::telemetry::STEALTH_ASCII_SIMD_SSE2_BYTES.inc_by(src.len() as u64);
-            append_ascii_sse2(dst, src);
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            unsafe { append_ascii_sse2(dst, src) };
             return;
-        },
-        _ => {}
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
-    match profile {
-        CpuProfile::ARM_A2
-        | CpuProfile::ARM_A1d
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A0
-        | CpuProfile::Apple_M => unsafe {
-            crate::optimize::telemetry::STEALTH_ASCII_SIMD_NEON_BYTES.inc_by(src.len() as u64);
-            append_ascii_neon(dst, src);
-            return;
-        },
-        _ => {}
+    if features.neon {
+        crate::optimize::telemetry::STEALTH_ASCII_SIMD_NEON_BYTES.inc_by(src.len() as u64);
+        // SAFETY: the exact runtime NEON feature is proven above.
+        unsafe { append_ascii_neon(dst, src) };
+        return;
     }
 
     crate::optimize::telemetry::STEALTH_ASCII_SCALAR_BYTES.inc_by(src.len() as u64);
@@ -288,49 +269,35 @@ unsafe fn append_ascii_neon(dst: &mut Vec<u8>, src: &[u8]) {
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn inject_pattern(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
-    let _profile = FeatureDetector::instance().profile();
+    let features = *FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
-            inject_pattern_avx2(data, pattern, positions);
+    {
+        let matrix = features.simd_dispatch_matrix();
+        if matrix.avx2 {
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            unsafe { inject_pattern_avx2(data, pattern, positions) };
             return;
-        },
-        CpuProfile::X86_P1f
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1a
-        | CpuProfile::X86_P0b
-        | CpuProfile::X86_P0a => unsafe {
-            inject_pattern_sse2(data, pattern, positions);
+        }
+        if features.sse2 {
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            unsafe { inject_pattern_sse2(data, pattern, positions) };
             return;
-        },
-        _ => {}
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A2 => unsafe {
-            inject_pattern_sve2(data, pattern, positions);
+    {
+        if features.sve2 {
+            // SAFETY: the exact runtime SVE2 feature is proven above.
+            unsafe { inject_pattern_sve2(data, pattern, positions) };
             return;
-        },
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M => unsafe {
-            inject_pattern_neon(data, pattern, positions);
+        }
+        if features.neon {
+            // SAFETY: the exact runtime NEON feature is proven above.
+            unsafe { inject_pattern_neon(data, pattern, positions) };
             return;
-        },
-        _ => {}
+        }
     }
 
     // Scalar fallback
@@ -488,10 +455,12 @@ pub fn add_tls_padding(record: &mut Vec<u8>, target_size: usize, padding_byte: u
         return;
     }
 
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let features = *FeatureDetector::instance().features_full();
+
     #[cfg(target_arch = "x86_64")]
     {
-        let features = FeatureDetector::instance().features_full();
-        if features.gfni {
+        if features.sse2 && features.gfni {
             let padding_needed = target_size - current_len;
             let seed_lo = (current_len as u64).wrapping_mul(0x9E37_79B1_85EB_CA87)
                 ^ (padding_byte as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -506,46 +475,26 @@ pub fn add_tls_padding(record: &mut Vec<u8>, target_size: usize, padding_byte: u
         }
     }
 
-    let _profile = FeatureDetector::instance().profile();
-
     #[cfg(target_arch = "x86_64")]
-    match _profile {
-        CpuProfile::X86_P2a
-        | CpuProfile::X86_P2b
-        | CpuProfile::X86_P3a
-        | CpuProfile::X86_P3b
-        | CpuProfile::X86_P3c
-        | CpuProfile::X86_P3d
-        | CpuProfile::X86_P3e
-        | CpuProfile::X86_P4a
-        | CpuProfile::X86_P4b => unsafe {
-            add_tls_padding_avx2(record, target_size, padding_byte);
+    {
+        let matrix = features.simd_dispatch_matrix();
+        if matrix.avx2 {
+            // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
+            unsafe { add_tls_padding_avx2(record, target_size, padding_byte) };
             return;
-        },
-        CpuProfile::X86_P1f
-        | CpuProfile::X86_P1b
-        | CpuProfile::X86_P1a
-        | CpuProfile::X86_P0b
-        | CpuProfile::X86_P0a => unsafe {
-            add_tls_padding_sse2(record, target_size, padding_byte);
+        }
+        if features.sse2 {
+            // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
+            unsafe { add_tls_padding_sse2(record, target_size, padding_byte) };
             return;
-        },
-        _ => {}
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
-    match _profile {
-        CpuProfile::ARM_A0
-        | CpuProfile::ARM_A1a
-        | CpuProfile::ARM_A1b
-        | CpuProfile::ARM_A1c
-        | CpuProfile::ARM_A1d
-        | CpuProfile::Apple_M
-        | CpuProfile::ARM_A2 => unsafe {
-            add_tls_padding_neon(record, target_size, padding_byte);
-            return;
-        },
-        _ => {}
+    if features.neon {
+        // SAFETY: the exact runtime NEON feature is proven above.
+        unsafe { add_tls_padding_neon(record, target_size, padding_byte) };
+        return;
     }
 
     // Scalar fallback
@@ -701,8 +650,9 @@ pub fn generate_fake_hmac(data: &[u8], key: &[u8; 32]) -> [u8; 32] {
 
     #[cfg(target_arch = "x86_64")]
     {
-        use crate::optimize::CpuFeature;
-        if detector.has_feature(CpuFeature::SHA) {
+        let features = detector.features_full();
+        let matrix = features.simd_dispatch_matrix();
+        if matrix.sha256_vnni || matrix.avx2 {
             // Route SHA-capable x86 profiles through the centralized SIMD HMAC.
             return crate::simd::crypto::hmac_sha256(key, data);
         }
@@ -710,8 +660,7 @@ pub fn generate_fake_hmac(data: &[u8], key: &[u8; 32]) -> [u8; 32] {
 
     #[cfg(target_arch = "aarch64")]
     {
-        use crate::optimize::CpuFeature;
-        if detector.has_feature(CpuFeature::SHA256) || detector.has_feature(CpuFeature::SHA2) {
+        if detector.features_full().sha2 {
             // Apple M / ARM SHA hardware now active in default builds.
             return crate::simd::crypto::hmac_sha256(key, data);
         }

@@ -169,19 +169,16 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     // are &[u8]. All backends process data in 16-byte blocks with offset guards.
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        use crate::optimize::CpuFeature;
-
-        let detector = crate::optimize::FeatureDetector::instance();
-        let features = detector.features_full();
+        let features = crate::optimize::FeatureDetector::instance().features_full();
         if let Some(mode) = ghash_override_value() {
             match mode {
                 GhashOverride::Auto => {}
                 GhashOverride::Vpclmul => {
-                    if detector.has_feature(CpuFeature::VPCLMULQDQ)
-                        && detector.has_feature(CpuFeature::PCLMULQDQ)
-                        && detector.has_feature(CpuFeature::SSSE3)
-                        && detector.has_feature(CpuFeature::AVX512F)
-                        && detector.has_feature(CpuFeature::AVX512VL)
+                    if features.vpclmulqdq
+                        && features.pclmulqdq
+                        && features.ssse3
+                        && features.avx512f
+                        && features.avx512vl
                     {
                         crate::optimize::telemetry::GHASH_VPCLMUL_OPS.inc();
                         return ghash_hw_vpclmul(h, aad, ct);
@@ -191,7 +188,7 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
                         );
                 }
                 GhashOverride::Pclmul => {
-                    if detector.has_feature(CpuFeature::PCLMULQDQ) {
+                    if features.pclmulqdq {
                         crate::optimize::telemetry::GHASH_PCLMUL_OPS.inc();
                         return ghash_hw_pclmul(h, aad, ct);
                     }
@@ -221,16 +218,16 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
             }
         }
 
-        if detector.has_feature(CpuFeature::VPCLMULQDQ)
-            && detector.has_feature(CpuFeature::PCLMULQDQ)
-            && detector.has_feature(CpuFeature::SSSE3)
-            && detector.has_feature(CpuFeature::AVX512F)
-            && detector.has_feature(CpuFeature::AVX512VL)
+        if features.vpclmulqdq
+            && features.pclmulqdq
+            && features.ssse3
+            && features.avx512f
+            && features.avx512vl
         {
             crate::optimize::telemetry::GHASH_VPCLMUL_OPS.inc();
             return ghash_hw_vpclmul(h, aad, ct);
         }
-        if detector.has_feature(CpuFeature::PCLMULQDQ) {
+        if features.pclmulqdq {
             crate::optimize::telemetry::GHASH_PCLMUL_OPS.inc();
             return ghash_hw_pclmul(h, aad, ct);
         }
@@ -243,7 +240,7 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
     // as x86_64 block above. PMULL/NEON crypto gates checked per-backend.
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        let detector = crate::optimize::FeatureDetector::instance();
+        let features = crate::optimize::FeatureDetector::instance().features_full();
         if ghash_pmull_enabled() {
             let finalize = |hw: [u8; 16]| -> [u8; 16] {
                 #[cfg(any(test, debug_assertions))]
@@ -257,20 +254,16 @@ pub fn ghash(h: [u8; 16], aad: &[u8], ct: &[u8]) -> [u8; 16] {
                 hw
             };
 
-            if detector.has_feature(crate::optimize::CpuFeature::SVE_PMULL)
-                && detector.has_feature(crate::optimize::CpuFeature::AES)
-            {
+            if features.sve_pmull && features.neon && features.aes {
                 let hw = ghash_hw_sve_pmull(h, aad, ct);
                 return finalize(hw);
             }
 
-            if detector.has_feature(crate::optimize::CpuFeature::PMULL)
-                && detector.has_feature(crate::optimize::CpuFeature::AES)
-            {
+            if features.pmull && features.neon && features.aes {
                 let hw = ghash_hw_pmull_optimized(h, aad, ct);
                 return finalize(hw);
             }
-            if detector.has_feature(crate::optimize::CpuFeature::NEON) {
+            if features.neon {
                 crate::optimize::telemetry::GHASH_NEON_OPS.inc();
                 return finalize(ghash_hw_neon(h, aad, ct));
             }

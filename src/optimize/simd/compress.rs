@@ -11,13 +11,14 @@ pub fn histogram(data: &[u8]) -> [u32; 256] {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if features.avx512vbmi2 && features.avx512bw {
+        let matrix = features.simd_dispatch_matrix();
+        if matrix.avx512_vbmi2 {
             return unsafe { histogram_avx512_vbmi2(data) };
         }
-        if features.avx512bw {
+        if matrix.avx512_bw {
             return unsafe { histogram_avx512(data) };
         }
-        if features.avx2 {
+        if matrix.avx2 {
             return unsafe { histogram_avx2(data) };
         }
     }
@@ -46,10 +47,11 @@ pub fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if features.avx512vbmi2 && needle.len() <= 64 {
+        let matrix = features.simd_dispatch_matrix();
+        if matrix.avx512_vbmi2 && needle.len() <= 64 {
             return unsafe { find_pattern_avx512_vbmi2(haystack, needle) };
         }
-        if features.avx2 && needle.len() <= 32 {
+        if matrix.avx2 && needle.len() <= 32 {
             return unsafe { find_pattern_avx2(haystack, needle) };
         }
     }

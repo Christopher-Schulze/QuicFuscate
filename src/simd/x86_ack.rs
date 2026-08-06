@@ -4,8 +4,9 @@
 
 use std::arch::x86_64::*;
 
+#[target_feature(enable = "avx2")]
 #[inline]
-pub(super) unsafe fn canonical_ack_blocks_avx2(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+pub(crate) unsafe fn canonical_ack_blocks_avx2(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     if ranges.is_empty() {
         return Vec::new();
     }
@@ -103,7 +104,7 @@ pub(super) unsafe fn canonical_ack_blocks_avx2(ranges: &[(u64, u64)]) -> Vec<(u6
 }
 
 #[target_feature(enable = "avx512f", enable = "avx512vl")]
-pub(super) unsafe fn canonical_ack_blocks_avx512(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+pub(crate) unsafe fn canonical_ack_blocks_avx512(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     if ranges.is_empty() {
         return Vec::new();
     }
@@ -190,5 +191,23 @@ pub(super) unsafe fn canonical_ack_blocks_avx512(ranges: &[(u64, u64)]) -> Vec<(
         out.push((current_start, current_end));
     }
 
+    out
+}
+
+/// Canonicalize ACK ranges without an ISA requirement for test wrappers.
+pub(crate) fn canonical_ack_blocks_scalar(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_by_key(|range| range.0);
+
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+    for (start, end) in sorted {
+        if let Some(last) = out.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        out.push((start, end));
+    }
     out
 }

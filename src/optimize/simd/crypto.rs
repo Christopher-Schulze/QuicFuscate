@@ -46,18 +46,13 @@ fn chacha20_blocks_x4_scalar(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> 
 /// AES round with best available SIMD
 #[inline(always)]
 pub fn aes_round(state: &mut [u8; 16], round_key: &[u8; 16]) {
-    #[cfg(all(target_arch = "x86_64", target_feature = "vaes"))]
+    #[cfg(target_arch = "x86_64")]
     {
         let features = FeatureDetector::instance().features_full();
-        if features.avx512f {
+        if features.simd_dispatch_matrix().vaes_aes {
             return unsafe { aes_round_vaes(state, round_key) };
         }
-    }
-
-    #[cfg(all(target_arch = "x86_64", target_feature = "aes"))]
-    {
-        let features = FeatureDetector::instance().features_full();
-        if features.aes {
+        if features.aesni && features.sse2 {
             return unsafe { aes_round_aesni(state, round_key) };
         }
     }
@@ -110,7 +105,7 @@ pub fn chacha20_blocks_x4(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u
                 );
             }
             "avx" => {
-                if features.avx {
+                if features.simd_dispatch_matrix().chacha_avx {
                     crate::optimize::telemetry::CHACHA20_X4_AVX_OPS.inc();
                     return unsafe { chacha20_blocks_x4_avx(key, nonce, counter) };
                 }
@@ -137,7 +132,7 @@ pub fn chacha20_blocks_x4(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u
         if features.avx2 {
             crate::optimize::telemetry::CHACHA20_X4_AVX2_OPS.inc();
             return unsafe { chacha20_blocks_x4_avx2(key, nonce, counter) };
-        } else if features.avx {
+        } else if features.simd_dispatch_matrix().chacha_avx {
             crate::optimize::telemetry::CHACHA20_X4_AVX_OPS.inc();
             return unsafe { chacha20_blocks_x4_avx(key, nonce, counter) };
         } else if features.sse41 && features.ssse3 {
@@ -694,7 +689,8 @@ unsafe fn xor_slice_simd(dst: &mut [u8], src: &[u8]) {
 }
 
 /// AES round with AES-NI
-#[cfg(all(target_arch = "x86_64", target_feature = "aes"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "aes,sse2")]
 #[inline(always)]
 unsafe fn aes_round_aesni(state: &mut [u8; 16], round_key: &[u8; 16]) {
     use std::arch::x86_64::*;
@@ -706,7 +702,8 @@ unsafe fn aes_round_aesni(state: &mut [u8; 16], round_key: &[u8; 16]) {
 }
 
 /// VAES for parallel AES rounds (AVX-512)
-#[cfg(all(target_arch = "x86_64", target_feature = "vaes"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "vaes,avx512f,aes,sse2")]
 #[inline(always)]
 unsafe fn aes_round_vaes(state: &mut [u8; 16], round_key: &[u8; 16]) {
     // Fallback to AES-NI for single block

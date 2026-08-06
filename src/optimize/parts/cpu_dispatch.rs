@@ -101,6 +101,8 @@ pub struct CpuFeatures {
     pub vaes: bool,
     /// x86_64: Vector CLMUL (256/512-bit carry-less multiply).
     pub vpclmulqdq: bool,
+    /// x86_64: Scalar-width carry-less multiply.
+    pub pclmulqdq: bool,
     /// x86_64: SHA-1/SHA-256 hardware acceleration.
     pub sha: bool,
     /// x86_64: Galois Field New Instructions (GF(2^8) native).
@@ -177,6 +179,67 @@ pub struct CpuFeatures {
     pub l3_cache: usize,
     /// Cache line size in bytes.
     pub cache_line: usize,
+}
+
+/// Exact runtime feature intersections required by SIMD target-feature
+/// functions. This matrix deliberately uses only CPU-reported capabilities;
+/// callers still need the compiler target-feature contract provided by each
+/// callee's `#[target_feature]` annotation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SimdFeatureMatrix {
+    /// AVX2 integer SIMD.
+    pub avx2: bool,
+    /// AVX-512 ACK canonicalization: Foundation plus Vector Length.
+    pub avx512_ack: bool,
+    /// AVX-512 byte/word operations.
+    pub avx512_bw: bool,
+    /// AVX-512 VBMI byte permutation.
+    pub avx512_vbmi: bool,
+    /// AVX-512 VBMI2 byte compress/expand operations.
+    pub avx512_vbmi2: bool,
+    /// AVX-512 vector population count.
+    pub avx512_vpopcnt: bool,
+    /// SHA-256 VNNI path.
+    pub sha256_vnni: bool,
+    /// Single-block VAES path delegated to AES-NI.
+    pub vaes_aes: bool,
+    /// GF(2^16) VPCLMUL path.
+    pub gf16_vpclmul: bool,
+    /// GF(2^16) PCLMUL path.
+    pub gf16_pclmul: bool,
+    /// AVX-512 FMA neural path.
+    pub neural_avx512: bool,
+    /// AVX2 FMA neural path.
+    pub neural_avx2: bool,
+    /// AVX ChaCha path.
+    pub chacha_avx: bool,
+    /// Runtime SVE2 availability.
+    pub sve2: bool,
+    /// Runtime NEON availability.
+    pub neon: bool,
+}
+
+impl CpuFeatures {
+    /// Compute the exact runtime feature intersections used by SIMD dispatch.
+    pub fn simd_dispatch_matrix(&self) -> SimdFeatureMatrix {
+        SimdFeatureMatrix {
+            avx2: self.avx2,
+            avx512_ack: self.avx512f && self.avx512vl,
+            avx512_bw: self.avx512f && self.avx512bw,
+            avx512_vbmi: self.avx512f && self.avx512vbmi,
+            avx512_vbmi2: self.avx512f && self.avx512bw && self.avx512vbmi2,
+            avx512_vpopcnt: self.avx512f && self.avx512cd && self.avx512vpopcntdq,
+            sha256_vnni: self.avx512f && self.avx512vl && self.avx512vnni,
+            vaes_aes: self.avx512f && self.vaes && self.aesni && self.sse2,
+            gf16_vpclmul: self.avx512f && self.vpclmulqdq && self.sse41,
+            gf16_pclmul: self.pclmulqdq && self.sse41,
+            neural_avx512: self.avx512f && self.fma3,
+            neural_avx2: self.avx2 && self.fma3,
+            chacha_avx: self.avx && self.sse41 && self.ssse3,
+            sve2: self.sve2,
+            neon: self.neon,
+        }
+    }
 }
 
 /// Evidence collected for Intel AMX without enabling a product dispatch path.
@@ -679,6 +742,7 @@ impl FeatureDetector {
             }
             if is_x86_feature_detected!("pclmulqdq") {
                 features.insert(CpuFeature::PCLMULQDQ);
+                features_full.pclmulqdq = true;
                 features_full.vpclmulqdq = is_x86_feature_detected!("vpclmulqdq");
             }
             if is_x86_feature_detected!("sha") {
@@ -1003,80 +1067,87 @@ impl FeatureDetector {
 
         #[cfg(target_arch = "x86_64")]
         {
-            if self.has_feature(CpuFeature::AVX10_1_512) {
+            let features = self.features_full;
+            let matrix = features.simd_dispatch_matrix();
+
+            if features.avx10_1_512 {
                 return CpuProfile::X86_P4b;
             }
-            if self.has_feature(CpuFeature::AVX10_1_256) {
+            if features.avx10_1_256 {
                 return CpuProfile::X86_P4a;
             }
 
             // Check from highest to lowest capability
-            if self.has_feature(CpuFeature::AVX512F) {
-                if self.has_feature(CpuFeature::GFNI) {
+            if features.avx512f {
+                if features.gfni {
                     return CpuProfile::X86_P3e;
                 }
-                if self.has_feature(CpuFeature::AVX512VPOPCNTDQ) {
+                if matrix.avx512_vpopcnt {
                     return CpuProfile::X86_P3d;
                 }
-                if self.has_feature(CpuFeature::AVX512VBMI2) {
+                if matrix.avx512_vbmi2 {
                     return CpuProfile::X86_P3c;
                 }
-                if self.has_feature(CpuFeature::VAES) && self.has_feature(CpuFeature::VPCLMULQDQ) {
+                if features.vaes && features.vpclmulqdq {
                     return CpuProfile::X86_P3b;
                 }
                 return CpuProfile::X86_P3a;
             }
 
-            if self.has_feature(CpuFeature::AVX2) {
-                if self.has_feature(CpuFeature::BMI2) {
+            if features.avx2 {
+                if features.bmi2 {
                     return CpuProfile::X86_P2b;
                 }
                 return CpuProfile::X86_P2a;
             }
 
-            if self.has_feature(CpuFeature::AVX) {
+            if features.avx {
                 return CpuProfile::X86_P1f;
             }
 
-            if self.has_feature(CpuFeature::AESNI) && self.has_feature(CpuFeature::PCLMULQDQ) {
+            if features.aesni && features.pclmulqdq {
                 return CpuProfile::X86_P1b;
             }
 
-            if self.has_feature(CpuFeature::SSE42) {
+            if features.sse42 {
                 return CpuProfile::X86_P1a;
             }
 
             // Legacy fallbacks
-            if self.has_feature(CpuFeature::SSSE3) {
+            if features.ssse3 {
                 return CpuProfile::X86_P0b;
             }
-            if self.has_feature(CpuFeature::SSE2) {
+            if features.sse2 {
                 return CpuProfile::X86_P0a;
             }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
+            let features = self.features_full;
             #[cfg(target_os = "macos")]
-            if self.has_feature(CpuFeature::APPLE_AMX) {
+            if features.apple_amx {
                 return CpuProfile::Apple_M;
             }
 
-            if self.has_feature(CpuFeature::SVE2) {
+            if features.sve2 {
                 return CpuProfile::ARM_A2;
             }
 
-            if self.has_feature(CpuFeature::NEON) {
-                if self.has_feature(CpuFeature::SHA256) || self.has_feature(CpuFeature::SHA512) {
+            if features.neon {
+                if features.aes
+                    && features.pmull
+                    && (features.sha1 || features.sha2 || features.sha512)
+                {
                     return CpuProfile::ARM_A1d;
                 }
-                if self.has_feature(CpuFeature::PMULL) {
+                if features.aes && features.pmull {
                     return CpuProfile::ARM_A1c;
                 }
-                if self.has_feature(CpuFeature::AES) {
+                if features.aes {
                     return CpuProfile::ARM_A1b;
                 }
-                if self.has_feature(CpuFeature::CRC32) {
+                if features.crc32 {
                     return CpuProfile::ARM_A1a;
                 }
                 return CpuProfile::ARM_A0;
@@ -1116,53 +1187,42 @@ impl FeatureDetector {
 
     #[cfg(any(test, feature = "rust-tests"))]
     fn profile_override_supported(&self, profile: CpuProfile) -> bool {
+        let features = self.features_full;
+        let matrix = features.simd_dispatch_matrix();
+
         match profile {
             CpuProfile::Scalar => true,
-            CpuProfile::X86_P0a => self.has_feature(CpuFeature::SSE2),
-            CpuProfile::X86_P0b => self.has_feature(CpuFeature::SSSE3),
-            CpuProfile::X86_P1a => self.has_feature(CpuFeature::SSE42),
-            CpuProfile::X86_P1b => {
-                self.has_feature(CpuFeature::AESNI) && self.has_feature(CpuFeature::PCLMULQDQ)
-            }
-            CpuProfile::X86_P1f => self.has_feature(CpuFeature::AVX),
-            CpuProfile::X86_P2a => self.has_feature(CpuFeature::AVX2),
-            CpuProfile::X86_P2b => {
-                self.has_feature(CpuFeature::AVX2) && self.has_feature(CpuFeature::BMI2)
-            }
-            CpuProfile::X86_P3a => self.has_feature(CpuFeature::AVX512F),
+            CpuProfile::X86_P0a => features.sse2,
+            CpuProfile::X86_P0b => features.ssse3,
+            CpuProfile::X86_P1a => features.sse42,
+            CpuProfile::X86_P1b => features.aesni && features.pclmulqdq,
+            CpuProfile::X86_P1f => features.avx,
+            CpuProfile::X86_P2a => matrix.avx2,
+            CpuProfile::X86_P2b => matrix.avx2 && features.bmi2,
+            CpuProfile::X86_P3a => features.avx512f,
             CpuProfile::X86_P3b => {
-                self.has_feature(CpuFeature::AVX512F)
-                    && self.has_feature(CpuFeature::VAES)
-                    && self.has_feature(CpuFeature::VPCLMULQDQ)
+                features.avx512f && features.vaes && features.vpclmulqdq
             }
-            CpuProfile::X86_P3c => {
-                self.has_feature(CpuFeature::AVX512F) && self.has_feature(CpuFeature::AVX512VBMI2)
-            }
-            CpuProfile::X86_P3d => {
-                self.has_feature(CpuFeature::AVX512F)
-                    && self.has_feature(CpuFeature::AVX512VPOPCNTDQ)
-            }
-            CpuProfile::X86_P3e => {
-                self.has_feature(CpuFeature::AVX512F) && self.has_feature(CpuFeature::GFNI)
-            }
-            CpuProfile::X86_P4a => self.has_feature(CpuFeature::AVX10_1_256),
-            CpuProfile::X86_P4b => self.has_feature(CpuFeature::AVX10_1_512),
-            CpuProfile::ARM_A0 => self.has_feature(CpuFeature::NEON),
+            CpuProfile::X86_P3c => matrix.avx512_vbmi2,
+            CpuProfile::X86_P3d => matrix.avx512_vpopcnt,
+            CpuProfile::X86_P3e => features.avx512f && features.gfni,
+            CpuProfile::X86_P4a => features.avx10_1_256,
+            CpuProfile::X86_P4b => features.avx10_1_512,
+            CpuProfile::ARM_A0 => features.neon,
             CpuProfile::ARM_A1a => {
-                self.has_feature(CpuFeature::NEON) && self.has_feature(CpuFeature::CRC32)
+                features.neon && features.crc32
             }
-            CpuProfile::ARM_A1b => self.has_feature(CpuFeature::AES),
-            CpuProfile::ARM_A1c => {
-                self.has_feature(CpuFeature::AES) && self.has_feature(CpuFeature::PMULL)
-            }
+            CpuProfile::ARM_A1b => features.neon && features.aes,
+            CpuProfile::ARM_A1c => features.neon && features.aes && features.pmull,
             CpuProfile::ARM_A1d => {
-                self.has_feature(CpuFeature::AES)
-                    && self.has_feature(CpuFeature::PMULL)
-                    && (self.has_feature(CpuFeature::SHA1) || self.has_feature(CpuFeature::SHA2))
+                features.neon
+                    && features.aes
+                    && features.pmull
+                    && (features.sha1 || features.sha2 || features.sha512)
             }
-            CpuProfile::ARM_A2 => self.has_feature(CpuFeature::SVE2),
-            CpuProfile::Apple_M => self.has_feature(CpuFeature::APPLE_AMX),
-            CpuProfile::RVV => self.has_feature(CpuFeature::RVV),
+            CpuProfile::ARM_A2 => features.sve2,
+            CpuProfile::Apple_M => features.apple_amx,
+            CpuProfile::RVV => features.rvv,
         }
     }
 
@@ -1515,16 +1575,8 @@ impl SimdDispatch {
             i += 64;
         }
 
-        // Process remainder with AVX2
-        while i + 32 <= len {
-            let a = _mm256_loadu_si256(dst[i..].as_ptr() as *const __m256i);
-            let b = _mm256_loadu_si256(src[i..].as_ptr() as *const __m256i);
-            let c = _mm256_xor_si256(a, b);
-            _mm256_storeu_si256(dst[i..].as_mut_ptr() as *mut __m256i, c);
-            i += 32;
-        }
-
-        // Process remainder scalar
+        // AVX-512F does not imply AVX2. Keep the remainder scalar so this
+        // function's target-feature contract remains self-contained.
         while i < len {
             dst[i] ^= src[i];
             i += 1;
@@ -1721,31 +1773,31 @@ where
     F: Fn(&dyn SimdPolicy) -> R,
 {
     let detector = FeatureDetector::instance();
+    let features = detector.features_full();
+    let matrix = features.simd_dispatch_matrix();
     let has_avx10_512 = detector.features.contains(&CpuFeature::AVX10_1_512);
     let has_avx10_256 = detector.features.contains(&CpuFeature::AVX10_1_256);
-    let has_avx512 = has_avx10_512 || detector.features.contains(&CpuFeature::AVX512F);
-    let has_avx2 = detector.features.contains(&CpuFeature::AVX2) || has_avx10_256 || has_avx10_512;
 
     // Priority order: GFNI > VBMI2 > VBMI > AVX2 > SSE2 > SVE2 > SVE > NEON
-    if has_avx512 && detector.has_feature(CpuFeature::GFNI) {
+    if features.avx512f && features.gfni {
         telemetry::SIMD_USAGE_AVX512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if has_avx10_512 {
             telemetry::SIMD_USAGE_AVX10_512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         f(&Avx512Gfni)
-    } else if has_avx512 && detector.has_feature(CpuFeature::AVX512VBMI2) {
+    } else if matrix.avx512_vbmi2 {
         telemetry::SIMD_USAGE_AVX512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if has_avx10_512 {
             telemetry::SIMD_USAGE_AVX10_512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         f(&Avx512Vbmi2)
-    } else if has_avx512 && detector.has_feature(CpuFeature::AVX512VBMI) {
+    } else if matrix.avx512_vbmi {
         telemetry::SIMD_USAGE_AVX512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if has_avx10_512 {
             telemetry::SIMD_USAGE_AVX10_512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         f(&Avx512)
-    } else if has_avx2 {
+    } else if matrix.avx2 {
         telemetry::SIMD_USAGE_AVX2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if has_avx10_512 {
             telemetry::SIMD_USAGE_AVX10_512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1754,18 +1806,18 @@ where
         }
         f(&Avx2)
     // SSE2 removed - fallback directly to scalar
-    } else if detector.has_feature(CpuFeature::PCLMULQDQ) {
+    } else if features.pclmulqdq {
         f(&Pclmulqdq)
-    } else if detector.has_feature(CpuFeature::SVE2) {
+    } else if matrix.sve2 {
         telemetry::SIMD_USAGE_NEON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&Sve2)
-    } else if detector.has_feature(CpuFeature::SVE) {
+    } else if features.sve {
         telemetry::SIMD_USAGE_NEON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&Sve)
-    } else if detector.has_feature(CpuFeature::NEON_CRYPTO) {
+    } else if features.neon && features.aes && features.pmull {
         telemetry::SIMD_USAGE_NEON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&NeonCrypto)
-    } else if detector.has_feature(CpuFeature::NEON) {
+    } else if matrix.neon {
         telemetry::SIMD_USAGE_NEON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&Neon)
     } else {
@@ -1797,6 +1849,8 @@ where
     F: FnMut(&dyn SimdPolicy) -> R,
 {
     let detector = FeatureDetector::instance();
+    let features = detector.features_full();
+    let matrix = features.simd_dispatch_matrix();
 
     // Resolve optional runtime override (test override takes precedence)
     let ov: Option<String> = {
@@ -1833,10 +1887,7 @@ where
                 return f(&Scalar);
             }
             "avx512vbmi2" => {
-                if detector.has_feature(CpuFeature::AVX512F)
-                    && detector.has_feature(CpuFeature::AVX512VBMI2)
-                    && detector.has_feature(CpuFeature::AVX512BW)
-                {
+                if matrix.avx512_vbmi2 {
                     return f(&Avx512Vbmi2);
                 } else {
                     warn!(
@@ -1845,28 +1896,21 @@ where
                 }
             }
             "avx512" => {
-                if detector.has_feature(CpuFeature::AVX512F)
-                    && detector.has_feature(CpuFeature::AVX512VBMI)
-                    && detector.has_feature(CpuFeature::PCLMULQDQ)
-                {
+                if matrix.avx512_vbmi {
                     return f(&Avx512);
                 } else {
                     warn!("QUICFUSCATE_FEC_KERNEL=avx512 requested but unsupported; falling back to auto");
                 }
             }
             "avx2" => {
-                if detector.has_feature(CpuFeature::AVX2)
-                    && detector.has_feature(CpuFeature::PCLMULQDQ)
-                {
+                if matrix.avx2 {
                     return f(&Avx2);
                 } else {
                     warn!("QUICFUSCATE_FEC_KERNEL=avx2 requested but unsupported; falling back to auto");
                 }
             }
             "neon" => {
-                if detector.has_feature(CpuFeature::NEON)
-                    && detector.has_feature(CpuFeature::NEON_CRYPTO)
-                {
+                if features.neon && features.aes && features.pmull {
                     return f(&Neon);
                 } else {
                     warn!("QUICFUSCATE_FEC_KERNEL=neon requested but unsupported; falling back to auto");
@@ -1886,26 +1930,17 @@ where
     }
 
     // Default automatic selection path (unchanged ordering)
-    if detector.has_feature(CpuFeature::AVX512F)
-        && detector.has_feature(CpuFeature::AVX512VBMI2)
-        && detector.has_feature(CpuFeature::AVX512BW)
-    {
+    if matrix.avx512_vbmi2 {
         f(&Avx512Vbmi2)
-    } else if detector.has_feature(CpuFeature::AVX512F)
-        && detector.has_feature(CpuFeature::AVX512VBMI)
-        && detector.has_feature(CpuFeature::PCLMULQDQ)
-    {
+    } else if matrix.avx512_vbmi {
         f(&Avx512)
-    } else if detector.has_feature(CpuFeature::AVX2) && detector.has_feature(CpuFeature::PCLMULQDQ)
-    {
+    } else if matrix.avx2 {
         f(&Avx2)
-    } else if detector.has_feature(CpuFeature::SSE2) {
+    } else if features.sse2 {
         f(&Sse2)
-    } else if detector.has_feature(CpuFeature::SVE2) {
+    } else if matrix.sve2 {
         f(&Sve2)
-    } else if detector.has_feature(CpuFeature::NEON)
-        && detector.has_feature(CpuFeature::NEON_CRYPTO)
-    {
+    } else if features.neon && features.aes && features.pmull {
         f(&Neon)
     } else {
         f(&Scalar)
@@ -1957,7 +1992,7 @@ fn with_override<T>(val: Option<&str>, f: impl FnOnce() -> T) -> T {
 mod tests {
     use super::{
         bitslice_policy_tag, dispatch_bitslice, with_override, AmxCapability, AmxSignals,
-        PROFILE_OVERRIDE, TEST_FEC_KERNEL_OVERRIDE,
+        CpuFeatures, PROFILE_OVERRIDE, TEST_FEC_KERNEL_OVERRIDE,
     };
     use crate::simd::{CpuFeature, FeatureDetector};
     use std::sync::{Arc, Barrier};
@@ -2096,6 +2131,55 @@ mod tests {
     }
 
     #[test]
+    fn simd_dispatch_matrix_requires_every_target_feature() {
+        let mut features = CpuFeatures::default();
+
+        features.avx512f = true;
+        assert!(!features.simd_dispatch_matrix().avx512_ack);
+        features.avx512vl = true;
+        assert!(features.simd_dispatch_matrix().avx512_ack);
+
+        features.avx512bw = true;
+        features.avx512vbmi2 = true;
+        assert!(features.simd_dispatch_matrix().avx512_vbmi2);
+        features.avx512f = false;
+        assert!(!features.simd_dispatch_matrix().avx512_vbmi2);
+        features.avx512f = true;
+
+        features.avx512cd = true;
+        assert!(!features.simd_dispatch_matrix().avx512_vpopcnt);
+        features.avx512vpopcntdq = true;
+        assert!(features.simd_dispatch_matrix().avx512_vpopcnt);
+
+        features.avx512vnni = true;
+        assert!(features.simd_dispatch_matrix().sha256_vnni);
+        features.avx512vl = false;
+        assert!(!features.simd_dispatch_matrix().sha256_vnni);
+        features.avx512vl = true;
+
+        features.vaes = true;
+        features.aesni = true;
+        assert!(!features.simd_dispatch_matrix().vaes_aes);
+        features.sse2 = true;
+        assert!(features.simd_dispatch_matrix().vaes_aes);
+
+        features.vpclmulqdq = true;
+        features.sse41 = true;
+        assert!(features.simd_dispatch_matrix().gf16_vpclmul);
+        features.pclmulqdq = true;
+        assert!(features.simd_dispatch_matrix().gf16_pclmul);
+
+        features.fma3 = true;
+        assert!(features.simd_dispatch_matrix().neural_avx512);
+        features.avx2 = true;
+        assert!(features.simd_dispatch_matrix().neural_avx2);
+
+        features.avx = true;
+        features.ssse3 = true;
+        assert!(features.simd_dispatch_matrix().chacha_avx);
+    }
+
+    #[test]
     fn override_ref_selects_scalar() {
         let tag = with_override(Some("ref"), || {
             dispatch_bitslice(|p| bitslice_policy_tag(p).to_string())
@@ -2118,7 +2202,7 @@ mod tests {
         let tag = with_override(Some("avx2"), || {
             dispatch_bitslice(|p| bitslice_policy_tag(p).to_string())
         });
-        if det.has_feature(CpuFeature::AVX2) && det.has_feature(CpuFeature::PCLMULQDQ) {
+        if det.features_full().simd_dispatch_matrix().avx2 {
             assert_eq!(tag, "avx2");
         } else {
             let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
@@ -2132,10 +2216,7 @@ mod tests {
         let tag = with_override(Some("avx512"), || {
             dispatch_bitslice(|p| bitslice_policy_tag(p).to_string())
         });
-        if det.has_feature(CpuFeature::AVX512F)
-            && det.has_feature(CpuFeature::AVX512VBMI)
-            && det.has_feature(CpuFeature::PCLMULQDQ)
-        {
+        if det.features_full().simd_dispatch_matrix().avx512_vbmi {
             assert_eq!(tag, "avx512");
         } else {
             let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];
@@ -2149,7 +2230,7 @@ mod tests {
         let tag = with_override(Some("neon"), || {
             dispatch_bitslice(|p| bitslice_policy_tag(p).to_string())
         });
-        if det.has_feature(CpuFeature::NEON) && det.has_feature(CpuFeature::NEON_CRYPTO) {
+        if det.features_full().neon && det.features_full().aes && det.features_full().pmull {
             assert_eq!(tag, "neon");
         } else {
             let allowed = ["avx512vbmi2", "avx512", "avx2", "sse2", "sve2", "neon", "scalar"];

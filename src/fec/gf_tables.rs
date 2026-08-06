@@ -237,7 +237,7 @@ pub(crate) fn gf_mul_scalar_slice(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     {
         // Intel GFNI multiplies in the AES 0x11B field, while this codec's
         // wire contract is GF(256)/0x11D. Use the 0x11D nibble-table path.
-        if policy.has_feature(optimize::CpuFeature::AVX2) {
+        if policy.features_full().simd_dispatch_matrix().avx2 {
             unsafe {
                 gf_mul_scalar_slice_avx2(coeff, &src[..len], &mut out_xor[..len]);
             }

@@ -13,7 +13,11 @@ pub(super) use super::x86_extended::{
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi2")]
 pub(super) unsafe fn find_pattern_vbmi2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    // No dedicated VBMI2 implementation here. AVX2 is a safe fallback for VBMI2-capable CPUs.
+    // No dedicated VBMI2 implementation exists here. The fallback helper is
+    // AVX2-only, so prove that intersection before calling it.
+    if !super::FeatureDetector::instance().features_full().simd_dispatch_matrix().avx2 {
+        return scalar::find_pattern(haystack, needle);
+    }
     find_pattern_avx2(haystack, needle)
 }
 
@@ -336,7 +340,7 @@ pub(super) unsafe fn find_pattern_sse42_short(haystack: &[u8], needle: &[u8]) ->
     None
 }
 /// AES encryption with VAES - vectorized AES for parallel blocks
-#[target_feature(enable = "vaes", enable = "avx512f")]
+#[target_feature(enable = "vaes", enable = "avx512f", enable = "aes", enable = "sse2")]
 pub(super) unsafe fn aes_encrypt_vaes(state: &mut [u8; 16], key: &[u8; 16]) {
     // For a single block, VAES provides no material benefit over AES-NI.
     aes_encrypt_aesni(state, key);
@@ -387,14 +391,8 @@ pub(super) unsafe fn aes_encrypt_aesni(state: &mut [u8; 16], key: &[u8; 16]) {
 
     _mm_storeu_si128(state.as_mut_ptr() as *mut __m128i, block);
 }
-/// SHA-256 with SHA Extensions hardware acceleration
-#[target_feature(enable = "sha", enable = "sse2")]
-pub(super) unsafe fn sha256_hw(data: &[u8]) -> [u8; 32] {
-    // Correctness-first fallback until a full SHA-NI schedule/padding implementation is wired.
-    scalar::sha256(data)
-}
 /// Histogram with AVX-512 - conflict detection for fast counting
-#[target_feature(enable = "avx512f", enable = "avx512cd")]
+#[target_feature(enable = "avx512f", enable = "avx512cd", enable = "avx512vpopcntdq")]
 pub(super) unsafe fn histogram_avx512(data: &[u8]) -> [u32; 256] {
     let mut hist = [0u32; 256];
     let mut i = 0;

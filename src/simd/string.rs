@@ -1,7 +1,7 @@
 //! Extracted SIMD `string` submodule (TODO-563).
 
 #[cfg(target_arch = "x86_64")]
-use crate::optimize::{CpuFeature, FeatureDetector};
+use crate::optimize::FeatureDetector;
 
 /// String comparison with SIMD acceleration when available.
 #[inline(always)]
@@ -15,11 +15,11 @@ pub fn compare(a: &[u8], b: &[u8]) -> bool {
     // Callees process in SIMD-width chunks with scalar tail handling.
     #[cfg(target_arch = "x86_64")]
     {
-        let features = FeatureDetector::instance();
-        if features.has_feature(CpuFeature::AVX2) {
+        let features = FeatureDetector::instance().features_full();
+        if features.simd_dispatch_matrix().avx2 {
             return unsafe { super::x86::string_compare_avx2(a, b) };
         }
-        if features.has_feature(CpuFeature::SSE42) {
+        if features.sse42 {
             return unsafe { super::x86::string_compare_sse42(a, b) };
         }
     }
