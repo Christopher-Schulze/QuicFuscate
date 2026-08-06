@@ -53,6 +53,7 @@ const TONES: Record<ToastTone, ToneStyle> = {
 let toasts = $state<Toast[]>([]);
 let anchor = $state<{ x: number; y: number } | null>(null);
 const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let nextToastId = 0;
 
 export function getToasts(): Toast[] {
   return toasts;
@@ -66,8 +67,14 @@ export function setAnchor(pos: { x: number; y: number } | null): void {
   anchor = pos;
 }
 
+function createToastId(): string {
+  const id = nextToastId;
+  nextToastId += 1;
+  return `toast-${id.toString(36)}`;
+}
+
 export function addToast(message: string, tone: ToastTone = "info", durationMs = 2800): void {
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = createToastId();
   toasts = [...toasts, { id, message, tone }];
   const timer = setTimeout(() => {
     toastTimers.delete(id);

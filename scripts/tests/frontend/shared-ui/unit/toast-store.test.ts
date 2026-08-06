@@ -50,6 +50,18 @@ describe("addToast", () => {
     expect(toasts[0].id).not.toBe(toasts[1].id);
   });
 
+  test("keeps ids unique with a fixed clock and repeated random output", () => {
+    vi.setSystemTime(new Date("2026-08-06T12:00:00.000Z"));
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    for (let index = 0; index < 128; index += 1) {
+      addToast(`Toast ${index}`, "info", 60_000);
+    }
+
+    const ids = getToasts().map((toast) => toast.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   test("defaults tone to info when not specified", () => {
     addToast("Default tone");
     const toasts = getToasts();

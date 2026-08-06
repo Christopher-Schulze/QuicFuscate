@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { render } from "../../../testing-library";
 
 import Sparkline from "../../../../../../../../apps/svelte-admin/src/lib/components/ui/Sparkline.svelte";
@@ -21,6 +21,21 @@ describe("Sparkline", () => {
     const { container } = render(Sparkline, { props: { data: [10, 20, 15, 30] } });
     const svg = container.querySelector("svg");
     expect(svg).not.toBeNull();
+  });
+
+  test("keeps gradient ids unique across concurrent instances", () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const { container } = render(Sparkline, { props: { data: [1, 2] } });
+    const second = render(Sparkline, { props: { data: [3, 4] } });
+    const ids = [
+      container.querySelector("linearGradient")?.getAttribute("id"),
+      second.container.querySelector("linearGradient")?.getAttribute("id"),
+    ];
+
+    expect(ids[0]).toBeTruthy();
+    expect(ids[1]).toBeTruthy();
+    expect(new Set(ids).size).toBe(ids.length);
+    random.mockRestore();
   });
 
   test("SVG has correct default dimensions", () => {

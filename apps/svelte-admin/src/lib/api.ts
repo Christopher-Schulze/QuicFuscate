@@ -68,6 +68,10 @@ const CSRF_TOKEN_HEADER = "X-CSRF-Token";
 const CSRF_NONCE_HEADER = "X-CSRF-Nonce";
 const CSRF_STORAGE_KEY = "qf_admin_csrf_token";
 
+export type CsrfNonceResult =
+  | { ok: true; value: string }
+  | { ok: false; reason: "secure-randomness-unavailable" };
+
 function readPersistedCsrfToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -94,16 +98,46 @@ function persistCsrfToken(token: string | null): void {
 }
 
 let csrfToken: string | null = readPersistedCsrfToken();
+let csrfNonceSequence = 0;
 
-function createCsrfNonce(): string {
+function encodeNonceBytes(bytes: Uint8Array): string {
+  let encoded = "";
+  for (const byte of bytes) encoded += byte.toString(16).padStart(2, "0");
+  return encoded;
+}
+
+function createSecureNoncePart(): string | null {
+  if (typeof globalThis.crypto === "undefined") return null;
+
   try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID();
+    if (typeof globalThis.crypto.randomUUID === "function") {
+      const value = globalThis.crypto.randomUUID().trim();
+      if (value) return value;
     }
   } catch {
-    // Fall through
+    // Try the byte-oriented secure source below.
   }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+
+  try {
+    if (typeof globalThis.crypto.getRandomValues === "function") {
+      const bytes = new Uint8Array(32);
+      globalThis.crypto.getRandomValues(bytes);
+      return encodeNonceBytes(bytes);
+    }
+  } catch {
+    // Report the unavailable secure source to the request owner.
+  }
+
+  return null;
+}
+
+export function createCsrfNonce(): CsrfNonceResult {
+  const securePart = createSecureNoncePart();
+  if (!securePart) return { ok: false, reason: "secure-randomness-unavailable" };
+
+  const sequence = csrfNonceSequence;
+  csrfNonceSequence += 1;
+  return { ok: true, value: `qf-csrf-${sequence.toString(36)}-${securePart}` };
 }
 
 function isCsrfError(status: number | undefined, message: string | null): boolean {
@@ -184,7 +218,9 @@ async function request(path: string, init: RequestInit): Promise<Response> {
     if (csrfToken) {
       headers.set(CSRF_TOKEN_HEADER, csrfToken);
       if (method === "POST") {
-        headers.set(CSRF_NONCE_HEADER, createCsrfNonce());
+        const nonce = createCsrfNonce();
+        if (!nonce.ok) throw new ApiError("CSRF nonce unavailable");
+        headers.set(CSRF_NONCE_HEADER, nonce.value);
       }
     }
     const resp = await fetch(path, {

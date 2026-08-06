@@ -1,5 +1,6 @@
 import { cleanup } from "@testing-library/svelte";
 import { afterEach, beforeEach, vi } from "vitest";
+import { createDeterministicTestUuid } from "../../test-identity";
 
 function ensurePortalStage(): void {
   if (document.getElementById("qf-app-stage")) return;
@@ -38,7 +39,7 @@ beforeEach(() => {
     Object.defineProperty(globalThis.crypto, "randomUUID", {
       configurable: true,
       writable: true,
-      value: () => `test-${Math.random().toString(16).slice(2)}-${Date.now().toString(16)}`,
+      value: createDeterministicTestUuid,
     });
   }
 

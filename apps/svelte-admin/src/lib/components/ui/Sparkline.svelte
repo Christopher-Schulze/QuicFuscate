@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  let nextSparklineId = 0;
+
+  function createSparklineGradientId(): string {
+    const id = nextSparklineId;
+    nextSparklineId += 1;
+    return `sparkline-grad-${id.toString(36)}`;
+  }
+</script>
+
 <script lang="ts">
   import { cn } from "@quicfuscate/ui";
 
@@ -19,7 +29,7 @@
     className,
   }: Props = $props();
 
-  const gradientId = `sparkline-grad-${Math.random().toString(36).slice(2, 8)}`;
+  const gradientId = createSparklineGradientId();
 
   const pathData = $derived.by(() => {
     if (data.length < 2) return null;

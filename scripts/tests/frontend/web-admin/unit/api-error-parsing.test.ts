@@ -1,10 +1,89 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   ApiError,
+  createCsrfNonce,
   parseErrorMessageBody,
+  postJson,
   sanitizeErrorMessage,
 } from "../../../../../apps/svelte-admin/src/lib/api";
+
+describe("createCsrfNonce", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  test("uses the platform UUID capability and adds an owner sequence", () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "native-uuid",
+      getRandomValues: () => {
+        throw new Error("byte fallback must not run when UUID is available");
+      },
+    });
+
+    const result = createCsrfNonce();
+
+    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    if (result.ok) expect(result.value).toMatch(/^qf-csrf-\d+-native-uuid$/);
+  });
+
+  test("uses secure random bytes when UUID is unavailable", () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.fill(0xab);
+        return bytes;
+      },
+    });
+
+    const result = createCsrfNonce();
+
+    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    if (result.ok) expect(result.value).toMatch(/^qf-csrf-\d-(?:ab){32}$/);
+  });
+
+  test("keeps repeated secure bytes distinct without wall-clock or Math entropy", () => {
+    vi.setSystemTime(new Date("2026-08-06T12:00:00.000Z"));
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    vi.stubGlobal("crypto", {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.fill(0xcd);
+        return bytes;
+      },
+    });
+
+    const first = createCsrfNonce();
+    const second = createCsrfNonce();
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (first.ok && second.ok) expect(first.value).not.toBe(second.value);
+  });
+
+  test("fails closed when no secure browser source is available", () => {
+    vi.stubGlobal("crypto", {});
+
+    expect(createCsrfNonce()).toEqual({
+      ok: false,
+      reason: "secure-randomness-unavailable",
+    });
+  });
+
+  test("does not dispatch a guarded POST after nonce failure", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, {
+      status: 200,
+      headers: { "X-CSRF-Token": "a".repeat(32) },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("crypto", {});
+
+    await expect(postJson("/api/test", {})).rejects.toMatchObject({
+      message: "CSRF nonce unavailable",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/csrf");
+  });
+});
 
 describe("parseErrorMessageBody", () => {
   test("returns null for empty input", () => {

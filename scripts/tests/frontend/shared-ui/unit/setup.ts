@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { beforeEach, vi } from "vitest";
+import { createDeterministicTestUuid } from "../../test-identity";
 
 beforeEach(() => {
   if (!globalThis.crypto) {
@@ -9,7 +10,7 @@ beforeEach(() => {
     Object.defineProperty(globalThis.crypto, "randomUUID", {
       configurable: true,
       writable: true,
-      value: () => `test-${Math.random().toString(16).slice(2)}-${Date.now().toString(16)}`,
+      value: createDeterministicTestUuid,
     });
   }
 
