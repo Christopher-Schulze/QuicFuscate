@@ -4,6 +4,12 @@
   import { ShieldAlert, ShieldCheck, Lock, Activity } from "@lucide/svelte";
   import { cn, ripple } from "@quicfuscate/ui";
   import { Skeleton, addToast } from "@quicfuscate/ui";
+  import {
+    evaluateByteRateSample,
+    isBrowserDocumentVisible,
+    readBrowserMonotonicMilliseconds,
+    type ByteCounterSample,
+  } from "@quicfuscate/time";
   import { useAnchorSync } from "$lib/use-anchor-sync";
   import Sparkline from "$lib/components/ui/Sparkline.svelte";
   import SmoothTrafficValue from "$lib/components/views/SmoothTrafficValue.svelte";
@@ -36,7 +42,7 @@
   let blockedReady = $state(false);
   let metricsReady = $state(false);
   let trafficBps = $state({ in: 0, out: 0 });
-  let prevSample: { bytesIn: number; bytesOut: number; tsMs: number } | null = null;
+  let prevSample: ByteCounterSample | null = null;
   let serverPanelCleared = $state(false);
   let lastErrorMsg = "";
   let actionsEl: HTMLDivElement | undefined = $state();
@@ -64,6 +70,12 @@
   let metricsHistory = $state<{ bytesIn: number[]; bytesOut: number[]; clients: number[] }>(
     { bytesIn: [], bytesOut: [], clients: [] },
   );
+
+  function resetTrafficSample(): void {
+    prevSample = null;
+    trafficBps = { in: 0, out: 0 };
+    metricsHistory = { bytesIn: [], bytesOut: [], clients: [] };
+  }
 
   const status = $derived(getStatus());
   const clients = $derived(getClients());
@@ -115,21 +127,26 @@
         const data = resp.data;
         setStatus(data);
 
-        const nowMs = performance.now();
-        let inBps = 0;
-        let outBps = 0;
-        if (prevSample) {
-          const dt = Math.max((nowMs - prevSample.tsMs) / 1000, 0.001);
-          inBps = (Math.max(0, data.bytes_in - prevSample.bytesIn) * 8) / dt;
-          outBps = (Math.max(0, data.bytes_out - prevSample.bytesOut) * 8) / dt;
+        if (!isBrowserDocumentVisible()) {
+          resetTrafficSample();
+          return;
         }
-        prevSample = { bytesIn: data.bytes_in, bytesOut: data.bytes_out, tsMs: nowMs };
-        trafficBps = { in: inBps, out: outBps };
+        const sample = evaluateByteRateSample(prevSample, {
+          atMilliseconds: readBrowserMonotonicMilliseconds(),
+          bytesIn: data.bytes_in,
+          bytesOut: data.bytes_out,
+        });
+        prevSample = sample.nextSample;
+        trafficBps = { in: sample.inBps, out: sample.outBps };
+        if (!sample.accepted) {
+          metricsHistory = { bytesIn: [], bytesOut: [], clients: [] };
+          return;
+        }
 
         const maxHistory = 20;
         metricsHistory = {
-          bytesIn: [...metricsHistory.bytesIn, inBps].slice(-maxHistory),
-          bytesOut: [...metricsHistory.bytesOut, outBps].slice(-maxHistory),
+          bytesIn: [...metricsHistory.bytesIn, sample.inBps].slice(-maxHistory),
+          bytesOut: [...metricsHistory.bytesOut, sample.outBps].slice(-maxHistory),
           clients: [...metricsHistory.clients, data.clients_active].slice(-maxHistory),
         };
       } catch (e: unknown) {
@@ -306,6 +323,8 @@
 
   // Polling
   $effect(() => {
+    const handleVisibilityChange = (): void => resetTrafficSample();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     void fetchStatus();
     void fetchClients();
     void fetchMetrics();
@@ -322,6 +341,7 @@
       clearInterval(statusTick);
       clearInterval(fast);
       clearInterval(slow);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   });
 </script>

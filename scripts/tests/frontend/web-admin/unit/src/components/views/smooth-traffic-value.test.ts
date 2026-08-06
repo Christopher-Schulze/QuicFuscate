@@ -1,5 +1,6 @@
 import { describe, expect, test, vi, beforeEach } from "vitest";
 import { render } from "../../../testing-library";
+import { tick } from "svelte";
 
 import SmoothTrafficValue from "../../../../../../../../apps/svelte-admin/src/lib/components/views/SmoothTrafficValue.svelte";
 
@@ -49,5 +50,24 @@ describe("SmoothTrafficValue", () => {
       props: { bitsPerSecond: 15_000 },
     });
     expect(container.textContent).toContain("15.0 Kbit/s");
+  });
+
+  test("cancels animation and snaps to the target when the document is hidden", async () => {
+    const original = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    const cancel = vi.spyOn(window, "cancelAnimationFrame");
+    try {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      const view = render(SmoothTrafficValue, { props: { bitsPerSecond: 0 } });
+      await view.rerender({ bitsPerSecond: 5_000_000 });
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      await tick();
+      expect(cancel).toHaveBeenCalled();
+      expect(view.container.textContent).toContain("5.00 Mbit/s");
+    } finally {
+      cancel.mockRestore();
+      if (original) Object.defineProperty(document, "visibilityState", original);
+      else delete (document as Document & { visibilityState?: string }).visibilityState;
+    }
   });
 });

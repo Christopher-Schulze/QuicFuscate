@@ -65,6 +65,21 @@ describe("tunnel/ImportQKeyDialog", () => {
     expect(screen.getByText("Paste")).toBeInTheDocument();
   });
 
+  test("suppresses the synthetic click after pointer paste within the bounded window", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    readClipboardTextDirectMock.mockResolvedValue("QKey-PASTED");
+    renderDialog();
+    const paste = screen.getByRole("button", { name: "Paste" });
+
+    await fireEvent.pointerDown(paste);
+    await fireEvent.click(paste);
+    await waitFor(() => expect(readClipboardTextDirectMock).toHaveBeenCalledTimes(1));
+
+    await vi.advanceTimersByTimeAsync(401);
+    await fireEvent.click(paste);
+    await waitFor(() => expect(readClipboardTextDirectMock).toHaveBeenCalledTimes(2));
+  });
+
   test("renders QKey security warning", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     renderDialog();

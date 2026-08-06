@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isBrowserDocumentVisible } from "@quicfuscate/time";
   import { formatBitsPerSecond } from "$lib/format";
 
   interface Props {
@@ -15,8 +16,20 @@
     return 1 - (1 - t) * (1 - t) * (1 - t);
   }
 
+  function cancelAnimation(): void {
+    if (rafId === null) return;
+    window.cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+
   $effect(() => {
     const target = Math.max(0, bitsPerSecond);
+    if (!isBrowserDocumentVisible()) {
+      cancelAnimation();
+      displayBits = target;
+      initialized = true;
+      return;
+    }
     if (!initialized) {
       displayBits = target;
       initialized = true;
@@ -28,10 +41,7 @@
       displayBits = target;
       return;
     }
-    if (rafId !== null) {
-      window.cancelAnimationFrame(rafId);
-      rafId = null;
-    }
+    cancelAnimation();
     const durationMs = 560;
     const startedAt = performance.now();
     const step = (now: number) => {
@@ -45,11 +55,19 @@
     };
     rafId = window.requestAnimationFrame(step);
     return () => {
-      if (rafId !== null) {
-        window.cancelAnimationFrame(rafId);
-        rafId = null;
+      cancelAnimation();
+    };
+  });
+
+  $effect(() => {
+    const handleVisibilityChange = (): void => {
+      if (!isBrowserDocumentVisible()) {
+        cancelAnimation();
+        displayBits = Math.max(0, bitsPerSecond);
       }
     };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   });
 </script>
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -46,12 +46,22 @@ function resetStores(): void {
   setLogs([]);
 }
 
+function setVisibility(state: "hidden" | "visible"): void {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
 describe("desktop engine poller ownership", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     resetStores();
     setTauriMode();
     vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    setVisibility("visible");
+    vi.useRealTimers();
   });
 
   test("discards delayed status, stats, and log responses after teardown", async () => {
@@ -136,5 +146,53 @@ describe("desktop engine poller ownership", () => {
     clearCommand.resolve(null);
     await clearPromise;
     stop();
+  });
+
+  test("uses monotonic throughput samples and rebases across visibility gaps", async () => {
+    let bytesIn = 100;
+    let bytesOut = 200;
+    const monotonicNow = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "engine_status") return Promise.resolve({ state: "Connected", activeTunnelId: "t1" });
+      if (command === "engine_stats") return Promise.resolve({ bytesIn, bytesOut });
+      if (command === "engine_logs_since") return Promise.resolve({ cursor: 0, lines: [] });
+      return Promise.resolve(null);
+    });
+
+    const stop = startEnginePollers();
+    try {
+      await vi.advanceTimersByTimeAsync(900);
+      expect(getThroughput()).toEqual({});
+
+      bytesIn = 1_100;
+      bytesOut = 2_200;
+      monotonicNow.mockReturnValue(2_000);
+      await vi.advanceTimersByTimeAsync(900);
+      expect(getThroughput()).toEqual({ t1: { downBps: 8_000, upBps: 16_000 } });
+
+      setVisibility("hidden");
+      expect(getThroughput()).toEqual({});
+      bytesIn = 2_100;
+      bytesOut = 3_200;
+      monotonicNow.mockReturnValue(3_000);
+      await vi.advanceTimersByTimeAsync(900);
+      expect(getThroughput()).toEqual({});
+
+      setVisibility("visible");
+      bytesIn = 2_200;
+      bytesOut = 3_300;
+      monotonicNow.mockReturnValue(4_000);
+      await vi.advanceTimersByTimeAsync(900);
+      expect(getThroughput()).toEqual({});
+
+      bytesIn = 2_300;
+      bytesOut = 3_400;
+      monotonicNow.mockReturnValue(5_000);
+      await vi.advanceTimersByTimeAsync(900);
+      expect(getThroughput()).toEqual({ t1: { downBps: 800, upBps: 800 } });
+    } finally {
+      stop();
+      monotonicNow.mockRestore();
+    }
   });
 });

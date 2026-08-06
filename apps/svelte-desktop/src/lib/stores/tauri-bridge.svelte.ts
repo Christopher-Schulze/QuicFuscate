@@ -20,7 +20,13 @@ import {
 } from "./app.svelte";
 import type { TunnelConfig, AppSettings, GeneralSettings, HardwareSettings } from "$lib/types";
 import { parseTauriLogLine, type RawTauriLogLine } from "$lib/timestamp-boundary";
-import { parseUnixMilliseconds } from "@quicfuscate/time";
+import {
+  evaluateByteRateSample,
+  isBrowserDocumentVisible,
+  parseUnixMilliseconds,
+  readBrowserMonotonicMilliseconds,
+  type ByteCounterSample,
+} from "@quicfuscate/time";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 /** Shape returned by the Tauri `load_state` command. */
@@ -180,8 +186,12 @@ export function startEnginePollers(): () => void {
   let logsInFlight = false;
   let statusStateVersion = 0;
   let previousStatusSignature = "";
-  const throughputSamples: Record<string, { ts: number; rx: number; tx: number }> = {};
+  const throughputSamples: Record<string, ByteCounterSample> = {};
   const isCurrent = (): boolean => !stopped && activePollerOwner === owner;
+  const resetThroughput = (): void => {
+    for (const key of Object.keys(throughputSamples)) delete throughputSamples[key];
+    setThroughput({});
+  };
 
   const pollStatus = async (): Promise<void> => {
     if (!isCurrent() || statusInFlight) return;
@@ -226,6 +236,7 @@ export function startEnginePollers(): () => void {
       if (!isCurrent() || stateVersionAtStart !== statusStateVersion || activeTunnelIdAtStart !== getActiveTunnelId()) return;
       if (!activeTunnelIdAtStart || !stats) {
         updateTunnelStats(() => ({}));
+        resetThroughput();
         return;
       }
       updateTunnelStats((prev) => ({
@@ -247,25 +258,37 @@ export function startEnginePollers(): () => void {
         },
       }));
 
-      // Compute throughput
-      const now = Date.now();
+      if (!isBrowserDocumentVisible()) {
+        resetThroughput();
+        return;
+      }
+
+      // Compute throughput from the shared monotonic sample contract.
+      const now = readBrowserMonotonicMilliseconds();
       const currentStats = getTunnelStats();
       const nextThroughput = { ...getThroughput() };
       for (const [id, s] of Object.entries(currentStats)) {
-        if (!s) { delete nextThroughput[id]; delete throughputSamples[id]; continue; }
-        const prev = throughputSamples[id];
-        if (prev) {
-          const dtMs = now - prev.ts;
-          const downBytes = s.rxBytes - prev.rx;
-          const upBytes = s.txBytes - prev.tx;
-          if (dtMs > 0 && downBytes >= 0 && upBytes >= 0) {
-            nextThroughput[id] = {
-              downBps: Math.max(0, Math.round((downBytes * 8 * 1000) / dtMs)),
-              upBps: Math.max(0, Math.round((upBytes * 8 * 1000) / dtMs)),
-            };
-          }
+        if (!s) {
+          delete nextThroughput[id];
+          delete throughputSamples[id];
+          continue;
         }
-        throughputSamples[id] = { ts: now, rx: s.rxBytes, tx: s.txBytes };
+        const current: ByteCounterSample = {
+          atMilliseconds: now,
+          bytesIn: s.rxBytes,
+          bytesOut: s.txBytes,
+        };
+        const result = evaluateByteRateSample(throughputSamples[id] ?? null, current);
+        if (result.nextSample) throughputSamples[id] = result.nextSample;
+        else delete throughputSamples[id];
+        if (result.accepted) {
+          nextThroughput[id] = {
+            downBps: Math.max(0, Math.round(result.inBps)),
+            upBps: Math.max(0, Math.round(result.outBps)),
+          };
+        } else {
+          delete nextThroughput[id];
+        }
       }
       setThroughput(nextThroughput);
     } catch { /* ignore */ }
@@ -299,6 +322,8 @@ export function startEnginePollers(): () => void {
   const statusInterval = setInterval(() => { void pollStatus(); }, 500);
   const statsInterval = setInterval(() => { void pollStats(); }, 900);
   const logsInterval = setInterval(() => { void pollLogs(); }, 350);
+  const handleVisibilityChange = (): void => resetThroughput();
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 
   return () => {
     stopped = true;
@@ -306,9 +331,8 @@ export function startEnginePollers(): () => void {
     clearInterval(statusInterval);
     clearInterval(statsInterval);
     clearInterval(logsInterval);
-    for (const key of Object.keys(throughputSamples)) {
-      delete throughputSamples[key];
-    }
+    document.removeEventListener("visibilitychange", handleVisibilityChange);
+    resetThroughput();
   };
 }
 

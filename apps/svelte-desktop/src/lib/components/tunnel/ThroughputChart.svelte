@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { isBrowserDocumentVisible } from "@quicfuscate/time";
+
   // ---------------------------------------------------------------------------
   // ThroughputChart - Canvas-based real-time dual-series throughput visualizer
   // ---------------------------------------------------------------------------
@@ -40,6 +42,14 @@
   let sampleCount = 0;
   let smoothedDown = 0;
   let smoothedUp = 0;
+
+  function resetSamples(): void {
+    smoothedDown = 0;
+    smoothedUp = 0;
+    sampleCount = 0;
+    writeIdx = 0;
+    currentScale = 1;
+  }
 
   // -- Grid cache -------------------------------------------------------------
   let gridCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
@@ -297,7 +307,7 @@
     let samplingId: ReturnType<typeof setInterval> | null = null;
     let rafId: number | null = null;
     let running = true;
-    let tabVisible = true;
+    let tabVisible = isBrowserDocumentVisible();
 
     // Capture initial size
     cssW = containerEl.clientWidth;
@@ -319,8 +329,13 @@
 
     // Visibility
     function onVisChange(): void {
-      tabVisible = !document.hidden;
-      if (tabVisible && !rafId && running) {
+      tabVisible = isBrowserDocumentVisible();
+      resetSamples();
+      if (!tabVisible && rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      if (tabVisible && rafId === null && running) {
         rafLoop();
       }
     }
@@ -331,10 +346,7 @@
       if (!tabVisible) return;
       if (!isActive) {
         // Reset buffers when not active - no phantom lines
-        smoothedDown = 0;
-        smoothedUp = 0;
-        sampleCount = 0;
-        writeIdx = 0;
+        resetSamples();
         return;
       }
       // Exponential smoothing
@@ -354,7 +366,7 @@
         rafId = requestAnimationFrame(rafLoop);
       }
     }
-    rafLoop();
+    if (tabVisible) rafLoop();
 
     return () => {
       running = false;

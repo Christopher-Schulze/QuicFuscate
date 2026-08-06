@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
   import { ripple } from "@quicfuscate/ui";
   import { cn } from "@quicfuscate/ui";
+  import { PASTE_CLICK_SUPPRESSION_MILLISECONDS } from "@quicfuscate/time";
   import { readClipboardTextDirect } from "$lib/clipboard";
   import { extractQKey, normalizeUtf8 } from "$lib/qkey-utils";
   import { isValidSniHost, normalizeRemoteForStorage } from "$lib/tunnel-validators";
@@ -20,7 +22,8 @@
   let qkeyText = $state("");
   let busy = $state(false);
   let parseError = $state<string | null>(null);
-  let suppressPasteClickUntil = $state(0);
+  let suppressPasteClick = $state(false);
+  let pasteClickSuppressionTimer: ReturnType<typeof setTimeout> | null = null;
 
   const MAX_QKEY = 16384;
   const runtimeReady = $derived(isTauri());
@@ -28,7 +31,18 @@
   const extracted = $derived(extractQKey(qkeyText.trim()));
   const canSubmit = $derived(runtimeReady && Boolean(extracted) && !busy && !parseError);
 
-  function reset() { qkeyText = ""; parseError = null; busy = false; }
+  function clearPasteClickSuppression(): void {
+    if (pasteClickSuppressionTimer !== null) clearTimeout(pasteClickSuppressionTimer);
+    pasteClickSuppressionTimer = null;
+    suppressPasteClick = false;
+  }
+
+  function reset(): void {
+    qkeyText = "";
+    parseError = null;
+    busy = false;
+    clearPasteClickSuppression();
+  }
 
   async function submit() {
     if (!canSubmit || !extracted) return;
@@ -60,14 +74,21 @@
   }
 
   function handlePastePointerDown() {
-    suppressPasteClickUntil = Date.now() + 400;
+    if (pasteClickSuppressionTimer !== null) clearTimeout(pasteClickSuppressionTimer);
+    suppressPasteClick = true;
+    pasteClickSuppressionTimer = setTimeout(() => {
+      pasteClickSuppressionTimer = null;
+      suppressPasteClick = false;
+    }, PASTE_CLICK_SUPPRESSION_MILLISECONDS);
     void handlePaste();
   }
 
   function handlePasteClick() {
-    if (Date.now() < suppressPasteClickUntil) return;
+    if (suppressPasteClick) return;
     void handlePaste();
   }
+
+  onDestroy(clearPasteClickSuppression);
 </script>
 
 <Dialog.Root bind:open onOpenChange={(v) => { if (!v) { reset(); onclose(); } }}>

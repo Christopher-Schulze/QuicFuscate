@@ -86,6 +86,20 @@ describe("desktop qkey edit dialog", () => {
     });
   });
 
+  test("suppresses the synthetic click after pointer paste within the bounded window", async () => {
+    readClipboardTextDirectMock.mockResolvedValue("QKey-PASTED-EDIT");
+    render(EditQKeyDialog, { open: true, tunnelId: "t1", mode: "set", onclose: vi.fn() });
+    const paste = screen.getByRole("button", { name: "Paste" });
+
+    await fireEvent.pointerDown(paste);
+    await fireEvent.click(paste);
+    await waitFor(() => expect(readClipboardTextDirectMock).toHaveBeenCalledTimes(1));
+
+    await vi.advanceTimersByTimeAsync(401);
+    await fireEvent.click(paste);
+    await waitFor(() => expect(readClipboardTextDirectMock).toHaveBeenCalledTimes(2));
+  });
+
   test("updates only the selected tunnel when qkey_parse succeeds", async () => {
     runtimeAvailable = true;
     qkeyParseMock.mockResolvedValue({

@@ -50,4 +50,20 @@ describe("tunnel/ThroughputChart", () => {
     const canvas = container.querySelector("canvas");
     expect(canvas?.classList.contains("inset-0")).toBe(true);
   });
+
+  test("cancels the render loop and resets samples when the document is hidden", () => {
+    const original = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    const cancel = vi.spyOn(window, "cancelAnimationFrame");
+    try {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      render(ThroughputChart, { downBps: 100_000, upBps: 50_000, isActive: true });
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(cancel).toHaveBeenCalled();
+    } finally {
+      cancel.mockRestore();
+      if (original) Object.defineProperty(document, "visibilityState", original);
+      else delete (document as Document & { visibilityState?: string }).visibilityState;
+    }
+  });
 });
