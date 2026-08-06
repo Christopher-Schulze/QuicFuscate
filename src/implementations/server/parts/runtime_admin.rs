@@ -71,22 +71,18 @@ impl ShutdownLifecycle {
 struct GracefulShutdown {
     lifecycle: AtomicU8,
     grace_ms: AtomicU64,
+    /// Native runtime monotonic time keeps drain progress live while the
+    /// protocol clock is manually controlled by tests or an embedding host.
     drain_started: parking_lot::RwLock<Option<Instant>>,
-    clock: ProtocolClock,
 }
 
 impl GracefulShutdown {
     #[allow(dead_code)]
     fn new(grace_ms: u64) -> Self {
-        Self::new_with_clock(grace_ms, &ProtocolClock::default())
-    }
-
-    fn new_with_clock(grace_ms: u64, clock: &ProtocolClock) -> Self {
         Self {
             lifecycle: AtomicU8::new(ShutdownLifecycle::Stopped as u8),
             grace_ms: AtomicU64::new(grace_ms),
             drain_started: parking_lot::RwLock::new(None),
-            clock: clock.clone(),
         }
     }
 
@@ -112,7 +108,7 @@ impl GracefulShutdown {
         {
             return false;
         }
-        *self.drain_started.write() = Some(self.clock.now());
+        *self.drain_started.write() = Some(Instant::now());
         true
     }
 
@@ -133,7 +129,7 @@ impl GracefulShutdown {
         self.drain_started
             .read()
             .as_ref()
-            .map(|started| self.clock.elapsed_since(*started))
+            .map(|started| Instant::now().saturating_duration_since(*started))
             .unwrap_or_default()
     }
 

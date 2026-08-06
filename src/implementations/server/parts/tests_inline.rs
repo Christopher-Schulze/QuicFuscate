@@ -2495,6 +2495,22 @@ mod tests {
     // --- Admin core tests ---
 
     #[test]
+    fn graceful_shutdown_drain_uses_live_runtime_clock() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let _guard = crate::time_source::install_for_test(source);
+        let shutdown = GracefulShutdown::new(20);
+        shutdown.set_running();
+        assert!(shutdown.begin_drain());
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        assert!(shutdown.deadline_reached());
+    }
+
+    #[test]
     fn test_server_admin_core_block_unblock_ip() {
         let metrics = Arc::new(Metrics::new());
         let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));

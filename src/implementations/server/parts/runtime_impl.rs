@@ -81,10 +81,7 @@ impl ServerRuntime {
 
         Ok(Self {
             clock: clock.clone(),
-            graceful_shutdown: Arc::new(GracefulShutdown::new_with_clock(
-                engine_config.engine.shutdown_timeout_ms,
-                &clock,
-            )),
+            graceful_shutdown: Arc::new(GracefulShutdown::new(engine_config.engine.shutdown_timeout_ms)),
             engine_config,
             server_config,
             assignment_settings,
@@ -1085,6 +1082,8 @@ impl ServerRuntime {
             );
         }
         #[cfg(unix)]
+        // systemd owns this watchdog deadline; it must remain live during
+        // protocol-clock freezes and runtime teardown.
         let watchdog_interval = self::systemd::notify::watchdog_interval();
         #[cfg(unix)]
         let mut next_watchdog = watchdog_interval.map(|interval| Instant::now() + interval);

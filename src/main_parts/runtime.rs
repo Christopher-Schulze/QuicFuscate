@@ -1118,7 +1118,9 @@ fn client_housekeeping_delay(
         return CLIENT_HOUSEKEEPING_ACTIVE;
     }
 
-    let now = std::time::Instant::now();
+    // QUIC release and recovery deadlines belong to the connection's injected
+    // protocol clock. Only the resulting duration crosses into Tokio.
+    let now = conn.protocol_clock().now();
     let mut delay = CLIENT_HOUSEKEEPING_IDLE;
     for deadline in [
         conn.next_outbound_release_deadline(),
@@ -2319,6 +2321,7 @@ async fn run_client(
                 {
                     if let Some(diagnostics) = io_diagnostics.as_ref() {
                         let diagnostic_now = std::time::Instant::now();
+                        let protocol_now = conn.protocol_clock().now();
                         warn!(
                             "Client receive diagnostics at heartbeat: socket_datagrams={}, socket_bytes={}, core_recv_successes={}, core_recv_errors={}, activity_updates={}, send_polls={}, send_datagrams={}, send_bytes={}, send_zero_results={}, send_done_results={}, send_errors={}, last_send_elapsed_ms={:?}, request_sent={}, h3_stream_id={:?}, masque_established={}, kill_switch_connected={}, transport_sent={}, transport_recv={}, transport_lost={}, transport_dgram_queue={}, transport_bytes_in_flight={}, transport_cwnd={}, pending_application_ack={}, outbound_release_remaining_ms={:?}, recovery_remaining_ms={:?}, last_activity_elapsed_ms={}",
                             diagnostics.socket_datagrams,
@@ -2347,10 +2350,10 @@ async fn run_client(
                             conn.conn.cwnd(),
                             conn.conn.has_pending_application_ack(),
                             conn.next_outbound_release_deadline().map(|deadline| {
-                                deadline.saturating_duration_since(diagnostic_now).as_millis()
+                                deadline.saturating_duration_since(protocol_now).as_millis()
                             }),
                             conn.conn.recovery_deadline().map(|deadline| {
-                                deadline.saturating_duration_since(diagnostic_now).as_millis()
+                                deadline.saturating_duration_since(protocol_now).as_millis()
                             }),
                             conn.conn.last_activity_elapsed().as_millis(),
                         );

@@ -446,7 +446,8 @@ impl ConnectionStats {
 }
 
 impl QuicFuscateConnection {
-    pub(crate) fn protocol_clock(&self) -> crate::time_source::ProtocolClock {
+    /// Returns the clock shared by protocol-facing connection state.
+    pub fn protocol_clock(&self) -> crate::time_source::ProtocolClock {
         self.clock.clone()
     }
 

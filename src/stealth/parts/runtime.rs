@@ -1,7 +1,7 @@
 use crate::reality::{CoverHandshakeCache, RealityConfig, RealityProxy};
 use std::future::Future;
 use std::sync::Weak;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -308,10 +308,12 @@ impl StealthRuntimeOwner {
         let mut joined = 0usize;
         let mut force_stopped = 0usize;
         let mut errors = Vec::new();
-        let deadline = Instant::now() + timeout;
+        // Worker joins are Tokio runtime deadlines, independent of the
+        // manually controlled protocol clock used by product state.
+        let deadline = tokio::time::Instant::now() + timeout;
         for worker in workers {
             let mut handle = worker.handle;
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 handle.abort();
                 let _ = handle.await;

@@ -459,13 +459,16 @@ impl DnsInterceptWorkerOwner {
 
     async fn shutdown(&self) {
         self.close_admission();
-        let deadline = Instant::now() + DNS_INTERCEPT_WORKER_SHUTDOWN_TIMEOUT;
+        // Async worker reaping is governed by Tokio time. The blocking
+        // operation itself remains a native worker and may be abandoned after
+        // this bounded runtime deadline expires.
+        let deadline = tokio::time::Instant::now() + DNS_INTERCEPT_WORKER_SHUTDOWN_TIMEOUT;
         loop {
             self.observe_finished().await;
             if !self.has_tasks() {
                 return;
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }

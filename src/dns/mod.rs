@@ -1280,7 +1280,7 @@ async fn resolve_via_doh_endpoints(
         query,
         doh_endpoints,
         client,
-        Instant::now() + DNS_FORWARDING_DEADLINE,
+        tokio::time::Instant::now() + DNS_FORWARDING_DEADLINE,
     )
     .await
 }
@@ -1289,16 +1289,16 @@ async fn resolve_via_doh_endpoints_until(
     query: &[u8],
     doh_endpoints: &[String],
     client: &reqwest::Client,
-    deadline: Instant,
+    deadline: tokio::time::Instant,
 ) -> Result<Vec<u8>, DnsProxyError> {
     validate_dns_query_size(query).map_err(DnsProxyError::QuerySize)?;
     let mut last_error = None;
     for endpoint in doh_endpoints {
-        if Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return Err(DnsProxyError::DeadlineExceeded(DnsForwardingStage::Doh));
         }
         match tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
+            deadline,
             resolve_via_doh_with_client(query, endpoint, client),
         )
         .await
@@ -1309,7 +1309,7 @@ async fn resolve_via_doh_endpoints_until(
                 return Err(DnsProxyError::QuerySize(error));
             }
             Ok(Err(error)) => {
-                if Instant::now() >= deadline {
+                if tokio::time::Instant::now() >= deadline {
                     return Err(DnsProxyError::DeadlineExceeded(DnsForwardingStage::Doh));
                 }
                 last_error = Some(error.to_string());
@@ -1330,11 +1330,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, DnsProxyError> + Send + 'static,
 {
-    if Instant::now() >= deadline {
+    // Native DNS socket deadlines stay in the blocking worker's std clock
+    // domain. Tokio only receives the remaining duration, avoiding an
+    // implicit Instant conversion at the async boundary.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
         return Err(DnsProxyError::DeadlineExceeded(DnsForwardingStage::Udp));
     }
     let task = tokio::task::spawn_blocking(operation);
-    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task).await {
+    match tokio::time::timeout(remaining, task).await {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
             Err(DnsProxyError::UpstreamError(format!("DNS forwarding worker failed: {error}")))
@@ -2048,7 +2052,7 @@ mod tests {
             &query,
             &["https://127.0.0.1:1/dns-query".to_string()],
             &client,
-            Instant::now() - Duration::from_millis(1),
+            tokio::time::Instant::now() - Duration::from_millis(1),
         )
         .await;
         assert!(matches!(
