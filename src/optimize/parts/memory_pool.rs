@@ -2,6 +2,250 @@
 // Foundational Structures for Global Optimizations
 //
 
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolBlockOrigin {
+    Accounted,
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolBlockLocation {
+    Queue,
+    Tls,
+    CheckedOut,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PoolBlockRecord {
+    origin: PoolBlockOrigin,
+    location: PoolBlockLocation,
+}
+
+#[derive(Debug, Default)]
+struct PoolOwnershipState {
+    records: HashMap<usize, PoolBlockRecord>,
+}
+
+/// Shared lifetime and ownership state for a `MemoryPool` and its thread-local caches.
+/// The `Arc` held by each TLS cache keeps this ledger alive until its blocks are dropped,
+/// even when the owning `MemoryPool` has already been dropped on another thread.
+#[derive(Debug)]
+struct PoolOwnershipLedger {
+    state: std::sync::Mutex<PoolOwnershipState>,
+    closed: AtomicBool,
+    capacity: Arc<AtomicUsize>,
+    in_use: Arc<AtomicUsize>,
+    available: Arc<AtomicUsize>,
+}
+
+impl PoolOwnershipLedger {
+    fn new(
+        capacity: Arc<AtomicUsize>,
+        in_use: Arc<AtomicUsize>,
+        available: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            state: std::sync::Mutex::new(PoolOwnershipState::default()),
+            closed: AtomicBool::new(false),
+            capacity,
+            in_use,
+            available,
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, PoolOwnershipState> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[inline]
+    fn decrement(counter: &AtomicUsize) {
+        let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            Some(value.saturating_sub(1))
+        });
+    }
+
+    fn register(&self, ptr: *const u8, origin: PoolBlockOrigin, location: PoolBlockLocation) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+
+        let address = ptr as usize;
+        let mut state = self.lock_state();
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+
+        if let Some(previous) = state.records.remove(&address) {
+            log::debug!(
+                target: "memory_pool",
+                "replacing stale ownership record for duplicate block address {:p} (old={previous:?}, new origin={origin:?}, location={location:?})",
+                ptr,
+            );
+            if previous.origin == PoolBlockOrigin::Accounted {
+                Self::decrement(&self.capacity);
+                match previous.location {
+                    PoolBlockLocation::Queue | PoolBlockLocation::Tls => {
+                        Self::decrement(&self.available);
+                    }
+                    PoolBlockLocation::CheckedOut => {
+                        Self::decrement(&self.in_use);
+                    }
+                }
+            }
+        }
+        state.records.insert(address, PoolBlockRecord { origin, location });
+        if origin == PoolBlockOrigin::Accounted {
+            self.capacity.fetch_add(1, Ordering::AcqRel);
+            match location {
+                PoolBlockLocation::Queue | PoolBlockLocation::Tls => {
+                    self.available.fetch_add(1, Ordering::AcqRel);
+                }
+                PoolBlockLocation::CheckedOut => {
+                    self.in_use.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+        }
+        true
+    }
+
+    fn checkout(&self, ptr: *const u8, from: PoolBlockLocation) -> bool {
+        let mut state = self.lock_state();
+        let Some(record) = state.records.get_mut(&(ptr as usize)) else {
+            return false;
+        };
+        if record.origin != PoolBlockOrigin::Accounted || record.location != from {
+            return false;
+        }
+        record.location = PoolBlockLocation::CheckedOut;
+        Self::decrement(&self.available);
+        self.in_use.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    fn begin_free(&self, ptr: *const u8) -> Option<PoolBlockOrigin> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let mut state = self.lock_state();
+        let address = ptr as usize;
+        let record = state.records.get(&address).copied()?;
+        if record.location != PoolBlockLocation::CheckedOut {
+            return None;
+        }
+        if record.origin == PoolBlockOrigin::Ephemeral {
+            state.records.remove(&address);
+        }
+        Some(record.origin)
+    }
+
+    fn return_accounted(&self, ptr: *const u8, location: PoolBlockLocation) -> bool {
+        let mut state = self.lock_state();
+        let Some(record) = state.records.get_mut(&(ptr as usize)) else {
+            return false;
+        };
+        if record.origin != PoolBlockOrigin::Accounted
+            || record.location != PoolBlockLocation::CheckedOut
+        {
+            return false;
+        }
+        record.location = location;
+        Self::decrement(&self.in_use);
+        self.available.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    fn move_available(
+        &self,
+        ptr: *const u8,
+        from: PoolBlockLocation,
+        to: PoolBlockLocation,
+    ) -> bool {
+        let mut state = self.lock_state();
+        let Some(record) = state.records.get_mut(&(ptr as usize)) else {
+            return false;
+        };
+        if record.origin != PoolBlockOrigin::Accounted || record.location != from {
+            return false;
+        }
+        record.location = to;
+        true
+    }
+
+    fn discard_available(&self, ptr: *const u8, location: PoolBlockLocation) -> bool {
+        let mut state = self.lock_state();
+        let address = ptr as usize;
+        let Some(record) = state.records.get(&address).copied() else {
+            return false;
+        };
+        if record.origin != PoolBlockOrigin::Accounted || record.location != location {
+            return false;
+        }
+        state.records.remove(&address);
+        Self::decrement(&self.available);
+        Self::decrement(&self.capacity);
+        true
+    }
+
+    /// Removes the ledger record for a block that is about to be physically released.
+    ///
+    /// This is the fail-closed cleanup path for malformed queue/TLS transitions. The caller
+    /// has already removed the block from its physical owner, so retaining any ledger record
+    /// would make a future allocator address look like a duplicate live block.
+    fn discard_released(&self, ptr: *const u8) -> bool {
+        let mut state = self.lock_state();
+        let Some(record) = state.records.remove(&(ptr as usize)) else {
+            return false;
+        };
+        if record.origin == PoolBlockOrigin::Accounted {
+            Self::decrement(&self.capacity);
+            match record.location {
+                PoolBlockLocation::Queue | PoolBlockLocation::Tls => {
+                    Self::decrement(&self.available);
+                }
+                PoolBlockLocation::CheckedOut => {
+                    Self::decrement(&self.in_use);
+                }
+            }
+        }
+        true
+    }
+
+    fn release_block(&self, block: AlignedBox<[u8]>, lock_ledger: &BlockLockLedger) {
+        self.discard_released(block.as_ptr());
+        release_locked_block(block, lock_ledger);
+    }
+
+    #[cfg(test)]
+    fn assert_consistent(&self) {
+        let state = self.lock_state();
+        let mut accounted = 0usize;
+        let mut available = 0usize;
+        let mut in_use = 0usize;
+        for record in state.records.values() {
+            if record.origin != PoolBlockOrigin::Accounted {
+                continue;
+            }
+            accounted += 1;
+            match record.location {
+                PoolBlockLocation::Queue | PoolBlockLocation::Tls => available += 1,
+                PoolBlockLocation::CheckedOut => in_use += 1,
+            }
+        }
+        assert_eq!(self.capacity.load(Ordering::Acquire), accounted);
+        assert_eq!(self.available.load(Ordering::Acquire), available);
+        assert_eq!(self.in_use.load(Ordering::Acquire), in_use);
+        assert_eq!(available + in_use, accounted);
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.lock_state().records.clear();
+    }
+}
+
 /// A high-performance, thread-safe memory pool for fixed-size blocks.
 /// This implementation uses a concurrent queue to manage free blocks,
 /// minimizing lock contention and fragmentation.
@@ -13,17 +257,21 @@ pub struct MemoryPool {
     pools: Vec<Arc<SegQueue<AlignedBox<[u8]>>>>,
     block_size: usize,
     num_nodes: usize,
-    capacity: AtomicUsize,
+    capacity: Arc<AtomicUsize>,
     hard_max_capacity: usize,
-    in_use: AtomicUsize,
-    available: AtomicUsize,
+    in_use: Arc<AtomicUsize>,
+    available: Arc<AtomicUsize>,
+    ownership: Arc<PoolOwnershipLedger>,
+    resize_lock: std::sync::Mutex<()>,
     runtime: Arc<MemoryPoolRuntimeConfig>,
 }
 
 #[derive(Debug)]
 struct MemoryPoolRuntimeConfig {
     tls_cache_limit: AtomicUsize,
+    #[cfg(debug_assertions)]
     debug_slack: usize,
+    #[cfg(debug_assertions)]
     debug_grace: usize,
     madvise_hugepage: bool,
     auto_tune: bool,
@@ -49,9 +297,11 @@ impl MemoryPoolRuntimeConfig {
             tls_cache_limit: AtomicUsize::new(
                 environment.parse::<usize>("QUICFUSCATE_TLS_CACHE").unwrap_or(0),
             ),
+            #[cfg(debug_assertions)]
             debug_slack: environment
                 .parse::<usize>("QUICFUSCATE_POOL_DEBUG_SLACK")
                 .unwrap_or(256),
+            #[cfg(debug_assertions)]
             debug_grace: environment
                 .parse::<usize>("QUICFUSCATE_POOL_DEBUG_GRACE")
                 .unwrap_or(64),
@@ -140,6 +390,7 @@ impl BlockLockLedger {
 struct ThreadLocalPoolCache {
     id: usize,
     lock_ledger: Arc<BlockLockLedger>,
+    ownership: Arc<PoolOwnershipLedger>,
     blocks: Vec<AlignedBox<[u8]>>,
 }
 
@@ -148,7 +399,10 @@ type ThreadLocalPoolCaches = Vec<ThreadLocalPoolCache>;
 impl Drop for ThreadLocalPoolCache {
     fn drop(&mut self) {
         while let Some(block) = self.blocks.pop() {
-            release_locked_block(block, &self.lock_ledger);
+            let _ = self
+                .ownership
+                .discard_available(block.as_ptr(), PoolBlockLocation::Tls);
+            self.ownership.release_block(block, &self.lock_ledger);
         }
     }
 }
@@ -251,6 +505,7 @@ impl MemoryPool {
                 caches.push(ThreadLocalPoolCache {
                     id: self.id,
                     lock_ledger: Arc::clone(&self.lock_ledger),
+                    ownership: Arc::clone(&self.ownership),
                     blocks: Vec::new(),
                 });
                 caches.len() - 1
@@ -265,13 +520,15 @@ impl MemoryPool {
         block: AlignedBox<[u8]>,
         limit: usize,
     ) -> Result<(), AlignedBox<[u8]>> {
-        self.with_tls_cache(|cache| {
-            if cache.len() >= limit {
-                return Err(block);
-            }
-            cache.push(block);
-            Ok(())
-        })
+        if limit == 0 {
+            return Err(block);
+        }
+        let has_room = self.with_tls_cache(|cache| cache.len() < limit);
+        if !has_room || !self.ownership.return_accounted(block.as_ptr(), PoolBlockLocation::Tls) {
+            return Err(block);
+        }
+        self.with_tls_cache(|cache| cache.push(block));
+        Ok(())
     }
 
     #[inline]
@@ -304,23 +561,26 @@ impl MemoryPool {
 
     #[inline]
     fn flush_tls_to_queue(&self, node: usize, max: usize) {
-        self.with_tls_cache(|cache| {
-            let limit = self.tls_limit();
-            let len = cache.len();
-            if len > limit {
-                let mut to_flush = core::cmp::min(len - limit, max);
-                if let Some(q) = self.pools.get(node) {
-                    while to_flush > 0 {
-                        if let Some(b) = cache.pop() {
-                            q.push(b);
-                        } else {
-                            break;
-                        }
-                        to_flush -= 1;
-                    }
-                }
+        let limit = self.tls_limit();
+        let mut to_flush = self.with_tls_cache(|cache| core::cmp::min(cache.len().saturating_sub(limit), max));
+        let Some(queue) = self.pools.get(node) else {
+            return;
+        };
+        while to_flush > 0 {
+            let Some(block) = self.with_tls_cache(|cache| cache.pop()) else {
+                break;
+            };
+            if self.ownership.move_available(
+                block.as_ptr(),
+                PoolBlockLocation::Tls,
+                PoolBlockLocation::Queue,
+            ) {
+                queue.push(block);
+            } else {
+                self.ownership.release_block(block, &self.lock_ledger);
             }
-        });
+            to_flush -= 1;
+        }
     }
 
     /// Creates a pool with an explicit block-size contract.
@@ -372,35 +632,55 @@ impl MemoryPool {
         let lock_blocks = Self::lock_blocks_enabled();
         let lock_ledger = Arc::new(BlockLockLedger::default());
         let runtime = Arc::new(MemoryPoolRuntimeConfig::from_snapshot(environment));
+        let capacity_counter = Arc::new(AtomicUsize::new(0));
+        let in_use_counter = Arc::new(AtomicUsize::new(0));
+        let available_counter = Arc::new(AtomicUsize::new(0));
+        let ownership = Arc::new(PoolOwnershipLedger::new(
+            Arc::clone(&capacity_counter),
+            Arc::clone(&in_use_counter),
+            Arc::clone(&available_counter),
+        ));
         #[cfg(target_os = "linux")]
         crate::optimize::initialize_numa_policy(environment);
         let nodes = numa::num_nodes();
+        let id = NEXT_MEMORY_POOL_ID.fetch_add(1, Ordering::Relaxed);
         let mut pools = Vec::with_capacity(nodes);
         for n in 0..nodes {
             let node_cap = capacity / nodes + if n < capacity % nodes { 1 } else { 0 };
             let q = Arc::new(SegQueue::new());
             for _ in 0..node_cap {
-                q.push(Self::alloc_numa_block(
+                let block = Self::alloc_numa_block(
                     block_size,
                     n,
                     lock_blocks,
                     &lock_ledger,
                     runtime.madvise_hugepage,
-                ));
+                );
+                if ownership.register(
+                    block.as_ptr(),
+                    PoolBlockOrigin::Accounted,
+                    PoolBlockLocation::Queue,
+                ) {
+                    q.push(block);
+                } else {
+                    ownership.release_block(block, &lock_ledger);
+                }
             }
             pools.push(q);
         }
         let pool = Self {
-            id: NEXT_MEMORY_POOL_ID.fetch_add(1, Ordering::Relaxed),
+            id,
             lock_blocks,
             lock_ledger,
             pools,
             block_size,
             num_nodes: nodes,
-            capacity: AtomicUsize::new(capacity),
+            capacity: capacity_counter,
             hard_max_capacity: Self::configured_hard_max_capacity(capacity, block_size, environment),
-            in_use: AtomicUsize::new(0),
-            available: AtomicUsize::new(capacity),
+            in_use: in_use_counter,
+            available: available_counter,
+            ownership,
+            resize_lock: std::sync::Mutex::new(()),
             runtime,
         };
         // Telemetry init
@@ -461,27 +741,6 @@ impl MemoryPool {
     #[inline(always)]
     fn check_invariants(&self) {}
 
-    #[inline]
-    fn dec_available(&self) {
-        use std::sync::atomic::Ordering;
-        let mut cur = self.available.load(Ordering::Acquire);
-        while cur > 0 {
-            match self.available.compare_exchange_weak(
-                cur,
-                cur - 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(next) => cur = next,
-            }
-        }
-    }
-
-    #[inline]
-    fn inc_in_use(&self) {
-        self.in_use.fetch_add(1, Ordering::Relaxed);
-    }
     /// Allocate a 64-byte aligned block bound to the given NUMA node.
     fn alloc_numa_block(
         block_size: usize,
@@ -570,28 +829,81 @@ impl MemoryPool {
         self.block_size
     }
 
-    fn grow(&self, new_capacity: usize) {
-        let limit = self.hard_max_capacity;
-        let target = core::cmp::min(new_capacity, limit);
-        while self.capacity.load(Ordering::Relaxed) < target {
-            for (n, q) in self.pools.iter().enumerate() {
-                if self.capacity.load(Ordering::Relaxed) >= target {
+    fn grow_locked(&self, new_capacity: usize) {
+        let target = core::cmp::min(new_capacity, self.hard_max_capacity);
+        while self.capacity.load(Ordering::Acquire) < target {
+            for (n, queue) in self.pools.iter().enumerate() {
+                if self.capacity.load(Ordering::Acquire) >= target {
                     break;
                 }
-                q.push(Self::alloc_numa_block(
+                let block = Self::alloc_numa_block(
                     self.block_size,
                     n,
                     self.lock_blocks,
                     &self.lock_ledger,
                     self.runtime.madvise_hugepage,
-                ));
-                self.available.fetch_add(1, Ordering::Relaxed);
-                self.capacity.fetch_add(1, Ordering::Relaxed);
+                );
+                let capacity_before = self.capacity.load(Ordering::Acquire);
+                if self.ownership.register(
+                    block.as_ptr(),
+                    PoolBlockOrigin::Accounted,
+                    PoolBlockLocation::Queue,
+                ) {
+                    queue.push(block);
+                    if self.capacity.load(Ordering::Acquire) <= capacity_before {
+                        log::debug!(
+                            target: "memory_pool",
+                            "stopping pool growth because stale-address recovery made no capacity progress"
+                        );
+                        return;
+                    }
+                } else {
+                    log::error!(
+                        target: "memory_pool",
+                        "stopping pool growth because the ownership ledger rejected a new block"
+                    );
+                    self.ownership.release_block(block, &self.lock_ledger);
+                    return;
+                }
             }
         }
-        // telemetry!(telemetry::MEM_POOL_CAPACITY.store(self.capacity.load(Ordering::Relaxed) as u64, Ordering::Relaxed));
+    }
+
+    fn grow(&self, new_capacity: usize) {
+        let _resize_guard = self
+            .resize_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.grow_locked(new_capacity);
         self.update_metrics();
         self.check_invariants();
+    }
+
+    fn pop_queue_block(&self, queue: &SegQueue<AlignedBox<[u8]>>) -> Option<AlignedBox<[u8]>> {
+        loop {
+            let block = queue.pop()?;
+            if block.len() != self.block_size {
+                log::error!(
+                    target: "memory_pool",
+                    "discarding an internally mismatched queue block: {} != {}",
+                    block.len(),
+                    self.block_size
+                );
+                let _ = self
+                    .ownership
+                    .discard_available(block.as_ptr(), PoolBlockLocation::Queue);
+                self.ownership.release_block(block, &self.lock_ledger);
+                continue;
+            }
+            if self
+                .ownership
+                .checkout(block.as_ptr(), PoolBlockLocation::Queue)
+            {
+                return Some(block);
+            }
+            log::error!(target: "memory_pool", "queue block was absent from the ownership ledger");
+            self.ownership.release_block(block, &self.lock_ledger);
+        }
     }
 
     fn update_metrics(&self) {
@@ -606,6 +918,7 @@ impl MemoryPool {
         // Fragmentation not tracked precisely; leave default 0
         let util =
             if cap == 0 { 0 } else { (in_use.saturating_mul(100).saturating_div(cap)) as u64 };
+        crate::optimize::telemetry::MEM_POOL_CAPACITY.store(cap as u64, Ordering::Relaxed);
         crate::optimize::telemetry::MEM_POOL_UTILIZATION.store(util, Ordering::Relaxed);
     }
 
@@ -618,22 +931,22 @@ impl MemoryPool {
     /// If the pool is empty, a new block is created.
     #[inline(always)]
     pub fn alloc(&self) -> AlignedBox<[u8]> {
+        let node = numa::current_node() % self.num_nodes;
+        self.flush_tls_to_queue(node, usize::MAX);
         // Fast-path: check TLS cache first
         if let Some(b) = self.with_tls_cache(Vec::pop) {
-            // Validate size; drop foreign/mismatched blocks
-            if b.len() == self.block_size {
+            if b.len() == self.block_size
+                && self.ownership.checkout(b.as_ptr(), PoolBlockLocation::Tls)
+            {
                 crate::optimize::telemetry::MEM_POOL_HITS_TLS.inc();
-                self.dec_available();
-                self.inc_in_use();
                 // Warm cache for caller
                 prefetch(b.as_ptr(), PrefetchHint::T0);
                 return b;
             } else {
-                // Remove from available as it left TLS, but do not count as in-use
-                self.dec_available();
-                // Release mismatched blocks owned by this pool before dropping them.
-                release_locked_block(b, &self.lock_ledger);
-                // Continue to the slow path to obtain a correct block.
+                let _ = self
+                    .ownership
+                    .discard_available(b.as_ptr(), PoolBlockLocation::Tls);
+                self.ownership.release_block(b, &self.lock_ledger);
             }
         }
 
@@ -660,10 +973,8 @@ impl MemoryPool {
         // to reduce long-term TLS growth under bursty patterns
         self.flush_tls_to_queue(node, 8);
         if let Some(queue) = self.pools.get(node) {
-            if let Some(b) = queue.pop() {
+            if let Some(b) = self.pop_queue_block(queue) {
                 crate::optimize::telemetry::MEM_POOL_HITS_QUEUE.inc();
-                self.dec_available();
-                self.in_use.fetch_add(1, Ordering::Relaxed);
                 self.update_metrics();
                 self.check_invariants();
                 // telemetry!(telemetry::update_memory_usage());
@@ -677,10 +988,8 @@ impl MemoryPool {
             for off in 1..self.num_nodes {
                 let idx = (node + off) % self.num_nodes;
                 if let Some(q) = self.pools.get(idx) {
-                    if let Some(b) = q.pop() {
+                    if let Some(b) = self.pop_queue_block(q) {
                         // Treat as regular queue hit
-                        self.dec_available();
-                        self.in_use.fetch_add(1, Ordering::Relaxed);
                         self.update_metrics();
                         self.check_invariants();
                         prefetch(b.as_ptr(), PrefetchHint::T0);
@@ -703,10 +1012,8 @@ impl MemoryPool {
             self.grow(target);
             // Try again after growth
             if let Some(queue) = self.pools.get(node) {
-                if let Some(b) = queue.pop() {
+                if let Some(b) = self.pop_queue_block(queue) {
                     crate::optimize::telemetry::MEM_POOL_ALLOC_GROW.inc();
-                    self.available.fetch_sub(1, Ordering::Relaxed);
-                    self.in_use.fetch_add(1, Ordering::Relaxed);
                     self.update_metrics();
                     self.check_invariants();
                     prefetch(b.as_ptr(), PrefetchHint::T0);
@@ -714,38 +1021,31 @@ impl MemoryPool {
                 }
             }
         }
-        // Hard-cap reached or still no blocks: allocate a new block and account it as pooled
-        // (checked-out). This maintains invariants for free() without needing origin tags.
-        let cap_now = self.capacity.load(Ordering::Relaxed);
-        let limit2 = self.hard_max_capacity;
-        if cap_now < limit2 {
-            let b = Self::alloc_numa_block(
-                self.block_size,
-                node,
-                self.lock_blocks,
-                &self.lock_ledger,
-                self.runtime.madvise_hugepage,
-            );
-            self.capacity.fetch_add(1, Ordering::Relaxed);
-            self.in_use.fetch_add(1, Ordering::Relaxed);
-            self.update_metrics();
-            self.check_invariants();
-            return b;
-        }
         // If we are strictly at the hard cap, we cannot grow. As a last resort, allocate
-        // an ephemeral block but do not touch counters; free() will drop it if pool is full.
+        // an ephemeral block which is tracked separately and never enters accounted state.
         crate::optimize::telemetry::MEM_POOL_ALLOC_EPHEMERAL.inc();
-        {
-            let b = Self::alloc_numa_block(
-                self.block_size,
-                node,
-                self.lock_blocks,
-                &self.lock_ledger,
-                self.runtime.madvise_hugepage,
+        let block = Self::alloc_numa_block(
+            self.block_size,
+            node,
+            self.lock_blocks,
+            &self.lock_ledger,
+            self.runtime.madvise_hugepage,
+        );
+        if !self.ownership.register(
+            block.as_ptr(),
+            PoolBlockOrigin::Ephemeral,
+            PoolBlockLocation::CheckedOut,
+        ) {
+            log::error!(
+                target: "memory_pool",
+                "returning an untracked emergency block because the ownership ledger rejected ephemeral registration"
             );
-            prefetch(b.as_ptr(), PrefetchHint::T0);
-            b
+            // The block remains owned by the caller. `MemoryPool::free` rejects it without
+            // changing accounted counters and drops it after zeroization.
+            return block;
         }
+        prefetch(block.as_ptr(), PrefetchHint::T0);
+        block
     }
 
     /// Returns a memory block to the pool.
@@ -754,39 +1054,58 @@ impl MemoryPool {
     /// block directly.
     #[inline(always)]
     pub fn free(&self, mut block: AlignedBox<[u8]>) {
-        // Drop foreign/mismatched sized blocks instead of re-caching them
+        let ptr = block.as_ptr();
         if block.len() != self.block_size {
-            // Do not touch counters: block did not originate from this pool's accounting
+            log::debug!(
+                target: "memory_pool",
+                "rejecting block with mismatched length: {} != {}",
+                block.len(),
+                self.block_size
+            );
+            self.ownership.discard_released(ptr);
+            release_locked_block(block, &self.lock_ledger);
             return;
         }
+
+        let Some(origin) = self.ownership.begin_free(ptr) else {
+            log::debug!(target: "memory_pool", "rejecting foreign or non-checked-out block {:p}", ptr);
+            self.ownership.discard_released(ptr);
+            release_locked_block(block, &self.lock_ledger);
+            return;
+        };
+
         // Zeroize efficiently; allows vectorized memset
         block.as_mut().fill(0);
+
+        if origin == PoolBlockOrigin::Ephemeral {
+            self.ownership.release_block(block, &self.lock_ledger);
+            self.update_metrics();
+            return;
+        }
+
         // Try to place into TLS cache
         let limit = self.tls_limit();
         let block = match self.try_cache_block(block, limit) {
-            Ok(()) => {
-                self.available.fetch_add(1, Ordering::Relaxed);
-                self.in_use.fetch_sub(1, Ordering::Relaxed);
-                self.update_metrics();
-                self.check_invariants();
-                return;
-            }
+            Ok(()) => return,
             Err(block) => block,
         };
+
         // Fallback: return to global pool queue
         let node = numa::current_node() % self.num_nodes;
-        if self.available.load(Ordering::Relaxed) < self.capacity.load(Ordering::Relaxed) {
-            if let Some(q) = self.pools.get(node) {
-                q.push(block);
-                self.available.fetch_add(1, Ordering::Relaxed);
-                self.in_use.fetch_sub(1, Ordering::Relaxed);
+        if let Some(queue) = self.pools.get(node) {
+            if self
+                .ownership
+                .return_accounted(block.as_ptr(), PoolBlockLocation::Queue)
+            {
+                queue.push(block);
                 self.update_metrics();
                 self.check_invariants();
                 return;
             }
         }
-        release_locked_block(block, &self.lock_ledger);
-        self.in_use.fetch_sub(1, Ordering::Relaxed);
+
+        log::error!(target: "memory_pool", "checked-out block lost its ownership record");
+        self.ownership.release_block(block, &self.lock_ledger);
         self.update_metrics();
         self.check_invariants();
         // telemetry!(telemetry::update_memory_usage());
@@ -794,34 +1113,48 @@ impl MemoryPool {
 
     /// Adjusts the maximum number of cached blocks at runtime.
     pub fn set_capacity(&self, new_capacity: usize) {
-        let current = self.capacity.load(Ordering::Relaxed);
         let limit = self.hard_max_capacity;
         let clamped = core::cmp::min(new_capacity, limit);
+        let node = numa::current_node() % self.num_nodes;
+        self.bump_tls_limit(self.tls_limit().min(clamped));
+        self.flush_tls_to_queue(node, usize::MAX);
+
+        let _resize_guard = self
+            .resize_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self.capacity.load(Ordering::Acquire);
         if clamped > current {
-            self.grow(clamped);
+            self.grow_locked(clamped);
         } else {
-            // shrink: drop excess blocks
-            let mut diff = current - clamped;
-            while diff > 0 && self.available.load(Ordering::Relaxed) > 0 {
-                for q in &self.pools {
-                    if diff == 0 {
+            let mut remaining = current - clamped;
+            while remaining > 0 {
+                let mut removed = false;
+                for queue in &self.pools {
+                    if remaining == 0 {
                         break;
                     }
-                    if let Some(block) = q.pop() {
-                        release_locked_block(block, &self.lock_ledger);
-                        self.available.fetch_sub(1, Ordering::Relaxed);
-                        self.capacity.fetch_sub(1, Ordering::Relaxed);
-                        diff -= 1;
+                    let Some(block) = queue.pop() else {
+                        continue;
+                    };
+                    if self
+                        .ownership
+                        .discard_available(block.as_ptr(), PoolBlockLocation::Queue)
+                    {
+                        self.ownership.release_block(block, &self.lock_ledger);
+                        remaining -= 1;
+                        removed = true;
+                    } else {
+                        log::error!(target: "memory_pool", "queue block was absent from the ownership ledger during shrink");
+                        self.ownership.release_block(block, &self.lock_ledger);
                     }
                 }
-                if diff == 0 {
+                if !removed {
                     break;
                 }
             }
         }
-        // telemetry!(telemetry::MEM_POOL_CAPACITY.store(self.capacity.load(Ordering::Relaxed) as u64, Ordering::Relaxed));
         self.update_metrics();
-        // telemetry!(telemetry::update_memory_usage());
         self.check_invariants();
     }
 
@@ -938,9 +1271,10 @@ impl MemoryPool {
 
 impl Drop for MemoryPool {
     fn drop(&mut self) {
+        self.ownership.close();
         for queue in &self.pools {
             while let Some(block) = queue.pop() {
-                release_locked_block(block, &self.lock_ledger);
+                self.ownership.release_block(block, &self.lock_ledger);
             }
         }
 
@@ -1261,9 +1595,11 @@ impl<'a> Drop for ZeroCopyBuffer<'a> {
 
 #[cfg(test)]
 mod memory_pool_growth_tests {
+    use std::sync::atomic::Ordering;
+
     use super::{
-        default_hard_max_capacity, MemoryPool, MemoryPoolRuntimeConfig, LOCK_BLOCKS_TEST_MUTEX,
-        DEFAULT_POOL_MAX_BYTES,
+        default_hard_max_capacity, MemoryPool, MemoryPoolRuntimeConfig, PoolBlockLocation,
+        PoolBlockOrigin, PoolOwnershipLedger, LOCK_BLOCKS_TEST_MUTEX, DEFAULT_POOL_MAX_BYTES,
     };
 
     #[test]
@@ -1327,21 +1663,169 @@ mod memory_pool_growth_tests {
 
     #[test]
     fn thread_local_blocks_remain_owned_by_their_origin_pool() {
-        use std::sync::atomic::Ordering;
-
         let first_pool = super::MemoryPool::new(1, 2_048);
         let second_pool = super::MemoryPool::new(1, 2_048);
         let first_block = first_pool.alloc();
         let first_pointer = first_block.as_ptr();
         assert!(first_pool.try_cache_block(first_block, 1).is_ok());
-        first_pool.available.fetch_add(1, Ordering::Relaxed);
-        first_pool.in_use.fetch_sub(1, Ordering::Relaxed);
+        first_pool.ownership.assert_consistent();
 
         let second_block = second_pool.alloc();
         assert_ne!(second_block.as_ptr(), first_pointer);
 
         let first_block_again = first_pool.alloc();
         assert_eq!(first_block_again.as_ptr(), first_pointer);
+        first_pool.free(first_block_again);
+        first_pool.ownership.assert_consistent();
+    }
+
+    #[test]
+    fn ephemeral_blocks_never_change_accounted_counters() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_POOL_HARD_MAX_CAP",
+            "1",
+        )]);
+        let pool = MemoryPool::new_with_snapshot(1, 2_048, &environment);
+        pool.runtime.tls_cache_limit.store(0, Ordering::Relaxed);
+
+        let accounted = pool.alloc();
+        let ephemeral = pool.alloc();
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 1);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), 1);
+        assert_eq!(pool.available.load(Ordering::Acquire), 0);
+
+        pool.free(ephemeral);
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 1);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), 1);
+        assert_eq!(pool.available.load(Ordering::Acquire), 0);
+
+        let pointer = accounted.as_ptr();
+        pool.free(accounted);
+        assert_eq!(pool.ownership.begin_free(pointer), None);
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 1);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), 0);
+        assert_eq!(pool.available.load(Ordering::Acquire), 1);
+        pool.ownership.assert_consistent();
+    }
+
+    #[test]
+    fn duplicate_address_registration_replaces_stale_state_without_counter_drift() {
+        use std::sync::Arc;
+
+        let capacity = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let in_use = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let available = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ledger = PoolOwnershipLedger::new(
+            Arc::clone(&capacity),
+            Arc::clone(&in_use),
+            Arc::clone(&available),
+        );
+        let pointer = 0x1000usize as *const u8;
+
+        assert!(ledger.register(pointer, PoolBlockOrigin::Accounted, PoolBlockLocation::CheckedOut));
+        assert!(ledger.register(pointer, PoolBlockOrigin::Accounted, PoolBlockLocation::Queue));
+        assert_eq!(capacity.load(Ordering::Acquire), 1);
+        assert_eq!(in_use.load(Ordering::Acquire), 0);
+        assert_eq!(available.load(Ordering::Acquire), 1);
+        ledger.assert_consistent();
+    }
+
+    #[test]
+    fn foreign_and_mismatched_blocks_do_not_enter_pool_state() {
+        use std::alloc::{alloc, Layout};
+
+        let pool = MemoryPool::new(1, 2_048);
+        pool.runtime.tls_cache_limit.store(0, Ordering::Relaxed);
+        let foreign_pool = MemoryPool::new(1, 2_048);
+        foreign_pool.runtime.tls_cache_limit.store(0, Ordering::Relaxed);
+
+        let foreign = foreign_pool.alloc();
+        pool.free(foreign);
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 1);
+        assert_eq!(pool.available.load(Ordering::Acquire), 1);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), 0);
+        assert_eq!(foreign_pool.in_use.load(Ordering::Acquire), 1);
+
+        let layout = Layout::from_size_align(1, 64).expect("one-byte layout");
+        let raw = unsafe { alloc(layout) };
+        assert!(!raw.is_null());
+        let slice = unsafe { std::slice::from_raw_parts_mut(raw, 1) };
+        let mismatched = unsafe { aligned_box::AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
+        pool.free(mismatched);
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 1);
+        assert_eq!(pool.available.load(Ordering::Acquire), 1);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), 0);
+        pool.ownership.assert_consistent();
+    }
+
+    #[test]
+    fn shrink_flushes_tls_and_releases_accounted_capacity() {
+        let pool = MemoryPool::new(2, 2_048);
+        pool.runtime.tls_cache_limit.store(2, Ordering::Relaxed);
+        let first = pool.alloc();
+        let second = pool.alloc();
+        pool.free(first);
+        pool.free(second);
+        assert_eq!(pool.available.load(Ordering::Acquire), 2);
+
+        pool.set_capacity(0);
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 0);
+        assert_eq!(pool.available.load(Ordering::Acquire), 0);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), 0);
+        pool.ownership.assert_consistent();
+    }
+
+    #[test]
+    fn concurrent_queue_transitions_preserve_exact_accounting() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(MemoryPool::new(4, 2_048));
+        pool.runtime.tls_cache_limit.store(0, Ordering::Relaxed);
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let pool = Arc::clone(&pool);
+            workers.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let block = pool.alloc();
+                    pool.free(block);
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("memory pool worker must finish");
+        }
+        let capacity = pool.capacity.load(Ordering::Acquire);
+        assert!(capacity >= 4);
+        assert_eq!(pool.available.load(Ordering::Acquire), capacity);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), 0);
+        pool.ownership.assert_consistent();
+    }
+
+    #[test]
+    fn tls_ledger_survives_pool_drop_until_thread_cleanup() {
+        use std::sync::{mpsc, Arc};
+
+        let pool = Arc::new(MemoryPool::new(1, 2_048));
+        pool.runtime.tls_cache_limit.store(1, Ordering::Relaxed);
+        let ledger = Arc::clone(&pool.ownership);
+        let lock_ledger = Arc::clone(&pool.lock_ledger);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_pool = Arc::clone(&pool);
+        let worker = std::thread::spawn(move || {
+            let block = worker_pool.alloc();
+            worker_pool.free(block);
+            drop(worker_pool);
+            ready_tx.send(()).expect("worker must signal TLS ownership");
+            release_rx.recv().expect("worker must receive cleanup signal");
+        });
+
+        ready_rx.recv().expect("worker must cache a block");
+        drop(pool);
+        release_tx.send(()).expect("worker cleanup signal must send");
+        worker.join().expect("worker must clean up its TLS cache");
+        assert!(ledger.closed.load(Ordering::Acquire));
+        assert_eq!(lock_ledger.len(), 0);
     }
 
     #[test]
@@ -1353,15 +1837,13 @@ mod memory_pool_growth_tests {
         MemoryPool::set_lock_blocks(true);
         {
             let pool = MemoryPool::new(1, 2_048);
+            pool.runtime.tls_cache_limit.store(1, Ordering::Relaxed);
             let block = pool.alloc();
             pool.free(block);
-
-            let cached = pool.with_tls_cache(|cache| cache.pop());
-            if let Some(block) = cached {
-                pool.pools[0].push(block);
-            }
             pool.set_capacity(0);
+            assert_eq!(pool.capacity.load(Ordering::Acquire), 0);
             assert_eq!(pool.lock_ledger.len(), 0);
+            pool.ownership.assert_consistent();
         }
         MemoryPool::set_lock_blocks(original);
     }
