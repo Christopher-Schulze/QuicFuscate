@@ -9,6 +9,8 @@ import {
   formatTimestamp,
 } from "../../../../../../../apps/svelte-desktop/src/lib/format";
 
+const VALID_TAURI_LOG_TIMESTAMP_MS = 1_704_117_045_000;
+
 describe("format utilities", () => {
   describe("countryCodeToFlag", () => {
     test("converts US to US flag emoji", () => {
@@ -161,7 +163,7 @@ describe("format utilities", () => {
     });
 
     test("formats current timestamp to valid time string", () => {
-      const parsed = parseUnixMilliseconds(Date.now(), "tauri-log");
+      const parsed = parseUnixMilliseconds(VALID_TAURI_LOG_TIMESTAMP_MS, "tauri-log");
       expect(parsed.ok).toBe(true);
       if (!parsed.ok) return;
       const result = formatTimestamp(parsed.value);

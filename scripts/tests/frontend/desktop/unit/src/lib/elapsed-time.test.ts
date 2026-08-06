@@ -3,8 +3,10 @@ import {
   MAX_ELAPSED_SAMPLE_GAP_MILLISECONDS,
   evaluateByteRateSample,
   isBrowserDocumentVisible,
+  readBrowserMonotonicMilliseconds,
   type ByteCounterSample,
 } from "../../../../../../../packages/time/index";
+import { getFrontendClockHarness } from "../../../../test-clock";
 
 const previous: ByteCounterSample = {
   atMilliseconds: 1_000,
@@ -67,16 +69,37 @@ describe("shared browser elapsed-time policy", () => {
     expect(rejected.reason).toBe("gap-too-large");
   });
 
+  test("keeps elapsed samples valid across a wall-clock jump", () => {
+    const clock = getFrontendClockHarness();
+    clock.installClockSources();
+    clock.setWallTime(1_710_000_000_000);
+    clock.setMonotonicTime(1_000);
+    const previousSample = {
+      atMilliseconds: readBrowserMonotonicMilliseconds(),
+      bytesIn: 100,
+      bytesOut: 200,
+    };
+
+    clock.advanceWallTime(-86_400_000);
+    clock.advanceMonotonicTime(1_000);
+    const currentSample = {
+      atMilliseconds: readBrowserMonotonicMilliseconds(),
+      bytesIn: 1_100,
+      bytesOut: 2_200,
+    };
+
+    expect(evaluateByteRateSample(previousSample, currentSample)).toMatchObject({
+      accepted: true,
+      inBps: 8_000,
+      outBps: 16_000,
+    });
+  });
+
   test("visibility helper treats only an explicitly hidden document as hidden", () => {
-    const original = Object.getOwnPropertyDescriptor(document, "visibilityState");
-    try {
-      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
-      expect(isBrowserDocumentVisible()).toBe(false);
-      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-      expect(isBrowserDocumentVisible()).toBe(true);
-    } finally {
-      if (original) Object.defineProperty(document, "visibilityState", original);
-      else delete (document as Document & { visibilityState?: string }).visibilityState;
-    }
+    const clock = getFrontendClockHarness();
+    clock.setVisibility("hidden");
+    expect(isBrowserDocumentVisible()).toBe(false);
+    clock.setVisibility("visible");
+    expect(isBrowserDocumentVisible()).toBe(true);
   });
 });

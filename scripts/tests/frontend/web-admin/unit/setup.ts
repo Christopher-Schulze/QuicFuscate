@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/svelte";
+import { beginFrontendClockHarness, resetFrontendClockHarness } from "../../test-clock";
 import { createDeterministicTestUuid } from "../../test-identity";
 
 function ensurePortalStage(): void {
@@ -10,6 +11,7 @@ function ensurePortalStage(): void {
 }
 
 beforeEach(() => {
+  beginFrontendClockHarness();
   if (!globalThis.crypto) {
     (globalThis as { crypto?: Crypto }).crypto = {} as Crypto;
   }
@@ -80,5 +82,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetFrontendClockHarness();
   vi.useRealTimers();
 });

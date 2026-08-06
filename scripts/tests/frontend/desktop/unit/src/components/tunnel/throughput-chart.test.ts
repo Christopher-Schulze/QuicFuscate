@@ -1,15 +1,12 @@
-import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import { render } from "../../../testing-library";
+import { getFrontendClockHarness } from "../../../../../test-clock";
 
 import ThroughputChart from "../../../../../../../../apps/svelte-desktop/src/lib/components/tunnel/ThroughputChart.svelte";
 
 describe("tunnel/ThroughputChart", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
+    getFrontendClockHarness().useFakeTimers();
   });
 
   test("renders a canvas element", () => {
@@ -52,18 +49,13 @@ describe("tunnel/ThroughputChart", () => {
   });
 
   test("cancels the render loop and resets samples when the document is hidden", () => {
-    const original = Object.getOwnPropertyDescriptor(document, "visibilityState");
-    const cancel = vi.spyOn(window, "cancelAnimationFrame");
-    try {
-      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-      render(ThroughputChart, { downBps: 100_000, upBps: 50_000, isActive: true });
-      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
-      document.dispatchEvent(new Event("visibilitychange"));
-      expect(cancel).toHaveBeenCalled();
-    } finally {
-      cancel.mockRestore();
-      if (original) Object.defineProperty(document, "visibilityState", original);
-      else delete (document as Document & { visibilityState?: string }).visibilityState;
-    }
+    const clock = getFrontendClockHarness();
+    clock.installAnimationFrame();
+    clock.setVisibility("visible");
+    render(ThroughputChart, { downBps: 100_000, upBps: 50_000, isActive: true });
+    expect(clock.pendingAnimationFrameCount()).toBeGreaterThan(0);
+
+    clock.setVisibility("hidden");
+    expect(clock.pendingAnimationFrameCount()).toBe(0);
   });
 });

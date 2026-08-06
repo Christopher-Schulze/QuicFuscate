@@ -27,6 +27,7 @@ const CONFIG_TOML = [
   "mtu = 1400",
   "",
 ].join("\n");
+const BASE_LOG_TIMESTAMP_MS = 1_710_000_000_000;
 
 function bump(counters: Map<string, number>, key: string) {
   counters.set(key, (counters.get(key) ?? 0) + 1);
@@ -247,8 +248,8 @@ test.describe("Button Semantics", () => {
       serverConfig: CONFIG_TOML,
       serverLogMode: "normal",
       logs: [
-        { ts: Date.now() - 2000, level: "info", msg: "client connected" },
-        { ts: Date.now() - 1000, level: "warn", msg: "latency spike" },
+        { ts: BASE_LOG_TIMESTAMP_MS - 2_000, level: "info", msg: "client connected" },
+        { ts: BASE_LOG_TIMESTAMP_MS - 1_000, level: "warn", msg: "latency spike" },
       ],
       logCursor: 2,
     };

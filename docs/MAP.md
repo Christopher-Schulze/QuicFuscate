@@ -1720,6 +1720,15 @@ The audit remains open. These reconciliations document current evidence and owne
 - Frontend unit setup -> deterministic `test-uuid-*` function only for environments without native `crypto.randomUUID()`; admin API tests independently exercise native UUID, secure-byte fallback, repeated provider output, and unavailable-source failure.
 - TODO-871 adds fixed-clock/repeated-random toast and CSRF cases plus concurrent Sparkline instance identity checks. Full unit suites pass Shared UI `89/89`, Admin `307/307`, and Desktop `411/411`; Admin/Desktop checks report 0 errors and 0 warnings; both production builds pass; Chromium `1.58.2` preflight passes; Admin E2E passes `70/70`; Desktop E2E passes `23/23`; the focused API nonce suite passes `15/15`; and `git diff --check` passes. TODO-872 remains the owner for the shared clock/visibility/suspension harness.
 
+## Deterministic Frontend Clock Wiring (2026-08-06, TODO-872)
+
+- Shared unit setup -> `scripts/tests/frontend/test-clock.ts` -> isolated wall-clock, monotonic, fake-timer, RAF, and visibility controls with descriptor, spy, callback, and timer restoration.
+- `DashboardView` and Tauri engine poller tests -> the harness -> hidden invalidation, delayed-response disposal, visible restart, monotonic throughput rebasing, and timer advancement.
+- `ThroughputChart` and `SmoothTrafficValue` tests -> controlled RAF queue -> explicit frame cancellation and hidden-state snapping without manual global descriptor leakage.
+- Elapsed-time test -> independent wall/monotonic controls -> accepted rate sample after a backwards wall-clock jump. Timestamp boundary and TODO-871 identity/CSRF tests remain the unit/provenance and collision owners.
+- Playwright fixture constants -> explicit `QKEY_CREATED_AT_SECONDS`, `ADMIN_LOG_TIMESTAMP_MS`, and `BASE_LOG_TIMESTAMP_MS` values; desktop timestamp fixtures -> fixed valid `DEFAULT_DESKTOP_CREATED_AT_MS` value. No timing fixture uses host `Date.now()`.
+- Unit verification: Shared UI `92/92`, Admin `307/307`, and Desktop `412/412` pass. Focused harness/owner regressions pass Shared UI `3/3`, Admin `46/46`, and Desktop `21/21`; Admin and Desktop `bun run check` pass with 0 errors and 0 warnings, and both production builds pass. Chromium preflight passes with Playwright `1.58.2`; Admin E2E passes `70/70` and Desktop E2E passes `23/23`; `git diff --check` passes. The Desktop build retains the known Tauri `core.js` dynamic/static import warning. No product or visual UI implementation is part of this wiring task, and no Rust gate is claimed.
+
 ## Browser Timer and RAF Lifecycle Wiring (2026-08-06, TODO-870)
 
 - `packages/ui/owned-scheduling.ts` -> admin and desktop delayed actions, login feedback/focus, QKey animation, error feedback, CountrySelect, and root persistence. Each owner cancels replacement work and destroys pending callbacks with its component or root lifecycle.

@@ -24,6 +24,8 @@ const CONFIG_TOML = [
   "mtu = 1400",
   "",
 ].join("\n");
+const QKEY_CREATED_AT_SECONDS = 1_710_000_000;
+const ADMIN_LOG_TIMESTAMP_MS = 1_710_000_000_000;
 
 async function selectLogMode(page: Page, modeLabel: "Verbose" | "Normal" | "Minimal" | "No-Log"): Promise<void> {
   const modeKey = modeLabel.toLowerCase().replace(/[^a-z]+/g, "-");
@@ -163,7 +165,7 @@ async function stubAdminApi(page: Page, opts: StubOptions = {}) {
         contentType: "application/json",
         body: JSON.stringify({
           success: true,
-          data: { qkey: "QKey-CENTER-TEST", created_at: Date.now() / 1000 },
+          data: { qkey: "QKey-CENTER-TEST", created_at: QKEY_CREATED_AT_SECONDS },
         }),
       });
       return;
@@ -178,7 +180,7 @@ async function stubAdminApi(page: Page, opts: StubOptions = {}) {
           data: {
             lines: [
               {
-                ts: Date.now(),
+                ts: ADMIN_LOG_TIMESTAMP_MS,
                 level: "info",
                 msg: "admin init",
               },

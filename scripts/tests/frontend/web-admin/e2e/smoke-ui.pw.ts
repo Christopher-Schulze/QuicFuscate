@@ -20,6 +20,7 @@ const CONFIG_TOML = [
   "mtu = 1400",
   "",
 ].join("\n");
+const QKEY_CREATED_AT_SECONDS = 1_710_000_000;
 
 async function stubAdminApi(page: Page): Promise<void> {
   await page.route("**/api/**", async (route) => {
@@ -91,7 +92,7 @@ async function stubAdminApi(page: Page): Promise<void> {
         contentType: "application/json",
         body: JSON.stringify({
           success: true,
-          data: { qkey: "QKey-SMOKE-TEST", created_at: Date.now() / 1000 },
+          data: { qkey: "QKey-SMOKE-TEST", created_at: QKEY_CREATED_AT_SECONDS },
         }),
       });
       return;

@@ -1,8 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+import { beginFrontendClockHarness, resetFrontendClockHarness } from "../../test-clock";
 import { createDeterministicTestUuid } from "../../test-identity";
 
 beforeEach(() => {
+  beginFrontendClockHarness();
   if (!globalThis.crypto) {
     (globalThis as { crypto?: Crypto }).crypto = {} as Crypto;
   }
@@ -67,4 +69,8 @@ beforeEach(() => {
       })),
     });
   }
+});
+
+afterEach(() => {
+  resetFrontendClockHarness();
 });

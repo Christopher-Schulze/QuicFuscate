@@ -23,6 +23,7 @@ import {
   engineLogsClear,
   startEnginePollers,
 } from "../../../../../../apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte";
+import { getFrontendClockHarness } from "../../../test-clock";
 import { desktopCreatedAt } from "./timestamp-fixtures";
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -47,8 +48,7 @@ function resetStores(): void {
 }
 
 function setVisibility(state: "hidden" | "visible"): void {
-  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
-  document.dispatchEvent(new Event("visibilitychange"));
+  getFrontendClockHarness().setVisibility(state);
 }
 
 describe("desktop engine poller ownership", () => {
@@ -56,11 +56,10 @@ describe("desktop engine poller ownership", () => {
     invokeMock.mockReset();
     resetStores();
     setTauriMode();
-    vi.useFakeTimers();
+    getFrontendClockHarness().useFakeTimers();
   });
 
   afterEach(() => {
-    setVisibility("visible");
     vi.useRealTimers();
   });
 
@@ -172,7 +171,8 @@ describe("desktop engine poller ownership", () => {
   test("uses monotonic throughput samples and rebases across visibility gaps", async () => {
     let bytesIn = 100;
     let bytesOut = 200;
-    const monotonicNow = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const clock = getFrontendClockHarness();
+    clock.setMonotonicTime(1_000);
     invokeMock.mockImplementation((command: string) => {
       if (command === "engine_status") return Promise.resolve({ state: "Connected", activeTunnelId: "t1" });
       if (command === "engine_stats") return Promise.resolve({ bytesIn, bytesOut });
@@ -187,7 +187,7 @@ describe("desktop engine poller ownership", () => {
 
       bytesIn = 1_100;
       bytesOut = 2_200;
-      monotonicNow.mockReturnValue(2_000);
+      clock.setMonotonicTime(2_000);
       await vi.advanceTimersByTimeAsync(900);
       expect(getThroughput()).toEqual({ t1: { downBps: 8_000, upBps: 16_000 } });
 
@@ -195,25 +195,24 @@ describe("desktop engine poller ownership", () => {
       expect(getThroughput()).toEqual({});
       bytesIn = 2_100;
       bytesOut = 3_200;
-      monotonicNow.mockReturnValue(3_000);
+      clock.setMonotonicTime(3_000);
       await vi.advanceTimersByTimeAsync(900);
       expect(getThroughput()).toEqual({});
 
       setVisibility("visible");
       bytesIn = 2_200;
       bytesOut = 3_300;
-      monotonicNow.mockReturnValue(4_000);
+      clock.setMonotonicTime(4_000);
       await vi.advanceTimersByTimeAsync(900);
       expect(getThroughput()).toEqual({});
 
       bytesIn = 2_300;
       bytesOut = 3_400;
-      monotonicNow.mockReturnValue(5_000);
+      clock.setMonotonicTime(5_000);
       await vi.advanceTimersByTimeAsync(900);
       expect(getThroughput()).toEqual({ t1: { downBps: 800, upBps: 800 } });
     } finally {
       stop();
-      monotonicNow.mockRestore();
     }
   });
 });

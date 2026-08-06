@@ -1,5 +1,6 @@
 import { cleanup } from "@testing-library/svelte";
 import { afterEach, beforeEach, vi } from "vitest";
+import { beginFrontendClockHarness, resetFrontendClockHarness } from "../../test-clock";
 import { createDeterministicTestUuid } from "../../test-identity";
 
 function ensurePortalStage(): void {
@@ -32,6 +33,7 @@ const createCanvasContextMock = () =>
   }) as CanvasRenderingContext2D;
 
 beforeEach(() => {
+  beginFrontendClockHarness();
   if (!globalThis.crypto) {
     (globalThis as { crypto?: Crypto }).crypto = {} as Crypto;
   }
@@ -108,6 +110,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
+  resetFrontendClockHarness();
   vi.useRealTimers();
   await new Promise((resolve) => window.setTimeout(resolve, 0));
 });

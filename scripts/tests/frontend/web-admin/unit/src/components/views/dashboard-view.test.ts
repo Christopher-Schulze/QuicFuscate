@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { cleanup, render, screen, fireEvent, waitFor } from "../../../testing-library";
+import { getFrontendClockHarness } from "../../../../../test-clock";
 
 const getJsonMock = vi.hoisted(() => vi.fn());
 const postJsonMock = vi.hoisted(() => vi.fn());
@@ -67,8 +68,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 function setVisibility(state: "hidden" | "visible"): void {
-  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
-  document.dispatchEvent(new Event("visibilitychange"));
+  getFrontendClockHarness().setVisibility(state);
 }
 
 function mockAllEndpoints() {
@@ -92,13 +92,12 @@ describe("DashboardView", () => {
     setClients([]);
     setMetrics(null);
     mockAllEndpoints();
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    getFrontendClockHarness().useFakeTimers({ shouldAdvanceTime: true });
   });
 
   afterEach(() => {
     cleanup();
     vi.runAllTimers();
-    vi.useRealTimers();
   });
 
   test("renders dashboard heading", async () => {
