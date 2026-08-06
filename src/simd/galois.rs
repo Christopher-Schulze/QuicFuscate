@@ -174,6 +174,11 @@ const fn gf4_mul_byte_const(a: u8, b: u8) -> u8 {
 /// AVX2 GF(2^4) multiplication using table lookup
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support, valid immutable `a`, and writable
+/// non-overlapping `dst` storage. Vector accesses are bounded by the shared
+/// minimum length and the scalar tail handles the remainder.
 unsafe fn gf4_mul_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
@@ -212,6 +217,11 @@ unsafe fn gf4_mul_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support, valid immutable `a`, and writable
+/// non-overlapping `dst` storage. Vector reads and writes are bounded by the
+/// shared minimum length.
 unsafe fn gf4_mul_xor_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
@@ -240,6 +250,11 @@ unsafe fn gf4_mul_xor_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
 /// NEON GF(2^4) multiplication
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, valid immutable `a`, and
+/// writable non-overlapping `dst` storage. Vector accesses are bounded by the
+/// shared minimum length and the scalar tail handles the remainder.
 unsafe fn gf4_mul_neon(a: &[u8], b: u8, dst: &mut [u8]) {
     use ::core::arch::aarch64::*;
 
@@ -275,6 +290,11 @@ unsafe fn gf4_mul_neon(a: &[u8], b: u8, dst: &mut [u8]) {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, valid immutable `a`, and
+/// writable non-overlapping `dst` storage. Vector reads and writes are bounded
+/// by the shared minimum length.
 unsafe fn gf4_mul_xor_neon(a: &[u8], b: u8, dst: &mut [u8]) {
     use ::core::arch::aarch64::*;
 
@@ -362,6 +382,12 @@ fn gf16_mul_single(a: u16, b: u16) -> u16 {
 /// AVX-512 VPCLMULQDQ for GF(2^16) - 8 u16s at once = 5-8x faster!
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "vpclmulqdq", enable = "sse4.1")]
+/// # Safety
+///
+/// The caller must provide AVX-512F, VPCLMULQDQ, and SSE4.1 support, valid
+/// immutable `a`, and writable non-overlapping `dst` storage. Vector accesses
+/// are bounded by the shared minimum length and the scalar tail handles the
+/// remainder.
 unsafe fn gf16_mul_vpclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
     use std::arch::x86_64::*;
 
@@ -411,6 +437,11 @@ unsafe fn gf16_mul_vpclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
 /// PCLMULQDQ version for SSE4.2 systems
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "pclmulqdq", enable = "sse4.1")]
+/// # Safety
+///
+/// The caller must provide PCLMULQDQ and SSE4.1 support, valid immutable `a`,
+/// and writable non-overlapping `dst` storage. Vector accesses are bounded by
+/// the shared minimum length and the scalar tail handles the remainder.
 unsafe fn gf16_mul_pclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
     use std::arch::x86_64::*;
 

@@ -7,6 +7,12 @@ use std::arch::aarch64::*;
 
 // Core
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure the compiled/runtime path has SVE2 support and that
+/// `dst` is writable and `src` readable for the duration of the call. The
+/// slices must not overlap; vector predicates bound each access to their shared
+/// length.
 pub(super) unsafe fn xor_blocks_sve2(dst: &mut [u8], src: &[u8]) {
     #[cfg(target_feature = "sve2")]
     {
@@ -18,10 +24,20 @@ pub(super) unsafe fn xor_blocks_sve2(dst: &mut [u8], src: &[u8]) {
     scalar::xor_blocks(dst, src)
 }
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, writable `dst`, and readable
+/// non-overlapping `src` storage. The scalar fallback preserves the same
+/// length-bounded contract.
 pub(super) unsafe fn xor_blocks_neon(dst: &mut [u8], src: &[u8]) {
     scalar::xor_blocks(dst, src)
 }
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure the AArch64 CRC extension is available when the CRC
+/// intrinsic branch is compiled. `data` must remain a valid immutable slice for
+/// the duration of the call; fixed-width reads are guarded by remaining length.
 pub(super) unsafe fn crc32_arm(data: &[u8], initial: u32) -> u32 {
     #[cfg(target_feature = "crc")]
     {
@@ -69,6 +85,11 @@ pub(super) unsafe fn crc32_arm(data: &[u8], initial: u32) -> u32 {
     }
 }
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and a valid immutable `data`
+/// slice for the duration of the call. The 16-byte vector loads are guarded and
+/// the remainder is handled element by element.
 pub(super) unsafe fn popcnt_neon(data: &[u8]) -> usize {
     #[cfg(target_arch = "aarch64")]
     {
@@ -98,6 +119,11 @@ pub(super) unsafe fn popcnt_neon(data: &[u8]) -> usize {
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure the compiled/runtime path has SVE2 support and must
+/// provide a valid immutable `data` slice for the duration of the call. The
+/// delegated NEON implementation performs only bounded reads.
 pub(super) unsafe fn popcnt_sve2(data: &[u8]) -> usize {
     #[cfg(target_feature = "sve2")]
     {
@@ -108,6 +134,11 @@ pub(super) unsafe fn popcnt_sve2(data: &[u8]) -> usize {
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure the compiled/runtime path has SVE2 support and must
+/// provide a valid immutable `header` slice. The function checks emptiness
+/// before reading the first byte and uses one-lane predicates for SVE reads.
 pub(super) unsafe fn validate_header_sve2(header: &[u8]) -> bool {
     #[cfg(target_feature = "sve2")]
     {
@@ -144,6 +175,11 @@ pub(super) unsafe fn validate_header_sve2(header: &[u8]) -> bool {
 }
 
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and a valid immutable `header`
+/// slice for the duration of the call. The function checks emptiness before
+/// reading the first byte and does not retain the slice.
 pub(super) unsafe fn validate_header_neon(header: &[u8]) -> bool {
     // Fast-path header validation using NEON. Mirrors SVE2 semantics:
     // - Fixed bit (0x40) must be set for all QUIC packets
@@ -181,6 +217,11 @@ pub(super) unsafe fn validate_header_neon(header: &[u8]) -> bool {
 
 // Galois field
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure the compiled/runtime path has SVE2 support and must
+/// provide valid non-overlapping readable `a` and writable `dst` slices. The
+/// implementation bounds all accesses by their shared minimum length.
 pub(super) unsafe fn gf_mul_sve2(a: &[u8], b: u8, dst: &mut [u8]) {
     #[cfg(target_feature = "sve2")]
     {
@@ -194,6 +235,11 @@ pub(super) unsafe fn gf_mul_sve2(a: &[u8], b: u8, dst: &mut [u8]) {
 // FEC
 #[cfg(target_feature = "sve2")]
 #[target_feature(enable = "sve2")]
+/// # Safety
+///
+/// The caller must provide SVE2 support, a valid immutable `syndrome` slice,
+/// and a `len` no greater than its length. The scalar implementation returns
+/// owned output and does not retain the slice.
 pub(super) unsafe fn berlekamp_massey_sve2(syndrome: &[u8], len: usize) -> Vec<u8> {
     // The canonical scalar implementation owns the validated length contract;
     // this feature boundary does not expose an independent unchecked loop.
@@ -203,6 +249,11 @@ pub(super) unsafe fn berlekamp_massey_sve2(syndrome: &[u8], len: usize) -> Vec<u
 /// GF(2^8) multiply using NEON PMULL - carryless polynomial multiplication
 /// Polynomial: x^8 + x^4 + x^3 + x + 1 (AES reduction polynomial 0x11B)
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, valid immutable `a`, and
+/// writable `dst` storage that does not overlap `a`. Accesses are bounded by
+/// the shared minimum length and scalar tails cover incomplete vectors.
 pub(super) unsafe fn gf_mul_neon_pmull(a: &[u8], b: u8, dst: &mut [u8]) {
     use core::arch::aarch64::*;
 
@@ -243,6 +294,11 @@ pub(super) unsafe fn gf_mul_neon_pmull(a: &[u8], b: u8, dst: &mut [u8]) {
 
 /// GF(2^8) multiply using basic NEON (no PMULL, table-based with SIMD gather)
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, valid immutable `a`, and
+/// writable non-overlapping `dst` storage. The implementation bounds all
+/// accesses by the shared minimum length.
 pub(super) unsafe fn gf_mul_neon(a: &[u8], b: u8, dst: &mut [u8]) {
     let len = a.len().min(dst.len());
     if len == 0 || b == 0 {
@@ -261,6 +317,11 @@ pub(super) unsafe fn gf_mul_neon(a: &[u8], b: u8, dst: &mut [u8]) {
 /// Helper: GF(2^8) vector multiply using polynomial arithmetic
 #[target_feature(enable = "neon")]
 #[inline]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and pass initialized vector
+/// values. The helper only operates on those values and returns a new vector;
+/// it does not dereference or retain pointers.
 unsafe fn gf_mul_vec_neon(
     a: core::arch::aarch64::uint8x16_t,
     b: core::arch::aarch64::uint8x16_t,
@@ -314,6 +375,11 @@ fn gf_mul_byte_scalar(a: u8, b: u8) -> u8 {
 
 #[cfg(target_feature = "sve2")]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide SVE2 support, writable `dst`, and readable
+/// non-overlapping `src` storage. Predicate masks and the shared minimum length
+/// bound every vector load and store.
 unsafe fn xor_blocks_sve2_impl(dst: &mut [u8], src: &[u8]) {
     let len = core::cmp::min(dst.len(), src.len());
     let mut offset = 0usize;
@@ -329,6 +395,11 @@ unsafe fn xor_blocks_sve2_impl(dst: &mut [u8], src: &[u8]) {
 
 #[cfg(target_feature = "sve2")]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide SVE2 support, writable `dst`, and readable
+/// non-overlapping `src` storage. Predicate masks and the shared minimum length
+/// bound every vector load and store.
 unsafe fn memcpy_sve2_impl(dst: &mut [u8], src: &[u8]) {
     let len = core::cmp::min(dst.len(), src.len());
     let mut offset = 0usize;
@@ -342,10 +413,20 @@ unsafe fn memcpy_sve2_impl(dst: &mut [u8], src: &[u8]) {
 
 // Crypto
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and valid writable `state` and
+/// readable `key` arrays for the duration of the call. The implementation does
+/// not retain either reference.
 pub(super) unsafe fn aes_encrypt_neon(state: &mut [u8; 16], key: &[u8; 16]) {
     scalar::aes_encrypt_block(state, key)
 }
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide the AArch64 SHA-256 instruction support required by
+/// the selected backend. `state` and `blocks` must be valid for the duration of
+/// the call, with `state` writable and `blocks` readable; no references escape.
 unsafe fn compress_sha_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     #[cfg(not(windows))]
     sha2_asm::compress256(state, blocks);
@@ -357,12 +438,22 @@ unsafe fn compress_sha_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
 }
 
 #[target_feature(enable = "neon", enable = "sha2")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON and SHA2 support. `data` must remain a
+/// valid immutable slice for the duration of the call; the hashing helper owns
+/// its block storage and does not retain input references.
 pub(super) unsafe fn sha256_hw(data: &[u8]) -> [u8; 32] {
     super::sha256_hash_with_batch(data, 1, |state, blocks| compress_sha_blocks(state, blocks))
 }
 
 // Bitstream pack/unpack (NEON/SVE2 dispatch, scalar-equivalent logic)
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure the selected compiled/runtime path has SVE2 or NEON
+/// support and must provide readable `src` and writable, non-overlapping `dst`
+/// slices. All vector and scalar accesses are length-bounded.
 pub(super) unsafe fn pack_bits_sve2(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     #[cfg(target_feature = "sve2")]
     {
@@ -372,6 +463,11 @@ pub(super) unsafe fn pack_bits_sve2(src: &[u8], bit_width: u8, dst: &mut [u8]) -
 }
 
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and readable `src` plus
+/// writable, non-overlapping `dst` storage. Every vector copy and scalar tail
+/// is bounded by the respective slice lengths.
 pub(super) unsafe fn pack_bits_neon(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     #[cfg(target_arch = "aarch64")]
     {
@@ -630,6 +726,11 @@ pub(super) unsafe fn pack_bits_neon(src: &[u8], bit_width: u8, dst: &mut [u8]) -
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure the selected compiled/runtime path has SVE2 or NEON
+/// support and must provide readable `src` plus writable, non-overlapping `dst`
+/// storage. All accesses are length-bounded.
 pub(super) unsafe fn unpack_bits_sve2(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     #[cfg(target_feature = "sve2")]
     {
@@ -639,6 +740,11 @@ pub(super) unsafe fn unpack_bits_sve2(src: &[u8], bit_width: u8, dst: &mut [u8])
 }
 
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and readable `src` plus
+/// writable, non-overlapping `dst` storage. All vector and scalar accesses are
+/// bounded by the respective slice lengths.
 pub(super) unsafe fn unpack_bits_neon(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     #[cfg(target_arch = "aarch64")]
     {
@@ -884,6 +990,11 @@ pub(super) unsafe fn unpack_bits_neon(src: &[u8], bit_width: u8, dst: &mut [u8])
 
 // Reed-Solomon encode using NEON+PMULL GF multiply (block-wise)
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and a valid immutable `data`
+/// slice. The function allocates owned output and does not retain input
+/// references; internal shard buffers are sized before vector operations.
 pub(super) unsafe fn reed_solomon_encode_neon(data: &[u8], parity_shards: usize) -> Vec<u8> {
     let shard_size = 256;
     let data_shards = data.len().div_ceil(shard_size);
@@ -947,6 +1058,11 @@ pub(crate) fn qpack_encode_neon(input: &[u8], output: &mut [u8]) -> usize {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, valid immutable `input`, and
+/// writable `output` storage. The slices must not overlap; each output write is
+/// checked against `output.len()`.
 unsafe fn qpack_encode_neon_impl(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3::qpack::{HUFF_CODES, HUFF_LENS};
     use core::arch::aarch64::{
@@ -1060,6 +1176,11 @@ unsafe fn qpack_encode_neon_impl(input: &[u8], output: &mut [u8]) -> usize {
 // Huffman accumulation. Compiles only when SVE2 is available; otherwise we fall back to NEON.
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
+/// # Safety
+///
+/// The caller must provide SVE2 support, valid immutable `input`, and writable
+/// non-overlapping `output` storage. Predicate loads and explicit output checks
+/// bound all accesses.
 unsafe fn qpack_encode_sve2_impl(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3::qpack::{HUFF_CODES, HUFF_LENS};
     use core::arch::aarch64::*;
@@ -1175,6 +1296,11 @@ pub(crate) fn qpack_decode_sve2(input: &[u8], output: &mut [u8]) -> usize {
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
+/// # Safety
+///
+/// The caller must provide SVE2 support, valid immutable `input`, and writable
+/// non-overlapping `output` storage. The delegated decoder owns its bounds
+/// checks and no input reference escapes this call.
 unsafe fn qpack_decode_sve2_impl(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3;
     match h3::qpack::huff_decode_into(input, output) {

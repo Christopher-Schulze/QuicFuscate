@@ -187,6 +187,11 @@ pub fn chacha20_blocks_x16(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+/// # Safety
+///
+/// The caller must provide AVX-512F support. `key` and `nonce` must remain
+/// valid immutable arrays for the duration of the call; the function returns
+/// owned output and does not retain their addresses.
 unsafe fn chacha20_blocks_x16_avx512(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -248,6 +253,10 @@ unsafe fn chacha20_blocks_x16_avx512(
         (x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15);
 
     #[inline(always)]
+    /// # Safety
+    ///
+    /// The caller must provide AVX-512F support. `v` must be an initialized
+    /// vector value; the function does not dereference pointers or retain state.
     unsafe fn rotl32(v: __m512i, n: i32) -> __m512i {
         let n = ((n as u32) & 31) as i32;
         if n == 0 {
@@ -259,6 +268,11 @@ unsafe fn chacha20_blocks_x16_avx512(
         _mm512_or_si512(l, r)
     }
     #[inline(always)]
+    /// # Safety
+    ///
+    /// The caller must provide AVX-512F support and pass initialized vector
+    /// values through valid mutable references. The function does not retain
+    /// the references after returning.
     unsafe fn qr(a: &mut __m512i, b: &mut __m512i, c: &mut __m512i, d: &mut __m512i) {
         *a = _mm512_add_epi32(*a, *b);
         *d = _mm512_xor_si512(*d, *a);
@@ -339,6 +353,11 @@ unsafe fn chacha20_blocks_x16_avx512(
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide x86-64 SSE2 support and valid immutable `key` and
+/// `nonce` arrays for the duration of the call. The function returns owned
+/// output and does not retain their addresses.
 unsafe fn chacha20_blocks_x4_sse_core(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -397,6 +416,10 @@ unsafe fn chacha20_blocks_x4_sse_core(
         (x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15);
 
     #[inline(always)]
+    /// # Safety
+    ///
+    /// The caller must provide x86-64 SSE2 support and pass an initialized
+    /// vector value. No pointer is dereferenced by this helper.
     unsafe fn rotl32(v: __m128i, n: i32) -> __m128i {
         use std::arch::x86_64::*;
         let n = ((n as u32) & 31) as i32;
@@ -409,6 +432,10 @@ unsafe fn chacha20_blocks_x4_sse_core(
         _mm_or_si128(l, r)
     }
     #[inline(always)]
+    /// # Safety
+    ///
+    /// The caller must provide x86-64 SSE2 support and valid mutable
+    /// references to initialized vector values. The references do not escape.
     unsafe fn qr(a: &mut __m128i, b: &mut __m128i, c: &mut __m128i, d: &mut __m128i) {
         use std::arch::x86_64::*;
         *a = _mm_add_epi32(*a, *b);
@@ -489,18 +516,31 @@ unsafe fn chacha20_blocks_x4_sse_core(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support and valid immutable key and nonce
+/// arrays for the duration of the call. The delegated SSE2 operations return
+/// owned output and do not retain input addresses.
 unsafe fn chacha20_blocks_x4_avx2(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u8; 64]; 4] {
     chacha20_blocks_x4_sse_core(key, nonce, counter)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx", enable = "sse4.1", enable = "ssse3")]
+/// # Safety
+///
+/// The caller must provide AVX, SSE4.1, and SSSE3 support and valid immutable
+/// key and nonce arrays for the duration of the call.
 unsafe fn chacha20_blocks_x4_avx(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u8; 64]; 4] {
     chacha20_blocks_x4_sse_core(key, nonce, counter)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1", enable = "ssse3")]
+/// # Safety
+///
+/// The caller must provide SSE4.1 and SSSE3 support and valid immutable key
+/// and nonce arrays for the duration of the call.
 unsafe fn chacha20_blocks_x4_sse41(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -511,6 +551,11 @@ unsafe fn chacha20_blocks_x4_sse41(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and valid immutable key and
+/// nonce arrays for the duration of the call. The function returns owned output
+/// and does not retain input addresses.
 unsafe fn chacha20_blocks_x4_neon(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [[u8; 64]; 4] {
     use std::arch::aarch64::*;
     // Constants
@@ -560,6 +605,10 @@ unsafe fn chacha20_blocks_x4_neon(key: &[u8; 32], nonce: &[u8; 12], counter: u32
         (x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15);
 
     #[inline(always)]
+    /// # Safety
+    ///
+    /// The caller must provide AArch64 NEON support and valid mutable
+    /// references to initialized vector values. The references do not escape.
     unsafe fn qr(a: &mut uint32x4_t, b: &mut uint32x4_t, c: &mut uint32x4_t, d: &mut uint32x4_t) {
         // rotl32(x,16)
         *a = vaddq_u32(*a, *b);
@@ -640,6 +689,11 @@ unsafe fn chacha20_blocks_x4_neon(key: &[u8; 32], nonce: &[u8; 12], counter: u32
 /// SIMD-accelerated XOR of two equal-length byte slices (dst ^= src).
 /// Mismatched slices are rejected without modifying either slice.
 #[inline(always)]
+/// # Safety
+///
+/// `dst` must be valid writable storage and `src` valid readable storage for
+/// the duration of the call. The slices must have equal lengths and must not
+/// overlap; runtime feature checks select only supported vector instructions.
 unsafe fn xor_slice_simd(dst: &mut [u8], src: &[u8]) {
     if dst.len() != src.len() {
         return;
@@ -696,6 +750,11 @@ unsafe fn xor_slice_simd(dst: &mut [u8], src: &[u8]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes,sse2")]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide AES-NI and SSE2 support. `state` must be valid
+/// writable storage and `round_key` valid readable storage; both arrays must
+/// remain alive for the duration of the intrinsic operations.
 unsafe fn aes_round_aesni(state: &mut [u8; 16], round_key: &[u8; 16]) {
     use std::arch::x86_64::*;
 
@@ -709,6 +768,11 @@ unsafe fn aes_round_aesni(state: &mut [u8; 16], round_key: &[u8; 16]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "vaes,avx512f,aes,sse2")]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide VAES, AVX-512F, AES-NI, and SSE2 support. `state`
+/// must be valid writable storage and `round_key` valid readable storage for
+/// the duration of the delegated AES-NI operation.
 unsafe fn aes_round_vaes(state: &mut [u8; 16], round_key: &[u8; 16]) {
     // Fallback to AES-NI for single block
     aes_round_aesni(state, round_key);

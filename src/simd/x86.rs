@@ -12,6 +12,12 @@ pub(super) use super::x86_extended::{
 };
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi2")]
+/// # Safety
+///
+/// The caller must ensure the compiled/runtime path has AVX-512F, AVX-512BW,
+/// and AVX-512VBMI2 support and that `haystack` and `needle` remain valid
+/// immutable slices. The delegated AVX2 helper is entered only after its
+/// runtime intersection check.
 pub(super) unsafe fn find_pattern_vbmi2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     // No dedicated VBMI2 implementation exists here. The fallback helper is
     // AVX2-only, so prove that intersection before calling it.
@@ -22,6 +28,11 @@ pub(super) unsafe fn find_pattern_vbmi2(haystack: &[u8], needle: &[u8]) -> Optio
 }
 
 #[target_feature(enable = "avx512f,fma")]
+/// # Safety
+///
+/// The caller must provide AVX-512F and FMA support. `a` and `b` must remain
+/// valid immutable slices for the duration of the call; complete vector chunks
+/// and the scalar tail are bounded by their shared minimum length.
 pub(super) unsafe fn dot_product_avx512(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let mut sum = _mm512_setzero_ps();
@@ -39,6 +50,11 @@ pub(super) unsafe fn dot_product_avx512(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[target_feature(enable = "avx2,fma")]
+/// # Safety
+///
+/// The caller must provide AVX2 and FMA support. `a` and `b` must remain valid
+/// immutable slices for the duration of the call; vector chunks and the scalar
+/// tail are bounded by their shared minimum length.
 pub(super) unsafe fn dot_product_fma(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let mut sum = _mm256_setzero_ps();
@@ -58,6 +74,11 @@ pub(super) unsafe fn dot_product_fma(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide the SHA-256 backend support used by the build and
+/// pass valid writable `state` plus readable `blocks` storage for the duration
+/// of the call. No references escape the compression routine.
 unsafe fn compress_batch_avx2(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     #[cfg(not(windows))]
     sha2_asm::compress256(state, blocks);
@@ -69,6 +90,11 @@ unsafe fn compress_batch_avx2(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide the SHA-256 VNNI backend support used by the build
+/// and pass valid writable `state` plus readable `blocks` storage. No
+/// references escape the compression routine.
 unsafe fn compress_batch_vnni(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     #[cfg(not(windows))]
     sha2_asm::compress256(state, blocks);
@@ -81,6 +107,11 @@ unsafe fn compress_batch_vnni(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
 
 /// SSE2 pre-fastpath for varint decoding: quickly find length via continuation-bit mask
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// The caller must provide SSE2 support and a valid immutable `buf` slice for
+/// the duration of the call. The implementation checks for eight readable bytes
+/// before its unaligned load and otherwise delegates to scalar decoding.
 pub(super) unsafe fn varint_decode_sse2_prefast(buf: &[u8]) -> Option<(u64, usize)> {
     if buf.len() < 8 {
         return super::scalar::decode_varint(buf);
@@ -116,6 +147,11 @@ pub(super) unsafe fn varint_decode_sse2_prefast(buf: &[u8]) -> Option<(u64, usiz
 }
 
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support and a valid immutable `data` slice for
+/// the duration of the call. The hashing helper owns its block storage and all
+/// raw vector work is bounded by complete blocks.
 pub(super) unsafe fn sha256_avx2(data: &[u8]) -> [u8; 32] {
     #[cfg(windows)]
     {
@@ -128,6 +164,11 @@ pub(super) unsafe fn sha256_avx2(data: &[u8]) -> [u8; 32] {
 }
 
 #[target_feature(enable = "avx512f", enable = "avx512vl", enable = "avx512vnni")]
+/// # Safety
+///
+/// The caller must provide AVX-512F, AVX-512VL, and AVX-512VNNI support and a
+/// valid immutable `data` slice for the duration of the call. Block processing
+/// is owned and length-bounded.
 pub(super) unsafe fn sha256_vnni(data: &[u8]) -> [u8; 32] {
     #[cfg(windows)]
     {
@@ -141,6 +182,11 @@ pub(super) unsafe fn sha256_vnni(data: &[u8]) -> [u8; 32] {
 
 /// AVX-512 XOR - 64 bytes at once!
 #[target_feature(enable = "avx512f")]
+/// # Safety
+///
+/// The caller must provide AVX-512F support, writable `dst`, and readable
+/// non-overlapping `src` storage. Vector reads and writes are bounded by their
+/// shared minimum length.
 pub(super) unsafe fn xor_blocks_avx512(dst: &mut [u8], src: &[u8]) {
     let len = dst.len().min(src.len());
     let mut i = 0;
@@ -163,6 +209,11 @@ pub(super) unsafe fn xor_blocks_avx512(dst: &mut [u8], src: &[u8]) {
 
 /// AVX2 XOR - 32 bytes at once
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support, writable `dst`, and readable
+/// non-overlapping `src` storage. Vector reads and writes are bounded by their
+/// shared minimum length.
 pub(super) unsafe fn xor_blocks_avx2(dst: &mut [u8], src: &[u8]) {
     let len = dst.len().min(src.len());
     let mut i = 0;
@@ -187,6 +238,11 @@ pub(super) unsafe fn xor_blocks_avx2(dst: &mut [u8], src: &[u8]) {
 }
 /// Population count using POPCNT on x86_64
 #[target_feature(enable = "popcnt")]
+/// # Safety
+///
+/// The caller must provide POPCNT support and a valid immutable `data` slice for
+/// the duration of the call. Every unaligned 8-byte or 4-byte load is preceded
+/// by a remaining-length check.
 pub(super) unsafe fn popcnt_hw(data: &[u8]) -> usize {
     let mut count: usize = 0;
     let mut i = 0;
@@ -215,6 +271,11 @@ pub(super) unsafe fn popcnt_hw(data: &[u8]) -> usize {
 }
 /// GF(2^8) multiplication with AVX-512 GFNI - 15x faster!
 #[target_feature(enable = "avx512f", enable = "gfni")]
+/// # Safety
+///
+/// The caller must provide AVX-512F and GFNI support, valid immutable `a`, and
+/// writable non-overlapping `dst` storage. Accesses are bounded by the shared
+/// minimum length and the scalar tail handles the remainder.
 pub(super) unsafe fn gf_mul_avx512_gfni(a: &[u8], b: u8, dst: &mut [u8]) {
     let b_broadcast = _mm512_set1_epi8(b as i8);
     let len = a.len().min(dst.len());
@@ -240,6 +301,11 @@ pub(super) unsafe fn gf_mul_avx512_gfni(a: &[u8], b: u8, dst: &mut [u8]) {
 
 /// GF(2^8) multiplication with AVX2 - table lookup method
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support, valid immutable `a`, and writable
+/// non-overlapping `dst` storage. Vector accesses are bounded by the shared
+/// minimum length and the scalar tail handles the remainder.
 pub(super) unsafe fn gf_mul_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
     let len = a.len().min(dst.len());
     let mut i = 0;
@@ -287,6 +353,12 @@ pub(super) unsafe fn gf_mul_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
 
 /// Short pattern search with SSE4.2 using string instructions (<= 16 bytes)
 #[target_feature(enable = "sse4.2")]
+/// # Safety
+///
+/// The caller must provide SSE4.2 support and valid immutable `haystack` and
+/// `needle` slices. The needle must be at most 16 bytes; all vector loads use
+/// owned padding or complete haystack chunks and scalar verification bounds the
+/// returned position.
 pub(super) unsafe fn find_pattern_sse42_short(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     use std::arch::x86_64::*;
     let nlen = needle.len();
@@ -377,6 +449,10 @@ mod tests {
 }
 /// AES encryption with VAES - vectorized AES for parallel blocks
 #[target_feature(enable = "vaes", enable = "avx512f", enable = "aes", enable = "sse2")]
+/// # Safety
+///
+/// The caller must provide VAES, AVX-512F, AES-NI, and SSE2 support plus valid
+/// writable `state` and readable `key` arrays for the duration of the call.
 pub(super) unsafe fn aes_encrypt_vaes(state: &mut [u8; 16], key: &[u8; 16]) {
     // For a single block, VAES provides no material benefit over AES-NI.
     aes_encrypt_aesni(state, key);
@@ -384,6 +460,10 @@ pub(super) unsafe fn aes_encrypt_vaes(state: &mut [u8; 16], key: &[u8; 16]) {
 
 /// AES encryption with AES-NI hardware acceleration
 #[target_feature(enable = "aes", enable = "sse2")]
+/// # Safety
+///
+/// The caller must provide AES-NI and SSE2 support plus valid writable `state`
+/// and readable `key` arrays for the duration of the intrinsic operations.
 pub(super) unsafe fn aes_encrypt_aesni(state: &mut [u8; 16], key: &[u8; 16]) {
     use std::arch::x86_64::*;
 
@@ -429,6 +509,11 @@ pub(super) unsafe fn aes_encrypt_aesni(state: &mut [u8; 16], key: &[u8; 16]) {
 }
 /// Histogram with AVX-512 - conflict detection for fast counting
 #[target_feature(enable = "avx512f", enable = "avx512cd", enable = "avx512vpopcntdq")]
+/// # Safety
+///
+/// The caller must provide AVX-512F, AVX-512CD, and AVX-512VPOPCNTDQ support
+/// plus a valid immutable `data` slice. The 64-byte loads are guarded by the
+/// remaining length and the tail is scalar.
 pub(super) unsafe fn histogram_avx512(data: &[u8]) -> [u32; 256] {
     let mut hist = [0u32; 256];
     let mut i = 0;
@@ -483,6 +568,11 @@ pub(super) unsafe fn histogram_avx512(data: &[u8]) -> [u32; 256] {
 
 /// Histogram with AVX2 - gather/scatter for histogram
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support and a valid immutable `data` slice for
+/// the duration of the call. The current implementation delegates to the safe
+/// scalar histogram owner and does not retain the slice.
 pub(super) unsafe fn histogram_avx2(data: &[u8]) -> [u32; 256] {
     // AVX2 dispatch path currently shares the scalar counting core to keep
     // one authoritative histogram implementation.
@@ -492,6 +582,11 @@ pub(super) unsafe fn histogram_avx2(data: &[u8]) -> [u32; 256] {
 /// Decode varint with BMI2 PEXT - extract bits efficiently
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi2")]
+/// # Safety
+///
+/// The caller must provide BMI2 support and a valid immutable `buf` slice for
+/// the duration of the call. The implementation checks for eight readable bytes
+/// before its unaligned load and delegates short inputs to scalar decoding.
 pub(super) unsafe fn decode_varint_bmi2(buf: &[u8]) -> Option<(u64, usize)> {
     use std::arch::x86_64::*;
 
@@ -527,6 +622,11 @@ pub(super) unsafe fn decode_varint_bmi2(buf: &[u8]) -> Option<(u64, usize)> {
 /// Decode varint with AVX2 - parallel byte processing
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support and a valid immutable `buf` slice for
+/// the duration of the call. The implementation checks for eight readable bytes
+/// before its unaligned load and otherwise returns through a bounded path.
 pub(super) unsafe fn decode_varint_avx2(buf: &[u8]) -> Option<(u64, usize)> {
     use std::arch::x86_64::*;
 
@@ -573,6 +673,11 @@ pub(super) unsafe fn decode_varint_avx2(buf: &[u8]) -> Option<(u64, usize)> {
 /// Pattern matching with AVX2 - 5x faster than scalar
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support and valid immutable `haystack` and
+/// `needle` slices. Vector reads are guarded by remaining-length checks and
+/// scalar window verification bounds each candidate.
 pub(super) unsafe fn find_pattern_avx2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     use std::arch::x86_64::*;
 

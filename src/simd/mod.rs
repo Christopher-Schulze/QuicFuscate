@@ -1,11 +1,11 @@
 //! Ultra-sophisticated centralized SIMD module - MAX EXCELLENCE!
-//! All hardware acceleration in ONE place - NO feature gates!
+//! Hardware acceleration is centralized here; target-specific implementations
+//! are gated by architecture, compiler target features, and runtime capability.
 
 #![cfg_attr(
     not(any(target_arch = "x86_64", target_arch = "aarch64")),
     allow(unused_imports, unused_variables)
 )]
-#![allow(clippy::missing_safety_doc)]
 use std::sync::OnceLock;
 
 use crate::optimize::{prefetch, telemetry, PrefetchHint};

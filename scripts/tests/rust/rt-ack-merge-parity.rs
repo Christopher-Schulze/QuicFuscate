@@ -23,6 +23,7 @@ fn scalar_merge(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 #[cfg(target_arch = "x86_64")]
 fn avx2_matches_scalar_random() {
     if !std::is_x86_feature_detected!("avx2") {
+        eprintln!("SIMD_SKIP test=avx2_matches_scalar_random required=avx2");
         return;
     }
     let mut rng = StdRng::seed_from_u64(0xA5A5_5A5A);
@@ -45,6 +46,7 @@ fn avx2_matches_scalar_random() {
 #[cfg(target_arch = "x86_64")]
 fn avx512_matches_scalar_random() {
     if !(std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl")) {
+        eprintln!("SIMD_SKIP test=avx512_matches_scalar_random required=avx512f+avx512vl");
         return;
     }
     let mut rng = SeedableRng::seed_from_u64(0x1234_5678_9ABC_DEF0);

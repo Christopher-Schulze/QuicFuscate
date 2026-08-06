@@ -36,12 +36,21 @@ pub fn berlekamp_massey_gf256(syndrome: &[u8], len: usize) -> Vec<u8> {
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide SVE2 support, a valid immutable `syndrome` slice,
+/// and a `len` no greater than that slice length. The delegated implementation
+/// returns owned output and does not retain the slice.
 unsafe fn berlekamp_massey_sve2_dispatch(syndrome: &[u8], len: usize) -> Vec<u8> {
     super::arm::berlekamp_massey_sve2(syndrome, len)
 }
 
 #[cfg(any(not(target_arch = "aarch64"), not(target_feature = "sve2")))]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide a valid immutable `syndrome` slice and a `len` no
+/// greater than its length. The fallback is scalar and returns owned output.
 unsafe fn berlekamp_massey_sve2_dispatch(syndrome: &[u8], len: usize) -> Vec<u8> {
     super::scalar::berlekamp_massey(syndrome, len)
 }

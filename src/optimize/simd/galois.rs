@@ -36,6 +36,11 @@ pub fn gf_mul(a: &[u8], b: u8, dst: &mut [u8]) {
 #[target_feature(enable = "avx512f")]
 #[target_feature(enable = "gfni")]
 #[inline]
+/// # Safety
+///
+/// The caller must provide AVX-512F and GFNI support, valid immutable `a`, and
+/// writable `dst` storage that does not overlap `a`. The implementation reads
+/// and writes only the shared minimum length with guarded unaligned accesses.
 unsafe fn gf_mul_avx512_gfni(a: &[u8], b: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
@@ -63,6 +68,11 @@ unsafe fn gf_mul_avx512_gfni(a: &[u8], b: u8, dst: &mut [u8]) {
 /// GF(2^8) multiplication with AVX2 - 5x faster with correct galois field arithmetic
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support, valid immutable `a`, and writable
+/// non-overlapping `dst` storage. Vector loads and stores are bounded by the
+/// shared minimum length and the scalar tail handles the remainder.
 unsafe fn gf_mul_avx2(a: &[u8], b: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
@@ -121,6 +131,11 @@ fn gf_mul_scalar(a: &[u8], b: u8, dst: &mut [u8]) {
 /// Shared NEON implementation used by both NEON and SVE2 frontends.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, valid immutable `a`, and
+/// writable non-overlapping `dst` storage. Vector accesses are bounded by the
+/// shared minimum length and the scalar tail handles the remainder.
 unsafe fn gf_mul_neon_impl(a: &[u8], b: u8, dst: &mut [u8]) {
     use std::arch::aarch64::*;
 
@@ -169,6 +184,11 @@ unsafe fn gf_mul_neon_impl(a: &[u8], b: u8, dst: &mut [u8]) {
 /// GF(2^8) multiplication with NEON - 8x faster than scalar!
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support and valid, non-overlapping
+/// source `a` and writable `dst` storage. The delegated implementation bounds
+/// all accesses by the shared minimum length.
 unsafe fn gf_mul_neon(a: &[u8], b: u8, dst: &mut [u8]) {
     gf_mul_neon_impl(a, b, dst);
     crate::optimize::telemetry::FEC_NEON_OPS.inc();
@@ -176,6 +196,11 @@ unsafe fn gf_mul_neon(a: &[u8], b: u8, dst: &mut [u8]) {
 
 /// GF(2^8) multiplication with SVE2 - scalable vector processing!
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// The caller must execute the SVE2 path only when the compiled target and the
+/// running CPU support SVE2. `a` must be valid immutable storage and `dst` must
+/// be valid writable non-overlapping storage; predicate masks bound each tail.
 unsafe fn gf_mul_sve2(a: &[u8], b: u8, dst: &mut [u8]) {
     #[cfg(target_feature = "sve2")]
     {

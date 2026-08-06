@@ -3,6 +3,11 @@
 /// AVX-512 fast-path header validation
 /// Checks the QUIC fixed bit and short-header reserved bits.
 #[target_feature(enable = "avx512f")]
+/// # Safety
+///
+/// The caller must provide AVX-512F support and a valid immutable `header`
+/// slice for the duration of the call. The implementation checks non-emptiness
+/// before its unchecked first-byte access.
 pub(super) unsafe fn validate_header_avx512(header: &[u8]) -> bool {
     if header.is_empty() {
         return false;

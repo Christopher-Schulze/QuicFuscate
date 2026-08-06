@@ -3,6 +3,7 @@
 #[test]
 fn chacha20_x16_matches_scalar_when_avx512() {
     if !std::arch::is_x86_feature_detected!("avx512f") {
+        eprintln!("SIMD_SKIP test=chacha20_x16_matches_scalar_when_avx512 required=avx512f");
         return;
     }
     let key = [0x42u8; 32];
@@ -15,3 +16,8 @@ fn chacha20_x16_matches_scalar_when_avx512() {
         assert_eq!(scalar, blocks[i]);
     }
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+#[test]
+#[ignore = "SKIP: target requires x86_64"]
+fn skip_chacha20_x16_parity_on_non_x86_64() {}

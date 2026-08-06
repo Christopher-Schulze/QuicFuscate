@@ -17,6 +17,7 @@ fn xor_scalar(dst: &mut [u8], key: &[u8]) {
 #[cfg(target_arch = "x86_64")]
 fn sse2_xor_repeating_key32_matches_scalar() {
     if !std::is_x86_feature_detected!("sse2") {
+        eprintln!("SIMD_SKIP test=sse2_xor_repeating_key32_matches_scalar required=sse2");
         return;
     }
     let key: [u8; 32] = [
@@ -40,6 +41,7 @@ fn sse2_xor_repeating_key32_matches_scalar() {
 #[cfg(target_arch = "x86_64")]
 fn sse2_xor_repeating_matches_scalar_varied_keys() {
     if !std::is_x86_feature_detected!("sse2") {
+        eprintln!("SIMD_SKIP test=sse2_xor_repeating_matches_scalar_varied_keys required=sse2");
         return;
     }
     let keys: Vec<Vec<u8>> = vec![

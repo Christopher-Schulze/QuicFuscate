@@ -31,6 +31,7 @@ fn run_chacha20_x4_backend(backend: &str, counter: &quicfuscate::optimize::telem
 #[test]
 fn chacha20_x4_matches_scalar_avx2_override() {
     if !std::arch::is_x86_feature_detected!("avx2") {
+        eprintln!("SIMD_SKIP test=chacha20_x4_matches_scalar_avx2_override required=avx2");
         return;
     }
     run_chacha20_x4_backend("avx2", &quicfuscate::optimize::telemetry::CHACHA20_X4_AVX2_OPS);
@@ -40,6 +41,7 @@ fn chacha20_x4_matches_scalar_avx2_override() {
 #[test]
 fn chacha20_x4_matches_scalar_avx_override() {
     if !std::arch::is_x86_feature_detected!("avx") {
+        eprintln!("SIMD_SKIP test=chacha20_x4_matches_scalar_avx_override required=avx");
         return;
     }
     run_chacha20_x4_backend("avx", &quicfuscate::optimize::telemetry::CHACHA20_X4_AVX_OPS);
@@ -51,7 +53,13 @@ fn chacha20_x4_matches_scalar_sse41_override() {
     if !std::arch::is_x86_feature_detected!("sse4.1")
         || !std::arch::is_x86_feature_detected!("ssse3")
     {
+        eprintln!("SIMD_SKIP test=chacha20_x4_matches_scalar_sse41_override required=sse4.1+ssse3");
         return;
     }
     run_chacha20_x4_backend("sse41", &quicfuscate::optimize::telemetry::CHACHA20_X4_SSE41_OPS);
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+#[test]
+#[ignore = "SKIP: target requires x86_64"]
+fn skip_chacha20_x4_parity_on_non_x86_64() {}

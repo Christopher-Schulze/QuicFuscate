@@ -14,6 +14,7 @@ fn ghash_sse_matches_scalar_when_available() {
     if !std::arch::is_x86_feature_detected!("ssse3")
         || !std::arch::is_x86_feature_detected!("sse4.1")
     {
+        eprintln!("SIMD_SKIP test=ghash_sse_matches_scalar_when_available required=ssse3+sse4.1");
         return;
     }
 

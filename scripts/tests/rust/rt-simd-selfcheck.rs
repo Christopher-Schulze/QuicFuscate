@@ -139,6 +139,7 @@ fn gf_mul_slice_telemetry_tracks_backend() {
     {
         use quicfuscate::optimize::telemetry;
         if !std::is_x86_feature_detected!("ssse3") {
+            eprintln!("SIMD_SKIP test=gf_mul_slice_telemetry_tracks_backend required=ssse3");
             return;
         }
 
@@ -162,6 +163,7 @@ fn gf16_vbmi2_matches_scalar() {
         || !std::is_x86_feature_detected!("avx512bw")
         || !std::is_x86_feature_detected!("avx512vbmi2")
     {
+        eprintln!("SIMD_SKIP test=gf16_vbmi2_matches_scalar required=avx512f+avx512bw+avx512vbmi2");
         return;
     }
 

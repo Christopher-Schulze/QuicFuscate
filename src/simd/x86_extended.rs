@@ -5,6 +5,10 @@ use super::*;
 use std::arch::x86_64::*;
 
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only on a CPU with AVX2 support. The
+/// input vector must be an initialized `__m256i` value.
 unsafe fn avx2_high_nibbles(value: __m256i) -> __m256i {
     let nibble_mask = _mm256_set1_epi8(0x0F);
     let low_byte_nibbles = _mm256_and_si256(_mm256_srli_epi16(value, 4), nibble_mask);
@@ -14,6 +18,11 @@ unsafe fn avx2_high_nibbles(value: __m256i) -> __m256i {
 
 /// AVX-512/GFNI feature boundary using the canonical scalar algorithm.
 #[target_feature(enable = "avx512f", enable = "gfni")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F and GFNI are
+/// available on the current CPU. `syndrome` must remain a valid immutable
+/// slice for the duration of the call.
 pub(super) unsafe fn berlekamp_massey_gfni(syndrome: &[u8], len: usize) -> Vec<u8> {
     if len > syndrome.len() {
         return Vec::new();
@@ -27,6 +36,11 @@ pub(super) unsafe fn berlekamp_massey_gfni(syndrome: &[u8], len: usize) -> Vec<u
 
 /// Berlekamp-Massey with AVX2 acceleration when available.
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `syndrome` must remain a valid immutable slice for the
+/// duration of the call.
 pub(super) unsafe fn berlekamp_massey_avx2(syndrome: &[u8], len: usize) -> Vec<u8> {
     if len > syndrome.len() {
         return Vec::new();
@@ -38,6 +52,13 @@ pub(super) unsafe fn berlekamp_massey_avx2(syndrome: &[u8], len: usize) -> Vec<u
 
 /// GF(256) matrix multiplication with GFNI
 #[target_feature(enable = "avx512f", enable = "gfni")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F and GFNI are
+/// available on the current CPU. `a` and `b` must be valid immutable slices,
+/// `c` must be a valid writable slice, and the three slices must not alias in
+/// a way that violates Rust's exclusive access rules. All slice storage must
+/// remain initialized for the duration of the call.
 pub(super) unsafe fn matmul_gf256_gfni(
     a: &[u8],
     b: &[u8],
@@ -98,6 +119,13 @@ pub(super) unsafe fn matmul_gf256_gfni(
 
 /// GF(256) matrix multiplication with AVX2
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `a` and `b` must be valid immutable slices, `c` must be a
+/// valid writable slice, and the three slices must not alias in a way that
+/// violates Rust's exclusive access rules. All slice storage must remain
+/// initialized for the duration of the call.
 pub(super) unsafe fn matmul_gf256_avx2(
     a: &[u8],
     b: &[u8],
@@ -188,22 +216,42 @@ fn quic_encode_bytes(val: u64, buf: &mut [u8]) -> Option<usize> {
 }
 
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// The caller must execute this function only when SSE2 is available on the
+/// current CPU. `buf` must be a valid writable slice whose storage remains
+/// initialized and live for the duration of the call.
 pub(super) unsafe fn encode_varint_sse2(val: u64, buf: &mut [u8]) -> Option<usize> {
     quic_encode_bytes(val, buf)
 }
 
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `buf` must be a valid writable slice whose storage remains
+/// initialized and live for the duration of the call.
 pub(super) unsafe fn encode_varint_avx2(val: u64, buf: &mut [u8]) -> Option<usize> {
     quic_encode_bytes(val, buf)
 }
 
 #[target_feature(enable = "avx512f")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F is available on
+/// the current CPU. `buf` must be a valid writable slice whose storage remains
+/// initialized and live for the duration of the call.
 pub(super) unsafe fn encode_varint_avx512(val: u64, buf: &mut [u8]) -> Option<usize> {
     quic_encode_bytes(val, buf)
 }
 
 /// Varint encoding with BMI2 acceleration when available.
 #[target_feature(enable = "bmi2")]
+/// # Safety
+///
+/// The caller must execute this function only when BMI2 is available on the
+/// current CPU. `buf` must be a valid writable slice whose storage remains
+/// initialized and live for the duration of the call.
 pub(super) unsafe fn varint_encode_bmi2(mut value: u64, buf: &mut [u8]) -> usize {
     use std::arch::x86_64::*;
 
@@ -234,6 +282,11 @@ pub(super) unsafe fn varint_encode_bmi2(mut value: u64, buf: &mut [u8]) -> usize
 
 /// Varint decoding with BMI2 acceleration when available.
 #[target_feature(enable = "bmi2")]
+/// # Safety
+///
+/// The caller must execute this function only when BMI2 is available on the
+/// current CPU. `buf` must be a valid immutable slice whose storage remains
+/// initialized and live for the duration of the call.
 pub(super) unsafe fn varint_decode_bmi2(buf: &[u8]) -> Option<(u64, usize)> {
     use std::arch::x86_64::*;
 
@@ -304,6 +357,12 @@ pub fn xor_multi_key(data: &mut [u8], keys: &[&[u8]]) {
 
 /// Batch XOR with multiple keys (vectorized when available).
 #[target_feature(enable = "avx512f")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F is available on
+/// the current CPU. `data` must be a valid writable slice and every key must
+/// be a valid initialized immutable slice. Key storage must not alias `data`
+/// in a way that violates Rust's exclusive access rules.
 pub(super) unsafe fn xor_multi_key_avx512(data: &mut [u8], keys: &[&[u8]]) {
     use std::arch::x86_64::*;
 
@@ -335,6 +394,12 @@ pub(super) unsafe fn xor_multi_key_avx512(data: &mut [u8], keys: &[&[u8]]) {
 
 /// Batch XOR with multiple keys using AVX2 when available.
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `data` must be a valid writable slice and every key must be a
+/// valid initialized immutable slice. Key storage must not alias `data` in a
+/// way that violates Rust's exclusive access rules.
 pub(super) unsafe fn xor_multi_key_avx2(data: &mut [u8], keys: &[&[u8]]) {
     use std::arch::x86_64::*;
 
@@ -368,6 +433,11 @@ pub(super) unsafe fn xor_multi_key_avx2(data: &mut [u8], keys: &[&[u8]]) {
 
 /// Packet header validation with AVX2 when available.
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `header` must be a valid initialized immutable slice that
+/// remains live for the duration of the call.
 pub(super) unsafe fn validate_header_avx2(header: &[u8]) -> bool {
     // Header validation only depends on the first byte. Keep the AVX2 dispatch
     // boundary for API and feature-selection stability, but avoid a discarded
@@ -377,6 +447,11 @@ pub(super) unsafe fn validate_header_avx2(header: &[u8]) -> bool {
 
 /// Packet header validation with SSE2 when available.
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// The caller must execute this function only when SSE2 is available on the
+/// current CPU. `header` must be a valid initialized immutable slice that
+/// remains live for the duration of the call.
 pub(super) unsafe fn validate_header_sse2(header: &[u8]) -> bool {
     use std::arch::x86_64::*;
 
@@ -411,6 +486,12 @@ pub(super) unsafe fn validate_header_sse2(header: &[u8]) -> bool {
 
 /// Pack bits with BMI2 acceleration when available.
 #[target_feature(enable = "bmi2")]
+/// # Safety
+///
+/// The caller must execute this function only when BMI2 is available on the
+/// current CPU. `src` must be a valid initialized immutable slice and `dst`
+/// must be a valid writable slice. The two slices must not alias in a way that
+/// violates Rust's exclusive access rules.
 pub(super) unsafe fn pack_bits_bmi2(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     use std::arch::x86_64::*;
 
@@ -454,6 +535,12 @@ pub(super) unsafe fn pack_bits_bmi2(src: &[u8], bit_width: u8, dst: &mut [u8]) -
 
 /// Unpack bits with BMI2 acceleration when available.
 #[target_feature(enable = "bmi2")]
+/// # Safety
+///
+/// The caller must execute this function only when BMI2 is available on the
+/// current CPU. `src` must be a valid initialized immutable slice and `dst`
+/// must be a valid writable slice. The two slices must not alias in a way that
+/// violates Rust's exclusive access rules.
 pub(super) unsafe fn unpack_bits_bmi2(src: &[u8], bit_width: u8, dst: &mut [u8]) -> usize {
     use std::arch::x86_64::*;
 
@@ -493,6 +580,11 @@ pub(super) unsafe fn unpack_bits_bmi2(src: &[u8], bit_width: u8, dst: &mut [u8])
 
 /// String comparison with AVX2 when available.
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `a` and `b` must be valid initialized immutable slices whose
+/// storage remains live for the duration of the call.
 pub(super) unsafe fn string_compare_avx2(a: &[u8], b: &[u8]) -> bool {
     use std::arch::x86_64::*;
 
@@ -530,6 +622,11 @@ pub(super) unsafe fn string_compare_avx2(a: &[u8], b: &[u8]) -> bool {
 
 /// String comparison with SSE4.2 when available.
 #[target_feature(enable = "sse4.2")]
+/// # Safety
+///
+/// The caller must execute this function only when SSE4.2 is available on the
+/// current CPU. `a` and `b` must be valid initialized immutable slices whose
+/// storage remains live for the duration of the call.
 pub(super) unsafe fn string_compare_sse42(a: &[u8], b: &[u8]) -> bool {
     use std::arch::x86_64::*;
 
@@ -566,6 +663,12 @@ pub(super) unsafe fn string_compare_sse42(a: &[u8], b: &[u8]) -> bool {
 
 /// POPCNT with AVX-512 VPOPCNTDQ when available (large bitmaps).
 #[target_feature(enable = "avx512f", enable = "avx512vpopcntdq")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F and AVX-512
+/// VPOPCNTDQ are available on the current CPU. `data` must be a valid
+/// initialized immutable slice whose storage remains live for the duration of
+/// the call.
 pub(super) unsafe fn popcnt_avx512(data: &[u8]) -> usize {
     use std::arch::x86_64::*;
 
@@ -591,6 +694,12 @@ pub(super) unsafe fn popcnt_avx512(data: &[u8]) -> usize {
 
 /// Reed-Solomon encoding with AVX-512 GFNI when available.
 #[target_feature(enable = "avx512f", enable = "gfni")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F and GFNI are
+/// available on the current CPU. `data` must be a valid initialized immutable
+/// slice. `parity_shards` must be a supported shard count whose allocation
+/// size fits in `usize`.
 pub(super) unsafe fn reed_solomon_encode_gfni(data: &[u8], parity_shards: usize) -> Vec<u8> {
     // Generate parity using GFNI for GF(256) operations
     let shard_size = 256;
@@ -632,6 +741,12 @@ pub(super) unsafe fn reed_solomon_encode_gfni(data: &[u8], parity_shards: usize)
 
 /// Reed-Solomon encoding with AVX2 when available.
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `data` must be a valid initialized immutable slice.
+/// `parity_shards` must be a supported shard count whose allocation size fits
+/// in `usize`.
 pub(super) unsafe fn reed_solomon_encode_avx2(data: &[u8], parity_shards: usize) -> Vec<u8> {
     use std::arch::x86_64::*;
 
@@ -758,6 +873,12 @@ fn build_reed_solomon_decode_matrix(
 
 /// Reed-Solomon decoding with GFNI when available.
 #[target_feature(enable = "avx512f", enable = "gfni")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F and GFNI are
+/// available on the current CPU. Every shard and index slice must remain
+/// valid and initialized for the duration of the call; the shared decoder
+/// validates shard lengths and matrix metadata.
 pub(super) unsafe fn reed_solomon_decode_gfni(
     shards: &[Vec<u8>],
     indices: &[usize],
@@ -802,6 +923,11 @@ pub(super) unsafe fn reed_solomon_decode_gfni(
 }
 
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. The vector and lookup-table arguments must be initialized
+/// `__m256i` values.
 unsafe fn gf_mul_avx2_tables(coefficient: u8) -> (__m256i, __m256i) {
     let mut lo_table = [0u8; 16];
     let mut hi_table = [0u8; 16];
@@ -816,6 +942,11 @@ unsafe fn gf_mul_avx2_tables(coefficient: u8) -> (__m256i, __m256i) {
 }
 
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. The vector and lookup-table arguments must be initialized
+/// `__m256i` values representing valid GF(256) nibble tables.
 unsafe fn gf_mul_avx2_vec(a: __m256i, lo_lut: __m256i, hi_lut: __m256i) -> __m256i {
     let nibble_mask = _mm256_set1_epi8(0x0F);
     let lo_nibbles = _mm256_and_si256(a, nibble_mask);
@@ -827,6 +958,12 @@ unsafe fn gf_mul_avx2_vec(a: __m256i, lo_lut: __m256i, hi_lut: __m256i) -> __m25
 
 /// Reed-Solomon decoding with AVX2
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. Every shard and index slice must remain valid and initialized
+/// for the duration of the call; the shared decoder validates shard lengths
+/// and matrix metadata.
 pub(super) unsafe fn reed_solomon_decode_avx2(
     shards: &[Vec<u8>],
     indices: &[usize],
@@ -873,6 +1010,12 @@ pub(super) unsafe fn reed_solomon_decode_avx2(
 
 /// QPACK Huffman encoding with AVX2
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `input` must be a valid initialized immutable slice and
+/// `output` must be a valid writable slice. The slices must not alias in a way
+/// that violates Rust's exclusive access rules.
 pub(super) unsafe fn qpack_encode_avx2(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3::qpack::{HUFF_CODES, HUFF_LENS};
     use std::arch::x86_64::*;
@@ -982,6 +1125,12 @@ pub(super) unsafe fn qpack_encode_avx2(input: &[u8], output: &mut [u8]) -> usize
 
 /// QPACK Huffman encoding with SSSE3/SSE4.1 fallback
 #[target_feature(enable = "ssse3", enable = "sse4.1")]
+/// # Safety
+///
+/// The caller must execute this function only when SSSE3 and SSE4.1 are
+/// available on the current CPU. `input` must be a valid initialized immutable
+/// slice and `output` must be a valid writable slice. The slices must not
+/// alias in a way that violates Rust's exclusive access rules.
 pub(super) unsafe fn qpack_encode_ssse3(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3::qpack::{HUFF_CODES, HUFF_LENS};
     use std::arch::x86_64::*;
@@ -1091,6 +1240,12 @@ pub(super) unsafe fn qpack_encode_ssse3(input: &[u8], output: &mut [u8]) -> usiz
 
 /// QPACK Huffman decoding with AVX2 helper (delegates to shared decode)
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available on the
+/// current CPU. `input` must be a valid initialized immutable slice and
+/// `output` must be a valid writable slice. The slices must not alias in a way
+/// that violates Rust's exclusive access rules.
 pub(super) unsafe fn qpack_decode_avx2(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3;
     match h3::qpack::huff_decode_into(input, output) {
@@ -1102,6 +1257,12 @@ pub(super) unsafe fn qpack_decode_avx2(input: &[u8], output: &mut [u8]) -> usize
 
 /// QPACK Huffman decoding with SSSE3 helper (reuses shared decode)
 #[target_feature(enable = "ssse3")]
+/// # Safety
+///
+/// The caller must execute this function only when SSSE3 is available on the
+/// current CPU. `input` must be a valid initialized immutable slice and
+/// `output` must be a valid writable slice. The slices must not alias in a way
+/// that violates Rust's exclusive access rules.
 pub(super) unsafe fn qpack_decode_ssse3(input: &[u8], output: &mut [u8]) -> usize {
     use crate::transport::h3;
     match h3::qpack::huff_decode_into(input, output) {
@@ -1124,9 +1285,14 @@ mod tests {
         b"content-type: application/json\r\nacceptable: */*\r\n",
     ];
 
+    fn report_simd_skip(test: &str, required: &str) {
+        eprintln!("SIMD_SKIP test={test} required={required}");
+    }
+
     #[test]
     fn qpack_avx2_matches_scalar() {
         if !is_x86_feature_detected!("avx2") {
+            report_simd_skip("qpack_avx2_matches_scalar", "avx2");
             return;
         }
 
@@ -1154,6 +1320,7 @@ mod tests {
     #[test]
     fn qpack_ssse3_matches_scalar() {
         if !is_x86_feature_detected!("ssse3") || !is_x86_feature_detected!("sse4.1") {
+            report_simd_skip("qpack_ssse3_matches_scalar", "ssse3+sse4.1");
             return;
         }
 
@@ -1181,6 +1348,7 @@ mod tests {
     #[test]
     fn avx2_rs_encode_and_decode_roundtrip_with_tail() {
         if !is_x86_feature_detected!("avx2") {
+            report_simd_skip("avx2_rs_encode_and_decode_roundtrip_with_tail", "avx2");
             return;
         }
 
@@ -1201,6 +1369,7 @@ mod tests {
     #[test]
     fn avx2_rs_decode_validates_shard_metadata() {
         if !is_x86_feature_detected!("avx2") {
+            report_simd_skip("avx2_rs_decode_validates_shard_metadata", "avx2");
             return;
         }
 
@@ -1220,6 +1389,7 @@ mod tests {
     #[test]
     fn avx2_gf256_matmul_matches_scalar_for_all_byte_positions() {
         if !is_x86_feature_detected!("avx2") {
+            report_simd_skip("avx2_gf256_matmul_matches_scalar_for_all_byte_positions", "avx2");
             return;
         }
 
@@ -1236,6 +1406,7 @@ mod tests {
     #[test]
     fn avx2_matmul_rejects_invalid_dimensions_and_slices() {
         if !is_x86_feature_detected!("avx2") {
+            report_simd_skip("avx2_matmul_rejects_invalid_dimensions_and_slices", "avx2");
             return;
         }
 
@@ -1257,6 +1428,7 @@ mod tests {
     #[test]
     fn gfni_matmul_rejects_invalid_dimensions_and_slices() {
         if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("gfni") {
+            report_simd_skip("gfni_matmul_rejects_invalid_dimensions_and_slices", "avx512f+gfni");
             return;
         }
 
@@ -1282,16 +1454,24 @@ mod tests {
         if is_x86_feature_detected!("avx2") {
             assert!(unsafe { berlekamp_massey_avx2(&syndrome, 4) }.is_empty());
             assert!(unsafe { berlekamp_massey_avx2(&syndrome, usize::MAX) }.is_empty());
+        } else {
+            report_simd_skip("berlekamp_massey_x86_entries_reject_overlong_prefixes", "avx2");
         }
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("gfni") {
             assert!(unsafe { berlekamp_massey_gfni(&syndrome, 4) }.is_empty());
             assert!(unsafe { berlekamp_massey_gfni(&syndrome, usize::MAX) }.is_empty());
+        } else {
+            report_simd_skip(
+                "berlekamp_massey_x86_entries_reject_overlong_prefixes",
+                "avx512f+gfni",
+            );
         }
     }
 
     #[test]
     fn bmi2_varint_rejects_short_output_and_preserves_leb128_bytes() {
         if !is_x86_feature_detected!("bmi2") {
+            report_simd_skip("bmi2_varint_rejects_short_output_and_preserves_leb128_bytes", "bmi2");
             return;
         }
 
@@ -1321,6 +1501,7 @@ mod tests {
     #[test]
     fn gfni_rs_encode_preserves_partial_input_shard() {
         if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("gfni") {
+            report_simd_skip("gfni_rs_encode_preserves_partial_input_shard", "avx512f+gfni");
             return;
         }
 
@@ -1337,6 +1518,7 @@ mod tests {
     #[test]
     fn gfni_rs_encode_and_decode_roundtrip_with_tail() {
         if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("gfni") {
+            report_simd_skip("gfni_rs_encode_and_decode_roundtrip_with_tail", "avx512f+gfni");
             return;
         }
 

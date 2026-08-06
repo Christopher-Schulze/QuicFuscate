@@ -226,6 +226,163 @@ else
   append_item "simd_x86_backend_internalization" "fail" "$SIMD_X86_UNSAFE_VISIBILITY_REFS"
 fi
 
+# 1b) Every unsafe SIMD declaration must have a local Safety contract. Keep
+#     this inventory source-driven so private, pub(super), and pub(crate)
+#     helpers cannot disappear behind a visibility-specific regex.
+SIMD_SAFETY_CONTRACT_LOG="$OUTPUT_DIR/simd-safety-contracts.log"
+set +e
+SIMD_SAFETY_CONTRACT_RESULT=$(python3 - <<'PY'
+from pathlib import Path
+import re
+import sys
+
+roots = (Path("src/simd"), Path("src/optimize/simd"))
+declaration = re.compile(
+    r"^\s*(?:(?:pub(?:\s*\([^)]*\))?|async)\s+)*"
+    r"unsafe\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+)
+target_feature = re.compile(r'enable\s*=\s*"([^"]+)"')
+all_functions = []
+target_feature_functions = 0
+missing_contracts = []
+feature_mismatches = []
+
+def normalized(value):
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+for root in roots:
+    for path in sorted(root.rglob("*.rs")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            match = declaration.match(line)
+            if match is None:
+                continue
+
+            docs = []
+            attributes = []
+            cursor = index - 1
+            while cursor >= 0:
+                stripped = lines[cursor].strip()
+                if stripped.startswith("///"):
+                    docs.append(stripped)
+                    cursor -= 1
+                    continue
+                if stripped.startswith("#["):
+                    attributes.append(stripped)
+                    cursor -= 1
+                    continue
+                break
+
+            location = f"{path}:{index + 1}:{match.group(1)}"
+            all_functions.append(location)
+            safety_text = " ".join(reversed(docs))
+            if "# Safety" not in safety_text:
+                missing_contracts.append(location)
+
+            features = []
+            for attribute in attributes:
+                if not attribute.startswith("#[target_feature"):
+                    continue
+                target_feature_functions += 1
+                for value in target_feature.findall(attribute):
+                    features.extend(feature.strip() for feature in value.split(","))
+            normalized_safety = normalized(safety_text)
+            missing_features = [
+                feature
+                for feature in features
+                if feature and normalized(feature) not in normalized_safety
+            ]
+            if missing_features:
+                feature_mismatches.append(
+                    f"{location}: missing {','.join(missing_features)} in # Safety"
+                )
+
+print(
+    f"unsafe_functions={len(all_functions)} "
+    f"unsafe_target_feature_functions={target_feature_functions}"
+)
+if missing_contracts:
+    print("missing_safety_contracts:")
+    print("\n".join(missing_contracts))
+if feature_mismatches:
+    print("target_feature_contract_mismatches:")
+    print("\n".join(feature_mismatches))
+if missing_contracts or feature_mismatches or not all_functions:
+    sys.exit(1)
+PY
+)
+SIMD_SAFETY_CONTRACT_RC=$?
+set -e
+printf '%s\n' "$SIMD_SAFETY_CONTRACT_RESULT" >"$SIMD_SAFETY_CONTRACT_LOG"
+if [[ "$SIMD_SAFETY_CONTRACT_RC" -eq 0 ]] \
+  && ! rg -n --no-messages '#!\[allow\(clippy::missing_safety_doc\)\]' src/simd src/optimize/simd >/dev/null; then
+  pass "SIMD unsafe inventory has local Safety contracts and exact declared ISA wording"
+  append_item "simd_safety_contract_inventory" "ok" "$SIMD_SAFETY_CONTRACT_RESULT; blanket missing_safety_doc suppression absent"
+else
+  fail_critical "SIMD unsafe Safety-contract inventory or blanket lint guardrail failed"
+  append_item "simd_safety_contract_inventory" "fail" "artifact=$SIMD_SAFETY_CONTRACT_LOG rc=$SIMD_SAFETY_CONTRACT_RC"
+fi
+
+# 1c) ISA-gated tests must account for unsupported hardware explicitly. A
+#     passing Rust test that silently returns is not evidence for that lane.
+SIMD_SKIP_TEST_LOG="$OUTPUT_DIR/simd-skip-accounting.log"
+set +e
+SIMD_SKIP_TEST_RESULT=$(python3 - <<'PY'
+from pathlib import Path
+
+files = [
+    Path("src/simd/tests_arm.rs"),
+    Path("src/simd/x86_extended.rs"),
+    Path("scripts/tests/rust/rt-ack-merge-parity.rs"),
+    Path("scripts/tests/rust/rt-header-validate-parity.rs"),
+    Path("scripts/tests/rust/rt-simd-selfcheck.rs"),
+    Path("scripts/tests/rust/rt-chacha-x16-parity.rs"),
+    Path("scripts/tests/rust/rt-chacha-x4-parity.rs"),
+    Path("scripts/tests/rust/rt-ghash-sse-parity.rs"),
+    Path("scripts/tests/rust/rt-xor-sse2-parity.rs"),
+]
+failures = []
+checked = 0
+for path in files:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = 0
+    if path == Path("src/simd/x86_extended.rs"):
+        start = next(
+            (index for index, line in enumerate(lines) if line.strip() == "mod tests {"),
+            len(lines),
+        )
+    for index, line in enumerate(lines[start:], start=start):
+        if line.strip() != "return;":
+            continue
+        context = "\n".join(lines[max(start, index - 12):index + 1])
+        if "is_x86_feature_detected" not in context and "is_aarch64_feature_detected" not in context:
+            continue
+        checked += 1
+        if "SIMD_SKIP" not in context and "report_simd_skip" not in context:
+            failures.append(f"{path}:{index + 1}: return without SIMD_SKIP accounting")
+
+    if "is_x86_feature_detected" in "\n".join(lines) or "is_aarch64_feature_detected" in "\n".join(lines):
+        if "SIMD_SKIP" not in "\n".join(lines):
+            failures.append(f"{path}: ISA detection has no SIMD_SKIP marker")
+
+print(f"files={len(files)} unsupported_returns_checked={checked}")
+if failures:
+    print("failures:")
+    print("\n".join(failures))
+    raise SystemExit(1)
+PY
+)
+SIMD_SKIP_TEST_RC=$?
+set -e
+printf '%s\n' "$SIMD_SKIP_TEST_RESULT" >"$SIMD_SKIP_TEST_LOG"
+if [[ "$SIMD_SKIP_TEST_RC" -eq 0 ]]; then
+  pass "ISA-gated SIMD tests report explicit SIMD_SKIP accounting for unsupported lanes"
+  append_item "simd_skip_accounting" "ok" "$SIMD_SKIP_TEST_RESULT"
+else
+  fail_critical "ISA-gated SIMD tests contain silent unsupported-lane returns"
+  append_item "simd_skip_accounting" "fail" "artifact=$SIMD_SKIP_TEST_LOG rc=$SIMD_SKIP_TEST_RC"
+fi
+
 AMX_EXTERNAL_DETECTOR_REFS=$(rg -n --no-messages 'Command::new\("cpuid"\)|\bcpuid\b' src/optimize/parts/cpu_dispatch.rs || true)
 if [[ -z "$AMX_EXTERNAL_DETECTOR_REFS" ]]; then
   pass "AMX capability detection stays in-process and has no cpuid helper dependency"

@@ -14,6 +14,7 @@ const SAMPLES: &[&[u8]] = &[
 #[test]
 fn qpack_neon_matches_scalar() {
     if !is_aarch64_feature_detected!("neon") {
+        eprintln!("SIMD_SKIP test=qpack_neon_matches_scalar required=neon");
         return;
     }
 

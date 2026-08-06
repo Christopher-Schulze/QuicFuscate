@@ -24,6 +24,11 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,fma")]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide AVX-512F and FMA support. `a` and `b` must remain
+/// valid immutable slices for the duration of the call; the implementation
+/// reads only complete 16-element chunks and a scalar tail.
 unsafe fn dot_product_avx512(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
 
@@ -48,6 +53,11 @@ unsafe fn dot_product_avx512(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline(always)]
+/// # Safety
+///
+/// The caller must provide AVX2 and FMA support. `a` and `b` must remain valid
+/// immutable slices for the duration of the call; the implementation reads
+/// only complete 8-element chunks and a scalar tail.
 unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
 

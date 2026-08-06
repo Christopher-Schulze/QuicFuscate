@@ -73,6 +73,11 @@ pub fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi2")]
 #[inline]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F, AVX-512BW, and
+/// AVX-512VBMI2 are available. `data` must remain a valid immutable slice for
+/// the duration of the call; its storage is read with unaligned 64-byte loads.
 unsafe fn histogram_avx512_vbmi2(data: &[u8]) -> [u32; 256] {
     use std::arch::x86_64::*;
 
@@ -107,6 +112,11 @@ unsafe fn histogram_avx512_vbmi2(data: &[u8]) -> [u32; 256] {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F and AVX-512BW are
+/// available. `data` must remain a valid immutable slice for the duration of
+/// the call; its storage is read with unaligned 64-byte loads.
 unsafe fn histogram_avx512(data: &[u8]) -> [u32; 256] {
     use std::arch::x86_64::*;
 
@@ -141,6 +151,11 @@ unsafe fn histogram_avx512(data: &[u8]) -> [u32; 256] {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available. `data`
+/// must remain a valid immutable slice for the duration of the call; its
+/// storage is read with unaligned 32-byte loads.
 unsafe fn histogram_avx2(data: &[u8]) -> [u32; 256] {
     use std::arch::x86_64::*;
 
@@ -174,6 +189,11 @@ unsafe fn histogram_avx2(data: &[u8]) -> [u32; 256] {
 
 /// Ultra-fast histogram with ARM SVE2 - scalable vector width!
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// The caller must execute the SVE2 path only when the compiled target and the
+/// running CPU both support SVE2. `data` must remain a valid immutable slice;
+/// the implementation reads only lanes enabled by its predicate.
 unsafe fn histogram_sve2(data: &[u8]) -> [u32; 256] {
     #[cfg(target_feature = "sve2")]
     {
@@ -210,6 +230,11 @@ unsafe fn histogram_sve2(data: &[u8]) -> [u32; 256] {
 /// Fast histogram with ARM NEON - 16 bytes at once
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must execute this function only on AArch64 with NEON available.
+/// `data` must remain a valid immutable slice for the duration of the call;
+/// unaligned 16-byte reads are limited by the guarded loop and scalar tail.
 unsafe fn histogram_neon(data: &[u8]) -> [u32; 256] {
     use std::arch::aarch64::*;
 
@@ -243,6 +268,11 @@ unsafe fn histogram_neon(data: &[u8]) -> [u32; 256] {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi2")]
 #[inline]
+/// # Safety
+///
+/// The caller must execute this function only when AVX-512F, AVX-512BW, and
+/// AVX-512VBMI2 are available. `haystack` and `needle` must remain valid
+/// immutable slices; the implementation performs only guarded unaligned reads.
 unsafe fn find_pattern_avx512_vbmi2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     use std::arch::x86_64::*;
 
@@ -296,6 +326,11 @@ unsafe fn find_pattern_avx512_vbmi2(haystack: &[u8], needle: &[u8]) -> Option<us
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
+/// # Safety
+///
+/// The caller must execute this function only when AVX2 is available.
+/// `haystack` and `needle` must remain valid immutable slices; all vector reads
+/// are guarded by the remaining-length checks in this implementation.
 unsafe fn find_pattern_avx2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     use std::arch::x86_64::*;
 
@@ -343,6 +378,11 @@ unsafe fn find_pattern_avx2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Ultra-fast pattern search with ARM SVE2 - scalable vector patterns
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// The caller must execute the SVE2 path only when the compiled target and the
+/// running CPU both support SVE2. `haystack` and `needle` must remain valid
+/// immutable slices; predicate masks and scalar checks bound every read.
 unsafe fn find_pattern_sve2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     #[cfg(target_feature = "sve2")]
     {
@@ -424,6 +464,11 @@ unsafe fn find_pattern_sve2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Fast pattern search with ARM NEON - up to 16-byte patterns
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must execute this function only on AArch64 with NEON available.
+/// `haystack` and `needle` must remain valid immutable slices; vector loads are
+/// performed only for complete 16-byte chunks and the remainder is scalar.
 unsafe fn find_pattern_neon(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     use std::arch::aarch64::*;
 

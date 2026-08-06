@@ -4,6 +4,7 @@
 #[cfg(target_arch = "x86_64")]
 fn header_validate_avx512_matches_scalar() {
     if !std::is_x86_feature_detected!("avx512f") {
+        eprintln!("SIMD_SKIP test=header_validate_avx512_matches_scalar required=avx512f");
         return;
     }
 
@@ -32,6 +33,7 @@ fn header_validate_avx512_matches_scalar() {
 #[cfg(target_arch = "x86_64")]
 fn header_validate_sse2_matches_scalar() {
     if !std::is_x86_feature_detected!("sse2") {
+        eprintln!("SIMD_SKIP test=header_validate_sse2_matches_scalar required=sse2");
         return;
     }
 

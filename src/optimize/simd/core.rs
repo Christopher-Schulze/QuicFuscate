@@ -117,6 +117,11 @@ pub fn xor_repeating_key(dst: &mut [u8], key: &[u8], start: usize) {
 // x86_64 backends
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support and non-overlapping valid `dst` and
+/// `key32` storage for the duration of the call. `dst` must remain writable;
+/// all unaligned vector accesses are bounded by the slice length.
 unsafe fn xor_repeating_key32_avx2(dst: &mut [u8], key32: &[u8; 32]) {
     use std::arch::x86_64::*;
     let key_vec = _mm256_loadu_si256(key32.as_ptr() as *const __m256i);
@@ -136,6 +141,11 @@ unsafe fn xor_repeating_key32_avx2(dst: &mut [u8], key32: &[u8; 32]) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// The caller must provide SSE2 support and non-overlapping valid `dst` and
+/// `key32` storage for the duration of the call. `dst` must remain writable;
+/// all unaligned vector accesses are bounded by the slice length.
 unsafe fn xor_repeating_key32_sse2(dst: &mut [u8], key32: &[u8; 32]) {
     use std::arch::x86_64::*;
     let key_low = _mm_loadu_si128(key32.as_ptr() as *const __m128i);
@@ -160,11 +170,21 @@ unsafe fn xor_repeating_key32_sse2(dst: &mut [u8], key32: &[u8; 32]) {
 // aarch64 backend
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must execute this function on AArch64 with NEON available and
+/// must provide non-overlapping valid `dst` and `key32` storage. The delegated
+/// loads and stores are bounded by the destination length.
 unsafe fn xor_repeating_key32_neon(dst: &mut [u8], key32: &[u8; 32]) {
     xor_repeating_key_generic_neon(dst, key32, 0);
 }
 
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// The caller must ensure that the selected compiled/runtime path has the
+/// required NEON or SVE2 support and that `dst` and `key32` are valid and
+/// non-overlapping for the duration of the call.
 unsafe fn xor_repeating_key32_sve2(dst: &mut [u8], key32: &[u8; 32]) {
     #[cfg(target_feature = "sve2")]
     {
@@ -180,12 +200,22 @@ unsafe fn xor_repeating_key32_sve2(dst: &mut [u8], key32: &[u8; 32]) {
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
+/// # Safety
+///
+/// The caller must provide SVE2 support and non-overlapping valid `dst` and
+/// `key32` storage. Predicate masks bound every vector load and store to the
+/// destination slice.
 unsafe fn xor_repeating_key32_sve2_impl(dst: &mut [u8], key32: &[u8; 32]) {
     xor_repeating_key_generic_sve2_impl(dst, key32, 0);
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must provide AVX2 support, valid writable `dst`, and valid
+/// immutable `key` storage that does not overlap `dst`. `key` must be non-empty
+/// and `start` must be a logical key offset; vector accesses are length-bounded.
 unsafe fn xor_repeating_key_generic_avx2(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::x86_64::*;
 
@@ -226,6 +256,11 @@ unsafe fn xor_repeating_key_generic_avx2(dst: &mut [u8], key: &[u8], start: usiz
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// The caller must provide SSE2 support, valid writable `dst`, and valid
+/// immutable `key` storage that does not overlap `dst`. `key` must be non-empty
+/// and `start` must be a logical key offset; vector accesses are length-bounded.
 unsafe fn xor_repeating_key_generic_sse2(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::x86_64::*;
 
@@ -266,6 +301,11 @@ unsafe fn xor_repeating_key_generic_sse2(dst: &mut [u8], key: &[u8], start: usiz
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must provide AArch64 NEON support, valid writable `dst`, and
+/// valid immutable non-overlapping `key` storage. `key` must be non-empty and
+/// `start` must be a logical key offset; vector accesses are length-bounded.
 unsafe fn xor_repeating_key_generic_neon(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::aarch64::*;
 
@@ -305,6 +345,11 @@ unsafe fn xor_repeating_key_generic_neon(dst: &mut [u8], key: &[u8], start: usiz
 }
 
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// The caller must ensure that the selected compiled/runtime path has NEON or
+/// SVE2 support and that `dst` and non-empty `key` are valid, non-overlapping
+/// storage. `start` is interpreted modulo the key length.
 unsafe fn xor_repeating_key_generic_sve2(dst: &mut [u8], key: &[u8], start: usize) {
     #[cfg(target_feature = "sve2")]
     {
@@ -320,6 +365,11 @@ unsafe fn xor_repeating_key_generic_sve2(dst: &mut [u8], key: &[u8], start: usiz
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
+/// # Safety
+///
+/// The caller must provide SVE2 support, valid writable `dst`, and valid
+/// immutable non-empty `key` storage that does not overlap `dst`. Predicate
+/// masks bound every vector access to the destination slice.
 unsafe fn xor_repeating_key_generic_sve2_impl(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::aarch64::*;
 
@@ -379,6 +429,11 @@ fn xor_repeating_key_scalar(dst: &mut [u8], key: &[u8], start: usize) {
 /// Ultra-fast CRC32 with ARMv8 CRC32 instructions (aarch64)
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "crc")]
+/// # Safety
+///
+/// The caller must execute this function only when the AArch64 CRC extension
+/// is available. `data` must remain a valid immutable slice for the duration of
+/// the call; all fixed-width reads are guarded before conversion.
 unsafe fn crc32_armv8(data: &[u8], mut crc: u32) -> u32 {
     use std::arch::aarch64::*;
 

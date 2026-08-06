@@ -6,6 +6,11 @@ use std::arch::x86_64::*;
 
 #[target_feature(enable = "avx2")]
 #[inline]
+/// # Safety
+///
+/// The caller must provide AVX2 support and a valid immutable `ranges` slice
+/// for the duration of the call. The implementation copies the input before
+/// sorting and bounds every unaligned vector load by the copied length.
 pub(crate) unsafe fn canonical_ack_blocks_avx2(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     if ranges.is_empty() {
         return Vec::new();
@@ -104,6 +109,11 @@ pub(crate) unsafe fn canonical_ack_blocks_avx2(ranges: &[(u64, u64)]) -> Vec<(u6
 }
 
 #[target_feature(enable = "avx512f", enable = "avx512vl")]
+/// # Safety
+///
+/// The caller must provide AVX-512F and AVX-512VL support and a valid immutable
+/// `ranges` slice for the duration of the call. The implementation copies the
+/// input before sorting and bounds every unaligned vector load by its length.
 pub(crate) unsafe fn canonical_ack_blocks_avx512(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     if ranges.is_empty() {
         return Vec::new();
