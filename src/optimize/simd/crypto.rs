@@ -637,10 +637,14 @@ unsafe fn chacha20_blocks_x4_neon(key: &[u8; 32], nonce: &[u8; 12], counter: u32
     out
 }
 
-/// SIMD-accelerated XOR of two byte slices (dst ^= src), supports any length.
+/// SIMD-accelerated XOR of two equal-length byte slices (dst ^= src).
+/// Mismatched slices are rejected without modifying either slice.
 #[inline(always)]
 unsafe fn xor_slice_simd(dst: &mut [u8], src: &[u8]) {
-    debug_assert_eq!(dst.len(), src.len());
+    if dst.len() != src.len() {
+        return;
+    }
+
     let len = dst.len();
     let mut i = 0usize;
     let features = FeatureDetector::instance().features_full();

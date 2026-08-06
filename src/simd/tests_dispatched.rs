@@ -455,3 +455,12 @@ fn berlekamp_massey_boundary_lengths_match_scalar() {
         );
     }
 }
+
+#[test]
+fn berlekamp_massey_rejects_overlong_lengths() {
+    let syndrome = [1u8, 2, 3];
+    for len in [syndrome.len() + 1, usize::MAX] {
+        assert!(fec::berlekamp_massey_gf256(&syndrome, len).is_empty());
+        assert!(scalar::berlekamp_massey(&syndrome, len).is_empty());
+    }
+}

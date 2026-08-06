@@ -190,6 +190,16 @@ pub(super) unsafe fn gf_mul_sve2(a: &[u8], b: u8, dst: &mut [u8]) {
     // Fallback when SVE2 is unavailable at compile time
     scalar::gf_mul(a, b, dst)
 }
+
+// FEC
+#[cfg(target_feature = "sve2")]
+#[target_feature(enable = "sve2")]
+pub(super) unsafe fn berlekamp_massey_sve2(syndrome: &[u8], len: usize) -> Vec<u8> {
+    // The canonical scalar implementation owns the validated length contract;
+    // this feature boundary does not expose an independent unchecked loop.
+    scalar::berlekamp_massey(syndrome, len)
+}
+
 /// GF(2^8) multiply using NEON PMULL - carryless polynomial multiplication
 /// Polynomial: x^8 + x^4 + x^3 + x + 1 (AES reduction polynomial 0x11B)
 #[target_feature(enable = "neon")]

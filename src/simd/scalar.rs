@@ -138,11 +138,19 @@ pub fn matmul(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 }
 
 /// Berlekamp-Massey algorithm over GF(256) for error-locator polynomial (scalar).
+/// Returns an empty polynomial when `len` exceeds the supplied syndrome.
 pub fn berlekamp_massey(syndrome: &[u8], len: usize) -> Vec<u8> {
-    let mut error_locator = vec![0u8; len + 1];
+    if len > syndrome.len() {
+        return Vec::new();
+    }
+    let Some(storage_len) = len.checked_add(1) else {
+        return Vec::new();
+    };
+
+    let mut error_locator = vec![0u8; storage_len];
     error_locator[0] = 1;
 
-    let mut old_locator = vec![0u8; len + 1];
+    let mut old_locator = vec![0u8; storage_len];
     old_locator[0] = 1;
 
     let mut syndrome_shift = 0u8;

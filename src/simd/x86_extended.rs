@@ -15,6 +15,10 @@ unsafe fn avx2_high_nibbles(value: __m256i) -> __m256i {
 /// AVX-512/GFNI feature boundary using the canonical scalar algorithm.
 #[target_feature(enable = "avx512f", enable = "gfni")]
 pub(super) unsafe fn berlekamp_massey_gfni(syndrome: &[u8], len: usize) -> Vec<u8> {
+    if len > syndrome.len() {
+        return Vec::new();
+    }
+
     // The removed vector loop indexed before the syndrome start for short
     // prefixes and updated overlapping polynomial lanes incorrectly. Keep
     // this feature-gated boundary fail-closed on the canonical algorithm.
@@ -24,6 +28,10 @@ pub(super) unsafe fn berlekamp_massey_gfni(syndrome: &[u8], len: usize) -> Vec<u
 /// Berlekamp-Massey with AVX2 acceleration when available.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn berlekamp_massey_avx2(syndrome: &[u8], len: usize) -> Vec<u8> {
+    if len > syndrome.len() {
+        return Vec::new();
+    }
+
     // Keep AVX2 routing separate from GFNI/AVX-512 to avoid unsupported instructions.
     scalar::berlekamp_massey(syndrome, len)
 }
@@ -47,9 +55,9 @@ pub(super) unsafe fn matmul_gf256_gfni(
     let c_len = m.checked_mul(n);
     debug_assert!(c_len.is_some(), "GFNI matrix dimensions overflow for C");
     let Some(c_len) = c_len else { return };
-    debug_assert!(a.len() >= a_len, "GFNI matrix A is smaller than m * k");
-    debug_assert!(b.len() >= b_len, "GFNI matrix B is smaller than k * n");
-    debug_assert!(c.len() >= c_len, "GFNI matrix C is smaller than m * n");
+    if a.len() < a_len || b.len() < b_len || c.len() < c_len {
+        return;
+    }
 
     // Zero output matrix
     for elem in c.iter_mut().take(c_len) {
@@ -107,9 +115,9 @@ pub(super) unsafe fn matmul_gf256_avx2(
     let c_len = m.checked_mul(n);
     debug_assert!(c_len.is_some(), "AVX2 matrix dimensions overflow for C");
     let Some(c_len) = c_len else { return };
-    debug_assert!(a.len() >= a_len, "AVX2 matrix A is smaller than m * k");
-    debug_assert!(b.len() >= b_len, "AVX2 matrix B is smaller than k * n");
-    debug_assert!(c.len() >= c_len, "AVX2 matrix C is smaller than m * n");
+    if a.len() < a_len || b.len() < b_len || c.len() < c_len {
+        return;
+    }
 
     // Use AVX2 with lookup tables for GF multiplication
     for elem in c.iter_mut().take(c_len) {
@@ -201,10 +209,9 @@ pub(super) unsafe fn varint_encode_bmi2(mut value: u64, buf: &mut [u8]) -> usize
 
     let required_len =
         if value == 0 { 1 } else { ((64 - value.leading_zeros()) as usize).div_ceil(7) };
-    debug_assert!(
-        buf.len() >= required_len,
-        "BMI2 varint output buffer is smaller than the encoded value"
-    );
+    if buf.len() < required_len {
+        return 0;
+    }
 
     if value < 128 {
         buf[0] = value as u8;
@@ -1224,6 +1231,91 @@ mod tests {
         crate::simd::scalar::matmul_gf256(&a, &b, &mut scalar_output, 1, 2, 65);
         unsafe { matmul_gf256_avx2(&a, &b, &mut avx2_output, 1, 2, 65) };
         assert_eq!(avx2_output, scalar_output);
+    }
+
+    #[test]
+    fn avx2_matmul_rejects_invalid_dimensions_and_slices() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        let mut output = vec![0xA5; 4];
+        unsafe { matmul_gf256_avx2(&[1], &[1, 2, 3, 4], &mut output, 2, 1, 2) };
+        assert_eq!(output, vec![0xA5; 4]);
+
+        unsafe { matmul_gf256_avx2(&[1, 2], &[1], &mut output, 1, 2, 2) };
+        assert_eq!(output, vec![0xA5; 4]);
+
+        let mut short_output = vec![0xA5; 1];
+        unsafe { matmul_gf256_avx2(&[1, 2], &[1, 2, 3, 4], &mut short_output, 1, 2, 2) };
+        assert_eq!(short_output, vec![0xA5]);
+
+        unsafe { matmul_gf256_avx2(&[], &[], &mut output, usize::MAX, 2, 1) };
+        assert_eq!(output, vec![0xA5; 4]);
+    }
+
+    #[test]
+    fn gfni_matmul_rejects_invalid_dimensions_and_slices() {
+        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("gfni") {
+            return;
+        }
+
+        let mut output = vec![0xA5; 4];
+        unsafe { matmul_gf256_gfni(&[1], &[1, 2, 3, 4], &mut output, 2, 1, 2) };
+        assert_eq!(output, vec![0xA5; 4]);
+
+        unsafe { matmul_gf256_gfni(&[1, 2], &[1], &mut output, 1, 2, 2) };
+        assert_eq!(output, vec![0xA5; 4]);
+
+        let mut short_output = vec![0xA5; 1];
+        unsafe { matmul_gf256_gfni(&[1, 2], &[1, 2, 3, 4], &mut short_output, 1, 2, 2) };
+        assert_eq!(short_output, vec![0xA5]);
+
+        unsafe { matmul_gf256_gfni(&[], &[], &mut output, usize::MAX, 2, 1) };
+        assert_eq!(output, vec![0xA5; 4]);
+    }
+
+    #[test]
+    fn berlekamp_massey_x86_entries_reject_overlong_prefixes() {
+        let syndrome = [1u8, 2, 3];
+
+        if is_x86_feature_detected!("avx2") {
+            assert!(unsafe { berlekamp_massey_avx2(&syndrome, 4) }.is_empty());
+            assert!(unsafe { berlekamp_massey_avx2(&syndrome, usize::MAX) }.is_empty());
+        }
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("gfni") {
+            assert!(unsafe { berlekamp_massey_gfni(&syndrome, 4) }.is_empty());
+            assert!(unsafe { berlekamp_massey_gfni(&syndrome, usize::MAX) }.is_empty());
+        }
+    }
+
+    #[test]
+    fn bmi2_varint_rejects_short_output_and_preserves_leb128_bytes() {
+        if !is_x86_feature_detected!("bmi2") {
+            return;
+        }
+
+        for value in [0, 127, 128, 16_383, 16_384, u64::MAX] {
+            let mut expected = Vec::new();
+            let mut remaining = value;
+            while remaining >= 128 {
+                expected.push((remaining as u8 & 0x7F) | 0x80);
+                remaining >>= 7;
+            }
+            expected.push(remaining as u8);
+
+            for short_len in 0..expected.len() {
+                let mut output = vec![0xA5; short_len];
+                let before = output.clone();
+                assert_eq!(unsafe { varint_encode_bmi2(value, &mut output) }, 0);
+                assert_eq!(output, before, "value {value}, short length {short_len}");
+            }
+
+            let mut output = vec![0u8; expected.len()];
+            let written = unsafe { varint_encode_bmi2(value, &mut output) };
+            assert_eq!(written, expected.len());
+            assert_eq!(output, expected, "value {value}");
+        }
     }
 
     #[test]

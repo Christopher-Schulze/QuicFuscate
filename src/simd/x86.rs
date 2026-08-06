@@ -297,8 +297,12 @@ pub(super) unsafe fn find_pattern_sse42_short(haystack: &[u8], needle: &[u8]) ->
         return None;
     }
 
-    // Use PCMPISTRI for efficient string search
-    let needle_vec = _mm_loadu_si128(needle.as_ptr() as *const __m128i);
+    // PCMPISTRI always reads a full 16-byte register. Copy the accepted needle
+    // into owned padding so short callers never need readable bytes past the
+    // supplied slice.
+    let mut needle_bytes = [0u8; 16];
+    needle_bytes[..nlen].copy_from_slice(needle);
+    let needle_vec = _mm_loadu_si128(needle_bytes.as_ptr() as *const __m128i);
     let mut i = 0;
 
     while i + 16 <= haystack.len() {
@@ -338,6 +342,38 @@ pub(super) unsafe fn find_pattern_sse42_short(haystack: &[u8], needle: &[u8]) ->
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse42_short_pattern_handles_every_accepted_needle_length() {
+        if !is_x86_feature_detected!("sse4.2") {
+            return;
+        }
+
+        for needle_len in 1..=16 {
+            let needle: Vec<u8> = (1..=needle_len).map(|value| value as u8).collect();
+            let offset = 17;
+            let mut haystack = vec![0xA5; 64];
+            haystack[offset..offset + needle_len].copy_from_slice(&needle);
+
+            assert_eq!(
+                unsafe { find_pattern_sse42_short(&haystack, &needle) },
+                Some(offset),
+                "needle length {needle_len}"
+            );
+
+            haystack[offset] ^= 0xFF;
+            assert_eq!(
+                unsafe { find_pattern_sse42_short(&haystack, &needle) },
+                None,
+                "mutated needle length {needle_len}"
+            );
+        }
+    }
 }
 /// AES encryption with VAES - vectorized AES for parallel blocks
 #[target_feature(enable = "vaes", enable = "avx512f", enable = "aes", enable = "sse2")]

@@ -5,10 +5,14 @@ use super::*;
 /// Router: Berlekamp-Massey over GF(256) with best available backend
 #[inline(always)]
 pub fn berlekamp_massey_gf256(syndrome: &[u8], len: usize) -> Vec<u8> {
+    if len > syndrome.len() {
+        return Vec::new();
+    }
+
     let features = FeatureDetector::instance();
     // SAFETY: Each branch is guarded by runtime feature detection matching the
-    // callee's `#[target_feature]`. Callees only read `syndrome[..len]` and
-    // return an owned Vec - no aliasing or pointer lifetime concerns.
+    // callee's `#[target_feature]`. The length guard above proves every callee
+    // may read only within `syndrome[..len]` and return an owned Vec.
     #[cfg(target_arch = "x86_64")]
     {
         let full = features.features_full();

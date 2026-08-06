@@ -189,7 +189,9 @@ unsafe fn xor_repeating_key32_sve2_impl(dst: &mut [u8], key32: &[u8; 32]) {
 unsafe fn xor_repeating_key_generic_avx2(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::x86_64::*;
 
-    debug_assert!(!key.is_empty());
+    if key.is_empty() || dst.is_empty() {
+        return;
+    }
     let key_len = key.len();
     let mut idx = start % key_len;
     let mut i = 0usize;
@@ -227,7 +229,9 @@ unsafe fn xor_repeating_key_generic_avx2(dst: &mut [u8], key: &[u8], start: usiz
 unsafe fn xor_repeating_key_generic_sse2(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::x86_64::*;
 
-    debug_assert!(!key.is_empty());
+    if key.is_empty() || dst.is_empty() {
+        return;
+    }
     let key_len = key.len();
     let mut idx = start % key_len;
     let mut i = 0usize;
@@ -265,7 +269,9 @@ unsafe fn xor_repeating_key_generic_sse2(dst: &mut [u8], key: &[u8], start: usiz
 unsafe fn xor_repeating_key_generic_neon(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::aarch64::*;
 
-    debug_assert!(!key.is_empty());
+    if key.is_empty() || dst.is_empty() {
+        return;
+    }
     let key_len = key.len();
     let mut idx = start % key_len;
     let mut i = 0usize;
@@ -317,7 +323,9 @@ unsafe fn xor_repeating_key_generic_sve2(dst: &mut [u8], key: &[u8], start: usiz
 unsafe fn xor_repeating_key_generic_sve2_impl(dst: &mut [u8], key: &[u8], start: usize) {
     use std::arch::aarch64::*;
 
-    debug_assert!(!key.is_empty());
+    if key.is_empty() || dst.is_empty() {
+        return;
+    }
 
     const MAX_SVE_BYTES: usize = 256;
     let len = dst.len();
@@ -353,6 +361,10 @@ unsafe fn xor_repeating_key_generic_sve2_impl(dst: &mut [u8], key: &[u8], start:
 
 #[inline(always)]
 fn xor_repeating_key_scalar(dst: &mut [u8], key: &[u8], start: usize) {
+    if key.is_empty() || dst.is_empty() {
+        return;
+    }
+
     let key_len = key.len();
     let mut idx = start % key_len;
     for byte in dst.iter_mut() {
