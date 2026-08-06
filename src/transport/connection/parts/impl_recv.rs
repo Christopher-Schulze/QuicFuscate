@@ -499,21 +499,7 @@ impl Connection {
                         Frame::Datagram { data } => {
                             ack_eliciting = true;
                             self.stats.dgram_recv += 1;
-                            if !self.is_dgram_recv_queue_full() {
-                                #[cfg(not(feature = "zero_copy_dgram"))]
-                                self.dgram_recv_queue.push_back(data.into_owned());
-                                #[cfg(feature = "zero_copy_dgram")]
-                                {
-                                    let mut buf = self.dgram_pool.alloc();
-                                    let len = data.len().min(buf.len());
-                                    buf[..len].copy_from_slice(&data[..len]);
-                                    self.dgram_recv_queue.push_back(DatagramBuffer {
-                                        data: buf,
-                                        len,
-                                        _pool: self.dgram_pool.clone(),
-                                    });
-                                }
-                            }
+                            self.enqueue_received_datagram(data);
                         }
                         Frame::Ack { ranges, ack_delay, .. } => {
                             // Decode ack_delay using the configured ack_delay_exponent

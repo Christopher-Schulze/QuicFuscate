@@ -35,6 +35,7 @@ pub struct Connection {
     dgram_recv_queue: DatagramQueue,
     dgram_send_queue: DatagramQueue,
     #[cfg(feature = "zero_copy_dgram")]
+    /// Pool whose fixed block-size contract bounds every zero-copy datagram payload.
     dgram_pool: Arc<crate::optimize::MemoryPool>,
     dgram_send_max_size: usize,
     timeout_count: u32,
@@ -197,9 +198,9 @@ type DatagramQueue = VecDeque<DatagramBuffer>;
 
 #[cfg(feature = "zero_copy_dgram")]
 struct DatagramBuffer {
-    data: crate::optimize::AlignedBox<[u8]>,
+    /// Pool-aware ownership guard. Dropping this buffer returns its block to `dgram_pool`.
+    data: crate::optimize::PooledBlock,
     len: usize,
-    _pool: Arc<crate::optimize::MemoryPool>,
 }
 
 /// Fixed-size 64 KB ring buffer for zero-copy stream I/O (feature-gated).

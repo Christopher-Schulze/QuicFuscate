@@ -260,6 +260,28 @@ impl Connection {
         Ok(buf.len())
     }
 
+    /// Enqueues an inbound DATAGRAM only when the queue and zero-copy block contract permit it.
+    fn enqueue_received_datagram(&mut self, data: Cow<'_, [u8]>) {
+        if self.is_dgram_recv_queue_full() {
+            return;
+        }
+        #[cfg(not(feature = "zero_copy_dgram"))]
+        {
+            self.dgram_recv_queue.push_back(data.into_owned());
+        }
+        #[cfg(feature = "zero_copy_dgram")]
+        {
+            let payload = data.as_ref();
+            if payload.len() > self.dgram_pool.block_size() {
+                return;
+            }
+            let mut buffer = crate::optimize::PooledBlock::new(Arc::clone(&self.dgram_pool));
+            buffer[..payload.len()].copy_from_slice(payload);
+            self.dgram_recv_queue
+                .push_back(DatagramBuffer { data: buffer, len: payload.len() });
+        }
+    }
+
     /// Dequeues one received DATAGRAM frame into the caller's buffer.
     #[inline(always)]
     pub fn dgram_recv(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
@@ -299,14 +321,12 @@ impl Connection {
         }
         #[cfg(feature = "zero_copy_dgram")]
         {
-            let mut data = self.dgram_pool.alloc();
-            let len = buf.len().min(data.len());
-            data[..len].copy_from_slice(&buf[..len]);
-            self.dgram_send_queue.push_back(DatagramBuffer {
-                data,
-                len,
-                _pool: self.dgram_pool.clone(),
-            });
+            if buf.len() > self.dgram_pool.block_size() {
+                return Err(crate::error::ConnectionError::InvalidState);
+            }
+            let mut data = crate::optimize::PooledBlock::new(Arc::clone(&self.dgram_pool));
+            data[..buf.len()].copy_from_slice(buf);
+            self.dgram_send_queue.push_back(DatagramBuffer { data, len: buf.len() });
         }
         self.stats.dgram_sent += 1;
         Ok(())

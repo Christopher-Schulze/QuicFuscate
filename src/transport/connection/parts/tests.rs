@@ -11,6 +11,8 @@ mod tests {
     use crate::error::ConnectionError;
     use crate::transport::config::Config;
     use crate::transport::PROTOCOL_VERSION;
+    #[cfg(feature = "zero_copy_dgram")]
+    use std::sync::Arc;
 
     fn local() -> std::net::SocketAddr {
         "127.0.0.1:10000".parse().unwrap()
@@ -2142,6 +2144,150 @@ mod tests {
         c.dgram_send(b"test_dgram").unwrap();
         assert_eq!(c.dgram_send_queue_len(), 1);
         assert_eq!(c.dgram_send_queue_byte_size(), 10);
+    }
+
+    #[test]
+    fn zero_copy_dgram_byte_equivalence_for_accepted_payload() {
+        let mut c = make_conn();
+        c.enable_datagrams(16, 16);
+        let payload: Vec<u8> = (0..64).map(|value| value as u8).collect();
+
+        c.dgram_send(&payload).expect("accepted DATAGRAM must enqueue");
+        assert_eq!(c.dgram_send_queue_byte_size(), payload.len());
+        #[cfg(not(feature = "zero_copy_dgram"))]
+        assert_eq!(c.dgram_send_queue.front().unwrap().as_slice(), payload.as_slice());
+        #[cfg(feature = "zero_copy_dgram")]
+        {
+            let front = c.dgram_send_queue.front().unwrap();
+            assert_eq!(&front.data[..front.len], payload.as_slice());
+        }
+
+        c.enqueue_received_datagram(std::borrow::Cow::Borrowed(&payload));
+        let mut received = vec![0u8; payload.len()];
+        assert_eq!(c.dgram_recv(&mut received).unwrap(), payload.len());
+        assert_eq!(received, payload);
+    }
+
+    #[cfg(feature = "zero_copy_dgram")]
+    #[test]
+    fn zero_copy_dgram_returns_pool_blocks_at_queue_boundaries() {
+        let mut c = make_conn();
+        c.enable_datagrams(16, 16);
+        let pool = Arc::new(crate::optimize::MemoryPool::new(2, 64));
+        c.dgram_pool = Arc::clone(&pool);
+        let before = pool.accounting_snapshot();
+
+        c.dgram_send(&[0xA5; 32]).expect("DATAGRAM enqueue must allocate one block");
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+        c.dgram_purge_outgoing(|data| data[0] == 0xA5);
+        assert_eq!(pool.accounting_snapshot(), before);
+
+        c.dgram_send(&[0x5A; 32]).expect("second DATAGRAM enqueue must allocate one block");
+        let mut output = [0u8; 128];
+        let (written, ack_eliciting) =
+            c.maybe_flush_one_datagram_frame(&mut output, 0).expect("DATAGRAM serialization");
+        assert!(written > 0);
+        assert!(ack_eliciting);
+        assert_eq!(pool.accounting_snapshot(), before);
+
+        c.dgram_send(&[0x3C; 32]).expect("teardown DATAGRAM enqueue");
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+        drop(c);
+        assert_eq!(pool.accounting_snapshot(), before);
+    }
+
+    #[cfg(feature = "zero_copy_dgram")]
+    #[test]
+    fn zero_copy_dgram_receive_pop_vec_and_rejection_return_pool_blocks() {
+        let mut c = make_conn();
+        c.enable_datagrams(16, 16);
+        let pool = Arc::new(crate::optimize::MemoryPool::new(2, 64));
+        c.dgram_pool = Arc::clone(&pool);
+        let before = pool.accounting_snapshot();
+
+        let mut limited_send = make_conn();
+        limited_send.enable_datagrams(16, 1);
+        limited_send.dgram_pool = Arc::clone(&pool);
+        limited_send.dgram_send(&[0xC1; 8]).expect("first send queue slot");
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+        assert!(matches!(
+            limited_send.dgram_send(&[0xC2; 8]),
+            Err(ConnectionError::DgramQueueFull)
+        ));
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+        drop(limited_send);
+        assert_eq!(pool.accounting_snapshot(), before);
+
+        c.enqueue_received_datagram(std::borrow::Cow::Borrowed(b"pop"));
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+        let mut received = [0u8; 3];
+        assert_eq!(c.dgram_recv(&mut received).unwrap(), 3);
+        assert_eq!(&received, b"pop");
+        assert_eq!(pool.accounting_snapshot(), before);
+
+        c.enqueue_received_datagram(std::borrow::Cow::Borrowed(b"vec"));
+        assert_eq!(c.dgram_recv_vec().unwrap(), b"vec");
+        assert_eq!(pool.accounting_snapshot(), before);
+
+        let oversized = vec![0xF0; pool.block_size() + 1];
+        c.enqueue_received_datagram(std::borrow::Cow::Borrowed(&oversized));
+        assert_eq!(c.dgram_recv_queue_len(), 0);
+        assert_eq!(pool.accounting_snapshot(), before);
+
+        drop(c);
+        assert_eq!(pool.accounting_snapshot(), before);
+
+        let mut limited_receive = make_conn();
+        limited_receive.enable_datagrams(1, 16);
+        limited_receive.dgram_pool = Arc::clone(&pool);
+        limited_receive.enqueue_received_datagram(std::borrow::Cow::Borrowed(b"one"));
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+        limited_receive.enqueue_received_datagram(std::borrow::Cow::Borrowed(b"two"));
+        assert_eq!(limited_receive.dgram_recv_queue_len(), 1);
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+        drop(limited_receive);
+        assert_eq!(pool.accounting_snapshot(), before);
+    }
+
+    #[cfg(feature = "zero_copy_dgram")]
+    #[test]
+    fn zero_copy_dgram_rejects_payload_larger_than_pool_without_truncation() {
+        let mut c = make_conn();
+        c.enable_datagrams(16, 16);
+        let pool = Arc::new(crate::optimize::MemoryPool::new(2, 64));
+        c.dgram_pool = Arc::clone(&pool);
+        c.dgram_send_max_size = pool.block_size() + 1;
+        let oversized = vec![0xD7; pool.block_size() + 1];
+        let before = pool.accounting_snapshot();
+
+        assert!(matches!(c.dgram_send(&oversized), Err(ConnectionError::InvalidState)));
+        assert_eq!(c.dgram_send_queue_len(), 0);
+        assert_eq!(c.dgram_send_queue_byte_size(), 0);
+        assert_eq!(pool.accounting_snapshot(), before);
+    }
+
+    #[cfg(feature = "zero_copy_dgram")]
+    #[test]
+    fn zero_copy_dgram_serialization_error_restores_pool_owned_buffer() {
+        let mut c = make_conn();
+        c.enable_datagrams(16, 16);
+        let pool = Arc::new(crate::optimize::MemoryPool::new(2, 16_384));
+        c.dgram_pool = Arc::clone(&pool);
+        c.dgram_send_max_size = 16_384;
+        let payload_len = 16_384;
+        let before = pool.accounting_snapshot();
+        let mut data = crate::optimize::PooledBlock::new(Arc::clone(&pool));
+        data[..payload_len].fill(0xAB);
+        c.dgram_send_queue.push_back(DatagramBuffer { data, len: payload_len });
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+
+        let mut output = vec![0u8; 1 + 2 + payload_len];
+        assert!(c.maybe_flush_one_datagram_frame(&mut output, 0).is_err());
+        assert_eq!(c.dgram_send_queue_len(), 1);
+        assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
+
+        c.dgram_purge_outgoing(|_| true);
+        assert_eq!(pool.accounting_snapshot(), before);
     }
 
     #[test]
