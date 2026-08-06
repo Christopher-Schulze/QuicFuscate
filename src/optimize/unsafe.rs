@@ -6,6 +6,13 @@ pub enum UnsafeError {
     ForeignPointer,
     DoubleFree,
     InvalidPacket,
+    ContextCreationFailed,
+    ContextUnavailable,
+    DictionaryCreationFailed,
+    DictionaryRejected,
+    ParameterRejected,
+    InvalidCompressionLevel,
+    InputTooLarge,
 }
 // # Unsafe Core - Maximum Performance Optimizations
 //
@@ -686,234 +693,62 @@ pub mod simd_gf {
 pub mod unsafe_compress {
     use super::*;
 
-    // Placeholder types for zstd_sys integration
-    // In production, these would come from zstd_sys crate
-    type ZstdCctx = std::ffi::c_void;
-    type ZstdCdict = std::ffi::c_void;
+    // Zstd context and dictionary ownership are represented by concrete branch-specific
+    // types. No opaque pointer is used for the safe fallback.
 
-    #[repr(C)]
-    enum ZstdCParameter {
-        CompressionLevel = 100,
+    #[derive(Clone, Copy)]
+    pub(super) enum CompressionStrategy {
+        Fast,
+        DFast,
+        Greedy,
+        Lazy2,
+        BtOpt,
     }
 
-    // zstd FFI wrappers - unsafe due to raw pointer manipulation and FFI calls.
+    impl CompressionStrategy {
+        #[cfg(feature = "compression_zstd_ffi")]
+        fn native_value(self) -> i32 {
+            match self {
+                Self::Fast => zstd_sys::ZSTD_strategy::ZSTD_fast as i32,
+                Self::DFast => zstd_sys::ZSTD_strategy::ZSTD_dfast as i32,
+                Self::Greedy => zstd_sys::ZSTD_strategy::ZSTD_greedy as i32,
+                Self::Lazy2 => zstd_sys::ZSTD_strategy::ZSTD_lazy2 as i32,
+                Self::BtOpt => zstd_sys::ZSTD_strategy::ZSTD_btopt as i32,
+            }
+        }
 
-    // SAFETY: FFI call to ZSTD_createCCtx which allocates a compression context.
-    // Returns a valid pointer or null. In non-FFI fallback, Box::into_raw produces
-    // a valid heap pointer. Caller must pair with zstd_free_cctx to avoid leaks.
-    unsafe fn zstd_create_cctx() -> *mut ZstdCctx {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            zstd_sys::ZSTD_createCCtx() as *mut ZstdCctx
-        }
         #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            Box::into_raw(Box::new(0u8)) as *mut ZstdCctx
-        }
-    }
-    // SAFETY: `ctx` must be a pointer previously returned by zstd_create_cctx (and not
-    // yet freed). In FFI mode, ZSTD_freeCCtx handles null gracefully. In fallback mode,
-    // Box::from_raw requires the pointer to have originated from Box::into_raw with the
-    // same type layout (*mut u8), which zstd_create_cctx guarantees.
-    unsafe fn zstd_free_cctx(ctx: *mut ZstdCctx) {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            if !ctx.is_null() {
-                zstd_sys::ZSTD_freeCCtx(ctx as *mut zstd_sys::ZSTD_CCtx);
-            }
-        }
-        #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            let _ = Box::from_raw(ctx as *mut u8);
-        }
-    }
-    // SAFETY: `data` must point to `len` readable bytes (the dictionary payload).
-    // In FFI mode, ZSTD_createCDict copies the data internally. In fallback mode,
-    // slice::from_raw_parts(data, len) requires data to be valid for len bytes and
-    // properly aligned for u8 (always satisfied). The resulting Vec is heap-allocated
-    // via Box::into_raw, producing a valid opaque pointer.
-    unsafe fn zstd_create_cdict(data: *const u8, len: usize, level: i32) -> *mut ZstdCdict {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            zstd_sys::ZSTD_createCDict(data as *const std::ffi::c_void, len, level)
-                as *mut ZstdCdict
-        }
-        #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            let _ = level; // level not needed for safe dictionary holder
-            let slice = std::slice::from_raw_parts(data, len);
-            let vec = slice.to_vec();
-            // Store bytes behind the opaque pointer for fallback usage
-            Box::into_raw(Box::new(vec)) as *mut ZstdCdict
-        }
-    }
-    // SAFETY: `dict` must be a pointer previously returned by zstd_create_cdict (and not
-    // yet freed), or null. In FFI mode, ZSTD_freeCDict handles null. In fallback mode,
-    // null is checked before Box::from_raw. The pointer type (*mut Vec<u8>) matches
-    // the Box::into_raw source in zstd_create_cdict.
-    unsafe fn zstd_free_cdict(dict: *mut ZstdCdict) {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            if !dict.is_null() {
-                zstd_sys::ZSTD_freeCDict(dict as *mut zstd_sys::ZSTD_CDict);
-            }
-        }
-        #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            if !dict.is_null() {
-                let _ = Box::from_raw(dict as *mut Vec<u8>);
+        fn fallback_value(self) -> zstd::zstd_safe::Strategy {
+            match self {
+                Self::Fast => zstd::zstd_safe::Strategy::ZSTD_fast,
+                Self::DFast => zstd::zstd_safe::Strategy::ZSTD_dfast,
+                Self::Greedy => zstd::zstd_safe::Strategy::ZSTD_greedy,
+                Self::Lazy2 => zstd::zstd_safe::Strategy::ZSTD_lazy2,
+                Self::BtOpt => zstd::zstd_safe::Strategy::ZSTD_btopt,
             }
         }
     }
-    // SAFETY: `ctx` must be a live compression context from zstd_create_cctx. In FFI
-    // mode, ZSTD_CCtx_setParameter is a safe-to-call C function that validates the
-    // parameter internally. In fallback mode, no pointer dereference occurs (no-op).
-    unsafe fn zstd_cctx_set_parameter(
-        ctx: *mut ZstdCctx,
-        _param: ZstdCParameter,
-        val: i32,
-    ) -> usize {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            zstd_sys::ZSTD_CCtx_setParameter(
-                ctx as *mut zstd_sys::ZSTD_CCtx,
-                zstd_sys::ZSTD_cParameter::ZSTD_c_compressionLevel,
-                val,
-            )
-        }
-        #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            let _ = (ctx, val);
-            0
-        }
+
+    #[derive(Clone, Copy)]
+    pub(super) struct CompressionPlan {
+        pub(super) level: i32,
+        pub(super) workers: i32,
+        pub(super) target_block: i32,
+        pub(super) strategy: CompressionStrategy,
+        pub(super) window_log: i32,
+        pub(super) checksum: bool,
+        pub(super) content_size: bool,
     }
-    // SAFETY: `_ctx` must be a live compression context. `dst` must point to
-    // `dst_capacity` writable bytes. `src` must point to `src_size` readable bytes.
-    // `dict` must be a live dictionary from zstd_create_cdict. In FFI mode, zstd
-    // handles all bounds internally. In fallback mode: dict is dereferenced as
-    // *const Vec<u8> (matching zstd_create_cdict's Box::into_raw type); src is
-    // converted via slice::from_raw_parts(src, src_size) which requires src to be
-    // valid for src_size bytes; the copy_nonoverlapping writes at most z.len() bytes
-    // to dst, checked against dst_capacity to prevent out-of-bounds writes.
-    unsafe fn zstd_compress_using_cdict(
-        _ctx: *mut ZstdCctx,
-        dst: *mut std::ffi::c_void,
-        dst_capacity: usize,
-        src: *const std::ffi::c_void,
-        src_size: usize,
-        dict: *const ZstdCdict,
-    ) -> usize {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            zstd_sys::ZSTD_compress_usingCDict(
-                _ctx as *mut zstd_sys::ZSTD_CCtx,
-                dst,
-                dst_capacity,
-                src,
-                src_size,
-                dict as *const zstd_sys::ZSTD_CDict,
-            )
-        }
-        #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            // Recover dictionary bytes from opaque pointer
-            let dict_bytes: &[u8] = if !dict.is_null() {
-                let vref: &Vec<u8> = &*(dict as *const Vec<u8>);
-                vref.as_slice()
-            } else {
-                &[]
-            };
-            // Perform real compression using safe zstd + dictionary
-            let mut enc = match zstd::stream::Encoder::with_dictionary(Vec::new(), 3, dict_bytes) {
-                Ok(e) => e,
-                Err(_) => return usize::MAX,
-            };
-            use std::io::Write;
-            if enc.write_all(std::slice::from_raw_parts(src as *const u8, src_size)).is_err() {
-                return usize::MAX;
-            }
-            let z = match enc.finish() {
-                Ok(v) => v,
-                Err(_) => return usize::MAX,
-            };
-            if z.len() > dst_capacity {
-                return usize::MAX;
-            }
-            // SAFETY: z is a Vec<u8> produced by the encoder, so z.as_ptr() is valid
-            // for z.len() bytes. dst points to dst_capacity writable bytes (caller
-            // contract). z.len() <= dst_capacity is checked above. src (z) and dst do
-            // not overlap - z is a local heap Vec, dst is the caller-provided buffer.
-            unsafe {
-                std::ptr::copy_nonoverlapping(z.as_ptr(), dst as *mut u8, z.len());
-            }
-            z.len()
-        }
-    }
-    #[cfg_attr(not(feature = "compression_zstd_ffi"), allow(unused_variables))]
-    // SAFETY: `ctx` must be a live compression context from zstd_create_cctx. `dst`
-    // must point to `dst_capacity` writable bytes. `src` must point to `src_size`
-    // readable bytes. In FFI mode, ZSTD_compressCCtx handles bounds internally.
-    // In fallback mode: slice::from_raw_parts(src, src_size) requires src valid for
-    // src_size bytes; copy_nonoverlapping writes z.len() bytes to dst, bounded by the
-    // z.len() <= dst_capacity check. src (local Vec) and dst do not overlap.
-    unsafe fn zstd_compress_cctx(
-        ctx: *mut ZstdCctx,
-        dst: *mut std::ffi::c_void,
-        dst_capacity: usize,
-        src: *const std::ffi::c_void,
-        src_size: usize,
-        level: i32,
-    ) -> usize {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            zstd_sys::ZSTD_compressCCtx(
-                ctx as *mut zstd_sys::ZSTD_CCtx,
-                dst,
-                dst_capacity,
-                src,
-                src_size,
-                level,
-            )
-        }
-        #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            let _ = ctx;
-            // Real compression using safe zstd path with chosen level
-            let z = match zstd::stream::encode_all(
-                std::io::Cursor::new(std::slice::from_raw_parts(src as *const u8, src_size)),
-                level,
-            ) {
-                Ok(v) => v,
-                Err(_) => return usize::MAX,
-            };
-            if z.len() > dst_capacity {
-                return usize::MAX;
-            }
-            // SAFETY: z is a local heap Vec from encode_all, so z.as_ptr() is valid for
-            // z.len() bytes. dst points to dst_capacity writable bytes (caller contract).
-            // z.len() <= dst_capacity is checked above. No overlap - z is local, dst is
-            // the caller-provided output buffer.
-            unsafe {
-                std::ptr::copy_nonoverlapping(z.as_ptr(), dst as *mut u8, z.len());
-            }
-            z.len()
-        }
-    }
-    fn zstd_is_error(code: usize) -> u32 {
-        #[cfg(feature = "compression_zstd_ffi")]
-        {
-            // SAFETY: ZSTD_isError is a pure function that inspects the error code value.
-            // It does not dereference any pointers or mutate state. Safe to call with any
-            // usize value.
-            (unsafe { zstd_sys::ZSTD_isError(code) }) as u32
-        }
-        #[cfg(not(feature = "compression_zstd_ffi"))]
-        {
-            if code == usize::MAX {
-                1
-            } else {
-                0
-            }
+
+    fn default_strategy(len: usize) -> CompressionStrategy {
+        if len <= 8 * 1024 {
+            CompressionStrategy::DFast
+        } else if len <= 64 * 1024 {
+            CompressionStrategy::Fast
+        } else if len <= 512 * 1024 {
+            CompressionStrategy::Greedy
+        } else {
+            CompressionStrategy::Lazy2
         }
     }
 
@@ -1013,31 +848,29 @@ pub mod unsafe_compress {
 
     #[cfg(feature = "compression_zstd_ffi")]
     #[inline]
-    fn choose_strategy(len: usize) -> zstd_sys::ZSTD_strategy {
-        if let Some(s) = zstd_environment().first(["QUICFUSCATE_ZSTD_STRATEGY"]) {
-            match s.to_ascii_lowercase().as_str() {
-                "fast" => return zstd_sys::ZSTD_strategy::ZSTD_fast,
-                "dfast" => return zstd_sys::ZSTD_strategy::ZSTD_dfast,
-                "greedy" => return zstd_sys::ZSTD_strategy::ZSTD_greedy,
-                "lazy2" => return zstd_sys::ZSTD_strategy::ZSTD_lazy2,
-                "btopt" => return zstd_sys::ZSTD_strategy::ZSTD_btlazy2,
+    fn choose_strategy(len: usize) -> CompressionStrategy {
+        if let Some(strategy) = zstd_environment().first(["QUICFUSCATE_ZSTD_STRATEGY"]) {
+            match strategy.to_ascii_lowercase().as_str() {
+                "fast" => return CompressionStrategy::Fast,
+                "dfast" => return CompressionStrategy::DFast,
+                "greedy" => return CompressionStrategy::Greedy,
+                "lazy2" => return CompressionStrategy::Lazy2,
+                "btopt" => return CompressionStrategy::BtOpt,
                 _ => {
                     log::warn!(
                         "Invalid QUICFUSCATE_ZSTD_STRATEGY value '{}'; retaining the length-based default",
-                        s
+                        strategy
                     );
                 }
             }
         }
-        if len <= 8 * 1024 {
-            zstd_sys::ZSTD_strategy::ZSTD_dfast
-        } else if len <= 64 * 1024 {
-            zstd_sys::ZSTD_strategy::ZSTD_fast
-        } else if len <= 512 * 1024 {
-            zstd_sys::ZSTD_strategy::ZSTD_greedy
-        } else {
-            zstd_sys::ZSTD_strategy::ZSTD_lazy2
-        }
+        default_strategy(len)
+    }
+
+    #[cfg(not(feature = "compression_zstd_ffi"))]
+    #[inline]
+    fn choose_strategy(len: usize) -> CompressionStrategy {
+        default_strategy(len)
     }
 
     #[cfg(feature = "compression_zstd_ffi")]
@@ -1047,6 +880,18 @@ pub mod unsafe_compress {
         if w != 0 {
             return w;
         }
+        if len <= 64 * 1024 {
+            17
+        } else if len <= 256 * 1024 {
+            18
+        } else {
+            19
+        }
+    }
+
+    #[cfg(not(feature = "compression_zstd_ffi"))]
+    #[inline]
+    fn choose_window_log(len: usize) -> i32 {
         if len <= 64 * 1024 {
             17
         } else if len <= 256 * 1024 {
@@ -1074,230 +919,467 @@ pub mod unsafe_compress {
         zstd_binary_flag("QUICFUSCATE_ZSTD_CONTENTSIZE")
     }
 
-    #[cfg(feature = "compression_zstd_ffi")]
-    #[inline]
-    fn zstd_workers() -> i32 {
-        zstd_i32_min("QUICFUSCATE_ZSTD_WORKERS", 0, 2)
+    fn compression_plan(len: usize) -> CompressionPlan {
+        let (level, workers, target_block) = {
+            #[cfg(feature = "compression_zstd_ffi")]
+            {
+                let manual = manual_cfg();
+                if manual.enabled {
+                    (manual.level, manual.workers, manual.block)
+                } else {
+                    sweetspot_params_for(len)
+                }
+            }
+            #[cfg(not(feature = "compression_zstd_ffi"))]
+            {
+                let (level, _, target_block) = sweetspot_params_for(len);
+                (level, 0, target_block)
+            }
+        };
+
+        #[cfg(feature = "compression_zstd_ffi")]
+        let checksum = choose_checksum_flag() != 0;
+        #[cfg(not(feature = "compression_zstd_ffi"))]
+        let checksum = false;
+
+        #[cfg(feature = "compression_zstd_ffi")]
+        let content_size = choose_content_size_flag() != 0;
+        #[cfg(not(feature = "compression_zstd_ffi"))]
+        let content_size = false;
+
+        CompressionPlan {
+            level,
+            workers,
+            target_block,
+            strategy: choose_strategy(len),
+            window_log: choose_window_log(len),
+            checksum,
+            content_size,
+        }
+    }
+
+    fn validate_compression_level(level: i32) -> Result<(), UnsafeError> {
+        if (1..=22).contains(&level) {
+            Ok(())
+        } else {
+            Err(UnsafeError::InvalidCompressionLevel)
+        }
+    }
+
+    pub(super) fn validate_source_len(len: usize) -> Result<(), UnsafeError> {
+        if len <= u32::MAX as usize {
+            Ok(())
+        } else {
+            Err(UnsafeError::InputTooLarge)
+        }
+    }
+
+    pub(super) fn validate_compression_plan(plan: CompressionPlan) -> Result<(), UnsafeError> {
+        if !(1..=22).contains(&plan.level)
+            || plan.workers < 0
+            || plan.target_block < 1
+            || !(10..=31).contains(&plan.window_log)
+        {
+            return Err(UnsafeError::ParameterRejected);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "compression_zstd_ffi")]
-    #[inline]
-    fn zstd_target_block() -> i32 {
-        zstd_i32_min("QUICFUSCATE_ZSTD_TARGET_BLOCK", 1, 64 * 1024)
+    fn native_is_error(code: usize) -> bool {
+        // SAFETY: ZSTD_isError only inspects the returned size/error code and does not
+        // dereference a pointer.
+        unsafe { zstd_sys::ZSTD_isError(code) != 0 }
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    pub(super) fn native_set_parameter(
+        ctx: NonNull<zstd_sys::ZSTD_CCtx>,
+        parameter: zstd_sys::ZSTD_cParameter,
+        value: i32,
+    ) -> Result<(), UnsafeError> {
+        // SAFETY: ctx is a live NonNull context created by ZSTD_createCCtx and held by
+        // the owning ZstdContext. The parameter enum and integer value are passed directly
+        // to zstd, which validates bounds and returns a status code.
+        let result = unsafe { zstd_sys::ZSTD_CCtx_setParameter(ctx.as_ptr(), parameter, value) };
+        if native_is_error(result) {
+            Err(UnsafeError::ParameterRejected)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    fn native_compression_error(code: usize) -> UnsafeError {
+        // SAFETY: ZSTD_getErrorCode only inspects the returned size/error code.
+        let error = unsafe { zstd_sys::ZSTD_getErrorCode(code) };
+        if error == zstd_sys::ZSTD_ErrorCode::ZSTD_error_dstSize_tooSmall {
+            UnsafeError::CapacityOverflow
+        } else {
+            UnsafeError::CompressionFailed
+        }
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    fn configure_native(
+        ctx: NonNull<zstd_sys::ZSTD_CCtx>,
+        plan: CompressionPlan,
+    ) -> Result<(), UnsafeError> {
+        native_set_parameter(ctx, zstd_sys::ZSTD_cParameter::ZSTD_c_compressionLevel, plan.level)?;
+        native_set_parameter(ctx, zstd_sys::ZSTD_cParameter::ZSTD_c_nbWorkers, plan.workers)?;
+        native_set_parameter(
+            ctx,
+            zstd_sys::ZSTD_cParameter::ZSTD_c_targetCBlockSize,
+            plan.target_block,
+        )?;
+        native_set_parameter(
+            ctx,
+            zstd_sys::ZSTD_cParameter::ZSTD_c_strategy,
+            plan.strategy.native_value(),
+        )?;
+        native_set_parameter(ctx, zstd_sys::ZSTD_cParameter::ZSTD_c_windowLog, plan.window_log)?;
+        native_set_parameter(
+            ctx,
+            zstd_sys::ZSTD_cParameter::ZSTD_c_checksumFlag,
+            plan.checksum as i32,
+        )?;
+        native_set_parameter(
+            ctx,
+            zstd_sys::ZSTD_cParameter::ZSTD_c_contentSizeFlag,
+            plan.content_size as i32,
+        )
+    }
+
+    #[cfg(not(feature = "compression_zstd_ffi"))]
+    fn configure_fallback(
+        compressor: &mut zstd::bulk::Compressor<'static>,
+        plan: CompressionPlan,
+    ) -> Result<(), UnsafeError> {
+        let target_block =
+            u32::try_from(plan.target_block).map_err(|_| UnsafeError::ParameterRejected)?;
+        let window_log =
+            u32::try_from(plan.window_log).map_err(|_| UnsafeError::ParameterRejected)?;
+        let parameters = [
+            zstd::zstd_safe::CParameter::CompressionLevel(plan.level),
+            zstd::zstd_safe::CParameter::TargetCBlockSize(target_block),
+            zstd::zstd_safe::CParameter::Strategy(plan.strategy.fallback_value()),
+            zstd::zstd_safe::CParameter::WindowLog(window_log),
+            zstd::zstd_safe::CParameter::ChecksumFlag(plan.checksum),
+            zstd::zstd_safe::CParameter::ContentSizeFlag(plan.content_size),
+        ];
+        for parameter in parameters {
+            compressor.set_parameter(parameter).map_err(|_| UnsafeError::ParameterRejected)?;
+        }
+        Ok(())
+    }
+
+    enum ZstdContext {
+        #[cfg(feature = "compression_zstd_ffi")]
+        Native { ctx: NonNull<zstd_sys::ZSTD_CCtx>, dict: Option<NonNull<zstd_sys::ZSTD_CDict>> },
+        #[cfg(not(feature = "compression_zstd_ffi"))]
+        Fallback { compressor: zstd::bulk::Compressor<'static>, has_dictionary: bool },
+    }
+
+    impl ZstdContext {
+        fn new(dict_data: Option<&[u8]>, level: i32) -> Result<Self, UnsafeError> {
+            #[cfg(feature = "compression_zstd_ffi")]
+            {
+                // SAFETY: This is the documented zstd context constructor. The returned
+                // pointer is checked immediately and becomes owned by ZstdContext.
+                let ctx = NonNull::new(unsafe { zstd_sys::ZSTD_createCCtx() })
+                    .ok_or(UnsafeError::ContextCreationFailed)?;
+                if let Err(error) = native_set_parameter(
+                    ctx,
+                    zstd_sys::ZSTD_cParameter::ZSTD_c_compressionLevel,
+                    level,
+                ) {
+                    // SAFETY: ctx is the live allocation returned above and no owner has
+                    // been constructed yet.
+                    unsafe {
+                        let _ = zstd_sys::ZSTD_freeCCtx(ctx.as_ptr());
+                    }
+                    return Err(error);
+                }
+                let dict = match dict_data {
+                    Some(data) => {
+                        // SAFETY: data is borrowed from a valid slice and zstd copies the
+                        // dictionary into its owned CDict.
+                        let dict = match NonNull::new(unsafe {
+                            zstd_sys::ZSTD_createCDict(
+                                data.as_ptr() as *const std::ffi::c_void,
+                                data.len(),
+                                level,
+                            )
+                        }) {
+                            Some(dict) => dict,
+                            None => {
+                                // SAFETY: ctx remains owned locally because the
+                                // ZstdContext enum has not been returned yet.
+                                unsafe {
+                                    let _ = zstd_sys::ZSTD_freeCCtx(ctx.as_ptr());
+                                }
+                                return Err(UnsafeError::DictionaryCreationFailed);
+                            }
+                        };
+                        Some(dict)
+                    }
+                    None => None,
+                };
+                Ok(Self::Native { ctx, dict })
+            }
+            #[cfg(not(feature = "compression_zstd_ffi"))]
+            {
+                let has_dictionary = dict_data.is_some();
+                let compressor = match dict_data {
+                    Some(data) => zstd::bulk::Compressor::with_dictionary(level, data)
+                        .map_err(|_| UnsafeError::DictionaryCreationFailed)?,
+                    None => zstd::bulk::Compressor::new(level)
+                        .map_err(|_| UnsafeError::ContextCreationFailed)?,
+                };
+                Ok(Self::Fallback { compressor, has_dictionary })
+            }
+        }
+
+        fn has_dictionary(&self) -> bool {
+            match self {
+                #[cfg(feature = "compression_zstd_ffi")]
+                Self::Native { dict, .. } => dict.is_some(),
+                #[cfg(not(feature = "compression_zstd_ffi"))]
+                Self::Fallback { has_dictionary, .. } => *has_dictionary,
+            }
+        }
+
+        fn compress_into(
+            &mut self,
+            src: &[u8],
+            dst: &mut [u8],
+            plan: CompressionPlan,
+        ) -> Result<usize, UnsafeError> {
+            validate_compression_plan(plan)?;
+            #[cfg(feature = "compression_zstd_ffi")]
+            {
+                match self {
+                    Self::Native { ctx, dict } => {
+                        // SAFETY: ctx is live and exclusively borrowed through the mutex
+                        // guard. reset_session_only is required before the next frame.
+                        let reset = unsafe {
+                            zstd_sys::ZSTD_CCtx_reset(
+                                ctx.as_ptr(),
+                                zstd_sys::ZSTD_ResetDirective::ZSTD_reset_session_only,
+                            )
+                        };
+                        if native_is_error(reset) {
+                            return Err(UnsafeError::ContextUnavailable);
+                        }
+                        if let Some(dict) = dict {
+                            // SAFETY: dict is live for the whole compressor lifetime and
+                            // the context is locked for this complete compression call.
+                            let result = unsafe {
+                                zstd_sys::ZSTD_CCtx_refCDict(ctx.as_ptr(), dict.as_ptr())
+                            };
+                            if native_is_error(result) {
+                                return Err(UnsafeError::DictionaryRejected);
+                            }
+                        } else {
+                            configure_native(*ctx, plan)?;
+                        }
+                        // SAFETY: src and dst are valid slices. zstd writes no more than
+                        // dst.len() bytes and returns the written length or an error code.
+                        let result = unsafe {
+                            zstd_sys::ZSTD_compress2(
+                                ctx.as_ptr(),
+                                dst.as_mut_ptr() as *mut std::ffi::c_void,
+                                dst.len(),
+                                src.as_ptr() as *const std::ffi::c_void,
+                                src.len(),
+                            )
+                        };
+                        if native_is_error(result) {
+                            Err(native_compression_error(result))
+                        } else {
+                            Ok(result)
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "compression_zstd_ffi"))]
+            {
+                match self {
+                    Self::Fallback { compressor, has_dictionary } => {
+                        if !*has_dictionary {
+                            configure_fallback(compressor, plan)?;
+                        }
+                        compressor
+                            .compress_to_buffer(src, dst)
+                            .map_err(|_| UnsafeError::CompressionFailed)
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    impl Drop for ZstdContext {
+        fn drop(&mut self) {
+            let Self::Native { ctx, dict } = self;
+            // SAFETY: Both pointers are NonNull values created by the matching zstd
+            // constructors and are freed exactly once here. The dictionary is released
+            // before the context that may reference it.
+            unsafe {
+                if let Some(dict) = dict {
+                    let _ = zstd_sys::ZSTD_freeCDict(dict.as_ptr());
+                }
+                let _ = zstd_sys::ZSTD_freeCCtx(ctx.as_ptr());
+            }
+        }
+    }
+
+    fn return_output_block(pool: &UnsafeMemoryPool, ptr: NonNull<u8>) {
+        // SAFETY: ptr was returned by this pool's alloc_uninit call and has not been
+        // transferred to an UnsafePacket on the failure paths that call this helper.
+        if let Err(error) = unsafe { pool.free(ptr) } {
+            log::error!("UnsafeCompressor could not return output block: {:?}", error);
+        }
     }
 
     /// Direct compression context using zstd C API
     pub struct UnsafeCompressor {
-        ctx: *mut ZstdCctx,
-        dict: Option<*mut ZstdCdict>,
-        dict_meta: Option<(u16, u16)>, // (hash, version)
+        ctx: Mutex<ZstdContext>,
+        dict_meta: Option<(u16, u16)>,
         pool: Arc<UnsafeMemoryPool>,
     }
 
-    // SAFETY: UnsafeCompressor is Send because its raw pointers (ctx, dict) are owned
-    // exclusively - they are created in new() and freed in Drop. No other thread shares
-    // these pointers. The Arc<UnsafeMemoryPool> field is already Send+Sync.
+    // SAFETY: Moving the compressor transfers exclusive ownership of the zstd context.
+    // Native raw pointers are only reachable through the owning ZstdContext.
     unsafe impl Send for UnsafeCompressor {}
-    // SAFETY: UnsafeCompressor is Sync because compress_direct takes &self but the zstd
-    // context is only used within a single call (zstd compression contexts are
-    // thread-safe for non-concurrent calls). The pool field is Arc-wrapped and already
-    // Sync. dict is read-only after construction.
+    // SAFETY: Every context mutation and compression call holds ctx's MutexGuard. The
+    // dictionary is immutable after construction and the pool has its own synchronization.
     unsafe impl Sync for UnsafeCompressor {}
 
     impl UnsafeCompressor {
-        /// Creates a new compressor with optional dictionary
-        pub fn new(pool: Arc<UnsafeMemoryPool>, dict_data: Option<&[u8]>, level: i32) -> Self {
-            // SAFETY: All FFI calls here (zstd_create_cctx, zstd_cctx_set_parameter,
-            // zstd_create_cdict) follow their documented contracts: ctx is checked for
-            // null immediately after creation (abort on failure), parameters are set on
-            // a live context, and dict_data.as_ptr()/len() originate from a valid &[u8]
-            // slice. All returned pointers are stored in Self and freed in Drop.
-            unsafe {
-                let ctx = zstd_create_cctx();
-                if ctx.is_null() {
-                    std::process::abort();
-                }
-
-                // Set compression level
-                zstd_cctx_set_parameter(ctx, ZstdCParameter::CompressionLevel, level);
-
-                // Tune parameters for throughput/latency (only active in FFI path)
-                #[cfg(feature = "compression_zstd_ffi")]
-                {
-                    // nbWorkers: from env or default 2 (reasonable for networking workloads)
-                    let workers = zstd_workers();
-                    let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                        ctx as *mut zstd_sys::ZSTD_CCtx,
-                        zstd_sys::ZSTD_cParameter::ZSTD_c_nbWorkers,
-                        workers,
-                    );
-                    // Target block size (bytes) to reduce latency for network packets
-                    let target_block = zstd_target_block();
-                    let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                        ctx as *mut zstd_sys::ZSTD_CCtx,
-                        zstd_sys::ZSTD_cParameter::ZSTD_c_targetCBlockSize,
-                        target_block,
-                    );
-                }
-
-                // Create dictionary if provided
-                let dict = dict_data.map(|data| {
-                    let dict_ptr = zstd_create_cdict(data.as_ptr(), data.len(), level);
-                    if dict_ptr.is_null() {
-                        return std::ptr::null_mut();
-                    }
-                    dict_ptr
-                });
-                let dict = dict.and_then(|ptr| if ptr.is_null() { None } else { Some(ptr) });
-
-                let dict_meta = dict_data.map(compute_dict_hash_version);
-
-                Self { ctx, dict, dict_meta, pool }
-            }
+        /// Creates a new compressor with optional dictionary.
+        pub fn new(
+            pool: Arc<UnsafeMemoryPool>,
+            dict_data: Option<&[u8]>,
+            level: i32,
+        ) -> Result<Self, UnsafeError> {
+            validate_compression_level(level)?;
+            let context = ZstdContext::new(dict_data, level)?;
+            let dict_meta = dict_data.map(compute_dict_hash_version);
+            Ok(Self { ctx: Mutex::new(context), dict_meta, pool })
         }
 
-        /// Compress directly into pool buffer without intermediate allocation
+        /// Compress directly into a pool buffer without an intermediate output allocation.
         #[inline]
         /// # Safety
-        /// `src` must point to readable memory; this writes into a pool-owned buffer and returns
-        /// an `UnsafePacket` that must be dropped to free the buffer back to the pool.
+        /// The returned packet owns the pool block and must be dropped to return it to the pool.
         pub unsafe fn compress_direct(&self, src: &[u8]) -> Result<UnsafePacket, UnsafeError> {
             telemetry::UNSAFE_COMPRESS_CALLS.inc();
 
-            // Allocate output buffer from pool
-            let dst_ptr = self.pool.alloc_uninit();
-            let dst_capacity = self.pool.block_size;
+            if let Err(error) = validate_source_len(src.len()) {
+                telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                return Err(error);
+            }
 
-            // Decide header type/size
-            let (header_magic, header_size) =
-                if self.dict.is_some() { (0x5D_u8, 9_usize) } else { (0x5A_u8, 5_usize) };
-            if dst_capacity < header_size + 16 {
-                if let Err(error) = self.pool.free(dst_ptr) {
-                    log::error!(
-                        "UnsafeCompressor could not return undersized output block: {:?}",
-                        error
-                    );
+            let mut context = match self.ctx.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                    return Err(UnsafeError::ContextUnavailable);
                 }
+            };
+            let has_dictionary = context.has_dictionary();
+            let (header_magic, header_size) =
+                if has_dictionary { (0x5D_u8, 9_usize) } else { (0x5A_u8, 5_usize) };
+            let compression_bound = zstd::zstd_safe::compress_bound(src.len());
+            let required_capacity = match header_size.checked_add(compression_bound) {
+                Some(required) => required,
+                None => {
+                    telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                    return Err(UnsafeError::CapacityOverflow);
+                }
+            };
+            let dst_capacity = self.pool.block_size;
+            if dst_capacity < required_capacity {
+                telemetry::UNSAFE_COMPRESS_FAILURES.inc();
                 return Err(UnsafeError::CapacityOverflow);
             }
 
-            // Adaptive sweetspot tuning (per-call)
-            #[cfg(feature = "compression_zstd_ffi")]
-            {
-                let man = manual_cfg();
-                let (level, workers, block) = if man.enabled {
-                    (man.level, man.workers, man.block)
-                } else {
-                    sweetspot_params_for(src.len())
-                };
-                let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                    self.ctx as *mut zstd_sys::ZSTD_CCtx,
-                    zstd_sys::ZSTD_cParameter::ZSTD_c_compressionLevel,
-                    level,
+            let dst_ptr = self.pool.alloc_uninit();
+
+            let plan = compression_plan(src.len());
+            // SAFETY: dst_ptr is a live pool block and the checked capacity leaves a
+            // writable suffix after the private header. src is a valid borrowed slice.
+            let compressed_size = {
+                let dst = slice::from_raw_parts_mut(
+                    dst_ptr.as_ptr().add(header_size),
+                    dst_capacity - header_size,
                 );
-                let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                    self.ctx as *mut zstd_sys::ZSTD_CCtx,
-                    zstd_sys::ZSTD_cParameter::ZSTD_c_nbWorkers,
-                    workers,
-                );
-                let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                    self.ctx as *mut zstd_sys::ZSTD_CCtx,
-                    zstd_sys::ZSTD_cParameter::ZSTD_c_targetCBlockSize,
-                    block,
-                );
-                // Conservative extras: strategy, windowLog, checksum off, contentSize off
-                let strategy = choose_strategy(src.len()) as i32;
-                let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                    self.ctx as *mut zstd_sys::ZSTD_CCtx,
-                    zstd_sys::ZSTD_cParameter::ZSTD_c_strategy,
-                    strategy,
-                );
-                let window_log = choose_window_log(src.len());
-                let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                    self.ctx as *mut zstd_sys::ZSTD_CCtx,
-                    zstd_sys::ZSTD_cParameter::ZSTD_c_windowLog,
-                    window_log,
-                );
-                let checksum = choose_checksum_flag();
-                let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                    self.ctx as *mut zstd_sys::ZSTD_CCtx,
-                    zstd_sys::ZSTD_cParameter::ZSTD_c_checksumFlag,
-                    checksum,
-                );
-                let content_size = choose_content_size_flag();
-                let _ = zstd_sys::ZSTD_CCtx_setParameter(
-                    self.ctx as *mut zstd_sys::ZSTD_CCtx,
-                    zstd_sys::ZSTD_cParameter::ZSTD_c_contentSizeFlag,
-                    content_size,
-                );
+                context.compress_into(src, dst, plan)
+            };
+
+            let compressed_size = match compressed_size {
+                Ok(size) => size,
+                Err(error) => {
+                    return_output_block(&self.pool, dst_ptr);
+                    telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                    return Err(error);
+                }
+            };
+            if compressed_size > dst_capacity - header_size {
+                return_output_block(&self.pool, dst_ptr);
+                telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                return Err(UnsafeError::CapacityOverflow);
             }
 
-            // Write header
-            // SAFETY (header writes): dst_ptr is a NonNull from pool.alloc_uninit with
-            // dst_capacity bytes (= pool.block_size). The check `dst_capacity < header_size + 16`
-            // above guarantees at least header_size + 16 bytes available. Header writes:
-            // - offset 0: 1 byte (magic) - within bounds
-            // - offsets 1..5 or 1..9: at most 9 bytes total (header_size) - within bounds
-            // Source arrays (len_be, h, v) are stack-local [u8; 4] / [u8; 2], so they do not
-            // overlap with the pool-allocated dst_ptr. All copy_nonoverlapping lengths match
-            // the source array sizes exactly.
+            let total_size = match header_size.checked_add(compressed_size) {
+                Some(size) => size,
+                None => {
+                    return_output_block(&self.pool, dst_ptr);
+                    telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                    return Err(UnsafeError::CapacityOverflow);
+                }
+            };
+
+            // SAFETY: The header offsets are within the block because total_size is no
+            // larger than dst_capacity. The source arrays are independent stack values.
             *dst_ptr.as_ptr() = header_magic;
             let len_be = (src.len() as u32).to_be_bytes();
             if header_magic == 0x5A {
-                // 0x5A + 4B orig len
                 ptr::copy_nonoverlapping(len_be.as_ptr(), dst_ptr.as_ptr().add(1), 4);
             } else {
-                // 0x5D + 2B hash + 2B version + 4B orig len
-                let (hash, ver) = self.dict_meta.unwrap_or((0, 1));
-                let h = hash.to_be_bytes();
-                let v = ver.to_be_bytes();
-                ptr::copy_nonoverlapping(h.as_ptr(), dst_ptr.as_ptr().add(1), 2);
-                ptr::copy_nonoverlapping(v.as_ptr(), dst_ptr.as_ptr().add(3), 2);
+                let (hash, version) = match self.dict_meta {
+                    Some(meta) => meta,
+                    None => {
+                        return_output_block(&self.pool, dst_ptr);
+                        telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                        return Err(UnsafeError::DictionaryRejected);
+                    }
+                };
+                let hash_bytes = hash.to_be_bytes();
+                let version_bytes = version.to_be_bytes();
+                ptr::copy_nonoverlapping(hash_bytes.as_ptr(), dst_ptr.as_ptr().add(1), 2);
+                ptr::copy_nonoverlapping(version_bytes.as_ptr(), dst_ptr.as_ptr().add(3), 2);
                 ptr::copy_nonoverlapping(len_be.as_ptr(), dst_ptr.as_ptr().add(5), 4);
             }
 
-            // Compress data
-            // SAFETY: self.ctx is a live compression context (null-checked in new()).
-            // dst_ptr.add(header_size) is within the pool block (header_size < dst_capacity).
-            // dst_capacity - header_size is the remaining writable bytes. src.as_ptr()
-            // with src.len() is valid (from the &[u8] slice reference). dict_ptr, if Some,
-            // is a live dictionary pointer from new(). Error result is checked below.
-            let compressed_size = if let Some(dict_ptr) = self.dict {
-                zstd_compress_using_cdict(
-                    self.ctx,
-                    dst_ptr.as_ptr().add(header_size) as *mut _,
-                    dst_capacity - header_size,
-                    src.as_ptr() as *const _,
-                    src.len(),
-                    dict_ptr,
-                )
-            } else {
-                zstd_compress_cctx(
-                    self.ctx,
-                    dst_ptr.as_ptr().add(header_size) as *mut _,
-                    dst_capacity - header_size,
-                    src.as_ptr() as *const _,
-                    src.len(),
-                    sweetspot_params_for(src.len()).0, // level
-                )
-            };
-
-            if zstd_is_error(compressed_size) != 0 {
-                if let Err(error) = self.pool.free(dst_ptr) {
-                    log::error!(
-                        "UnsafeCompressor could not return failed output block: {:?}",
-                        error
-                    );
-                }
-                telemetry::UNSAFE_COMPRESS_FAILURES.inc();
-                return Err(UnsafeError::CompressionFailed);
-            }
-
-            let total_size = header_size + compressed_size;
+            drop(context);
             telemetry::UNSAFE_COMPRESS_BYTES_IN.inc_by(src.len() as u64);
             telemetry::UNSAFE_COMPRESS_BYTES_OUT.inc_by(total_size as u64);
 
-            UnsafePacket::from_raw_parts(dst_ptr, total_size, dst_capacity, Arc::clone(&self.pool))
+            match UnsafePacket::from_raw_parts(
+                dst_ptr,
+                total_size,
+                dst_capacity,
+                Arc::clone(&self.pool),
+            ) {
+                Ok(packet) => Ok(packet),
+                Err(error) => {
+                    return_output_block(&self.pool, dst_ptr);
+                    telemetry::UNSAFE_COMPRESS_FAILURES.inc();
+                    Err(error)
+                }
+            }
         }
     }
 
@@ -1308,22 +1390,6 @@ pub mod unsafe_compress {
             hash = hash.wrapping_mul(257).wrapping_add(*b as u16);
         }
         (hash, 1)
-    }
-
-    impl Drop for UnsafeCompressor {
-        fn drop(&mut self) {
-            // SAFETY: Drop has exclusive (&mut self) access. self.ctx was allocated by
-            // zstd_create_cctx in new() and has not been freed yet (Drop runs once).
-            // self.dict, if Some, was allocated by zstd_create_cdict in new() and has
-            // not been freed. Both free functions accept pointers from their respective
-            // create functions, satisfying their contracts.
-            unsafe {
-                if let Some(dict_ptr) = self.dict {
-                    zstd_free_cdict(dict_ptr);
-                }
-                zstd_free_cctx(self.ctx);
-            }
-        }
     }
 
     /// Fast entropy calculation using SIMD
@@ -1459,7 +1525,8 @@ mod tests {
     #[test]
     fn test_unsafe_compression() {
         let pool = Arc::new(UnsafeMemoryPool::new(10, 8192, 0));
-        let compressor = unsafe_compress::UnsafeCompressor::new(Arc::clone(&pool), None, 3);
+        let compressor = unsafe_compress::UnsafeCompressor::new(Arc::clone(&pool), None, 3)
+            .expect("valid compressor context");
 
         // SAFETY: compress_direct takes a valid &[u8] slice (stack-allocated byte string
         // literal). The pool has 8192-byte blocks, sufficient for header + compressed
@@ -1477,6 +1544,126 @@ mod tests {
             let original_len =
                 u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
             assert_eq!(original_len as usize, data.len());
+        }
+    }
+
+    #[test]
+    fn test_unsafe_compressor_rejects_invalid_level_and_source_length() {
+        let pool = Arc::new(UnsafeMemoryPool::new(2, 8192, 0));
+        let invalid = unsafe_compress::UnsafeCompressor::new(Arc::clone(&pool), None, 0);
+        assert!(matches!(invalid, Err(UnsafeError::InvalidCompressionLevel)));
+        assert_eq!(
+            unsafe_compress::validate_source_len(u32::MAX as usize + 1),
+            Err(UnsafeError::InputTooLarge)
+        );
+    }
+
+    #[test]
+    fn test_unsafe_compressor_dictionary_roundtrip_and_level_contract() {
+        let pool = Arc::new(UnsafeMemoryPool::new(4, 8192, 0));
+        let dictionary = b"shared dictionary phrase for the compression contract";
+        let data = b"shared dictionary phrase for the compression contract repeated twice";
+        let compressor =
+            unsafe_compress::UnsafeCompressor::new(Arc::clone(&pool), Some(dictionary), 7)
+                .expect("valid dictionary compressor context");
+
+        // SAFETY: data is a valid slice and the returned packet is dropped after inspection.
+        unsafe {
+            let packet = compressor.compress_direct(data).expect("dictionary compression");
+            let encoded = packet.as_slice();
+            assert_eq!(encoded[0], 0x5D);
+            let hash = u16::from_be_bytes([encoded[1], encoded[2]]);
+            let version = u16::from_be_bytes([encoded[3], encoded[4]]);
+            assert_eq!(version, 1);
+            assert_ne!(hash, 0);
+            let original_len = u32::from_be_bytes([encoded[5], encoded[6], encoded[7], encoded[8]]);
+            assert_eq!(original_len as usize, data.len());
+
+            let mut decompressor =
+                zstd::bulk::Decompressor::with_dictionary(dictionary).expect("dictionary decoder");
+            let decoded = decompressor
+                .decompress(&encoded[9..], data.len())
+                .expect("dictionary decompression");
+            assert_eq!(decoded, data);
+        }
+    }
+
+    #[test]
+    fn test_unsafe_compressor_serializes_concurrent_calls() {
+        let pool = Arc::new(UnsafeMemoryPool::new(4, 8192, 0));
+        let compressor = Arc::new(
+            unsafe_compress::UnsafeCompressor::new(Arc::clone(&pool), None, 3)
+                .expect("valid concurrent compressor context"),
+        );
+        let mut workers = Vec::new();
+
+        for worker_id in 0..8u8 {
+            let compressor = Arc::clone(&compressor);
+            workers.push(std::thread::spawn(move || {
+                let data = vec![worker_id; 256];
+                for _ in 0..16 {
+                    // SAFETY: data is a valid slice and the packet remains owned by this
+                    // worker until it is dropped at the end of the iteration.
+                    let packet = unsafe {
+                        compressor.compress_direct(&data).expect("serialized compression")
+                    };
+                    let encoded = packet.as_slice();
+                    assert_eq!(encoded[0], 0x5A);
+                    let original_len =
+                        u32::from_be_bytes([encoded[1], encoded[2], encoded[3], encoded[4]]);
+                    assert_eq!(original_len as usize, data.len());
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().expect("compression worker must complete");
+        }
+        assert_eq!(pool.in_use_count(), 0);
+    }
+
+    #[test]
+    fn test_unsafe_compressor_capacity_failure_returns_output_block() {
+        let pool = Arc::new(UnsafeMemoryPool::new(1, 64, 0));
+        let compressor = unsafe_compress::UnsafeCompressor::new(Arc::clone(&pool), None, 3)
+            .expect("valid small compressor context");
+        let result = unsafe { compressor.compress_direct(&[0xA5; 128]) };
+        assert!(matches!(result, Err(UnsafeError::CapacityOverflow)));
+        assert_eq!(pool.in_use_count(), 0);
+        assert_eq!(pool.available_count(), 1);
+    }
+
+    #[test]
+    fn test_unsafe_compressor_parameter_validation_is_fail_closed() {
+        let plan = unsafe_compress::CompressionPlan {
+            level: 3,
+            workers: 0,
+            target_block: 0,
+            strategy: unsafe_compress::CompressionStrategy::DFast,
+            window_log: 17,
+            checksum: false,
+            content_size: false,
+        };
+        assert_eq!(
+            unsafe_compress::validate_compression_plan(plan),
+            Err(UnsafeError::ParameterRejected)
+        );
+    }
+
+    #[cfg(feature = "compression_zstd_ffi")]
+    #[test]
+    fn test_native_zstd_parameter_failure_is_typed() {
+        let ctx =
+            NonNull::new(unsafe { zstd_sys::ZSTD_createCCtx() }).expect("native zstd context");
+        let result = unsafe_compress::native_set_parameter(
+            ctx,
+            zstd_sys::ZSTD_cParameter::ZSTD_c_windowLog,
+            1,
+        );
+        assert_eq!(result, Err(UnsafeError::ParameterRejected));
+        // SAFETY: ctx is the live pointer returned above and has not been freed elsewhere.
+        unsafe {
+            let _ = zstd_sys::ZSTD_freeCCtx(ctx.as_ptr());
         }
     }
 

@@ -535,7 +535,7 @@ cfg.log_keys();
 
 - Feature flag: `compression_zstd_ffi` (optional; default OFF). Build example:
   - `cargo build --features "unsafe_rust,compression_zstd_ffi"`
-- When enabled, the internal `unsafe_compress` backend in `src/optimize/unsafe.rs` uses native `zstd-sys` with per-call tuning for maximum throughput and low CPU.
+- When enabled, the internal `unsafe_compress` backend in `src/optimize/unsafe.rs` uses native `zstd-sys` with per-call tuning for maximum throughput and low CPU. The feature also enables zstd's `zstdmt` backend so configured worker counts are valid.
 - The default mode is a single "sweetspot" profile optimized for network payloads (good ratio at very low CPU). Heuristics (length -> (level, workers, target_block)):
   - `<= 8 KiB` -> `(2, 0, 16 KiB)`
   - `<= 64 KiB` -> `(3, 1, 64 KiB)`
@@ -552,24 +552,23 @@ cfg.log_keys();
   - `QUICFUSCATE_ZSTD_WINDOW_LOG=<int>` in `10..=31` (invalid values warn and use the length-based default)
   - `QUICFUSCATE_ZSTD_CHECKSUM=0|1` (invalid values warn and retain `0`)
   - `QUICFUSCATE_ZSTD_CONTENTSIZE=0|1` (invalid values warn and retain `0`)
-- Additional initialization hints (FFI path; applied at compressor creation):
-  - `ZSTD_c_nbWorkers` is also set from `QUICFUSCATE_ZSTD_WORKERS` if present.
-  - `ZSTD_c_targetCBlockSize` is set from `QUICFUSCATE_ZSTD_TARGET_BLOCK` if present.
-- Safe fallback behavior: If `compression_zstd_ffi` is OFF, the "unsafe" path uses the safe `zstd` crate under the same nominal headers/mode. Native/fallback ownership, parameter-error, dictionary-failure, initialization, and concurrent-context contracts are not yet proven equivalent and remain TODO-828.
+- Context ownership: the native context is a checked `NonNull<ZSTD_CCtx>` serialized by a `Mutex`; every parameter setter is checked, and compression uses `ZSTD_compress2()` so Advanced API parameters are effective. A native `CDict` is immutable and released before its context.
+- Safe fallback behavior: If `compression_zstd_ffi` is OFF, the path uses `zstd::bulk::Compressor` with the same level, dictionary level, header shapes, parameter validation, capacity preflight, and typed error policy. The fallback remains blocking because its package feature does not enable zstd multithreading.
+- Failure and length contract: context/dictionary creation, dictionary reference, parameter, context-lock, output-capacity, compression, and packet-construction failures are recoverable typed results. Inputs larger than `u32::MAX` are rejected before allocation or header narrowing.
 
 ##### Headers and Compatibility
 - Basic frame (no dictionary): `0x5A` + 4B big-endian original length, followed by zstd data.
 - Dictionary frame: `0x5D` + 2B dict hash + 2B dict version + 4B big-endian original length, followed by zstd data.
-- The internal unsafe compressor/decompressor backend reads and writes the same header shapes as `compress.rs` helpers; full feature-on/feature-off interchangeability remains TODO-828.
+- The internal unsafe compressor/decompressor backend reads and writes the same header shapes as `compress.rs` helpers. Feature-on and feature-off outputs use the same framing contract; compressed bytes remain backend-specific and require the matching dictionary for dictionary frames.
 
 ##### Dictionary Training and Lookup
 - Training: `compress.rs::maybe_train()` periodically builds dictionaries from submitted samples and persists them to `dict_cache/`.
 - Lookup: `get_dict_by_id(hash, version)` resolves bytes at runtime; the unsafe decompressor prefers the supplied dictionary but falls back to cache lookup by id.
 
-##### Streaming Compression API
+##### Compression API
 - Internal unsafe FFI backend:
-  - The internal compressor streams via `ZSTD_compressStream2` with `targetCBlockSize` to reduce end-to-end latency on large inputs.
-  - Direct and streaming selection follows the compiled backend contract; `QUICFUSCATE_ZSTD_STREAM_MIN` is not a current runtime key.
+  - The internal compressor encodes one complete frame with `ZSTD_compress2`; `targetCBlockSize` is applied through the Advanced API before encoding.
+  - No separate streaming selector is active; `QUICFUSCATE_ZSTD_STREAM_MIN` is not a current runtime key.
   - Header semantics are identical to direct: `0x5A` (no dict) or `0x5D` (with dict-ID: 2B hash, 2B version, then 4B length).
 - Safe path (`src/compress.rs`):
   - `CompressionManager::compress_to_pool()` writes zstd output directly into the caller-provided pool block after the `0x5A` header via `zstd::bulk::Compressor::compress_to_buffer`.
@@ -2071,7 +2070,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 | product | `server` | `rcgen`, `time`, `maxminddb` | Server role, certificate generation, and GeoIP support |
 | runtime | `io_uring` | `dep:io-uring` | Linux client/server async I/O path |
 | runtime | `aggressive_inline` | none | Explicit optimization build knob |
-| runtime | `compression_zstd_ffi` | `dep:zstd-sys` | Optional zstd FFI compression path |
+| runtime | `compression_zstd_ffi` | `dep:zstd-sys`, `zstd-sys/zstdmt` | Optional zstd FFI compression path with native worker support |
 | runtime | `orchestrator` | none | Brain/connection/stealth orchestration path |
 | runtime | `prefetch` | none | Cache and transport prefetch hints |
 | runtime | `rate_limiter` | none | Server admission and rate-limiting path |
@@ -4980,7 +4979,7 @@ This pass reconciled the remaining unsafe inventory and the next transport/FEC l
 
 - **Crypto corrections:** TODO-631's blanket round-key zeroization claim is stale because the AES-NI schedule exists only on x86_64 and is zeroized in its target-specific `Drop`; key and IV zeroization remains cross-target. TODO-642's zero-key fallback claim is stale because TLS cover entropy failure returns a typed crypto error before derivation. TODO-627 closes the constructor key/IV boundary; TODO-629 and TODO-632 retain the independent header-protection and nonce-lifecycle contracts, while TODO-633 now owns the local exact 32-byte KDF boundary and its remaining full-matrix/native proof.
 - **AMX:** TODO-816 removes the compile-time-absent production AMX branch from `src/fec/parts/decoders.rs`, restores scalar SpMV on every x86 build, and removes the uncalled raw kernels from `src/simd/amx.rs`. TODO-817 removes the external detector process and makes product eligibility fail closed until OS permission and a verified backend exist. The current production path no longer claims AMX operations or allocates AMX scratch. TODO-676 retains the broader planner/runtime and concurrent ownership audit; TODO-818 owns a future AMX proof lane, and TODO-819 owns profile/documentation truth.
-- **Unsafe memory and pooled-buffer boundaries:** TODO-826 replaces the former non-TLS `UnsafeCell` cache in `src/optimize/unsafe.rs` with a synchronized exact-base ownership registry, separates fallback allocations, checks packet invariants in release builds, and bounds prefetch pointer arithmetic. `UnsafeCompressor` still exposes a shared mutable zstd context through `Sync`. The active safe `MemoryPool` can accept same-sized foreign blocks, mishandle ephemeral returns, and fail to make TLS-aware shrink progress. Plain `AlignedBox` drops on compression, TUN, transport-frame, and FEC error paths bypass pool accounting, and feature-gated `DatagramBuffer` has no pool-return Drop path. The historical `copy_to_block` inventory is absent from the current source. TODO-678 is the umbrella index; TODO-827 through TODO-833 own the remaining split remediation boundaries, with TODO-516, TODO-646, TODO-682, TODO-683, TODO-687, TODO-689, TODO-730, TODO-734, and TODO-767 retaining their adjacent contracts.
+- **Unsafe memory and pooled-buffer boundaries:** TODO-826 replaces the former non-TLS `UnsafeCell` cache in `src/optimize/unsafe.rs` with a synchronized exact-base ownership registry, separates fallback allocations, checks packet invariants in release builds, and bounds prefetch pointer arithmetic. TODO-828 now uses a checked native/fallback zstd context behind a mutex, applies Advanced API parameters through `ZSTD_compress2()`, rejects invalid lengths before header narrowing, and returns every failed output block to its pool. TODO-827 owns the completed safe `MemoryPool` origin/capacity/TLS/ephemeral accounting contract. Plain `AlignedBox` drops on compression, TUN, transport-frame, and FEC error paths bypass pool accounting, and feature-gated `DatagramBuffer` has no pool-return Drop path. The historical `copy_to_block` inventory is absent from the current source. TODO-678 is the umbrella index; TODO-829 through TODO-833 own the remaining split remediation boundaries, with TODO-516, TODO-646, TODO-682, TODO-683, TODO-687, TODO-689, TODO-730, TODO-734, and TODO-767 retaining their adjacent contracts.
 - **SIMD:** The old AVX-512/GFNI Reed-Solomon delegation claim is stale for the active decoder. TODO-834's dispatch pass confirmed open SVE2 decode, ACK AVX512VL, SHA-VNNI, AES/VAES, GF16, AVX-512 compression/pattern/histogram, neural FMA, optimization string, stale BMI2 profile, and scalar-claim boundaries. TODO-835's completed boundary pass confirmed the critical `find_pattern_sse42_short` short-needle load, debug-only matrix and BMI2 output checks, unchecked Berlekamp-Massey length, and caller-only proofs for private key/XOR helpers; remaining vector tails were cross-checked. TODO-836's completed proof pass confirmed the blanket safety-doc suppression, only four function-level `# Safety` sections, silent ISA-test returns, stale unsafe-surface matching, and missing native-ISA proof lane. TODO-835 and TODO-836 retain their respective release-safe and proof remediations.
 - **Optimize and UDP:** TODO-680's completed Optimize audit confirmed the P1f-to-AVX2 reduction route, P4a-to-AVX512 moving-average route, test-only BMI2 bitmap dispatch/range contract, SSE2 short-pattern overwrite, overflow-prone pattern position arithmetic, SVE2 base64 output-lane undercoverage, unchecked QUIC packet-number lengths, VNNI truncation beyond 64 samples, percentile input gaps, and Linux batch receive-length, sockaddr initialization, and syscall-count proof gaps. TODO-682 completed the direct transport owner pass and split its open remediation into TODO-837-TODO-842. Valid vector tails and the bounded active connection caller were cross-checked; remediation remains open under TODO-680, TODO-837-TODO-842, TODO-834, TODO-689, and TODO-836.
 - **Interface and platform:** TODO-683 completed the full read-only source,

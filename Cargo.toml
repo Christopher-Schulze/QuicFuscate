@@ -106,7 +106,7 @@ server = ["rcgen", "time", "maxminddb"]
 # --- Runtime / transport features ---
 io_uring = ["dep:io-uring"]
 aggressive_inline = []
-compression_zstd_ffi = ["dep:zstd-sys"]
+compression_zstd_ffi = ["dep:zstd-sys", "zstd-sys/zstdmt"]
 orchestrator = []
 prefetch = []
 rate_limiter = []

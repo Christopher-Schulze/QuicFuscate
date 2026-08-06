@@ -26,7 +26,7 @@ FEATURE_CONTRACT: dict[str, tuple[str, tuple[str, ...]]] = {
     "server": ("product", ("rcgen", "time", "maxminddb")),
     "io_uring": ("runtime", ("dep:io-uring",)),
     "aggressive_inline": ("runtime", ()),
-    "compression_zstd_ffi": ("runtime", ("dep:zstd-sys",)),
+    "compression_zstd_ffi": ("runtime", ("dep:zstd-sys", "zstd-sys/zstdmt")),
     "orchestrator": ("runtime", ()),
     "prefetch": ("runtime", ()),
     "rate_limiter": ("runtime", ()),
