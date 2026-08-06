@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { addToast, ConfirmDialog, ripple } from "@quicfuscate/ui";
+  import { onDestroy } from "svelte";
+  import { addToast, ConfirmDialog, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import {
     getTunnels, getSelectedId, setSelectedId,
     getTunnelStates, updateTunnelStates, setTunnelStates,
@@ -33,6 +34,7 @@
   let pendingDisconnectId = $state<string | null>(null);
   let pendingSwitchTargetId = $state<string | null>(null);
   let switchingTunnelId = $state<string | null>(null);
+  const dialogActionDelay = createOwnedTimeout();
 
   const tunnels = $derived(getTunnels());
   const selectedId = $derived(getSelectedId());
@@ -172,7 +174,7 @@
     const qkey = target.qkey.trim();
     if (!qkey) {
       addToast("QKey missing on target tunnel. Set a QKey before switching.", "warning");
-      window.setTimeout(() => {
+      dialogActionDelay.schedule(() => {
         editQkeyTunnelId = target.id;
       }, 88);
       return;
@@ -216,7 +218,7 @@
     const qkey = selectedTunnel.qkey.trim();
     if (!qkey) {
       addToast("QKey missing. Set a QKey before connecting.", "warning");
-      window.setTimeout(() => {
+      dialogActionDelay.schedule(() => {
         editQkeyTunnelId = selectedTunnel.id;
       }, 88);
       return;
@@ -254,19 +256,19 @@
   const SIDEBAR_PILL = "background: rgba(255,255,255,0.65); backdrop-filter: blur(24px) saturate(200%); -webkit-backdrop-filter: blur(24px) saturate(200%); border: 1px solid rgba(255,255,255,0.60); box-shadow: inset 0 1px 0.5px rgba(255,255,255,0.55), 0 3px 10px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.03);";
 
   function openCreateDialog() {
-    window.setTimeout(() => {
+    dialogActionDelay.schedule(() => {
       createOpen = true;
     }, 88);
   }
 
   function openImportDialog() {
-    window.setTimeout(() => {
+    dialogActionDelay.schedule(() => {
       importOpen = true;
     }, 88);
   }
 
   function openEditQkeyDialog(id: string) {
-    window.setTimeout(() => {
+    dialogActionDelay.schedule(() => {
       editQkeyTunnelId = id;
     }, 88);
   }
@@ -286,6 +288,8 @@
       window.removeEventListener("qf:disconnect-active", handleDisconnect);
     };
   });
+
+  onDestroy(dialogActionDelay.destroy);
 </script>
 
 {#if createOpen}

@@ -72,6 +72,8 @@ function createRipple(
   container: HTMLElement,
   event: PointerEvent,
   opts: RippleOptions,
+  activeCircles: Set<HTMLSpanElement>,
+  safetyTimers: Set<ReturnType<typeof setTimeout>>,
 ): void {
   const rect = el.getBoundingClientRect();
   const x = event.clientX - rect.left;
@@ -95,15 +97,29 @@ function createRipple(
   circle.style.setProperty("--ripple-duration", `${duration}ms`);
 
   container.appendChild(circle);
+  activeCircles.add(circle);
 
-  circle.addEventListener("animationend", () => {
+  let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+  const removeCircle = (): void => {
+    if (safetyTimer !== null) {
+      clearTimeout(safetyTimer);
+      safetyTimers.delete(safetyTimer);
+      safetyTimer = null;
+    }
+    activeCircles.delete(circle);
     circle.remove();
-  }, { once: true });
+  };
+
+  circle.addEventListener("animationend", removeCircle, { once: true });
 
   // Safety fallback: remove after duration + 100ms buffer
-  setTimeout(() => {
-    if (circle.parentNode) circle.remove();
+  const timer = setTimeout(() => {
+    safetyTimers.delete(timer);
+    safetyTimer = null;
+    removeCircle();
   }, duration + 100);
+  safetyTimer = timer;
+  safetyTimers.add(timer);
 }
 
 export function ripple(
@@ -113,6 +129,8 @@ export function ripple(
   injectStyles();
 
   let opts: RippleOptions = options ?? {};
+  const activeCircles = new Set<HTMLSpanElement>();
+  const safetyTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // Ensure host element has position for the absolute container
   const pos = getComputedStyle(node).position;
@@ -128,7 +146,7 @@ export function ripple(
 
   function handlePointerDown(event: PointerEvent): void {
     if (opts.disabled) return;
-    createRipple(node, container, event, opts);
+    createRipple(node, container, event, opts, activeCircles, safetyTimers);
   }
 
   node.addEventListener("pointerdown", handlePointerDown);
@@ -139,6 +157,10 @@ export function ripple(
     },
     destroy() {
       node.removeEventListener("pointerdown", handlePointerDown);
+      for (const timer of safetyTimers) clearTimeout(timer);
+      safetyTimers.clear();
+      for (const circle of activeCircles) circle.remove();
+      activeCircles.clear();
       if (container.parentNode) container.remove();
     },
   };

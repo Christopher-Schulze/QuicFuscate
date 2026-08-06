@@ -1,14 +1,15 @@
 <script lang="ts">
   import { Dialog } from "bits-ui";
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { Shield, ShieldCheck, AlertTriangle, Eye, EyeOff, Check } from "@lucide/svelte";
-  import { cn, ripple, createCopyFeedback } from "@quicfuscate/ui";
+  import { cn, createCopyFeedback, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import { useAnchorSync } from "$lib/use-anchor-sync";
   import { formatTimestamp, formatTimestampIso } from "$lib/format";
   import { parseAdminLogEntries } from "$lib/timestamp-boundary";
+  import { isBrowserDocumentVisible } from "@quicfuscate/time";
   import { ApiError, isAuthError, getJson, postJson, sanitizeErrorMessage } from "$lib/api";
   import {
     setAuthRequired,
@@ -66,6 +67,8 @@
   let bottomEl: HTMLDivElement | undefined = $state();
   let lastLogErrorMsg = "";
   let actionsEl: HTMLDivElement | undefined = $state();
+  const errorResetTimer = createOwnedTimeout();
+  const dialogActionDelay = createOwnedTimeout();
 
   $effect(() => useAnchorSync(actionsEl));
 
@@ -78,8 +81,13 @@
     if (msg === lastLogErrorMsg) return;
     lastLogErrorMsg = msg;
     addToast(msg, "error");
-    setTimeout(() => { if (lastLogErrorMsg === msg) lastLogErrorMsg = ""; }, 10000);
+    errorResetTimer.schedule(() => { if (lastLogErrorMsg === msg) lastLogErrorMsg = ""; }, 10000);
   }
+
+  onDestroy(() => {
+    errorResetTimer.destroy();
+    dialogActionDelay.destroy();
+  });
 
   const entryCountLabel = $derived(logs.length === 1 ? "1 entry" : `${logs.length} entries`);
   const isDirty = $derived(mode !== savedMode);
@@ -275,13 +283,32 @@
   }
 
   $effect(() => {
+    const handleVisibilityChange = (): void => {
+      if (!isBrowserDocumentVisible()) {
+        modeRequests.invalidate();
+        logsRequests.invalidate();
+        statusRequests.invalidate();
+        return;
+      }
+      void fetchMode({ invalidate: true }).then((latestMode) => {
+        if (viewActive && isBrowserDocumentVisible()) {
+          void fetchLogsOnce(latestMode, false, { invalidate: true });
+        }
+      });
+      void fetchOnlineStatus({ invalidate: true });
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     untrack(() => {
       void fetchMode();
       void fetchOnlineStatus();
       void fetchLogsOnce();
     });
-    const logPoll = window.setInterval(() => { void fetchLogsOnce(); }, 1200);
-    const statusPoll = window.setInterval(() => { void fetchOnlineStatus(); }, 5000);
+    const logPoll = window.setInterval(() => {
+      if (isBrowserDocumentVisible()) void fetchLogsOnce();
+    }, 1200);
+    const statusPoll = window.setInterval(() => {
+      if (isBrowserDocumentVisible()) void fetchOnlineStatus();
+    }, 5000);
     return () => {
       viewActive = false;
       modeRequests.dispose();
@@ -289,6 +316,7 @@
       logsRequests.dispose();
       window.clearInterval(logPoll);
       window.clearInterval(statusPoll);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   });
 </script>
@@ -533,8 +561,8 @@
             <div class="text-[11px] text-black">Do you want to continue?</div>
           </div>
           <div class="dialog-footer-pad">
-            <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { window.setTimeout(() => { clearDialogOpen = false; }, 88); }}>Cancel</button>
-            <button use:ripple={{ color: "dark" }} class="action-neutral-btn flex-1" onclick={() => { window.setTimeout(() => { void confirmClearLogs(); }, 88); }}>Clear</button>
+            <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { dialogActionDelay.schedule(() => { clearDialogOpen = false; }, 88); }}>Cancel</button>
+            <button use:ripple={{ color: "dark" }} class="action-neutral-btn flex-1" onclick={() => { dialogActionDelay.schedule(() => { void confirmClearLogs(); }, 88); }}>Clear</button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

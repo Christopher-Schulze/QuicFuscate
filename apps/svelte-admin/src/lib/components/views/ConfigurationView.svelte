@@ -1,6 +1,7 @@
 <script lang="ts">
   import { cn, ripple } from "@quicfuscate/ui";
   import { addToast } from "@quicfuscate/ui";
+  import { isBrowserDocumentVisible } from "@quicfuscate/time";
   import { useAnchorSync } from "$lib/use-anchor-sync";
   import QKeyPanel from "$lib/components/panels/QKeyPanel.svelte";
   import StealthPanel from "$lib/components/panels/StealthPanel.svelte";
@@ -230,14 +231,26 @@
 
   // Init
   $effect(() => {
+    const handleVisibilityChange = (): void => {
+      if (!isBrowserDocumentVisible()) {
+        statusRequests.invalidate();
+        configRequests.invalidate();
+        return;
+      }
+      void fetchStatus({ invalidate: true });
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     void fetchStatus();
     void fetchConfig();
-    const interval = setInterval(() => { void fetchStatus(); }, 5000);
+    const interval = setInterval(() => {
+      if (isBrowserDocumentVisible()) void fetchStatus();
+    }, 5000);
     return () => {
       viewActive = false;
       statusRequests.dispose();
       configRequests.dispose();
       clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   });
 

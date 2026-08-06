@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { fly, scale } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { ShieldAlert, ShieldCheck, Lock, Activity } from "@lucide/svelte";
-  import { cn, ripple } from "@quicfuscate/ui";
+  import { cn, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import {
     evaluateByteRateSample,
@@ -51,6 +52,7 @@
   const clientsRequests = createRequestCoordinator();
   const metricsRequests = createRequestCoordinator();
   const blockedRequests = createRequestCoordinator();
+  const errorResetTimer = createOwnedTimeout();
 
   $effect(() => useAnchorSync(actionsEl));
 
@@ -65,8 +67,10 @@
     lastErrorMsg = msg;
     addToast(msg, "error");
     // Reset after 10s to allow the same error to show again if it reoccurs later
-    setTimeout(() => { if (lastErrorMsg === msg) lastErrorMsg = ""; }, 10000);
+    errorResetTimer.schedule(() => { if (lastErrorMsg === msg) lastErrorMsg = ""; }, 10000);
   }
+
+  onDestroy(errorResetTimer.destroy);
   let metricsHistory = $state<{ bytesIn: number[]; bytesOut: number[]; clients: number[] }>(
     { bytesIn: [], bytesOut: [], clients: [] },
   );
@@ -323,15 +327,32 @@
 
   // Polling
   $effect(() => {
-    const handleVisibilityChange = (): void => resetTrafficSample();
+    const handleVisibilityChange = (): void => {
+      resetTrafficSample();
+      if (!isBrowserDocumentVisible()) {
+        statusRequests.invalidate();
+        clientsRequests.invalidate();
+        metricsRequests.invalidate();
+        blockedRequests.invalidate();
+        return;
+      }
+      void fetchStatus({ invalidate: true });
+      void fetchClients({ invalidate: true });
+      void fetchMetrics({ invalidate: true });
+      void fetchBlocked({ invalidate: true });
+    };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     void fetchStatus();
     void fetchClients();
     void fetchMetrics();
     void fetchBlocked();
-    const statusTick = setInterval(() => { void fetchStatus(); }, 1200);
-    const fast = setInterval(() => { void fetchClients(); void fetchBlocked(); }, 5000);
-    const slow = setInterval(() => { void fetchMetrics(); }, 15000);
+    const statusTick = setInterval(() => { if (isBrowserDocumentVisible()) void fetchStatus(); }, 1200);
+    const fast = setInterval(() => {
+      if (!isBrowserDocumentVisible()) return;
+      void fetchClients();
+      void fetchBlocked();
+    }, 5000);
+    const slow = setInterval(() => { if (isBrowserDocumentVisible()) void fetchMetrics(); }, 15000);
     return () => {
       viewActive = false;
       statusRequests.dispose();

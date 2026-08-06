@@ -50,6 +50,9 @@
     },
     "./cn": {
       "default": "./cn.ts"
+    },
+    "./owned-scheduling": {
+      "default": "./owned-scheduling.ts"
     }
   },
   "scripts": {

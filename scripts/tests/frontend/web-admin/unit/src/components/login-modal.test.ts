@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "../../testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "../../testing-library";
 
 const getJsonMock = vi.hoisted(() => vi.fn());
 const postJsonMock = vi.hoisted(() => vi.fn());
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
 
 vi.mock("$lib/api", async () => {
   const actual = await vi.importActual<typeof import("$lib/api")>("$lib/api");
@@ -190,6 +196,49 @@ describe("LoginModal", () => {
     await vi.advanceTimersByTimeAsync(90);
 
     expect(screen.queryByText("Admin Login")).not.toBeInTheDocument();
+  });
+
+  test("cleans reject timeout and focus frame when unmounted", async () => {
+    const cancel = vi.spyOn(window, "cancelAnimationFrame");
+    render(LoginModal, {
+      props: { open: true, error: "Bad password", onClearError: clearErrorMock },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+
+    cleanup();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(cancel).toHaveBeenCalled();
+    cancel.mockRestore();
+  });
+
+  test("does not update auth state when login resolves after unmount", async () => {
+    setAuthRequired(true);
+    const pending = deferred({
+      success: true,
+      data: { user: "admin", requires_password_change: false },
+    });
+    postJsonMock.mockReturnValue(pending.promise);
+
+    render(LoginModal, {
+      props: { open: true, error: null, onClearError: clearErrorMock },
+    });
+    await vi.advanceTimersByTimeAsync(90);
+    await fireEvent.input(screen.getByLabelText("Password"), {
+      target: { value: "secret123" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Login" }));
+    await waitFor(() => expect(postJsonMock).toHaveBeenCalled());
+
+    cleanup();
+    pending.resolve({
+      success: true,
+      data: { user: "admin", requires_password_change: false },
+    });
+    await pending.promise;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getAuthRequired()).toBe(true);
   });
 
   test("calls onClearError when password field receives input", async () => {

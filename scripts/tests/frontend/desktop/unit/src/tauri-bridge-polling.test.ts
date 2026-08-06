@@ -148,6 +148,27 @@ describe("desktop engine poller ownership", () => {
     stop();
   });
 
+  test("does not start hidden pollers and polls all resources after becoming visible", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "engine_status") return Promise.resolve({ state: "Connected", activeTunnelId: "t1" });
+      if (command === "engine_stats") return Promise.resolve({ bytesIn: 100, bytesOut: 200 });
+      if (command === "engine_logs_since") return Promise.resolve({ cursor: 0, lines: [] });
+      return Promise.resolve(null);
+    });
+
+    setVisibility("hidden");
+    const stop = startEnginePollers();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invokeMock).toHaveBeenCalledWith("engine_status", {}, undefined);
+    expect(invokeMock).toHaveBeenCalledWith("engine_stats", {}, undefined);
+    expect(invokeMock).toHaveBeenCalledWith("engine_logs_since", { cursor: 0 }, undefined);
+    stop();
+  });
+
   test("uses monotonic throughput samples and rebases across visibility gaps", async () => {
     let bytesIn = 100;
     let bytesOut = 200;

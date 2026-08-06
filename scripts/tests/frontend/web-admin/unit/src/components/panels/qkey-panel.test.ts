@@ -115,4 +115,16 @@ describe("qkey panel", () => {
     expect(within(issuedDialog).getByRole("button", { name: /Copy QKey/ })).toBeInTheDocument();
     expect(screen.getByText("reg-999")).toBeInTheDocument();
   });
+
+  test("does not open the create dialog after the panel unmounts", async () => {
+    getJsonMock.mockResolvedValue({ success: true, data: { keys: [] } });
+    render(QKeyPanel);
+
+    await screen.findByText("No Keys created");
+    await fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+    cleanup();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
 });

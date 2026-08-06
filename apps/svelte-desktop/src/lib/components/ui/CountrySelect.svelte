@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Popover } from "bits-ui";
-  import { cn } from "@quicfuscate/ui";
+  import { cn, createOwnedTimeout } from "@quicfuscate/ui";
   import { countryCodeToFlag } from "$lib/format";
   import { COUNTRY_OPTIONS } from "$data/countries";
 
@@ -16,22 +17,27 @@
   let isOpen = $state(false);
   let highlightedIndex = $state(-1);
   let typeaheadBuffer = $state("");
-  let typeaheadTimer: ReturnType<typeof setTimeout> | null = null;
   let listRef: HTMLDivElement | undefined = $state(undefined);
+  const focusDelay = createOwnedTimeout();
+  const typeaheadDelay = createOwnedTimeout();
 
   const allOptions = $derived([{ code: NO_FLAG_KEY, name: "No Flag" }, ...COUNTRY_OPTIONS]);
   const displayValue = $derived(value ? countryCodeToFlag(value.toUpperCase()) : "-");
 
   $effect(() => {
-    if (isOpen) {
-      const idx = value
-        ? allOptions.findIndex((o) => o.code.toUpperCase() === value.toUpperCase())
-        : 0;
-      highlightedIndex = idx >= 0 ? idx : 0;
-      typeaheadBuffer = "";
-      // Auto-focus listbox after render
-      setTimeout(() => { listRef?.focus(); }, 10);
+    if (!isOpen) {
+      focusDelay.cancel();
+      typeaheadDelay.cancel();
+      return;
     }
+    const idx = value
+      ? allOptions.findIndex((o) => o.code.toUpperCase() === value.toUpperCase())
+      : 0;
+    highlightedIndex = idx >= 0 ? idx : 0;
+    typeaheadBuffer = "";
+    // Auto-focus listbox after render
+    focusDelay.schedule(() => { listRef?.focus(); }, 10);
+    return () => focusDelay.cancel();
   });
 
   // Scroll highlighted item into view
@@ -55,6 +61,7 @@
   }
 
   function handleSelect(opt: { code: string }) {
+    typeaheadDelay.cancel();
     onchange(opt.code === NO_FLAG_KEY ? "" : opt.code.toUpperCase());
     isOpen = false;
   }
@@ -68,7 +75,7 @@
       if (highlightedIndex >= 0 && highlightedIndex < allOptions.length) handleSelect(allOptions[highlightedIndex]);
       return;
     }
-    if (e.key === "Escape") { e.preventDefault(); isOpen = false; return; }
+    if (e.key === "Escape") { e.preventDefault(); typeaheadDelay.cancel(); isOpen = false; return; }
     if (e.key === "Backspace") {
       e.preventDefault();
       typeaheadBuffer = typeaheadBuffer.slice(0, -1);
@@ -81,13 +88,17 @@
     // Typeahead: letters only
     if (e.key.length === 1 && /[a-zA-Z]/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
-      if (typeaheadTimer) clearTimeout(typeaheadTimer);
       typeaheadBuffer += e.key.toLowerCase();
-      typeaheadTimer = setTimeout(() => { typeaheadBuffer = ""; typeaheadTimer = null; }, 1400);
+      typeaheadDelay.schedule(() => { typeaheadBuffer = ""; }, 1400);
       const matchIdx = findMatchIndex(typeaheadBuffer);
       if (matchIdx >= 0) highlightedIndex = matchIdx;
     }
   }
+
+  onDestroy(() => {
+    focusDelay.destroy();
+    typeaheadDelay.destroy();
+  });
 </script>
 
 <svelte:window onkeydown={isOpen ? handleKeydown : undefined} />

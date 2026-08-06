@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
+  import { createOwnedTimeout } from "./owned-scheduling";
   import { ripple } from "./ripple";
 
   interface Props {
@@ -27,6 +29,13 @@
   }: Props = $props();
 
   const pos = $derived(portalTarget ? "absolute" : "fixed");
+  const actionDelay = createOwnedTimeout();
+
+  $effect(() => {
+    if (!open) actionDelay.cancel();
+  });
+
+  onDestroy(actionDelay.destroy);
 </script>
 
 <Dialog.Root bind:open>
@@ -47,13 +56,13 @@
         <p class="text-[12px] text-black leading-relaxed">{message}</p>
       </div>
       <div class="dialog-footer-pad">
-        <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { window.setTimeout(oncancel, 88); }}>
+        <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { actionDelay.schedule(oncancel, 88); }}>
           {cancelLabel}
         </button>
         <button
           use:ripple={{ color: "light" }}
           class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all {destructive ? 'action-disconnect-btn' : 'action-save-btn'} flex-1"
-          onclick={() => { window.setTimeout(onconfirm, 88); }}
+          onclick={() => { actionDelay.schedule(onconfirm, 88); }}
         >
           {confirmLabel}
         </button>

@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
-  import { ripple } from "@quicfuscate/ui";
-  import { cn } from "@quicfuscate/ui";
+  import { cn, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { PASTE_CLICK_SUPPRESSION_MILLISECONDS } from "@quicfuscate/time";
   import { readClipboardTextDirect } from "$lib/clipboard";
   import { extractQKey, normalizeUtf8 } from "$lib/qkey-utils";
@@ -23,6 +22,8 @@
   let parseError = $state<string | null>(null);
   let suppressPasteClick = $state(false);
   let pasteClickSuppressionTimer: ReturnType<typeof setTimeout> | null = null;
+  const dialogActionDelay = createOwnedTimeout();
+  let viewActive = true;
 
   const MAX_QKEY = 16384;
   const runtimeReady = $derived(isTauri());
@@ -52,11 +53,13 @@
   }
 
   async function handleImport() {
+    if (!viewActive) return;
     const raw = qkeyText.trim();
     if (!raw || !runtimeReady || !extracted) return;
     if (raw.length > MAX_QKEY) { parseError = `Input too long [max ${MAX_QKEY} chars].`; return; }
     try {
       const parsed = await qkeyParse(extracted);
+      if (!viewActive) return;
       const normalizedRemote = normalizeRemoteForStorage(String(parsed.remote ?? "").trim());
       if (!normalizedRemote) { parseError = "QKey contains invalid remote endpoint"; return; }
       const normalizedSni = String(parsed.sni ?? "").trim();
@@ -68,17 +71,21 @@
       updateTunnels((prev) => [...prev, config]);
       setSelectedId(config.id);
       reset(); open = false; onclose();
-    } catch (e: unknown) { parseError = String(e ?? "Invalid QKey or missing token"); }
+    } catch (e: unknown) {
+      if (viewActive) parseError = String(e ?? "Invalid QKey or missing token");
+    }
   }
 
   async function handlePaste() {
+    if (!viewActive) return;
     const pasted = await readClipboardTextDirect();
-    if (!pasted) return;
+    if (!viewActive || !pasted) return;
     qkeyText = normalizeUtf8(pasted).slice(0, MAX_QKEY);
     parseError = null;
   }
 
   function handlePastePointerDown() {
+    if (!viewActive) return;
     if (pasteClickSuppressionTimer !== null) clearTimeout(pasteClickSuppressionTimer);
     suppressPasteClick = true;
     pasteClickSuppressionTimer = setTimeout(() => {
@@ -89,11 +96,16 @@
   }
 
   function handlePasteClick() {
+    if (!viewActive) return;
     if (suppressPasteClick) return;
     void handlePaste();
   }
 
-  onDestroy(clearPasteClickSuppression);
+  onDestroy(() => {
+    viewActive = false;
+    clearPasteClickSuppression();
+    dialogActionDelay.destroy();
+  });
 </script>
 
 <Dialog.Root bind:open onOpenChange={(v) => { if (!v) { reset(); onclose(); } }}>
@@ -137,9 +149,9 @@
         </div>
       </div>
       <div class="dialog-footer-pad">
-        <button type="button" use:ripple onclick={() => setTimeout(() => { reset(); open = false; onclose(); }, 88)}
+        <button type="button" use:ripple onclick={() => dialogActionDelay.schedule(() => { reset(); open = false; onclose(); }, 88)}
           class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn h-auto min-w-0">Cancel</button>
-        <button type="button" use:ripple onclick={() => setTimeout(() => { void handleImport(); }, 88)} disabled={!canImport}
+        <button type="button" use:ripple onclick={() => dialogActionDelay.schedule(() => { void handleImport(); }, 88)} disabled={!canImport}
           class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-save-btn disabled:opacity-55 disabled:cursor-not-allowed h-auto min-w-0">Import</button>
       </div>
     </Dialog.Content>

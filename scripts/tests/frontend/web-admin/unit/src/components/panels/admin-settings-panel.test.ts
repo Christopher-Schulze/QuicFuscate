@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "../../../testing-library";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../testing-library";
 
 const getJsonMock = vi.hoisted(() => vi.fn());
 const postJsonMock = vi.hoisted(() => vi.fn());
@@ -63,6 +63,17 @@ describe("admin settings panel", () => {
     expect(within(dialog).getByLabelText("Confirm Password")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Save" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
+
+  test("does not open the password dialog after the panel unmounts", async () => {
+    render(AdminSettingsPanel);
+
+    await screen.findByRole("button", { name: "Change Password" });
+    await fireEvent.click(screen.getByRole("button", { name: "Change Password" }));
+    cleanup();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   test("enforces the minimum password length policy", async () => {

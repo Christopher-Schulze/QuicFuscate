@@ -70,6 +70,11 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+function setVisibility(state: "hidden" | "visible"): void {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
 function configWithMtu(mtu: number): string {
   return BASE_CONFIG.replace("mtu = 1400", `mtu = ${mtu}`);
 }
@@ -113,6 +118,21 @@ describe("ConfigurationView", () => {
       expect(getJsonMock).toHaveBeenCalledWith("/api/config");
       expect(getJsonMock).toHaveBeenCalledWith("/api/status");
     });
+  });
+
+  test("pauses the status poller while hidden and refreshes status when visible again", async () => {
+    render(ConfigurationView);
+    await vi.advanceTimersByTimeAsync(200);
+    getJsonMock.mockClear();
+
+    setVisibility("hidden");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(getJsonMock).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
+    expect(getJsonMock).not.toHaveBeenCalledWith("/api/config");
   });
 
   test("Save button is disabled initially (clean state)", async () => {

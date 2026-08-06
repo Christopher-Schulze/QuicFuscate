@@ -3,6 +3,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "../../../testing-li
 
 const readClipboardTextDirectMock = vi.hoisted(() => vi.fn<() => Promise<string>>());
 const qkeyParseMock = vi.hoisted(() => vi.fn());
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
 let runtimeAvailable = false;
 
 vi.mock("$lib/clipboard", () => ({
@@ -85,6 +91,22 @@ describe("desktop tunnel creation and import dialogs", () => {
     expect(getSelectedId()).toBe(getTunnels()[0]?.id ?? null);
   });
 
+  test("does not create a tunnel after the delayed action owner unmounts", async () => {
+    render(AddTunnelDialog, { open: true, onclose: vi.fn() });
+
+    await fireEvent.input(screen.getByLabelText("Name of the Connection"), {
+      target: { value: "Unmounted" },
+    });
+    await fireEvent.input(screen.getByLabelText("Remote [IP-Address:Port]"), {
+      target: { value: "203.0.113.12:4433" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Create Tunnel" }));
+    cleanup();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(getTunnels()).toHaveLength(0);
+  });
+
   test("rejects unbracketed ipv6 remotes and url-like remotes", async () => {
     render(AddTunnelDialog, { open: true, onclose: vi.fn() });
 
@@ -154,6 +176,35 @@ describe("desktop tunnel creation and import dialogs", () => {
       hasToken: true,
       qkey: "QKey-ABC_def-123==",
     });
+  });
+
+  test("does not import when qkey_parse resolves after unmount", async () => {
+    runtimeAvailable = true;
+    const pending = deferred({
+      remote: "vpn.example.com:4433",
+      sni: "cdn.example.com",
+      hasToken: true,
+    });
+    qkeyParseMock.mockReturnValue(pending.promise);
+
+    render(ImportQKeyDialog, { open: true, onclose: vi.fn() });
+    await fireEvent.input(screen.getByLabelText("QKey String"), {
+      target: { value: "prefix qkey-ABC_def-123== suffix" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await vi.advanceTimersByTimeAsync(90);
+    await waitFor(() => expect(qkeyParseMock).toHaveBeenCalled());
+
+    cleanup();
+    pending.resolve({
+      remote: "vpn.example.com:4433",
+      sni: "cdn.example.com",
+      hasToken: true,
+    });
+    await pending.promise;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getTunnels()).toHaveLength(0);
   });
 
 });

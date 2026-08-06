@@ -40,6 +40,7 @@ export function createCopyFeedback<K = string>(
   let copied = $state(false);
   let copiedKey = $state<K | null>(null);
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let destroyed = false;
 
   function clearTimer() {
     if (timeoutId !== null) {
@@ -49,8 +50,10 @@ export function createCopyFeedback<K = string>(
   }
 
   function scheduleReset(key: K | null) {
+    if (destroyed) return;
     clearTimer();
     timeoutId = setTimeout(() => {
+      if (destroyed) return;
       if (key !== null) {
         if (copiedKey === key) copiedKey = null;
       }
@@ -60,24 +63,30 @@ export function createCopyFeedback<K = string>(
   }
 
   async function trigger(text: string): Promise<void> {
+    if (destroyed) return;
     try {
       await navigator.clipboard.writeText(text);
+      if (destroyed) return;
       copied = true;
       copiedKey = null;
       scheduleReset(null);
     } catch {
+      if (destroyed) return;
       copied = false;
       copiedKey = null;
     }
   }
 
   async function triggerKeyed(text: string, key: K): Promise<void> {
+    if (destroyed) return;
     try {
       await navigator.clipboard.writeText(text);
+      if (destroyed) return;
       copied = true;
       copiedKey = key;
       scheduleReset(key);
     } catch {
+      if (destroyed) return;
       copied = false;
       copiedKey = null;
     }
@@ -94,6 +103,7 @@ export function createCopyFeedback<K = string>(
   }
 
   function destroy() {
+    destroyed = true;
     clearTimer();
   }
 

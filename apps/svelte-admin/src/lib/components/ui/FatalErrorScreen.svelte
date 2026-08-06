@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { ripple } from "@quicfuscate/ui";
 
   interface Props {
@@ -13,12 +14,21 @@
 
   let copied = $state(false);
   let copyTimer: number | null = null;
+  let viewActive = true;
+
+  function clearCopyTimer(): void {
+    if (copyTimer === null) return;
+    window.clearTimeout(copyTimer);
+    copyTimer = null;
+  }
 
   async function copyDetails() {
+    if (!viewActive) return;
     try {
       await navigator.clipboard.writeText(details);
+      if (!viewActive) return;
       copied = true;
-      if (copyTimer) window.clearTimeout(copyTimer);
+      clearCopyTimer();
       copyTimer = window.setTimeout(() => {
         copied = false;
         copyTimer = null;
@@ -29,7 +39,12 @@
   }
 
   $effect(() => {
-    return () => { if (copyTimer) window.clearTimeout(copyTimer); };
+    return clearCopyTimer;
+  });
+
+  onDestroy(() => {
+    viewActive = false;
+    clearCopyTimer();
   });
 </script>
 

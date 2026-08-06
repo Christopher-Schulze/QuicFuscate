@@ -104,6 +104,19 @@ describe("ripple action", () => {
     btn.remove();
   });
 
+  test("destroy clears pending safety cleanup and active circles", () => {
+    const btn = createButton();
+    const handle = ripple(btn, { duration: 300 });
+    firePointerDown(btn);
+    expect(btn.querySelectorAll(".__ripple-circle").length).toBe(1);
+
+    handle.destroy();
+    vi.advanceTimersByTime(1000);
+
+    expect(btn.querySelectorAll(".__ripple-circle").length).toBe(0);
+    btn.remove();
+  });
+
   test("update changes options (e.g. enables disabled)", () => {
     const btn = createButton();
     const handle = ripple(btn, { disabled: true });

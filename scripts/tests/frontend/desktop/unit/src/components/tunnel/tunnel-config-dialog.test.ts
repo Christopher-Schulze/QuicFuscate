@@ -242,6 +242,25 @@ describe("tunnel/TunnelConfigDialog", () => {
     expect(updated!.remote).toBe("192.168.1.1:5000");
   });
 
+  test("does not save after the delayed action owner unmounts", async () => {
+    const tunnel = makeTunnel({ name: "Original" });
+    setTunnels([tunnel]);
+    render(TunnelConfigDialog, { open: true, tunnel, onclose: closeFn });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Name of the Connection")).toBeInTheDocument();
+    });
+    await fireEvent.input(screen.getByLabelText("Name of the Connection"), {
+      target: { value: "Unmounted" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    cleanup();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(getTunnels()[0]?.name).toBe("Original");
+    expect(closeFn).not.toHaveBeenCalled();
+  });
+
   test("delete removes tunnel from store via confirm dialog", async () => {
     const tunnel = makeTunnel({ name: "ToDelete" });
     setTunnels([tunnel]);

@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
-  import { ripple } from "@quicfuscate/ui";
+  import { createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import CountrySelect from "$lib/components/ui/CountrySelect.svelte";
   import { cn } from "@quicfuscate/ui";
   import { parseRemote, isValidSniHost } from "$lib/tunnel-validators";
@@ -20,6 +21,7 @@
   let countryCode = $state("");
   let parseError = $state<string | null>(null);
   let nameInput: HTMLInputElement | null = $state(null);
+  const dialogActionDelay = createOwnedTimeout();
 
   const MAX_NAME = 96;
   const MAX_REMOTE = 320;
@@ -72,6 +74,8 @@
     open = false;
     onclose();
   }
+
+  onDestroy(dialogActionDelay.destroy);
 </script>
 
 <Dialog.Root bind:open onOpenChange={(v) => { if (!v) { reset(); onclose(); } }}>
@@ -144,9 +148,9 @@
         </div>
       </div>
       <div class="dialog-footer-pad">
-        <button type="button" use:ripple onclick={() => setTimeout(() => { reset(); open = false; onclose(); }, 88)}
+        <button type="button" use:ripple onclick={() => dialogActionDelay.schedule(() => { reset(); open = false; onclose(); }, 88)}
           class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn h-auto min-w-0">Cancel</button>
-        <button type="button" use:ripple onclick={() => setTimeout(() => handleCreate(), 88)} disabled={!canCreate}
+        <button type="button" use:ripple onclick={() => dialogActionDelay.schedule(handleCreate, 88)} disabled={!canCreate}
           class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-save-btn disabled:opacity-55 disabled:cursor-not-allowed h-auto min-w-0">Create Tunnel</button>
       </div>
     </Dialog.Content>

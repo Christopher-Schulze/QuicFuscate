@@ -85,6 +85,7 @@ describe("removeToast", () => {
     addToast("To remove", "info");
     const id = getToasts()[0].id;
     removeToast(id);
+    vi.advanceTimersByTime(10_000);
     expect(getToasts()).toHaveLength(0);
   });
 

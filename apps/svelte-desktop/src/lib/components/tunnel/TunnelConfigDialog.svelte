@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
-  import { ripple } from "@quicfuscate/ui";
+  import { createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { Lock } from "@lucide/svelte";
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import CountrySelect from "$lib/components/ui/CountrySelect.svelte";
@@ -26,6 +27,7 @@
   let parseError = $state<string | null>(null);
   let dirty = $state(false);
   let confirmDeleteOpen = $state(false);
+  const dialogActionDelay = createOwnedTimeout();
 
   const MAX_NAME = 96;
   const MAX_REMOTE = 320;
@@ -72,6 +74,8 @@
     confirmDeleteOpen = false; open = false; onclose();
   }
 
+  onDestroy(dialogActionDelay.destroy);
+
   const INPUT_CLASS = "h-8 w-full px-3 rounded-md glass-nav-pill glass-select-edge text-[11px] text-black placeholder:text-black/40 outline-none focus:outline-none focus:border-edge-accent transition-colors";
 </script>
 
@@ -101,7 +105,7 @@
           </div>
           <div class="text-[10px] text-black">{tunnel.name} &middot; {tunnel.remote}</div>
         </div>
-        <button type="button" use:ripple onclick={() => setTimeout(() => handleSave(), 88)} disabled={!canSave}
+        <button type="button" use:ripple onclick={() => dialogActionDelay.schedule(handleSave, 88)} disabled={!canSave}
           class="inline-flex items-center rounded-lg px-3 border text-[11px] font-semibold transition-all action-save-btn disabled:opacity-55 disabled:cursor-not-allowed h-auto min-w-0">Save</button>
       </div>
       <div class="dialog-body-pad overflow-y-auto">
@@ -151,9 +155,9 @@
       </div>
       <div class="dialog-footer-pad">
         <div class="w-full flex items-center justify-end gap-2">
-          <button type="button" use:ripple onclick={() => setTimeout(() => { open = false; onclose(); }, 88)}
+          <button type="button" use:ripple onclick={() => dialogActionDelay.schedule(() => { open = false; onclose(); }, 88)}
             class="inline-flex items-center rounded-lg px-3 border text-[11px] font-semibold transition-all action-refresh-btn h-auto min-w-0">Cancel</button>
-          <button type="button" use:ripple onclick={() => setTimeout(() => { confirmDeleteOpen = true; }, 88)}
+          <button type="button" use:ripple onclick={() => dialogActionDelay.schedule(() => { confirmDeleteOpen = true; }, 88)}
             class="inline-flex items-center rounded-lg px-3 border text-[11px] font-semibold transition-all action-disconnect-btn h-auto min-w-0">Delete</button>
         </div>
       </div>

@@ -13,3 +13,5 @@ export type { RippleOptions, RippleColor } from "./ripple";
 export * from "./toast-store.svelte";
 export { createCopyFeedback } from "./use-copy-feedback.svelte";
 export type { CopyFeedback } from "./use-copy-feedback.svelte";
+export { createOwnedAnimationFrame, createOwnedTimeout } from "./owned-scheduling";
+export type { OwnedAnimationFrame, OwnedTimeout } from "./owned-scheduling";

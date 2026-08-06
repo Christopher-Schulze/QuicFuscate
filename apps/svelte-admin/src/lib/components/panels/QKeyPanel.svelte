@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
   import { Check } from "@lucide/svelte";
-  import { cn, ripple, createCopyFeedback } from "@quicfuscate/ui";
+  import { cn, createCopyFeedback, createOwnedAnimationFrame, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import { fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -92,7 +93,9 @@
   const copyFb = createCopyFeedback<string>(1100);
   let viewActive = true;
   const qkeyRequests = createRequestCoordinator();
-  const reconciliationTimers = new Set<number>();
+  const qkeyRefreshDelay = createOwnedTimeout();
+  const dialogActionDelay = createOwnedTimeout();
+  const qkeyAnimationFrame = createOwnedAnimationFrame();
 
   const qkeyNameError = $derived.by(() => {
     const v = qkeyName.trim();
@@ -174,11 +177,9 @@
   }
 
   function scheduleQKeyRefresh(): void {
-    const timer = window.setTimeout(() => {
-      reconciliationTimers.delete(timer);
+    qkeyRefreshDelay.schedule(() => {
       if (viewActive) void fetchQKeyList({ invalidate: true });
     }, 600);
-    reconciliationTimers.add(timer);
   }
 
   async function copyQKey(text: string, id?: string) {
@@ -202,7 +203,7 @@
   }
 
   function openCreateDialog() {
-    window.setTimeout(() => {
+    dialogActionDelay.schedule(() => {
       createDialogOpen = true;
     }, RIPPLE_DELAY_MS);
   }
@@ -305,14 +306,24 @@
     return () => {
       viewActive = false;
       qkeyRequests.dispose();
-      for (const timer of reconciliationTimers) window.clearTimeout(timer);
-      reconciliationTimers.clear();
+      copyFb.destroy();
     };
   });
   $effect(() => {
     if (qkeyReady && !qkeyAnimationReady) {
-      requestAnimationFrame(() => { qkeyAnimationReady = true; });
+      qkeyAnimationFrame.schedule(() => {
+        if (viewActive) qkeyAnimationReady = true;
+      });
+    } else if (!qkeyReady) {
+      qkeyAnimationFrame.cancel();
     }
+    return () => qkeyAnimationFrame.cancel();
+  });
+
+  onDestroy(() => {
+    qkeyRefreshDelay.destroy();
+    dialogActionDelay.destroy();
+    qkeyAnimationFrame.destroy();
   });
 </script>
 
@@ -490,7 +501,7 @@
           </div>
         </div>
         <div class="dialog-footer-pad">
-          <button type="button" use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { window.setTimeout(() => { createDialogOpen = false; }, 88); }} disabled={busyCreate}>Cancel</button>
+          <button type="button" use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { dialogActionDelay.schedule(() => { createDialogOpen = false; }, RIPPLE_DELAY_MS); }} disabled={busyCreate}>Cancel</button>
           <button type="submit" use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-save-btn flex-1 min-w-[108px] justify-center" disabled={Boolean(qkeyNameError || qkeyPortError) || busyCreate}>
             {#if busyCreate}<span class="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin"></span>{/if}
             Generate
@@ -530,7 +541,7 @@
             type="button"
             use:ripple={{ color: "light" }}
             class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1"
-            onclick={() => { window.setTimeout(() => { issuedQKeyDialogOpen = false; }, 88); }}
+            onclick={() => { dialogActionDelay.schedule(() => { issuedQKeyDialogOpen = false; }, RIPPLE_DELAY_MS); }}
           >Done</button>
           <button
             type="button"

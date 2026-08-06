@@ -91,4 +91,22 @@ describe("createCopyFeedback", () => {
     expect(fb.copied).toBe(false);
     fb.destroy();
   });
+
+  test("does not mutate or retain a timer when clipboard resolves after destroy", async () => {
+    let resolveClipboard!: () => void;
+    vi.spyOn(navigator.clipboard, "writeText").mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveClipboard = resolve; }),
+    );
+    const fb = createCopyFeedback();
+    const pending = fb.trigger("late");
+
+    fb.destroy();
+    resolveClipboard();
+    await pending;
+    vi.advanceTimersByTime(2_000);
+
+    expect(fb.copied).toBe(false);
+    expect(fb.copiedKey).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

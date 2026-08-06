@@ -1,7 +1,7 @@
 <script lang="ts">
   import "../app.css";
   import faviconUrl from "$lib/assets/favicon.png";
-  import { Toast, addToast } from "@quicfuscate/ui";
+  import { Toast, addToast, createOwnedTimeout } from "@quicfuscate/ui";
   import Sidebar from "$lib/components/layout/Sidebar.svelte";
   import ErrorBanner from "$lib/components/ui/ErrorBanner.svelte";
   import FatalErrorScreen from "$lib/components/ui/FatalErrorScreen.svelte";
@@ -13,6 +13,7 @@
     startEnginePollers,
     persistState,
   } from "$lib/stores/tauri-bridge.svelte";
+  import { createPersistenceQueue } from "$lib/persistence-queue";
   import {
     getTunnels,
     getSelectedId,
@@ -29,7 +30,8 @@
   const hydrationDone = $derived(getHydrationDone());
 
   // Debounced persist
-  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  const persistDebounce = createOwnedTimeout();
+  const persistQueue = createPersistenceQueue(persistState);
   const tunnels = $derived(getTunnels());
   const selectedId = $derived(getSelectedId());
   const settings = $derived(getSettings());
@@ -58,19 +60,26 @@
     void tunnels;
     void selectedId;
     void settings;
-    if (!hydrationDone) return;
-    if (persistTimer) clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => { void persistState(); }, 400);
+    if (!hydrationDone) {
+      persistDebounce.cancel();
+      return;
+    }
+    persistDebounce.schedule(persistQueue.queue, 400);
   });
+
+  function persistNow(): void {
+    persistDebounce.cancel();
+    persistQueue.queue();
+  }
 
   // Persist on visibility change and before unload
   $effect(() => {
     if (!isTauri()) return;
     const handleVisibility = () => {
-      if (document.visibilityState === "hidden") void persistState();
+      if (document.visibilityState === "hidden") persistNow();
     };
     const handleBeforeUnload = () => {
-      void persistState();
+      persistNow();
     };
     document.addEventListener("visibilitychange", handleVisibility);
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -160,7 +169,8 @@
     return () => {
       stopSettings?.();
       stopPollers();
-      if (persistTimer) clearTimeout(persistTimer);
+      persistQueue.stop();
+      persistDebounce.destroy();
     };
   });
 </script>

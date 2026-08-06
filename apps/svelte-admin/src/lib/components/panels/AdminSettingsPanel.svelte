@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
-  import { cn, ripple } from "@quicfuscate/ui";
+  import { cn, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
@@ -43,6 +44,7 @@
   let unDialogEl: HTMLDivElement | undefined = $state();
   let viewActive = true;
   const authRequests = createRequestCoordinator();
+  const dialogActionDelay = createOwnedTimeout();
 
   const usernameError = $derived.by(() => {
     const v = dlgNewUsername.trim();
@@ -99,6 +101,7 @@
       authRequests.dispose();
     };
   });
+  onDestroy(dialogActionDelay.destroy);
   $effect(() => { onRefresh?.(() => fetchAuth({ invalidate: true })); });
 
   function shakeEl(el: HTMLDivElement | undefined) {
@@ -112,7 +115,7 @@
     dlgNewUsername = "";
     dlgCurrentPw = "";
     dlgNewPw = "";
-    window.setTimeout(() => {
+    dialogActionDelay.schedule(() => {
       usernameDialogOpen = true;
     }, RIPPLE_DELAY_MS);
   }
@@ -121,7 +124,7 @@
     dlgCurrentPw = "";
     dlgNewPw = "";
     dlgConfirmPw = "";
-    window.setTimeout(() => {
+    dialogActionDelay.schedule(() => {
       passwordDialogOpen = true;
     }, RIPPLE_DELAY_MS);
   }
@@ -260,7 +263,7 @@
           </div>
         </div>
         <div class="dialog-footer-pad">
-          <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { window.setTimeout(() => { usernameDialogOpen = false; }, 88); }} disabled={busy}>Cancel</button>
+          <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { dialogActionDelay.schedule(() => { usernameDialogOpen = false; }, RIPPLE_DELAY_MS); }} disabled={busy}>Cancel</button>
           <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-save-btn flex-1" disabled={usernameSaveDisabled} onclick={() => { void submitUsername(); }}>
             {#if busy}<span class="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin"></span>{/if}
             Save
@@ -291,7 +294,7 @@
         </div>
         <div class="dialog-footer-pad">
           {#if !requiresChange}
-            <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { window.setTimeout(() => { passwordDialogOpen = false; }, 88); }} disabled={busy}>Cancel</button>
+            <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-refresh-btn flex-1" onclick={() => { dialogActionDelay.schedule(() => { passwordDialogOpen = false; }, RIPPLE_DELAY_MS); }} disabled={busy}>Cancel</button>
           {/if}
           <button use:ripple={{ color: "light" }} class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-save-btn flex-1" disabled={passwordSaveDisabled} onclick={() => { void submitPassword(); }}>
             {#if busy}<span class="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin"></span>{/if}

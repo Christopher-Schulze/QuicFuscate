@@ -54,6 +54,11 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+function setVisibility(state: "hidden" | "visible"): void {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
 function mockAllEndpoints(opts?: { logs?: unknown; mode?: unknown; status?: unknown }) {
   getJsonMock.mockImplementation((path: string) => {
     if (path === "/api/config/logging") return Promise.resolve(opts?.mode ?? MODE_RESPONSE);
@@ -179,6 +184,22 @@ describe("LogsView", () => {
     expect(getJsonMock).toHaveBeenCalledWith("/api/config/logging");
     expect(getJsonMock).toHaveBeenCalledWith("/api/status");
     expect(getJsonMock).toHaveBeenCalledWith("/api/logs?cursor=0");
+  });
+
+  test("pauses hidden polling and refreshes mode, status, and logs when visible again", async () => {
+    render(LogsView);
+    await vi.advanceTimersByTimeAsync(200);
+    getJsonMock.mockClear();
+
+    setVisibility("hidden");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(getJsonMock).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/config/logging");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/logs?cursor=3");
   });
 
   test("shows waiting message when logs are empty", async () => {

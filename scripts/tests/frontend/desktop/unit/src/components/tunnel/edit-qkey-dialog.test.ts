@@ -5,6 +5,12 @@ const readClipboardTextDirectMock = vi.hoisted(() => vi.fn<() => Promise<string>
 const qkeyParseMock = vi.hoisted(() => vi.fn());
 let runtimeAvailable = false;
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 vi.mock("$lib/clipboard", () => ({
   readClipboardTextDirect: () => readClipboardTextDirectMock(),
 }));
@@ -128,6 +134,39 @@ describe("desktop qkey edit dialog", () => {
       qkey: "",
       remote: "manual2.example.com:4433",
       sni: "manual2.example.com",
+    });
+  });
+
+  test("does not update a tunnel when qkey_parse resolves after unmount", async () => {
+    runtimeAvailable = true;
+    const pending = deferred({
+      remote: "vpn.example.com:4433",
+      sni: "cdn.example.com",
+      hasToken: true,
+    });
+    qkeyParseMock.mockReturnValue(pending.promise);
+
+    render(EditQKeyDialog, { open: true, tunnelId: "t1", mode: "replace", onclose: vi.fn() });
+    await fireEvent.input(screen.getByLabelText("QKey String"), {
+      target: { value: "QKey-ABC_def-123==" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await vi.advanceTimersByTimeAsync(90);
+    await waitFor(() => expect(qkeyParseMock).toHaveBeenCalled());
+
+    cleanup();
+    pending.resolve({
+      remote: "vpn.example.com:4433",
+      sni: "cdn.example.com",
+      hasToken: true,
+    });
+    await pending.promise;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getTunnels()[0]).toMatchObject({
+      qkey: "",
+      remote: "manual1.example.com:4433",
+      sni: "manual1.example.com",
     });
   });
 

@@ -151,6 +151,16 @@ describe("desktop tunnel list", () => {
     expect(engineConnectMock).not.toHaveBeenCalled();
   });
 
+  test("does not open a dialog after the list action owner unmounts", async () => {
+    render(TunnelList);
+
+    await fireEvent.click(screen.getByRole("button", { name: "Open tunnel composer" }));
+    cleanup();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   test("connect failure sets error and returns tunnel to inactive", async () => {
     runtimeAvailable = true;
     engineConnectMock.mockRejectedValue("boom");

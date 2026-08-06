@@ -66,6 +66,11 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+function setVisibility(state: "hidden" | "visible"): void {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
 function mockAllEndpoints() {
   getJsonMock.mockImplementation((path: string) => {
     if (path === "/api/status") return Promise.resolve(STATUS_RESPONSE);
@@ -142,6 +147,23 @@ describe("DashboardView", () => {
     render(DashboardView);
     await vi.advanceTimersByTimeAsync(200);
 
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/clients");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/metrics/json");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/blocked");
+  });
+
+  test("pauses hidden polling and refreshes all resources when visible again", async () => {
+    render(DashboardView);
+    await vi.advanceTimersByTimeAsync(200);
+    getJsonMock.mockClear();
+
+    setVisibility("hidden");
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(getJsonMock).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    await vi.advanceTimersByTimeAsync(0);
     expect(getJsonMock).toHaveBeenCalledWith("/api/status");
     expect(getJsonMock).toHaveBeenCalledWith("/api/clients");
     expect(getJsonMock).toHaveBeenCalledWith("/api/metrics/json");

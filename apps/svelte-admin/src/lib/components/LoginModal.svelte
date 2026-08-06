@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
-  import { cn, ripple } from "@quicfuscate/ui";
+  import { cn, createOwnedAnimationFrame, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import {
     setAuthRequired,
@@ -28,8 +29,10 @@
   let busy = $state(false);
   let feedbackPhase = $state<"idle" | "reject">("idle");
   let dialogEl: HTMLDivElement | undefined = $state();
-  let rejectTimeoutId: number | null = null;
+  const rejectTimeout = createOwnedTimeout();
+  const rejectFocusFrame = createOwnedAnimationFrame();
   let prefersReducedMotion = $state(false);
+  let viewActive = true;
 
   $effect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -65,14 +68,12 @@
   $effect(() => {
     if (!open || !error) return;
     feedbackPhase = "reject";
-    if (rejectTimeoutId !== null) window.clearTimeout(rejectTimeoutId);
-    rejectTimeoutId = window.setTimeout(() => {
+    rejectTimeout.schedule(() => {
       feedbackPhase = "idle";
-      rejectTimeoutId = null;
     }, REJECT_FEEDBACK_MS);
 
     // Auto-focus + select password field after reject
-    window.requestAnimationFrame(() => {
+    rejectFocusFrame.schedule(() => {
       const pwInput = dialogEl?.querySelector<HTMLInputElement>('input[type="password"]');
       if (pwInput) {
         pwInput.focus();
@@ -92,10 +93,21 @@
         dialogEl.classList.add("qf-shake");
       }
     }
+
+    return () => {
+      rejectTimeout.cancel();
+      rejectFocusFrame.cancel();
+    };
+  });
+
+  onDestroy(() => {
+    viewActive = false;
+    rejectTimeout.destroy();
+    rejectFocusFrame.destroy();
   });
 
   async function submit() {
-    if (!canSubmit || busy) return;
+    if (!viewActive || !canSubmit || busy) return;
     busy = true;
     onClearError();
     try {
@@ -103,6 +115,7 @@
         "/api/login",
         { username: username.trim(), password: password.slice(0, MAX_PASSWORD_CHARS) },
       );
+      if (!viewActive) return;
       if (!resp.success) {
         setAuthError(sanitizeErrorMessage(resp.message, "Invalid credentials"));
         busy = false;
@@ -116,6 +129,7 @@
         setActiveTab("configuration");
       }
     } catch (e: unknown) {
+      if (!viewActive) return;
       const msg = sanitizeErrorMessage(
         e instanceof Error ? e.message : String(e),
         "Login failed",
@@ -127,7 +141,7 @@
         setAuthError(msg || "Login failed");
       }
     } finally {
-      busy = false;
+      if (viewActive) busy = false;
     }
   }
 </script>

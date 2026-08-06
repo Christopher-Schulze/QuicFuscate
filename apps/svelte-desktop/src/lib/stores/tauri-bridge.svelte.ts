@@ -194,12 +194,12 @@ export function startEnginePollers(): () => void {
   };
 
   const pollStatus = async (): Promise<void> => {
-    if (!isCurrent() || statusInFlight) return;
+    if (!isCurrent() || statusInFlight || !isBrowserDocumentVisible()) return;
     statusInFlight = true;
     try {
       if (!isCurrent()) return;
       const status = await tauriInvoke<{ state: string; activeTunnelId?: string | null; lastError?: string | null }>("engine_status");
-      if (!isCurrent()) return;
+      if (!isCurrent() || !isBrowserDocumentVisible()) return;
       const activeTunnelId = status.activeTunnelId ?? null;
       const signature = `${status.state}:${activeTunnelId ?? ""}:${status.lastError ?? ""}`;
       if (signature !== previousStatusSignature) {
@@ -226,7 +226,7 @@ export function startEnginePollers(): () => void {
   };
 
   const pollStats = async (): Promise<void> => {
-    if (!isCurrent() || statsInFlight) return;
+    if (!isCurrent() || statsInFlight || !isBrowserDocumentVisible()) return;
     statsInFlight = true;
     const stateVersionAtStart = statusStateVersion;
     const activeTunnelIdAtStart = getActiveTunnelId();
@@ -234,6 +234,10 @@ export function startEnginePollers(): () => void {
       if (!isCurrent()) return;
       const stats = await tauriInvoke<RawEngineStats | null>("engine_stats");
       if (!isCurrent() || stateVersionAtStart !== statusStateVersion || activeTunnelIdAtStart !== getActiveTunnelId()) return;
+      if (!isBrowserDocumentVisible()) {
+        resetThroughput();
+        return;
+      }
       if (!activeTunnelIdAtStart || !stats) {
         updateTunnelStats(() => ({}));
         resetThroughput();
@@ -257,11 +261,6 @@ export function startEnginePollers(): () => void {
             ? stats.currentSni.trim() : undefined,
         },
       }));
-
-      if (!isBrowserDocumentVisible()) {
-        resetThroughput();
-        return;
-      }
 
       // Compute throughput from the shared monotonic sample contract.
       const now = readBrowserMonotonicMilliseconds();
@@ -296,7 +295,7 @@ export function startEnginePollers(): () => void {
   };
 
   const pollLogs = async (): Promise<void> => {
-    if (!isCurrent() || logsInFlight) return;
+    if (!isCurrent() || logsInFlight || !isBrowserDocumentVisible()) return;
     logsInFlight = true;
     const cursorAtStart = logCursor;
     const cursorEpochAtStart = logCursorEpoch;
@@ -305,7 +304,7 @@ export function startEnginePollers(): () => void {
       const resp = await tauriInvoke<{ cursor: number; lines: RawTauriLogLine[] }>(
         "engine_logs_since", { cursor: cursorAtStart },
       );
-      if (!isCurrent() || cursorEpochAtStart !== logCursorEpoch) return;
+      if (!isCurrent() || cursorEpochAtStart !== logCursorEpoch || !isBrowserDocumentVisible()) return;
       const nextCursor = resp?.cursor ?? cursorAtStart;
       if (nextCursor < cursorAtStart || nextCursor < logCursor) return;
       if (!resp || !Array.isArray(resp.lines) || resp.lines.length === 0) {
@@ -319,10 +318,18 @@ export function startEnginePollers(): () => void {
     finally { logsInFlight = false; }
   };
 
-  const statusInterval = setInterval(() => { void pollStatus(); }, 500);
-  const statsInterval = setInterval(() => { void pollStats(); }, 900);
-  const logsInterval = setInterval(() => { void pollLogs(); }, 350);
-  const handleVisibilityChange = (): void => resetThroughput();
+  const statusInterval = setInterval(() => { if (isBrowserDocumentVisible()) void pollStatus(); }, 500);
+  const statsInterval = setInterval(() => { if (isBrowserDocumentVisible()) void pollStats(); }, 900);
+  const logsInterval = setInterval(() => { if (isBrowserDocumentVisible()) void pollLogs(); }, 350);
+  const handleVisibilityChange = (): void => {
+    if (!isBrowserDocumentVisible()) {
+      resetThroughput();
+      return;
+    }
+    void pollStatus();
+    void pollStats();
+    void pollLogs();
+  };
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
   return () => {

@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "../../../testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "../../../testing-library";
 
 vi.mock("@quicfuscate/ui", async () => {
   const actual = await vi.importActual<typeof import("@quicfuscate/ui")>("@quicfuscate/ui");
@@ -190,5 +190,36 @@ describe("FatalErrorScreen (admin)", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
     });
+  });
+
+  test("does not schedule copy feedback when clipboard resolves after unmount", async () => {
+    let resolveClipboard!: () => void;
+    const writeTextMock = vi.fn(() => new Promise<void>((resolve) => { resolveClipboard = resolve; }));
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock, readText: vi.fn(async () => "") },
+    });
+
+    render(FatalErrorScreen, {
+      props: {
+        title: "Error",
+        description: "Desc",
+        details: "details",
+        onretry: vi.fn(),
+        onreload: vi.fn(),
+      },
+    });
+
+    const click = fireEvent.click(screen.getByRole("button", { name: "Copy Details" }));
+    await waitFor(() => expect(writeTextMock).toHaveBeenCalledWith("details"));
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+
+    cleanup();
+    resolveClipboard();
+    await click;
+    await Promise.resolve();
+
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
   });
 });
