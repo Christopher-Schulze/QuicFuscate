@@ -19,9 +19,8 @@
 //! - No background runtime dependency: synchronous API with helper loop; users
 //!   may drive it from threads or async runtimes as needed.
 
-use crate::optimize::MemoryPool;
+use crate::optimize::{MemoryPool, PooledBlock};
 use crate::telemetry::TELEMETRY_ENABLED;
-use aligned_box::AlignedBox;
 use std::io::{self};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -42,20 +41,19 @@ pub const TUN_IPV6_MIN_MTU: u16 = 1280;
 /// copying into a newly allocated `Vec`. Dropping it returns the block to the
 /// originating pool.
 pub struct TunPacket {
-    block: Option<AlignedBox<[u8]>>,
-    pool: Arc<MemoryPool>,
+    block: PooledBlock,
     len: usize,
 }
 
 impl TunPacket {
-    fn new(block: AlignedBox<[u8]>, len: usize, pool: Arc<MemoryPool>) -> Self {
+    fn new(block: PooledBlock, len: usize) -> Self {
         let len = len.min(block.len());
-        Self { block: Some(block), pool, len }
+        Self { block, len }
     }
 
     /// Return the valid layer-3 frame bytes.
     pub fn as_slice(&self) -> &[u8] {
-        self.block.as_ref().map(|block| &block[..self.len]).unwrap_or(&[])
+        &self.block[..self.len]
     }
 
     /// Return the valid frame length.
@@ -66,14 +64,6 @@ impl TunPacket {
     /// Return whether the frame contains no valid bytes.
     pub fn is_empty(&self) -> bool {
         self.len == 0
-    }
-}
-
-impl Drop for TunPacket {
-    fn drop(&mut self) {
-        if let Some(block) = self.block.take() {
-            self.pool.free(block);
-        }
     }
 }
 
@@ -615,11 +605,11 @@ impl TunInterface {
     }
 
     /// Reads one packet into a pooled block and returns (block, len).
-    /// The block remains zero-initialized outside the valid frame region.
-    pub fn read_block(&self) -> io::Result<(AlignedBox<[u8]>, usize)> {
-        let mut block = self.pool.alloc();
-        let buf = &mut block[..];
-        let len = self.dev.read(buf)?;
+    /// The block remains zero-initialized outside the valid frame region and returns to its pool
+    /// automatically when the returned `PooledBlock` is dropped.
+    pub fn read_block(&self) -> io::Result<(PooledBlock, usize)> {
+        let mut block = PooledBlock::new(Arc::clone(&self.pool));
+        let len = self.dev.read(&mut block[..])?;
         if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
             crate::telemetry::BYTES_RECEIVED.inc_by(len as u64);
         }
@@ -805,11 +795,8 @@ impl TunInterface {
             match self.read_block() {
                 Ok((block, len)) if len > 0 => {
                     on_packet(&block[..len]);
-                    self.pool.free(block);
                 }
-                Ok((block, _)) => {
-                    self.pool.free(block);
-                }
+                Ok((_block, _)) => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if !self.wait_for_readable(shutdown)? {
                         return Ok(());
@@ -840,10 +827,8 @@ impl TunInterface {
                 return Ok(());
             }
             match self.read_block() {
-                Ok((block, len)) if len > 0 => {
-                    on_packet(TunPacket::new(block, len, Arc::clone(&self.pool)))
-                }
-                Ok((block, _)) => self.pool.free(block),
+                Ok((block, len)) if len > 0 => on_packet(TunPacket::new(block, len)),
+                Ok((_block, _)) => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if !self.wait_for_readable(shutdown)? {
                         return Ok(());
@@ -1843,6 +1828,7 @@ mod tests {
         last_write_len: AtomicUsize,
         mtu: AtomicU16,
         refuse_mtu_updates: bool,
+        fail_reads: bool,
     }
 
     impl DummyTun {
@@ -1853,11 +1839,16 @@ mod tests {
                 last_write_len: AtomicUsize::new(0),
                 mtu: AtomicU16::new(1500),
                 refuse_mtu_updates: false,
+                fail_reads: false,
             }
         }
 
         fn refusing_mtu_updates() -> Self {
             Self { refuse_mtu_updates: true, ..Self::with_reads(Vec::new()) }
+        }
+
+        fn failing_reads() -> Self {
+            Self { fail_reads: true, ..Self::with_reads(Vec::new()) }
         }
     }
 
@@ -1879,6 +1870,9 @@ mod tests {
         }
 
         fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.fail_reads {
+                return Err(io::Error::other("dummy read failure"));
+            }
             let mut reads = self.reads.lock().expect("dummy read lock poisoned");
             if reads.is_empty() {
                 return Ok(0);
@@ -1962,6 +1956,20 @@ mod tests {
         let (block, len) = tun.read_block().expect("read_block must succeed");
         assert_eq!(len, packet.len());
         assert_eq!(&block[..len], packet.as_slice());
+    }
+
+    #[test]
+    fn read_block_failure_returns_the_pool_block() {
+        let pool = Arc::new(crate::optimize::MemoryPool::new(1, 2_048));
+        let before = pool.accounting_snapshot();
+        let tun = TunInterface::from_device_for_test(
+            Box::new(DummyTun::failing_reads()),
+            Arc::clone(&pool),
+            false,
+        );
+
+        assert!(tun.read_block().is_err());
+        assert_eq!(pool.accounting_snapshot(), before);
     }
 
     #[test]

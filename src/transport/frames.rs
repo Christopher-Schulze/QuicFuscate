@@ -313,22 +313,16 @@ pub fn to_bytes(
 pub fn batch_encode_frames(
     frames: &[crate::transport::Frame<'_>],
     out: &mut [u8],
-    pool: Arc<crate::optimize::MemoryPool>,
+    _pool: Arc<crate::optimize::MemoryPool>,
 ) -> Result<Vec<usize>, ConnectionError> {
     let mut offsets = Vec::with_capacity(frames.len());
     let mut pos = 0;
-
-    // Use aligned buffer from pool for intermediate work
-    let work_buf = pool.alloc();
 
     for frame in frames {
         let len = to_bytes(frame, &mut out[pos..])?;
         offsets.push(len);
         pos += len;
     }
-
-    // Return buffer to pool
-    pool.free(work_buf);
 
     Ok(offsets)
 }

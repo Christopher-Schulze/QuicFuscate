@@ -1188,7 +1188,6 @@ mod tests {
         let (_out, n) =
             compress::decompress_with_dict(&pool, payload2, &dict_bytes).expect("decompress");
         assert_eq!(&payload[..], &_out[..n]);
-        pool.free(blk);
     }
 
     #[cfg(feature = "masque-tests")]

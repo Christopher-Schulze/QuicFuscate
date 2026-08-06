@@ -571,10 +571,10 @@ cfg.log_keys();
   - No separate streaming selector is active; `QUICFUSCATE_ZSTD_STREAM_MIN` is not a current runtime key.
   - Header semantics are identical to direct: `0x5A` (no dict) or `0x5D` (with dict-ID: 2B hash, 2B version, then 4B length).
 - Safe path (`src/compress.rs`):
-  - `CompressionManager::compress_to_pool()` writes zstd output directly into the caller-provided pool block after the `0x5A` header via `zstd::bulk::Compressor::compress_to_buffer`.
-  - `CompressionManager::decompress_to_pool()` writes directly into the caller-provided pool block with `zstd::bulk::decompress_to_buffer`, validating the declared original length without an intermediate `Vec`.
-  - Dictionary compression and decompression write directly into the caller-provided pool block via the symmetric bulk compressor/decompressor APIs after the `0x5D` dictionary header. Decompression requires the block to hold the declared original length and rejects any decoded length mismatch instead of returning a truncated payload.
-  - No API change; behavior is compatible, headers remain `0x5A` and `0x5D` in the safe path.
+  - `CompressionManager::compress_to_pool()` writes zstd output directly into a `PooledBlock` after the `0x5A` header via `zstd::bulk::Compressor::compress_to_buffer`.
+  - `CompressionManager::decompress_to_pool()` writes directly into a `PooledBlock` with `zstd::bulk::decompress_to_buffer`, validating the declared original length without an intermediate `Vec`.
+  - Dictionary compression and decompression write directly into `PooledBlock` values via the symmetric bulk compressor/decompressor APIs after the `0x5D` dictionary header. Decompression requires the block to hold the declared original length and rejects any decoded length mismatch instead of returning a truncated payload.
+  - `PooledBlock` is the returned RAII owner and returns the allocation through `MemoryPool::free()` on drop, including caller error and unwind paths. Headers remain `0x5A` and `0x5D` in the safe path.
 
 #### Provider API (Unified)
 ```rust
@@ -923,6 +923,7 @@ let mgr = CompressionManager::new(CompressionConfig::default());
 let pool = OptimizationManager::new().memory_pool();
 if let Some((block, used)) = mgr.compress_to_pool(&pool, payload) {
     // send &block[..used]
+    // `block` returns itself to `pool` when it is dropped.
 }
 ```
 
@@ -2025,11 +2026,12 @@ if compress.should_compress(payload.len(), rtt_ms, loss, bw_bps) {
     if let Some((block, used)) = compress.compress_to_pool(&pool, payload) {
         let compressed = &block[..used];
         // send compressed bytes
+        // `block` returns itself to `pool` when it is dropped.
     }
 }
 ```
 
-Pool-backed compression and decompression return a plain `AlignedBox<[u8]>`; the caller must return a successful block through `MemoryPool::free()`. A direct `AlignedBox` drop deallocates the block without updating pool accounting. Error-path cleanup for compression, decompression, TUN reads, and batch frame encoding remains open under TODO-831; exact decompression-length validation remains TODO-603.
+Pool-backed compression and decompression return a `PooledBlock` RAII owner. Dropping it returns the checked-out allocation through `MemoryPool::free()`, including malformed-input, compressor/decompressor, caller-error, and unwind paths. TUN reads use the same owner, and frame batching no longer allocates an unused intermediate pool block. FEC and zero-copy DATAGRAM ownership remain TODO-832 and TODO-833; exact decompression-length semantics remain TODO-603.
 
 #### Unified TLS Provider Usage
 ```rust
@@ -3396,7 +3398,7 @@ All memory-pool controls in this section are parsed into one `MemoryPoolRuntimeC
 - `QUICFUSCATE_TLS_LOW` - TLS cache size under low utilization after explicit TLS-cache opt-in (default: `24`).
 - `QUICFUSCATE_POOL_ADAPTIVE_BLOCK` - `0|1|false|true` for the explicitly adaptive packet-pool constructors (default: `true`). If enabled, block size is selected from MTU hints: `<=1500 -> 4096`, `<=9000 -> 16384`, otherwise `65536`. It does not override `MemoryPool::new()` or `QUICFUSCATE_BODYPOOL_BLOCK`.
 - `QUICFUSCATE_MTU_HINT` - Integer hint for typical link MTU used by adaptive block sizing (default: `1500`).
-- `QUICFUSCATE_TLS_CACHE` - Per-thread cache size for pooled blocks (default: `0`). The active `MemoryPool` cache is actual thread-local storage keyed by pool identity, and TODO-827's synchronized ledger tracks pool lifetime, block origin, cache ownership, and exact accounted capacity. Direct caller failure cleanup remains TODO-831. The separate feature-gated `UnsafeMemoryPool` uses the synchronized exact-base ownership registry documented and verified under TODO-826.
+- `QUICFUSCATE_TLS_CACHE` - Per-thread cache size for pooled blocks (default: `0`). The active `MemoryPool` cache is actual thread-local storage keyed by pool identity, and TODO-827's synchronized ledger tracks pool lifetime, block origin, cache ownership, and exact accounted capacity. Generic compression, TUN, frame, and pre-FEC caller paths use `PooledBlock` where early return or unwind can occur. The separate feature-gated `UnsafeMemoryPool` uses the synchronized exact-base ownership registry documented and verified under TODO-826.
 - `QUICFUSCATE_POOL_DEBUG_SLACK` / `QUICFUSCATE_POOL_DEBUG_GRACE` - Debug-only invariants slack to reduce spurious warnings under bursty workloads.
 - `QUICFUSCATE_MADVISE_HUGEPAGE` - `0|1|false|true` to disable or enable MADV_HUGEPAGE hints on Linux (default: `true`).
 - `QUICFUSCATE_NUMA_POLICY` - `local|interleave|preferred:<n>` for NUMA placement on Linux (default: `local`). The policy is initialized from the same global-pool construction snapshot.
@@ -3406,7 +3408,7 @@ Notes:
 - TODO-829 verification: the safe pool focused release lane passes `16/16`, the raw `unsafe_rust` lane passes `31/31`, the complete default-feature `unsafe_rust` library passes `2453/2453`, the native `unsafe_rust,compression_zstd_ffi` lane passes `32/32`, `cargo check --all-targets --features unsafe_rust` passes, and strict library Clippy passes. Formatting, diff hygiene, locked metadata, and the absence of unchecked layout or `handle_alloc_error` paths in the two pool implementations pass as well.
 - Zero-copy syscall contract (TODO-830): `ZeroCopyBuffer` is send-only and `ZeroCopyRecvBuffer` is receive-only on Unix and Windows. Constructors retain the caller's slice lifetimes, receive construction holds an exclusive mutable borrow, Unix iovec admission is checked against runtime `IOV_MAX` and the signed ABI ceiling, and Windows WSABUF lengths/counts are checked against `u32::MAX`. `ZeroCopyResult<T>` separates typed boundary errors from `ZeroCopyTransfer`, whose requested/transferred counts classify zero, partial, and complete progress without signed-result narrowing. The wrappers do not retry; direct datagram callers reject partial writes as `WriteZero`. `zc_batch` retains its synchronous `io::Result<usize>` transport boundary under TODO-682/TODO-683.
 - Pool growth targets 64 MiB per pool by default, or an explicitly larger initial pool, and `QUICFUSCATE_POOL_HARD_MAX_CAP` cannot reduce an already configured initial capacity. At the hard cap, ephemeral blocks are recorded as checked-out, never mutate accounted counters, and are released directly after return. TODO-827 owns this origin and capacity contract; TODO-767 remains the explicit requested-versus-effective block-size owner.
-- `check_invariants()` remains a diagnostic warning surface with configurable debug slack/grace, but the synchronized ownership ledger is authoritative for exact block, origin, location, capacity, available, and in-use state and is covered by focused tests. Direct `AlignedBox` drops in generic failure paths remain TODO-831.
+- `check_invariants()` remains a diagnostic warning surface with configurable debug slack/grace, but the synchronized ownership ledger is authoritative for exact block, origin, location, capacity, available, and in-use state and is covered by focused tests. `PooledBlock` closes the generic early-return and unwind cleanup boundary; FEC and zero-copy DATAGRAM retain their separate ownership tasks.
 
 **Stealth fine-tuning (runtime overrides):**
 - `QUICFUSCATE_STEALTH_PADDING_MAX`: positive integer; caps per-packet padding in bytes
@@ -5487,7 +5489,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `src/optimize/parts/memory_pool.rs::PoolOwnershipLedger` is the per-pool ownership authority. It keys exact allocation base addresses to `Accounted` or `Ephemeral` origin and to one physical state: `Queue`, `Tls`, or `CheckedOut`. Every allocation, queue transfer, TLS transfer, return, discard, resize, and pool close uses the ledger under a mutex; resize operations additionally serialize through the pool resize lock.
 - Accounted records are the only records reflected in `capacity`, `available`, and `in_use`. Ephemeral hard-cap allocations are checked-out records and never enter accounted queues or TLS. `MemoryPool::free()` requires the exact recorded checked-out block and exact configured length; foreign, duplicate, mismatched, and already-released blocks are rejected without accepting them into the pool. Physically released known blocks remove their ledger record first, and allocator-address reuse replaces stale records while correcting the old accounted counters.
 - Growth registers each accounted block before queue admission and returns on ledger rejection or stale-address replacement without capacity progress, so a closed or stale pool cannot spin in an allocation loop. Shrink removes only registered queue blocks and stops when no queue block is available, so remote TLS ownership cannot create an infinite loop. TLS caches retain the shared ledger and lock ledger through pool drop; their `Drop` path releases cached blocks after removing their ownership records.
-- `MemoryPool::update_metrics()` publishes the ledger-backed capacity mirror. The effective adaptive block size and its requested-versus-effective configuration semantics remain TODO-767. Direct generic caller paths that drop a checked-out `AlignedBox` without `MemoryPool::free()` can still bypass the pool's intended return protocol; TODO-831 owns that caller cleanup and is intentionally not folded into TODO-827.
+- `MemoryPool::update_metrics()` publishes the ledger-backed capacity mirror. The effective adaptive block size and its requested-versus-effective configuration semantics remain TODO-767. `PooledBlock` is the generic caller guard for compression, TUN, frame batching, and pre-FEC send preparation; FEC and zero-copy DATAGRAM returns remain separate task boundaries.
 - Final local evidence: focused `optimize::memory_pool` debug tests pass `13/13`; the four-thread FEC E2E group passes `19/19`; the full default library passes `2419/2419`; and the final isolated release-focused lane passes `13/13`. The release build emits only the two existing `qftls.rs` warnings at lines `1479` and `2094`; no `memory_pool.rs` warning remains. The strict all-target Clippy lane remains blocked by 11 unrelated baseline diagnostics in `recovery.rs`, `server/metrics.rs`, `fec/tests.rs`, `client/backend.rs`, `client/dns_runtime.rs`, and `server/parts/tests_inline.rs`. Formatting and `git diff --check` pass; the temporary Rust target was cleaned after the final release run.
 
 ## MemoryPool Allocation Layout and Recovery Contract (2026-08-06, TODO-829)
@@ -5495,7 +5497,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `MemoryPool::try_new*()` rejects zero capacity and zero requested block size, applies the documented 2048-byte minimum, validates a 64-byte `Layout`, and rejects total initial bytes above `isize::MAX` before constructing queues or allocating blocks. A configured hard ceiling is clamped to `isize::MAX / effective_block_size` so later growth cannot bypass the same bound.
 - `alloc_numa_block()` uses only the checked layout and returns `MemoryPoolError::AllocationFailed` on a null allocation. There is no alignment-1 fallback. Constructor failure drains every partially populated queue through the existing zeroization, `munlock`, ownership-ledger, and `AlignedBox` release boundary.
 - `MemoryPool::try_alloc()`, `try_alloc_from_slice()`, and `try_set_capacity()` propagate growth, ownership, and emergency-allocation failures without invoking `handle_alloc_error`; auto-tuning logs and retains the previous capacity on a failed resize. The existing infallible APIs are compatibility wrappers with explicit panic policy, and `OptimizationManager` exposes matching `try_new*()` constructors plus `try_alloc_block()`.
-- `UnsafeMemoryPool::try_new()` checks cache-line rounding, total-byte bounds, valid layout, collection reservations, allocator null results, and partial preallocation cleanup. `try_alloc_uninit()` checks registry reservation and allocator failure; the old infallible methods are wrappers only. TODO-516 owns locking lifecycle, TODO-827 owns origin/accounting, and TODO-831 owns direct caller return-path cleanup.
+- `UnsafeMemoryPool::try_new()` checks cache-line rounding, total-byte bounds, valid layout, collection reservations, allocator null results, and partial preallocation cleanup. `try_alloc_uninit()` checks registry reservation and allocator failure; the old infallible methods are wrappers only. TODO-516 owns locking lifecycle, TODO-827 owns origin/accounting, and TODO-831 owns the generic `PooledBlock` caller guard and return-path cleanup.
 
 ## ZeroCopyBuffer FFI and Transfer Contract (2026-08-06, TODO-830)
 
@@ -5505,3 +5507,12 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The wrapper performs one synchronous syscall and never retries. Nonblocking `WouldBlock`, zero progress, and positive partial progress remain visible to the caller. Product datagram callers convert a partial transfer into `io::ErrorKind::WriteZero`; stream retry policy remains outside this wrapper. Linux `zc_batch` delegates to the raw UDP owner and remains bounded by TODO-682/TODO-683.
 - The boundary-test source covers typed transfer classification, Unix iovec admission, invalid-descriptor error mapping, and the Windows 64-bit ABI boundary. Executed local evidence covers the cross-platform transfer tests and Unix checks; Windows target compilation/runtime evidence is unavailable on the current ARM64 macOS host and remains an explicit acceptance gate.
 - Verification on the current revision: release zero-copy focus `18/18`, native `unsafe_rust,compression_zstd_ffi` zero-copy focus `18/18`, default-feature release library `2424/2424`, `unsafe_rust` release library `2455/2455`, `cargo check --all-targets --features unsafe_rust`, strict library Clippy, strict all-target Clippy, formatting, diff hygiene, and locked metadata all pass. The installed Linux target is unavailable because `ring` cannot find `x86_64-linux-gnu-gcc`; no Windows target is installed.
+
+## Generic Pooled-Buffer Failure Cleanup Contract (2026-08-06, TODO-831)
+
+- `PooledBlock` owns one checked-out `MemoryPool` allocation and returns it through `MemoryPool::free()` from `Drop`. It dereferences as a byte slice for compression, TUN, and transport code, so early returns, propagated errors, and unwinding do not fall through to `AlignedBox`'s direct deallocation path.
+- Safe compression and decompression now return `PooledBlock` values for basic and dictionary frames. H3 stream sends retain the owner until `stream_send()` has consumed the frame bytes, MASQUE compressed dispatch drops through the same owner, and the client TUN reader keeps the guard across async error paths. `TunPacket` stores the guard directly.
+- The pre-FEC core send path keeps a `PooledBlock` until all buffer-size, QUIC send, path-control, stealth, and wire-length checks pass; only then does it transfer the raw block and its originating pool into `FecPacket`. FEC-internal failure cleanup remains TODO-832.
+- `batch_encode_frames()` no longer allocates an unused intermediate pool block. The compatibility pool argument remains accepted, but frame encoding has no hidden allocation or cleanup obligation.
+- Failure-injection coverage asserts exact capacity/in-use/available counter recovery for the pooled guard, basic/dictionary compression and decompression, and TUN read errors. The optimization benchmark now returns its block through `free_block()` instead of directly dropping it.
+- Verification on the current ARM64 macOS revision: the default library passes `2431/2431` with one serial test thread in both debug and release profiles, the focused compression suite passes `27/27`, `cargo check --all-targets`, strict `unsafe_rust` library/all-target Clippy, formatting, diff hygiene, and locked metadata pass. Default strict library Clippy remains blocked by four pre-existing diagnostics in `src/transport.rs`, `src/optimize/mod.rs`, `src/transport/recovery.rs`, and `src/implementations/server/metrics.rs`; Linux target checking is blocked by the missing `x86_64-linux-gnu-gcc`, and no Windows target is installed.

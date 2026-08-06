@@ -1,4 +1,5 @@
 use super::*;
+use crate::optimize::PooledBlock;
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -443,11 +444,7 @@ impl Connection {
         }
         // Adaptive compression - policy + content-type aware
         let mut to_send = body;
-        let mut owned_buf: Option<(
-            aligned_box::AlignedBox<[u8]>,
-            usize,
-            Arc<crate::optimize::MemoryPool>,
-        )> = None;
+        let mut owned_buf: Option<(PooledBlock, usize)> = None;
         // Policy & Dictionary
         let pol = crate::compress::global_policy_with_snapshot(conn.environment_snapshot());
         if pol.enabled {
@@ -481,26 +478,26 @@ impl Connection {
                             if let Some((blk, used)) = crate::compress::compress_with_dict(
                                 pool, body, pol.level, &dict, ver,
                             ) {
-                                owned_buf = Some((blk, used, pool.clone()));
+                                owned_buf = Some((blk, used));
                             }
                         } else {
                             let pool = &crate::compress::body_pool();
                             if let Some((blk, used)) = cm.compress_to_pool(pool, body) {
-                                owned_buf = Some((blk, used, pool.clone()));
+                                owned_buf = Some((blk, used));
                             }
                         }
                     } else {
                         let pool = &crate::compress::body_pool();
                         if let Some((blk, used)) = cm.compress_to_pool(pool, body) {
-                            owned_buf = Some((blk, used, pool.clone()));
+                            owned_buf = Some((blk, used));
                         }
                     }
                 }
             }
         }
-        if let Some((blk, used, _pool)) = &owned_buf {
+        if let Some((blk, used)) = &owned_buf {
             to_send = &blk[..*used];
-            // Note: freed after frame is sent
+            // The RAII owner remains live until the transport has consumed the frame bytes.
         }
         let mut frame = Vec::new();
         frame.push(0x00);
@@ -511,9 +508,7 @@ impl Connection {
         crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::optimize::telemetry::H3_DATA_BYTES
             .fetch_add(to_send.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        if let Some((blk, _used, pool)) = owned_buf {
-            pool.free(blk);
-        }
+        drop(owned_buf);
         stream_state.sent_bytes += sent;
         stream_state.fin_sent = fin;
         if fin {
@@ -1260,7 +1255,6 @@ impl Connection {
         let pool = conn.dgram_pool_or_global();
         if let Some((blk, used)) = cm.compress_to_pool(&pool, payload) {
             let capsule = Self::encode_capsule(0x21, &blk[..used]);
-            pool.free(blk);
             return Some(capsule);
         }
         None

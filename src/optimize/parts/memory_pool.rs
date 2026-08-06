@@ -1062,6 +1062,15 @@ impl MemoryPool {
         self.update_metrics();
     }
 
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub(crate) fn accounting_snapshot(&self) -> (usize, usize, usize) {
+        (
+            self.capacity.load(Ordering::Acquire),
+            self.in_use.load(Ordering::Acquire),
+            self.available.load(Ordering::Acquire),
+        )
+    }
+
     /// Allocates a 64-byte aligned memory block from the pool.
     /// If the pool is empty, a new block is created.
     #[inline(always)]
@@ -1459,6 +1468,61 @@ impl Drop for MemoryPool {
                 "MemoryPool dropped with {} checked-out locked block(s); callers must return them through MemoryPool::free",
                 remaining
             );
+        }
+    }
+}
+
+/// An owned pool block that returns itself through [`MemoryPool::free`] when dropped.
+///
+/// Use this guard while a caller still controls a block and may return early, propagate an
+/// error, or unwind. Ownership can be transferred to an existing pool-aware wrapper through the
+/// crate-internal transfer methods without changing the block's allocation or pool identity.
+#[must_use = "dropping a pooled block returns it to its originating MemoryPool"]
+pub struct PooledBlock {
+    block: Option<AlignedBox<[u8]>>,
+    pool: Arc<MemoryPool>,
+}
+
+impl PooledBlock {
+    /// Allocate a block whose drop path returns it to `pool`.
+    pub fn new(pool: Arc<MemoryPool>) -> Self {
+        let block = pool.alloc();
+        Self { block: Some(block), pool }
+    }
+
+    /// Return the originating pool for an ownership transfer inside the crate.
+    pub(crate) fn pool(&self) -> Arc<MemoryPool> {
+        Arc::clone(&self.pool)
+    }
+
+    /// Take the raw block for an ownership transfer inside the crate.
+    ///
+    /// Once taken, this guard remains a harmless pool keep-alive and no longer returns a block on
+    /// drop. Callers must immediately pass the returned block to another owner or to
+    /// [`MemoryPool::free`].
+    pub(crate) fn take_block(&mut self) -> Option<AlignedBox<[u8]>> {
+        self.block.take()
+    }
+}
+
+impl std::ops::Deref for PooledBlock {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.block.as_deref().unwrap_or(&[])
+    }
+}
+
+impl std::ops::DerefMut for PooledBlock {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.block.as_deref_mut().unwrap_or(&mut [])
+    }
+}
+
+impl Drop for PooledBlock {
+    fn drop(&mut self) {
+        if let Some(block) = self.block.take() {
+            self.pool.free(block);
         }
     }
 }
@@ -2032,7 +2096,7 @@ mod memory_pool_growth_tests {
     use super::{
         default_hard_max_capacity, MemoryPool, MemoryPoolRuntimeConfig, PoolBlockLocation,
         PoolBlockOrigin, PoolOwnershipLedger, MemoryPoolError, LOCK_BLOCKS_TEST_MUTEX,
-        DEFAULT_POOL_MAX_BYTES,
+        PooledBlock, DEFAULT_POOL_MAX_BYTES,
     };
 
     #[cfg(any(unix, windows))]
@@ -2134,6 +2198,37 @@ mod memory_pool_growth_tests {
         assert_eq!(pool.capacity.load(Ordering::Acquire), 2);
         pool.try_set_capacity(0).expect("fallible shrink must succeed");
         assert_eq!(pool.capacity.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn pooled_block_drop_returns_the_checked_out_block() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(MemoryPool::new(1, 2_048));
+        let before = pool.accounting_snapshot();
+        {
+            let mut block = PooledBlock::new(Arc::clone(&pool));
+            block[0] = 0xA5;
+            assert_eq!(pool.in_use.load(Ordering::Acquire), before.1 + 1);
+        }
+        assert_eq!(pool.accounting_snapshot(), before);
+        pool.ownership.assert_consistent();
+    }
+
+    #[test]
+    fn pooled_block_transfer_disarms_only_the_guard() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(MemoryPool::new(1, 2_048));
+        let before = pool.accounting_snapshot();
+        let mut guard = PooledBlock::new(Arc::clone(&pool));
+        let originating_pool = guard.pool();
+        let block = guard.take_block().expect("a new guard owns one block");
+        drop(guard);
+        assert_eq!(pool.in_use.load(Ordering::Acquire), before.1 + 1);
+        originating_pool.free(block);
+        assert_eq!(pool.accounting_snapshot(), before);
+        pool.ownership.assert_consistent();
     }
 
     #[test]

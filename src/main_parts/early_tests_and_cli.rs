@@ -609,7 +609,7 @@ fn run_pool_bench(
                 b[j] ^= ((i as u8).wrapping_add(j as u8)) ^ 0x5A;
                 touched = touched.wrapping_add(b[j] as u64);
             }
-            drop(b);
+            opt.free_block(b);
         }
         let _ = touched; // avoid optimization
         t0.elapsed().as_secs_f64()

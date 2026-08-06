@@ -1,6 +1,6 @@
 use crate::accelerate::compress::classify as classify_bytes;
 use crate::env_utils::EnvSnapshot;
-use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool};
+use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool, PooledBlock};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use zstd::stream::raw::CParameter;
@@ -222,16 +222,19 @@ impl CompressionManager {
         }
     }
 
-    /// Compress using zstd (multi-threaded when available) into a pooled block; returns (block, used)
+    /// Compress using zstd (multi-threaded when available) into a pooled block.
+    ///
+    /// The returned block is an RAII owner and is returned to `pool` on drop, including when a
+    /// caller propagates an error after receiving it.
     pub fn compress_to_pool(
         &self,
         pool: &Arc<MemoryPool>,
         data: &[u8],
-    ) -> Option<(aligned_box::AlignedBox<[u8]>, usize)> {
+    ) -> Option<(PooledBlock, usize)> {
         crate::optimize::telemetry::COMPRESS_ATTEMPTS.inc();
         let analysis = CompressionAnalysis::from_full(data);
         analysis.record_telemetry();
-        let mut out = pool.alloc();
+        let mut out = PooledBlock::new(Arc::clone(pool));
         crate::optimize::telemetry::BODY_POOL_ALLOCS.inc();
         // Reserve space for a simple header: 1 byte magic + 4 bytes orig len
         if out.len() < 5 {
@@ -255,19 +258,21 @@ impl CompressionManager {
         Some((out, 5 + compressed_len))
     }
 
-    /// Decompress a pooled buffer created by compress_to_pool
+    /// Decompress a pooled buffer created by [`Self::compress_to_pool`].
+    ///
+    /// The returned block is an RAII owner and is returned to `pool` on drop.
     pub fn decompress_to_pool(
         &self,
         pool: &Arc<MemoryPool>,
         data: &[u8],
-    ) -> Option<(aligned_box::AlignedBox<[u8]>, usize)> {
+    ) -> Option<(PooledBlock, usize)> {
         if data.len() < 5 || data[0] != 0x5A {
             return None;
         }
         let mut len_buf = [0u8; 4];
         len_buf.copy_from_slice(&data[1..5]);
         let orig_len = u32::from_be_bytes(len_buf) as usize;
-        let mut out = pool.alloc();
+        let mut out = PooledBlock::new(Arc::clone(pool));
         if out.len() < orig_len {
             return None;
         }
@@ -684,17 +689,19 @@ fn compute_chunk_metrics(data: &[u8]) -> (u32, u32, u32) {
 // -------------------- Zstd with dictionary --------------------
 
 /// Compress payload using a pre-trained zstd dictionary into a pooled buffer.
+///
+/// The returned block is an RAII owner and is returned to `pool` on drop.
 pub fn compress_with_dict(
     pool: &Arc<MemoryPool>,
     data: &[u8],
     level: i32,
     dict_bytes: &[u8],
     dict_version: u32,
-) -> Option<(aligned_box::AlignedBox<[u8]>, usize)> {
+) -> Option<(PooledBlock, usize)> {
     crate::optimize::telemetry::COMPRESS_ATTEMPTS.inc();
     let analysis = CompressionAnalysis::from_full(data);
     analysis.record_telemetry();
-    let mut out = pool.alloc();
+    let mut out = PooledBlock::new(Arc::clone(pool));
     crate::optimize::telemetry::BODY_POOL_ALLOCS.inc();
     // Header: 1 byte magic (0x5D) + 2 bytes dict id hash + 2 bytes version + 4 bytes orig len
     if out.len() < 9 {
@@ -725,11 +732,12 @@ pub fn compress_with_dict(
 /// The pool block must be at least as large as the declared original payload length. The decoder
 /// writes into exactly that declared-length slice and rejects any result whose length differs, so
 /// an undersized block or malformed frame returns `None` instead of exposing a truncated payload.
+/// The returned block is an RAII owner and is returned to `pool` on drop.
 pub fn decompress_with_dict(
     pool: &Arc<MemoryPool>,
     data: &[u8],
     dict_bytes: &[u8],
-) -> Option<(aligned_box::AlignedBox<[u8]>, usize)> {
+) -> Option<(PooledBlock, usize)> {
     if data.len() < 9 || data[0] != 0x5D {
         return None;
     }
@@ -737,7 +745,7 @@ pub fn decompress_with_dict(
     len_buf.copy_from_slice(&data[5..9]);
     let orig_len = u32::from_be_bytes(len_buf) as usize;
     let mut dec = zstd::bulk::Decompressor::with_dictionary(dict_bytes).ok()?;
-    let mut out = pool.alloc();
+    let mut out = PooledBlock::new(Arc::clone(pool));
     if out.len() < orig_len {
         return None;
     }
@@ -1095,6 +1103,58 @@ mod tests {
         let mut wrong_header = compressed[..used].to_vec();
         wrong_header[1..5].copy_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
         assert!(manager.decompress_to_pool(&pool, &wrong_header).is_none());
+    }
+
+    #[test]
+    fn compression_output_buffer_failure_returns_the_pool_block() {
+        let pool = Arc::new(MemoryPool::new(1, 2_048));
+        let before = pool.accounting_snapshot();
+        let manager = CompressionManager::new(CompressionConfig { min_len: 0, max_level: 5 });
+        let data: Vec<u8> = (0..32 * 1024)
+            .scan(0x1234_5678u32, |state, _| {
+                *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                Some((*state >> 24) as u8)
+            })
+            .collect();
+
+        assert!(manager.compress_to_pool(&pool, &data).is_none());
+        assert_eq!(pool.accounting_snapshot(), before);
+    }
+
+    #[test]
+    fn decompression_failure_returns_the_pool_block() {
+        let pool = Arc::new(MemoryPool::new(1, 2_048));
+        let before = pool.accounting_snapshot();
+        let manager = CompressionManager::new(CompressionConfig::default());
+        let malformed = [0x5A, 0, 0, 0, 32, 0x01, 0x02, 0x03];
+
+        assert!(manager.decompress_to_pool(&pool, &malformed).is_none());
+        assert_eq!(pool.accounting_snapshot(), before);
+    }
+
+    #[test]
+    fn dictionary_compression_output_buffer_failure_returns_the_pool_block() {
+        let pool = Arc::new(MemoryPool::new(1, 2_048));
+        let before = pool.accounting_snapshot();
+        let data: Vec<u8> = (0..32 * 1024)
+            .scan(0x8765_4321u32, |state, _| {
+                *state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                Some((*state >> 24) as u8)
+            })
+            .collect();
+
+        assert!(compress_with_dict(&pool, &data, 5, b"dict", 1).is_none());
+        assert_eq!(pool.accounting_snapshot(), before);
+    }
+
+    #[test]
+    fn dictionary_decompression_failure_returns_the_pool_block() {
+        let pool = Arc::new(MemoryPool::new(1, 2_048));
+        let before = pool.accounting_snapshot();
+        let malformed = [0x5D, 0, 0, 0, 1, 0, 0, 0, 16, 0x01, 0x02, 0x03];
+
+        assert!(decompress_with_dict(&pool, &malformed, b"dict").is_none());
+        assert_eq!(pool.accounting_snapshot(), before);
     }
 
     #[test]

@@ -59,9 +59,7 @@ fn main() {
     let pool = Arc::new(MemoryPool::new(256, (opts.size + 1024).next_power_of_two()));
 
     // Warmup
-    if let Some((block, _)) = mgr.compress_to_pool(&pool, &dataset) {
-        pool.free(block);
-    }
+    let _ = mgr.compress_to_pool(&pool, &dataset);
 
     let start = Instant::now();
     let mut total_out = 0usize;
@@ -72,7 +70,7 @@ fn main() {
             successes += 1;
             compressed_input += dataset.len();
             total_out += used.saturating_sub(5); // exclude header length
-            pool.free(block);
+            drop(block);
         }
     }
     let elapsed = start.elapsed();

@@ -15,7 +15,7 @@ use crate::brain::{CombinedObserver, StealthBrain};
 use crate::crypto::CryptoManager;
 use crate::fec::wire::{self, WireFecReceiver, WirePacketMeta, WireProfile};
 use crate::fec::{AdaptiveFec, FecConfig, FecPacket, FecTransportObserver};
-use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig};
+use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig, PooledBlock};
 use crate::stealth::{
     IcmpUnreachablePolicy, NormalizeResult, OsFingerprintProfile, PacketNormalizer, StealthConfig,
     StealthManager, StealthMode, StealthRuntimeOwner,
@@ -1425,7 +1425,6 @@ impl QuicFuscateConnection {
                     &blk[..outcome.packet_len],
                 );
             }
-            pool.free(blk);
         }
     }
 
@@ -1671,7 +1670,7 @@ impl QuicFuscateConnection {
                     self.stealth_manager.handle_fallback(data, from);
                 }
             } else if let Some(slice) = packet.payload_slice() {
-                let mut buf = self.optimization_manager.alloc_block();
+                let mut buf = PooledBlock::new(self.optimization_manager.memory_pool());
                 let n = slice.len().min(buf.len());
                 buf[..n].copy_from_slice(&slice[..n]);
                 let data = &mut buf[..n];
@@ -1685,7 +1684,6 @@ impl QuicFuscateConnection {
                             | crate::error::ConnectionError::PeerCertificateUnsupported
                     ) {
                         terminal_receive_error = Some(error);
-                        self.optimization_manager.free_block(buf);
                         break;
                     }
                     debug!(
@@ -1695,7 +1693,6 @@ impl QuicFuscateConnection {
                     );
                     self.stealth_manager.handle_fallback(data, from);
                 }
-                self.optimization_manager.free_block(buf);
             }
         }
         self.fec_receive_scratch = recovered_packets;
@@ -1985,7 +1982,7 @@ impl QuicFuscateConnection {
         let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
 
         // Otherwise, generate a new QUIC packet using a pooled buffer.
-        let mut send_buffer = self.optimization_manager.alloc_block();
+        let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
         let send_result = if wire_profile.is_some() {
             if send_buffer.len() <= 2 * wire::SOURCE_LENGTH_LEN {
                 return Err(crate::error::ConnectionError::BufferTooShort);
@@ -2020,7 +2017,7 @@ impl QuicFuscateConnection {
                 return Err(crate::error::ConnectionError::BufferTooShort);
             }
             Err(e) => {
-                // The buffer is recycled automatically via FecPacket Drop.
+                // The PooledBlock guard recycles the buffer on this early return.
                 drop(send_buffer);
                 return Err(crate::error::ConnectionError::Transport(e.to_string()));
             }
@@ -2077,6 +2074,14 @@ impl QuicFuscateConnection {
             (self.packet_id_counter, write)
         };
 
+        // Transfer the checked-out block only after every pre-FEC fallible operation has passed.
+        let send_pool = send_buffer.pool();
+        let Some(send_buffer) = send_buffer.take_block() else {
+            return Err(crate::error::ConnectionError::Transport(
+                "pooled send buffer was already transferred".to_string(),
+            ));
+        };
+
         // Create a source (systematic) FEC packet, passing ownership of the buffer.
         let mut fec_packet = FecPacket::new(
             packet_id,
@@ -2086,7 +2091,7 @@ impl QuicFuscateConnection {
             None,
             0,
             // Use the same pool the buffer was allocated from to avoid cross-pool leaks
-            self.optimization_manager.memory_pool().clone(),
+            send_pool,
         );
         fec_packet.seq = packet_id;
 
