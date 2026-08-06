@@ -105,6 +105,8 @@ use crate::optimize::MemoryPool;
 use crate::optimize::OptimizeConfig;
 #[cfg(unix)]
 use crate::optimize::ZeroCopyBuffer;
+#[cfg(unix)]
+use crate::optimize::ZeroCopyRecvBuffer;
 use crate::stealth::{
     BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, StealthConfig,
     StealthMode, StealthRuntimeOwner,

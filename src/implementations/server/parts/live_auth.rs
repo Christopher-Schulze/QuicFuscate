@@ -513,19 +513,15 @@ pub async fn send_live_datagram_to(
     let fd = socket.as_raw_fd();
     socket
         .async_io(Interest::WRITABLE, || {
-            let zc = ZeroCopyBuffer::new(&[data]);
-            let rc = zc.send_to(fd, *addr);
-            if rc >= 0 {
-                if rc as usize == data.len() {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "partial datagram send_to",
-                    ))
-                }
+            let zc = ZeroCopyBuffer::new(&[data]).map_err(std::io::Error::from)?;
+            let transfer = zc.send_to(fd, *addr).map_err(std::io::Error::from)?;
+            if transfer.is_complete() {
+                Ok(())
             } else {
-                Err(std::io::Error::last_os_error())
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "partial datagram send_to",
+                ))
             }
         })
         .await

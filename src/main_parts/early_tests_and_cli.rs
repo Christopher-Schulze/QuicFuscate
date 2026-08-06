@@ -13,6 +13,8 @@ use quicfuscate::optimize::OptimizationManager;
 use quicfuscate::optimize::OptimizeConfig;
 #[cfg(unix)]
 use quicfuscate::optimize::ZeroCopyBuffer;
+#[cfg(unix)]
+use quicfuscate::optimize::ZeroCopyRecvBuffer;
 use quicfuscate::stealth::StealthConfig;
 use quicfuscate::stealth::TlsClientHelloProfileCatalog;
 use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
@@ -231,13 +233,9 @@ async fn recv_connected_datagram(
     socket
         .async_io(Interest::READABLE, || {
             let mut slice = [&mut buf[..]];
-            let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
-            let rc = zc.recv(fd);
-            if rc >= 0 {
-                Ok(rc as usize)
-            } else {
-                Err(Error::last_os_error())
-            }
+            let mut zc = ZeroCopyRecvBuffer::new_mut(&mut slice).map_err(Error::from)?;
+            let transfer = zc.recv(fd).map_err(Error::from)?;
+            Ok(transfer.transferred())
         })
         .await
 }
@@ -269,16 +267,12 @@ async fn send_connected_datagram(
     let fd = socket.as_raw_fd();
     socket
         .async_io(Interest::WRITABLE, || {
-            let zc = ZeroCopyBuffer::new(&[data]);
-            let rc = zc.send(fd);
-            if rc >= 0 {
-                if rc as usize == data.len() {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "partial datagram send"))
-                }
+            let zc = ZeroCopyBuffer::new(&[data]).map_err(Error::from)?;
+            let transfer = zc.send(fd).map_err(Error::from)?;
+            if transfer.is_complete() {
+                Ok(())
             } else {
-                Err(Error::last_os_error())
+                Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "partial datagram send"))
             }
         })
         .await

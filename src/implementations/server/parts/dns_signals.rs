@@ -1049,8 +1049,6 @@ pub(crate) async fn recv_datagram_from(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
 ) -> std::io::Result<(usize, std::net::SocketAddr)> {
-    use std::io::ErrorKind;
-
     // Use `async_io` so tokio properly clears the edge-triggered readiness
     // when `recvmsg` returns `WouldBlock`.  Calling `ready()` + raw `recvmsg`
     // in a loop causes a busy-spin because tokio never observes the EAGAIN.
@@ -1058,14 +1056,9 @@ pub(crate) async fn recv_datagram_from(
     socket
         .async_io(Interest::READABLE, || {
             let mut slice = [&mut buf[..]];
-            let mut zc = ZeroCopyBuffer::new_mut(&mut slice);
-            match zc.recv_from(fd) {
-                Ok((rc, addr)) if rc >= 0 => Ok((rc as usize, addr)),
-                Ok(_) => {
-                    Err(std::io::Error::new(ErrorKind::UnexpectedEof, "negative recv_from result"))
-                }
-                Err(e) => Err(e),
-            }
+            let mut zc = ZeroCopyRecvBuffer::new_mut(&mut slice).map_err(std::io::Error::from)?;
+            let (transfer, addr) = zc.recv_from(fd).map_err(std::io::Error::from)?;
+            Ok((transfer.transferred(), addr))
         })
         .await
 }
