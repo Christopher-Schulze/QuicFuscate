@@ -2,6 +2,10 @@
 pub enum UnsafeError {
     CapacityOverflow,
     CompressionFailed,
+    InvalidPointer,
+    ForeignPointer,
+    DoubleFree,
+    InvalidPacket,
 }
 // # Unsafe Core - Maximum Performance Optimizations
 //
@@ -10,10 +14,11 @@ pub enum UnsafeError {
 // for maximum throughput and minimum latency.
 //
 // Safety Invariants
-// - All raw pointers must be valid and aligned
-// - Lifetimes are strictly enforced through PhantomData
-// - Memory is never double-freed
-// - All operations are protected by debug assertions
+// - Pool-owned blocks are registered by exact base address and live state.
+// - Registry transitions are serialized by the pool mutex in every thread.
+// - Fallback blocks are tracked separately and never enter the preallocated cache.
+// - Packet length and capacity invariants are checked in release builds.
+// - Raw callers must keep a block live until every read/write operation completes.
 //
 // Performance Gains (indicative)
 // - Memory Pool: 10-15% CPU reduction, 5% latency improvement
@@ -23,13 +28,11 @@ pub enum UnsafeError {
 // - Overall: throughput improvements are workload-dependent and must be validated with benchmarks.
 
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
-use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::io::IoSlice;
-use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::slice;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(feature = "compression_zstd_ffi")]
 use crate::env_utils::EnvSnapshot;
@@ -44,37 +47,55 @@ use crate::telemetry;
 // Zero-Copy Memory Pool with MaybeUninit
 // ============================================================================
 
-/// Ultra-fast memory pool using raw pointers and MaybeUninit
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocationKind {
+    Preallocated,
+    Fallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocationState {
+    Available,
+    InUse,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AllocationRecord {
+    kind: AllocationKind,
+    state: AllocationState,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnedBlock {
+    ptr: NonNull<u8>,
+}
+
+// SAFETY: OwnedBlock is accessed only through UnsafeMemoryPool::state, whose Mutex
+// serializes every ownership transition. The pointer refers to an allocation owned by
+// the pool and is never dereferenced merely by moving this record between threads.
+unsafe impl Send for OwnedBlock {}
+
+struct PoolState {
+    available: Vec<OwnedBlock>,
+    allocations: HashMap<usize, AllocationRecord>,
+}
+
+/// Memory pool using a synchronized ownership registry and raw aligned blocks.
 pub struct UnsafeMemoryPool {
-    /// Thread-local cache using raw pointers
-    tls_cache: UnsafeCell<Vec<*mut u8>>,
-    /// Global pool using atomic pointers
-    global_pool: Vec<AtomicPtr<u8>>,
-    /// Pool configuration
+    /// All available preallocated blocks. Fallback blocks are never stored here.
+    state: Mutex<PoolState>,
     block_size: usize,
-    capacity: AtomicUsize,
-    in_use: AtomicUsize,
-    available: AtomicUsize,
-    /// Memory layout for allocation
+    capacity: usize,
     layout: Layout,
-    /// NUMA node affinity
     numa_node: usize,
 }
 
-// SAFETY: UnsafeMemoryPool is Send because all raw pointers it contains are owned
-// allocations (via std::alloc::alloc) that are not shared with other threads without
-// atomic synchronization. The global_pool uses AtomicPtr with Acquire/Release ordering,
-// and the tls_cache is only accessed by the thread that owns it.
-unsafe impl Send for UnsafeMemoryPool {}
-// SAFETY: UnsafeMemoryPool is Sync because shared access to the global_pool is fully
-// mediated by AtomicPtr with Acquire/Release ordering, ensuring no data races. The
-// tls_cache (UnsafeCell<Vec<*mut u8>>) is only accessed from a single thread per the
-// thread-local cache protocol - concurrent callers each operate on their own TLS path
-// or take the atomic global path.
-unsafe impl Sync for UnsafeMemoryPool {}
+// Send and Sync are intentionally derived by the compiler for UnsafeMemoryPool. The only
+// field carrying allocation ownership is Mutex<PoolState>; OwnedBlock is Send because its
+// raw pointer is an address record protected by that mutex. No pool-level unsafe trait impl
+// is needed, and no raw pointer is accessed without a live registry record.
 
 impl UnsafeMemoryPool {
-    const TLS_CACHE_SIZE: usize = 32;
     const PREFETCH_DISTANCE: usize = 8;
 
     /// Creates a new unsafe memory pool with specified capacity and block size
@@ -86,7 +107,8 @@ impl UnsafeMemoryPool {
         // alignment rounding. These preconditions satisfy Layout::from_size_align.
         let layout = unsafe { Layout::from_size_align_unchecked(block_size, 64) };
 
-        let mut global_pool = Vec::with_capacity(capacity);
+        let mut available = Vec::with_capacity(capacity);
+        let mut allocations = HashMap::with_capacity(capacity);
 
         // Pre-allocate all blocks
         for _ in 0..capacity {
@@ -106,27 +128,32 @@ impl UnsafeMemoryPool {
                 }
                 raw
             };
-            global_pool.push(AtomicPtr::new(ptr));
+            // SAFETY: alloc returned a non-null pointer after handle_alloc_error.
+            let block = unsafe { NonNull::new_unchecked(ptr) };
+            allocations.insert(
+                block.as_ptr() as usize,
+                AllocationRecord {
+                    kind: AllocationKind::Preallocated,
+                    state: AllocationState::Available,
+                },
+            );
+            available.push(OwnedBlock { ptr: block });
         }
         telemetry::UNSAFE_POOL_CREATED.inc();
-        telemetry::UNSAFE_POOL_CAPACITY.store(capacity as u64, Ordering::Relaxed);
+        telemetry::UNSAFE_POOL_CAPACITY
+            .store(capacity as u64, std::sync::atomic::Ordering::Relaxed);
 
         let this = Self {
-            tls_cache: UnsafeCell::new(Vec::with_capacity(Self::TLS_CACHE_SIZE)),
-            global_pool,
+            state: Mutex::new(PoolState { available, allocations }),
             block_size,
-            capacity: AtomicUsize::new(capacity),
-            in_use: AtomicUsize::new(0),
-            available: AtomicUsize::new(capacity),
+            capacity,
             layout,
             numa_node,
         };
 
-        // Touch fields so they are considered used and emit a helpful debug line.
-        let cap_now = this.capacity.load(Ordering::Relaxed);
         log::debug!(
             "UnsafeMemoryPool::new -> capacity={}, numa_node={}, block_size={}",
-            cap_now,
+            this.capacity,
             this.numa_node,
             this.block_size
         );
@@ -134,126 +161,161 @@ impl UnsafeMemoryPool {
         this
     }
 
+    fn lock_state(&self) -> MutexGuard<'_, PoolState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                log::error!("UnsafeMemoryPool ownership registry was poisoned; recovering state");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn validate_live_block(&self, ptr: NonNull<u8>) -> Result<(), UnsafeError> {
+        if (ptr.as_ptr() as usize) % self.layout.align() != 0 {
+            return Err(UnsafeError::InvalidPointer);
+        }
+
+        let state = self.lock_state();
+        match state.allocations.get(&(ptr.as_ptr() as usize)) {
+            None => Err(UnsafeError::ForeignPointer),
+            Some(record) if record.state != AllocationState::InUse => Err(UnsafeError::DoubleFree),
+            Some(_) => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    fn available_count(&self) -> usize {
+        self.lock_state().available.len()
+    }
+
+    #[cfg(test)]
+    fn in_use_count(&self) -> usize {
+        self.lock_state()
+            .allocations
+            .values()
+            .filter(|record| record.state == AllocationState::InUse)
+            .count()
+    }
+
+    #[cfg(test)]
+    fn allocation_count(&self) -> usize {
+        self.lock_state().allocations.len()
+    }
+
     /// Allocates a block without zeroing - maximum performance
     #[inline(always)]
     /// # Safety
-    /// Caller must ensure the returned pointer is used within the pool's block size
-    /// and deallocated via `UnsafeMemoryPool::free`. No aliasing guarantees are provided.
+    /// The returned pointer is a live full-size block. The caller must not call `free` or
+    /// hand the block to another owner until all reads and writes through it are complete.
     pub unsafe fn alloc_uninit(&self) -> NonNull<u8> {
         telemetry::UNSAFE_ALLOC_CALLS.inc();
 
-        // SAFETY: UnsafeCell::get() returns a raw pointer to the inner Vec.
-        // This is safe to dereference because the pool is !Sync on the TLS path
-        // (single-threaded access to thread-local cache). The Vec itself is valid.
-        // Try TLS cache first
-        let cache = &mut *self.tls_cache.get();
-        if let Some(ptr) = cache.pop() {
+        let cached = {
+            let mut state = self.lock_state();
+            state.available.pop().and_then(|block| {
+                let address = block.ptr.as_ptr() as usize;
+                match state.allocations.get_mut(&address) {
+                    Some(record) if record.state == AllocationState::Available => {
+                        record.state = AllocationState::InUse;
+                        Some(block.ptr)
+                    }
+                    _ => {
+                        log::error!("UnsafeMemoryPool available registry invariant violated");
+                        None
+                    }
+                }
+            })
+        };
+        if let Some(ptr) = cached {
             telemetry::UNSAFE_TLS_HITS.inc();
-            self.available.fetch_sub(1, Ordering::Relaxed);
-            self.in_use.fetch_add(1, Ordering::Relaxed);
-
-            // Prefetch next block
-            if let Some(&next) = cache.last() {
-                self.prefetch_block(next);
-            }
-
-            // SAFETY: `ptr` was previously returned by alloc() for this pool's layout,
-            // so it is non-null and valid. NonNull::new_unchecked precondition satisfied.
-            return NonNull::new_unchecked(ptr);
-        }
-
-        // Try global pool
-        for slot in &self.global_pool {
-            let ptr = slot.swap(ptr::null_mut(), Ordering::Acquire);
-            if !ptr.is_null() {
-                telemetry::UNSAFE_GLOBAL_HITS.inc();
-                self.available.fetch_sub(1, Ordering::Relaxed);
-                self.in_use.fetch_add(1, Ordering::Relaxed);
-
-                // Prefetch the block
-                self.prefetch_block(ptr);
-
-                // SAFETY: `ptr` was loaded from the global pool via atomic swap and
-                // verified non-null above. It was originally allocated with this pool's layout.
-                return NonNull::new_unchecked(ptr);
-            }
+            self.prefetch_block(ptr.as_ptr());
+            return ptr;
         }
 
         // Fallback: allocate new block
         telemetry::UNSAFE_FALLBACK_ALLOCS.inc();
         // SAFETY: self.layout has valid size and alignment (constructed in new()).
         // Null check + handle_alloc_error ensures we never return null.
-        let ptr = alloc(self.layout);
-        if ptr.is_null() {
+        let raw = alloc(self.layout);
+        if raw.is_null() {
             handle_alloc_error(self.layout);
         }
-
-        self.in_use.fetch_add(1, Ordering::Relaxed);
+        let ptr = NonNull::new_unchecked(raw);
+        self.lock_state().allocations.insert(
+            ptr.as_ptr() as usize,
+            AllocationRecord { kind: AllocationKind::Fallback, state: AllocationState::InUse },
+        );
         // SAFETY: null case handled above - ptr is guaranteed non-null here.
-        NonNull::new_unchecked(ptr)
+        ptr
     }
 
     /// Returns a block to the pool
     #[inline(always)]
     /// # Safety
-    /// `ptr` must originate from this pool via `alloc_uninit` or pool-owned allocations.
-    pub unsafe fn free(&self, ptr: NonNull<u8>) {
+    /// `ptr` must be the exact base address returned by this pool's `alloc_uninit`, and no
+    /// other thread or owner may access the block after this call starts. Invalid, foreign,
+    /// and already-returned pointers are rejected without changing pool state.
+    pub unsafe fn free(&self, ptr: NonNull<u8>) -> Result<(), UnsafeError> {
         telemetry::UNSAFE_FREE_CALLS.inc();
 
-        // SAFETY: UnsafeCell::get() - same single-threaded TLS access pattern as alloc_uninit.
-        // Try TLS cache first
-        let cache = &mut *self.tls_cache.get();
-        if cache.len() < Self::TLS_CACHE_SIZE {
-            cache.push(ptr.as_ptr());
-            self.available.fetch_add(1, Ordering::Relaxed);
-            self.in_use.fetch_sub(1, Ordering::Relaxed);
-            return;
+        if (ptr.as_ptr() as usize) % self.layout.align() != 0 {
+            return Err(UnsafeError::InvalidPointer);
         }
 
-        // Try global pool
-        for slot in &self.global_pool {
-            if slot
-                .compare_exchange(
-                    ptr::null_mut(),
-                    ptr.as_ptr(),
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                self.available.fetch_add(1, Ordering::Relaxed);
-                self.in_use.fetch_sub(1, Ordering::Relaxed);
-                return;
+        let kind = {
+            let mut state = self.lock_state();
+            let address = ptr.as_ptr() as usize;
+            let kind = match state.allocations.get_mut(&address) {
+                None => return Err(UnsafeError::ForeignPointer),
+                Some(record) if record.state != AllocationState::InUse => {
+                    return Err(UnsafeError::DoubleFree);
+                }
+                Some(record) => {
+                    let kind = record.kind;
+                    if kind == AllocationKind::Preallocated {
+                        record.state = AllocationState::Available;
+                    }
+                    kind
+                }
+            };
+
+            if kind == AllocationKind::Preallocated {
+                state.available.push(OwnedBlock { ptr });
+            } else {
+                state.allocations.remove(&address);
             }
-        }
+            kind
+        };
 
-        // Pool is full, deallocate
-        telemetry::UNSAFE_DEALLOCS.inc();
-        // SAFETY: `ptr` was originally allocated with `self.layout` via alloc().
-        // The caller guarantees `ptr` originates from this pool (documented in fn safety).
-        // dealloc requires matching layout, which is satisfied.
-        dealloc(ptr.as_ptr(), self.layout);
-        self.in_use.fetch_sub(1, Ordering::Relaxed);
+        if kind == AllocationKind::Fallback {
+            telemetry::UNSAFE_DEALLOCS.inc();
+            // SAFETY: the registry admitted this exact pointer as a live fallback block
+            // allocated with self.layout, and removed the record before deallocation.
+            dealloc(ptr.as_ptr(), self.layout);
+        }
+        Ok(())
     }
 
     /// Copies data into a live pool block, clamping the write to the block size.
     #[inline(always)]
     /// # Safety
     /// `ptr` must be a live, correctly aligned block returned by this pool's
-    /// `alloc_uninit`, valid for `self.block_size` writable bytes, and not overlap
-    /// the source slice. The block must not have been returned through `free`.
-    pub unsafe fn copy_from_slice(&self, ptr: NonNull<u8>, data: &[u8]) -> usize {
-        debug_assert_eq!(ptr.as_ptr() as usize % self.layout.align(), 0);
-        debug_assert!(self.block_size > 0);
+    /// `alloc_uninit`, valid for `self.block_size` writable bytes, and not returned through
+    /// `free`. The source may overlap the destination; the copy is overlap-safe.
+    pub unsafe fn copy_from_slice(
+        &self,
+        ptr: NonNull<u8>,
+        data: &[u8],
+    ) -> Result<usize, UnsafeError> {
+        self.validate_live_block(ptr)?;
         let len = data.len().min(self.block_size);
-        debug_assert!(len <= self.block_size);
 
         // SAFETY: The caller guarantees that `ptr` points to a live block with
-        // `self.block_size` writable bytes. The explicit slice length and bounded
-        // subslice make the destination range checked before the copy.
-        let destination = slice::from_raw_parts_mut(ptr.as_ptr(), self.block_size);
-        destination[..len].copy_from_slice(&data[..len]);
-        len
+        // `self.block_size` writable bytes. `ptr::copy` is used instead of
+        // `copy_nonoverlapping`, so an aliased source slice has defined copy semantics.
+        ptr::copy(data.as_ptr(), ptr.as_ptr(), len);
+        Ok(len)
     }
 
     /// Prefetch a memory block for faster access
@@ -261,12 +323,9 @@ impl UnsafeMemoryPool {
     /// # Safety
     /// `ptr` must be a valid address; this performs hardware prefetch hints only.
     unsafe fn prefetch_block(&self, ptr: *mut u8) {
-        // SAFETY: ptr points to a pool block of self.block_size bytes (cache-line aligned,
-        // minimum 64 bytes). PREFETCH_DISTANCE is 8, so the maximum offset is 8*64 = 512
-        // bytes. Pool blocks are at least block_size bytes which is >= 64 and typically
-        // >= 4096. Even if the offset exceeds the allocation, prefetch is a hint-only
-        // instruction that does not fault on invalid addresses (x86/ARM behavior).
-        for i in 0..=Self::PREFETCH_DISTANCE {
+        let line_count = self.block_size / 64;
+        let last_line = line_count.saturating_sub(1).min(Self::PREFETCH_DISTANCE);
+        for i in 0..=last_line {
             let p = ptr.add(i * 64);
             prefetch(p as *const u8, PrefetchHint::T0);
         }
@@ -277,25 +336,29 @@ impl UnsafeMemoryPool {
 
 impl Drop for UnsafeMemoryPool {
     fn drop(&mut self) {
-        // SAFETY: Drop has exclusive (&mut self) access. All pointers in TLS cache and
-        // global pool were originally allocated with `self.layout` via alloc(). Each
-        // pointer is checked for null before dealloc. No double-free because each slot
-        // holds a unique pointer placed there by alloc_uninit/free.
+        // SAFETY: Drop has exclusive access to the registry. Only available preallocated
+        // blocks are deallocated here. Checked-out blocks are deliberately leaked if the
+        // no-live-user precondition is violated, because deallocating them would create a
+        // use-after-free for the outstanding raw owner. Valid users must return every block
+        // before the final Arc reference to this pool is dropped.
+        let state = match self.state.get_mut() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let live_count = state
+            .allocations
+            .values()
+            .filter(|record| record.state == AllocationState::InUse)
+            .count();
+        if live_count != 0 {
+            log::error!(
+                "UnsafeMemoryPool dropped with {} live blocks; leaking checked-out ownership",
+                live_count
+            );
+        }
         unsafe {
-            // Free all blocks in TLS cache
-            let cache = &mut *self.tls_cache.get();
-            for &ptr in cache.iter() {
-                if !ptr.is_null() {
-                    dealloc(ptr, self.layout);
-                }
-            }
-
-            // Free all blocks in global pool
-            for slot in &self.global_pool {
-                let ptr = slot.load(Ordering::Relaxed);
-                if !ptr.is_null() {
-                    dealloc(ptr, self.layout);
-                }
+            for block in state.available.drain(..) {
+                dealloc(block.ptr.as_ptr(), self.layout);
             }
         }
     }
@@ -305,7 +368,7 @@ impl Drop for UnsafeMemoryPool {
 // Zero-Copy Transport with IoSlice
 // ============================================================================
 
-/// Zero-copy packet structure using raw pointers
+/// Zero-copy packet structure using a validated live pool block.
 pub struct UnsafePacket {
     /// Raw data pointer
     data: NonNull<u8>,
@@ -315,25 +378,27 @@ pub struct UnsafePacket {
     capacity: usize,
     /// Pool reference for deallocation
     pool: Arc<UnsafeMemoryPool>,
-    /// Phantom data for lifetime tracking
-    _phantom: PhantomData<&'static [u8]>,
 }
 
 impl UnsafePacket {
     /// Creates a new packet from raw parts
     #[inline(always)]
     /// # Safety
-    /// `data` must be a valid pointer with `capacity` bytes owned by `pool`. `len <= capacity`.
+    /// `data` must be the exact base address of a live block returned by `pool` and must not
+    /// be returned through `pool.free` while the packet exists. The constructor validates
+    /// pool identity, alignment, live state, `capacity <= block_size`, and `len <= capacity`.
     pub unsafe fn from_raw_parts(
         data: NonNull<u8>,
         len: usize,
         capacity: usize,
         pool: Arc<UnsafeMemoryPool>,
-    ) -> Self {
-        debug_assert!(len <= capacity);
-        debug_assert!(capacity <= pool.block_size);
+    ) -> Result<Self, UnsafeError> {
+        if len > capacity || capacity > pool.block_size {
+            return Err(UnsafeError::InvalidPacket);
+        }
+        pool.validate_live_block(data)?;
 
-        Self { data, len, capacity, pool, _phantom: PhantomData }
+        Ok(Self { data, len, capacity, pool })
     }
 
     /// Returns a slice view of the packet data
@@ -355,19 +420,17 @@ impl UnsafePacket {
     /// Extends the packet with data
     #[inline(always)]
     /// # Safety
-    /// Extends in-place; caller must ensure `self.capacity - self.len >= data.len()`.
+    /// `self` must retain exclusive ownership of its live block for the duration of the
+    /// operation. The source may alias the packet block because the copy is overlap-safe.
     pub unsafe fn extend_from_slice(&mut self, data: &[u8]) -> Result<(), UnsafeError> {
-        let new_len = self.len + data.len();
+        let new_len = self.len.checked_add(data.len()).ok_or(UnsafeError::CapacityOverflow)?;
         if new_len > self.capacity {
             return Err(UnsafeError::CapacityOverflow);
         }
 
-        // SAFETY: dst pointer is self.data offset by self.len, which stays within
-        // the allocated block because new_len <= self.capacity (checked above) and
-        // the block has self.capacity bytes. src is data.as_ptr() with data.len()
-        // bytes - a valid slice reference. Regions do not overlap because self.data
-        // is a pool-allocated block and data is an independent slice from the caller.
-        ptr::copy_nonoverlapping(data.as_ptr(), self.data.as_ptr().add(self.len), data.len());
+        // SAFETY: new_len <= capacity bounds the destination within the validated block;
+        // data is a valid slice and ptr::copy supports overlap with the source.
+        ptr::copy(data.as_ptr(), self.data.as_ptr().add(self.len), data.len());
         self.len = new_len;
         Ok(())
     }
@@ -375,12 +438,11 @@ impl UnsafePacket {
 
 impl Drop for UnsafePacket {
     fn drop(&mut self) {
-        // SAFETY: self.data is a NonNull<u8> that was allocated from self.pool via
-        // alloc_uninit (guaranteed by from_raw_parts contract). It has not been freed
-        // yet because Drop runs exactly once. pool.free accepts any pointer that
-        // originated from the same pool's alloc_uninit, which is satisfied here.
+        // SAFETY: from_raw_parts admitted self.data as this pool's live exact-base block.
         unsafe {
-            self.pool.free(self.data);
+            if let Err(error) = self.pool.free(self.data) {
+                log::error!("UnsafePacket could not return its pool block: {:?}", error);
+            }
         }
     }
 }
@@ -1110,7 +1172,12 @@ pub mod unsafe_compress {
             let (header_magic, header_size) =
                 if self.dict.is_some() { (0x5D_u8, 9_usize) } else { (0x5A_u8, 5_usize) };
             if dst_capacity < header_size + 16 {
-                self.pool.free(dst_ptr);
+                if let Err(error) = self.pool.free(dst_ptr) {
+                    log::error!(
+                        "UnsafeCompressor could not return undersized output block: {:?}",
+                        error
+                    );
+                }
                 return Err(UnsafeError::CapacityOverflow);
             }
 
@@ -1216,7 +1283,12 @@ pub mod unsafe_compress {
             };
 
             if zstd_is_error(compressed_size) != 0 {
-                self.pool.free(dst_ptr);
+                if let Err(error) = self.pool.free(dst_ptr) {
+                    log::error!(
+                        "UnsafeCompressor could not return failed output block: {:?}",
+                        error
+                    );
+                }
                 telemetry::UNSAFE_COMPRESS_FAILURES.inc();
                 return Err(UnsafeError::CompressionFailed);
             }
@@ -1225,12 +1297,7 @@ pub mod unsafe_compress {
             telemetry::UNSAFE_COMPRESS_BYTES_IN.inc_by(src.len() as u64);
             telemetry::UNSAFE_COMPRESS_BYTES_OUT.inc_by(total_size as u64);
 
-            Ok(UnsafePacket::from_raw_parts(
-                dst_ptr,
-                total_size,
-                dst_capacity,
-                Arc::clone(&self.pool),
-            ))
+            UnsafePacket::from_raw_parts(dst_ptr, total_size, dst_capacity, Arc::clone(&self.pool))
         }
     }
 
@@ -1330,7 +1397,7 @@ mod tests {
 
             // Test write
             let data = b"Hello, World!";
-            let len = pool.copy_from_slice(ptr1, data);
+            let len = pool.copy_from_slice(ptr1, data).expect("live pool copy must succeed");
             assert_eq!(len, data.len());
 
             // Test read
@@ -1338,12 +1405,12 @@ mod tests {
             assert_eq!(slice, data);
 
             // Test free
-            pool.free(ptr1);
+            pool.free(ptr1).expect("preallocated block must return");
 
-            // Test TLS cache hit
+            // Test synchronized available-cache hit
             let ptr2 = pool.alloc_uninit();
-            assert_eq!(ptr1, ptr2); // Should get same pointer from TLS cache
-            pool.free(ptr2);
+            assert_eq!(ptr1, ptr2); // Should get same pointer from the available cache
+            pool.free(ptr2).expect("reused block must return");
         }
     }
 
@@ -1357,7 +1424,8 @@ mod tests {
         // the pointer to the pool.
         unsafe {
             let ptr = pool.alloc_uninit();
-            let mut packet = UnsafePacket::from_raw_parts(ptr, 0, 1024, Arc::clone(&pool));
+            let mut packet = UnsafePacket::from_raw_parts(ptr, 0, 1024, Arc::clone(&pool))
+                .expect("valid pool packet parts");
 
             // Test extend
             let data = b"Test data";
@@ -1435,8 +1503,8 @@ mod tests {
             assert_eq!(*ptr1.as_ptr(), 0xAA);
             assert_eq!(*ptr2.as_ptr(), 0xBB);
 
-            pool.free(ptr1);
-            pool.free(ptr2);
+            pool.free(ptr1).expect("first Miri block must return");
+            pool.free(ptr2).expect("second Miri block must return");
         }
     }
 
@@ -1457,12 +1525,12 @@ mod tests {
 
             // Free all blocks - must not panic
             for ptr in ptrs {
-                pool.free(ptr);
+                pool.free(ptr).expect("cycle block must return");
             }
 
             // Re-allocate to verify pool reuse works after free cycle
             let reused = pool.alloc_uninit();
-            pool.free(reused);
+            pool.free(reused).expect("reused cycle block must return");
         }
     }
 
@@ -1481,7 +1549,7 @@ mod tests {
                     "pointer {:p} is not 64-byte aligned",
                     ptr.as_ptr()
                 );
-                pool.free(ptr);
+                pool.free(ptr).expect("aligned block must return");
             }
         }
     }
@@ -1495,7 +1563,8 @@ mod tests {
         // within the 1024-byte capacity. Packet dropped normally at end.
         unsafe {
             let ptr = pool.alloc_uninit();
-            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 1024, Arc::clone(&pool));
+            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 1024, Arc::clone(&pool))
+                .expect("valid sequential packet parts");
 
             let chunks: [&[u8]; 5] = [b"AAAA", b"BBBB", b"CCCC", b"DDDD", b"EEEE"];
             for chunk in &chunks {
@@ -1522,7 +1591,8 @@ mod tests {
         // of 100 bytes exceeds capacity and must return Err. Packet dropped normally.
         unsafe {
             let ptr = pool.alloc_uninit();
-            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 128, Arc::clone(&pool));
+            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 128, Arc::clone(&pool))
+                .expect("valid overflow packet parts");
 
             let buf = [0xCCu8; 100];
             let first = pkt.extend_from_slice(&buf);
@@ -1599,13 +1669,14 @@ mod tests {
         unsafe {
             let ptr = pool.alloc_uninit();
             let big_data = [0xABu8; 256]; // larger than block_size (64)
-            let written = pool.copy_from_slice(ptr, &big_data);
+            let written =
+                pool.copy_from_slice(ptr, &big_data).expect("live oversized copy must succeed");
             assert_eq!(written, 64, "copy_from_slice must clamp to block_size");
 
             // Verify the data was actually written
             let slice = std::slice::from_raw_parts(ptr.as_ptr(), written);
             assert!(slice.iter().all(|&b| b == 0xAB));
-            pool.free(ptr);
+            pool.free(ptr).expect("clamped-copy block must return");
         }
     }
 
@@ -1617,9 +1688,9 @@ mod tests {
         // slice writes zero bytes. free returns to pool.
         unsafe {
             let ptr = pool.alloc_uninit();
-            let written = pool.copy_from_slice(ptr, &[]);
+            let written = pool.copy_from_slice(ptr, &[]).expect("live empty copy must succeed");
             assert_eq!(written, 0);
-            pool.free(ptr);
+            pool.free(ptr).expect("empty-copy block must return");
         }
     }
 
@@ -1631,7 +1702,8 @@ mod tests {
         // from_raw_parts with len=0 creates empty packet.
         unsafe {
             let ptr = pool.alloc_uninit();
-            let pkt = UnsafePacket::from_raw_parts(ptr, 0, 256, Arc::clone(&pool));
+            let pkt = UnsafePacket::from_raw_parts(ptr, 0, 256, Arc::clone(&pool))
+                .expect("valid empty packet parts");
             assert!(pkt.as_slice().is_empty());
             assert_eq!(pkt.as_io_slice().len(), 0);
         }
@@ -1644,7 +1716,8 @@ mod tests {
         // SAFETY: ptr from alloc_uninit is valid. Extending with empty slice is a no-op.
         unsafe {
             let ptr = pool.alloc_uninit();
-            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 128, Arc::clone(&pool));
+            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 128, Arc::clone(&pool))
+                .expect("valid zero-length packet parts");
             let result = pkt.extend_from_slice(&[]);
             assert!(result.is_ok());
             assert_eq!(pkt.as_slice().len(), 0);
@@ -1659,7 +1732,8 @@ mod tests {
         // Extending with exactly 128 bytes should succeed.
         unsafe {
             let ptr = pool.alloc_uninit();
-            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 128, Arc::clone(&pool));
+            let mut pkt = UnsafePacket::from_raw_parts(ptr, 0, 128, Arc::clone(&pool))
+                .expect("valid exact-capacity packet parts");
             let data = [0xFFu8; 128];
             let result = pkt.extend_from_slice(&data);
             assert!(result.is_ok());
@@ -1678,9 +1752,10 @@ mod tests {
         unsafe {
             let ptr = pool.alloc_uninit();
             let data = [0xCCu8; 64];
-            let written = pool.copy_from_slice(ptr, &data);
+            let written =
+                pool.copy_from_slice(ptr, &data).expect("rounded block copy must succeed");
             assert_eq!(written, 64, "block_size=1 should round to 64");
-            pool.free(ptr);
+            pool.free(ptr).expect("rounded block must return");
         }
     }
 
@@ -1701,9 +1776,189 @@ mod tests {
             assert_eq!(*ptr_a.as_ptr(), 0xAA);
             assert_eq!(*ptr_b.as_ptr(), 0xBB);
 
-            pool_a.free(ptr_a);
-            pool_b.free(ptr_b);
+            pool_a.free(ptr_a).expect("pool A block must return");
+            pool_b.free(ptr_b).expect("pool B block must return");
         }
+    }
+
+    #[test]
+    fn test_pool_send_sync_contract() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<UnsafeMemoryPool>();
+    }
+
+    #[test]
+    fn test_pool_rejects_foreign_subslice_and_double_free() {
+        let pool = Arc::new(UnsafeMemoryPool::new(2, 256, 0));
+        let foreign_pool = Arc::new(UnsafeMemoryPool::new(2, 256, 0));
+
+        // SAFETY: both pointers are live blocks from their respective pools. The shifted
+        // pointer remains within its allocation but is intentionally not a valid pool base.
+        unsafe {
+            let foreign_ptr = foreign_pool.alloc_uninit();
+            assert_eq!(
+                pool.free(foreign_ptr),
+                Err(UnsafeError::ForeignPointer),
+                "a block from another pool must not enter this registry"
+            );
+            assert_eq!(pool.in_use_count(), 0);
+            assert_eq!(foreign_pool.in_use_count(), 1);
+            foreign_pool.free(foreign_ptr).expect("foreign pool must reclaim its own block");
+
+            let ptr = pool.alloc_uninit();
+            let shifted = NonNull::new_unchecked(ptr.as_ptr().add(1));
+            let shifted_result = pool.free(shifted);
+            assert!(
+                matches!(
+                    shifted_result,
+                    Err(UnsafeError::InvalidPointer) | Err(UnsafeError::ForeignPointer)
+                ),
+                "a sub-slice base must be rejected"
+            );
+            assert_eq!(pool.in_use_count(), 1);
+
+            pool.free(ptr).expect("live base block must return");
+            assert_eq!(
+                pool.free(ptr),
+                Err(UnsafeError::DoubleFree),
+                "a returned block must not be accepted twice"
+            );
+            assert_eq!(pool.in_use_count(), 0);
+            assert_eq!(pool.available_count(), 2);
+        }
+    }
+
+    #[test]
+    fn test_pool_separates_fallback_ownership_and_capacity() {
+        let pool = Arc::new(UnsafeMemoryPool::new(1, 256, 0));
+
+        // SAFETY: the first block is preallocated and the second necessarily uses the
+        // distinct fallback path because the configured preallocated capacity is one.
+        unsafe {
+            let preallocated = pool.alloc_uninit();
+            let fallback = pool.alloc_uninit();
+            assert_eq!(pool.available_count(), 0);
+            assert_eq!(pool.in_use_count(), 2);
+            assert_eq!(pool.allocation_count(), 2);
+
+            pool.free(fallback).expect("fallback block must deallocate directly");
+            assert_eq!(pool.available_count(), 0);
+            assert_eq!(pool.allocation_count(), 1);
+            assert_eq!(pool.in_use_count(), 1);
+
+            pool.free(preallocated).expect("preallocated block must return to available cache");
+            assert_eq!(pool.available_count(), 1);
+            assert_eq!(pool.allocation_count(), 1);
+            assert_eq!(pool.in_use_count(), 0);
+        }
+    }
+
+    #[test]
+    fn test_pool_prefetch_bounds_undersized_block() {
+        let pool = Arc::new(UnsafeMemoryPool::new(1, 1, 0));
+
+        // SAFETY: new() rounds this block to one 64-byte cache line. The prefetch helper
+        // must issue only the offset zero hint and the block is returned once afterward.
+        unsafe {
+            let ptr = pool.alloc_uninit();
+            pool.prefetch_block(ptr.as_ptr());
+            pool.free(ptr).expect("undersized-prefetch block must return");
+        }
+    }
+
+    #[test]
+    fn test_packet_constructor_rejects_invalid_runtime_parts() {
+        let pool = Arc::new(UnsafeMemoryPool::new(1, 128, 0));
+
+        // SAFETY: ptr is live and valid for the final constructor call. The first two calls
+        // intentionally fail before taking ownership, so ptr remains available for cleanup.
+        unsafe {
+            let ptr = pool.alloc_uninit();
+            assert!(matches!(
+                UnsafePacket::from_raw_parts(ptr, 129, 128, Arc::clone(&pool)),
+                Err(UnsafeError::InvalidPacket)
+            ));
+            assert!(matches!(
+                UnsafePacket::from_raw_parts(ptr, 0, 129, Arc::clone(&pool)),
+                Err(UnsafeError::InvalidPacket)
+            ));
+            assert_eq!(pool.in_use_count(), 1);
+
+            let packet = UnsafePacket::from_raw_parts(ptr, 0, 128, Arc::clone(&pool))
+                .expect("valid packet parts must be admitted");
+            drop(packet);
+            assert_eq!(pool.in_use_count(), 0);
+        }
+    }
+
+    #[test]
+    fn test_packet_extend_supports_overlapping_source() {
+        let pool = Arc::new(UnsafeMemoryPool::new(1, 128, 0));
+
+        // SAFETY: the seed is copied into the live block, and the source slice is an alias
+        // within that same block. extend_from_slice uses ptr::copy, which supports overlap.
+        unsafe {
+            let ptr = pool.alloc_uninit();
+            let seed = *b"ABCDEFGH";
+            ptr::copy(seed.as_ptr(), ptr.as_ptr(), seed.len());
+            let mut packet = UnsafePacket::from_raw_parts(ptr, 4, 128, Arc::clone(&pool))
+                .expect("valid overlapping packet parts");
+            let source = slice::from_raw_parts(ptr.as_ptr().add(2), 4);
+            packet.extend_from_slice(source).expect("overlapping extension must succeed");
+            assert_eq!(packet.as_slice(), b"ABCDCDEF");
+        }
+    }
+
+    #[test]
+    fn test_packet_extend_checked_addition_overflow() {
+        let pool = Arc::new(UnsafeMemoryPool::new(1, 128, 0));
+
+        // SAFETY: this test-only state reaches checked_add before any packet memory is read
+        // or written. The live pointer remains valid and is returned by Drop afterward.
+        unsafe {
+            let ptr = pool.alloc_uninit();
+            let mut packet = UnsafePacket {
+                data: ptr,
+                len: usize::MAX,
+                capacity: usize::MAX,
+                pool: Arc::clone(&pool),
+            };
+            assert_eq!(packet.extend_from_slice(&[1]), Err(UnsafeError::CapacityOverflow));
+        }
+        assert_eq!(pool.in_use_count(), 0);
+    }
+
+    #[test]
+    fn test_pool_concurrent_alloc_free() {
+        let pool = Arc::new(UnsafeMemoryPool::new(4, 256, 0));
+        let mut workers = Vec::new();
+
+        for worker_id in 0..8u8 {
+            let pool = Arc::clone(&pool);
+            workers.push(std::thread::spawn(move || {
+                for iteration in 0..200u16 {
+                    // SAFETY: each worker owns its block until free, and all pointers are
+                    // obtained from and returned to the same synchronized pool.
+                    unsafe {
+                        let ptr = pool.alloc_uninit();
+                        let marker = [worker_id, iteration as u8, 0xA5, 0x5A];
+                        let written = pool
+                            .copy_from_slice(ptr, &marker)
+                            .expect("concurrent live copy must succeed");
+                        assert_eq!(written, marker.len());
+                        pool.free(ptr).expect("concurrent block must return");
+                    }
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().expect("pool worker must complete");
+        }
+        assert_eq!(pool.in_use_count(), 0);
+        assert_eq!(pool.available_count(), 4);
+        assert_eq!(pool.allocation_count(), 4);
     }
 
     #[test]

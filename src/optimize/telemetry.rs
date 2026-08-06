@@ -803,9 +803,10 @@ pub static UNSAFE_POOL_CAPACITY: AtomicU64 = AtomicU64::new(0);
 pub static UNSAFE_ALLOC_CALLS: Counter = Counter::new();
 /// Total free calls through unsafe pool.
 pub static UNSAFE_FREE_CALLS: Counter = Counter::new();
-/// Allocations served from thread-local slab hits.
+/// Allocations served from the synchronized UnsafeMemoryPool available cache.
+/// The symbol name is retained for telemetry compatibility with older releases.
 pub static UNSAFE_TLS_HITS: Counter = Counter::new();
-/// Allocations served from global pool hits.
+/// Retained compatibility counter for the removed atomic global-pool path.
 pub static UNSAFE_GLOBAL_HITS: Counter = Counter::new();
 /// Allocations that fell back to the system allocator.
 pub static UNSAFE_FALLBACK_ALLOCS: Counter = Counter::new();
