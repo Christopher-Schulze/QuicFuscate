@@ -149,7 +149,7 @@ pub struct CpuFeatures {
     /// ARM64: SVE bit permutation instructions.
     pub sve_bitperm: bool,
 
-    /// Apple Silicon: Apple Matrix Extensions.
+    /// Apple Silicon: platform matrix-capability metadata; no active AMX arithmetic backend.
     pub apple_amx: bool,
     /// Apple Silicon: M1 generation detected.
     pub apple_m1: bool,
@@ -317,7 +317,7 @@ pub enum CpuProfile {
     X86_P0a,
     /// SSSE3 baseline (byte-shuffle; no AES acceleration).
     X86_P0b,
-    /// SSE4.2 + POPCNT + CRC32 (no crypto).
+    /// SSE4.2 baseline.
     X86_P1a,
     /// P1a + AES-NI + PCLMUL (~2010 baseline).
     X86_P1b,
@@ -355,7 +355,7 @@ pub enum CpuProfile {
     /// ARM64: SVE2 + optional crypto.
     ARM_A2,
 
-    /// Apple Silicon: NEON + Crypto + AMX.
+    /// Apple Silicon: NEON + Crypto profile; the Apple matrix marker is metadata only.
     Apple_M,
 
     /// RISC-V: Vector extension baseline.
@@ -488,7 +488,7 @@ pub enum CpuFeature {
     SVE_BITPERM,
 
     // -- Apple Silicon Features --
-    /// Apple AMX (matrix coprocessor).
+    /// Apple Silicon matrix-capability metadata; no active AMX arithmetic caller.
     APPLE_AMX,
     /// Apple M1 generation detected.
     APPLE_M1,
@@ -587,7 +587,9 @@ impl FeatureDetector {
 
                 #[cfg(target_os = "macos")]
                 if detector.features_full.apple_amx {
-                    log::info!("  Apple AMX: matrix acceleration available");
+                    log::info!(
+                        "  Apple matrix capability metadata present; no active AMX backend"
+                    );
                 }
             }
 

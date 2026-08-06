@@ -967,7 +967,7 @@ CPU feature detection is centralized, but the current-source audit found that se
   - `X86_P3b`: VAES and VPCLMULQDQ profile route
   - `X86_P3c`: AVX512VBMI2 profile route
   - `X86_P3d`: AVX512VPOPCNTDQ profile route
-  - `X86_P3e`: GFNI profile route (AMX is detected independently and is not part of the current x86 profile selection; TODO-819)
+  - `X86_P3e`: AVX-512F + GFNI profile route (Intel AMX is detected independently and is not part of x86 profile selection)
   - `X86_P4a`: +AVX10.1-256 (internal preview gate `internal_avx10_preview`; inherits AVX2/AVX-512 kernels, telemetry `SIMD_USAGE_AVX10_256`)
   - `X86_P4b`: +AVX10.1-512 (internal preview gate `internal_avx10_preview`; inherits AVX-512 kernels, telemetry `SIMD_USAGE_AVX10_512`)
   - `ARM_A0`: NEON, AES, PMULL
@@ -976,6 +976,7 @@ CPU feature detection is centralized, but the current-source audit found that se
   - `ARM_A1c`: +SVE
   - `ARM_A1d`: +SVE2
   - `ARM_A2`: +SVE-BF16
+  - `Apple_M`: Apple Silicon NEON + crypto profile; current callers use NEON, while the Apple matrix marker is telemetry metadata and not an active AMX backend
 
 - **PMULL**: Polynomial multiplication for GHASH
 
@@ -994,7 +995,7 @@ let policy: Box<dyn SimdPolicy> = if cpu_supports_avx512gfni() {
 
 #### SIMD Gap Status
  - **Crypto (Poly1305 wide reduction ARM)**: Done - `mac_sve2_block_wide` provides the 256-bit carry chain on `ARM_A2`/Apple M.
- - **FEC (large-window decode acceleration)**: The active Wiedemann path uses a checked scalar GF(256) SpMV fallback. The former raw AMX staging and unverified INT8 kernels are removed because they did not perform GF(256) arithmetic and had no proven tile contract. TODO-818 now owns `scripts/tests/suites/test-amx-proof.sh`, which compiles the integration target with exactly `-Ctarget-feature=+amx-tile,+amx-int8`, records compiler/OS/CPU/source-revision evidence, emits machine-readable `AVAILABLE` or `UNAVAILABLE`, and runs scalar parity, concurrency, dimension, scratch-reset, and telemetry coverage. BF16 is not an eligibility requirement. Native AMX arithmetic, tile-state ownership, and supported-host execution remain fail-closed until a verified backend exists. Planner/detector, profile, and broader tile-ownership boundaries remain under TODO-676, TODO-817, and TODO-819.
+ - **FEC (large-window decode acceleration)**: The active Wiedemann path uses a checked scalar GF(256) SpMV fallback. The former raw AMX staging and unverified INT8 kernels are removed because they did not perform GF(256) arithmetic and had no proven tile contract. TODO-818 owns `scripts/tests/suites/test-amx-proof.sh`, which compiles the integration target with exactly `-Ctarget-feature=+amx-tile,+amx-int8`, records compiler/OS/CPU/source-revision evidence, emits machine-readable `AVAILABLE` or `UNAVAILABLE`, and runs scalar parity, concurrency, dimension, scratch-reset, and telemetry coverage. BF16 is not an eligibility requirement. Native AMX arithmetic, tile-state ownership, and supported-host execution remain fail-closed until a verified backend exists. Intel AMX remains independent of `X86_P3e`; `Apple_M` is a NEON/crypto profile whose current callers do not execute AMX. TODO-676, TODO-817, and TODO-818 retain the planner/detector, tile, and proof boundaries.
  - **Utility (RVV)**: Infrastructure for RISC-V Vector (`RVV`) and additional iterator backends are not active in the current build.
  - **SIMD safety (TODO-593)**: x86 GF(256) matrix kernels validate dimension products in debug builds, BMI2 varint encoding validates its required output capacity, AVX2 header dispatch avoids a discarded 32-byte load by delegating to the scalar first-byte check, and scalar/NEON/GFNI Reed-Solomon encoders zero-pad partial input shards instead of truncating them. Windows-only SHA-256 compression stubs fail loudly if reached. TODO-835's boundary audit confirmed that the matrix and BMI2 checks remain debug-only, the SSE4.2 short-needle path can load sixteen bytes for a shorter slice, and Berlekamp-Massey accepts an unchecked length; release-safe remediation and malformed-input proof remain open.
  - **SIMD Reed-Solomon compatibility path (TODO-594)**: standalone x86 AVX2 and GFNI Reed-Solomon encode/decode now use the canonical GF(256) generator, full augmented-matrix inversion, dynamic per-coefficient nibble LUTs, release-safe shard metadata validation, and scalar tails for non-vector-aligned shards. Rosetta-executed x86 tests cover AVX2/GFNI roundtrips and the AVX2 matrix kernel. These helpers remain internal/test-only; production FEC stays on `src/fec/`. TODO-679 confirmed the old AVX2-to-GFNI delegation claim is stale. Remaining SIMD dispatch, bounds, and proof work is TODO-834 through TODO-836, with the completed FEC audit in TODO-686, GF16 polynomial correctness in TODO-715, and FEC-specific SIMD remediation in TODO-855.
@@ -1062,8 +1063,8 @@ runtime acceleration entrypoint, not as a broad consumer-facing `accelerate::*` 
 
 ##### Brain Acceleration (brain submodule)
 - **AVX2/FMA/SVE2 statistical computations**: 4-5x faster mean, variance, correlation
-- **Matrix multiplication**: AVX512F on x86 and dedicated SVE2 Gather/`svmla` on ARM; no current AMX arithmetic caller is proven (TODO-818, TODO-819)
-- **Apple Silicon AMX**: capability metadata exists in CPU detection, but an active matrix kernel and proof lane are not established (TODO-819)
+- **Matrix multiplication**: no active matrix-multiplication caller is owned by `src/optimize/brain.rs`; the existing AVX512F/SVE2 helpers are separate from Intel AMX and do not establish an AMX product path
+- **Apple_M profile**: current Apple_M callers route to NEON for brain, stealth, string, FEC, transport, sorting, iteration, compression, and memory helpers. `APPLE_AMX` and the corresponding CPU-mask bit remain platform/profile metadata only; no Apple AMX arithmetic kernel or proof is active
 - **Moving averages**: AVX-512/AVX2 (x86) & NEON (ARM/Apple M) sliding windows with telemetry-tracked scalar fallback
 - **Histogram decay & Jensen-Shannon divergence**: x86 uses AVX-512/AVX2/SSE4.1 fixed-point pipelines, ARM uses NEON/SVE2; backend selection is visible via `BRAIN_HISTOGRAM_{AVX512,AVX2,SSE,NEON,SVE2,SCALAR}_OPS`, and parity is validated by `scripts/tests/rust/rt-brain-histogram.rs` and `scripts/tests/rust/rt-simd-selfcheck.rs`.
 
@@ -5348,6 +5349,15 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - **Semantic and legacy boundaries:** The run records 53 semantic content files, zero cached files, zero partial subagent results, and no `GEMINI_API_KEY` or `GOOGLE_API_KEY`, therefore semantic extraction is `UNAVAILABLE`. The legacy `graphify-out/graph.json` is explicitly stale because it was built at `57965230c92f1b741a0e52312191f93001897978`, contains 537 nodes and 1,616 links, and lacks current corpus, extraction, tool, and timestamp provenance.
 - **Machine-readable contract:** Each run records `quicfuscate.graphify-evidence.v1`, source revision, source-scope SHA-256, extraction mode, Graphify version, timestamp, ignored/generated policy, sensitive policy, semantic cache state, unsupported surfaces, raw and normalized AST artifact paths, and a report path. `scripts/tests/audits/verify-audit-completeness.sh` validates the latest manifest, normalized non-dangling identity, semantic classification, artifact presence, and stale legacy attribution. `BLOCKED` and `UNAVAILABLE` are valid fail-closed outcomes and never count as project-green evidence.
 - **Scope boundary:** This contract changes audit tooling and evidence only. It does not modify Rust product behavior, frontend source, UI surfaces, remote state, or Omega checkout state. Native runtime proof, hosted semantic credentials, and any remaining parser/relationship remediation stay explicit open gates under TODO-759.
+
+## Implementation Reconciliation (2026-08-05, TODO-819 AMX profile and documentation truth)
+
+- **Intel x86 profile:** `CpuProfile::X86_P3e` is selected and accepted only for AVX-512F plus GFNI. Intel AMX-TILE/INT8/BF16 evidence is collected independently through `AmxCapability` and never selects `X86_P3e` or any other current x86 profile.
+- **Apple profile:** `CpuProfile::Apple_M` is a stable Apple Silicon profile marker. Its current dispatch callers use NEON or Apple/ARM crypto paths; `CpuFeature::APPLE_AMX`, `CpuFeatures::apple_amx`, and the CPU-profile mask bit are platform/profile metadata, not proof of an active Apple AMX arithmetic backend.
+- **Brain and FEC callers:** `src/optimize/brain.rs` has no active matrix-multiplication or AMX caller. The active Wiedemann solver remains checked scalar GF(256) SpMV, and `WIEDEMANN_AMX_OPS` plus AMX scratch telemetry remain reserved and zero until TODO-818 proves a native backend.
+- **Telemetry and logging:** The x86 AMX contract log separates CPU, OS, compiler, verified-backend, and product-eligibility state. Apple startup logging now reports metadata without claiming matrix acceleration. The profile documentation and source comments use the same capability language.
+- **Consistency proof:** `scripts/audits/verify-amx-proof-contract.sh` now checks the `X86_P3e`/`Apple_M` documentation, source comments, brain module contract, and absence of the stale Apple active-matrix log. The checker passes on the current source.
+- **Scope boundary:** This reconciliation fixes source comments, operator logging, telemetry labeling, and canonical documentation only. It does not introduce an AMX backend, change profile variant names, or claim native Intel/Apple AMX execution. TODO-676 retains broader dispatch/tile ownership; TODO-818 retains the build/runtime proof lane; TODO-690 retains Wiedemann equation correctness.
 
 ## Implementation Reconciliation (2026-08-05, DNS query wire admission)
 

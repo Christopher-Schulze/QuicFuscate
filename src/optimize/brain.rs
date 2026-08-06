@@ -1,5 +1,5 @@
-//! Ultra-sophisticated brain acceleration module
-//! Complete HW acceleration for statistics, ML operations, matrix multiply
+//! SIMD acceleration for statistics and vector/ML operations.
+//! No active matrix-multiplication or AMX caller is owned by this module.
 
 use crate::optimize::telemetry;
 use crate::optimize::{CpuFeature, FeatureDetector};

@@ -102,6 +102,24 @@ check_absent "Removed AMX tests do not reintroduce silent skips" \
 check_absent "No proof lane treats BF16 as the eligibility requirement" \
   'amx_bf16' scripts/tests/rust/rt-amx-proof.rs scripts/tests/suites/test-amx-proof.sh
 
+check_literal "X86_P3e documentation names AVX-512F plus GFNI" \
+  'X86_P3e`: AVX-512F + GFNI profile route' docs/DOCUMENTATION.md
+check_literal "Apple_M documentation names its NEON/crypto caller contract" \
+  '`Apple_M`: Apple Silicon NEON + crypto profile' docs/DOCUMENTATION.md
+check_literal "Apple_M source comment excludes an active AMX backend claim" \
+  'Apple Silicon: NEON + Crypto profile; the Apple matrix marker is metadata only.' \
+  src/optimize/parts/cpu_dispatch.rs
+check_literal "Apple profile logging excludes an active AMX matrix claim" \
+  'Apple matrix capability metadata present; no active AMX backend' \
+  src/optimize/parts/cpu_dispatch.rs
+check_literal "Brain module documentation excludes an active AMX caller" \
+  'No active matrix-multiplication or AMX caller is owned by this module.' \
+  src/optimize/brain.rs
+check_absent "Apple profile logging has no stale active matrix claim" \
+  'Apple AMX: matrix acceleration available' src/optimize/parts/cpu_dispatch.rs
+check_absent "Brain module has no stale complete matrix claim" \
+  'Complete HW acceleration for statistics, ML operations, matrix multiply' src/optimize/brain.rs
+
 if [[ "$FAILURES" -eq 0 ]]; then
   printf '%s\n' 'AMX_PROOF_CONTRACT=PASS'
   exit 0

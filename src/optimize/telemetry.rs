@@ -1607,6 +1607,7 @@ const CPU_MASK_NEON: i64 = 1 << 10;
 const CPU_MASK_AES: i64 = 1 << 11;
 const CPU_MASK_PMULL: i64 = 1 << 12;
 const CPU_MASK_SVE2: i64 = 1 << 13;
+// Apple Silicon profile metadata only; this bit is not proof of active AMX arithmetic.
 const CPU_MASK_APPLE_AMX: i64 = 1 << 14;
 const CPU_MASK_RVV: i64 = 1 << 15;
 const CPU_MASK_SCALAR: i64 = 1 << 16;
