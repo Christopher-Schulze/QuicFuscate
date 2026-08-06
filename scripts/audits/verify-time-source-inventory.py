@@ -55,11 +55,106 @@ BROWSER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 
 def mask_javascript(text: str) -> str:
-    """Mask comments and quoted literals while preserving offsets and lines."""
+    """Mask comments and literals while preserving offsets and lines.
+
+    Template literal text is masked, but interpolation expressions remain
+    visible so clock calls such as ```${Date.now()}``` cannot evade the
+    inventory. Nested strings, comments, braces, and template literals inside
+    an interpolation are handled recursively.
+    """
 
     output = list(text)
-    index = 0
     length = len(text)
+
+    def mask_quoted(start: int, quote: str) -> int:
+        output[start] = " "
+        position = start + 1
+        escaped = False
+        while position < length:
+            char = text[position]
+            if char != "\n":
+                output[position] = " "
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                return position + 1
+            position += 1
+        return position
+
+    def mask_template(start: int) -> int:
+        output[start] = " "
+        position = start + 1
+        escaped = False
+        while position < length:
+            char = text[position]
+            if escaped:
+                if char != "\n":
+                    output[position] = " "
+                escaped = False
+                position += 1
+                continue
+            if char == "\\":
+                output[position] = " "
+                escaped = True
+                position += 1
+                continue
+            if char == "`":
+                output[position] = " "
+                return position + 1
+            if text.startswith("${", position):
+                output[position] = " "
+                output[position + 1] = " "
+                position = mask_expression(position + 2)
+                continue
+            if char != "\n":
+                output[position] = " "
+            position += 1
+        return position
+
+    def mask_expression(start: int) -> int:
+        position = start
+        brace_depth = 1
+        while position < length:
+            if text.startswith("//", position):
+                while position < length and text[position] != "\n":
+                    output[position] = " "
+                    position += 1
+                continue
+            if text.startswith("/*", position):
+                output[position] = " "
+                if position + 1 < length:
+                    output[position + 1] = " "
+                position += 2
+                while position < length:
+                    if text.startswith("*/", position):
+                        output[position] = " "
+                        if position + 1 < length:
+                            output[position + 1] = " "
+                        position += 2
+                        break
+                    if text[position] != "\n":
+                        output[position] = " "
+                    position += 1
+                continue
+            if text[position] in {"'", '"'}:
+                position = mask_quoted(position, text[position])
+                continue
+            if text[position] == "`":
+                position = mask_template(position)
+                continue
+            if text[position] == "{":
+                brace_depth += 1
+            elif text[position] == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    output[position] = " "
+                    return position + 1
+            position += 1
+        return position
+
+    index = 0
     while index < length:
         if text.startswith("//", index):
             while index < length and text[index] != "\n":
@@ -90,23 +185,11 @@ def mask_javascript(text: str) -> str:
                     output[position] = " "
             index = end
             continue
-        if text[index] in {"'", '"', "`"}:
-            quote = text[index]
-            output[index] = " "
-            index += 1
-            escaped = False
-            while index < length:
-                char = text[index]
-                if char != "\n":
-                    output[index] = " "
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == quote:
-                    index += 1
-                    break
-                index += 1
+        if text[index] in {"'", '"'}:
+            index = mask_quoted(index, text[index])
+            continue
+        if text[index] == "`":
+            index = mask_template(index)
             continue
         index += 1
     return "".join(output)
