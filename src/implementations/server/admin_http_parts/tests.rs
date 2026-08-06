@@ -366,15 +366,15 @@ mod tests {
     }
 
     fn test_sessions() -> Arc<Mutex<SessionStore>> {
-        shared_session_store(Duration::from_secs(3600))
+        shared_session_store(Duration::from_secs(3600), &ProtocolClock::default())
     }
 
     fn test_short_sessions() -> Arc<Mutex<SessionStore>> {
-        shared_session_store(Duration::from_secs(60))
+        shared_session_store(Duration::from_secs(60), &ProtocolClock::default())
     }
 
     fn test_rate_limiter(max_attempts: u32) -> Arc<Mutex<LoginRateLimiter>> {
-        shared_login_rate_limiter(max_attempts, 60)
+        shared_login_rate_limiter(max_attempts, 60, &ProtocolClock::default())
     }
 
     fn test_handler() -> Arc<dyn AdminHttpHandler> {
@@ -1718,6 +1718,27 @@ mod tests {
             panic!("missing attempts entry");
         }
         assert!(!limiter.is_locked(ip));
+    }
+
+    #[test]
+    fn admin_auth_and_session_expiry_use_explicit_clock_without_sleeping() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let clock = ProtocolClock::from_source(source.clone());
+        let mut limiter = LoginRateLimiter::new_with_clock(2, 60, &clock);
+        limiter.record_attempt("127.0.0.1");
+        limiter.record_attempt("127.0.0.1");
+        assert!(limiter.is_locked("127.0.0.1"));
+
+        let mut store = SessionStore::new_with_capacity_and_clock(Duration::from_secs(60), 1, &clock);
+        store.create().expect("first admin session");
+        source.advance(Duration::from_secs(61));
+        assert_eq!(store.snapshot().active_sessions, 0);
+        store.create().expect("expired session releases capacity");
+        assert_eq!(store.snapshot().active_sessions, 1);
+        assert!(!limiter.is_locked("127.0.0.1"));
     }
 
     #[test]

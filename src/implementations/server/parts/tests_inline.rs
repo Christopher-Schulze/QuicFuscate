@@ -1919,6 +1919,7 @@ mod tests {
             stealth_runtime: None,
             auth_rate_limiter,
             retry_token_manager: None,
+            clock: crate::time_source::ProtocolClock::default(),
         });
 
         assert!(result.is_none());
@@ -3440,6 +3441,7 @@ constant_rate_pps = 1001
             remote,
             10,
             30,
+            &crate::time_source::ProtocolClock::default(),
         );
         assert!(result.is_ok());
         let (session_id, _, assigned_ips) = result.unwrap();
@@ -3468,6 +3470,7 @@ constant_rate_pps = 1001
             remote,
             10,
             30,
+            &crate::time_source::ProtocolClock::default(),
         );
         assert!(result.is_ok());
         let (session_id, _, _) = result.unwrap();
@@ -3498,6 +3501,7 @@ constant_rate_pps = 1001
             remote,
             10,
             30,
+            &crate::time_source::ProtocolClock::default(),
         )
         .unwrap();
 

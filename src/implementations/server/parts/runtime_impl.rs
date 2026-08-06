@@ -12,7 +12,7 @@ fn standalone_housekeeping_delay(live: &ServerLiveRuntime) -> Duration {
         return SERVER_HOUSEKEEPING_ACTIVE;
     }
 
-    let now = Instant::now();
+    let now = live.live_state.clock.now();
     let mut delay = SERVER_HOUSEKEEPING_IDLE;
     for connection in live.live_state.clients.values() {
         if !connection.conn.is_established()
@@ -33,6 +33,15 @@ impl ServerRuntime {
     pub fn new(
         engine_config: EngineConfig,
         server_config: ServerConfig,
+    ) -> Result<Self, EngineError> {
+        Self::new_with_clock(engine_config, server_config, ProtocolClock::default())
+    }
+
+    /// Create a server runtime bound to an explicit protocol clock.
+    pub fn new_with_clock(
+        engine_config: EngineConfig,
+        server_config: ServerConfig,
+        clock: ProtocolClock,
     ) -> Result<Self, EngineError> {
         engine_config.validate().map_err(EngineError::from)?;
         server_config
@@ -63,15 +72,18 @@ impl ServerRuntime {
             optimize_config.block_size,
         ));
 
-        let domain = SharedServerDomain::try_new(&server_config).map_err(EngineError::Config)?;
+        let domain =
+            SharedServerDomain::try_new_with_clock(&server_config, &clock).map_err(EngineError::Config)?;
         let stealth_runtime = Arc::new(
             StealthRuntimeOwner::from_env()
                 .map_err(|error| EngineError::Config(format!("Invalid Reality config: {error}")))?,
         );
 
         Ok(Self {
-            graceful_shutdown: Arc::new(GracefulShutdown::new(
+            clock: clock.clone(),
+            graceful_shutdown: Arc::new(GracefulShutdown::new_with_clock(
                 engine_config.engine.shutdown_timeout_ms,
+                &clock,
             )),
             engine_config,
             server_config,
@@ -99,14 +111,46 @@ impl ServerRuntime {
         qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
         admin_web_bootstrap: StandaloneAdminWebBootstrap,
     ) -> std::io::Result<Self> {
-        let mut runtime =
-            Self::new(engine_config, server_config.clone()).map_err(std::io::Error::other)?;
+        Self::new_standalone_with_clock(
+            engine_config,
+            server_config,
+            accept_config,
+            tun_config,
+            opt_params,
+            blocked_ips,
+            qkey_registry,
+            admin_web_bootstrap,
+            ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_standalone_with_clock(
+        engine_config: EngineConfig,
+        server_config: ServerConfig,
+        accept_config: AcceptConfig,
+        tun_config: Option<TunConfig>,
+        opt_params: crate::optimize::OptimizeConfig,
+        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+        qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
+        admin_web_bootstrap: StandaloneAdminWebBootstrap,
+        clock: ProtocolClock,
+    ) -> std::io::Result<Self> {
+        let mut runtime = Self::new_with_clock(
+            engine_config,
+            server_config.clone(),
+            clock.clone(),
+        )
+        .map_err(std::io::Error::other)?;
         let tun_config = tun_config
             .map(|config| server_config.reconcile_standalone_tun_config(config))
             .transpose()
             .map_err(std::io::Error::other)?;
-        let mut live_state =
-            LiveServerState::try_new(server_config.clone()).map_err(std::io::Error::other)?;
+        let mut live_state = LiveServerState::try_new_with_clock(
+            server_config.clone(),
+            clock.clone(),
+        )
+        .map_err(std::io::Error::other)?;
         live_state.enable_uring_worker();
 
         let std_socket = std::net::UdpSocket::bind(server_config.listen)?;
@@ -276,7 +320,7 @@ impl ServerRuntime {
             None => (None, None, None, None, None),
         };
 
-        let metrics = Arc::new(Metrics::new());
+        let metrics = Arc::new(Metrics::new_with_clock(&clock));
         #[cfg(feature = "rate_limiter")]
         {
             metrics.set_geoip_status(live_state.geoip_status());
@@ -343,15 +387,35 @@ impl ServerRuntime {
         opt_params: crate::optimize::OptimizeConfig,
         bootstrap: StandaloneServerBootstrapState,
     ) -> std::io::Result<Self> {
-        let (blocked_ips, qkey_registry, admin_web_bootstrap) = bootstrap.into_runtime_parts();
-        Self::new_standalone_default(
+        Self::new_standalone_with_bootstrap_and_clock(
             engine_config,
             server_config,
+            tun_config,
+            opt_params,
+            bootstrap,
+            ProtocolClock::default(),
+        )
+    }
+
+    pub fn new_standalone_with_bootstrap_and_clock(
+        engine_config: EngineConfig,
+        server_config: ServerConfig,
+        tun_config: Option<TunConfig>,
+        opt_params: crate::optimize::OptimizeConfig,
+        bootstrap: StandaloneServerBootstrapState,
+        clock: ProtocolClock,
+    ) -> std::io::Result<Self> {
+        let (blocked_ips, qkey_registry, admin_web_bootstrap) = bootstrap.into_runtime_parts();
+        Self::new_standalone_with_clock(
+            engine_config,
+            server_config,
+            AcceptConfig::default(),
             tun_config,
             opt_params,
             blocked_ips,
             qkey_registry,
             admin_web_bootstrap,
+            clock,
         )
     }
 
@@ -366,18 +430,44 @@ impl ServerRuntime {
         qkey_ttl_override: Option<u64>,
         qkey_store_override: Option<std::path::PathBuf>,
     ) -> std::io::Result<Self> {
+        Self::new_initialized_standalone_default_with_clock(
+            engine_config,
+            server_config,
+            tun_config,
+            opt_params,
+            config_path,
+            admin_log_buffer_override,
+            qkey_ttl_override,
+            qkey_store_override,
+            ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_initialized_standalone_default_with_clock(
+        engine_config: EngineConfig,
+        server_config: ServerConfig,
+        tun_config: Option<TunConfig>,
+        opt_params: crate::optimize::OptimizeConfig,
+        config_path: Option<&std::path::Path>,
+        admin_log_buffer_override: Option<Arc<self::admin_logs::AdminLogBuffer>>,
+        qkey_ttl_override: Option<u64>,
+        qkey_store_override: Option<std::path::PathBuf>,
+        clock: ProtocolClock,
+    ) -> std::io::Result<Self> {
         let bootstrap = initialize_standalone_server_bootstrap(
             config_path,
             admin_log_buffer_override,
             qkey_ttl_override,
             qkey_store_override,
         )?;
-        Self::new_standalone_with_bootstrap(
+        Self::new_standalone_with_bootstrap_and_clock(
             engine_config,
             server_config,
             tun_config,
             opt_params,
             bootstrap,
+            clock,
         )
     }
 
@@ -707,7 +797,7 @@ impl ServerRuntime {
     }
 
     fn make_admin_core(&self) -> ServerAdminCore {
-        ServerAdminCore::new(
+        ServerAdminCore::new_with_clock(
             self.standalone_metrics(),
             self.blocked_ips().clone(),
             self.live_client_snapshots().clone(),
@@ -726,6 +816,7 @@ impl ServerRuntime {
             },
             #[cfg(feature = "rate_limiter")]
             self.live().live_state.geoip_status(),
+            self.clock.clone(),
         )
     }
 
@@ -1122,6 +1213,7 @@ impl ServerRuntime {
                                 self.live().live_state.retry_token_manager.clone();
                             #[cfg(not(feature = "rate_limiter"))]
                             let retry_token_manager = None;
+                            let runtime_clock = self.clock.clone();
                             let runtime_parts = self.live_parts();
                             let stealth_runtime = runtime_owner.clone();
                             let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
@@ -1154,6 +1246,7 @@ impl ServerRuntime {
                                             stealth_runtime: Some(stealth_runtime.clone()),
                                             auth_rate_limiter: auth_rate_limiter.clone(),
                                             retry_token_manager: retry_token_manager.clone(),
+                                            clock: runtime_clock.clone(),
                                         },
                                 )
                             },
@@ -1290,7 +1383,7 @@ impl ServerRuntime {
 
                     // Sweep expired entries from 0-RTT anti-replay strike register.
                     if let Some(ref sr) = runtime_config.strike_register {
-                        sr.cleanup(std::time::Instant::now());
+                        sr.cleanup(self.clock.now());
                     }
                     #[cfg(unix)]
                     if let (Some(interval), Some(deadline)) =

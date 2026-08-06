@@ -231,14 +231,14 @@ fn drain_pending_tun_downlinks(
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
     let mut deferred_sessions = std::collections::HashSet::new();
     let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
-    let now = Instant::now();
+    let now = live.live_state.clock.now();
     while let Some(mut entry) = live.live_state.pending_tun_downlinks.pop_next(&deferred_sessions) {
         if entry.is_expired(now) {
             metrics.record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::Expired);
             log::warn!(
                 "dropping expired pending TUN downlink for {} after {} ms",
                 entry.target,
-                now.duration_since(entry.queued_at).as_millis()
+                now.saturating_duration_since(entry.queued_at).as_millis()
             );
             continue;
         }
@@ -580,7 +580,7 @@ fn process_server_tun_packet(
                                     target,
                                     session_id,
                                     packet: packet.to_vec(),
-                                    queued_at: Instant::now(),
+                                    queued_at: live.live_state.clock.now(),
                                     bandwidth_accounted: true,
                                 },
                                 weight,
@@ -621,7 +621,7 @@ fn process_server_tun_packet(
             session_id,
             weight,
             packet.to_vec(),
-            Instant::now(),
+            live.live_state.clock.now(),
             metrics,
         ) {
             log::warn!(

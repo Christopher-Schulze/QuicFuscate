@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::core::QuicFuscateConnection;
 use crate::engine::{EngineConfig, EngineError};
 use crate::stealth::StealthRuntimeOwner;
+use crate::time_source::ProtocolClock;
 
 /// Client connection wrapper.
 ///
@@ -20,13 +21,30 @@ pub struct ClientConnection {
 impl ClientConnection {
     /// Create a new client connection from engine configuration.
     pub fn connect(config: &EngineConfig) -> Result<Self, EngineError> {
-        Self::connect_with_runtime(config, None)
+        Self::connect_with_clock(config, &ProtocolClock::default())
+    }
+
+    /// Create a new client connection bound to an explicit protocol clock.
+    pub fn connect_with_clock(
+        config: &EngineConfig,
+        clock: &ProtocolClock,
+    ) -> Result<Self, EngineError> {
+        Self::connect_with_runtime_and_clock(config, None, clock)
     }
 
     /// Create a new client connection attached to a runtime-owned stealth service.
     pub fn connect_with_runtime(
         config: &EngineConfig,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    ) -> Result<Self, EngineError> {
+        Self::connect_with_runtime_and_clock(config, runtime_owner, &ProtocolClock::default())
+    }
+
+    /// Create a client connection attached to a runtime owner and explicit clock.
+    pub fn connect_with_runtime_and_clock(
+        config: &EngineConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        clock: &ProtocolClock,
     ) -> Result<Self, EngineError> {
         config.validate().map_err(|error| {
             EngineError::Config(format!("Invalid engine configuration: {error}"))
@@ -75,7 +93,7 @@ impl ClientConnection {
         let qkey_token = config.connection.qkey_token.clone().filter(|t| !t.trim().is_empty());
         let qkey_initial_token: Option<Vec<u8>> =
             qkey_token.as_deref().map(|raw| crate::engine::qkey::id(raw.trim()).into_bytes());
-        let conn = QuicFuscateConnection::new_client_with_runtime(
+        let conn = QuicFuscateConnection::new_client_with_runtime_and_clock(
             &sni,
             local_addr,
             remote_addr,
@@ -88,6 +106,7 @@ impl ClientConnection {
             Self::should_use_utls(config),
             runtime_owner,
             None,
+            clock.clone(),
         )
         .map_err(|e| {
             crate::instrumentation::global().client.connection_failure();

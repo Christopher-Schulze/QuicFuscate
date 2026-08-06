@@ -11,6 +11,7 @@ use super::platform::{
     self, DnsConfig, PlatformBackend, PlatformError, RouteConfig, TunDeviceConfig, TunHandle,
 };
 use crate::engine::{qkey, EngineConfig, EngineError};
+use crate::time_source::ProtocolClock;
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,8 @@ pub struct ClientBackend {
     dns_configured: bool,
     /// Statistics
     stats: ClientStatsInternal,
+    /// Clock shared by connection-state statistics and the owned connection.
+    clock: ProtocolClock,
 }
 
 struct ClientStatsInternal {
@@ -289,6 +292,11 @@ impl Default for ClientStatsInternal {
 impl ClientBackend {
     /// Create a new client backend using the native platform.
     pub fn new() -> Self {
+        Self::new_with_clock(ProtocolClock::default())
+    }
+
+    /// Create a client backend bound to an explicit protocol clock.
+    pub fn new_with_clock(clock: ProtocolClock) -> Self {
         Self {
             platform: Box::new(platform::native()),
             state: ConnectionState::Disconnected,
@@ -297,11 +305,20 @@ impl ClientBackend {
             active_routes: Vec::new(),
             dns_configured: false,
             stats: ClientStatsInternal::default(),
+            clock,
         }
     }
 
     /// Create with custom platform backend.
     pub fn with_platform(platform: Box<dyn PlatformBackend>) -> Self {
+        Self::with_platform_and_clock(platform, ProtocolClock::default())
+    }
+
+    /// Create a client backend with a platform and explicit protocol clock.
+    pub fn with_platform_and_clock(
+        platform: Box<dyn PlatformBackend>,
+        clock: ProtocolClock,
+    ) -> Self {
         Self {
             platform,
             state: ConnectionState::Disconnected,
@@ -310,6 +327,7 @@ impl ClientBackend {
             active_routes: Vec::new(),
             dns_configured: false,
             stats: ClientStatsInternal::default(),
+            clock,
         }
     }
 
@@ -325,7 +343,8 @@ impl ClientBackend {
 
     /// Get current statistics.
     pub fn stats(&self) -> ClientStats {
-        let uptime = self.stats.connect_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let uptime =
+            self.stats.connect_time.map(|t| self.clock.elapsed_since(t).as_secs()).unwrap_or(0);
 
         let (rtt_ms, loss_rate) = if let Some(ref conn) = self.connection {
             (conn.rtt_ms(), conn.loss_rate())
@@ -410,7 +429,7 @@ impl ClientBackend {
 
         match self.connect_inner(config) {
             Ok(()) => {
-                self.stats.connect_time = Some(std::time::Instant::now());
+                self.stats.connect_time = Some(self.clock.now());
                 self.state = ConnectionState::Connected;
                 log::info!("Connected successfully");
                 Ok(())
@@ -452,7 +471,7 @@ impl ClientBackend {
         self.tun_handle = Some(tun_handle);
 
         // Establish QUIC connection
-        let connection = ClientConnection::connect(config)?;
+        let connection = ClientConnection::connect_with_clock(config, &self.clock)?;
         self.connection = Some(connection);
 
         // Add routes (route all traffic through VPN)
@@ -723,6 +742,25 @@ mod tests {
         let stats = backend.stats();
         assert_eq!(stats.bytes_sent, 0);
         assert_eq!(stats.uptime_secs, 0);
+    }
+
+    #[test]
+    fn client_backend_uptime_uses_explicit_clock_without_sleeping() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let clock = ProtocolClock::from_source(source.clone());
+        let tun_config = Arc::new(StdMutex::new(None));
+        let routes = Arc::new(StdMutex::new(Vec::new()));
+        let platform = ConfigCapturePlatform { tun_config, routes };
+        let mut backend = ClientBackend::with_platform_and_clock(Box::new(platform), clock);
+
+        backend.connect(&test_backend_config()).expect("clocked backend connect");
+        assert_eq!(backend.stats().uptime_secs, 0);
+        source.advance(std::time::Duration::from_secs(3));
+        assert_eq!(backend.stats().uptime_secs, 3);
+        backend.disconnect().expect("clocked backend disconnect");
     }
 
     fn config_capture_backend(

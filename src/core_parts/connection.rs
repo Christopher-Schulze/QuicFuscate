@@ -446,6 +446,10 @@ impl ConnectionStats {
 }
 
 impl QuicFuscateConnection {
+    pub(crate) fn protocol_clock(&self) -> crate::time_source::ProtocolClock {
+        self.clock.clone()
+    }
+
     #[cfg(test)]
     fn env_optional_trimmed(name: &str) -> Option<String> {
         std::env::var(name).ok().and_then(|v| {
@@ -494,7 +498,7 @@ impl QuicFuscateConnection {
         server_name: &str,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        mut config: crate::transport::Config,
+        config: crate::transport::Config,
         stealth_config: StealthConfig,
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
@@ -504,7 +508,40 @@ impl QuicFuscateConnection {
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
         http_authority: Option<&str>,
     ) -> Result<Self, String> {
-        let clock = crate::time_source::ProtocolClock::default();
+        Self::new_client_with_runtime_and_clock(
+            server_name,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            qkey_auth_token_hex,
+            qkey_initial_token,
+            use_utls,
+            runtime_owner,
+            http_authority,
+            crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Creates a new client connection with an explicit protocol clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_client_with_runtime_and_clock(
+        server_name: &str,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        mut config: crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+        qkey_initial_token: Option<Vec<u8>>,
+        use_utls: bool,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        http_authority: Option<&str>,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Result<Self, String> {
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
         let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner_and_clock(
@@ -598,7 +635,34 @@ impl QuicFuscateConnection {
         opt_cfg: OptimizeConfig,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     ) -> Result<Self, String> {
-        let clock = crate::time_source::ProtocolClock::default();
+        Self::new_server_with_runtime_and_clock(
+            scid,
+            initial_key_dcid,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            runtime_owner,
+            crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Creates a new server-side connection with an explicit protocol clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_server_with_runtime_and_clock(
+        scid: &crate::transport::ConnectionId,
+        initial_key_dcid: Option<&crate::transport::ConnectionId>,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        config: &mut crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Result<Self, String> {
         let tunnel_ingress_profile = if !stealth_config.enable_network_fingerprint_normalization
             || matches!(stealth_config.mode, StealthMode::Off)
         {

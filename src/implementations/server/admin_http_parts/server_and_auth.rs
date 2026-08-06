@@ -54,6 +54,7 @@ use tokio::task::{JoinError, JoinSet};
 
 use super::admin::{normalize_admin_client_id, normalize_admin_ip, AdminResponse, ClientInfo};
 use super::BandwidthPolicy;
+use crate::time_source::ProtocolClock;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -122,12 +123,20 @@ impl AdminHttpEnvironment {
     }
 }
 
-fn shared_session_store(ttl: Duration) -> Arc<Mutex<SessionStore>> {
-    Arc::new(Mutex::new(SessionStore::new(ttl)))
+fn shared_session_store(ttl: Duration, clock: &ProtocolClock) -> Arc<Mutex<SessionStore>> {
+    Arc::new(Mutex::new(SessionStore::new_with_clock(ttl, clock)))
 }
 
-fn shared_login_rate_limiter(max_attempts: u32, window_secs: u64) -> Arc<Mutex<LoginRateLimiter>> {
-    Arc::new(Mutex::new(LoginRateLimiter::new(max_attempts, window_secs)))
+fn shared_login_rate_limiter(
+    max_attempts: u32,
+    window_secs: u64,
+    clock: &ProtocolClock,
+) -> Arc<Mutex<LoginRateLimiter>> {
+    Arc::new(Mutex::new(LoginRateLimiter::new_with_clock(
+        max_attempts,
+        window_secs,
+        clock,
+    )))
 }
 
 #[derive(Clone, Debug)]
@@ -297,15 +306,22 @@ struct LoginRateLimiter {
     lru_keys: VecDeque<String>,
     max_attempts: u32,
     lockout: Duration,
+    clock: ProtocolClock,
 }
 
 impl LoginRateLimiter {
+    #[allow(dead_code)]
     fn new(max_attempts: u32, lockout_secs: u64) -> Self {
+        Self::new_with_clock(max_attempts, lockout_secs, &ProtocolClock::default())
+    }
+
+    fn new_with_clock(max_attempts: u32, lockout_secs: u64, clock: &ProtocolClock) -> Self {
         Self {
             attempts: HashMap::new(),
             lru_keys: VecDeque::new(),
             max_attempts,
             lockout: Duration::from_secs(lockout_secs),
+            clock: clock.clone(),
         }
     }
 
@@ -319,7 +335,7 @@ impl LoginRateLimiter {
     }
 
     fn record_attempt(&mut self, ip: &str) {
-        let now = Instant::now();
+        let now = self.clock.now();
         if let Some(entry) = self.attempts.get_mut(ip) {
             entry.0 = entry.0.saturating_add(1);
             entry.1 = now;
@@ -338,7 +354,8 @@ impl LoginRateLimiter {
 
     fn prune(&mut self) {
         let cutoff = self.lockout;
-        self.attempts.retain(|_, (_, ts)| ts.elapsed() < cutoff);
+        let clock = self.clock.clone();
+        self.attempts.retain(|_, (_, ts)| clock.elapsed_since(*ts) < cutoff);
         self.lru_keys.retain(|ip| self.attempts.contains_key(ip));
     }
 
@@ -371,7 +388,7 @@ impl LoginRateLimiter {
         if *count < self.max_attempts {
             return None;
         }
-        let elapsed = last.elapsed();
+        let elapsed = self.clock.elapsed_since(*last);
         let rem = self.lockout.checked_sub(elapsed).unwrap_or_else(|| Duration::from_secs(0));
         Some(rem.as_secs().max(1))
     }
@@ -384,6 +401,7 @@ struct SessionStore {
     created_total: u64,
     capacity_rejected_total: u64,
     expired_total: u64,
+    clock: ProtocolClock,
 }
 
 #[derive(Debug)]
@@ -438,11 +456,25 @@ impl SessionRecord {
 }
 
 impl SessionStore {
+    #[allow(dead_code)]
     fn new(ttl: Duration) -> Self {
-        Self::new_with_capacity(ttl, DEFAULT_ADMIN_WEB_MAX_SESSIONS)
+        Self::new_with_clock(ttl, &ProtocolClock::default())
     }
 
+    fn new_with_clock(ttl: Duration, clock: &ProtocolClock) -> Self {
+        Self::new_with_capacity_and_clock(ttl, DEFAULT_ADMIN_WEB_MAX_SESSIONS, clock)
+    }
+
+    #[allow(dead_code)]
     fn new_with_capacity(ttl: Duration, max_sessions: usize) -> Self {
+        Self::new_with_capacity_and_clock(ttl, max_sessions, &ProtocolClock::default())
+    }
+
+    fn new_with_capacity_and_clock(
+        ttl: Duration,
+        max_sessions: usize,
+        clock: &ProtocolClock,
+    ) -> Self {
         Self {
             sessions: HashMap::new(),
             ttl,
@@ -450,6 +482,7 @@ impl SessionStore {
             created_total: 0,
             capacity_rejected_total: 0,
             expired_total: 0,
+            clock: clock.clone(),
         }
     }
 
@@ -470,7 +503,8 @@ impl SessionStore {
             push_hex_byte(&mut csrf_token, b);
         }
 
-        let expires_at = Instant::now() + self.ttl;
+        let now = self.clock.now();
+        let expires_at = now.checked_add(self.ttl).unwrap_or(now);
         self.sessions.insert(
             id.clone(),
             SessionRecord {
@@ -486,9 +520,10 @@ impl SessionStore {
 
     fn is_valid(&mut self, id: &str) -> bool {
         self.prune();
+        let now = self.clock.now();
         if let Some(record) = self.sessions.get_mut(id) {
-            if record.expires_at > Instant::now() {
-                record.expires_at = Instant::now() + self.ttl;
+            if record.expires_at > now {
+                record.expires_at = now.checked_add(self.ttl).unwrap_or(now);
                 return true;
             }
         }
@@ -497,11 +532,12 @@ impl SessionStore {
 
     fn csrf_token(&mut self, id: &str) -> Option<String> {
         self.prune();
+        let now = self.clock.now();
         let record = self.sessions.get_mut(id)?;
-        if record.expires_at <= Instant::now() {
+        if record.expires_at <= now {
             return None;
         }
-        record.expires_at = Instant::now() + self.ttl;
+        record.expires_at = now.checked_add(self.ttl).unwrap_or(now);
         Some(record.csrf_token.clone())
     }
 
@@ -517,7 +553,7 @@ impl SessionStore {
             csrf_token,
             replay_fingerprint,
             enforce_replay_guard,
-            Instant::now(),
+            self.clock.now(),
         )
     }
 
@@ -551,7 +587,7 @@ impl SessionStore {
                     }
                 }
             }
-            record.expires_at = now + self.ttl;
+            record.expires_at = now.checked_add(self.ttl).unwrap_or(now);
             return Ok(());
         }
         Err("Invalid CSRF token")
@@ -577,7 +613,7 @@ impl SessionStore {
     }
 
     fn prune(&mut self) {
-        self.prune_at(Instant::now());
+        self.prune_at(self.clock.now());
     }
 
     fn prune_at(&mut self, now: Instant) {
@@ -1090,6 +1126,7 @@ impl AdminHttpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn new_with_max_connections_and_operation_timeout_and_diagnostics(
         addr: SocketAddr,
         web_root: PathBuf,
@@ -1100,6 +1137,31 @@ impl AdminHttpServer {
         operation_timeout_ms: u64,
         operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
     ) -> std::io::Result<Self> {
+        Self::new_with_max_connections_and_operation_timeout_and_diagnostics_and_clock(
+            addr,
+            web_root,
+            auth,
+            auth_path,
+            handler,
+            max_connections,
+            operation_timeout_ms,
+            operation_diagnostics,
+            ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_max_connections_and_operation_timeout_and_diagnostics_and_clock(
+        addr: SocketAddr,
+        web_root: PathBuf,
+        auth: Option<AdminAuth>,
+        auth_path: Option<PathBuf>,
+        handler: Arc<dyn AdminHttpHandler>,
+        max_connections: usize,
+        operation_timeout_ms: u64,
+        operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+        clock: ProtocolClock,
+    ) -> std::io::Result<Self> {
         let operation_timeout = validate_admin_web_operation_timeout_ms(operation_timeout_ms)?;
         if operation_diagnostics.timeout_ms() != operation_timeout_ms {
             return Err(std::io::Error::new(
@@ -1107,7 +1169,7 @@ impl AdminHttpServer {
                 "admin web operation diagnostics timeout does not match server timeout",
             ));
         }
-        Self::new_with_operation_timeout_and_diagnostics(
+        Self::new_with_operation_timeout_and_diagnostics_and_clock(
             addr,
             web_root,
             auth,
@@ -1116,6 +1178,7 @@ impl AdminHttpServer {
             max_connections,
             operation_timeout,
             operation_diagnostics,
+            clock,
         )
     }
 
@@ -1129,6 +1192,31 @@ impl AdminHttpServer {
         max_connections: usize,
         operation_timeout: Duration,
         operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+    ) -> std::io::Result<Self> {
+        Self::new_with_operation_timeout_and_diagnostics_and_clock(
+            addr,
+            web_root,
+            auth,
+            auth_path,
+            handler,
+            max_connections,
+            operation_timeout,
+            operation_diagnostics,
+            ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_operation_timeout_and_diagnostics_and_clock(
+        addr: SocketAddr,
+        web_root: PathBuf,
+        auth: Option<AdminAuth>,
+        auth_path: Option<PathBuf>,
+        handler: Arc<dyn AdminHttpHandler>,
+        max_connections: usize,
+        operation_timeout: Duration,
+        operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
+        clock: ProtocolClock,
     ) -> std::io::Result<Self> {
         let max_connections = validate_admin_web_max_connections(max_connections)?;
         let mut loaded_from_disk = false;
@@ -1168,10 +1256,11 @@ impl AdminHttpServer {
             auth_path,
             handler,
             shutdown: Arc::new(AtomicBool::new(false)),
-            sessions: shared_session_store(Duration::from_secs(SESSION_TTL_SECS)),
+            sessions: shared_session_store(Duration::from_secs(SESSION_TTL_SECS), &clock),
             rate_limiter: shared_login_rate_limiter(
                 LOGIN_RATE_LIMIT_ATTEMPTS,
                 LOGIN_RATE_LIMIT_WINDOW_SECS,
+                &clock,
             ),
             conn_semaphore: Arc::new(tokio::sync::Semaphore::new(max_connections)),
             admission: Arc::new(AdminHttpAdmissionState::new(max_connections)),

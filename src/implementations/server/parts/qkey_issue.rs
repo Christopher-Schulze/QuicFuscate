@@ -28,17 +28,29 @@ pub struct QKeyAuthState {
 impl QKeyAuthState {
     #[inline]
     pub fn begin_post_handshake_timeout(&mut self) {
+        self.begin_post_handshake_timeout_at(ProtocolClock::default().now());
+    }
+
+    #[inline]
+    pub fn begin_post_handshake_timeout_at(&mut self, now: Instant) {
         if !self.authed && self.post_handshake_started_at.is_none() {
-            self.post_handshake_started_at = Some(Instant::now());
+            self.post_handshake_started_at = Some(now);
         }
     }
 
     #[inline]
     pub fn is_expired(&self) -> bool {
+        self.is_expired_at(ProtocolClock::default().now())
+    }
+
+    #[inline]
+    pub fn is_expired_at(&self, now: Instant) -> bool {
         !self.authed
             && self
                 .post_handshake_started_at
-                .is_some_and(|started_at| started_at.elapsed() > QKEY_AUTH_TIMEOUT)
+                .is_some_and(|started_at| {
+                    now.saturating_duration_since(started_at) > QKEY_AUTH_TIMEOUT
+                })
     }
 }
 

@@ -9,7 +9,7 @@ struct PendingTunDownlink {
 
 impl PendingTunDownlink {
     fn is_expired(&self, now: Instant) -> bool {
-        now.duration_since(self.queued_at) >= MAX_PENDING_TUN_DOWNLINK_AGE
+        now.saturating_duration_since(self.queued_at) >= MAX_PENDING_TUN_DOWNLINK_AGE
     }
 }
 
@@ -53,21 +53,42 @@ struct PendingTunDownlinks {
 impl PendingTunDownlinks {
     const DRR_QUANTUM_BYTES: usize = 1_200;
 
+    #[allow(dead_code)]
     fn new(rate_bytes_per_second: u64, burst_bytes: u64) -> Self {
-        Self::with_limits_and_capacity(
+        Self::new_with_clock(
+            rate_bytes_per_second,
+            burst_bytes,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    fn new_with_clock(
+        rate_bytes_per_second: u64,
+        burst_bytes: u64,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
+        Self::with_limits_and_capacity_and_clock(
             MAX_PENDING_TUN_DOWNLINKS,
             MAX_PENDING_TUN_DOWNLINK_BYTES,
             MAX_PENDING_TUN_DOWNLINKS_PER_TARGET,
             rate_bytes_per_second,
             burst_bytes,
+            clock,
         )
     }
 
     #[cfg(test)]
     fn with_limits(max_entries: usize, max_bytes: usize, max_per_target: usize) -> Self {
-        Self::with_limits_and_capacity(max_entries, max_bytes, max_per_target, 0, 0)
+        Self::with_limits_and_capacity(
+            max_entries,
+            max_bytes,
+            max_per_target,
+            0,
+            0,
+        )
     }
 
+    #[allow(dead_code)]
     fn with_limits_and_capacity(
         max_entries: usize,
         max_bytes: usize,
@@ -75,10 +96,32 @@ impl PendingTunDownlinks {
         rate_bytes_per_second: u64,
         burst_bytes: u64,
     ) -> Self {
+        Self::with_limits_and_capacity_and_clock(
+            max_entries,
+            max_bytes,
+            max_per_target,
+            rate_bytes_per_second,
+            burst_bytes,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    fn with_limits_and_capacity_and_clock(
+        max_entries: usize,
+        max_bytes: usize,
+        max_per_target: usize,
+        rate_bytes_per_second: u64,
+        burst_bytes: u64,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
         Self {
             queues: std::collections::HashMap::new(),
             active: std::collections::VecDeque::new(),
-            capacity_limiter: BandwidthLimiter::new(rate_bytes_per_second, burst_bytes),
+            capacity_limiter: BandwidthLimiter::new_with_clock(
+                rate_bytes_per_second,
+                burst_bytes,
+                clock,
+            ),
             entries: 0,
             bytes: 0,
             max_entries,
@@ -343,6 +386,7 @@ struct BlacklistSyncState {
 #[cfg(feature = "rate_limiter")]
 struct BlacklistSyncOwner {
     state: Arc<Mutex<BlacklistSyncState>>,
+    clock: crate::time_source::ProtocolClock,
 }
 
 #[cfg(feature = "rate_limiter")]
@@ -356,7 +400,12 @@ enum BlacklistSyncClaim {
 
 #[cfg(feature = "rate_limiter")]
 impl BlacklistSyncOwner {
+    #[allow(dead_code)]
     fn new() -> Self {
+        Self::new_with_clock(&crate::time_source::ProtocolClock::default())
+    }
+
+    fn new_with_clock(clock: &crate::time_source::ProtocolClock) -> Self {
         Self {
             state: Arc::new(Mutex::new(BlacklistSyncState {
                 closed: false,
@@ -365,6 +414,7 @@ impl BlacklistSyncOwner {
                 interval: Duration::ZERO,
                 task: None,
             })),
+            clock: clock.clone(),
         }
     }
 
@@ -380,7 +430,7 @@ impl BlacklistSyncOwner {
         if state.task.is_some() {
             return BlacklistSyncClaim::InFlight;
         }
-        if state.next_due.is_some_and(|next_due| Instant::now() < next_due) {
+        if state.next_due.is_some_and(|next_due| self.clock.now() < next_due) {
             return BlacklistSyncClaim::NotDue;
         }
 
@@ -426,13 +476,15 @@ impl BlacklistSyncOwner {
         if retry {
             let attempt = state.retry_attempts;
             state.retry_attempts = state.retry_attempts.saturating_add(1);
-            state.next_due = Some(Instant::now() + retry_delay(attempt));
+            let now = self.clock.now();
+            state.next_due = Some(now.checked_add(retry_delay(attempt)).unwrap_or(now));
             metrics.record_blacklist_sync_event(
                 crate::implementations::server::metrics::BlacklistSyncEvent::RetryScheduled,
             );
         } else {
             state.retry_attempts = 0;
-            state.next_due = Some(Instant::now() + state.interval);
+            let now = self.clock.now();
+            state.next_due = Some(now.checked_add(state.interval).unwrap_or(now));
         }
     }
 
@@ -538,6 +590,7 @@ impl Drop for BlacklistSyncOwner {
 }
 
 pub struct LiveServerState {
+    pub(crate) clock: crate::time_source::ProtocolClock,
     clients: std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
     path_candidates: std::collections::HashMap<SocketAddr, SocketAddr>,
     /// Bounded downlink packets that could not be enqueued because a client's
@@ -580,6 +633,7 @@ pub(crate) struct LiveClientBuildRequest<'a> {
     pub auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
     pub retry_token_manager: Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
+    pub clock: crate::time_source::ProtocolClock,
 }
 
 fn complete_auth_attempt(
@@ -764,7 +818,7 @@ pub(crate) fn build_live_server_client_init(
         );
         return None;
     }
-    match create_live_server_connection_with_runtime(
+    match create_live_server_connection_with_runtime_and_clock(
         request.local_addr,
         request.remote_addr,
         &mut selected_transport,
@@ -773,6 +827,7 @@ pub(crate) fn build_live_server_client_init(
         opt_params,
         &initial_ctx.initial_key_dcid,
         request.stealth_runtime.clone(),
+        request.clock,
     ) {
         Ok(connection) => {
             Some(LiveClientInit { connection, pending_qkey_auth: initial_ctx.pending_qkey_auth })
@@ -821,13 +876,21 @@ struct LiveServerDomain {
 }
 
 impl LiveServerDomain {
+    #[allow(dead_code)]
     fn try_new(server_config: &ServerConfig) -> Result<Self, String> {
+        Self::try_new_with_clock(server_config, &crate::time_source::ProtocolClock::default())
+    }
+
+    fn try_new_with_clock(
+        server_config: &ServerConfig,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Result<Self, String> {
         let dns_admission = Arc::new(
-            crate::dns::DnsAdmission::try_new(server_config.dns_admission)
+            crate::dns::DnsAdmission::try_new_with_clock(server_config.dns_admission, clock)
                 .map_err(|error| format!("server DNS admission configuration: {error}"))?,
         );
         Ok(Self {
-            shared: SharedServerDomain::try_new(server_config)?,
+            shared: SharedServerDomain::try_new_with_clock(server_config, clock)?,
             client_snapshots: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             dns_admission,
         })
@@ -1002,6 +1065,7 @@ impl LiveServerDomain {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn accept_session_in_domain(
     sessions: &mut SessionManager,
     ip_pool: &mut IpPool,
@@ -1010,6 +1074,7 @@ fn accept_session_in_domain(
     remote_addr: SocketAddr,
     max_clients: usize,
     client_timeout_secs: u64,
+    clock: &crate::time_source::ProtocolClock,
 ) -> Result<(SessionId, Arc<SessionStats>, AssignedClientIps), AcceptError> {
     if !connection_limiter.check(remote_addr.ip()) {
         return Err(AcceptError::TooManyConnectionsPerIp);
@@ -1034,9 +1099,15 @@ fn accept_session_in_domain(
     };
 
     let session = if let Some(v6) = client_ipv6 {
-        Session::new_dual_stack(remote_addr, client_ip, Some(v6), client_timeout_secs)
+        Session::new_dual_stack_with_clock(
+            remote_addr,
+            client_ip,
+            Some(v6),
+            client_timeout_secs,
+            clock,
+        )
     } else {
-        Session::new(remote_addr, client_ip, client_timeout_secs)
+        Session::new_with_clock(remote_addr, client_ip, client_timeout_secs, clock)
     };
     let session_id = session.id();
     let stats = Arc::clone(session.stats());
@@ -1123,6 +1194,13 @@ fn reap_expired_sessions_from_domain(
 
 impl LiveServerState {
     pub fn try_new(server_config: ServerConfig) -> Result<Self, String> {
+        Self::try_new_with_clock(server_config, crate::time_source::ProtocolClock::default())
+    }
+
+    pub fn try_new_with_clock(
+        server_config: ServerConfig,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Result<Self, String> {
         server_config.validate_revocation_retention()?;
         let revocation_manager =
             Arc::new(crate::implementations::server::revocation::RevocationManager::new_with_retention_secs(
@@ -1130,31 +1208,34 @@ impl LiveServerState {
             ));
         let qkey_tracker =
             Arc::new(crate::implementations::server::revocation::QKeyConnectionTracker::new());
-        let domain = LiveServerDomain::try_new(&server_config)?;
+        let domain = LiveServerDomain::try_new_with_clock(&server_config, &clock)?;
         #[cfg(feature = "rate_limiter")]
         let retry_token_manager = domain.shared.retry_token_manager.clone();
         Ok(Self {
+            clock: clock.clone(),
             clients: std::collections::HashMap::new(),
             path_candidates: std::collections::HashMap::new(),
-            pending_tun_downlinks: PendingTunDownlinks::new(
+            pending_tun_downlinks: PendingTunDownlinks::new_with_clock(
                 server_config.downlink_scheduler_rate_bytes_per_second,
                 server_config.downlink_scheduler_burst_bytes,
+                &clock,
             ),
             fanout_queue: new_client_fanout_queue(),
             qkey_auth: std::collections::HashMap::new(),
             domain,
             auth_rate_limiter: Arc::new(std::sync::Mutex::new(
-                crate::implementations::server::limits::AuthRateLimiter::new(
+                crate::implementations::server::limits::AuthRateLimiter::new_with_clock(
                     server_config.auth_policy.clone(),
+                    &clock,
                 ),
             )),
             #[cfg(feature = "rate_limiter")]
             retry_token_manager,
             revocation_manager,
             qkey_tracker,
-            next_stats_log: Instant::now(),
+            next_stats_log: clock.now(),
             #[cfg(feature = "rate_limiter")]
-            blacklist_sync: BlacklistSyncOwner::new(),
+            blacklist_sync: BlacklistSyncOwner::new_with_clock(&clock),
             uring_worker: None,
         })
     }
@@ -1487,7 +1568,7 @@ impl LiveServerState {
                     session_id,
                     weight,
                     fanout.packet.clone(),
-                    Instant::now(),
+                    self.clock.now(),
                     metrics,
                 )
                 .is_ok()
@@ -1512,10 +1593,11 @@ impl LiveServerState {
         metrics: &Metrics,
         accept_loop: &AcceptLoop,
     ) -> Result<(), crate::engine::DataPlaneFault> {
-        let now = Instant::now();
+        let now = self.clock.now();
         let log_client_stats = now >= self.next_stats_log;
         if log_client_stats {
-            self.next_stats_log = now + SERVER_STATS_LOG_INTERVAL;
+            self.next_stats_log =
+                now.checked_add(SERVER_STATS_LOG_INTERVAL).unwrap_or(now);
         }
         {
             let mut limiter =
@@ -1572,7 +1654,7 @@ impl LiveServerState {
             };
             if let Some(conn_id) = established_conn_id {
                 if let Some(state) = self.qkey_auth.get_mut(&conn_id) {
-                    state.begin_post_handshake_timeout();
+                    state.begin_post_handshake_timeout_at(now);
                 }
             }
         }
@@ -1956,7 +2038,9 @@ impl LiveServerState {
         let timed_out_conn_ids: Vec<Vec<u8>> = self
             .qkey_auth
             .iter()
-            .filter_map(|(conn_id, state)| state.is_expired().then_some(conn_id.clone()))
+            .filter_map(|(conn_id, state)| {
+                state.is_expired_at(self.clock.now()).then_some(conn_id.clone())
+            })
             .collect();
         for conn_id in timed_out_conn_ids {
             let key_id = self.qkey_auth.get(&conn_id).map(|state| state.key_id.clone());

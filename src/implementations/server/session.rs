@@ -11,6 +11,7 @@ use crate::implementations::server::bandwidth::{
     PerClientBandwidthManager,
 };
 use crate::rng;
+use crate::time_source::ProtocolClock;
 
 /// Unique session identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -50,6 +51,7 @@ pub struct Session {
     created_at: Instant,
     timeout: Duration,
     stats: Arc<SessionStats>,
+    clock: ProtocolClock,
 }
 
 /// Session statistics (interior mutable via atomics).
@@ -80,14 +82,25 @@ impl SessionStats {
 impl Session {
     /// Create a new session.
     pub fn new(remote_addr: SocketAddr, client_ip: Ipv4Addr, timeout_secs: u64) -> Self {
+        Self::new_with_clock(remote_addr, client_ip, timeout_secs, &ProtocolClock::default())
+    }
+
+    /// Create a new session bound to an explicit protocol clock.
+    pub fn new_with_clock(
+        remote_addr: SocketAddr,
+        client_ip: Ipv4Addr,
+        timeout_secs: u64,
+        clock: &ProtocolClock,
+    ) -> Self {
         Self {
             id: SessionId::new(),
             remote_addr,
             client_ip,
             client_ipv6: None,
-            created_at: Instant::now(),
+            created_at: clock.now(),
             timeout: Duration::from_secs(timeout_secs),
             stats: Arc::new(SessionStats::new()),
+            clock: clock.clone(),
         }
     }
 
@@ -98,14 +111,32 @@ impl Session {
         client_ipv6: Option<Ipv6Addr>,
         timeout_secs: u64,
     ) -> Self {
+        Self::new_dual_stack_with_clock(
+            remote_addr,
+            client_ip,
+            client_ipv6,
+            timeout_secs,
+            &ProtocolClock::default(),
+        )
+    }
+
+    /// Create a new dual-stack session bound to an explicit protocol clock.
+    pub fn new_dual_stack_with_clock(
+        remote_addr: SocketAddr,
+        client_ip: Ipv4Addr,
+        client_ipv6: Option<Ipv6Addr>,
+        timeout_secs: u64,
+        clock: &ProtocolClock,
+    ) -> Self {
         Self {
             id: SessionId::new(),
             remote_addr,
             client_ip,
             client_ipv6,
-            created_at: Instant::now(),
+            created_at: clock.now(),
             timeout: Duration::from_secs(timeout_secs),
             stats: Arc::new(SessionStats::new()),
+            clock: clock.clone(),
         }
     }
 
@@ -131,12 +162,12 @@ impl Session {
 
     /// Get session uptime.
     pub fn uptime(&self) -> Duration {
-        self.created_at.elapsed()
+        self.clock.elapsed_since(self.created_at)
     }
 
     /// Check if session has expired.
     pub fn is_expired(&self) -> bool {
-        !self.timeout.is_zero() && self.created_at.elapsed() > self.timeout
+        !self.timeout.is_zero() && self.clock.elapsed_since(self.created_at) > self.timeout
     }
 
     /// Get session stats.
@@ -162,14 +193,22 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a new session manager.
     pub fn new(max_sessions: usize) -> Self {
+        Self::new_with_clock(max_sessions, &ProtocolClock::default())
+    }
+
+    /// Create a session manager bound to an explicit protocol clock.
+    pub fn new_with_clock(max_sessions: usize, clock: &ProtocolClock) -> Self {
         Self {
             sessions: HashMap::new(),
             by_client_ip: HashMap::new(),
             by_client_ipv6: HashMap::new(),
             by_remote_addr: HashMap::new(),
             max_sessions,
-            bandwidth_manager: PerClientBandwidthManager::new(BandwidthPolicy::default())
-                .expect("default bandwidth policy is valid"),
+            bandwidth_manager: PerClientBandwidthManager::new_with_clock(
+                BandwidthPolicy::default(),
+                clock,
+            )
+            .expect("default bandwidth policy is valid"),
         }
     }
 
@@ -445,6 +484,25 @@ mod tests {
     }
 
     #[test]
+    fn session_expiry_uses_explicit_clock_without_sleeping() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let clock = ProtocolClock::from_source(source.clone());
+        let session = Session::new_with_clock(
+            "127.0.0.1:12345".parse().unwrap(),
+            Ipv4Addr::new(10, 8, 0, 2),
+            10,
+            &clock,
+        );
+
+        assert!(!session.is_expired());
+        source.advance(Duration::from_secs(11));
+        assert!(session.is_expired());
+    }
+
+    #[test]
     fn test_session_manager() {
         let mut mgr = SessionManager::new(100);
 
@@ -535,6 +593,7 @@ mod tests {
             created_at: Instant::now(),
             timeout: Duration::from_secs(3600),
             stats: Arc::new(SessionStats::new()),
+            clock: ProtocolClock::default(),
         };
 
         assert!(

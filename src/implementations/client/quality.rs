@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 
+use crate::time_source::ProtocolClock;
+
 /// Connection quality level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Quality {
@@ -160,17 +162,25 @@ pub struct BandwidthTracker {
     /// Calculated rates
     rate_in: f64,
     rate_out: f64,
+    /// Clock owning the measurement window.
+    clock: ProtocolClock,
 }
 
 impl BandwidthTracker {
     /// Create a new bandwidth tracker.
     pub fn new() -> Self {
+        Self::new_with_clock(&ProtocolClock::default())
+    }
+
+    /// Create a bandwidth tracker bound to an explicit protocol clock.
+    pub fn new_with_clock(clock: &ProtocolClock) -> Self {
         Self {
             bytes_in: 0,
             bytes_out: 0,
-            last_update: std::time::Instant::now(),
+            last_update: clock.now(),
             rate_in: 0.0,
             rate_out: 0.0,
+            clock: clock.clone(),
         }
     }
 
@@ -188,14 +198,14 @@ impl BandwidthTracker {
 
     /// Update rates if enough time has passed.
     fn maybe_update(&mut self) {
-        let elapsed = self.last_update.elapsed();
+        let elapsed = self.clock.elapsed_since(self.last_update);
         if elapsed.as_secs_f64() >= 1.0 {
             let secs = elapsed.as_secs_f64();
             self.rate_in = self.bytes_in as f64 / secs;
             self.rate_out = self.bytes_out as f64 / secs;
             self.bytes_in = 0;
             self.bytes_out = 0;
-            self.last_update = std::time::Instant::now();
+            self.last_update = self.clock.now();
         }
     }
 
@@ -293,6 +303,22 @@ mod tests {
         tracker.add_sample(32.0, 0.4);
 
         assert_eq!(tracker.quality(), Quality::Excellent);
+    }
+
+    #[test]
+    fn bandwidth_tracker_uses_explicit_clock_without_sleeping() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let clock = crate::time_source::ProtocolClock::from_source(source.clone());
+        let mut tracker = BandwidthTracker::new_with_clock(&clock);
+        tracker.add_received(1_000);
+        source.advance(std::time::Duration::from_secs(2));
+        tracker.add_received(1_000);
+
+        assert_eq!(tracker.download_rate(), 1_000.0);
+        assert_eq!(tracker.upload_rate(), 0.0);
     }
 
     #[test]

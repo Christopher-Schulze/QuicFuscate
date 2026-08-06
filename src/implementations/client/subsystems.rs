@@ -4,23 +4,34 @@ use std::sync::Arc;
 
 use crate::engine::{EngineConfig, EngineError};
 use crate::stealth::StealthRuntimeOwner;
+use crate::time_source::ProtocolClock;
 
 use super::ClientSubsystems;
 
+#[allow(dead_code)]
 pub fn init_subsystems_with_runtime(
     config: &EngineConfig,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
 ) -> Result<ClientSubsystems, EngineError> {
+    init_subsystems_with_runtime_and_clock(config, runtime_owner, &ProtocolClock::default())
+}
+
+pub fn init_subsystems_with_runtime_and_clock(
+    config: &EngineConfig,
+    runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    clock: &ProtocolClock,
+) -> Result<ClientSubsystems, EngineError> {
     config
         .validate()
         .map_err(|error| EngineError::Config(format!("Invalid engine configuration: {error}")))?;
-    let stealth = init_stealth(config, runtime_owner)?;
+    let stealth = init_stealth(config, runtime_owner, clock)?;
     Ok(ClientSubsystems { stealth })
 }
 
 fn init_stealth(
     config: &EngineConfig,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    clock: &ProtocolClock,
 ) -> Result<Arc<crate::stealth::StealthManager>, EngineError> {
     use crate::crypto::CryptoManager;
     use crate::optimize::OptimizationManager;
@@ -36,11 +47,12 @@ fn init_stealth(
         .map_err(|error| EngineError::Config(format!("Optimization config error: {error}")))?;
     let opt_mgr = Arc::new(OptimizationManager::from_cfg(optimize_config));
     let crypto_mgr = Arc::new(CryptoManager::new());
-    Ok(Arc::new(StealthManager::new_with_runtime_owner(
+    Ok(Arc::new(StealthManager::new_with_runtime_owner_and_clock(
         stealth_config,
         opt_mgr,
         crypto_mgr,
         runtime_owner,
+        clock.clone(),
     )))
 }
 

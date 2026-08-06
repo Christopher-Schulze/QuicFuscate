@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::time_source::ProtocolClock;
+
 const SECONDS_PER_DAY: u64 = 86_400;
 const DENIAL_AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -132,6 +134,8 @@ pub struct BandwidthLimiter {
     tokens: u64,
     /// Monotonic timestamp of the last refill.
     last_refill: Instant,
+    /// Clock owning refill progression for this limiter.
+    clock: ProtocolClock,
 }
 
 impl BandwidthLimiter {
@@ -141,11 +145,17 @@ impl BandwidthLimiter {
     /// burst capacity (the bucket starts full). A `rate_bps` or `burst_bytes` of
     /// `0` disables the limiter (all sends are allowed).
     pub fn new(rate_bps: u64, burst_bytes: u64) -> Self {
+        Self::new_with_clock(rate_bps, burst_bytes, &ProtocolClock::default())
+    }
+
+    /// Create a limiter bound to an explicit protocol clock.
+    pub fn new_with_clock(rate_bps: u64, burst_bytes: u64, clock: &ProtocolClock) -> Self {
         Self {
             capacity_bytes: burst_bytes,
             refill_rate_bps: rate_bps,
             tokens: burst_bytes,
-            last_refill: Instant::now(),
+            last_refill: clock.now(),
+            clock: clock.clone(),
         }
     }
 
@@ -191,8 +201,8 @@ impl BandwidthLimiter {
     /// arithmetic to avoid overflow for large idle gaps, then saturates at
     /// `capacity_bytes`.
     pub fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill);
+        let now = self.clock.now();
+        let elapsed = self.clock.elapsed_since(self.last_refill);
 
         if elapsed.is_zero() {
             return;
@@ -244,6 +254,8 @@ pub struct QuotaTracker {
     used_bytes: u64,
     period: QuotaPeriod,
     period_index: i64,
+    /// Clock owning billing-period selection for this tracker.
+    clock: ProtocolClock,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,15 +266,35 @@ pub enum QuotaPeriod {
 
 impl QuotaTracker {
     pub fn new(quota_limit_bytes: u64, period: QuotaPeriod) -> Self {
-        Self::new_at(quota_limit_bytes, period, SystemTime::now())
+        Self::new_with_clock(quota_limit_bytes, period, &ProtocolClock::default())
     }
 
+    /// Create a quota tracker bound to an explicit protocol clock.
+    pub fn new_with_clock(
+        quota_limit_bytes: u64,
+        period: QuotaPeriod,
+        clock: &ProtocolClock,
+    ) -> Self {
+        Self::new_at_with_clock(quota_limit_bytes, period, clock.now_system(), clock)
+    }
+
+    #[allow(dead_code)]
     fn new_at(quota_limit_bytes: u64, period: QuotaPeriod, now: SystemTime) -> Self {
+        Self::new_at_with_clock(quota_limit_bytes, period, now, &ProtocolClock::default())
+    }
+
+    fn new_at_with_clock(
+        quota_limit_bytes: u64,
+        period: QuotaPeriod,
+        now: SystemTime,
+        clock: &ProtocolClock,
+    ) -> Self {
         Self {
             quota_limit_bytes,
             used_bytes: 0,
             period,
             period_index: quota_period_index(now, period),
+            clock: clock.clone(),
         }
     }
 
@@ -293,7 +325,7 @@ impl QuotaTracker {
 
     /// Reset the used-bytes counter if the billing interval has elapsed.
     pub fn check_and_reset(&mut self) {
-        self.check_and_reset_at(SystemTime::now());
+        self.check_and_reset_at(self.clock.now_system());
     }
 
     fn check_and_reset_at(&mut self, now: SystemTime) {
@@ -314,7 +346,7 @@ impl QuotaTracker {
 
     pub fn reset(&mut self) {
         self.used_bytes = 0;
-        self.period_index = quota_period_index(SystemTime::now(), self.period);
+        self.period_index = quota_period_index(self.clock.now_system(), self.period);
     }
 
     fn set_limit(&mut self, quota_limit_bytes: u64) {
@@ -405,23 +437,46 @@ pub struct BandwidthStats {
 pub struct PerClientBandwidthManager {
     clients: HashMap<String, ClientBandwidthEntry>,
     default_policy: BandwidthPolicy,
+    /// Clock shared by all per-client rate, quota, and audit state.
+    clock: ProtocolClock,
 }
 
 impl PerClientBandwidthManager {
     pub fn new(default_policy: BandwidthPolicy) -> Result<Self, String> {
-        default_policy.validate()?;
-        Ok(Self { clients: HashMap::new(), default_policy })
+        Self::new_with_clock(default_policy, &ProtocolClock::default())
     }
 
-    fn entry_from_policy(policy: BandwidthPolicy) -> ClientBandwidthEntry {
+    /// Create a manager bound to an explicit protocol clock.
+    pub fn new_with_clock(
+        default_policy: BandwidthPolicy,
+        clock: &ProtocolClock,
+    ) -> Result<Self, String> {
+        default_policy.validate()?;
+        Ok(Self { clients: HashMap::new(), default_policy, clock: clock.clone() })
+    }
+
+    fn entry_from_policy(policy: BandwidthPolicy, clock: &ProtocolClock) -> ClientBandwidthEntry {
         ClientBandwidthEntry {
-            uplink_limiter: BandwidthLimiter::new(policy.rate_bytes_per_second, policy.burst_bytes),
-            downlink_limiter: BandwidthLimiter::new(
+            uplink_limiter: BandwidthLimiter::new_with_clock(
                 policy.rate_bytes_per_second,
                 policy.burst_bytes,
+                clock,
             ),
-            daily_quota: QuotaTracker::new(policy.daily_quota_bytes, QuotaPeriod::Daily),
-            monthly_quota: QuotaTracker::new(policy.monthly_quota_bytes, QuotaPeriod::Monthly),
+            downlink_limiter: BandwidthLimiter::new_with_clock(
+                policy.rate_bytes_per_second,
+                policy.burst_bytes,
+                clock,
+            ),
+            daily_quota: QuotaTracker::new_with_clock(
+                policy.daily_quota_bytes,
+                QuotaPeriod::Daily,
+                clock,
+            ),
+            monthly_quota: QuotaTracker::new_with_clock(
+                policy.monthly_quota_bytes,
+                QuotaPeriod::Monthly,
+                clock,
+            ),
             last_audited_denial: [None; 2],
             policy,
         }
@@ -437,7 +492,7 @@ impl PerClientBandwidthManager {
         if self.clients.contains_key(client_id) {
             return Err("bandwidth client already registered".to_string());
         }
-        self.clients.insert(client_id.to_string(), Self::entry_from_policy(policy));
+        self.clients.insert(client_id.to_string(), Self::entry_from_policy(policy, &self.clock));
         Ok(())
     }
 
@@ -450,10 +505,16 @@ impl PerClientBandwidthManager {
         let Some(entry) = self.clients.get_mut(client_id) else {
             return Err("bandwidth client not found".to_string());
         };
-        entry.uplink_limiter =
-            BandwidthLimiter::new(policy.rate_bytes_per_second, policy.burst_bytes);
-        entry.downlink_limiter =
-            BandwidthLimiter::new(policy.rate_bytes_per_second, policy.burst_bytes);
+        entry.uplink_limiter = BandwidthLimiter::new_with_clock(
+            policy.rate_bytes_per_second,
+            policy.burst_bytes,
+            &self.clock,
+        );
+        entry.downlink_limiter = BandwidthLimiter::new_with_clock(
+            policy.rate_bytes_per_second,
+            policy.burst_bytes,
+            &self.clock,
+        );
         entry.daily_quota.set_limit(policy.daily_quota_bytes);
         entry.monthly_quota.set_limit(policy.monthly_quota_bytes);
         entry.policy = policy;
@@ -490,11 +551,11 @@ impl PerClientBandwidthManager {
                 BandwidthDecision::RateLimited
             }
         };
-        let now = Instant::now();
+        let now = self.clock.now();
         let audit_slot = &mut entry.last_audited_denial[direction.index()];
         let should_audit = decision != BandwidthDecision::Allowed
             && audit_slot.is_none_or(|(previous, last)| {
-                previous != decision || now.duration_since(last) >= DENIAL_AUDIT_INTERVAL
+                previous != decision || self.clock.elapsed_since(last) >= DENIAL_AUDIT_INTERVAL
             });
         if should_audit {
             *audit_slot = Some((decision, now));
@@ -576,6 +637,28 @@ mod tests {
         // Bucket starts full at capacity, so a send up to capacity is allowed.
         assert!(limiter.check(10_000));
         assert_eq!(limiter.available_tokens(), 0);
+    }
+
+    #[test]
+    fn explicit_clock_drives_bandwidth_refill_and_daily_quota_reset() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            UNIX_EPOCH + Duration::from_secs(86_400),
+        );
+        let clock = ProtocolClock::from_source(source.clone());
+        let mut limiter = BandwidthLimiter::new_with_clock(10, 10, &clock);
+        assert!(limiter.check(10));
+        assert!(!limiter.check(1));
+
+        source.advance(Duration::from_secs(1));
+        assert!(limiter.check(10));
+
+        let mut quota = QuotaTracker::new_with_clock(10, QuotaPeriod::Daily, &clock);
+        assert!(quota.record(10));
+        assert_eq!(quota.remaining(), 0);
+        source.advance(Duration::from_secs(86_400));
+        quota.check_and_reset();
+        assert_eq!(quota.remaining(), 10);
     }
 
     #[test]

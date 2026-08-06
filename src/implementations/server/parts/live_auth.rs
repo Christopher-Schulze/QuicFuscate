@@ -87,7 +87,7 @@ pub(crate) fn start_standalone_admin_web_service(
     handler: ServerAdminHttpRuntimeHandler,
     operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
 ) -> std::io::Result<()> {
-    let server = AdminHttpServer::new_with_max_connections_and_operation_timeout_and_diagnostics(
+    let server = AdminHttpServer::new_with_max_connections_and_operation_timeout_and_diagnostics_and_clock(
         addr,
         web_root,
         Some(auth),
@@ -96,6 +96,7 @@ pub(crate) fn start_standalone_admin_web_service(
         max_connections,
         operation_timeout_ms,
         operation_diagnostics,
+        runtime.clock.clone(),
     )?;
     runtime.register_admin_web_shutdown(server.shutdown_signal());
     // JoinHandle intentionally not stored: graceful shutdown via registered signal.
@@ -335,10 +336,35 @@ pub fn create_live_server_connection_with_runtime(
     initial_key_dcid: &crate::transport::ConnectionId,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
 ) -> Result<QuicFuscateConnection, String> {
+    create_live_server_connection_with_runtime_and_clock(
+        local_addr,
+        remote_addr,
+        transport_config,
+        stealth_config,
+        fec_config,
+        opt_params,
+        initial_key_dcid,
+        runtime_owner,
+        crate::time_source::ProtocolClock::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_live_server_connection_with_runtime_and_clock(
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    transport_config: &mut crate::transport::Config,
+    stealth_config: crate::stealth::StealthConfig,
+    fec_config: crate::fec::FecConfig,
+    opt_params: crate::optimize::OptimizeConfig,
+    initial_key_dcid: &crate::transport::ConnectionId,
+    runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    clock: crate::time_source::ProtocolClock,
+) -> Result<QuicFuscateConnection, String> {
     let mut scid_bytes = [0u8; crate::transport::MAX_CONN_ID_LEN];
     crate::transport::rand::rand_bytes(&mut scid_bytes);
     let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
-    QuicFuscateConnection::new_server_with_runtime(
+    QuicFuscateConnection::new_server_with_runtime_and_clock(
         &scid,
         Some(initial_key_dcid),
         local_addr,
@@ -348,6 +374,7 @@ pub fn create_live_server_connection_with_runtime(
         fec_config,
         opt_params,
         runtime_owner,
+        clock,
     )
 }
 
@@ -432,6 +459,7 @@ fn record_live_snapshot_bytes_in(
     bytes_in: u64,
     stealth_mode: String,
     session_id: Option<SessionId>,
+    connected_at: std::time::Instant,
 ) {
     if bytes_in == 0 {
         return;
@@ -440,8 +468,9 @@ fn record_live_snapshot_bytes_in(
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let snap =
-        snapshots_guard.entry(addr).or_insert_with(|| ClientSnapshot::new(stealth_mode.clone()));
+    let snap = snapshots_guard
+        .entry(addr)
+        .or_insert_with(|| ClientSnapshot::new_at(stealth_mode.clone(), connected_at));
     if let Some(session_id) = session_id {
         snap.set_session_id(session_id);
     }
@@ -1091,6 +1120,7 @@ async fn process_live_server_client_datagram(
         packet.len() as u64,
         format!("{:?}", conn.stealth_mode()),
         session_id,
+        conn.protocol_clock().now(),
     );
     if let Some(stats) = session_stats.as_ref() {
         stats.record_received(packet.len() as u64);

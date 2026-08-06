@@ -905,7 +905,8 @@ impl QuicFuscateEngine {
         let start_result = (|| -> Result<(), EngineError> {
             match self.config.engine.mode {
                 EngineMode::Client => {
-                    let mut runtime = ClientRuntime::new(self.config.clone())?;
+                    let mut runtime =
+                        ClientRuntime::new_with_clock(self.config.clone(), self.clock.clone())?;
                     runtime.start()?;
                     self.client_runtime = Some(runtime);
                     Ok(())
@@ -957,6 +958,7 @@ impl QuicFuscateEngine {
                     );
                     let engine_config = self.config.clone();
                     let server_opt_params = build_server_optimize_config(&self.config)?;
+                    let runtime_clock = self.clock.clone();
                     let startup_timeout = std::time::Duration::from_millis(
                         self.config.engine.shutdown_timeout_ms.max(30_000),
                     );
@@ -976,7 +978,7 @@ impl QuicFuscateEngine {
 
                             runtime.block_on(async move {
                                 let mut server_runtime =
-                                    match ServerRuntime::new_initialized_standalone_default(
+                                    match ServerRuntime::new_initialized_standalone_default_with_clock(
                                         engine_config,
                                         server_config,
                                         None,
@@ -985,6 +987,7 @@ impl QuicFuscateEngine {
                                         None,
                                         None,
                                         None,
+                                        runtime_clock,
                                     ) {
                                         Ok(server_runtime) => server_runtime,
                                         Err(error) => {

@@ -26,6 +26,42 @@ impl TimeSource for SystemTimeSource {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::TimeSource;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime};
+
+    pub(crate) struct ManualTimeSource {
+        instant: Mutex<Instant>,
+        system: Mutex<SystemTime>,
+    }
+
+    impl ManualTimeSource {
+        pub(crate) fn new(instant: Instant, system: SystemTime) -> Arc<Self> {
+            Arc::new(Self { instant: Mutex::new(instant), system: Mutex::new(system) })
+        }
+
+        pub(crate) fn advance(&self, duration: Duration) {
+            let mut instant = self.instant.lock().expect("manual instant lock");
+            *instant = instant.checked_add(duration).expect("manual instant overflow");
+            drop(instant);
+            let mut system = self.system.lock().expect("manual system lock");
+            *system = system.checked_add(duration).expect("manual system overflow");
+        }
+    }
+
+    impl TimeSource for ManualTimeSource {
+        fn now_instant(&self) -> Instant {
+            *self.instant.lock().expect("manual instant lock")
+        }
+
+        fn now_system(&self) -> SystemTime {
+            *self.system.lock().expect("manual system lock")
+        }
+    }
+}
+
 /// Explicit monotonic clock owner for one protocol connection or runtime.
 ///
 /// The handle snapshots one `TimeSource` at construction. Cloning the handle

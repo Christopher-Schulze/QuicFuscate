@@ -14,6 +14,7 @@ use crate::engine::{DataPlaneFault, EngineError};
 use crate::interface::TunInterface;
 #[cfg(target_os = "linux")]
 use crate::interface::TunReadContract;
+use crate::time_source::ProtocolClock;
 
 #[inline]
 fn profile_prefers_wide_batches(profile: crate::optimize::CpuProfile) -> bool {
@@ -292,6 +293,7 @@ pub fn evaluate_hotpath_perf_smoke(
 /// Async I/O driver handle.
 pub struct IoDriver {
     config: IoDriverConfig,
+    clock: ProtocolClock,
     shutdown: Arc<AtomicBool>,
     stats: Arc<IoDriverStats>,
     #[cfg(target_os = "linux")]
@@ -325,6 +327,11 @@ impl IoDriver {
 
     /// Create a new I/O driver.
     pub fn new(config: IoDriverConfig) -> Self {
+        Self::new_with_clock(config, &ProtocolClock::default())
+    }
+
+    /// Create an I/O driver bound to an explicit protocol clock.
+    pub fn new_with_clock(config: IoDriverConfig, clock: &ProtocolClock) -> Self {
         #[cfg(target_os = "linux")]
         let hotpath_adapter: Arc<dyn IoHotpathAdapter> =
             Arc::new(SystemIoHotpathAdapter::default());
@@ -342,6 +349,7 @@ impl IoDriver {
         let wide_batch_cpu = profile_prefers_wide_batches(profile);
         Self {
             config,
+            clock: clock.clone(),
             shutdown: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(IoDriverStats::default()),
             #[cfg(target_os = "linux")]
@@ -448,7 +456,7 @@ impl IoDriver {
         let base = Duration::from_millis(200);
         let deadline = { conn.lock().next_send_deadline() };
         if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = deadline.saturating_duration_since(self.clock.now());
             if remaining.is_zero() {
                 return Duration::from_millis(1);
             }
@@ -520,7 +528,7 @@ impl IoDriver {
         let mut recv_buf = vec![0u8; 65_535];
         let mut send_buf = vec![0u8; 65_535];
         let mut control_started = false;
-        while Instant::now() < deadline {
+        while self.clock.now() < deadline {
             self.flush_outbound(conn, socket, &mut send_buf).await?;
             let (failure, assignment) = {
                 let state = reception.lock();
@@ -546,7 +554,7 @@ impl IoDriver {
                 continue;
             }
 
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.saturating_duration_since(self.clock.now());
             let wait = remaining.min(Duration::from_millis(100));
             if wait.is_zero() {
                 break;

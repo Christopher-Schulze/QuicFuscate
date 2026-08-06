@@ -12,6 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::isolation::{UplinkDrop, UplinkRoute};
 use super::{BandwidthDecision, BandwidthDirection};
+use crate::time_source::ProtocolClock;
 
 #[derive(Clone, Copy, Debug)]
 enum FecProcessCounterKind {
@@ -277,11 +278,17 @@ pub struct Metrics {
 
     // Uptime (set once at start)
     start_time: std::time::Instant,
+    clock: ProtocolClock,
 }
 
 impl Metrics {
     /// Create new metrics collector.
     pub fn new() -> Self {
+        Self::new_with_clock(&ProtocolClock::default())
+    }
+
+    /// Create metrics bound to an explicit protocol clock.
+    pub fn new_with_clock(clock: &ProtocolClock) -> Self {
         Self {
             clients_active: AtomicU64::new(0),
             clients_total: AtomicU64::new(0),
@@ -402,13 +409,14 @@ impl Metrics {
             geoip_lookups: AtomicU64::new(0),
             geoip_blocked: AtomicU64::new(0),
             geoip_lookup_errors: AtomicU64::new(0),
-            start_time: std::time::Instant::now(),
+            start_time: clock.now(),
+            clock: clock.clone(),
         }
     }
 
     /// Get uptime in seconds.
     pub fn uptime_secs(&self) -> u64 {
-        self.start_time.elapsed().as_secs()
+        self.clock.elapsed_since(self.start_time).as_secs()
     }
 
     pub fn record_connection_accepted(&self) {

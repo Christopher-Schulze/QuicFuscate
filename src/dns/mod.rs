@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::time_source::ProtocolClock;
+
 /// Default upstream DoH providers used when none are configured.
 pub const DEFAULT_DOH_UPSTREAM: &[&str] =
     &["https://cloudflare-dns.com/dns-query", "https://dns.google/dns-query"];
@@ -298,8 +300,7 @@ struct DnsAdmissionState {
 }
 
 impl DnsAdmissionState {
-    fn new(config: DnsAdmissionConfig) -> Self {
-        let now = Instant::now();
+    fn new(config: DnsAdmissionConfig, now: Instant) -> Self {
         Self {
             global: DnsTokenBucket::new(config.global_pps, config.global_burst, now),
             identities: HashMap::new(),
@@ -327,6 +328,7 @@ impl DnsAdmissionState {
 /// Shared, bounded admission owner for DNS forwarding work.
 pub struct DnsAdmission {
     config: DnsAdmissionConfig,
+    clock: ProtocolClock,
     in_flight: Arc<tokio::sync::Semaphore>,
     state: parking_lot::Mutex<DnsAdmissionState>,
     accepted: AtomicU64,
@@ -395,11 +397,20 @@ pub fn validate_dns_query_size(query: &[u8]) -> Result<(), DnsQuerySizeError> {
 
 impl DnsAdmission {
     pub fn try_new(config: DnsAdmissionConfig) -> Result<Self, DnsAdmissionConfigError> {
+        Self::try_new_with_clock(config, &ProtocolClock::default())
+    }
+
+    /// Create a DNS admission owner bound to an explicit protocol clock.
+    pub fn try_new_with_clock(
+        config: DnsAdmissionConfig,
+        clock: &ProtocolClock,
+    ) -> Result<Self, DnsAdmissionConfigError> {
         config.validate()?;
         Ok(Self {
             config,
+            clock: clock.clone(),
             in_flight: Arc::new(tokio::sync::Semaphore::new(config.max_in_flight)),
-            state: parking_lot::Mutex::new(DnsAdmissionState::new(config)),
+            state: parking_lot::Mutex::new(DnsAdmissionState::new(config, clock.now())),
             accepted: AtomicU64::new(0),
             rejected_in_flight: AtomicU64::new(0),
             rejected_global_rate: AtomicU64::new(0),
@@ -415,7 +426,7 @@ impl DnsAdmission {
         let permit = Arc::clone(&self.in_flight)
             .try_acquire_owned()
             .map_err(|_| self.reject(DnsAdmissionReject::InFlight))?;
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut state = self.state.lock();
         state.prune_if_due(now, self.config.idle_timeout);
         if !state.identities.contains_key(&identity)
@@ -448,7 +459,7 @@ impl DnsAdmission {
     }
 
     pub fn prune_idle(&self) -> usize {
-        let now = Instant::now();
+        let now = self.clock.now();
         self.state.lock().prune_all(now, self.config.idle_timeout)
     }
 
@@ -2127,5 +2138,25 @@ mod tests {
         let mut invalid = client;
         invalid.max_identities = 0;
         assert!(matches!(invalid.validate(), Err(DnsAdmissionConfigError::Zero("max_identities"))));
+    }
+
+    #[test]
+    fn dns_admission_prunes_idle_identity_with_explicit_clock() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let clock = ProtocolClock::from_source(source.clone());
+        let mut config = DnsAdmissionConfig::client_default();
+        config.idle_timeout = Duration::from_secs(2);
+        let admission = DnsAdmission::try_new_with_clock(config, &clock).expect("admission config");
+        let identity = DnsAdmissionIdentity::Session(7);
+        let permit = admission.try_acquire(identity).expect("first DNS admission");
+        drop(permit);
+        assert_eq!(admission.snapshot().tracked_identities, 1);
+
+        source.advance(Duration::from_secs(3));
+        assert_eq!(admission.prune_idle(), 1);
+        assert_eq!(admission.snapshot().tracked_identities, 0);
     }
 }

@@ -1,5 +1,9 @@
+use crate::time_source::ProtocolClock;
+
 /// Server runtime handle.
 pub struct ServerRuntime {
+    /// Monotonic protocol clock shared by runtime-owned state machines.
+    clock: ProtocolClock,
     /// Engine configuration
     engine_config: EngineConfig,
     /// Server-specific configuration
@@ -68,14 +72,21 @@ struct GracefulShutdown {
     lifecycle: AtomicU8,
     grace_ms: AtomicU64,
     drain_started: parking_lot::RwLock<Option<Instant>>,
+    clock: ProtocolClock,
 }
 
 impl GracefulShutdown {
+    #[allow(dead_code)]
     fn new(grace_ms: u64) -> Self {
+        Self::new_with_clock(grace_ms, &ProtocolClock::default())
+    }
+
+    fn new_with_clock(grace_ms: u64, clock: &ProtocolClock) -> Self {
         Self {
             lifecycle: AtomicU8::new(ShutdownLifecycle::Stopped as u8),
             grace_ms: AtomicU64::new(grace_ms),
             drain_started: parking_lot::RwLock::new(None),
+            clock: clock.clone(),
         }
     }
 
@@ -101,7 +112,7 @@ impl GracefulShutdown {
         {
             return false;
         }
-        *self.drain_started.write() = Some(Instant::now());
+        *self.drain_started.write() = Some(self.clock.now());
         true
     }
 
@@ -119,7 +130,11 @@ impl GracefulShutdown {
     }
 
     fn elapsed(&self) -> Duration {
-        self.drain_started.read().as_ref().map(|started| started.elapsed()).unwrap_or_default()
+        self.drain_started
+            .read()
+            .as_ref()
+            .map(|started| self.clock.elapsed_since(*started))
+            .unwrap_or_default()
     }
 
     fn deadline_reached(&self) -> bool {
@@ -169,6 +184,7 @@ pub enum AdminAction {
 
 #[derive(Clone)]
 struct SharedServerDomain {
+    clock: ProtocolClock,
     sessions: Arc<RwLock<SessionManager>>,
     forwarding_policy: Arc<ClientIsolationManager>,
     ip_pool: Arc<parking_lot::Mutex<IpPool>>,
@@ -369,7 +385,15 @@ impl ServerHostResources {
 }
 
 impl SharedServerDomain {
+    #[allow(dead_code)]
     fn try_new(server_config: &ServerConfig) -> Result<Self, String> {
+        Self::try_new_with_clock(server_config, &ProtocolClock::default())
+    }
+
+    fn try_new_with_clock(
+        server_config: &ServerConfig,
+        clock: &ProtocolClock,
+    ) -> Result<Self, String> {
         // Create IPv6 pool only if both start and end are configured
         let ipv6_pool = match (server_config.ipv6_pool_start, server_config.ipv6_pool_end) {
             (Some(start), Some(end)) => {
@@ -378,9 +402,13 @@ impl SharedServerDomain {
             _ => None,
         };
         Ok(Self {
+            clock: clock.clone(),
             sessions: Arc::new(RwLock::new(SessionManager::with_bandwidth_manager(
                 server_config.max_clients,
-                PerClientBandwidthManager::new(server_config.bandwidth_policy.clone())
+                PerClientBandwidthManager::new_with_clock(
+                    server_config.bandwidth_policy.clone(),
+                    clock,
+                )
                     .expect("validated server bandwidth policy"),
             ))),
             forwarding_policy: Arc::new(ClientIsolationManager::with_network(
@@ -398,16 +426,17 @@ impl SharedServerDomain {
             ))),
             #[cfg(feature = "rate_limiter")]
             packet_rate_limiter: Arc::new(parking_lot::Mutex::new(PacketRateLimiterDomain {
-                limiter: RateLimiter::new(load_rate_limit_config_from_env()),
-                last_prune: Instant::now(),
-                last_sample: Instant::now(),
+                limiter: RateLimiter::new_with_clock(load_rate_limit_config_from_env(), clock),
+                last_prune: clock.now(),
+                last_sample: clock.now(),
             })),
             #[cfg(feature = "rate_limiter")]
-            global_rate_limiter: Arc::new(GlobalRateLimiter::with_default_cap()),
+            global_rate_limiter: Arc::new(GlobalRateLimiter::with_default_cap_with_clock(clock)),
             #[cfg(feature = "rate_limiter")]
             ddos_detector: Arc::new(
-                crate::implementations::server::limits::EwmaAnomalyDetector::with_config(
+                crate::implementations::server::limits::EwmaAnomalyDetector::with_config_and_clock(
                     server_config.ddos_policy.clone(),
+                    clock,
                 )
                 .expect("validated server DDoS policy"),
             ),
@@ -434,7 +463,7 @@ impl SharedServerDomain {
             ),
             #[cfg(feature = "rate_limiter")]
             blacklist: Arc::new(
-                crate::implementations::server::limits::BlacklistSync::new_bounded_with_ca(
+                crate::implementations::server::limits::BlacklistSync::new_bounded_with_ca_and_clock(
                     Duration::from_secs(server_config.blacklist.default_ttl_secs),
                     server_config.blacklist.sync_url.clone(),
                     Duration::from_secs(server_config.blacklist.sync_interval_secs),
@@ -443,6 +472,7 @@ impl SharedServerDomain {
                     server_config.blacklist.max_entries,
                     server_config.blacklist.cache_path.clone(),
                     server_config.blacklist.custom_ca_path.clone(),
+                    clock,
                 )
                 .expect("validated server blacklist policy"),
             ),
@@ -472,6 +502,7 @@ impl SharedServerDomain {
             remote_addr,
             self.max_clients,
             self.client_timeout_secs,
+            &self.clock,
         );
         if let Ok((session_id, _, addresses)) = accepted.as_ref() {
             self.forwarding_policy.assign_client(&session_id.as_u64().to_string(), *addresses);
@@ -613,14 +644,15 @@ impl SharedServerDomain {
     fn prune_rate_limits_if_due(&self, metrics: &Metrics) {
         let should_sample = {
             let mut limiter = self.packet_rate_limiter.lock();
-            if limiter.last_prune.elapsed() >= Duration::from_secs(30) {
+            if self.clock.elapsed_since(limiter.last_prune) >= Duration::from_secs(30) {
                 limiter.limiter.prune_idle(Duration::from_secs(120));
-                limiter.last_prune = Instant::now();
+                limiter.last_prune = self.clock.now();
                 self.blacklist.prune_expired();
             }
-            let due = limiter.last_sample.elapsed() >= self.ddos_detector.sample_interval();
+            let due = self.clock.elapsed_since(limiter.last_sample)
+                >= self.ddos_detector.sample_interval();
             if due {
-                limiter.last_sample = Instant::now();
+                limiter.last_sample = self.clock.now();
             }
             due
         };
@@ -715,6 +747,7 @@ struct ServerAdminControlPlane {
 
 #[derive(Clone)]
 pub struct ServerAdminCore {
+    clock: ProtocolClock,
     metrics: Arc<Metrics>,
     blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
     client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
@@ -727,6 +760,7 @@ pub struct ServerAdminCore {
 }
 
 impl ServerAdminCore {
+    #[allow(dead_code)]
     fn new(
         metrics: Arc<Metrics>,
         blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
@@ -738,7 +772,33 @@ impl ServerAdminCore {
         #[cfg(feature = "rate_limiter")] geoip_status:
             crate::implementations::server::limits::GeoIpStatus,
     ) -> Self {
+        Self::new_with_clock(
+            metrics,
+            blocked_ips,
+            client_snapshots,
+            sessions,
+            control_plane,
+            #[cfg(feature = "rate_limiter")]
+            geoip_status,
+            ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_clock(
+        metrics: Arc<Metrics>,
+        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+        client_snapshots: Arc<
+            std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>,
+        >,
+        sessions: Arc<RwLock<SessionManager>>,
+        control_plane: ServerAdminControlPlane,
+        #[cfg(feature = "rate_limiter")] geoip_status:
+            crate::implementations::server::limits::GeoIpStatus,
+        clock: ProtocolClock,
+    ) -> Self {
         Self {
+            clock,
             metrics,
             blocked_ips,
             client_snapshots,
@@ -844,7 +904,7 @@ impl ServerAdminCore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        snapshots_to_client_info(&guard, Instant::now())
+        snapshots_to_client_info(&guard, self.clock.now())
     }
 
     fn resolve_session_id(&self, raw: &str) -> Option<SessionId> {

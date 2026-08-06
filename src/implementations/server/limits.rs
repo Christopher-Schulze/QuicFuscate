@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::time_source::ProtocolClock;
+
 /// Default global server-wide packet rate cap (packets per second across all IPs).
 pub const DEFAULT_GLOBAL_RATE_LIMIT_PPS: u64 = 50_000;
 /// Default sustained packet rate per source.
@@ -153,8 +155,9 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
+    #[allow(dead_code)]
     fn new(capacity: u64, refill_rate: u64, refill_interval: Duration) -> Self {
-        Self::new_at(capacity, refill_rate, refill_interval, Instant::now())
+        Self::new_at(capacity, refill_rate, refill_interval, ProtocolClock::default().now())
     }
 
     fn new_at(capacity: u64, refill_rate: u64, refill_interval: Duration, now: Instant) -> Self {
@@ -168,8 +171,9 @@ impl TokenBucket {
         }
     }
 
+    #[allow(dead_code)]
     fn consume(&mut self, amount: u64) -> bool {
-        self.consume_at(amount, Instant::now())
+        self.consume_at(amount, ProtocolClock::default().now())
     }
 
     fn consume_at(&mut self, amount: u64, now: Instant) -> bool {
@@ -207,7 +211,7 @@ impl TokenBucket {
     }
 
     fn is_idle(&self, now: Instant, max_idle: Duration) -> bool {
-        now.duration_since(self.last_seen) >= max_idle
+        now.saturating_duration_since(self.last_seen) >= max_idle
     }
 }
 
@@ -216,6 +220,7 @@ pub struct RateLimiter {
     config: RateLimitConfig,
     packet_buckets: parking_lot::Mutex<HashMap<RateLimitKey, TokenBucket>>,
     byte_buckets: parking_lot::Mutex<HashMap<RateLimitKey, TokenBucket>>,
+    clock: ProtocolClock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -227,10 +232,16 @@ enum RateLimitKey {
 impl RateLimiter {
     /// Create a new rate limiter.
     pub fn new(config: RateLimitConfig) -> Self {
+        Self::new_with_clock(config, &ProtocolClock::default())
+    }
+
+    /// Create a rate limiter bound to an explicit protocol clock.
+    pub fn new_with_clock(config: RateLimitConfig, clock: &ProtocolClock) -> Self {
         Self {
             config,
             packet_buckets: parking_lot::Mutex::new(HashMap::new()),
             byte_buckets: parking_lot::Mutex::new(HashMap::new()),
+            clock: clock.clone(),
         }
     }
 
@@ -260,9 +271,14 @@ impl RateLimiter {
         let burst = self.config.effective_burst();
         let mut buckets = self.packet_buckets.lock();
         let bucket = buckets.entry(key).or_insert_with(|| {
-            TokenBucket::new(burst, self.config.max_pps, self.config.refill_interval)
+            TokenBucket::new_at(
+                burst,
+                self.config.max_pps,
+                self.config.refill_interval,
+                self.clock.now(),
+            )
         });
-        let allowed = bucket.consume(cost);
+        let allowed = bucket.consume_at(cost, self.clock.now());
 
         if !allowed {
             crate::instrumentation::global().server.rate_limit_hit();
@@ -292,9 +308,14 @@ impl RateLimiter {
         };
         let mut buckets = self.byte_buckets.lock();
         let bucket = buckets.entry(key).or_insert_with(|| {
-            TokenBucket::new(capacity, self.config.max_bps, self.config.refill_interval)
+            TokenBucket::new_at(
+                capacity,
+                self.config.max_bps,
+                self.config.refill_interval,
+                self.clock.now(),
+            )
         });
-        let allowed = bucket.consume(bytes);
+        let allowed = bucket.consume_at(bytes, self.clock.now());
         if !allowed {
             crate::instrumentation::global().server.rate_limit_hit();
         }
@@ -315,7 +336,7 @@ impl RateLimiter {
 
     /// Prune idle session buckets to bound memory growth under churn/spoofing.
     pub fn prune_idle(&self, max_idle: Duration) {
-        let now = Instant::now();
+        let now = self.clock.now();
         self.packet_buckets.lock().retain(|_, bucket| !bucket.is_idle(now, max_idle));
         self.byte_buckets.lock().retain(|_, bucket| !bucket.is_idle(now, max_idle));
     }
@@ -504,6 +525,7 @@ impl AuthIpState {
 pub(crate) struct AuthRateLimiter {
     config: AuthPolicyConfig,
     anchor: Instant,
+    clock: ProtocolClock,
     last_now: Duration,
     next_prune: Duration,
     next_attempt_id: u64,
@@ -511,10 +533,16 @@ pub(crate) struct AuthRateLimiter {
 }
 
 impl AuthRateLimiter {
+    #[allow(dead_code)]
     pub(crate) fn new(config: AuthPolicyConfig) -> Self {
+        Self::new_with_clock(config, &ProtocolClock::default())
+    }
+
+    pub(crate) fn new_with_clock(config: AuthPolicyConfig, clock: &ProtocolClock) -> Self {
         Self {
             config,
-            anchor: Instant::now(),
+            anchor: clock.now(),
+            clock: clock.clone(),
             last_now: Duration::ZERO,
             next_prune: Duration::ZERO,
             next_attempt_id: 1,
@@ -523,7 +551,7 @@ impl AuthRateLimiter {
     }
 
     pub(crate) fn begin(&mut self, ip: IpAddr) -> AuthAdmission {
-        self.begin_at(ip, self.anchor.elapsed())
+        self.begin_at(ip, self.clock.elapsed_since(self.anchor))
     }
 
     pub(crate) fn complete(
@@ -531,11 +559,11 @@ impl AuthRateLimiter {
         attempt: AuthAttempt,
         terminal: AuthTerminal,
     ) -> AuthCompletion {
-        self.complete_at(attempt, terminal, self.anchor.elapsed())
+        self.complete_at(attempt, terminal, self.clock.elapsed_since(self.anchor))
     }
 
     pub(crate) fn prune_if_due(&mut self) -> usize {
-        self.prune_if_due_at(self.anchor.elapsed())
+        self.prune_if_due_at(self.clock.elapsed_since(self.anchor))
     }
 
     pub(crate) fn tracked_ips(&self) -> usize {
@@ -690,6 +718,8 @@ pub struct GlobalRateLimiter {
     refill_per_sec: u64,
     /// Anchor instant used to derive a stable monotonic nanosecond clock.
     anchor: Instant,
+    /// Clock owning the anchor domain.
+    clock: ProtocolClock,
     /// Total packets accepted (for PPS estimation by the DDoS detector).
     pub(crate) accepted: AtomicU64,
     /// Timestamp (ns since anchor) of the last PPS snapshot.
@@ -708,14 +738,20 @@ impl GlobalRateLimiter {
     /// `refill_per_sec` is the sustained server-wide PPS cap; `capacity` is the
     /// burst size (defaults to `2 × refill_per_sec` when 0).
     pub fn new(refill_per_sec: u64, capacity: u64) -> Self {
+        Self::new_with_clock(refill_per_sec, capacity, &ProtocolClock::default())
+    }
+
+    /// Create a global limiter bound to an explicit protocol clock.
+    pub fn new_with_clock(refill_per_sec: u64, capacity: u64, clock: &ProtocolClock) -> Self {
         let cap = if capacity == 0 { refill_per_sec.saturating_mul(2) } else { capacity };
-        let anchor = Instant::now();
+        let anchor = clock.now();
         Self {
             tokens: AtomicU64::new(cap),
             last_refill_ns: AtomicU64::new(0),
             capacity: cap,
             refill_per_sec,
             anchor,
+            clock: clock.clone(),
             accepted: AtomicU64::new(0),
             last_pps_ns: AtomicU64::new(0),
             last_pps_accepted: AtomicU64::new(0),
@@ -729,9 +765,14 @@ impl GlobalRateLimiter {
         Self::new(DEFAULT_GLOBAL_RATE_LIMIT_PPS, 0)
     }
 
+    /// Create the default global limiter with an explicit protocol clock.
+    pub fn with_default_cap_with_clock(clock: &ProtocolClock) -> Self {
+        Self::new_with_clock(DEFAULT_GLOBAL_RATE_LIMIT_PPS, 0, clock)
+    }
+
     #[inline]
     fn now_ns(&self) -> u64 {
-        self.anchor.elapsed().as_nanos() as u64
+        self.clock.elapsed_since(self.anchor).as_nanos() as u64
     }
 
     /// Check whether one packet is allowed under the global cap.
@@ -949,6 +990,7 @@ pub struct EwmaAnomalyDetector {
     anomaly_active: AtomicBool,
     config: DdosPolicyConfig,
     anchor: Instant,
+    clock: ProtocolClock,
     timing: parking_lot::Mutex<AnomalyTimingState>,
 }
 
@@ -956,19 +998,33 @@ pub struct EwmaAnomalyDetector {
 impl EwmaAnomalyDetector {
     /// Create a detector with the given smoothing and spike threshold.
     pub fn new(alpha: f64, spike_multiplier: f64) -> Self {
+        Self::new_with_clock(alpha, spike_multiplier, &ProtocolClock::default())
+    }
+
+    /// Create a detector bound to an explicit protocol clock.
+    pub fn new_with_clock(alpha: f64, spike_multiplier: f64, clock: &ProtocolClock) -> Self {
         let config =
             DdosPolicyConfig { ewma_alpha: alpha, spike_multiplier, ..DdosPolicyConfig::default() };
-        Self::with_config(config).expect("legacy DDoS detector parameters must be valid")
+        Self::with_config_and_clock(config, clock)
+            .expect("legacy DDoS detector parameters must be valid")
     }
 
     pub fn with_config(config: DdosPolicyConfig) -> Result<Self, String> {
+        Self::with_config_and_clock(config, &ProtocolClock::default())
+    }
+
+    pub fn with_config_and_clock(
+        config: DdosPolicyConfig,
+        clock: &ProtocolClock,
+    ) -> Result<Self, String> {
         config.validate()?;
         Ok(Self {
             ewma_pps: AtomicU64::new(0f64.to_bits()),
             current_pps: AtomicU64::new(0),
             anomaly_active: AtomicBool::new(false),
             config,
-            anchor: Instant::now(),
+            anchor: clock.now(),
+            clock: clock.clone(),
             timing: parking_lot::Mutex::new(AnomalyTimingState::default()),
         })
     }
@@ -980,7 +1036,7 @@ impl EwmaAnomalyDetector {
 
     /// Record an observed PPS sample at the detector's monotonic clock.
     pub fn record_pps(&self, pps: u64) -> DdosTransition {
-        self.record_pps_at(pps, self.anchor.elapsed())
+        self.record_pps_at(pps, self.clock.elapsed_since(self.anchor))
     }
 
     /// Record a deterministic monotonic sample.
@@ -1481,12 +1537,23 @@ pub struct BlacklistSync {
     max_entries: usize,
     cache_path: Option<PathBuf>,
     custom_ca_certificates: Vec<reqwest::Certificate>,
+    clock: ProtocolClock,
 }
 
 impl BlacklistSync {
     /// Create a new blacklist synchronizer.
     pub fn new(default_ttl: Duration, sync_url: Option<String>, sync_interval: Duration) -> Self {
-        Self::new_bounded(
+        Self::new_with_clock(default_ttl, sync_url, sync_interval, &ProtocolClock::default())
+    }
+
+    /// Create a blacklist synchronizer bound to an explicit protocol clock.
+    pub fn new_with_clock(
+        default_ttl: Duration,
+        sync_url: Option<String>,
+        sync_interval: Duration,
+        clock: &ProtocolClock,
+    ) -> Self {
+        Self::new_bounded_with_clock(
             default_ttl,
             sync_url,
             sync_interval,
@@ -1494,6 +1561,7 @@ impl BlacklistSync {
             MAX_BLACKLIST_BODY_BYTES,
             MAX_BLACKLIST_ENTRIES,
             None,
+            clock,
         )
         .expect("legacy blacklist defaults must be valid")
     }
@@ -1508,7 +1576,30 @@ impl BlacklistSync {
         max_entries: usize,
         cache_path: Option<PathBuf>,
     ) -> Result<Self, BlacklistError> {
-        Self::new_bounded_with_ca(
+        Self::new_bounded_with_clock(
+            default_ttl,
+            sync_url,
+            sync_interval,
+            request_timeout,
+            max_body_bytes,
+            max_entries,
+            cache_path,
+            &ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bounded_with_clock(
+        default_ttl: Duration,
+        sync_url: Option<String>,
+        sync_interval: Duration,
+        request_timeout: Duration,
+        max_body_bytes: usize,
+        max_entries: usize,
+        cache_path: Option<PathBuf>,
+        clock: &ProtocolClock,
+    ) -> Result<Self, BlacklistError> {
+        Self::new_bounded_with_ca_and_clock(
             default_ttl,
             sync_url,
             sync_interval,
@@ -1517,6 +1608,7 @@ impl BlacklistSync {
             max_entries,
             cache_path,
             None,
+            clock,
         )
     }
 
@@ -1530,6 +1622,31 @@ impl BlacklistSync {
         max_entries: usize,
         cache_path: Option<PathBuf>,
         custom_ca_path: Option<PathBuf>,
+    ) -> Result<Self, BlacklistError> {
+        Self::new_bounded_with_ca_and_clock(
+            default_ttl,
+            sync_url,
+            sync_interval,
+            request_timeout,
+            max_body_bytes,
+            max_entries,
+            cache_path,
+            custom_ca_path,
+            &ProtocolClock::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bounded_with_ca_and_clock(
+        default_ttl: Duration,
+        sync_url: Option<String>,
+        sync_interval: Duration,
+        request_timeout: Duration,
+        max_body_bytes: usize,
+        max_entries: usize,
+        cache_path: Option<PathBuf>,
+        custom_ca_path: Option<PathBuf>,
+        clock: &ProtocolClock,
     ) -> Result<Self, BlacklistError> {
         if default_ttl.is_zero()
             || sync_interval.is_zero()
@@ -1585,6 +1702,7 @@ impl BlacklistSync {
             max_entries,
             cache_path,
             custom_ca_certificates,
+            clock: clock.clone(),
         };
         if let Err(error) = synchronizer.load_cache() {
             log::warn!("Blacklist cache ignored: {error}");
@@ -1594,12 +1712,17 @@ impl BlacklistSync {
 
     /// Create a synchronizer with no feed configured (manual blocking only).
     pub fn manual_only(default_ttl: Duration) -> Self {
-        Self::new(default_ttl, None, Duration::from_secs(3600))
+        Self::manual_only_with_clock(default_ttl, &ProtocolClock::default())
+    }
+
+    /// Create a manual-only synchronizer with an explicit protocol clock.
+    pub fn manual_only_with_clock(default_ttl: Duration, clock: &ProtocolClock) -> Self {
+        Self::new_with_clock(default_ttl, None, Duration::from_secs(3600), clock)
     }
 
     /// Whether an IP is currently blocked (and not expired).
     pub fn is_blocked(&self, ip: IpAddr) -> bool {
-        let now = Instant::now();
+        let now = self.clock.now();
         let guard = self.blocked.read();
         match guard.get(&ip) {
             Some(expiry) => *expiry > now,
@@ -1615,7 +1738,8 @@ impl BlacklistSync {
     /// Add an IP to the blacklist with a custom TTL.
     pub fn add_with_ttl(&self, ip: IpAddr, ttl: Duration) {
         let ttl = ttl.min(Duration::from_secs(MAX_BLACKLIST_TTL_SECS));
-        let expiry = Instant::now() + ttl;
+        let now = self.clock.now();
+        let expiry = now.checked_add(ttl).unwrap_or(now);
         self.blocked.write().insert(ip, expiry);
     }
 
@@ -1627,12 +1751,12 @@ impl BlacklistSync {
     /// Replace the entire blocked set from an external feed (bulk sync).
     /// Each entry is seeded with the default TTL.
     pub fn replace_list(&self, ips: &[IpAddr]) {
-        replace_blacklist_entries(&self.blocked, self.default_ttl, ips);
+        replace_blacklist_entries(&self.blocked, self.default_ttl, ips, &self.clock);
     }
 
     /// Number of currently-blocked (non-expired) IPs.
     pub fn len(&self) -> usize {
-        let now = Instant::now();
+        let now = self.clock.now();
         self.blocked.read().values().filter(|e| **e > now).count()
     }
 
@@ -1643,7 +1767,7 @@ impl BlacklistSync {
 
     /// Prune expired entries to bound memory.
     pub fn prune_expired(&self) {
-        let now = Instant::now();
+        let now = self.clock.now();
         self.blocked.write().retain(|_, expiry| *expiry > now);
     }
 
@@ -1756,6 +1880,7 @@ impl BlacklistSync {
         let default_ttl = self.default_ttl;
         let cache_path = self.cache_path.clone();
         let blocked = Arc::clone(&self.blocked);
+        let clock = self.clock.clone();
         let cancellation_for_blocking = Arc::clone(&cancellation);
         let ips = tokio::task::spawn_blocking(move || {
             if cancellation_for_blocking.load(Ordering::Acquire) {
@@ -1765,11 +1890,17 @@ impl BlacklistSync {
             if cancellation_for_blocking.load(Ordering::Acquire) {
                 return Err(BlacklistError::Cancelled);
             }
-            persist_blacklist_cache(cache_path.as_deref(), default_ttl, max_body_bytes, &ips)?;
+            persist_blacklist_cache(
+                cache_path.as_deref(),
+                default_ttl,
+                max_body_bytes,
+                &ips,
+                &clock,
+            )?;
             if cancellation_for_blocking.load(Ordering::Acquire) {
                 return Err(BlacklistError::Cancelled);
             }
-            replace_blacklist_entries(&blocked, default_ttl, &ips);
+            replace_blacklist_entries(&blocked, default_ttl, &ips, &clock);
             Ok(ips.len())
         })
         .await
@@ -1824,7 +1955,12 @@ impl BlacklistSync {
                 "unsupported version or entry bound exceeded".to_string(),
             ));
         }
-        let now = current_epoch_secs();
+        let now = self
+            .clock
+            .now_system()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
         if cache.expires_at_secs <= now {
             return Err(BlacklistError::CacheError("cache is stale".to_string()));
         }
@@ -1836,7 +1972,8 @@ impl BlacklistSync {
             return Err(BlacklistError::CacheError("cache entry bound exceeded".to_string()));
         }
         let remaining = Duration::from_secs(cache.expires_at_secs - now);
-        let expiry = Instant::now() + remaining;
+        let now = self.clock.now();
+        let expiry = now.checked_add(remaining).unwrap_or(now);
         let count = unique.len();
         self.blocked.write().extend(unique.drain().map(|ip| (ip, expiry)));
         log::info!("Blacklist cache: loaded {count} entries from {}", path.display());
@@ -1850,6 +1987,7 @@ impl BlacklistSync {
             self.default_ttl,
             self.max_body_bytes,
             ips,
+            &self.clock,
         )
     }
 }
@@ -1896,8 +2034,10 @@ fn replace_blacklist_entries(
     blocked: &parking_lot::RwLock<HashMap<IpAddr, Instant>>,
     default_ttl: Duration,
     ips: &[IpAddr],
+    clock: &ProtocolClock,
 ) {
-    let expiry = Instant::now() + default_ttl;
+    let now = clock.now();
+    let expiry = now.checked_add(default_ttl).unwrap_or(now);
     let mut guard = blocked.write();
     guard.clear();
     guard.reserve(ips.len());
@@ -1911,13 +2051,19 @@ fn persist_blacklist_cache(
     default_ttl: Duration,
     max_body_bytes: usize,
     ips: &[IpAddr],
+    clock: &ProtocolClock,
 ) -> Result<(), BlacklistError> {
     let Some(path) = path else {
         return Ok(());
     };
     let cache = BlacklistCache {
         version: 1,
-        expires_at_secs: current_epoch_secs().saturating_add(default_ttl.as_secs()),
+        expires_at_secs: clock
+            .now_system()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+            .saturating_add(default_ttl.as_secs()),
         ips: ips.to_vec(),
     };
     let bytes = serde_json::to_vec(&cache)
@@ -1943,6 +2089,7 @@ struct BlacklistCache {
     ips: Vec<IpAddr>,
 }
 
+#[cfg(test)]
 fn current_epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2346,6 +2493,50 @@ mod tests {
             assert!(limiter.check_bytes_ip(ip, 10));
         }
         assert!(!limiter.check_bytes_ip(ip, 1));
+    }
+
+    #[test]
+    fn rate_limiter_refill_uses_explicit_clock_without_sleeping() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let clock = ProtocolClock::from_source(source.clone());
+        let limiter = RateLimiter::new_with_clock(
+            RateLimitConfig {
+                max_pps: 1,
+                max_bps: 0,
+                refill_interval: Duration::from_secs(1),
+                burst_size: 1,
+            },
+            &clock,
+        );
+        let ip: IpAddr = "192.0.2.11".parse().unwrap();
+        assert!(limiter.check_packet_ip(ip));
+        assert!(!limiter.check_packet_ip(ip));
+        source.advance(Duration::from_secs(1));
+        assert!(limiter.check_packet_ip(ip));
+    }
+
+    #[test]
+    fn auth_rate_limiter_runtime_clock_advances_backoff_without_sleeping() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let clock = ProtocolClock::from_source(source.clone());
+        let mut limiter = AuthRateLimiter::new_with_clock(test_auth_policy_config(), &clock);
+        let ip: IpAddr = "192.0.2.12".parse().unwrap();
+        let first = allowed_attempt(limiter.begin(ip));
+        assert_eq!(limiter.complete(first, AuthTerminal::Failed), AuthCompletion::Failed);
+        let second = allowed_attempt(limiter.begin(ip));
+        assert!(matches!(
+            limiter.complete(second, AuthTerminal::Failed),
+            AuthCompletion::FailedWithBackoff { .. }
+        ));
+        assert!(matches!(limiter.begin(ip), AuthAdmission::Backoff { .. }));
+        source.advance(Duration::from_millis(11));
+        assert!(matches!(limiter.begin(ip), AuthAdmission::Allowed(_)));
     }
 
     #[test]

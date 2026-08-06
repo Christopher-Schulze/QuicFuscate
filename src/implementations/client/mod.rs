@@ -46,6 +46,7 @@ use crate::engine::{DataPlaneFault, DisconnectReason, EngineConfig, EngineError,
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;
 use crate::stealth::StealthRuntimeOwner;
+use crate::time_source::ProtocolClock;
 
 /// Client runtime handle for the VPN client.
 ///
@@ -54,6 +55,8 @@ use crate::stealth::StealthRuntimeOwner;
 pub struct ClientRuntime {
     /// Configuration
     config: EngineConfig,
+    /// Clock shared by client policy and connection state.
+    clock: ProtocolClock,
     /// Memory pool for zero-copy I/O
     pool: Arc<MemoryPool>,
     /// TUN interface handle
@@ -173,6 +176,11 @@ fn client_tun_config_from_assignment(
 impl ClientRuntime {
     /// Create a new client runtime from configuration.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        Self::new_with_clock(config, ProtocolClock::default())
+    }
+
+    /// Create a client runtime bound to an explicit protocol clock.
+    pub fn new_with_clock(config: EngineConfig, clock: ProtocolClock) -> Result<Self, EngineError> {
         config.validate().map_err(|error| {
             EngineError::Config(format!("Invalid engine configuration: {error}"))
         })?;
@@ -190,6 +198,7 @@ impl ClientRuntime {
 
         Ok(Self {
             config,
+            clock,
             pool,
             tun: None,
             assignment: None,
@@ -256,9 +265,10 @@ impl ClientRuntime {
         };
 
         // Initialize subsystems against the runtime owner before any worker starts.
-        self.subsystems = match subsystems::init_subsystems_with_runtime(
+        self.subsystems = match subsystems::init_subsystems_with_runtime_and_clock(
             &self.config,
             Some(runtime_owner.clone()),
+            &self.clock,
         ) {
             Ok(subsystems) => Some(subsystems),
             Err(e) => {
@@ -324,10 +334,11 @@ impl ClientRuntime {
             .clone();
         let tun_name =
             self.tun_name().ok_or_else(|| EngineError::Tun("TUN not initialized".to_string()))?;
-        let dns_runtime = dns_runtime::ClientDnsRuntime::start_with_config(
+        let dns_runtime = dns_runtime::ClientDnsRuntime::start_with_config_and_clock(
             runtime.handle(),
             proxy_config,
             &tun_name,
+            &self.clock,
         )?;
         self.dns_runtime = Some(dns_runtime);
         Ok(())
@@ -505,8 +516,11 @@ impl ClientRuntime {
         let generation = self.next_connection_generation()?;
 
         // Create QUIC connection
-        let conn =
-            ClientConnection::connect_with_runtime(&self.config, self.stealth_runtime.clone())?;
+        let conn = ClientConnection::connect_with_runtime_and_clock(
+            &self.config,
+            self.stealth_runtime.clone(),
+            &self.clock,
+        )?;
         let local_addr = conn.local_addr();
         let remote_addr = conn.peer_addr();
         self.connection = Some(conn);
@@ -544,7 +558,7 @@ impl ClientRuntime {
                 let socket = Arc::new(socket);
                 self.socket = Some(socket.clone());
 
-                let io_driver = Arc::new(IoDriver::new(io_config));
+                let io_driver = Arc::new(IoDriver::new_with_clock(io_config, &self.clock));
                 self.io_driver = Some(io_driver.clone());
                 let shared_conn = self
                     .connection
@@ -558,11 +572,17 @@ impl ClientRuntime {
                     let (lock, _) = &*self.handshake_event;
                     *lock.lock() = false;
                 }
+                let deadline = self
+                    .clock
+                    .checked_deadline_after(std::time::Duration::from_secs(10))
+                    .ok_or_else(|| {
+                        EngineError::Connection("client assignment deadline overflow".to_string())
+                    })?;
                 let assignment = runtime.block_on(io_driver.negotiate_assignment(
                     &shared_conn,
                     &socket,
                     generation,
-                    std::time::Instant::now() + std::time::Duration::from_secs(10),
+                    deadline,
                 ))?;
                 let mut tun_config = client_tun_config_from_assignment(&self.config, &assignment)?;
                 let effective_transport_mtu = {

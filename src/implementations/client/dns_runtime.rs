@@ -15,6 +15,7 @@ use crate::dns::{
     DnsProxyConfig, DnsProxyError, DNS_MESSAGE_MAX_SIZE,
 };
 use crate::engine::{EngineConfig, EngineError};
+use crate::time_source::ProtocolClock;
 
 const DNS_LISTEN_PORT: u16 = 53;
 const LOCAL_DNS_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -58,7 +59,12 @@ impl ClientDnsRuntime {
         tun_name: &str,
     ) -> Result<Self, EngineError> {
         let proxy_config = Self::prepare(config)?;
-        Self::start_with_config(runtime.handle(), proxy_config, tun_name)
+        Self::start_with_config_and_clock(
+            runtime.handle(),
+            proxy_config,
+            tun_name,
+            &ProtocolClock::default(),
+        )
     }
 
     /// Start the client DNS proxy on an already-running Tokio runtime.
@@ -68,7 +74,12 @@ impl ClientDnsRuntime {
         tun_name: &str,
     ) -> Result<Self, EngineError> {
         let proxy_config = Self::prepare_endpoint(endpoint)?;
-        Self::start_with_config(runtime, proxy_config, tun_name)
+        Self::start_with_config_and_clock(
+            runtime,
+            proxy_config,
+            tun_name,
+            &ProtocolClock::default(),
+        )
     }
 
     /// Commit a prepared DoH configuration to the local resolver and proxy.
@@ -76,6 +87,21 @@ impl ClientDnsRuntime {
         runtime: &Handle,
         proxy_config: DnsProxyConfig,
         tun_name: &str,
+    ) -> Result<Self, EngineError> {
+        Self::start_with_config_and_clock(
+            runtime,
+            proxy_config,
+            tun_name,
+            &ProtocolClock::default(),
+        )
+    }
+
+    /// Start the client DNS proxy with an explicit protocol clock.
+    pub fn start_with_config_and_clock(
+        runtime: &Handle,
+        proxy_config: DnsProxyConfig,
+        tun_name: &str,
+        clock: &ProtocolClock,
     ) -> Result<Self, EngineError> {
         if proxy_config.listen_port != DNS_LISTEN_PORT {
             return Err(EngineError::Config(format!(
@@ -94,9 +120,9 @@ impl ClientDnsRuntime {
             ));
         }
         let admission =
-            Arc::new(DnsAdmission::try_new(proxy_config.admission).map_err(|error| {
-                EngineError::Config(format!("client DNS admission configuration: {error}"))
-            })?);
+            Arc::new(DnsAdmission::try_new_with_clock(proxy_config.admission, clock).map_err(
+                |error| EngineError::Config(format!("client DNS admission configuration: {error}")),
+            )?);
         let tun_name = tun_name.trim();
         if tun_name.is_empty() {
             return Err(EngineError::Tun(

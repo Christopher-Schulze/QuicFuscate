@@ -480,13 +480,11 @@ pub struct ClientSnapshot {
 
 impl ClientSnapshot {
     pub fn new(stealth_mode: String) -> Self {
-        Self {
-            connected_at: Instant::now(),
-            bytes_in: 0,
-            bytes_out: 0,
-            stealth_mode,
-            session_id: None,
-        }
+        Self::new_at(stealth_mode, Instant::now())
+    }
+
+    pub fn new_at(stealth_mode: String, connected_at: Instant) -> Self {
+        Self { connected_at, bytes_in: 0, bytes_out: 0, stealth_mode, session_id: None }
     }
 
     pub fn record_bytes_in(&mut self, bytes: u64, stealth_mode: String) {
@@ -507,7 +505,7 @@ impl ClientSnapshot {
             id: ClientIdentity::canonical(self.session_id, remote_addr).to_string(),
             ip: remote_addr.ip().to_string(),
             remote_addr: remote_addr.to_string(),
-            connected_secs: now.duration_since(self.connected_at).as_secs(),
+            connected_secs: now.saturating_duration_since(self.connected_at).as_secs(),
             bytes_in: self.bytes_in,
             bytes_out: self.bytes_out,
             stealth_mode: self.stealth_mode.clone(),
