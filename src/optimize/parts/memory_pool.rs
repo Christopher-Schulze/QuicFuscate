@@ -41,18 +41,24 @@ struct PoolOwnershipLedger {
 }
 
 impl PoolOwnershipLedger {
-    fn new(
+    fn try_new(
         capacity: Arc<AtomicUsize>,
         in_use: Arc<AtomicUsize>,
         available: Arc<AtomicUsize>,
-    ) -> Self {
-        Self {
-            state: std::sync::Mutex::new(PoolOwnershipState::default()),
+        expected_capacity: usize,
+    ) -> Result<Self, MemoryPoolError> {
+        let mut state = PoolOwnershipState::default();
+        state
+            .records
+            .try_reserve(expected_capacity)
+            .map_err(|_| MemoryPoolError::AllocationFailed)?;
+        Ok(Self {
+            state: std::sync::Mutex::new(state),
             closed: AtomicBool::new(false),
             capacity,
             in_use,
             available,
-        }
+        })
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, PoolOwnershipState> {
@@ -357,6 +363,69 @@ static NEXT_MEMORY_POOL_ID: AtomicUsize = AtomicUsize::new(1);
 const DEFAULT_AUTO_TUNE_MAX_CAPACITY: usize = 1024;
 const DEFAULT_POOL_MAX_BYTES: usize = 64 * 1024 * 1024;
 const MIN_POOL_BLOCK_SIZE: usize = 2048;
+const POOL_ALIGNMENT: usize = 64;
+
+/// Recoverable configuration and allocation failures for `MemoryPool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPoolError {
+    /// The pool must contain at least one accounted block.
+    InvalidCapacity,
+    /// A zero-sized requested block cannot establish a pool contract.
+    InvalidBlockSize,
+    /// The requested block size cannot be represented by a valid allocator layout.
+    InvalidLayout,
+    /// The requested capacity and block size exceed the representable byte bound.
+    CapacityOverflow,
+    /// The allocator or an internal reservation could not provide memory.
+    AllocationFailed,
+    /// The ownership ledger rejected a newly allocated block.
+    OwnershipRejected,
+}
+
+impl std::fmt::Display for MemoryPoolError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::InvalidCapacity => "memory pool capacity must be greater than zero",
+            Self::InvalidBlockSize => "memory pool block size must be greater than zero",
+            Self::InvalidLayout => "memory pool block size cannot form a valid aligned layout",
+            Self::CapacityOverflow => "memory pool capacity and block size exceed the addressable byte bound",
+            Self::AllocationFailed => "memory pool allocation or reservation failed",
+            Self::OwnershipRejected => "memory pool ownership ledger rejected a new block",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for MemoryPoolError {}
+
+fn effective_block_size(requested: usize) -> Result<usize, MemoryPoolError> {
+    if requested == 0 {
+        return Err(MemoryPoolError::InvalidBlockSize);
+    }
+    Ok(requested.max(MIN_POOL_BLOCK_SIZE))
+}
+
+fn checked_pool_layout(block_size: usize) -> Result<std::alloc::Layout, MemoryPoolError> {
+    if block_size == 0 {
+        return Err(MemoryPoolError::InvalidBlockSize);
+    }
+    std::alloc::Layout::from_size_align(block_size, POOL_ALIGNMENT)
+        .map_err(|_| MemoryPoolError::InvalidLayout)
+}
+
+fn validate_pool_configuration(capacity: usize, block_size: usize) -> Result<(), MemoryPoolError> {
+    if capacity == 0 {
+        return Err(MemoryPoolError::InvalidCapacity);
+    }
+    let total_bytes = capacity
+        .checked_mul(block_size)
+        .ok_or(MemoryPoolError::CapacityOverflow)?;
+    if total_bytes > isize::MAX as usize {
+        return Err(MemoryPoolError::CapacityOverflow);
+    }
+    checked_pool_layout(block_size)?;
+    Ok(())
+}
 
 #[cfg(test)]
 static LOCK_BLOCKS_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -479,6 +548,19 @@ fn release_locked_block(mut block: AlignedBox<[u8]>, lock_ledger: &BlockLockLedg
     drop(block);
 }
 
+fn release_pool_queues(
+    pools: &[Arc<SegQueue<AlignedBox<[u8]>>>],
+    ownership: &PoolOwnershipLedger,
+    lock_ledger: &BlockLockLedger,
+) {
+    for queue in pools {
+        while let Some(block) = queue.pop() {
+            ownership.discard_available(block.as_ptr(), PoolBlockLocation::Queue);
+            ownership.release_block(block, lock_ledger);
+        }
+    }
+}
+
 impl MemoryPool {
     /// Enable or disable mlock on MemoryPool blocks (TODO-516).
     /// Call once during server startup before the pool is created.
@@ -537,10 +619,22 @@ impl MemoryPool {
         block_size: usize,
         environment: &EnvSnapshot,
     ) -> usize {
+        let representable_max = (isize::MAX as usize) / block_size;
         let configured = environment.parse_positive_usize("QUICFUSCATE_POOL_HARD_MAX_CAP");
-        configured
+        let requested = configured
             .map(|capacity| capacity.max(initial_capacity))
-            .unwrap_or_else(|| default_hard_max_capacity(initial_capacity, block_size))
+            .unwrap_or_else(|| default_hard_max_capacity(initial_capacity, block_size));
+        if requested > representable_max {
+            log::warn!(
+                target: "memory_pool",
+                "QUICFUSCATE_POOL_HARD_MAX_CAP={} exceeds the representable block count {}; clamping",
+                requested,
+                representable_max
+            );
+            representable_max
+        } else {
+            requested
+        }
     }
 
     #[inline]
@@ -588,8 +682,15 @@ impl MemoryPool {
     /// The requested block size is retained, subject only to the minimum safe
     /// size. Use [`MemoryPool::new_adaptive`] when MTU-based sizing is desired.
     pub fn new(capacity: usize, block_size: usize) -> Self {
+        Self::try_new(capacity, block_size).unwrap_or_else(|error| {
+            panic!("MemoryPool::new failed: {error}")
+        })
+    }
+
+    /// Fallible counterpart to [`MemoryPool::new`].
+    pub fn try_new(capacity: usize, block_size: usize) -> Result<Self, MemoryPoolError> {
         let environment = EnvSnapshot::capture();
-        Self::new_with_snapshot(capacity, block_size, &environment)
+        Self::try_new_with_snapshot(capacity, block_size, &environment)
     }
 
     /// Creates a pool using one immutable environment generation.
@@ -598,7 +699,18 @@ impl MemoryPool {
         block_size: usize,
         environment: &EnvSnapshot,
     ) -> Self {
-        Self::new_with_effective_block_size(capacity, block_size, environment)
+        Self::try_new_with_snapshot(capacity, block_size, environment).unwrap_or_else(|error| {
+            panic!("MemoryPool::new_with_snapshot failed: {error}")
+        })
+    }
+
+    /// Fallible constructor using one immutable environment generation.
+    pub(crate) fn try_new_with_snapshot(
+        capacity: usize,
+        block_size: usize,
+        environment: &EnvSnapshot,
+    ) -> Result<Self, MemoryPoolError> {
+        Self::try_new_with_effective_block_size(capacity, block_size, environment)
     }
 
     /// Creates a pool whose block size follows the configured MTU profile.
@@ -606,8 +718,15 @@ impl MemoryPool {
     /// `QUICFUSCATE_POOL_ADAPTIVE_BLOCK=0|false` disables the MTU selection and
     /// retains the requested size, subject to the minimum safe size.
     pub fn new_adaptive(capacity: usize, block_size: usize) -> Self {
+        Self::try_new_adaptive(capacity, block_size).unwrap_or_else(|error| {
+            panic!("MemoryPool::new_adaptive failed: {error}")
+        })
+    }
+
+    /// Fallible counterpart to [`MemoryPool::new_adaptive`].
+    pub fn try_new_adaptive(capacity: usize, block_size: usize) -> Result<Self, MemoryPoolError> {
         let environment = EnvSnapshot::capture();
-        Self::new_adaptive_with_snapshot(capacity, block_size, &environment)
+        Self::try_new_adaptive_with_snapshot(capacity, block_size, &environment)
     }
 
     /// Creates an adaptive pool using one immutable environment generation.
@@ -616,46 +735,73 @@ impl MemoryPool {
         block_size: usize,
         environment: &EnvSnapshot,
     ) -> Self {
-        Self::new_with_effective_block_size(
+        Self::try_new_adaptive_with_snapshot(capacity, block_size, environment).unwrap_or_else(
+            |error| panic!("MemoryPool::new_adaptive_with_snapshot failed: {error}"),
+        )
+    }
+
+    /// Fallible adaptive constructor using one immutable environment generation.
+    pub(crate) fn try_new_adaptive_with_snapshot(
+        capacity: usize,
+        block_size: usize,
+        environment: &EnvSnapshot,
+    ) -> Result<Self, MemoryPoolError> {
+        if block_size == 0 {
+            return Err(MemoryPoolError::InvalidBlockSize);
+        }
+        Self::try_new_with_effective_block_size(
             capacity,
             Self::adaptive_block_size_with_snapshot(block_size, environment),
             environment,
         )
     }
 
-    fn new_with_effective_block_size(
+    fn try_new_with_effective_block_size(
         capacity: usize,
         block_size: usize,
         environment: &EnvSnapshot,
-    ) -> Self {
-        let block_size = block_size.max(MIN_POOL_BLOCK_SIZE);
+    ) -> Result<Self, MemoryPoolError> {
+        let block_size = effective_block_size(block_size)?;
+        validate_pool_configuration(capacity, block_size)?;
+        checked_pool_layout(block_size)?;
         let lock_blocks = Self::lock_blocks_enabled();
         let lock_ledger = Arc::new(BlockLockLedger::default());
         let runtime = Arc::new(MemoryPoolRuntimeConfig::from_snapshot(environment));
         let capacity_counter = Arc::new(AtomicUsize::new(0));
         let in_use_counter = Arc::new(AtomicUsize::new(0));
         let available_counter = Arc::new(AtomicUsize::new(0));
-        let ownership = Arc::new(PoolOwnershipLedger::new(
+        let ownership = Arc::new(PoolOwnershipLedger::try_new(
             Arc::clone(&capacity_counter),
             Arc::clone(&in_use_counter),
             Arc::clone(&available_counter),
-        ));
+            capacity,
+        )?);
         #[cfg(target_os = "linux")]
         crate::optimize::initialize_numa_policy(environment);
-        let nodes = numa::num_nodes();
+        let nodes = numa::num_nodes().max(1);
         let id = NEXT_MEMORY_POOL_ID.fetch_add(1, Ordering::Relaxed);
-        let mut pools = Vec::with_capacity(nodes);
+        let mut pools = Vec::new();
+        pools
+            .try_reserve_exact(nodes)
+            .map_err(|_| MemoryPoolError::AllocationFailed)?;
         for n in 0..nodes {
             let node_cap = capacity / nodes + if n < capacity % nodes { 1 } else { 0 };
             let q = Arc::new(SegQueue::new());
+            pools.push(Arc::clone(&q));
             for _ in 0..node_cap {
-                let block = Self::alloc_numa_block(
+                let block = match Self::alloc_numa_block(
                     block_size,
                     n,
                     lock_blocks,
                     &lock_ledger,
                     runtime.madvise_hugepage,
-                );
+                ) {
+                    Ok(block) => block,
+                    Err(error) => {
+                        release_pool_queues(&pools, &ownership, &lock_ledger);
+                        return Err(error);
+                    }
+                };
                 if ownership.register(
                     block.as_ptr(),
                     PoolBlockOrigin::Accounted,
@@ -664,9 +810,10 @@ impl MemoryPool {
                     q.push(block);
                 } else {
                     ownership.release_block(block, &lock_ledger);
+                    release_pool_queues(&pools, &ownership, &lock_ledger);
+                    return Err(MemoryPoolError::OwnershipRejected);
                 }
             }
-            pools.push(q);
         }
         let pool = Self {
             id,
@@ -687,7 +834,7 @@ impl MemoryPool {
         crate::optimize::telemetry::MEM_POOL_CAPACITY.store(capacity as u64, Ordering::Relaxed);
         crate::optimize::telemetry::MEM_POOL_BLOCK_SIZE.store(block_size as u64, Ordering::Relaxed);
         pool.update_metrics();
-        pool
+        Ok(pool)
     }
 
     #[cfg(debug_assertions)]
@@ -748,28 +895,14 @@ impl MemoryPool {
         lock_blocks: bool,
         lock_ledger: &BlockLockLedger,
         madvise_hugepage: bool,
-    ) -> AlignedBox<[u8]> {
+    ) -> Result<AlignedBox<[u8]>, MemoryPoolError> {
         #[cfg(not(target_os = "linux"))]
         let _ = madvise_hugepage;
         // Use manual aligned allocation to guarantee exact length = block_size.
-        let layout = match std::alloc::Layout::from_size_align(block_size.max(1), 64) {
-            Ok(l) => l,
-            Err(le) => {
-                error!(
-                    "Invalid allocation layout: {} bytes, 64B: {}. Falling back to minimal alignment.",
-                    block_size, le
-                );
-                let min_align = core::mem::align_of::<u8>().max(1);
-                // Safety: we clamp size to at least 1
-                unsafe {
-                    std::alloc::Layout::from_size_align_unchecked(block_size.max(1), min_align)
-                }
-            }
-        };
+        let layout = checked_pool_layout(block_size)?;
         let ptr = unsafe { std::alloc::alloc(layout) };
         if ptr.is_null() {
-            // Standard behavior on OOM
-            std::alloc::handle_alloc_error(layout);
+            return Err(MemoryPoolError::AllocationFailed);
         }
         // Zero-initialize for deterministic tests and safety
         unsafe { std::ptr::write_bytes(ptr, 0u8, block_size) };
@@ -820,7 +953,7 @@ impl MemoryPool {
         if lock_blocks && mlock_block(block.as_mut_ptr(), block_size) {
             lock_ledger.record(block.as_mut_ptr());
         }
-        block
+        Ok(block)
     }
 
     /// Returns the effective block size used by every allocation from the pool.
@@ -829,7 +962,7 @@ impl MemoryPool {
         self.block_size
     }
 
-    fn grow_locked(&self, new_capacity: usize) {
+    fn try_grow_locked(&self, new_capacity: usize) -> Result<(), MemoryPoolError> {
         let target = core::cmp::min(new_capacity, self.hard_max_capacity);
         while self.capacity.load(Ordering::Acquire) < target {
             for (n, queue) in self.pools.iter().enumerate() {
@@ -842,7 +975,7 @@ impl MemoryPool {
                     self.lock_blocks,
                     &self.lock_ledger,
                     self.runtime.madvise_hugepage,
-                );
+                )?;
                 let capacity_before = self.capacity.load(Ordering::Acquire);
                 if self.ownership.register(
                     block.as_ptr(),
@@ -855,7 +988,7 @@ impl MemoryPool {
                             target: "memory_pool",
                             "stopping pool growth because stale-address recovery made no capacity progress"
                         );
-                        return;
+                        return Ok(());
                     }
                 } else {
                     log::error!(
@@ -863,20 +996,22 @@ impl MemoryPool {
                         "stopping pool growth because the ownership ledger rejected a new block"
                     );
                     self.ownership.release_block(block, &self.lock_ledger);
-                    return;
+                    return Err(MemoryPoolError::OwnershipRejected);
                 }
             }
         }
+        Ok(())
     }
 
-    fn grow(&self, new_capacity: usize) {
+    fn try_grow(&self, new_capacity: usize) -> Result<(), MemoryPoolError> {
         let _resize_guard = self
             .resize_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.grow_locked(new_capacity);
+        self.try_grow_locked(new_capacity)?;
         self.update_metrics();
         self.check_invariants();
+        Ok(())
     }
 
     fn pop_queue_block(&self, queue: &SegQueue<AlignedBox<[u8]>>) -> Option<AlignedBox<[u8]>> {
@@ -931,6 +1066,14 @@ impl MemoryPool {
     /// If the pool is empty, a new block is created.
     #[inline(always)]
     pub fn alloc(&self) -> AlignedBox<[u8]> {
+        self.try_alloc().unwrap_or_else(|error| {
+            panic!("MemoryPool::alloc failed: {error}")
+        })
+    }
+
+    /// Fallible counterpart to [`MemoryPool::alloc`].
+    #[inline(always)]
+    pub fn try_alloc(&self) -> Result<AlignedBox<[u8]>, MemoryPoolError> {
         let node = numa::current_node() % self.num_nodes;
         self.flush_tls_to_queue(node, usize::MAX);
         // Fast-path: check TLS cache first
@@ -941,7 +1084,7 @@ impl MemoryPool {
                 crate::optimize::telemetry::MEM_POOL_HITS_TLS.inc();
                 // Warm cache for caller
                 prefetch(b.as_ptr(), PrefetchHint::T0);
-                return b;
+                return Ok(b);
             } else {
                 let _ = self
                     .ownership
@@ -956,18 +1099,28 @@ impl MemoryPool {
 
     /// Allocates an aligned buffer and copies data from the provided slice
     pub fn alloc_from_slice(&self, data: &[u8]) -> AlignedBox<[u8]> {
-        let mut buf = self.alloc();
+        self.try_alloc_from_slice(data).unwrap_or_else(|error| {
+            panic!("MemoryPool::alloc_from_slice failed: {error}")
+        })
+    }
+
+    /// Fallible counterpart to [`MemoryPool::alloc_from_slice`].
+    pub fn try_alloc_from_slice(
+        &self,
+        data: &[u8],
+    ) -> Result<AlignedBox<[u8]>, MemoryPoolError> {
+        let mut buf = self.try_alloc()?;
         let copy_len = data.len().min(buf.len());
         debug_assert!(copy_len <= buf.len());
         buf[..copy_len].copy_from_slice(&data[..copy_len]);
         // Resize the box to match the actual data length if possible
         // For now, just return the full buffer - callers should track actual length
-        buf
+        Ok(buf)
     }
 
     #[cold]
     #[inline(never)]
-    fn alloc_cold(&self) -> AlignedBox<[u8]> {
+    fn alloc_cold(&self) -> Result<AlignedBox<[u8]>, MemoryPoolError> {
         let node = numa::current_node() % self.num_nodes;
         // Opportunistically flush some TLS cache back to the global queue
         // to reduce long-term TLS growth under bursty patterns
@@ -980,7 +1133,7 @@ impl MemoryPool {
                 // telemetry!(telemetry::update_memory_usage());
                 // Prefetch freshly popped memory to warm cache for the caller
                 prefetch(b.as_ptr(), PrefetchHint::T0);
-                return b;
+                return Ok(b);
             }
         }
         // Opportunistically steal from other NUMA queues to reduce growth pressure
@@ -993,7 +1146,7 @@ impl MemoryPool {
                         self.update_metrics();
                         self.check_invariants();
                         prefetch(b.as_ptr(), PrefetchHint::T0);
-                        return b;
+                        return Ok(b);
                     }
                 }
             }
@@ -1009,7 +1162,7 @@ impl MemoryPool {
             if target > limit {
                 target = limit;
             }
-            self.grow(target);
+            self.try_grow(target)?;
             // Try again after growth
             if let Some(queue) = self.pools.get(node) {
                 if let Some(b) = self.pop_queue_block(queue) {
@@ -1017,7 +1170,7 @@ impl MemoryPool {
                     self.update_metrics();
                     self.check_invariants();
                     prefetch(b.as_ptr(), PrefetchHint::T0);
-                    return b;
+                    return Ok(b);
                 }
             }
         }
@@ -1030,7 +1183,7 @@ impl MemoryPool {
             self.lock_blocks,
             &self.lock_ledger,
             self.runtime.madvise_hugepage,
-        );
+        )?;
         if !self.ownership.register(
             block.as_ptr(),
             PoolBlockOrigin::Ephemeral,
@@ -1040,12 +1193,11 @@ impl MemoryPool {
                 target: "memory_pool",
                 "returning an untracked emergency block because the ownership ledger rejected ephemeral registration"
             );
-            // The block remains owned by the caller. `MemoryPool::free` rejects it without
-            // changing accounted counters and drops it after zeroization.
-            return block;
+            self.ownership.release_block(block, &self.lock_ledger);
+            return Err(MemoryPoolError::OwnershipRejected);
         }
         prefetch(block.as_ptr(), PrefetchHint::T0);
-        block
+        Ok(block)
     }
 
     /// Returns a memory block to the pool.
@@ -1113,6 +1265,13 @@ impl MemoryPool {
 
     /// Adjusts the maximum number of cached blocks at runtime.
     pub fn set_capacity(&self, new_capacity: usize) {
+        self.try_set_capacity(new_capacity).unwrap_or_else(|error| {
+            panic!("MemoryPool::set_capacity failed: {error}")
+        });
+    }
+
+    /// Fallible counterpart to [`MemoryPool::set_capacity`].
+    pub fn try_set_capacity(&self, new_capacity: usize) -> Result<(), MemoryPoolError> {
         let limit = self.hard_max_capacity;
         let clamped = core::cmp::min(new_capacity, limit);
         let node = numa::current_node() % self.num_nodes;
@@ -1125,7 +1284,7 @@ impl MemoryPool {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = self.capacity.load(Ordering::Acquire);
         if clamped > current {
-            self.grow_locked(clamped);
+            self.try_grow_locked(clamped)?;
         } else {
             let mut remaining = current - clamped;
             while remaining > 0 {
@@ -1156,6 +1315,7 @@ impl MemoryPool {
         }
         self.update_metrics();
         self.check_invariants();
+        Ok(())
     }
 
     /// Background auto-tuner: periodically adjusts capacity based on usage.
@@ -1232,7 +1392,14 @@ impl MemoryPool {
                         pool.bump_tls_limit(tls_low);
                     }
                     if target != cap {
-                        pool.set_capacity(target);
+                        if let Err(error) = pool.try_set_capacity(target) {
+                            warn!(
+                                target: "memory_pool",
+                                "auto-tuner could not resize MemoryPool to {}: {}",
+                                target,
+                                error
+                            );
+                        }
                     }
 
                     std::thread::park_timeout(std::time::Duration::from_millis(tick_ms));
@@ -1599,8 +1766,59 @@ mod memory_pool_growth_tests {
 
     use super::{
         default_hard_max_capacity, MemoryPool, MemoryPoolRuntimeConfig, PoolBlockLocation,
-        PoolBlockOrigin, PoolOwnershipLedger, LOCK_BLOCKS_TEST_MUTEX, DEFAULT_POOL_MAX_BYTES,
+        PoolBlockOrigin, PoolOwnershipLedger, MemoryPoolError, LOCK_BLOCKS_TEST_MUTEX,
+        DEFAULT_POOL_MAX_BYTES,
     };
+
+    #[test]
+    fn fallible_constructor_rejects_zero_and_unrepresentable_configuration() {
+        assert!(matches!(
+            MemoryPool::try_new(0, 4_096),
+            Err(MemoryPoolError::InvalidCapacity)
+        ));
+        assert!(matches!(
+            MemoryPool::try_new(1, 0),
+            Err(MemoryPoolError::InvalidBlockSize)
+        ));
+        assert!(matches!(
+            MemoryPool::try_new_adaptive(1, 0),
+            Err(MemoryPoolError::InvalidBlockSize)
+        ));
+        assert!(matches!(
+            MemoryPool::try_new(usize::MAX, 2_048),
+            Err(MemoryPoolError::CapacityOverflow)
+        ));
+        assert!(matches!(
+            MemoryPool::try_new(1, usize::MAX - 100),
+            Err(MemoryPoolError::CapacityOverflow)
+        ));
+        assert!(matches!(
+            super::checked_pool_layout(0),
+            Err(MemoryPoolError::InvalidBlockSize)
+        ));
+    }
+
+    #[test]
+    fn fallible_allocation_and_resize_preserve_the_existing_contract() {
+        let pool = MemoryPool::try_new(1, 2_048).expect("valid fallible pool");
+        let block = pool.try_alloc().expect("fallible allocation must succeed");
+        assert_eq!(block.len(), 2_048);
+        pool.free(block);
+        pool.try_set_capacity(2).expect("fallible growth must succeed");
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 2);
+        pool.try_set_capacity(0).expect("fallible shrink must succeed");
+        assert_eq!(pool.capacity.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn fallible_slice_allocation_copies_and_clamps_data() {
+        let pool = MemoryPool::try_new(1, 2_048).expect("valid fallible pool");
+        let data = vec![0xA5; 2_200];
+        let block = pool.try_alloc_from_slice(&data).expect("fallible slice allocation must succeed");
+        assert_eq!(block.len(), 2_048);
+        assert!(block.iter().all(|byte| *byte == 0xA5));
+        pool.free(block);
+    }
 
     #[test]
     fn default_growth_limit_is_byte_bounded_and_never_below_initial_capacity() {
@@ -1715,11 +1933,13 @@ mod memory_pool_growth_tests {
         let capacity = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let in_use = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let available = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let ledger = PoolOwnershipLedger::new(
+        let ledger = PoolOwnershipLedger::try_new(
             Arc::clone(&capacity),
             Arc::clone(&in_use),
             Arc::clone(&available),
-        );
+            1,
+        )
+        .expect("one-record ledger reservation must succeed");
         let pointer = 0x1000usize as *const u8;
 
         assert!(ledger.register(pointer, PoolBlockOrigin::Accounted, PoolBlockLocation::CheckedOut));

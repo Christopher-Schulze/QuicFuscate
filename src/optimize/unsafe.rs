@@ -1,6 +1,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsafeError {
     CapacityOverflow,
+    InvalidPoolConfiguration,
+    AllocationFailed,
     CompressionFailed,
     InvalidPointer,
     ForeignPointer,
@@ -34,7 +36,7 @@ pub enum UnsafeError {
 // - Compression: 10-20% CPU reduction
 // - Overall: throughput improvements are workload-dependent and must be validated with benchmarks.
 
-use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+use std::alloc::{alloc, dealloc, Layout};
 use std::collections::HashMap;
 use std::io::IoSlice;
 use std::ptr::{self, NonNull};
@@ -105,38 +107,57 @@ pub struct UnsafeMemoryPool {
 impl UnsafeMemoryPool {
     const PREFETCH_DISTANCE: usize = 8;
 
-    /// Creates a new unsafe memory pool with specified capacity and block size
+    /// Creates a new unsafe memory pool with specified capacity and block size.
+    ///
+    /// This compatibility constructor panics on invalid configuration or allocation failure.
+    /// Use [`Self::try_new`] when the caller can recover from those conditions.
     pub fn new(capacity: usize, block_size: usize, numa_node: usize) -> Self {
-        // Ensure block size is aligned to cache line (64 bytes)
-        let block_size = (block_size + 63) & !63;
-        // SAFETY: block_size is cache-line aligned (rounded up to multiple of 64 above),
-        // so it is always a valid power-of-two alignment. Size > 0 is guaranteed by the
-        // alignment rounding. These preconditions satisfy Layout::from_size_align.
-        let layout = unsafe { Layout::from_size_align_unchecked(block_size, 64) };
+        Self::try_new(capacity, block_size, numa_node)
+            .unwrap_or_else(|error| panic!("UnsafeMemoryPool::new failed: {error:?}"))
+    }
 
-        let mut available = Vec::with_capacity(capacity);
-        let mut allocations = HashMap::with_capacity(capacity);
+    /// Fallible constructor with checked rounding, layout, reservation, and allocation bounds.
+    pub fn try_new(
+        capacity: usize,
+        block_size: usize,
+        numa_node: usize,
+    ) -> Result<Self, UnsafeError> {
+        if capacity == 0 || block_size == 0 {
+            return Err(UnsafeError::InvalidPoolConfiguration);
+        }
+        let block_size = block_size.checked_add(63).ok_or(UnsafeError::CapacityOverflow)? & !63;
+        if block_size == 0 {
+            return Err(UnsafeError::CapacityOverflow);
+        }
+        let total_bytes = capacity.checked_mul(block_size).ok_or(UnsafeError::CapacityOverflow)?;
+        if total_bytes > isize::MAX as usize {
+            return Err(UnsafeError::CapacityOverflow);
+        }
+        let layout = Layout::from_size_align(block_size, 64)
+            .map_err(|_| UnsafeError::InvalidPoolConfiguration)?;
 
-        // Pre-allocate all blocks
+        let mut available: Vec<OwnedBlock> = Vec::new();
+        available.try_reserve_exact(capacity).map_err(|_| UnsafeError::AllocationFailed)?;
+        let mut allocations = HashMap::new();
+        allocations.try_reserve(capacity).map_err(|_| UnsafeError::AllocationFailed)?;
+
         for _ in 0..capacity {
-            // SAFETY: `layout` was constructed with valid size (>0) and alignment (64)
-            // above. alloc returns a valid pointer or null; null is caught by
-            // handle_alloc_error which aborts. The returned pointer is valid for
-            // `block_size` bytes with 64-byte alignment.
-            let ptr = unsafe {
-                let raw = alloc(layout);
-                if raw.is_null() {
-                    handle_alloc_error(layout);
+            // SAFETY: layout was constructed by Layout::from_size_align and remains live for
+            // every allocation and deallocation performed by this pool.
+            let raw = unsafe { alloc(layout) };
+            if raw.is_null() {
+                for block in available.drain(..) {
+                    // SAFETY: every drained block was allocated with this exact layout.
+                    unsafe { dealloc(block.ptr.as_ptr(), layout) };
                 }
-                #[cfg(target_os = "linux")]
-                {
-                    // NUMA binding
-                    crate::optimize::numa::move_to_node(raw, block_size, numa_node);
-                }
-                raw
-            };
-            // SAFETY: alloc returned a non-null pointer after handle_alloc_error.
-            let block = unsafe { NonNull::new_unchecked(ptr) };
+                return Err(UnsafeError::AllocationFailed);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                crate::optimize::numa::move_to_node(raw, block_size, numa_node);
+            }
+            // SAFETY: the allocator returned a non-null pointer for this valid layout.
+            let block = unsafe { NonNull::new_unchecked(raw) };
             allocations.insert(
                 block.as_ptr() as usize,
                 AllocationRecord {
@@ -165,7 +186,7 @@ impl UnsafeMemoryPool {
             this.block_size
         );
 
-        this
+        Ok(this)
     }
 
     fn lock_state(&self) -> MutexGuard<'_, PoolState> {
@@ -216,6 +237,19 @@ impl UnsafeMemoryPool {
     /// The returned pointer is a live full-size block. The caller must not call `free` or
     /// hand the block to another owner until all reads and writes through it are complete.
     pub unsafe fn alloc_uninit(&self) -> NonNull<u8> {
+        // SAFETY: This compatibility wrapper preserves the original infallible API. The
+        // fallible implementation validates the live pool layout and returns allocation
+        // failures before any pointer is exposed.
+        unsafe { self.try_alloc_uninit() }
+            .unwrap_or_else(|error| panic!("UnsafeMemoryPool::alloc_uninit failed: {error:?}"))
+    }
+
+    /// Fallible allocation counterpart to [`Self::alloc_uninit`].
+    ///
+    /// # Safety
+    /// The returned pointer is a live full-size block. The caller must not call `free` or
+    /// hand the block to another owner until all reads and writes through it are complete.
+    pub unsafe fn try_alloc_uninit(&self) -> Result<NonNull<u8>, UnsafeError> {
         telemetry::UNSAFE_ALLOC_CALLS.inc();
 
         let cached = {
@@ -237,24 +271,25 @@ impl UnsafeMemoryPool {
         if let Some(ptr) = cached {
             telemetry::UNSAFE_TLS_HITS.inc();
             self.prefetch_block(ptr.as_ptr());
-            return ptr;
+            return Ok(ptr);
         }
 
         // Fallback: allocate new block
         telemetry::UNSAFE_FALLBACK_ALLOCS.inc();
-        // SAFETY: self.layout has valid size and alignment (constructed in new()).
-        // Null check + handle_alloc_error ensures we never return null.
-        let raw = alloc(self.layout);
+        let mut state = self.lock_state();
+        state.allocations.try_reserve(1).map_err(|_| UnsafeError::AllocationFailed)?;
+        // SAFETY: self.layout has valid size and alignment established by try_new().
+        let raw = unsafe { alloc(self.layout) };
         if raw.is_null() {
-            handle_alloc_error(self.layout);
+            return Err(UnsafeError::AllocationFailed);
         }
-        let ptr = NonNull::new_unchecked(raw);
-        self.lock_state().allocations.insert(
+        // SAFETY: the allocator returned a non-null pointer for the validated layout.
+        let ptr = unsafe { NonNull::new_unchecked(raw) };
+        state.allocations.insert(
             ptr.as_ptr() as usize,
             AllocationRecord { kind: AllocationKind::Fallback, state: AllocationState::InUse },
         );
-        // SAFETY: null case handled above - ptr is guaranteed non-null here.
-        ptr
+        Ok(ptr)
     }
 
     /// Returns a block to the pool
@@ -1944,6 +1979,40 @@ mod tests {
             assert_eq!(written, 64, "block_size=1 should round to 64");
             pool.free(ptr).expect("rounded block must return");
         }
+    }
+
+    #[test]
+    fn test_pool_fallible_constructor_rejects_invalid_layout_and_capacity() {
+        assert!(matches!(
+            UnsafeMemoryPool::try_new(0, 64, 0),
+            Err(UnsafeError::InvalidPoolConfiguration)
+        ));
+        assert!(matches!(
+            UnsafeMemoryPool::try_new(1, 0, 0),
+            Err(UnsafeError::InvalidPoolConfiguration)
+        ));
+        assert!(matches!(
+            UnsafeMemoryPool::try_new(usize::MAX, 64, 0),
+            Err(UnsafeError::CapacityOverflow)
+        ));
+        assert!(matches!(
+            UnsafeMemoryPool::try_new(1, usize::MAX - 100, 0),
+            Err(UnsafeError::CapacityOverflow)
+        ));
+    }
+
+    #[test]
+    fn test_pool_fallible_allocation_reuses_and_returns_blocks() {
+        let pool = UnsafeMemoryPool::try_new(1, 256, 0).expect("valid fallible pool");
+
+        // SAFETY: the fallible allocator returns an owned live pool block, and the exact
+        // pointer is returned once after the assertion.
+        unsafe {
+            let ptr = pool.try_alloc_uninit().expect("fallible allocation must succeed");
+            assert_eq!(pool.in_use_count(), 1);
+            pool.free(ptr).expect("fallible block must return");
+        }
+        assert_eq!(pool.available_count(), 1);
     }
 
     #[test]
