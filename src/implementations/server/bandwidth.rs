@@ -15,7 +15,7 @@
 //!   shared quotas for every explicitly registered authenticated session.
 
 use std::collections::HashMap;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime};
 
 use crate::time_source::ProtocolClock;
 
@@ -98,6 +98,8 @@ pub enum BandwidthDecision {
     RateLimited,
     DailyQuotaExceeded,
     MonthlyQuotaExceeded,
+    /// The wall clock was invalid, so quota admission fails closed.
+    ClockUnavailable,
 }
 
 impl BandwidthDecision {
@@ -107,6 +109,7 @@ impl BandwidthDecision {
             Self::RateLimited => "rate_limited",
             Self::DailyQuotaExceeded => "daily_quota_exceeded",
             Self::MonthlyQuotaExceeded => "monthly_quota_exceeded",
+            Self::ClockUnavailable => "clock_unavailable",
         }
     }
 }
@@ -265,7 +268,10 @@ pub enum QuotaPeriod {
 }
 
 impl QuotaTracker {
-    pub fn new(quota_limit_bytes: u64, period: QuotaPeriod) -> Self {
+    pub fn new(
+        quota_limit_bytes: u64,
+        period: QuotaPeriod,
+    ) -> Result<Self, crate::time_source::WallClockError> {
         Self::new_with_clock(quota_limit_bytes, period, &ProtocolClock::default())
     }
 
@@ -274,12 +280,16 @@ impl QuotaTracker {
         quota_limit_bytes: u64,
         period: QuotaPeriod,
         clock: &ProtocolClock,
-    ) -> Self {
+    ) -> Result<Self, crate::time_source::WallClockError> {
         Self::new_at_with_clock(quota_limit_bytes, period, clock.now_system(), clock)
     }
 
     #[allow(dead_code)]
-    fn new_at(quota_limit_bytes: u64, period: QuotaPeriod, now: SystemTime) -> Self {
+    fn new_at(
+        quota_limit_bytes: u64,
+        period: QuotaPeriod,
+        now: SystemTime,
+    ) -> Result<Self, crate::time_source::WallClockError> {
         Self::new_at_with_clock(quota_limit_bytes, period, now, &ProtocolClock::default())
     }
 
@@ -288,14 +298,14 @@ impl QuotaTracker {
         period: QuotaPeriod,
         now: SystemTime,
         clock: &ProtocolClock,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, crate::time_source::WallClockError> {
+        Ok(Self {
             quota_limit_bytes,
             used_bytes: 0,
             period,
-            period_index: quota_period_index(now, period),
+            period_index: quota_period_index(now, period)?,
             clock: clock.clone(),
-        }
+        })
     }
 
     /// Whether this quota tracker is disabled (limit is zero).
@@ -324,16 +334,20 @@ impl QuotaTracker {
     }
 
     /// Reset the used-bytes counter if the billing interval has elapsed.
-    pub fn check_and_reset(&mut self) {
-        self.check_and_reset_at(self.clock.now_system());
+    pub fn check_and_reset(&mut self) -> Result<(), crate::time_source::WallClockError> {
+        self.check_and_reset_at(self.clock.now_system())
     }
 
-    fn check_and_reset_at(&mut self, now: SystemTime) {
-        let period_index = quota_period_index(now, self.period);
+    fn check_and_reset_at(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), crate::time_source::WallClockError> {
+        let period_index = quota_period_index(now, self.period)?;
         if period_index > self.period_index {
             self.used_bytes = 0;
             self.period_index = period_index;
         }
+        Ok(())
     }
 
     fn can_record(&self, bytes: u64) -> bool {
@@ -344,9 +358,16 @@ impl QuotaTracker {
                 .is_some_and(|total| total <= self.quota_limit_bytes)
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<(), crate::time_source::WallClockError> {
+        self.reset_at(self.clock.now_system())?;
+        Ok(())
+    }
+
+    fn reset_at(&mut self, now: SystemTime) -> Result<(), crate::time_source::WallClockError> {
+        let period_index = quota_period_index(now, self.period)?;
         self.used_bytes = 0;
-        self.period_index = quota_period_index(self.clock.now_system(), self.period);
+        self.period_index = period_index;
+        Ok(())
     }
 
     fn set_limit(&mut self, quota_limit_bytes: u64) {
@@ -375,20 +396,27 @@ impl QuotaTracker {
     }
 }
 
-fn quota_period_index(now: SystemTime, period: QuotaPeriod) -> i64 {
-    let epoch_seconds =
-        now.duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0);
-    let epoch_days = (epoch_seconds / SECONDS_PER_DAY) as i64;
+fn quota_period_index(
+    now: SystemTime,
+    period: QuotaPeriod,
+) -> Result<i64, crate::time_source::WallClockError> {
+    let epoch_seconds = crate::time_source::unix_epoch_seconds(now)?;
+    let epoch_days = (epoch_seconds / SECONDS_PER_DAY)
+        .try_into()
+        .map_err(|_| crate::time_source::WallClockError::CalendarOverflow)?;
     match period {
-        QuotaPeriod::Daily => epoch_days,
+        QuotaPeriod::Daily => Ok(epoch_days),
         QuotaPeriod::Monthly => {
             let (year, month) = utc_year_month_from_epoch_days(epoch_days);
-            i64::from(year) * 12 + i64::from(month) - 1
+            year.checked_mul(12)
+                .and_then(|value| value.checked_add(i64::from(month)))
+                .and_then(|value| value.checked_sub(1))
+                .ok_or(crate::time_source::WallClockError::CalendarOverflow)
         }
     }
 }
 
-fn utc_year_month_from_epoch_days(epoch_days: i64) -> (i32, u32) {
+fn utc_year_month_from_epoch_days(epoch_days: i64) -> (i64, u32) {
     let shifted = epoch_days + 719_468;
     let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
     let day_of_era = shifted - era * 146_097;
@@ -399,7 +427,7 @@ fn utc_year_month_from_epoch_days(epoch_days: i64) -> (i32, u32) {
     let month_prime = (5 * day_of_year + 2) / 153;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += if month <= 2 { 1 } else { 0 };
-    (year as i32, month as u32)
+    (year, month as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -455,8 +483,11 @@ impl PerClientBandwidthManager {
         Ok(Self { clients: HashMap::new(), default_policy, clock: clock.clone() })
     }
 
-    fn entry_from_policy(policy: BandwidthPolicy, clock: &ProtocolClock) -> ClientBandwidthEntry {
-        ClientBandwidthEntry {
+    fn entry_from_policy(
+        policy: BandwidthPolicy,
+        clock: &ProtocolClock,
+    ) -> Result<ClientBandwidthEntry, crate::time_source::WallClockError> {
+        Ok(ClientBandwidthEntry {
             uplink_limiter: BandwidthLimiter::new_with_clock(
                 policy.rate_bytes_per_second,
                 policy.burst_bytes,
@@ -471,15 +502,15 @@ impl PerClientBandwidthManager {
                 policy.daily_quota_bytes,
                 QuotaPeriod::Daily,
                 clock,
-            ),
+            )?,
             monthly_quota: QuotaTracker::new_with_clock(
                 policy.monthly_quota_bytes,
                 QuotaPeriod::Monthly,
                 clock,
-            ),
+            )?,
             last_audited_denial: [None; 2],
             policy,
-        }
+        })
     }
 
     pub fn add_client(
@@ -492,7 +523,9 @@ impl PerClientBandwidthManager {
         if self.clients.contains_key(client_id) {
             return Err("bandwidth client already registered".to_string());
         }
-        self.clients.insert(client_id.to_string(), Self::entry_from_policy(policy, &self.clock));
+        let entry = Self::entry_from_policy(policy, &self.clock)
+            .map_err(|error| format!("bandwidth wall-clock error: {error}"))?;
+        self.clients.insert(client_id.to_string(), entry);
         Ok(())
     }
 
@@ -530,10 +563,12 @@ impl PerClientBandwidthManager {
         let Some(entry) = self.clients.get_mut(client_id) else {
             return BandwidthDecision::RateLimited;
         };
-        entry.daily_quota.check_and_reset();
-        entry.monthly_quota.check_and_reset();
+        let clock_available = entry.daily_quota.check_and_reset().is_ok()
+            && entry.monthly_quota.check_and_reset().is_ok();
         let accounted_bytes = bytes as u64;
-        let decision = if !entry.daily_quota.can_record(accounted_bytes) {
+        let decision = if !clock_available {
+            BandwidthDecision::ClockUnavailable
+        } else if !entry.daily_quota.can_record(accounted_bytes) {
             BandwidthDecision::DailyQuotaExceeded
         } else if !entry.monthly_quota.can_record(accounted_bytes) {
             BandwidthDecision::MonthlyQuotaExceeded
@@ -595,13 +630,17 @@ impl PerClientBandwidthManager {
         })
     }
 
-    pub fn reset_client_quota(&mut self, client_id: &str) -> bool {
+    pub fn reset_client_quota(
+        &mut self,
+        client_id: &str,
+    ) -> Result<bool, crate::time_source::WallClockError> {
         let Some(entry) = self.clients.get_mut(client_id) else {
-            return false;
+            return Ok(false);
         };
-        entry.daily_quota.reset();
-        entry.monthly_quota.reset();
-        true
+        let now = self.clock.now_system();
+        entry.daily_quota.reset_at(now)?;
+        entry.monthly_quota.reset_at(now)?;
+        Ok(true)
     }
 
     /// Remove a client's bandwidth/quota state (e.g. on session teardown).
@@ -627,7 +666,7 @@ impl PerClientBandwidthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     // --- BandwidthLimiter --------------------------------------------------
 
@@ -653,11 +692,12 @@ mod tests {
         source.advance(Duration::from_secs(1));
         assert!(limiter.check(10));
 
-        let mut quota = QuotaTracker::new_with_clock(10, QuotaPeriod::Daily, &clock);
+        let mut quota = QuotaTracker::new_with_clock(10, QuotaPeriod::Daily, &clock)
+            .expect("valid epoch clock");
         assert!(quota.record(10));
         assert_eq!(quota.remaining(), 0);
         source.advance(Duration::from_secs(86_400));
-        quota.check_and_reset();
+        quota.check_and_reset().expect("valid epoch clock");
         assert_eq!(quota.remaining(), 10);
     }
 
@@ -738,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_quota_record_within_limit() {
-        let mut quota = QuotaTracker::new(10_000, QuotaPeriod::Daily);
+        let mut quota = QuotaTracker::new(10_000, QuotaPeriod::Daily).expect("valid epoch clock");
         assert!(quota.record(4_000));
         assert_eq!(quota.used_bytes(), 4_000);
         assert!(quota.record(6_000));
@@ -748,7 +788,7 @@ mod tests {
 
     #[test]
     fn test_quota_exceeded_rejected() {
-        let mut quota = QuotaTracker::new(10_000, QuotaPeriod::Daily);
+        let mut quota = QuotaTracker::new(10_000, QuotaPeriod::Daily).expect("valid epoch clock");
         assert!(quota.record(9_000));
         // 2000 more would exceed 10_000 → rejected, and not recorded.
         assert!(!quota.record(2_000));
@@ -759,11 +799,11 @@ mod tests {
     #[test]
     fn daily_quota_resets_at_utc_midnight_not_elapsed_duration() {
         let start = UNIX_EPOCH + Duration::from_secs(20_000 * SECONDS_PER_DAY + 86_399);
-        let mut quota = QuotaTracker::new_at(10_000, QuotaPeriod::Daily, start);
+        let mut quota = QuotaTracker::new_at(10_000, QuotaPeriod::Daily, start).unwrap();
         assert!(quota.record(10_000));
-        quota.check_and_reset_at(start);
+        quota.check_and_reset_at(start).unwrap();
         assert_eq!(quota.used_bytes(), 10_000);
-        quota.check_and_reset_at(start + Duration::from_secs(1));
+        quota.check_and_reset_at(start + Duration::from_secs(1)).unwrap();
         assert_eq!(quota.used_bytes(), 0);
         assert_eq!(quota.remaining(), 10_000);
     }
@@ -772,24 +812,43 @@ mod tests {
     fn monthly_quota_resets_on_first_utc_day_and_ignores_clock_rollback() {
         let january_31_2024 = UNIX_EPOCH + Duration::from_secs(19_753 * SECONDS_PER_DAY + 86_399);
         let february_1_2024 = january_31_2024 + Duration::from_secs(1);
-        let mut quota = QuotaTracker::new_at(10_000, QuotaPeriod::Monthly, january_31_2024);
+        let mut quota =
+            QuotaTracker::new_at(10_000, QuotaPeriod::Monthly, january_31_2024).unwrap();
         assert!(quota.record(10_000));
-        quota.check_and_reset_at(january_31_2024 - Duration::from_secs(SECONDS_PER_DAY));
+        quota.check_and_reset_at(january_31_2024 - Duration::from_secs(SECONDS_PER_DAY)).unwrap();
         assert_eq!(quota.used_bytes(), 10_000);
-        quota.check_and_reset_at(february_1_2024);
+        quota.check_and_reset_at(february_1_2024).unwrap();
         assert_eq!(quota.used_bytes(), 0);
     }
 
     #[test]
     fn quota_disabled_and_overflow_are_bounded() {
-        let mut unlimited = QuotaTracker::new(0, QuotaPeriod::Monthly);
+        let mut unlimited = QuotaTracker::new(0, QuotaPeriod::Monthly).expect("valid epoch clock");
         assert!(unlimited.record(u64::MAX));
         assert_eq!(unlimited.remaining(), u64::MAX);
 
-        let mut bounded = QuotaTracker::new(10_000, QuotaPeriod::Daily);
+        let mut bounded = QuotaTracker::new(10_000, QuotaPeriod::Daily).expect("valid epoch clock");
         assert!(bounded.record(5_000));
         assert!(!bounded.record(u64::MAX));
         assert_eq!(bounded.used_bytes(), 5_000);
+    }
+
+    #[test]
+    fn quota_rejects_pre_epoch_clock_without_selecting_epoch_zero() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap(),
+        );
+        let clock = ProtocolClock::from_source(source);
+        assert!(matches!(
+            QuotaTracker::new_with_clock(10, QuotaPeriod::Daily, &clock),
+            Err(crate::time_source::WallClockError::BeforeUnixEpoch)
+        ));
+
+        let mut manager =
+            PerClientBandwidthManager::new_with_clock(policy(1_000, 1_000, 10, 10), &clock)
+                .expect("policy is valid before client admission");
+        assert!(manager.add_client("pre-epoch", None).is_err());
     }
 
     // --- PerClientBandwidthManager ----------------------------------------
@@ -952,7 +1011,7 @@ mod tests {
         );
         manager.update_client_policy("alice", policy(20_000, 20_000, 2_000, 3_000)).unwrap();
         assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 1_000);
-        assert!(manager.reset_client_quota("alice"));
+        assert!(manager.reset_client_quota("alice").expect("reset quota"));
         assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 0);
     }
 

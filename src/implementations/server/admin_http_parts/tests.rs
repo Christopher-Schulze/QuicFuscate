@@ -6,6 +6,7 @@ mod tests {
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
     use std::sync::atomic::AtomicBool;
     use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[derive(Clone)]
     struct TestHandler {
@@ -1252,6 +1253,25 @@ mod tests {
     }
 
     #[test]
+    fn admin_auth_persistence_rejects_pre_epoch_wall_clock() {
+        let root = test_auth_root("pre-epoch");
+        let auth_path = root.join("admin-auth.json");
+        let auth = AdminAuth::new("admin".to_string(), "123456".to_string(), false)
+            .expect("auth fixture");
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH - Duration::from_secs(1),
+        );
+        let clock = ProtocolClock::from_source(source);
+
+        let error = persist_auth_file_with_clock(&auth_path, &auth, &clock)
+            .expect_err("pre-epoch auth timestamp");
+        assert!(error.to_string().contains("before the Unix epoch"), "{error}");
+        assert!(!auth_path.exists());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn admin_auth_failed_update_does_not_change_restart_credential() {
         let root = test_auth_root("restart");
         let auth_path = root.join("admin-auth.json");
@@ -1547,8 +1567,11 @@ mod tests {
     #[test]
     fn static_assets_rejects_path_traversal_with_403() {
         let web_root = {
-            let root = std::env::temp_dir()
-                .join(format!("qf-admin-webroot-traversal-{}", current_epoch_secs()));
+            let root = std::env::temp_dir().join(format!(
+                "qf-admin-webroot-traversal-{}",
+                crate::time_source::unix_epoch_seconds(crate::time_source::now_system())
+                    .expect("test wall-clock timestamp")
+            ));
             let _ = std::fs::create_dir_all(&root);
             let index = root.join("index.html");
             let _ = std::fs::write(&index, "<html>ok</html>");
@@ -1566,8 +1589,11 @@ mod tests {
     #[test]
     fn static_assets_serves_index_for_spa_routes() {
         let web_root = {
-            let root =
-                std::env::temp_dir().join(format!("qf-admin-webroot-spa-{}", current_epoch_secs()));
+            let root = std::env::temp_dir().join(format!(
+                "qf-admin-webroot-spa-{}",
+                crate::time_source::unix_epoch_seconds(crate::time_source::now_system())
+                    .expect("test wall-clock timestamp")
+            ));
             let _ = std::fs::create_dir_all(&root);
             let index = root.join("index.html");
             let _ = std::fs::write(&index, "<html>index</html>");

@@ -8,9 +8,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
+
+use crate::time_source::{ProtocolClock, WallClockError};
 
 /// Default retention for revoked QKey records.
 pub const DEFAULT_REVOCATION_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
@@ -33,6 +34,7 @@ pub struct RevocationManager {
     revoked_records: RwLock<HashMap<String, RevokedKey>>,
     retention_secs: u64,
     last_prune_at: AtomicU64,
+    clock: ProtocolClock,
 }
 
 impl RevocationManager {
@@ -42,15 +44,21 @@ impl RevocationManager {
 
     /// Create a manager with a bounded retention window for revoked records.
     pub fn new_with_retention_secs(retention_secs: u64) -> Self {
+        Self::new_with_retention_secs_and_clock(retention_secs, &ProtocolClock::default())
+    }
+
+    /// Create a manager with an explicit wall-clock source for timestamps.
+    pub fn new_with_retention_secs_and_clock(retention_secs: u64, clock: &ProtocolClock) -> Self {
         Self {
             revoked_records: RwLock::new(HashMap::new()),
             retention_secs: retention_secs.max(1),
             last_prune_at: AtomicU64::new(0),
+            clock: clock.clone(),
         }
     }
 
-    fn current_epoch_secs() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    fn current_epoch_secs(&self) -> Result<u64, WallClockError> {
+        crate::time_source::unix_epoch_seconds(self.clock.now_system())
     }
 
     fn revoke_at(&self, key_id: &str, reason: &str, revoked_at: u64) {
@@ -62,15 +70,18 @@ impl RevocationManager {
 
     /// Revoke a QKey by ID. Immediately terminates all active connections
     /// using that key through the owning live server state.
-    pub fn revoke(&self, key_id: &str, reason: &str) {
-        self.revoke_at(key_id, reason, Self::current_epoch_secs());
+    pub fn revoke(&self, key_id: &str, reason: &str) -> Result<(), WallClockError> {
+        let revoked_at = self.current_epoch_secs()?;
+        self.revoke_at(key_id, reason, revoked_at);
 
         log::warn!("QKey revoked: id={} reason={}", key_id, reason);
+        Ok(())
     }
 
     /// Prune expired records at most once per bounded housekeeping interval.
-    pub fn prune_expired_if_due(&self) -> usize {
-        self.prune_expired_if_due_at(Self::current_epoch_secs())
+    pub fn prune_expired_if_due(&self) -> Result<usize, WallClockError> {
+        let now = self.current_epoch_secs()?;
+        Ok(self.prune_expired_if_due_at(now))
     }
 
     fn prune_expired_if_due_at(&self, now: u64) -> usize {
@@ -231,16 +242,30 @@ mod tests {
     fn test_revocation_manager_basic() {
         let mgr = RevocationManager::new();
         assert!(!mgr.is_revoked("key1"));
-        mgr.revoke("key1", "compromised");
+        mgr.revoke("key1", "compromised").expect("revoke");
         assert!(mgr.is_revoked("key1"));
         assert!(!mgr.is_revoked("key2"));
     }
 
     #[test]
+    fn test_revocation_manager_rejects_pre_epoch_wall_clock() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        );
+        let clock = ProtocolClock::from_source(source);
+        let mgr = RevocationManager::new_with_retention_secs_and_clock(90, &clock);
+
+        assert_eq!(mgr.revoke("key1", "clock-test"), Err(WallClockError::BeforeUnixEpoch));
+        assert!(!mgr.is_revoked("key1"));
+        assert_eq!(mgr.prune_expired_if_due(), Err(WallClockError::BeforeUnixEpoch));
+    }
+
+    #[test]
     fn test_revocation_manager_list() {
         let mgr = RevocationManager::new();
-        mgr.revoke("key1", "reason1");
-        mgr.revoke("key2", "reason2");
+        mgr.revoke("key1", "reason1").expect("revoke");
+        mgr.revoke("key2", "reason2").expect("revoke");
         let list = mgr.list_revoked();
         assert_eq!(list.len(), 2);
     }
@@ -248,7 +273,7 @@ mod tests {
     #[test]
     fn test_revocation_manager_unrevoke() {
         let mgr = RevocationManager::new();
-        mgr.revoke("key1", "test");
+        mgr.revoke("key1", "test").expect("revoke");
         assert!(mgr.is_revoked("key1"));
         assert!(mgr.unrevoke("key1"));
         assert!(!mgr.is_revoked("key1"));
@@ -258,13 +283,13 @@ mod tests {
     #[test]
     fn test_revocation_manager_owns_lookup_and_record_atomically() {
         let mgr = RevocationManager::new();
-        mgr.revoke("key1", "compromised");
+        mgr.revoke("key1", "compromised").expect("revoke");
         let records = mgr.list_revoked();
         let record = records.iter().find(|record| record.key_id == "key1").expect("record");
         assert_eq!(record.reason, "compromised");
         assert!(mgr.is_revoked("key1"));
 
-        mgr.revoke("key1", "updated");
+        mgr.revoke("key1", "updated").expect("revoke");
         let records = mgr.list_revoked();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].reason, "updated");
@@ -307,7 +332,7 @@ mod tests {
         });
         assert!(join.join().is_err());
 
-        manager.revoke("key-after-panic", "still-usable");
+        manager.revoke("key-after-panic", "still-usable").expect("revoke");
         assert!(manager.is_revoked("key-after-panic"));
     }
 

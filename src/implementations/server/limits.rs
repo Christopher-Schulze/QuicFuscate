@@ -1458,6 +1458,8 @@ pub enum BlacklistError {
     FetchError(String),
     /// Bounded cache read or write failed.
     CacheError(String),
+    /// The wall clock could not provide a valid epoch timestamp.
+    Clock(crate::time_source::WallClockError),
     /// Configuration or feed content violated the bounded contract.
     InvalidData(String),
 }
@@ -1469,6 +1471,7 @@ impl std::fmt::Display for BlacklistError {
             Self::Cancelled => write!(f, "blacklist synchronization cancelled"),
             Self::FetchError(s) => write!(f, "blacklist fetch error: {s}"),
             Self::CacheError(s) => write!(f, "blacklist cache error: {s}"),
+            Self::Clock(error) => write!(f, "blacklist wall-clock error: {error}"),
             Self::InvalidData(s) => write!(f, "invalid blacklist data: {s}"),
         }
     }
@@ -1955,12 +1958,8 @@ impl BlacklistSync {
                 "unsupported version or entry bound exceeded".to_string(),
             ));
         }
-        let now = self
-            .clock
-            .now_system()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
+        let now = crate::time_source::unix_epoch_seconds(self.clock.now_system())
+            .map_err(BlacklistError::Clock)?;
         if cache.expires_at_secs <= now {
             return Err(BlacklistError::CacheError("cache is stale".to_string()));
         }
@@ -2056,16 +2055,12 @@ fn persist_blacklist_cache(
     let Some(path) = path else {
         return Ok(());
     };
-    let cache = BlacklistCache {
-        version: 1,
-        expires_at_secs: clock
-            .now_system()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0)
-            .saturating_add(default_ttl.as_secs()),
-        ips: ips.to_vec(),
-    };
+    let now_secs = crate::time_source::unix_epoch_seconds(clock.now_system())
+        .map_err(BlacklistError::Clock)?;
+    let expires_at_secs = now_secs.checked_add(default_ttl.as_secs()).ok_or_else(|| {
+        BlacklistError::CacheError("cache expiry exceeds Unix seconds".to_string())
+    })?;
+    let cache = BlacklistCache { version: 1, expires_at_secs, ips: ips.to_vec() };
     let bytes = serde_json::to_vec(&cache)
         .map_err(|error| BlacklistError::CacheError(format!("serialize: {error}")))?;
     if bytes.len() > max_body_bytes {
@@ -2894,6 +2889,34 @@ mod tests {
             Duration::from_secs(3600),
         );
         assert_eq!(bl.sync_interval(), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn blacklist_cache_rejects_pre_epoch_wall_clock_without_epoch_zero() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            std::time::UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap(),
+        );
+        let clock = ProtocolClock::from_source(source);
+        let path = blacklist_cache_path("pre-epoch");
+        let synchronizer = BlacklistSync::new_bounded_with_clock(
+            Duration::from_secs(60),
+            None,
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            4096,
+            8,
+            Some(path.clone()),
+            &clock,
+        )
+        .unwrap();
+
+        let error = synchronizer.persist_cache(&["192.0.2.1".parse().unwrap()]).unwrap_err();
+        assert!(matches!(
+            error,
+            BlacklistError::Clock(crate::time_source::WallClockError::BeforeUnixEpoch)
+        ));
+        assert!(!path.exists());
     }
 
     #[test]

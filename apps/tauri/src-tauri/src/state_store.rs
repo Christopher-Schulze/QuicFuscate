@@ -67,7 +67,7 @@ impl FileStateStore {
         state: PersistedState,
         store: &dyn SecretStore,
     ) -> Result<(), String> {
-        let redacted = redact_state_for_disk(state, store);
+        let redacted = redact_state_for_disk(state, store)?;
         let json = serde_json::to_string_pretty(&redacted).map_err(|e| e.to_string())?;
         self.atomic_write_json(path, &json)
     }
@@ -85,8 +85,8 @@ impl FileStateStore {
         let process = |raw: &str| -> Result<(PersistedState, String), String> {
             let state = serde_json::from_str::<PersistedState>(raw)
                 .map_err(|e| format!("State parse failed: {}", e))?;
-            let runtime = hydrate_state_for_runtime(state, store);
-            let disk = redact_state_for_disk(runtime.clone(), store);
+            let runtime = hydrate_state_for_runtime(state, store)?;
+            let disk = redact_state_for_disk(runtime.clone(), store)?;
             let json = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
             Ok((runtime, json))
         };

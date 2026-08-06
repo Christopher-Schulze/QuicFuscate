@@ -83,6 +83,8 @@ pub struct QKeyRegistry {
     default_ttl_secs: Option<u64>,
     /// Sliding-window anti-replay protection for QKey auth frames.
     replay_window: ReplayWindow,
+    /// Wall-clock source for epoch metadata and expiry decisions.
+    clock: crate::time_source::ProtocolClock,
     #[cfg(any(test, feature = "rust-tests"))]
     initial_lookup_count: u64,
 }
@@ -92,12 +94,26 @@ const DEFAULT_AUTH_REPLAY_WINDOW_SECS: u64 = 300;
 
 impl QKeyRegistry {
     pub fn new_in_memory(max_entries: usize, default_ttl_secs: Option<u64>) -> Self {
+        Self::new_in_memory_with_clock(
+            max_entries,
+            default_ttl_secs,
+            &crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Create an in-memory registry bound to an explicit clock.
+    pub fn new_in_memory_with_clock(
+        max_entries: usize,
+        default_ttl_secs: Option<u64>,
+        clock: &crate::time_source::ProtocolClock,
+    ) -> Self {
         Self {
             entries: Vec::new(),
             max_entries,
             storage: None,
             default_ttl_secs,
             replay_window: ReplayWindow::new(DEFAULT_AUTH_REPLAY_WINDOW_SECS),
+            clock: clock.clone(),
             #[cfg(any(test, feature = "rust-tests"))]
             initial_lookup_count: 0,
         }
@@ -108,10 +124,26 @@ impl QKeyRegistry {
         path: PathBuf,
         default_ttl_secs: Option<u64>,
     ) -> Result<Self, QKeyRegistryError> {
+        Self::open_with_clock(
+            max_entries,
+            path,
+            default_ttl_secs,
+            crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Open a persisted registry bound to an explicit wall-clock source.
+    pub fn open_with_clock(
+        max_entries: usize,
+        path: PathBuf,
+        default_ttl_secs: Option<u64>,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Result<Self, QKeyRegistryError> {
         Self::open_with_storage(
             max_entries,
             default_ttl_secs,
             RegistryStorage::from_environment(path)?,
+            clock,
         )
     }
 
@@ -119,6 +151,7 @@ impl QKeyRegistry {
         max_entries: usize,
         default_ttl_secs: Option<u64>,
         storage: RegistryStorage,
+        clock: crate::time_source::ProtocolClock,
     ) -> Result<Self, QKeyRegistryError> {
         let mut registry = Self {
             entries: Vec::new(),
@@ -126,6 +159,7 @@ impl QKeyRegistry {
             storage: Some(storage),
             default_ttl_secs,
             replay_window: ReplayWindow::new(DEFAULT_AUTH_REPLAY_WINDOW_SECS),
+            clock,
             #[cfg(any(test, feature = "rust-tests"))]
             initial_lookup_count: 0,
         };
@@ -145,6 +179,7 @@ impl QKeyRegistry {
             max_entries,
             default_ttl_secs,
             RegistryStorage::for_test(path, current, previous)?,
+            crate::time_source::ProtocolClock::default(),
         )
     }
 
@@ -157,6 +192,7 @@ impl QKeyRegistry {
         };
         let mut entries: Vec<QKeyRecord> = serde_json::from_slice(loaded.as_slice())
             .map_err(|error| QKeyRegistryError::InvalidPlaintext(error.to_string()))?;
+        let now = current_epoch_secs(&self.clock)?;
         let mut seen = std::collections::HashSet::new();
         let mut filtered = Vec::new();
         let mut updated = false;
@@ -166,7 +202,7 @@ impl QKeyRegistry {
                 continue;
             }
             if entry.created_at == 0 {
-                entry.created_at = current_epoch_secs();
+                entry.created_at = now;
                 updated = true;
             }
             if let Some(policy) = entry.bandwidth_policy.as_ref() {
@@ -189,7 +225,6 @@ impl QKeyRegistry {
             updated = true;
         }
         let before = filtered.len();
-        let now = current_epoch_secs();
         filtered.retain(|entry| !is_expired(entry.expires_at, now));
         let removed = before != filtered.len();
         let rewrite =
@@ -257,7 +292,8 @@ impl QKeyRegistry {
                 .map_err(|error| QKeyRegistryError::InvalidRecord(error.to_string()))?;
         }
         let qkey = SecretString::new(qkey, "qkey_registry_input");
-        let mut candidate = self.active_entries();
+        let mut candidate = self.active_entries()?;
+        let now = current_epoch_secs(&self.clock)?;
         let id = qkey_id(&qkey);
         if let Some(existing) = candidate.iter().find(|e| e.id == id).cloned() {
             self.commit_entries(candidate)?;
@@ -282,7 +318,7 @@ impl QKeyRegistry {
                 ));
             }
         };
-        let expires_at = compute_expiry(ttl_seconds.or(self.default_ttl_secs));
+        let expires_at = compute_expiry(ttl_seconds.or(self.default_ttl_secs), now)?;
         let record = QKeyRecord {
             id,
             name,
@@ -291,7 +327,7 @@ impl QKeyRegistry {
             fec,
             bandwidth_policy,
             traffic_analysis_policy,
-            created_at: current_epoch_secs(),
+            created_at: now,
             expires_at,
         };
         candidate.push(record.clone());
@@ -319,9 +355,10 @@ impl QKeyRegistry {
         })
     }
 
-    pub fn list(&mut self) -> Vec<QKeyEntry> {
-        let now = current_epoch_secs();
-        self.entries
+    pub fn list(&mut self) -> Result<Vec<QKeyEntry>, QKeyRegistryError> {
+        let now = current_epoch_secs(&self.clock)?;
+        Ok(self
+            .entries
             .iter()
             .filter(|entry| !is_expired(entry.expires_at, now))
             .cloned()
@@ -335,11 +372,11 @@ impl QKeyRegistry {
                 bandwidth_policy: entry.bandwidth_policy,
                 traffic_analysis_policy: entry.traffic_analysis_policy,
             })
-            .collect()
+            .collect())
     }
 
     pub fn revoke(&mut self, id: &str) -> Result<bool, QKeyRegistryError> {
-        let mut candidate = self.active_entries();
+        let mut candidate = self.active_entries()?;
         let before = candidate.len();
         candidate.retain(|entry| entry.id != id);
         let changed = before != candidate.len();
@@ -361,7 +398,10 @@ impl QKeyRegistry {
     /// Returns `true` only if the record exists, the HMAC is valid, and the
     /// `(timestamp, nonce)` pair is fresh.
     pub fn verify_auth_frame(&mut self, frame: &AuthFrame, qkey_token: &[u8]) -> bool {
-        let now = current_epoch_secs();
+        let now = match current_epoch_secs(&self.clock) {
+            Ok(now) => now,
+            Err(_) => return false,
+        };
         let exists = self
             .entries
             .iter()
@@ -376,8 +416,10 @@ impl QKeyRegistry {
     }
 
     /// Prune replay slots against the current Unix-epoch timestamp.
-    pub fn prune_replay_window(&mut self) {
-        self.replay_window.prune(current_epoch_secs());
+    pub fn prune_replay_window(&mut self) -> Result<(), QKeyRegistryError> {
+        let now = current_epoch_secs(&self.clock)?;
+        self.replay_window.prune(now);
+        Ok(())
     }
 
     /// Look up a record by Initial packet token value, which must be a 12-char
@@ -388,7 +430,7 @@ impl QKeyRegistry {
             self.initial_lookup_count = self.initial_lookup_count.saturating_add(1);
         }
         let id = normalize_initial_id_token(token)?;
-        let now = current_epoch_secs();
+        let now = current_epoch_secs(&self.clock).ok()?;
         self.entries
             .iter()
             .find(|entry| entry.id == id && !is_expired(entry.expires_at, now))
@@ -400,14 +442,19 @@ impl QKeyRegistry {
         self.initial_lookup_count
     }
 
-    pub fn has_entries(&mut self) -> bool {
-        let now = current_epoch_secs();
-        self.entries.iter().any(|entry| !is_expired(entry.expires_at, now))
+    pub fn has_entries(&mut self) -> Result<bool, QKeyRegistryError> {
+        let now = current_epoch_secs(&self.clock)?;
+        Ok(self.entries.iter().any(|entry| !is_expired(entry.expires_at, now)))
     }
 
-    fn active_entries(&self) -> Vec<QKeyRecord> {
-        let now = current_epoch_secs();
-        self.entries.iter().filter(|entry| !is_expired(entry.expires_at, now)).cloned().collect()
+    fn active_entries(&self) -> Result<Vec<QKeyRecord>, QKeyRegistryError> {
+        let now = current_epoch_secs(&self.clock)?;
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| !is_expired(entry.expires_at, now))
+            .cloned()
+            .collect())
     }
 
     fn commit_entries(&mut self, entries: Vec<QKeyRecord>) -> Result<(), QKeyRegistryError> {
@@ -437,11 +484,8 @@ fn normalize_initial_id_token(token: &[u8]) -> Option<String> {
     Some(id.to_ascii_lowercase())
 }
 
-fn current_epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+fn current_epoch_secs(clock: &crate::time_source::ProtocolClock) -> Result<u64, QKeyRegistryError> {
+    crate::time_source::unix_epoch_seconds(clock.now_system()).map_err(QKeyRegistryError::Clock)
 }
 
 /// Hash a 64-char hex token string by decoding to 32 binary bytes first, then SHA256.
@@ -486,12 +530,14 @@ fn policy_from_parsed_qkey(
     (stealth, fec)
 }
 
-fn compute_expiry(ttl_seconds: Option<u64>) -> Option<u64> {
+fn compute_expiry(ttl_seconds: Option<u64>, now: u64) -> Result<Option<u64>, QKeyRegistryError> {
     let ttl = match ttl_seconds {
-        Some(0) | None => return None,
+        Some(0) | None => return Ok(None),
         Some(v) => v,
     };
-    Some(current_epoch_secs().saturating_add(ttl))
+    now.checked_add(ttl)
+        .map(Some)
+        .ok_or(QKeyRegistryError::Clock(crate::time_source::WallClockError::CalendarOverflow))
 }
 
 fn is_expired(expires_at: Option<u64>, now: u64) -> bool {
@@ -545,6 +591,24 @@ mod tests {
 
         assert!(reg.lookup_initial_id_token(b"").is_none());
         assert!(reg.lookup_initial_id_token(b"unknown").is_none());
+    }
+
+    #[test]
+    fn registry_rejects_pre_epoch_wall_clock_without_epoch_zero_metadata() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        );
+        let clock = crate::time_source::ProtocolClock::from_source(source);
+        let mut registry = QKeyRegistry::new_in_memory_with_clock(16, None, &clock);
+        let token_hex = mk_token_hex('a');
+        let qkey_value = mk_qkey_with_token(&token_hex);
+
+        assert!(matches!(
+            registry.insert(qkey_value, token_hex.into(), None),
+            Err(QKeyRegistryError::Clock(crate::time_source::WallClockError::BeforeUnixEpoch))
+        ));
+        assert!(registry.entries.is_empty());
     }
 
     #[test]
@@ -630,11 +694,11 @@ mod tests {
         reg.insert(qkey_value, token_hex.into(), None).expect("insert");
         assert_eq!(reg.entries.len(), 1);
 
-        let now = current_epoch_secs();
+        let now = current_epoch_secs(&reg.clock).unwrap();
         reg.entries[0].expires_at = Some(now.saturating_sub(1));
 
         assert!(reg.lookup_initial_id_token(id.as_bytes()).is_none());
-        assert!(reg.list().is_empty());
+        assert!(reg.list().unwrap().is_empty());
     }
 
     #[test]
@@ -691,7 +755,8 @@ mod tests {
         let qkey_value = mk_qkey_with_token(&token_hex);
         let id = qkey_id(&qkey_value);
         let sha = token_sha256_hex_from_token_hex(&token_hex).expect("sha");
-        let now = current_epoch_secs();
+        let clock = crate::time_source::ProtocolClock::default();
+        let now = current_epoch_secs(&clock).unwrap();
 
         let records = vec![
             // Empty id - dropped
@@ -859,7 +924,7 @@ mod tests {
         let t1 = mk_token_hex('1');
         let q1 = mk_qkey_with_token(&t1);
         let e1 = reg.insert_with_ttl(q1, t1.into(), Some(60), None).expect("insert ttl");
-        let now = current_epoch_secs();
+        let now = current_epoch_secs(&reg.clock).unwrap();
         let exp = e1.expires_at.expect("expires");
         assert!(exp >= now + 55 && exp <= now + 65);
 
@@ -875,7 +940,7 @@ mod tests {
         let token_hex = mk_token_hex('3');
         let qkey_value = mk_qkey_with_token(&token_hex);
         let e = reg.insert(qkey_value, token_hex.into(), None).expect("insert");
-        let now = current_epoch_secs();
+        let now = current_epoch_secs(&reg.clock).unwrap();
         let exp = e.expires_at.expect("default expiry");
         assert!(exp >= now + 115 && exp <= now + 125);
     }
@@ -896,7 +961,7 @@ mod tests {
         let q3 = mk_qkey_with_token(&t3);
         let e3 = reg.insert(q3, t3.into(), None).expect("insert 3");
 
-        let ids: Vec<String> = reg.list().into_iter().map(|e| e.id).collect();
+        let ids: Vec<String> = reg.list().unwrap().into_iter().map(|e| e.id).collect();
         assert_eq!(ids.len(), 2);
         assert!(!ids.contains(&e1.id));
         assert!(ids.contains(&e2.id));

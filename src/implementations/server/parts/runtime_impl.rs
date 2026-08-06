@@ -452,11 +452,12 @@ impl ServerRuntime {
         qkey_store_override: Option<std::path::PathBuf>,
         clock: ProtocolClock,
     ) -> std::io::Result<Self> {
-        let bootstrap = initialize_standalone_server_bootstrap(
+        let bootstrap = initialize_standalone_server_bootstrap_with_clock(
             config_path,
             admin_log_buffer_override,
             qkey_ttl_override,
             qkey_store_override,
+            clock.clone(),
         )?;
         Self::new_standalone_with_bootstrap_and_clock(
             engine_config,
@@ -1317,10 +1318,13 @@ impl ServerRuntime {
                         break;
                     }
                     let qkey_registry = self.live().qkey_registry.clone();
-                    qkey_registry
+                    if let Err(error) = qkey_registry
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .prune_replay_window();
+                        .prune_replay_window()
+                    {
+                        log::error!("QKey replay-window pruning unavailable: {error}");
+                    }
                     let runtime_parts = self.live_parts();
                     if let Err(fault) = runtime_parts.live_state
                         .run_housekeeping_tick(
@@ -1543,8 +1547,30 @@ impl ServerRuntime {
                 false
             }
             AdminAction::RevokeQKey(id) => {
-                let live = self.live_mut();
-                live.live_state.revoke_qkey_now(&id, "admin_revoked", &live.accept_loop, metrics);
+                let revoke_result = {
+                    let live = self.live_mut();
+                    live.live_state.revoke_qkey_now(
+                        &id,
+                        "admin_revoked",
+                        &live.accept_loop,
+                        metrics,
+                    )
+                };
+                let (outcome, reason, message) = match revoke_result {
+                    Ok(()) => (
+                        crate::audit::AuditOutcome::Succeeded,
+                        "admin_revoked",
+                        "Admin revoked QKey",
+                    ),
+                    Err(error) => {
+                        log::error!("Admin QKey revocation rejected: {error}");
+                        (
+                            crate::audit::AuditOutcome::Failed,
+                            "wall_clock_unavailable",
+                            "Admin QKey revocation was rejected because wall-clock time was unavailable",
+                        )
+                    }
+                };
                 crate::audit::audit_typed(
                     crate::audit::AuditEventType::QkeyRevoked,
                     crate::audit::AuditSeverity::Warning,
@@ -1553,10 +1579,10 @@ impl ServerRuntime {
                     crate::audit::AuditContext {
                         actor: crate::audit::AuditActor::Administrator,
                         target: crate::audit::AuditTarget::Qkey,
-                        outcome: crate::audit::AuditOutcome::Succeeded,
-                        reason: Some("admin_revoked"),
+                        outcome,
+                        reason: Some(reason),
                     },
-                    "Admin revoked QKey",
+                    message,
                 );
                 false
             }

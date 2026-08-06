@@ -277,7 +277,8 @@ fn drain_pending_tun_downlinks(
                         continue;
                     }
                     BandwidthDecision::DailyQuotaExceeded
-                    | BandwidthDecision::MonthlyQuotaExceeded => {
+                    | BandwidthDecision::MonthlyQuotaExceeded
+                    | BandwidthDecision::ClockUnavailable => {
                         live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                         continue;
                     }
@@ -610,7 +611,9 @@ fn process_server_tun_packet(
                 BandwidthDecision::RateLimited => {
                     metrics.record_tun_downlink_backpressure_retry();
                 }
-                BandwidthDecision::DailyQuotaExceeded | BandwidthDecision::MonthlyQuotaExceeded => {
+                BandwidthDecision::DailyQuotaExceeded
+                | BandwidthDecision::MonthlyQuotaExceeded
+                | BandwidthDecision::ClockUnavailable => {
                     continue
                 }
             }

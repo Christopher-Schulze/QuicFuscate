@@ -401,8 +401,24 @@ pub fn initialize_standalone_server_bootstrap(
     qkey_ttl_override: Option<u64>,
     qkey_store_override: Option<std::path::PathBuf>,
 ) -> std::io::Result<StandaloneServerBootstrapState> {
+    initialize_standalone_server_bootstrap_with_clock(
+        config_path,
+        admin_log_buffer_override,
+        qkey_ttl_override,
+        qkey_store_override,
+        crate::time_source::ProtocolClock::default(),
+    )
+}
+
+pub fn initialize_standalone_server_bootstrap_with_clock(
+    config_path: Option<&std::path::Path>,
+    admin_log_buffer_override: Option<Arc<self::admin_logs::AdminLogBuffer>>,
+    qkey_ttl_override: Option<u64>,
+    qkey_store_override: Option<std::path::PathBuf>,
+    clock: crate::time_source::ProtocolClock,
+) -> std::io::Result<StandaloneServerBootstrapState> {
     let admin_log_buffer = admin_log_buffer_override
-        .unwrap_or_else(|| Arc::new(self::admin_logs::AdminLogBuffer::new(4096)));
+        .unwrap_or_else(|| Arc::new(self::admin_logs::AdminLogBuffer::new_with_clock(4096, &clock)));
     let initial_mode = match load_persisted_logging_mode(config_path)? {
         PersistedLoggingModeState::Absent => crate::engine::LoggingMode::Normal,
         PersistedLoggingModeState::Valid(mode) => mode,
@@ -420,7 +436,8 @@ pub fn initialize_standalone_server_bootstrap(
     let qkey_ttl_secs = resolve_qkey_ttl_secs(qkey_ttl_override);
     let qkey_store_path = resolve_qkey_store_path(config_path, qkey_store_override);
     let qkey_registry = Arc::new(std::sync::Mutex::new(
-        QKeyRegistry::open(200, qkey_store_path, qkey_ttl_secs).map_err(std::io::Error::other)?,
+        QKeyRegistry::open_with_clock(200, qkey_store_path, qkey_ttl_secs, clock)
+            .map_err(std::io::Error::other)?,
     ));
 
     Ok(StandaloneServerBootstrapState {

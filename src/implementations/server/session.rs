@@ -268,7 +268,10 @@ impl SessionManager {
         self.bandwidth_manager.update_client_policy(&session_id.as_u64().to_string(), policy)
     }
 
-    pub fn reset_bandwidth_quota(&mut self, session_id: SessionId) -> bool {
+    pub fn reset_bandwidth_quota(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<bool, crate::time_source::WallClockError> {
         self.bandwidth_manager.reset_client_quota(&session_id.as_u64().to_string())
     }
 
@@ -703,7 +706,7 @@ mod tests {
         let stats = sessions.bandwidth_stats(id).unwrap();
         assert_eq!(stats.policy, admin_policy);
         assert_eq!(stats.daily_used_bytes, 500);
-        assert!(sessions.reset_bandwidth_quota(id));
+        assert!(sessions.reset_bandwidth_quota(id).expect("reset quota"));
         assert_eq!(sessions.bandwidth_stats(id).unwrap().daily_used_bytes, 0);
     }
 

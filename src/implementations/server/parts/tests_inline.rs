@@ -1736,7 +1736,11 @@ mod tests {
         let client_scid = vec![5, 6, 7, 8];
         let initial =
             initial_packet(original_dcid.clone(), client_scid.clone(), qkey_id.as_bytes().to_vec());
-        let manager = RetryTokenManager::new(Duration::from_secs(10)).expect("Retry manager");
+        let manager = RetryTokenManager::new_with_clock(
+            Duration::from_secs(10),
+            &crate::time_source::ProtocolClock::default(),
+        )
+        .expect("Retry manager");
         let issue = manager.issue_for_initial(&initial, remote.ip()).expect("Retry issue");
         let (retry, _) = parse_header(&issue.packet, 0).expect("Retry header");
         let retry_scid = retry.scid.clone();
@@ -2075,7 +2079,9 @@ mod tests {
         );
         assert_eq!(metrics.connections_rejected.load(Ordering::Relaxed), rejected_before);
 
-        live_state.revoke_qkey_now("test-key", "test", &accept_loop, &metrics);
+        live_state
+            .revoke_qkey_now("test-key", "test", &accept_loop, &metrics)
+            .expect("revoke qkey");
 
         assert!(live_state.revocation_manager.is_revoked("test-key"));
         assert!(live_state
@@ -2194,7 +2200,10 @@ mod tests {
                 auth_attempt: Some(auth_attempt),
             },
         );
-        live_state.revocation_manager.revoke("pending-key", "test");
+        live_state
+            .revocation_manager
+            .revoke("pending-key", "test")
+            .expect("revoke pending key");
 
         live_state.commit_qkey_auth_result(
             None,

@@ -1665,3 +1665,12 @@ The audit remains open. These reconciliations document current evidence and owne
 - Wall/diagnostic graph: `SystemTime` remains separate for epoch and persistence semantics; instrumentation, harness, FEC telemetry, and benchmark measurements retain native diagnostic timing. TODO-823 owns wall-clock provenance, TODO-824 owns broader injection/test isolation, and TODO-825 owns frontend/browser clocks.
 - Scope closure: direct mixed-clock comparisons in the traced client housekeeping/diagnostic, server drain, stealth shutdown, DNS worker shutdown, DoH fallback, and blocking-DNS cancellation paths are removed. Handshake, watchdog, native adapter, accept/admin, and admin HTTP boundaries remain explicit by design.
 - Local proof: format, diff hygiene, locked library/test-target checking, strict library Clippy, and the Cargo-built 2,399-test library binary pass on ARM64 macOS. A redundant later relink hit `ld: write() failed, errno=28` after the generated target exhausted the disk budget; the generated target was cleaned and no test failure occurred. Omega exact commit `1d7d56f2e039cfcf2c500fc5948c6f4933273aa7` passes locked test-target checking and strict library Clippy in the clean isolated checkout. The full remote test attempt ended with SSH exit `255` before a summary, so no Omega test pass is claimed.
+
+## Wall-Clock Wiring (2026-08-06, TODO-823)
+
+- `SystemTimeSource`/`now_system()` -> checked `unix_epoch_seconds()` and `unix_epoch_millis()` -> shared `WallClockError` classification for pre-epoch and overflow failures.
+- Runtime wall-clock source -> blacklist cache, quota tracker and per-client bandwidth manager, retry-token manager, qkey registry, revocation store, admin log buffer, and admin-auth persistence.
+- Quota `ClockUnavailable` -> bandwidth metrics -> TUN admission drop; no quota accounting occurs after a failed wall-clock conversion.
+- Client profile connection capture and Tauri persisted-state sanitization -> explicit propagation of wall-clock errors; server and desktop log records -> `timestamp_valid`/`timestamp_error` metadata when conversion is unavailable.
+- Audit and RFC3339 logging -> shared checked conversion -> explicit write/format failure; epoch zero is retained only for an actual epoch input or an explicitly marked invalid log record.
+- Narrower owners remain separate: PKI TODO-656, H3 TODO-640, Reality and Stealth timestamp behavior TODO-584, test isolation TODO-824, and frontend/browser clocks TODO-825.

@@ -1203,8 +1203,9 @@ impl LiveServerState {
     ) -> Result<Self, String> {
         server_config.validate_revocation_retention()?;
         let revocation_manager =
-            Arc::new(crate::implementations::server::revocation::RevocationManager::new_with_retention_secs(
+            Arc::new(crate::implementations::server::revocation::RevocationManager::new_with_retention_secs_and_clock(
                 server_config.revocation_retention_secs,
+                &clock,
             ));
         let qkey_tracker =
             Arc::new(crate::implementations::server::revocation::QKeyConnectionTracker::new());
@@ -1606,7 +1607,14 @@ impl LiveServerState {
             metrics.set_auth_state_tracked_ips(limiter.tracked_ips());
             metrics.record_auth_state_pruned(pruned);
         }
-        metrics.record_revocation_pruned(self.revocation_manager.prune_expired_if_due());
+        let pruned_revocations = match self.revocation_manager.prune_expired_if_due() {
+            Ok(pruned) => pruned,
+            Err(error) => {
+                log::error!("QKey revocation pruning skipped: {error}");
+                0
+            }
+        };
+        metrics.record_revocation_pruned(pruned_revocations);
         #[cfg(feature = "rate_limiter")]
         {
             self.prune_rate_limits_if_due(metrics);
@@ -1735,9 +1743,10 @@ impl LiveServerState {
         reason: &str,
         _accept_loop: &AcceptLoop,
         _metrics: &Metrics,
-    ) {
-        self.revocation_manager.revoke(key_id, reason);
+    ) -> Result<(), crate::time_source::WallClockError> {
+        self.revocation_manager.revoke(key_id, reason)?;
         self.close_sessions_for_revoked_qkey(key_id);
+        Ok(())
     }
 
     pub fn handle_incoming_path_update(

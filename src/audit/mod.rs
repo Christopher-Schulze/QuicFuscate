@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// Default number of accepted commands waiting for the single audit writer.
 pub const DEFAULT_AUDIT_QUEUE_CAPACITY: usize = 16_384;
@@ -820,7 +820,7 @@ impl AuditWriter {
     }
 
     fn try_write_event(&mut self, event: PendingAuditEvent) -> std::io::Result<()> {
-        let timestamp = unix_timestamp(SystemTime::now())?;
+        let timestamp = unix_timestamp(crate::time_source::now_system())?;
         let mut entry = AuditEntry {
             version: 2,
             seq: self.next_seq,
@@ -946,8 +946,8 @@ impl AuditWriter {
 }
 
 fn unix_timestamp(now: SystemTime) -> std::io::Result<u64> {
-    now.duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).map_err(|error| {
-        std::io::Error::other(format!("system clock is before Unix epoch: {error}"))
+    crate::time_source::unix_epoch_seconds(now).map_err(|error| {
+        std::io::Error::other(format!("audit wall-clock timestamp unavailable: {error}"))
     })
 }
 
@@ -1813,6 +1813,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     // Tiny segments intentionally force dozens of synchronous checkpoint replacements.
     // Windows write-through durability needs a wider bound under parallel CI load.
@@ -1839,7 +1840,7 @@ mod tests {
     #[test]
     fn unix_timestamp_rejects_a_clock_before_the_epoch() {
         let error = unix_timestamp(UNIX_EPOCH - Duration::from_secs(1)).unwrap_err();
-        assert!(error.to_string().contains("before Unix epoch"));
+        assert!(error.to_string().contains("before the Unix epoch"));
         assert_eq!(unix_timestamp(UNIX_EPOCH).unwrap(), 0);
     }
 

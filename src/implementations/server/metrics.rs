@@ -193,6 +193,8 @@ pub struct Metrics {
     pub bandwidth_downlink_daily_quota_exceeded: AtomicU64,
     pub bandwidth_uplink_monthly_quota_exceeded: AtomicU64,
     pub bandwidth_downlink_monthly_quota_exceeded: AtomicU64,
+    pub bandwidth_uplink_clock_unavailable: AtomicU64,
+    pub bandwidth_downlink_clock_unavailable: AtomicU64,
     pub bandwidth_scheduler_active_clients: AtomicU64,
     pub bandwidth_scheduler_delivered_packets: AtomicU64,
     pub bandwidth_scheduler_delivered_bytes: AtomicU64,
@@ -333,6 +335,8 @@ impl Metrics {
             bandwidth_downlink_daily_quota_exceeded: AtomicU64::new(0),
             bandwidth_uplink_monthly_quota_exceeded: AtomicU64::new(0),
             bandwidth_downlink_monthly_quota_exceeded: AtomicU64::new(0),
+            bandwidth_uplink_clock_unavailable: AtomicU64::new(0),
+            bandwidth_downlink_clock_unavailable: AtomicU64::new(0),
             bandwidth_scheduler_active_clients: AtomicU64::new(0),
             bandwidth_scheduler_delivered_packets: AtomicU64::new(0),
             bandwidth_scheduler_delivered_bytes: AtomicU64::new(0),
@@ -812,6 +816,12 @@ impl Metrics {
             (BandwidthDirection::Downlink, BandwidthDecision::MonthlyQuotaExceeded) => {
                 &self.bandwidth_downlink_monthly_quota_exceeded
             }
+            (BandwidthDirection::Uplink, BandwidthDecision::ClockUnavailable) => {
+                &self.bandwidth_uplink_clock_unavailable
+            }
+            (BandwidthDirection::Downlink, BandwidthDecision::ClockUnavailable) => {
+                &self.bandwidth_downlink_clock_unavailable
+            }
         };
         counter.fetch_add(1, Ordering::Relaxed);
         self.record_rate_limited();
@@ -1046,6 +1056,16 @@ impl Metrics {
                 "downlink",
                 "monthly_quota_exceeded",
                 self.bandwidth_downlink_monthly_quota_exceeded.load(Ordering::Relaxed),
+            ),
+            (
+                "uplink",
+                "clock_unavailable",
+                self.bandwidth_uplink_clock_unavailable.load(Ordering::Relaxed),
+            ),
+            (
+                "downlink",
+                "clock_unavailable",
+                self.bandwidth_downlink_clock_unavailable.load(Ordering::Relaxed),
             ),
         ] {
             write_metric!(

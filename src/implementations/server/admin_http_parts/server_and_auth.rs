@@ -47,7 +47,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinSet};
@@ -265,11 +265,22 @@ fn load_auth_file(path: &Path) -> std::io::Result<Option<AdminAuth>> {
 }
 
 fn persist_auth_file(path: &Path, auth: &AdminAuth) -> std::io::Result<()> {
+    persist_auth_file_with_clock(path, auth, &ProtocolClock::default())
+}
+
+fn persist_auth_file_with_clock(
+    path: &Path,
+    auth: &AdminAuth,
+    clock: &ProtocolClock,
+) -> std::io::Result<()> {
+    let updated_at = crate::time_source::unix_epoch_seconds(clock.now_system()).map_err(|error| {
+        std::io::Error::other(format!("admin auth wall-clock timestamp unavailable: {error}"))
+    })?;
     let payload = AdminAuthFile {
         user: auth.user.clone(),
         password_phc: auth.password_phc.clone(),
         requires_password_change: auth.requires_password_change,
-        updated_at: current_epoch_secs(),
+        updated_at,
     };
     let bytes = serde_json::to_vec_pretty(&payload).map_err(|error| {
         std::io::Error::new(
@@ -292,13 +303,6 @@ fn persist_auth_file(path: &Path, auth: &AdminAuth) -> std::io::Result<()> {
 #[inline(always)]
 fn push_hex_byte(out: &mut String, byte: u8) {
     crate::rng::push_hex_byte(out, byte);
-}
-
-fn current_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| Duration::from_secs(0))
-        .as_secs()
 }
 
 struct LoginRateLimiter {

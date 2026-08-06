@@ -12,6 +12,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::engine::qkey;
+use crate::time_source::{ProtocolClock, WallClockError};
 
 const PROFILE_ID_BYTES: usize = 16;
 const PROFILE_FILE_MODE: u32 = 0o600;
@@ -90,14 +91,18 @@ impl Profile {
     }
 
     /// Mark as connected now.
-    pub fn mark_connected(&mut self) {
+    pub fn mark_connected(&mut self) -> Result<(), ProfileError> {
+        self.mark_connected_with_clock(&ProtocolClock::default())
+    }
+
+    /// Mark as connected using an explicit wall-clock source.
+    pub fn mark_connected_with_clock(&mut self, clock: &ProtocolClock) -> Result<(), ProfileError> {
         self.last_connected = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            crate::time_source::unix_epoch_seconds(clock.now_system())
+                .map_err(ProfileError::Clock)?,
         );
         self.connect_count += 1;
+        Ok(())
     }
 }
 
@@ -247,6 +252,7 @@ impl ProfileManager {
 pub enum ProfileError {
     InvalidQKey(String),
     Entropy(String),
+    Clock(WallClockError),
     InvalidId(String),
     DuplicateId(String),
     Io(String),
@@ -259,6 +265,7 @@ impl std::fmt::Display for ProfileError {
         match self {
             Self::InvalidQKey(s) => write!(f, "Invalid QKey: {}", s),
             Self::Entropy(s) => write!(f, "Profile ID entropy unavailable: {}", s),
+            Self::Clock(error) => write!(f, "Profile wall-clock timestamp unavailable: {error}"),
             Self::InvalidId(s) => write!(f, "Invalid profile ID: {}", s),
             Self::DuplicateId(id) => write!(f, "Duplicate profile ID: {}", id),
             Self::Io(s) => write!(f, "I/O error: {}", s),
@@ -548,6 +555,23 @@ mod tests {
         assert!(profile.token.is_some());
         assert_eq!(profile.id.len(), PROFILE_ID_BYTES * 2);
         assert!(profile.id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn mark_connected_rejects_pre_epoch_wall_clock_without_mutating_profile() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        );
+        let clock = ProtocolClock::from_source(source);
+        let mut profile = test_profile("clock", "Clock");
+
+        assert!(matches!(
+            profile.mark_connected_with_clock(&clock),
+            Err(ProfileError::Clock(WallClockError::BeforeUnixEpoch))
+        ));
+        assert_eq!(profile.last_connected, None);
+        assert_eq!(profile.connect_count, 0);
     }
 
     #[test]

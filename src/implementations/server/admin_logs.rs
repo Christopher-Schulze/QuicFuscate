@@ -1,11 +1,14 @@
 use std::collections::VecDeque;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+
+use crate::time_source::ProtocolClock;
 
 #[derive(Clone, Debug)]
 pub struct AdminLogLine {
     pub ts: u64,
+    pub timestamp_valid: bool,
+    pub timestamp_error: Option<String>,
     pub level: String,
     pub msg: String,
 }
@@ -25,13 +28,19 @@ struct Inner {
 pub struct AdminLogBuffer {
     capacity: usize,
     inner: Mutex<Inner>,
+    clock: ProtocolClock,
 }
 
 impl AdminLogBuffer {
     pub fn new(capacity: usize) -> Self {
+        Self::new_with_clock(capacity, &ProtocolClock::default())
+    }
+
+    pub fn new_with_clock(capacity: usize, clock: &ProtocolClock) -> Self {
         Self {
             capacity: capacity.max(1),
             inner: Mutex::new(Inner { next_seq: 1, lines: VecDeque::new() }),
+            clock: clock.clone(),
         }
     }
 
@@ -41,13 +50,19 @@ impl AdminLogBuffer {
     }
 
     pub fn push(&self, level: log::Level, msg: &str) {
-        let ts = now_unix_ms();
+        let (ts, timestamp_valid, timestamp_error) =
+            match crate::time_source::unix_epoch_millis(self.clock.now_system()) {
+                Ok(ts) => (ts, true, None),
+                Err(error) => (0, false, Some(error.to_string())),
+            };
         let mut g = self.inner.lock();
         let seq = g.next_seq;
         g.next_seq = g.next_seq.saturating_add(1);
 
         let line = AdminLogLine {
             ts,
+            timestamp_valid,
+            timestamp_error,
             level: level.to_string(),
             // Keep message stable for the UI, avoid CRLF differences.
             msg: msg.replace("\r\n", "\n"),
@@ -80,19 +95,18 @@ impl AdminLogBuffer {
                 _ => line.msg.clone(),
             };
 
-            out.push(AdminLogLine { ts: line.ts, level: line.level.clone(), msg });
+            out.push(AdminLogLine {
+                ts: line.ts,
+                timestamp_valid: line.timestamp_valid,
+                timestamp_error: line.timestamp_error.clone(),
+                level: line.level.clone(),
+                msg,
+            });
             new_cursor = *seq;
         }
 
         (out, new_cursor)
     }
-}
-
-fn now_unix_ms() -> u64 {
-    let Ok(dur) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return 0;
-    };
-    dur.as_millis() as u64
 }
 
 fn redact_minimal(input: &str) -> String {
@@ -277,6 +291,26 @@ mod tests {
         assert_eq!(l3.len(), 3);
         assert_eq!(l3[0].msg, "b");
         assert_eq!(l3[2].msg, "d");
+    }
+
+    #[test]
+    fn pre_epoch_wall_clock_is_explicit_in_admin_log_lines() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        );
+        let clock = ProtocolClock::from_source(source);
+        let buffer = AdminLogBuffer::new_with_clock(4, &clock);
+
+        buffer.push(log::Level::Warn, "clock test");
+        let (lines, _) = buffer.since(0, "normal", 4);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].ts, 0);
+        assert!(!lines[0].timestamp_valid);
+        assert_eq!(
+            lines[0].timestamp_error.as_deref(),
+            Some("wall clock is before the Unix epoch")
+        );
     }
 
     #[test]

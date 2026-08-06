@@ -37,6 +37,7 @@ pub enum QKeyRegistryError {
     InvalidRecord(String),
     Serialization(String),
     Encryption(String),
+    Clock(crate::time_source::WallClockError),
 }
 
 impl QKeyRegistryError {
@@ -81,6 +82,7 @@ impl fmt::Display for QKeyRegistryError {
             Self::Encryption(message) => {
                 write!(formatter, "QKey registry encryption failed: {message}")
             }
+            Self::Clock(error) => write!(formatter, "QKey registry wall-clock error: {error}"),
         }
     }
 }

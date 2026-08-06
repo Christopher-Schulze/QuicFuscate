@@ -441,8 +441,9 @@ impl SharedServerDomain {
                 && server_config.ddos_policy.retry_enabled)
                 .then(|| {
                     Arc::new(
-                        crate::implementations::server::ddos::RetryTokenManager::new(
+                        crate::implementations::server::ddos::RetryTokenManager::new_with_clock(
                             server_config.ddos_policy.retry_token_lifetime,
+                            clock,
                         )
                         .expect("validated Retry token lifetime"),
                     )
@@ -1008,22 +1009,34 @@ impl ServerAdminCore {
             return AdminResponse::error("Client not found");
         };
         let canonical_id = ClientIdentity::Session(session_id).to_string();
-        if self.sessions.write().reset_bandwidth_quota(session_id) {
-            self.audit_bandwidth_admin(
-                &canonical_id,
-                "Client bandwidth quota reset",
-                crate::audit::AuditOutcome::Succeeded,
-                None,
-            );
-            AdminResponse::ok_with_message("Client quota reset")
-        } else {
-            self.audit_bandwidth_admin(
-                &canonical_id,
-                "Client quota reset failed",
-                crate::audit::AuditOutcome::Failed,
-                Some("bandwidth_state_not_found"),
-            );
-            AdminResponse::error("Client bandwidth state not found")
+        match self.sessions.write().reset_bandwidth_quota(session_id) {
+            Ok(true) => {
+                self.audit_bandwidth_admin(
+                    &canonical_id,
+                    "Client bandwidth quota reset",
+                    crate::audit::AuditOutcome::Succeeded,
+                    None,
+                );
+                AdminResponse::ok_with_message("Client quota reset")
+            }
+            Ok(false) => {
+                self.audit_bandwidth_admin(
+                    &canonical_id,
+                    "Client quota reset failed",
+                    crate::audit::AuditOutcome::Failed,
+                    Some("bandwidth_state_not_found"),
+                );
+                AdminResponse::error("Client bandwidth state not found")
+            }
+            Err(error) => {
+                self.audit_bandwidth_admin(
+                    &canonical_id,
+                    "Client quota reset rejected",
+                    crate::audit::AuditOutcome::Failed,
+                    Some("wall_clock_unavailable"),
+                );
+                AdminResponse::error(format!("Client quota reset rejected: {error}"))
+            }
         }
     }
 
@@ -1285,7 +1298,10 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
 
     fn handle_list_qkeys(&self) -> AdminResponse {
         let mut registry = self.core.qkeys().lock().unwrap_or_else(|e| e.into_inner());
-        AdminResponse::ok_with_data(serde_json::json!({ "keys": registry.list() }))
+        match registry.list() {
+            Ok(keys) => AdminResponse::ok_with_data(serde_json::json!({ "keys": keys })),
+            Err(error) => AdminResponse::error(format!("QKey list unavailable: {error}")),
+        }
     }
 
     fn handle_revoke_qkey(&self, id: &str) -> AdminResponse {
@@ -1382,6 +1398,8 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
         AdminResponse::ok_with_data(serde_json::json!({
             "lines": lines.iter().map(|l| serde_json::json!({
                 "ts": l.ts,
+                "timestamp_valid": l.timestamp_valid,
+                "timestamp_error": l.timestamp_error,
                 "level": l.level,
                 "msg": l.msg,
             })).collect::<Vec<_>>(),

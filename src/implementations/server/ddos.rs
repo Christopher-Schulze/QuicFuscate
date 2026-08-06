@@ -2,11 +2,12 @@
 
 use crate::crypto::hkdf::hmac_sha256;
 use crate::secret::SecretBytes;
+use crate::time_source::{ProtocolClock, WallClockError};
 use crate::transport::packet::{append_retry_tag, format_header, parse_header, Header};
 use crate::transport::{PacketType, MAX_CONN_ID_LEN};
 use std::fmt;
 use std::net::IpAddr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const RETRY_TOKEN_MAGIC: &[u8; 4] = b"QFRT";
 const RETRY_TOKEN_VERSION: u8 = 1;
@@ -31,6 +32,7 @@ pub(crate) enum RetryTokenError {
     Expired,
     IssuedInFuture,
     UnsupportedVersion,
+    ClockUnavailable(WallClockError),
 }
 
 impl fmt::Display for RetryTokenError {
@@ -44,6 +46,9 @@ impl fmt::Display for RetryTokenError {
             Self::Expired => "Retry token expired",
             Self::IssuedInFuture => "Retry token issued in the future",
             Self::UnsupportedVersion => "unsupported Retry token version",
+            Self::ClockUnavailable(error) => {
+                return write!(formatter, "Retry token clock unavailable: {error}")
+            }
         };
         formatter.write_str(message)
     }
@@ -73,16 +78,20 @@ pub(crate) enum IncomingDatagramAdmission {
 pub(crate) struct RetryTokenManager {
     secret: SecretBytes,
     lifetime: Duration,
+    clock: ProtocolClock,
 }
 
 impl RetryTokenManager {
-    pub(crate) fn new(lifetime: Duration) -> Result<Self, String> {
+    pub(crate) fn new_with_clock(
+        lifetime: Duration,
+        clock: &ProtocolClock,
+    ) -> Result<Self, String> {
         if lifetime.is_zero() {
             return Err("Retry token lifetime must be greater than zero".to_string());
         }
         let mut secret = SecretBytes::zeroed(32, "server_retry_token_secret");
         crate::transport::rand::rand_bytes(secret.as_mut_slice());
-        Ok(Self { secret, lifetime })
+        Ok(Self { secret, lifetime, clock: clock.clone() })
     }
 
     pub(crate) fn is_retry_token(token: &[u8]) -> bool {
@@ -109,8 +118,9 @@ impl RetryTokenManager {
         let mut retry_scid = vec![0u8; MAX_CONN_ID_LEN];
         crate::transport::rand::rand_bytes(&mut retry_scid);
         let credential = header.token.as_deref().unwrap_or(&[]);
-        let token =
-            self.seal(source_ip, &header.dcid, &retry_scid, credential, current_epoch_secs())?;
+        let issued_at_secs = current_epoch_secs(&self.clock)
+            .map_err(|error| format!("Retry token clock unavailable: {error}"))?;
+        let token = self.seal(source_ip, &header.dcid, &retry_scid, credential, issued_at_secs)?;
         let retry_header = Header {
             ty: PacketType::Retry,
             version: header.version,
@@ -137,7 +147,9 @@ impl RetryTokenManager {
         source_ip: IpAddr,
         current_dcid: &[u8],
     ) -> Result<RetryTokenClaims, RetryTokenError> {
-        self.validate_at(token, source_ip, current_dcid, current_epoch_secs())
+        let now_secs =
+            current_epoch_secs(&self.clock).map_err(RetryTokenError::ClockUnavailable)?;
+        self.validate_at(token, source_ip, current_dcid, now_secs)
     }
 
     fn seal(
@@ -285,8 +297,8 @@ fn constant_time_eq(expected: &[u8; RETRY_TOKEN_TAG_LEN], actual: &[u8]) -> bool
     difference == 0
 }
 
-fn current_epoch_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
+fn current_epoch_secs(clock: &ProtocolClock) -> Result<u64, WallClockError> {
+    crate::time_source::unix_epoch_seconds(clock.now_system())
 }
 
 #[cfg(test)]
@@ -294,7 +306,26 @@ mod tests {
     use super::*;
 
     fn manager() -> RetryTokenManager {
-        RetryTokenManager::new(Duration::from_secs(10)).unwrap()
+        RetryTokenManager::new_with_clock(Duration::from_secs(10), &ProtocolClock::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn retry_token_rejects_unrepresentable_wall_clock() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            std::time::Instant::now(),
+            std::time::SystemTime::UNIX_EPOCH - Duration::from_secs(1),
+        );
+        let clock = ProtocolClock::from_source(source);
+        let manager = RetryTokenManager::new_with_clock(Duration::from_secs(10), &clock).unwrap();
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let token = manager.seal(ip, &[1], &[2], b"credential", 100).unwrap();
+
+        assert_eq!(
+            manager.validate(&token, ip, &[2]),
+            Err(RetryTokenError::ClockUnavailable(WallClockError::BeforeUnixEpoch))
+        );
+        assert_eq!(current_epoch_secs(&clock), Err(WallClockError::BeforeUnixEpoch));
     }
 
     #[test]

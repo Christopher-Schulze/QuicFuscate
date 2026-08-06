@@ -26,6 +26,51 @@ impl TimeSource for SystemTimeSource {
     }
 }
 
+/// Failure modes when a wall-clock value is converted to an epoch timestamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallClockError {
+    /// The captured wall clock precedes the Unix epoch.
+    BeforeUnixEpoch,
+    /// The captured wall clock cannot be represented as Unix milliseconds.
+    UnixMillisOverflow,
+    /// The captured wall clock cannot be represented by a calendar-period index.
+    CalendarOverflow,
+}
+
+impl std::fmt::Display for WallClockError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeUnixEpoch => formatter.write_str("wall clock is before the Unix epoch"),
+            Self::UnixMillisOverflow => {
+                formatter.write_str("wall clock exceeds the Unix millisecond range")
+            }
+            Self::CalendarOverflow => {
+                formatter.write_str("wall clock exceeds the calendar-period range")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WallClockError {}
+
+/// Convert one captured wall-clock value to a checked duration since the Unix epoch.
+#[inline]
+pub fn unix_epoch_duration(now: SystemTime) -> Result<Duration, WallClockError> {
+    now.duration_since(SystemTime::UNIX_EPOCH).map_err(|_| WallClockError::BeforeUnixEpoch)
+}
+
+/// Convert one captured wall-clock value to checked Unix seconds.
+#[inline]
+pub fn unix_epoch_seconds(now: SystemTime) -> Result<u64, WallClockError> {
+    Ok(unix_epoch_duration(now)?.as_secs())
+}
+
+/// Convert one captured wall-clock value to checked Unix milliseconds.
+#[inline]
+pub fn unix_epoch_millis(now: SystemTime) -> Result<u64, WallClockError> {
+    unix_epoch_duration(now)?.as_millis().try_into().map_err(|_| WallClockError::UnixMillisOverflow)
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::TimeSource;
@@ -227,6 +272,36 @@ mod tests {
         for handle in handles {
             handle.join().expect("clock clone worker");
         }
+    }
+
+    #[test]
+    fn wall_clock_conversion_preserves_epoch_and_rejects_pre_epoch() {
+        assert_eq!(super::unix_epoch_seconds(SystemTime::UNIX_EPOCH).unwrap(), 0);
+        assert_eq!(super::unix_epoch_millis(SystemTime::UNIX_EPOCH).unwrap(), 0);
+
+        let before_epoch = SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            super::unix_epoch_seconds(before_epoch),
+            Err(super::WallClockError::BeforeUnixEpoch)
+        );
+        assert_eq!(
+            super::unix_epoch_millis(before_epoch),
+            Err(super::WallClockError::BeforeUnixEpoch)
+        );
+    }
+
+    #[test]
+    fn wall_clock_millisecond_conversion_rejects_overflow() {
+        let maximum = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_millis(u64::MAX))
+            .expect("platform SystemTime must represent the u64 millisecond bound");
+        assert_eq!(super::unix_epoch_millis(maximum), Ok(u64::MAX));
+
+        let overflow = maximum.checked_add(Duration::from_millis(1)).unwrap();
+        assert_eq!(
+            super::unix_epoch_millis(overflow),
+            Err(super::WallClockError::UnixMillisOverflow)
+        );
     }
 }
 

@@ -18,9 +18,10 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use crate::engine::{LogFormat, LoggingConfig};
+use crate::time_source::WallClockError;
 
 /// Default maximum file size before rotation (100 MiB).
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -713,7 +714,7 @@ fn format_rfc5424_facility(
 ) -> String {
     let severity = level_to_severity(level);
     let pri = (facility as u32) * 8 + severity as u32;
-    let ts = rfc3339_utc(SystemTime::now());
+    let ts = rfc3339_utc(crate::time_source::now_system());
     format!("<{}>1 {} {} {} {} - - {}", pri, ts, hostname, app_name, procid, msg)
 }
 
@@ -724,14 +725,14 @@ fn format_rfc5424_facility(
 /// Format a record as a human-readable text line (no trailing newline).
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn format_text(record: &Record) -> String {
-    let ts = rfc3339_utc(SystemTime::now());
+    let ts = rfc3339_utc(crate::time_source::now_system());
     format!("{} [{}] {}: {}", ts, record.level(), record.target(), record.args())
 }
 
 /// Format a record as a single NDJSON line (no trailing newline).
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn format_json(record: &Record) -> String {
-    let ts = rfc3339_utc(SystemTime::now());
+    let ts = rfc3339_utc(crate::time_source::now_system());
     let mut obj = serde_json::Map::new();
     obj.insert("ts".into(), serde_json::Value::String(ts));
     obj.insert("level".into(), serde_json::Value::String(record.level().as_str().to_lowercase()));
@@ -747,12 +748,12 @@ pub fn format_json(record: &Record) -> String {
 }
 
 fn format_owned_text(record: &OwnedRecord) -> String {
-    let ts = rfc3339_utc(SystemTime::now());
+    let ts = rfc3339_utc(crate::time_source::now_system());
     format!("{} [{}] {}: {}", ts, record.level, record.target, record.message)
 }
 
 fn format_owned_json(record: &OwnedRecord) -> String {
-    let ts = rfc3339_utc(SystemTime::now());
+    let ts = rfc3339_utc(crate::time_source::now_system());
     let mut obj = serde_json::Map::new();
     obj.insert("ts".into(), serde_json::Value::String(ts));
     obj.insert("level".into(), serde_json::Value::String(record.level.as_str().to_lowercase()));
@@ -769,7 +770,12 @@ fn format_owned_json(record: &OwnedRecord) -> String {
 
 /// Format `SystemTime` as an RFC 3339 UTC timestamp with millisecond precision.
 pub fn rfc3339_utc(now: SystemTime) -> String {
-    let dur = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    rfc3339_utc_checked(now).unwrap_or_else(|_| "INVALID-TIMESTAMP".to_string())
+}
+
+/// Format `SystemTime` as RFC 3339, returning the wall-clock conversion error.
+pub fn rfc3339_utc_checked(now: SystemTime) -> Result<String, WallClockError> {
+    let dur = crate::time_source::unix_epoch_duration(now)?;
     let secs = dur.as_secs();
     let millis = dur.subsec_millis();
     let days = (secs / 86400) as i64;
@@ -778,7 +784,7 @@ pub fn rfc3339_utc(now: SystemTime) -> String {
     let m = (rem % 3600) / 60;
     let s = rem % 60;
     let (y, mo, d) = civil_from_days(days);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, m, s, millis)
+    Ok(format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, m, s, millis))
 }
 
 /// Convert days since the Unix epoch (1970-01-01) to a proleptic Gregorian date.
@@ -831,6 +837,7 @@ mod tests {
     use log::Level;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::UNIX_EPOCH;
 
     fn build_and_format<F>(level: Level, target: &str, msg: &str, formatter: F) -> String
     where
@@ -906,6 +913,13 @@ mod tests {
         assert_eq!(ts.chars().nth(10), Some('T'));
         assert_eq!(ts.chars().nth(19), Some('.'));
         assert_eq!(ts.chars().nth(23), Some('Z'));
+    }
+
+    #[test]
+    fn rfc3339_rejects_pre_epoch_without_epoch_zero() {
+        let before_epoch = UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(rfc3339_utc_checked(before_epoch), Err(WallClockError::BeforeUnixEpoch));
+        assert_eq!(rfc3339_utc(before_epoch), "INVALID-TIMESTAMP");
     }
 
     #[test]

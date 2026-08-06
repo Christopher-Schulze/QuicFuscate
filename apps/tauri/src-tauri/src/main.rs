@@ -185,7 +185,7 @@ fn parse_qkey_domain_fronting_sni_policy(extra: Option<&str>) -> Option<DomainFr
     None
 }
 
-fn sanitize_persisted_state(mut state: PersistedState) -> PersistedState {
+fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState, String> {
     if state.schema_version == 0 {
         state.schema_version = 1;
     }
@@ -199,7 +199,11 @@ fn sanitize_persisted_state(mut state: PersistedState) -> PersistedState {
         state.tunnels.truncate(MAX_TUNNELS);
     }
 
-    let now = now_ms();
+    let now = if state.tunnels.iter().any(|tunnel| tunnel.created_at == 0) {
+        Some(now_ms()?)
+    } else {
+        None
+    };
     let mut out = Vec::with_capacity(state.tunnels.len());
     for mut t in state.tunnels.drain(..) {
         t.id = t.id.trim().to_string();
@@ -250,7 +254,10 @@ fn sanitize_persisted_state(mut state: PersistedState) -> PersistedState {
         t.has_token = qkey_is_valid_bearer(&t.qkey);
 
         if t.created_at == 0 {
-            t.created_at = now;
+            t.created_at = now.ok_or_else(|| {
+                "persisted state timestamp was required but wall-clock time was unavailable"
+                    .to_string()
+            })?;
         }
 
         t.country_code = t.country_code.and_then(|cc| {
@@ -285,7 +292,7 @@ fn sanitize_persisted_state(mut state: PersistedState) -> PersistedState {
         }
     }
 
-    state
+    Ok(state)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -312,6 +319,10 @@ pub struct EngineStatus {
 pub struct BufferedLogLine {
     pub seq: u64,
     pub ts_ms: u64,
+    #[serde(default)]
+    pub timestamp_valid: bool,
+    #[serde(default)]
+    pub timestamp_error: Option<String>,
     pub level: String,
     pub message: String,
     #[serde(default)]
@@ -382,10 +393,15 @@ impl LogBuffer {
 
     fn push(&self, level: log::Level, target: &str, message: String) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let ts_ms = now_ms();
+        let (ts_ms, timestamp_valid, timestamp_error) = match now_ms() {
+            Ok(ts_ms) => (ts_ms, true, None),
+            Err(error) => (0, false, Some(error)),
+        };
         let line = BufferedLogLine {
             seq,
             ts_ms,
+            timestamp_valid,
+            timestamp_error,
             level: level.to_string().to_lowercase(),
             message,
             target: Some(target.to_string()),
@@ -501,8 +517,8 @@ fn qkey_is_valid_bearer(qkey_value: &str) -> bool {
 pub(crate) fn redact_state_for_disk(
     mut state: PersistedState,
     store: &dyn secrets::SecretStore,
-) -> PersistedState {
-    state = sanitize_persisted_state(state);
+) -> Result<PersistedState, String> {
+    state = sanitize_persisted_state(state)?;
     for t in &mut state.tunnels {
         let qk = t.qkey.trim().to_string();
         if qk.is_empty() {
@@ -549,13 +565,13 @@ pub(crate) fn redact_state_for_disk(
             }
         }
     }
-    state
+    Ok(state)
 }
 
 pub(crate) fn hydrate_state_for_runtime(
     mut state: PersistedState,
     store: &dyn secrets::SecretStore,
-) -> PersistedState {
+) -> Result<PersistedState, String> {
     for t in &mut state.tunnels {
         let existing = t.qkey.trim();
         if existing.is_empty() {
@@ -1138,9 +1154,24 @@ async fn updater_runtime_enabled(state: tauri::State<'_, AppState>) -> Result<bo
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+fn now_ms() -> Result<u64, String> {
+    timestamp_ms_at(quicfuscate::time_source::now_system())
+}
+
+fn timestamp_ms_at(now: std::time::SystemTime) -> Result<u64, String> {
+    quicfuscate::time_source::unix_epoch_millis(now)
+        .map_err(|error| format!("desktop wall-clock timestamp unavailable: {error}"))
+}
+
+#[cfg(test)]
+fn test_timestamp_ms() -> u64 {
+    1_700_000_000_000
+}
+
+#[cfg(test)]
+fn test_nonce() -> u64 {
+    static NEXT_NONCE: AtomicU64 = AtomicU64::new(1);
+    NEXT_NONCE.fetch_add(1, Ordering::Relaxed)
 }
 
 const TRAY_ID: &str = "main-tray";
@@ -2257,7 +2288,7 @@ mod tests {
                 remote: "1.2.3.4:4433".to_string(),
                 sni: "example.com".to_string(),
                 qkey: qk.clone(),
-                created_at: now_ms(),
+                created_at: test_timestamp_ms(),
                 country_code: None,
                 location: None,
                 has_token: false,
@@ -2267,11 +2298,11 @@ mod tests {
             settings: serde_json::json!({}),
         };
 
-        let disk = redact_state_for_disk(state.clone(), &store);
+        let disk = redact_state_for_disk(state.clone(), &store).expect("redact state");
         assert!(disk.tunnels[0].qkey.is_empty());
         assert!(disk.tunnels[0].has_token);
 
-        let hydrated = hydrate_state_for_runtime(disk, &store);
+        let hydrated = hydrate_state_for_runtime(disk, &store).expect("hydrate state");
         assert_eq!(hydrated.tunnels[0].qkey, qk);
         assert!(hydrated.tunnels[0].has_token);
     }
@@ -2319,7 +2350,7 @@ mod tests {
                 remote: "1.2.3.4:4433".to_string(),
                 sni: "example.com".to_string(),
                 qkey: qk,
-                created_at: now_ms(),
+                created_at: test_timestamp_ms(),
                 country_code: None,
                 location: None,
                 has_token: true,
@@ -2329,7 +2360,7 @@ mod tests {
             settings: serde_json::json!({}),
         };
 
-        let disk = redact_state_for_disk(state, &store);
+        let disk = redact_state_for_disk(state, &store).expect("redact state");
         assert!(disk.tunnels[0].qkey.is_empty());
         assert!(!disk.tunnels[0].has_token);
 
@@ -2353,7 +2384,7 @@ mod tests {
                 remote: "1.2.3.4:4433".to_string(),
                 sni: "example.com".to_string(),
                 qkey: qk.clone(),
-                created_at: now_ms(),
+                created_at: test_timestamp_ms(),
                 country_code: None,
                 location: None,
                 has_token: false,
@@ -2363,7 +2394,7 @@ mod tests {
             settings: serde_json::json!({}),
         };
 
-        let disk = redact_state_for_disk(state, &store);
+        let disk = redact_state_for_disk(state, &store).expect("redact state");
         assert_eq!(disk.tunnels[0].qkey, qk);
         assert!(disk.tunnels[0].has_token);
     }
@@ -2373,7 +2404,8 @@ mod tests {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
 
-        let base = std::env::temp_dir().join(format!("qf-desktop-state-corrupt-{}", now_ms()));
+        let base =
+            std::env::temp_dir().join(format!("qf-desktop-state-corrupt-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
         std::fs::write(&path, "not-json").expect("write");
@@ -2390,7 +2422,8 @@ mod tests {
     fn load_state_from_path_propagates_unreadable_state_path() {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
-        let base = std::env::temp_dir().join(format!("qf-desktop-state-unreadable-{}", now_ms()));
+        let base = std::env::temp_dir()
+            .join(format!("qf-desktop-state-unreadable-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
         std::fs::create_dir(&path).expect("directory state path");
@@ -2405,7 +2438,8 @@ mod tests {
     fn restart_loads_persisted_start_at_login_without_fabricating_state() {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
-        let base = std::env::temp_dir().join(format!("qf-desktop-state-restart-{}", now_ms()));
+        let base =
+            std::env::temp_dir().join(format!("qf-desktop-state-restart-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
         let state = PersistedState {
@@ -2436,7 +2470,8 @@ mod tests {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
 
-        let base = std::env::temp_dir().join(format!("qf-desktop-state-redact-{}", now_ms()));
+        let base =
+            std::env::temp_dir().join(format!("qf-desktop-state-redact-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
 
@@ -2452,7 +2487,7 @@ mod tests {
                 remote: "1.2.3.4:4433".to_string(),
                 sni: "example.com".to_string(),
                 qkey: qk.clone(),
-                created_at: now_ms(),
+                created_at: test_timestamp_ms(),
                 country_code: None,
                 location: None,
                 has_token: false,
@@ -2505,7 +2540,7 @@ mod tests {
             selected_tunnel_id: Some("does-not-exist".to_string()),
             settings: serde_json::json!(true),
         };
-        let sanitized = sanitize_persisted_state(state);
+        let sanitized = sanitize_persisted_state(state).expect("sanitize state");
         assert_eq!(sanitized.schema_version, 1);
         assert!(matches!(sanitized.settings, serde_json::Value::Object(_)));
         assert_eq!(sanitized.tunnels.len(), MAX_TUNNELS);
@@ -2515,6 +2550,14 @@ mod tests {
         assert!(sanitized.tunnels[0].location.as_deref().unwrap_or("").len() <= MAX_LOCATION_CHARS);
         assert!(sanitized.tunnels[0].qkey.len() <= MAX_QKEY_CHARS);
         assert!(sanitized.tunnels[0].created_at > 0);
+    }
+
+    #[test]
+    fn desktop_timestamp_conversion_rejects_pre_epoch_without_epoch_zero() {
+        let before_epoch =
+            std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let error = timestamp_ms_at(before_epoch).expect_err("pre-epoch timestamp");
+        assert!(error.contains("before the Unix epoch"), "{error}");
     }
 
     #[test]
@@ -2660,7 +2703,7 @@ mod tests {
             remote: "1.2.3.4:4433".to_string(),
             sni: "example.com".to_string(),
             qkey: "QKey-abc".to_string(),
-            created_at: now_ms(),
+                created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: true,
@@ -2672,7 +2715,7 @@ mod tests {
             remote: "5.6.7.8:4433".to_string(),
             sni: "fallback.example.com".to_string(),
             qkey: "QKey-def".to_string(),
-            created_at: now_ms(),
+                created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: true,
@@ -2696,7 +2739,7 @@ mod tests {
             remote: "1.1.1.1:4433".to_string(),
             sni: "empty.example.com".to_string(),
             qkey: String::new(),
-            created_at: now_ms(),
+                created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: false,
@@ -2708,7 +2751,7 @@ mod tests {
             remote: "2.2.2.2:4433".to_string(),
             sni: "valid.example.com".to_string(),
             qkey: "QKey-xyz".to_string(),
-            created_at: now_ms(),
+                created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: true,
