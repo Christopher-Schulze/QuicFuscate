@@ -16,6 +16,7 @@ import {
   getLogs,
   setLogs,
 } from "../../../../../../../apps/svelte-desktop/src/lib/stores/app.svelte";
+import { tauriLogTimestamp } from "../timestamp-fixtures";
 
 describe("desktop logs view", () => {
   beforeEach(() => {
@@ -31,8 +32,8 @@ describe("desktop logs view", () => {
     });
 
     setLogs([
-      { timestamp: 1710000000000, level: "info", message: "connected" },
-      { timestamp: 1710000005000, level: "warn", message: "latency spike" },
+      { timestamp: tauriLogTimestamp(1710000000000), timestampValid: true, timestampError: null, level: "info", message: "connected" },
+      { timestamp: tauriLogTimestamp(1710000005000), timestampValid: true, timestampError: null, level: "warn", message: "latency spike" },
     ]);
 
     render(LogsView);
@@ -48,8 +49,8 @@ describe("desktop logs view", () => {
 
   test("Clear clears log container and calls engine clear command", async () => {
     setLogs([
-      { timestamp: 1710000000000, level: "info", message: "connected" },
-      { timestamp: 1710000005000, level: "warn", message: "latency spike" },
+      { timestamp: tauriLogTimestamp(1710000000000), timestampValid: true, timestampError: null, level: "info", message: "connected" },
+      { timestamp: tauriLogTimestamp(1710000005000), timestampValid: true, timestampError: null, level: "warn", message: "latency spike" },
     ]);
     engineLogsClearMock.mockResolvedValue(undefined);
 

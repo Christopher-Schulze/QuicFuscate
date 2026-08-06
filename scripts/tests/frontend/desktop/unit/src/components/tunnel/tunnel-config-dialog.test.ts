@@ -18,6 +18,7 @@ import {
   setSelectedId,
 } from "../../../../../../../../apps/svelte-desktop/src/lib/stores/app.svelte";
 import type { TunnelConfig } from "../../../../../../../../apps/svelte-desktop/src/lib/types";
+import { desktopCreatedAt } from "../../timestamp-fixtures";
 
 function makeTunnel(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
   return {
@@ -26,7 +27,7 @@ function makeTunnel(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
     remote: "10.0.0.1:4433",
     sni: "cdn.example.com",
     qkey: "",
-    createdAt: Date.now(),
+    createdAt: desktopCreatedAt(),
     hasToken: false,
     countryCode: "DE",
     ...overrides,

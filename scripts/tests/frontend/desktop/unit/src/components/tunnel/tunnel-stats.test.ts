@@ -20,6 +20,7 @@ import type {
   TunnelStats as TStats,
   TunnelPolicyView,
 } from "../../../../../../../../apps/svelte-desktop/src/lib/types";
+import { desktopCreatedAt } from "../../timestamp-fixtures";
 
 function makeTunnel(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
   return {
@@ -28,7 +29,7 @@ function makeTunnel(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
     remote: "10.0.0.1:4433",
     sni: "cdn.example.com",
     qkey: "qk_abc",
-    createdAt: Date.now(),
+    createdAt: desktopCreatedAt(),
     hasToken: true,
     countryCode: "DE",
     ...overrides,

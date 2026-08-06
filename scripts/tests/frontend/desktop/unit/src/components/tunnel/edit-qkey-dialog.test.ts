@@ -23,9 +23,10 @@ import {
   getTunnels,
   setTunnels,
 } from "../../../../../../../../apps/svelte-desktop/src/lib/stores/app.svelte";
+import { desktopCreatedAt } from "../../timestamp-fixtures";
 
 function seedTunnels(): void {
-  const now = Date.now();
+  const now = desktopCreatedAt();
   setTunnels([
     {
       id: "t1",

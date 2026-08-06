@@ -45,6 +45,8 @@ pub struct PersistedTunnel {
     pub remote: String,
     pub sni: String,
     pub qkey: String,
+    /// Unix epoch milliseconds. Zero is a legacy disk sentinel repaired by
+    /// `sanitize_persisted_state()` before this value reaches the frontend.
     pub created_at: u64,
     #[serde(default)]
     pub country_code: Option<String>,
@@ -318,9 +320,13 @@ pub struct EngineStatus {
 #[serde(rename_all = "camelCase")]
 pub struct BufferedLogLine {
     pub seq: u64,
+    /// Unix epoch milliseconds. Zero is meaningful only when `timestamp_valid`
+    /// is false and `timestamp_error` explains why wall-clock capture failed.
     pub ts_ms: u64,
+    /// Explicit validity metadata for the serialized `ts_ms` value.
     #[serde(default)]
     pub timestamp_valid: bool,
+    /// Backend-owned diagnostic for an unavailable wall-clock timestamp.
     #[serde(default)]
     pub timestamp_error: Option<String>,
     pub level: String,

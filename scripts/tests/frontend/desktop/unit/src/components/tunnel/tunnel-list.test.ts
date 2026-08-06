@@ -40,6 +40,7 @@ import {
   setTunnelStates,
   setTunnels,
 } from "../../../../../../../../apps/svelte-desktop/src/lib/stores/app.svelte";
+import { desktopCreatedAt } from "../../timestamp-fixtures";
 
 function seedTunnels(): void {
   setTunnels([
@@ -48,7 +49,7 @@ function seedTunnels(): void {
       name: "Alpha",
       remote: "alpha.example.com:4433",
       countryCode: "US",
-      createdAt: Date.now(),
+      createdAt: desktopCreatedAt(),
       qkey: "",
       sni: "alpha.example.com",
       hasToken: false,
@@ -58,7 +59,7 @@ function seedTunnels(): void {
       name: "Beta",
       remote: "beta.example.com:4433",
       countryCode: "DE",
-      createdAt: Date.now(),
+      createdAt: desktopCreatedAt(),
       qkey: "QKey-BETA",
       sni: "beta.example.com",
       hasToken: true,

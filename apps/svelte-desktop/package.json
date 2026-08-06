@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@quicfuscate/theme": "workspace:*",
+    "@quicfuscate/time": "workspace:*",
     "@quicfuscate/ui": "workspace:*",
     "@tauri-apps/api": "2.10.1",
     "@tauri-apps/plugin-updater": "2",

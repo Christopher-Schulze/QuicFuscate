@@ -7,6 +7,8 @@
   import { cn, ripple, createCopyFeedback } from "@quicfuscate/ui";
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import { useAnchorSync } from "$lib/use-anchor-sync";
+  import { formatTimestamp, formatTimestampIso } from "$lib/format";
+  import { parseAdminLogEntries } from "$lib/timestamp-boundary";
   import { ApiError, isAuthError, getJson, postJson, sanitizeErrorMessage } from "$lib/api";
   import {
     setAuthRequired,
@@ -90,17 +92,13 @@
     return typeof v === "object" && v !== null && !Array.isArray(v);
   }
 
-  function isLogEntry(v: unknown): v is LogEntry {
-    return isRecord(v) && typeof v.ts === "number" && typeof v.level === "string" && typeof v.msg === "string";
-  }
-
   function parseLogsResponse(resp: unknown): { lines: LogEntry[]; cursor: number } {
     const asObj = isRecord(resp) ? resp : {};
     if (typeof asObj.success === "boolean" && !asObj.success) {
       throw new Error(typeof asObj.message === "string" ? asObj.message.trim() : "Failed to load logs");
     }
     const data = isRecord(asObj.data) ? asObj.data : (isRecord(resp) ? resp : {});
-    const lines = Array.isArray(data.lines) ? data.lines.filter(isLogEntry) : [];
+    const lines = parseAdminLogEntries(data.lines);
     const cur = typeof data.cursor === "number" ? data.cursor : 0;
     return { lines, cursor: cur };
   }
@@ -272,7 +270,7 @@
 
   async function handleCopyAll() {
     if (logs.length === 0) return;
-    const text = logs.map(l => `[${new Date(l.ts).toISOString()}] [${l.level.toUpperCase()}] ${l.msg}`).join("\n");
+    const text = logs.map(l => `[${formatTimestampIso(l.ts)}] [${l.level.toUpperCase()}] ${l.msg}`).join("\n");
     await copyFb.trigger(text);
   }
 
@@ -502,7 +500,7 @@
                       )}
                     >
                       <span class="text-text-ghost/60 shrink-0 tabular-nums w-[64px] dashboard-heading-sans">
-                        {new Date(entry.ts).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                        {formatTimestamp(entry.ts)}
                       </span>
                       <span class={cn(
                         "w-[40px] text-center text-[9px] font-medium py-0.5 rounded shrink-0 dashboard-heading-sans",

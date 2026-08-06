@@ -1,4 +1,9 @@
+import type { UnixMilliseconds, UnixSeconds } from "@quicfuscate/time";
+
 export type NavTab = "dashboard" | "configuration" | "logs" | "about";
+
+export type AdminQKeyTimestamp = UnixSeconds<"admin-qkey">;
+export type AdminLogTimestamp = UnixMilliseconds<"admin-log">;
 
 export interface AdminResponse<T> {
   success: boolean;
@@ -32,14 +37,20 @@ export interface QKeyEntry {
   id: string;
   name?: string | null;
   qkey?: string | null;
-  created_at: number;
-  expires_at?: number | null;
+  /** Unix epoch seconds from the admin API. */
+  created_at: AdminQKeyTimestamp | null;
+  expires_at?: AdminQKeyTimestamp | null;
+  created_at_error?: string | null;
+  expires_at_error?: string | null;
   stealth?: string | null;
   fec?: string | null;
 }
 
 export interface LogEntry {
-  ts: number;
+  /** Unix epoch milliseconds from the admin API, or null when invalid. */
+  ts: AdminLogTimestamp | null;
+  timestampValid: boolean;
+  timestampError: string | null;
   level: string;
   msg: string;
 }

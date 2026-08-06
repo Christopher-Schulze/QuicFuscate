@@ -19,6 +19,8 @@ import {
   getActiveTunnelId,
 } from "./app.svelte";
 import type { TunnelConfig, AppSettings, GeneralSettings, HardwareSettings } from "$lib/types";
+import { parseTauriLogLine, type RawTauriLogLine } from "$lib/timestamp-boundary";
+import { parseUnixMilliseconds } from "@quicfuscate/time";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 /** Shape returned by the Tauri `load_state` command. */
@@ -62,9 +64,13 @@ type PersistedTunnel = {
   countryCode?: unknown; location?: unknown; debugSniOverride?: unknown;
 };
 
-function normalizePersistedTunnels(input: unknown): TunnelConfig[] {
-  if (!Array.isArray(input)) return [];
+export function normalizePersistedTunnels(input: unknown): {
+  tunnels: TunnelConfig[];
+  invalidTimestampCount: number;
+} {
+  if (!Array.isArray(input)) return { tunnels: [], invalidTimestampCount: 0 };
   const result: TunnelConfig[] = [];
+  let invalidTimestampCount = 0;
   for (const raw of input as PersistedTunnel[]) {
     if (!raw || typeof raw !== "object") continue;
     const id = typeof raw.id === "string" ? raw.id.trim() : "";
@@ -73,9 +79,11 @@ function normalizePersistedTunnels(input: unknown): TunnelConfig[] {
     if (!id || !remote || !sni) continue;
     const name = typeof raw.name === "string" && raw.name.trim().length > 0 ? raw.name.trim() : remote;
     const qkey = typeof raw.qkey === "string" ? raw.qkey : "";
-    const createdAt =
-      typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) && raw.createdAt > 0
-        ? raw.createdAt : Date.now();
+    const createdAt = parseUnixMilliseconds(raw.createdAt, "tauri-persisted-tunnel");
+    if (!createdAt.ok) {
+      invalidTimestampCount += 1;
+      continue;
+    }
     const hasToken = Boolean(raw.hasToken);
     const countryCode =
       typeof raw.countryCode === "string" && /^[A-Za-z]{2}$/.test(raw.countryCode.trim())
@@ -85,9 +93,9 @@ function normalizePersistedTunnels(input: unknown): TunnelConfig[] {
     const debugSniOverride =
       typeof raw.debugSniOverride === "string" && raw.debugSniOverride.trim().length > 0
         ? raw.debugSniOverride.trim() : undefined;
-    result.push({ id, name, remote, sni, qkey, createdAt, hasToken, countryCode, location, debugSniOverride });
+    result.push({ id, name, remote, sni, qkey, createdAt: createdAt.value, hasToken, countryCode, location, debugSniOverride });
   }
-  return result;
+  return { tunnels: result, invalidTimestampCount };
 }
 
 export async function persistState(): Promise<void> {
@@ -112,18 +120,23 @@ export async function loadPersistedState(): Promise<void> {
     const loaded = await invoke<PersistedState | null>("load_state");
     if (!loaded) { setHydrationDone(true); return; }
     const loadedTunnels = normalizePersistedTunnels(loaded.tunnels);
+    if (loadedTunnels.invalidTimestampCount > 0) {
+      setError(
+        `${loadedTunnels.invalidTimestampCount} persisted tunnel(s) were skipped because their creation timestamp was invalid.`,
+      );
+    }
     const loadedSettings = isRecord(loaded.settings) ? loaded.settings as PersistedState["settings"] : null;
     const loadedSelected = typeof loaded.selectedTunnelId === "string" ? loaded.selectedTunnelId : null;
-    if (loadedTunnels.length > 0) setTunnels(loadedTunnels);
+    if (loadedTunnels.tunnels.length > 0) setTunnels(loadedTunnels.tunnels);
     if (loadedSettings) {
       updateSettings((prev: AppSettings): AppSettings => ({
         general: { ...prev.general, ...(isRecord(loadedSettings.general) ? loadedSettings.general : {}) },
         hardware: { ...prev.hardware, ...(isRecord(loadedSettings.hardware) ? loadedSettings.hardware : {}) },
       }));
     }
-    const selectedIsValid = !!loadedSelected && loadedTunnels.some((t) => t.id === loadedSelected);
+    const selectedIsValid = !!loadedSelected && loadedTunnels.tunnels.some((t) => t.id === loadedSelected);
     if (selectedIsValid) setSelectedId(loadedSelected);
-    else if (loadedTunnels.length > 0) setSelectedId(loadedTunnels[0].id);
+    else if (loadedTunnels.tunnels.length > 0) setSelectedId(loadedTunnels.tunnels[0].id);
   } catch { /* Ignore: dev browser mode or missing file. */ }
   finally { setHydrationDone(true); }
 }
@@ -266,7 +279,7 @@ export function startEnginePollers(): () => void {
     const cursorEpochAtStart = logCursorEpoch;
     try {
       if (!isCurrent()) return;
-      const resp = await tauriInvoke<{ cursor: number; lines: { tsMs: number; level: string; message: string }[] }>(
+      const resp = await tauriInvoke<{ cursor: number; lines: RawTauriLogLine[] }>(
         "engine_logs_since", { cursor: cursorAtStart },
       );
       if (!isCurrent() || cursorEpochAtStart !== logCursorEpoch) return;
@@ -277,11 +290,8 @@ export function startEnginePollers(): () => void {
         return;
       }
       logCursor = nextCursor;
-      appendLogs(resp.lines.map((l) => ({
-        timestamp: l.tsMs,
-        level: (l.level ?? "info") as "trace" | "debug" | "info" | "warn" | "error",
-        message: l.message,
-      })));
+      const parsedLines = resp.lines.map(parseTauriLogLine).filter((line): line is NonNullable<typeof line> => line !== null);
+      appendLogs(parsedLines);
     } catch { /* ignore */ }
     finally { logsInFlight = false; }
   };

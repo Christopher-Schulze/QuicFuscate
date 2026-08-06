@@ -7,6 +7,7 @@
   import { isValidSniHost, normalizeRemoteForStorage } from "$lib/tunnel-validators";
   import { updateTunnels, setSelectedId } from "$lib/stores/app.svelte";
   import { isTauri, qkeyParse } from "$lib/stores/tauri-bridge.svelte";
+  import { createDesktopCreatedAt } from "$lib/timestamp-boundary";
   import type { TunnelConfig } from "$lib/types";
 
   interface Props {
@@ -49,7 +50,7 @@
       if (!isValidSniHost(normalizedSni)) { parseError = "QKey contains invalid SNI"; return; }
       const config: TunnelConfig = {
         id: crypto.randomUUID(), name: deriveName(normalizedRemote), remote: normalizedRemote,
-        sni: normalizedSni, qkey: extracted, createdAt: Date.now(), hasToken: Boolean(parsed.hasToken),
+        sni: normalizedSni, qkey: extracted, createdAt: createDesktopCreatedAt(), hasToken: Boolean(parsed.hasToken),
       };
       updateTunnels((prev) => [...prev, config]);
       setSelectedId(config.id);

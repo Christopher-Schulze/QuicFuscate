@@ -1,5 +1,12 @@
+import type { UnixMilliseconds } from "@quicfuscate/time";
+
 /** Per-tunnel activation state */
 export type TunnelState = "inactive" | "activating" | "active" | "deactivating";
+
+export type DesktopCreatedAt =
+  | UnixMilliseconds<"tauri-persisted-tunnel">
+  | UnixMilliseconds<"desktop-created">;
+export type TauriLogTimestamp = UnixMilliseconds<"tauri-log">;
 
 /** Tunnel configuration - imported via QKey or manual entry. */
 export interface TunnelConfig {
@@ -14,7 +21,8 @@ export interface TunnelConfig {
   /** Metadata */
   countryCode?: string;
   location?: string;
-  createdAt: number;
+  /** Unix epoch milliseconds. Source is Tauri persistence or explicit desktop creation. */
+  createdAt: DesktopCreatedAt;
   hasToken: boolean;
   /** Canonical credential */
   qkey: string;
@@ -56,7 +64,10 @@ export interface HardwareSettings {
 
 /** Log entry from engine */
 export interface LogEntry {
-  timestamp: number;
+  /** Unix epoch milliseconds, or null when Tauri marked the timestamp invalid. */
+  timestamp: TauriLogTimestamp | null;
+  timestampValid: boolean;
+  timestampError: string | null;
   level: "trace" | "debug" | "info" | "warn" | "error";
   message: string;
   target?: string;

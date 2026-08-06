@@ -4,6 +4,7 @@
   import CountrySelect from "$lib/components/ui/CountrySelect.svelte";
   import { cn } from "@quicfuscate/ui";
   import { parseRemote, isValidSniHost } from "$lib/tunnel-validators";
+  import { createDesktopCreatedAt } from "$lib/timestamp-boundary";
   import { updateTunnels, setSelectedId } from "$lib/stores/app.svelte";
   import type { TunnelConfig } from "$lib/types";
 
@@ -63,7 +64,7 @@
     if (cc && !/^[A-Z]{2}$/.test(cc)) { parseError = "Invalid country code. Use 2 letters [e.g. DE]."; return; }
     const config: TunnelConfig = {
       id: crypto.randomUUID(), name: nt, remote: `${host}:${r.port}`, sni,
-      qkey: "", createdAt: Date.now(), hasToken: false, countryCode: cc || undefined,
+      qkey: "", createdAt: createDesktopCreatedAt(), hasToken: false, countryCode: cc || undefined,
     };
     updateTunnels((prev) => [...prev, config]);
     setSelectedId(config.id);

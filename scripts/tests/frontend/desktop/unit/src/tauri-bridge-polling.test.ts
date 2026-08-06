@@ -23,6 +23,7 @@ import {
   engineLogsClear,
   startEnginePollers,
 } from "../../../../../../apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte";
+import { desktopCreatedAt } from "./timestamp-fixtures";
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -37,7 +38,7 @@ function setTauriMode(): void {
 }
 
 function resetStores(): void {
-  setTunnels([{ id: "t1", name: "Alpha", remote: "vpn.example.com:4433", sni: "cdn.example.com", qkey: "QKey", createdAt: 1, hasToken: false }]);
+  setTunnels([{ id: "t1", name: "Alpha", remote: "vpn.example.com:4433", sni: "cdn.example.com", qkey: "QKey", createdAt: desktopCreatedAt(1), hasToken: false }]);
   setActiveTunnelId(null);
   setTunnelStates({});
   setTunnelStats({});
@@ -56,7 +57,7 @@ describe("desktop engine poller ownership", () => {
   test("discards delayed status, stats, and log responses after teardown", async () => {
     const status = deferred<{ state: string; activeTunnelId: string | null }>();
     const stats = deferred<{ bytesIn: number; bytesOut: number }>();
-    const logs = deferred<{ cursor: number; lines: { tsMs: number; level: string; message: string }[] }>();
+    const logs = deferred<{ cursor: number; lines: { tsMs: number; timestampValid: boolean; timestampError: string | null; level: string; message: string }[] }>();
     invokeMock.mockImplementation((command: string) => {
       if (command === "engine_status") return status.promise;
       if (command === "engine_stats") return stats.promise;
@@ -69,7 +70,7 @@ describe("desktop engine poller ownership", () => {
     stop();
     status.resolve({ state: "Connected", activeTunnelId: "t1" });
     stats.resolve({ bytesIn: 100, bytesOut: 200 });
-    logs.resolve({ cursor: 4, lines: [{ tsMs: 1, level: "error", message: "late" }] });
+    logs.resolve({ cursor: 4, lines: [{ tsMs: 1, timestampValid: true, timestampError: null, level: "error", message: "late" }] });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(getActiveTunnelId()).toBeNull();
@@ -80,8 +81,8 @@ describe("desktop engine poller ownership", () => {
   });
 
   test("serializes log polls and rejects cursor regressions and cleared epochs", async () => {
-    const first = deferred<{ cursor: number; lines: { tsMs: number; level: string; message: string }[] }>();
-    const second = deferred<{ cursor: number; lines: { tsMs: number; level: string; message: string }[] }>();
+    const first = deferred<{ cursor: number; lines: { tsMs: number; timestampValid: boolean; timestampError: string | null; level: string; message: string }[] }>();
+    const second = deferred<{ cursor: number; lines: { tsMs: number; timestampValid: boolean; timestampError: string | null; level: string; message: string }[] }>();
     const clearCommand = deferred<null>();
     let logCall = 0;
     invokeMock.mockImplementation((command: string, payload?: { cursor?: number }) => {
@@ -106,17 +107,22 @@ describe("desktop engine poller ownership", () => {
     await vi.advanceTimersByTimeAsync(700);
     expect(logCall).toBe(1);
 
-    first.resolve({ cursor: 5, lines: [{ tsMs: 1, level: "info", message: "first" }] });
+    first.resolve({ cursor: 5, lines: [{ tsMs: 1_710_000_000_000, timestampValid: true, timestampError: null, level: "info", message: "first" }] });
     await vi.advanceTimersByTimeAsync(0);
     await vi.dynamicImportSettled();
     await vi.advanceTimersByTimeAsync(350);
     expect(logCall).toBe(2);
+    expect(getLogs()[0]).toMatchObject({
+      timestamp: 1_710_000_000_000,
+      timestampValid: true,
+      timestampError: null,
+    });
 
-    second.resolve({ cursor: 4, lines: [{ tsMs: 2, level: "error", message: "regressed" }] });
+    second.resolve({ cursor: 4, lines: [{ tsMs: 2, timestampValid: false, timestampError: "wall clock unavailable", level: "error", message: "regressed" }] });
     await vi.advanceTimersByTimeAsync(0);
     expect(getLogs().map((entry) => entry.message)).toEqual(["first"]);
 
-    const cleared = deferred<{ cursor: number; lines: { tsMs: number; level: string; message: string }[] }>();
+    const cleared = deferred<{ cursor: number; lines: { tsMs: number; timestampValid: boolean; timestampError: string | null; level: string; message: string }[] }>();
     invokeMock.mockImplementation((command: string) => {
       if (command === "engine_logs_since") return cleared.promise;
       if (command === "engine_logs_clear") return clearCommand.promise;
@@ -124,7 +130,7 @@ describe("desktop engine poller ownership", () => {
     });
     await vi.advanceTimersByTimeAsync(350);
     const clearPromise = engineLogsClear();
-    cleared.resolve({ cursor: 9, lines: [{ tsMs: 3, level: "warn", message: "after clear" }] });
+    cleared.resolve({ cursor: 9, lines: [{ tsMs: 0, timestampValid: false, timestampError: "wall clock unavailable", level: "warn", message: "after clear" }] });
     await vi.advanceTimersByTimeAsync(0);
     expect(getLogs().map((entry) => entry.message)).toEqual(["first"]);
     clearCommand.resolve(null);

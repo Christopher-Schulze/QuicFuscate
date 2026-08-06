@@ -1,3 +1,6 @@
+import { unixMillisecondsToDate, unixSecondsToMilliseconds } from "@quicfuscate/time";
+import type { AdminLogTimestamp, AdminQKeyTimestamp } from "$lib/types";
+
 export function formatBitsPerSecond(bitsRaw: number): string {
   const bits = Math.max(0, Number.isFinite(bitsRaw) ? bitsRaw : 0);
   const units = [
@@ -48,4 +51,26 @@ export function formatMetricValue(name: string, value: number): string {
   if (name.endsWith("_active")) return value >= 1 ? "Enabled" : "Disabled";
   if (Number.isInteger(value)) return formatMetricCount(value);
   return value.toFixed(2);
+}
+
+export function formatTimestamp(ts: AdminLogTimestamp | null): string {
+  const date = unixMillisecondsToDate(ts);
+  if (!date) return "Time unavailable";
+  return date.toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+export function formatTimestampIso(ts: AdminLogTimestamp | null): string {
+  const date = unixMillisecondsToDate(ts);
+  return date ? date.toISOString() : "Time unavailable";
+}
+
+export function formatUnixSeconds(ts: AdminQKeyTimestamp | null): string | null {
+  if (ts === null) return null;
+  const milliseconds = unixSecondsToMilliseconds(ts, "admin-qkey");
+  return milliseconds ? unixMillisecondsToDate(milliseconds)?.toLocaleString() ?? null : null;
 }

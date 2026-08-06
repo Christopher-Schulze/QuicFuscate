@@ -35,9 +35,9 @@ const LOGS_RESPONSE = {
   success: true,
   data: {
     lines: [
-      { ts: 1710000000000, level: "info", msg: "Server started" },
-      { ts: 1710000001000, level: "warn", msg: "High latency detected" },
-      { ts: 1710000002000, level: "error", msg: "Connection dropped" },
+      { ts: 1710000000000, timestamp_valid: true, timestamp_error: null, level: "info", msg: "Server started" },
+      { ts: 1710000001000, timestamp_valid: true, timestamp_error: null, level: "warn", msg: "High latency detected" },
+      { ts: 1710000002000, timestamp_valid: true, timestamp_error: null, level: "error", msg: "Connection dropped" },
     ],
     cursor: 3,
   },
@@ -253,7 +253,7 @@ describe("LogsView", () => {
 
     initialLogs.resolve({
       success: true,
-      data: { lines: [{ ts: 1710000000000, level: "error", msg: "stale response" }], cursor: 7 },
+      data: { lines: [{ ts: 1710000000000, timestamp_valid: true, timestamp_error: null, level: "error", msg: "stale response" }], cursor: 7 },
     });
     await vi.advanceTimersByTimeAsync(0);
     await waitFor(() => expect(logCalls).toBe(2));
@@ -261,7 +261,7 @@ describe("LogsView", () => {
 
     refreshedLogs.resolve({
       success: true,
-      data: { lines: [{ ts: 1710000001000, level: "info", msg: "fresh response" }], cursor: 8 },
+      data: { lines: [{ ts: 1710000001000, timestamp_valid: true, timestamp_error: null, level: "info", msg: "fresh response" }], cursor: 8 },
     });
     await waitFor(() => expect(screen.getByText("fresh response")).toBeInTheDocument());
   });

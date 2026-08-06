@@ -5,7 +5,11 @@ import {
   formatMetricBytes,
   formatMetricCount,
   formatMetricValue,
+  formatTimestamp,
+  formatTimestampIso,
+  formatUnixSeconds,
 } from "../../../../../apps/svelte-admin/src/lib/format";
+import { parseUnixMilliseconds, parseUnixSeconds } from "../../../../../packages/time/index";
 
 describe("formatBitsPerSecond", () => {
   test("formats zero as 0.00 bit/s", () => {
@@ -147,5 +151,27 @@ describe("formatMetricValue", () => {
 
   test("formats float values with two decimals", () => {
     expect(formatMetricValue("some_metric", 3.14159)).toBe("3.14");
+  });
+});
+
+describe("timestamp formatting", () => {
+  test("formats validated admin log milliseconds", () => {
+    const parsed = parseUnixMilliseconds(1_710_000_000_000, "admin-log");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(formatTimestamp(parsed.value)).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    expect(formatTimestampIso(parsed.value)).toContain("2024-03-09T16:00:00.000Z");
+  });
+
+  test("renders unavailable for an invalid timestamp", () => {
+    expect(formatTimestamp(null)).toBe("Time unavailable");
+    expect(formatTimestampIso(null)).toBe("Time unavailable");
+  });
+
+  test("converts validated admin QKey seconds centrally", () => {
+    const parsed = parseUnixSeconds(1_710_000_000, "admin-qkey");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(formatUnixSeconds(parsed.value)).toContain("2024");
   });
 });

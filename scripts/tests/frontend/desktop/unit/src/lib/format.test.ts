@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { parseUnixMilliseconds } from "../../../../../../../packages/time/index";
 import { cn } from "../../../../../../../packages/ui/cn";
 import {
   countryCodeToFlag,
@@ -147,18 +148,23 @@ describe("format utilities", () => {
     test("formats a known timestamp to HH:MM:SS", () => {
       // 2024-01-01T12:30:45.000Z
       const ts = Date.UTC(2024, 0, 1, 12, 30, 45);
-      const result = formatTimestamp(ts);
+      const parsed = parseUnixMilliseconds(ts, "tauri-log");
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      const result = formatTimestamp(parsed.value);
       // Result depends on locale/timezone, but must match HH:MM:SS pattern
       expect(result).toMatch(/^\d{2}:\d{2}:\d{2}$/);
     });
 
-    test("formats epoch zero to valid time string", () => {
-      const result = formatTimestamp(0);
-      expect(result).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    test("renders an unavailable value instead of epoch zero", () => {
+      expect(formatTimestamp(null)).toBe("Time unavailable");
     });
 
     test("formats current timestamp to valid time string", () => {
-      const result = formatTimestamp(Date.now());
+      const parsed = parseUnixMilliseconds(Date.now(), "tauri-log");
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      const result = formatTimestamp(parsed.value);
       expect(result).toMatch(/^\d{2}:\d{2}:\d{2}$/);
     });
   });

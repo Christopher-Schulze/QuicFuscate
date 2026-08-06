@@ -37,6 +37,8 @@
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import { Select } from "@quicfuscate/ui";
   import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
+  import { formatUnixSeconds } from "$lib/format";
+  import { parseAdminQKeyCreateResponse, parseAdminQKeyEntries } from "$lib/timestamp-boundary";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import {
     setAuthRequired,
@@ -52,16 +54,18 @@
     parsePort,
     FRONTING_SNI_ALLOWLIST,
   } from "$lib/config-helpers";
-  import type { AdminResponse, QKeyEntry } from "$lib/types";
+  import type { AdminQKeyTimestamp, AdminResponse, QKeyEntry } from "$lib/types";
 
-  type QKeyList = { keys: QKeyEntry[] };
-  type QKeyCreateResp = { qkey: string; created_at?: number | null; expires_at?: number | null };
+  type QKeyList = { keys?: unknown };
+  type QKeyCreateResp = unknown;
   type DomainFrontingMode = "auto" | "off" | "manual";
   type IssuedQKey = {
     value: string;
     name?: string | null;
-    createdAt?: number | null;
-    expiresAt?: number | null;
+    createdAt?: AdminQKeyTimestamp | null;
+    expiresAt?: AdminQKeyTimestamp | null;
+    createdAtError?: string | null;
+    expiresAtError?: string | null;
   };
 
   const MAX_QKEY_NAME_CHARS = 64;
@@ -112,21 +116,24 @@
       ? formatQKeyMetadata({
           created_at: issuedQKey.createdAt,
           expires_at: issuedQKey.expiresAt,
+          created_at_error: issuedQKey.createdAtError,
+          expires_at_error: issuedQKey.expiresAtError,
         })
       : "",
   );
 
-  function formatIssuedAt(ts?: number | null): string | null {
-    if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) return null;
-    return new Date(ts * 1000).toLocaleString();
+  function formatIssuedAt(ts?: AdminQKeyTimestamp | null): string | null {
+    return formatUnixSeconds(ts ?? null);
   }
 
-  function formatQKeyMetadata(entry: { created_at?: number | null; expires_at?: number | null; stealth?: string | null; fec?: string | null }): string {
+  function formatQKeyMetadata(entry: { created_at?: AdminQKeyTimestamp | null; expires_at?: AdminQKeyTimestamp | null; created_at_error?: string | null; expires_at_error?: string | null; stealth?: string | null; fec?: string | null }): string {
     const parts: string[] = [];
     const created = formatIssuedAt(entry.created_at);
     const expires = formatIssuedAt(entry.expires_at);
     if (created) parts.push(`Created ${created}`);
+    else if (entry.created_at_error) parts.push("Created unavailable");
     if (expires) parts.push(`Expires ${expires}`);
+    else if (entry.expires_at_error) parts.push("Expires unavailable");
     if (entry.stealth) parts.push(`Stealth ${entry.stealth}`);
     if (entry.fec) parts.push(`FEC ${entry.fec}`);
     return parts.join(" · ");
@@ -153,7 +160,7 @@
         const resp = await getJson<AdminResponse<QKeyList>>("/api/qkeys");
         if (!resp.success) throw new Error(resp.message ?? "Failed to load QKeys");
         if (!qkeyRequests.isCurrent(token)) return;
-        setQkeyList(resp.data?.keys ?? []);
+        setQkeyList(parseAdminQKeyEntries(resp.data?.keys));
       } catch (e: unknown) {
         if (!qkeyRequests.isCurrent(token)) return;
         if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
@@ -240,14 +247,17 @@
       if (port != null) payload.port = port;
       if (qkeyFrontingMode === "manual") payload.sni_domain = qkeyFixedDomain;
       const resp = await postJson<AdminResponse<QKeyCreateResp>, typeof payload>("/api/qkey", payload);
-      if (!resp.success || !resp.data?.qkey) throw new Error(resp.message ?? "QKey create failed");
+      const created = parseAdminQKeyCreateResponse(resp.data);
+      if (!resp.success || !created) throw new Error(resp.message ?? "QKey create failed");
       if (!viewActive) return;
-      const normalized = normalizeQKey(resp.data.qkey);
+      const normalized = normalizeQKey(created.qkey);
       issuedQKey = {
         value: normalized,
         name: name || null,
-        createdAt: resp.data.created_at ?? null,
-        expiresAt: resp.data.expires_at ?? null,
+        createdAt: created.created_at,
+        expiresAt: created.expires_at,
+        createdAtError: created.created_at_error,
+        expiresAtError: created.expires_at_error,
       };
       addToast(name ? `QKey created: ${name}` : "QKey created", "success");
       createDialogOpen = false;

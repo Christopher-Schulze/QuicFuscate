@@ -1,3 +1,6 @@
+import { unixMillisecondsToDate } from "@quicfuscate/time";
+import type { TauriLogTimestamp } from "$lib/types";
+
 export function countryCodeToFlag(code: string | undefined): string {
   if (!code || code.length !== 2) return "";
   const cp = [...code.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65);
@@ -30,8 +33,9 @@ export function formatRate(bps: number): string {
   return `${bps} bps`;
 }
 
-export function formatTimestamp(ts: number): string {
-  const d = new Date(ts);
+export function formatTimestamp(ts: TauriLogTimestamp | null): string {
+  const d = unixMillisecondsToDate(ts);
+  if (!d) return "Time unavailable";
   return d.toLocaleTimeString("en-US", {
     hour12: false,
     hour: "2-digit",
@@ -54,4 +58,3 @@ export function toErrorMessage(value: unknown, fallback = "Unknown error"): stri
     return fallback;
   }
 }
-

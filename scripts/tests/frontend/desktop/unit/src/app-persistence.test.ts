@@ -8,10 +8,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import {
   getHydrationDone,
+  getError,
   getSelectedId,
   getSettings,
   getTunnels,
   setHydrationDone,
+  setError,
   setSelectedId,
   setSettings,
   setTunnels,
@@ -20,11 +22,13 @@ import {
   loadPersistedState,
   persistState,
 } from "../../../../../../apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte";
+import { desktopCreatedAt } from "./timestamp-fixtures";
 
 function resetDesktopStore(): void {
   setTunnels([]);
   setSelectedId(null);
   setHydrationDone(false);
+  setError(null);
   setSettings({
     general: {
       logLevel: "info",
@@ -56,7 +60,7 @@ describe("desktop state persistence", () => {
         remote: "vpn.example.com:4433",
         sni: "cdn.example.com",
         qkey: "QKey-ABC",
-        createdAt: 123,
+        createdAt: desktopCreatedAt(123),
         hasToken: true,
       },
     ]);
@@ -153,5 +157,31 @@ describe("desktop state persistence", () => {
 
     expect(invokeMock).not.toHaveBeenCalled();
     expect(getHydrationDone()).toBe(true);
+  });
+
+  test("skips invalid backend timestamps and exposes the invalid-state error", async () => {
+    invokeMock.mockResolvedValue({
+      schemaVersion: 1,
+      tunnels: [{
+        id: "bad-time",
+        name: "Bad time",
+        remote: "vpn.example.com:4433",
+        sni: "cdn.example.com",
+        createdAt: 0,
+      }],
+      selectedTunnelId: "bad-time",
+      settings: {},
+    });
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => {
+      throw new Error("backend-owned timestamp must not use browser Date.now");
+    });
+
+    await loadPersistedState();
+
+    expect(dateNow).not.toHaveBeenCalled();
+    expect(getTunnels()).toEqual([]);
+    expect(getError()).toContain("creation timestamp was invalid");
+    expect(getHydrationDone()).toBe(true);
+    dateNow.mockRestore();
   });
 });
