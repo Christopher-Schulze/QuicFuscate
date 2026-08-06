@@ -1675,3 +1675,11 @@ The audit remains open. These reconciliations document current evidence and owne
 - Audit and RFC3339 logging -> shared checked conversion -> explicit write/format failure; epoch zero is retained only for an actual epoch input or an explicitly marked invalid log record.
 - Local proof: root library `2410/2410`, Tauri host `42/42`, locked test-target checking, strict library Clippy, format, and diff hygiene pass. Exact Omega commit `4157892d72ba4a5ab5f15fca871047ec26afa199` passes locked test-target checking, strict library Clippy, and the full library `2434/2434`; its only warning is the unchanged `RoutingManager::pf_rules` dead-code warning.
 - Narrower owners remain separate: PKI TODO-656, H3 TODO-640, Reality and Stealth timestamp behavior TODO-584, test isolation TODO-824, and frontend/browser clocks TODO-825.
+
+## Time-Source Wiring (2026-08-06, TODO-824)
+
+- `TimeSource` -> explicit `ProtocolClock` owner contract: production monotonic reads are non-decreasing, manual tests may move backwards, checked deadlines reject overflow, and `SystemTime` remains an independent wall-clock domain.
+- Test override wiring: `install_for_test()` -> thread-local nested source -> current-test `ProtocolClock::global()` reads; explicit owner handles and spawned threads do not inherit an unrelated test override. Guard drop restores the previous value during normal return and unwinding.
+- Machine-checkable inventory: `scripts/audits/verify-time-source-inventory.py` -> reusable Rust masking/brace detection -> tracked Rust, browser, and shell patterns -> JSON locations with path, line, kind, scope, domain, owner, and evidence -> fail-closed status. Current source: 957 locations, 0 unclassified.
+- Scope map: TODO-820 protocol, TODO-821 server/client state, TODO-822 Tokio/native runtime, TODO-823 wall clock, TODO-584 Reality/Stealth timestamps, TODO-640 H3 cookies, TODO-656 PKI, TODO-825 browser; test, benchmark, probe, script, and archive locations are explicitly classified as evidence-only domains.
+- Verification: focused time-source tests pass 7/7; the full root-library suite passes 2413/2413 with bounded serial execution; locked test-target checking, default library checking, strict feature Clippy, format/diff hygiene, and the Tauri host suite pass at 42/42. Pushed-source and Omega verification remain the publication boundary.

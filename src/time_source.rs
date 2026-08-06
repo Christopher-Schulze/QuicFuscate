@@ -3,11 +3,23 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// Source of monotonic protocol time and independent wall-clock time.
 ///
-/// Implementations must return `Instant` values from one monotonic domain for
-/// their lifetime. Production sources are expected to be non-decreasing.
-/// Manual test sources may move backwards; protocol owners must use
-/// [`ProtocolClock::elapsed_since`] so that such movement is handled as zero
-/// elapsed time rather than as a cross-domain comparison.
+/// Implementations must return `Instant` values from one logical monotonic
+/// domain for their lifetime. Production sources must be non-decreasing for
+/// repeated reads. Manual test sources may move backwards so tests can cover
+/// clock corrections and stale samples; protocol owners must use
+/// [`ProtocolClock::elapsed_since`] so that backwards movement is handled as
+/// zero elapsed time rather than as a cross-domain comparison.
+///
+/// `now_system()` is a separate wall-clock domain. It is not derived from
+/// `now_instant()`, is allowed to move backwards, and can precede the Unix
+/// epoch. Callers that serialize or compare epoch values must use the checked
+/// conversion helpers in this module and propagate their errors. The two
+/// domains must never be compared or used to manufacture one another.
+///
+/// A source does not promise that one read of `now_instant()` and one read of
+/// `now_system()` represent the same physical instant. Owners that need a
+/// coherent sample must capture the required value once and pass it through
+/// the operation explicitly.
 pub trait TimeSource: Send + Sync {
     fn now_instant(&self) -> Instant;
     fn now_system(&self) -> SystemTime;
@@ -107,6 +119,16 @@ pub(crate) mod test_support {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override for the current test thread.
+    ///
+    /// This must remain thread-local: a process-global override would make an
+    /// unrelated runtime task or parallel test observe another test's clock.
+    static TEST_TIME_SOURCE: std::cell::RefCell<Option<Arc<dyn TimeSource>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Explicit monotonic clock owner for one protocol connection or runtime.
 ///
 /// The handle snapshots one `TimeSource` at construction. Cloning the handle
@@ -124,8 +146,14 @@ impl ProtocolClock {
         Self { source }
     }
 
-    /// Captures the currently configured process source.
+    /// Captures the configured default source, or the current test-thread
+    /// override when this code is compiled for crate tests.
     pub fn global() -> Self {
+        #[cfg(test)]
+        if let Some(source) = test_override_source() {
+            return Self::from_source(source);
+        }
+
         let guard = time_source_cell().read().unwrap_or_else(|e| e.into_inner());
         Self::from_source(guard.clone())
     }
@@ -175,13 +203,16 @@ fn time_source_cell() -> &'static RwLock<Arc<dyn TimeSource>> {
 }
 
 pub fn now_instant() -> Instant {
-    let guard = time_source_cell().read().unwrap_or_else(|e| e.into_inner());
-    guard.now_instant()
+    ProtocolClock::global().now()
 }
 
 pub fn now_system() -> SystemTime {
-    let guard = time_source_cell().read().unwrap_or_else(|e| e.into_inner());
-    guard.now_system()
+    ProtocolClock::global().now_system()
+}
+
+#[cfg(test)]
+fn test_override_source() -> Option<Arc<dyn TimeSource>> {
+    TEST_TIME_SOURCE.with(|source| source.borrow().clone())
 }
 
 #[cfg(test)]
@@ -303,31 +334,79 @@ mod tests {
             Err(super::WallClockError::UnixMillisOverflow)
         );
     }
+
+    #[test]
+    fn explicit_clock_does_not_fall_back_to_test_override() {
+        let base = Instant::now();
+        let explicit_system = SystemTime::UNIX_EPOCH + Duration::from_secs(7);
+        let explicit = ProtocolClock::from_source(std::sync::Arc::new(FixedSource {
+            instant: base,
+            system: explicit_system,
+        }));
+        let override_instant = base + Duration::from_secs(3);
+        let override_system = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        let _guard = super::install_for_test(std::sync::Arc::new(FixedSource {
+            instant: override_instant,
+            system: override_system,
+        }));
+
+        assert_eq!(explicit.now(), base);
+        assert_eq!(explicit.now_system(), explicit_system);
+        assert_eq!(super::now_instant(), override_instant);
+        assert_eq!(super::now_system(), override_system);
+    }
+
+    #[test]
+    fn checked_deadline_rejects_monotonic_overflow() {
+        let clock = ProtocolClock::from_source(std::sync::Arc::new(FixedSource {
+            instant: Instant::now(),
+            system: SystemTime::UNIX_EPOCH,
+        }));
+
+        assert_eq!(clock.checked_deadline_after(Duration::MAX), None);
+    }
+
+    #[test]
+    fn test_override_is_thread_local_and_restores_after_panic() {
+        let sentinel = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        let result = std::panic::catch_unwind(|| {
+            let _guard = super::install_for_test(std::sync::Arc::new(FixedSource {
+                instant: Instant::now(),
+                system: sentinel,
+            }));
+            assert_eq!(super::now_system(), sentinel);
+
+            let child_system = std::thread::spawn(super::now_system).join().unwrap();
+            assert!(child_system.duration_since(SystemTime::UNIX_EPOCH).is_ok());
+            panic!("verify test clock restoration");
+        });
+
+        assert!(result.is_err());
+        assert!(super::now_system().duration_since(SystemTime::UNIX_EPOCH).is_ok());
+    }
 }
 
 #[cfg(test)]
 pub struct TimeSourceTestGuard {
-    previous: Arc<dyn TimeSource>,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<Arc<dyn TimeSource>>,
 }
 
 #[cfg(test)]
 impl Drop for TimeSourceTestGuard {
     fn drop(&mut self) {
-        let mut guard = time_source_cell().write().expect("time source poisoned");
-        *guard = self.previous.clone();
+        TEST_TIME_SOURCE.with(|source| {
+            *source.borrow_mut() = self.previous.take();
+        });
     }
 }
 
 #[cfg(test)]
+/// Installs a test source only on the calling thread.
+///
+/// Explicit `ProtocolClock` owners remain the required seam for production
+/// code and spawned tasks. The returned guard restores a previous nested
+/// override on normal scope exit and during unwinding.
 pub fn install_for_test(source: Arc<dyn TimeSource>) -> TimeSourceTestGuard {
-    static TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    let lock = TEST_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .expect("time source test lock poisoned");
-    let mut guard = time_source_cell().write().expect("time source poisoned");
-    let previous = guard.clone();
-    *guard = source;
-    TimeSourceTestGuard { previous, _lock: lock }
+    let previous = TEST_TIME_SOURCE.with(|current| current.borrow_mut().replace(source));
+    TimeSourceTestGuard { previous }
 }
