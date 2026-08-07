@@ -276,6 +276,25 @@ fn stream_parser_returns_coefficient_guard_when_payload_is_oversized() {
 }
 
 #[test]
+fn stream_parser_rejects_unknown_flags_and_inconsistent_metadata() {
+    let pool = Arc::new(crate::optimize::MemoryPool::new(2, 2_048));
+    let mut input = vec![0u8; 2 + 1 + 8 + 8 + 2 + 1];
+    input[..2].copy_from_slice(&[0xF1, 0xEC]);
+    input[2] = 2;
+    assert!(matches!(
+        FecPacket::from_stream_raw(&input, Arc::clone(&pool)),
+        Err(error) if error == "UnsupportedFlags"
+    ));
+
+    input[2] = 1;
+    input[19..21].copy_from_slice(&1u16.to_be_bytes());
+    assert!(matches!(
+        FecPacket::from_stream_raw(&input, Arc::clone(&pool)),
+        Err(error) if error == "CoefficientMetadataInvalid"
+    ));
+}
+
+#[test]
 fn pooled_packet_rejects_overstated_lengths_without_consuming_buffers() {
     let pool = Arc::new(crate::optimize::MemoryPool::new(2, 2_048));
     let before = pool.accounting_snapshot();
@@ -387,9 +406,63 @@ fn oversized_coefficient_clone_preserves_a_valid_declared_length() {
         Arc::clone(&pool),
     );
     let clone = packet.clone();
-    assert_eq!(clone.coeff_len, coefficient_len);
-    assert_eq!(clone.coefficients.as_ref().map(|value| value.len()), Some(coefficient_len));
+    assert_eq!(clone.coeff_len, pool.block_size());
+    assert_eq!(clone.coefficients.as_ref().map(|value| value.len()), Some(pool.block_size()));
     drop(clone);
     drop(packet);
     assert_eq!(pool.accounting_snapshot(), before);
+}
+
+#[test]
+fn direct_decoders_reject_overlong_coefficient_vectors() {
+    let pool = Arc::new(crate::optimize::MemoryPool::new(4, 2_048));
+    let mut data = pool.alloc();
+    data[0] = 0xA5;
+    let mut coefficients = pool.alloc();
+    coefficients[..2].copy_from_slice(&[1, 0]);
+
+    let packet = FecPacket::new(10, Some(data), 1, false, Some(coefficients), 2, Arc::clone(&pool));
+    let mut decoder8 = Decoder8::new(1, Arc::clone(&pool));
+    decoder8.take_packet(packet.clone());
+    assert!(decoder8.get_partial_result().is_empty());
+
+    let mut decoder4 = Decoder4::new(1, Arc::clone(&pool));
+    decoder4.take_packet(packet);
+    assert!(decoder4.get_partial_result().is_empty());
+}
+
+#[test]
+fn checked_decoder_constructor_rejects_invalid_dimensions() {
+    let pool = Arc::new(crate::optimize::MemoryPool::new(2, 2_048));
+    assert!(matches!(
+        FecDecoder8::try_new(0, Arc::clone(&pool)),
+        Err(FecDecoderConfigError::ZeroSourceCount)
+    ));
+    assert!(matches!(
+        FecDecoder8::try_new(256, Arc::clone(&pool)),
+        Err(FecDecoderConfigError::FieldSourceLimit { max: 255 })
+    ));
+}
+
+#[test]
+fn gf16_completion_requires_active_window_membership() {
+    let pool = Arc::new(crate::optimize::MemoryPool::new(4, 2_048));
+    let mut decoder = Decoder16::new(2, Arc::clone(&pool));
+    decoder.take_packet(FecPacket::from_block(100, &[1], Arc::clone(&pool)));
+    decoder.take_packet(FecPacket::from_block(101, &[2], Arc::clone(&pool)));
+
+    let data = pool.alloc();
+    let mut coefficients = pool.alloc();
+    coefficients[..4].copy_from_slice(&[0, 0, 0, 0]);
+    decoder.take_packet(FecPacket::new(
+        10,
+        Some(data),
+        1,
+        false,
+        Some(coefficients),
+        4,
+        Arc::clone(&pool),
+    ));
+
+    assert!(decoder.get_result().is_none());
 }

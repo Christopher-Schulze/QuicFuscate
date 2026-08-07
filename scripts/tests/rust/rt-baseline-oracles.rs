@@ -118,10 +118,10 @@ fn matrix_identity_roundtrip() {
     let identity = make_vec(&[&[0x01, 0x00, 0x00], &[0x00, 0x01, 0x00], &[0x00, 0x00, 0x01]]);
 
     let mut result = vec![vec![0u8; 3]; 3];
-    matrix_multiply_scalar(&a, &identity, &mut result);
+    matrix_multiply_scalar(&a, &identity, &mut result).expect("valid identity matrix");
     assert_eq!(result, a);
 
     let mut zero = vec![vec![0u8; 3]; 3];
-    matrix_multiply_scalar(&a, &vec![vec![0u8; 3]; 3], &mut zero);
+    matrix_multiply_scalar(&a, &vec![vec![0u8; 3]; 3], &mut zero).expect("valid zero matrix");
     assert!(zero.iter().all(|row| row.iter().all(|&v| v == 0)));
 }

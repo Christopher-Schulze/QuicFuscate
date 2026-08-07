@@ -87,7 +87,7 @@ fn gf16_mul_scalar_slice_padded(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
 #[inline(always)]
 fn gf16_vector_threshold_words() -> usize {
     let features = FeatureDetector::instance().features_full();
-    gf16_vector_threshold_words_for_features(&features)
+    gf16_vector_threshold_words_for_features(features)
 }
 
 #[inline(always)]
@@ -915,7 +915,7 @@ impl AdaptiveFec {
         // Centralized detection via optimize::FeatureDetector
         let det = crate::optimize::FeatureDetector::instance();
         let features = det.features_full();
-        self.simd_level = fec_simd_level_for_features(&features);
+        self.simd_level = fec_simd_level_for_features(features);
         self.simd_enabled = self.simd_level != SimdLevel::None;
         crate::telemetry::SIMD_ACTIVE
             .store(self.simd_enabled as u64, std::sync::atomic::Ordering::Relaxed);

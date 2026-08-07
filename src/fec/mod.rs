@@ -482,8 +482,36 @@ fn continuous_fec_target(
 ///  - A is M x K, B is K x N, C is M x N
 ///  - All inputs/outputs are byte matrices with XOR as addition and gf_mul as multiplication
 #[inline]
-pub fn matrix_multiply_scalar(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8>]) {
+pub fn matrix_multiply_scalar(
+    a: &[Vec<u8>],
+    b: &[Vec<u8>],
+    result: &mut [Vec<u8>],
+) -> Result<(), MatrixError> {
+    let a_cols = a.first().ok_or(MatrixError::EmptyInput)?.len();
+    let b_cols = b.first().ok_or(MatrixError::EmptyInput)?.len();
+    let result_cols = result.first().ok_or(MatrixError::EmptyInput)?.len();
+    if a_cols == 0 || b_cols == 0 || result_cols == 0 {
+        return Err(MatrixError::EmptyInput);
+    }
+    if a.iter().any(|row| row.len() != a_cols) {
+        return Err(MatrixError::RaggedA);
+    }
+    if b.iter().any(|row| row.len() != b_cols) {
+        return Err(MatrixError::RaggedB);
+    }
+    if result.iter().any(|row| row.len() != result_cols) {
+        return Err(MatrixError::RaggedResult);
+    }
+    if a_cols != b.len() || result.len() != a.len() || result_cols != b_cols {
+        return Err(MatrixError::DimensionMismatch);
+    }
+    a.len()
+        .checked_mul(a_cols)
+        .and_then(|_| a_cols.checked_mul(b_cols))
+        .and_then(|_| a.len().checked_mul(b_cols))
+        .ok_or(MatrixError::DimensionOverflow)?;
     matrix_multiply_accumulate(a, b, result);
+    Ok(())
 }
 
 #[inline]
@@ -670,6 +698,82 @@ const GF16_SVE2_MIN_WORDS: usize = 24;
 const GF16_NEON_MIN_WORDS: usize = 32;
 
 const STREAM_ADJUST_MIN_MS: u64 = 150;
+
+const MAX_DECODER_SOURCE_COUNT: usize = 2048;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FecDecoderConfigError {
+    ZeroSourceCount,
+    SourceCountTooLarge { max: usize },
+    InvalidInterleaveDepth,
+    FieldSourceLimit { max: usize },
+}
+
+impl std::fmt::Display for FecDecoderConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroSourceCount => {
+                formatter.write_str("FEC decoder source count must be nonzero")
+            }
+            Self::SourceCountTooLarge { max } => {
+                write!(formatter, "FEC decoder source count exceeds {max}")
+            }
+            Self::InvalidInterleaveDepth => {
+                formatter.write_str("FEC decoder interleave depth must be in 1..=8")
+            }
+            Self::FieldSourceLimit { max } => {
+                write!(formatter, "FEC decoder source count exceeds field limit {max}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FecDecoderConfigError {}
+
+fn validate_decoder_dimensions(
+    k: usize,
+    depth: usize,
+    field_limit: usize,
+) -> Result<(), FecDecoderConfigError> {
+    if k == 0 {
+        return Err(FecDecoderConfigError::ZeroSourceCount);
+    }
+    if k > MAX_DECODER_SOURCE_COUNT {
+        return Err(FecDecoderConfigError::SourceCountTooLarge { max: MAX_DECODER_SOURCE_COUNT });
+    }
+    if k > field_limit {
+        return Err(FecDecoderConfigError::FieldSourceLimit { max: field_limit });
+    }
+    if !(1..=8).contains(&depth) {
+        return Err(FecDecoderConfigError::InvalidInterleaveDepth);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatrixError {
+    EmptyInput,
+    RaggedA,
+    RaggedB,
+    RaggedResult,
+    DimensionMismatch,
+    DimensionOverflow,
+}
+
+impl std::fmt::Display for MatrixError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::EmptyInput => "FEC matrix inputs must be nonempty",
+            Self::RaggedA => "FEC matrix A is ragged",
+            Self::RaggedB => "FEC matrix B is ragged",
+            Self::RaggedResult => "FEC matrix result is ragged",
+            Self::DimensionMismatch => "FEC matrix dimensions do not match",
+            Self::DimensionOverflow => "FEC matrix dimensions overflow",
+        })
+    }
+}
+
+impl std::error::Error for MatrixError {}
 
 // ============================================================================
 // FEC implementation with accelerated kernels where available.

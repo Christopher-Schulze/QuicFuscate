@@ -266,6 +266,15 @@ impl FecDecoder8 {
     pub fn new(k: usize, pool: Arc<MemoryPool>) -> Self {
         Self(Decoder8::new(k, pool))
     }
+
+    /// Create a GF(2^8) decoder and reject dimensions outside the wire contract.
+    pub fn try_new(
+        k: usize,
+        pool: Arc<MemoryPool>,
+    ) -> Result<Self, FecDecoderConfigError> {
+        validate_decoder_dimensions(k, 1, wire::MAX_GF8_BLOCK_SOURCE_COUNT)?;
+        Ok(Self(Decoder8::new(k, pool)))
+    }
     /// Create a benchmark decoder with an explicit decoder policy snapshot.
     #[cfg(feature = "benches")]
     pub fn new_with_decoder_policy(
@@ -276,6 +285,19 @@ impl FecDecoder8 {
         let mut policy = FecRuntimePolicy::detect();
         policy.decoder_policy = decoder_policy.to_string();
         Self(Decoder8::new_with_policy(k, pool, &policy))
+    }
+
+    /// Create a benchmark decoder with an explicit policy and checked dimensions.
+    #[cfg(feature = "benches")]
+    pub fn try_new_with_decoder_policy(
+        k: usize,
+        pool: Arc<MemoryPool>,
+        decoder_policy: &str,
+    ) -> Result<Self, FecDecoderConfigError> {
+        validate_decoder_dimensions(k, 1, wire::MAX_GF8_BLOCK_SOURCE_COUNT)?;
+        let mut policy = FecRuntimePolicy::detect();
+        policy.decoder_policy = decoder_policy.to_string();
+        Ok(Self(Decoder8::new_with_policy(k, pool, &policy)))
     }
     /// Feed a received FEC packet (source or repair) into the decoder.
     pub fn take_packet(&mut self, p: FecPacket) {
@@ -678,8 +700,10 @@ impl FecPacket {
     /// Construct a compatibility FEC packet from raw aligned buffers.
     ///
     /// New production paths should use [`Self::from_pooled_blocks`]. This compatibility
-    /// constructor accepts pool-origin and foreign buffers; `MemoryPool::free` safely returns
-    /// only recognized pool blocks and directly releases foreign or mismatched buffers.
+    /// constructor never allocates an upsized replacement buffer. Declared lengths are bounded
+    /// to their backing buffers and systematic packets cannot retain coefficient metadata.
+    /// Invalid compatibility input is represented as a bounded packet; callers that need
+    /// rejection should use [`Self::try_new`].
     pub fn new(
         id: u64,
         data: Option<AlignedBox<[u8]>>,
@@ -689,59 +713,27 @@ impl FecPacket {
         coeff_len: usize,
         mem_pool: Arc<MemoryPool>,
     ) -> Self {
-        // Ensure provided buffers can accommodate declared lengths and keep pool accounting correct.
-        let data = match data {
-            Some(d) => {
-                if data_len > d.len() {
-                    match AlignedBox::<[u8]>::slice_from_default(64, data_len) {
-                        Ok(mut bigger) => {
-                            let copy = d.len();
-                            bigger[..copy].copy_from_slice(&d[..copy]);
-                            // Return original pool buffer to pool
-                            mem_pool.free(d);
-                            Some(bigger)
-                        }
-                        Err(_) => {
-                            log::warn!("FEC: data buffer upsizing failed, returning original");
-                            mem_pool.free(d);
-                            None
-                        }
-                    }
-                } else {
-                    Some(d)
-                }
+        let (data, data_len) = match data {
+            Some(data) => {
+                let bounded_len = data_len.min(data.len());
+                (Some(data), bounded_len)
             }
-            None => None,
+            None => (None, 0),
         };
-
-        let coefficients = match coefficients {
-            Some(c) => {
-                if coeff_len > c.len() {
-                    match AlignedBox::<[u8]>::slice_from_default(64, coeff_len) {
-                        Ok(mut bigger) => {
-                            let copy = c.len();
-                            bigger[..copy].copy_from_slice(&c[..copy]);
-                            // Return original pool buffer to pool
-                            mem_pool.free(c);
-                            Some(bigger)
-                        }
-                        Err(_) => {
-                            log::warn!(
-                                "FEC: coefficient buffer upsizing failed, returning original"
-                            );
-                            mem_pool.free(c);
-                            None
-                        }
-                    }
-                } else {
-                    Some(c)
-                }
+        let (coefficients, coeff_len) = if is_systematic {
+            if let Some(coefficients) = coefficients {
+                mem_pool.free(coefficients);
             }
-            None => None,
+            (None, 0)
+        } else {
+            match coefficients {
+                Some(coefficients) => {
+                    let bounded_len = coeff_len.min(coefficients.len());
+                    (Some(coefficients), bounded_len)
+                }
+                None => (None, 0),
+            }
         };
-
-        let data_len = if data.is_some() { data_len } else { 0 };
-        let coeff_len = if coefficients.is_some() { coeff_len } else { 0 };
         let data = data.map(|buf| SharedFecBuffer::new(buf, Arc::clone(&mem_pool)));
 
         Self {
@@ -755,6 +747,45 @@ impl FecPacket {
             seq: id, // Default: seq = id
             timestamp: std::time::Instant::now(),
         }
+    }
+
+    /// Construct a compatibility packet while rejecting inconsistent metadata.
+    pub fn try_new(
+        id: u64,
+        data: Option<AlignedBox<[u8]>>,
+        data_len: usize,
+        is_systematic: bool,
+        coefficients: Option<AlignedBox<[u8]>>,
+        coeff_len: usize,
+        mem_pool: Arc<MemoryPool>,
+    ) -> Result<Self, String> {
+        if data_len > mem_pool.block_size() {
+            return Err("data length exceeds memory-pool block size".into());
+        }
+        if coeff_len > mem_pool.block_size() {
+            return Err("coefficient length exceeds memory-pool block size".into());
+        }
+        if data_len > data.as_ref().map_or(0, |buffer| buffer.len()) {
+            return Err("data length exceeds backing buffer".into());
+        }
+        if coeff_len > coefficients.as_ref().map_or(0, |buffer| buffer.len()) {
+            return Err("coefficient length exceeds backing buffer".into());
+        }
+        if is_systematic && (coeff_len != 0 || coefficients.is_some()) {
+            return Err("systematic packet cannot carry coefficients".into());
+        }
+        if !is_systematic && (coeff_len == 0 || coefficients.is_none()) {
+            return Err("repair packet requires coefficients".into());
+        }
+        Ok(Self::new(
+            id,
+            data,
+            data_len,
+            is_systematic,
+            coefficients,
+            coeff_len,
+            mem_pool,
+        ))
     }
 
     /// Construct a packet by transferring live pool guards after all lengths are validated.
@@ -840,14 +871,29 @@ impl FecPacket {
     }
 
     /// Create a systematic FEC packet from a raw byte block, copying into a pool buffer.
+    /// Oversized input is rejected by [`Self::try_from_block`]; this compatibility wrapper
+    /// returns an empty packet instead of silently truncating the source.
     pub fn from_block(id: u64, block: &[u8], mem_pool: Arc<MemoryPool>) -> Self {
+        match Self::try_from_block(id, block, Arc::clone(&mem_pool)) {
+            Ok(packet) => packet,
+            Err(_) => Self::new(id, None, 0, true, None, 0, mem_pool),
+        }
+    }
+
+    /// Create a systematic packet or reject a symbol that cannot fit one pool block.
+    pub fn try_from_block(
+        id: u64,
+        block: &[u8],
+        mem_pool: Arc<MemoryPool>,
+    ) -> Result<Self, String> {
+        if block.len() > mem_pool.block_size() {
+            return Err("data block exceeds memory-pool block size".into());
+        }
         let mut dst = PooledBlock::new(Arc::clone(&mem_pool));
-        let n = block.len().min(dst.len());
-        dst[..n].copy_from_slice(&block[..n]);
-        let Some(dst) = dst.take_block() else {
-            return Self::new(id, None, 0, true, None, 0, mem_pool);
-        };
-        Self::new(id, Some(dst), n, true, None, 0, mem_pool)
+        let n = block.len();
+        dst[..n].copy_from_slice(block);
+        Self::from_pooled_blocks(id, Some(dst), n, true, None, 0, mem_pool)
+            .map_err(|error| format!("data block rejected: {error}"))
     }
 
     /// Copy only the payload into `buf` (no headers). This is NOT the
@@ -866,6 +912,13 @@ impl FecPacket {
     /// Serialize a streaming-friendly raw format for transport DATAGRAM:
     /// [magic:2=0xF1EC][is_systematic:1][base_id:8][seq:8][coeff_len:2][coeffs (coeff_len bytes)][payload]
     pub fn to_stream_raw(&self, buf: &mut [u8]) -> Result<usize, String> {
+        if self.is_systematic {
+            if self.coeff_len != 0 || self.coefficients.is_some() {
+                return Err("CoefficientMetadataInvalid".into());
+            }
+        } else if self.coeff_len == 0 || self.coefficients.is_none() {
+            return Err("CoefficientMetadataInvalid".into());
+        }
         let mut off = 0usize;
         if buf.len() < 2 + 1 + 8 + 8 + 2 {
             return Err("BufferTooShort".into());
@@ -923,7 +976,11 @@ impl FecPacket {
             return Err("BadMagic".into());
         }
         let mut off = 2usize;
-        let is_systematic = input[off] != 0;
+        let flags = input[off];
+        if flags & !1 != 0 {
+            return Err("UnsupportedFlags".into());
+        }
+        let is_systematic = flags & 1 != 0;
         off += 1;
         let mut id_bytes = [0u8; 8];
         id_bytes.copy_from_slice(&input[off..off + 8]);
@@ -937,6 +994,9 @@ impl FecPacket {
         cl_bytes.copy_from_slice(&input[off..off + 2]);
         off += 2;
         let coeff_len = u16::from_be_bytes(cl_bytes) as usize;
+        if (is_systematic && coeff_len != 0) || (!is_systematic && coeff_len == 0) {
+            return Err("CoefficientMetadataInvalid".into());
+        }
         if input.len() < off + coeff_len {
             return Err("BufferTooShort".into());
         }
@@ -982,20 +1042,15 @@ impl FecPacket {
 
 impl Clone for FecPacket {
     fn clone(&self) -> Self {
+        let data_len = self
+            .data
+            .as_ref()
+            .map(|shared| shared.bytes(self.data_len).len())
+            .unwrap_or(0);
         let data_clone = self.data.clone();
 
         let (coeffs_clone, coeff_len) = if let Some(ref coeffs) = self.coefficients {
-            let mut buf = if self.coeff_len > self.mem_pool.block_size() {
-                match AlignedBox::<[u8]>::slice_from_default(64, self.coeff_len) {
-                    Ok(buf) => buf,
-                    Err(error) => {
-                        log::warn!("FEC coefficient clone fell back to a pool block: {error}");
-                        self.mem_pool.alloc()
-                    }
-                }
-            } else {
-                self.mem_pool.alloc()
-            };
+            let mut buf = self.mem_pool.alloc();
             let copy_len = self.coeff_len.min(buf.len()).min(coeffs.len());
             buf[..copy_len].copy_from_slice(&coeffs[..copy_len]);
             (Some(buf), copy_len)
@@ -1006,7 +1061,7 @@ impl Clone for FecPacket {
         Self {
             id: self.id,
             data: data_clone,
-            data_len: self.data_len,
+            data_len,
             is_systematic: self.is_systematic,
             coefficients: coeffs_clone,
             coeff_len,
@@ -1431,27 +1486,19 @@ impl Encoder16 {
         }
         // Pad the final GF16 word instead of truncating an odd source byte.
         // The protected source-length prefix removes this zero padding after recovery.
-        let Some(max_len_even) = max_len.checked_add(max_len % 2) else {
-            return None;
-        };
+        let max_len_even = max_len.checked_add(max_len % 2)?;
         if max_len_even == 0 {
             return None;
         }
-        let Some(coeff_bytes) = self.inner.k.checked_mul(2) else {
-            return None;
-        };
+        let coeff_bytes = self.inner.k.checked_mul(2)?;
         if max_len_even > pool.block_size() || coeff_bytes > pool.block_size() {
             return None;
         }
         if !self.ensure_coeff_row(idx) {
             return None;
         }
-        let Some(row_start) = idx.checked_mul(self.coeff_stride) else {
-            return None;
-        };
-        let Some(row_end) = row_start.checked_add(coeff_bytes) else {
-            return None;
-        };
+        let row_start = idx.checked_mul(self.coeff_stride)?;
+        let row_end = row_start.checked_add(coeff_bytes)?;
         let mut out = PooledBlock::new(Arc::clone(pool));
         for b in &mut out[..max_len_even] {
             *b = 0;

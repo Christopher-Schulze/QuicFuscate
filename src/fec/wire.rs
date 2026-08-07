@@ -43,8 +43,13 @@ pub enum WireCodec {
 
 impl WireCodec {
     pub fn for_mode(mode: FecMode, block_source_count: usize) -> Result<Self, WireError> {
+        if mode == FecMode::Zero {
+            return Err(WireError::ZeroModeMustRemainRaw);
+        }
+        if block_source_count == 0 || block_source_count > MAX_SOURCE_COUNT as usize {
+            return Err(WireError::InvalidSourceCount);
+        }
         match mode {
-            FecMode::Zero => Err(WireError::ZeroModeMustRemainRaw),
             FecMode::Light if block_source_count <= 15 => Ok(Self::Gf4),
             FecMode::Light
             | FecMode::Normal
@@ -64,6 +69,7 @@ impl WireCodec {
             | FecMode::Ultra => Ok(Self::Gf16),
             FecMode::Fountain => Ok(Self::Fountain),
             FecMode::Streaming => Ok(Self::StreamingGf8),
+            FecMode::Zero => Err(WireError::ZeroModeMustRemainRaw),
         }
     }
 
@@ -79,6 +85,9 @@ impl WireCodec {
     }
 
     pub fn coefficient_len(self, block_source_count: u16) -> Result<usize, WireError> {
+        if block_source_count == 0 || block_source_count > MAX_SOURCE_COUNT {
+            return Err(WireError::InvalidSourceCount);
+        }
         match self {
             Self::Gf4 if block_source_count <= 15 => Ok(block_source_count as usize),
             Self::Gf8 | Self::StreamingGf8
@@ -98,6 +107,9 @@ impl WireCodec {
         repair_index: u16,
         output: &mut [u8],
     ) -> Result<usize, WireError> {
+        if repair_index == SYSTEMATIC_REPAIR_INDEX {
+            return Err(WireError::InvalidRepairMetadata);
+        }
         if matches!(self, Self::Gf8 | Self::StreamingGf8) {
             super::gf_tables::init_tables();
         }
@@ -109,8 +121,10 @@ impl WireCodec {
             Self::Gf4 => {
                 for (source_index, coefficient) in output[..coefficient_len].iter_mut().enumerate()
                 {
-                    let product =
-                        repair_index.wrapping_add(1).wrapping_mul(source_index as u16 + 1);
+                    let product = u32::from(repair_index)
+                        .checked_add(1)
+                        .and_then(|value| value.checked_mul(source_index as u32 + 1))
+                        .ok_or(WireError::InvalidRepairMetadata)?;
                     *coefficient = (product % 15) as u8 + 1;
                 }
             }
@@ -123,16 +137,18 @@ impl WireCodec {
                         .filter(|&y| y < 256)
                         .map_or_else(
                             || {
-                                1u8 + (((repair_index as u8).wrapping_add(1))
-                                    .wrapping_mul((source_index as u8).wrapping_add(1))
-                                    % 255)
+                                let product =
+                                    (u32::from(repair_index) + 1) * (source_index as u32 + 1);
+                                1 + (product % 255) as u8
                             },
                             |y| super::gf_tables::gf_inv8((source_index as u8) ^ (y as u8)),
                         );
                 }
             }
             Self::Gf16 => {
-                let y = block_source_count.wrapping_add(repair_index);
+                let y = block_source_count
+                    .checked_add(repair_index)
+                    .ok_or(WireError::InvalidRepairMetadata)?;
                 for source_index in 0..block_source_count as usize {
                     let coefficient = super::gf_tables::gf16_inv((source_index as u16) ^ y);
                     let offset = source_index * 2;
@@ -168,7 +184,7 @@ impl WireProfile {
         if !self.source_count.is_multiple_of(self.interleave_depth as u16) {
             return Err(WireError::UnevenInterleave);
         }
-        let block_source_count = self.source_count / self.interleave_depth as u16;
+        let block_source_count = self.try_block_source_count()?;
         match self.codec {
             WireCodec::Gf4 if block_source_count > 15 => Err(WireError::CodecSourceLimit),
             WireCodec::Gf8 | WireCodec::StreamingGf8
@@ -185,7 +201,26 @@ impl WireProfile {
 
     #[inline]
     pub fn block_source_count(self) -> u16 {
-        self.source_count / self.interleave_depth as u16
+        self.try_block_source_count().unwrap_or(0)
+    }
+
+    /// Return the per-block source count after validating the public profile fields.
+    pub fn try_block_source_count(self) -> Result<u16, WireError> {
+        if self.source_count == 0 || self.source_count > MAX_SOURCE_COUNT {
+            return Err(WireError::InvalidSourceCount);
+        }
+        if !(1..=8).contains(&self.interleave_depth) {
+            return Err(WireError::InvalidInterleaveDepth);
+        }
+        let depth = u16::from(self.interleave_depth);
+        if !self.source_count.is_multiple_of(depth) {
+            return Err(WireError::UnevenInterleave);
+        }
+        let block_source_count = self.source_count / depth;
+        if block_source_count == 0 {
+            return Err(WireError::InvalidSourceCount);
+        }
+        Ok(block_source_count)
     }
 }
 
@@ -815,7 +850,8 @@ impl WireFecReceiver {
         report.source_payload_bytes = payload.len();
         report.decoded_packets = 1;
         let mut packet =
-            FecPacket::from_block(parsed.meta.sequence, payload, Arc::clone(&self.mem_pool));
+            FecPacket::try_from_block(parsed.meta.sequence, payload, Arc::clone(&self.mem_pool))
+                .map_err(|_| WireError::ResourceExhausted)?;
         packet.seq = parsed.meta.sequence;
         output.push(packet);
         Ok(report)
@@ -961,6 +997,36 @@ mod tests {
     }
 
     #[test]
+    fn source_only_receive_rejects_payload_larger_than_pool_block() {
+        let pool = Arc::new(MemoryPool::new(2, 32));
+        let receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let profile = WireProfile {
+            epoch: 1,
+            codec: WireCodec::Gf8,
+            source_count: 4,
+            total_count: 6,
+            interleave_depth: 1,
+        };
+        let payload = protected_datagram(&vec![0xA5; pool.block_size() + 1]);
+        let meta = WirePacketMeta {
+            profile,
+            window: 0,
+            sequence: 0,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let mut datagram = vec![0u8; HEADER_LEN + payload.len()];
+        let written = write_packet(meta, &payload, &mut datagram).expect("source wire");
+        let mut output = Vec::new();
+        assert_eq!(
+            receiver.receive_source_only(&datagram[..written], &mut output),
+            Err(WireError::ResourceExhausted)
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
     fn source_length_survives_zero_padded_recovery_symbol() {
         let payload = [0x40, 0xAA, 0xBB];
         let mut symbol = [0u8; 32];
@@ -1055,6 +1121,42 @@ mod tests {
         assert_eq!(WireCodec::for_mode(FecMode::Ultra, 256), Ok(WireCodec::Gf16));
         assert_eq!(WireCodec::for_mode(FecMode::Fountain, 2048), Ok(WireCodec::Fountain));
         assert_eq!(WireCodec::for_mode(FecMode::Zero, 0), Err(WireError::ZeroModeMustRemainRaw));
+    }
+
+    #[test]
+    fn direct_wire_helpers_reject_invalid_dimensions_and_ordinals() {
+        let invalid_profile = WireProfile {
+            epoch: 1,
+            codec: WireCodec::Gf8,
+            source_count: 4,
+            total_count: 8,
+            interleave_depth: 0,
+        };
+        assert_eq!(
+            invalid_profile.try_block_source_count(),
+            Err(WireError::InvalidInterleaveDepth)
+        );
+        assert_eq!(invalid_profile.block_source_count(), 0);
+        assert_eq!(WireCodec::Gf8.coefficient_len(0), Err(WireError::InvalidSourceCount));
+        assert_eq!(
+            WireCodec::Gf16.coefficient_len(MAX_SOURCE_COUNT + 1),
+            Err(WireError::InvalidSourceCount)
+        );
+        assert_eq!(WireCodec::for_mode(FecMode::Normal, 0), Err(WireError::InvalidSourceCount));
+
+        let mut coefficients = [0u8; 8];
+        assert_eq!(
+            WireCodec::Gf16.write_repair_coefficients(
+                4,
+                SYSTEMATIC_REPAIR_INDEX,
+                &mut coefficients
+            ),
+            Err(WireError::InvalidRepairMetadata)
+        );
+        assert_eq!(
+            WireCodec::Gf16.write_repair_coefficients(4, u16::MAX - 1, &mut coefficients),
+            Err(WireError::InvalidRepairMetadata)
+        );
     }
 
     #[test]

@@ -442,7 +442,7 @@ fn bench_fec_matrix_mul(c: &mut Criterion) {
                 for row in result.iter_mut() {
                     row.fill(0);
                 }
-                matrix_multiply_scalar(&a, &b, &mut result);
+                matrix_multiply_scalar(&a, &b, &mut result).expect("valid benchmark matrix");
                 black_box(&result);
             });
         });

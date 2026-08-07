@@ -1,16 +1,44 @@
 use super::test_support::*;
 use super::{
     continuous_fec_target, fec_simd_level_for_features, gf16_mul_slice,
-    gf16_vector_threshold_words_for_features, low_cost_block_uses_gf4, mode_for_target,
-    target_from_mode, target_rank, AdaptiveFec, CpuProfile, Decoder8, FecAmbientInputs,
-    FecBackendFamily, FecComputeProfile, FecConfig, FecMode, FecObserverPlatformHints,
-    FecObserverProfilePolicy, FecPacket, FecRuntimePlan, FecRuntimePolicy, FecTransportObserver,
-    SimdLevel, TransportProfile, GF16_AVX2_MIN_WORDS, GF16_AVX512_MIN_WORDS, GF16_NEON_MIN_WORDS,
-    GF16_SSE2_MIN_WORDS, GF16_SVE2_MIN_WORDS, GF16_VBMI2_MIN_WORDS,
+    gf16_vector_threshold_words_for_features, low_cost_block_uses_gf4, matrix_multiply_scalar,
+    mode_for_target, target_from_mode, target_rank, AdaptiveFec, CpuProfile, Decoder8,
+    FecAmbientInputs, FecBackendFamily, FecComputeProfile, FecConfig, FecMode,
+    FecObserverPlatformHints, FecObserverProfilePolicy, FecPacket, FecRuntimePlan,
+    FecRuntimePolicy, FecTransportObserver, MatrixError, SimdLevel, TransportProfile,
+    GF16_AVX2_MIN_WORDS, GF16_AVX512_MIN_WORDS, GF16_NEON_MIN_WORDS, GF16_SSE2_MIN_WORDS,
+    GF16_SVE2_MIN_WORDS, GF16_VBMI2_MIN_WORDS,
 };
 use crate::{fec::gf_tables, optimize::telemetry};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+
+#[test]
+fn matrix_multiply_rejects_malformed_shapes() {
+    let mut result = vec![vec![0u8; 1]];
+    assert_eq!(matrix_multiply_scalar(&[], &[vec![1]], &mut result), Err(MatrixError::EmptyInput));
+    assert_eq!(
+        matrix_multiply_scalar(&[vec![1], vec![]], &[vec![1]], &mut result),
+        Err(MatrixError::RaggedA)
+    );
+    assert_eq!(
+        matrix_multiply_scalar(&[vec![1, 2]], &[vec![1], vec![2, 3]], &mut result),
+        Err(MatrixError::RaggedB)
+    );
+    assert_eq!(
+        matrix_multiply_scalar(&[vec![1]], &[vec![1]], &mut [vec![0], vec![0]]),
+        Err(MatrixError::DimensionMismatch)
+    );
+    assert_eq!(
+        matrix_multiply_scalar(&[vec![1]], &[vec![1]], &mut [vec![0, 0], vec![0]]),
+        Err(MatrixError::RaggedResult)
+    );
+
+    let mut valid = vec![vec![0u8; 1]];
+    matrix_multiply_scalar(&[vec![1, 2]], &[vec![3], vec![4]], &mut valid)
+        .expect("valid matrix dimensions");
+    assert_eq!(valid, vec![vec![11]]);
+}
 
 #[test]
 fn test_auto_mode_streaming_selection() {

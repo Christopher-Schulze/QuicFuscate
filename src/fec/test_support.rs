@@ -46,7 +46,7 @@ pub fn mk_src_packet(id: u64, len: usize, pool: &Arc<MemoryPool>) -> FecPacket {
     if buf.len() < len {
         // Allocate an exact-sized aligned buffer to satisfy test payload length
         let mut exact = AlignedBox::<[u8]>::slice_from_default(64, len).unwrap_or({
-            // Fallback: use pool buffer; FecPacket::new will upsize if needed
+            // Fallback: use the pool buffer; the compatibility constructor keeps it bounded.
             buf
         });
         for (i, b) in exact.iter_mut().enumerate() {

@@ -564,23 +564,27 @@ impl LazyDecoder {
         seed: u64,
         fountain_repair_limit: usize,
     ) -> Self {
+        let dimensions_valid =
+            super::validate_decoder_dimensions(k, depth, super::MAX_DECODER_SOURCE_COUNT).is_ok();
+        let effective_k = if dimensions_valid { k } else { 0 };
+        let effective_depth = if dimensions_valid { depth } else { 1 };
         Self {
             inner: DecoderVariant::new_for_wire(
                 codec,
-                k,
+                effective_k,
                 pool,
                 policy,
-                depth,
+                effective_depth,
                 seed,
                 fountain_repair_limit,
             ),
-            pending_sources: VecDeque::with_capacity(k.max(1)),
+            pending_sources: VecDeque::with_capacity(effective_k),
             pending_repairs: VecDeque::with_capacity(32),
             seen_seqs: HashSet::new(),
             seen_seq_min: None,
             seen_seq_max: None,
-            k,
-            depth: depth.max(1),
+            k: effective_k,
+            depth: effective_depth,
             expected_seq: 0,
             max_pending: 64,
             lazy_enabled: policy.lazy_enabled,
@@ -619,16 +623,20 @@ impl LazyDecoder {
     ) -> Self {
         let lazy_enabled = policy.lazy_enabled;
         let streaming_mode = super::fec_backend_family(mode) == super::FecBackendFamily::Streaming;
+        let dimensions_valid =
+            super::validate_decoder_dimensions(k, depth, super::MAX_DECODER_SOURCE_COUNT).is_ok();
+        let effective_k = if dimensions_valid { k } else { 0 };
+        let effective_depth = if dimensions_valid { depth } else { 1 };
 
         Self {
-            inner: DecoderVariant::new_with_depth(mode, k, pool, policy, depth),
-            pending_sources: VecDeque::with_capacity(k.max(1)),
+            inner: DecoderVariant::new_with_depth(mode, effective_k, pool, policy, effective_depth),
+            pending_sources: VecDeque::with_capacity(effective_k),
             pending_repairs: VecDeque::with_capacity(32),
             seen_seqs: HashSet::new(),
             seen_seq_min: None,
             seen_seq_max: None,
-            k,
-            depth: depth.max(1),
+            k: effective_k,
+            depth: effective_depth,
             expected_seq: 0,
             max_pending: 64,
             lazy_enabled,
@@ -972,8 +980,14 @@ impl InterleavedDecoder {
         policy: &FecRuntimePolicy,
         seed: u64,
     ) -> Self {
+        let Ok(profile) = profile.validate() else {
+            return Self {
+                blocks: vec![LazyDecoder::new_with_depth(FecMode::Zero, 0, pool, policy, 1)],
+                depth: 1,
+            };
+        };
         let depth = profile.interleave_depth as usize;
-        let block_k = profile.block_source_count() as usize;
+        let block_k = profile.try_block_source_count().unwrap_or(0) as usize;
         let fountain_repair_limit = (profile.total_count - profile.source_count) as usize;
         let blocks = (0..depth)
             .map(|_| {
@@ -1009,17 +1023,28 @@ impl InterleavedDecoder {
         let enabled = policy.interleave_enabled;
 
         let actual_depth = if enabled { depth.clamp(1, 8) } else { 1 };
+        let dimensions_valid =
+            super::validate_decoder_dimensions(k, actual_depth, super::MAX_DECODER_SOURCE_COUNT)
+                .is_ok();
+        let effective_k = if dimensions_valid { k } else { 0 };
+        let effective_depth = if dimensions_valid { actual_depth } else { 1 };
 
         // CRITICAL: Scale decoder k same as encoder
-        let block_k = (k / actual_depth).max(1);
+        let block_k = if effective_k == 0 { 0 } else { (effective_k / effective_depth).max(1) };
 
-        let blocks = (0..actual_depth)
+        let blocks = (0..effective_depth)
             .map(|_| {
-                LazyDecoder::new_with_depth(mode, block_k, Arc::clone(&pool), policy, actual_depth)
+                LazyDecoder::new_with_depth(
+                    mode,
+                    block_k,
+                    Arc::clone(&pool),
+                    policy,
+                    effective_depth,
+                )
             })
             .collect();
 
-        Self { blocks, depth: actual_depth }
+        Self { blocks, depth: effective_depth }
     }
 
     pub(crate) fn set_fountain_seed(&mut self, seed: u64) {

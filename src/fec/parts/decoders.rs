@@ -1,6 +1,35 @@
 // --- GF(2^8) Streaming Decoder (peeling) ---
 
 #[inline]
+fn source_id_for_params(k: usize, depth: usize, base_id: u64, j: usize) -> Option<u64> {
+    if k == 0 || j >= k || depth == 0 {
+        return None;
+    }
+    if depth == 1 {
+        let start = u64::try_from(k - 1).ok()?;
+        base_id.checked_sub(start)?.checked_add(j as u64)
+    } else {
+        let span = (k - 1 - j).checked_mul(depth)?;
+        base_id.checked_sub(u64::try_from(span).ok()?)
+    }
+}
+
+#[inline]
+fn anchor_is_valid(k: usize, depth: usize, anchor: u64) -> bool {
+    k > 0
+        && depth > 0
+        && (k - 1)
+            .checked_mul(depth)
+            .and_then(|span| u64::try_from(span).ok())
+            .is_some_and(|span| anchor >= span)
+}
+
+#[inline]
+fn id_is_in_window(k: usize, depth: usize, anchor: u64, id: u64) -> bool {
+    (0..k).any(|j| source_id_for_params(k, depth, anchor, j) == Some(id))
+}
+
+#[inline]
 fn record_decoder_solve(started: std::time::Instant, solved: bool) {
     crate::telemetry::FEC_DECODER_SOLVE_ATTEMPTS.inc();
     crate::telemetry::FEC_DECODER_SOLVE_TIME_NS
@@ -137,12 +166,27 @@ impl Decoder8 {
         Self::new_with_depth(k, pool, policy, 1)
     }
 
+    fn rejected(pool: Arc<MemoryPool>, policy: &FecRuntimePolicy) -> Self {
+        Self {
+            k: 0,
+            mem_pool: pool,
+            decoder_policy: policy.decoder_policy.clone(),
+            known: HashMap::new(),
+            equations: VecDeque::new(),
+            emit_q: VecDeque::new(),
+            depth: 1,
+        }
+    }
+
     fn new_with_depth(
         k: usize,
         pool: Arc<MemoryPool>,
         policy: &FecRuntimePolicy,
         depth: usize,
     ) -> Self {
+        if validate_decoder_dimensions(k, depth, wire::MAX_GF8_BLOCK_SOURCE_COUNT).is_err() {
+            return Self::rejected(pool, policy);
+        }
         Self {
             k,
             mem_pool: pool,
@@ -161,16 +205,13 @@ impl Decoder8 {
     /// In non-interleaved mode (depth = 1), this simplifies to base_id - k + 1 + j.
     #[inline]
     fn source_id_for(&self, base_id: u64, j: usize) -> u64 {
-        if self.depth > 1 {
-            // Interleaved: source IDs are spaced `depth` apart
-            base_id.saturating_sub((self.k as u64 - 1 - j as u64) * self.depth as u64)
-        } else {
-            // Non-interleaved: consecutive IDs
-            base_id.saturating_sub(self.k as u64 - 1) + j as u64
-        }
+        source_id_for_params(self.k, self.depth, base_id, j).unwrap_or(0)
     }
 
     fn take_packet(&mut self, p: FecPacket) {
+        if self.k == 0 {
+            return;
+        }
         if p.is_systematic {
             if let Some(data) = p.payload_slice() {
                 if data.len() > self.mem_pool.block_size() || self.known.contains_key(&p.id) {
@@ -192,9 +233,10 @@ impl Decoder8 {
                 let Some(coeffs) = coeffs.get(..p.coeff_len) else {
                     return;
                 };
-                if p.coeff_len < self.k
+                if p.coeff_len != self.k
                     || len > self.mem_pool.block_size()
                     || d.len() < len
+                    || !anchor_is_valid(self.k, self.depth, p.id)
                 {
                     return;
                 }
@@ -317,7 +359,7 @@ impl Decoder8 {
                 break 'outer;
             }
             pass += 1;
-            if pass > 4 * self.k {
+            if pass > self.k.saturating_mul(4) {
                 break 'outer;
             }
         }
@@ -673,7 +715,7 @@ impl Decoder8 {
         }
 
         // Compute the sequence s_i = u^T * A^i * v
-        let seq_len = 2 * n + 64;
+        let seq_len = n.checked_mul(2)?.checked_add(64)?;
         let mut sequence = vec![0u8; seq_len];
         let mut av = v.clone();
         crate::telemetry::WIEDEMANN_KRYLOV_ALLOCS.inc_by(4);
@@ -741,8 +783,12 @@ struct Decoder4 {
 impl Decoder4 {
     #[allow(dead_code)]
     fn new(k: usize, pool: Arc<MemoryPool>) -> Self {
+        Self::new_with_depth(k, pool, 1)
+    }
+
+    fn rejected(pool: Arc<MemoryPool>) -> Self {
         Self {
-            k,
+            k: 0,
             mem_pool: pool,
             known: HashMap::new(),
             equations: VecDeque::new(),
@@ -752,6 +798,9 @@ impl Decoder4 {
     }
 
     fn new_with_depth(k: usize, pool: Arc<MemoryPool>, depth: usize) -> Self {
+        if validate_decoder_dimensions(k, depth, 15).is_err() {
+            return Self::rejected(pool);
+        }
         Self {
             k,
             mem_pool: pool,
@@ -764,14 +813,13 @@ impl Decoder4 {
 
     #[inline]
     fn source_id_for(&self, base_id: u64, j: usize) -> u64 {
-        if self.depth > 1 {
-            base_id.saturating_sub((self.k as u64 - 1 - j as u64) * self.depth as u64)
-        } else {
-            base_id.saturating_sub(self.k as u64 - 1) + j as u64
-        }
+        source_id_for_params(self.k, self.depth, base_id, j).unwrap_or(0)
     }
 
     fn take_packet(&mut self, p: FecPacket) {
+        if self.k == 0 {
+            return;
+        }
         if p.is_systematic {
             if let Some(data) = p.payload_slice() {
                 if data.len() > self.mem_pool.block_size() || self.known.contains_key(&p.id) {
@@ -791,7 +839,11 @@ impl Decoder4 {
                 return;
             };
             let n = p.data_len;
-            if p.coeff_len < self.k || n > self.mem_pool.block_size() || d.len() < n {
+            if p.coeff_len != self.k
+                || n > self.mem_pool.block_size()
+                || d.len() < n
+                || !anchor_is_valid(self.k, self.depth, p.id)
+            {
                 return;
             }
             let mut data_buf = PooledBlock::new(Arc::clone(&self.mem_pool));
@@ -832,7 +884,7 @@ impl Decoder4 {
         let mut j = 0;
         const GF4_INV: [u8; 16] = [0, 1, 9, 14, 13, 11, 7, 6, 15, 2, 12, 5, 10, 4, 3, 8];
 
-        while j < eq.coeffs.len() {
+        while j < self.k {
             let c = eq.coeffs[j];
             if c == 0 {
                 j += 1;
@@ -935,22 +987,32 @@ struct Decoder16 {
     emit_q: VecDeque<FecPacket>,
     /// Interleave depth (1 = non-interleaved).
     depth: usize,
+    /// Anchor ID for the active source window. Repair packets establish it.
+    active_anchor: Option<u64>,
 }
 
 impl Decoder16 {
     #[cfg(test)]
     fn new(k: usize, pool: Arc<MemoryPool>) -> Self {
+        Self::new_with_depth(k, pool, 1)
+    }
+
+    fn rejected(pool: Arc<MemoryPool>) -> Self {
         Self {
-            k,
+            k: 0,
             mem_pool: pool,
             known: HashMap::new(),
             equations: VecDeque::new(),
             emit_q: VecDeque::new(),
             depth: 1,
+            active_anchor: None,
         }
     }
 
     fn new_with_depth(k: usize, pool: Arc<MemoryPool>, depth: usize) -> Self {
+        if validate_decoder_dimensions(k, depth, MAX_DECODER_SOURCE_COUNT).is_err() {
+            return Self::rejected(pool);
+        }
         Self {
             k,
             mem_pool: pool,
@@ -958,22 +1020,27 @@ impl Decoder16 {
             equations: VecDeque::new(),
             emit_q: VecDeque::new(),
             depth,
+            active_anchor: None,
         }
     }
 
     #[inline]
     fn source_id_for(&self, base_id: u64, j: usize) -> u64 {
-        if self.depth > 1 {
-            base_id.saturating_sub((self.k as u64 - 1 - j as u64) * self.depth as u64)
-        } else {
-            base_id.saturating_sub(self.k as u64 - 1) + j as u64
-        }
+        source_id_for_params(self.k, self.depth, base_id, j).unwrap_or(0)
     }
 
     fn take_packet(&mut self, p: FecPacket) {
+        if self.k == 0 {
+            return;
+        }
         if p.is_systematic {
             if let Some(data) = p.payload_slice() {
-                if data.len() > self.mem_pool.block_size() || self.known.contains_key(&p.id) {
+                if data.len() > self.mem_pool.block_size()
+                    || self.known.contains_key(&p.id)
+                    || self
+                        .active_anchor
+                        .is_some_and(|anchor| !id_is_in_window(self.k, self.depth, anchor, p.id))
+                {
                     return;
                 }
                 let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
@@ -1003,7 +1070,7 @@ impl Decoder16 {
                     return;
                 };
                 if end > coeffs_be.len() {
-                    break;
+                    return;
                 }
                 let b0 = coeffs_be[offset] as u16;
                 let b1 = coeffs_be[offset + 1] as u16;
@@ -1019,6 +1086,13 @@ impl Decoder16 {
             }
             let mut data_buf = PooledBlock::new(Arc::clone(&self.mem_pool));
             data_buf[..len].copy_from_slice(&d[..len]);
+            if !self.active_anchor.is_some_and(|anchor| anchor == p.id) {
+                if self.active_anchor.is_some() || !anchor_is_valid(self.k, self.depth, p.id) {
+                    return;
+                }
+                self.active_anchor = Some(p.id);
+                self.known.retain(|&id, _| id_is_in_window(self.k, self.depth, p.id, id));
+            }
             let mut equation =
                 Equation16 { base_id: p.id, coeffs: coeffs16, data: data_buf, len };
             if self.try_solve_equation(&mut equation) {
@@ -1058,7 +1132,14 @@ impl Decoder16 {
     }
 
     fn is_complete(&self) -> bool {
+        let Some(anchor) = self.active_anchor else {
+            return false;
+        };
         self.known.len() >= self.k
+            && self
+                .known
+                .keys()
+                .all(|&id| id_is_in_window(self.k, self.depth, anchor, id))
     }
 
     fn unknown_ids_for(&self, base_id: u64, coeffs: &[u16]) -> Vec<(usize, u64)> {
@@ -1206,9 +1287,15 @@ impl Decoder16 {
             let mut a = vec![vec![0u16; u]; m];
             let mut y = vec![0u16; m];
             for (i, eq) in self.equations.iter().enumerate() {
-                if 2 * w + 1 < eq.len {
-                    let b0 = eq.data[2 * w] as u16;
-                    let b1 = eq.data[2 * w + 1] as u16;
+                let Some(byte_offset) = w.checked_mul(2) else {
+                    return false;
+                };
+                let Some(end) = byte_offset.checked_add(2) else {
+                    return false;
+                };
+                if end <= eq.len {
+                    let b0 = eq.data[byte_offset] as u16;
+                    let b1 = eq.data[byte_offset + 1] as u16;
                     y[i] = (b0 << 8) | b1;
                     for (col, &sid) in unknowns.iter().enumerate() {
                         for j in 0..self.k {
@@ -1289,8 +1376,17 @@ impl Decoder16 {
             }
             let mut buf = PooledBlock::new(Arc::clone(&self.mem_pool));
             for (w, &val) in solutions[col].iter().enumerate() {
-                buf[2 * w] = (val >> 8) as u8;
-                buf[2 * w + 1] = (val & 0xff) as u8;
+                let Some(byte_offset) = w.checked_mul(2) else {
+                    return false;
+                };
+                let Some(end) = byte_offset.checked_add(2) else {
+                    return false;
+                };
+                if end > buf.len() {
+                    return false;
+                }
+                buf[byte_offset] = (val >> 8) as u8;
+                buf[byte_offset + 1] = (val & 0xff) as u8;
             }
             let mut buf2 = PooledBlock::new(Arc::clone(&self.mem_pool));
             buf2[..sl].copy_from_slice(&buf[..sl]);
