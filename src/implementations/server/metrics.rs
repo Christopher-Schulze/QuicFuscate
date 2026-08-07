@@ -183,6 +183,8 @@ pub struct Metrics {
     pub tun_data_plane_ready: AtomicU64,
     /// Number of terminal server TUN data-plane faults.
     pub tun_data_plane_faults: AtomicU64,
+    /// Process-wide memory-lock readiness and failure state.
+    memory_lock_status: parking_lot::RwLock<crate::memory_lock::MemoryLockStartupStatus>,
 
     // Per-session bandwidth and fair-scheduler metrics
     pub bandwidth_uplink_allowed_bytes: AtomicU64,
@@ -327,6 +329,9 @@ impl Metrics {
             tun_downlink_backpressure_drop_shutdown: AtomicU64::new(0),
             tun_data_plane_ready: AtomicU64::new(1),
             tun_data_plane_faults: AtomicU64::new(0),
+            memory_lock_status: parking_lot::RwLock::new(
+                crate::memory_lock::MemoryLockStartupStatus::not_configured(),
+            ),
             bandwidth_uplink_allowed_bytes: AtomicU64::new(0),
             bandwidth_downlink_allowed_bytes: AtomicU64::new(0),
             bandwidth_uplink_rate_limited: AtomicU64::new(0),
@@ -753,6 +758,16 @@ impl Metrics {
     pub fn record_tun_data_plane_fault(&self) {
         self.tun_data_plane_faults.fetch_add(1, Ordering::Relaxed);
         self.set_tun_data_plane_ready(false);
+    }
+
+    /// Publish the process-wide memory-lock result for runtime health probes.
+    pub fn set_memory_lock_status(&self, status: crate::memory_lock::MemoryLockStartupStatus) {
+        *self.memory_lock_status.write() = status;
+    }
+
+    /// Read the process-wide memory-lock result exposed by this runtime.
+    pub fn memory_lock_status(&self) -> crate::memory_lock::MemoryLockStartupStatus {
+        *self.memory_lock_status.read()
     }
 
     pub fn record_tun_downlink_backpressure_enqueued(&self) {
@@ -1566,10 +1581,14 @@ impl Metrics {
     pub fn export_health(&self) -> String {
         let geoip_status = self.geoip_status();
         let uptime = self.uptime_secs();
+        let memory_lock = self.memory_lock_status();
         let health = if geoip_status == crate::implementations::server::limits::GeoIpStatus::Failed
             || self.tun_data_plane_ready.load(Ordering::Acquire) == 0
+            || memory_lock.is_not_ready()
         {
             "not_ready"
+        } else if memory_lock.is_degraded() {
+            "degraded"
         } else {
             "ok"
         };
@@ -1596,6 +1615,7 @@ impl Metrics {
             "clients": self.clients_active.load(Ordering::Relaxed),
             "geoip_status": geoip_status.as_str(),
             "tun_data_plane_ready": self.tun_data_plane_ready.load(Ordering::Acquire),
+            "memory_lock": memory_lock.health_json(),
             "blacklist_sync": {
                 "enabled": enabled,
                 "status": status,
@@ -2202,6 +2222,34 @@ mod tests {
         assert!(output.contains("\"status\":\"ok\""));
         assert!(output.contains("\"clients\":10"));
         assert!(output.contains("\"geoip_status\":\"disabled\""));
+    }
+
+    #[test]
+    fn memory_lock_health_exposes_degraded_and_not_ready_states() {
+        let metrics = Metrics::new();
+        metrics.set_memory_lock_status(crate::memory_lock::MemoryLockStartupStatus {
+            policy: crate::engine::MemoryLockFailurePolicy::BestEffort,
+            state: crate::memory_lock::MemoryLockState::Degraded,
+            process_mode: crate::memory_lock::MemoryLockProcessMode::None,
+            limit: crate::memory_lock::MemoryLockLimit::Unknown,
+            failure: Some(crate::memory_lock::MemoryLockFailureKind::RlimitQuery),
+        });
+        let degraded = metrics.export_health();
+        assert!(degraded.contains("\"status\":\"degraded\""));
+        assert!(degraded.contains("\"memory_lock\""));
+        assert!(degraded.contains("\"failure\":\"rlimit-query\""));
+
+        metrics.set_memory_lock_status(crate::memory_lock::MemoryLockStartupStatus {
+            policy: crate::engine::MemoryLockFailurePolicy::FailClosed,
+            state: crate::memory_lock::MemoryLockState::Failed,
+            process_mode: crate::memory_lock::MemoryLockProcessMode::None,
+            limit: crate::memory_lock::MemoryLockLimit::Finite(4096),
+            failure: Some(crate::memory_lock::MemoryLockFailureKind::Mlockall),
+        });
+        let failed = metrics.export_health();
+        assert!(failed.contains("\"status\":\"not_ready\""));
+        assert!(failed.contains("\"policy\":\"fail-closed\""));
+        assert!(failed.contains("\"limit_bytes\":4096"));
     }
 
     #[test]

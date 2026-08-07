@@ -318,6 +318,7 @@ impl ServerRuntime {
         };
 
         let metrics = Arc::new(Metrics::new_with_clock(&clock));
+        metrics.set_memory_lock_status(crate::memory_lock::current_status());
         #[cfg(feature = "rate_limiter")]
         {
             metrics.set_geoip_status(live_state.geoip_status());

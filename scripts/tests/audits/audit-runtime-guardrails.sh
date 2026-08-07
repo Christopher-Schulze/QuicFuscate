@@ -927,13 +927,13 @@ from pathlib import Path
 checks = [
     (
         Path("src/engine/engine.rs"),
-        "MemoryLockPolicy::from_security(&self.config.security).apply_before_tls_identity(false);",
+        "apply_before_tls_identity(false)",
         "let _pool = crate::optimize::global_pool();",
         "embedded server memory policy is not applied before the global pool",
     ),
     (
         Path("src/main_parts/late_tests_and_mlock.rs"),
-        "memory_lock_policy.apply_before_tls_identity(defer_process_memory_lock);",
+        "apply_before_tls_identity(defer_process_memory_lock)",
         "quicfuscate::implementations::server::load_server_identity(",
         "standalone memory policy is not applied before TLS identity loading",
     ),
@@ -956,6 +956,10 @@ PY
 )"
 if [[ -z "$MEMORY_LOCK_POLICY_ORDER_ERRORS" ]] \
   && rg -F -- 'pub struct MemoryLockPolicy' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'pub struct MemoryLockStartupStatus' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'pub struct MemoryLockStartupError' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'pub fn current_status()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'pub enum MemoryLockFailurePolicy' src/engine/config.rs >/dev/null \
   && rg -F -- 'pub fn apply_before_tls_identity(' src/memory_lock.rs >/dev/null \
   && rg -F -- 'pub fn apply_deferred_process_memory_lock(' src/memory_lock.rs >/dev/null \
   && rg -F -- 'MemoryPool::set_lock_blocks(self.lock_blocks)' src/memory_lock.rs >/dev/null \
@@ -966,16 +970,45 @@ if [[ -z "$MEMORY_LOCK_POLICY_ORDER_ERRORS" ]] \
   && rg -F -- 'fn test_runtime_reload_rejects_startup_owned_memory_settings()' src/implementations/server/parts/tests_inline.rs >/dev/null \
   && rg -F -- 'lock_memory = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
   && rg -F -- 'lock_blocks = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
+  && rg -F -- 'memory_lock_failure_policy = "best-effort"' config/quicfuscate.toml >/dev/null \
+  && rg -F -- 'memory_lock_failure_policy = "fail-closed"' config/server-linux.default.toml >/dev/null \
   && rg -F -- 'startup-owned' config/server-linux.default.toml >/dev/null \
   && rg -F -- 'MemoryLockPolicy::from_security' src/main_parts/late_tests_and_mlock.rs >/dev/null \
+  && rg -F -- 'server memory-lock startup failed' src/main_parts/late_tests_and_mlock.rs src/engine/engine.rs >/dev/null \
+  && rg -F -- 'set_memory_lock_status' src/implementations/server/metrics.rs src/main_parts/late_tests_and_mlock.rs >/dev/null \
+  && rg -F -- '"memory_lock": memory_lock.health_json()' src/implementations/server/metrics.rs src/implementations/server/parts/runtime_admin.rs >/dev/null \
+  && rg -F -- 'Process Memory-Lock Readiness and Failure Policy' docs/MAP.md docs/DOCUMENTATION.md >/dev/null \
+  && rg -F -- 'struct ProcessMemoryLockGuard' src/memory_lock.rs >/dev/null \
+  && ! rg -F -- 'current_memlock_limit().ok()' src/memory_lock.rs >/dev/null \
   && rg -F -- 'reject_standalone_reload(candidate_memory_lock_policy)?' src/implementations/server/parts/runtime_impl.rs >/dev/null \
   && ! rg -F -- 'fn apply_process_memory_lock' src/main_parts/late_tests_and_mlock.rs >/dev/null \
   && rg -F -- 'Shared server startup memory-lock policy' docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
-  pass "Embedded and standalone server memory-lock policy, ordering, reload rejection, and tests are wired"
-  append_item "embedded_memory_lock_policy_propagation" "ok" "shared process/pool policy, pre-identity ordering, deferred privilege boundary, standalone reload rejection, and policy tests are present"
+  pass "Embedded and standalone memory-lock policy, typed failure/readiness, ordering, reload rejection, and tests are wired"
+  append_item "embedded_memory_lock_policy_propagation" "ok" "shared process/pool policy, typed failure state, pre-identity ordering, deferred privilege boundary, health/readiness, reload rejection, tests, and documentation are present"
 else
-  fail_critical "Embedded and standalone server memory-lock policy propagation or ordering is incomplete"
-  append_item "embedded_memory_lock_policy_propagation" "fail" "shared policy, source-order checks, reload rejection, tests, or documentation missing: ${MEMORY_LOCK_POLICY_ORDER_ERRORS:-contract probe failed}"
+  fail_critical "Embedded and standalone memory-lock policy, failure/readiness propagation, or ordering is incomplete"
+  append_item "embedded_memory_lock_policy_propagation" "fail" "shared policy, typed status/error, source-order checks, health/readiness, reload rejection, tests, or documentation missing: ${MEMORY_LOCK_POLICY_ORDER_ERRORS:-contract probe failed}"
+fi
+
+# 4r) Process-wide memory-lock failures must preserve their cause and expose
+#     an explicit startup policy. The process test cleanup must be panic-safe.
+if rg -F -- 'pub enum MemoryLockFailureKind' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'MemoryLockFailureKind::RlimitQuery' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'MemoryLockFailureKind::Mlockall' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'MemoryLockFailureKind::UnsupportedPlatform' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn decide_process_memory_lock_failure(' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn mlockall_flags_for_budget(' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'impl Drop for ProcessMemoryLockGuard' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'libc::munlockall()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'memory_lock_health_exposes_degraded_and_not_ready_states' \
+    src/implementations/server/metrics.rs >/dev/null \
+  && rg -F -- 'MemoryLockFailurePolicy::FailClosed' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'memory_lock_failure_policy' src/engine/config.rs src/memory_lock.rs >/dev/null; then
+  pass "Process memory-lock failure causes, policy decisions, health states, and panic-safe cleanup are wired"
+  append_item "process_memory_lock_failure_policy" "ok" "typed rlimit/mlockall/platform causes, best-effort/fail-closed decision, current-only fallback, and Drop cleanup are present"
+else
+  fail_critical "Process memory-lock failure/readiness policy or panic-safe cleanup is incomplete"
+  append_item "process_memory_lock_failure_policy" "fail" "missing typed failure cause, policy decision, fallback flags, health regression, or Drop cleanup"
 fi
 
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.

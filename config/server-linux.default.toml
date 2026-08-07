@@ -214,6 +214,9 @@ flush_timeout_ms = 5000
 [security]
 lock_memory = true
 lock_blocks = true
+# Required production mode: abort before TLS/service readiness if process-wide
+# locking cannot be established.
+memory_lock_failure_policy = "fail-closed"
 
 # ==============================================================================
 # REALITY-GRADE TLS MIMIKRY (TODO-415 Phase 1)

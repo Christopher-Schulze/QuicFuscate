@@ -873,7 +873,14 @@ impl QuicFuscateEngine {
         self.start_time = Some(self.clock.now());
 
         if self.config.engine.mode == EngineMode::Server {
-            MemoryLockPolicy::from_security(&self.config.security).apply_before_tls_identity(false);
+            if let Err(error) = MemoryLockPolicy::from_security(&self.config.security)
+                .apply_before_tls_identity(false)
+            {
+                return Err(self.fail_start(
+                    old_state,
+                    EngineError::Config(format!("server memory-lock startup failed: {error}")),
+                ));
+            }
         }
 
         // Initialize memory pool for optimized memory management

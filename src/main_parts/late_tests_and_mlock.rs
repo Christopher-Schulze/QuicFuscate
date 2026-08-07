@@ -844,7 +844,11 @@ async fn run_server(
         .unwrap_or_default();
     let defer_process_memory_lock =
         cfg!(target_os = "linux") && privilege_target.is_some() && memory_lock_policy.lock_memory;
-    memory_lock_policy.apply_before_tls_identity(defer_process_memory_lock);
+    memory_lock_policy
+        .apply_before_tls_identity(defer_process_memory_lock)
+        .map_err(|error| {
+            std::io::Error::other(format!("server memory-lock startup failed: {error}"))
+        })?;
 
     let mut config = match new_runtime_transport_config() {
         Ok(c) => c,
@@ -916,6 +920,9 @@ async fn run_server(
         qkey_ttl_secs,
         qkey_store,
     )?;
+    runtime
+        .standalone_metrics()
+        .set_memory_lock_status(quicfuscate::memory_lock::current_status());
     let fec_mode_override = fec_mode;
     let mut launch =
         quicfuscate::implementations::server::PreparedStandaloneLaunch::new_with_runtime_stealth(
@@ -976,7 +983,14 @@ async fn run_server(
         match finalization {
             Ok((report, verified_threads)) => {
                 if defer_process_memory_lock {
-                    memory_lock_policy.apply_deferred_process_memory_lock();
+                    let status = memory_lock_policy
+                        .apply_deferred_process_memory_lock()
+                        .map_err(|error| {
+                            std::io::Error::other(format!(
+                                "deferred server memory-lock startup failed: {error}"
+                            ))
+                        })?;
+                    runtime.standalone_metrics().set_memory_lock_status(status);
                 }
                 info!(
                     "Privileges finalized across {} threads: uid={}/{}/{:?}, gid={}/{}/{:?}, capabilities=0, no_new_privileges=true",

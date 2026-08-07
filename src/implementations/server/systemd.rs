@@ -348,6 +348,7 @@ pub mod health {
             404 => "Not Found",
             405 => "Method Not Allowed",
             413 => "Payload Too Large",
+            503 => "Service Unavailable",
             _ => "Internal Server Error",
         };
         format!(
@@ -359,18 +360,35 @@ pub mod health {
         )
     }
 
+    fn memory_lock_response(path: &str) -> (u16, String) {
+        let memory_lock = crate::memory_lock::current_status();
+        let status = if path == "/live" { "ok" } else { memory_lock.health_status() };
+        let response_status =
+            if path == "/live" || !memory_lock.is_not_ready() { 200 } else { 503 };
+        (
+            response_status,
+            serde_json::json!({
+                "status": status,
+                "memory_lock": memory_lock.health_json(),
+            })
+            .to_string(),
+        )
+    }
+
     async fn handle_connection(mut socket: TcpStream) {
         let response = match read_request(&mut socket).await {
             Ok(Some(request)) => {
                 let req_str = String::from_utf8_lossy(&request);
                 let (status, body) = match parse_request_line(&req_str) {
-                    Some(("GET", "/health" | "/ready" | "/live")) => (200, "{\"status\":\"ok\"}"),
-                    Some(("GET", _)) => (404, "{\"error\":\"not_found\"}"),
-                    Some((_, _)) => (405, "{\"error\":\"method_not_allowed\"}"),
-                    None => (400, "{\"error\":\"bad_request\"}"),
+                    Some(("GET", path)) if matches!(path, "/health" | "/ready" | "/live") => {
+                        memory_lock_response(path)
+                    }
+                    Some(("GET", _)) => (404, "{\"error\":\"not_found\"}".to_string()),
+                    Some((_, _)) => (405, "{\"error\":\"method_not_allowed\"}".to_string()),
+                    None => (400, "{\"error\":\"bad_request\"}".to_string()),
                 };
                 if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    http_response(status, body)
+                    http_response(status, &body)
                 } else {
                     http_response(400, "{\"error\":\"bad_request\"}")
                 }

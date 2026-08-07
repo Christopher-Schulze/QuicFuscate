@@ -2617,6 +2617,8 @@ mod tests {
             core.health_json()["admin_http"]["timeout_ms"],
             MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS
         );
+        assert_eq!(core.base_status_json()["memory_lock"]["state"], "not-configured");
+        assert_eq!(core.health_json()["memory_lock"]["state"], "not-configured");
 
         #[cfg(feature = "rate_limiter")]
         {

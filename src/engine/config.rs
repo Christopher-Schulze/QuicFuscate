@@ -1761,6 +1761,26 @@ impl AntiReplaySection {
 // SECURITY SECTION
 // ============================================================================
 
+/// Process-wide memory-lock failure behavior.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryLockFailurePolicy {
+    /// Keep the service available and expose a degraded memory-lock state.
+    #[default]
+    BestEffort,
+    /// Abort startup before TLS identity publication or service readiness.
+    FailClosed,
+}
+
+impl MemoryLockFailurePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BestEffort => "best-effort",
+            Self::FailClosed => "fail-closed",
+        }
+    }
+}
+
 /// Security settings: kill switch, leak prevention, connection-loss detection.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -1777,12 +1797,17 @@ pub struct SecurityConfig {
     /// Firewall backend selection (Linux only). When `None`, one backend is
     /// resolved and retained at startup via [`crate::firewall::resolve_backend`].
     pub firewall: FirewallConfig,
-    /// Lock all current and future process memory against swap with
-    /// `mlockall(MCL_CURRENT | MCL_FUTURE)` on server startup (TODO-516).
-    /// Prevents key material, AEAD state, and QKey tokens from being written
-    /// to disk where they persist across reboots. Requires `LimitMEMLOCK=infinity`
-    /// in systemd or `ulimit -l unlimited`. Default: true on server.
+    /// Lock process memory against swap with `mlockall` on server startup
+    /// (TODO-516). Unlimited `RLIMIT_MEMLOCK` permits current-and-future
+    /// locking; finite budgets use current-only locking. Prevents key
+    /// material, AEAD state, and QKey tokens from being written to disk where
+    /// they persist across reboots. Requires `LimitMEMLOCK=infinity` in
+    /// systemd or `ulimit -l unlimited` for current-and-future coverage.
     pub lock_memory: bool,
+    /// Process-wide memory-lock failure behavior. The best-effort default
+    /// preserves cross-platform embedding; the Linux server template selects
+    /// fail-closed explicitly for production service startup.
+    pub memory_lock_failure_policy: MemoryLockFailurePolicy,
     /// Lock `MemoryPool` blocks against swap with `mlock` on allocation
     /// (TODO-516). Crypto buffers used for packet encryption/decryption are
     /// kept in RAM. Default: true on server, false on client.
@@ -1797,6 +1822,7 @@ impl Default for SecurityConfig {
             cleanup_firewall_on_start: false,
             firewall: FirewallConfig::default(),
             lock_memory: true,
+            memory_lock_failure_policy: MemoryLockFailurePolicy::default(),
             lock_blocks: true,
         }
     }
@@ -2186,6 +2212,7 @@ mode = "roaming"
         assert_eq!(config.optimization.memory_pool_size, 67_108_864);
         assert!(config.telemetry.enabled);
         assert_eq!(config.audit.max_segments, 8);
+        assert_eq!(config.security.memory_lock_failure_policy, MemoryLockFailurePolicy::BestEffort);
 
         let encoded = toml::to_string(&config).expect("canonical engine config serializes");
         let decoded = EngineConfig::from_toml(&encoded).expect("serialized engine config parses");
@@ -2203,6 +2230,10 @@ mode = "roaming"
         );
         assert_eq!(decoded.fec.window_poor, config.fec.window_poor);
         assert_eq!(decoded.security.kill_switch, config.security.kill_switch);
+        assert_eq!(
+            decoded.security.memory_lock_failure_policy,
+            config.security.memory_lock_failure_policy
+        );
         assert_eq!(decoded.security.firewall.backend, config.security.firewall.backend);
     }
 

@@ -515,6 +515,11 @@ lock_memory = true
 # Default: true on server.
 lock_blocks = true
 
+# Process-wide lock failure behavior. "best-effort" keeps startup available
+# with degraded health; "fail-closed" aborts before TLS/service readiness.
+# Default: "best-effort" for portable and embedded configurations.
+memory_lock_failure_policy = "best-effort"
+
 # Enable kill switch (blocks all non-VPN traffic when disconnected).
 kill_switch = false
 

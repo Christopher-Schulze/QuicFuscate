@@ -852,6 +852,7 @@ impl ServerAdminCore {
             "auth_state_tracked_ips": self.metrics.auth_state_tracked_ips.load(Ordering::Relaxed),
             "bytes_in": self.metrics.bytes_in.load(Ordering::Relaxed),
             "bytes_out": self.metrics.bytes_out.load(Ordering::Relaxed),
+            "memory_lock": self.metrics.memory_lock_status().health_json(),
         });
         #[cfg(feature = "rate_limiter")]
         {
@@ -870,7 +871,11 @@ impl ServerAdminCore {
     }
 
     pub fn health_json(&self) -> serde_json::Value {
-        let mut data = serde_json::json!({ "status": "ok" });
+        let mut data = serde_json::json!({ "status": "not_ready" });
+        if let Ok(health) = serde_json::from_str::<serde_json::Value>(&self.metrics.export_health()) {
+            data["status"] = health["status"].clone();
+            data["memory_lock"] = health["memory_lock"].clone();
+        }
         #[cfg(feature = "rate_limiter")]
         {
             data["geoip_status"] = serde_json::Value::String(self.geoip_status.as_str().to_string());
