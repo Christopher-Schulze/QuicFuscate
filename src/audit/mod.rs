@@ -1246,10 +1246,13 @@ static AUDIT_LOG: std::sync::OnceLock<Arc<AuditLog>> = std::sync::OnceLock::new(
 /// function created it — a pre-existing system directory (e.g. `/var/log`)
 /// is never re-owned, which would be a privilege-escalation vector.
 /// This must be called **before** `drop_privileges`.
-pub fn init_audit_log(path: Option<PathBuf>, owner: Option<(u32, u32)>) {
-    if let Err(error) = init_audit_log_with_options(path, owner, AuditOptions::default()) {
+pub fn init_audit_log(path: Option<PathBuf>, owner: Option<(u32, u32)>) -> Result<(), AuditError> {
+    // Returns the status instead of downgrading it to a log line. Audit-file hardening is
+    // fail-closed, so a caller that ignored a warning here would run believing the audit log was
+    // owner-only and survivable across the privilege drop when it is neither.
+    init_audit_log_with_options(path, owner, AuditOptions::default()).inspect_err(|error| {
         log::warn!("Failed to initialize audit log: {error}");
-    }
+    })
 }
 
 /// Initialize the global audit log with validated bounded persistence settings.
@@ -1269,8 +1272,11 @@ pub fn init_audit_log_with_options(
             }
         }
         let audit_log = AuditLog::open_with_options(p.clone(), options)?;
+        // Hardening must succeed before the owner is published. Publishing after a failed
+        // permission or ownership operation would report the documented secure state while the
+        // file is readable by others or unreachable after the privilege drop.
         #[cfg(unix)]
-        secure_audit_file(&p, parent_newly_created, owner);
+        secure_audit_file(&p, parent_newly_created, owner)?;
         if AUDIT_LOG.set(Arc::new(audit_log)).is_err() {
             return Err(AuditError::AlreadyInitialized);
         }
@@ -1294,49 +1300,67 @@ fn secure_audit_file(
     path: &std::path::Path,
     parent_newly_created: bool,
     owner: Option<(u32, u32)>,
-) {
+) -> Result<(), AuditError> {
     use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(AUDIT_FILE_MODE))
-    {
-        log::warn!("Failed to set audit log permissions on {}: {}", path.display(), e);
-    }
+    // Fail closed. An audit log whose mode could not be tightened to owner-only must not be
+    // published as the process audit owner, because every later reader would treat it as the
+    // documented secure state.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(AUDIT_FILE_MODE))
+        .map_err(AuditError::IoError)?;
+
     // Only chown the parent dir if we just created it. Never reown a
     // pre-existing directory (e.g. /var/log) — that would break other
     // services and open a privilege-escalation path.
-    if unsafe { libc::geteuid() } == 0 {
+    //
+    // SAFETY: `geteuid` takes no arguments, dereferences no pointers, and cannot fail. It reads
+    // the calling process's effective user id and is always safe to call from any thread.
+    let running_as_root = unsafe { libc::geteuid() } == 0;
+    if running_as_root {
         if let Some((uid, gid)) = owner {
-            chown_to_identity(path, uid, gid);
+            chown_to_identity(path, uid, gid)?;
             if parent_newly_created {
                 if let Some(parent) = path.parent() {
-                    chown_to_identity(parent, uid, gid);
+                    chown_to_identity(parent, uid, gid)?;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Chown `path` to the pre-resolved privilege target.
+///
+/// Fails closed. A failed ownership transfer means audit logging breaks after the privilege
+/// drop, so the caller must not publish the audit owner as if hardening had succeeded.
 #[cfg(unix)]
-fn chown_to_identity(path: &std::path::Path, uid: u32, gid: u32) {
+fn chown_to_identity(path: &std::path::Path, uid: u32, gid: u32) -> Result<(), AuditError> {
     use std::ffi::CString;
-    // SAFETY: chown changes ownership. Path is a valid filesystem path.
-    let c_path = match CString::new(path.as_os_str().as_encoded_bytes()) {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("chown: path {} not representable as CString: {}", path.display(), e);
-            return;
-        }
-    };
-    if unsafe { libc::chown(c_path.as_ptr(), uid, gid) } != 0 {
+    // An interior NUL would silently truncate the path handed to the kernel, so reject it here
+    // rather than chowning a different file than the caller named.
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| {
+        AuditError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("audit path {} is not representable as a C string: {e}", path.display()),
+        ))
+    })?;
+
+    // SAFETY: `c_path` owns a NUL-terminated buffer that outlives the call, and `as_ptr()`
+    // borrows it without transferring ownership. `chown` reads the path and the two ids, writes
+    // through no caller pointer, and reports failure through its return value, which is checked
+    // below before `errno` is read.
+    let status = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if status != 0 {
         let err = std::io::Error::last_os_error();
         log::warn!(
-            "chown failed for {} (uid={}, gid={}): {} — audit logging may break after privilege drop",
+            "chown failed for {} (uid={}, gid={}): {} — audit logging would break after privilege drop",
             path.display(),
             uid,
             gid,
             err
         );
+        return Err(AuditError::IoError(err));
     }
+    Ok(())
 }
 
 /// Emit an audit event to the global audit log if initialized.
@@ -1798,15 +1822,43 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(source, destination)
 }
 
+/// Turn UTF-16 path units into the NUL-terminated buffer a wide Win32 call requires.
+///
+/// An interior NUL would terminate the string early inside the kernel, so the call would act on a
+/// prefix of the path the caller named. Reject that instead of encoding it.
+///
+/// Compiled on Windows, where `replace_file` uses it, and in test builds on every target so the
+/// encoding contract stays provable on a non-Windows workspace.
+#[cfg(any(windows, test))]
+fn encode_wide_nul_terminated(
+    units: impl IntoIterator<Item = u16>,
+    label: &str,
+) -> std::io::Result<Vec<u16>> {
+    let mut buffer: Vec<u16> = units.into_iter().collect();
+    if buffer.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{label} path contains an interior NUL and cannot be passed to Win32"),
+        ));
+    }
+    buffer.push(0);
+    Ok(buffer)
+}
+
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both paths are NUL-terminated UTF-16 buffers valid for the duration of the call.
+    let source = encode_wide_nul_terminated(source.as_os_str().encode_wide(), "source")?;
+    let destination =
+        encode_wide_nul_terminated(destination.as_os_str().encode_wide(), "destination")?;
+
+    // SAFETY: both buffers are owned locals holding NUL-terminated UTF-16 with no interior NUL,
+    // rejected above, and they outlive the call. `MoveFileExW` reads through both pointers and
+    // writes through neither, so no aliasing or lifetime obligation escapes this scope. A zero
+    // return means failure and is the only case in which `errno` is read.
     let result = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -2995,14 +3047,90 @@ mod tests {
         // holds — we just need to confirm secure_audit_file sets exactly 0o600.
         let mode_before = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
         // After the call the mode must be exactly 0o600 regardless of the
-        // mode in effect when the file was created.
-        secure_audit_file(&file_path, false, None);
+        // mode in effect when the file was created. Hardening is fail-closed, so the result
+        // itself is part of the contract.
+        secure_audit_file(&file_path, false, None).expect("hardening a writable audit file");
         let mode_after = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode_after, 0o600,
             "audit log file must be 0o600 after secure_audit_file, got {mode_after:#o} (was {mode_before:#o} before)"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Win32 wide-path contract. Exercised on every target so a non-Windows workspace still
+    /// proves that an interior NUL is refused instead of silently truncating the path the kernel
+    /// acts on. Windows execution of `replace_file` itself remains unavailable here.
+    #[test]
+    fn test_encode_wide_rejects_interior_nul_and_terminates_valid_paths() {
+        let encoded = encode_wide_nul_terminated("C:\\logs\\audit.jsonl".encode_utf16(), "source")
+            .expect("a path without interior NUL must encode");
+        assert_eq!(encoded.last(), Some(&0), "buffer must be NUL terminated");
+        assert_eq!(
+            encoded.iter().filter(|unit| **unit == 0).count(),
+            1,
+            "exactly one NUL, at the end"
+        );
+
+        // A NUL in the middle would end the string inside the kernel, so MoveFileExW would act on
+        // "C:\\logs" rather than the named file.
+        let smuggled: Vec<u16> = "C:\\logs\u{0}\\audit.jsonl".encode_utf16().collect();
+        let error = encode_wide_nul_terminated(smuggled, "destination")
+            .expect_err("interior NUL must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("destination"),
+            "error must name which path was rejected, got {error}"
+        );
+
+        // An empty path is still encodable; it is the caller's business, not an encoding fault.
+        let empty = encode_wide_nul_terminated(std::iter::empty(), "source").expect("empty path");
+        assert_eq!(empty, vec![0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_secure_audit_file_fails_closed_when_permissions_cannot_be_set() {
+        // A path that does not exist cannot be hardened. Before this contract the failure was
+        // warning-only and initialization still published the audit owner as if the file had been
+        // tightened to owner-only.
+        let missing = std::env::temp_dir().join(format!(
+            "quicfuscate_audit_missing_{}_{}.jsonl",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&missing);
+
+        let error = secure_audit_file(&missing, false, None)
+            .expect_err("hardening a missing audit file must fail closed");
+        assert!(
+            matches!(error, AuditError::IoError(_)),
+            "permission failure must surface as a typed IO error, got {error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_audit_init_does_not_publish_owner_when_hardening_fails() {
+        // The parent exists as a regular file, so creating the audit directory under it fails and
+        // initialization must return an error rather than publishing a global audit owner.
+        let blocker = std::env::temp_dir().join(format!(
+            "quicfuscate_audit_blocker_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&blocker);
+        let _ = std::fs::remove_file(&blocker);
+        std::fs::write(&blocker, b"not a directory\n").expect("seed blocking file");
+
+        let result = init_audit_log_with_options(
+            Some(blocker.join("nested").join("audit.jsonl")),
+            None,
+            AuditOptions::default(),
+        );
+        assert!(result.is_err(), "initialization must fail when the audit path cannot be created");
+
+        let _ = std::fs::remove_file(&blocker);
     }
 
     #[cfg(unix)]
@@ -3022,7 +3150,7 @@ mod tests {
         std::fs::write(&file_path, b"seed\n").unwrap();
         let parent_meta_before = std::fs::symlink_metadata(&parent).unwrap();
         // parent_newly_created = false simulates a pre-existing system dir.
-        secure_audit_file(&file_path, false, None);
+        secure_audit_file(&file_path, false, None).expect("hardening a writable audit file");
         let parent_meta_after = std::fs::symlink_metadata(&parent).unwrap();
         // Ownership (uid/gid) must be identical before and after.
         use std::os::unix::fs::MetadataExt;
