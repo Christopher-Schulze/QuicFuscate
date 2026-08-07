@@ -56,6 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if first_stats.dropped_events != 0
         || first_stats.payload_rejections != 0
         || first_stats.persistence_errors != 0
+        || first_stats.terminal_dropped_events != 0
+        || first_stats.slow_flushes != 0
+        || first_stats.shutdown_failures != 0
     {
         return Err(format!("unexpected audit worker counters: {first_stats:?}").into());
     }
@@ -81,6 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if restart_stats.dropped_events != 0
         || restart_stats.payload_rejections != 0
         || restart_stats.persistence_errors != 0
+        || restart_stats.terminal_dropped_events != 0
+        || restart_stats.slow_flushes != 0
+        || restart_stats.shutdown_failures != 0
     {
         return Err(format!("unexpected restarted audit counters: {restart_stats:?}").into());
     }
@@ -133,9 +139,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "dropped_events": first_stats.dropped_events,
             "payload_rejections": first_stats.payload_rejections,
             "persistence_errors": first_stats.persistence_errors,
+            "terminal_dropped_events": first_stats.terminal_dropped_events,
+            "slow_flushes": first_stats.slow_flushes,
+            "shutdown_failures": first_stats.shutdown_failures,
             "restart_dropped_events": restart_stats.dropped_events,
             "restart_payload_rejections": restart_stats.payload_rejections,
             "restart_persistence_errors": restart_stats.persistence_errors,
+            "restart_terminal_dropped_events": restart_stats.terminal_dropped_events,
+            "restart_slow_flushes": restart_stats.slow_flushes,
+            "restart_shutdown_failures": restart_stats.shutdown_failures,
             "restart_verified": true,
         })
     );

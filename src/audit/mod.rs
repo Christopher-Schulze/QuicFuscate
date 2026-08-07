@@ -14,7 +14,7 @@
 //!   (Splunk, Elastic, Loki, Wazuh).
 //! - Syslog RFC 5424 — for direct forwarding to a SIEM via syslog relay.
 
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -22,8 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Default number of accepted commands waiting for the single audit writer.
 pub const DEFAULT_AUDIT_QUEUE_CAPACITY: usize = 16_384;
@@ -278,7 +277,7 @@ pub struct AuditLog {
     sender: Sender<AuditCommand>,
     dropped_events: Arc<AtomicU64>,
     payload_rejections: Arc<AtomicU64>,
-    persistence_errors: Arc<AtomicU64>,
+    state: Arc<AuditState>,
     admission_state: AtomicUsize,
     worker: Mutex<Option<JoinHandle<()>>>,
     flush_timeout: Duration,
@@ -294,8 +293,88 @@ struct AuditWriter {
     rotated_segments: Vec<AuditSegment>,
     next_seq: u64,
     last_hash: String,
-    terminal_error: Option<String>,
-    persistence_errors: Arc<AtomicU64>,
+    state: Arc<AuditState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AuditFailure {
+    Persistence(String),
+    DurabilityTimeout(String),
+    FlushTimeout(String),
+    ShutdownTimeout(String),
+    WorkerDisconnected,
+}
+
+impl AuditFailure {
+    fn to_error(&self) -> AuditError {
+        match self {
+            Self::Persistence(error) => AuditError::PersistenceFailed(error.clone()),
+            Self::DurabilityTimeout(error) => AuditError::DurabilityTimeout(error.clone()),
+            Self::FlushTimeout(error) => AuditError::FlushTimeout(error.clone()),
+            Self::ShutdownTimeout(error) => AuditError::ShutdownTimeout(error.clone()),
+            Self::WorkerDisconnected => AuditError::WorkerDisconnected,
+        }
+    }
+}
+
+struct AuditState {
+    terminal_error: Mutex<Option<AuditFailure>>,
+    shutdown_error: Mutex<Option<AuditFailure>>,
+    persistence_errors: AtomicU64,
+    terminal_dropped_events: AtomicU64,
+    slow_flushes: AtomicU64,
+    shutdown_failures: AtomicU64,
+}
+
+impl Default for AuditState {
+    fn default() -> Self {
+        Self {
+            terminal_error: Mutex::new(None),
+            shutdown_error: Mutex::new(None),
+            persistence_errors: AtomicU64::new(0),
+            terminal_dropped_events: AtomicU64::new(0),
+            slow_flushes: AtomicU64::new(0),
+            shutdown_failures: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AuditState {
+    fn terminal_error(&self) -> Option<AuditFailure> {
+        self.terminal_error.lock().unwrap_or_else(|error| error.into_inner()).clone()
+    }
+
+    fn record_terminal(&self, failure: AuditFailure) -> AuditFailure {
+        let mut terminal = self.terminal_error.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(existing) = terminal.as_ref() {
+            return existing.clone();
+        }
+        *terminal = Some(failure.clone());
+        failure
+    }
+
+    fn record_persistence_failure(&self, failure: AuditFailure) -> AuditFailure {
+        self.persistence_errors.fetch_add(1, Ordering::Relaxed);
+        self.record_terminal(failure)
+    }
+
+    fn sticky_failure(&self) -> Option<AuditFailure> {
+        self.shutdown_error().or_else(|| self.terminal_error())
+    }
+
+    fn shutdown_error(&self) -> Option<AuditFailure> {
+        self.shutdown_error.lock().unwrap_or_else(|error| error.into_inner()).clone()
+    }
+
+    fn record_shutdown_failure(&self, failure: AuditFailure) -> AuditFailure {
+        let mut shutdown = self.shutdown_error.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(existing) = shutdown.as_ref() {
+            return existing.clone();
+        }
+        self.shutdown_failures.fetch_add(1, Ordering::Relaxed);
+        *shutdown = Some(failure.clone());
+        failure
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -447,7 +526,7 @@ impl Drop for AuditAdmissionGuard<'_> {
 
 enum AuditCommand {
     Event(PendingAuditEvent),
-    Flush(Sender<Result<(), String>>),
+    Flush(Sender<Result<(), AuditFailure>>),
     Shutdown,
 }
 
@@ -482,6 +561,12 @@ pub struct AuditStats {
     pub payload_rejections: u64,
     /// File write or durability-flush failures observed by the worker.
     pub persistence_errors: u64,
+    /// Events discarded after the writer entered its terminal persistence-failure state.
+    pub terminal_dropped_events: u64,
+    /// Durability operations that exceeded the configured writer-side timeout.
+    pub slow_flushes: u64,
+    /// Shutdown calls that retained a failure instead of reporting success.
+    pub shutdown_failures: u64,
 }
 
 /// Error returned by audit log operations.
@@ -495,7 +580,10 @@ pub enum AuditError {
     WorkerClosing,
     WorkerDisconnected,
     WorkerSpawnError(std::io::Error),
+    PersistenceFailed(String),
+    DurabilityTimeout(String),
     FlushTimeout(String),
+    ShutdownTimeout(String),
     AlreadyInitialized,
 }
 
@@ -514,13 +602,47 @@ impl std::fmt::Display for AuditError {
             Self::WorkerClosing => write!(f, "audit worker is closing"),
             Self::WorkerDisconnected => write!(f, "audit worker is disconnected"),
             Self::WorkerSpawnError(e) => write!(f, "audit worker spawn error: {e}"),
-            Self::FlushTimeout(error) => write!(f, "audit flush failed: {error}"),
+            Self::PersistenceFailed(error) => write!(f, "audit persistence failed: {error}"),
+            Self::DurabilityTimeout(error) => write!(f, "audit durability timed out: {error}"),
+            Self::FlushTimeout(error) => write!(f, "audit flush acknowledgement failed: {error}"),
+            Self::ShutdownTimeout(error) => write!(f, "audit shutdown timed out: {error}"),
             Self::AlreadyInitialized => write!(f, "audit log is already initialized"),
         }
     }
 }
 
 impl std::error::Error for AuditError {}
+
+struct DurabilityWatchdog {
+    cancel: Sender<()>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DurabilityWatchdog {
+    fn start(state: Arc<AuditState>, timeout: Duration) -> Result<Self, std::io::Error> {
+        let (cancel, receiver) = crossbeam_channel::bounded(0);
+        let handle = std::thread::Builder::new()
+            .name("qf-audit-durability-watchdog".to_string())
+            .spawn(move || match receiver.recv_timeout(timeout) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                let error =
+                    format!("audit durability operation exceeded {} ms", timeout.as_millis());
+                log::error!("audit durability watchdog: {error}");
+                state.slow_flushes.fetch_add(1, Ordering::Relaxed);
+                state.record_persistence_failure(AuditFailure::DurabilityTimeout(error));
+            }
+        })?;
+        Ok(Self { cancel, handle: Some(handle) })
+    }
+
+    fn finish(mut self) {
+        drop(self.cancel);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 impl AuditLog {
     /// Create a new audit log at the given path.
@@ -559,9 +681,10 @@ impl AuditLog {
 
         let dropped_events = Arc::new(AtomicU64::new(0));
         let payload_rejections = Arc::new(AtomicU64::new(0));
-        let persistence_errors = Arc::new(AtomicU64::new(0));
+        let state = Arc::new(AuditState::default());
         let (sender, receiver) = crossbeam_channel::bounded(options.queue_capacity);
-        let worker_errors = persistence_errors.clone();
+        let worker_state = state.clone();
+        let worker_timeout = options.flush_timeout;
         let worker = std::thread::Builder::new()
             .name("qf-audit-writer".to_string())
             .spawn(move || {
@@ -577,9 +700,9 @@ impl AuditLog {
                         rotated_segments,
                         next_seq,
                         last_hash,
-                        terminal_error: None,
-                        persistence_errors: worker_errors,
+                        state: worker_state,
                     },
+                    worker_timeout,
                 );
             })
             .map_err(AuditError::WorkerSpawnError)?;
@@ -588,7 +711,7 @@ impl AuditLog {
             sender,
             dropped_events,
             payload_rejections,
-            persistence_errors,
+            state,
             admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
             worker: Mutex::new(Some(worker)),
             flush_timeout: options.flush_timeout,
@@ -691,6 +814,10 @@ impl AuditLog {
         context: AuditContext<'_>,
         message: &str,
     ) -> Result<(), AuditError> {
+        if let Some(failure) = self.state.terminal_error() {
+            self.state.terminal_dropped_events.fetch_add(1, Ordering::Relaxed);
+            return Err(failure.to_error());
+        }
         if let Err(error) = validate_audit_payload(source_ip, client_id, context, message) {
             self.payload_rejections.fetch_add(1, Ordering::Relaxed);
             return Err(error);
@@ -702,6 +829,10 @@ impl AuditLog {
                 return Err(error);
             }
         };
+        if let Some(failure) = self.state.terminal_error() {
+            self.state.terminal_dropped_events.fetch_add(1, Ordering::Relaxed);
+            return Err(failure.to_error());
+        }
         let event = PendingAuditEvent {
             event_type,
             severity,
@@ -728,14 +859,20 @@ impl AuditLog {
 
     /// Flush all events accepted before this bounded barrier.
     pub fn flush(&self) -> Result<(), AuditError> {
+        self.flush_internal().map_err(|failure| failure.to_error())
+    }
+
+    fn flush_internal(&self) -> Result<(), AuditFailure> {
+        if let Some(failure) = self.state.terminal_error() {
+            return Err(failure);
+        }
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
         self.sender
             .send_timeout(AuditCommand::Flush(ack_tx), self.flush_timeout)
-            .map_err(|error| AuditError::FlushTimeout(error.to_string()))?;
+            .map_err(|error| AuditFailure::FlushTimeout(error.to_string()))?;
         ack_rx
             .recv_timeout(self.flush_timeout)
-            .map_err(|error| AuditError::FlushTimeout(error.to_string()))?
-            .map_err(AuditError::FlushTimeout)
+            .map_err(|error| AuditFailure::FlushTimeout(error.to_string()))?
     }
 
     /// Return bounded-queue and persistence-failure counters.
@@ -743,7 +880,37 @@ impl AuditLog {
         AuditStats {
             dropped_events: self.dropped_events.load(Ordering::Relaxed),
             payload_rejections: self.payload_rejections.load(Ordering::Relaxed),
-            persistence_errors: self.persistence_errors.load(Ordering::Relaxed),
+            persistence_errors: self.state.persistence_errors.load(Ordering::Relaxed),
+            terminal_dropped_events: self.state.terminal_dropped_events.load(Ordering::Relaxed),
+            slow_flushes: self.state.slow_flushes.load(Ordering::Relaxed),
+            shutdown_failures: self.state.shutdown_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    fn wait_for_worker(
+        worker: &mut Option<JoinHandle<()>>,
+        timeout: Duration,
+    ) -> Result<(), AuditFailure> {
+        let Some(handle) = worker.as_ref() else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + timeout;
+        while !handle.is_finished() {
+            if Instant::now() >= deadline {
+                return Err(AuditFailure::ShutdownTimeout(format!(
+                    "audit writer did not stop within {} ms",
+                    timeout.as_millis()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let Some(handle) = worker.take() else {
+            return Ok(());
+        };
+        if handle.join().is_err() {
+            Err(AuditFailure::WorkerDisconnected)
+        } else {
+            Ok(())
         }
     }
 
@@ -753,22 +920,26 @@ impl AuditLog {
         if worker.is_none() {
             self.close_event_admission_and_wait();
             self.mark_event_admission_closed();
-            return Ok(());
+            return self.state.sticky_failure().map_or(Ok(()), |failure| Err(failure.to_error()));
         }
         self.close_event_admission_and_wait();
-        let flush_result = self.flush();
-        let _ = self.sender.send_timeout(AuditCommand::Shutdown, self.flush_timeout);
-        let mut join_result = Ok(());
-        if let Some(handle) = worker.take() {
-            if handle.join().is_err() {
-                join_result = Err(AuditError::WorkerDisconnected);
-            }
-        }
+        let flush_result = self.state.terminal_error().map_or_else(|| self.flush_internal(), Err);
+        let shutdown_result = self
+            .sender
+            .send_timeout(AuditCommand::Shutdown, self.flush_timeout)
+            .map_err(|error| AuditFailure::ShutdownTimeout(error.to_string()));
+        let join_result = Self::wait_for_worker(&mut worker, self.flush_timeout);
         self.mark_event_admission_closed();
-        match (flush_result, join_result) {
-            (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
-            (Ok(()), Ok(())) => Ok(()),
+        let failure = match flush_result {
+            Err(error) => Some(error),
+            Ok(()) => match shutdown_result {
+                Err(error) => Some(error),
+                Ok(()) => join_result.err(),
+            },
+        };
+        match failure {
+            Some(failure) => Err(self.state.record_shutdown_failure(failure).to_error()),
+            None => Ok(()),
         }
     }
 
@@ -788,34 +959,52 @@ impl Drop for AuditLog {
     }
 }
 
-fn run_audit_writer(receiver: Receiver<AuditCommand>, mut writer: AuditWriter) {
+fn run_audit_writer(
+    receiver: Receiver<AuditCommand>,
+    mut writer: AuditWriter,
+    flush_timeout: Duration,
+) {
     while let Ok(command) = receiver.recv() {
         match command {
             AuditCommand::Event(event) => writer.write_event(event),
             AuditCommand::Flush(ack) => {
-                let result = writer.flush().map_err(|error| error.to_string());
-                if result.is_err() {
-                    writer.persistence_errors.fetch_add(1, Ordering::Relaxed);
-                }
+                let result = writer.flush_with_timeout(flush_timeout);
                 let _ = ack.send(result);
             }
             AuditCommand::Shutdown => break,
         }
     }
-    if writer.flush().is_err() {
-        writer.persistence_errors.fetch_add(1, Ordering::Relaxed);
-    }
+    let _ = writer.flush_with_timeout(flush_timeout);
 }
 
 impl AuditWriter {
     fn write_event(&mut self, event: PendingAuditEvent) {
-        if self.terminal_error.is_some() {
-            self.persistence_errors.fetch_add(1, Ordering::Relaxed);
+        if self.state.terminal_error().is_some() {
+            self.state.terminal_dropped_events.fetch_add(1, Ordering::Relaxed);
             return;
         }
         if let Err(error) = self.try_write_event(event) {
-            self.persistence_errors.fetch_add(1, Ordering::Relaxed);
-            self.terminal_error = Some(error.to_string());
+            self.state.terminal_dropped_events.fetch_add(1, Ordering::Relaxed);
+            self.state.record_persistence_failure(AuditFailure::Persistence(error.to_string()));
+        }
+    }
+
+    fn flush_with_timeout(&mut self, timeout: Duration) -> Result<(), AuditFailure> {
+        if let Some(failure) = self.state.terminal_error() {
+            return Err(failure);
+        }
+        let watchdog = DurabilityWatchdog::start(self.state.clone(), timeout).map_err(|error| {
+            self.state.record_persistence_failure(AuditFailure::Persistence(format!(
+                "failed to start audit durability watchdog: {error}"
+            )))
+        })?;
+        let result = self.flush();
+        watchdog.finish();
+        match result {
+            Ok(()) => self.state.terminal_error().map_or(Ok(()), Err),
+            Err(error) => Err(self
+                .state
+                .record_persistence_failure(AuditFailure::Persistence(error.to_string()))),
         }
     }
 
@@ -861,9 +1050,6 @@ impl AuditWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         self.flush_file()?;
         self.persist_checkpoint()?;
-        if let Some(error) = &self.terminal_error {
-            return Err(std::io::Error::other(error.clone()));
-        }
         Ok(())
     }
 
@@ -1837,6 +2023,20 @@ mod tests {
         }
     }
 
+    fn pending_test_event(message: &str) -> PendingAuditEvent {
+        PendingAuditEvent {
+            event_type: AuditEventType::AdminAction,
+            severity: AuditSeverity::Critical,
+            source_ip: None,
+            client_id: None,
+            message: message.to_string(),
+            actor: AuditActor::System,
+            target: AuditTarget::Server,
+            outcome: AuditOutcome::Failed,
+            reason: Some("test_failure".to_string()),
+        }
+    }
+
     #[test]
     fn unix_timestamp_rejects_a_clock_before_the_epoch() {
         let error = unix_timestamp(UNIX_EPOCH - Duration::from_secs(1)).unwrap_err();
@@ -2335,7 +2535,7 @@ mod tests {
             sender,
             dropped_events: Arc::new(AtomicU64::new(0)),
             payload_rejections: Arc::new(AtomicU64::new(0)),
-            persistence_errors: Arc::new(AtomicU64::new(0)),
+            state: Arc::new(AuditState::default()),
             admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
             worker: Mutex::new(None),
             flush_timeout: Duration::ZERO,
@@ -2348,6 +2548,109 @@ mod tests {
         assert_eq!(log.stats().dropped_events, 1);
         drop(receiver);
         drop(log);
+    }
+
+    #[test]
+    fn durability_watchdog_marks_a_stalled_operation_terminal() {
+        let state = Arc::new(AuditState::default());
+        let watchdog = DurabilityWatchdog::start(state.clone(), Duration::from_millis(20)).unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+
+        assert!(matches!(state.terminal_error(), Some(AuditFailure::DurabilityTimeout(_))));
+        assert_eq!(state.slow_flushes.load(Ordering::Relaxed), 1);
+        assert_eq!(state.persistence_errors.load(Ordering::Relaxed), 1);
+        watchdog.finish();
+    }
+
+    #[test]
+    fn terminal_writer_failure_rejects_producers_and_counts_discarded_events() {
+        let (sender, receiver) = crossbeam_channel::bounded(8);
+        let state = Arc::new(AuditState::default());
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            run_audit_writer(
+                receiver,
+                AuditWriter {
+                    file: None,
+                    path: PathBuf::from("test-audit.ndjson"),
+                    active_bytes: 0,
+                    active_start_seq: 0,
+                    max_segment_bytes: 1024,
+                    max_segments: 2,
+                    rotated_segments: Vec::new(),
+                    next_seq: 0,
+                    last_hash: "0".repeat(64),
+                    state: worker_state,
+                },
+                Duration::from_millis(100),
+            );
+        });
+        let log = AuditLog {
+            sender,
+            dropped_events: Arc::new(AtomicU64::new(0)),
+            payload_rejections: Arc::new(AtomicU64::new(0)),
+            state,
+            admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
+            worker: Mutex::new(Some(worker)),
+            flush_timeout: Duration::from_millis(100),
+        };
+
+        log.log(AuditEventType::AdminAction, AuditSeverity::Critical, None, None, "first failure")
+            .unwrap();
+        let terminal_deadline = Instant::now() + Duration::from_secs(1);
+        while log.state.terminal_error().is_none() && Instant::now() < terminal_deadline {
+            std::thread::yield_now();
+        }
+        assert!(log.state.terminal_error().is_some());
+        assert!(matches!(
+            log.log(
+                AuditEventType::AdminAction,
+                AuditSeverity::Critical,
+                None,
+                None,
+                "after failure",
+            ),
+            Err(AuditError::PersistenceFailed(_))
+        ));
+        assert!(matches!(log.flush(), Err(AuditError::PersistenceFailed(_))));
+        let first_shutdown = log.shutdown().unwrap_err().to_string();
+        let second_shutdown = log.shutdown().unwrap_err().to_string();
+        assert_eq!(first_shutdown, second_shutdown);
+        let stats = log.stats();
+        assert_eq!(stats.persistence_errors, 1);
+        assert!(stats.terminal_dropped_events >= 2);
+    }
+
+    #[test]
+    fn terminal_writer_drains_queued_events_as_discarded() {
+        let (sender, receiver) = crossbeam_channel::bounded(4);
+        let state = Arc::new(AuditState::default());
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            run_audit_writer(
+                receiver,
+                AuditWriter {
+                    file: None,
+                    path: PathBuf::from("test-audit.ndjson"),
+                    active_bytes: 0,
+                    active_start_seq: 0,
+                    max_segment_bytes: 1024,
+                    max_segments: 2,
+                    rotated_segments: Vec::new(),
+                    next_seq: 0,
+                    last_hash: "0".repeat(64),
+                    state: worker_state,
+                },
+                Duration::from_millis(100),
+            );
+        });
+        sender.send(AuditCommand::Event(pending_test_event("failed"))).unwrap();
+        sender.send(AuditCommand::Event(pending_test_event("queued"))).unwrap();
+        sender.send(AuditCommand::Shutdown).unwrap();
+        worker.join().unwrap();
+
+        assert_eq!(state.persistence_errors.load(Ordering::Relaxed), 1);
+        assert_eq!(state.terminal_dropped_events.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -2424,7 +2727,7 @@ mod tests {
             sender,
             dropped_events: Arc::new(AtomicU64::new(0)),
             payload_rejections: Arc::new(AtomicU64::new(0)),
-            persistence_errors: Arc::new(AtomicU64::new(0)),
+            state: Arc::new(AuditState::default()),
             admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
             worker: Mutex::new(None),
             flush_timeout: Duration::ZERO,

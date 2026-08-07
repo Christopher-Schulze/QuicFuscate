@@ -1536,7 +1536,28 @@ impl Metrics {
             "# HELP quicfuscate_audit_persistence_errors_total Audit writer or durability-checkpoint failures\n",
         );
         out.push_str("# TYPE quicfuscate_audit_persistence_errors_total counter\n");
-        write_metric!("quicfuscate_audit_persistence_errors_total {}\n", audit.persistence_errors);
+        write_metric!(
+            "quicfuscate_audit_persistence_errors_total {}\n\n",
+            audit.persistence_errors
+        );
+        out.push_str(
+            "# HELP quicfuscate_audit_terminal_dropped_events_total Events discarded after terminal audit persistence failure\n",
+        );
+        out.push_str("# TYPE quicfuscate_audit_terminal_dropped_events_total counter\n");
+        write_metric!(
+            "quicfuscate_audit_terminal_dropped_events_total {}\n\n",
+            audit.terminal_dropped_events
+        );
+        out.push_str(
+            "# HELP quicfuscate_audit_slow_flushes_total Audit durability operations exceeding the configured timeout\n",
+        );
+        out.push_str("# TYPE quicfuscate_audit_slow_flushes_total counter\n");
+        write_metric!("quicfuscate_audit_slow_flushes_total {}\n\n", audit.slow_flushes);
+        out.push_str(
+            "# HELP quicfuscate_audit_shutdown_failures_total Audit shutdown calls that retained a failure\n",
+        );
+        out.push_str("# TYPE quicfuscate_audit_shutdown_failures_total counter\n");
+        write_metric!("quicfuscate_audit_shutdown_failures_total {}\n", audit.shutdown_failures);
 
         out
     }
@@ -1920,6 +1941,9 @@ mod tests {
         assert!(output.contains("quicfuscate_audit_dropped_events_total"));
         assert!(output.contains("quicfuscate_audit_payload_rejections_total"));
         assert!(output.contains("quicfuscate_audit_persistence_errors_total"));
+        assert!(output.contains("quicfuscate_audit_terminal_dropped_events_total"));
+        assert!(output.contains("quicfuscate_audit_slow_flushes_total"));
+        assert!(output.contains("quicfuscate_audit_shutdown_failures_total"));
     }
 
     #[test]
