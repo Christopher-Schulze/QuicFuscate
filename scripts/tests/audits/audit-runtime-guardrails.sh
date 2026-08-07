@@ -881,6 +881,24 @@ else
   append_item "crypto_lifecycle_contracts" "fail" "missing erasure owner, release-control test, or AES side-channel scope"
 fi
 
+# 4o) Privilege identity and libc result contracts must remain opaque and
+#     fail-closed across Unix and non-Unix compilation paths.
+if rg -n --no-messages '^type CurrentIds =' src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'fn validate_resolved_identity(' src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'fn checked_group_result_count(' src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'final_identity_boundary_rejects_forged_root_target' \
+    src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'group_result_rejects_count_larger_than_requested_capacity' \
+    src/privilege/drop.rs >/dev/null \
+  && ! rg -n --no-messages '^\s+pub (user_selector|user_name|uid|group_selector|group_name|gid):' \
+    src/privilege/drop.rs >/dev/null; then
+  pass "Privilege identity is opaque and libc count/platform contracts are wired"
+  append_item "privilege_identity_ffi_contracts" "ok" "opaque resolved identity, final revalidation, cross-target CurrentIds, and checked getgroups result"
+else
+  fail_critical "Privilege identity or cross-platform libc contract is incomplete"
+  append_item "privilege_identity_ffi_contracts" "fail" "missing opaque identity, final validation, CurrentIds type, or group-result regression"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

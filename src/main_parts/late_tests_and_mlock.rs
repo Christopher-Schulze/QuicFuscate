@@ -907,7 +907,7 @@ async fn run_server(
         audit_log_path.clone(),
         privilege_target
             .as_ref()
-            .map(|identity| (identity.uid, identity.gid)),
+            .map(|identity| (identity.uid(), identity.gid())),
         audit_config.to_audit_options(),
     )
     .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -1091,7 +1091,10 @@ async fn run_server(
     if let Some(identity) = privilege_target.as_ref() {
         info!(
             "Finalizing process privileges as {}:{} (uid={}, gid={})",
-            identity.user_name, identity.group_name, identity.uid, identity.gid
+            identity.user_name(),
+            identity.group_name(),
+            identity.uid(),
+            identity.gid()
         );
         let drop_identity = identity.clone();
         let finalization = tokio::task::spawn_blocking(move || {
@@ -1132,7 +1135,8 @@ async fn run_server(
                     },
                     &format!(
                         "Privileges irreversibly reduced to uid={} gid={}",
-                        identity.uid, identity.gid
+                        identity.uid(),
+                        identity.gid()
                     ),
                 );
                 if tun_enable {

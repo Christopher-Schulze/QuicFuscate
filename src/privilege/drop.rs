@@ -36,12 +36,44 @@ pub struct CapabilityRequirements {
 /// A user/group pair resolved through the platform account database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedIdentity {
-    pub user_selector: String,
-    pub user_name: String,
-    pub uid: u32,
-    pub group_selector: String,
-    pub group_name: String,
-    pub gid: u32,
+    user_selector: String,
+    user_name: String,
+    uid: u32,
+    group_selector: String,
+    group_name: String,
+    gid: u32,
+}
+
+impl ResolvedIdentity {
+    /// Return the exact user selector that was resolved.
+    pub fn user_selector(&self) -> &str {
+        &self.user_selector
+    }
+
+    /// Return the canonical user name returned by the account database.
+    pub fn user_name(&self) -> &str {
+        &self.user_name
+    }
+
+    /// Return the resolved user ID.
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Return the exact group selector that was resolved.
+    pub fn group_selector(&self) -> &str {
+        &self.group_selector
+    }
+
+    /// Return the canonical group name returned by the account database.
+    pub fn group_name(&self) -> &str {
+        &self.group_name
+    }
+
+    /// Return the resolved group ID.
+    pub const fn gid(&self) -> u32 {
+        self.gid
+    }
 }
 
 /// Non-failing target-account diagnostic used by the capabilities command.
@@ -112,6 +144,10 @@ pub enum DropError {
     },
     StateInspectionFailed(String),
     MissingCapabilities(String),
+    MalformedSystemCallResult {
+        operation: &'static str,
+        detail: &'static str,
+    },
     SystemCallFailed {
         operation: &'static str,
         errno: i32,
@@ -139,6 +175,9 @@ impl std::fmt::Display for DropError {
             }
             Self::MissingCapabilities(detail) => {
                 write!(f, "required startup capabilities missing: {detail}")
+            }
+            Self::MalformedSystemCallResult { operation, detail } => {
+                write!(f, "{operation} returned malformed data: {detail}")
             }
             Self::SystemCallFailed { operation, errno } => {
                 write!(f, "{operation} failed (errno {errno})")
@@ -394,11 +433,16 @@ pub fn drop_privileges_resolved(
 ) -> Result<CapabilityReport, DropError> {
     #[cfg(target_os = "linux")]
     {
+        validate_resolved_identity(identity)?;
         enable_no_new_privileges()?;
         clear_supplementary_groups()?;
+        // SAFETY: `identity` has been re-resolved and validated as non-root;
+        // libc receives plain scalar IDs and performs the kernel transition.
         call_zero("setresgid", unsafe {
             libc::setresgid(identity.gid, identity.gid, identity.gid)
         })?;
+        // SAFETY: `identity` has been re-resolved and validated as non-root;
+        // libc receives plain scalar IDs and performs the kernel transition.
         call_zero("setresuid", unsafe {
             libc::setresuid(identity.uid, identity.uid, identity.uid)
         })?;
@@ -411,7 +455,12 @@ pub fn drop_privileges_resolved(
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
+        validate_resolved_identity(identity)?;
+        // SAFETY: the final identity validator rejects zero IDs and confirms
+        // the account database mapping before these scalar libc calls.
         call_zero("setgid", unsafe { libc::setgid(identity.gid) })?;
+        // SAFETY: the final identity validator rejects zero IDs and confirms
+        // the account database mapping before this scalar libc call.
         call_zero("setuid", unsafe { libc::setuid(identity.uid) })?;
         let report = try_check_capabilities(Some(identity), CapabilityRequirements::default())?;
         if report.effective_uid != identity.uid || report.effective_gid != identity.gid {
@@ -428,6 +477,38 @@ pub fn drop_privileges_resolved(
     }
 }
 
+#[cfg(unix)]
+fn validate_resolved_identity(identity: &ResolvedIdentity) -> Result<(), DropError> {
+    if identity.uid == 0 {
+        return Err(DropError::UnsafeTarget("target UID must not be 0".to_string()));
+    }
+    if identity.gid == 0 {
+        return Err(DropError::UnsafeTarget("target GID must not be 0".to_string()));
+    }
+    if identity.user_selector.is_empty() || identity.group_selector.is_empty() {
+        return Err(DropError::InvalidIdentity("selector must not be empty".to_string()));
+    }
+    if identity.user_name.is_empty() || identity.group_name.is_empty() {
+        return Err(DropError::InvalidIdentity(
+            "canonical account name must not be empty".to_string(),
+        ));
+    }
+
+    let (user_uid, user_name) = resolve_user(&identity.user_selector)?;
+    if user_uid != identity.uid || user_name != identity.user_name {
+        return Err(DropError::InvalidIdentity(
+            "resolved user no longer matches the final target".to_string(),
+        ));
+    }
+    let (group_gid, group_name) = resolve_group(&identity.group_selector)?;
+    if group_gid != identity.gid || group_name != identity.group_name {
+        return Err(DropError::InvalidIdentity(
+            "resolved group no longer matches the final target".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve and irreversibly drop to the specified user/group.
 pub fn drop_privileges(user: &str, group: &str) -> Result<CapabilityReport, DropError> {
     let identity = resolve_identity(user, group)?;
@@ -438,6 +519,8 @@ pub fn drop_privileges(user: &str, group: &str) -> Result<CapabilityReport, Drop
 pub fn enable_no_new_privileges() -> Result<(), DropError> {
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: prctl receives only constant scalar arguments and does not
+        // dereference a caller-provided pointer for this operation.
         call_zero("prctl(PR_SET_NO_NEW_PRIVS)", unsafe {
             libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
         })
@@ -635,10 +718,15 @@ fn resolve_user(selector: &str) -> Result<(u32, String), DropError> {
         .then(|| CString::new(selector).map_err(|_| DropError::InvalidIdentity(selector.into())))
         .transpose()?;
     let name_ptr = name.as_ref().map_or(std::ptr::null(), |value| value.as_ptr());
-    let (pwd, buffer) = lookup_buffer(selector, |output, buffer, len, result| unsafe {
-        match numeric {
-            Some(uid) => libc::getpwuid_r(uid, output, buffer, len, result),
-            None => libc::getpwnam_r(name_ptr, output, buffer, len, result),
+    let (pwd, buffer) = lookup_buffer(selector, |output, buffer, len, result| {
+        // SAFETY: `lookup_buffer` owns the `MaybeUninit<passwd>`, writable
+        // scratch buffer, and result pointer for the duration of the call;
+        // `name_ptr` points into the live NUL-terminated `CString` when used.
+        unsafe {
+            match numeric {
+                Some(uid) => libc::getpwuid_r(uid, output, buffer, len, result),
+                None => libc::getpwnam_r(name_ptr, output, buffer, len, result),
+            }
         }
     })
     .map_err(|error| match error {
@@ -660,10 +748,15 @@ fn resolve_group(selector: &str) -> Result<(u32, String), DropError> {
         .then(|| CString::new(selector).map_err(|_| DropError::InvalidIdentity(selector.into())))
         .transpose()?;
     let name_ptr = name.as_ref().map_or(std::ptr::null(), |value| value.as_ptr());
-    let (grp, buffer) = lookup_buffer(selector, |output, buffer, len, result| unsafe {
-        match numeric {
-            Some(gid) => libc::getgrgid_r(gid, output, buffer, len, result),
-            None => libc::getgrnam_r(name_ptr, output, buffer, len, result),
+    let (grp, buffer) = lookup_buffer(selector, |output, buffer, len, result| {
+        // SAFETY: `lookup_buffer` owns the `MaybeUninit<group>`, writable
+        // scratch buffer, and result pointer for the duration of the call;
+        // `name_ptr` points into the live NUL-terminated `CString` when used.
+        unsafe {
+            match numeric {
+                Some(gid) => libc::getgrgid_r(gid, output, buffer, len, result),
+                None => libc::getgrnam_r(name_ptr, output, buffer, len, result),
+            }
         }
     })
     .map_err(|error| match error {
@@ -677,7 +770,6 @@ fn resolve_group(selector: &str) -> Result<(u32, String), DropError> {
     Ok((grp.gr_gid, canonical))
 }
 
-#[cfg(unix)]
 type CurrentIds = (u32, u32, Option<u32>, u32, u32, Option<u32>);
 
 #[cfg(unix)]
@@ -696,12 +788,16 @@ fn current_ids() -> Result<CurrentIds, DropError> {
         let mut real_uid = 0;
         let mut effective_uid = 0;
         let mut saved_uid = 0;
+        // SAFETY: all output pointers refer to distinct initialized local
+        // storage and libc writes exactly the three UID values it reports.
         call_zero("getresuid", unsafe {
             libc::getresuid(&mut real_uid, &mut effective_uid, &mut saved_uid)
         })?;
         let mut real_gid = 0;
         let mut effective_gid = 0;
         let mut saved_gid = 0;
+        // SAFETY: all output pointers refer to distinct initialized local
+        // storage and libc writes exactly the three GID values it reports.
         call_zero("getresgid", unsafe {
             libc::getresgid(&mut real_gid, &mut effective_gid, &mut saved_gid)
         })?;
@@ -718,9 +814,17 @@ fn current_ids() -> Result<CurrentIds, DropError> {
         target_os = "openbsd",
     )))]
     {
+        // SAFETY: these libc queries take no pointers and have no caller-owned
+        // memory preconditions.
         let real_uid = unsafe { libc::getuid() };
+        // SAFETY: this libc query takes no pointers and has no caller-owned
+        // memory preconditions.
         let effective_uid = unsafe { libc::geteuid() };
+        // SAFETY: this libc query takes no pointers and has no caller-owned
+        // memory preconditions.
         let real_gid = unsafe { libc::getgid() };
+        // SAFETY: this libc query takes no pointers and has no caller-owned
+        // memory preconditions.
         let effective_gid = unsafe { libc::getegid() };
         Ok((real_uid, effective_uid, None, real_gid, effective_gid, None))
     }
@@ -733,21 +837,46 @@ fn current_ids() -> Result<CurrentIds, DropError> {
 
 #[cfg(unix)]
 fn current_groups() -> Result<Vec<u32>, DropError> {
+    // SAFETY: a zero-sized query passes a null pointer as required by the
+    // getgroups ABI and requests only the count of supplementary groups.
     let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
     if count < 0 {
         return Err(DropError::SystemCallFailed { operation: "getgroups(size)", errno: errno() });
     }
     let mut groups = vec![0; count as usize];
     if count > 0 {
+        // SAFETY: `groups` has exactly `count` u32 slots and remains alive for
+        // the duration of the syscall; libc receives its writable base pointer.
         let actual = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
         if actual < 0 {
             return Err(DropError::SystemCallFailed { operation: "getgroups", errno: errno() });
         }
-        groups.truncate(actual as usize);
+        let actual = checked_group_result_count(count, actual)?;
+        groups.truncate(actual);
     }
     groups.sort_unstable();
     groups.dedup();
     Ok(groups)
+}
+
+#[cfg(unix)]
+fn checked_group_result_count(
+    requested: libc::c_int,
+    actual: libc::c_int,
+) -> Result<usize, DropError> {
+    if requested < 0 || actual < 0 {
+        return Err(DropError::MalformedSystemCallResult {
+            operation: "getgroups",
+            detail: "negative group count",
+        });
+    }
+    if actual > requested {
+        return Err(DropError::MalformedSystemCallResult {
+            operation: "getgroups",
+            detail: "returned count exceeds requested capacity",
+        });
+    }
+    Ok(actual as usize)
 }
 
 #[cfg(not(unix))]
@@ -813,11 +942,15 @@ fn has_capability(mask: u64, capability: u32) -> bool {
 
 #[cfg(target_os = "linux")]
 fn clear_supplementary_groups() -> Result<(), DropError> {
+    // SAFETY: the count is zero, so the null pointer is explicitly permitted
+    // by setgroups and no group memory is read.
     call_zero("setgroups", unsafe { libc::setgroups(0, std::ptr::null()) })
 }
 
 #[cfg(target_os = "linux")]
 fn clear_ambient_capabilities() -> Result<(), DropError> {
+    // SAFETY: prctl receives constant scalar arguments for the ambient-clear
+    // operation and does not dereference a caller-provided pointer.
     call_zero("prctl(PR_CAP_AMBIENT_CLEAR_ALL)", unsafe {
         libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
     })
@@ -844,6 +977,8 @@ fn clear_process_capabilities() -> Result<(), DropError> {
     const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
     let mut header = LinuxCapabilityHeader { version: LINUX_CAPABILITY_VERSION_3, pid: 0 };
     let data = [LinuxCapabilityData::default(); 2];
+    // SAFETY: the header and two-word data array are repr(C), live for the
+    // syscall, and match the Linux capability v3 ABI expected by capset.
     let result = unsafe {
         libc::syscall(libc::SYS_capset, &mut header as *mut LinuxCapabilityHeader, data.as_ptr())
     };
@@ -981,6 +1116,8 @@ fn verify_linux_thread_status(
 
 #[cfg(target_os = "linux")]
 fn verify_root_cannot_be_regained() -> Result<(), DropError> {
+    // SAFETY: setresuid receives scalar IDs only; this isolated probe uses the
+    // call specifically to verify that the completed drop is irreversible.
     let result = unsafe { libc::setresuid(0, 0, 0) };
     if result == 0 {
         return Err(DropError::VerificationFailed(
@@ -1052,6 +1189,9 @@ mod tests {
                     }
                     2 => {
                         assert_eq!(len, 32 * 1024);
+                        // SAFETY: the fixture writes the initialized test
+                        // value through the exact output pointer supplied by
+                        // `lookup_buffer` and returns that same pointer.
                         unsafe {
                             output.write(7);
                             *result = output;
@@ -1085,6 +1225,9 @@ mod tests {
         let mut foreign = std::mem::MaybeUninit::<u32>::new(11);
         let foreign_pointer = foreign.as_mut_ptr();
         let result = lookup_buffer::<u32>("pointer-mismatch", |_output, _buffer, _len, result| {
+            // SAFETY: this fixture intentionally returns a foreign pointer to
+            // prove that the production identity check rejects it before any
+            // uninitialized output is read.
             unsafe {
                 *result = foreign_pointer;
             }
@@ -1095,6 +1238,33 @@ mod tests {
             result,
             Err(DropError::AccountLookupFailed { errno, .. }) if errno == libc::EINVAL
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_identity_boundary_rejects_forged_root_target() {
+        let identity = ResolvedIdentity {
+            user_selector: "0".to_string(),
+            user_name: "root".to_string(),
+            uid: 0,
+            group_selector: "0".to_string(),
+            group_name: "root".to_string(),
+            gid: 0,
+        };
+
+        assert!(matches!(validate_resolved_identity(&identity), Err(DropError::UnsafeTarget(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_result_rejects_count_larger_than_requested_capacity() {
+        assert!(matches!(
+            checked_group_result_count(2, 3),
+            Err(DropError::MalformedSystemCallResult { operation, detail })
+                if operation == "getgroups"
+                    && detail == "returned count exceeds requested capacity"
+        ));
+        assert_eq!(checked_group_result_count(2, 2).unwrap(), 2);
     }
 
     #[cfg(unix)]

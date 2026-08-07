@@ -79,8 +79,8 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
         .or_else(|_| resolve_identity("nobody", "nobody"))
         .expect("Linux test host must provide a nobody identity");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_qf-privilege-probe"))
-        .arg(identity.uid.to_string())
-        .arg(identity.gid.to_string())
+        .arg(identity.uid().to_string())
+        .arg(identity.gid().to_string())
         .output()
         .expect("launch isolated privilege-drop probe");
     assert!(
@@ -91,12 +91,12 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
 
     let proof: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("parse privilege-drop proof");
-    assert_eq!(proof["real_uid"], identity.uid);
-    assert_eq!(proof["effective_uid"], identity.uid);
-    assert_eq!(proof["saved_uid"], identity.uid);
-    assert_eq!(proof["real_gid"], identity.gid);
-    assert_eq!(proof["effective_gid"], identity.gid);
-    assert_eq!(proof["saved_gid"], identity.gid);
+    assert_eq!(proof["real_uid"], identity.uid());
+    assert_eq!(proof["effective_uid"], identity.uid());
+    assert_eq!(proof["saved_uid"], identity.uid());
+    assert_eq!(proof["real_gid"], identity.gid());
+    assert_eq!(proof["effective_gid"], identity.gid());
+    assert_eq!(proof["saved_gid"], identity.gid());
     assert_eq!(proof["supplementary_groups"], serde_json::json!([]));
     assert_eq!(proof["effective_capabilities"], 0);
     assert_eq!(proof["permitted_capabilities"], 0);
@@ -105,8 +105,8 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
     assert_eq!(proof["no_new_privileges"], true);
 
     let tokio_output = std::process::Command::new(env!("CARGO_BIN_EXE_qf-privilege-probe"))
-        .arg(identity.uid.to_string())
-        .arg(identity.gid.to_string())
+        .arg(identity.uid().to_string())
+        .arg(identity.gid().to_string())
         .args(["--tokio-threads", "8"])
         .output()
         .expect("launch Tokio privilege-drop probe");
@@ -117,8 +117,8 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
     );
     let tokio_proof: serde_json::Value =
         serde_json::from_slice(&tokio_output.stdout).expect("parse Tokio privilege-drop proof");
-    assert_eq!(tokio_proof["effective_uid"], identity.uid);
-    assert_eq!(tokio_proof["effective_gid"], identity.gid);
+    assert_eq!(tokio_proof["effective_uid"], identity.uid());
+    assert_eq!(tokio_proof["effective_gid"], identity.gid());
     assert_eq!(tokio_proof["effective_capabilities"], 0);
     assert_eq!(tokio_proof["no_new_privileges"], true);
 
