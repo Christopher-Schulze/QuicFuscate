@@ -1349,6 +1349,31 @@ impl Recovery {
     /// Discards a packet number space (RFC 9002 §6.2.2 key-discard rule): the
     /// space's packets leave bytes-in-flight without a loss response, and all
     /// loss/PTO timers for the space are reset.
+    /// Terminal discard of every packet-number space.
+    ///
+    /// One owner retires all recovery state at once: sent maps, retained byte accounting,
+    /// time-threshold timers, PTO bases, largest-acked marks, PTO backoff, and the congestion
+    /// controller's in-flight accounting. After this call the recovery owner holds nothing that
+    /// could produce a later loss callback, probe, or retransmission.
+    ///
+    /// Idempotent: a second call finds every space already empty and changes nothing.
+    ///
+    /// Used by terminal connection timeout, where the connection previously zeroed its own
+    /// `bytes_in_flight` while the three recovery spaces kept their packets and timers, so
+    /// transport and recovery state could disagree after the connection reported itself closed.
+    pub fn discard_all_spaces(&mut self) {
+        for index in 0..self.spaces.len() {
+            let space = match index {
+                0 => PacketSpace::Initial,
+                1 => PacketSpace::Handshake,
+                _ => PacketSpace::Application,
+            };
+            self.discard_space(space);
+        }
+        // PTO backoff belongs to the retired state: nothing is in flight to probe for.
+        self.pto_count = 0;
+    }
+
     pub fn discard_space(&mut self, space: PacketSpace) {
         let discarded_in_flight: usize = {
             let sp = &mut self.spaces[space.index()];
@@ -1845,6 +1870,70 @@ mod tests {
             "retained bytes {accounted} must stay within the per-space budget"
         );
         assert_eq!(accounted, retained * 1200, "byte accounting must match the retained set");
+    }
+
+    /// Terminal discard must retire every space at once and stay idempotent.
+    #[test]
+    fn discard_all_spaces_retires_every_packet_number_space() {
+        let mut rec = Recovery::new(120_000, 1200);
+        let t0 = Instant::now();
+        for space in [PacketSpace::Initial, PacketSpace::Handshake, PacketSpace::Application] {
+            seed_space(&mut rec, space, 4, t0);
+        }
+        rec.update_rtt(Duration::from_millis(25));
+        // Arm a time-threshold timer so there is something to cancel.
+        let _ = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(3, 4)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(5),
+        );
+        rec.pto_count = 3;
+
+        assert!(rec.bytes_in_flight > 0, "the fixture must have packets in flight");
+
+        rec.discard_all_spaces();
+
+        for space in [PacketSpace::Initial, PacketSpace::Handshake, PacketSpace::Application] {
+            let sp = &rec.spaces[space.index()];
+            assert!(sp.sent.is_empty(), "{space:?} must retain no packets");
+            assert_eq!(sp.retained_bytes, 0, "{space:?} byte accounting must be retired");
+            assert!(sp.loss_time.is_none(), "{space:?} time-threshold timer must be cancelled");
+            assert!(sp.time_of_last_ack_eliciting.is_none(), "{space:?} PTO base must be retired");
+            assert!(sp.largest_acked.is_none(), "{space:?} largest-acked mark must be retired");
+        }
+        assert_eq!(rec.pto_count, 0, "PTO backoff must not survive a terminal discard");
+        assert_eq!(rec.bytes_in_flight, 0, "in-flight accounting must be retired");
+
+        // Idempotent: a second discard finds nothing and changes nothing.
+        rec.discard_all_spaces();
+        assert_eq!(rec.bytes_in_flight, 0);
+        assert_eq!(rec.pto_count, 0);
+    }
+
+    /// Nothing may remain that could produce a later loss callback or probe.
+    #[test]
+    fn nothing_is_declared_lost_after_a_terminal_discard() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(25));
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 12, t0);
+
+        rec.discard_all_spaces();
+
+        // An ACK arriving after the discard cannot resurrect losses for retired packets.
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(11, 12)],
+            Duration::ZERO,
+            true,
+            false,
+            t0 + Duration::from_millis(500),
+        );
+        assert!(outcome.lost.is_empty(), "a retired space must not declare losses");
+        assert!(outcome.newly_acked.is_empty(), "a retired space has nothing left to acknowledge");
     }
 
     #[test]

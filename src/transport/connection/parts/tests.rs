@@ -545,6 +545,34 @@ mod tests {
         assert_eq!(c.error(), Some(&provider_error));
     }
 
+    /// Terminal timeout must retire recovery state, not only the connection's own counters.
+    #[test]
+    fn on_timeout_retires_recovery_state_and_is_idempotent() {
+        let mut conn = make_conn();
+        conn.bytes_in_flight = 4800;
+
+        conn.on_timeout();
+
+        assert!(conn.is_closed, "terminal timeout closes the connection");
+        assert!(conn.is_draining);
+        assert_eq!(conn.bytes_in_flight, 0);
+        assert_eq!(
+            conn.recovery.bytes_in_flight, 0,
+            "recovery in-flight accounting must be retired with the connection"
+        );
+        assert_eq!(conn.recovery.pto_count, 0, "no PTO backoff survives a terminal timeout");
+
+        // A repeated timeout must not double-count or resurrect state.
+        let lost_before = conn.stats.lost;
+        conn.on_timeout();
+        assert_eq!(conn.bytes_in_flight, 0);
+        assert_eq!(conn.recovery.bytes_in_flight, 0);
+        assert_eq!(
+            conn.stats.lost, lost_before,
+            "a second terminal timeout must not count another in-flight loss"
+        );
+    }
+
     #[test]
     fn on_timeout_clears_bytes_in_flight() {
         let mut c = make_conn();

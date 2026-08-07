@@ -1128,16 +1128,21 @@ impl Connection {
         // The previous code added 100ms on every timeout, causing monotonic RTT inflation
         // (0→385ms observed on loopback). The PTO backoff is handled by the loss detection
         // timer, not by inflating self.rtt.
-        // Treat timeout as loss of in-flight bytes (coarse approximation)
+        // Terminal timeout retires recovery through its own owner. Previously this path called
+        // the aggregate loss hook and zeroed the connection's `bytes_in_flight` while the three
+        // recovery spaces kept their sent maps, time-threshold timers, and PTO state, so a later
+        // poll could observe packets and timers belonging to a connection that already reported
+        // itself closed.
         if self.bytes_in_flight > 0 {
             let lost = self.bytes_in_flight;
             let now = self.clock.now();
             self.recovery.on_loss(lost, now);
             self.stats.lost = self.stats.lost.saturating_add(1);
             self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(lost as u64);
-            self.cwnd = self.recovery.cwnd;
-            self.bytes_in_flight = 0;
         }
+        self.recovery.discard_all_spaces();
+        self.cwnd = self.recovery.cwnd;
+        self.bytes_in_flight = 0;
         // Update bytes in flight duration (mock)
         if let Some(start) = self.bytes_in_flight_started.take() {
             self.stats.bytes_in_flight_duration = self
