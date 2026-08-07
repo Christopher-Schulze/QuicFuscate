@@ -53,7 +53,8 @@ enum SimdLevel {
     None,
     Sse2,
     Avx2,
-    Avx512,
+    Avx512Vbmi2,
+    Avx512Vbmi,
     Sve2,
     Neon,
 }

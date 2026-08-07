@@ -292,6 +292,8 @@ impl FecDecoder8 {
 fn gf16_mul_slice(coeff: u16, src: &[u16], dst: &mut [u16]) {
     use crate::optimize;
     let len = core::cmp::min(src.len(), dst.len());
+    let src = &src[..len];
+    let dst = &mut dst[..len];
     optimize::dispatch_bitslice(|policy| {
         #[cfg(target_arch = "x86_64")]
         {

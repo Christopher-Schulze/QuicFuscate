@@ -87,29 +87,60 @@ fn gf16_mul_scalar_slice_padded(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
 #[inline(always)]
 fn gf16_vector_threshold_words() -> usize {
     let features = FeatureDetector::instance().features_full();
+    gf16_vector_threshold_words_for_features(&features)
+}
+
+#[inline(always)]
+fn fec_simd_level_for_features(features: &crate::optimize::CpuFeatures) -> SimdLevel {
     let matrix = features.simd_dispatch_matrix();
 
     if matrix.avx512_vbmi2 {
-        GF16_VBMI2_MIN_WORDS
+        SimdLevel::Avx512Vbmi2
     } else if matrix.avx512_vbmi {
-        GF16_AVX512_MIN_WORDS
+        SimdLevel::Avx512Vbmi
     } else if matrix.avx2 {
-        GF16_AVX2_MIN_WORDS
+        SimdLevel::Avx2
     } else if features.sse2 {
-        GF16_SSE2_MIN_WORDS
+        SimdLevel::Sse2
     } else if matrix.sve2 {
-        GF16_SVE2_MIN_WORDS
+        SimdLevel::Sve2
     } else if matrix.neon {
-        GF16_NEON_MIN_WORDS
+        SimdLevel::Neon
     } else {
-        usize::MAX
+        SimdLevel::None
     }
+}
+
+#[inline(always)]
+fn gf16_vector_threshold_words_for_features(
+    features: &crate::optimize::CpuFeatures,
+) -> usize {
+    match fec_simd_level_for_features(features) {
+        SimdLevel::Avx512Vbmi2 => GF16_VBMI2_MIN_WORDS,
+        SimdLevel::Avx512Vbmi => GF16_AVX512_MIN_WORDS,
+        SimdLevel::Avx2 => GF16_AVX2_MIN_WORDS,
+        SimdLevel::Sse2 => GF16_SSE2_MIN_WORDS,
+        SimdLevel::Sve2 => GF16_SVE2_MIN_WORDS,
+        SimdLevel::Neon => GF16_NEON_MIN_WORDS,
+        SimdLevel::None => usize::MAX,
+    }
+}
+
+#[inline(always)]
+fn bounded_u16_len(src: &[u16], dst: &[u16], requested: usize) -> usize {
+    requested.min(src.len()).min(dst.len())
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vbmi2")]
+/// # Safety
+///
+/// The caller must prove AVX512F, AVX512BW, and AVX512VBMI2 support. `src` and
+/// `dst` must remain valid for the duration of the call; `len` is bounded to
+/// both slice lengths before any vector access.
 unsafe fn gf16_mul_slice_vbmi2(coeff: u16, src: &[u16], dst: &mut [u16], len: usize) {
     use std::arch::x86_64::*;
+    let len = bounded_u16_len(src, dst, len);
 
     if len == 0 {
         return;
@@ -194,27 +225,47 @@ unsafe fn gf16_mul_slice_vbmi2(coeff: u16, src: &[u16], dst: &mut [u16], len: us
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vbmi")]
+/// # Safety
+///
+/// The caller must prove AVX512F and AVX512VBMI support. `src` and `dst` must
+/// remain valid for the duration of the call; `len` is bounded to both slice
+/// lengths before the loop accesses either slice.
 unsafe fn gf16_mul_slice_avx512(coeff: u16, src: &[u16], dst: &mut [u16], len: usize) {
+    let len = bounded_u16_len(src, dst, len);
     let mut i = 0usize;
     while i < len {
         dst[i] ^= gf_tables::gf16_mul(coeff, src[i]);
         i += 1;
     }
+    crate::telemetry::FEC_AVX512_OPS.inc();
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must prove AVX2 support. `src` and `dst` must remain valid for
+/// the duration of the call; `len` is bounded to both slice lengths before
+/// the loop accesses either slice.
 unsafe fn gf16_mul_slice_avx2(coeff: u16, src: &[u16], dst: &mut [u16], len: usize) {
+    let len = bounded_u16_len(src, dst, len);
     let mut i = 0usize;
     while i < len {
         dst[i] ^= gf_tables::gf16_mul(coeff, src[i]);
         i += 1;
     }
+    crate::telemetry::FEC_AVX2_OPS.inc();
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// The caller must prove SSE2 support. `src` and `dst` must remain valid for
+/// the duration of the call; `len` is bounded to both slice lengths before
+/// the loop accesses either slice.
 unsafe fn gf16_mul_slice_sse2(coeff: u16, src: &[u16], dst: &mut [u16], len: usize) {
+    let len = bounded_u16_len(src, dst, len);
     let mut i = 0usize;
     while i < len {
         dst[i] ^= gf_tables::gf16_mul(coeff, src[i]);
@@ -224,8 +275,14 @@ unsafe fn gf16_mul_slice_sse2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must prove AArch64 NEON support. `src` and `dst` must remain
+/// valid for the duration of the call; `len` is bounded to both slice lengths
+/// before vector loads, stores, or scalar tail accesses.
 unsafe fn gf16_mul_slice_neon(coeff: u16, src: &[u16], dst: &mut [u16], len: usize) {
     use std::arch::aarch64::*;
+    let len = bounded_u16_len(src, dst, len);
     let one = vdupq_n_u16(1);
     let poly = vdupq_n_u16(0x100b);
     let mut i = 0;
@@ -253,10 +310,18 @@ unsafe fn gf16_mul_slice_neon(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
         dst[i] ^= gf_tables::gf16_mul(coeff, src[i]);
         i += 1;
     }
+    crate::telemetry::FEC_NEON_OPS.inc();
 }
 
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// On builds that include the SVE2 block, the caller must prove AArch64 SVE2
+/// support. `src` and `dst` must remain valid for the duration of the call;
+/// `len` is bounded to both slice lengths before predicated accesses. Builds
+/// without SVE2 compile to the NEON fallback, which has its own NEON contract.
 unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usize) {
+    let len = bounded_u16_len(src, dst, len);
     #[cfg(target_feature = "sve2")]
     {
         use std::arch::aarch64::*;
@@ -298,6 +363,11 @@ unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "pclmulqdq")]
+/// # Safety
+///
+/// The caller must prove PCLMULQDQ support. The scalar inputs are valid for
+/// the duration of the call and the target-feature intrinsic is not executed
+/// unless the shared FEC dispatch policy has selected this backend.
 unsafe fn gf16_mul_pclmul(a: u16, b: u16) -> u16 {
     use std::arch::x86_64::*;
     let a_vec = _mm_cvtsi32_si128(a as i32);
@@ -845,26 +915,18 @@ impl AdaptiveFec {
         // Centralized detection via optimize::FeatureDetector
         let det = crate::optimize::FeatureDetector::instance();
         let features = det.features_full();
-        let matrix = features.simd_dispatch_matrix();
-        self.simd_level = if matrix.avx512_vbmi {
-            SimdLevel::Avx512
-        } else if matrix.avx2 {
-            SimdLevel::Avx2
-        } else if features.sse2 {
-            SimdLevel::Sse2
-        } else if matrix.sve2 {
-            SimdLevel::Sve2
-        } else if matrix.neon {
-            SimdLevel::Neon
-        } else {
-            SimdLevel::None
-        };
+        self.simd_level = fec_simd_level_for_features(&features);
         self.simd_enabled = self.simd_level != SimdLevel::None;
         crate::telemetry::SIMD_ACTIVE
             .store(self.simd_enabled as u64, std::sync::atomic::Ordering::Relaxed);
 
         match self.simd_level {
-            SimdLevel::Avx512 => log::info!("FEC: AVX-512 SIMD acceleration enabled"),
+            SimdLevel::Avx512Vbmi2 => {
+                log::info!("FEC: AVX-512 VBMI2 SIMD acceleration enabled")
+            }
+            SimdLevel::Avx512Vbmi => {
+                log::info!("FEC: AVX-512 VBMI SIMD acceleration enabled")
+            }
             SimdLevel::Avx2 => log::info!("FEC: AVX2 SIMD acceleration enabled"),
             SimdLevel::Sse2 => log::info!("FEC: SSE2 SIMD acceleration enabled"),
             SimdLevel::Sve2 => log::info!("FEC: SVE2 SIMD acceleration enabled"),
@@ -874,7 +936,7 @@ impl AdaptiveFec {
         // Telemetry: report SIMD level
         let lvl = self.simd_level();
         match lvl {
-            "AVX-512" => crate::telemetry::SIMD_USAGE_AVX512
+            "AVX-512 VBMI2" | "AVX-512 VBMI" => crate::telemetry::SIMD_USAGE_AVX512
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             "AVX2" => {
                 crate::telemetry::SIMD_USAGE_AVX2.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -899,7 +961,8 @@ impl AdaptiveFec {
             SimdLevel::None => "scalar",
             SimdLevel::Sse2 => "SSE2",
             SimdLevel::Avx2 => "AVX2",
-            SimdLevel::Avx512 => "AVX-512",
+            SimdLevel::Avx512Vbmi2 => "AVX-512 VBMI2",
+            SimdLevel::Avx512Vbmi => "AVX-512 VBMI",
             SimdLevel::Sve2 => "SVE2",
             SimdLevel::Neon => "NEON",
         }

@@ -1,9 +1,12 @@
 use super::test_support::*;
 use super::{
-    continuous_fec_target, low_cost_block_uses_gf4, mode_for_target, target_from_mode, target_rank,
-    AdaptiveFec, CpuProfile, Decoder8, FecAmbientInputs, FecBackendFamily, FecComputeProfile,
-    FecConfig, FecMode, FecObserverPlatformHints, FecObserverProfilePolicy, FecPacket,
-    FecRuntimePlan, FecRuntimePolicy, FecTransportObserver, SimdLevel, TransportProfile,
+    continuous_fec_target, fec_simd_level_for_features, gf16_mul_slice,
+    gf16_vector_threshold_words_for_features, low_cost_block_uses_gf4, mode_for_target,
+    target_from_mode, target_rank, AdaptiveFec, CpuProfile, Decoder8, FecAmbientInputs,
+    FecBackendFamily, FecComputeProfile, FecConfig, FecMode, FecObserverPlatformHints,
+    FecObserverProfilePolicy, FecPacket, FecRuntimePlan, FecRuntimePolicy, FecTransportObserver,
+    SimdLevel, TransportProfile, GF16_AVX2_MIN_WORDS, GF16_AVX512_MIN_WORDS, GF16_NEON_MIN_WORDS,
+    GF16_SSE2_MIN_WORDS, GF16_SVE2_MIN_WORDS, GF16_VBMI2_MIN_WORDS,
 };
 use crate::{fec::gf_tables, optimize::telemetry};
 use std::collections::{HashMap, VecDeque};
@@ -745,44 +748,87 @@ fn test_enable_simd_acceleration_updates_telemetry() {
 }
 
 #[test]
-fn test_simd_dispatch_selection_covers_scalar_avx_neon_sve() {
-    fn select_test_simd_level<F>(has_feature: F) -> SimdLevel
-    where
-        F: Fn(crate::optimize::CpuFeature) -> bool,
-    {
-        if has_feature(crate::optimize::CpuFeature::AVX512F)
-            && has_feature(crate::optimize::CpuFeature::AVX512VBMI)
-        {
-            SimdLevel::Avx512
-        } else if has_feature(crate::optimize::CpuFeature::AVX2) {
-            SimdLevel::Avx2
-        } else if has_feature(crate::optimize::CpuFeature::SSE2) {
-            SimdLevel::Sse2
-        } else if has_feature(crate::optimize::CpuFeature::SVE2) {
-            SimdLevel::Sve2
-        } else if has_feature(crate::optimize::CpuFeature::NEON) {
-            SimdLevel::Neon
-        } else {
-            SimdLevel::None
+fn test_simd_dispatch_selection_matches_feature_matrix_and_thresholds() {
+    use crate::optimize::CpuFeatures;
+
+    let mut vbmi2 =
+        CpuFeatures { avx512f: true, avx512bw: true, avx512vbmi2: true, ..CpuFeatures::default() };
+    assert_eq!(fec_simd_level_for_features(&vbmi2), SimdLevel::Avx512Vbmi2);
+    assert_eq!(gf16_vector_threshold_words_for_features(&vbmi2), GF16_VBMI2_MIN_WORDS);
+
+    vbmi2.avx512vbmi2 = false;
+    vbmi2.avx512vbmi = true;
+    assert_eq!(fec_simd_level_for_features(&vbmi2), SimdLevel::Avx512Vbmi);
+    assert_eq!(gf16_vector_threshold_words_for_features(&vbmi2), GF16_AVX512_MIN_WORDS);
+
+    let avx2 = CpuFeatures { avx2: true, ..CpuFeatures::default() };
+    assert_eq!(fec_simd_level_for_features(&avx2), SimdLevel::Avx2);
+    assert_eq!(gf16_vector_threshold_words_for_features(&avx2), GF16_AVX2_MIN_WORDS);
+
+    let sse2 = CpuFeatures { sse2: true, ..CpuFeatures::default() };
+    assert_eq!(fec_simd_level_for_features(&sse2), SimdLevel::Sse2);
+    assert_eq!(gf16_vector_threshold_words_for_features(&sse2), GF16_SSE2_MIN_WORDS);
+
+    let sve2 = CpuFeatures { sve2: true, ..CpuFeatures::default() };
+    assert_eq!(fec_simd_level_for_features(&sve2), SimdLevel::Sve2);
+    assert_eq!(gf16_vector_threshold_words_for_features(&sve2), GF16_SVE2_MIN_WORDS);
+
+    let neon = CpuFeatures { neon: true, ..CpuFeatures::default() };
+    assert_eq!(fec_simd_level_for_features(&neon), SimdLevel::Neon);
+    assert_eq!(gf16_vector_threshold_words_for_features(&neon), GF16_NEON_MIN_WORDS);
+
+    let incomplete_vbmi2 =
+        CpuFeatures { avx512f: true, avx512vbmi2: true, ..CpuFeatures::default() };
+    assert_eq!(
+        incomplete_vbmi2.simd_dispatch_matrix().avx512_vbmi2,
+        false,
+        "VBMI2 must require AVX512F, AVX512BW, and AVX512VBMI2"
+    );
+    assert_eq!(fec_simd_level_for_features(&incomplete_vbmi2), SimdLevel::None);
+    assert_eq!(gf16_vector_threshold_words_for_features(&incomplete_vbmi2), usize::MAX);
+
+    let scalar = CpuFeatures::default();
+    assert_eq!(fec_simd_level_for_features(&scalar), SimdLevel::None);
+    assert_eq!(gf16_vector_threshold_words_for_features(&scalar), usize::MAX);
+}
+
+#[test]
+fn test_gf16_slice_dispatch_clamps_unequal_lengths_and_tails() {
+    let coefficient = 0x7a31;
+    let gf16_mul_reference = |a: u16, b: u16| {
+        let mut multiplicand = a;
+        let mut factor = b;
+        let mut result = 0u16;
+        while factor != 0 {
+            if factor & 1 != 0 {
+                result ^= multiplicand;
+            }
+            factor >>= 1;
+            let carry = multiplicand & 0x8000 != 0;
+            multiplicand <<= 1;
+            if carry {
+                multiplicand ^= 0x100b;
+            }
         }
+        result
+    };
+    for source_len in [0usize, 1, 2, 15, 16, 23, 24, 31, 32, 63, 64, 95, 96] {
+        let destination_len = source_len.saturating_sub(3).max(1);
+        let source: Vec<u16> =
+            (0..source_len).map(|index| (index as u16).wrapping_mul(0x219d) ^ 0xa55a).collect();
+        let initial: Vec<u16> = (0..destination_len)
+            .map(|index| (index as u16).wrapping_mul(0x1041) ^ 0x5aa5)
+            .collect();
+        let mut actual = initial.clone();
+        let mut expected = initial;
+        let len = source.len().min(expected.len());
+        for index in 0..len {
+            expected[index] ^= gf16_mul_reference(coefficient, source[index]);
+        }
+
+        gf16_mul_slice(coefficient, &source, &mut actual);
+        assert_eq!(actual, expected, "GF16 dispatch mismatch at source_len={source_len}");
     }
-
-    let avx = select_test_simd_level(|f| {
-        matches!(f, crate::optimize::CpuFeature::AVX512F | crate::optimize::CpuFeature::AVX512VBMI)
-    });
-    assert_eq!(avx, SimdLevel::Avx512);
-
-    let avx2 = select_test_simd_level(|f| matches!(f, crate::optimize::CpuFeature::AVX2));
-    assert_eq!(avx2, SimdLevel::Avx2);
-
-    let sve2 = select_test_simd_level(|f| matches!(f, crate::optimize::CpuFeature::SVE2));
-    assert_eq!(sve2, SimdLevel::Sve2);
-
-    let neon = select_test_simd_level(|f| matches!(f, crate::optimize::CpuFeature::NEON));
-    assert_eq!(neon, SimdLevel::Neon);
-
-    let scalar = select_test_simd_level(|_| false);
-    assert_eq!(scalar, SimdLevel::None);
 }
 
 #[test]

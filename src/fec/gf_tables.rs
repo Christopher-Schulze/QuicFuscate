@@ -99,13 +99,18 @@ pub(crate) fn gf_inv8(x: u8) -> u8 {
 // Removed gf_mul_slice_sve2 (not used).
 
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// On builds that include the SVE2 block, the caller must prove AArch64 SVE2
+/// support. `src` and `out_xor` must remain valid for the duration of the call;
+/// all accesses use their shared minimum length. Builds without SVE2 use the
+/// NEON fallback, which has its own NEON contract.
 unsafe fn gf_mul_scalar_slice_sve2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     #[cfg(target_feature = "sve2")]
     {
         use std::arch::aarch64::*;
 
-        debug_assert_eq!(src.len(), out_xor.len());
-        let len = src.len();
+        let len = src.len().min(out_xor.len());
         if len == 0 {
             return;
         }
@@ -246,13 +251,14 @@ pub(crate) fn gf_mul_scalar_slice(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if policy.has_feature(optimize::CpuFeature::SVE2) {
+        let matrix = policy.features_full().simd_dispatch_matrix();
+        if matrix.sve2 {
             unsafe {
                 gf_mul_scalar_slice_sve2(coeff, &src[..len], &mut out_xor[..len]);
             }
             return;
         }
-        if policy.has_feature(optimize::CpuFeature::NEON) {
+        if matrix.neon {
             unsafe {
                 gf_mul_scalar_slice_neon(coeff, &src[..len], &mut out_xor[..len]);
             }
@@ -337,9 +343,14 @@ pub(crate) fn gf_mul_scalar_slice(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 // --- SIMD scalar x vector mul-add (GF(2^8)) specialized paths ---
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must prove AVX2 support. `src` and `out_xor` must remain valid
+/// for the duration of the call; all accesses are bounded by their shared
+/// minimum length.
 unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     use std::arch::x86_64::*;
-    debug_assert_eq!(src.len(), out_xor.len());
+    let len = src.len().min(out_xor.len());
     // Precompute 16-entry nibble tables
     let mut t0 = [0u8; 16];
     let mut t1 = [0u8; 16];
@@ -354,11 +365,11 @@ unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     let mask0f = _mm256_set1_epi8(0x0f as i8);
 
     // Heuristic prefetch distance based on total length
-    let pf_dist: usize = if src.len() >= 4096 {
+    let pf_dist: usize = if len >= 4096 {
         256
-    } else if src.len() >= 1024 {
+    } else if len >= 1024 {
         192
-    } else if src.len() >= 512 {
+    } else if len >= 512 {
         128
     } else {
         0
@@ -366,10 +377,10 @@ unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 
     let mut i = 0usize;
     // Unroll by 2: process 64 bytes per iteration when possible
-    while i + 64 <= src.len() {
+    while i + 64 <= len {
         if pf_dist != 0 {
             let pf_i = i + pf_dist;
-            if pf_i < src.len() {
+            if pf_i < len {
                 prefetch_fec_slice(src.as_ptr().add(pf_i));
                 prefetch_fec_slice(out_xor.as_ptr().add(pf_i));
             }
@@ -398,10 +409,10 @@ unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 
         i += 64;
     }
-    while i + 32 <= src.len() {
+    while i + 32 <= len {
         if pf_dist != 0 {
             let pf_i = i + pf_dist;
-            if pf_i < src.len() {
+            if pf_i < len {
                 prefetch_fec_slice(src.as_ptr().add(pf_i));
                 prefetch_fec_slice(out_xor.as_ptr().add(pf_i));
             }
@@ -417,7 +428,7 @@ unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
         _mm256_storeu_si256(out_xor.as_mut_ptr().add(i) as *mut __m256i, y2);
         i += 32;
     }
-    while i < src.len() {
+    while i < len {
         let v = src[i];
         let lo = (v & 0x0f) as usize;
         let hi = (v >> 4) as usize;
@@ -430,9 +441,14 @@ unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must prove AArch64 NEON support. `src` and `out_xor` must remain
+/// valid for the duration of the call; all accesses are bounded by their
+/// shared minimum length.
 unsafe fn gf_mul_scalar_slice_neon(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     use std::arch::aarch64::*;
-    debug_assert_eq!(src.len(), out_xor.len());
+    let len = src.len().min(out_xor.len());
     // Precompute 16-entry nibble tables
     let mut t0_arr = [0u8; 16];
     let mut t1_arr = [0u8; 16];
@@ -445,11 +461,11 @@ unsafe fn gf_mul_scalar_slice_neon(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     let mask0f = vdupq_n_u8(0x0f);
 
     // Heuristic prefetch distance for NEON
-    let pf_dist: usize = if src.len() >= 4096 {
+    let pf_dist: usize = if len >= 4096 {
         192
-    } else if src.len() >= 1024 {
+    } else if len >= 1024 {
         160
-    } else if src.len() >= 512 {
+    } else if len >= 512 {
         128
     } else {
         0
@@ -457,10 +473,10 @@ unsafe fn gf_mul_scalar_slice_neon(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 
     let mut i = 0usize;
     // Unroll by 2: 32 bytes per iteration
-    while i + 32 <= src.len() {
+    while i + 32 <= len {
         if pf_dist != 0 {
             let pf_i = i + pf_dist;
-            if pf_i < src.len() {
+            if pf_i < len {
                 prefetch_fec_slice(src.as_ptr().add(pf_i));
             }
         }
@@ -488,10 +504,10 @@ unsafe fn gf_mul_scalar_slice_neon(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
 
         i += 32;
     }
-    while i + 16 <= src.len() {
+    while i + 16 <= len {
         if pf_dist != 0 {
             let pf_i = i + pf_dist;
-            if pf_i < src.len() {
+            if pf_i < len {
                 prefetch_fec_slice(src.as_ptr().add(pf_i));
             }
         }
@@ -506,7 +522,7 @@ unsafe fn gf_mul_scalar_slice_neon(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
         vst1q_u8(out_xor.as_mut_ptr().add(i), y2);
         i += 16;
     }
-    while i < src.len() {
+    while i < len {
         let v = src[i];
         let lo = (v & 0x0f) as usize;
         let hi = (v >> 4) as usize;
@@ -564,20 +580,21 @@ fn gf16_inverse_table() -> &'static [u16] {
 
 #[inline(always)]
 pub(crate) fn gf16_mul(a: u16, b: u16) -> u16 {
-    optimize::dispatch(|policy| {
+    optimize::dispatch(|_policy| {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let matrix = optimize::FeatureDetector::instance().features_full().simd_dispatch_matrix();
         #[cfg(target_arch = "x86_64")]
         {
-            let _ = policy;
-            if optimize::FeatureDetector::instance().has_feature(optimize::CpuFeature::PCLMULQDQ) {
+            if matrix.gf16_pclmul {
                 return unsafe { super::gf16_mul_pclmul(a, b) };
             }
         }
         #[cfg(target_arch = "aarch64")]
         {
-            if policy.as_any().is::<optimize::Sve2>() {
+            if matrix.sve2 {
                 return unsafe { gf16_mul_sve2_impl(a, b) };
             }
-            if policy.as_any().is::<optimize::Neon>() {
+            if matrix.neon {
                 return gf16_mul_neon_impl(a, b);
             }
         }
@@ -624,6 +641,11 @@ pub(crate) fn gf16_inv(x: u16) -> u16 {
 }
 
 #[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// On builds that include the SVE2 block, the caller must prove AArch64 SVE2
+/// support. The scalar inputs are valid for the duration of the call. Builds
+/// without SVE2 use the scalar NEON-compatible fallback.
 unsafe fn gf16_mul_sve2_impl(a: u16, b: u16) -> u16 {
     #[cfg(target_feature = "sve2")]
     {
@@ -679,7 +701,9 @@ pub(crate) fn gf16_mul_add(a: u16, b: u16, acc: u16) -> u16 {
     // Scalar GF(2^16) multiply with XOR-accumulate
     #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
     {
-        return unsafe { gf16_mul_sve2_impl(a, b) ^ acc };
+        if optimize::FeatureDetector::instance().features_full().simd_dispatch_matrix().sve2 {
+            return unsafe { gf16_mul_sve2_impl(a, b) ^ acc };
+        }
     }
 
     gf16_mul_neon_impl(a, b) ^ acc

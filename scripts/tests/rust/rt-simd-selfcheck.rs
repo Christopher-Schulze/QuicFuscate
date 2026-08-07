@@ -62,6 +62,24 @@ fn make_data(len: usize, seed: u32) -> Vec<u8> {
     (0..len).map(|i| (((i as u32).wrapping_mul(31) ^ (seed + 17)) & 0xFF) as u8).collect()
 }
 
+fn gf16_mul_reference(a: u16, b: u16) -> u16 {
+    let mut multiplicand = a;
+    let mut factor = b;
+    let mut result = 0u16;
+    while factor != 0 {
+        if factor & 1 != 0 {
+            result ^= multiplicand;
+        }
+        factor >>= 1;
+        let carry = multiplicand & 0x8000 != 0;
+        multiplicand <<= 1;
+        if carry {
+            multiplicand ^= 0x100B;
+        }
+    }
+    result
+}
+
 #[test]
 fn varint_roundtrip_and_consistency() {
     let mut buf_simd = [0u8; 8];
@@ -198,6 +216,27 @@ fn gf16_vbmi2_matches_scalar() {
     }
 
     assert_eq!(vbmi2_dst, scalar_dst, "VBMI2 GF16 multiply must match scalar path");
+}
+
+#[test]
+fn gf16_slice_dispatch_handles_unequal_lengths_and_tails() {
+    let coefficient = 0x7A31;
+    for source_len in [0usize, 1, 2, 15, 16, 23, 24, 31, 32, 63, 64, 95, 96] {
+        let destination_len = source_len.saturating_sub(3).max(1);
+        let source: Vec<u16> =
+            (0..source_len).map(|index| (index as u16).wrapping_mul(0x219D) ^ 0xA55A).collect();
+        let initial: Vec<u16> = (0..destination_len)
+            .map(|index| (index as u16).wrapping_mul(0x1041) ^ 0x5AA5)
+            .collect();
+        let mut actual = initial.clone();
+        let mut expected = initial;
+        for index in 0..source.len().min(expected.len()) {
+            expected[index] ^= gf16_mul_reference(coefficient, source[index]);
+        }
+
+        quicfuscate::fec::gf16_mul_slice_selfcheck(coefficient, &source, &mut actual);
+        assert_eq!(actual, expected, "GF16 dispatch mismatch at source_len={source_len}");
+    }
 }
 
 #[test]

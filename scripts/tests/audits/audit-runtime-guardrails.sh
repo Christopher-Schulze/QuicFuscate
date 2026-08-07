@@ -236,7 +236,7 @@ from pathlib import Path
 import re
 import sys
 
-roots = (Path("src/simd"), Path("src/optimize/simd"))
+roots = (Path("src/simd"), Path("src/optimize/simd"), Path("src/fec"))
 declaration = re.compile(
     r"^\s*(?:(?:pub(?:\s*\([^)]*\))?|async)\s+)*"
     r"unsafe\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\b"
@@ -315,7 +315,7 @@ SIMD_SAFETY_CONTRACT_RC=$?
 set -e
 printf '%s\n' "$SIMD_SAFETY_CONTRACT_RESULT" >"$SIMD_SAFETY_CONTRACT_LOG"
 if [[ "$SIMD_SAFETY_CONTRACT_RC" -eq 0 ]] \
-  && ! rg -n --no-messages '#!\[allow\(clippy::missing_safety_doc\)\]' src/simd src/optimize/simd >/dev/null; then
+  && ! rg -n --no-messages '#!\[allow\(clippy::missing_safety_doc\)\]' src/simd src/optimize/simd src/fec >/dev/null; then
   pass "SIMD unsafe inventory has local Safety contracts and exact declared ISA wording"
   append_item "simd_safety_contract_inventory" "ok" "$SIMD_SAFETY_CONTRACT_RESULT; blanket missing_safety_doc suppression absent"
 else
@@ -398,6 +398,7 @@ files = [
     Path("scripts/tests/rust/rt-ack-merge-parity.rs"),
     Path("scripts/tests/rust/rt-header-validate-parity.rs"),
     Path("scripts/tests/rust/rt-simd-selfcheck.rs"),
+    Path("src/fec/gf16_tests.rs"),
     Path("scripts/tests/rust/rt-chacha-x16-parity.rs"),
     Path("scripts/tests/rust/rt-chacha-x4-parity.rs"),
     Path("scripts/tests/rust/rt-ghash-sse-parity.rs"),

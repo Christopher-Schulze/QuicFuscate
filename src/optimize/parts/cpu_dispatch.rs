@@ -1917,14 +1917,14 @@ where
                 }
             }
             "neon" => {
-                if features.neon && features.aes && features.pmull {
+                if matrix.neon {
                     return f(&Neon);
                 } else {
                     warn!("QUICFUSCATE_FEC_KERNEL=neon requested but unsupported; falling back to auto");
                 }
             }
             "sve2" => {
-                if detector.has_feature(CpuFeature::SVE2) {
+                if matrix.sve2 {
                     return f(&Sve2);
                 } else {
                     warn!("QUICFUSCATE_FEC_KERNEL=sve2 requested but unsupported; falling back to auto");
@@ -1947,7 +1947,7 @@ where
         f(&Sse2)
     } else if matrix.sve2 {
         f(&Sve2)
-    } else if features.neon && features.aes && features.pmull {
+    } else if matrix.neon {
         f(&Neon)
     } else {
         f(&Scalar)

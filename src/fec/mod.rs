@@ -496,9 +496,14 @@ fn matrix_multiply_accumulate(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3")]
     #[allow(dead_code)]
+    /// # Safety
+    ///
+    /// The caller must prove SSSE3 support. `src` and `out_xor` must remain
+    /// valid for the duration of the call; all accesses are bounded by their
+    /// shared minimum length.
     unsafe fn gf_mul_scalar_slice_ssse3(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
         use std::arch::x86_64::*;
-        debug_assert_eq!(src.len(), out_xor.len());
+        let len = src.len().min(out_xor.len());
 
         let mut t0 = [0u8; 16];
         let mut t1 = [0u8; 16];
@@ -511,21 +516,21 @@ fn matrix_multiply_accumulate(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8
         let tbl1 = _mm_loadu_si128(t1.as_ptr() as *const __m128i);
         let mask0f = _mm_set1_epi8(0x0f_i8);
 
-        let pf_dist: usize = if src.len() >= 4096 {
+        let pf_dist: usize = if len >= 4096 {
             256
-        } else if src.len() >= 1024 {
+        } else if len >= 1024 {
             192
-        } else if src.len() >= 512 {
+        } else if len >= 512 {
             128
         } else {
             0
         };
 
         let mut i = 0usize;
-        while i + 32 <= src.len() {
+        while i + 32 <= len {
             if pf_dist != 0 {
                 let pf_i = i + pf_dist;
-                if pf_i < src.len() {
+                if pf_i < len {
                     prefetch_fec_slice(src.as_ptr().add(pf_i));
                     prefetch_fec_slice(out_xor.as_ptr().add(pf_i));
                 }
@@ -554,10 +559,10 @@ fn matrix_multiply_accumulate(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8
             i += 32;
         }
 
-        while i + 16 <= src.len() {
+        while i + 16 <= len {
             if pf_dist != 0 {
                 let pf_i = i + pf_dist;
-                if pf_i < src.len() {
+                if pf_i < len {
                     prefetch_fec_slice(src.as_ptr().add(pf_i));
                     prefetch_fec_slice(out_xor.as_ptr().add(pf_i));
                 }
@@ -575,8 +580,7 @@ fn matrix_multiply_accumulate(a: &[Vec<u8>], b: &[Vec<u8>], result: &mut [Vec<u8
 
             i += 16;
         }
-
-        while i < src.len() {
+        while i < len {
             let v = src[i];
             let lo = (v & 0x0f) as usize;
             let hi = (v >> 4) as usize;

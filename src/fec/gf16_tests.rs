@@ -42,6 +42,9 @@ fn gf16_vbmi2_slice_matches_scalar_reference() {
         && std::arch::is_x86_feature_detected!("avx512bw")
         && std::arch::is_x86_feature_detected!("avx512vbmi2"))
     {
+        eprintln!(
+            "SIMD_SKIP test=gf16_vbmi2_slice_matches_scalar_reference required=avx512f+avx512bw+avx512vbmi2"
+        );
         return;
     }
 
