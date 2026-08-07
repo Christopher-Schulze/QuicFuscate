@@ -133,6 +133,30 @@ run_verified_library_target "interface-write-result-contract" \
   "interface::tests::external_factory_write_result_contract_rejects_zero_short_and_oversized_results" rust-tests
 run_verified_library_target "interface-write-packet-result-contract" \
   "interface::tests::write_packet_rejects_short_external_factory_result" rust-tests
+run_verified_library_target "unix-raw-result-contract" \
+  "interface::tests::unix_raw_result_contract_rejects_zero_and_oversized_counts" rust-tests
+run_verified_library_target "unix-interface-name-contract" \
+  "interface::tests::unix_interface_name_parser_requires_bounded_terminated_utf8" rust-tests
+run_verified_library_target "unix-close-ownership" \
+  "interface::tests::unix_close_failure_is_reported_and_descriptor_number_is_terminalized" rust-tests
+run_verified_library_target "compatibility-tun-handle-close" \
+  "implementations::client::platform::traits::tests::tun_handle_close_failure_is_reported_and_terminalized" rust-tests
+case "$(detect_os)" in
+  macos)
+    run_verified_library_target "macos-utun-iovec-contract" \
+      "interface::macos_tun::tests::utun_writev_iovecs_follow_bounded_progress" rust-tests
+    record_platform_skip "linux-compatibility-kernel-name" "host_os_not_linux" "lib" "rust-tests"
+    ;;
+  linux)
+    run_verified_library_target "linux-compatibility-kernel-name" \
+      "implementations::client::platform::linux::tests::compatibility_kernel_name_contract_rejects_unterminated_identity" rust-tests
+    record_platform_skip "macos-utun-iovec-contract" "host_os_not_macos" "lib" "rust-tests"
+    ;;
+  *)
+    record_platform_skip "linux-compatibility-kernel-name" "host_os_not_linux" "lib" "rust-tests"
+    record_platform_skip "macos-utun-iovec-contract" "host_os_not_macos" "lib" "rust-tests"
+    ;;
+esac
 if [[ "$(detect_arch)" == "x86_64" ]]; then
   run_verified_library_target "interface-bmi2-dispatch" \
     "interface::tests::bmi2_dispatch_requires_profile_and_runtime_feature_intersection" rust-tests

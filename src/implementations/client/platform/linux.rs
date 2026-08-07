@@ -8,8 +8,11 @@ use super::dns_restore::{
     write_resolver_file_at, ProcessIdentity, ResolvConfRestoreState, RESOLVER_PRIVATE_FILE_MODE,
 };
 use super::traits::*;
+use std::ffi::OsString;
 use std::fs::File;
+use std::io;
 use std::net::IpAddr;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -160,11 +163,16 @@ impl LinuxPlatform {
         self.run_command("ip", args)
     }
 
-    fn interface_exists(name: &str) -> Result<bool, PlatformError> {
-        let output =
-            Command::new("ip").args(["link", "show", "dev", name]).output().map_err(|error| {
-                PlatformError::CommandFailed(format!("ip link inspect spawn: {error}"))
-            })?;
+    fn interface_exists_bytes(name: &[u8]) -> Result<bool, PlatformError> {
+        if name.is_empty() {
+            return Err(PlatformError::DeviceError(
+                "cannot inspect an unnamed Linux TUN interface".to_string(),
+            ));
+        }
+        let name = OsString::from_vec(name.to_vec());
+        let output = Command::new("ip").args(["link", "show", "dev"]).arg(name).output().map_err(
+            |error| PlatformError::CommandFailed(format!("ip link inspect spawn: {error}")),
+        )?;
         if output.status.success() {
             return Ok(true);
         }
@@ -182,28 +190,60 @@ impl LinuxPlatform {
         )))
     }
 
-    fn remove_owned_interface(name: &str) -> Result<(), PlatformError> {
-        if !Self::interface_exists(name)? {
+    fn interface_exists(name: &str) -> Result<bool, PlatformError> {
+        Self::interface_exists_bytes(name.as_bytes())
+    }
+
+    fn remove_owned_interface_bytes(name: &[u8]) -> Result<(), PlatformError> {
+        if name.is_empty() {
+            return Err(PlatformError::DeviceError(
+                "cannot roll back a Linux TUN without an exact interface name".to_string(),
+            ));
+        }
+        let name_bytes = name.to_vec();
+        let display_name = String::from_utf8_lossy(&name_bytes);
+        if !Self::interface_exists_bytes(&name_bytes)? {
             return Ok(());
         }
+        let name = OsString::from_vec(name_bytes.clone());
         let output =
-            Command::new("ip").args(["link", "delete", "dev", name]).output().map_err(|error| {
-                PlatformError::CommandFailed(format!("ip link delete spawn: {error}"))
-            })?;
-        if !output.status.success() && Self::interface_exists(name)? {
+            Command::new("ip").args(["link", "delete", "dev"]).arg(name).output().map_err(
+                |error| PlatformError::CommandFailed(format!("ip link delete spawn: {error}")),
+            )?;
+        if !output.status.success() && Self::interface_exists_bytes(&name_bytes)? {
             return Err(PlatformError::CommandFailed(format!(
                 "ip link delete returned status {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        if Self::interface_exists(name)? {
+        if Self::interface_exists_bytes(&name_bytes)? {
             return Err(PlatformError::DeviceError(format!(
-                "owned TUN {} remains after rollback",
-                name
+                "owned TUN {display_name} remains after rollback"
             )));
         }
         Ok(())
+    }
+
+    fn rollback_open_failure(
+        &self,
+        fd: &mut std::os::unix::io::RawFd,
+        name: &[u8],
+        primary: PlatformError,
+    ) -> PlatformError {
+        let close_error = crate::interface::close_owned_fd(fd).err();
+        let cleanup_error = Self::remove_owned_interface_bytes(name).err();
+        if close_error.is_none() && cleanup_error.is_none() {
+            return primary;
+        }
+        let mut message = format!("Linux compatibility TUN setup failed: {primary}");
+        if let Some(error) = close_error {
+            message.push_str(&format!("; descriptor close failed: {error}"));
+        }
+        if let Some(error) = cleanup_error {
+            message.push_str(&format!("; interface rollback failed: {error}"));
+        }
+        PlatformError::DeviceError(message)
     }
 
     fn linux_boot_id() -> Result<String, PlatformError> {
@@ -491,7 +531,7 @@ impl PlatformBackend for LinuxPlatform {
                 .map_err(|e| PlatformError::DeviceError(e.to_string()))?,
         };
 
-        let fd = file.as_raw_fd();
+        let ioctl_fd = file.as_raw_fd();
         // SAFETY: `IfReq` is a `#[repr(C)]` struct whose fields are a fixed-size C char
         // array and a c_short. Zero is a valid bit pattern for both, so zero-initializing
         // the struct is well-defined. The fields are overwritten before the ioctl call.
@@ -523,35 +563,44 @@ impl PlatformBackend for LinuxPlatform {
         // initialized `#[repr(C)]` struct with the correct layout required by the
         // TUNSETIFF ioctl. The ioctl request code `TUNSETIFF` expects a pointer to
         // `struct ifreq`; our `IfReq` has the identical ABI layout.
-        let ret = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr) };
+        let ret = unsafe { libc::ioctl(ioctl_fd, TUNSETIFF, &ifr) };
         if ret < 0 {
             return Err(PlatformError::DeviceError(std::io::Error::last_os_error().to_string()));
         }
 
-        // Reconstruct name from ifr_name with explicit null-terminator search
-        let name_len = ifr.ifr_name.iter().position(|&c| c == 0).unwrap_or(ifr.ifr_name.len());
-        let name: String =
-            ifr.ifr_name[..name_len].iter().map(|&c| char::from(c.to_ne_bytes()[0])).collect();
-        if name.is_empty() {
-            drop(file);
-            return Err(PlatformError::DeviceError(
-                "Kernel did not return a valid tunnel interface name".to_string(),
+        // The ioctl created the interface, so descriptor and interface cleanup
+        // are explicit from this point onward.
+        let mut fd = file.into_raw_fd();
+        let raw_name = crate::interface::kernel_interface_name_bytes(&ifr.ifr_name);
+        let rollback_name = if raw_name.is_empty() {
+            config.name.as_deref().map(str::as_bytes).unwrap_or(&[])
+        } else {
+            &raw_name
+        };
+        let name = match crate::interface::parse_kernel_interface_name(&ifr.ifr_name) {
+            Ok(name) => name,
+            Err(error) => {
+                return Err(self.rollback_open_failure(
+                    &mut fd,
+                    rollback_name,
+                    PlatformError::Io(error),
+                ));
+            }
+        };
+        if let Err(error) = crate::interface::validate_linux_interface_name(&name) {
+            return Err(self.rollback_open_failure(
+                &mut fd,
+                name.as_bytes(),
+                PlatformError::Io(error),
             ));
         }
         if let Some(requested_name) = config.name.as_deref() {
             if requested_name != name {
-                drop(file);
-                let cleanup = Self::remove_owned_interface(&name);
-                return Err(match cleanup {
-                    Ok(()) => PlatformError::DeviceError(format!(
-                        "Kernel returned interface {}, requested {}",
-                        name, requested_name
-                    )),
-                    Err(cleanup_error) => PlatformError::DeviceError(format!(
-                        "Kernel returned interface {}, requested {}; rollback failed: {}",
-                        name, requested_name, cleanup_error
-                    )),
-                });
+                let error = PlatformError::DeviceError(format!(
+                    "Kernel returned interface {}, requested {}",
+                    name, requested_name
+                ));
+                return Err(self.rollback_open_failure(&mut fd, name.as_bytes(), error));
             }
         }
 
@@ -577,15 +626,7 @@ impl PlatformBackend for LinuxPlatform {
             })
             .and_then(|()| self.run_ip(&["link", "set", &name, "mtu", &config.mtu.to_string()]))
         {
-            drop(file);
-            let cleanup = Self::remove_owned_interface(&name);
-            return Err(match cleanup {
-                Ok(()) => error,
-                Err(cleanup_error) => PlatformError::DeviceError(format!(
-                    "Linux TUN setup failed: {}; rollback failed: {}",
-                    error, cleanup_error
-                )),
-            });
+            return Err(self.rollback_open_failure(&mut fd, name.as_bytes(), error));
         }
 
         log::info!("Created TUN device {} with IP {}/{}", name, config.address, config.netmask);
@@ -598,20 +639,14 @@ impl PlatformBackend for LinuxPlatform {
         let id = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
         if id == 0 {
             let error = std::io::Error::last_os_error();
-            drop(file);
-            let cleanup = Self::remove_owned_interface(&name);
-            return Err(match cleanup {
-                Ok(()) => {
-                    PlatformError::DeviceError(format!("if_nametoindex({name}) failed: {error}"))
-                }
-                Err(cleanup_error) => PlatformError::DeviceError(format!(
-                    "if_nametoindex({name}) failed: {error}; rollback failed: {cleanup_error}"
-                )),
-            });
+            let primary = PlatformError::Io(io::Error::other(format!(
+                "if_nametoindex({name}) failed: {error}"
+            )));
+            return Err(self.rollback_open_failure(&mut fd, name.as_bytes(), primary));
         }
         self.set_active_tun_name(Some(name.clone()));
 
-        Ok(TunHandle { name, id, fd: file.into_raw_fd() })
+        Ok(TunHandle { name, id, fd })
     }
 
     fn destroy_tun(&self, handle: &mut TunHandle) -> Result<(), PlatformError> {
@@ -623,17 +658,8 @@ impl PlatformBackend for LinuxPlatform {
             command_failures.push(e.to_string());
         }
 
-        // Close file descriptor
-        // SAFETY: `handle.fd` is the raw file descriptor of the TUN device opened in
-        // `create_tun`. A close error must not be retried because the descriptor
-        // number may already have been released and reused.
-        if handle.fd >= 0 {
-            let close_result = unsafe { libc::close(handle.fd) };
-            handle.fd = -1;
-            if close_result != 0 {
-                command_failures
-                    .push(format!("close TUN descriptor: {}", std::io::Error::last_os_error()));
-            }
+        if let Err(error) = handle.close_fd() {
+            command_failures.push(format!("close TUN descriptor: {error}"));
         }
 
         if Self::interface_exists(&handle.name)? {
@@ -838,6 +864,17 @@ mod tests {
     fn test_linux_platform_name() {
         let platform = LinuxPlatform::new();
         assert_eq!(platform.name(), "Linux");
+    }
+
+    #[test]
+    fn compatibility_kernel_name_contract_rejects_unterminated_identity() {
+        let mut ifr_name = [0 as libc::c_char; 16];
+        for (slot, byte) in ifr_name.iter_mut().zip(b"tun0\0") {
+            *slot = *byte as libc::c_char;
+        }
+        assert_eq!(crate::interface::parse_kernel_interface_name(&ifr_name).unwrap(), "tun0");
+        ifr_name.fill(b'x' as libc::c_char);
+        assert!(crate::interface::parse_kernel_interface_name(&ifr_name).is_err());
     }
 
     #[test]

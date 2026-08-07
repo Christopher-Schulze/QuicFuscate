@@ -622,6 +622,55 @@ else
   append_item "generic_tun_result_contract" "fail" "missing result validator, caller routing, regression fixture, or core-suite target"
 fi
 
+# 4i) Native Unix TUN syscalls must keep kernel result counts, interface
+#     identity, rollback ownership, and descriptor teardown fail-closed. The
+#     platform-specific runners remain explicit so unsupported hosts are not
+#     reported as native proof.
+if rg -F -- 'pub(crate) fn validate_raw_read_result' src/interface.rs >/dev/null \
+  && rg -F -- 'pub(crate) fn validate_raw_write_progress' src/interface.rs >/dev/null \
+  && rg -F -- 'pub(crate) fn parse_bounded_interface_name' src/interface.rs >/dev/null \
+  && rg -F -- 'pub(crate) fn close_owned_fd' src/interface.rs >/dev/null \
+  && rg -F -- 'validate_raw_read_result(n, buf.len(), "Linux TUN read")' src/interface.rs >/dev/null \
+  && rg -F -- 'validate_raw_write_progress(n, remaining, "Linux TUN write")' src/interface.rs >/dev/null \
+  && rg -F -- 'fn writev_iovecs(' src/interface.rs >/dev/null \
+  && rg -F -- 'validate_raw_write_progress(n, total - written, "macOS utun writev")' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'parse_bounded_interface_name(&ifname, reported_len)' src/interface.rs >/dev/null \
+  && rg -F -- 'fn close_fd(&mut self) -> Result<(), PlatformError>' \
+    src/implementations/client/platform/traits.rs >/dev/null \
+  && rg -F -- 'fn compatibility_kernel_name_contract_rejects_unterminated_identity()' \
+    src/implementations/client/platform/linux.rs >/dev/null \
+  && rg -F -- 'fn tun_handle_close_failure_is_reported_and_terminalized()' \
+    src/implementations/client/platform/traits.rs >/dev/null \
+  && rg -F -- 'fn unix_raw_result_contract_rejects_zero_and_oversized_counts()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'fn unix_interface_name_parser_requires_bounded_terminated_utf8()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'fn unix_close_failure_is_reported_and_descriptor_number_is_terminalized()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'fn utun_writev_iovecs_follow_bounded_progress()' src/interface.rs >/dev/null \
+  && rg -F -- 'run_verified_library_target "unix-raw-result-contract"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "unix-interface-name-contract"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "unix-close-ownership"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "compatibility-tun-handle-close"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'record_platform_skip "linux-compatibility-kernel-name"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'record_platform_skip "macos-utun-iovec-contract"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && ! rg -F -- 'written += n;' src/interface.rs >/dev/null \
+  && ! rg -F -- 'String::from_utf8_lossy(&ifname[..(len as usize - 1)])' \
+    src/interface.rs >/dev/null; then
+  pass "Native Unix TUN raw results, progress, names, rollback, and close ownership are fail-closed"
+  append_item "unix_tun_syscall_boundaries" "ok" "bounded syscall validators, exact-name rollback, terminal close ownership, native fault tests, and explicit host skips are wired"
+else
+  fail_critical "Native Unix TUN syscall boundary or its fail-closed platform proof is incomplete"
+  append_item "unix_tun_syscall_boundaries" "fail" "missing raw result validation, bounded identity parsing, rollback, close ownership, tests, or platform skip wiring"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

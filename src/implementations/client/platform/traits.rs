@@ -152,17 +152,21 @@ pub struct TunHandle {
     pub handle: usize,
 }
 
+impl TunHandle {
+    /// Close the owned Unix descriptor once. POSIX close errors are returned,
+    /// but the descriptor number is terminalized because retrying it can close
+    /// an unrelated descriptor after reuse.
+    #[cfg(unix)]
+    pub(crate) fn close_fd(&mut self) -> Result<(), PlatformError> {
+        crate::interface::close_owned_fd(&mut self.fd).map_err(PlatformError::Io)
+    }
+}
+
 #[cfg(unix)]
 impl Drop for TunHandle {
     fn drop(&mut self) {
-        if self.fd >= 0 {
-            // SAFETY: `fd` remains owned by this handle until platform cleanup
-            // closes it and sets it to -1. Drop is the final leak-prevention
-            // fallback when all explicit cleanup attempts fail.
-            unsafe {
-                libc::close(self.fd);
-            }
-            self.fd = -1;
+        if let Err(error) = self.close_fd() {
+            log::error!("close compatibility TUN descriptor failed: {error}");
         }
     }
 }
@@ -182,5 +186,17 @@ mod tests {
     fn test_platform_error_display() {
         let err = PlatformError::PermissionDenied("test".to_string());
         assert!(err.to_string().contains("Permission denied"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tun_handle_close_failure_is_reported_and_terminalized() {
+        let mut handle = TunHandle { name: "test-tun".to_string(), id: 1, fd: -2 };
+        let error = handle.close_fd().expect_err("invalid descriptor close must be reported");
+        assert!(matches!(
+            error,
+            PlatformError::Io(ref error) if error.raw_os_error() == Some(libc::EBADF)
+        ));
+        assert_eq!(handle.fd, -1);
     }
 }

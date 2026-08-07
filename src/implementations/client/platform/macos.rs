@@ -62,13 +62,8 @@ impl FdGuard {
 impl Drop for FdGuard {
     fn drop(&mut self) {
         if self.armed && self.fd >= 0 {
-            // SAFETY: `self.fd` is a valid open file descriptor set in `FdGuard::new`.
-            // The guard is only constructed with an fd obtained from a successful
-            // `libc::socket()` call. `armed` is set to false via `disarm()` once the fd
-            // is successfully handed off, so this close path only runs when the fd would
-            // otherwise leak. The guard itself is dropped only once.
-            unsafe {
-                libc::close(self.fd);
+            if let Err(error) = crate::interface::close_owned_fd(&mut self.fd) {
+                log::error!("close macOS compatibility TUN descriptor failed: {error}");
             }
         }
     }
@@ -421,22 +416,10 @@ impl PlatformBackend for MacOSPlatform {
     fn destroy_tun(&self, handle: &mut TunHandle) -> Result<(), PlatformError> {
         let down_error = self.run_ifconfig(&[&handle.name, "down"]).err();
 
-        // Close socket
-        // SAFETY: `handle.fd` is the raw file descriptor of the utun socket created in
-        // `create_tun`. A close error must not be retried because the descriptor
-        // number may already have been released and reused.
-        let mut close_error = None;
-        if handle.fd >= 0 {
-            let close_result = unsafe { libc::close(handle.fd) };
-            handle.fd = -1;
-            if close_result != 0 {
-                close_error = Some(format!(
-                    "close owned utun descriptor {}: {}",
-                    handle.name,
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
+        let close_error = handle
+            .close_fd()
+            .err()
+            .map(|error| format!("close owned utun descriptor {}: {error}", handle.name));
         if self.interface_exists(&handle.name)? {
             return Err(PlatformError::DeviceError(format!(
                 "owned utun {} remains after descriptor close{}{}",

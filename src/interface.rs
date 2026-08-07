@@ -37,6 +37,178 @@ pub const TUN_MIN_MTU: u16 = 576;
 /// Minimum valid TUN MTU while IPv6 is enabled.
 pub const TUN_IPV6_MIN_MTU: u16 = 1280;
 
+#[cfg(unix)]
+fn close_owned_fd_with<F>(fd: &mut std::os::fd::RawFd, close: F) -> io::Result<()>
+where
+    F: FnOnce(std::os::fd::RawFd) -> io::Result<()>,
+{
+    if *fd == -1 {
+        return Ok(());
+    }
+    if *fd < -1 {
+        *fd = -1;
+        return Err(io::Error::from_raw_os_error(libc::EBADF));
+    }
+    let owned_fd = *fd;
+    // POSIX leaves the descriptor state unspecified after a close error such
+    // as EINTR. Never retry the number because it may already be reused.
+    *fd = -1;
+    close(owned_fd)
+}
+
+/// Close a descriptor while making the terminal ownership transition explicit.
+/// A close error is returned, but the descriptor number is not retained for a
+/// retry because POSIX may have released it before reporting the error.
+#[cfg(unix)]
+pub(crate) fn close_owned_fd(fd: &mut std::os::fd::RawFd) -> io::Result<()> {
+    close_owned_fd_with(fd, |owned_fd| {
+        let result = unsafe { libc::close(owned_fd) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_raw_read_result(
+    result: libc::ssize_t,
+    capacity: usize,
+    operation: &str,
+) -> io::Result<usize> {
+    if result < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{operation} returned a negative result after errno handling"),
+        ));
+    }
+    if result == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("{operation} returned zero bytes"),
+        ));
+    }
+    let result = usize::try_from(result).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("{operation} result overflowed usize"))
+    })?;
+    if result > capacity {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{operation} returned {result} bytes for a {capacity}-byte destination"),
+        ));
+    }
+    Ok(result)
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_raw_write_progress(
+    result: libc::ssize_t,
+    remaining: usize,
+    operation: &str,
+) -> io::Result<usize> {
+    if result < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{operation} returned a negative result after errno handling"),
+        ));
+    }
+    if result == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("{operation} made no progress while {remaining} bytes remained"),
+        ));
+    }
+    let result = usize::try_from(result).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("{operation} result overflowed usize"))
+    })?;
+    if result > remaining {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{operation} reported {result} bytes for {remaining} remaining bytes"),
+        ));
+    }
+    Ok(result)
+}
+
+#[cfg(unix)]
+pub(crate) fn parse_bounded_interface_name(
+    bytes: &[u8],
+    reported_len: usize,
+) -> io::Result<String> {
+    if reported_len == 0 || reported_len > bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "kernel interface name length {reported_len} exceeds {}-byte buffer",
+                bytes.len()
+            ),
+        ));
+    }
+    let bounded = &bytes[..reported_len];
+    if bounded.last() != Some(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel interface name is not NUL-terminated within the reported length",
+        ));
+    }
+    let name_bytes = &bounded[..reported_len - 1];
+    if name_bytes.is_empty() || name_bytes.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel interface name is empty or contains an interior NUL",
+        ));
+    }
+    String::from_utf8(name_bytes.to_vec()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("kernel interface name is not valid UTF-8: {error}"),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn kernel_interface_name_bytes(ifr_name: &[libc::c_char]) -> Vec<u8> {
+    let raw: Vec<u8> = ifr_name.iter().map(|byte| byte.to_ne_bytes()[0]).collect();
+    let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
+    raw[..end].to_vec()
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn parse_kernel_interface_name(ifr_name: &[libc::c_char]) -> io::Result<String> {
+    let raw: Vec<u8> = ifr_name.iter().map(|byte| byte.to_ne_bytes()[0]).collect();
+    let terminator = raw.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel interface name has no NUL terminator in the fixed buffer",
+        )
+    })?;
+    parse_bounded_interface_name(&raw, terminator + 1)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn validate_linux_interface_name(name: &str) -> io::Result<()> {
+    if name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Linux TUN interface name must not be empty",
+        ));
+    }
+    if name.len() > 15 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Linux TUN interface name is {} bytes; maximum is 15", name.len()),
+        ));
+    }
+    if name.contains('/') || name.contains('\0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Linux TUN interface name contains a forbidden character",
+        ));
+    }
+    Ok(())
+}
+
 /// Permit the BMI2 parser only when both the automatic/override profile is an
 /// x86 profile and the exact runtime BMI2 feature is present. Higher x86
 /// profiles do not imply BMI2, so the feature bit remains a separate gate.
@@ -956,10 +1128,11 @@ pub fn register_tun_factory(factory: TunFactory) -> bool {
 #[cfg(target_os = "linux")]
 mod linux_tun {
     use super::*;
-    use std::ffi::CString;
+    use std::ffi::{CString, OsString};
     use std::fs::OpenOptions;
     use std::mem;
     use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+    use std::os::unix::ffi::OsStringExt;
     use std::process::Command;
     use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -1011,30 +1184,20 @@ mod linux_tun {
         }
 
         fn validate_interface_name(name: &str) -> io::Result<()> {
-            if name.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Linux TUN interface name must not be empty",
-                ));
-            }
-            if name.len() > 15 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("Linux TUN interface name is {} bytes; maximum is 15", name.len()),
-                ));
-            }
-            if name.contains('/') || name.contains('\0') {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Linux TUN interface name contains a forbidden character",
-                ));
-            }
-            Ok(())
+            validate_linux_interface_name(name)
         }
 
-        fn interface_exists(name: &str) -> io::Result<bool> {
+        fn interface_exists_bytes(name: &[u8]) -> io::Result<bool> {
+            if name.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "cannot inspect an unnamed Linux TUN interface",
+                ));
+            }
+            let name = OsString::from_vec(name.to_vec());
             let output = Command::new("ip")
-                .args(["link", "show", "dev", name])
+                .args(["link", "show", "dev"])
+                .arg(name)
                 .output()
                 .map_err(|error| io::Error::other(format!("ip link inspect spawn: {error}")))?;
             if output.status.success() {
@@ -1054,25 +1217,57 @@ mod linux_tun {
             )))
         }
 
-        fn remove_owned_interface(name: &str) -> io::Result<()> {
-            if !Self::interface_exists(name)? {
+        fn interface_exists(name: &str) -> io::Result<bool> {
+            Self::interface_exists_bytes(name.as_bytes())
+        }
+
+        fn remove_owned_interface_bytes(name: &[u8]) -> io::Result<()> {
+            if name.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "cannot roll back a Linux TUN without an exact interface name",
+                ));
+            }
+            let name_bytes = name.to_vec();
+            let display_name = String::from_utf8_lossy(&name_bytes);
+            if !Self::interface_exists_bytes(&name_bytes)? {
                 return Ok(());
             }
+            let name = OsString::from_vec(name_bytes.clone());
             let output = Command::new("ip")
-                .args(["link", "delete", "dev", name])
+                .args(["link", "delete", "dev"])
+                .arg(name)
                 .output()
                 .map_err(|error| io::Error::other(format!("ip link delete spawn: {error}")))?;
-            if !output.status.success() && Self::interface_exists(name)? {
+            if !output.status.success() && Self::interface_exists_bytes(&name_bytes)? {
                 return Err(io::Error::other(format!(
                     "ip link delete returned status {}: {}",
                     output.status,
                     String::from_utf8_lossy(&output.stderr).trim()
                 )));
             }
-            if Self::interface_exists(name)? {
-                return Err(io::Error::other("owned Linux TUN interface remains after rollback"));
+            if Self::interface_exists_bytes(&name_bytes)? {
+                return Err(io::Error::other(format!(
+                    "owned Linux TUN interface {display_name} remains after rollback"
+                )));
             }
             Ok(())
+        }
+
+        fn rollback_open_failure(fd: &mut RawFd, name: &[u8], primary: io::Error) -> io::Error {
+            let close_error = close_owned_fd(fd).err();
+            let cleanup_error = Self::remove_owned_interface_bytes(name).err();
+            if close_error.is_none() && cleanup_error.is_none() {
+                return primary;
+            }
+            let mut message = format!("Linux TUN setup failed: {primary}");
+            if let Some(error) = close_error {
+                message.push_str(&format!("; descriptor close failed: {error}"));
+            }
+            if let Some(error) = cleanup_error {
+                message.push_str(&format!("; interface rollback failed: {error}"));
+            }
+            io::Error::other(message)
         }
 
         fn json_ip(args: &[&str]) -> io::Result<serde_json::Value> {
@@ -1262,105 +1457,60 @@ mod linux_tun {
                     ifr.ifr_name[i] = *byte as libc::c_char;
                 }
             }
-            let fd = file.as_raw_fd();
-            let ret = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr) };
+            let ioctl_fd = file.as_raw_fd();
+            let ret = unsafe { libc::ioctl(ioctl_fd, TUNSETIFF, &ifr) };
             if ret < 0 {
                 return Err(io::Error::last_os_error());
             }
 
-            // Determine actual device name
-            let mut name_bytes = Vec::new();
-            for &c in &ifr.ifr_name {
-                if c == 0 {
-                    break;
-                }
-                name_bytes.push(c.to_ne_bytes()[0]);
-            }
-            let name = match String::from_utf8(name_bytes) {
+            // The ioctl created the interface, so descriptor and interface
+            // cleanup are explicit from this point onward.
+            let mut fd = file.into_raw_fd();
+            let raw_name = kernel_interface_name_bytes(&ifr.ifr_name);
+            let rollback_name = if raw_name.is_empty() {
+                cfg.name.as_deref().map(str::as_bytes).unwrap_or(&[])
+            } else {
+                &raw_name
+            };
+            let name = match parse_kernel_interface_name(&ifr.ifr_name) {
                 Ok(name) => name,
                 Err(error) => {
-                    drop(file);
-                    return Err(io::Error::other(format!(
-                        "kernel returned invalid TUN name: {error}"
-                    )));
+                    return Err(Self::rollback_open_failure(&mut fd, rollback_name, error));
                 }
             };
             if let Err(error) = Self::validate_interface_name(&name) {
-                drop(file);
-                return Err(error);
+                return Err(Self::rollback_open_failure(&mut fd, name.as_bytes(), error));
             }
             if let Some(requested) = cfg.name.as_deref() {
                 if requested != name {
-                    drop(file);
-                    let cleanup = Self::remove_owned_interface(&name);
-                    return Err(match cleanup {
-                        Ok(()) => io::Error::other(format!(
-                            "kernel returned TUN name {name}, requested {requested}"
-                        )),
-                        Err(cleanup_error) => io::Error::other(format!(
-                            "kernel returned TUN name {name}, requested {requested}; rollback failed: {cleanup_error}"
-                        )),
-                    });
+                    let error = io::Error::other(format!(
+                        "kernel returned TUN name {name}, requested {requested}"
+                    ));
+                    return Err(Self::rollback_open_failure(&mut fd, name.as_bytes(), error));
                 }
             }
 
             if let Err(error) = Self::configure(&name, cfg) {
-                drop(file);
-                let cleanup = Self::remove_owned_interface(&name);
-                return Err(match cleanup {
-                    Ok(()) => error,
-                    Err(cleanup_error) => io::Error::other(format!(
-                        "Linux TUN setup failed: {error}; rollback failed: {cleanup_error}"
-                    )),
-                });
+                return Err(Self::rollback_open_failure(&mut fd, name.as_bytes(), error));
             }
 
-            // Take ownership of the fd to avoid per-call File reconstruction.
             // Keep the descriptor nonblocking so async runtimes and shutdown
             // paths can poll TUN without getting stuck in an uninterruptible
             // blocking read.
-            let fd = file.into_raw_fd();
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
             if flags < 0 {
                 let error = io::Error::last_os_error();
-                unsafe {
-                    libc::close(fd);
-                }
-                let cleanup = Self::remove_owned_interface(&name);
-                return Err(match cleanup {
-                    Ok(()) => error,
-                    Err(cleanup_error) => io::Error::other(format!(
-                        "Linux TUN descriptor setup failed: {error}; rollback failed: {cleanup_error}"
-                    )),
-                });
+                return Err(Self::rollback_open_failure(&mut fd, name.as_bytes(), error));
             }
             if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
                 let error = io::Error::last_os_error();
-                unsafe {
-                    libc::close(fd);
-                }
-                let cleanup = Self::remove_owned_interface(&name);
-                return Err(match cleanup {
-                    Ok(()) => error,
-                    Err(cleanup_error) => io::Error::other(format!(
-                        "Linux TUN nonblocking setup failed: {error}; rollback failed: {cleanup_error}"
-                    )),
-                });
+                return Err(Self::rollback_open_failure(&mut fd, name.as_bytes(), error));
             }
             let name: Arc<str> = Arc::from(name);
             let mtu = match Self::read_mtu(&name) {
                 Ok(mtu) => mtu,
                 Err(error) => {
-                    unsafe {
-                        libc::close(fd);
-                    }
-                    let cleanup = Self::remove_owned_interface(&name);
-                    return Err(match cleanup {
-                        Ok(()) => error,
-                        Err(cleanup_error) => io::Error::other(format!(
-                            "Linux TUN MTU verification failed: {error}; rollback failed: {cleanup_error}"
-                        )),
-                    });
+                    return Err(Self::rollback_open_failure(&mut fd, name.as_bytes(), error));
                 }
             };
             Ok(Self { name, fd, mtu: AtomicU16::new(mtu) })
@@ -1394,7 +1544,7 @@ mod linux_tun {
             Some(self.fd)
         }
         fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-            // Blocking read into the user-provided buffer using libc::read with EINTR retry
+            // Read into the user-provided buffer using libc::read with EINTR retry.
             loop {
                 let n = unsafe {
                     libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
@@ -1406,19 +1556,16 @@ mod linux_tun {
                     }
                     return Err(e);
                 }
-                return Ok(n as usize);
+                return validate_raw_read_result(n, buf.len(), "Linux TUN read");
             }
         }
         fn write(&self, buf: &[u8]) -> io::Result<usize> {
-            // Write the full packet using libc::write with EINTR retry
+            // Write the full packet using libc::write with EINTR retry.
             let mut off = 0usize;
             while off < buf.len() {
+                let remaining = buf.len() - off;
                 let n = unsafe {
-                    libc::write(
-                        self.fd,
-                        buf[off..].as_ptr() as *const libc::c_void,
-                        buf.len() - off,
-                    )
+                    libc::write(self.fd, buf[off..].as_ptr() as *const libc::c_void, remaining)
                 };
                 if n < 0 {
                     let e = io::Error::last_os_error();
@@ -1427,7 +1574,7 @@ mod linux_tun {
                     }
                     return Err(e);
                 }
-                off += n as usize;
+                off += validate_raw_write_progress(n, remaining, "Linux TUN write")?;
             }
             Ok(off)
         }
@@ -1435,8 +1582,8 @@ mod linux_tun {
 
     impl Drop for LinuxTun {
         fn drop(&mut self) {
-            unsafe {
-                libc::close(self.fd);
+            if let Err(error) = close_owned_fd(&mut self.fd) {
+                log::error!("close Linux TUN descriptor failed: {error}");
             }
         }
     }
@@ -1598,9 +1745,100 @@ mod macos_tun {
             Ok(())
         }
 
+        fn interface_exists(name: &str) -> io::Result<bool> {
+            let output = Command::new("/sbin/ifconfig")
+                .arg(name)
+                .output()
+                .map_err(|error| io::Error::other(format!("ifconfig inspect spawn: {error}")))?;
+            if output.status.success() {
+                return Ok(true);
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+            if stderr.contains("does not exist") || stderr.contains("no such") {
+                return Ok(false);
+            }
+            Err(io::Error::other(format!(
+                "ifconfig {name} inspect returned status {}: {}",
+                output.status,
+                stderr.trim()
+            )))
+        }
+
+        fn rollback_open_error(
+            fd: &mut RawFd,
+            connected: bool,
+            name: Option<&str>,
+            primary: io::Error,
+        ) -> io::Error {
+            let close_error = close_owned_fd(fd).err();
+            let cleanup_error = if close_error.is_none() && connected {
+                match name {
+                    Some(name) => match Self::interface_exists(name) {
+                        Ok(false) => None,
+                        Ok(true) => Some(io::Error::other(format!(
+                            "utun interface {name} remains after descriptor close"
+                        ))),
+                        Err(error) => Some(error),
+                    },
+                    None => Some(io::Error::other(
+                        "utun interface identity is unavailable; absence cannot be proven",
+                    )),
+                }
+            } else {
+                None
+            };
+            if close_error.is_none() && cleanup_error.is_none() {
+                return primary;
+            }
+            let mut message = format!("macOS utun setup failed: {primary}");
+            if let Some(error) = close_error {
+                message.push_str(&format!("; descriptor close failed: {error}"));
+            }
+            if let Some(error) = cleanup_error {
+                message.push_str(&format!("; interface rollback failed: {error}"));
+            }
+            io::Error::other(message)
+        }
+
+        fn writev_iovecs(
+            hdr: &mut [u8; 4],
+            buf: &[u8],
+            written: usize,
+        ) -> io::Result<[libc::iovec; 2]> {
+            let total = 4usize.checked_add(buf.len()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "utun packet length overflow")
+            })?;
+            if written >= total {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "utun writev progress is outside the packet",
+                ));
+            }
+            if written < 4 {
+                // SAFETY: written < 4 proves the header pointer offset is in bounds.
+                let header_ptr = unsafe { hdr.as_mut_ptr().add(written) };
+                return Ok([
+                    libc::iovec { iov_base: header_ptr as *mut libc::c_void, iov_len: 4 - written },
+                    libc::iovec { iov_base: buf.as_ptr() as *mut libc::c_void, iov_len: buf.len() },
+                ]);
+            }
+            let payload_offset = written - 4;
+            // written < total proves payload_offset < buf.len() here.
+            // SAFETY: The checked offset is strictly inside the payload.
+            let payload_ptr = unsafe { buf.as_ptr().add(payload_offset) };
+            Ok([
+                libc::iovec { iov_base: hdr.as_mut_ptr() as *mut libc::c_void, iov_len: 0 },
+                libc::iovec {
+                    iov_base: payload_ptr as *mut libc::c_void,
+                    iov_len: buf.len() - payload_offset,
+                },
+            ])
+        }
+
         /// Open a macOS utun device with the given configuration.
         pub fn open(cfg: &TunConfig) -> io::Result<Self> {
-            let fd = unsafe { libc::socket(libc::AF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL) };
+            let mut fd =
+                unsafe { libc::socket(libc::AF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL) };
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -1609,8 +1847,8 @@ mod macos_tun {
             info.ctl_name[..UTUN_CONTROL_NAME.len()].copy_from_slice(UTUN_CONTROL_NAME);
             let rc = unsafe { libc::ioctl(fd, CTLIOCGINFO, &mut info) };
             if rc < 0 {
-                unsafe { libc::close(fd) };
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                return Err(Self::rollback_open_error(&mut fd, false, None, error));
             }
 
             let mut addr: SockAddrCtl = unsafe { mem::zeroed() };
@@ -1627,8 +1865,8 @@ mod macos_tun {
                 )
             };
             if rc < 0 {
-                unsafe { libc::close(fd) };
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                return Err(Self::rollback_open_error(&mut fd, false, None, error));
             }
 
             // Keep the descriptor interruptible by the cooperative reader
@@ -1637,13 +1875,11 @@ mod macos_tun {
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
             if flags < 0 {
                 let error = io::Error::last_os_error();
-                unsafe { libc::close(fd) };
-                return Err(error);
+                return Err(Self::rollback_open_error(&mut fd, true, None, error));
             }
             if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
                 let error = io::Error::last_os_error();
-                unsafe { libc::close(fd) };
-                return Err(error);
+                return Err(Self::rollback_open_error(&mut fd, true, None, error));
             }
 
             // Query interface name
@@ -1659,19 +1895,27 @@ mod macos_tun {
                 )
             };
             if rc < 0 {
-                unsafe { libc::close(fd) };
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                return Err(Self::rollback_open_error(&mut fd, true, None, error));
             }
-            if len == 0 {
-                unsafe { libc::close(fd) };
-                return Err(io::Error::other("ifname empty"));
-            }
-            let name_s = String::from_utf8_lossy(&ifname[..(len as usize - 1)]).to_string();
+            let reported_len = match usize::try_from(len) {
+                Ok(length) => length,
+                Err(_) => {
+                    let error = io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "utun interface name length overflow",
+                    );
+                    return Err(Self::rollback_open_error(&mut fd, true, None, error));
+                }
+            };
+            let name_s = match parse_bounded_interface_name(&ifname, reported_len) {
+                Ok(name) => name,
+                Err(error) => return Err(Self::rollback_open_error(&mut fd, true, None, error)),
+            };
             let mtu = match Self::configure(&name_s, cfg) {
                 Ok(mtu) => mtu,
                 Err(error) => {
-                    unsafe { libc::close(fd) };
-                    return Err(error);
+                    return Err(Self::rollback_open_error(&mut fd, true, Some(&name_s), error));
                 }
             };
             let name: Arc<str> = Arc::from(name_s);
@@ -1714,10 +1958,17 @@ mod macos_tun {
                     }
                     return Err(e);
                 }
-                if n <= 4 {
-                    return Ok(0);
+                let total = 4usize.checked_add(buf.len()).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "utun read buffer length overflow")
+                })?;
+                let total_read = validate_raw_read_result(n, total, "macOS utun readv")?;
+                if total_read <= 4 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "macOS utun readv returned an incomplete AF header or empty packet",
+                    ));
                 }
-                return Ok((n as usize) - 4);
+                return Ok(total_read - 4);
             }
         }
         fn write(&self, buf: &[u8]) -> io::Result<usize> {
@@ -1728,13 +1979,12 @@ mod macos_tun {
                 libc::AF_INET as u32
             };
             let mut hdr = af.to_be_bytes();
-            let mut iov = [
-                libc::iovec { iov_base: hdr.as_mut_ptr() as *mut libc::c_void, iov_len: hdr.len() },
-                libc::iovec { iov_base: buf.as_ptr() as *mut libc::c_void, iov_len: buf.len() },
-            ];
-            let total = 4 + buf.len();
-            let mut written = 0isize;
-            while (written as usize) < total {
+            let total = 4usize.checked_add(buf.len()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "utun packet length overflow")
+            })?;
+            let mut written = 0usize;
+            while written < total {
+                let iov = Self::writev_iovecs(&mut hdr, buf, written)?;
                 let n = unsafe { libc::writev(self.fd, iov.as_ptr(), iov.len() as i32) };
                 if n < 0 {
                     let e = io::Error::last_os_error();
@@ -1743,25 +1993,11 @@ mod macos_tun {
                     }
                     return Err(e);
                 }
-                written += n;
-                // After first successful writev, if partial, adjust iovecs
-                if (written as usize) < total {
-                    // Compute how much consumed from hdr/payload
-                    let mut remain = written as usize;
-                    // Consume hdr first
-                    if remain >= 4 {
-                        iov[0].iov_len = 0;
-                        remain -= 4;
-                        iov[1].iov_base =
-                            unsafe { (buf.as_ptr().add(remain)) as *mut libc::c_void };
-                        iov[1].iov_len = buf.len() - remain;
-                    } else {
-                        // Still within header
-                        iov[0].iov_base =
-                            unsafe { hdr.as_mut_ptr().add(remain) as *mut libc::c_void };
-                        iov[0].iov_len = 4 - remain;
-                    }
-                }
+                let progress =
+                    validate_raw_write_progress(n, total - written, "macOS utun writev")?;
+                written = written.checked_add(progress).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "utun writev progress overflow")
+                })?;
             }
             Ok(buf.len())
         }
@@ -1769,9 +2005,35 @@ mod macos_tun {
 
     impl Drop for MacTun {
         fn drop(&mut self) {
-            unsafe {
-                libc::close(self.fd);
+            if let Err(error) = close_owned_fd(&mut self.fd) {
+                log::error!("close macOS utun descriptor failed: {error}");
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn utun_writev_iovecs_follow_bounded_progress() {
+            let mut hdr = [0u8; 4];
+            let payload = [1u8, 2, 3];
+
+            let initial = MacTun::writev_iovecs(&mut hdr, &payload, 0).unwrap();
+            assert_eq!(initial[0].iov_len, 4);
+            assert_eq!(initial[1].iov_len, payload.len());
+
+            let header_partial = MacTun::writev_iovecs(&mut hdr, &payload, 2).unwrap();
+            assert_eq!(header_partial[0].iov_len, 2);
+            assert_eq!(header_partial[1].iov_len, payload.len());
+
+            let payload_partial = MacTun::writev_iovecs(&mut hdr, &payload, 5).unwrap();
+            assert_eq!(payload_partial[0].iov_len, 0);
+            assert_eq!(payload_partial[1].iov_len, 2);
+            assert_eq!(payload_partial[1].iov_base as usize, payload.as_ptr() as usize + 1);
+
+            assert!(MacTun::writev_iovecs(&mut hdr, &payload, 7).is_err());
         }
     }
 
@@ -1883,6 +2145,65 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_raw_result_contract_rejects_zero_and_oversized_counts() {
+        assert_eq!(validate_raw_read_result(8, 8, "read").unwrap(), 8);
+        assert_eq!(validate_raw_write_progress(8, 8, "write").unwrap(), 8);
+
+        let zero_read = validate_raw_read_result(0, 8, "read").expect_err("zero read must fail");
+        assert_eq!(zero_read.kind(), io::ErrorKind::UnexpectedEof);
+        let oversized_read =
+            validate_raw_read_result(9, 8, "read").expect_err("oversized read must fail");
+        assert_eq!(oversized_read.kind(), io::ErrorKind::InvalidData);
+        let zero_write =
+            validate_raw_write_progress(0, 8, "write").expect_err("zero write must fail");
+        assert_eq!(zero_write.kind(), io::ErrorKind::WriteZero);
+        let oversized_write =
+            validate_raw_write_progress(9, 8, "write").expect_err("oversized write must fail");
+        assert_eq!(oversized_write.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_interface_name_parser_requires_bounded_terminated_utf8() {
+        assert_eq!(parse_bounded_interface_name(b"utun4\0", 6).unwrap(), "utun4");
+        for (bytes, reported_len) in
+            [(&b"utun4\0"[..], 0), (&b"utun4\0"[..], 7), (&b"utun4x"[..], 6), (&[0xff, 0][..], 2)]
+        {
+            assert!(
+                parse_bounded_interface_name(bytes, reported_len).is_err(),
+                "malformed interface name must fail: bytes={bytes:?} len={reported_len}"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut ifr_name = [0 as libc::c_char; 16];
+            for (slot, byte) in ifr_name.iter_mut().zip(b"tun0\0") {
+                *slot = *byte as libc::c_char;
+            }
+            assert_eq!(parse_kernel_interface_name(&ifr_name).unwrap(), "tun0");
+            ifr_name.fill(b'x' as libc::c_char);
+            assert!(parse_kernel_interface_name(&ifr_name).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_close_failure_is_reported_and_descriptor_number_is_terminalized() {
+        let mut fd = 42;
+        let error =
+            close_owned_fd_with(&mut fd, |_fd| Err(io::Error::from_raw_os_error(libc::EIO)))
+                .expect_err("injected close failure must be observable");
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(fd, -1);
+        assert!(close_owned_fd_with(&mut fd, |_fd| {
+            Err(io::Error::other("close must not be retried"))
+        })
+        .is_ok());
+    }
 
     struct DummyTun {
         reads: Mutex<Vec<Vec<u8>>>,
