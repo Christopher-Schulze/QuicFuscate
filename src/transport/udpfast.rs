@@ -24,16 +24,6 @@ use libc::{
     CMSG_LEN, CMSG_SPACE, MSG_DONTWAIT, SOL_UDP, UDP_GRO, UDP_SEGMENT,
 };
 
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn sendmsg_x(
-        s: libc::c_int,
-        msgp: *const libc::msghdr,
-        cnt: libc::c_uint,
-        flags: libc::c_int,
-    ) -> libc::c_int;
-}
-
 // Telemetry
 
 // Maximum batch sizes
@@ -76,9 +66,19 @@ pub(crate) struct AlignedBuffer {
 }
 
 impl AlignedBuffer {
-    pub(crate) fn new(size: usize) -> Self {
-        let aligned_size = (size + CACHE_LINE_SIZE - 1) & !(CACHE_LINE_SIZE - 1);
-        Self { data: vec![0u8; aligned_size] }
+    pub(crate) fn try_new(size: usize) -> io::Result<Self> {
+        let aligned_size = size.checked_add(CACHE_LINE_SIZE - 1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "aligned buffer size overflow")
+        })? & !(CACHE_LINE_SIZE - 1);
+        let mut data = Vec::new();
+        data.try_reserve_exact(aligned_size).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                format!("unable to reserve {aligned_size} bytes for aligned UDP buffer"),
+            )
+        })?;
+        data.resize(aligned_size, 0);
+        Ok(Self { data })
     }
 
     #[inline(always)]
@@ -93,8 +93,8 @@ impl AlignedBuffer {
 }
 
 #[cfg(any(test, feature = "rust-tests"))]
-pub fn aligned_buffer_len_for_rust_tests(size: usize) -> usize {
-    AlignedBuffer::new(size).as_slice().len()
+pub fn aligned_buffer_len_for_rust_tests(size: usize) -> io::Result<usize> {
+    Ok(AlignedBuffer::try_new(size)?.as_slice().len())
 }
 
 pub struct UdpFastPath {
@@ -147,7 +147,7 @@ impl UdpFastPath {
 
         // Pre-allocate aligned buffers
         for _ in 0..MAX_BATCH_SIZE {
-            fast_path.recv_batch.push(AlignedBuffer::new(65536));
+            fast_path.recv_batch.push(AlignedBuffer::try_new(65536)?);
         }
 
         // Enable features as supported on this platform and requested by config.
@@ -242,11 +242,6 @@ impl UdpFastPath {
     // Fallback for non-Linux
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub fn send_batch(&mut self, packets: &[(&[u8], SocketAddr)]) -> io::Result<usize> {
-        // macOS/iOS: Use sendmsg_x when available, fall back to sendmsg.
-        use libc::{iovec, msghdr, sendmsg, sockaddr_storage, MSG_DONTWAIT};
-        use std::os::unix::io::AsRawFd;
-        let fd = self.socket.as_raw_fd();
-
         if unlikely(packets.is_empty()) {
             return Ok(0);
         }
@@ -255,129 +250,18 @@ impl UdpFastPath {
             self.send_single(batch_packets[0].0, batch_packets[0].1)?;
             return Ok(1);
         }
-
-        let mut msgs: Vec<msghdr> = Vec::with_capacity(batch_packets.len());
-        let mut iovecs: Vec<iovec> = Vec::with_capacity(batch_packets.len());
-        let mut addrs: Vec<sockaddr_storage> = Vec::with_capacity(batch_packets.len());
-        let mut addr_lens: Vec<libc::socklen_t> = Vec::with_capacity(batch_packets.len());
-
-        for (data, addr) in batch_packets.iter() {
-            let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
-            let len = match addr {
-                SocketAddr::V4(v4) => {
-                    #[cfg(target_os = "macos")]
-                    let raw = libc::sockaddr_in {
-                        sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-                        sin_family: libc::AF_INET as libc::sa_family_t,
-                        sin_port: v4.port().to_be(),
-                        sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
-                        sin_zero: [0; 8],
-                    };
-                    #[cfg(not(target_os = "macos"))]
-                    let raw = libc::sockaddr_in {
-                        sin_family: libc::AF_INET as libc::sa_family_t,
-                        sin_port: v4.port().to_be(),
-                        sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
-                        sin_zero: [0; 8],
-                    };
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            &raw as *const _ as *const u8,
-                            &mut storage as *mut _ as *mut u8,
-                            std::mem::size_of_val(&raw),
-                        );
-                    }
-                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
-                }
-                SocketAddr::V6(v6) => {
-                    #[cfg(target_os = "macos")]
-                    let raw = libc::sockaddr_in6 {
-                        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-                        sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                        sin6_port: v6.port().to_be(),
-                        sin6_flowinfo: v6.flowinfo(),
-                        sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
-                        sin6_scope_id: v6.scope_id(),
-                    };
-                    #[cfg(not(target_os = "macos"))]
-                    let raw = libc::sockaddr_in6 {
-                        sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                        sin6_port: v6.port().to_be(),
-                        sin6_flowinfo: v6.flowinfo(),
-                        sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
-                        sin6_scope_id: v6.scope_id(),
-                    };
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            &raw as *const _ as *const u8,
-                            &mut storage as *mut _ as *mut u8,
-                            std::mem::size_of_val(&raw),
-                        );
-                    }
-                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
-                }
-            };
-
-            addrs.push(storage);
-            addr_lens.push(len);
-            iovecs.push(iovec { iov_base: data.as_ptr() as *mut _, iov_len: data.len() });
+        for window in batch_packets.windows(2) {
+            prefetch_outbound_payload(window[1].0.as_ptr());
         }
 
-        for i in 0..batch_packets.len() {
-            msgs.push(msghdr {
-                msg_name: &mut addrs[i] as *mut _ as *mut _,
-                msg_namelen: addr_lens[i],
-                msg_iov: &mut iovecs[i],
-                msg_iovlen: 1,
-                msg_control: std::ptr::null_mut(),
-                msg_controllen: 0,
-                msg_flags: 0,
-            });
-        }
+        let sent_count = crate::optimize::udp::send_batch(&self.socket, batch_packets)?;
+        let total_bytes =
+            batch_packets.iter().take(sent_count).map(|(data, _)| data.len()).sum::<usize>();
 
-        let flags = MSG_DONTWAIT;
-        let mut sent = 0usize;
-
-        #[cfg(target_os = "macos")]
-        {
-            let ret = unsafe { sendmsg_x(fd, msgs.as_ptr(), batch_packets.len() as u32, flags) };
-            if ret >= 0 {
-                sent = ret as usize;
-            } else {
-                let err = io::Error::last_os_error();
-                if matches!(
-                    err.raw_os_error(),
-                    Some(libc::ENOSYS)
-                        | Some(libc::EOPNOTSUPP)
-                        | Some(libc::ENOTSUP)
-                        | Some(libc::EINVAL)
-                        | Some(libc::EADDRNOTAVAIL)
-                ) {
-                } else {
-                    return Err(err);
-                }
-            }
-        }
-
-        let mut total_bytes = 0usize;
-        if sent > 0 {
-            total_bytes +=
-                batch_packets.iter().take(sent).map(|(data, _)| data.len()).sum::<usize>();
-        }
-
-        for (_packet, msg) in batch_packets.iter().zip(msgs.iter()).skip(sent) {
-            let n = unsafe { sendmsg(fd, msg, flags) };
-            if n < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            sent += 1;
-            total_bytes += n as usize;
-        }
-
-        self.packets_sent.fetch_add(sent as u64, Ordering::Relaxed);
+        self.packets_sent.fetch_add(sent_count as u64, Ordering::Relaxed);
         self.bytes_sent.fetch_add(total_bytes as u64, Ordering::Relaxed);
 
-        Ok(sent)
+        Ok(sent_count)
     }
 
     #[cfg(target_os = "windows")]
@@ -419,8 +303,14 @@ impl UdpFastPath {
         }
 
         let sent = self.socket.send_to(data, addr)?;
+        if sent != data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!("UDP datagram completed with {sent} bytes; expected {}", data.len()),
+            ));
+        }
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(data.len() as u64, Ordering::Relaxed);
         Ok(sent)
     }
 
@@ -431,6 +321,18 @@ impl UdpFastPath {
         addr: SocketAddr,
         segment_size: usize,
     ) -> io::Result<usize> {
+        crate::optimize::udp::validate_datagram_len(data.len())?;
+        if segment_size == 0 || segment_size > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid UDP GSO segment size {segment_size}"),
+            ));
+        }
+        let segments =
+            data.len().checked_add(segment_size - 1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "UDP GSO size overflow")
+            })? / segment_size;
+
         unsafe {
             let sock_addr = socket2::SockAddr::from(addr);
 
@@ -471,11 +373,22 @@ impl UdpFastPath {
                 return Err(io::Error::last_os_error());
             }
 
-            let segments = data.len().div_ceil(segment_size);
+            let sent_bytes = usize::try_from(sent).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "UDP GSO returned an invalid byte count")
+            })?;
+            if sent_bytes != data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    format!(
+                        "UDP GSO datagram completed with {sent_bytes} bytes; expected {}",
+                        data.len()
+                    ),
+                ));
+            }
             self.packets_sent.fetch_add(segments as u64, Ordering::Relaxed);
-            self.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
+            self.bytes_sent.fetch_add(data.len() as u64, Ordering::Relaxed);
 
-            Ok(sent as usize)
+            Ok(sent_bytes)
         }
     }
 
@@ -532,27 +445,30 @@ impl UdpFastPath {
                 return Err(err);
             }
 
-            let mut results = Vec::with_capacity(received as usize);
+            let received_count = crate::optimize::udp::checked_syscall_count(received, batch_size)?;
+            let mut results = Vec::with_capacity(received_count);
             let mut total_bytes = 0usize;
-            for i in 0..received as usize {
-                let len = msgs[i].msg_len as usize;
+            for i in 0..received_count {
+                let len = crate::optimize::udp::checked_received_len(
+                    msgs[i].msg_len,
+                    self.recv_batch[i].as_slice().len(),
+                    i,
+                )?;
                 total_bytes += len;
                 let mut data = vec![0u8; len];
                 data.copy_from_slice(&self.recv_batch[i].as_slice()[..len]);
 
-                let addr = socket2::SockAddr::new(addrs[i], msgs[i].msg_hdr.msg_namelen);
-
-                if let Some(peer) = addr.as_socket() {
-                    results.push((data, peer));
-                } else {
-                    log::debug!(
-                        "recvmmsg returned non-IP sockaddr family, dropping packet (namelen={})",
-                        msgs[i].msg_hdr.msg_namelen
-                    );
-                }
+                let address_len = usize::try_from(msgs[i].msg_hdr.msg_namelen).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("peer address length at index {i} is not representable"),
+                    )
+                })?;
+                let peer = crate::optimize::udp::socket_addr_from_storage(&addrs[i], address_len)?;
+                results.push((data, peer));
             }
 
-            self.packets_received.fetch_add(received as u64, Ordering::Relaxed);
+            self.packets_received.fetch_add(received_count as u64, Ordering::Relaxed);
             self.bytes_received.fetch_add(total_bytes as u64, Ordering::Relaxed);
 
             Ok(results)
@@ -608,7 +524,7 @@ impl UdpFastPath {
 
 #[cfg(test)]
 mod tests {
-    use super::UdpFastPath;
+    use super::{AlignedBuffer, UdpFastPath};
     use std::net::UdpSocket;
     use std::time::Duration;
 
@@ -649,5 +565,10 @@ mod tests {
         let (_, bytes_received, _, packets_received) = fast_path.counters_for_rust_tests();
         assert_eq!(bytes_received, 0);
         assert_eq!(packets_received, 0);
+    }
+
+    #[test]
+    fn aligned_buffer_rejects_size_overflow() {
+        assert!(AlignedBuffer::try_new(usize::MAX).is_err());
     }
 }

@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 #[test]
 fn aligned_buffer_is_cacheline_aligned() {
-    let len = aligned_buffer_len_for_rust_tests(1);
+    let len = aligned_buffer_len_for_rust_tests(1).expect("aligned buffer allocation");
     assert_eq!(len % 64, 0);
     assert!(len >= 64);
 }

@@ -21,6 +21,216 @@ extern "C" {
     ) -> libc::c_int;
 }
 
+#[cfg(unix)]
+const UDP_BATCH_LIMIT: usize = 64;
+
+#[cfg(unix)]
+const _: () = {
+    assert!(std::mem::size_of::<sockaddr_storage>() >= std::mem::size_of::<libc::sockaddr_in>());
+    assert!(std::mem::size_of::<sockaddr_storage>() >= std::mem::size_of::<libc::sockaddr_in6>());
+    assert!(std::mem::align_of::<sockaddr_storage>() >= std::mem::align_of::<libc::sockaddr_in>());
+    assert!(std::mem::align_of::<sockaddr_storage>() >= std::mem::align_of::<libc::sockaddr_in6>());
+};
+
+#[cfg(unix)]
+fn validate_batch_len(len: usize) -> std::io::Result<()> {
+    if len > UDP_BATCH_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("UDP batch contains {len} datagrams; maximum is {UDP_BATCH_LIMIT}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_datagram_len(len: usize) -> std::io::Result<()> {
+    if len > u32::MAX as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("UDP datagram length {len} exceeds the 32-bit syscall result width"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn checked_syscall_count(
+    result: libc::c_int,
+    prepared: usize,
+) -> std::io::Result<usize> {
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let completed = usize::try_from(result).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "UDP syscall returned an unrepresentable completion count",
+        )
+    })?;
+    if completed > prepared {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("UDP syscall returned {completed} completions for {prepared} messages"),
+        ));
+    }
+    Ok(completed)
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) fn checked_received_len(
+    result: u32,
+    capacity: usize,
+    index: usize,
+) -> std::io::Result<usize> {
+    let length = usize::try_from(result).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("received UDP length at index {index} is not representable"),
+        )
+    })?;
+    if length > capacity {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "received UDP length {length} at index {index} exceeds buffer capacity {capacity}"
+            ),
+        ));
+    }
+    Ok(length)
+}
+
+#[cfg(unix)]
+fn checked_sent_len(actual: usize, expected: usize, index: usize) -> std::io::Result<()> {
+    if actual != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!("UDP datagram {index} completed with {actual} bytes; expected {expected}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn sockaddr_storage_for(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
+    // The const assertions above prove that the storage is large and aligned
+    // enough for both address families. Zeroing the C storage gives every
+    // padding byte a defined value before the family-specific prefix is copied.
+    let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
+    let length = match addr {
+        SocketAddr::V4(v4) => {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            let raw = libc::sockaddr_in {
+                sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: v4.port().to_be(),
+                sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
+                sin_zero: [0; 8],
+            };
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            let raw = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: v4.port().to_be(),
+                sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
+                sin_zero: [0; 8],
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &raw as *const _ as *const u8,
+                    &mut storage as *mut _ as *mut u8,
+                    std::mem::size_of_val(&raw),
+                );
+            }
+            std::mem::size_of::<libc::sockaddr_in>() as socklen_t
+        }
+        SocketAddr::V6(v6) => {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            let raw = libc::sockaddr_in6 {
+                sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
+                sin6_scope_id: v6.scope_id(),
+            };
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            let raw = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
+                sin6_scope_id: v6.scope_id(),
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &raw as *const _ as *const u8,
+                    &mut storage as *mut _ as *mut u8,
+                    std::mem::size_of_val(&raw),
+                );
+            }
+            std::mem::size_of::<libc::sockaddr_in6>() as socklen_t
+        }
+    };
+    (storage, length)
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) fn socket_addr_from_storage(
+    storage: &sockaddr_storage,
+    length: usize,
+) -> std::io::Result<SocketAddr> {
+    let family_prefix_len = std::mem::size_of::<libc::sockaddr>();
+    if length > std::mem::size_of::<sockaddr_storage>() || length < family_prefix_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid UDP peer address length {length}"),
+        ));
+    }
+
+    // SAFETY: `storage` is aligned as proven above, and the family field is at
+    // the ABI-defined prefix of sockaddr_storage on every supported Unix.
+    let family = unsafe { (*(storage as *const _ as *const libc::sockaddr)).sa_family as i32 };
+    match family {
+        libc::AF_INET => {
+            if length < std::mem::size_of::<libc::sockaddr_in>() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "IPv4 peer address is shorter than sockaddr_in",
+                ));
+            }
+            // SAFETY: the family and full sockaddr_in length were validated.
+            let addr = unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
+            Ok(SocketAddr::V4(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes()),
+                u16::from_be(addr.sin_port),
+            )))
+        }
+        libc::AF_INET6 => {
+            if length < std::mem::size_of::<libc::sockaddr_in6>() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "IPv6 peer address is shorter than sockaddr_in6",
+                ));
+            }
+            // SAFETY: the family and full sockaddr_in6 length were validated.
+            let addr = unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
+            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+                std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr),
+                u16::from_be(addr.sin6_port),
+                addr.sin6_flowinfo,
+                addr.sin6_scope_id,
+            )))
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported UDP peer address family {family}"),
+        )),
+    }
+}
+
 // =========================================================================
 // UDP GSO/GRO - Generic Segmentation/Receive Offload (Linux >= 4.18)
 // =========================================================================
@@ -77,7 +287,11 @@ impl UdpGsoConfig {
 // sendmmsg/recvmmsg - Batched syscalls for reduced overhead
 // =========================================================================
 
-/// Batched UDP send with sendmmsg (Linux/BSD)
+/// Batched UDP send with `sendmmsg` on Linux.
+///
+/// The returned count is the number of complete datagrams reported by the
+/// kernel. It may be smaller than the input on non-blocking backpressure. A
+/// partial byte result is returned as `WriteZero`, never as a complete send.
 #[cfg(target_os = "linux")]
 pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io::Result<usize> {
     send_batch_fd(sock.as_raw_fd(), packets)
@@ -85,11 +299,10 @@ pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io:
 
 #[cfg(target_os = "linux")]
 pub(crate) fn send_batch_fd(fd: RawFd, packets: &[(&[u8], SocketAddr)]) -> std::io::Result<usize> {
-    use std::mem::MaybeUninit;
-
     if packets.is_empty() {
         return Ok(0);
     }
+    validate_batch_len(packets.len())?;
 
     let mut messages: SmallVec<[libc::mmsghdr; UDP_BATCH_STACK]> =
         SmallVec::with_capacity(packets.len());
@@ -98,63 +311,8 @@ pub(crate) fn send_batch_fd(fd: RawFd, packets: &[(&[u8], SocketAddr)]) -> std::
         SmallVec::with_capacity(packets.len());
 
     for (data, addr) in packets {
-        let mut storage = MaybeUninit::<sockaddr_storage>::uninit();
-        let len = match addr {
-            SocketAddr::V4(v4) => {
-                #[cfg(target_os = "macos")]
-                let raw = libc::sockaddr_in {
-                    sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-                    sin_family: libc::AF_INET as libc::sa_family_t,
-                    sin_port: v4.port().to_be(),
-                    sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
-                    sin_zero: [0; 8],
-                };
-                #[cfg(not(target_os = "macos"))]
-                let raw = libc::sockaddr_in {
-                    sin_family: libc::AF_INET as libc::sa_family_t,
-                    sin_port: v4.port().to_be(),
-                    sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
-                    sin_zero: [0; 8],
-                };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &raw as *const _ as *const u8,
-                        storage.as_mut_ptr() as *mut u8,
-                        std::mem::size_of_val(&raw),
-                    );
-                }
-                std::mem::size_of::<libc::sockaddr_in>() as socklen_t
-            }
-            SocketAddr::V6(v6) => {
-                #[cfg(target_os = "macos")]
-                let raw = libc::sockaddr_in6 {
-                    sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-                    sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                    sin6_port: v6.port().to_be(),
-                    sin6_flowinfo: v6.flowinfo(),
-                    sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
-                    sin6_scope_id: v6.scope_id(),
-                };
-                #[cfg(not(target_os = "macos"))]
-                let raw = libc::sockaddr_in6 {
-                    sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                    sin6_port: v6.port().to_be(),
-                    sin6_flowinfo: v6.flowinfo(),
-                    sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
-                    sin6_scope_id: v6.scope_id(),
-                };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &raw as *const _ as *const u8,
-                        storage.as_mut_ptr() as *mut u8,
-                        std::mem::size_of_val(&raw),
-                    );
-                }
-                std::mem::size_of::<libc::sockaddr_in6>() as socklen_t
-            }
-        };
-
-        let storage = unsafe { storage.assume_init() };
+        validate_datagram_len(data.len())?;
+        let (storage, len) = sockaddr_storage_for(*addr);
         addrs.push(storage);
 
         iovecs.push(iovec { iov_base: data.as_ptr() as *mut c_void, iov_len: data.len() });
@@ -183,11 +341,24 @@ pub(crate) fn send_batch_fd(fd: RawFd, packets: &[(&[u8], SocketAddr)]) -> std::
         )
     };
 
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error());
+    let completed = checked_syscall_count(ret, messages.len())?;
+    for (index, ((data, _), message)) in packets.iter().zip(messages.iter()).enumerate() {
+        if index == completed {
+            break;
+        }
+        checked_sent_len(
+            usize::try_from(message.msg_len).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("sendmmsg returned an unrepresentable length at index {index}"),
+                )
+            })?,
+            data.len(),
+            index,
+        )?;
     }
 
-    Ok(ret as usize)
+    Ok(completed)
 }
 
 /// Batched UDP send for connected sockets via sendmmsg (Linux).
@@ -199,12 +370,14 @@ pub(crate) fn send_batch_connected(fd: RawFd, payloads: &[&[u8]]) -> std::io::Re
     if payloads.is_empty() {
         return Ok(0);
     }
+    validate_batch_len(payloads.len())?;
 
     let mut iovecs: SmallVec<[iovec; UDP_BATCH_STACK]> = SmallVec::with_capacity(payloads.len());
     let mut msgs: SmallVec<[libc::mmsghdr; UDP_BATCH_STACK]> =
         SmallVec::with_capacity(payloads.len());
 
     for payload in payloads {
+        validate_datagram_len(payload.len())?;
         iovecs.push(iovec { iov_base: payload.as_ptr() as *mut c_void, iov_len: payload.len() });
     }
 
@@ -225,11 +398,23 @@ pub(crate) fn send_batch_connected(fd: RawFd, payloads: &[&[u8]]) -> std::io::Re
 
     let rc =
         unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), msgs.len() as u32, libc::MSG_DONTWAIT) };
-    if rc < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(rc as usize)
+    let completed = checked_syscall_count(rc, msgs.len())?;
+    for (index, (payload, message)) in payloads.iter().zip(msgs.iter()).enumerate() {
+        if index == completed {
+            break;
+        }
+        checked_sent_len(
+            usize::try_from(message.msg_len).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("sendmmsg returned an unrepresentable length at index {index}"),
+                )
+            })?,
+            payload.len(),
+            index,
+        )?;
     }
+    Ok(completed)
 }
 
 /// Batched UDP receive for connected sockets via recvmmsg (Linux).
@@ -238,6 +423,7 @@ pub(crate) fn recv_batch_connected(fd: RawFd, bufs: &mut [&mut [u8]]) -> std::io
     if bufs.is_empty() {
         return Ok(0);
     }
+    validate_batch_len(bufs.len())?;
 
     let mut iovecs: SmallVec<[iovec; UDP_BATCH_STACK]> = SmallVec::with_capacity(bufs.len());
     let mut msgs: SmallVec<[libc::mmsghdr; UDP_BATCH_STACK]> = SmallVec::with_capacity(bufs.len());
@@ -270,19 +456,26 @@ pub(crate) fn recv_batch_connected(fd: RawFd, bufs: &mut [&mut [u8]]) -> std::io
             std::ptr::null_mut(),
         )
     };
-    if rc < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(rc as usize)
+    let completed = checked_syscall_count(rc, msgs.len())?;
+    for (index, (buf, message)) in bufs.iter().zip(msgs.iter()).enumerate() {
+        if index == completed {
+            break;
+        }
+        checked_received_len(message.msg_len, buf.len(), index)?;
     }
+    Ok(completed)
 }
 
-/// Batched UDP send using sendmsg_x where available (macOS/iOS).
+/// Batched UDP send using `sendmsg_x` where available (macOS/iOS).
+///
+/// The returned count is the number of complete datagrams. A short byte
+/// result from the scalar fallback is returned as `WriteZero`.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io::Result<usize> {
     if packets.is_empty() {
         return Ok(0);
     }
+    validate_batch_len(packets.len())?;
 
     let fd = sock.as_raw_fd();
     let mut messages: Vec<msghdr> = Vec::with_capacity(packets.len());
@@ -291,62 +484,8 @@ pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io:
     let mut addr_lens: Vec<socklen_t> = Vec::with_capacity(packets.len());
 
     for (data, addr) in packets {
-        let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
-        let len = match addr {
-            SocketAddr::V4(v4) => {
-                #[cfg(target_os = "macos")]
-                let raw = libc::sockaddr_in {
-                    sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-                    sin_family: libc::AF_INET as libc::sa_family_t,
-                    sin_port: v4.port().to_be(),
-                    sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
-                    sin_zero: [0; 8],
-                };
-                #[cfg(not(target_os = "macos"))]
-                let raw = libc::sockaddr_in {
-                    sin_family: libc::AF_INET as libc::sa_family_t,
-                    sin_port: v4.port().to_be(),
-                    sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
-                    sin_zero: [0; 8],
-                };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &raw as *const _ as *const u8,
-                        &mut storage as *mut _ as *mut u8,
-                        std::mem::size_of_val(&raw),
-                    );
-                }
-                std::mem::size_of::<libc::sockaddr_in>() as socklen_t
-            }
-            SocketAddr::V6(v6) => {
-                #[cfg(target_os = "macos")]
-                let raw = libc::sockaddr_in6 {
-                    sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-                    sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                    sin6_port: v6.port().to_be(),
-                    sin6_flowinfo: v6.flowinfo(),
-                    sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
-                    sin6_scope_id: v6.scope_id(),
-                };
-                #[cfg(not(target_os = "macos"))]
-                let raw = libc::sockaddr_in6 {
-                    sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                    sin6_port: v6.port().to_be(),
-                    sin6_flowinfo: v6.flowinfo(),
-                    sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
-                    sin6_scope_id: v6.scope_id(),
-                };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &raw as *const _ as *const u8,
-                        &mut storage as *mut _ as *mut u8,
-                        std::mem::size_of_val(&raw),
-                    );
-                }
-                std::mem::size_of::<libc::sockaddr_in6>() as socklen_t
-            }
-        };
-
+        validate_datagram_len(data.len())?;
+        let (storage, len) = sockaddr_storage_for(*addr);
         addrs.push(storage);
         addr_lens.push(len);
         iovecs.push(iovec { iov_base: data.as_ptr() as *mut c_void, iov_len: data.len() });
@@ -365,33 +504,40 @@ pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io:
     }
 
     let flags = libc::MSG_DONTWAIT;
+    let mut sent = 0usize;
 
     #[cfg(target_os = "macos")]
     {
-        let sent = unsafe { sendmsg_x(fd, messages.as_ptr(), messages.len() as u32, flags) };
-        if sent >= 0 {
-            return Ok(sent as usize);
-        }
-
-        let err = std::io::Error::last_os_error();
-        if !matches!(
-            err.raw_os_error(),
-            Some(libc::ENOSYS)
-                | Some(libc::EOPNOTSUPP)
-                | Some(libc::ENOTSUP)
-                | Some(libc::EINVAL)
-                | Some(libc::EADDRNOTAVAIL)
-        ) {
-            return Err(err);
+        let result = unsafe { sendmsg_x(fd, messages.as_ptr(), messages.len() as u32, flags) };
+        if result >= 0 {
+            sent = checked_syscall_count(result, messages.len())?;
+        } else {
+            let err = std::io::Error::last_os_error();
+            if !matches!(
+                err.raw_os_error(),
+                Some(libc::ENOSYS)
+                    | Some(libc::EOPNOTSUPP)
+                    | Some(libc::ENOTSUP)
+                    | Some(libc::EINVAL)
+                    | Some(libc::EADDRNOTAVAIL)
+            ) {
+                return Err(err);
+            }
         }
     }
 
-    let mut sent = 0usize;
-    for msg in &messages {
+    for (index, msg) in messages.iter().enumerate().skip(sent) {
         let rc = unsafe { libc::sendmsg(fd, msg as *const _ as *const _, flags) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let bytes = usize::try_from(rc).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("sendmsg returned an unrepresentable length at index {index}"),
+            )
+        })?;
+        checked_sent_len(bytes, packets[index].0.len(), index)?;
         sent += 1;
     }
     Ok(sent)
@@ -485,6 +631,58 @@ mod tests {
         let packets: Vec<(&[u8], SocketAddr)> = vec![];
         let sent = send_batch(&sock, &packets).expect("send_batch failed on empty");
         assert_eq!(sent, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_udp_syscall_metadata_is_bounded() {
+        assert_eq!(checked_syscall_count(2, 2).expect("valid count"), 2);
+        assert_eq!(checked_received_len(0, 0, 0).expect("valid zero length"), 0);
+
+        let count_error = checked_syscall_count(3, 2).expect_err("count must be bounded");
+        assert_eq!(count_error.kind(), std::io::ErrorKind::InvalidData);
+
+        let length_error = checked_received_len(9, 8, 4).expect_err("length must fit buffer");
+        assert_eq!(length_error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sockaddr_storage_round_trip_requires_full_abi_length() {
+        for text in ["127.0.0.1:4433", "[::1]:4433"] {
+            let expected: SocketAddr = text.parse().expect("test address");
+            let (storage, length) = sockaddr_storage_for(expected);
+            let parsed = socket_addr_from_storage(
+                &storage,
+                usize::try_from(length).expect("sockaddr length"),
+            )
+            .expect("round-trip address");
+            assert_eq!(parsed, expected);
+
+            let short_length = usize::try_from(length).expect("sockaddr length") - 1;
+            let short_error =
+                socket_addr_from_storage(&storage, short_length).expect_err("short address");
+            assert_eq!(short_error.kind(), std::io::ErrorKind::InvalidData);
+        }
+
+        let address: SocketAddr = "127.0.0.1:4433".parse().expect("test address");
+        let (storage, _) = sockaddr_storage_for(address);
+        let long_error =
+            socket_addr_from_storage(&storage, std::mem::size_of::<sockaddr_storage>() + 1)
+                .expect_err("oversized address");
+        assert_eq!(long_error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn test_send_batch_rejects_unrepresentable_batch_count() {
+        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind failed");
+        let destination: SocketAddr = "127.0.0.1:9".parse().expect("destination");
+        let payload = b"bounded";
+        let packets = vec![(payload.as_slice(), destination); UDP_BATCH_LIMIT + 1];
+
+        let error = send_batch(&sock, &packets).expect_err("batch limit must be enforced");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

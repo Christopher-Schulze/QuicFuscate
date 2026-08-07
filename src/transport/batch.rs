@@ -133,7 +133,12 @@ impl BatchProcessor {
         crate::transport::init_socket_acceleration(socket)
     }
 
-    /// Batch send packets with sendmmsg and acceleration (Linux)
+    /// Batch send packets with sendmmsg and acceleration (Linux).
+    ///
+    /// A successful return is the number of complete datagrams. A nonblocking
+    /// error after a completed prefix returns that prefix count; an error before
+    /// progress is returned as an `io::Error`. A short datagram result is always
+    /// a typed `WriteZero` error and is never counted as complete.
     #[cfg(target_os = "linux")]
     pub fn batch_send(
         &mut self,
@@ -145,10 +150,21 @@ impl BatchProcessor {
         {
             let result = accelerate::send_batch_fd(socket, packets);
 
-            if let Ok(sent) = result {
-                BATCH_SENDS.fetch_add(1, Ordering::Relaxed);
-                PACKETS_BATCHED.fetch_add(sent, Ordering::Relaxed);
-                return Ok(sent);
+            match result {
+                Ok(sent) => {
+                    BATCH_SENDS.fetch_add(1, Ordering::Relaxed);
+                    PACKETS_BATCHED.fetch_add(sent, Ordering::Relaxed);
+                    return Ok(sent);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::InvalidData | std::io::ErrorKind::WriteZero
+                    ) =>
+                {
+                    return Err(error)
+                }
+                Err(_) => {}
             }
         }
 
@@ -156,10 +172,21 @@ impl BatchProcessor {
         if !self.force_batch_send_fallback {
             let result = accelerate::send_batch_fd(socket, packets);
 
-            if let Ok(sent) = result {
-                BATCH_SENDS.fetch_add(1, Ordering::Relaxed);
-                PACKETS_BATCHED.fetch_add(sent, Ordering::Relaxed);
-                return Ok(sent);
+            match result {
+                Ok(sent) => {
+                    BATCH_SENDS.fetch_add(1, Ordering::Relaxed);
+                    PACKETS_BATCHED.fetch_add(sent, Ordering::Relaxed);
+                    return Ok(sent);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::InvalidData | std::io::ErrorKind::WriteZero
+                    ) =>
+                {
+                    return Err(error)
+                }
+                Err(_) => {}
             }
         }
 
@@ -172,6 +199,7 @@ impl BatchProcessor {
 
         let mut sent = 0usize;
         'send_loop: for (data, addr) in packets.iter().take(batch_count) {
+            crate::optimize::udp::validate_datagram_len(data.len())?;
             let sock_addr = socket2::SockAddr::from(*addr);
             loop {
                 // SAFETY: `socket` is a valid UDP fd supplied by the caller. `data` and
@@ -187,6 +215,21 @@ impl BatchProcessor {
                     )
                 };
                 if rc >= 0 {
+                    let bytes = usize::try_from(rc).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "sendto returned an unrepresentable byte count",
+                        )
+                    })?;
+                    if bytes != data.len() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            format!(
+                                "UDP datagram completed with {bytes} bytes; expected {}",
+                                data.len()
+                            ),
+                        ));
+                    }
                     sent += 1;
                     break;
                 }
@@ -228,10 +271,30 @@ impl BatchProcessor {
         let mut results = Vec::with_capacity(self.batch_size);
 
         // Setup timeout
-        let mut ts = timeout.map(|d| libc::timespec {
-            tv_sec: d.as_secs() as i64,
-            tv_nsec: d.subsec_nanos() as i64,
-        });
+        let mut ts = timeout
+            .map(|d| {
+                let tv_sec = libc::time_t::try_from(d.as_secs()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "UDP receive timeout exceeds the platform time_t range",
+                    )
+                })?;
+                let tv_nsec = libc::c_long::try_from(d.subsec_nanos()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "UDP receive timeout nanoseconds exceed the platform range",
+                    )
+                })?;
+                Ok(libc::timespec { tv_sec, tv_nsec })
+            })
+            .transpose()?;
+
+        let batch_count = u32::try_from(self.batch_size).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "UDP receive batch size exceeds the syscall count width",
+            )
+        })?;
 
         // Setup receive messages
         for i in 0..self.batch_size {
@@ -272,7 +335,7 @@ impl BatchProcessor {
             libc::recvmmsg(
                 socket,
                 self.recv_msgs.as_mut_ptr(),
-                self.batch_size as u32,
+                batch_count,
                 libc::MSG_DONTWAIT,
                 ts.as_mut().map_or(std::ptr::null_mut(), |t| t as *mut _),
             )
@@ -286,51 +349,34 @@ impl BatchProcessor {
             return Err(err);
         }
 
-        // Process received packets
-        for i in 0..received as usize {
-            let len = self.recv_msgs[i].msg_len as usize;
-            if len > 0 {
-                let mut data = vec![0u8; len];
-                data.copy_from_slice(&self.recv_buffers[i][..len]);
+        let received_count =
+            crate::optimize::udp::checked_syscall_count(received, self.batch_size)?;
 
-                // Parse address
-                // SAFETY: `recv_addrs[i]` was written by the kernel during recvmmsg for
-                // all `i < received`. We check `ss_family` before casting so we only
-                // dereference the union variant (sockaddr_in / sockaddr_in6) that the
-                // kernel actually filled in. Misalignment is not possible because
-                // `sockaddr_storage` is defined with maximum alignment for all sockaddr
-                // subtypes. If the family is neither AF_INET nor AF_INET6 we skip the
-                // packet (`continue`), so no invalid memory access can occur.
-                let addr = unsafe {
-                    let sa = &self.recv_addrs[i] as *const libc::sockaddr_storage;
-                    match (*sa).ss_family as i32 {
-                        libc::AF_INET => {
-                            let sa4 = sa as *const libc::sockaddr_in;
-                            SocketAddr::V4(std::net::SocketAddrV4::new(
-                                std::net::Ipv4Addr::from((*sa4).sin_addr.s_addr.to_ne_bytes()),
-                                (*sa4).sin_port.to_be(),
-                            ))
-                        }
-                        libc::AF_INET6 => {
-                            let sa6 = sa as *const libc::sockaddr_in6;
-                            SocketAddr::V6(std::net::SocketAddrV6::new(
-                                std::net::Ipv6Addr::from((*sa6).sin6_addr.s6_addr),
-                                (*sa6).sin6_port.to_be(),
-                                (*sa6).sin6_flowinfo,
-                                (*sa6).sin6_scope_id,
-                            ))
-                        }
-                        _ => continue,
-                    }
-                };
-
-                results.push((data, addr));
-            }
+        // Process received packets. Zero-length UDP datagrams are valid and are
+        // preserved; malformed kernel metadata is an error, never a skipped packet.
+        for i in 0..received_count {
+            let len = crate::optimize::udp::checked_received_len(
+                self.recv_msgs[i].msg_len,
+                self.recv_buffers[i].len(),
+                i,
+            )?;
+            let mut data = vec![0u8; len];
+            data.copy_from_slice(&self.recv_buffers[i][..len]);
+            let address_len =
+                usize::try_from(self.recv_msgs[i].msg_hdr.msg_namelen).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("peer address length at index {i} is not representable"),
+                    )
+                })?;
+            let addr =
+                crate::optimize::udp::socket_addr_from_storage(&self.recv_addrs[i], address_len)?;
+            results.push((data, addr));
         }
 
         BATCH_RECVS.fetch_add(1, Ordering::Relaxed);
-        PACKETS_BATCHED.fetch_add(received as usize, Ordering::Relaxed);
-        crate::optimize::telemetry::ZERO_COPY_RECVS.inc_by(received as u64);
+        PACKETS_BATCHED.fetch_add(received_count, Ordering::Relaxed);
+        crate::optimize::telemetry::ZERO_COPY_RECVS.inc_by(received_count as u64);
 
         Ok(results)
     }
@@ -346,13 +392,11 @@ impl BatchProcessor {
             return Ok(0);
         }
 
-        use std::os::unix::io::IntoRawFd;
         // SAFETY: `socket` is a valid, open UDP socket fd provided by the caller.
-        // `into_raw_fd()` is called immediately after the send so the fd is not closed
-        // when `sock` is dropped; the caller retains ownership of the descriptor.
-        let sock = unsafe { UdpSocket::from_raw_fd(socket) };
-        let result = accelerate::send_batch(&sock, packets);
-        let _ = sock.into_raw_fd();
+        // ManuallyDrop prevents this temporary view from closing the caller-owned
+        // descriptor on either success or an early send error.
+        let sock = std::mem::ManuallyDrop::new(unsafe { UdpSocket::from_raw_fd(socket) });
+        let result = accelerate::send_batch(&*sock, packets);
 
         match result {
             Ok(sent) => {
@@ -370,17 +414,21 @@ impl BatchProcessor {
         socket: i32,
         packets: &[(&[u8], SocketAddr)],
     ) -> std::io::Result<usize> {
-        use std::os::unix::io::IntoRawFd;
         // SAFETY: `socket` is a valid, open UDP socket fd provided by the caller.
-        // `into_raw_fd()` is called at the end of the function so the fd is not closed
-        // when `sock` is dropped; the caller retains ownership of the descriptor.
-        let sock = unsafe { UdpSocket::from_raw_fd(socket) };
+        // ManuallyDrop prevents this temporary view from closing the caller-owned
+        // descriptor when a send fails before the loop completes.
+        let sock = std::mem::ManuallyDrop::new(unsafe { UdpSocket::from_raw_fd(socket) });
         let mut sent = 0usize;
         for (data, addr) in packets {
-            sock.send_to(data, addr)?;
+            let bytes = sock.send_to(data, addr)?;
+            if bytes != data.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    format!("UDP datagram completed with {bytes} bytes; expected {}", data.len()),
+                ));
+            }
             sent += 1;
         }
-        let _ = sock.into_raw_fd();
         Ok(sent)
     }
 
@@ -398,7 +446,13 @@ impl BatchProcessor {
         let sock = std::mem::ManuallyDrop::new(unsafe { UdpSocket::from_raw_socket(socket) });
         let mut sent = 0usize;
         for (data, addr) in packets {
-            sock.send_to(data, addr)?;
+            let bytes = sock.send_to(data, addr)?;
+            if bytes != data.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    format!("UDP datagram completed with {bytes} bytes; expected {}", data.len()),
+                ));
+            }
             sent += 1;
         }
         Ok(sent)
@@ -485,6 +539,35 @@ mod tests {
         let mut bp = BatchProcessor::new();
         // init_acceleration may fail on some platforms but should not panic
         let _ = bp.init_acceleration(&socket);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unix_batch_send_preserves_caller_socket_after_error() {
+        use std::os::unix::io::AsRawFd;
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+        receiver.set_read_timeout(Some(Duration::from_secs(1))).expect("set receiver timeout");
+        let destination = receiver.local_addr().expect("receiver address");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let oversized_payload = vec![0u8; MAX_UDP_DATAGRAM_SIZE];
+        let oversized_packets = [(oversized_payload.as_slice(), destination)];
+        let mut batch = BatchProcessor::new();
+
+        batch
+            .batch_send(sender.as_raw_fd(), &oversized_packets)
+            .expect_err("oversized UDP payload must fail");
+        assert!(sender.local_addr().is_ok(), "batch send closed the caller socket");
+
+        let recovery_payload = b"after-send-error";
+        let recovery_packets = [(recovery_payload.as_slice(), destination)];
+        assert_eq!(
+            batch.batch_send(sender.as_raw_fd(), &recovery_packets).expect("recovery send"),
+            1
+        );
+        let mut receive_buffer = [0u8; 64];
+        let (recovery_len, _) = receiver.recv_from(&mut receive_buffer).expect("receive recovery");
+        assert_eq!(&receive_buffer[..recovery_len], recovery_payload);
     }
 
     #[cfg(target_os = "windows")]

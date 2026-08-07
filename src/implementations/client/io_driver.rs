@@ -168,7 +168,7 @@ fn resolve_outbound_dispatch(_queued: usize, _has_uring: bool) -> OutboundDispat
 
 #[cfg(target_os = "linux")]
 trait IoHotpathAdapter: Send + Sync {
-    fn sendmmsg_batch(&self, socket_fd: i32, payloads: &[&[u8]]) -> Result<usize, String>;
+    fn sendmmsg_batch(&self, socket_fd: i32, payloads: &[&[u8]]) -> Result<usize, std::io::Error>;
 }
 
 #[cfg(target_os = "linux")]
@@ -185,7 +185,7 @@ impl Default for SystemIoHotpathAdapter {
 
 #[cfg(target_os = "linux")]
 impl IoHotpathAdapter for SystemIoHotpathAdapter {
-    fn sendmmsg_batch(&self, socket_fd: i32, payloads: &[&[u8]]) -> Result<usize, String> {
+    fn sendmmsg_batch(&self, socket_fd: i32, payloads: &[&[u8]]) -> Result<usize, std::io::Error> {
         if self
             .acceleration_initialized
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -197,7 +197,6 @@ impl IoHotpathAdapter for SystemIoHotpathAdapter {
         }
 
         crate::optimize::zc_batch::sendmmsg(socket_fd, payloads)
-            .map_err(|e: std::io::Error| e.to_string())
     }
 }
 
@@ -207,12 +206,13 @@ fn try_sendmmsg_batch(
     socket_fd: i32,
     dispatch: OutboundDispatch,
     payloads: &[&[u8]],
-) -> Result<usize, String> {
+) -> Result<usize, std::io::Error> {
     match dispatch {
         #[cfg(feature = "io_uring")]
-        OutboundDispatch::IoUringBatch => {
-            Err("io_uring dispatch must be handled by the io_uring sender".to_string())
-        }
+        OutboundDispatch::IoUringBatch => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "io_uring dispatch must be handled by the io_uring sender",
+        )),
         OutboundDispatch::SendmmsgBatch => {
             Ok(adapter.sendmmsg_batch(socket_fd, payloads)?.min(payloads.len()))
         }
@@ -781,8 +781,20 @@ impl IoDriver {
                                     crate::optimize::telemetry::IO_DRIVER_SENDMMSG_PACKETS
                                         .fetch_add(already_sent as u64, Ordering::Relaxed);
                                 }
-                                Err(e) => {
-                                    log::debug!("sendmmsg batch fallback: {}", e);
+                                Err(error)
+                                    if matches!(
+                                        error.kind(),
+                                        std::io::ErrorKind::InvalidData
+                                            | std::io::ErrorKind::WriteZero
+                                    ) =>
+                                {
+                                    return Err(self.transport_send_error(
+                                        "client UDP sendmmsg result",
+                                        error,
+                                    ));
+                                }
+                                Err(error) => {
+                                    log::debug!("sendmmsg batch fallback: {}", error);
                                 }
                             }
                         }
@@ -1361,9 +1373,21 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl IoHotpathAdapter for MockHotpathAdapter {
-        fn sendmmsg_batch(&self, _socket_fd: i32, _payloads: &[&[u8]]) -> Result<usize, String> {
+        fn sendmmsg_batch(
+            &self,
+            _socket_fd: i32,
+            _payloads: &[&[u8]],
+        ) -> Result<usize, std::io::Error> {
             self.sendmmsg_calls.fetch_add(1, Ordering::Relaxed);
-            self.sendmmsg_result.lock().map_err(|e| e.to_string())?.clone()
+            match self
+                .sendmmsg_result
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .clone()
+            {
+                Ok(sent) => Ok(sent),
+                Err(error) => Err(std::io::Error::other(error)),
+            }
         }
     }
 
@@ -1402,7 +1426,7 @@ mod tests {
         let error = try_sendmmsg_batch(&adapter, 0, OutboundDispatch::IoUringBatch, &payloads)
             .expect_err("io_uring dispatch must not silently report zero sends");
 
-        assert!(error.contains("io_uring"));
+        assert!(error.to_string().contains("io_uring"));
         assert_eq!(adapter.sendmmsg_calls.load(Ordering::Relaxed), 0);
     }
 
