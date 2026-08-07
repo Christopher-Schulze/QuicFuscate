@@ -536,6 +536,35 @@ else
   append_item "transport_packet_number_native_regression" "fail" "missing scalar parity, target-feature compile, suite runner, or skip contract"
 fi
 
+# 4f) Interface BMI2 dispatch must keep profile selection and the parser's
+# runtime feature intersection explicit. Hardware-specific execution is a
+# platform lane; unsupported hosts must be recorded rather than silently green.
+if rg -F -- 'fn bmi2_parser_is_allowed(profile: CpuProfile, features: &CpuFeatures)' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'if bmi2_parser_is_allowed(detector.profile(), features)' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'Self::profile_from_features(features_full)' \
+    src/optimize/parts/cpu_dispatch.rs >/dev/null \
+  && rg -F -- 'fn x86_profile_selection_keeps_bmi2_explicit()' \
+    src/optimize/parts/cpu_dispatch.rs >/dev/null \
+  && rg -F -- 'fn bmi2_dispatch_requires_profile_and_runtime_feature_intersection()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'SIMD_SKIP test=bmi2_parser_accepts_intentionally_unaligned_ipv4_slice_when_supported required=bmi2' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'run_verified_library_target "interface-unaligned-write"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "interface-bmi2-dispatch"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "cpu-profile-bmi2-intersection"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'host_cpu_has_no_bmi2' scripts/tests/suites/test-core.sh >/dev/null; then
+  pass "Interface BMI2 dispatch proves profile selection, runtime feature intersection, unaligned input, and native host skips"
+  append_item "interface_bmi2_dispatch_regression" "ok" "cached profile, exact BMI2 gate, synthetic profile cases, unaligned coverage, and explicit native skip wiring present"
+else
+  fail_critical "Interface BMI2 dispatch proof or its fail-closed platform runner is missing"
+  append_item "interface_bmi2_dispatch_regression" "fail" "missing profile intersection, test coverage, SIMD skip, or core-suite wiring"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

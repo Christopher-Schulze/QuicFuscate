@@ -20,6 +20,8 @@
 //!   may drive it from threads or async runtimes as needed.
 
 use crate::optimize::{MemoryPool, PooledBlock};
+#[cfg(target_arch = "x86_64")]
+use crate::simd::{CpuFeatures, CpuProfile};
 use crate::telemetry::TELEMETRY_ENABLED;
 use std::io::{self};
 use std::net::{IpAddr, Ipv6Addr};
@@ -34,6 +36,31 @@ pub const TUN_PACKET_QUEUE_CAPACITY: usize = 1024;
 pub const TUN_MIN_MTU: u16 = 576;
 /// Minimum valid TUN MTU while IPv6 is enabled.
 pub const TUN_IPV6_MIN_MTU: u16 = 1280;
+
+/// Permit the BMI2 parser only when both the automatic/override profile is an
+/// x86 profile and the exact runtime BMI2 feature is present. Higher x86
+/// profiles do not imply BMI2, so the feature bit remains a separate gate.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn bmi2_parser_is_allowed(profile: CpuProfile, features: &CpuFeatures) -> bool {
+    matches!(
+        profile,
+        CpuProfile::X86_P0a
+            | CpuProfile::X86_P0b
+            | CpuProfile::X86_P1a
+            | CpuProfile::X86_P1b
+            | CpuProfile::X86_P1f
+            | CpuProfile::X86_P2a
+            | CpuProfile::X86_P2b
+            | CpuProfile::X86_P3a
+            | CpuProfile::X86_P3b
+            | CpuProfile::X86_P3c
+            | CpuProfile::X86_P3d
+            | CpuProfile::X86_P3e
+            | CpuProfile::X86_P4a
+            | CpuProfile::X86_P4b
+    ) && features.bmi2
+}
 
 /// An owned TUN frame backed by a pooled memory block.
 ///
@@ -621,8 +648,9 @@ impl TunInterface {
         // Parse IP headers with BMI2 only when the exact runtime feature is present.
         #[cfg(target_arch = "x86_64")]
         {
-            let features = crate::optimize::FeatureDetector::instance().features_full();
-            if features.bmi2 {
+            let detector = crate::optimize::FeatureDetector::instance();
+            let features = detector.features_full();
+            if bmi2_parser_is_allowed(detector.profile(), features) {
                 // SAFETY: the exact runtime BMI2 feature is proven above.
                 unsafe { self.parse_ip_header_bmi2(buf) };
             } else {
@@ -2171,6 +2199,9 @@ mod tests {
     #[test]
     fn bmi2_parser_accepts_intentionally_unaligned_ipv4_slice_when_supported() {
         if !is_x86_feature_detected!("bmi2") {
+            eprintln!(
+                "SIMD_SKIP test=bmi2_parser_accepts_intentionally_unaligned_ipv4_slice_when_supported required=bmi2"
+            );
             return;
         }
 
@@ -2193,6 +2224,48 @@ mod tests {
         // SAFETY: The runtime check above proves BMI2 support for this call,
         // and the parser uses an alignment-safe four-byte load.
         unsafe { tun.parse_ip_header_bmi2(packet) };
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn bmi2_dispatch_requires_profile_and_runtime_feature_intersection() {
+        let selecting_profiles = [
+            CpuProfile::X86_P0a,
+            CpuProfile::X86_P0b,
+            CpuProfile::X86_P1a,
+            CpuProfile::X86_P1b,
+            CpuProfile::X86_P1f,
+            CpuProfile::X86_P2a,
+            CpuProfile::X86_P2b,
+            CpuProfile::X86_P3a,
+            CpuProfile::X86_P3b,
+            CpuProfile::X86_P3c,
+            CpuProfile::X86_P3d,
+            CpuProfile::X86_P3e,
+            CpuProfile::X86_P4a,
+            CpuProfile::X86_P4b,
+        ];
+        let without_bmi2 = CpuFeatures::default();
+        let with_bmi2 = CpuFeatures { bmi2: true, ..CpuFeatures::default() };
+
+        for profile in selecting_profiles {
+            assert!(!bmi2_parser_is_allowed(profile, &without_bmi2));
+            assert!(bmi2_parser_is_allowed(profile, &with_bmi2));
+        }
+
+        for profile in [
+            CpuProfile::ARM_A0,
+            CpuProfile::ARM_A1a,
+            CpuProfile::ARM_A1b,
+            CpuProfile::ARM_A1c,
+            CpuProfile::ARM_A1d,
+            CpuProfile::ARM_A2,
+            CpuProfile::Apple_M,
+            CpuProfile::RVV,
+            CpuProfile::Scalar,
+        ] {
+            assert!(!bmi2_parser_is_allowed(profile, &with_bmi2));
+        }
     }
 
     #[test]

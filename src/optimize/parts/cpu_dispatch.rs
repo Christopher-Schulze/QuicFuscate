@@ -583,6 +583,8 @@ pub enum CpuFeature {
 pub struct FeatureDetector {
     features: HashSet<CpuFeature>,
     features_full: CpuFeatures,
+    /// Cached automatic profile selected from the detected feature set.
+    profile: CpuProfile,
     amx_capability: AmxCapability,
     cache_line_size: usize,
     has_avx512: bool,
@@ -1032,10 +1034,12 @@ impl FeatureDetector {
         // Determine capabilities
         let has_avx512 =
             features.contains(&CpuFeature::AVX512F) || features.contains(&CpuFeature::AVX10_1_512);
+        let profile = Self::profile_from_features(features_full);
 
         Self {
             features,
             features_full,
+            profile,
             amx_capability,
             cache_line_size,
             has_avx512,
@@ -1065,9 +1069,13 @@ impl FeatureDetector {
             return override_profile;
         }
 
+        self.profile
+    }
+
+    /// Select the automatic profile from an exact feature snapshot.
+    fn profile_from_features(features: CpuFeatures) -> CpuProfile {
         #[cfg(target_arch = "x86_64")]
         {
-            let features = self.features_full;
             let matrix = features.simd_dispatch_matrix();
 
             if features.avx10_1_512 {
@@ -1124,7 +1132,6 @@ impl FeatureDetector {
 
         #[cfg(target_arch = "aarch64")]
         {
-            let features = self.features_full;
             #[cfg(target_os = "macos")]
             if features.apple_amx {
                 return CpuProfile::Apple_M;
@@ -1156,7 +1163,7 @@ impl FeatureDetector {
 
         #[cfg(target_arch = "riscv64")]
         {
-            if self.has_feature(CpuFeature::RVV) {
+            if features.rvv {
                 return CpuProfile::RVV;
             }
         }
@@ -1992,9 +1999,9 @@ fn with_override<T>(val: Option<&str>, f: impl FnOnce() -> T) -> T {
 mod tests {
     use super::{
         bitslice_policy_tag, dispatch_bitslice, with_override, AmxCapability, AmxSignals,
-        CpuFeatures, PROFILE_OVERRIDE, TEST_FEC_KERNEL_OVERRIDE,
+        CpuFeatures, CpuProfile, FeatureDetector, PROFILE_OVERRIDE, TEST_FEC_KERNEL_OVERRIDE,
     };
-    use crate::simd::{CpuFeature, FeatureDetector};
+    use crate::simd::CpuFeature;
     use std::sync::{Arc, Barrier};
 
     #[test]
@@ -2177,6 +2184,94 @@ mod tests {
         features.avx = true;
         features.ssse3 = true;
         assert!(features.simd_dispatch_matrix().chacha_avx);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_profile_selection_keeps_bmi2_explicit() {
+        let cases = [
+            ("p0a", CpuFeatures { sse2: true, ..CpuFeatures::default() }, CpuProfile::X86_P0a),
+            ("p0b", CpuFeatures { ssse3: true, ..CpuFeatures::default() }, CpuProfile::X86_P0b),
+            ("p1a", CpuFeatures { sse42: true, ..CpuFeatures::default() }, CpuProfile::X86_P1a),
+            (
+                "p1b",
+                CpuFeatures { aesni: true, pclmulqdq: true, ..CpuFeatures::default() },
+                CpuProfile::X86_P1b,
+            ),
+            ("p1f", CpuFeatures { avx: true, ..CpuFeatures::default() }, CpuProfile::X86_P1f),
+            (
+                "p3a",
+                CpuFeatures { avx512f: true, ..CpuFeatures::default() },
+                CpuProfile::X86_P3a,
+            ),
+            (
+                "p3b",
+                CpuFeatures {
+                    avx512f: true,
+                    vaes: true,
+                    vpclmulqdq: true,
+                    ..CpuFeatures::default()
+                },
+                CpuProfile::X86_P3b,
+            ),
+            (
+                "p3c",
+                CpuFeatures {
+                    avx512f: true,
+                    avx512bw: true,
+                    avx512vbmi2: true,
+                    ..CpuFeatures::default()
+                },
+                CpuProfile::X86_P3c,
+            ),
+            (
+                "p3d",
+                CpuFeatures {
+                    avx512f: true,
+                    avx512cd: true,
+                    avx512vpopcntdq: true,
+                    ..CpuFeatures::default()
+                },
+                CpuProfile::X86_P3d,
+            ),
+            (
+                "p3e",
+                CpuFeatures { avx512f: true, gfni: true, ..CpuFeatures::default() },
+                CpuProfile::X86_P3e,
+            ),
+            (
+                "p4a",
+                CpuFeatures { avx10_1_256: true, ..CpuFeatures::default() },
+                CpuProfile::X86_P4a,
+            ),
+            (
+                "p4b",
+                CpuFeatures { avx10_1_512: true, ..CpuFeatures::default() },
+                CpuProfile::X86_P4b,
+            ),
+        ];
+
+        for (name, features, expected) in cases {
+            let without_bmi2 = CpuFeatures { bmi2: false, ..features };
+            assert_eq!(
+                FeatureDetector::profile_from_features(without_bmi2),
+                expected,
+                "automatic profile {name} must be selected without BMI2"
+            );
+
+            let with_bmi2 = CpuFeatures { bmi2: true, ..features };
+            assert_eq!(
+                FeatureDetector::profile_from_features(with_bmi2),
+                expected,
+                "automatic profile {name} must not gain a BMI2-dependent meaning"
+            );
+        }
+
+        let p2a = CpuFeatures { avx2: true, ..CpuFeatures::default() };
+        assert_eq!(FeatureDetector::profile_from_features(p2a), CpuProfile::X86_P2a);
+
+        let p2b = CpuFeatures { avx2: true, bmi2: true, ..CpuFeatures::default() };
+        assert_eq!(FeatureDetector::profile_from_features(p2b), CpuProfile::X86_P2b);
     }
 
     #[test]
