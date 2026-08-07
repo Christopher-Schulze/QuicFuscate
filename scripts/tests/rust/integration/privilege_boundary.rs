@@ -71,7 +71,7 @@ fn capability_report_is_serializable_and_readiness_is_fail_closed() {
 fn privileged_drop_is_isolated_in_a_subprocess() {
     // SAFETY: geteuid has no side effects.
     if unsafe { libc::geteuid() } != 0 {
-        eprintln!("root-only subprocess proof deferred to the privileged Omega gate");
+        eprintln!("PRIVILEGE_PROOF_UNAVAILABLE reason=requires_root");
         return;
     }
 
@@ -103,6 +103,9 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
     assert_eq!(proof["inheritable_capabilities"], 0);
     assert_eq!(proof["ambient_capabilities"], 0);
     assert_eq!(proof["no_new_privileges"], true);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("PRIVILEGE_PROBE_STATE threads_verified=")
+    );
 
     let tokio_output = std::process::Command::new(env!("CARGO_BIN_EXE_qf-privilege-probe"))
         .arg(identity.uid().to_string())
@@ -117,10 +120,20 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
     );
     let tokio_proof: serde_json::Value =
         serde_json::from_slice(&tokio_output.stdout).expect("parse Tokio privilege-drop proof");
+    assert_eq!(tokio_proof["real_uid"], identity.uid());
     assert_eq!(tokio_proof["effective_uid"], identity.uid());
+    assert_eq!(tokio_proof["saved_uid"], identity.uid());
+    assert_eq!(tokio_proof["real_gid"], identity.gid());
     assert_eq!(tokio_proof["effective_gid"], identity.gid());
+    assert_eq!(tokio_proof["saved_gid"], identity.gid());
+    assert_eq!(tokio_proof["supplementary_groups"], serde_json::json!([]));
     assert_eq!(tokio_proof["effective_capabilities"], 0);
+    assert_eq!(tokio_proof["permitted_capabilities"], 0);
+    assert_eq!(tokio_proof["inheritable_capabilities"], 0);
+    assert_eq!(tokio_proof["ambient_capabilities"], 0);
     assert_eq!(tokio_proof["no_new_privileges"], true);
+    assert!(String::from_utf8_lossy(&tokio_output.stderr)
+        .contains("PRIVILEGE_PROBE_STATE threads_verified="));
 
     // SAFETY: parent identity is inspected only; the child performed the drop.
     assert_eq!(unsafe { libc::geteuid() }, 0);

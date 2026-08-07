@@ -899,6 +899,25 @@ else
   append_item "privilege_identity_ffi_contracts" "fail" "missing opaque identity, final validation, CurrentIds type, or group-result regression"
 fi
 
+# 4p) Privilege post-drop proof must cover all Linux ID fields, expose partial
+#     transition state, and keep non-Linux verification explicitly unsupported.
+if rg -F -- 'Result<[u32; 4], DropError>' src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'PartialTransition' src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'verify_root_cannot_be_regained(identity' src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'linux_thread_status_requires_filesystem_uid_and_gid_fields' \
+    src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'partial_transition_error_preserves_state_and_operation' \
+    src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'PRIVILEGE_PROBE_STATE threads_verified=' \
+    src/bin/qf-privilege-probe.rs scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
+  && rg -F -- 'Err(DropError::NotSupported)' src/privilege/drop.rs >/dev/null; then
+  pass "Privilege post-drop ID, partial-transition, root-regain, and platform contracts are wired"
+  append_item "privilege_post_drop_state_proof" "ok" "Linux UID/GID filesystem fields, fail-closed transition state, complete isolated regain probe, and explicit non-Linux boundary"
+else
+  fail_critical "Privilege post-drop state or failure-proof contract is incomplete"
+  append_item "privilege_post_drop_state_proof" "fail" "missing four-field Linux proof, partial state, isolated regain check, probe evidence, or non-Linux fail-closed boundary"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

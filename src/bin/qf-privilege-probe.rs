@@ -60,17 +60,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     ready.wait();
     let report = drop_privileges_resolved(&identity)?;
-    let _verified_threads = verify_process_privilege_state(&identity)?;
+    let verified_threads = verify_process_privilege_state(&identity)?;
+    eprintln!("PRIVILEGE_PROBE_STATE threads_verified={verified_threads}");
     if let Some(runtime) = runtime {
-        runtime.block_on(async { tokio::task::yield_now().await });
-    } else if workers.is_empty() {
-        prove_root_cannot_be_regained()?;
+        runtime.shutdown_timeout(std::time::Duration::from_secs(5));
     } else {
         stop.store(true, std::sync::atomic::Ordering::Release);
         for worker in workers {
             worker.join().map_err(|_| "privilege probe worker panicked")?;
         }
     }
+    prove_root_cannot_be_regained(&identity)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }

@@ -76,6 +76,42 @@ impl ResolvedIdentity {
     }
 }
 
+/// Known progress points of the privilege transition.
+///
+/// Once the transition starts, any later failure is returned as a
+/// [`DropError::PartialTransition`] carrying the last completed point. The
+/// caller must keep the service unexposed until an operator or supervisor
+/// handles the uncertain process state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PrivilegeTransitionState {
+    /// Finalization has started after the target identity was validated.
+    TransitionStarted,
+    /// Linux `PR_SET_NO_NEW_PRIVS` completed.
+    NoNewPrivilegesSet,
+    /// Supplementary groups were cleared.
+    SupplementaryGroupsCleared,
+    /// The target group IDs were applied.
+    GroupIdsChanged,
+    /// The target user IDs were applied.
+    UserIdsChanged,
+    /// Linux ambient and process capability sets were cleared.
+    CapabilitiesCleared,
+}
+
+impl std::fmt::Display for PrivilegeTransitionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::TransitionStarted => "transition_started",
+            Self::NoNewPrivilegesSet => "no_new_privileges_set",
+            Self::SupplementaryGroupsCleared => "supplementary_groups_cleared",
+            Self::GroupIdsChanged => "group_ids_changed",
+            Self::UserIdsChanged => "user_ids_changed",
+            Self::CapabilitiesCleared => "capabilities_cleared",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Non-failing target-account diagnostic used by the capabilities command.
 #[derive(Debug, Clone, Serialize)]
 pub struct IdentityResolution {
@@ -148,6 +184,12 @@ pub enum DropError {
         operation: &'static str,
         detail: &'static str,
     },
+    /// The process may be partially transitioned and must not be exposed.
+    PartialTransition {
+        state: PrivilegeTransitionState,
+        operation: &'static str,
+        detail: String,
+    },
     SystemCallFailed {
         operation: &'static str,
         errno: i32,
@@ -179,6 +221,9 @@ impl std::fmt::Display for DropError {
             Self::MalformedSystemCallResult { operation, detail } => {
                 write!(f, "{operation} returned malformed data: {detail}")
             }
+            Self::PartialTransition { state, operation, detail } => {
+                write!(f, "privilege transition is partial after {state}: {operation}: {detail}")
+            }
             Self::SystemCallFailed { operation, errno } => {
                 write!(f, "{operation} failed (errno {errno})")
             }
@@ -191,6 +236,14 @@ impl std::fmt::Display for DropError {
 }
 
 impl std::error::Error for DropError {}
+
+fn partial_transition_error(
+    state: PrivilegeTransitionState,
+    operation: &'static str,
+    error: DropError,
+) -> DropError {
+    DropError::PartialTransition { state, operation, detail: error.to_string() }
+}
 
 /// Check the current process's privilege state.
 ///
@@ -434,38 +487,71 @@ pub fn drop_privileges_resolved(
     #[cfg(target_os = "linux")]
     {
         validate_resolved_identity(identity)?;
-        enable_no_new_privileges()?;
-        clear_supplementary_groups()?;
+        let mut state = PrivilegeTransitionState::TransitionStarted;
+        enable_no_new_privileges().map_err(|error| {
+            partial_transition_error(state, "prctl(PR_SET_NO_NEW_PRIVS)", error)
+        })?;
+        state = PrivilegeTransitionState::NoNewPrivilegesSet;
+        clear_supplementary_groups()
+            .map_err(|error| partial_transition_error(state, "setgroups", error))?;
+        state = PrivilegeTransitionState::SupplementaryGroupsCleared;
         // SAFETY: `identity` has been re-resolved and validated as non-root;
         // libc receives plain scalar IDs and performs the kernel transition.
         call_zero("setresgid", unsafe {
             libc::setresgid(identity.gid, identity.gid, identity.gid)
-        })?;
+        })
+        .map_err(|error| partial_transition_error(state, "setresgid", error))?;
+        state = PrivilegeTransitionState::GroupIdsChanged;
         // SAFETY: `identity` has been re-resolved and validated as non-root;
         // libc receives plain scalar IDs and performs the kernel transition.
         call_zero("setresuid", unsafe {
             libc::setresuid(identity.uid, identity.uid, identity.uid)
+        })
+        .map_err(|error| partial_transition_error(state, "setresuid", error))?;
+        state = PrivilegeTransitionState::UserIdsChanged;
+        clear_ambient_capabilities().map_err(|error| {
+            partial_transition_error(state, "prctl(PR_CAP_AMBIENT_CLEAR_ALL)", error)
         })?;
-        clear_ambient_capabilities()?;
-        clear_process_capabilities()?;
+        clear_process_capabilities()
+            .map_err(|error| partial_transition_error(state, "capset(clear)", error))?;
+        state = PrivilegeTransitionState::CapabilitiesCleared;
 
-        let report = try_check_capabilities(Some(identity), CapabilityRequirements::default())?;
-        verify_linux_post_drop(&report, identity)?;
+        let report = try_check_capabilities(Some(identity), CapabilityRequirements::default())
+            .map_err(|error| {
+                partial_transition_error(state, "post-drop state inspection", error)
+            })?;
+        verify_linux_post_drop(&report, identity)
+            .map_err(|error| partial_transition_error(state, "post-drop verification", error))?;
+        verify_process_privilege_state(identity).map_err(|error| {
+            partial_transition_error(state, "thread post-drop verification", error)
+        })?;
         Ok(report)
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
         validate_resolved_identity(identity)?;
+        let mut state = PrivilegeTransitionState::TransitionStarted;
         // SAFETY: the final identity validator rejects zero IDs and confirms
         // the account database mapping before these scalar libc calls.
-        call_zero("setgid", unsafe { libc::setgid(identity.gid) })?;
+        call_zero("setgid", unsafe { libc::setgid(identity.gid) })
+            .map_err(|error| partial_transition_error(state, "setgid", error))?;
+        state = PrivilegeTransitionState::GroupIdsChanged;
         // SAFETY: the final identity validator rejects zero IDs and confirms
         // the account database mapping before this scalar libc call.
-        call_zero("setuid", unsafe { libc::setuid(identity.uid) })?;
-        let report = try_check_capabilities(Some(identity), CapabilityRequirements::default())?;
+        call_zero("setuid", unsafe { libc::setuid(identity.uid) })
+            .map_err(|error| partial_transition_error(state, "setuid", error))?;
+        state = PrivilegeTransitionState::UserIdsChanged;
+        let report = try_check_capabilities(Some(identity), CapabilityRequirements::default())
+            .map_err(|error| {
+                partial_transition_error(state, "post-drop state inspection", error)
+            })?;
         if report.effective_uid != identity.uid || report.effective_gid != identity.gid {
-            return Err(DropError::VerificationFailed(
-                "effective identity does not match the resolved target".to_string(),
+            return Err(partial_transition_error(
+                state,
+                "post-drop verification",
+                DropError::VerificationFailed(
+                    "effective identity does not match the resolved target".to_string(),
+                ),
             ));
         }
         Ok(report)
@@ -544,6 +630,10 @@ pub fn harden_runtime_worker_thread() -> Result<(), DropError> {
 }
 
 /// Verify every Linux thread, not only the caller, after the final drop.
+///
+/// Non-Linux Unix has no equivalent portable per-thread kernel status source,
+/// so this function returns [`DropError::NotSupported`] there instead of
+/// returning a false zero-thread proof.
 pub fn verify_process_privilege_state(identity: &ResolvedIdentity) -> Result<usize, DropError> {
     #[cfg(target_os = "linux")]
     {
@@ -574,21 +664,24 @@ pub fn verify_process_privilege_state(identity: &ResolvedIdentity) -> Result<usi
     #[cfg(not(target_os = "linux"))]
     {
         let _ = identity;
-        Ok(0)
+        Err(DropError::NotSupported)
     }
 }
 
-/// Prove that UID 0 cannot be regained after a completed Linux drop.
+/// Prove that UID/GID 0 cannot be regained after a completed Linux drop.
 ///
-/// This invokes glibc's process-wide `setresuid` path and must therefore run
-/// only in an isolated single-threaded subprocess, never in the live server.
-pub fn prove_root_cannot_be_regained() -> Result<(), DropError> {
+/// This invokes glibc's process-wide `setresuid` and `setresgid` paths and must
+/// therefore run only in an isolated single-threaded subprocess, never in the
+/// live server. The supplied target is used to repeat the complete state and
+/// per-thread assertions after both regain attempts are denied.
+pub fn prove_root_cannot_be_regained(identity: &ResolvedIdentity) -> Result<(), DropError> {
     #[cfg(target_os = "linux")]
     {
-        verify_root_cannot_be_regained()
+        verify_root_cannot_be_regained(identity)
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = identity;
         Err(DropError::NotSupported)
     }
 }
@@ -1041,7 +1134,7 @@ fn verify_linux_thread_status(
     identity: &ResolvedIdentity,
     path: &std::path::Path,
 ) -> Result<(), DropError> {
-    let parse_ids = |key: &str| -> Result<[u32; 3], DropError> {
+    let parse_ids = |key: &str| -> Result<[u32; 4], DropError> {
         let values = status
             .lines()
             .find_map(|line| line.strip_prefix(key))
@@ -1049,7 +1142,6 @@ fn verify_linux_thread_status(
                 DropError::StateInspectionFailed(format!("missing {key} in {}", path.display()))
             })?
             .split_whitespace()
-            .take(3)
             .map(str::parse::<u32>)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| {
@@ -1058,19 +1150,29 @@ fn verify_linux_thread_status(
                     path.display()
                 ))
             })?;
+        if values.len() != 4 {
+            return Err(DropError::StateInspectionFailed(format!(
+                "expected four {key} fields in {}, got {}",
+                path.display(),
+                values.len()
+            )));
+        }
         values.try_into().map_err(|_| {
-            DropError::StateInspectionFailed(format!("incomplete {key} in {}", path.display()))
+            DropError::StateInspectionFailed(format!(
+                "invalid {key} field count in {}",
+                path.display()
+            ))
         })
     };
-    if parse_ids("Uid:")? != [identity.uid; 3] {
+    if parse_ids("Uid:")? != [identity.uid; 4] {
         return Err(DropError::VerificationFailed(format!(
-            "thread {} does not have target real/effective/saved UIDs",
+            "thread {} does not have target real/effective/saved/filesystem UIDs",
             path.display()
         )));
     }
-    if parse_ids("Gid:")? != [identity.gid; 3] {
+    if parse_ids("Gid:")? != [identity.gid; 4] {
         return Err(DropError::VerificationFailed(format!(
-            "thread {} does not have target real/effective/saved GIDs",
+            "thread {} does not have target real/effective/saved/filesystem GIDs",
             path.display()
         )));
     }
@@ -1115,24 +1217,37 @@ fn verify_linux_thread_status(
 }
 
 #[cfg(target_os = "linux")]
-fn verify_root_cannot_be_regained() -> Result<(), DropError> {
+fn verify_root_cannot_be_regained(identity: &ResolvedIdentity) -> Result<(), DropError> {
     // SAFETY: setresuid receives scalar IDs only; this isolated probe uses the
     // call specifically to verify that the completed drop is irreversible.
-    let result = unsafe { libc::setresuid(0, 0, 0) };
+    let uid_result = unsafe { libc::setresuid(0, 0, 0) };
+    verify_root_regain_result("setresuid", uid_result)?;
+    // SAFETY: setresgid receives scalar IDs only; this isolated probe uses the
+    // call specifically to verify that the completed drop is irreversible.
+    let gid_result = unsafe { libc::setresgid(0, 0, 0) };
+    verify_root_regain_result("setresgid", gid_result)?;
+
+    let report = try_check_capabilities(Some(identity), CapabilityRequirements::default())?;
+    verify_linux_post_drop(&report, identity)?;
+    verify_process_privilege_state(identity)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_root_regain_result(
+    operation: &'static str,
+    result: libc::c_int,
+) -> Result<(), DropError> {
     if result == 0 {
-        return Err(DropError::VerificationFailed(
-            "setresuid(0,0,0) unexpectedly regained root".to_string(),
-        ));
-    }
-    if errno() != libc::EPERM {
         return Err(DropError::VerificationFailed(format!(
-            "root-regain probe failed with errno {}, expected EPERM",
-            errno()
+            "{operation}(0,0,0) unexpectedly regained root"
         )));
     }
-    let ids = current_ids()?;
-    if ids.0 == 0 || ids.1 == 0 || ids.2 == Some(0) {
-        return Err(DropError::VerificationFailed("root-regain probe left a root UID".to_string()));
+    let error = errno();
+    if error != libc::EPERM {
+        return Err(DropError::VerificationFailed(format!(
+            "root-regain probe {operation} failed with errno {error}, expected EPERM"
+        )));
     }
     Ok(())
 }
@@ -1146,6 +1261,24 @@ mod tests {
         assert!(format!("{}", DropError::UserNotFound("foo".into())).contains("foo"));
         assert!(format!("{}", DropError::UnsafeTarget("root".into())).contains("root"));
         assert!(format!("{}", DropError::NotSupported).contains("not supported"));
+    }
+
+    #[test]
+    fn partial_transition_error_preserves_state_and_operation() {
+        let error = partial_transition_error(
+            PrivilegeTransitionState::GroupIdsChanged,
+            "setuid",
+            DropError::SystemCallFailed { operation: "setuid", errno: libc::EPERM },
+        );
+
+        assert!(matches!(
+            &error,
+            DropError::PartialTransition { state, operation, detail }
+                if *state == PrivilegeTransitionState::GroupIdsChanged
+                    && *operation == "setuid"
+                    && detail.contains("errno")
+        ));
+        assert!(format!("{error}").contains("partial"));
     }
 
     #[test]
@@ -1265,6 +1398,30 @@ mod tests {
                     && detail == "returned count exceeds requested capacity"
         ));
         assert_eq!(checked_group_result_count(2, 2).unwrap(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_thread_status_requires_filesystem_uid_and_gid_fields() {
+        let identity = ResolvedIdentity {
+            user_selector: "1001".to_string(),
+            user_name: "fixture-user".to_string(),
+            uid: 1001,
+            group_selector: "1002".to_string(),
+            group_name: "fixture-group".to_string(),
+            gid: 1002,
+        };
+        let path = std::path::Path::new("/proc/self/task/fixture");
+        let status = "Uid:\t1001 1001 1001 1001\nGid:\t1002 1002 1002 1002\nGroups:\t\nCapEff:\t0000000000000000\nCapPrm:\t0000000000000000\nCapInh:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\n";
+
+        verify_linux_thread_status(status, &identity, path)
+            .expect("all four Linux UID/GID fields must be accepted");
+
+        let filesystem_mismatch = status.replace("1001 1001 1001 1001", "1001 1001 1001 0");
+        assert!(matches!(
+            verify_linux_thread_status(&filesystem_mismatch, &identity, path),
+            Err(DropError::VerificationFailed(detail)) if detail.contains("filesystem")
+        ));
     }
 
     #[cfg(unix)]
@@ -1398,6 +1555,21 @@ mod tests {
     fn test_should_drop_privileges_consistent_with_check() {
         let report = check_capabilities();
         assert_eq!(should_drop_privileges(), report.is_root);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn process_privilege_verification_does_not_claim_linux_proof_elsewhere() {
+        let identity = ResolvedIdentity {
+            user_selector: "1001".to_string(),
+            user_name: "fixture-user".to_string(),
+            uid: 1001,
+            group_selector: "1002".to_string(),
+            group_name: "fixture-group".to_string(),
+            gid: 1002,
+        };
+
+        assert!(matches!(verify_process_privilege_state(&identity), Err(DropError::NotSupported)));
     }
 
     #[cfg(not(unix))]
