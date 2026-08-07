@@ -17,6 +17,18 @@ use std::time::{Duration, Instant};
 
 // Global repair ID counter for fountain codes
 static REPAIR_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Bits reserved at the bottom of an interleaved repair identity for the lane index.
+///
+/// Interleave depth is clamped to `1..=8`, so four bits always hold the lane.
+pub(crate) const REPAIR_LANE_BITS: u32 = 4;
+
+/// Largest repair ordinal that still fits above [`REPAIR_LANE_BITS`] in a `u64` identity.
+///
+/// An ordinal beyond this would shift out of range and alias an unrelated repair packet, so the
+/// interleaved encoder refuses to mint one.
+pub(crate) const MAX_REPAIR_ORDINAL: u64 = u64::MAX >> REPAIR_LANE_BITS;
+
 const GF4_LIGHT_REDUNDANCY: f32 = 16.0 / 15.0;
 const FOUNTAIN_LOSS_THRESHOLD: f32 = 0.25;
 const FOUNTAIN_MIN_RECENT_OBSERVATIONS: u64 = 32;

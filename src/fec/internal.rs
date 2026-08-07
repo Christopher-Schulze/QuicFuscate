@@ -394,7 +394,21 @@ impl DecoderVariant {
                 if let Some(data) = p.payload_slice() {
                     let payload = data.to_vec();
                     if p.is_systematic {
-                        let _ = d.add_source_symbol(p.id as usize, payload);
+                        // The admission check inside `add_source_symbol` compares against `k` as a
+                        // `usize`. On a 32-bit target an `as usize` cast would truncate an id above
+                        // `u32::MAX` first, so an out-of-range id could alias a valid source index.
+                        // Convert fallibly and drop what does not fit.
+                        match usize::try_from(p.id) {
+                            Ok(source_index) => {
+                                let _ = d.add_source_symbol(source_index, payload);
+                            }
+                            Err(_) => {
+                                log::debug!(
+                                    "dropping Fountain source symbol with id {} that exceeds usize",
+                                    p.id
+                                );
+                            }
+                        }
                     } else {
                         let source_indices = d.source_indices(p.id);
                         let _ = d.add_encoded_symbol(p.id, payload, source_indices);
@@ -885,7 +899,9 @@ pub struct InterleavedEncoder {
     blocks: Vec<EncoderVariant>,
     depth: usize,
     packet_idx: usize,
+    /// Sources actually represented across all lanes (`block_k * depth`).
     k: usize,
+    /// Total symbols actually represented across all lanes (`block_n * depth`).
     n: usize,
 }
 
@@ -910,10 +926,30 @@ impl InterleavedEncoder {
             .map(|_| EncoderVariant::new_with_policy(mode, block_k, block_n, policy))
             .collect();
 
-        Self { blocks, depth: actual_depth, packet_idx: 0, k, n }
+        // A non-divisible request floors to `block_k` per lane, so the encoder represents
+        // `block_k * depth` sources, not the requested `k`. Store what is actually represented so
+        // window checks, repair scheduling, and the emitted wire profile all agree with the
+        // blocks. Reporting the request here would let a non-divisible `k` produce a wire
+        // `source_count` that its own interleave depth does not divide.
+        let represented_k = block_k.saturating_mul(actual_depth);
+        let represented_n = block_n.saturating_mul(actual_depth).max(represented_k);
+
+        if (represented_k, represented_n) != (k, n) {
+            log::warn!(
+                "interleave depth {actual_depth} does not divide the requested FEC shape \
+                 (k={k}, n={n}); representing (k={represented_k}, n={represented_n})"
+            );
+        }
+
+        Self { blocks, depth: actual_depth, packet_idx: 0, k: represented_k, n: represented_n }
     }
 
-    /// Return the (k, n) parameters for the overall interleaved encoder.
+    /// Return the (k, n) parameters the encoder actually represents across its lanes.
+    ///
+    /// A non-divisible request floors to `k / depth` per lane, so this can be smaller than what
+    /// the caller asked for. The construction path logs that case; reporting the request here
+    /// would let a non-divisible `k` reach the wire profile as a `source_count` that its own
+    /// interleave depth does not divide.
     pub fn params(&self) -> (usize, usize) {
         (self.k, self.n)
     }
@@ -938,13 +974,19 @@ impl InterleavedEncoder {
     ) -> Option<FecPacket> {
         let block_idx = i % self.depth;
         let repair_idx = i / self.depth;
+        // The identity packs the lane into the low four bits and the ordinal above them. Depth is
+        // clamped to `1..=8`, so the lane always fits, but an unbounded ordinal would shift out of
+        // `u64` and alias a different repair. Reject beyond the representable range instead.
+        if repair_idx as u64 > MAX_REPAIR_ORDINAL {
+            return None;
+        }
         if block_idx < self.blocks.len() {
             if let Some(mut repair) =
                 self.blocks[block_idx].generate_repair_packet(repair_idx, pool)
             {
                 // The high bits carry the repair ordinal. Coefficients can then
                 // be regenerated from compact wire metadata at the receiver.
-                repair.seq = ((repair_idx as u64) << 4) | (block_idx as u64);
+                repair.seq = ((repair_idx as u64) << REPAIR_LANE_BITS) | (block_idx as u64);
                 return Some(repair);
             }
         }
@@ -1246,9 +1288,19 @@ impl ModeManager {
         };
         let n = if k == 0 {
             0
-        } else {
+        } else if target.redundancy.is_finite() && target.redundancy >= 0.0 {
             ((k as f32) * target.redundancy).ceil().min(wire::MAX_TOTAL_COUNT as f32).max(0.0)
                 as usize
+        } else {
+            // NaN and infinity must not silently become the maximum repair budget. `f32::min`
+            // returns the other operand for NaN, so the previous clamp turned a non-finite
+            // redundancy into `MAX_TOTAL_COUNT`, the most expensive possible answer. Fall back to
+            // systematic-only instead, which `n.max(k)` below turns into exactly `k`.
+            log::warn!(
+                "FEC redundancy {} is not a usable finite ratio; falling back to systematic-only",
+                target.redundancy
+            );
+            0
         };
         (mode, k, n.max(k))
     }
@@ -1871,6 +1923,71 @@ mod tests {
         let (k, n) = enc.params();
         assert_eq!(k, 8);
         assert_eq!(n, 12);
+    }
+
+    #[test]
+    fn test_interleaved_encoder_reports_the_shape_it_actually_represents() {
+        let mut policy = test_policy();
+        policy.interleave_enabled = true;
+
+        // 10 sources over 4 lanes floors to 2 per lane, so only 8 are represented. Reporting the
+        // request here would emit a wire source_count that its own interleave depth cannot divide.
+        let enc = InterleavedEncoder::new_with_policy(FecMode::Normal, 10, 14, 4, &policy);
+        assert_eq!(enc.params(), (8, 12), "params must describe the represented lanes");
+        let (represented_k, _) = enc.params();
+        assert_eq!(
+            represented_k % enc.depth(),
+            0,
+            "represented sources must divide by depth so the wire profile cannot report an \
+             uneven interleave"
+        );
+
+        // A divisible request is represented exactly.
+        let exact = InterleavedEncoder::new_with_policy(FecMode::Normal, 8, 12, 4, &policy);
+        assert_eq!(exact.params(), (8, 12));
+    }
+
+    #[test]
+    fn test_interleaved_encoder_refuses_aliasing_repair_ordinals() {
+        let policy = test_policy();
+        let pool = make_pool();
+        let mut enc = InterleavedEncoder::new_with_policy(FecMode::Normal, 8, 12, 2, &policy);
+
+        // `i / depth` is the ordinal and `i % depth` the lane. An ordinal above the representable
+        // range would shift out of the u64 identity and collide with an unrelated repair.
+        let aliasing_index = ((crate::fec::MAX_REPAIR_ORDINAL as usize) + 1)
+            .saturating_mul(enc.depth())
+            .saturating_add(1);
+        assert!(
+            enc.generate_repair_packet(aliasing_index, &pool).is_none(),
+            "out-of-range repair ordinal must be refused, not aliased"
+        );
+    }
+
+    #[test]
+    fn test_params_for_target_rejects_non_finite_redundancy() {
+        let base = FecProtectionTarget {
+            family: FecBackendFamily::HeavyBlock,
+            redundancy: 1.5,
+            effective_window: 16,
+            stream_every: None,
+        };
+
+        let (_, k, n) = ModeManager::params_for_target(base, 16, false);
+        assert_eq!(k, 16);
+        assert_eq!(n, 24, "a finite ratio still scales the total count");
+
+        // NaN previously survived `f32::min`, which returns the other operand for NaN, so the
+        // clamp produced MAX_TOTAL_COUNT: the most expensive possible repair budget.
+        for broken in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let target = FecProtectionTarget { redundancy: broken, ..base };
+            let (_, k, n) = ModeManager::params_for_target(target, 16, false);
+            assert_eq!(k, 16);
+            assert_eq!(
+                n, k,
+                "non-finite redundancy {broken} must fall back to systematic-only, not to the maximum"
+            );
+        }
     }
 
     #[test]

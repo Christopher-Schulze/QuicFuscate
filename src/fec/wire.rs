@@ -574,7 +574,18 @@ impl ReceiveWindow {
         let mut symbol = PooledBlock::new(Arc::clone(&self.mem_pool));
         write_source_symbol(payload, &mut symbol)?;
         let internal_id = if meta.profile.codec == WireCodec::Fountain {
-            meta.sequence - self.window_start()
+            // Fountain keeps the global sequence on the wire and needs a window-relative internal
+            // id. `WirePacketMeta::validate()` already binds systematic sequences to the window,
+            // but this conversion must not depend on a caller invariant: an unchecked subtraction
+            // would panic in debug and mint a wrapped internal source id in release.
+            let offset = meta
+                .sequence
+                .checked_sub(self.window_start())
+                .ok_or(WireError::SourceOutsideWindow)?;
+            if offset >= meta.profile.source_count as u64 {
+                return Err(WireError::SourceOutsideWindow);
+            }
+            offset
         } else {
             meta.sequence
         };

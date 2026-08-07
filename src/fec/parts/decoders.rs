@@ -1370,7 +1370,11 @@ impl Decoder16 {
             if self.known.contains_key(&sid) {
                 continue;
             }
-            let sl = words * 2;
+            // Two bytes per GF16 word. Check the product itself, not only the result against the
+            // block size, so an oversized word count cannot wrap into a small accepted length.
+            let Some(sl) = words.checked_mul(2) else {
+                return false;
+            };
             if sl > self.mem_pool.block_size() {
                 return false;
             }
