@@ -695,7 +695,24 @@ fn test_fec_e2e_no_duplication_no_ordering_violation() {
     for &id in &sim.delivered {
         assert!(id < 300, "delivered packet id {} should be in valid range [0, 300)", id);
     }
+
+    // Ordering contract. Recovery may surface a source after later sources, but only within a
+    // bounded window. Without this the test's ordering claim would rest on the duplicate and
+    // range checks alone, which say nothing about delivery order.
+    let mut worst_latency = 0usize;
+    for &id in &sim.delivered {
+        let delivered_at = sim.delivered_at.get(&id).copied().expect("delivery time recorded");
+        worst_latency = worst_latency.max(delivered_at.saturating_sub(id as usize + 1));
+    }
+    assert!(
+        worst_latency <= FEC_E2E_MAX_RECOVERY_REORDER,
+        "delivery reordering {worst_latency} exceeded the bounded recovery window {FEC_E2E_MAX_RECOVERY_REORDER}"
+    );
 }
+
+/// Maximum number of later source sends a recovered packet may trail its own position by in the
+/// 5 percent loss end-to-end simulation. Bounded by the active block window, not by chance.
+const FEC_E2E_MAX_RECOVERY_REORDER: usize = 64;
 
 #[test]
 fn test_fec_e2e_zero_mode_passthrough_no_repairs() {

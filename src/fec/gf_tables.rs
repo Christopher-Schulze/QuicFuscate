@@ -864,6 +864,23 @@ mod tests {
         }
     }
 
+    /// Binds the documented GF16 table footprint to the code. The retained table is the only
+    /// steady-state allocation; the exponent and logarithm vectors exist solely during
+    /// construction and define the documented one-time peak.
+    #[test]
+    fn test_gf16_inverse_table_footprint_matches_documented_sizes() {
+        let retained_bytes = gf16_inverse_table().len() * std::mem::size_of::<u16>();
+        assert_eq!(retained_bytes, 131_072, "retained GF16 inverse table must stay 128 KiB");
+
+        let exponent_bytes = GF16_FIELD_ORDER * std::mem::size_of::<u16>();
+        let logarithm_bytes = (GF16_FIELD_ORDER + 1) * std::mem::size_of::<u16>();
+        assert_eq!(
+            retained_bytes + exponent_bytes + logarithm_bytes,
+            393_214,
+            "documented one-time GF16 construction peak must stay at 393,214 bytes"
+        );
+    }
+
     #[test]
     fn test_gf16_inverse_table_matches_exponentiation_reference() {
         for element in [1u16, 2, 7, 255, 1000, 0x8000, 0xFFFF] {

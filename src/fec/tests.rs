@@ -2200,7 +2200,10 @@ fn test_streaming_dedup_across_calls() {
     let mut receiver = AdaptiveFec::new(cfg);
 
     let mut tx_q = VecDeque::new();
-    let missing_id = 42u64; // deterministic choice beyond initial window base
+    // Must lie inside the transmitted range below, past the first stream window, so the
+    // receiver actually has to recover it. A value outside the range would never be dropped
+    // and would make the dedup assertion vacuous.
+    let missing_id = 10u64;
 
     let mut seen_missing = 0usize;
 
@@ -2236,11 +2239,11 @@ fn test_streaming_dedup_across_calls() {
         }
     }
 
-    // Dedup guarantee: even if decoder could surface the same id across calls, we emit it once.
-    assert!(
-        seen_missing <= 1,
-        "recovered packet with same id must be emitted at most once, got {}",
-        seen_missing
+    // The dropped source must actually be recovered, otherwise the dedup guarantee below is
+    // never exercised and the test would pass vacuously.
+    assert_eq!(
+        seen_missing, 1,
+        "dropped source {missing_id} must be recovered and emitted exactly once, got {seen_missing}"
     );
 }
 

@@ -213,8 +213,8 @@ fn test_fec_mode_transition_no_memory_leak() {
 
     let mem_before = MEM_POOL_IN_USE.load(Ordering::Relaxed);
 
-    // Force 50 mode transitions via report_loss
-    for i in 0..50u64 {
+    // Force 100 mode transitions via report_loss
+    for i in 0..100u64 {
         // Alternate between high loss (escalate) and zero loss (de-escalate)
         if i % 2 == 0 {
             fec.report_loss(50, 100); // 50% loss → escalate

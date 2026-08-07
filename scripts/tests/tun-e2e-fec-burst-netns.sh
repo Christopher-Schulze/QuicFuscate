@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # E2E FEC burst loss test through real QUIC transport with tc-netem.
 #
+# Proof boundary: requires privileged Linux network namespaces. It proves live burst-loss
+# recovery and cleanup for the configured profile only. It does not prove every decoder
+# contract, every FEC mode, or any non-Linux platform, and it cannot run on macOS hosts.
+#
 # Tests FEC recovery under bursty loss patterns (correlated loss) which are
 # more realistic than uniform random loss. tc-netem supports loss correlation
 # to simulate burst loss.

@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 # Description: Test suite runner: test-fec-simulation.
+#
+# Proof boundary: every matrix cell runs the same focused test,
+# fec::test_auto_mode_streaming_selection, under a different runtime environment
+# (mode, loss, threads, GF16 toggle, stream cadence, adaptive RS). The matrix therefore
+# proves that the selection test stays green across those configurations. It does NOT
+# prove that each dimension drives a different code path; per-dimension path divergence
+# is owned by the focused unit tests in src/fec, not by this suite. Read a green matrix
+# as configuration robustness, not as per-dimension coverage.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -187,6 +195,9 @@ echo "  Total runs:  $TOTAL" | tee -a "$LOG_FILE"
 echo "  [OK] Passed:    $PASS" | tee -a "$LOG_FILE"
 echo "  [FAIL] Failed:    $FAIL" | tee -a "$LOG_FILE"
 echo "  Artifacts:   $OUTPUT_DIR" | tee -a "$LOG_FILE"
+echo "  Proof scope: all cells run fec::test_auto_mode_streaming_selection under different" | tee -a "$LOG_FILE"
+echo "               runtime environments. Green means configuration robustness, not" | tee -a "$LOG_FILE"
+echo "               per-dimension path coverage." | tee -a "$LOG_FILE"
 
 # Build a success matrix by (mode,loss)
 MATRIX_TSV="$OUTPUT_DIR/matrix.tsv"
@@ -210,7 +221,13 @@ for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
         "fail": int(failed),
         "success_rate": float(rate),
     }
-print(json.dumps({"schema": "quicfuscate.v1.fec_simulation_matrix", "matrix": matrix}, ensure_ascii=False, separators=(",", ":")))
+document = {
+    "schema": "quicfuscate.v1.fec_simulation_matrix",
+    "test_under_matrix": "fec::test_auto_mode_streaming_selection",
+    "proof_boundary": "Every cell runs the same focused test under a different runtime environment. A green matrix proves configuration robustness, not per-dimension code-path coverage.",
+    "matrix": matrix,
+}
+print(json.dumps(document, ensure_ascii=False, separators=(",", ":")))
 PY
 )"
 qf_json_write_raw_file "$MATRIX_JSON" "$MATRIX_DOCUMENT"
