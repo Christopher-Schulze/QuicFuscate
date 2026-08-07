@@ -1502,13 +1502,18 @@ impl PooledBlock {
     /// The caller must guarantee that `block` was allocated from `pool` (e.g. via `pool.alloc()`).
     /// This is exposed as `pub(crate)` because internal modules pass their own checked-out blocks
     /// directly into the FEC packet path.
-    pub(crate) fn from_pool_block(pool: Arc<MemoryPool>, block: AlignedBox<[u8]>) -> Self {
-        assert_eq!(
-            block.len(),
-            pool.block_size(),
-            "PooledBlock::from_pool_block: block length must match the pool block size"
-        );
-        Self { block: Some(block), pool }
+    ///
+    /// Fails closed instead of panicking when the block length does not match the pool block size.
+    /// The rejected block is returned to the caller so it can be released through
+    /// [`MemoryPool::free`] and pool accounting stays exact.
+    pub(crate) fn from_pool_block(
+        pool: Arc<MemoryPool>,
+        block: AlignedBox<[u8]>,
+    ) -> Result<Self, AlignedBox<[u8]>> {
+        if block.len() != pool.block_size() {
+            return Err(block);
+        }
+        Ok(Self { block: Some(block), pool })
     }
 
     /// Return the originating pool for an ownership transfer inside the crate.
