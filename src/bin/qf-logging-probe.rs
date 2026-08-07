@@ -60,7 +60,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sink = Arc::new(ProbeSink { records: AtomicU64::new(0), delay: sink_delay });
     quicfuscate::logging::set_admin_sink(sink.clone());
     quicfuscate::logging::init(&engine.logging)?;
-    quicfuscate::logging::init(&engine.logging)?;
     let flush_guard = quicfuscate::logging::FlushGuard::new();
 
     log::info!(target: "quicfuscate::probe", "probe-info");
