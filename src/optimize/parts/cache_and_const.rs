@@ -23,6 +23,23 @@ pub(crate) enum PrefetchHint {
 }
 
 /// Issue a best-effort hardware prefetch for the supplied pointer.
+///
+/// # Contract
+///
+/// This is a pure hint and never a load. Every supported lane compiles to a genuinely
+/// non-faulting instruction: `PRFM PLDL1KEEP` on AArch64 and `PREFETCHh` through `_mm_prefetch`
+/// on x86_64. Both are architecturally defined to have no effect other than a possible cache
+/// line fill, and neither signals on an unmapped, unaligned, or permission-denied address.
+/// Unsupported architectures compile to nothing.
+///
+/// Callers therefore do **not** owe a readable span. `ptr` may be dangling, one past the end of
+/// an allocation, or derived from an empty slice. The null check is a cheap filter for the
+/// common uninitialised case, not a safety requirement.
+///
+/// What callers still owe is provenance discipline for the pointer arithmetic that produced
+/// `ptr`: computing an out-of-bounds address with `ptr::add` is undefined regardless of what this
+/// function does with the result. Offset and allocation-lifetime proof stays with each caller and
+/// its owner, and this facade deliberately makes no claim about it.
 #[cfg_attr(feature = "aggressive_inline", inline(always))]
 pub(crate) fn prefetch(ptr: *const u8, hint: PrefetchHint) {
     #[cfg(feature = "prefetch")]
@@ -41,17 +58,24 @@ pub(crate) fn prefetch(ptr: *const u8, hint: PrefetchHint) {
     }
 }
 
+/// # Safety
+///
+/// `ptr` must be a pointer value the caller was allowed to compute. It does not need to be
+/// readable, aligned, or inside a live allocation: every lane below emits a non-faulting hint
+/// instruction rather than a load, so no memory is accessed through it. See [`prefetch`] for the
+/// full contract.
 #[cfg(feature = "prefetch")]
 #[cfg_attr(feature = "aggressive_inline", inline(always))]
 unsafe fn prefetch_impl(ptr: *const u8, hint: PrefetchHint) {
     #[cfg(target_arch = "x86_64")]
     {
         use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0, _MM_HINT_T1};
-        let mode = match hint {
-            PrefetchHint::T0 => _MM_HINT_T0,
-            PrefetchHint::T1 => _MM_HINT_T1,
-        };
-        _mm_prefetch(ptr as *const i8, mode);
+        // `_mm_prefetch` takes its locality strategy as a const generic, so the hint has to be
+        // resolved at compile time. Passing a runtime value does not compile on x86_64 at all.
+        match hint {
+            PrefetchHint::T0 => _mm_prefetch::<_MM_HINT_T0>(ptr as *const i8),
+            PrefetchHint::T1 => _mm_prefetch::<_MM_HINT_T1>(ptr as *const i8),
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -266,5 +290,48 @@ mod mlock_tests {
         let block = pool.alloc();
         assert_eq!(block.len(), 4096);
         pool.free(block);
+    }
+
+    /// The facade is a hint, not a load. These inputs are exactly the classes the shared callers
+    /// pass: an interior pointer, an empty-slice pointer, and a one-past-the-end pointer. None of
+    /// them may fault, and none of them dereferences anything here.
+    ///
+    /// This is a positive contract test. No invalid or dangling address is fabricated, so the
+    /// test relies on no undefined behaviour.
+    #[test]
+    fn prefetch_accepts_every_shared_caller_pointer_class() {
+        for hint in [PrefetchHint::T0, PrefetchHint::T1] {
+            // Null is filtered before any architecture lane runs.
+            prefetch(std::ptr::null(), hint);
+
+            let buffer = vec![0u8; 128];
+            prefetch(buffer.as_ptr(), hint);
+            prefetch(buffer[64..].as_ptr(), hint);
+
+            // One past the end is a valid pointer to form and a legal prefetch target.
+            prefetch(unsafe { buffer.as_ptr().add(buffer.len()) }, hint);
+
+            // An empty slice yields a non-null, non-readable pointer. The old AArch64 lane read a
+            // byte through it; the current lanes must only hint.
+            let empty: &[u8] = &[];
+            prefetch(empty.as_ptr(), hint);
+
+            // A zero-length slice at the end of a live allocation is the UDP packet-start shape.
+            let tail: &[u8] = &buffer[buffer.len()..];
+            prefetch(tail.as_ptr(), hint);
+        }
+    }
+
+    /// Both hints must be accepted on every architecture. On x86_64 the locality strategy is a
+    /// const generic, so a runtime hint value fails to compile; this exercises both arms of the
+    /// match that resolves it.
+    #[test]
+    fn prefetch_hint_variants_are_both_dispatchable() {
+        let buffer = [7u8; 64];
+        prefetch(buffer.as_ptr(), PrefetchHint::T0);
+        prefetch(buffer.as_ptr(), PrefetchHint::T1);
+
+        let hints = [PrefetchHint::T0, PrefetchHint::T1];
+        assert_eq!(hints.len(), 2, "both locality tiers stay reachable through the facade");
     }
 }

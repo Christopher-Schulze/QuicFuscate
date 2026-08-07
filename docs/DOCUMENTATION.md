@@ -1105,7 +1105,7 @@ coverage, not as a normal consumer-facing API promise.
 - **Fast allocation/deallocation**: Optimized memory management routines
 - **Cache-efficient allocators**: Memory allocators optimized for cache locality
 - **Batched operations**: Optimized batch memory operations
-- **Workload-local prefetch**: retained only in selected crypto/FEC/transport hot paths where ownership stays explicit
+- **Workload-local prefetch**: retained only in selected crypto/FEC/transport hot paths where ownership stays explicit. The shared `optimize::prefetch()` facade is a pure hint, never a load: AArch64 emits `PRFM PLDL1KEEP` and x86_64 uses `_mm_prefetch` with a const-generic locality strategy, both architecturally non-faulting on unmapped, unaligned, or permission-denied addresses. Callers therefore owe no readable span and may pass empty-slice, one-past-the-end, or dangling pointers; they still owe provenance discipline for the arithmetic that produced the pointer, which stays with each caller's own owner.
 ```
 
 #### Memory Pool Architecture
