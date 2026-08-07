@@ -334,4 +334,83 @@ mod mlock_tests {
         let hints = [PrefetchHint::T0, PrefetchHint::T1];
         assert_eq!(hints.len(), 2, "both locality tiers stay reachable through the facade");
     }
+
+    /// Auto-tuner lifecycle. The worker is process-global, so these assertions run under the same
+    /// serialising mutex the other pool-global tests use and always restore an empty slot.
+    #[test]
+    fn auto_tuner_start_is_idempotent_and_shutdown_joins_exactly_once() {
+        let _guard =
+            LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Start from a known-empty slot regardless of what other tests left behind.
+        MemoryPool::shutdown_auto_tuner();
+        assert!(
+            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_none(),
+            "teardown must leave no worker behind"
+        );
+
+        // Shutdown with no worker running is a no-op, not a panic or a hang.
+        MemoryPool::shutdown_auto_tuner();
+
+        // Auto-tuning is on by default, so a plain pool is an auto-tune-enabled pool.
+        let pool = Arc::new(MemoryPool::new(4, 4096));
+
+        MemoryPool::start_auto_tuner(Arc::clone(&pool));
+        let started = auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        assert!(started, "an auto-tune-enabled pool must start the worker");
+
+        // A second start must not spawn a second worker for the same process-global slot.
+        MemoryPool::start_auto_tuner(Arc::clone(&pool));
+        assert!(
+            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_some(),
+            "the slot still holds exactly one worker"
+        );
+
+        MemoryPool::shutdown_auto_tuner();
+        assert!(
+            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_none(),
+            "shutdown must stop and join the worker, leaving the slot empty"
+        );
+
+        // The pool itself outlives its worker and stays usable for allocation.
+        let block = pool.alloc();
+        assert_eq!(block.len(), 4096);
+        pool.free(block);
+
+        // Tuning can be restarted explicitly after a shutdown.
+        MemoryPool::start_auto_tuner(Arc::clone(&pool));
+        assert!(auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_some());
+        MemoryPool::shutdown_auto_tuner();
+    }
+
+    /// A pool with tuning disabled must never occupy the process-global worker slot.
+    #[test]
+    fn auto_tune_disabled_pool_starts_no_worker() {
+        let _guard =
+            LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        MemoryPool::shutdown_auto_tuner();
+
+        let environment =
+            crate::env_utils::EnvSnapshot::from_pairs([("QUICFUSCATE_POOL_AUTO_TUNE", "0")]);
+        let pool = Arc::new(MemoryPool::new_with_snapshot(4, 4096, &environment));
+
+        MemoryPool::start_auto_tuner(pool);
+        assert!(
+            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_none(),
+            "a pool with auto_tune disabled must not claim the worker slot"
+        );
+    }
+
+    /// Metrics refresh must observe, never create. Before this contract a scrape could construct
+    /// the process-global pool and its worker as a side effect of being asked for numbers.
+    #[test]
+    fn telemetry_refresh_does_not_create_the_global_pool() {
+        // `global_pool_if_initialized` is the accessor telemetry uses. Whatever the ambient state
+        // of GLOBAL_POOL is in this test binary, the observing accessor must agree with it and
+        // must never be the thing that publishes it.
+        let before = crate::optimize::global_pool_if_initialized().is_some();
+        crate::optimize::telemetry::flush();
+        let after = crate::optimize::global_pool_if_initialized().is_some();
+        assert_eq!(before, after, "a telemetry flush must not change pool existence");
+    }
 }

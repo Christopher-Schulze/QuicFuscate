@@ -1433,6 +1433,23 @@ impl MemoryPool {
     }
 
     /// Stops and joins the process-wide auto-tuner thread when one is running.
+    /// Stop and join the process-global auto-tuner worker.
+    ///
+    /// # Lifecycle contract
+    ///
+    /// This is a process-final or test-teardown operation, not a pool operation. It stops the one
+    /// worker held in the process-global slot and joins it, so no thread survives the call. The
+    /// published `GLOBAL_POOL` is intentionally left in place: it is an `OnceLock` and the pool
+    /// remains valid and usable for allocation afterwards, just without background tuning.
+    ///
+    /// Calling it when no worker is running is a no-op. Because the slot is emptied, a caller that
+    /// wants tuning back can call [`Self::start_auto_tuner`] again with the existing pool;
+    /// [`crate::optimize::global_pool`] will not restart it on its own, since the pool is already
+    /// initialized and its initializer never runs a second time.
+    ///
+    /// `MemoryPool::drop` deliberately does not call this. The worker is process-global while a
+    /// pool is not, so tying the two together would let dropping any pool stop tuning for the one
+    /// that is still published.
     pub fn shutdown_auto_tuner() {
         let handle = {
             let mut slot = auto_tuner_slot()

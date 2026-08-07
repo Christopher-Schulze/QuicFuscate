@@ -328,6 +328,17 @@ static GLOBAL_POOL: OnceLock<Arc<MemoryPool>> = OnceLock::new();
 /// enabled. `MemoryPool::block_size()` and the exported block-size gauge report
 /// the effective size returned by allocations.
 #[inline]
+/// Return the process-global pool, creating it and starting the auto-tuner on first use.
+///
+/// # Lifecycle contract
+///
+/// This is the authoritative initialization path. The first call captures one [`EnvSnapshot`],
+/// builds the adaptive pool from it, and starts the process-global auto-tuner if the resolved
+/// runtime enables it. [`init_global_pool`] is the explicit alternative and produces the same
+/// worker behaviour; whichever runs first wins, and the pool stays published for the life of the
+/// process.
+///
+/// Callers that must not create the pool as a side effect use [`global_pool_if_initialized`].
 pub fn global_pool() -> Arc<MemoryPool> {
     GLOBAL_POOL
         .get_or_init(|| {
@@ -351,10 +362,32 @@ pub fn global_pool() -> Arc<MemoryPool> {
 }
 
 /// Initializes the global pool with an explicit capacity and block-size contract.
-/// Subsequent calls to `global_pool()` return this instance. Returns `false` if
-/// an instance was already initialized.
+///
+/// Subsequent calls to [`global_pool`] return this instance. Returns `false` if an instance was
+/// already initialized, in which case nothing is changed and no worker is started.
+///
+/// # Lifecycle contract
+///
+/// This is the explicit counterpart to lazy initialization and produces the same worker behaviour:
+/// on success it starts the process-global auto-tuner exactly as [`global_pool`] does. Before this
+/// parity existed, a caller that initialized explicitly silently got no auto-tuner while a caller
+/// that initialized lazily got one, so identical workloads tuned differently depending only on
+/// which path ran first.
 pub fn init_global_pool(capacity: usize, block_size: usize) -> bool {
-    GLOBAL_POOL.set(Arc::new(MemoryPool::new(capacity, block_size))).is_ok()
+    let pool = Arc::new(MemoryPool::new(capacity, block_size));
+    if GLOBAL_POOL.set(Arc::clone(&pool)).is_err() {
+        return false;
+    }
+    MemoryPool::start_auto_tuner(pool);
+    true
+}
+
+/// Return the process-global pool only if it already exists.
+///
+/// Use this from observers such as metrics export, which must report on the pool without bringing
+/// it, and the auto-tuner thread, into existence as a side effect of being asked for numbers.
+pub fn global_pool_if_initialized() -> Option<Arc<MemoryPool>> {
+    GLOBAL_POOL.get().cloned()
 }
 
 // Use cpufeatures for portable runtime detection

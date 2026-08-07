@@ -1809,8 +1809,12 @@ pub fn update_memory_usage() {
 
 fn refresh_resource_metrics() {
     update_memory_usage();
-    let pool = crate::optimize::global_pool();
-    pool.refresh_metrics();
+    // Observing must not create. Using the creating accessor here meant a metrics scrape could
+    // construct the process-global pool and start the auto-tuner thread before the runtime had
+    // initialized optimization state at all. With no pool there is simply nothing to report.
+    if let Some(pool) = crate::optimize::global_pool_if_initialized() {
+        pool.refresh_metrics();
+    }
 }
 
 /// Refresh process-wide resource metrics at most once per interval.
