@@ -207,14 +207,18 @@ impl Connection {
                 }
                 let crypto_range = crypto_frame.as_ref().map(|(o, d)| (*o, d.len() as u64));
 
+                // Inspect without consuming. The capacity check below can reject the frame and
+                // `to_bytes` can fail; either would otherwise discard a pending ACK that no
+                // further inbound packet is guaranteed to re-trigger.
                 if let Some((ack_delay, ack_ranges)) =
-                    self.pkt_spaces[space_idx]
-                        .take_ack_at(self.config.ack_delay_exponent, now)
+                    self.pkt_spaces[space_idx].peek_ack_at(self.config.ack_delay_exponent, now)
                 {
                     let ack = Frame::Ack { ack_delay, ranges: ack_ranges, ecn_counts: None };
                     let need = frames::wire_len(&ack)?;
                     if out.len().saturating_sub(off) >= need.saturating_add(16) {
                         off += frames::to_bytes(&ack, &mut out[off..])?;
+                        // Committed only now that the bytes are in the packet.
+                        self.pkt_spaces[space_idx].commit_ack_at(now);
                     }
                 }
                 let ping = Frame::Ping { mtu_probe: None };

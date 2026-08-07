@@ -108,32 +108,61 @@ pub mod pnspace {
             self.take_ack_at(ack_delay_exponent, self.clock.now())
         }
 
-        /// Takes an ACK decision at an explicit protocol timestamp.
+        /// Inspect the pending ACK without consuming the pending decision.
+        ///
+        /// Returns the same `(ack_delay, ranges)` a commit would emit, but leaves `ack_elicited`,
+        /// `recvd_since_ack`, and `ack_deadline` untouched. Callers that may fail to serialize the
+        /// frame use this and only call [`Self::commit_ack_at`] once the bytes are written, so an
+        /// undersized output buffer or a serialization error cannot silently drop an ACK that no
+        /// further inbound packet is guaranteed to re-trigger.
         #[inline(always)]
-        pub fn take_ack_at(
-            &mut self,
+        pub fn peek_ack_at(
+            &self,
             ack_delay_exponent: u64,
             now: Instant,
         ) -> Option<(u64, Vec<(u64, u64)>)> {
             if !self.has_pending_ack_at(now) {
                 return None;
             }
-            self.ack_elicited = false;
-            self.recvd_since_ack = 0;
-            self.ack_deadline = None;
 
             let delay = if let Some(last) = self.last_recv_time {
                 now.saturating_duration_since(last)
             } else {
                 Duration::from_micros(0)
             };
-            self.last_ack_time = Some(now);
 
             // QUIC ACK delay encoding uses 2^ack_delay_exponent microseconds units
             let micros = delay.as_micros() as u64;
             let ack_delay = micros >> ack_delay_exponent.min(20);
 
             Some((ack_delay, self.ack_ranges.iter().map(|r| (r.start, r.end)).collect()))
+        }
+
+        /// Commit a previously inspected ACK: clear the pending decision and record the send time.
+        ///
+        /// Idempotent in effect but must be called exactly once per emitted ACK frame, after the
+        /// frame has been successfully written.
+        #[inline(always)]
+        pub fn commit_ack_at(&mut self, now: Instant) {
+            self.ack_elicited = false;
+            self.recvd_since_ack = 0;
+            self.ack_deadline = None;
+            self.last_ack_time = Some(now);
+        }
+
+        /// Takes an ACK decision at an explicit protocol timestamp.
+        ///
+        /// Convenience for callers that cannot fail between inspection and emission. Paths whose
+        /// serialization can fail must use [`Self::peek_ack_at`] plus [`Self::commit_ack_at`].
+        #[inline(always)]
+        pub fn take_ack_at(
+            &mut self,
+            ack_delay_exponent: u64,
+            now: Instant,
+        ) -> Option<(u64, Vec<(u64, u64)>)> {
+            let taken = self.peek_ack_at(ack_delay_exponent, now)?;
+            self.commit_ack_at(now);
+            Some(taken)
         }
 
         /// True if PN is currently within our ack ranges
@@ -1086,6 +1115,72 @@ mod tests {
     }
 
     // --- PktNumSpace tests ---
+
+    /// Inspecting a pending ACK must not consume it.
+    ///
+    /// Before the split, `take_ack` cleared the pending flag, the receive counter, and the
+    /// deadline before the caller knew whether the frame would fit or serialize. A failure there
+    /// dropped the ACK, and nothing guarantees another inbound packet arrives to re-trigger one.
+    #[test]
+    fn peek_ack_leaves_the_pending_decision_intact() {
+        let now = std::time::Instant::now();
+        let mut pns = PktNumSpace::new();
+        assert!(pns.on_packet_recv(0));
+        pns.note_ack_eliciting(0, 1);
+        assert!(pns.has_pending_ack(), "an ack-eliciting packet must schedule an ACK");
+
+        let first = pns.peek_ack_at(3, now).expect("a pending ACK must be inspectable");
+        assert!(pns.has_pending_ack(), "inspection must not consume the pending decision");
+
+        // Repeated inspection is stable and still non-consuming.
+        let second = pns.peek_ack_at(3, now).expect("still pending");
+        assert_eq!(first.1, second.1, "the reported ranges must not change under inspection");
+        assert!(pns.has_pending_ack());
+    }
+
+    /// Committing clears the pending decision exactly once.
+    #[test]
+    fn commit_ack_clears_the_pending_decision_and_ranges_survive() {
+        let now = std::time::Instant::now();
+        let mut pns = PktNumSpace::new();
+        assert!(pns.on_packet_recv(7));
+        pns.note_ack_eliciting(0, 1);
+
+        let (_, ranges) = pns.peek_ack_at(3, now).expect("pending");
+        assert!(!ranges.is_empty(), "the fixture must carry ranges");
+
+        pns.commit_ack_at(now);
+        assert!(!pns.has_pending_ack(), "commit must clear the pending decision");
+        assert!(pns.peek_ack_at(3, now).is_none(), "nothing is pending after a commit");
+
+        // The stored ranges are retained; only the pending decision was consumed.
+        assert!(pns.contains(7), "committing an ACK must not forget what was received");
+
+        // A later ack-eliciting packet schedules a fresh ACK carrying the retained range.
+        assert!(pns.on_packet_recv(8));
+        pns.note_ack_eliciting(0, 1);
+        let (_, later) = pns.peek_ack_at(3, now).expect("a new ACK is pending");
+        assert!(!later.is_empty());
+    }
+
+    /// A failed emission must leave the ACK pending so the next send can carry it.
+    #[test]
+    fn an_inspected_but_uncommitted_ack_survives_for_a_later_attempt() {
+        let now = std::time::Instant::now();
+        let mut pns = PktNumSpace::new();
+        assert!(pns.on_packet_recv(1));
+        pns.note_ack_eliciting(0, 1);
+
+        // Model a send that inspects, then fails on capacity and never commits.
+        let _ = pns.peek_ack_at(3, now).expect("pending");
+        assert!(pns.has_pending_ack(), "a failed emission must not consume the ACK");
+
+        // The retry succeeds and commits.
+        let (_, ranges) = pns.peek_ack_at(3, now).expect("still pending on retry");
+        assert!(!ranges.is_empty());
+        pns.commit_ack_at(now);
+        assert!(!pns.has_pending_ack());
+    }
 
     #[test]
     fn pkt_num_space_accepts_valid_pn() {

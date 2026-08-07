@@ -755,8 +755,11 @@ impl Connection {
         out: &mut [u8],
         mut off: usize,
     ) -> Result<usize, crate::error::ConnectionError> {
+        // Inspect without consuming: the capacity check and serialization below can both fail,
+        // and a dropped ACK is not guaranteed to be re-triggered by another inbound packet.
+        let now = self.clock.now();
         if let Some((ack_delay, ack_ranges)) =
-            self.pkt_spaces[2].take_ack_at(self.config.ack_delay_exponent, self.clock.now())
+            self.pkt_spaces[2].peek_ack_at(self.config.ack_delay_exponent, now)
         {
             let ecn = if self.ecn_ect0 | self.ecn_ect1 | self.ecn_ce > 0 {
                 Some(EcnCounts { ect0: self.ecn_ect0, ect1: self.ecn_ect1, ce: self.ecn_ce })
@@ -773,6 +776,8 @@ impl Connection {
                 ack_written = true;
             }
             if ack_written {
+                // Committed only now that the bytes are in the packet.
+                self.pkt_spaces[2].commit_ack_at(now);
                 if let Some(obs) = &self.observer {
                     if let Frame::Ack { ranges, .. } = &ack {
                         obs.on_ack(ack_delay, ranges);
