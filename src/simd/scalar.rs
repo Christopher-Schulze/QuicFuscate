@@ -137,8 +137,60 @@ pub fn matmul(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
     }
 }
 
-/// Berlekamp-Massey algorithm over GF(256) for error-locator polynomial (scalar).
+/// Berlekamp-Massey over GF(256): shortest linear recurrence for `syndrome[..len]`.
+///
+/// Returns the connection polynomial `C` with `C[0] == 1` and degree equal to the recurrence
+/// length `L`, satisfying
+///
+/// ```text
+/// XOR_{j=0..L} C[j] * s[i-j] == 0   for every i in L..len
+/// ```
+///
 /// Returns an empty polynomial when `len` exceeds the supplied syndrome.
+///
+/// The previous implementation tracked the shift with a `old_degree` value that is not the
+/// distance back to the saved polynomial, so it produced polynomials that do not annihilate their
+/// own input. For the periodic sequence `[fd,30,aa,0d,fd,30,aa,0d]` it returned
+/// `[01,00,dd,3e,cd]` where the recurrence `s_i == s_{i-4}` requires `[01,00,00,00,01]`. Every
+/// dispatched lane delegates here, so that defect reached all architectures.
+/// GF(256) multiply in the FEC codec field `0x11D`.
+///
+/// Berlekamp-Massey must not use [`gf_mul_byte`], which reduces with the AES polynomial `0x11B`.
+/// The FEC wire contract is `0x11D`, so a polynomial derived in the AES field is meaningless for
+/// the system the Wiedemann solver is trying to solve. That mismatch is why the solver could not
+/// work no matter how the back-substitution was written.
+#[inline]
+fn gf_mul_byte_fec(a: u8, b: u8) -> u8 {
+    let mut result = 0u8;
+    let mut left = a;
+    let mut right = b;
+    while right != 0 {
+        if right & 1 != 0 {
+            result ^= left;
+        }
+        let carry = left & 0x80;
+        left <<= 1;
+        if carry != 0 {
+            left ^= 0x1D;
+        }
+        right >>= 1;
+    }
+    result
+}
+
+/// Multiplicative inverse in the FEC codec field `0x11D` via Fermat's little theorem.
+#[inline]
+fn gf_inv_fec(a: u8) -> u8 {
+    if a == 0 {
+        return 0;
+    }
+    let mut result = a;
+    for _ in 0..253 {
+        result = gf_mul_byte_fec(result, a);
+    }
+    result
+}
+
 pub fn berlekamp_massey(syndrome: &[u8], len: usize) -> Vec<u8> {
     if len > syndrome.len() {
         return Vec::new();
@@ -147,50 +199,47 @@ pub fn berlekamp_massey(syndrome: &[u8], len: usize) -> Vec<u8> {
         return Vec::new();
     };
 
-    let mut error_locator = vec![0u8; storage_len];
-    error_locator[0] = 1;
+    // `current` is the polynomial under construction, `previous` the last one that shortened the
+    // recurrence, `shift` how many steps back that was, and `discrepancy_at_shift` the
+    // discrepancy observed when it was saved.
+    let mut current = vec![0u8; storage_len];
+    current[0] = 1;
+    let mut previous = vec![0u8; storage_len];
+    previous[0] = 1;
 
-    let mut old_locator = vec![0u8; storage_len];
-    old_locator[0] = 1;
-
-    let mut syndrome_shift = 0u8;
-    let mut error_degree = 0;
-    let mut old_degree = 1;
+    let mut recurrence_len = 0usize;
+    let mut shift = 1usize;
+    let mut discrepancy_at_shift = 1u8;
 
     for i in 0..len {
         let mut discrepancy = syndrome[i];
-
-        for j in 1..=error_degree.min(i) {
-            discrepancy ^= super::scalar::gf_mul_byte(error_locator[j], syndrome[i - j]);
+        for j in 1..=recurrence_len.min(i) {
+            discrepancy ^= gf_mul_byte_fec(current[j], syndrome[i - j]);
         }
 
-        if discrepancy != 0 {
-            let mut new_locator = error_locator.clone();
+        if discrepancy == 0 {
+            shift += 1;
+            continue;
+        }
 
-            if syndrome_shift != 0 {
-                let factor =
-                    super::scalar::gf_mul_byte(discrepancy, super::scalar::gf_inv(syndrome_shift));
-                for j in 0..=old_degree {
-                    if j + i >= old_degree {
-                        new_locator[j + i - old_degree + 1] ^=
-                            super::scalar::gf_mul_byte(factor, old_locator[j]);
-                    }
-                }
-            }
+        let factor = gf_mul_byte_fec(discrepancy, gf_inv_fec(discrepancy_at_shift));
+        let saved = current.clone();
+        for j in 0..storage_len.saturating_sub(shift) {
+            current[j + shift] ^= gf_mul_byte_fec(factor, previous[j]);
+        }
 
-            if 2 * error_degree <= i {
-                old_locator = error_locator.clone();
-                old_degree = error_degree;
-                syndrome_shift = discrepancy;
-                error_degree = i + 1 - error_degree;
-            }
-
-            error_locator = new_locator;
+        if 2 * recurrence_len <= i {
+            recurrence_len = i + 1 - recurrence_len;
+            previous = saved;
+            discrepancy_at_shift = discrepancy;
+            shift = 1;
+        } else {
+            shift += 1;
         }
     }
 
-    error_locator.truncate(error_degree + 1);
-    error_locator
+    current.truncate(recurrence_len + 1);
+    current
 }
 
 /// GF(256) matrix multiplication C = A * B with dimensions (m x k) * (k x n) (scalar).

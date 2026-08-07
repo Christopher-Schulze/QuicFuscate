@@ -46,6 +46,13 @@ struct Equation8 {
     len: usize,
 }
 
+/// Independent deterministic projector vectors tried before the Wiedemann solve gives up.
+///
+/// Scalar Wiedemann can fail for a particular projector even on a full-rank system, so a single
+/// attempt would push solvable systems onto the Gaussian fallback. Four rounds cover the cases in
+/// the regression suite while keeping the worst case bounded at a small multiple of one solve.
+const WIEDEMANN_PROJECTION_ROUNDS: usize = 4;
+
 struct WiedemannScratch {
     column_buffers: Vec<Vec<u8>>,
     spmv_acc: Vec<u8>,
@@ -704,60 +711,104 @@ impl Decoder8 {
             return None;
         }
 
-        // Generate random vectors for Wiedemann
-        let mut u = vec![0u8; m];
-        let mut v = vec![0u8; n];
-        for (i, elem) in u.iter_mut().enumerate().take(m) {
-            *elem = (i as u8).wrapping_add(1);
-        }
-        for (i, elem) in v.iter_mut().enumerate().take(n) {
-            *elem = ((i * 2 + 1) as u8).wrapping_add(1);
-        }
-
-        // Compute the sequence s_i = u^T * A^i * v
-        let seq_len = n.checked_mul(2)?.checked_add(64)?;
-        let mut sequence = vec![0u8; seq_len];
-        let mut av = v.clone();
-        crate::telemetry::WIEDEMANN_KRYLOV_ALLOCS.inc_by(4);
+        // Two n terms is the standard requirement for Berlekamp-Massey to recover a recurrence of
+        // degree at most n.
+        let seq_len = n.checked_mul(2)?;
 
         crate::telemetry::WIEDEMANN_USAGE.inc();
-
         crate::telemetry::WIEDEMANN_SCALAR_OPS.inc();
+        crate::telemetry::WIEDEMANN_KRYLOV_ALLOCS.inc_by(3);
 
-        for slot in sequence.iter_mut().take(seq_len) {
-            // s_i = u^T * av
-            let mut s = 0u8;
-            for (j, uval) in u.iter().enumerate().take(m) {
-                s ^= gf_tables::gf_mul_table(*uval, av[j.min(n - 1)]);
-            }
-            *slot = s;
-
-            // av = A * av (Matrix-Vector multiply)
-            crate::telemetry::WIEDEMANN_ITERATION_ALLOCS.inc();
-            let mut next_av = vec![0u8; n];
-            multiply_gf256_with_scratch(scratch, &av, &mut next_av);
-
-            av = next_av;
-        }
-
-        // Berlekamp-Massey for minimal polynomial (SIMD-dispatched)
-        let min_poly = crate::simd::fec::berlekamp_massey_gf256(&sequence, sequence.len());
-        if min_poly.len() <= 1 {
-            return None;
-        }
-
-        // Solve using the minimal polynomial
+        let mut sequence = vec![0u8; seq_len];
+        let mut krylov = vec![0u8; n];
+        let mut next = vec![0u8; n];
+        let mut projector = vec![0u8; m];
+        let mut accumulator = vec![0u8; n];
+        let mut spun = vec![0u8; n];
         crate::telemetry::WIEDEMANN_CANDIDATE_ALLOCS.inc_by(2);
-        let mut x = vec![0u8; n];
-        let temp = rhs.to_vec();
 
-        for i in 0..n {
-            if i < temp.len() {
-                x[i] = temp[i];
+        // Scalar Wiedemann projects the system onto a single sequence, so an unlucky projector can
+        // expose a recurrence shorter than the true minimal polynomial of `b` under `A` and yield
+        // a candidate that does not solve the system. A 3-cycle permutation over GF(256) is the
+        // smallest example. Retrying with independent deterministic projectors recovers those
+        // cases; determinism keeps decoding reproducible across peers.
+        for round in 0..WIEDEMANN_PROJECTION_ROUNDS {
+            for (index, element) in projector.iter_mut().enumerate() {
+                let spread = (index as u32 + 1)
+                    .wrapping_mul(2 * round as u32 + 1)
+                    .wrapping_add(round as u32 * 37);
+                // Never zero: an all-zero projector produces the zero sequence for every matrix.
+                *element = ((spread % 255) as u8).wrapping_add(1);
+            }
+
+            // Krylov sequence s_i = u^T A^i b, built from the right-hand side. The polynomial we
+            // need is the one annihilating `b` under `A`, and that is what makes the
+            // back-substitution below a solution rather than a plausible-looking vector.
+            krylov.copy_from_slice(rhs);
+            for slot in sequence.iter_mut() {
+                let mut projection = 0u8;
+                for (index, &coefficient) in projector.iter().enumerate() {
+                    projection ^= gf_tables::gf_mul_table(coefficient, krylov[index]);
+                }
+                *slot = projection;
+
+                crate::telemetry::WIEDEMANN_ITERATION_ALLOCS.inc();
+                multiply_gf256_with_scratch(scratch, &krylov, &mut next);
+                krylov.copy_from_slice(&next);
+            }
+
+            // Berlekamp-Massey returns the connection polynomial `lambda` with `lambda[0] == 1`
+            // and degree equal to the recurrence length, satisfying
+            // `XOR_j lambda[j] * s_{i-j} == 0`.
+            let lambda = crate::simd::fec::berlekamp_massey_gf256(&sequence, sequence.len());
+            let Some(degree) = lambda.len().checked_sub(1).filter(|&degree| degree > 0) else {
+                continue;
+            };
+            // A zero constant term means the reversed polynomial has no invertible leading term,
+            // which is what a singular restriction of `A` to `b` looks like. Fail this round
+            // rather than dividing by zero or shortening the degree, which would silently solve a
+            // different system.
+            let leading = lambda[degree];
+            if leading == 0 {
+                continue;
+            }
+
+            // With `f(A) b = 0` for the reversed polynomial `f` of degree `d`:
+            //
+            //   XOR_{j=0..d} lambda[j] A^(d-j) b = 0
+            //   lambda[d] b = A * (XOR_{j=0..d-1} lambda[j] A^(d-1-j) b)
+            //
+            // so `x = lambda[d]^-1 * XOR_{j=0..d-1} lambda[j] A^(d-1-j) b` satisfies `A x = b`.
+            // Subtraction is XOR in GF(2^8), so the rearrangement carries no sign. The sum is
+            // accumulated by Horner's rule at one SpMV per degree step.
+            accumulator.fill(0);
+            for &coefficient in lambda.iter().take(degree) {
+                multiply_gf256_with_scratch(scratch, &accumulator, &mut spun);
+                for (slot, (&carried, &right)) in
+                    accumulator.iter_mut().zip(spun.iter().zip(rhs.iter()))
+                {
+                    *slot = carried ^ gf_tables::gf_mul_table(coefficient, right);
+                }
+            }
+
+            let inverse = gf_tables::gf_inv8(leading);
+            if inverse == 0 {
+                continue;
+            }
+            for value in accumulator.iter_mut() {
+                *value = gf_tables::gf_mul_table(inverse, *value);
+            }
+
+            // Verify before returning. The caller validates every equation again before mutating
+            // decoder state, but a solver that can return a non-solution is not a solver, and an
+            // unverified candidate would make the fallback decision depend on luck.
+            multiply_gf256_with_scratch(scratch, &accumulator, &mut spun);
+            if spun == rhs {
+                return Some(accumulator);
             }
         }
 
-        Some(x)
+        None
     }
 }
 

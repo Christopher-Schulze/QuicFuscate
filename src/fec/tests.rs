@@ -1117,12 +1117,116 @@ fn test_wiedemann_scalar_telemetry_increments() {
 
     assert!(usage_after > usage_before, "usage counter should increase");
     assert!(scalar_after > scalar_before, "scalar counter should increase");
-    assert!(krylov_after >= krylov_before + 4, "Krylov allocation accounting should increase");
+    assert!(krylov_after >= krylov_before + 3, "Krylov allocation accounting should increase");
     assert!(iteration_after > iteration_before, "iteration allocation accounting should increase");
     assert!(
         candidate_after >= candidate_before + 2,
         "candidate allocation accounting should increase"
     );
+}
+
+/// GF(256) matrix-vector product used as an independent reference in the solver tests.
+fn wiedemann_reference_multiply(matrix: &[Vec<u8>], vector: &[u8]) -> Vec<u8> {
+    matrix
+        .iter()
+        .map(|row| {
+            row.iter().zip(vector.iter()).fold(0u8, |acc, (&coefficient, &value)| {
+                acc ^ gf_tables::gf_mul_table(coefficient, value)
+            })
+        })
+        .collect()
+}
+
+/// The core correctness contract. Before this, `solve_wiedemann_system` computed a Krylov
+/// sequence and a minimal polynomial and then returned a copy of the right-hand side, so it was
+/// only ever "right" when the matrix happened to be the identity.
+#[test]
+fn test_wiedemann_solves_non_identity_systems_where_solution_differs_from_rhs() {
+    gf_tables::init_tables();
+    let pool = make_pool();
+    let decoder = Decoder8::new(8, pool);
+
+    // Lower unitriangular with non-trivial off-diagonal entries: invertible over GF(256) by
+    // construction, and far from a permutation of the right-hand side.
+    let matrix = vec![
+        vec![1u8, 0u8, 0u8, 0u8],
+        vec![0x1Du8, 1u8, 0u8, 0u8],
+        vec![0x8Eu8, 0x2Au8, 1u8, 0u8],
+        vec![0x40u8, 0xB3u8, 0x77u8, 1u8],
+    ];
+    let expected = vec![0x11u8, 0x22u8, 0x33u8, 0x44u8];
+    let rhs = wiedemann_reference_multiply(&matrix, &expected);
+    assert_ne!(rhs, expected, "the fixture must not be a system whose solution equals its RHS");
+
+    let mut scratch = super::WiedemannScratch::from_matrix(&matrix, 4);
+    let solution = decoder
+        .solve_wiedemann_system(&matrix, &rhs, 4, &mut scratch)
+        .expect("a full-rank non-identity system must be solvable");
+
+    assert_eq!(solution, expected, "solver must return the true solution, not the RHS");
+    assert_eq!(
+        wiedemann_reference_multiply(&matrix, &solution),
+        rhs,
+        "A x = b must hold byte for byte over GF(256)"
+    );
+}
+
+/// A diagonal system with non-unit entries is the smallest case that distinguishes a real solve
+/// from returning the right-hand side: every component is scaled by a known inverse.
+#[test]
+fn test_wiedemann_solves_diagonal_and_permutation_systems() {
+    gf_tables::init_tables();
+    let pool = make_pool();
+    let decoder = Decoder8::new(8, pool);
+
+    let diagonal = vec![vec![0x03u8, 0u8, 0u8], vec![0u8, 0x05u8, 0u8], vec![0u8, 0u8, 0x1Bu8]];
+    let expected = vec![0x7Au8, 0x0Fu8, 0xC1u8];
+    let rhs = wiedemann_reference_multiply(&diagonal, &expected);
+    let mut scratch = super::WiedemannScratch::from_matrix(&diagonal, 3);
+    let solution = decoder
+        .solve_wiedemann_system(&diagonal, &rhs, 3, &mut scratch)
+        .expect("diagonal system must be solvable");
+    assert_eq!(solution, expected);
+    assert_eq!(wiedemann_reference_multiply(&diagonal, &solution), rhs);
+
+    let permutation = vec![vec![0u8, 1u8, 0u8], vec![0u8, 0u8, 1u8], vec![1u8, 0u8, 0u8]];
+    let expected = vec![0xDEu8, 0xADu8, 0xBEu8];
+    let rhs = wiedemann_reference_multiply(&permutation, &expected);
+    let mut scratch = super::WiedemannScratch::from_matrix(&permutation, 3);
+    let solution = decoder
+        .solve_wiedemann_system(&permutation, &rhs, 3, &mut scratch)
+        .expect("permutation system must be solvable");
+    assert_eq!(solution, expected);
+    assert_eq!(wiedemann_reference_multiply(&permutation, &solution), rhs);
+}
+
+/// Singular systems must fail closed. Either the solver reports no solution, or whatever it
+/// returns is a genuine solution of the system; it must never fabricate a recovery that does not
+/// satisfy the equations.
+#[test]
+fn test_wiedemann_singular_systems_never_fabricate_a_recovery() {
+    gf_tables::init_tables();
+    let pool = make_pool();
+    let decoder = Decoder8::new(8, pool);
+
+    // Row 2 is row 0 scaled, so the matrix has rank 2 over GF(256).
+    let singular = vec![
+        vec![0x01u8, 0x02u8, 0x03u8],
+        vec![0x00u8, 0x01u8, 0x04u8],
+        vec![0x02u8, 0x04u8, 0x06u8],
+    ];
+    // A right-hand side that is inconsistent with that dependency.
+    let rhs = vec![0x10u8, 0x20u8, 0x31u8];
+
+    let mut scratch = super::WiedemannScratch::from_matrix(&singular, 3);
+    if let Some(solution) = decoder.solve_wiedemann_system(&singular, &rhs, 3, &mut scratch) {
+        assert_eq!(
+            wiedemann_reference_multiply(&singular, &solution),
+            rhs,
+            "any returned vector must actually solve the system; the caller's validation is the \
+             second gate, not the first"
+        );
+    }
 }
 
 #[test]
