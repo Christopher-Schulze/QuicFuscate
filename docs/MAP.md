@@ -1784,7 +1784,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - Parser admission: `Cursor` uses checked varint and byte-tail access; ARM NEON/SVE2 stream parsing validates every decoder-reported byte count and the caller rejects any cursor advance beyond the remaining input before borrowing payload bytes.
 - Output admission: `write_varint_at()` and `write_bytes_at()` centralize checked output tails, while `batch_encode_frames()` validates each cumulative position before slicing the caller buffer. The compatibility `Arc<MemoryPool>` argument remains allocation-free.
 - Regression surfaces: malformed ACK, truncated STREAM, invalid New Connection ID, capacity-bound batch, scalar frame round-trip, and ARM parser-boundary cases are present in `src/transport/frames.rs`, `src/simd/arm_stream.rs`, and `scripts/tests/rust/rt-transport-frames-roundtrip.rs`.
-- Current gate boundary: formatting, diff hygiene, locked metadata, and ARM64 library checking pass. Focused test execution is pending because local free space remains 1.8 GiB after `cargo clean`; the two pre-existing Omega project paths are dirty or stale and were not modified.
+- Current gate boundary: formatting, diff hygiene, locked metadata, and ARM64 library checking pass. A one-job focused test build was intentionally aborted when free space reached 1.8 GiB; `cargo clean` restored 2.3 GiB, but a complete focused test build is still not admitted under the 2-GiB safety margin. The two pre-existing Omega project paths are dirty or stale and were not modified.
 
 ## Generic Pooled-Buffer Failure Cleanup Wiring (2026-08-06, TODO-831)
 
