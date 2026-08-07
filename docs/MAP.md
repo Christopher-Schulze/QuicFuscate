@@ -1363,9 +1363,9 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Audit Reconciliation (2026-08-03, FEC complete audit)
 
-- TODO-686 is complete as a read-only audit across every current FEC source and test module, all FEC `unsafe` sites and direct callers, public decoder/matrix/wire/Fountain boundaries, feature gates, malformed-input tests, fuzz and shell/benchmark/netns proof, documentation, related owners, and history.
-- The audit separates current product-wire validation from direct public API reachability and does not claim that unsafe contracts, decoder mathematics, native ISA paths, negative proof, or documentation are fixed. Pooled-buffer resource ownership is closed under TODO-832. Open remediation is tracked by TODO-634, TODO-636, TODO-637, TODO-690, TODO-715, and TODO-855 through TODO-860, with shared SIMD, AMX, transport, and environment owners retained.
-- No production implementation, build, test, native probe, privileged network run, commit, or push was performed for TODO-686. The complete findings and evidence boundary are in `docs/todo/todo-686-fec-unsafe-audit.md`.
+- TODO-686 is complete as a read-only audit across every current FEC source and test module, all FEC `unsafe` sites and direct callers, public decoder/matrix/wire/Fountain boundaries, feature gates, malformed-input tests, fuzz and shell/benchmark/netns proof, documentation, related owners, and history. Current reconciliation records TODO-832, TODO-834-836, and TODO-676/816-819 source closures or external proof boundaries; Fountain source-index and `k == 0` progress checks are source-closed.
+- The audit separates current product-wire validation from direct public API reachability and does not claim that remaining unsafe contracts, decoder mathematics, native ISA paths, negative proof, or documentation remediation are fixed. Open remediation is tracked by TODO-634, TODO-636, TODO-637, TODO-690, TODO-715, and TODO-855 through TODO-860, with shared transport and environment owners retained.
+- No production implementation, build, test, native probe, privileged network run, commit, or push was performed for TODO-686. The complete findings and current evidence boundary are in `docs/todo/todo-686-fec-unsafe-audit.md`.
 
 ## SIMD Dispatch Intersection Wiring (2026-08-06, TODO-834)
 
