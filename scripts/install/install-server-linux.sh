@@ -111,6 +111,27 @@ random_password() {
   printf '%s' "$password"
 }
 
+# Serialize a value for a systemd EnvironmentFile assignment.
+#
+# systemd accepts a double-quoted value with backslash escapes. A literal line break cannot be
+# represented at all: it would terminate the assignment and the remainder would be parsed as a new
+# key, so hostile or merely surprising input could change which paths and arguments the unit
+# starts with. Reject those rather than writing something that parses differently from what the
+# installer reported.
+systemd_env_value() {
+  local name="$1" value="$2"
+  case "$value" in
+    *$'\n'*|*$'\r'*)
+      echo "error: $name contains a line break and cannot be written to an EnvironmentFile" >&2
+      return 1
+      ;;
+  esac
+  # Backslash first, so the escape introduced for the quote is not escaped again.
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
 ensure_group() {
   local group="$1"
   if getent group "$group" >/dev/null 2>&1; then
@@ -274,6 +295,7 @@ main() {
 
   local config_dst="/etc/quicfuscate/quicfuscate.toml"
   local env_dst="/etc/quicfuscate/quicfuscate.env"
+  local admin_credentials_dst="/etc/quicfuscate/admin-credentials"
   local web_dst="/usr/share/quicfuscate/admin-web"
   local state_dir="/var/lib/quicfuscate"
   local qkey_store="/var/lib/quicfuscate/qkeys.json"
@@ -465,27 +487,47 @@ main() {
   fi
 
   if [[ ! -f "$env_dst" ]]; then
-    cat >"$env_dst" <<EOF
-# QuicFuscate service environment.
-# This file contains admin credentials. Keep permissions tight.
+    # Restrict before any secret reaches the file, not after.
+    ( umask 0177; : >"$env_dst" )
+    chmod 0640 "$env_dst"
+    chown root:quicfuscate "$env_dst"
 
-QUICFUSCATE_LISTEN=${listen}
-QUICFUSCATE_CERT=${cert}
-QUICFUSCATE_KEY=${key}
-QUICFUSCATE_CONFIG=${config_dst}
-QUICFUSCATE_ADMIN_WEB=${admin_web}
-QUICFUSCATE_ADMIN_WEB_ROOT=${web_dst}
-QUICFUSCATE_ADMIN_USER=${admin_user}
-QUICFUSCATE_ADMIN_PASSWORD=${admin_password}
-QUICFUSCATE_QKEY_STORE=${qkey_store}
-QUICFUSCATE_QKEY_TTL_SECS=${qkey_ttl}
-QUICFUSCATE_QKEY_ENC_KEY_FILE=${qkey_key_file}
-EOF
-    chmod 0640 "$env_dst" || true
-    chown root:quicfuscate "$env_dst" || true
-    echo "admin credentials:"
-    echo "  user: ${admin_user}"
-    echo "  pass: ${admin_password}"
+    {
+      printf '# QuicFuscate service environment.\n'
+      printf '# This file contains admin credentials. Keep permissions tight.\n\n'
+      printf 'QUICFUSCATE_LISTEN=%s\n' "$(systemd_env_value QUICFUSCATE_LISTEN "$listen")"
+      printf 'QUICFUSCATE_CERT=%s\n' "$(systemd_env_value QUICFUSCATE_CERT "$cert")"
+      printf 'QUICFUSCATE_KEY=%s\n' "$(systemd_env_value QUICFUSCATE_KEY "$key")"
+      printf 'QUICFUSCATE_CONFIG=%s\n' "$(systemd_env_value QUICFUSCATE_CONFIG "$config_dst")"
+      printf 'QUICFUSCATE_ADMIN_WEB=%s\n' "$(systemd_env_value QUICFUSCATE_ADMIN_WEB "$admin_web")"
+      printf 'QUICFUSCATE_ADMIN_WEB_ROOT=%s\n' \
+        "$(systemd_env_value QUICFUSCATE_ADMIN_WEB_ROOT "$web_dst")"
+      printf 'QUICFUSCATE_ADMIN_USER=%s\n' \
+        "$(systemd_env_value QUICFUSCATE_ADMIN_USER "$admin_user")"
+      printf 'QUICFUSCATE_ADMIN_PASSWORD=%s\n' \
+        "$(systemd_env_value QUICFUSCATE_ADMIN_PASSWORD "$admin_password")"
+      printf 'QUICFUSCATE_QKEY_STORE=%s\n' \
+        "$(systemd_env_value QUICFUSCATE_QKEY_STORE "$qkey_store")"
+      printf 'QUICFUSCATE_QKEY_TTL_SECS=%s\n' \
+        "$(systemd_env_value QUICFUSCATE_QKEY_TTL_SECS "$qkey_ttl")"
+      printf 'QUICFUSCATE_QKEY_ENC_KEY_FILE=%s\n' \
+        "$(systemd_env_value QUICFUSCATE_QKEY_ENC_KEY_FILE "$qkey_key_file")"
+    } >"$env_dst"
+
+    # Credential handoff is a root-only file, never terminal output. Printing the password left it
+    # in scrollback, install logs, and CI artifacts, which contradicts the documented contract that
+    # secrets must not appear in logs.
+    ( umask 0177; : >"$admin_credentials_dst" )
+    chmod 0600 "$admin_credentials_dst"
+    chown root:root "$admin_credentials_dst"
+    {
+      printf '# QuicFuscate administrator credentials.\n'
+      printf '# Read once, store in your password manager, then delete this file.\n'
+      printf 'user=%s\n' "$admin_user"
+      printf 'password=%s\n' "$admin_password"
+    } >"$admin_credentials_dst"
+    echo "admin credentials written to $admin_credentials_dst (mode 0600, root only)"
+    echo "read them once, store them securely, then remove that file"
   else
     echo "info: env file exists, not overwriting: $env_dst"
     if [[ "$qkey_key_source_configured" == "0" ]]; then

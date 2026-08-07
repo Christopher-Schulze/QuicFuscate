@@ -156,8 +156,108 @@ run_static_checks() {
   bash -n "$host_suite"
   shellcheck -S warning "$bundle_builder" "$installer" "$guest_suite" "$host_suite"
   verify_random_password_contract "$installer"
-  printf 'bash_syntax=PASS\nshellcheck_warning=PASS\nrandom_password_contract=PASS\n' \
+  verify_systemd_env_serialization "$installer"
+  verify_installer_never_prints_credentials "$installer"
+  verify_unit_quotes_expansions "$PROJECT_ROOT/scripts/install/quicfuscate-server.service"
+  printf 'bash_syntax=PASS\nshellcheck_warning=PASS\nrandom_password_contract=PASS\nsystemd_env_serialization=PASS\ncredential_output=PASS\nunit_quoted_expansions=PASS\n' \
     >"$OUTPUT_DIR/static-checks.txt"
+}
+
+# Prove that every value written into the systemd EnvironmentFile round-trips exactly.
+#
+# The installer previously wrote raw values through a here-document, so whitespace, quotes,
+# backslashes, or a line break could change parsing and start the unit with different paths and
+# arguments than the installer reported.
+verify_systemd_env_serialization() {
+  local installer="$1"
+  local harness="$OUTPUT_DIR/systemd-env-harness.sh"
+
+  {
+    printf 'set -euo pipefail\n'
+    sed -n '/^systemd_env_value() {/,/^}$/p' "$installer"
+    cat <<'HARNESS'
+
+# Decode a double-quoted systemd environment value the way systemd does: backslash escapes one
+# character, and the surrounding quotes are removed.
+decode() {
+  local raw="$1" out="" i=0 ch
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  while (( i < ${#raw} )); do
+    ch="${raw:i:1}"
+    if [[ "$ch" == "\\" ]]; then
+      i=$(( i + 1 ))
+      out+="${raw:i:1}"
+    else
+      out+="$ch"
+    fi
+    i=$(( i + 1 ))
+  done
+  printf '%s' "$out"
+}
+
+roundtrip() {
+  local label="$1" value="$2" encoded decoded
+  encoded="$(systemd_env_value "$label" "$value")"
+  decoded="$(decode "$encoded")"
+  if [[ "$decoded" != "$value" ]]; then
+    echo "error: $label did not round-trip: [$value] -> $encoded -> [$decoded]" >&2
+    exit 1
+  fi
+}
+
+roundtrip PLAIN 'simple'
+roundtrip SPACES '/etc/quic fuscate/server.crt'
+roundtrip QUOTES 'pa"ss'
+roundtrip BACKSLASH 'pa\ss'
+roundtrip BOTH 'a\"b'
+roundtrip DOLLAR 'p$w0rd'
+roundtrip SEMICOLON 'a;b c'
+roundtrip TICK 'a`b'
+
+# A line break cannot be represented and must be rejected, not silently written.
+if systemd_env_value NEWLINE "$(printf 'a\nb')" >/dev/null 2>&1; then
+  echo "error: a value containing a newline must be rejected" >&2
+  exit 1
+fi
+if systemd_env_value CARRIAGE "$(printf 'a\rb')" >/dev/null 2>&1; then
+  echo "error: a value containing a carriage return must be rejected" >&2
+  exit 1
+fi
+echo "systemd_env_serialization=PASS"
+HARNESS
+  } >"$harness"
+
+  bash "$harness" >"$OUTPUT_DIR/systemd-env.txt"
+}
+
+# Unquoted ${VAR} in ExecStart is split on whitespace by systemd, so a value containing a space
+# would become two arguments and the unit would start with arguments the installer never reported.
+verify_unit_quotes_expansions() {
+  local unit="$1"
+  local unquoted
+  unquoted="$(grep -nE '^[[:space:]]*--[a-z-]+ \$\{[A-Z_]+\}' "$unit" || true)"
+  if [[ -n "$unquoted" ]]; then
+    echo "error: systemd unit expands variables unquoted in ExecStart:" >&2
+    echo "$unquoted" >&2
+    return 1
+  fi
+  printf 'unit_quoted_expansions=PASS\n' >"$OUTPUT_DIR/unit-expansions.txt"
+}
+
+# The installer must never echo a credential. docs/DOCUMENTATION.md states secrets must not appear
+# in logs, and terminal output lands in scrollback, install logs, and CI artifacts.
+verify_installer_never_prints_credentials() {
+  local installer="$1"
+  if grep -nE '^[[:space:]]*echo .*\$\{?admin_password' "$installer"; then
+    echo "error: installer echoes the administrator password" >&2
+    return 1
+  fi
+  if grep -nE '^[[:space:]]*(echo|printf) .*(pass:|password:)[^=]*\$' "$installer"; then
+    echo "error: installer prints a credential value" >&2
+    return 1
+  fi
+  printf 'credential_output=PASS\n' >"$OUTPUT_DIR/credential-output.txt"
 }
 
 # Exercise the installer's password generator directly, on the host, without installing anything.

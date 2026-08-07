@@ -14,15 +14,18 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_CHOWN C
 # Runtime configuration (credentials, bind addresses, paths).
 EnvironmentFile=/etc/quicfuscate/quicfuscate.env
 
+# Every expansion is quoted. Unquoted ${VAR} in ExecStart is split on whitespace by systemd, so a
+# path containing a space would become two arguments and the unit would start with different
+# arguments than the installer reported. "${VAR}" always expands to exactly one argument.
 ExecStart=/usr/local/bin/quicfuscate server \
-  --listen ${QUICFUSCATE_LISTEN} \
-  --cert ${QUICFUSCATE_CERT} \
-  --key ${QUICFUSCATE_KEY} \
-  --config ${QUICFUSCATE_CONFIG} \
-  --admin-web ${QUICFUSCATE_ADMIN_WEB} \
-  --admin-web-root ${QUICFUSCATE_ADMIN_WEB_ROOT} \
-  --qkey-store ${QUICFUSCATE_QKEY_STORE} \
-  --qkey-ttl-secs ${QUICFUSCATE_QKEY_TTL_SECS}
+  --listen "${QUICFUSCATE_LISTEN}" \
+  --cert "${QUICFUSCATE_CERT}" \
+  --key "${QUICFUSCATE_KEY}" \
+  --config "${QUICFUSCATE_CONFIG}" \
+  --admin-web "${QUICFUSCATE_ADMIN_WEB}" \
+  --admin-web-root "${QUICFUSCATE_ADMIN_WEB_ROOT}" \
+  --qkey-store "${QUICFUSCATE_QKEY_STORE}" \
+  --qkey-ttl-secs "${QUICFUSCATE_QKEY_TTL_SECS}"
 ExecReload=/bin/kill -HUP $MAINPID
 
 Restart=on-failure
