@@ -1,4 +1,45 @@
 impl Connection {
+    /// Bytes of `[start, end)` this stream has not already received.
+    ///
+    /// The already-received set is the contiguous delivered prefix `[0, recv_next)` plus every
+    /// buffered out-of-order fragment. QUIC flow-control credit represents new data, so a
+    /// duplicate or partially overlapping retransmission must contribute exactly the bytes it
+    /// newly covers and nothing more.
+    fn newly_covered_bytes(
+        recv_next: u64,
+        fragments: &std::collections::BTreeMap<u64, Vec<u8>>,
+        start: u64,
+        end: u64,
+    ) -> u64 {
+        if end <= start {
+            return 0;
+        }
+        // Everything below `recv_next` was already delivered.
+        let mut cursor = start.max(recv_next);
+        if cursor >= end {
+            return 0;
+        }
+
+        let mut new_bytes = 0u64;
+        // Fragments are keyed by start offset, so ascending iteration walks the covered ranges in
+        // order. Only fragments beginning before `end` can overlap the incoming range.
+        for (&fragment_start, fragment) in fragments.range(..end) {
+            let fragment_end = fragment_start.saturating_add(fragment.len() as u64);
+            if fragment_end <= cursor {
+                continue;
+            }
+            if fragment_start > cursor {
+                // The gap between the cursor and this fragment is genuinely new.
+                new_bytes = new_bytes.saturating_add(fragment_start - cursor);
+            }
+            cursor = cursor.max(fragment_end);
+            if cursor >= end {
+                return new_bytes;
+            }
+        }
+        new_bytes.saturating_add(end - cursor)
+    }
+
     /// Processes incoming packet
     #[inline(always)]
     pub fn recv(
@@ -280,7 +321,6 @@ impl Connection {
                     match frame {
                         Frame::Stream { stream_id, offset, data, fin } => {
                             ack_eliciting = true;
-                            self.stats.stream_recv_bytes += data.len() as u64;
                             if self.readable_stream_ids.insert(stream_id) {
                                 self.readable_streams.push_back(stream_id);
                             }
@@ -309,10 +349,18 @@ impl Connection {
                                 max_stream_data_tx: self.config.initial_max_stream_data_bidi_remote,
                             });
                             let end = offset.saturating_add(data.len() as u64);
+                            // Flow-control credit represents newly received data. Counting the
+                            // whole payload here let a reordered or retransmitted range consume
+                            // credit again for bytes the stream already holds, which could
+                            // exhaust the connection window and trip MAX_DATA without a single
+                            // new byte being delivered.
+                            let newly_covered =
+                                Self::newly_covered_bytes(s.recv_next, &s.recv_frags, offset, end);
                             // Track highest received offset for flow control accounting.
                             s.recv_off = s.recv_off.max(end);
+                            self.stats.stream_recv_bytes += newly_covered;
                             self.conn_bytes_recvd =
-                                self.conn_bytes_recvd.saturating_add(data.len() as u64);
+                                self.conn_bytes_recvd.saturating_add(newly_covered);
 
                             // Store fragment for ordered delivery.
                             if !data.is_empty() {

@@ -2586,4 +2586,102 @@ mod tests {
         assert_eq!(state.probe_size(), None);
         assert!(!state.enabled());
     }
+
+    /// Flow-control credit must reflect newly received bytes, not raw payload length.
+    ///
+    /// Before this contract every STREAM frame added its full length to `conn_bytes_recvd`, so a
+    /// retransmitted or reordered range consumed connection credit again for bytes the stream
+    /// already held.
+    #[test]
+    fn newly_covered_bytes_counts_only_the_union_of_new_ranges() {
+        use std::collections::BTreeMap;
+        type Frags = BTreeMap<u64, Vec<u8>>;
+
+        let empty: Frags = BTreeMap::new();
+
+        // Nothing received yet: the whole range is new.
+        assert_eq!(Connection::newly_covered_bytes(0, &empty, 0, 100), 100);
+        // Empty and inverted ranges contribute nothing.
+        assert_eq!(Connection::newly_covered_bytes(0, &empty, 50, 50), 0);
+        assert_eq!(Connection::newly_covered_bytes(0, &empty, 80, 50), 0);
+
+        // Everything below the delivered prefix is a duplicate.
+        assert_eq!(Connection::newly_covered_bytes(100, &empty, 0, 100), 0);
+        assert_eq!(Connection::newly_covered_bytes(100, &empty, 40, 60), 0);
+        // Straddling the prefix boundary counts only the part above it.
+        assert_eq!(Connection::newly_covered_bytes(100, &empty, 60, 140), 40);
+
+        // A buffered out-of-order fragment already covers [200, 300).
+        let mut frags: Frags = BTreeMap::new();
+        frags.insert(200, vec![0u8; 100]);
+
+        // Exact duplicate of the fragment.
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 200, 300), 0);
+        // Fully inside the fragment.
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 220, 260), 0);
+        // Overlapping the fragment on the left: only [150, 200) is new.
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 150, 250), 50);
+        // Overlapping on the right: only [300, 340) is new.
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 250, 340), 40);
+        // Spanning the fragment: the two gaps around it are new, the fragment itself is not.
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 150, 350), 100);
+        // Entirely past the fragment.
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 400, 450), 50);
+
+        // Two fragments with a hole between them: [300, 400) is the only new part.
+        frags.insert(400, vec![0u8; 50]);
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 200, 450), 100);
+
+        // The delivered prefix and the fragments combine.
+        assert_eq!(Connection::newly_covered_bytes(250, &frags, 0, 450), 100);
+    }
+
+    /// A duplicate STREAM frame must not consume connection credit twice.
+    #[test]
+    fn duplicate_stream_frames_do_not_consume_connection_credit_again() {
+        use std::collections::BTreeMap;
+        let mut frags: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+
+        // First arrival of [0, 64) with nothing delivered yet.
+        let first = Connection::newly_covered_bytes(0, &frags, 0, 64);
+        assert_eq!(first, 64, "the first copy of a range is entirely new");
+
+        // Store it the way the receive path would for out-of-order data.
+        frags.insert(0, vec![0u8; 64]);
+
+        // The identical retransmission is worth nothing.
+        assert_eq!(
+            Connection::newly_covered_bytes(0, &frags, 0, 64),
+            0,
+            "a retransmission must not consume credit a second time"
+        );
+
+        // A partial retransmission that extends the range only pays for the extension.
+        assert_eq!(Connection::newly_covered_bytes(0, &frags, 32, 96), 32);
+    }
+
+    /// Arbitrary arrival order must total exactly the size of the covered union.
+    #[test]
+    fn overlapping_arrivals_in_any_order_total_the_covered_union() {
+        use std::collections::BTreeMap;
+
+        // Ranges deliberately overlap and arrive out of order. Their union is [0, 120).
+        let arrivals: [(u64, u64); 6] =
+            [(40, 80), (0, 50), (70, 120), (10, 30), (0, 120), (100, 110)];
+
+        let mut frags: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let mut credited = 0u64;
+        for (start, end) in arrivals {
+            credited += Connection::newly_covered_bytes(0, &frags, start, end);
+            // Model the receive path's storage: keep the newly seen span.
+            frags.insert(start, vec![0u8; (end - start) as usize]);
+        }
+
+        assert_eq!(
+            credited, 120,
+            "total credit must equal the size of the covered union, not the sum of payloads"
+        );
+        let raw_total: u64 = arrivals.iter().map(|(start, end)| end - start).sum();
+        assert!(raw_total > credited, "the fixture must actually contain overlap");
+    }
 }
