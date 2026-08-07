@@ -188,7 +188,7 @@ impl WindowsKillSwitch {
             (Some(policy), true) => Some(interface_luid(policy.tun_name())?),
             _ => None,
         };
-        let engine = Engine::open()?;
+        let mut engine = Engine::open()?;
         let transaction = Transaction::begin(&engine)?;
         delete_owned_objects(&engine)?;
         add_provider(&engine)?;
@@ -210,7 +210,7 @@ impl WindowsKillSwitch {
     }
 
     fn remove_wfp_objects() -> Result<(), KillSwitchError> {
-        let engine = Engine::open()?;
+        let mut engine = Engine::open()?;
         let transaction = Transaction::begin(&engine)?;
         delete_owned_objects(&engine)?;
         transaction.commit()?;
@@ -219,8 +219,8 @@ impl WindowsKillSwitch {
 
     #[cfg(test)]
     fn verify_managed_objects_absent() -> Result<(), KillSwitchError> {
-        let engine = Engine::open()?;
-        let transaction = Transaction::begin(&engine)?;
+        let mut engine = Engine::open()?;
+        let mut transaction = Transaction::begin(&engine)?;
         for layer in Layer::ALL {
             for kind in
                 [FilterKind::Loopback, FilterKind::Endpoint, FilterKind::Tunnel, FilterKind::Block]
@@ -248,12 +248,72 @@ impl WindowsKillSwitch {
             )));
         }
         transaction.abort()?;
+        drop(transaction);
         engine.close()
     }
 }
 
+/// Tracks one native WFP owner until its release status is successful.
+///
+/// A failed release keeps `owned` set and records the exact status so the
+/// caller or `Drop` can retry and report the still-pending native resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WfpOwnerState {
+    owned: bool,
+    last_failure: Option<u32>,
+}
+
+impl WfpOwnerState {
+    const fn owned() -> Self {
+        Self { owned: true, last_failure: None }
+    }
+
+    #[cfg(test)]
+    const fn released() -> Self {
+        Self { owned: false, last_failure: None }
+    }
+
+    const fn is_owned(self) -> bool {
+        self.owned
+    }
+
+    const fn last_failure(self) -> Option<u32> {
+        self.last_failure
+    }
+
+    fn release(&mut self) {
+        self.owned = false;
+        self.last_failure = None;
+    }
+
+    fn retain_failure(&mut self, status: u32) {
+        self.owned = true;
+        self.last_failure = Some(status);
+    }
+}
+
+fn apply_wfp_owner_status(
+    owner: &mut WfpOwnerState,
+    action: &str,
+    status: u32,
+) -> Result<(), KillSwitchError> {
+    if status == ERROR_SUCCESS {
+        owner.release();
+        Ok(())
+    } else {
+        owner.retain_failure(status);
+        check_status(action, status)
+    }
+}
+
+/// Owns one `FwpmEngineOpen0` session.
+///
+/// The native handle is cleared only after `FwpmEngineClose0` succeeds. The
+/// close status seam is shared with the fault-injection tests so a failed
+/// release exercises the same ownership transition as the native call.
 struct Engine {
     handle: HANDLE,
+    owner: WfpOwnerState,
 }
 
 impl Engine {
@@ -274,6 +334,9 @@ impl Engine {
                 username: null_mut(),
                 kernelMode: 0,
             };
+        // SAFETY: `name`, `description`, and every field referenced by
+        // `session` remain alive and writable for the complete synchronous
+        // `FwpmEngineOpen0` call. No pointer escapes this function.
         let mut handle = null_mut();
         let status =
             unsafe { FwpmEngineOpen0(null(), RPC_C_AUTHN_WINNT, null(), &session, &mut handle) };
@@ -283,70 +346,121 @@ impl Engine {
                 "open WFP engine returned a null handle".to_string(),
             ));
         }
-        Ok(Self { handle })
+        Ok(Self { handle, owner: WfpOwnerState::owned() })
     }
 
-    fn close(mut self) -> Result<(), KillSwitchError> {
+    fn close(&mut self) -> Result<(), KillSwitchError> {
+        self.close_with(|handle| {
+            // SAFETY: The handle remains owned by this Engine until the
+            // native close reports success, and the call is serialized by
+            // the enclosing kill-switch operation.
+            unsafe { FwpmEngineClose0(handle) }
+        })
+    }
+
+    fn close_with<F>(&mut self, close: F) -> Result<(), KillSwitchError>
+    where
+        F: FnOnce(HANDLE) -> u32,
+    {
+        if !self.owner.is_owned() {
+            return Ok(());
+        }
         let handle = self.handle;
+        debug_assert!(!handle.is_null());
+        apply_wfp_owner_status(&mut self.owner, "close WFP engine", close(handle))?;
         self.handle = null_mut();
-        check_status("close WFP engine", unsafe { FwpmEngineClose0(handle) })
+        Ok(())
     }
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            let status = unsafe { FwpmEngineClose0(self.handle) };
-            if status != ERROR_SUCCESS {
-                log::error!("WFP engine close during cleanup failed: 0x{status:08x}");
+        if self.owner.is_owned() {
+            if let Err(error) = self.close() {
+                log::error!(
+                    "WFP engine close during Drop failed; native ownership remains pending: {error}"
+                );
             }
-            self.handle = null_mut();
+            if self.owner.is_owned() {
+                log::error!(
+                    "WFP engine cleanup remained pending after Drop: status={:?}",
+                    self.owner.last_failure()
+                );
+            }
         }
     }
 }
 
+/// Owns one transaction started on a still-live WFP engine.
+///
+/// The lifetime borrow prevents the engine owner from being released before
+/// the transaction owner. A failed abort retains `active` ownership for an
+/// explicit retry while the transaction remains in scope, and `Drop` makes a
+/// bounded final attempt.
 struct Transaction<'a> {
     engine: &'a Engine,
-    active: bool,
+    owner: WfpOwnerState,
 }
 
 impl<'a> Transaction<'a> {
     fn begin(engine: &'a Engine) -> Result<Self, KillSwitchError> {
+        // SAFETY: `engine.handle` is the live session returned by
+        // `FwpmEngineOpen0`; the transaction owner borrows that Engine for its
+        // full lifetime and no native transaction pointer is retained here.
         check_status("begin WFP transaction", unsafe { FwpmTransactionBegin0(engine.handle, 0) })?;
-        Ok(Self { engine, active: true })
+        Ok(Self { engine, owner: WfpOwnerState::owned() })
     }
 
     fn commit(mut self) -> Result<(), KillSwitchError> {
-        check_status("commit WFP transaction", unsafe {
-            FwpmTransactionCommit0(self.engine.handle)
-        })?;
-        self.active = false;
-        Ok(())
+        // SAFETY: The Engine borrow keeps the session open until this
+        // transaction is consumed, and the native status controls ownership.
+        let status = unsafe { FwpmTransactionCommit0(self.engine.handle) };
+        apply_wfp_owner_status(&mut self.owner, "commit WFP transaction", status)
     }
 
-    #[cfg(test)]
-    fn abort(mut self) -> Result<(), KillSwitchError> {
-        check_status("abort WFP verification transaction", unsafe {
-            FwpmTransactionAbort0(self.engine.handle)
-        })?;
-        self.active = false;
-        Ok(())
+    fn abort(&mut self) -> Result<(), KillSwitchError> {
+        self.abort_with(|handle| {
+            // SAFETY: The borrowed Engine outlives this transaction and the
+            // native transaction remains active until abort reports success.
+            unsafe { FwpmTransactionAbort0(handle) }
+        })
+    }
+
+    fn abort_with<F>(&mut self, abort: F) -> Result<(), KillSwitchError>
+    where
+        F: FnOnce(HANDLE) -> u32,
+    {
+        if !self.owner.is_owned() {
+            return Ok(());
+        }
+        let handle = self.engine.handle;
+        debug_assert!(!handle.is_null());
+        apply_wfp_owner_status(&mut self.owner, "abort WFP transaction", abort(handle))
     }
 }
 
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
-        if self.active {
-            let status = unsafe { FwpmTransactionAbort0(self.engine.handle) };
-            if status != ERROR_SUCCESS {
-                log::error!("WFP transaction abort during cleanup failed: 0x{status:08x}");
+        if self.owner.is_owned() {
+            if let Err(error) = self.abort() {
+                log::error!(
+                    "WFP transaction abort during Drop failed; native ownership remains pending: {error}"
+                );
             }
-            self.active = false;
+            if self.owner.is_owned() {
+                log::error!(
+                    "WFP transaction cleanup remained pending after Drop: status={:?}",
+                    self.owner.last_failure()
+                );
+            }
         }
     }
 }
 
 fn delete_owned_objects(engine: &Engine) -> Result<(), KillSwitchError> {
+    // SAFETY: Each delete call receives a live Engine handle and either a
+    // static managed key or a key stored in a stack value that lives through
+    // the synchronous call. Every returned status is checked immediately.
     for layer in Layer::ALL {
         for kind in
             [FilterKind::Loopback, FilterKind::Endpoint, FilterKind::Tunnel, FilterKind::Block]
@@ -374,6 +488,8 @@ fn add_provider(engine: &Engine) -> Result<(), KillSwitchError> {
         providerData: empty_blob(),
         serviceName: null_mut(),
     };
+    // SAFETY: The local UTF-16 buffers and provider descriptor remain alive
+    // for the complete synchronous `FwpmProviderAdd0` call.
     check_status("add WFP provider", unsafe {
         FwpmProviderAdd0(engine.handle, &provider, null_mut())
     })
@@ -393,6 +509,9 @@ fn add_sublayer(engine: &Engine) -> Result<(), KillSwitchError> {
         providerData: empty_blob(),
         weight: SUBLAYER_WEIGHT,
     };
+    // SAFETY: The static provider key and local display/blob fields remain
+    // valid for the complete synchronous `FwpmSubLayerAdd0` call. No pointer
+    // is used by this wrapper after the call returns.
     check_status("add WFP sublayer", unsafe {
         FwpmSubLayerAdd0(engine.handle, &sublayer, null_mut())
     })
@@ -551,6 +670,10 @@ fn add_filter(
             Anonymous: FWP_VALUE0_0 { uint64: null_mut() },
         },
     };
+    // SAFETY: `name`, `description`, `conditions`, and all nested pointers
+    // referenced by `filter` remain alive for the complete synchronous
+    // `FwpmFilterAdd0` call. The wrapper does not retain those borrowed
+    // addresses after the call returns.
     check_status("add WFP filter", unsafe {
         FwpmFilterAdd0(engine.handle, &filter, null_mut(), null_mut())
     })
@@ -657,6 +780,45 @@ mod tests {
     fn layer_contract_covers_both_ip_families() {
         assert_eq!(Layer::ALL.iter().filter(|layer| layer.is_ipv6()).count(), 1);
         assert_eq!(Layer::ALL.iter().filter(|layer| !layer.is_ipv6()).count(), 1);
+    }
+
+    #[test]
+    fn wfp_engine_close_fault_retains_native_handle_for_retry() {
+        let mut engine = Engine {
+            handle: std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr(),
+            owner: WfpOwnerState::owned(),
+        };
+        let failed = engine.close_with(|_| ERROR_ACCESS_DENIED);
+        let retained = engine.owner.is_owned() && !engine.handle.is_null();
+        let failure_status = engine.owner.last_failure();
+        let retried = engine.close_with(|_| ERROR_SUCCESS);
+        let released = !engine.owner.is_owned() && engine.handle.is_null();
+
+        assert!(failed.is_err());
+        assert!(retained);
+        assert_eq!(failure_status, Some(ERROR_ACCESS_DENIED));
+        assert!(retried.is_ok());
+        assert!(released);
+    }
+
+    #[test]
+    fn wfp_transaction_abort_fault_retains_active_state_for_retry() {
+        let engine = Engine {
+            handle: std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr(),
+            owner: WfpOwnerState::released(),
+        };
+        let mut transaction = Transaction { engine: &engine, owner: WfpOwnerState::owned() };
+        let failed = transaction.abort_with(|_| ERROR_ACCESS_DENIED);
+        let retained = transaction.owner.is_owned();
+        let failure_status = transaction.owner.last_failure();
+        let retried = transaction.abort_with(|_| ERROR_SUCCESS);
+        let released = !transaction.owner.is_owned();
+
+        assert!(failed.is_err());
+        assert!(retained);
+        assert_eq!(failure_status, Some(ERROR_ACCESS_DENIED));
+        assert!(retried.is_ok());
+        assert!(released);
     }
 
     #[test]

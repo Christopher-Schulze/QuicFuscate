@@ -699,6 +699,33 @@ else
   append_item "wintun_cleanup_ownership" "fail" "missing retryable owner state, startup rollback, Send/Sync gate, native close assertion, or core-suite wiring"
 fi
 
+# 4k) WFP engine and transaction owners must retain failed native cleanup,
+#     expose the shared fault-status transition, and run executable tests.
+if rg -F -- 'struct WfpOwnerState' src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'fn apply_wfp_owner_status(' src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'owner: WfpOwnerState' src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'fn close_with<F>' src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'fn abort_with<F>' src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'wfp_engine_close_fault_retains_native_handle_for_retry()' \
+    src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'wfp_transaction_abort_fault_retains_active_state_for_retry()' \
+    src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'native ownership remains pending' \
+    src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'all nested pointers' src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'FwpmFilterAdd0(engine.handle' src/implementations/client/killswitch/windows.rs >/dev/null \
+  && rg -F -- 'implementations::client::killswitch::windows::tests::wfp_' \
+    .github/workflows/ci.yml >/dev/null \
+  && ! rg -n -U 'let handle = self\.handle;\s*self\.handle = null_mut\(\);' \
+    src/implementations/client/killswitch/windows.rs >/dev/null \
+  && ! rg -F -- 'self.active = false;' src/implementations/client/killswitch/windows.rs >/dev/null; then
+  pass "WFP engine and transaction cleanup ownership remains retryable and fault-tested"
+  append_item "wfp_cleanup_ownership" "ok" "shared status ledger, retained native ownership, explicit safety contracts, fault-injected tests, and Windows CI wiring are present"
+else
+  fail_critical "WFP engine or transaction cleanup ownership and its fault-proof gate is incomplete"
+  append_item "wfp_cleanup_ownership" "fail" "missing retained owner state, fault-injected tests, safety contract, CI gate, or legacy state-clearing pattern"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then
