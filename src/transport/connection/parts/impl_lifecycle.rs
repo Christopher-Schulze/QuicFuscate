@@ -154,7 +154,7 @@ impl Connection {
         peer: SocketAddr,
         config: Config,
         is_server: bool,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_with_role_and_clock(
             scid,
             local,
@@ -172,7 +172,7 @@ impl Connection {
         config: Config,
         is_server: bool,
         clock: crate::time_source::ProtocolClock,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ConnectionError> {
         let dgram_send_max_size = config.max_udp_payload_size as usize;
         let initial_max_data = config.initial_max_data;
         let pmtu_enabled = config.pmtu_discovery_enabled();
@@ -270,7 +270,7 @@ impl Connection {
             observer: None,
             h3: None,
             strike_register: None,
-            pmtu: PmtuState::new(pmtu_enabled, pmtu_policy),
+            pmtu: PmtuState::new(pmtu_enabled, pmtu_policy)?,
             pmtu_probe_pn: None,
             pmtu_above_floor_pns: HashSet::new(),
             traffic_analysis: None,
@@ -286,7 +286,7 @@ impl Connection {
         }
         conn.install_recovery_fec_callbacks();
         conn.refresh_path_count();
-        conn
+        Ok(conn)
     }
 
     #[allow(dead_code)]
@@ -295,7 +295,7 @@ impl Connection {
         local: SocketAddr,
         peer: SocketAddr,
         config: Config,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_with_role(scid, local, peer, config, false)
     }
 
@@ -305,7 +305,7 @@ impl Connection {
         local: SocketAddr,
         peer: SocketAddr,
         config: Config,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_with_role(scid, local, peer, config, true)
     }
 

@@ -38,9 +38,10 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
     let client_write = [0xAAu8; 32];
     let server_write = [0xBBu8; 32];
 
-    let mut client =
-        Connection::new_client(&client_scid, local_client, peer_client, config.clone());
-    let mut server = Connection::new_server(&server_scid, local_server, peer_server, config);
+    let mut client = Connection::new_client(&client_scid, local_client, peer_client, config.clone())
+        .expect("valid benchmark client configuration");
+    let mut server = Connection::new_server(&server_scid, local_server, peer_server, config)
+        .expect("valid benchmark server configuration");
 
     client.set_destination_cid(ConnectionId::from_ref(&server_scid));
     server.set_destination_cid(ConnectionId::from_ref(&client_scid));
@@ -93,7 +94,8 @@ pub fn bench_retry_case() -> BenchRetryCase {
     let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 29111));
     let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 29112));
     let config = Config::new_with_version(crate::transport::PROTOCOL_VERSION).expect("bench config");
-    let mut client = Connection::new_client(b"retry-client", local, peer, config);
+    let mut client = Connection::new_client(b"retry-client", local, peer, config)
+        .expect("valid benchmark client configuration");
     let original_dcid = ConnectionId::from_ref(b"retry-original");
     client.set_initial_dcid(original_dcid);
 

@@ -24,6 +24,10 @@ mod tests {
         RecvInfo { from: peer(), to: local(), ecn: None }
     }
 
+    fn pmtu_state(enabled: bool, policy: PmtuPolicy) -> PmtuState {
+        PmtuState::new(enabled, policy).expect("valid test PMTU policy")
+    }
+
     /// Minimal connection used across tests; does not require TLS or sockets.
     fn make_conn() -> Connection {
         Connection::new_with_role(
@@ -33,6 +37,7 @@ mod tests {
             Config::new_with_version(PROTOCOL_VERSION).unwrap(),
             false, // client
         )
+        .expect("valid test connection configuration")
     }
 
     fn enable_test_traffic_analysis(
@@ -45,7 +50,7 @@ mod tests {
             matches!(mode, crate::transport::config::TrafficAnalysisDefense::ConstantRate);
         connection.config.set_traffic_analysis_defense(mode);
         connection.config.set_chaff_size_bytes(target_size);
-        connection.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        connection.pmtu = pmtu_state(false, PmtuPolicy::default());
         connection.traffic_analysis =
             Some(crate::stealth::TrafficAnalysisScheduler::with_lifecycle(
                 rate_pps,
@@ -82,7 +87,8 @@ mod tests {
             .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
             .unwrap();
         let mut connection =
-            Connection::new_with_role(b"client-scid", local(), peer(), config, false);
+            Connection::new_with_role(b"client-scid", local(), peer(), config, false)
+                .expect("valid test connection configuration");
         connection.set_initial_dcid(ConnectionId::from_ref(b"client-dcid"));
         connection
     }
@@ -103,7 +109,8 @@ mod tests {
         let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Reno);
         let mut connection =
-            Connection::new_with_role(b"client-scid", local(), peer(), config, false);
+            Connection::new_with_role(b"client-scid", local(), peer(), config, false)
+                .expect("valid test connection configuration");
 
         assert_reno_window_grows(&mut connection);
     }
@@ -116,7 +123,8 @@ mod tests {
             .unwrap();
         config.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Reno);
         let mut connection =
-            Connection::new_with_role(b"client-scid", local(), peer(), config, false);
+            Connection::new_with_role(b"client-scid", local(), peer(), config, false)
+                .expect("valid test connection configuration");
         connection.set_initial_dcid(ConnectionId::from_ref(b"client-dcid"));
 
         let mut vn = packet::generate_version_negotiation_packet(
@@ -288,7 +296,8 @@ mod tests {
         config
             .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
             .unwrap();
-        let mut server = Connection::new_with_role(b"server-scid", local(), peer(), config, true);
+        let mut server = Connection::new_with_role(b"server-scid", local(), peer(), config, true)
+            .expect("valid test connection configuration");
         assert_eq!(server.validate_peer_version_information(Some(Vec::new())), Ok(()));
 
         let mut client = make_v2_client();
@@ -703,7 +712,8 @@ mod tests {
             peer(),
             Config::new_with_version(PROTOCOL_VERSION).unwrap(),
             true,
-        );
+        )
+        .expect("valid test connection configuration");
         assert!(s.is_server(), "server connection must report is_server=true");
     }
 
@@ -880,7 +890,8 @@ mod tests {
     fn is_in_early_data_when_configured() {
         let mut cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         cfg.enable_early_data = true;
-        let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false);
+        let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false)
+            .expect("valid test connection configuration");
         assert!(
             c.is_in_early_data(),
             "connection with enable_early_data must report is_in_early_data"
@@ -891,7 +902,9 @@ mod tests {
     fn not_in_early_data_when_established() {
         let mut cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         cfg.enable_early_data = true;
-        let mut c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false);
+        let mut c =
+            Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false)
+                .expect("valid test connection configuration");
         c.is_established = true;
         assert!(!c.is_in_early_data(), "established connection must not be in early data");
     }
@@ -919,8 +932,8 @@ mod tests {
     fn timeout_uses_configured_max_idle_timeout() {
         let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         config.set_max_idle_timeout(1_234);
-        let c =
-            Connection::new_with_role(b"test_scid_0123456789", local(), peer(), config, false);
+        let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), config, false)
+            .expect("valid test connection configuration");
 
         assert_eq!(c.timeout(), Some(Duration::from_millis(1_234)));
     }
@@ -929,8 +942,8 @@ mod tests {
     fn zero_max_idle_timeout_disables_idle_expiry() {
         let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         config.set_max_idle_timeout(0);
-        let mut c =
-            Connection::new_with_role(b"test_scid_0123456789", local(), peer(), config, false);
+        let mut c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), config, false)
+            .expect("valid test connection configuration");
         c.last_activity = Instant::now() - Duration::from_secs(60);
 
         assert_eq!(c.timeout(), None);
@@ -1082,8 +1095,8 @@ mod tests {
     #[test]
     fn lost_stream_range_is_retransmitted_with_identical_payload_and_offset() {
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
-        pair.server.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
+        pair.server.pmtu = pmtu_state(false, PmtuPolicy::default());
         let payload = b"reliable stream payload across a dropped QUIC packet";
         pair.client.stream_send(0, payload, false).unwrap();
         let mut first_packet = [0u8; 1500];
@@ -1111,9 +1124,9 @@ mod tests {
         let mut pair = bench_paired_1rtt_connections();
         pair.client.dgram_send_max_size = 1500;
         pair.server.dgram_send_max_size = 1500;
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.pmtu.confirmed_mtu = 1500;
-        pair.server.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.server.pmtu = pmtu_state(false, PmtuPolicy::default());
         let payload = (0..1400).map(|index| (index % 251) as u8).collect::<Vec<_>>();
         pair.client.stream_send(0, &payload, false).unwrap();
 
@@ -1161,7 +1174,7 @@ mod tests {
     fn late_ack_of_pre_split_packet_retires_every_retransmission_segment() {
         let mut pair = bench_paired_1rtt_connections();
         pair.client.dgram_send_max_size = 1500;
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.pmtu.confirmed_mtu = 1500;
         pair.client.stream_send(0, &[0xA5; 1400], false).unwrap();
 
@@ -1199,7 +1212,7 @@ mod tests {
     #[test]
     fn late_ack_of_lost_copy_retires_active_retransmission_exactly_once() {
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.stream_send(0, b"late ACK retirement", false).unwrap();
         let mut packet = [0u8; 1500];
         let original_pn = pair.client.next_send_pn_by_space[2];
@@ -1241,7 +1254,7 @@ mod tests {
     #[test]
     fn send_info_keeps_ack_only_packets_out_of_external_pacing() {
         let mut pair = bench_paired_1rtt_connections();
-        pair.server.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.server.pmtu = pmtu_state(false, PmtuPolicy::default());
         assert!(pair.server.pkt_spaces[2].on_packet_recv(7));
         pair.server.pkt_spaces[2].note_ack_eliciting(0, 1);
         let bytes_in_flight = pair.server.recovery.bytes_in_flight;
@@ -1267,7 +1280,8 @@ mod tests {
             peer(),
             config,
             false,
-        );
+        )
+        .expect("valid test connection configuration");
 
         assert!(connection.traffic_analysis.is_none());
         assert!(connection.traffic_analysis_deadline().is_none());
@@ -1340,7 +1354,8 @@ mod tests {
             .set_intelligent_traffic_analysis_ceiling(escalation)
             .expect("valid escalation ceiling");
         let mut connection =
-            Connection::new_with_role(b"intelligent-auth", local(), peer(), config, true);
+            Connection::new_with_role(b"intelligent-auth", local(), peer(), config, true)
+                .expect("valid test connection configuration");
 
         connection
             .apply_intelligent_traffic_analysis_level(2)
@@ -1451,7 +1466,7 @@ mod tests {
         pair.client.config.set_max_send_udp_payload_size(1500);
         pair.client.dgram_send_max_size = 1500;
         pair.server.config.set_max_recv_udp_payload_size(1500);
-        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(true, PmtuPolicy::default());
         let probe_time = Instant::now();
         pair.client.pmtu.on_probe_sent(1500, probe_time);
         pair.client.pmtu.on_probe_acked(probe_time);
@@ -1558,7 +1573,7 @@ mod tests {
     #[test]
     fn send_info_marks_stream_packets_for_external_pacing() {
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.stream_send(0, b"paced stream", false).unwrap();
         let mut packet = [0u8; 1500];
 
@@ -1573,7 +1588,7 @@ mod tests {
         // fires a probe, the probe's ACK advances largest_acked, and the time
         // threshold then declares the tail packet lost.
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.stream_send(0, b"tail loss", false).unwrap();
         let mut packet = [0u8; 1500];
         let packet_number = pair.client.next_send_pn_by_space[2];
@@ -1633,7 +1648,7 @@ mod tests {
     fn aged_datagram_survives_pto_without_being_declared_lost() {
         // RFC 9002 §6.2.4: a PTO firing sends probes - it never declares loss.
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.enable_datagrams(16, 16);
         pair.client.dgram_send(b"unreliable tail").unwrap();
         let mut packet = [0u8; 1500];
@@ -1668,7 +1683,7 @@ mod tests {
         // terminal error, and a subsequent dgram_send must succeed once send()
         // has serialized the queued frame (TODO-559).
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.enable_datagrams(0, 1);
         assert_eq!(pair.client.dgram_send_queue_len(), 0);
 
@@ -1692,7 +1707,7 @@ mod tests {
         // RFC 9002 §7.5/§6.2.4: a PTO probe bypasses the congestion gate but
         // still counts as in flight (tracked ack-eliciting packet).
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.enable_datagrams(16, 16);
         pair.client.dgram_send(b"unreliable tail").unwrap();
         let mut packet = [0u8; 1500];
@@ -1720,7 +1735,7 @@ mod tests {
     #[test]
     fn packet_threshold_loss_requeues_stream_range() {
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.stream_send(0, b"packet threshold loss", false).unwrap();
         let mut packet = [0u8; 1500];
         let stream_packet_number = pair.client.next_send_pn_by_space[2];
@@ -1757,7 +1772,7 @@ mod tests {
     #[test]
     fn full_stream_ledger_backpressures_without_emitting_empty_packets() {
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(false, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
         pair.client.stream_send(0, b"bounded", false).unwrap();
         pair.client.stream_retransmit_bytes = MAX_STREAM_RETRANSMIT_BYTES;
         let packet_number = pair.client.next_send_pn_by_space[2];
@@ -1937,7 +1952,8 @@ mod tests {
     fn conn_max_data_initial_matches_config() {
         let cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
         let initial_max = cfg.initial_max_data;
-        let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false);
+        let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false)
+            .expect("valid test connection configuration");
         assert_eq!(
             c.conn_max_data, initial_max,
             "conn_max_data must match config initial_max_data"
@@ -2374,7 +2390,7 @@ mod tests {
     #[test]
     fn pmtu_policy_reaches_configured_1500_ceiling() {
         let now = Instant::now();
-        let mut state = PmtuState::new(true, PmtuPolicy::default());
+        let mut state = pmtu_state(true, PmtuPolicy::default());
 
         assert_eq!(state.effective_mtu(), 1280);
         assert_eq!(state.probe_size(), Some(1500));
@@ -2389,7 +2405,7 @@ mod tests {
     fn connection_emits_dedicated_probe_above_confirmed_mtu() {
         let mut pair = bench_paired_1rtt_connections();
         pair.client.dgram_send_max_size = 1500;
-        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(true, PmtuPolicy::default());
         pair.client.recovery.cwnd = 64 * 1024;
         pair.client.recovery.bytes_in_flight = 0;
         let mut packet = [0u8; 1600];
@@ -2410,7 +2426,7 @@ mod tests {
         let mut pair = bench_paired_1rtt_connections();
         pair.client.dgram_send_max_size = 1472;
         pair.client.pmtu =
-            PmtuState::new(true, PmtuPolicy { max_mtu: 1472, ..PmtuPolicy::default() });
+            pmtu_state(true, PmtuPolicy { max_mtu: 1472, ..PmtuPolicy::default() });
         pair.client.recovery.cwnd = pair.client.recovery.bytes_in_flight;
         assert!(!pair.client.recovery.can_send(pair.client.dgram_send_max_size));
 
@@ -2432,7 +2448,7 @@ mod tests {
     fn dedicated_pmtu_probe_respects_congestion_when_interval_is_shorter_than_rtt() {
         let mut pair = bench_paired_1rtt_connections();
         pair.client.dgram_send_max_size = 1472;
-        pair.client.pmtu = PmtuState::new(
+        pair.client.pmtu = pmtu_state(
             true,
             PmtuPolicy {
                 max_mtu: 1472,
@@ -2453,7 +2469,7 @@ mod tests {
         const FEC_WIRE_OVERHEAD: usize = 18;
         let mut pair = bench_paired_1rtt_connections();
         pair.client.dgram_send_max_size = 1500;
-        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(true, PmtuPolicy::default());
         pair.client.recovery.cwnd = 64 * 1024;
         pair.client.recovery.bytes_in_flight = 0;
         let mut packet = [0u8; 1600];
@@ -2470,7 +2486,7 @@ mod tests {
     #[test]
     fn unavailable_probe_capacity_does_not_emit_empty_packet() {
         let mut pair = bench_paired_1rtt_connections();
-        pair.client.pmtu = PmtuState::new(true, PmtuPolicy::default());
+        pair.client.pmtu = pmtu_state(true, PmtuPolicy::default());
         let packet_number = pair.client.next_send_pn_by_space[2];
         let mut packet = [0u8; 1600];
 
@@ -2484,7 +2500,7 @@ mod tests {
     #[test]
     fn pmtu_loss_bisects_configured_bounds() {
         let now = Instant::now();
-        let mut state = PmtuState::new(true, PmtuPolicy::default());
+        let mut state = pmtu_state(true, PmtuPolicy::default());
 
         state.on_probe_sent(1500, now);
         state.on_probe_lost();
@@ -2498,7 +2514,7 @@ mod tests {
         let policy =
             PmtuPolicy { black_hole_timeout: Duration::from_millis(10), ..PmtuPolicy::default() };
         let start = Instant::now();
-        let mut state = PmtuState::new(true, policy);
+        let mut state = pmtu_state(true, policy);
         state.on_probe_sent(1500, start);
         state.on_probe_acked(start);
         let large_send = start + Duration::from_millis(1);
@@ -2513,7 +2529,7 @@ mod tests {
         let policy =
             PmtuPolicy { black_hole_timeout: Duration::from_millis(10), ..PmtuPolicy::default() };
         let start = Instant::now();
-        let mut state = PmtuState::new(true, policy);
+        let mut state = pmtu_state(true, policy);
         state.on_probe_sent(1500, start);
         state.on_probe_acked(start);
         state.on_packet_sent(1400, start + Duration::from_millis(1));
@@ -2531,7 +2547,7 @@ mod tests {
             ..PmtuPolicy::default()
         };
         let start = Instant::now();
-        let mut state = PmtuState::new(true, policy);
+        let mut state = pmtu_state(true, policy);
         state.on_probe_sent(1500, start);
         state.on_probe_acked(start);
         state.on_packet_sent(1500, start + Duration::from_millis(1));
@@ -2564,7 +2580,7 @@ mod tests {
 
     #[test]
     fn disabled_pmtu_stays_at_configured_floor() {
-        let state = PmtuState::new(false, PmtuPolicy::default());
+        let state = pmtu_state(false, PmtuPolicy::default());
 
         assert_eq!(state.effective_mtu(), 1280);
         assert_eq!(state.probe_size(), None);

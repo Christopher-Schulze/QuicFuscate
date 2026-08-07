@@ -1732,6 +1732,7 @@ mod time_source_tests {
     fn test_connection(local_port: u16, peer_port: u16) -> Connection {
         let config = Config::new_with_version(PROTOCOL_VERSION).expect("config");
         Connection::new_client(&[7; 8], addr(local_port), addr(peer_port), config)
+            .expect("valid test connection configuration")
     }
 
     #[test]

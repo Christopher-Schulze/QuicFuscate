@@ -26,8 +26,13 @@ pub struct PmtuState {
 }
 
 impl PmtuState {
-    pub fn new(enabled: bool, policy: PmtuPolicy) -> Self {
-        Self {
+    /// Creates PMTU state from a validated DPLPMTUD policy.
+    pub fn new(
+        enabled: bool,
+        policy: PmtuPolicy,
+    ) -> Result<Self, crate::error::ConnectionError> {
+        let policy = policy.validate()?;
+        Ok(Self {
             confirmed_mtu: policy.min_mtu,
             probe_target: if enabled { policy.max_mtu } else { policy.min_mtu },
             probe_in_flight: None,
@@ -38,7 +43,7 @@ impl PmtuState {
             max_mtu: policy.max_mtu,
             probe_interval: policy.probe_interval,
             black_hole_timeout: policy.black_hole_timeout,
-        }
+        })
     }
 
     /// Returns the current effective MTU (confirmed, not probe target).
@@ -59,7 +64,7 @@ impl PmtuState {
         }
         // Send probe if interval has elapsed since last probe
         match self.last_probe_sent {
-            Some(last) => now.duration_since(last) >= self.probe_interval,
+            Some(last) => now.saturating_duration_since(last) >= self.probe_interval,
             None => true, // First probe
         }
     }
@@ -75,6 +80,9 @@ impl PmtuState {
 
     /// Record that a probe of `size` bytes was sent.
     pub fn on_probe_sent(&mut self, size: usize, now: Instant) {
+        if size <= self.confirmed_mtu || size > self.max_mtu {
+            return;
+        }
         self.probe_in_flight = Some(size);
         self.last_probe_sent = Some(now);
     }
@@ -82,10 +90,10 @@ impl PmtuState {
     /// Record that a probe was ACKed - confirm the MTU.
     pub fn on_probe_acked(&mut self, _now: Instant) {
         if let Some(size) = self.probe_in_flight.take() {
-            self.confirmed_mtu = size;
+            self.confirmed_mtu = size.clamp(self.min_mtu, self.max_mtu);
             // Next probe: try larger (binary search up)
-            self.probe_target = (size + self.max_mtu) / 2;
-            if self.probe_target == size {
+            self.probe_target = midpoint(self.confirmed_mtu, self.max_mtu);
+            if self.probe_target == self.confirmed_mtu {
                 self.probe_target = self.max_mtu; // Already at max
             }
         }
@@ -96,7 +104,7 @@ impl PmtuState {
     pub fn on_probe_lost(&mut self) {
         if let Some(size) = self.probe_in_flight.take() {
             // Binary search down: try midpoint between confirmed and failed size
-            let next_target = (self.confirmed_mtu + size) / 2;
+            let next_target = midpoint(self.confirmed_mtu, size.min(self.max_mtu));
             // Once the search converges at the confirmed floor, retain an
             // upward target. The probe interval then becomes the quiet period
             // before a periodic re-probe instead of leaving discovery parked
@@ -119,7 +127,9 @@ impl PmtuState {
     /// Reset to minimum MTU (black hole detected).
     pub fn reset_to_minimum(&mut self, now: Instant) {
         self.confirmed_mtu = self.min_mtu;
-        self.probe_target = self.min_mtu + (self.max_mtu - self.min_mtu) / 4;
+        self.probe_target = self
+            .min_mtu
+            .saturating_add(self.max_mtu.saturating_sub(self.min_mtu) / 4);
         self.probe_in_flight = None;
         self.last_probe_sent = Some(now);
         self.above_floor_unacked_since = None;
@@ -165,18 +175,19 @@ impl PmtuState {
     }
 }
 
+#[inline]
+fn midpoint(lower: usize, upper: usize) -> usize {
+    lower.saturating_add(upper.saturating_sub(lower) / 2)
+}
+
 /// Upper bound for peer-advertised MAX_DATA to prevent resource exhaustion (1 GiB).
 /// A malicious peer sending MAX_DATA(u64::MAX) would effectively disable flow control.
 const MAX_PEER_MAX_DATA: u64 = 1_073_741_824;
 
 #[inline(always)]
 fn prefetch_recv_packet_buffer(buf: &[u8]) {
-    // SAFETY: `buf.as_ptr()` is a valid pointer to at least `buf.len()` bytes for the
-    // lifetime of `buf`. Prefetch instructions are pure hints to the CPU and cannot
-    // cause faults or UB even if the address turns out to be unmapped - on all supported
-    // architectures a prefetch to an invalid address is silently ignored by the hardware.
-    // The second prefetch (`ptr + 64`) is only issued when `buf.len() > 64`, ensuring
-    // the offset is within the allocated object, making the pointer arithmetic valid.
+    // SAFETY: the first pointer comes from the borrowed buffer. The second pointer is
+    // formed only when its cache-line offset remains within that same allocation.
     unsafe {
         prefetch(buf.as_ptr(), PrefetchHint::T0);
         if buf.len() > 64 {
@@ -186,9 +197,69 @@ fn prefetch_recv_packet_buffer(buf: &[u8]) {
 }
 
 #[inline(always)]
-fn prefetch_frame_parse_window(buf: *const u8, end: usize, off: usize) {
-    let ahead = core::cmp::min(off + 64, end);
-    crate::fec::prefetch_decode_window(buf.wrapping_add(ahead));
+fn prefetch_frame_parse_window(buf: &[u8], off: usize) {
+    let Some(last) = buf.len().checked_sub(1) else {
+        return;
+    };
+    let ahead = off.min(last).saturating_add(64).min(last);
+    crate::fec::prefetch_decode_window(buf.as_ptr().wrapping_add(ahead));
+}
+
+#[cfg(test)]
+mod pmtu_tests {
+    use super::*;
+
+    #[test]
+    fn constructor_rejects_invalid_policy() {
+        let policy = PmtuPolicy { min_mtu: 1199, ..PmtuPolicy::default() };
+
+        let error = PmtuState::new(true, policy).expect_err("invalid PMTU policy must be rejected");
+
+        assert!(matches!(error, crate::error::ConnectionError::Transport(_)));
+    }
+
+    #[test]
+    fn earlier_probe_time_is_deterministic_and_does_not_panic() {
+        let start = Instant::now();
+        let mut state = PmtuState::new(true, PmtuPolicy::default()).expect("valid PMTU policy");
+        state.on_probe_sent(1500, start);
+
+        assert!(!state.should_send_probe(start - Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn pmtu_arithmetic_stays_within_validated_bounds() {
+        let policy = PmtuPolicy {
+            min_mtu: 1200,
+            max_mtu: u16::MAX as usize,
+            ..PmtuPolicy::default()
+        };
+        let start = Instant::now();
+        let mut state = PmtuState::new(true, policy).expect("valid PMTU policy");
+
+        state.on_probe_sent(policy.max_mtu, start);
+        state.on_probe_acked(start);
+        assert!(state.effective_mtu() <= policy.max_mtu);
+        assert!(state.probe_target().is_none());
+
+        state.reset_to_minimum(start);
+        assert!(state.probe_target().is_some_and(|target| {
+            target >= policy.min_mtu && target <= policy.max_mtu
+        }));
+    }
+
+    #[test]
+    fn prefetch_helpers_accept_empty_exact_and_over_bound_windows() {
+        let empty = [];
+        let bytes = [0u8; 128];
+
+        prefetch_recv_packet_buffer(&empty);
+        prefetch_recv_packet_buffer(&bytes[..64]);
+        prefetch_recv_packet_buffer(&bytes[..65]);
+        prefetch_frame_parse_window(&empty, 0);
+        prefetch_frame_parse_window(&bytes[..64], 64);
+        prefetch_frame_parse_window(&bytes[..64], usize::MAX);
+    }
 }
 
 fn trace_send_packet(
@@ -302,4 +373,3 @@ impl PendingPathValidation {
         self.local_addr == local_addr && self.peer_addr == peer_addr
     }
 }
-

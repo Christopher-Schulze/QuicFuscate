@@ -265,7 +265,7 @@ impl Connection {
         let mut ack_eliciting = false;
         while off < end {
             // Prefetch the next frame parse window for the recv hotpath.
-            prefetch_frame_parse_window(buf.as_ptr(), end, off);
+            prefetch_frame_parse_window(&buf[..end], off);
             match frames::from_bytes(&buf[off..end], pkt_ty) {
                 Ok((frame, used)) => {
                     if used == 0 {

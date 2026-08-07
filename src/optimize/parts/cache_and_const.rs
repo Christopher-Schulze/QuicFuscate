@@ -54,7 +54,7 @@ unsafe fn prefetch_impl(ptr: *const u8, hint: PrefetchHint) {
         _mm_prefetch(ptr as *const i8, mode);
     }
 
-    #[cfg(all(target_arch = "aarch64", any(target_os = "ios", target_os = "android")))]
+    #[cfg(target_arch = "aarch64")]
     unsafe {
         core::arch::asm!(
             "prfm pldl1keep, [{ptr}]",
@@ -62,12 +62,6 @@ unsafe fn prefetch_impl(ptr: *const u8, hint: PrefetchHint) {
             options(nostack, preserves_flags)
         );
         let _ = hint;
-    }
-
-    #[cfg(all(target_arch = "aarch64", not(any(target_os = "ios", target_os = "android"))))]
-    {
-        let _ = hint;
-        let _ = core::ptr::read_volatile(ptr);
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

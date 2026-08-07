@@ -180,7 +180,7 @@ pub fn connect_with_clock(
         config.clone(),
         false,
         clock,
-    );
+    )?;
 
     // Client selects an unpredictable initial DCID (RFC 9000). This DCID is also the ODCID
     // used for Initial key derivation (RFC 9001).
@@ -244,7 +244,7 @@ pub fn accept_with_clock(
         config.clone(),
         true,
         clock,
-    );
+    )?;
     if let Some(initial_key_dcid) = initial_key_dcid {
         conn.set_initial_dcid(crate::transport::ConnectionId::from_ref(initial_key_dcid));
     }

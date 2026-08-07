@@ -555,7 +555,7 @@ impl Default for PmtuPolicy {
 }
 
 impl PmtuPolicy {
-    fn validate(self) -> Result<Self, crate::error::ConnectionError> {
+    pub(crate) fn validate(self) -> Result<Self, crate::error::ConnectionError> {
         if self.min_mtu < 1200
             || self.max_mtu < self.min_mtu
             || self.max_mtu > u16::MAX as usize
