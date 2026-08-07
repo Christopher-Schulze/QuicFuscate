@@ -1221,6 +1221,11 @@ pub static BYTES_RECEIVED: Counter = Counter::new();
 
 /// Last FEC decoding time in milliseconds.
 pub static DECODING_TIME_MS: AtomicU64 = AtomicU64::new(0);
+/// Sent-packet records evicted because a packet-number space hit its retention budget.
+///
+/// A non-zero value means loss detection lost visibility of the oldest unacknowledged packets in
+/// that space, which is a signal that the in-flight window or the ACK pattern is abnormal.
+pub static RECOVERY_SENT_RETENTION_EVICTIONS: Counter = Counter::new();
 /// Wiedemann solver invocations for FEC recovery.
 pub static WIEDEMANN_USAGE: Counter = Counter::new();
 /// Wiedemann solver operations via a verified AMX arithmetic backend.

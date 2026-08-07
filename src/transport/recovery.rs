@@ -109,11 +109,24 @@ pub struct SentPacket {
     pub path_epoch: u64,
 }
 
+/// Hard cap on retained unacknowledged packets per packet-number space.
+///
+/// Loss detection and ACK processing both walk this map, so an unbounded retained set turns a
+/// delayed or adversarial ACK pattern into an allocation and CPU spike in the packet-processing
+/// path. The cap is far above any legitimate in-flight window at the configured congestion
+/// limits and exists so the boundary is explicit and measurable rather than implied.
+const MAX_RETAINED_SENT_PACKETS_PER_SPACE: usize = 16_384;
+
+/// Hard cap on retained unacknowledged bytes per packet-number space.
+const MAX_RETAINED_SENT_BYTES_PER_SPACE: usize = 64 * 1024 * 1024;
+
 /// Per-space loss detection state owned by [`Recovery`].
 #[derive(Debug, Default)]
 struct SpaceRecovery {
     /// Unacknowledged sent packets by packet number.
     sent: BTreeMap<u64, SentPacket>,
+    /// Retained bytes across `sent`, maintained alongside the map so the budget check is O(1).
+    retained_bytes: usize,
     /// Armed time-threshold deadline (RFC 9002 §6.1.2).
     loss_time: Option<Instant>,
     /// Send time of the most recent ack-eliciting packet (PTO base, §6.2.1).
@@ -811,6 +824,21 @@ impl Recovery {
         if ack_eliciting {
             sp.time_of_last_ack_eliciting = Some(now);
         }
+        // Enforce the retention budget before inserting. Evicting the oldest retained packet keeps
+        // the newest state, which is what loss detection and ACK processing actually need; the
+        // alternative of refusing the insert would silently stop tracking current traffic.
+        while sp.sent.len() >= MAX_RETAINED_SENT_PACKETS_PER_SPACE
+            || sp.retained_bytes.saturating_add(size) > MAX_RETAINED_SENT_BYTES_PER_SPACE
+        {
+            let Some(oldest) = sp.sent.keys().next().copied() else {
+                break;
+            };
+            if let Some(evicted) = sp.sent.remove(&oldest) {
+                sp.retained_bytes = sp.retained_bytes.saturating_sub(evicted.size);
+                crate::telemetry::RECOVERY_SENT_RETENTION_EVICTIONS.inc();
+            }
+        }
+        sp.retained_bytes = sp.retained_bytes.saturating_add(size);
         sp.sent.insert(
             pn,
             SentPacket {
@@ -834,8 +862,11 @@ impl Recovery {
     }
 
     /// RFC 9002 §6.1 `DetectLostPackets` for one space. Removes and returns the
-    /// declared-lost packets (sorted by sent time) and (re)arms `loss_time`.
-    /// Bounded: one prefix walk over `pn <= largest_acked`, O(log n + k).
+    /// declared-lost packets in send order and (re)arms `loss_time`.
+    ///
+    /// Bounded in the loss set, not in the retained window: the scan stops at the first survivor
+    /// because the loss set is a contiguous prefix, so the cost is `O(log n + k)` for `k` losses
+    /// with no temporary copy of the retained prefix and no sort.
     fn detect_lost_packets(
         &mut self,
         space: PacketSpace,
@@ -845,30 +876,39 @@ impl Recovery {
         let loss_delay = self.loss_delay();
         let threshold_pn = largest_acked.checked_sub(K_PACKET_THRESHOLD);
         let sp = &mut self.spaces[space.index()];
-        let candidates: Vec<u64> = sp.sent.range(..=largest_acked).map(|(pn, _)| *pn).collect();
-        let mut lost = Vec::new();
-        for pn in candidates {
-            let declare = match sp.sent.get(&pn) {
-                Some(pkt) => {
-                    threshold_pn.is_some_and(|t| pn <= t)
-                        || now.saturating_duration_since(pkt.sent_at) >= loss_delay
-                }
-                None => false,
-            };
-            if declare {
-                if let Some(pkt) = sp.sent.remove(&pn) {
-                    lost.push(pkt);
-                }
+
+        // The loss set is a contiguous prefix of the retained packets, so the scan stops at the
+        // first survivor instead of walking the whole prefix. Packet numbers ascend through the
+        // BTreeMap, so once `pn` passes the packet threshold it can never satisfy it again, and
+        // send times are non-decreasing in packet number, so the time threshold cannot fire later
+        // either. Materializing and sorting every retained packet number made the work and the
+        // temporary allocation scale with the in-flight window rather than with the losses.
+        let mut lost_pns: Vec<u64> = Vec::new();
+        for (&pn, packet) in sp.sent.range(..=largest_acked) {
+            let past_packet_threshold = threshold_pn.is_some_and(|threshold| pn <= threshold);
+            let past_time_threshold = now.saturating_duration_since(packet.sent_at) >= loss_delay;
+            if past_packet_threshold || past_time_threshold {
+                lost_pns.push(pn);
+                continue;
+            }
+            break;
+        }
+
+        let mut lost = Vec::with_capacity(lost_pns.len());
+        for pn in &lost_pns {
+            if let Some(packet) = sp.sent.remove(pn) {
+                sp.retained_bytes = sp.retained_bytes.saturating_sub(packet.size);
+                lost.push(packet);
             }
         }
-        lost.sort_by_key(|p| p.sent_at);
-        // Re-arm the time-threshold timer for the earliest remaining candidate (§6.1.2).
+        // Ascending packet numbers already yield ascending send times, so no sort is needed.
+
+        // Re-arm the time-threshold timer for the earliest remaining candidate (§6.1.2). Deadlines
+        // are non-decreasing in packet number, so the first usable one is the minimum.
         sp.loss_time = sp
             .sent
             .range(..=largest_acked)
-            .filter_map(|(_, p)| p.sent_at.checked_add(loss_delay))
-            .filter(|d| *d > now)
-            .min();
+            .find_map(|(_, p)| p.sent_at.checked_add(loss_delay).filter(|d| *d > now));
         lost
     }
 
@@ -907,6 +947,7 @@ impl Recovery {
                 let keys: Vec<u64> = sp.sent.range(*start..*end).map(|(pn, _)| *pn).collect();
                 for pn in keys {
                     if let Some(pkt) = sp.sent.remove(&pn) {
+                        sp.retained_bytes = sp.retained_bytes.saturating_sub(pkt.size);
                         newly_acked.push(pkt);
                     }
                 }
@@ -1313,6 +1354,7 @@ impl Recovery {
             let sp = &mut self.spaces[space.index()];
             let bytes = sp.sent.values().filter(|p| p.in_flight).map(|p| p.size).sum();
             sp.sent.clear();
+            sp.retained_bytes = 0;
             sp.loss_time = None;
             sp.time_of_last_ack_eliciting = None;
             sp.largest_acked = None;
@@ -1728,6 +1770,81 @@ mod tests {
                 t0 + Duration::from_millis(pn * 10),
             );
         }
+    }
+
+    /// The loss set is a contiguous prefix, so the scan must stop at the first survivor.
+    ///
+    /// Before this, every retained packet number up to `largest_acked` was materialized into a
+    /// vector and the declared losses were sorted, so the work and the temporary allocation scaled
+    /// with the in-flight window rather than with the losses.
+    #[test]
+    fn loss_detection_returns_a_contiguous_prefix_in_send_order() {
+        let mut rec = Recovery::new(120_000, 1200);
+        rec.update_rtt(Duration::from_millis(25)); // loss_delay = 9/8 * 25 = 28.125 ms
+        let t0 = Instant::now();
+        seed_space(&mut rec, PacketSpace::Application, 12, t0);
+
+        // Acknowledge the newest packet. Everything at least K_PACKET_THRESHOLD below it is lost,
+        // and the older packets are also past the time threshold at t0 + 110 ms.
+        let now = t0 + Duration::from_millis(110);
+        let outcome = rec.on_ack_received(
+            PacketSpace::Application,
+            &[(11, 12)],
+            Duration::ZERO,
+            true,
+            false,
+            now,
+        );
+
+        assert!(!outcome.lost.is_empty(), "the fixture must declare losses");
+        let lost_pns: Vec<u64> = outcome.lost.iter().map(|(pn, _)| *pn).collect();
+
+        // Ascending packet numbers already give ascending send times; no sort is involved.
+        let mut sorted = lost_pns.clone();
+        sorted.sort_unstable();
+        assert_eq!(lost_pns, sorted, "declared losses must come back in send order");
+
+        // Contiguity: the loss set is a prefix starting at the oldest retained packet.
+        let expected: Vec<u64> = (0..lost_pns.len() as u64).collect();
+        assert_eq!(lost_pns, expected, "the loss set must be a contiguous prefix");
+    }
+
+    /// Retention is bounded per space, and the eviction is observable.
+    #[test]
+    fn sent_packet_retention_is_bounded_per_space() {
+        let mut rec = Recovery::new(1_000_000_000, 1200);
+        let t0 = Instant::now();
+        let evictions_before = crate::telemetry::RECOVERY_SENT_RETENTION_EVICTIONS.get();
+
+        // Send well past the packet cap without ever acknowledging anything.
+        let overshoot = (super::MAX_RETAINED_SENT_PACKETS_PER_SPACE + 500) as u64;
+        for pn in 0..overshoot {
+            rec.on_packet_sent_in_space(PacketSpace::Application, pn, 1200, true, true, None, t0);
+        }
+
+        let retained = rec.spaces[PacketSpace::Application.index()].sent.len();
+        assert!(
+            retained <= super::MAX_RETAINED_SENT_PACKETS_PER_SPACE,
+            "retained packets {retained} must stay within the per-space budget"
+        );
+        assert!(
+            crate::telemetry::RECOVERY_SENT_RETENTION_EVICTIONS.get() > evictions_before,
+            "hitting the budget must be observable in telemetry"
+        );
+
+        // Eviction removes the oldest, so the newest packet is always still tracked.
+        assert!(
+            rec.spaces[PacketSpace::Application.index()].sent.contains_key(&(overshoot - 1)),
+            "the newest packet must never be the one evicted"
+        );
+
+        // Byte accounting tracks the retained set rather than everything ever sent.
+        let accounted = rec.spaces[PacketSpace::Application.index()].retained_bytes;
+        assert!(
+            accounted <= super::MAX_RETAINED_SENT_BYTES_PER_SPACE,
+            "retained bytes {accounted} must stay within the per-space budget"
+        );
+        assert_eq!(accounted, retained * 1200, "byte accounting must match the retained set");
     }
 
     #[test]
