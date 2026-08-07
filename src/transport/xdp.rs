@@ -1,273 +1,13 @@
-// XDP (AF_XDP) Runtime Path - REMOVED
+// Compatibility/test transport helpers.
 //
-// XDP was evaluated as a kernel-bypass receive/transmit path but was removed as a
-// runtime transport. This file retains only:
-//   1. Compatibility type definitions behind `internal_af_xdp_experimental` feature gate
-//   2. GSO/GRO segmentation helpers used by tests
-//
-// The feature gate `internal_af_xdp_experimental` prevents any runtime usage - these
-// types are never compiled into release builds. They exist solely for architectural
-// reference and test compatibility.
-//
-// For production fast-path transport, use:
-//   - `UdpFastPath`       (src/transport/udpfast.rs) - cross-platform UDP batching
+// The former AF_XDP experiment was removed because it never implemented the
+// kernel-backed UMEM and ring ownership contract. The remaining helpers are
+// test-only segmentation and UDP fast-path compatibility coverage.
 
 #[cfg(all(target_os = "linux", test))]
 use libc::{c_void, socklen_t};
 #[cfg(all(target_os = "linux", test))]
 use std::mem;
-#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
-use std::ptr;
-#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
-use std::sync::Arc;
-
-// Experimental AF_XDP implementation kept behind an explicit feature gate.
-#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
-pub(super) mod linux {
-    use super::*;
-    use libc::c_void;
-
-    const XDP_RING_SIZE: u32 = 2048;
-
-    // AF_XDP structs retained only for the explicit experimental implementation.
-    #[repr(C)]
-    pub struct SockaddrXdp {
-        pub sxdp_family: u16,
-        pub sxdp_flags: u16,
-        pub sxdp_ifindex: u32,
-        pub sxdp_queue_id: u32,
-        pub sxdp_shared_umem_fd: u32,
-    }
-
-    // UMEM descriptor for zero-copy
-    #[repr(C)]
-    #[derive(Clone, Copy, Default)]
-    pub struct XdpDesc {
-        pub addr: u64,
-        pub len: u32,
-        pub options: u32,
-    }
-
-    // XDP ring structures
-    #[allow(dead_code)]
-    pub struct XdpRing {
-        pub producer: u32,
-        pub consumer: u32,
-        pub desc: Box<[XdpDesc; XDP_RING_SIZE as usize]>,
-        pub flags: u32,
-    }
-
-    impl XdpRing {
-        fn new() -> Self {
-            Self {
-                producer: 0,
-                consumer: 0,
-                desc: Box::new([XdpDesc::default(); XDP_RING_SIZE as usize]),
-                flags: 0,
-            }
-        }
-    }
-
-    // XDP runtime path removed. These struct definitions are retained only for the
-    // experimental feature gate. Use UdpFastPath or UringBatchSender for production.
-
-    #[allow(dead_code)]
-    pub struct UmemArea {
-        pub(crate) addr: *mut u8,
-        pub(crate) size: usize,
-        pub(crate) frame_size: usize,
-        pub(crate) frame_count: usize,
-    }
-
-    #[allow(dead_code)]
-    pub(super) struct XdpSocket {
-        pub(crate) fd: i32,
-        pub(crate) umem: Arc<UmemArea>,
-        pub(crate) rx_ring: XdpRing,
-        pub(crate) tx_ring: XdpRing,
-        pub(crate) fill_ring: XdpRing,
-        pub(crate) comp_ring: XdpRing,
-    }
-
-    impl XdpSocket {
-        pub(super) fn new(
-            ifindex: u32,
-            queue_id: u32,
-            frame_size: usize,
-            frame_count: usize,
-        ) -> Result<Self, std::io::Error> {
-            if frame_size == 0 || frame_count == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "frame_size and frame_count must be greater than zero",
-                ));
-            }
-            let umem_size = frame_size.checked_mul(frame_count).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "UMEM size overflow")
-            })?;
-
-            unsafe {
-                // Create AF_XDP socket
-                let fd = libc::socket(libc::AF_XDP, libc::SOCK_RAW, 0);
-                if fd < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
-                let sockaddr = SockaddrXdp {
-                    sxdp_family: libc::AF_XDP as u16,
-                    sxdp_flags: 0,
-                    sxdp_ifindex: ifindex,
-                    sxdp_queue_id: queue_id,
-                    sxdp_shared_umem_fd: 0,
-                };
-                let bind_rc = libc::bind(
-                    fd,
-                    &sockaddr as *const SockaddrXdp as *const libc::sockaddr,
-                    std::mem::size_of::<SockaddrXdp>() as libc::socklen_t,
-                );
-                if bind_rc < 0 {
-                    let err = std::io::Error::last_os_error();
-                    libc::close(fd);
-                    return Err(err);
-                }
-
-                // Allocate UMEM area (try huge pages first, then standard pages).
-                let mut addr = libc::mmap(
-                    ptr::null_mut(),
-                    umem_size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB,
-                    -1,
-                    0,
-                ) as *mut u8;
-
-                if addr == libc::MAP_FAILED as *mut u8 {
-                    addr = libc::mmap(
-                        ptr::null_mut(),
-                        umem_size,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                        -1,
-                        0,
-                    ) as *mut u8;
-                    if addr == libc::MAP_FAILED as *mut u8 {
-                        libc::close(fd);
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-
-                let umem = Arc::new(UmemArea { addr, size: umem_size, frame_size, frame_count });
-
-                // Allocate independent software-side rings.
-                let rx_ring = XdpRing::new();
-                let tx_ring = XdpRing::new();
-                let fill_ring = XdpRing::new();
-                let comp_ring = XdpRing::new();
-
-                Ok(XdpSocket { fd, umem, rx_ring, tx_ring, fill_ring, comp_ring })
-            }
-        }
-
-        #[allow(dead_code)]
-        pub fn send_packet(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
-            unsafe {
-                let producer = self.tx_ring.producer;
-                let consumer = self.tx_ring.consumer;
-
-                if producer.wrapping_sub(consumer) >= XDP_RING_SIZE {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "TX ring full",
-                    ));
-                }
-
-                let idx = (producer & (XDP_RING_SIZE - 1)) as usize;
-                let desc = &mut self.tx_ring.desc[idx];
-                let copy_len = data.len().min(self.umem.frame_size);
-
-                // Copy data to UMEM
-                let frame_addr = self.umem.addr.add((idx as usize) * self.umem.frame_size);
-                ptr::copy_nonoverlapping(data.as_ptr(), frame_addr, copy_len);
-
-                desc.addr = (idx as u64) * (self.umem.frame_size as u64);
-                desc.len = copy_len as u32;
-                desc.options = 0;
-
-                // Update producer
-                self.tx_ring.producer = producer.wrapping_add(1);
-
-                // Kick TX
-                libc::sendto(self.fd, ptr::null(), 0, libc::MSG_DONTWAIT, ptr::null(), 0);
-
-                Ok(())
-            }
-        }
-
-        #[allow(dead_code)]
-        pub fn recv_packet(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-            unsafe {
-                let producer = self.rx_ring.producer;
-                let consumer = self.rx_ring.consumer;
-
-                if producer == consumer {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "RX ring empty",
-                    ));
-                }
-
-                let idx = (consumer & (XDP_RING_SIZE - 1)) as usize;
-                let desc = self.rx_ring.desc[idx];
-                let frame_offset = desc.addr as usize;
-                if frame_offset >= self.umem.size {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "RX descriptor points outside UMEM",
-                    ));
-                }
-
-                // Copy from UMEM
-                let frame_addr = self.umem.addr.add(frame_offset);
-                let available = self.umem.size.saturating_sub(frame_offset);
-                let len = (desc.len as usize).min(buf.len()).min(available);
-                ptr::copy_nonoverlapping(frame_addr, buf.as_mut_ptr(), len);
-
-                // Update consumer
-                self.rx_ring.consumer = consumer.wrapping_add(1);
-
-                // Refill
-                let fill_producer = self.fill_ring.producer;
-                let fill_desc =
-                    &mut self.fill_ring.desc[(fill_producer & (XDP_RING_SIZE - 1)) as usize];
-                fill_desc.addr = desc.addr;
-                self.fill_ring.producer = fill_producer.wrapping_add(1);
-
-                Ok(len)
-            }
-        }
-    }
-
-    impl Drop for XdpSocket {
-        fn drop(&mut self) {
-            unsafe {
-                libc::close(self.fd);
-                libc::munmap(self.umem.addr as *mut c_void, self.umem.size);
-            }
-        }
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "internal_af_xdp_experimental"))]
-pub(super) fn run_experimental_socket_probe(
-    ifindex: u32,
-    queue_id: u32,
-    frame_size: usize,
-    frame_count: usize,
-) -> Result<(), std::io::Error> {
-    let _socket = linux::XdpSocket::new(ifindex, queue_id, frame_size, frame_count)?;
-    Ok(())
-}
-
 // GSO/GRO offload helpers retained only for compatibility tests.
 #[cfg(test)]
 pub struct SegmentationOffload {
@@ -355,6 +95,10 @@ impl SegmentationOffload {
 
     // Optimized userland GSO emulation for non-Linux platforms
     pub fn segment_packet(&self, data: &[u8], mtu: usize) -> Vec<Vec<u8>> {
+        if data.is_empty() || mtu == 0 {
+            return Vec::new();
+        }
+
         // Use configured max_gso_size if available
         let effective_mtu = if self.gso_enabled { mtu.min(self.max_gso_size) } else { mtu };
 
@@ -384,7 +128,8 @@ impl SegmentationOffload {
 
     // Optimized userland GRO emulation
     pub fn coalesce_packets(&self, packets: Vec<Vec<u8>>) -> Vec<u8> {
-        let mut total_size: usize = packets.iter().map(|p| p.len()).sum();
+        let mut total_size =
+            packets.iter().fold(0usize, |total, packet| total.saturating_add(packet.len()));
         if self.gro_enabled {
             total_size = total_size.min(self.max_gro_size);
         }
@@ -630,7 +375,7 @@ impl Default for FastPathTransport {
 
 #[cfg(test)]
 mod fastpath_udp_tests {
-    use super::FastPathTransport;
+    use super::{FastPathTransport, SegmentationOffload};
     use crate::transport::udpfast::MAX_BATCH_SIZE;
     use std::env;
     use std::net::UdpSocket;
@@ -662,6 +407,12 @@ mod fastpath_udp_tests {
 
     fn udp_fastpath_lock() -> MutexGuard<'static, ()> {
         crate::env_utils::test_support::acquire_env_lock()
+    }
+
+    #[test]
+    fn segmentation_rejects_zero_mtu_without_panicking() {
+        let segmentation = SegmentationOffload::new();
+        assert!(segmentation.segment_packet(b"payload", 0).is_empty());
     }
 
     #[test]

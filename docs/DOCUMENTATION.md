@@ -20,7 +20,6 @@
 | Feature Surface | State | Notes |
 |---|---|---|
 | UDP/io_uring fast path | `active` | canonical retained fastpath |
-| AF_XDP socket code (`internal_af_xdp_experimental`) | `experimental/internal` | not part of default runtime |
 | Core H3/MASQUE carrier | `active` | production CONNECT-UDP/capsule carrier for authenticated TUN traffic |
 | XOR obfuscation | `compat-only` | not part of canonical product path |
 | `transport::batch` | `experimental/internal` | rust-parity/test-only transport surface |
@@ -38,7 +37,7 @@ The retained complexity in this repository is intentional and should be read thr
 | `canonical runtime/product path` | user-visible retained runtime behavior and stable product contract | `src/core.rs` (+ `src/core_parts/`), `src/transport/connection/`, `src/crypto/` product contract, `src/fec/` public `auto` / `off` contract |
 | `adaptive policy/control` | runtime policy loops that tune retained capability without changing the product contract | `src/brain.rs`, `src/stealth/`, `src/fec/` target/family auto-controller |
 | `platform acceleration` | hardware detection, SIMD dispatch, Linux fast paths, and owner-local hot-path helpers | `src/optimize/`, `src/simd/`, `src/optimize/udp.rs`, `src/optimize/uring_batch.rs` |
-| `compat/test/experimental` | retained compatibility machinery, parity hooks, archived sources, and explicitly gated internal surfaces | archived legacy sources, `internal_af_xdp_experimental`, `rust-tests`, `benches` |
+| `compat/test/experimental` | retained compatibility machinery, parity hooks, archived sources, and explicitly gated internal surfaces | archived legacy sources, `rust-tests`, `benches` |
 
 ### Layer Ownership Rules
 
@@ -1157,9 +1156,8 @@ let packet_pool = MemoryPool::new_adaptive(512, 65536);
 - **Windows**: WSASend with scatter-gather, IOCP
 - **macOS**: kqueue, Grand Central Dispatch
 - Batched processing keeps hot loops in cache
-- AF_XDP runtime wiring is retained only behind the internal feature gate `internal_af_xdp_experimental`.
-- Legacy AF_XDP socket code is kept behind the internal feature gate `internal_af_xdp_experimental` and is not part of the default production runtime path. Explicit feature-enabled release compilation remains possible, and its UMEM/ring ownership contract is open under TODO-838.
-- `OptimizationManager` no longer models live AF_XDP runtime availability as mutable instance state in this fork; there is no separate `available` or `enabled` XDP runtime query surface anymore.
+- AF_XDP socket code and its internal feature gate were removed under TODO-838 because the retained implementation did not establish the kernel-backed UMEM and ring ownership contract.
+- No AF_XDP runtime availability, constructor, or enablement query surface remains after TODO-838; the canonical fast-path capability owners are UDP batching and io_uring.
 - Optional io_uring UDP Fast Path (Linux, feature `io_uring`) uses `UringBatchSender` in `src/optimize/uring_batch.rs` with the official `io-uring` crate (v0.7). Every public sender call admits at most 256 packets and 524,288 aggregate payload bytes before payload copies. Direct `UringBatchSender` calls remain explicitly synchronous compatibility primitives; client and standalone server runtimes use one bounded `UringBatchWorker` per runtime, with one queued request, one owned blocking thread, a 250 ms controlled completion deadline, quarantine on timeout/cancellation, and a joined teardown. The runtime worker disables SendMsgZc so notification CQEs cannot outlive its operation owner; worker-busy requests fall back to `sendmmsg`/async socket sends, while worker failures become typed data-plane faults rather than unsafe duplicate retries.
 
 #### Prefetch and Memory Optimization
@@ -1676,14 +1674,14 @@ Transport submodules (`src/transport/`):
 - `src/transport/pn.rs` - packet number and varint helpers.
 - `src/transport/recovery.rs` - loss detection/recovery controller.
 - `src/transport/batch.rs` - explicit rust parity/test-only batched IO surface, not part of the normal runtime transport path.
-- `src/transport/udpfast.rs` - narrowed UDP fastpath compatibility layer used by harness/XDP-compat coverage; internal buffer/counter machinery is not part of the public runtime contract.
+- `src/transport/udpfast.rs` - narrowed UDP fastpath compatibility layer used by harness coverage; internal buffer/counter machinery is not part of the public runtime contract.
 - `src/transport/anti_replay.rs` - 0-RTT strike register (SHA-256 fingerprint dedup, Bloom fast-negative, FIFO ring eviction).
 - `src/transport/cc/mod.rs` - pluggable CongestionController trait and CcImpl dispatch.
 - `src/transport/cc/reno.rs` - RFC 6582 NewReno implementation.
 - `src/transport/cc/bbr2.rs` - BBR v2 standalone implementation (IETF draft-ietf-ccwg-bbr). Four-state machine (Startup/Drain/ProbeBW/ProbeRTT), windowed max-bandwidth filter, loss tracking via EWMA. No external crate dependency.
 - `src/transport/cc/bbr3.rs` - BBR v3 implementation (default CC algorithm).
 - `src/transport/cc/stealth_shaper.rs` - universal CC wrapper (browser traffic gains + jitter).
-- `src/transport/xdp.rs` - internal AF_XDP and compatibility/test machinery. This is not a public transport mode surface; `FastPathTransport` plus its segmented/coalesced helpers remain private compat/test machinery, and AF_XDP stays behind `internal_af_xdp_experimental`.
+- `src/transport/xdp.rs` - test-only UDP/GSO compatibility machinery. It is not a runtime transport surface and contains no AF_XDP implementation.
 
 ### Governance Overview
 - Cross-cutting engineering principles and policies: see "Governance (Canonical)".
@@ -2070,7 +2068,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 - Stealth hotpaths (header/QPACK building and persona-driven shaping) prefer SIMD kernels with safe scalar fallback; mutex/atomic usage is minimized in hotpaths.
 
 #### Feature Matrix (Crypto)
-- The root manifest declares exactly 27 direct feature entries. Cargo metadata exposes 30 effective selectors because the optional dependencies `rcgen`, `time`, and `maxminddb` also remain available as implicit dependency selectors. Those three selectors are implementation dependencies, not user-facing product groups.
+- The root manifest declares exactly 26 direct feature entries. Cargo metadata exposes 29 effective selectors because the optional dependencies `rcgen`, `time`, and `maxminddb` also remain available as implicit dependency selectors. Those three selectors are implementation dependencies, not user-facing product groups.
 - Canonical feature taxonomy and consumer semantics:
 
 | Class | Feature | Dependencies | Consumer or owner semantics |
@@ -2092,7 +2090,6 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 | test | `dev-certs` | `rcgen`, `time` | Development certificate generation |
 | platform | `tun-windows` | none | Windows Wintun/WFP integration |
 | platform | `tun-ios` | none | Reserved iOS platform selector; no current Rust consumer |
-| internal | `internal_af_xdp_experimental` | none | Internal Linux AF_XDP experiment |
 | internal | `internal_wiedemann` | none | Internal FEC Wiedemann policy |
 | internal | `internal_avx10_preview` | none | Internal AVX10 preview dispatch branch |
 | test | `rust-tests` | none | Rust integration and feature-gated test targets |
@@ -2101,7 +2098,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 | test | `tun-tests` | none | TUN example/test target contract |
 | test | `simd-selfcheck` | none | SIMD parity and telemetry self-check target |
 | meta | `test-suite` | `rust-tests`, `benches` | Aggregate test and benchmark compilation profile |
-| meta | `experimental` | `internal_af_xdp_experimental`, `internal_wiedemann`, `internal_avx10_preview` | Aggregate internal-only profile |
+| meta | `experimental` | `internal_wiedemann`, `internal_avx10_preview` | Aggregate internal-only profile |
 | runtime dependency | `rcgen` | `dep:rcgen` | Implicit selector enabled by `server` or `dev-certs`; do not select directly |
 | runtime dependency | `time` | `dep:time` | Implicit selector enabled by `server` or `dev-certs`; do not select directly |
 | runtime dependency | `maxminddb` | `dep:maxminddb` | Implicit selector enabled by `server`; do not select directly |
@@ -2147,7 +2144,7 @@ Benchmarks
 #### Automated Build and CI/CD
 - The general CI workflow `ci.yml` runs frontend checks, frontend E2E, security audit, the release-version contract, app backend checks, release compilation and tests, fuzz target checks, non-duplicated feature-matrix tests, benchmark regression checks on pull requests, and Linux fastpath evidence.
 - `scripts/audits/verify-simd-feature-contract.sh` is run by the CI feature matrix, the strict Clippy matrix, and the comprehensive audit. It proves that no hardware ISA name is declared as a Cargo feature, that `rust-tests,simd-selfcheck` remains a valid positive test contract, that `--all-features` remains metadata-valid, and that each removed hardware/meta selector is rejected by Cargo rather than silently accepted as hardware proof.
-- `scripts/audits/verify-cargo-feature-taxonomy.sh` is run beside the SIMD gate by CI, the strict Clippy matrix, and the comprehensive audit. It checks the exact 27-entry manifest taxonomy, the 30-selector Cargo metadata surface including implicit optional-dependency selectors, every Rust cfg and target `required-features` reference, positive aggregate build profiles, and rejection of TODO-176's retired feature-group names.
+- `scripts/audits/verify-cargo-feature-taxonomy.sh` is run beside the SIMD gate by CI, the strict Clippy matrix, and the comprehensive audit. It checks the exact 26-entry manifest taxonomy, the 29-selector Cargo metadata surface including implicit optional-dependency selectors, every Rust cfg and target `required-features` reference, positive aggregate build profiles, and rejection of TODO-176's retired feature-group names.
 - `scripts/audits/verify-web-admin-publish-contract.sh` is run by the CI release-contract job, the release version-contract job, and the comprehensive audit. It proves that `assets/web-admin/` is generated and ignored, checks the build/release/installer/E2E prerequisite ordering, and runs a bounded missing-`index.html` bundle negative probe without building or modifying UI sources.
 - `scripts/audits/verify-tls-clienthello-contract.sh` is run by the CI release-contract job, the release version-contract job, and the comprehensive audit. It proves that the retired transport ClientHello storage/setters and injection helpers are absent, deterministic bytes remain metadata-only, rustls remains the wire owner, and canonical docs/tests describe the same boundary.
 - The `app-backend-checks` job validates the native desktop backend without UI source edits: it builds the existing `apps/svelte-desktop` bundle for Tauri context, then runs `cargo metadata --locked`, `cargo check --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` in `apps/tauri/src-tauri`.
@@ -3182,7 +3179,7 @@ quicfuscate crypto-bench --mode rolling --warmup 1000
 Both client and server subcommands support extensive configuration:
 - Browser and OS fingerprinting profiles with rotation capabilities
 - FEC mode selection and memory pool tuning
-- UDP/io_uring fast paths (experimental AF_XDP socket code stays outside the canonical runtime path)
+- UDP/io_uring fast paths; the removed AF_XDP experiment is not part of the runtime
 - Stealth features: uTLS persona shaping, DoH, explicit domain fronting, HTTP/3 masquerading, adaptive padding, timing shaping, bounded cover traffic
 - TOML configuration file support
 - TLS debugging and certificate validation options
@@ -3372,7 +3369,7 @@ The following table is the ownership and invalid-value contract for every produc
 - `QUICFUSCATE_BLACKLIST_CA_PATH` - optional bounded PEM CA bundle for private HTTPS feed endpoints; public feeds continue using platform roots.
 - `QUICFUSCATE_BLACKLIST_REQUEST_TIMEOUT_SECS`, `QUICFUSCATE_BLACKLIST_MAX_BODY_BYTES`, `QUICFUSCATE_BLACKLIST_MAX_ENTRIES` - fetch and parsed-state bounds (defaults: `30`, `16777216`, `250000`). Absolute ceilings are `300` seconds for request timeout, `16777216` bytes for body/cache size, and `250000` unique entries; TTL and sync interval are each capped at `604800` seconds.
 - `QUICFUSCATE_BLACKLIST_CACHE_PATH` - atomic last-known-good cache path, or `disabled` for no persistence (default: `config/local/blacklist-cache.json`).
-- `QUICFUSCATE_FASTPATH` - `auto|off` (default: `auto`). Controls XDP/UDP fast-path selection.
+- `QUICFUSCATE_FASTPATH` - `auto|off` (default: `auto`). Controls UDP fast-path selection.
 - io_uring queue depth and SQPOLL are probed automatically at runtime with no env override needed.
   SQPOLL requires `CAP_SYS_ADMIN` on kernels < 5.12 and falls back to standard mode silently.
   SendMsgZc requires kernel 6.0+ and `QUICFUSCATE_IO_URING_ZC=1`; without that explicit opt-in,
@@ -4172,7 +4169,7 @@ Compile-time bench metadata (feature `benches`):
 - `QUICFUSCATE_GIT_REV`, `QUICFUSCATE_CPU_MODEL`, `QUICFUSCATE_RUSTC_VERSION` are read via `option_env!` at build time and embedded in the JSON output.
 
 #### Benchmarking Scripts - Guide
-Performance measurements are consolidated via the individual benchmark suites (optionally coordinated with `bench-orchestrator.sh`). All scripts detect OS/Arch/features, including Linux `io_uring` capability and retained internal AF_XDP experimental feature availability where relevant, and export reports (text/JSON) to `scripts/out/<category>/`.
+Performance measurements are consolidated via the individual benchmark suites (optionally coordinated with `bench-orchestrator.sh`). All scripts detect OS/Arch/features, including Linux `io_uring` capability where relevant, and export reports (text/JSON) to `scripts/out/<category>/`.
 
 **Tooling status**
 - Tooling naming and structure finalized: tests use `test-*.sh`, benchmarks use `bench-*.sh`, micro benches use `micro-*.sh`.
@@ -4506,10 +4503,10 @@ and export metrics through your own endpoint:
 - Exporting metrics: call `telemetry::export_telemetry_text()` to obtain a plain text snapshot, or use the built-in `/telemetry` endpoint.
 - Integration: serve the snapshot via your own HTTP endpoint or exporter; call `telemetry::flush()` to refresh process and pool resource gauges immediately before exporting a one-off snapshot.
 
-### AF_XDP Experimental Status
-Status: `experimental/internal` for the retained AF_XDP socket code behind `internal_af_xdp_experimental`.
+### AF_XDP Removal Status
+Status: removed under TODO-838.
 
-AF_XDP runtime wiring is not part of the canonical runtime in this fork. The retained AF_XDP socket code remains available only behind the internal feature gate `internal_af_xdp_experimental`; an explicitly feature-enabled release can still compile the module, so its UMEM/ring ownership contract remains open under TODO-838. The canonical Linux high-end send path is `io_uring`.
+The incomplete AF_XDP socket experiment, its internal Cargo feature, constructor probe, and feature-gated integration target were removed because no production caller existed and the retained software rings did not implement the kernel-backed UMEM ownership contract. The canonical Linux high-end send path is `io_uring`; the remaining UDP/GSO compatibility helpers are test-only.
 
 ## Static Policy Checks
 To validate security and stealth policies without performing a build, use the dedicated audit and utility scripts:
@@ -4925,7 +4922,7 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
 - **SIMD unsafe surface**: TODO-679 completed the read-only audit of all 31 files in `src/simd/*` and `src/optimize/simd/*`, including the historical 138 unsafe function declarations, 102 actual target-feature attributes, direct callers, tests, audit scripts, and history. The current source inventory is 131 unsafe declarations, 120 target-feature attributes, and 131 local `# Safety` sections. TODO-834 completed the exact dispatch-owner audit and implementation of the SVE2 decode, ACK AVX512VL, SHA-VNNI, AES/VAES, GF16, AVX-512 compression/pattern/histogram, neural FMA, optimization string, stale BMI2 profile, scalar-claim, FEC, and packet transport boundaries. TODO-835 closes the release-safe short-needle, matrix, BMI2, Berlekamp-Massey, private repeating-key, and private ChaCha XOR length boundaries with focused malformed-input tests; remaining vector tails were cross-checked. TODO-836 closes the blanket safety-doc suppression, adds local contracts to all 131 unsafe declarations, makes the guardrail visibility-complete and exact-feature-aware, and makes 24 unsupported-ISA test returns emit explicit `SIMD_SKIP` accounting. The 2026-08-07 umbrella reconciliation also passed the SIMD feature-contract gate and cargo metadata; the aggregate runtime guardrail still reports four pre-existing critical findings and one warning outside this SIMD owner. Native x86/Linux, Windows, SVE2, sanitizer, and Miri evidence remain explicit unclaimed proof boundaries.
 - **Optimize brain/transport/stealth unsafe**: TODO-680's read-only audit and 2026-08-07 source reconciliation cover all ten current Optimize boundaries, CPU profile mapping, direct callers, vector tails, malformed-input fixtures, Linux/macOS UDP FFI, guardrails, documentation, history, and the TODO-834 delta. TODO-834 resolved the former P1f-to-AVX2 reduction route, P4a-to-AVX512 moving-average route, BMI2 bitmap dispatch predicate, AVX2 packet-number byte order, and stale SVE2 search symbol. Remaining findings are reversed/clipped bitmap arithmetic, SSE2 short-pattern overwrite, overflow-prone pattern positions, SVE2 Base64 output coverage, public packet-number and length contracts, VNNI truncation beyond 64 samples, invalid percentile behavior, formal safety documentation, and native/profile proof. TODO-837 now owns the implemented UDP result/ownership contract; its local test and native-proof status is recorded in the dedicated section. TODO-682 split shared transport remediation into TODO-837-TODO-842.
 - **Crypto unsafe primitives**: TODO-681's full source-and-owner reconciliation covers AES, AEGIS, MORUS, GCM, Poly1305, ChaCha, direct callers, dispatch, lifecycles, length and nonce boundaries, tests, guardrails, docs, and history. TODO-834's exact dispatch delta is reconciled. Open work remains for schedule and transient-state erasure, checked AEAD lengths (TODO-716), primitive/API nonce ownership, GHASH release/native proof, AES table side-channel scope, MORUS's release-safe loader precondition, and fail-closed/native ISA evidence. No product or test implementation was made in this audit phase.
-- **Transport unsafe**: TODO-682's current-source and owner reconciliation covers transport batching, shared UDP FFI, internal AF_XDP, frame/packet SIMD, public packet lengths, PMTU/prefetch, direct callers, tests, suites, guardrails, documentation, and history. TODO-834 resolved the historical AVX2 packet-number endian mismatch and exact x86 ACK dispatch delta; TODO-831 removed the historical temporary batch pool path. TODO-837 implements the bounded UDP result/address/partial-send and caller-fd contract, with native platform proof still open. Open remediation covers AF_XDP UMEM/ring ownership (TODO-838), public packet/header and length contracts (TODO-839), frame malformed-input and cumulative batch-output bounds (TODO-840), PMTU/prefetch (TODO-841), and malformed/native proof coverage (TODO-842).
+- **Transport unsafe**: TODO-682's current-source and owner reconciliation covers transport batching, shared UDP FFI, AF_XDP removal, frame/packet SIMD, public packet lengths, PMTU/prefetch, direct callers, tests, suites, guardrails, documentation, and history. TODO-834 resolved the historical AVX2 packet-number endian mismatch and exact x86 ACK dispatch delta; TODO-831 removed the historical temporary batch pool path. TODO-837 implements the bounded UDP result/address/partial-send and caller-fd contract, with native platform proof still open. Open remediation covers public packet/header and length contracts (TODO-839), frame malformed-input and cumulative batch-output bounds (TODO-840), PMTU/prefetch (TODO-841), and malformed/native proof coverage (TODO-842).
 - **Interface/platform unsafe**: TODO-683 completed the read-only audit of
   `interface.rs`, Wintun, Linux/macOS/Windows platform backends, Windows WFP,
   every direct client/server TUN caller, platform gate, cleanup owner, test,
@@ -5067,8 +5064,8 @@ The audit remains open. These reconciliations document current evidence and owne
 This read-only pass reconciled the current Cargo target inventory, runner references, CI feature lanes, and audit-register scope. No product or protected UI implementation was changed.
 
 - **Cargo target inventory:** The root package declares 71 integration-test targets and every declared source path exists. The desktop/web-admin Rust validation suite invokes five current declared targets. The historical `it-masque-runtime-integration` source remains under `archive/tests/` as evidence only and is not an active Cargo target; TODO-774 closed the stale runner contract.
-- **Feature-gated tests:** All 64 declared test targets with crate-level feature cfgs now declare matching Cargo `required-features`. The orchestrator target requires `rust-tests,orchestrator`, SIMD self-check requires `rust-tests,simd-selfcheck`, Linux io_uring targets require `rust-tests,io_uring`, and XDP requires `rust-tests,internal_af_xdp_experimental`. The common `run_cargo` helper retains baseline `rust-tests` injection, while target-specific runners pass the complete feature set explicitly.
-- **Non-vacuous execution:** `scripts/tests/lib/lib-common.sh::qf_cargo_test_run_expect()` rejects zero executed tests, missing successful libtest output, and missing named test markers. The transport suite verifies one named body in each transport integration target and records non-Linux io_uring, kernel-hotpath, and XDP paths as explicit `SKIP` records. `scripts/tests/fast/test-dynamic-discovery-fail-closed.sh` proves that missing `rust-tests` or `orchestrator` is rejected by Cargo before any green zero-test result. The CI SIMD lane passes `rust-tests,simd-selfcheck` and requires `varint_roundtrip_and_consistency`; the default all-target feature lane passes `rust-tests`.
+- **Feature-gated tests:** All retained declared test targets with crate-level feature cfgs now declare matching Cargo `required-features`. The orchestrator target requires `rust-tests,orchestrator`, SIMD self-check requires `rust-tests,simd-selfcheck`, and Linux io_uring targets require `rust-tests,io_uring`. The common `run_cargo` helper retains baseline `rust-tests` injection, while target-specific runners pass the complete feature set explicitly.
+- **Non-vacuous execution:** `scripts/tests/lib/lib-common.sh::qf_cargo_test_run_expect()` rejects zero executed tests, missing successful libtest output, and missing named test markers. The transport suite verifies one named body in each retained transport integration target and records non-Linux io_uring and kernel-hotpath paths as explicit `SKIP` records. `scripts/tests/fast/test-dynamic-discovery-fail-closed.sh` proves that missing `rust-tests` or `orchestrator` is rejected by Cargo before any green zero-test result. The CI SIMD lane passes `rust-tests,simd-selfcheck` and requires `varint_roundtrip_and_consistency`; the default all-target feature lane passes `rust-tests`.
 - **Example target:** `tun_factory_example` is selected by Cargo and its crate-level cfg only with `tun-tests`; `main()` now demonstrates the registered external factory without advertising unreachable `tun-windows` or `tun-ios` branches. The example proves factory wiring, not platform backend behavior. TODO-775 closed the target contract; TODO-443 remains the platform implementation owner.
 - **CI and release:** The current workflow review confirms existing ownership under TODO-708, TODO-709, TODO-734, TODO-741, TODO-749, and TODO-758: masked benchmark-baseline failures, incomplete strict Clippy feature coverage, vacuous feature lanes, optional release artifact publication and updater activation, mutable dependency/toolchain inputs, and push-only fuzz coverage. No additional unowned workflow finding was created in this pass.
 - **Audit register:** The current local corpus contains 709 tracker headings, 370 current detail files, and 374 archived detail files. A fresh raw Git path inventory classifies 910 tracked and 21,283 ignored paths with zero unclassified paths; the last recorded validator pass accounted for 902 tracked, 58,787 ignored, and zero non-ignored untracked paths, for 59,689 accounted paths, including exactly three `historical-archive` paths. The current validator run stops before those counts because it rejects the canonical `Blocked` tracker section; TODO-799 owns that schema mismatch. TODO-773 closed the tracked archive classifier boundary; TODO-777 closed the fast FEC smoke failure-propagation boundary; new runtime/configuration/evidence findings are owned by TODO-724, TODO-751, and TODO-788 through TODO-805. Therefore the broader whole-project audit remains open for its separately owned target, runtime, native, evidence, feature-contract, and frontend dependency boundaries.
@@ -5311,14 +5308,14 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 ## Implementation Reconciliation (2026-08-04, feature-gated test target contract)
 
-- **Cargo contract:** The root package retains 71 integration-test targets and every source path exists. All 64 sources with crate-level feature cfgs now declare the same feature prerequisites in `Cargo.toml`; the orchestrator disabled branch and the unsupported-host no-op tests were removed so a missing feature or platform cannot masquerade as coverage.
-- **Runner contract:** `qf_cargo_test_run_expect()` requires a positive executed-test count and a named successful test marker. `test-transport.sh` passes `rust-tests,io_uring` for Linux io_uring and kernel-hotpath targets, `rust-tests,internal_af_xdp_experimental` for XDP, verifies one intended test in every transport integration target, and writes structured Linux-only `SKIP` records on macOS. Desktop/web-admin Rust integration invokes the orchestrator with `rust-tests,orchestrator` and verifies one real body in all five targets. The full-suite utility passes the exact Linux feature sets as well.
+- **Cargo contract:** The root package retains 71 integration-test targets and every source path exists. All retained sources with crate-level feature cfgs declare the same feature prerequisites in `Cargo.toml`; the AF_XDP target and feature were removed under TODO-838, while the orchestrator disabled branch and unsupported-host no-op tests were removed so a missing feature or platform cannot masquerade as coverage.
+- **Runner contract:** `qf_cargo_test_run_expect()` requires a positive executed-test count and a named successful test marker. `test-transport.sh` passes `rust-tests,io_uring` for Linux io_uring and kernel-hotpath targets, verifies one intended test in every retained transport integration target, and writes structured Linux-only `SKIP` records on macOS. Desktop/web-admin Rust integration invokes the orchestrator with `rust-tests,orchestrator` and verifies one real body in all five targets. The full-suite utility passes the exact Linux feature sets as well.
 - **CI contract:** The SIMD self-check lane passes `rust-tests,simd-selfcheck` and requires the `varint_roundtrip_and_consistency` success marker. The default all-target feature-matrix lane passes `rust-tests`, and non-empty matrix entries append that baseline feature.
 - **Negative proof:** `scripts/tests/fast/test-dynamic-discovery-fail-closed.sh` now runs real Cargo invocations with one required feature removed for SIMD and Orchestrator targets. Both must exit nonzero, identify Cargo's `required-features` contract, and contain neither `running 0 tests` nor a green test-result line.
 - **Local proof:** Cargo metadata reports zero crate-feature-gated targets without matching `required-features`; `cargo check --all-targets` passes; SIMD self-check passes 14/14; Orchestrator integration passes 2/2; the dynamic-discovery negative contract passes; and the macOS transport suite passes 541/541 basic transport tests, 13/13 anti-replay and 20/20 congestion tests, all 11 target-scoped transport checks with their named markers, and explicit Linux-only `SKIP` records. The combined desktop/web-admin validation suite passes its desktop and web-admin checks with 0 errors/0 warnings, desktop unit tests 370/370, web-admin unit tests 285/285, and the five Rust targets with 5/3/2/1/7 tests. The broad workspace all-target gate reaches 2,308/2,308 library tests and 41/43 binary tests; its exit is still limited to the two unchanged runtime-reload assertions at `src/main_parts/late_tests_and_mlock.rs:566,638`.
 - **Resource boundary:** After the broad gate, the filesystem reports 11 GiB free and `target/` is 11 GiB, below the 13 GiB target ceiling used for this task.
 - **Architecture boundary:** The five architecture-specific test targets no longer compile as empty crates. On this arm64 host, `rt-random-aes-ctr` executes 1/1, while the four x86_64-only targets emit one ignored test each with an explicit `SKIP: target requires x86_64` reason.
-- **External boundary:** The Linux kernel, AF_XDP, and native io_uring runtime bodies remain CI/Omega-gated and are not claimed by this macOS run. No production or protected UI surface changed.
+- **External boundary:** The Linux kernel and native io_uring runtime bodies remain CI/Omega-gated and are not claimed by this macOS run. No production or protected UI surface changed.
 
 ## Implementation Reconciliation (2026-08-04, Tauri dependency advisory closure)
 
@@ -5573,7 +5570,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Evidence boundary: this reconciliation is a current-source and task-truth audit only. No implementation, Rust build, test, Clippy, H3 wire, native transport, or live runtime gate was run for these findings. The referenced TODOs remain the authoritative remediation queue.
 ## Deep Audit Reconciliation (2026-08-07, Platform, Tooling, and Coverage)
 
-- Native transport and interface ownership remains source-audited but not fully cross-platform proven. TODO-837 now implements the bounded UDP batch result, address-length, partial-send, timeout, aligned-buffer, and caller-fd contracts; local ARM64 macOS gates pass, while native Linux/Windows/Omega execution remains unclaimed. AF_XDP compatibility code, PMTU/prefetch, generic TUN results, Unix TUN syscalls, Wintun cleanup, WFP transactions, and privilege/memory-lock negative proof remain owned by TODO-838, TODO-841, TODO-842, TODO-844 through TODO-848, and TODO-850 through TODO-854.
+- Native transport and interface ownership remains source-audited but not fully cross-platform proven. TODO-837 now implements the bounded UDP batch result, address-length, partial-send, timeout, aligned-buffer, and caller-fd contracts; local ARM64 macOS gates pass, while native Linux/Windows/Omega execution remains unclaimed. PMTU/prefetch, generic TUN results, Unix TUN syscalls, Wintun cleanup, WFP transactions, and privilege/memory-lock negative proof remain owned by TODO-841, TODO-842, TODO-844 through TODO-848, and TODO-850 through TODO-854.
 - Current operational surfaces retain open fail-closed gaps in server shutdown ownership, installer secret handling, release-version propagation, CI baseline restoration, admin request bounds, macOS kill-switch/DNS state, runtime reload atomicity, blocked-IP durability, benchmark result propagation, release updater completeness, and local UI process readiness. The current owners are recorded in TODO-699 through TODO-748, TODO-757, TODO-782, and TODO-798 through TODO-807.
 - The current TODO register is structurally accounted for: the post-push validator at commit `ea528d9` reports 777 tracker entries, 371 current detail files, 441 archived detail files, 36 explicit archive exceptions, 991 tracked paths, 35,527 ignored paths, and zero unexpected untracked paths. The increase from the preceding snapshot is generated Graphify evidence and related ignored audit output, not production scope. The canonical validator passes register/detail/archive/path integrity while Graphify remains explicitly BLOCKED. The legacy `docs/todo/audit-todo-consistency.sh` was also run and returned 75 obsolete-status violations across the 371 details because its allowlist predates the current canonical status vocabulary; it is not the authoritative structural gate.
 - The audit boundary is source and documentation truth, not a release claim. No production implementation, UI change, privileged native run, authenticated live tunnel, or remote Omega mutation was performed in this reconciliation.

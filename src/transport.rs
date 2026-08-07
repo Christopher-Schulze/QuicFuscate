@@ -38,6 +38,7 @@ pub mod recovery;
 pub mod udpfast;
 /// QUIC version mapping, negotiation state, downgrade protection, and greasing.
 pub mod version;
+#[cfg(test)]
 mod xdp;
 
 pub use anti_replay::{AntiReplayConfig, StrikeRegister};
@@ -80,24 +81,6 @@ pub(crate) fn init_socket_acceleration_fd(socket_fd: std::os::fd::RawFd) -> std:
     log::info!("  GSO: {}", gso_enabled);
 
     Ok(())
-}
-
-/// Experimental AF_XDP constructor probe kept behind the transport root,
-/// which is the sole retained owner for explicit AF_XDP compatibility hooks.
-#[cfg(all(
-    target_os = "linux",
-    any(test, feature = "rust-tests"),
-    feature = "internal_af_xdp_experimental"
-))]
-/// Probes whether AF_XDP sockets are usable on the given NIC queue (experimental).
-#[doc(hidden)]
-pub fn run_xdp_experimental_socket_probe(
-    ifindex: u32,
-    queue_id: u32,
-    frame_size: usize,
-    frame_count: usize,
-) -> std::io::Result<()> {
-    xdp::run_experimental_socket_probe(ifindex, queue_id, frame_size, frame_count)
 }
 
 /// Pending FEC parameter changes to be consumed by the adaptive FEC controller.

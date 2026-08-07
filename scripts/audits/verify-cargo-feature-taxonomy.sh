@@ -38,7 +38,6 @@ FEATURE_CONTRACT: dict[str, tuple[str, tuple[str, ...]]] = {
     "dev-certs": ("test", ("rcgen", "time")),
     "tun-windows": ("platform", ()),
     "tun-ios": ("platform", ()),
-    "internal_af_xdp_experimental": ("internal", ()),
     "internal_wiedemann": ("internal", ()),
     "internal_avx10_preview": ("internal", ()),
     "rust-tests": ("test", ()),
@@ -50,7 +49,6 @@ FEATURE_CONTRACT: dict[str, tuple[str, tuple[str, ...]]] = {
     "experimental": (
         "meta",
         (
-            "internal_af_xdp_experimental",
             "internal_wiedemann",
             "internal_avx10_preview",
         ),

@@ -188,7 +188,7 @@ PRs that break the consolidation principles (e.g., re-adding `src/fec/*` trees) 
 
 
 ### Issue Reporting & Repro Steps
-- Use descriptive titles, include platform, CPU arch, and relevant features/modes (e.g., FEC mode, MASQUE, `io_uring`, internal AF_XDP experimental builds)
+- Use descriptive titles, include platform, CPU arch, and relevant features/modes (e.g., FEC mode, MASQUE, or `io_uring`)
 - Provide exact commands and configs used (`config/quicfuscate.toml` snippet or flags)
 - Attach logs if possible (sanitize secrets)
 - For performance regressions, include throughput/latency numbers and hardware

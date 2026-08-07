@@ -232,19 +232,6 @@ else
       "test:rt-io-hotpath-kernel-integration" "io_uring,rust-tests"
 fi
 
-# Test XDP fast path (Linux)
-echo -e "\n> Testing XDP Fast Path..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    run_verified_target \
-      rt-transport-xdp \
-      xdp_rejects_zero_frame_size \
-      rust-tests,internal_af_xdp_experimental
-else
-    record_platform_skip \
-      "rt-transport-xdp" "host_os_not_linux" "test:rt-transport-xdp" \
-      "rust-tests,internal_af_xdp_experimental"
-fi
-
 echo -e "\n> Testing Anti-Replay Strike Register..."
 run_cargo test --features rust-tests --test rt-anti-replay -- --nocapture
 

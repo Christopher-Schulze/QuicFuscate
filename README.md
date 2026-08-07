@@ -64,7 +64,7 @@ QuicFuscate is a stealth transport and VPN runtime built on a custom QUIC-based 
 - AEAD selection at runtime (`Aegis128L` family, `Morus1280_128`) with automatic CPU feature detection;
   PFS by default via ephemeral X25519 key exchange
 - Hybrid FEC (Adaptive RLNC + Tetrys-like Streaming) with ownership-preserving zero-overhead receive at 0% loss; escalates seamlessly under loss up to Wiedemann (GF(2^8), bitsliced, multi-U/block-BM with Rayon parallelization) and streaming burst (1 repair per N sources, partial-recovery toggle, SIMD-optimized GF(2^16) nibble paths)
-- Zero-copy I/O with tunable memory pool and optional io_uring UDP fast path (Linux); AF_XDP support is experimental and opt-in behind `internal_af_xdp_experimental`
+- Zero-copy I/O with tunable memory pool and optional io_uring UDP fast path (Linux)
 - Optional NAT traversal path discovery is default-off and reason-gated for connectivity fallback, roaming, or explicit mesh experiments; it is not a baseline stealth layer
 - Active-probe mitigation with detector-driven escalation and Reality fallback proxying to avoid protocol disclosure under active scans
 - Adaptive StealthBrain control loop for ACK policy, timing/padding shaping, MASQUE preference hints, and FEC interval/redundancy hints
@@ -106,8 +106,6 @@ QuicFuscate organizes its runtime into four explicit layers. This layering defin
 ### 4. Compat/Test/Experimental
 - compatibility surfaces, test parity checks, and explicitly feature-gated experimental code
 - examples:
-  - internal AF_XDP experiment hooks
-  - AF_XDP code behind `internal_af_xdp_experimental`
   - archived legacy MASQUE sources under `archive/`
   - `rust-tests` / `benches` hooks
 
@@ -184,7 +182,7 @@ AEGIS-128L and MORUS-1280-128 are the production AEAD ciphers; the runtime selec
 - **Adaptive Compression (zstd Policy)**: Runtime compression decisions use payload size and link signals (RTT/loss/bandwidth), with optional dictionary-based paths and telemetry counters<br>
 - **Zero-Copy Architecture**: Minimizes memory allocations for maximum throughput
   - Lock-free buffer pool with tunables `--pool-capacity` and `--pool-block`<br>
-- **UDP Fast Path**: Portable batching (sendmmsg/recvmmsg), GSO/GRO (Linux), and optional io_uring path for reduced syscall overhead; experimental AF_XDP support behind `internal_af_xdp_experimental`<br>
+- **UDP Fast Path**: Portable batching (sendmmsg/recvmmsg), GSO/GRO (Linux), and optional io_uring path for reduced syscall overhead<br>
 - **Tunable Memory Pool**: Pre-allocated buffers for zero-copy I/O; adjust capacity/block size per workload<br>
 - **Connection Multiplexing**: Multiple streams over a single connection<br>
 - **0-RTT Handshake**: Reduced latency for subsequent connections; protected by a SHA-256 strike register (RFC 8446 Section 8) that rejects duplicate 0-RTT packets<br>
@@ -228,7 +226,6 @@ Development focuses on hardening and operational validation across all runtime s
 ### Feature Status Highlights
 - **UDP/io_uring fast path**: active
 - **Server egress network-stack normalization**: active, connection-frozen, explicit disabled passthrough
-- **AF_XDP socket code (`internal_af_xdp_experimental`)**: experimental/internal only
 
 ### Development and Review Transparency
 - Security-sensitive changes land with explicit runtime validation or fail-closed behavior, with matching documentation updates in `docs/DOCUMENTATION.md`.
@@ -300,7 +297,7 @@ QuicFuscate uses a modular, consolidated layout:
 - `src/implementations/` (client/server runtime wiring, admin HTTP, QKey registry, platform integration).
 - `src/optimize/` (CPU/SIMD dispatch, memory/telemetry/perf-focused acceleration modules).
 The project is built as a single Rust crate that exposes a library and one CLI binary (`quicfuscate` with `client` and `server` subcommands).
-The transport subsystem uses `src/transport.rs` as the module root and focused submodules under `src/transport/` (`connection/`, `packet.rs`, `frames.rs`, `recovery.rs`, `udpfast.rs`, `batch.rs`, `config.rs`, `pn.rs`, `h3.rs`, `anti_replay.rs`, `xdp.rs`, `cc/`). The `cc/` directory contains the pluggable congestion control trait and implementations (`reno.rs`, `bbr2.rs`, `bbr3.rs`, `stealth_shaper.rs`). The io_uring batch sender lives in `src/optimize/uring_batch.rs` (feature-gated, Linux-only).
+The transport subsystem uses `src/transport.rs` as the module root and focused submodules under `src/transport/` (`connection/`, `packet.rs`, `frames.rs`, `recovery.rs`, `udpfast.rs`, `batch.rs`, `config.rs`, `pn.rs`, `h3.rs`, `anti_replay.rs`, `cc/`). The `cc/` directory contains the pluggable congestion control trait and implementations (`reno.rs`, `bbr2.rs`, `bbr3.rs`, `stealth_shaper.rs`). The io_uring batch sender lives in `src/optimize/uring_batch.rs` (feature-gated, Linux-only); UDP/GSO compatibility helpers are test-only.
 
 ## Technical Specifications
 

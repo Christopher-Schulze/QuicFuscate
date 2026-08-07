@@ -72,13 +72,13 @@ else
   append_item "xdp_public_token_removed" "fail" "$PUBLIC_XDP_TOKEN_REFS"
 fi
 
-STALE_XDP_FEATURE_REFS=$(rg -n --no-messages "\\baf_xdp_experimental\\b" README.md docs/DOCUMENTATION.md || true)
-if [[ -z "$STALE_XDP_FEATURE_REFS" ]]; then
-  pass "README/docs use the internal_af_xdp_experimental feature name consistently"
-  append_item "xdp_internal_feature_naming" "ok" "no stale af_xdp_experimental naming in public docs"
+REMOVED_AF_XDP_REFS=$(rg -n --no-messages "internal_af_xdp_experimental|run_xdp_experimental_socket_probe|SockaddrXdp|XdpSocket" Cargo.toml README.md docs/DOCUMENTATION.md docs/MAP.md src/transport.rs src/transport/xdp.rs scripts/tests/rust || true)
+if [[ -z "$REMOVED_AF_XDP_REFS" ]]; then
+  pass "Retained AF_XDP implementation and feature claims are removed"
+  append_item "xdp_internal_surface_removed" "ok" "no AF_XDP implementation, feature, probe, or runtime claim remains"
 else
-  fail_critical "README/docs still use stale af_xdp_experimental naming"
-  append_item "xdp_internal_feature_naming" "fail" "$STALE_XDP_FEATURE_REFS"
+  fail_critical "Retained AF_XDP implementation or feature claims remain"
+  append_item "xdp_internal_surface_removed" "fail" "$REMOVED_AF_XDP_REFS"
 fi
 
 ACCELERATE_PUBLIC_DOC_REFS=$(rg -n --no-messages "use quicfuscate::accelerate::(brain|iter|sort|string|transport_io)" README.md docs/DOCUMENTATION.md || true)
@@ -1027,10 +1027,10 @@ fi
 
 XDP_EXPERIMENTAL_OWNER_REFS=$(rg -n --no-messages "xdp::linux::XdpSocket" src scripts/tests/rust | rg -v "^src/transport.rs:" || true)
 if [[ -z "$XDP_EXPERIMENTAL_OWNER_REFS" ]]; then
-  pass "experimental AF_XDP constructor surface remains owned only by transport root"
-  append_item "xdp_experimental_owner_reachability" "ok" "no direct xdp::linux::XdpSocket references outside src/transport.rs"
+  pass "experimental AF_XDP constructor surface is removed"
+  append_item "xdp_experimental_owner_reachability" "ok" "no xdp::linux::XdpSocket constructor surface remains"
 else
-  fail_critical "experimental AF_XDP constructor surface has escaped the transport root owner"
+  fail_critical "removed AF_XDP constructor surface still has direct references"
   append_item "xdp_experimental_owner_reachability" "fail" "$XDP_EXPERIMENTAL_OWNER_REFS"
 fi
 

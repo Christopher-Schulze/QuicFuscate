@@ -125,7 +125,6 @@ tun-windows = []
 tun-ios = []
 
 # --- Internal / experimental features ---
-internal_af_xdp_experimental = []
 internal_wiedemann = []
 internal_avx10_preview = []
 # Post-quantum key exchange: removed in TODO-286 (code + deps were orphaned).
@@ -141,7 +140,7 @@ simd-selfcheck = []
 
 # --- Meta-features for convenience ---
 test-suite = ["rust-tests", "benches"]
-experimental = ["internal_af_xdp_experimental", "internal_wiedemann", "internal_avx10_preview"]
+experimental = ["internal_wiedemann", "internal_avx10_preview"]
 
 [profile.dev]
 opt-level = 0
@@ -487,11 +486,6 @@ required-features = ["rust-tests"]
 name = "rt-transport-udpfast"
 path = "scripts/tests/rust/rt-transport-udpfast.rs"
 required-features = ["rust-tests"]
-
-[[test]]
-name = "rt-transport-xdp"
-path = "scripts/tests/rust/rt-transport-xdp.rs"
-required-features = ["rust-tests", "internal_af_xdp_experimental"]
 
 [[test]]
 name = "rt-transpose-parity"

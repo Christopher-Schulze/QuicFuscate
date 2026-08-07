@@ -102,7 +102,6 @@ echo "  ARM SIMD blocks: $(count_matches 'target_arch.*aarch64' src/ --glob '*.r
 echo -e "\n> Feature gates:"
 echo "  aes (hw): $(count_matches 'feature.*\"aes\"' src/ --glob '*.rs') uses"
 echo "  io_uring: $(count_matches 'feature.*io_uring' src/ --glob '*.rs') uses"
-echo "  internal_af_xdp_experimental: $(count_matches 'feature.*internal_af_xdp_experimental' src/ --glob '*.rs') uses"
 echo "  benches: $(count_matches 'feature.*benches' src/ --glob '*.rs') uses"
 
 echo -e "\n+===============================================================+"
