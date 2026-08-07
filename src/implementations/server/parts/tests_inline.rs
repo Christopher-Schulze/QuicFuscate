@@ -1321,6 +1321,49 @@ mod tests {
         assert!(metrics.load(Ordering::SeqCst));
     }
 
+    /// Direct `stop()` must signal every auxiliary service, not only the drain paths.
+    ///
+    /// The async drain and live-shutdown paths already called `shutdown_all()`, but direct stop
+    /// did not, so admin, web, and metrics listeners could stay alive holding their ports and
+    /// serving stale state while the runtime published Stopped.
+    #[tokio::test]
+    async fn direct_stop_signals_every_registered_service_and_is_idempotent() {
+        let server_config =
+            ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
+        let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let mut runtime = ServerRuntime::new_standalone_default(
+            EngineConfig::default(),
+            server_config,
+            None,
+            crate::optimize::OptimizeConfig::default(),
+            blocked_ips,
+            qkey_registry,
+            StandaloneAdminWebBootstrap::default(),
+        )
+        .unwrap();
+
+        let admin = Arc::new(AtomicBool::new(false));
+        let admin_web = Arc::new(AtomicBool::new(false));
+        let metrics = Arc::new(AtomicBool::new(false));
+        runtime.register_admin_shutdown(admin.clone());
+        runtime.register_admin_web_shutdown(admin_web.clone());
+        runtime.register_metrics_shutdown(metrics.clone());
+
+        runtime.stop().expect("direct stop");
+
+        assert!(admin.load(Ordering::SeqCst), "direct stop must signal the admin service");
+        assert!(admin_web.load(Ordering::SeqCst), "direct stop must signal the web service");
+        assert!(metrics.load(Ordering::SeqCst), "direct stop must signal the metrics service");
+
+        // A service registered after the first stop must still be signalled by a repeated stop,
+        // and the repeat itself must stay successful.
+        let late = Arc::new(AtomicBool::new(false));
+        runtime.register_admin_shutdown(late.clone());
+        runtime.stop().expect("repeated stop stays successful");
+        assert!(late.load(Ordering::SeqCst), "a repeated stop must not skip signalling");
+    }
+
     #[tokio::test]
     async fn test_standalone_runtime_drain_rejects_new_clients_and_reports_lifecycle() {
         let engine_config = EngineConfig {

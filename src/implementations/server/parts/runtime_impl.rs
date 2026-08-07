@@ -568,6 +568,11 @@ impl ServerRuntime {
             .as_mut()
             .and_then(|live| live.live_state.stop_uring_worker());
         if self.state == ServerState::Stopped {
+            // Idempotent: signalling again is harmless and keeps a repeated stop from leaving a
+            // service that was registered after the first one.
+            if let Some(live) = self.live.as_mut() {
+                live.service_signals.shutdown_all();
+            }
             let mut cleanup_errors = Vec::new();
             if let Some(error) = tun_reader_error {
                 cleanup_errors.push(error);
@@ -588,6 +593,14 @@ impl ServerRuntime {
 
         self.state = ServerState::Stopping;
         self.shutdown.store(true, Ordering::SeqCst);
+
+        // Signal every registered auxiliary service. The async drain and live-shutdown paths
+        // already did this, but direct stop did not, so admin, web, and metrics listeners could
+        // stay alive holding their ports and serving stale state while the runtime published
+        // Stopped.
+        if let Some(live) = self.live.as_mut() {
+            live.service_signals.shutdown_all();
+        }
 
         // Close all sessions
         for id in self.domain.all_session_ids() {
