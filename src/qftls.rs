@@ -12,6 +12,9 @@ use zeroize::Zeroizing;
 use crate::error::ConnectionError;
 use crate::transport::packet::CryptoContext;
 
+/// Sensitive keying material returned by the TLS exporter.
+pub type SensitiveKeyingMaterial = Zeroizing<Vec<u8>>;
+
 static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_SERVER_IDENTITY_OVERRIDE: OnceLock<PreloadedServerIdentity> = OnceLock::new();
@@ -518,6 +521,9 @@ pub fn profile_from_fingerprint(fp: &crate::stealth::FingerprintProfile) -> TlsP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use zeroize::Zeroize;
 
     #[cfg(feature = "rcgen")]
     struct IdentityFixture {
@@ -568,6 +574,19 @@ mod tests {
 
         if std::env::var_os(CHILD_ENV).is_some() {
             let first = IdentityFixture::new("first");
+            let mismatched = IdentityFixture::new("mismatched");
+            let mismatch_error = preload_tls_server_identity(
+                first.cert_path.to_str().expect("fixture certificate path is UTF-8"),
+                mismatched.key_path.to_str().expect("fixture key path is UTF-8"),
+                true,
+            )
+            .expect_err("a certificate and unrelated private key must be rejected");
+            assert!(matches!(
+                mismatch_error,
+                ConnectionError::TlsError(message)
+                    if message.contains("correspondence validation failed")
+            ));
+
             let first_status = preload_tls_server_identity(
                 first.cert_path.to_str().expect("fixture certificate path is UTF-8"),
                 first.key_path.to_str().expect("fixture key path is UTF-8"),
@@ -655,6 +674,37 @@ mod tests {
             Err(ConnectionError::TlsError(message))
                 if message.contains("different certificate or private key")
         ));
+    }
+
+    struct ZeroizeDropProbe {
+        was_zeroized: Arc<AtomicBool>,
+    }
+
+    impl Zeroize for ZeroizeDropProbe {
+        fn zeroize(&mut self) {
+            self.was_zeroized.store(true, Ordering::Release);
+        }
+    }
+
+    impl Drop for ZeroizeDropProbe {
+        fn drop(&mut self) {
+            assert!(
+                self.was_zeroized.load(Ordering::Acquire),
+                "Zeroizing must erase the sensitive owner before its inner value drops"
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_keying_material_owner_zeroizes_before_drop() {
+        let output: SensitiveKeyingMaterial = SensitiveKeyingMaterial::new(vec![0xA5; 32]);
+        assert_eq!(output.len(), 32);
+
+        let was_zeroized = Arc::new(AtomicBool::new(false));
+        {
+            let _owner = Zeroizing::new(ZeroizeDropProbe { was_zeroized: was_zeroized.clone() });
+        }
+        assert!(was_zeroized.load(Ordering::Acquire));
     }
 
     fn client_hello_cipher_suites(frame: &[u8]) -> Vec<u16> {
@@ -1014,13 +1064,13 @@ pub trait QuicTlsProvider: Send + Sync {
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError>;
     /// Get 0-RTT keys if available
     fn get_0rtt_keys(&self) -> Option<(Vec<u8>, Vec<u8>)>;
-    /// Export keying material (for QUIC key update)
+    /// Export keying material (for QUIC key update) with an erasing owner.
     fn export_keying_material(
         &self,
         label: &[u8],
         context: &[u8],
         length: usize,
-    ) -> Result<Vec<u8>, ConnectionError>;
+    ) -> Result<SensitiveKeyingMaterial, ConnectionError>;
     /// Get transport parameters to send
     fn get_quic_transport_params(&self) -> Vec<u8>;
     /// Set peer's transport parameters
@@ -1383,7 +1433,7 @@ impl QuicTlsProvider for CombinedProvider {
         label: &[u8],
         context: &[u8],
         length: usize,
-    ) -> Result<Vec<u8>, ConnectionError> {
+    ) -> Result<SensitiveKeyingMaterial, ConnectionError> {
         self.rustls.export_keying_material(label, context, length)
     }
     fn get_quic_transport_params(&self) -> Vec<u8> {
@@ -1451,9 +1501,21 @@ mod rustls_provider {
                 "Certificate chain must not be empty".to_string(),
             ));
         }
-        PrivateKeyDer::from_pem_slice(key_pem)
+        let key = PrivateKeyDer::from_pem_slice(key_pem)
             .map_err(|error| ConnectionError::TlsError(format!("Key parse failed: {error}")))?;
-        Ok(())
+        ServerConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|error| {
+                ConnectionError::TlsError(format!("TLS protocol validation failed: {error}"))
+            })?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map(|_| ())
+            .map_err(|error| {
+                ConnectionError::TlsError(format!(
+                    "Certificate/private-key correspondence validation failed: {error}"
+                ))
+            })
     }
 
     /// Full-featured rustls QUIC TLS provider with session resumption, 0-RTT, and PQ support.
@@ -2738,16 +2800,16 @@ mod rustls_provider {
             label: &[u8],
             context: &[u8],
             length: usize,
-        ) -> Result<Vec<u8>, ConnectionError> {
+        ) -> Result<SensitiveKeyingMaterial, ConnectionError> {
             if length == 0 {
                 return Err(ConnectionError::TlsError(
                     "export_keying_material requires non-zero length".to_string(),
                 ));
             }
-            let out = vec![0u8; length];
+            let output = SensitiveKeyingMaterial::new(vec![0u8; length]);
             self.connection
                 .export_keying_material(
-                    out,
+                    output,
                     label,
                     if context.is_empty() { None } else { Some(context) },
                 )
@@ -2973,7 +3035,7 @@ impl QuicTlsProvider for RustlsProvider {
         label: &[u8],
         context: &[u8],
         length: usize,
-    ) -> Result<Vec<u8>, ConnectionError> {
+    ) -> Result<SensitiveKeyingMaterial, ConnectionError> {
         self.0.export_keying_material(label, context, length)
     }
     fn get_quic_transport_params(&self) -> Vec<u8> {

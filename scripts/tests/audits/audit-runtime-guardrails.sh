@@ -1011,6 +1011,23 @@ else
   append_item "process_memory_lock_failure_policy" "fail" "missing typed failure cause, policy decision, fallback flags, health regression, or Drop cleanup"
 fi
 
+# 4s) TLS identity publication must prove certificate/key correspondence, and
+#     exported keying material must retain a zeroizing owner at every boundary.
+if rg -F -- 'pub type SensitiveKeyingMaterial = Zeroizing<Vec<u8>>;' src/qftls.rs >/dev/null \
+  && rg -F -- 'Result<SensitiveKeyingMaterial, ConnectionError>' src/qftls.rs >/dev/null \
+  && rg -F -- '.with_single_cert(certs, key)' src/qftls.rs >/dev/null \
+  && rg -F -- 'Certificate/private-key correspondence validation failed' src/qftls.rs >/dev/null \
+  && rg -F -- 'preload_identity_duplicate_and_conflict_contract_is_isolated' src/qftls.rs >/dev/null \
+  && rg -F -- 'correspondence validation failed' src/qftls.rs >/dev/null \
+  && rg -F -- 'sensitive_keying_material_owner_zeroizes_before_drop' src/qftls.rs >/dev/null \
+  && rg -F -- 'TLS Identity Consistency and Secret Output Ownership' docs/todo/done/todo-853-tls-identity-secret-output.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
+  pass "TLS certificate/key correspondence, preload lifecycle, and zeroizing exporter ownership are wired"
+  append_item "tls_identity_and_secret_output" "ok" "rustls SPKI correspondence validation, isolated mismatch/duplicate/conflict preload coverage, and zeroizing key-export type/erasure test are present"
+else
+  fail_critical "TLS certificate/key correspondence or sensitive exporter ownership is incomplete"
+  append_item "tls_identity_and_secret_output" "fail" "missing correspondence validator, preload regression, zeroizing exporter boundary, erasure test, or documentation"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then
