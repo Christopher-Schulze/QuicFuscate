@@ -564,10 +564,17 @@ pub(crate) fn redact_state_for_disk(
                 t.has_token = true;
             }
             Err(e) => {
-                // Fail-safe: keep state functional even if the environment has no keychain.
-                t.qkey = qk;
-                t.has_token = true;
-                log::warn!("Keychain store failed for {}: {}", t.id, e);
+                // Fail closed. Writing the bearer credential into desktop_state.json kept the UI
+                // functional but turned a keychain-protected secret into a plaintext disk
+                // credential, reachable through file access, backups, and crash artifacts. A
+                // locked or missing keychain is a retryable condition, not a reason to downgrade
+                // the storage class, so the save fails and the caller can retry after recovery.
+                log::error!("Keychain store failed for {}: {}", t.id, e);
+                return Err(format!(
+                    "cannot persist state: keychain storage is unavailable for tunnel {} ({e}); \
+                     the QKey was not written to disk, retry once the keychain is reachable",
+                    t.id
+                ));
             }
         }
     }
@@ -2375,7 +2382,7 @@ mod tests {
     }
 
     #[test]
-    fn secrets_redaction_keeps_qkey_if_store_set_fails() {
+    fn secrets_redaction_fails_closed_when_the_keychain_cannot_store() {
         let store = FailingSetStore::new();
         let qk = quicfuscate::engine::qkey::generate(
             &quicfuscate::engine::qkey::QKeyConfig::new("1.2.3.4:4433", "example.com")
@@ -2400,9 +2407,58 @@ mod tests {
             settings: serde_json::json!({}),
         };
 
-        let disk = redact_state_for_disk(state, &store).expect("redact state");
-        assert_eq!(disk.tunnels[0].qkey, qk);
-        assert!(disk.tunnels[0].has_token);
+        // The old contract kept the QKey in the returned state, which the caller then serialized
+        // into desktop_state.json: a keychain-protected secret downgraded to a plaintext disk
+        // credential whenever the keychain was locked or missing.
+        let error = redact_state_for_disk(state, &store)
+            .expect_err("an unavailable keychain must fail the save, not downgrade the storage");
+        assert!(
+            error.contains("keychain storage is unavailable"),
+            "the caller needs a typed, retryable reason, got: {error}"
+        );
+        assert!(
+            !error.contains(&qk),
+            "the failure message must not leak the bearer credential it refused to persist"
+        );
+    }
+
+    /// No successful redaction may return a non-empty QKey, whatever the keychain does.
+    #[test]
+    fn no_successful_redaction_ever_returns_a_plaintext_qkey() {
+        let qk = quicfuscate::engine::qkey::generate(
+            &quicfuscate::engine::qkey::QKeyConfig::new("1.2.3.4:4433", "example.com")
+                .with_token(&"b".repeat(64)),
+        );
+        let state = PersistedState {
+            schema_version: 1,
+            tunnels: vec![PersistedTunnel {
+                id: "t1".to_string(),
+                name: "A".to_string(),
+                remote: "1.2.3.4:4433".to_string(),
+                sni: "example.com".to_string(),
+                qkey: qk.clone(),
+                created_at: test_timestamp_ms(),
+                country_code: None,
+                location: None,
+                has_token: false,
+                debug_sni_override: None,
+            }],
+            selected_tunnel_id: Some("t1".to_string()),
+            settings: serde_json::json!({}),
+        };
+
+        // Working keychain: the credential is stored there and redacted from the disk state.
+        let working = secrets::MemorySecretStore::default();
+        let disk = redact_state_for_disk(state.clone(), &working).expect("redact with a keychain");
+        assert!(disk.tunnels[0].qkey.is_empty(), "a stored QKey must never reach the disk state");
+        assert!(disk.tunnels[0].has_token, "the tunnel still has credentials, just not on disk");
+
+        // Failing keychain: no state is returned at all, so nothing can be serialized.
+        let failing = FailingSetStore::new();
+        assert!(
+            redact_state_for_disk(state, &failing).is_err(),
+            "a failing keychain must not produce a persistable state"
+        );
     }
 
     #[test]
