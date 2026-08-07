@@ -52,13 +52,63 @@ require_root() {
   fi
 }
 
+# Emit exactly PASSWORD_LENGTH characters from PASSWORD_ALPHABET, or fail with a diagnostic.
+#
+# The previous fallback piped `tr -dc` into `head -c 24` under `set -o pipefail`. `head` closes the
+# pipe once it has its bytes, so `tr` takes SIGPIPE and the pipeline fails, aborting an install
+# whose only defect was a missing OpenSSL. `tr` character classes are also locale sensitive, so a
+# non-C locale could reject bytes or admit unexpected ones.
+#
+# This reads a bounded amount of entropy directly, maps each byte into the alphabet with shell
+# arithmetic, and never depends on a pipeline exit status or on the active locale.
+PASSWORD_LENGTH=24
+PASSWORD_ALPHABET='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+
 random_password() {
   if need_cmd openssl; then
-    openssl rand -base64 32 | tr -d '=\n' | tr '+/' 'AA' | cut -c1-24
-    return 0
+    local generated
+    generated="$(openssl rand -base64 48 | tr -d '=+/\n' | cut -c1-"$PASSWORD_LENGTH")"
+    if [[ ${#generated} -eq $PASSWORD_LENGTH ]]; then
+      printf '%s' "$generated"
+      return 0
+    fi
+    echo "warning: openssl produced ${#generated} usable characters; using /dev/urandom" >&2
   fi
-  # fallback
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+
+  if [[ ! -r /dev/urandom ]]; then
+    echo "error: cannot generate an administrator password: /dev/urandom is unreadable" >&2
+    return 1
+  fi
+
+  local alphabet_len=${#PASSWORD_ALPHABET}
+  # Reject bytes at or above the largest multiple of the alphabet size so every character is
+  # equally likely; without that the low indices would be slightly favoured.
+  local ceiling=$(( 256 - (256 % alphabet_len) ))
+  local password=""
+  local attempts=0
+  local max_attempts=$(( PASSWORD_LENGTH * 64 ))
+
+  while [[ ${#password} -lt $PASSWORD_LENGTH ]]; do
+    attempts=$(( attempts + 1 ))
+    if [[ $attempts -gt $max_attempts ]]; then
+      echo "error: exhausted entropy attempts while generating an administrator password" >&2
+      return 1
+    fi
+    local octal
+    # LC_ALL=C keeps od's numeric output locale independent.
+    octal="$(LC_ALL=C od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    if [[ -z "$octal" ]]; then
+      echo "error: short read from /dev/urandom while generating an administrator password" >&2
+      return 1
+    fi
+    if [[ $octal -ge $ceiling ]]; then
+      continue
+    fi
+    local index=$(( octal % alphabet_len ))
+    password+="${PASSWORD_ALPHABET:index:1}"
+  done
+
+  printf '%s' "$password"
 }
 
 ensure_group() {

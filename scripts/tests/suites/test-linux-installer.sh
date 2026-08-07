@@ -155,8 +155,65 @@ run_static_checks() {
   bash -n "$guest_suite"
   bash -n "$host_suite"
   shellcheck -S warning "$bundle_builder" "$installer" "$guest_suite" "$host_suite"
-  printf 'bash_syntax=PASS\nshellcheck_warning=PASS\n' \
+  verify_random_password_contract "$installer"
+  printf 'bash_syntax=PASS\nshellcheck_warning=PASS\nrandom_password_contract=PASS\n' \
     >"$OUTPUT_DIR/static-checks.txt"
+}
+
+# Exercise the installer's password generator directly, on the host, without installing anything.
+#
+# The fallback runs on systems without OpenSSL during a privileged install, so a failure there
+# leaves the service unconfigured. It must produce exactly the documented length and alphabet under
+# `pipefail` and under a non-C locale, and it must do so repeatedly.
+verify_random_password_contract() {
+  local installer="$1"
+  local harness="$OUTPUT_DIR/random-password-harness.sh"
+
+  {
+    printf 'set -euo pipefail\n'
+    printf 'need_cmd() { command -v "$1" >/dev/null 2>&1; }\n'
+    sed -n '/^PASSWORD_LENGTH=/,/^}$/p' "$installer"
+    cat <<'HARNESS'
+
+expect_password() {
+  local label="$1" value="$2"
+  if [[ ${#value} -ne $PASSWORD_LENGTH ]]; then
+    echo "error: $label produced ${#value} characters, expected $PASSWORD_LENGTH" >&2
+    exit 1
+  fi
+  case "$value" in
+    *[!A-Za-z0-9]*)
+      echo "error: $label produced a character outside the documented alphabet" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# OpenSSL path, when the host has it.
+if command -v openssl >/dev/null 2>&1; then
+  expect_password "openssl path" "$(random_password)"
+fi
+
+# Fallback path: hide OpenSSL and force a non-C locale.
+need_cmd() { return 1; }
+export LC_ALL=de_DE.UTF-8
+for _ in 1 2 3 4 5; do
+  expect_password "urandom fallback" "$(random_password)"
+done
+
+# Distribution sanity: repeated generation must span most of the alphabet rather than a few bytes.
+sample=""
+for _ in $(seq 1 84); do sample+="$(random_password)"; done
+distinct="$(printf '%s' "$sample" | fold -w1 | sort -u | wc -l | tr -d ' ')"
+if [[ "$distinct" -lt 55 ]]; then
+  echo "error: fallback covered only $distinct of 62 alphabet characters" >&2
+  exit 1
+fi
+echo "random_password_contract=PASS distinct=$distinct"
+HARNESS
+  } >"$harness"
+
+  bash "$harness" >"$OUTPUT_DIR/random-password.txt"
 }
 
 verify_alma_key() {
