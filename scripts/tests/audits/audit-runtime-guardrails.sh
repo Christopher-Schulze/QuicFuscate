@@ -726,6 +726,42 @@ else
   append_item "wfp_cleanup_ownership" "fail" "missing retained owner state, fault-injected tests, safety contract, CI gate, or legacy state-clearing pattern"
 fi
 
+# 4l) The interface/platform negative-proof owner must emit one explicit
+#     evidence schema. Local tests may pass, but unavailable native fault
+#     lanes remain declared as unavailable rather than being inferred green.
+if rg -F -- 'write_interface_platform_negative_proof()' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'schema=quicfuscate.interface_platform_negative_proof.v1' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'interface-platform-negative-proof.json' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'wintun_native_cleanup_fault_status=UNAVAILABLE' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'wfp_native_cleanup_fault_status=UNAVAILABLE' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'Record interface and platform negative-proof boundary' \
+    .github/workflows/ci.yml >/dev/null \
+  && rg -F -- 'schema = "quicfuscate.interface_platform_negative_proof.v1"' \
+    .github/workflows/ci.yml >/dev/null \
+  && rg -F -- 'wintun_native_cleanup_fault_status = "UNAVAILABLE"' \
+    .github/workflows/ci.yml >/dev/null \
+  && rg -F -- 'wfp_native_cleanup_fault_status = "UNAVAILABLE"' \
+    .github/workflows/ci.yml >/dev/null \
+  && rg -F -- 'requires injectable Win32 SetEvent CloseHandle FreeLibrary failures' \
+    .github/workflows/ci.yml >/dev/null \
+  && rg -F -- 'requires BFE or Fwpm failure injection plus residue verification' \
+    .github/workflows/ci.yml >/dev/null \
+  && rg -F -- 'interface_platform_negative_proof.v1' docs/DOCUMENTATION.md docs/MAP.md \
+    >/dev/null \
+  && rg -F -- 'status: BLOCKED' docs/todo/todo-848-interface-platform-negative-proof.md \
+    >/dev/null; then
+  pass "Interface and platform negative-proof matrix declares local, conditional, and unavailable evidence"
+  append_item "interface_platform_negative_proof_matrix" "ok" "exact local fault targets, host skips, Windows boundary statuses, evidence schema, and documentation are wired"
+else
+  fail_critical "Interface and platform negative-proof evidence matrix is incomplete or can overclaim unavailable native proof"
+  append_item "interface_platform_negative_proof_matrix" "fail" "missing manifest schema, explicit unavailable status, workflow boundary, or TODO-848 reconciliation"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

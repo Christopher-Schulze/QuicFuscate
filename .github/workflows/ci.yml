@@ -318,6 +318,33 @@ jobs:
             -LiteralPath "scripts/out/tests/wintun-native/windows-runtime.json" `
             -Encoding utf8
 
+      - name: Record interface and platform negative-proof boundary
+        if: always()
+        shell: pwsh
+        run: |
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          $evidence = [ordered]@{
+            schema = "quicfuscate.interface_platform_negative_proof.v1"
+            status = "BOUNDARY_DECLARED"
+            git_sha = $env:GITHUB_SHA
+            host_os = "windows"
+            host_arch = $architecture
+            generic_interface_status = "EXECUTED_BY_WINDOWS_CORE_LIBRARY"
+            unix_syscall_status = "NOT_APPLICABLE"
+            wintun_deterministic_status = "EXECUTED_BY_WINDOWS_CORE_LIBRARY"
+            wintun_native_cleanup_fault_status = "UNAVAILABLE"
+            wintun_native_cleanup_fault_reason = "requires injectable Win32 SetEvent CloseHandle FreeLibrary failures"
+            wfp_deterministic_status = "EXECUTED_BY_EXACT_CI_STEP"
+            wfp_native_cleanup_fault_status = "UNAVAILABLE"
+            wfp_native_cleanup_fault_reason = "requires BFE or Fwpm failure injection plus residue verification"
+            unsupported_isa_status = "HOST_CONDITIONAL"
+            native_prerequisites = "administrator_verified_wintun_dll_base_filtering_engine"
+          }
+          New-Item -ItemType Directory -Force -Path "scripts/out/tests/wintun-native" | Out-Null
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content `
+            -LiteralPath "scripts/out/tests/wintun-native/interface-platform-negative-proof.json" `
+            -Encoding utf8
+
       - name: Lint Windows Wintun core library
         run: cargo clippy --locked --lib --features tun-windows,rust-tests -- -D warnings
 
