@@ -5,6 +5,43 @@ use std::sync::Arc;
 
 const MAX_FRAME_DATA_LEN: usize = 64 * 1024;
 const MAX_ACK_BLOCKS: usize = MAX_FRAME_DATA_LEN / 2;
+const MAX_TWO_BYTE_VARINT: usize = 0x3fff;
+
+#[inline]
+fn checked_len_add(total: usize, value: usize) -> Result<usize, ConnectionError> {
+    total.checked_add(value).ok_or(ConnectionError::InvalidFrame)
+}
+
+#[inline]
+fn checked_len_sum(parts: &[usize]) -> Result<usize, ConnectionError> {
+    parts.iter().try_fold(0usize, |total, value| checked_len_add(total, *value))
+}
+
+#[inline]
+fn checked_u64_len(len: usize) -> Result<u64, ConnectionError> {
+    u64::try_from(len).map_err(|_| ConnectionError::InvalidFrame)
+}
+
+#[inline]
+fn checked_two_byte_len(len: usize) -> Result<u64, ConnectionError> {
+    if len > MAX_TWO_BYTE_VARINT {
+        return Err(ConnectionError::InvalidFrame);
+    }
+    checked_u64_len(len)
+}
+
+#[inline]
+fn validate_connection_id_fields(
+    seq_num: u64,
+    retire_prior_to: u64,
+    conn_id_len: usize,
+) -> Result<(), ConnectionError> {
+    if !(1..=crate::transport::MAX_CONN_ID_LEN).contains(&conn_id_len) || retire_prior_to > seq_num
+    {
+        return Err(ConnectionError::InvalidFrame);
+    }
+    Ok(())
+}
 
 #[inline]
 fn check_frame_len(len: usize, remaining: usize) -> Result<(), ConnectionError> {
@@ -19,7 +56,8 @@ fn check_frame_len(len: usize, remaining: usize) -> Result<(), ConnectionError> 
 
 #[inline(always)]
 pub fn stream_frame_wire_len(stream_id: u64, offset: u64, data_len: usize) -> usize {
-    1 + varint_len(stream_id) + varint_len(offset) + 2 + data_len
+    checked_len_sum(&[1, varint_len(stream_id), varint_len(offset), 2, data_len])
+        .unwrap_or(usize::MAX)
 }
 
 #[inline(always)]
@@ -30,103 +68,137 @@ pub fn write_stream_frame(
     fin: bool,
     out: &mut [u8],
 ) -> Result<usize, ConnectionError> {
+    checked_two_byte_len(data.len())?;
     let need = stream_frame_wire_len(stream_id, offset, data.len());
-    if out.len() < need {
+    if need == usize::MAX || out.len() < need {
         return Err(ConnectionError::BufferTooShort);
     }
 
     let mut off = 0usize;
     let ty = 0x08 | 0x04 | 0x02 | if fin { 0x01 } else { 0x00 };
-    off += write_varint(ty, &mut out[off..])?;
-    off += write_varint(stream_id, &mut out[off..])?;
-    off += write_varint(offset, &mut out[off..])?;
-    off += write_varint_with_len(data.len() as u64, 2, &mut out[off..])?;
-    out[off..off + data.len()].copy_from_slice(data);
-    off += data.len();
+    write_varint_at(ty, out, &mut off)?;
+    write_varint_at(stream_id, out, &mut off)?;
+    write_varint_at(offset, out, &mut off)?;
+    write_varint_with_len_at(checked_two_byte_len(data.len())?, 2, out, &mut off)?;
+    write_bytes_at(data, out, &mut off)?;
     Ok(off)
 }
 
 #[inline(always)]
 pub fn write_padding(len: usize, out: &mut [u8]) -> Result<usize, ConnectionError> {
-    if out.len() < len {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    out[..len].fill(0x00);
+    out.get_mut(..len).ok_or(ConnectionError::BufferTooShort)?.fill(0x00);
     Ok(len)
 }
 
 #[inline(always)]
-pub fn wire_len(frame: &crate::transport::Frame<'_>) -> usize {
+pub fn wire_len(frame: &crate::transport::Frame<'_>) -> Result<usize, ConnectionError> {
     use crate::transport::Frame as F;
     match frame {
-        F::Padding { len } => *len,
-        F::Ping { .. } => 1,
+        F::Padding { len } => Ok(*len),
+        F::Ping { .. } => Ok(1),
         F::Ack { ack_delay, ranges, ecn_counts } => {
-            let mut blocks = canonical_ack_blocks(ranges);
-            if blocks.is_empty() {
-                return 0;
-            }
-            let Some(first) = blocks.pop() else {
-                return 0;
-            };
-            let largest = first.1 - 1;
-            let first_block = (first.1 - 1) - first.0;
-            let mut len = 1
-                + varint_len(largest)
-                + varint_len(*ack_delay)
-                + varint_len(blocks.len() as u64)
-                + varint_len(first_block);
-            let mut smallest_ack = first.0;
-            while let Some(block) = blocks.pop() {
-                let gap = smallest_ack - block.1 - 1;
-                let blk = (block.1 - 1) - block.0;
-                len += varint_len(gap) + varint_len(blk);
-                smallest_ack = block.0;
-            }
-            if let Some(ecn) = ecn_counts {
-                len += varint_len(ecn.ect0) + varint_len(ecn.ect1) + varint_len(ecn.ce);
-            }
-            len
+            checked_ack_wire_len(*ack_delay, ranges, ecn_counts.as_ref())
         }
-        F::ResetStream { stream_id, error_code, final_size } => {
-            1 + varint_len(*stream_id) + varint_len(*error_code) + varint_len(*final_size)
-        }
+        F::ResetStream { stream_id, error_code, final_size } => checked_len_sum(&[
+            1,
+            varint_len(*stream_id),
+            varint_len(*error_code),
+            varint_len(*final_size),
+        ]),
         F::StopSending { stream_id, error_code } => {
-            1 + varint_len(*stream_id) + varint_len(*error_code)
+            checked_len_sum(&[1, varint_len(*stream_id), varint_len(*error_code)])
         }
-        F::Crypto { offset, data } => 1 + varint_len(*offset) + 2 + data.len(),
-        F::NewToken { token } => 1 + varint_len(token.len() as u64) + token.len(),
+        F::Crypto { offset, data } => {
+            checked_two_byte_len(data.len())?;
+            checked_len_sum(&[1, varint_len(*offset), 2, data.len()])
+        }
+        F::NewToken { token } => {
+            let token_len = checked_u64_len(token.len())?;
+            checked_len_sum(&[1, varint_len(token_len), token.len()])
+        }
         F::Stream { stream_id, offset, data, .. } => {
-            stream_frame_wire_len(*stream_id, *offset, data.len())
+            checked_two_byte_len(data.len())?;
+            checked_len_sum(&[1, varint_len(*stream_id), varint_len(*offset), 2, data.len()])
         }
-        F::MaxData { max } => 1 + varint_len(*max),
-        F::MaxStreamData { stream_id, max } => 1 + varint_len(*stream_id) + varint_len(*max),
-        F::MaxStreamsBidi { max } => 1 + varint_len(*max),
-        F::MaxStreamsUni { max } => 1 + varint_len(*max),
-        F::DataBlocked { limit } => 1 + varint_len(*limit),
+        F::MaxData { max } => checked_len_sum(&[1, varint_len(*max)]),
+        F::MaxStreamData { stream_id, max } => {
+            checked_len_sum(&[1, varint_len(*stream_id), varint_len(*max)])
+        }
+        F::MaxStreamsBidi { max } => checked_len_sum(&[1, varint_len(*max)]),
+        F::MaxStreamsUni { max } => checked_len_sum(&[1, varint_len(*max)]),
+        F::DataBlocked { limit } => checked_len_sum(&[1, varint_len(*limit)]),
         F::StreamDataBlocked { stream_id, limit } => {
-            1 + varint_len(*stream_id) + varint_len(*limit)
+            checked_len_sum(&[1, varint_len(*stream_id), varint_len(*limit)])
         }
-        F::StreamsBlockedBidi { limit } => 1 + varint_len(*limit),
-        F::StreamsBlockedUni { limit } => 1 + varint_len(*limit),
+        F::StreamsBlockedBidi { limit } => checked_len_sum(&[1, varint_len(*limit)]),
+        F::StreamsBlockedUni { limit } => checked_len_sum(&[1, varint_len(*limit)]),
         F::NewConnectionId { seq_num, retire_prior_to, conn_id, reset_token: _ } => {
-            1 + varint_len(*seq_num) + varint_len(*retire_prior_to) + 1 + conn_id.len() + 16
+            validate_connection_id_fields(*seq_num, *retire_prior_to, conn_id.len())?;
+            checked_len_sum(&[
+                1,
+                varint_len(*seq_num),
+                varint_len(*retire_prior_to),
+                1,
+                conn_id.len(),
+                16,
+            ])
         }
-        F::RetireConnectionId { seq_num } => 1 + varint_len(*seq_num),
-        F::PathChallenge { .. } => 1 + 8,
-        F::PathResponse { .. } => 1 + 8,
+        F::RetireConnectionId { seq_num } => checked_len_sum(&[1, varint_len(*seq_num)]),
+        F::PathChallenge { .. } => Ok(1 + 8),
+        F::PathResponse { .. } => Ok(1 + 8),
         F::ConnectionClose { error_code, frame_type, reason } => {
-            1 + varint_len(*error_code)
-                + varint_len(*frame_type)
-                + varint_len(reason.len() as u64)
-                + reason.len()
+            let reason_len = checked_u64_len(reason.len())?;
+            checked_len_sum(&[
+                1,
+                varint_len(*error_code),
+                varint_len(*frame_type),
+                varint_len(reason_len),
+                reason.len(),
+            ])
         }
         F::ApplicationClose { error_code, reason } => {
-            1 + varint_len(*error_code) + varint_len(reason.len() as u64) + reason.len()
+            let reason_len = checked_u64_len(reason.len())?;
+            checked_len_sum(&[1, varint_len(*error_code), varint_len(reason_len), reason.len()])
         }
-        F::Datagram { data } => 1 + varint_len(data.len() as u64) + data.len(),
-        F::DatagramHeader { length } => 1 + varint_len(*length as u64),
+        F::Datagram { data } => {
+            let data_len = checked_u64_len(data.len())?;
+            checked_len_sum(&[1, varint_len(data_len), data.len()])
+        }
+        F::DatagramHeader { length } => {
+            let length = checked_u64_len(*length)?;
+            checked_len_sum(&[1, varint_len(length)])
+        }
     }
+}
+
+#[inline]
+fn write_varint_at(value: u64, out: &mut [u8], off: &mut usize) -> Result<(), ConnectionError> {
+    let tail = out.get_mut(*off..).ok_or(ConnectionError::BufferTooShort)?;
+    let written = write_varint(value, tail)?;
+    *off = off.checked_add(written).ok_or(ConnectionError::InvalidFrame)?;
+    Ok(())
+}
+
+#[inline]
+fn write_varint_with_len_at(
+    value: u64,
+    len: usize,
+    out: &mut [u8],
+    off: &mut usize,
+) -> Result<(), ConnectionError> {
+    let tail = out.get_mut(*off..).ok_or(ConnectionError::BufferTooShort)?;
+    let written = write_varint_with_len(value, len, tail)?;
+    *off = off.checked_add(written).ok_or(ConnectionError::InvalidFrame)?;
+    Ok(())
+}
+
+#[inline]
+fn write_bytes_at(bytes: &[u8], out: &mut [u8], off: &mut usize) -> Result<(), ConnectionError> {
+    let end = off.checked_add(bytes.len()).ok_or(ConnectionError::InvalidFrame)?;
+    let dst = out.get_mut(*off..end).ok_or(ConnectionError::BufferTooShort)?;
+    dst.copy_from_slice(bytes);
+    *off = end;
+    Ok(())
 }
 
 #[inline(always)]
@@ -136,7 +208,7 @@ pub fn to_bytes(
 ) -> Result<usize, ConnectionError> {
     use crate::transport::Frame as F;
     let mut off = 0usize;
-    let need = wire_len(frame);
+    let need = wire_len(frame)?;
     if out.len() < need {
         return Err(ConnectionError::BufferTooShort);
     }
@@ -145,165 +217,138 @@ pub fn to_bytes(
             return write_padding(*len, out);
         }
         F::Ping { .. } => {
-            off += write_varint(0x01, &mut out[off..])?;
+            write_varint_at(0x01, out, &mut off)?;
         }
         F::Ack { ack_delay, ranges, ecn_counts } => {
-            let mut blocks = canonical_ack_blocks(ranges);
-            if blocks.is_empty() {
-                return Err(ConnectionError::InvalidFrame);
-            }
-            let Some(first) = blocks.pop() else {
-                return Err(ConnectionError::InvalidFrame);
-            };
-            let largest = first.1 - 1;
-            let first_block = (first.1 - 1) - first.0;
+            let mut blocks = canonical_ack_blocks(ranges)?;
+            let first = blocks.pop().ok_or(ConnectionError::InvalidFrame)?;
+            let largest = first.1.checked_sub(1).ok_or(ConnectionError::InvalidFrame)?;
+            let first_block = largest.checked_sub(first.0).ok_or(ConnectionError::InvalidFrame)?;
             let ty = if ecn_counts.is_some() { 0x03 } else { 0x02 };
-            off += write_varint(ty, &mut out[off..])?;
-            off += write_varint(largest, &mut out[off..])?;
-            off += write_varint(*ack_delay, &mut out[off..])?;
-            off += write_varint(blocks.len() as u64, &mut out[off..])?;
-            off += write_varint(first_block, &mut out[off..])?;
+            write_varint_at(ty, out, &mut off)?;
+            write_varint_at(largest, out, &mut off)?;
+            write_varint_at(*ack_delay, out, &mut off)?;
+            write_varint_at(checked_u64_len(blocks.len())?, out, &mut off)?;
+            write_varint_at(first_block, out, &mut off)?;
             let mut smallest_ack = first.0;
             while let Some(block) = blocks.pop() {
-                let gap = smallest_ack - block.1 - 1;
-                let blk = (block.1 - 1) - block.0;
-                off += write_varint(gap, &mut out[off..])?;
-                off += write_varint(blk, &mut out[off..])?;
+                let gap_end = block.1.checked_add(1).ok_or(ConnectionError::InvalidFrame)?;
+                let gap = smallest_ack.checked_sub(gap_end).ok_or(ConnectionError::InvalidFrame)?;
+                let block_end = block.1.checked_sub(1).ok_or(ConnectionError::InvalidFrame)?;
+                let blk = block_end.checked_sub(block.0).ok_or(ConnectionError::InvalidFrame)?;
+                write_varint_at(gap, out, &mut off)?;
+                write_varint_at(blk, out, &mut off)?;
                 smallest_ack = block.0;
             }
             if let Some(ecn) = ecn_counts {
-                off += write_varint(ecn.ect0, &mut out[off..])?;
-                off += write_varint(ecn.ect1, &mut out[off..])?;
-                off += write_varint(ecn.ce, &mut out[off..])?;
+                write_varint_at(ecn.ect0, out, &mut off)?;
+                write_varint_at(ecn.ect1, out, &mut off)?;
+                write_varint_at(ecn.ce, out, &mut off)?;
             }
         }
         F::ResetStream { stream_id, error_code, final_size } => {
-            off += write_varint(0x04, &mut out[off..])?;
-            off += write_varint(*stream_id, &mut out[off..])?;
-            off += write_varint(*error_code, &mut out[off..])?;
-            off += write_varint(*final_size, &mut out[off..])?;
+            write_varint_at(0x04, out, &mut off)?;
+            write_varint_at(*stream_id, out, &mut off)?;
+            write_varint_at(*error_code, out, &mut off)?;
+            write_varint_at(*final_size, out, &mut off)?;
         }
         F::StopSending { stream_id, error_code } => {
-            off += write_varint(0x05, &mut out[off..])?;
-            off += write_varint(*stream_id, &mut out[off..])?;
-            off += write_varint(*error_code, &mut out[off..])?;
+            write_varint_at(0x05, out, &mut off)?;
+            write_varint_at(*stream_id, out, &mut off)?;
+            write_varint_at(*error_code, out, &mut off)?;
         }
         F::Crypto { offset, data } => {
-            off += write_varint(0x06, &mut out[off..])?;
-            off += write_varint(*offset, &mut out[off..])?;
-            off += write_varint_with_len(data.len() as u64, 2, &mut out[off..])?;
-            off += data.len().min(out[off..].len());
-            out[off - data.len()..off].copy_from_slice(data);
+            write_varint_at(0x06, out, &mut off)?;
+            write_varint_at(*offset, out, &mut off)?;
+            write_varint_with_len_at(checked_two_byte_len(data.len())?, 2, out, &mut off)?;
+            write_bytes_at(data, out, &mut off)?;
         }
         F::NewToken { token } => {
-            off += write_varint(0x07, &mut out[off..])?;
-            off += write_varint(token.len() as u64, &mut out[off..])?;
-            out[off..off + token.len()].copy_from_slice(token);
-            off += token.len();
+            write_varint_at(0x07, out, &mut off)?;
+            write_varint_at(checked_u64_len(token.len())?, out, &mut off)?;
+            write_bytes_at(token, out, &mut off)?;
         }
         F::Stream { stream_id, offset, data, fin } => {
-            off += write_stream_frame(*stream_id, *offset, data, *fin, &mut out[off..])?;
+            let tail = out.get_mut(off..).ok_or(ConnectionError::BufferTooShort)?;
+            let written = write_stream_frame(*stream_id, *offset, data, *fin, tail)?;
+            off = off.checked_add(written).ok_or(ConnectionError::InvalidFrame)?;
         }
         F::MaxData { max } => {
-            off += write_varint(0x10, &mut out[off..])?;
-            off += write_varint(*max, &mut out[off..])?;
+            write_varint_at(0x10, out, &mut off)?;
+            write_varint_at(*max, out, &mut off)?;
         }
         F::MaxStreamData { stream_id, max } => {
-            off += write_varint(0x11, &mut out[off..])?;
-            off += write_varint(*stream_id, &mut out[off..])?;
-            off += write_varint(*max, &mut out[off..])?;
+            write_varint_at(0x11, out, &mut off)?;
+            write_varint_at(*stream_id, out, &mut off)?;
+            write_varint_at(*max, out, &mut off)?;
         }
         F::MaxStreamsBidi { max } => {
-            off += write_varint(0x12, &mut out[off..])?;
-            off += write_varint(*max, &mut out[off..])?;
+            write_varint_at(0x12, out, &mut off)?;
+            write_varint_at(*max, out, &mut off)?;
         }
         F::MaxStreamsUni { max } => {
-            off += write_varint(0x13, &mut out[off..])?;
-            off += write_varint(*max, &mut out[off..])?;
+            write_varint_at(0x13, out, &mut off)?;
+            write_varint_at(*max, out, &mut off)?;
         }
         F::DataBlocked { limit } => {
-            off += write_varint(0x14, &mut out[off..])?;
-            off += write_varint(*limit, &mut out[off..])?;
+            write_varint_at(0x14, out, &mut off)?;
+            write_varint_at(*limit, out, &mut off)?;
         }
         F::StreamDataBlocked { stream_id, limit } => {
-            off += write_varint(0x15, &mut out[off..])?;
-            off += write_varint(*stream_id, &mut out[off..])?;
-            off += write_varint(*limit, &mut out[off..])?;
+            write_varint_at(0x15, out, &mut off)?;
+            write_varint_at(*stream_id, out, &mut off)?;
+            write_varint_at(*limit, out, &mut off)?;
         }
         F::StreamsBlockedBidi { limit } => {
-            off += write_varint(0x16, &mut out[off..])?;
-            off += write_varint(*limit, &mut out[off..])?;
+            write_varint_at(0x16, out, &mut off)?;
+            write_varint_at(*limit, out, &mut off)?;
         }
         F::StreamsBlockedUni { limit } => {
-            off += write_varint(0x17, &mut out[off..])?;
-            off += write_varint(*limit, &mut out[off..])?;
+            write_varint_at(0x17, out, &mut off)?;
+            write_varint_at(*limit, out, &mut off)?;
         }
         F::NewConnectionId { seq_num, retire_prior_to, conn_id, reset_token } => {
-            off += write_varint(0x18, &mut out[off..])?;
-            off += write_varint(*seq_num, &mut out[off..])?;
-            off += write_varint(*retire_prior_to, &mut out[off..])?;
-            off += write_varint(conn_id.len() as u64, &mut out[off..])?;
-            if out.len() < off + conn_id.len() + 16 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + conn_id.len()].copy_from_slice(conn_id);
-            off += conn_id.len();
-            out[off..off + 16].copy_from_slice(reset_token);
-            off += 16;
+            validate_connection_id_fields(*seq_num, *retire_prior_to, conn_id.len())?;
+            write_varint_at(0x18, out, &mut off)?;
+            write_varint_at(*seq_num, out, &mut off)?;
+            write_varint_at(*retire_prior_to, out, &mut off)?;
+            write_varint_at(checked_u64_len(conn_id.len())?, out, &mut off)?;
+            write_bytes_at(conn_id, out, &mut off)?;
+            write_bytes_at(reset_token, out, &mut off)?;
         }
         F::RetireConnectionId { seq_num } => {
-            off += write_varint(0x19, &mut out[off..])?;
-            off += write_varint(*seq_num, &mut out[off..])?;
+            write_varint_at(0x19, out, &mut off)?;
+            write_varint_at(*seq_num, out, &mut off)?;
         }
         F::PathChallenge { data } => {
-            off += write_varint(0x1a, &mut out[off..])?;
-            if out.len() < off + 8 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + 8].copy_from_slice(data);
-            off += 8;
+            write_varint_at(0x1a, out, &mut off)?;
+            write_bytes_at(data, out, &mut off)?;
         }
         F::PathResponse { data } => {
-            off += write_varint(0x1b, &mut out[off..])?;
-            if out.len() < off + 8 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + 8].copy_from_slice(data);
-            off += 8;
+            write_varint_at(0x1b, out, &mut off)?;
+            write_bytes_at(data, out, &mut off)?;
         }
         F::ConnectionClose { error_code, frame_type, reason } => {
-            off += write_varint(0x1c, &mut out[off..])?;
-            off += write_varint(*error_code, &mut out[off..])?;
-            off += write_varint(*frame_type, &mut out[off..])?;
-            off += write_varint(reason.len() as u64, &mut out[off..])?;
-            if out.len() < off + reason.len() {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + reason.len()].copy_from_slice(reason);
-            off += reason.len();
+            write_varint_at(0x1c, out, &mut off)?;
+            write_varint_at(*error_code, out, &mut off)?;
+            write_varint_at(*frame_type, out, &mut off)?;
+            write_varint_at(checked_u64_len(reason.len())?, out, &mut off)?;
+            write_bytes_at(reason, out, &mut off)?;
         }
         F::ApplicationClose { error_code, reason } => {
-            off += write_varint(0x1d, &mut out[off..])?;
-            off += write_varint(*error_code, &mut out[off..])?;
-            off += write_varint(reason.len() as u64, &mut out[off..])?;
-            if out.len() < off + reason.len() {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + reason.len()].copy_from_slice(reason);
-            off += reason.len();
+            write_varint_at(0x1d, out, &mut off)?;
+            write_varint_at(*error_code, out, &mut off)?;
+            write_varint_at(checked_u64_len(reason.len())?, out, &mut off)?;
+            write_bytes_at(reason, out, &mut off)?;
         }
         F::Datagram { data } => {
-            off += write_varint(0x31, &mut out[off..])?;
-            off += write_varint(data.len() as u64, &mut out[off..])?;
-            if out.len() < off + data.len() {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + data.len()].copy_from_slice(data);
-            off += data.len();
+            write_varint_at(0x31, out, &mut off)?;
+            write_varint_at(checked_u64_len(data.len())?, out, &mut off)?;
+            write_bytes_at(data, out, &mut off)?;
         }
         F::DatagramHeader { length } => {
-            off += write_varint(0x31, &mut out[off..])?;
-            off += write_varint(*length as u64, &mut out[off..])?;
+            write_varint_at(0x31, out, &mut off)?;
+            write_varint_at(checked_u64_len(*length)?, out, &mut off)?;
         }
     }
     Ok(off)
@@ -319,16 +364,56 @@ pub fn batch_encode_frames(
     let mut pos = 0;
 
     for frame in frames {
-        let len = to_bytes(frame, &mut out[pos..])?;
+        let tail = out.get_mut(pos..).ok_or(ConnectionError::BufferTooShort)?;
+        let len = to_bytes(frame, tail)?;
         offsets.push(len);
-        pos += len;
+        pos = pos.checked_add(len).ok_or(ConnectionError::InvalidFrame)?;
     }
 
     Ok(offsets)
 }
 
 #[inline(always)]
-fn canonical_ack_blocks(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+fn checked_ack_wire_len(
+    ack_delay: u64,
+    ranges: &[(u64, u64)],
+    ecn_counts: Option<&crate::transport::EcnCounts>,
+) -> Result<usize, ConnectionError> {
+    let mut blocks = canonical_ack_blocks(ranges)?;
+    let first = blocks.pop().ok_or(ConnectionError::InvalidFrame)?;
+    let largest = first.1.checked_sub(1).ok_or(ConnectionError::InvalidFrame)?;
+    let first_block = largest.checked_sub(first.0).ok_or(ConnectionError::InvalidFrame)?;
+    let mut len = checked_len_sum(&[
+        1,
+        varint_len(largest),
+        varint_len(ack_delay),
+        varint_len(checked_u64_len(blocks.len())?),
+        varint_len(first_block),
+    ])?;
+    let mut smallest_ack = first.0;
+    while let Some(block) = blocks.pop() {
+        let gap_end = block.1.checked_add(1).ok_or(ConnectionError::InvalidFrame)?;
+        let gap = smallest_ack.checked_sub(gap_end).ok_or(ConnectionError::InvalidFrame)?;
+        let block_end = block.1.checked_sub(1).ok_or(ConnectionError::InvalidFrame)?;
+        let block_len = block_end.checked_sub(block.0).ok_or(ConnectionError::InvalidFrame)?;
+        len = checked_len_add(len, varint_len(gap))?;
+        len = checked_len_add(len, varint_len(block_len))?;
+        smallest_ack = block.0;
+    }
+    if let Some(ecn) = ecn_counts {
+        len = checked_len_add(len, varint_len(ecn.ect0))?;
+        len = checked_len_add(len, varint_len(ecn.ect1))?;
+        len = checked_len_add(len, varint_len(ecn.ce))?;
+    }
+    Ok(len)
+}
+
+#[inline(always)]
+fn canonical_ack_blocks(ranges: &[(u64, u64)]) -> Result<Vec<(u64, u64)>, ConnectionError> {
+    if ranges.iter().any(|(start, end)| start >= end) {
+        return Err(ConnectionError::InvalidFrame);
+    }
+
     #[cfg(target_arch = "x86_64")]
     {
         let matrix =
@@ -336,11 +421,11 @@ fn canonical_ack_blocks(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
         if ranges.len() >= 8 && matrix.avx512_ack {
             // SAFETY: `avx512_ack` proves AVX-512F and AVX-512VL at runtime,
             // matching the callee's target-feature contract.
-            return unsafe { crate::simd::x86_ack::canonical_ack_blocks_avx512(ranges) };
+            return Ok(unsafe { crate::simd::x86_ack::canonical_ack_blocks_avx512(ranges) });
         }
         if ranges.len() >= 4 && matrix.avx2 {
             // SAFETY: `avx2` proves the AVX2 target-feature contract.
-            return unsafe { crate::simd::x86_ack::canonical_ack_blocks_avx2(ranges) };
+            return Ok(unsafe { crate::simd::x86_ack::canonical_ack_blocks_avx2(ranges) });
         }
     }
 
@@ -350,12 +435,12 @@ fn canonical_ack_blocks(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
             && crate::simd::FeatureDetector::instance().has_feature(crate::simd::CpuFeature::SVE2)
         {
             unsafe {
-                return canonical_ack_blocks_sve2(ranges);
+                return Ok(canonical_ack_blocks_sve2(ranges));
             }
         }
     }
 
-    canonical_ack_blocks_scalar(ranges)
+    Ok(canonical_ack_blocks_scalar(ranges))
 }
 
 fn canonical_ack_blocks_scalar(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
@@ -488,6 +573,10 @@ impl<'a> Cursor<'a> {
         self.buf.len().saturating_sub(self.off)
     }
     #[inline(always)]
+    fn tail(&self) -> Result<&'a [u8], ConnectionError> {
+        self.buf.get(self.off..).ok_or(ConnectionError::BufferTooShort)
+    }
+    #[inline(always)]
     fn peek_u8(&self) -> Result<u8, ConnectionError> {
         if self.remaining() < 1 {
             Err(ConnectionError::BufferTooShort)
@@ -498,25 +587,31 @@ impl<'a> Cursor<'a> {
     #[inline(always)]
     fn get_u8(&mut self) -> Result<u8, ConnectionError> {
         let v = self.peek_u8()?;
-        self.off += 1;
+        self.off = self.off.checked_add(1).ok_or(ConnectionError::InvalidFrame)?;
         Ok(v)
     }
     #[inline(always)]
     fn get_varint(&mut self) -> Result<u64, ConnectionError> {
-        let (v, n) = read_varint(&self.buf[self.off..])?;
-        self.off += n;
+        let tail = self.tail()?;
+        let (v, n) = read_varint(tail)?;
+        if n == 0 || n > tail.len() {
+            return Err(ConnectionError::InvalidPacket);
+        }
+        self.off = self.off.checked_add(n).ok_or(ConnectionError::InvalidFrame)?;
         Ok(v)
     }
     #[inline(always)]
     fn get_bytes(&mut self, len: usize) -> Result<&'a [u8], ConnectionError> {
-        if self.remaining() < len {
-            Err(ConnectionError::BufferTooShort)
-        } else {
-            let s = &self.buf[self.off..self.off + len];
-            self.off += len;
-            Ok(s)
-        }
+        let end = self.off.checked_add(len).ok_or(ConnectionError::InvalidFrame)?;
+        let bytes = self.buf.get(self.off..end).ok_or(ConnectionError::BufferTooShort)?;
+        self.off = end;
+        Ok(bytes)
     }
+}
+
+#[inline]
+fn checked_varint_usize(value: u64) -> Result<usize, ConnectionError> {
+    usize::try_from(value).map_err(|_| ConnectionError::InvalidFrame)
 }
 
 #[inline(always)]
@@ -531,8 +626,8 @@ pub fn from_bytes<'a>(
         0x00 => {
             let mut len = 1usize;
             while c.remaining() > 0 && c.buf[c.off] == 0x00 {
-                c.off += 1;
-                len += 1;
+                c.off = c.off.checked_add(1).ok_or(ConnectionError::InvalidFrame)?;
+                len = len.checked_add(1).ok_or(ConnectionError::InvalidFrame)?;
             }
             F::Padding { len }
         }
@@ -545,13 +640,17 @@ pub fn from_bytes<'a>(
             let ack_delay = c.get_varint()?;
             let num_blocks = c.get_varint()?;
             let max_blocks = c.remaining() / 2;
-            if num_blocks > max_blocks as u64 || num_blocks > MAX_ACK_BLOCKS as u64 {
+            if num_blocks > checked_u64_len(max_blocks)?
+                || num_blocks > checked_u64_len(MAX_ACK_BLOCKS)?
+            {
                 return Err(ConnectionError::InvalidFrame);
             }
             let num_blocks_usize =
                 usize::try_from(num_blocks).map_err(|_| ConnectionError::InvalidFrame)?;
             let first_block = c.get_varint()?;
-            let mut ranges = Vec::with_capacity(num_blocks_usize + 1);
+            let range_capacity =
+                num_blocks_usize.checked_add(1).ok_or(ConnectionError::InvalidFrame)?;
+            let mut ranges = Vec::with_capacity(range_capacity);
             let mut smallest_ack =
                 largest_ack.checked_sub(first_block).ok_or(ConnectionError::InvalidFrame)?;
             let mut largest = largest_ack;
@@ -592,13 +691,13 @@ pub fn from_bytes<'a>(
         }
         0x06 => {
             let offset = c.get_varint()?;
-            let len = c.get_varint()? as usize;
+            let len = checked_varint_usize(c.get_varint()?)?;
             check_frame_len(len, c.remaining())?;
             let data = Cow::Borrowed(c.get_bytes(len)?);
             F::Crypto { offset, data }
         }
         0x07 => {
-            let len = c.get_varint()? as usize;
+            let len = checked_varint_usize(c.get_varint()?)?;
             check_frame_len(len, c.remaining())?;
             let token = Cow::Borrowed(c.get_bytes(len)?);
             F::NewToken { token }
@@ -613,9 +712,12 @@ pub fn from_bytes<'a>(
                         .has_feature(crate::simd::CpuFeature::NEON)
                 {
                     if let Some((sid, offv, dlen, fin, used)) =
-                        crate::simd::arm_stream::parse_stream_header(&c.buf[c.off..], ty)
+                        crate::simd::arm_stream::parse_stream_header(c.tail()?, ty)
                     {
-                        c.off += used;
+                        if used > c.remaining() {
+                            return Err(ConnectionError::BufferTooShort);
+                        }
+                        c.off = c.off.checked_add(used).ok_or(ConnectionError::InvalidFrame)?;
                         // Daten kopieren (LEN-Bit erwartet aktiv in diesem Projekt)
                         check_frame_len(dlen, c.remaining())?;
                         let data = Cow::Borrowed(c.get_bytes(dlen)?);
@@ -646,7 +748,7 @@ pub fn from_bytes<'a>(
                     offset = c.get_varint()?;
                 }
                 let data = if ty & 0x02 != 0 {
-                    let len = c.get_varint()? as usize;
+                    let len = checked_varint_usize(c.get_varint()?)?;
                     check_frame_len(len, c.remaining())?;
                     Cow::Borrowed(c.get_bytes(len)?)
                 } else {
@@ -694,6 +796,7 @@ pub fn from_bytes<'a>(
             let seq_num = c.get_varint()?;
             let retire_prior_to = c.get_varint()?;
             let cid_len = c.get_u8()? as usize;
+            validate_connection_id_fields(seq_num, retire_prior_to, cid_len)?;
             let conn_id = Cow::Borrowed(c.get_bytes(cid_len)?);
             let tok_bytes = c.get_bytes(16)?;
             let mut token_arr = [0u8; 16];
@@ -705,30 +808,30 @@ pub fn from_bytes<'a>(
             F::RetireConnectionId { seq_num }
         }
         0x1a => {
-            let data = c.get_bytes(8)?.try_into().unwrap_or([0u8; 8]);
+            let data = c.get_bytes(8)?.try_into().map_err(|_| ConnectionError::InvalidFrame)?;
             F::PathChallenge { data }
         }
         0x1b => {
-            let data = c.get_bytes(8)?.try_into().unwrap_or([0u8; 8]);
+            let data = c.get_bytes(8)?.try_into().map_err(|_| ConnectionError::InvalidFrame)?;
             F::PathResponse { data }
         }
         0x1c => {
             let error_code = c.get_varint()?;
             let frame_type = c.get_varint()?;
-            let len = c.get_varint()? as usize;
+            let len = checked_varint_usize(c.get_varint()?)?;
             check_frame_len(len, c.remaining())?;
             let reason = Cow::Borrowed(c.get_bytes(len)?);
             F::ConnectionClose { error_code, frame_type, reason }
         }
         0x1d => {
             let error_code = c.get_varint()?;
-            let len = c.get_varint()? as usize;
+            let len = checked_varint_usize(c.get_varint()?)?;
             check_frame_len(len, c.remaining())?;
             let reason = Cow::Borrowed(c.get_bytes(len)?);
             F::ApplicationClose { error_code, reason }
         }
         0x31 => {
-            let len = c.get_varint()? as usize;
+            let len = checked_varint_usize(c.get_varint()?)?;
             check_frame_len(len, c.remaining())?;
             let data = Cow::Borrowed(c.get_bytes(len)?);
             F::Datagram { data }
@@ -747,22 +850,22 @@ mod tests {
     #[test]
     fn test_wire_len_padding() {
         let frame = Frame::Padding { len: 42 };
-        assert_eq!(wire_len(&frame), 42);
+        assert_eq!(wire_len(&frame).expect("valid padding length"), 42);
 
         let frame_zero = Frame::Padding { len: 0 };
-        assert_eq!(wire_len(&frame_zero), 0);
+        assert_eq!(wire_len(&frame_zero).expect("valid zero padding length"), 0);
 
         let frame_large = Frame::Padding { len: 1024 };
-        assert_eq!(wire_len(&frame_large), 1024);
+        assert_eq!(wire_len(&frame_large).expect("valid padding length"), 1024);
     }
 
     #[test]
     fn test_wire_len_ping() {
         let frame = Frame::Ping { mtu_probe: None };
-        assert_eq!(wire_len(&frame), 1);
+        assert_eq!(wire_len(&frame).expect("valid ping length"), 1);
 
         let frame_probe = Frame::Ping { mtu_probe: Some(1200) };
-        assert_eq!(wire_len(&frame_probe), 1);
+        assert_eq!(wire_len(&frame_probe).expect("valid ping probe length"), 1);
     }
 
     #[test]
@@ -810,7 +913,7 @@ mod tests {
     fn test_roundtrip_ack_simple() {
         // Single range: packets 10..15 (exclusive end = 15)
         let frame = Frame::Ack { ack_delay: 100, ranges: vec![(10, 15)], ecn_counts: None };
-        let wlen = wire_len(&frame);
+        let wlen = wire_len(&frame).expect("valid ACK length");
         assert!(wlen > 0);
 
         let mut buf = vec![0u8; 256];
@@ -845,7 +948,7 @@ mod tests {
             data: Cow::Owned(payload.to_vec()),
             fin: false,
         };
-        let wlen = wire_len(&frame);
+        let wlen = wire_len(&frame).expect("valid STREAM length");
         assert!(wlen > 0);
 
         let mut buf = vec![0u8; 256];
@@ -929,5 +1032,67 @@ mod tests {
         // Non-overlapping ranges stay separate
         let result4 = canonical_ack_blocks_scalar(&[(1, 3), (10, 15), (20, 25)]);
         assert_eq!(result4, vec![(1, 3), (10, 15), (20, 25)]);
+    }
+
+    #[test]
+    fn malformed_ack_ranges_fail_before_serialization() {
+        for ranges in [vec![], vec![(5, 5)], vec![(8, 3)], vec![(1, 2), (7, 7)]] {
+            let frame = Frame::Ack { ack_delay: 0, ranges, ecn_counts: None };
+            let mut out = [0xA5u8; 64];
+
+            assert!(matches!(wire_len(&frame), Err(ConnectionError::InvalidFrame)));
+            assert!(matches!(to_bytes(&frame, &mut out), Err(ConnectionError::InvalidFrame)));
+            assert!(out.iter().all(|byte| *byte == 0xA5));
+        }
+    }
+
+    #[test]
+    fn new_connection_id_invariants_fail_on_parse_and_serialize() {
+        let mut invalid_cid_length = vec![0x18, 0, 0, 0];
+        invalid_cid_length.extend_from_slice(&[0u8; 16]);
+        assert!(matches!(
+            from_bytes(&invalid_cid_length, PacketType::Short),
+            Err(ConnectionError::InvalidFrame)
+        ));
+
+        let mut oversized_cid = vec![0x18, 0, 0, 21];
+        oversized_cid.extend_from_slice(&[0u8; 21]);
+        oversized_cid.extend_from_slice(&[0u8; 16]);
+        assert!(matches!(
+            from_bytes(&oversized_cid, PacketType::Short),
+            Err(ConnectionError::InvalidFrame)
+        ));
+
+        let frame = Frame::NewConnectionId {
+            seq_num: 2,
+            retire_prior_to: 3,
+            conn_id: Cow::Borrowed(&[1u8, 2, 3]),
+            reset_token: [0u8; 16],
+        };
+        let mut out = [0xA5u8; 64];
+        assert!(matches!(wire_len(&frame), Err(ConnectionError::InvalidFrame)));
+        assert!(matches!(to_bytes(&frame, &mut out), Err(ConnectionError::InvalidFrame)));
+        assert!(out.iter().all(|byte| *byte == 0xA5));
+    }
+
+    #[test]
+    fn truncated_stream_header_is_bounded() {
+        let input = [0x0e, 0x40];
+        assert!(matches!(
+            from_bytes(&input, PacketType::Short),
+            Err(ConnectionError::BufferTooShort)
+        ));
+    }
+
+    #[test]
+    fn batch_encoding_returns_capacity_error_at_cumulative_boundary() {
+        let frames = [Frame::Padding { len: 2 }, Frame::Padding { len: 2 }];
+        let pool = Arc::new(crate::optimize::MemoryPool::new(2, 64));
+        let mut out = [0u8; 3];
+
+        assert!(matches!(
+            batch_encode_frames(&frames, &mut out, pool),
+            Err(ConnectionError::BufferTooShort)
+        ));
     }
 }

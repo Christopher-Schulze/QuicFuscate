@@ -685,10 +685,11 @@ impl Connection {
             if congestion_bypass && Self::frame_is_ack_eliciting(ctrl) {
                 break;
             }
-            let need = frames::wire_len(ctrl);
+            let need = frames::wire_len(ctrl)?;
             let tag_reserve = self.tag_reserve_1rtt();
-            if out.len() >= off + need + tag_reserve {
-                off += frames::to_bytes(ctrl, &mut out[off..])?;
+            if out.len().saturating_sub(off) >= need.saturating_add(tag_reserve) {
+                let tail = out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
+                off += frames::to_bytes(ctrl, tail)?;
                 if Self::frame_is_ack_eliciting(ctrl) {
                     wrote_ack_eliciting = true;
                 }
@@ -715,11 +716,12 @@ impl Connection {
                 None
             };
             let ack = Frame::Ack { ack_delay, ranges: ack_ranges, ecn_counts: ecn };
-            let need = frames::wire_len(&ack);
+            let need = frames::wire_len(&ack)?;
             let tag_reserve = self.tag_reserve_1rtt();
             let mut ack_written = false;
-            if out.len() >= off + need + tag_reserve {
-                off += frames::to_bytes(&ack, &mut out[off..])?;
+            if out.len().saturating_sub(off) >= need.saturating_add(tag_reserve) {
+                let tail = out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
+                off += frames::to_bytes(&ack, tail)?;
                 ack_written = true;
             }
             if ack_written {
@@ -1018,7 +1020,7 @@ impl Connection {
                         return Err(crate::error::ConnectionError::Done);
                     };
                     let frame = Frame::Datagram { data: Cow::Owned(front_owned) };
-                    log::trace!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={}", frames::wire_len(&frame));
+                    log::trace!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={:?}", frames::wire_len(&frame));
                     match frames::to_bytes(&frame, &mut out[off..]) {
                         Ok(written) => {
                             log::trace!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
@@ -1290,12 +1292,13 @@ impl Connection {
         out[pn_off..pn_off + pn_len].copy_from_slice(&tmp[..pn_len]);
 
         let mut off = pn_off + pn_len;
-        let need = frames::wire_len(frame);
+        let need = frames::wire_len(frame)?;
         let tag_reserve = self.tag_reserve_1rtt();
-        if out.len() < off + need + tag_reserve {
+        if out.len().saturating_sub(off) < need.saturating_add(tag_reserve) {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
-        off += frames::to_bytes(frame, &mut out[off..])?;
+        let tail = out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
+        off += frames::to_bytes(frame, tail)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 
         let now = self.clock.now();

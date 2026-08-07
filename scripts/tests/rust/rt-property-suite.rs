@@ -44,7 +44,7 @@ proptest! {
         data in proptest::collection::vec(any::<u8>(), 0..256),
     ) {
         let frame = Frame::Stream { stream_id, offset, data: Cow::Owned(data.clone()), fin };
-        let len = wire_len(&frame);
+        let len = wire_len(&frame).expect("valid STREAM wire length");
         let mut buf = vec![0u8; len];
         let used = to_bytes(&frame, &mut buf).expect("to_bytes");
         let (decoded, used2) = from_bytes(&buf[..used], PacketType::Short).expect("from_bytes");
@@ -308,7 +308,7 @@ proptest! {
         data in proptest::collection::vec(any::<u8>(), 0..256),
     ) {
         let frame = Frame::Crypto { offset, data: Cow::Owned(data.clone()) };
-        let len = wire_len(&frame);
+        let len = wire_len(&frame).expect("valid CRYPTO wire length");
         let mut buf = vec![0u8; len];
         let used = to_bytes(&frame, &mut buf).expect("to_bytes");
         let (decoded, used2) = from_bytes(&buf[..used], PacketType::Initial).expect("from_bytes");

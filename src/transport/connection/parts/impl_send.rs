@@ -212,8 +212,8 @@ impl Connection {
                         .take_ack_at(self.config.ack_delay_exponent, now)
                 {
                     let ack = Frame::Ack { ack_delay, ranges: ack_ranges, ecn_counts: None };
-                    let need = frames::wire_len(&ack);
-                    if out.len() >= off + need + 16 {
+                    let need = frames::wire_len(&ack)?;
+                    if out.len().saturating_sub(off) >= need.saturating_add(16) {
                         off += frames::to_bytes(&ack, &mut out[off..])?;
                     }
                 }
@@ -400,7 +400,8 @@ impl Connection {
             {
                 let ping = Frame::Ping { mtu_probe: None };
                 let tag_reserve = self.tag_reserve_1rtt();
-                if out.len() >= off + frames::wire_len(&ping) + tag_reserve {
+                let ping_len = frames::wire_len(&ping)?;
+                if out.len().saturating_sub(off) >= ping_len.saturating_add(tag_reserve) {
                     self.pending_probe_spaces.remove(pos);
                     off += frames::to_bytes(&ping, &mut out[off..])?;
                     wrote_ack_eliciting = true;

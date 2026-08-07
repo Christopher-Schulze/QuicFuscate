@@ -1778,6 +1778,14 @@ The audit remains open. These reconciliations document current evidence and owne
 - Evidence boundary: the source test covers transfer classification, Unix invalid-descriptor and iovec-count checks, and the 64-bit Windows ABI boundary. Executed local evidence covers the cross-platform transfer tests and Unix checks; Windows compilation/runtime remains unavailable on the current ARM64 macOS host.
 - Verification on the current revision: release zero-copy focus `18/18`, native `unsafe_rust,compression_zstd_ffi` zero-copy focus `18/18`, default-feature release library `2424/2424`, `unsafe_rust` release library `2455/2455`, all-target checking, strict library/all-target Clippy, formatting, diff hygiene, and locked metadata pass. Linux cross-target compilation is blocked by the missing `x86_64-linux-gnu-gcc`; no Windows target is installed.
 
+## Transport Frame Boundary Wiring (2026-08-07, TODO-840)
+
+- Frame length admission: `transport::frames::wire_len()` validates malformed ACK ranges, exact two-byte CRYPTO/STREAM payload limits, New Connection ID length and retirement ordering, and checked aggregate lengths before `to_bytes()` writes anything.
+- Parser admission: `Cursor` uses checked varint and byte-tail access; ARM NEON/SVE2 stream parsing validates every decoder-reported byte count and the caller rejects any cursor advance beyond the remaining input before borrowing payload bytes.
+- Output admission: `write_varint_at()` and `write_bytes_at()` centralize checked output tails, while `batch_encode_frames()` validates each cumulative position before slicing the caller buffer. The compatibility `Arc<MemoryPool>` argument remains allocation-free.
+- Regression surfaces: malformed ACK, truncated STREAM, invalid New Connection ID, capacity-bound batch, scalar frame round-trip, and ARM parser-boundary cases are present in `src/transport/frames.rs`, `src/simd/arm_stream.rs`, and `scripts/tests/rust/rt-transport-frames-roundtrip.rs`.
+- Current gate boundary: formatting, diff hygiene, locked metadata, and ARM64 library checking pass. Focused test execution is pending because local free space remains 1.8 GiB after `cargo clean`; the two pre-existing Omega project paths are dirty or stale and were not modified.
+
 ## Generic Pooled-Buffer Failure Cleanup Wiring (2026-08-06, TODO-831)
 
 - Generic allocation -> `PooledBlock { block, Arc<MemoryPool> }` -> byte-slice dereference for the active operation -> `Drop` -> `MemoryPool::free()` unless the block is deliberately transferred to a pool-aware owner.

@@ -13,26 +13,36 @@ pub fn parse_stream_header(input: &[u8], ty: u64) -> Option<(u64, u64, usize, bo
     let mut pos = 0usize;
 
     // stream_id
-    let (sid, used) = crate::simd::transport::decode_varint(&input[pos..])?;
-    pos += used;
+    let (sid, used) = decode_varint_at(input, pos)?;
+    pos = pos.checked_add(used)?;
 
     // offset (optional)
     let mut off: u64 = 0;
     if has_off {
-        let (v, u) = crate::simd::transport::decode_varint(&input[pos..])?;
+        let (v, u) = decode_varint_at(input, pos)?;
         off = v;
-        pos += u;
+        pos = pos.checked_add(u)?;
     }
 
     // length (optional; in this project LEN is set on encode paths)
     let mut len_usize: usize = 0;
     if has_len {
-        let (v, u) = crate::simd::transport::decode_varint(&input[pos..])?;
-        pos += u;
-        len_usize = v as usize;
+        let (v, u) = decode_varint_at(input, pos)?;
+        pos = pos.checked_add(u)?;
+        len_usize = usize::try_from(v).ok()?;
     }
 
     Some((sid, off, len_usize, fin, pos))
+}
+
+#[inline(always)]
+fn decode_varint_at(input: &[u8], pos: usize) -> Option<(u64, usize)> {
+    let tail = input.get(pos..)?;
+    let (value, used) = crate::simd::transport::decode_varint(tail)?;
+    if used == 0 || used > tail.len() {
+        return None;
+    }
+    Some((value, used))
 }
 
 #[cfg(test)]
@@ -55,5 +65,22 @@ mod tests {
         assert_eq!(l, 144usize);
         assert!(fin);
         assert_eq!(used, off);
+    }
+
+    #[test]
+    fn parse_header_rejects_truncated_varint_without_advancing() {
+        let ty: u64 = 0x08 | 0x04 | 0x02;
+        assert!(parse_stream_header(&[0x40], ty).is_none());
+        assert!(parse_stream_header(&[0x00, 0x40], ty).is_none());
+    }
+
+    #[test]
+    fn parse_header_rejects_length_that_does_not_fit_usize() {
+        let ty: u64 = 0x08 | 0x02;
+        let input = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+        let parsed = parse_stream_header(&input, ty);
+        if usize::BITS < 64 {
+            assert!(parsed.is_none());
+        }
     }
 }

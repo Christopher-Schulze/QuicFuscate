@@ -796,8 +796,14 @@ impl Connection {
         if path.origin != PathValidationOrigin::PeerPath {
             return true;
         }
-        let estimated_packet_len =
-            1 + self.dcid.as_ref().len() + 4 + frames::wire_len(frame) + self.tag_reserve_1rtt();
+        let Some(frame_len) = frames::wire_len(frame).ok() else {
+            return false;
+        };
+        let estimated_packet_len = 1usize
+            .saturating_add(self.dcid.as_ref().len())
+            .saturating_add(4)
+            .saturating_add(frame_len)
+            .saturating_add(self.tag_reserve_1rtt());
         let max_factor = self.config.max_amplification_factor.max(1);
         path.sent_bytes.saturating_add(estimated_packet_len)
             <= path.received_bytes.saturating_mul(max_factor)

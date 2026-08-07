@@ -23,7 +23,7 @@ use quicfuscate::transport::{Frame, PacketType};
 use std::borrow::Cow;
 
 fn encode_frame(frame: &Frame<'_>, pkt: PacketType) -> Vec<u8> {
-    let len = wire_len(frame);
+    let len = wire_len(frame).expect("valid frame wire length");
     let mut buf = vec![0u8; len];
     let used = to_bytes(frame, &mut buf).expect("to_bytes");
     assert_eq!(used, len);
@@ -259,7 +259,7 @@ fn data_aead_force_morus_roundtrip() {
 fn replay_attack_duplicate_ack_ranges_collapsed() {
     let frame =
         Frame::Ack { ack_delay: 2, ranges: vec![(10, 12), (1, 2), (12, 13)], ecn_counts: None };
-    let len = wire_len(&frame);
+    let len = wire_len(&frame).expect("valid ACK wire length");
     let mut buf = vec![0u8; len];
     let used = to_bytes(&frame, &mut buf).expect("to_bytes");
     assert_eq!(used, len);

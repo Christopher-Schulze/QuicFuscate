@@ -7,7 +7,7 @@ use quicfuscate::transport::frames::{from_bytes, to_bytes, wire_len};
 use quicfuscate::transport::{Frame, PacketType};
 
 fn roundtrip(frame: Frame<'_>, pkt: PacketType) {
-    let len = wire_len(&frame);
+    let len = wire_len(&frame).expect("valid frame wire length");
     assert!(len > 0, "wire_len must be positive");
     let mut buf = vec![0u8; len];
     let used = to_bytes(&frame, &mut buf).expect("to_bytes");
@@ -46,7 +46,7 @@ fn roundtrip_basic_frames() {
 #[test]
 fn datagram_header_requires_payload() {
     let frame = Frame::DatagramHeader { length: 128 };
-    let len = wire_len(&frame);
+    let len = wire_len(&frame).expect("valid datagram header wire length");
     let mut buf = vec![0u8; len];
     let used = to_bytes(&frame, &mut buf).expect("to_bytes");
     assert_eq!(used, len, "encoder must fill the buffer for {:?}", frame);
@@ -59,7 +59,7 @@ fn ack_roundtrip_canonicalizes_ranges() {
     let frame =
         Frame::Ack { ack_delay: 5, ranges: vec![(10, 12), (1, 2), (12, 13)], ecn_counts: None };
 
-    let len = wire_len(&frame);
+    let len = wire_len(&frame).expect("valid ACK wire length");
     let mut buf = vec![0u8; len];
     let used = to_bytes(&frame, &mut buf).expect("to_bytes");
     assert_eq!(used, len, "encoder must fill the buffer for {:?}", frame);
@@ -77,7 +77,7 @@ fn ack_roundtrip_canonicalizes_ranges() {
 #[test]
 fn ack_in_zero_rtt_is_invalid() {
     let frame = Frame::Ack { ack_delay: 1, ranges: vec![(1, 2)], ecn_counts: None };
-    let len = wire_len(&frame);
+    let len = wire_len(&frame).expect("valid ACK wire length");
     let mut buf = vec![0u8; len];
     let used = to_bytes(&frame, &mut buf).expect("to_bytes");
     assert_eq!(used, len);
