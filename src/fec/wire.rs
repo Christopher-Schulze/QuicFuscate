@@ -665,7 +665,8 @@ impl ReceiveWindow {
             return Ok(None);
         }
         let payload_len = payload.len();
-        let mut recovered = FecPacket::from_block(global_id, payload, Arc::clone(&self.mem_pool));
+        let mut recovered = FecPacket::from_block(global_id, payload, Arc::clone(&self.mem_pool))
+            .map_err(|_| WireError::PayloadTooLarge)?;
         recovered.seq = global_id;
         output.push(recovered);
         Ok(Some(payload_len))
@@ -742,18 +743,25 @@ impl ReceiveWindow {
         if systematic && self.delivered.insert(meta.sequence) {
             let payload = systematic_payload.ok_or(WireError::InvalidSourceDatagramLength)?;
             let mut original =
-                FecPacket::from_block(meta.sequence, payload, Arc::clone(&self.mem_pool));
+                FecPacket::from_block(meta.sequence, payload, Arc::clone(&self.mem_pool))
+                    .map_err(|_| WireError::PayloadTooLarge)?;
             original.seq = meta.sequence;
             output.push(original);
             report.decoded_packets += 1;
         }
 
         if self.decoder.recovery_needed() {
-            let recovered = if self.decoder.full_recovery_needed() {
+            let mut recovered = if self.decoder.full_recovery_needed() {
                 self.decoder.get_result().unwrap_or_default()
             } else {
                 self.decoder.get_partial_result()
             };
+            // Some backends (Fountain, GF16) may have partial progress even when a full
+            // recovery attempt returns no new packets. Drain the partial queue too, so
+            // any recovered sources are not lost when the window advances.
+            if recovered.is_empty() {
+                recovered = self.decoder.get_partial_result();
+            }
             for packet in recovered {
                 if let Some(payload_len) = self.emit_recovered(packet, output)? {
                     report.decoded_packets += 1;

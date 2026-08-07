@@ -383,6 +383,14 @@ cargo build
 cargo test --features rust-tests
 ```
 
+For changes touching `src/fec/` (especially the `internal_wiedemann` path) or `src/optimize/parts/memory_pool.rs`, also run the full-feature matrix:
+```bash
+cargo check --all-features
+cargo clippy --all-features
+cargo test --all-features --lib
+cargo fmt --all -- --check
+```
+
 ### If You Must Start a Dev Server
 
 **macOS has no `timeout` command.** Use background process + sleep + kill:

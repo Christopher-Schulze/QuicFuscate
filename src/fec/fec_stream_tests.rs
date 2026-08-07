@@ -324,21 +324,21 @@ fn decoder_known_storage_returns_pool_blocks_on_teardown() {
 
     {
         let mut decoder = Decoder8::new(1, Arc::clone(&pool));
-        decoder.take_packet(FecPacket::from_block(1, &[1, 2, 3, 4], Arc::clone(&pool)));
+        decoder.take_packet(FecPacket::from_block(1, &[1, 2, 3, 4], Arc::clone(&pool)).unwrap());
         assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
     }
     assert_eq!(pool.accounting_snapshot(), before);
 
     {
         let mut decoder = Decoder4::new(1, Arc::clone(&pool));
-        decoder.take_packet(FecPacket::from_block(2, &[1, 2, 3, 4], Arc::clone(&pool)));
+        decoder.take_packet(FecPacket::from_block(2, &[1, 2, 3, 4], Arc::clone(&pool)).unwrap());
         assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
     }
     assert_eq!(pool.accounting_snapshot(), before);
 
     {
         let mut decoder = Decoder16::new(1, Arc::clone(&pool));
-        decoder.take_packet(FecPacket::from_block(3, &[1, 2, 3, 4], Arc::clone(&pool)));
+        decoder.take_packet(FecPacket::from_block(3, &[1, 2, 3, 4], Arc::clone(&pool)).unwrap());
         assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
     }
     assert_eq!(pool.accounting_snapshot(), before);
@@ -348,7 +348,7 @@ fn oversized_source_packet(id: u64, pool: &Arc<crate::optimize::MemoryPool>) -> 
     let length = pool.block_size() + 64;
     let mut data = AlignedBox::<[u8]>::slice_from_default(64, length).expect("test buffer");
     data[0] = id as u8;
-    FecPacket::new(id, Some(data), length, true, None, 0, Arc::clone(pool))
+    FecPacket::new_unchecked(id, Some(data), length, true, None, 0, Arc::clone(pool))
 }
 
 #[test]
@@ -375,12 +375,12 @@ fn block_generators_fail_closed_before_pool_transfer_for_oversized_symbols() {
     let invalid_index = u16::MAX as usize + 1;
     {
         let mut encoder = Encoder8::new(1, 2);
-        encoder.take_packet(FecPacket::from_block(13, &[1, 2, 3, 4], Arc::clone(&pool)));
+        encoder.take_packet(FecPacket::from_block(13, &[1, 2, 3, 4], Arc::clone(&pool)).unwrap());
         assert!(encoder.generate_repair_packet(invalid_index, &pool).is_none());
     }
     {
         let mut encoder = Encoder16::new(1, 2);
-        encoder.take_packet(FecPacket::from_block(14, &[1, 2, 3, 4], Arc::clone(&pool)));
+        encoder.take_packet(FecPacket::from_block(14, &[1, 2, 3, 4], Arc::clone(&pool)).unwrap());
         assert!(encoder.generate_repair_packet(invalid_index, &pool).is_none());
     }
 
@@ -396,7 +396,7 @@ fn oversized_coefficient_clone_preserves_a_valid_declared_length() {
     let mut coefficients =
         AlignedBox::<[u8]>::slice_from_default(64, coefficient_len).expect("test coefficients");
     coefficients[0] = 0xA5;
-    let packet = FecPacket::new(
+    let packet = FecPacket::new_unchecked(
         13,
         Some(data),
         1,
@@ -448,8 +448,8 @@ fn checked_decoder_constructor_rejects_invalid_dimensions() {
 fn gf16_completion_requires_active_window_membership() {
     let pool = Arc::new(crate::optimize::MemoryPool::new(4, 2_048));
     let mut decoder = Decoder16::new(2, Arc::clone(&pool));
-    decoder.take_packet(FecPacket::from_block(100, &[1], Arc::clone(&pool)));
-    decoder.take_packet(FecPacket::from_block(101, &[2], Arc::clone(&pool)));
+    decoder.take_packet(FecPacket::from_block(100, &[1], Arc::clone(&pool)).unwrap());
+    decoder.take_packet(FecPacket::from_block(101, &[2], Arc::clone(&pool)).unwrap());
 
     let data = pool.alloc();
     let mut coefficients = pool.alloc();

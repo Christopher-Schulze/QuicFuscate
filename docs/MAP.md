@@ -1799,7 +1799,7 @@ The audit remains open. These reconciliations document current evidence and owne
 ## FEC Pooled-Buffer Failure Cleanup Wiring (2026-08-06, TODO-832)
 
 - FEC allocation -> live `PooledBlock` -> checked payload/coefficient/row operation -> `FecPacket::from_pooled_blocks()` only after pool-origin and length validation. Parser, wire, GF4/GF8/GF16 encoder, decoder equation/known storage, and Fountain adapter failure paths therefore retain an explicit owner until commit.
-- Decoder maps and equation queues store `PooledBlock` rather than raw `AlignedBox`, so normal teardown and occupied-entry recovery return blocks through the originating `MemoryPool`. Fountain output rejects oversized symbols; `FecPacket::new()` remains a compatibility boundary for raw/foreign buffers with explicit direct-release behavior.
+- Decoder maps and equation queues store `PooledBlock` rather than raw `AlignedBox`, so normal teardown and occupied-entry recovery return blocks through the originating `MemoryPool`. Fountain output rejects oversized symbols; `FecPacket::new()` is a crate-internal compatibility boundary for raw/foreign buffers with explicit direct-release behavior.
 - GF16 row stride, row extent, coefficient-byte, and even-symbol arithmetic is checked before indexing or transfer. The final FEC matrix passes `252/252`; the complete debug and release libraries pass `2,436/2,436`; strict `unsafe_rust` library and all-target Clippy, formatting, diff hygiene, and locked metadata pass. TODO-833 closes the separate zero-copy DATAGRAM queue owner.
 
 ## Zero-Copy Datagram Pool Return Wiring (2026-08-06, TODO-833)

@@ -1005,6 +1005,7 @@ fn test_lazy_decoder_pending_repair_ring_reuse_under_load() {
 
 #[test]
 fn test_interleaved_decoder_get_result_skips_idle_lazy_blocks() {
+    let _env_lock = acquire_env_lock();
     let pool = make_pool();
     let mut decoder =
         super::internal::InterleavedDecoder::new(FecMode::Streaming, 8, Arc::clone(&pool), 2);
@@ -1631,6 +1632,7 @@ fn test_wire_profile_switch_commits_only_after_source_block_boundary() {
 
 #[test]
 fn test_forced_streaming_wire_profile_waits_for_large_source_block_boundary() {
+    let _env_lock = acquire_env_lock();
     let pool = make_pool();
     let mut windows = HashMap::new();
     windows.insert(FecMode::Extreme, 1024);
@@ -1660,6 +1662,7 @@ fn test_forced_streaming_wire_profile_waits_for_large_source_block_boundary() {
 
 #[test]
 fn test_extreme_disturbance_streaming_target_is_gf8_wire_safe() {
+    let _env_lock = acquire_env_lock();
     let pool = make_pool();
     let mut windows = HashMap::new();
     windows.insert(FecMode::Extreme, 1024);
@@ -1820,11 +1823,12 @@ fn test_batch_window_cleared_no_extra_repairs() {
 #[test]
 fn test_decoder_elimination_paths() {
     let _env_lock = acquire_env_lock();
+    crate::fec::gf_tables::init_tables();
     let pool = crate::optimize::global_pool();
     let k = 8;
 
     // Test Gauss elimination (forced via ENV)
-    std::env::set_var("QUICFUSCATE_FEC_DECODER", "gauss");
+    let _g_decoder_gauss = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "gauss");
     let mut decoder_gauss = Decoder8::new(k, Arc::clone(&pool));
 
     // Add k-1 systematic packets
@@ -1859,7 +1863,7 @@ fn test_decoder_elimination_paths() {
     // Test Wiedemann (if feature enabled)
     #[cfg(feature = "internal_wiedemann")]
     {
-        std::env::set_var("QUICFUSCATE_FEC_DECODER", "wiedemann");
+        let _g_decoder_wiedemann = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "wiedemann");
         let mut decoder_wm = Decoder8::new(k, Arc::clone(&pool));
 
         // Same setup
@@ -1876,15 +1880,22 @@ fn test_decoder_elimination_paths() {
         for j in 0..k {
             coeffs[j] = (j + 1) as u8;
         }
-        let repair =
-            FecPacket::new(100, Some(repair_data), 1, false, Some(coeffs), k, Arc::clone(&pool));
+        let repair = FecPacket::new(
+            (k as u64) - 1,
+            Some(repair_data),
+            1,
+            false,
+            Some(coeffs),
+            k,
+            Arc::clone(&pool),
+        );
         decoder_wm.take_packet(repair);
 
         assert!(decoder_wm.is_complete());
     }
 
     // Test auto mode with large k (should prefer Wiedemann if available)
-    std::env::set_var("QUICFUSCATE_FEC_DECODER", "auto");
+    let _g_decoder_auto = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "auto");
     let large_k = 128;
     let _decoder_auto = Decoder8::new(large_k, Arc::clone(&pool));
     // Construction succeeded; additional properties are validated in dedicated decoder tests.

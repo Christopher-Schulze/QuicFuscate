@@ -1497,6 +1497,20 @@ impl PooledBlock {
         Self { block: Some(block), pool }
     }
 
+    /// Wrap a block already allocated from `pool` so that `Drop` returns it to the pool.
+    ///
+    /// The caller must guarantee that `block` was allocated from `pool` (e.g. via `pool.alloc()`).
+    /// This is exposed as `pub(crate)` because internal modules pass their own checked-out blocks
+    /// directly into the FEC packet path.
+    pub(crate) fn from_pool_block(pool: Arc<MemoryPool>, block: AlignedBox<[u8]>) -> Self {
+        assert_eq!(
+            block.len(),
+            pool.block_size(),
+            "PooledBlock::from_pool_block: block length must match the pool block size"
+        );
+        Self { block: Some(block), pool }
+    }
+
     /// Return the originating pool for an ownership transfer inside the crate.
     pub(crate) fn pool(&self) -> Arc<MemoryPool> {
         Arc::clone(&self.pool)

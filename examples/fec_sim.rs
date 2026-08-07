@@ -52,7 +52,9 @@ fn main() {
         for j in 0..n {
             buf[j] = (i as u8).wrapping_add((j * 17) as u8);
         }
-        let pkt = FecPacket::new(source_id_start + i, Some(buf), n, true, None, 0, pool.clone());
+        let pkt =
+            FecPacket::try_new(source_id_start + i, Some(buf), n, true, None, 0, pool.clone())
+                .expect("source packet fits the pool block");
         for p in fec.on_send(pkt) {
             tx.push(p);
         }

@@ -702,19 +702,15 @@ impl Drop for FecPacket {
 }
 
 impl FecPacket {
-    /// Construct a compatibility FEC packet from raw aligned buffers.
+    /// Crate-internal compatibility constructor from raw aligned buffers.
     ///
-    /// New production paths should use [`Self::from_pooled_blocks`]. This compatibility
-    /// constructor never allocates an upsized replacement buffer. Declared lengths are bounded
-    /// to their backing buffers and systematic packets cannot retain coefficient metadata.
-    /// Invalid compatibility input is represented as a bounded packet; callers that need
-    /// rejection should use [`Self::try_new`].
-    ///
-    /// Callers are responsible for ensuring `data_len` and `coeff_len` fit within the
-    /// memory-pool block size for wire-shaped packets; this constructor does not enforce
-    /// that bound so that test paths can deliberately exercise oversized-symbol rejection
-    /// in downstream encoders.
-    pub fn new(
+    /// Production paths should use [`Self::from_pooled_blocks`]; checked public input validation is
+    /// available through [`Self::try_new`]. This constructor bounds declared lengths to their
+    /// backing buffers, normalizes systematic packets by discarding any coefficient metadata, and
+    /// panics if the bounded `data_len` or `coeff_len` exceeds the memory-pool block size. It is
+    /// `pub(crate)` because a public constructor that panics on bad input would be a DoS surface;
+    /// external callers must use the checked constructors.
+    pub(crate) fn new(
         id: u64,
         data: Option<AlignedBox<[u8]>>,
         data_len: usize,
@@ -744,6 +740,18 @@ impl FecPacket {
                 None => (None, 0),
             }
         };
+
+        assert!(
+            data_len <= mem_pool.block_size(),
+            "FecPacket::new: data_len ({data_len}) exceeds memory-pool block size ({block_size}); use try_new for checked construction",
+            block_size = mem_pool.block_size()
+        );
+        assert!(
+            coeff_len <= mem_pool.block_size(),
+            "FecPacket::new: coeff_len ({coeff_len}) exceeds memory-pool block size ({block_size}); use try_new for checked construction",
+            block_size = mem_pool.block_size()
+        );
+
         let data = data.map(|buf| SharedFecBuffer::new(buf, Arc::clone(&mem_pool)));
 
         Self {
@@ -755,6 +763,34 @@ impl FecPacket {
             coeff_len,
             mem_pool,
             seq: id, // Default: seq = id
+            timestamp: std::time::Instant::now(),
+        }
+    }
+
+    /// Unchecked constructor for test fixtures that need to deliberately create invalid
+    /// oversized packets (e.g. to verify that encoders reject them or that `Clone` bounds
+    /// coefficient length). It does not bound `data_len`/`coeff_len`, nor does it enforce the
+    /// systematic/repair coefficient contract.
+    #[cfg(test)]
+    pub(crate) fn new_unchecked(
+        id: u64,
+        data: Option<AlignedBox<[u8]>>,
+        data_len: usize,
+        is_systematic: bool,
+        coefficients: Option<AlignedBox<[u8]>>,
+        coeff_len: usize,
+        mem_pool: Arc<MemoryPool>,
+    ) -> Self {
+        let data = data.map(|buf| SharedFecBuffer::new(buf, Arc::clone(&mem_pool)));
+        Self {
+            id,
+            data,
+            data_len,
+            is_systematic,
+            coefficients,
+            coeff_len,
+            mem_pool,
+            seq: id,
             timestamp: std::time::Instant::now(),
         }
     }
@@ -783,9 +819,6 @@ impl FecPacket {
         }
         if is_systematic && (coeff_len != 0 || coefficients.is_some()) {
             return Err("systematic packet cannot carry coefficients".into());
-        }
-        if !is_systematic && (coeff_len == 0 || coefficients.is_none()) {
-            return Err("repair packet requires coefficients".into());
         }
         Ok(Self::new(
             id,
@@ -831,6 +864,9 @@ impl FecPacket {
             }
         } else if coeff_len != 0 {
             return Err("FEC coefficient length is nonzero without a coefficient block".into());
+        }
+        if is_systematic && (coeff_len != 0 || coefficients.is_some()) {
+            return Err("systematic packet cannot carry coefficients".into());
         }
 
         let mut data_raw = match data {
@@ -881,13 +917,16 @@ impl FecPacket {
     }
 
     /// Create a systematic FEC packet from a raw byte block, copying into a pool buffer.
-    /// Oversized input is rejected by [`Self::try_from_block`]; this compatibility wrapper
-    /// returns an empty packet instead of silently truncating the source.
-    pub fn from_block(id: u64, block: &[u8], mem_pool: Arc<MemoryPool>) -> Self {
-        match Self::try_from_block(id, block, Arc::clone(&mem_pool)) {
-            Ok(packet) => packet,
-            Err(_) => Self::new(id, None, 0, true, None, 0, mem_pool),
-        }
+    ///
+    /// This is a convenience wrapper around [`Self::try_from_block`] for callers that already
+    /// know the input fits a pool block. If the block is oversized, construction fails.
+    pub fn from_block(
+        id: u64,
+        block: &[u8],
+        mem_pool: Arc<MemoryPool>,
+    ) -> Result<Self, String> {
+        Self::try_from_block(id, block, Arc::clone(&mem_pool))
+            .map_err(|error| format!("from_block failed: {error}"))
     }
 
     /// Create a systematic packet or reject a symbol that cannot fit one pool block.

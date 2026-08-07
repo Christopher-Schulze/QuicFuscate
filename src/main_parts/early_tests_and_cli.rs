@@ -514,7 +514,8 @@ fn run_fec_bench(
                 block[3] = ((id >> 16) & 0xff) as u8;
                 block[4] = ((id >> 24) & 0xff) as u8;
             }
-            FecPacket::new(id, Some(block), len, true, None, 0, mem_pool.clone())
+            FecPacket::try_new(id, Some(block), len, true, None, 0, mem_pool.clone())
+                .expect("early test packet fits the pool block")
         };
 
         // optional warmup

@@ -1625,15 +1625,18 @@ impl QuicFuscateConnection {
                 }
             }
         } else {
-            let packet = FecPacket::new(
+            let mem_pool = self.optimization_manager.memory_pool().clone();
+            let data = PooledBlock::from_pool_block(Arc::clone(&mem_pool), block);
+            let packet = FecPacket::from_pooled_blocks(
                 self.packet_id_counter,
-                Some(block),
+                Some(data),
                 len,
                 true,
                 None,
                 0,
-                self.optimization_manager.memory_pool().clone(),
-            );
+                mem_pool,
+            )
+            .map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
             self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
             recovered_packets.clear();
             recovered_packets.push(packet);

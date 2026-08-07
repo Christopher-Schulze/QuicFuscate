@@ -1236,11 +1236,11 @@ impl FecConfig {
         if !self.hysteresis.is_finite() || self.hysteresis < 0.0 || self.hysteresis >= 1.0 {
             return Err("hysteresis must be between 0 (inclusive) and 1".into());
         }
-        if !self.kalman_q.is_finite() || self.kalman_q <= 0.0 {
-            return Err("kalman_q must be finite and positive".into());
+        if !(1e-8f32..=1.0f32).contains(&self.kalman_q) {
+            return Err("kalman_q must be between 1e-8 and 1.0".into());
         }
-        if !self.kalman_r.is_finite() || self.kalman_r <= 0.0 {
-            return Err("kalman_r must be finite and positive".into());
+        if !(1e-8f32..=1.0f32).contains(&self.kalman_r) {
+            return Err("kalman_r must be between 1e-8 and 1.0".into());
         }
         if matches!(self.configured_stream_every, Some(0)) {
             return Err("configured_stream_every must be > 0".into());
