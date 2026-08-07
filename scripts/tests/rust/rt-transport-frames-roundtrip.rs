@@ -1,9 +1,11 @@
 #![cfg(feature = "rust-tests")]
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use quicfuscate::error::ConnectionError;
-use quicfuscate::transport::frames::{from_bytes, to_bytes, wire_len};
+use quicfuscate::optimize::MemoryPool;
+use quicfuscate::transport::frames::{batch_encode_frames, from_bytes, to_bytes, wire_len};
 use quicfuscate::transport::{Frame, PacketType};
 
 fn roundtrip(frame: Frame<'_>, pkt: PacketType) {
@@ -84,4 +86,67 @@ fn ack_in_zero_rtt_is_invalid() {
 
     let err = from_bytes(&buf, PacketType::ZeroRTT).expect_err("ACK in 0-RTT should fail");
     assert!(matches!(err, ConnectionError::InvalidFrame));
+}
+
+#[test]
+fn malformed_ack_ranges_are_rejected_before_serialization() {
+    for ranges in [vec![], vec![(5, 5)], vec![(8, 3)], vec![(1, 2), (7, 7)]] {
+        let frame = Frame::Ack { ack_delay: 0, ranges, ecn_counts: None };
+        let mut out = [0xA5u8; 64];
+
+        assert!(matches!(wire_len(&frame), Err(ConnectionError::InvalidFrame)));
+        assert!(matches!(to_bytes(&frame, &mut out), Err(ConnectionError::InvalidFrame)));
+        assert!(out.iter().all(|byte| *byte == 0xA5));
+    }
+}
+
+#[test]
+fn malformed_connection_ids_are_rejected_before_serialization() {
+    let mut zero_length_cid = vec![0x18, 0, 0, 0];
+    zero_length_cid.extend_from_slice(&[0u8; 16]);
+    assert!(matches!(
+        from_bytes(&zero_length_cid, PacketType::Short),
+        Err(ConnectionError::InvalidFrame)
+    ));
+
+    let mut oversized_cid = vec![0x18, 0, 0, 21];
+    oversized_cid.extend_from_slice(&[0u8; 21]);
+    oversized_cid.extend_from_slice(&[0u8; 16]);
+    assert!(matches!(
+        from_bytes(&oversized_cid, PacketType::Short),
+        Err(ConnectionError::InvalidFrame)
+    ));
+
+    let frame = Frame::NewConnectionId {
+        seq_num: 2,
+        retire_prior_to: 3,
+        conn_id: Cow::Borrowed(&[1u8, 2, 3]),
+        reset_token: [0u8; 16],
+    };
+    let mut out = [0xA5u8; 64];
+    assert!(matches!(wire_len(&frame), Err(ConnectionError::InvalidFrame)));
+    assert!(matches!(to_bytes(&frame, &mut out), Err(ConnectionError::InvalidFrame)));
+    assert!(out.iter().all(|byte| *byte == 0xA5));
+}
+
+#[test]
+fn arm_stream_cursor_bounds_are_rejected() {
+    for input in [&[0x08u8][..], &[0x0E, 0x40][..], &[0x0E, 0x00, 0x40][..]] {
+        assert!(matches!(
+            from_bytes(input, PacketType::Short),
+            Err(ConnectionError::BufferTooShort)
+        ));
+    }
+}
+
+#[test]
+fn batch_encoding_rejects_cumulative_capacity_overflow() {
+    let frames = [Frame::Padding { len: 2 }, Frame::Padding { len: 2 }];
+    let pool = Arc::new(MemoryPool::new(2, 64));
+    let mut out = [0u8; 3];
+
+    assert!(matches!(
+        batch_encode_frames(&frames, &mut out, pool),
+        Err(ConnectionError::BufferTooShort)
+    ));
 }

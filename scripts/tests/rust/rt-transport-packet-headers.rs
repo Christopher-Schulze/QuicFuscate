@@ -6,6 +6,21 @@ use quicfuscate::transport::packet::{
     MAX_CID_LEN,
 };
 
+fn scalar_encode_packet_number(packet_number: u64, length: usize, output: &mut [u8]) -> usize {
+    match length {
+        1 => output[0] = packet_number as u8,
+        2 => output[..2].copy_from_slice(&(packet_number as u16).to_be_bytes()),
+        3 => {
+            output[0] = (packet_number >> 16) as u8;
+            output[1] = (packet_number >> 8) as u8;
+            output[2] = packet_number as u8;
+        }
+        4 => output[..4].copy_from_slice(&(packet_number as u32).to_be_bytes()),
+        _ => panic!("test vector length must be between 1 and 4"),
+    }
+    length
+}
+
 #[test]
 fn short_header_roundtrip() {
     let hdr = Header {
@@ -138,7 +153,18 @@ fn native_avx2_packet_number_encoding_matches_scalar_unaligned() {
             .simd_dispatch_matrix()
             .avx2
     );
-    let mut storage = [0xCCu8; 8];
-    assert_eq!(encode_pkt_num(0xA1_B2_C3_D4, 4, &mut storage[1..5]), Ok(4));
-    assert_eq!(&storage[1..5], &[0xA1, 0xB2, 0xC3, 0xD4]);
+    for (packet_number, length) in [
+        (0x00_00_00_7Fu64, 1usize),
+        (0x00_00_A1_B2u64, 2),
+        (0x00_C3_D4_E5u64, 3),
+        (0xA1_B2_C3_D4u64, 4),
+    ] {
+        let mut scalar = [0xCCu8; 8];
+        let mut actual = [0xCCu8; 8];
+        let expected_len = scalar_encode_packet_number(packet_number, length, &mut scalar[1..]);
+        assert_eq!(encode_pkt_num(packet_number, length, &mut actual[1..]), Ok(expected_len));
+        assert_eq!(&actual[1..=length], &scalar[1..=length]);
+        assert_eq!(actual[0], 0xCC);
+        assert_eq!(actual[length + 1], 0xCC);
+    }
 }

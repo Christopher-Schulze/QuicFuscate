@@ -570,6 +570,19 @@ mod tests {
         assert_eq!(&receive_buffer[..recovery_len], recovery_payload);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_batch_send_rejects_invalid_caller_fd() {
+        let destination: SocketAddr = "127.0.0.1:9".parse().expect("destination");
+        let payload = b"invalid-fd";
+        let mut batch = BatchProcessor::new();
+
+        let error = batch
+            .batch_send(-1, &[(payload.as_slice(), destination)])
+            .expect_err("invalid caller fd must fail");
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn test_windows_batch_send_preserves_destinations_and_socket_ownership() {

@@ -467,6 +467,75 @@ else
   append_item "ipv4_sockaddr_endian_pattern" "ok" "no from_ne_bytes(...).to_be() pattern found"
 fi
 
+# 4b) Shared UDP FFI metadata validators and malformed-result regressions must
+# stay present and must be executed by the transport suite.
+if rg -n --no-messages '^pub\(crate\) fn checked_syscall_count\(' src/optimize/udp.rs >/dev/null \
+  && rg -n --no-messages '^pub\(crate\) fn checked_received_len\(' src/optimize/udp.rs >/dev/null \
+  && rg -n --no-messages '^fn checked_sent_len\(' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'fn test_udp_syscall_metadata_rejects_malformed_results()' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'checked_syscall_count(3, 2)' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'checked_received_len(9, 8, 4)' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'checked_sent_len(7, 8, 2)' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'run_verified_library_target udp-syscall-metadata' scripts/tests/suites/test-transport.sh >/dev/null; then
+  pass "UDP syscall count, receive length, partial-send, batch, datagram, and address metadata guards have a wired malformed-result regression"
+  append_item "udp_malformed_metadata_regressions" "ok" "shared validators, malformed fixtures, and transport-suite execution wiring are present"
+else
+  fail_critical "UDP malformed syscall/result regression or transport-suite execution contract is missing"
+  append_item "udp_malformed_metadata_regressions" "fail" "missing shared validator, malformed fixture, or executed suite target"
+fi
+
+# 4c) Linux caller-fd failures must be exercised against the real batch path;
+# non-Linux hosts must record the platform boundary instead of compiling it out.
+if rg -F -- 'fn test_linux_batch_send_rejects_invalid_caller_fd()' src/transport/batch.rs >/dev/null \
+  && rg -F -- 'Some(libc::EBADF)' src/transport/batch.rs >/dev/null \
+  && rg -F -- 'batch-invalid-caller-fd' scripts/tests/suites/test-transport.sh >/dev/null \
+  && rg -F -- 'host_os_not_linux' scripts/tests/suites/test-transport.sh >/dev/null; then
+  pass "Linux batch caller-fd failure coverage is real and non-Linux execution is explicitly bounded"
+  append_item "batch_invalid_caller_fd_regression" "ok" "Linux EBADF regression plus explicit non-Linux platform boundary present"
+else
+  fail_critical "Linux batch caller-fd failure coverage or its platform boundary is missing"
+  append_item "batch_invalid_caller_fd_regression" "fail" "missing EBADF fixture, suite invocation, or non-Linux skip"
+fi
+
+# 4d) Transport frame malformed-input coverage must be represented in the
+# executed integration target, including the cumulative batch boundary.
+if rg -F -- 'fn malformed_ack_ranges_are_rejected_before_serialization()' \
+    scripts/tests/rust/rt-transport-frames-roundtrip.rs >/dev/null \
+  && rg -F -- 'fn malformed_connection_ids_are_rejected_before_serialization()' \
+    scripts/tests/rust/rt-transport-frames-roundtrip.rs >/dev/null \
+  && rg -F -- 'fn arm_stream_cursor_bounds_are_rejected()' \
+    scripts/tests/rust/rt-transport-frames-roundtrip.rs >/dev/null \
+  && rg -F -- 'fn batch_encoding_rejects_cumulative_capacity_overflow()' \
+    scripts/tests/rust/rt-transport-frames-roundtrip.rs >/dev/null \
+  && rg -F -- 'run_arm_transport_target rt-transport-frames-roundtrip arm_stream_cursor_bounds_are_rejected rust-tests' \
+    scripts/tests/suites/test-transport.sh >/dev/null; then
+  pass "Transport integration target covers malformed ACK/CID, ARM cursor, and cumulative batch boundaries"
+  append_item "transport_frame_malformed_regressions" "ok" "malformed frame tests and the ARM platform runner are present"
+else
+  fail_critical "Transport frame malformed-input regression or ARM platform runner is missing"
+  append_item "transport_frame_malformed_regressions" "fail" "missing malformed frame target or explicit ARM execution boundary"
+fi
+
+# 4e) The x86 packet-number lane must compile the real AVX2 target-feature
+# body, compare against scalar big-endian bytes, and use a host skip boundary.
+if rg -F -- '#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]' \
+    scripts/tests/rust/rt-transport-packet-headers.rs >/dev/null \
+  && rg -F -- 'fn native_avx2_packet_number_encoding_matches_scalar_unaligned()' \
+    scripts/tests/rust/rt-transport-packet-headers.rs >/dev/null \
+  && rg -F -- 'scalar_encode_packet_number' scripts/tests/rust/rt-transport-packet-headers.rs >/dev/null \
+  && rg -F -- '-C target-feature=+avx2' scripts/tests/suites/test-transport.sh >/dev/null \
+  && rg -F -- 'host_cpu_has_no_avx2' scripts/tests/suites/test-transport.sh >/dev/null \
+  && rg -F -- 'run_native_avx2_target rt-transport-packet-headers native_avx2_packet_number_encoding_matches_scalar_unaligned rust-tests' \
+    scripts/tests/suites/test-transport.sh >/dev/null \
+  && rg -F -- 'run_verified_target rt-packet-number-parity packet_number_decode_matches_scalar_reference rust-tests' \
+    scripts/tests/suites/test-transport.sh >/dev/null; then
+  pass "Packet-number scalar parity, unaligned output, compile-time AVX2 execution, and explicit host skips are wired"
+  append_item "transport_packet_number_native_regression" "ok" "scalar parity target plus explicit AVX2 target-feature runner present"
+else
+  fail_critical "Packet-number native AVX2 parity or its fail-closed host boundary is missing"
+  append_item "transport_packet_number_native_regression" "fail" "missing scalar parity, target-feature compile, suite runner, or skip contract"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

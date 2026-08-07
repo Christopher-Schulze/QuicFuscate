@@ -49,7 +49,8 @@ run_verified_target() {
   local target="$1"
   local expected_test_name="$2"
   local feature_set="$3"
-  local output_file="$OUTPUT_DIR/${target}.log"
+  local artifact_name="${4:-$target}"
+  local output_file="$OUTPUT_DIR/${artifact_name}.log"
   if qf_cargo_test_run_expect \
     "$output_file" "test:${target}" "$feature_set" "$expected_test_name" \
     "$expected_test_name" --release --test "$target" -- --nocapture; then
@@ -77,6 +78,91 @@ run_verified_target() {
     "command_status=int:$command_status" \
     "raw_output=$output_file"
   return "$command_status"
+}
+
+run_verified_library_target() {
+  local name="$1"
+  local expected_test_name="$2"
+  local feature_set="$3"
+  local output_file="$OUTPUT_DIR/${name}.log"
+  if qf_cargo_test_run_expect \
+    "$output_file" "lib" "$feature_set" "$expected_test_name" "$expected_test_name" \
+    --release --lib "$expected_test_name" -- --nocapture --exact; then
+    qf_json_append_object "$JSON" \
+      "name=$name" \
+      "status=PASS" \
+      "result=PASS" \
+      "reason=expected_library_test_executed" \
+      "target=lib" \
+      "feature_set=$(qf_cargo_test_feature_set "$feature_set")" \
+      "test_count=int:$QF_CARGO_TEST_COUNT" \
+      "command_status=int:0" \
+      "raw_output=$output_file"
+    return 0
+  fi
+  local command_status="$?"
+  qf_json_append_object "$JSON" \
+    "name=$name" \
+    "status=FAIL" \
+    "result=FAIL" \
+    "reason=$QF_CARGO_TEST_REASON" \
+    "target=$QF_CARGO_TEST_TARGET" \
+    "feature_set=$QF_CARGO_TEST_FEATURE_SET" \
+    "test_count=int:$QF_CARGO_TEST_COUNT" \
+    "command_status=int:$command_status" \
+    "raw_output=$output_file"
+  return "$command_status"
+}
+
+host_has_avx2() {
+  case "$(detect_os)" in
+    macos)
+      [[ "$(sysctl -n hw.optional.avx2_0 2>/dev/null || printf '0')" == "1" ]]
+      ;;
+    linux)
+      if [[ -r /proc/cpuinfo ]] && grep -Eiq '(^|[[:space:]])avx2([[:space:]]|$)' /proc/cpuinfo; then
+        return 0
+      fi
+      lscpu 2>/dev/null | grep -Eiq 'Flags:.*(^|[[:space:]])avx2([[:space:]]|$)'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+run_native_avx2_target() {
+  local target="$1"
+  local expected_test_name="$2"
+  local feature_set="$3"
+  if [[ "$(detect_arch)" != "x86_64" ]]; then
+    record_platform_skip "$target" "host_arch_not_x86_64" "test:$target" "$feature_set"
+    return 0
+  fi
+  if ! host_has_avx2; then
+    record_platform_skip "$target" "host_cpu_has_no_avx2" "test:$target" "$feature_set"
+    return 0
+  fi
+
+  local native_flags="${RUSTFLAGS_EXTRA:-}"
+  [[ -n "$native_flags" ]] && native_flags+=" "
+  native_flags+="-C target-feature=+avx2"
+  RUSTFLAGS_EXTRA="$native_flags" run_verified_target \
+    "$target" "$expected_test_name" "$feature_set" "${target}-native-avx2"
+}
+
+run_arm_transport_target() {
+  local target="$1"
+  local expected_test_name="$2"
+  local feature_set="$3"
+  case "$(detect_arch)" in
+    aarch64|arm64)
+      run_verified_target "$target" "$expected_test_name" "$feature_set" "${target}-arm"
+      ;;
+    *)
+      record_platform_skip "$target" "host_arch_not_aarch64" "test:$target" "$feature_set"
+      ;;
+  esac
 }
 
 write_uring_proof_evidence() {
@@ -243,13 +329,24 @@ run_verified_target rt-transport-connection connection_datagram_queues_and_thres
 run_verified_target rt-transport-config config_accepts_known_version rust-tests
 run_verified_target rt-transport-batch-processor batch_processor_init_acceleration_is_ok rust-tests
 run_verified_target rt-transport-frames-roundtrip roundtrip_basic_frames rust-tests
+run_arm_transport_target rt-transport-frames-roundtrip arm_stream_cursor_bounds_are_rejected rust-tests
 run_verified_target rt-transport-packet-headers short_header_roundtrip rust-tests
+run_native_avx2_target rt-transport-packet-headers native_avx2_packet_number_encoding_matches_scalar_unaligned rust-tests
+run_verified_target rt-packet-number-parity packet_number_decode_matches_scalar_reference rust-tests
 run_verified_target rt-transport-recovery recovery_counters_and_pto_progression rust-tests
 run_verified_target rt-transport-udpfast aligned_buffer_is_cacheline_aligned rust-tests
 run_verified_target rt-transport-h3 h3_send_request_returns_stream_id rust-tests
 run_verified_target rt-pnspace-ack-policy ack_elicitation_threshold_and_ranges rust-tests
 run_verified_target rt-udp-batch-send udpfast_send_batch_sends_all_packets rust-tests
 run_verified_target rt-harness-udpfast harness_udpfast_loopback_smoke rust-tests
+run_verified_library_target udp-syscall-metadata \
+  optimize::udp::tests::test_udp_syscall_metadata_rejects_malformed_results rust-tests
+if [[ "$(detect_os)" == "linux" ]]; then
+  run_verified_library_target batch-invalid-caller-fd \
+    transport::batch::tests::test_linux_batch_send_rejects_invalid_caller_fd rust-tests
+else
+  record_platform_skip "batch-invalid-caller-fd" "host_os_not_linux" "lib" "rust-tests"
+fi
 
 json_end "$JSON"
 if [[ "$URING_PROOF_FAILURE" -ne 0 ]]; then

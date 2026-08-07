@@ -635,7 +635,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_udp_syscall_metadata_is_bounded() {
+    fn test_udp_syscall_metadata_rejects_malformed_results() {
         assert_eq!(checked_syscall_count(2, 2).expect("valid count"), 2);
         assert_eq!(checked_received_len(0, 0, 0).expect("valid zero length"), 0);
 
@@ -644,6 +644,38 @@ mod tests {
 
         let length_error = checked_received_len(9, 8, 4).expect_err("length must fit buffer");
         assert_eq!(length_error.kind(), std::io::ErrorKind::InvalidData);
+
+        let partial_error = checked_sent_len(7, 8, 2).expect_err("partial send must fail");
+        assert_eq!(partial_error.kind(), std::io::ErrorKind::WriteZero);
+
+        let batch_error =
+            validate_batch_len(UDP_BATCH_LIMIT + 1).expect_err("batch must be bounded");
+        assert_eq!(batch_error.kind(), std::io::ErrorKind::InvalidInput);
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let datagram_error =
+                validate_datagram_len(u32::MAX as usize + 1).expect_err("datagram must fit u32");
+            assert_eq!(datagram_error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+
+        let address: SocketAddr = "127.0.0.1:4433".parse().expect("test address");
+        let (storage, length) = sockaddr_storage_for(address);
+        let parsed =
+            socket_addr_from_storage(&storage, usize::try_from(length).expect("sockaddr length"))
+                .expect("valid address metadata");
+        assert_eq!(parsed, address);
+
+        let mut unknown_family = storage;
+        // SAFETY: the storage is correctly aligned and large enough for the ABI sockaddr
+        // prefix; changing only the family keeps the malformed fixture in-bounds.
+        unsafe {
+            (*(std::ptr::addr_of_mut!(unknown_family) as *mut libc::sockaddr)).sa_family = 0;
+        }
+        let family_error =
+            socket_addr_from_storage(&unknown_family, std::mem::size_of::<libc::sockaddr_in>())
+                .expect_err("unknown address family must fail");
+        assert_eq!(family_error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[cfg(unix)]
