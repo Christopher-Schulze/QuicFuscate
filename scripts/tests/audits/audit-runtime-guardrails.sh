@@ -918,6 +918,66 @@ else
   append_item "privilege_post_drop_state_proof" "fail" "missing four-field Linux proof, partial state, isolated regain check, probe evidence, or non-Linux fail-closed boundary"
 fi
 
+# 4q) Embedded and standalone server startup must share one memory-lock
+#     policy. The process/pool order is startup-owned, and standalone reload
+#     must reject changes that cannot be applied to an existing runtime.
+MEMORY_LOCK_POLICY_ORDER_ERRORS="$(python3 - <<'PY'
+from pathlib import Path
+
+checks = [
+    (
+        Path("src/engine/engine.rs"),
+        "MemoryLockPolicy::from_security(&self.config.security).apply_before_tls_identity(false);",
+        "let _pool = crate::optimize::global_pool();",
+        "embedded server memory policy is not applied before the global pool",
+    ),
+    (
+        Path("src/main_parts/late_tests_and_mlock.rs"),
+        "memory_lock_policy.apply_before_tls_identity(defer_process_memory_lock);",
+        "quicfuscate::implementations::server::load_server_identity(",
+        "standalone memory policy is not applied before TLS identity loading",
+    ),
+    (
+        Path("src/implementations/server/parts/runtime_impl.rs"),
+        "current_memory_lock_policy.reject_standalone_reload(candidate_memory_lock_policy)?;",
+        "apply_runtime_config_reload(",
+        "standalone reload applies runtime changes before checking startup-owned memory policy",
+    ),
+]
+errors = []
+for path, first, second, message in checks:
+    text = path.read_text(encoding="utf-8")
+    first_index = text.find(first)
+    second_index = text.find(second)
+    if first_index < 0 or second_index < 0 or first_index >= second_index:
+        errors.append(message)
+print("; ".join(errors))
+PY
+)"
+if [[ -z "$MEMORY_LOCK_POLICY_ORDER_ERRORS" ]] \
+  && rg -F -- 'pub struct MemoryLockPolicy' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'pub fn apply_before_tls_identity(' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'pub fn apply_deferred_process_memory_lock(' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'MemoryPool::set_lock_blocks(self.lock_blocks)' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn security_settings_map_to_startup_policy_without_normalization()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn standalone_reload_rejects_each_changed_startup_setting()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn embedded_startup_policy_applies_pool_setting_before_identity_boundary()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn standalone_restart_reapplies_pool_setting_instead_of_retaining_previous_value()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn test_runtime_reload_rejects_startup_owned_memory_settings()' src/implementations/server/parts/tests_inline.rs >/dev/null \
+  && rg -F -- 'lock_memory = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
+  && rg -F -- 'lock_blocks = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
+  && rg -F -- 'startup-owned' config/server-linux.default.toml >/dev/null \
+  && rg -F -- 'MemoryLockPolicy::from_security' src/main_parts/late_tests_and_mlock.rs >/dev/null \
+  && rg -F -- 'reject_standalone_reload(candidate_memory_lock_policy)?' src/implementations/server/parts/runtime_impl.rs >/dev/null \
+  && ! rg -F -- 'fn apply_process_memory_lock' src/main_parts/late_tests_and_mlock.rs >/dev/null \
+  && rg -F -- 'Shared server startup memory-lock policy' docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
+  pass "Embedded and standalone server memory-lock policy, ordering, reload rejection, and tests are wired"
+  append_item "embedded_memory_lock_policy_propagation" "ok" "shared process/pool policy, pre-identity ordering, deferred privilege boundary, standalone reload rejection, and policy tests are present"
+else
+  fail_critical "Embedded and standalone server memory-lock policy propagation or ordering is incomplete"
+  append_item "embedded_memory_lock_policy_propagation" "fail" "shared policy, source-order checks, reload rejection, tests, or documentation missing: ${MEMORY_LOCK_POLICY_ORDER_ERRORS:-contract probe failed}"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

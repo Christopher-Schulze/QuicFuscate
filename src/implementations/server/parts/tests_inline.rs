@@ -1429,6 +1429,70 @@ mod tests {
         std::fs::remove_file(config_path).unwrap();
     }
 
+    #[tokio::test]
+    async fn test_runtime_reload_rejects_startup_owned_memory_settings() {
+        static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let config_path = std::env::temp_dir().join(format!(
+            "quicfuscate-reload-memory-lock-{}-{}.toml",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut config_file =
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&config_path).unwrap();
+        config_file
+            .write_all(b"[security]\nlock_memory = false\nlock_blocks = false\n")
+            .unwrap();
+        drop(config_file);
+
+        let server_config =
+            ServerConfig { listen: "127.0.0.1:0".parse().unwrap(), ..ServerConfig::default() };
+        let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let qkey_registry = Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None)));
+        let mut runtime = ServerRuntime::new_standalone_default(
+            EngineConfig::default(),
+            server_config,
+            None,
+            crate::optimize::OptimizeConfig::default(),
+            blocked_ips,
+            qkey_registry,
+            StandaloneAdminWebBootstrap::default(),
+        )
+        .unwrap();
+        let transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let mut runtime_config = PreparedStandaloneRuntimeConfig::new(
+            Some(config_path.clone()),
+            transport,
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            StealthConfig::default(),
+            None,
+            vec![FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Linux)],
+            0,
+            OwnedRuntimeStealthPolicy::from_runtime_policy(RuntimeStealthPolicy {
+                profile: BrowserProfile::Chrome,
+                os: OsProfile::Linux,
+                disable_doh: true,
+                doh_provider: "",
+                disable_fronting: true,
+                front_domain: &[],
+                disable_http3: true,
+            }),
+            false,
+        );
+        runtime.sync_standalone_runtime_metadata(&runtime_config.standalone_runtime_metadata);
+        runtime.start().unwrap();
+
+        runtime.reload_standalone_runtime(&mut runtime_config, "test");
+
+        assert_eq!(runtime.state(), ServerState::Running);
+        assert!(runtime.engine_config.security.lock_memory);
+        assert!(runtime.engine_config.security.lock_blocks);
+        assert_eq!(runtime.graceful_shutdown.grace(), Duration::from_secs(5));
+        runtime.stop().unwrap();
+        std::fs::remove_file(config_path).unwrap();
+    }
+
     #[test]
     fn test_server_config_from_listen_addr_resolves_socket() {
         let config = server_config_from_listen_addr(

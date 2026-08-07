@@ -1706,6 +1706,11 @@ impl ServerRuntime {
             engine_config
                 .validate()
                 .map_err(|error| format!("Engine config validation failed: {error}"))?;
+            let current_memory_lock_policy =
+                crate::memory_lock::MemoryLockPolicy::from_security(&self.engine_config.security);
+            let candidate_memory_lock_policy =
+                crate::memory_lock::MemoryLockPolicy::from_security(&engine_config.security);
+            current_memory_lock_policy.reject_standalone_reload(candidate_memory_lock_policy)?;
             apply_runtime_config_reload(
                 cfg_path,
                 runtime_metadata.reload_policy.fec_mode_override,

@@ -433,7 +433,7 @@ fn validate_pool_configuration(capacity: usize, block_size: usize) -> Result<(),
 }
 
 #[cfg(test)]
-static LOCK_BLOCKS_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static LOCK_BLOCKS_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Default)]
 struct BlockLockLedger {

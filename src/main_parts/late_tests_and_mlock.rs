@@ -640,129 +640,6 @@ mtu = 100
     }
 }
 
-#[cfg(unix)]
-fn mlockall_flags_for_limit(current_limit: libc::rlim_t) -> libc::c_int {
-    if current_limit == libc::RLIM_INFINITY {
-        libc::MCL_CURRENT | libc::MCL_FUTURE
-    } else {
-        libc::MCL_CURRENT
-    }
-}
-
-#[cfg(unix)]
-fn current_memlock_limit() -> std::io::Result<libc::rlim_t> {
-    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
-    // SAFETY: getrlimit initializes the pointed-to rlimit structure on success.
-    let result = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, limit.as_mut_ptr()) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: a zero return from getrlimit guarantees the structure was initialized.
-    Ok(unsafe { limit.assume_init() }.rlim_cur)
-}
-
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct MemoryLockOutcome {
-    flags: libc::c_int,
-    current_limit: Option<libc::rlim_t>,
-}
-
-#[cfg(unix)]
-fn lock_process_memory() -> std::io::Result<MemoryLockOutcome> {
-    let current_limit = current_memlock_limit().ok();
-    let flags = current_limit.map(mlockall_flags_for_limit).unwrap_or(libc::MCL_CURRENT);
-
-    // SAFETY: flags contain only MCL_CURRENT and, when the process has an
-    // unlimited memlock budget, MCL_FUTURE.
-    if unsafe { libc::mlockall(flags) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    Ok(MemoryLockOutcome { flags, current_limit })
-}
-
-#[cfg(unix)]
-fn apply_process_memory_lock() {
-    quicfuscate::qftls::set_process_memory_lock_covers_future_allocations(false);
-    match lock_process_memory() {
-        Ok(outcome) => {
-            quicfuscate::qftls::set_process_memory_lock_covers_future_allocations(
-                outcome.flags & libc::MCL_FUTURE != 0,
-            );
-            match outcome.current_limit {
-                Some(limit) if outcome.flags == libc::MCL_CURRENT => {
-                    log::warn!(
-                        "RLIMIT_MEMLOCK is finite ({} bytes); locking current pages only to avoid future allocation failures. Set LimitMEMLOCK=infinity for full process locking.",
-                        limit
-                    );
-                }
-                None => {
-                    log::warn!(
-                        "RLIMIT_MEMLOCK query failed. Locked current pages only to avoid future allocation failures."
-                    );
-                }
-                _ => {}
-            }
-            info!("Process memory locked against swap (mlockall flags={})", outcome.flags);
-        }
-        Err(error) => {
-            quicfuscate::qftls::set_process_memory_lock_covers_future_allocations(false);
-            log::warn!(
-                "mlockall failed: {}. Process memory may be swapped to disk. \
-                 Set LimitMEMLOCK=infinity in systemd or run with CAP_IPC_LOCK.",
-                error
-            );
-        }
-    }
-}
-
-#[cfg(all(test, unix))]
-mod memory_lock_tests {
-    use super::*;
-
-    #[test]
-    fn finite_memlock_limit_never_enables_future_allocation_locking() {
-        assert_eq!(mlockall_flags_for_limit(8 * 1024 * 1024), libc::MCL_CURRENT);
-        assert_eq!(
-            mlockall_flags_for_limit(libc::RLIM_INFINITY),
-            libc::MCL_CURRENT | libc::MCL_FUTURE
-        );
-    }
-
-    #[test]
-    fn production_memory_lock_boundary_locks_pages_or_reports_supported_limit_error() {
-        match lock_process_memory() {
-            Ok(outcome) => {
-                assert_ne!(outcome.flags & libc::MCL_CURRENT, 0);
-
-                #[cfg(target_os = "linux")]
-                {
-                    let status = std::fs::read_to_string("/proc/self/status")
-                        .expect("read current process status after mlockall");
-                    let locked_kib = status
-                        .lines()
-                        .find_map(|line| line.strip_prefix("VmLck:"))
-                        .and_then(|value| value.split_whitespace().next())
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .expect("parse VmLck from /proc/self/status");
-                    assert!(locked_kib > 0, "mlockall succeeded but VmLck stayed zero");
-                }
-
-                // SAFETY: this test owns the process-wide lock it just acquired.
-                assert_eq!(unsafe { libc::munlockall() }, 0, "munlockall failed");
-            }
-            Err(error) => {
-                let raw_error = error.raw_os_error();
-                assert!(
-                    matches!(raw_error, Some(code) if code == libc::EPERM || code == libc::ENOMEM || code == libc::EAGAIN || code == libc::ENOSYS),
-                    "unexpected mlockall failure: {error}"
-                );
-            }
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_server(
     listen_addr: &str,
@@ -957,28 +834,17 @@ async fn run_server(
         }
     }
 
-    // Apply memory-locking settings from SecurityConfig (TODO-516).
-    // MemoryPool locking remains active before key material is loaded. Linux
+    // Apply the shared memory-lock policy before TLS identity loading. Linux
     // process-wide locking is deferred until after a configured UID/GID drop:
     // carrying MCL_CURRENT mappings through glibc's multi-threaded setxid
     // broadcast is not safe on the production ARM64 runtime.
-    let (lock_memory, lock_blocks) = engine_cfg_opt
+    let memory_lock_policy = engine_cfg_opt
         .as_ref()
-        .map(|cfg| (cfg.security.lock_memory, cfg.security.lock_blocks))
-        .unwrap_or((true, true)); // defaults: lock on server
+        .map(|cfg| quicfuscate::memory_lock::MemoryLockPolicy::from_security(&cfg.security))
+        .unwrap_or_default();
     let defer_process_memory_lock =
-        cfg!(target_os = "linux") && privilege_target.is_some() && lock_memory;
-    if lock_memory && !defer_process_memory_lock {
-        #[cfg(unix)]
-        {
-            apply_process_memory_lock();
-        }
-        #[cfg(not(unix))]
-        {
-            log::debug!("mlockall not supported on this platform; lock_memory ignored");
-        }
-    }
-    quicfuscate::optimize::MemoryPool::set_lock_blocks(lock_blocks);
+        cfg!(target_os = "linux") && privilege_target.is_some() && memory_lock_policy.lock_memory;
+    memory_lock_policy.apply_before_tls_identity(defer_process_memory_lock);
 
     let mut config = match new_runtime_transport_config() {
         Ok(c) => c,
@@ -992,7 +858,7 @@ async fn run_server(
         &mut config,
         cert_path,
         key_path,
-        lock_memory,
+        memory_lock_policy.lock_memory,
     )?;
 
     if let Some(cfg_path) = config_path.as_ref() {
@@ -1110,7 +976,7 @@ async fn run_server(
         match finalization {
             Ok((report, verified_threads)) => {
                 if defer_process_memory_lock {
-                    apply_process_memory_lock();
+                    memory_lock_policy.apply_deferred_process_memory_lock();
                 }
                 info!(
                     "Privileges finalized across {} threads: uid={}/{}/{:?}, gid={}/{}/{:?}, capabilities=0, no_new_privileges=true",

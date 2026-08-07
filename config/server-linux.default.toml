@@ -203,6 +203,19 @@ max_segments = 8
 flush_timeout_ms = 5000
 
 # ==============================================================================
+# SECURITY AND MEMORY LOCKING
+# ==============================================================================
+# These startup-owned settings are shared by the standalone CLI and embedded
+# server engine. A standalone reload that changes either field requires restart.
+# On Linux with a configured UID/GID transition, the TLS key is individually
+# locked before the transition and process-wide locking is applied after the
+# verified privilege state.
+
+[security]
+lock_memory = true
+lock_blocks = true
+
+# ==============================================================================
 # REALITY-GRADE TLS MIMIKRY (TODO-415 Phase 1)
 # ==============================================================================
 # When enabled, the server caches TLS handshake material from a cover site

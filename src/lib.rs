@@ -230,6 +230,9 @@ pub mod instrumentation;
 pub mod interface;
 /// Production logging: structured JSON, size-rotating file appender, and RFC 5424 syslog.
 pub mod logging;
+/// Shared server startup policy for process and pooled-buffer memory locking.
+#[doc(hidden)]
+pub mod memory_lock;
 /// Runtime metrics collection - counters, gauges, and histograms for all subsystems.
 pub mod metrics;
 /// Performance optimization subsystem - memory pools, crypto planning, transport tuning.

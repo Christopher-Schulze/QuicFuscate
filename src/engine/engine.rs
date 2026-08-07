@@ -22,6 +22,7 @@ use crate::implementations::server::{
     ServerRuntime,
 };
 use crate::interface::app_config::AppConfig;
+use crate::memory_lock::MemoryLockPolicy;
 use crate::transport::Config;
 use crate::transport::{self, CongestionControlAlgorithm};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
@@ -870,6 +871,10 @@ impl QuicFuscateEngine {
         let old_state = state;
         self.set_state(EngineState::Starting);
         self.start_time = Some(self.clock.now());
+
+        if self.config.engine.mode == EngineMode::Server {
+            MemoryLockPolicy::from_security(&self.config.security).apply_before_tls_identity(false);
+        }
 
         // Initialize memory pool for optimized memory management
         let _pool = crate::optimize::global_pool();
