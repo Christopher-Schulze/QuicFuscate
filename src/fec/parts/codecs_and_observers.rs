@@ -709,6 +709,11 @@ impl FecPacket {
     /// to their backing buffers and systematic packets cannot retain coefficient metadata.
     /// Invalid compatibility input is represented as a bounded packet; callers that need
     /// rejection should use [`Self::try_new`].
+    ///
+    /// Callers are responsible for ensuring `data_len` and `coeff_len` fit within the
+    /// memory-pool block size for wire-shaped packets; this constructor does not enforce
+    /// that bound so that test paths can deliberately exercise oversized-symbol rejection
+    /// in downstream encoders.
     pub fn new(
         id: u64,
         data: Option<AlignedBox<[u8]>>,

@@ -34,7 +34,7 @@ impl ZeroEncoder {
     #[inline(always)]
     pub fn take_packet(&mut self, _p: FecPacket) {
         // ZERO-OVERHEAD: Just count, no processing
-        self.packets_passed += 1;
+        self.packets_passed = self.packets_passed.saturating_add(1);
     }
 
     /// Always returns None - zero mode never generates repair packets.
@@ -92,8 +92,9 @@ impl ZeroDecoder {
     pub fn take_packet(&mut self, p: FecPacket) {
         // ZERO-OVERHEAD: Just track sequence for gap detection
         if p.is_systematic {
-            // Check for gaps (non-contiguous sequence)
-            if self.last_seq > 0 && p.seq > self.last_seq + 1 {
+            // Check for gaps (non-contiguous sequence). Use saturating_add to stay
+            // defined when last_seq reaches u64::MAX.
+            if self.last_seq > 0 && p.seq > self.last_seq.saturating_add(1) {
                 self.loss_detected = true;
             }
             self.last_seq = p.seq;
@@ -659,8 +660,9 @@ impl LazyDecoder {
         let (Some(first), Some(last)) = (self.seen_seq_min, self.seen_seq_max) else {
             return false;
         };
-        // Gap exists if we've seen N sequences but range is > N
-        last.saturating_sub(first).saturating_add(1) as usize > self.seen_seqs.len()
+        // Gap exists if we've seen N sequences but range is > N.
+        // Compare in u64 to avoid narrowing the span on 32-bit targets.
+        last.saturating_sub(first).saturating_add(1) > self.seen_seqs.len() as u64
     }
 
     /// Flush pending repairs to actual decoder (when loss detected)
@@ -678,6 +680,10 @@ impl LazyDecoder {
 
     #[inline]
     fn push_pending_source(&mut self, source: FecPacket) {
+        if self.k == 0 {
+            // Rejected/Zero decoder: drop the packet to avoid unbounded buffering.
+            return;
+        }
         if self.k > 0 && self.pending_sources.len() >= self.k {
             self.pending_sources.pop_front();
         }
@@ -685,6 +691,13 @@ impl LazyDecoder {
     }
 
     pub fn take_packet(&mut self, p: FecPacket) {
+        // A rejected or Zero decoder has nothing to recover. Drop packets
+        // immediately to keep seen_seqs / pending_sources / pending_repairs
+        // from growing without bound.
+        if self.k == 0 {
+            return;
+        }
+
         if p.is_systematic {
             let block_seq = self.source_block_seq(p.seq);
             // Source packet - track sequence
@@ -1057,8 +1070,9 @@ impl InterleavedDecoder {
     pub fn take_packet(&mut self, p: FecPacket) {
         // Extract block index from seq (low 4 bits for repair, high bits for source)
         let block_idx = if p.is_systematic {
-            // Source packets: use seq modulo depth
-            (p.seq as usize) % self.depth
+            // Source packets: use seq modulo depth, computed in u64 so 32-bit targets
+            // do not truncate the sequence before the modulo.
+            (p.seq % self.depth as u64) as usize
         } else {
             // Repair packets: block index encoded in low 4 bits
             (p.seq & 0x0F) as usize
@@ -1357,7 +1371,11 @@ impl ModeManager {
     /// Force a specific mode and window, bypassing hysteresis and cooldown.
     pub fn force_state(&mut self, mode: FecMode, window: usize) {
         self.current_mode = mode;
-        self.window_size = window.max(1).min(wire::MAX_SOURCE_COUNT as usize);
+        self.window_size = if mode == FecMode::Zero {
+            0
+        } else {
+            window.max(1).min(wire::MAX_SOURCE_COUNT as usize)
+        };
         self.last_switch_time = crate::time_source::now_instant();
         self.window_history.push_back(self.window_size);
         if self.window_history.len() > 10 {
@@ -1853,5 +1871,62 @@ mod tests {
         let (k, n) = enc.params();
         assert_eq!(k, 8);
         assert_eq!(n, 12);
+    }
+
+    #[test]
+    fn test_mode_manager_force_state_preserves_zero_semantics() {
+        let policy = test_policy();
+        let mut mgr = ModeManager::with_runtime_policy(FecMode::Zero, 0.1, &policy);
+        mgr.force_state(FecMode::Zero, 5);
+        assert_eq!(mgr.current_window(), 0);
+        mgr.force_state(FecMode::Zero, 0);
+        assert_eq!(mgr.current_window(), 0);
+        mgr.force_state(FecMode::Normal, 0);
+        assert_eq!(mgr.current_window(), 1);
+        mgr.force_state(FecMode::Strong, crate::fec::wire::MAX_SOURCE_COUNT as usize + 10);
+        assert_eq!(mgr.current_window(), crate::fec::wire::MAX_SOURCE_COUNT as usize);
+    }
+
+    #[test]
+    fn test_lazy_decoder_rejected_zero_does_not_buffer() {
+        let mut policy = test_policy();
+        policy.lazy_enabled = true;
+        let pool = make_pool();
+        let mut dec = LazyDecoder::new_with_policy(FecMode::Zero, 0, Arc::clone(&pool), &policy);
+
+        for i in 0..100u64 {
+            dec.take_packet(mk_src_packet(i, 100, &pool));
+        }
+
+        for i in 0..50u64 {
+            let repair = FecPacket::new(1000 + i, None, 0, false, None, 0, Arc::clone(&pool));
+            dec.take_packet(repair);
+        }
+
+        assert_eq!(dec.pending_sources_len(), 0);
+        assert_eq!(dec.pending_repairs_len(), 0);
+        assert_eq!(dec.seen_seqs_len(), 0);
+        assert!(dec.get_result().is_some_and(|v| v.is_empty()));
+        assert!(dec.get_partial_result().is_empty());
+    }
+
+    #[test]
+    fn test_interleaved_decoder_routes_large_source_sequences_in_u64() {
+        let mut policy = test_policy();
+        policy.interleave_enabled = true;
+        policy.lazy_enabled = true;
+        let pool = make_pool();
+        let mut dec =
+            InterleavedDecoder::new_with_policy(FecMode::Normal, 4, Arc::clone(&pool), 2, &policy);
+
+        // u64::MAX is odd, so with depth 2 it must route to block 1.
+        dec.take_packet(mk_src_packet(u64::MAX, 100, &pool));
+        assert_eq!(dec.blocks[1].pending_sources_len(), 1);
+        assert_eq!(dec.blocks[0].pending_sources_len(), 0);
+
+        // u64::MAX - 1 is even, so it must route to block 0.
+        dec.take_packet(mk_src_packet(u64::MAX - 1, 100, &pool));
+        assert_eq!(dec.blocks[0].pending_sources_len(), 1);
+        assert_eq!(dec.blocks[1].pending_sources_len(), 1);
     }
 }

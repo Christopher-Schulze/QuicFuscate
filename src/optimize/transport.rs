@@ -1075,8 +1075,11 @@ mod tests {
 
     #[test]
     fn test_decode_packet_number_4byte() {
+        // 0x1_DEAD_BEEF is more than half a 2^32 window ahead of expected+1
+        // (0x1_0000_0001), so the standard QUIC decoder wraps it back by one
+        // range to the nearest candidate, 0xDEADBEEF.
         let decoded = decode_packet_number(0xDEAD_BEEF, 0x1_0000_0000, 4);
-        assert_eq!(decoded, 0x1_DEAD_BEEF);
+        assert_eq!(decoded, 0xDEAD_BEEF);
     }
 
     #[test]
