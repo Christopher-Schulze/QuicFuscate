@@ -1240,6 +1240,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3")]
+    // SAFETY: the caller dispatches only after runtime SSSE3 verification;
+    // full chunks are exactly 32 bytes and all tails use bounded slice helpers.
     unsafe fn encrypt_morus1280_ssse3_inner(
         &self,
         buffer: &mut [u8],
@@ -1284,6 +1286,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3")]
+    // SAFETY: the caller dispatches only after runtime SSSE3 verification;
+    // full chunks are exactly 32 bytes and all tails use bounded slice helpers.
     unsafe fn decrypt_morus1280_ssse3_inner(
         &self,
         buffer: &mut [u8],
@@ -1334,6 +1338,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3,sse4.1")]
+    // SAFETY: the caller dispatches only after runtime SSSE3 and SSE4.1
+    // verification; full chunks and tails remain slice-bounded.
     unsafe fn encrypt_morus1280_sse41_inner(
         &self,
         buffer: &mut [u8],
@@ -1377,6 +1383,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3,sse4.1")]
+    // SAFETY: the caller dispatches only after runtime SSSE3 and SSE4.1
+    // verification; full chunks and tails remain slice-bounded.
     unsafe fn decrypt_morus1280_sse41_inner(
         &self,
         buffer: &mut [u8],
@@ -1413,6 +1421,8 @@ impl MorusAead {
     }
 
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: the caller dispatches only after runtime SSSE3, SSE4.1, and
+    // SSE4.2 verification; this wrapper calls only the matching inner path.
     unsafe fn encrypt_morus1280_sse42_inplace(
         &self,
         buffer: &mut [u8],
@@ -1425,6 +1435,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3,sse4.1,sse4.2")]
+    // SAFETY: the caller dispatches only after runtime SSSE3, SSE4.1, and
+    // SSE4.2 verification; full chunks and tails remain slice-bounded.
     unsafe fn encrypt_morus1280_sse42_inner(
         &self,
         buffer: &mut [u8],
@@ -1455,6 +1467,8 @@ impl MorusAead {
     }
 
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: the caller dispatches only after runtime SSSE3, SSE4.1, and
+    // SSE4.2 verification; this wrapper calls only the matching inner path.
     unsafe fn decrypt_morus1280_sse42_inplace(
         &self,
         buffer: &mut [u8],
@@ -1468,6 +1482,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3,sse4.1,sse4.2")]
+    // SAFETY: the caller dispatches only after runtime SSSE3, SSE4.1, and
+    // SSE4.2 verification; full chunks and tails remain slice-bounded.
     unsafe fn decrypt_morus1280_sse42_inner(
         &self,
         buffer: &mut [u8],
@@ -1505,6 +1521,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse2")]
+    // SAFETY: x86_64 provides SSE2 and the wrapper receives mutable buffers;
+    // full chunks and tails stay within their slice bounds.
     unsafe fn encrypt_morus1280_sse2_inplace(
         &self,
         buffer: &mut [u8],
@@ -1537,6 +1555,8 @@ impl MorusAead {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse2")]
+    // SAFETY: x86_64 provides SSE2 and the wrapper receives mutable buffers;
+    // full chunks and tails stay within their slice bounds.
     unsafe fn decrypt_morus1280_sse2_inplace(
         &self,
         buffer: &mut [u8],

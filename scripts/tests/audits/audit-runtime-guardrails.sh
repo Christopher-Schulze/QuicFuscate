@@ -323,7 +323,69 @@ else
   append_item "simd_safety_contract_inventory" "fail" "artifact=$SIMD_SAFETY_CONTRACT_LOG rc=$SIMD_SAFETY_CONTRACT_RC"
 fi
 
-# 1c) ISA-gated tests must account for unsupported hardware explicitly. A
+# 1c) Crypto unsafe declarations must retain a local Safety contract. Crypto
+#     predates rustdoc sections in several files, so `SAFETY` comments are the
+#     accepted equivalent and target-feature names must appear in that text.
+CRYPTO_SAFETY_CONTRACT_LOG="$OUTPUT_DIR/crypto-safety-contracts.log"
+set +e
+CRYPTO_SAFETY_CONTRACT_RESULT=$(python3 - <<'PY'
+from pathlib import Path
+import re
+import sys
+
+declaration = re.compile(r"^\s*(?:(?:pub(?:\s*\([^)]*\))?|async)\s+)*unsafe\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+target_feature = re.compile(r'enable\s*=\s*"([^"]+)"')
+functions = []
+missing = []
+mismatches = []
+
+def normalized(value):
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+for path in sorted(Path("src/crypto").rglob("*.rs")):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        match = declaration.match(line)
+        if match is None:
+            continue
+        location = f"{path}:{index + 1}:{match.group(1)}"
+        functions.append(location)
+        local = " ".join(lines[max(0, index - 12):index])
+        if "# Safety" not in local and "SAFETY" not in local:
+            missing.append(location)
+        features = []
+        for previous in lines[max(0, index - 12):index]:
+            if previous.strip().startswith("#[target_feature"):
+                for value in target_feature.findall(previous):
+                    features.extend(item.strip() for item in value.split(","))
+        compact = normalized(local)
+        for feature in features:
+            if feature and normalized(feature) not in compact:
+                mismatches.append(f"{location}: missing {feature}")
+
+print(f"unsafe_functions={len(functions)} missing_contracts={len(missing)} feature_mismatches={len(mismatches)}")
+if missing:
+    print("missing_safety_contracts:")
+    print("\n".join(missing))
+if mismatches:
+    print("target_feature_contract_mismatches:")
+    print("\n".join(mismatches))
+if not functions or missing or mismatches:
+    sys.exit(1)
+PY
+)
+CRYPTO_SAFETY_CONTRACT_RC=$?
+set -e
+printf '%s\n' "$CRYPTO_SAFETY_CONTRACT_RESULT" >"$CRYPTO_SAFETY_CONTRACT_LOG"
+if [[ "$CRYPTO_SAFETY_CONTRACT_RC" -eq 0 ]]; then
+  pass "Crypto unsafe inventory has local Safety contracts and exact declared ISA wording"
+  append_item "crypto_safety_contract_inventory" "ok" "$CRYPTO_SAFETY_CONTRACT_RESULT"
+else
+  fail_critical "Crypto unsafe Safety-contract inventory or target-feature wording failed"
+  append_item "crypto_safety_contract_inventory" "fail" "artifact=$CRYPTO_SAFETY_CONTRACT_LOG rc=$CRYPTO_SAFETY_CONTRACT_RC"
+fi
+
+# 1d) ISA-gated tests must account for unsupported hardware explicitly. A
 #     passing Rust test that silently returns is not evidence for that lane.
 SIMD_SKIP_TEST_LOG="$OUTPUT_DIR/simd-skip-accounting.log"
 set +e
@@ -795,6 +857,28 @@ if rg -F -- 'fn bounded_bitmap_end(' src/optimize/transport.rs >/dev/null \
 else
   fail_critical "Optimize unsafe-boundary remediation or its malformed-input proof wiring is incomplete"
   append_item "optimize_unsafe_contracts" "fail" "missing fail-closed input contract, parity regression, or documentation owner"
+fi
+
+# 4n) Crypto key and nonce material must have explicit local lifecycle owners;
+#     GHASH controls and the AES table fallback must state their release
+#     boundaries instead of implying constant-time or compiler-erasure proof.
+if rg -F -- 'impl Drop for Aes128Ctx' src/crypto/aes.rs >/dev/null \
+  && rg -F -- 'fn zeroize_round_keys(' src/crypto/aes.rs >/dev/null \
+  && rg -F -- 'fn zeroize_aes128_schedule(' src/crypto/mod.rs >/dev/null \
+  && rg -F -- 'self.nonce.zeroize();' src/crypto/mod.rs >/dev/null \
+  && rg -F -- 'poly_key.zeroize();' src/crypto/mod.rs >/dev/null \
+  && ! rg -n --no-messages 'let rk = key_expansion\(' src/crypto/aes.rs >/dev/null \
+  && rg -F -- 'not a constant-time or' src/crypto/aes.rs >/dev/null \
+  && rg -F -- 'ghash_release_override_parser_has_explicit_backend_contract()' \
+    src/crypto/gcm.rs >/dev/null \
+  && rg -F -- 'QUICFUSCATE_GHASH_PMULL' src/crypto/gcm.rs >/dev/null \
+  && rg -F -- 'Crypto key and nonce lifecycle' docs/DOCUMENTATION.md docs/MAP.md \
+    >/dev/null; then
+  pass "Crypto schedule, nonce, GHASH-control, and AES fallback lifecycle contracts are wired"
+  append_item "crypto_lifecycle_contracts" "ok" "retained and temporary schedules, ChaCha nonce/one-time keys, GHASH controls, and AES fallback scope are explicit"
+else
+  fail_critical "Crypto key/nonce lifecycle or backend boundary contract is incomplete"
+  append_item "crypto_lifecycle_contracts" "fail" "missing erasure owner, release-control test, or AES side-channel scope"
 fi
 
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.

@@ -1,6 +1,7 @@
 use super::OnceLock;
 #[cfg(target_arch = "aarch64")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use zeroize::Zeroize;
 const SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -48,12 +49,29 @@ pub(crate) fn key_expansion(key: &[u8; 16]) -> [u8; 176] {
 
 #[inline(always)]
 fn expand_round_keys_array(key: &[u8; 16]) -> [[u8; 16]; 11] {
-    let expanded = key_expansion(key);
+    let mut expanded = key_expansion(key);
     let mut keys = [[0u8; 16]; 11];
     for (idx, chunk) in expanded.chunks_exact(16).enumerate() {
         keys[idx].copy_from_slice(chunk);
     }
+    // The flat expansion is a temporary secret schedule. Clear it before the
+    // function returns the retained round-key representation.
+    expanded.zeroize();
     keys
+}
+
+fn zeroize_round_keys(round_keys: &mut [[u8; 16]; 11]) {
+    for round_key in round_keys {
+        round_key.zeroize();
+    }
+}
+
+fn zeroize_round_key_words(round_keys: &mut [[u32; 4]; 11]) {
+    for round_key in round_keys {
+        for word in round_key {
+            *word = 0;
+        }
+    }
 }
 
 #[inline(always)]
@@ -192,6 +210,12 @@ fn store_block_words(words: [u32; 4]) -> [u8; 16] {
 }
 
 #[inline(always)]
+/// AES table fallback for hosts without AES instructions.
+///
+/// This backend is functionally correct but is not a constant-time or
+/// cache-side-channel-resistant implementation: table indices depend on the
+/// AES state. Security-sensitive callers must select an instruction-backed
+/// backend or an approved constant-time implementation instead.
 fn aes128_encrypt_block_tables_words(round_keys: &[[u32; 4]; 11], block: &[u8; 16]) -> [u8; 16] {
     let table = aes_tables();
     let mut state = load_block_words(block);
@@ -483,8 +507,10 @@ pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
         crate::optimize::telemetry::AES_BLOCK_SVE_OPS.inc();
         // SAFETY: SVE2 AES confirmed by features. key and block are &[u8; 16].
         return unsafe {
-            let rk = expand_round_keys_array(key);
-            aes128_encrypt_block_sve_round_keys(&rk, block)
+            let mut rk = expand_round_keys_array(key);
+            let out = aes128_encrypt_block_sve_round_keys(&rk, block);
+            zeroize_round_keys(&mut rk);
+            out
         };
     }
     #[cfg(target_arch = "aarch64")]
@@ -513,16 +539,22 @@ pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     #[cfg(target_arch = "x86_64")]
     if features.sse2 && !features.aesni {
         crate::optimize::telemetry::AES_BLOCK_SSSE3_OPS.inc();
-        let round_keys = expand_round_keys_array(key);
-        let round_key_words = round_keys_to_words(&round_keys);
-        return aes128_encrypt_block_tables_words(&round_key_words, block);
+        let mut round_keys = expand_round_keys_array(key);
+        let mut round_key_words = round_keys_to_words(&round_keys);
+        let out = aes128_encrypt_block_tables_words(&round_key_words, block);
+        zeroize_round_key_words(&mut round_key_words);
+        zeroize_round_keys(&mut round_keys);
+        return out;
     }
     #[cfg(target_arch = "aarch64")]
     if features.neon && !features.aes && !features.sve_aes {
         crate::optimize::telemetry::AES_BLOCK_NEON_TABLE_OPS.inc();
-        let round_keys = expand_round_keys_array(key);
-        let round_key_words = round_keys_to_words(&round_keys);
-        return aes128_encrypt_block_tables_words(&round_key_words, block);
+        let mut round_keys = expand_round_keys_array(key);
+        let mut round_key_words = round_keys_to_words(&round_keys);
+        let out = aes128_encrypt_block_tables_words(&round_key_words, block);
+        zeroize_round_key_words(&mut round_key_words);
+        zeroize_round_keys(&mut round_keys);
+        return out;
     }
     crate::optimize::telemetry::AES_BLOCK_SCALAR_OPS.inc();
     aes128_encrypt_block_scalar(key, block)
@@ -530,8 +562,10 @@ pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
 
 #[inline]
 fn aes128_encrypt_block_scalar(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
-    let round_keys = expand_round_keys_array(key);
-    aes128_encrypt_block_scalar_with_round_keys(&round_keys, block)
+    let mut round_keys = expand_round_keys_array(key);
+    let out = aes128_encrypt_block_scalar_with_round_keys(&round_keys, block);
+    zeroize_round_keys(&mut round_keys);
+    out
 }
 
 #[inline(always)]
@@ -901,6 +935,21 @@ impl Aes128Ctx {
     }
 }
 
+impl Drop for Aes128Ctx {
+    fn drop(&mut self) {
+        zeroize_round_keys(&mut self.round_keys);
+        zeroize_round_key_words(&mut self.round_keys_words);
+        #[cfg(target_arch = "x86_64")]
+        for round_key in &mut self.round_keys_ssse3 {
+            // SAFETY: __m128i is an opaque 128-bit value and zero is a valid
+            // bit pattern. The field contains no borrowed pointers.
+            unsafe {
+                *round_key = core::arch::x86_64::_mm_setzero_si128();
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes")]
 // SAFETY: target_feature gate ensures AES-NI. `key` and `block` are &[u8; 16].
@@ -908,7 +957,7 @@ impl Aes128Ctx {
 // at rk[16*r..16*(r+1)] stay within the 176-byte schedule. `out` is stack-owned.
 unsafe fn aes128_encrypt_block_aesni(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     use core::arch::x86_64::*;
-    let rk = key_expansion(key);
+    let mut rk = key_expansion(key);
     let mut s = _mm_loadu_si128(block.as_ptr() as *const __m128i);
     let k0 = _mm_loadu_si128(rk[0..16].as_ptr() as *const __m128i);
     s = _mm_xor_si128(s, k0);
@@ -920,6 +969,7 @@ unsafe fn aes128_encrypt_block_aesni(key: &[u8; 16], block: &[u8; 16]) -> [u8; 1
     s = _mm_aesenclast_si128(s, kf);
     let mut out = [0u8; 16];
     _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, s);
+    rk.zeroize();
     out
 }
 
@@ -1093,7 +1143,7 @@ unsafe fn aesni_encrypt4_round_keys(
 // `out` is stack-owned [u8; 16]; vst1q_u8 writes exactly 16 bytes.
 unsafe fn aes128_encrypt_block_aese(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     use core::arch::aarch64::*;
-    let rk = key_expansion(key);
+    let mut rk = key_expansion(key);
     let mut s = vld1q_u8(block.as_ptr());
     for r in 0..9 {
         let kr = vld1q_u8(rk[16 * r..16 * (r + 1)].as_ptr());
@@ -1106,6 +1156,7 @@ unsafe fn aes128_encrypt_block_aese(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16
     s = veorq_u8(s, kf);
     let mut out = [0u8; 16];
     vst1q_u8(out.as_mut_ptr(), s);
+    rk.zeroize();
     out
 }
 

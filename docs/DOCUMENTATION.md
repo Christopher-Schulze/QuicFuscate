@@ -1315,7 +1315,13 @@ pub struct MacTun {
 - Constant-time tag glue for the documented backends and strict nonce/tag checks on hot paths; the AES table fallback remains separately scoped under TODO-681
 - Perfect Forward Secrecy via ephemeral X25519
 - Runtime selection via FeatureDetector and `simd::planner` (CryptoAeadPlan) chooses the best internal implementation for the selected data-plane AEAD posture
-- TODO-681 completed the read-only unsafe-crypto audit. It found no active out-of-bounds production caller in the inspected primitive paths, but leaves checked `len + 16` arithmetic, owner-only QUIC packet-number enforcement, AES table fallback side-channel scope, GHASH release-control proof, complete key-schedule erasure, and native ISA proof open.
+- TODO-681's implementation pass now gives `Aes128Ctx` and AES-GCM retained schedules explicit zeroization owners, clears temporary flat AES schedules before return, clears temporary AES-NI schedules after use, and zeroizes the ChaCha base nonce, derived nonce, and Poly1305 one-time key. The AES table fallback is explicitly not constant-time or cache-side-channel-resistant and is not a security-sensitive backend. x86 GHASH override parsing and the independent AArch64 PMULL boolean control are covered as separate release configuration surfaces. Checked `len + 16` arithmetic remains owned by TODO-716, primitive packet-number validation remains owned by TODO-632/TODO-681, and native ISA, compiler-erasure, and side-channel execution proof remain unclaimed.
+
+#### Crypto key and nonce lifecycle
+
+- Retained AES-128 contexts clear byte schedules, word schedules, and x86 SIMD schedules in `Drop`. One-shot AES software/ARM schedules and AES-NI flat schedules are explicitly cleared before their functions return. AES-GCM and ChaCha constructors clear their temporary copied key/IV arrays after transferring ownership.
+- ChaCha20-Poly1305 clears the retained key and base nonce on `Drop`; each seal/open path clears its derived nonce and Poly1305 one-time key after use, including authentication failure. `Clone` creates an independent owner whose Drop path must run separately; compiler-level erasure of transient register copies is not claimed.
+- x86 `QUICFUSCATE_GHASH` supports `auto`, `vpclmul`, `pclmul`, `sse`, `scalar`, and `ref`, with runtime feature checks and fallback. AArch64 `QUICFUSCATE_GHASH_PMULL` is an independent boolean enable that never bypasses NEON/PMULL feature checks. The AES table fallback uses state-indexed lookups and is explicitly excluded from constant-time claims.
 
 #### AEAD Policy and Implementation Status
 - AEGIS implementation is fully internal in `src/crypto/`; there are no active references to external AEGIS forks.

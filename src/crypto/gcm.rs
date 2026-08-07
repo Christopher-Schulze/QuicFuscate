@@ -4,6 +4,10 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 #[cfg(target_arch = "x86_64")]
+/// Release override for the x86 GHASH backend. `auto` is the default;
+/// explicit values are accepted only as performance/configuration controls and
+/// always fall back to a feature-checked backend when the requested ISA is not
+/// available.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GhashOverride {
     Auto,
@@ -49,6 +53,9 @@ static GHASH_PMULL_ENABLED: OnceLock<bool> = OnceLock::new();
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
+/// Read the independent AArch64 PMULL release control once. Unlike the x86
+/// selector, this flag is boolean: false disables PMULL and preserves the
+/// NEON/scalar fallback; true never bypasses runtime feature checks.
 fn ghash_pmull_enabled() -> bool {
     *GHASH_PMULL_ENABLED.get_or_init(|| {
         crate::env_utils::EnvSnapshot::capture().flag("QUICFUSCATE_GHASH_PMULL", true)
@@ -495,6 +502,18 @@ mod tests {
             h = h.rotate_left(17) ^ (index as u128).wrapping_mul(0x9e3779b97f4a7c15);
             x = x.rotate_right(23) ^ (index as u128).wrapping_mul(0xd6e8feb86659fd93);
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn ghash_release_override_parser_has_explicit_backend_contract() {
+        assert_eq!(parse_ghash_override("auto"), GhashOverride::Auto);
+        assert_eq!(parse_ghash_override("vpclmul"), GhashOverride::Vpclmul);
+        assert_eq!(parse_ghash_override("pclmul"), GhashOverride::Pclmul);
+        assert_eq!(parse_ghash_override("sse"), GhashOverride::Sse);
+        assert_eq!(parse_ghash_override("scalar"), GhashOverride::Scalar);
+        assert_eq!(parse_ghash_override("ref"), GhashOverride::Scalar);
+        assert_eq!(parse_ghash_override("unsupported"), GhashOverride::Unknown);
     }
 
     #[test]

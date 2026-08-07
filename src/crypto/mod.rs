@@ -104,7 +104,10 @@ pub(crate) mod chacha20poly1305 {
             key_array.copy_from_slice(key);
             let mut iv_array = [0u8; 12];
             iv_array.copy_from_slice(iv);
-            Ok(Self::from_arrays(&key_array, &iv_array))
+            let cipher = Self::from_arrays(&key_array, &iv_array);
+            key_array.zeroize();
+            iv_array.zeroize();
+            Ok(cipher)
         }
 
         pub(crate) fn from_arrays(key: &[u8; 32], iv: &[u8; 12]) -> Self {
@@ -141,6 +144,7 @@ pub(crate) mod chacha20poly1305 {
     impl Drop for ChaCha20Poly1305 {
         fn drop(&mut self) {
             self.key.zeroize();
+            self.nonce.zeroize();
         }
     }
 
@@ -158,12 +162,14 @@ pub(crate) mod chacha20poly1305 {
             }
             let (pt, rest) = buf.split_at_mut(len);
 
-            let nonce12 = self.make_nonce(counter);
-            let poly_key = self.one_time_key(0, &nonce12);
+            let mut nonce12 = self.make_nonce(counter);
+            let mut poly_key = self.one_time_key(0, &nonce12);
 
             self.process_in_place(1, &nonce12, pt);
 
             let tag = poly1305::aead_tag_chacha20poly1305(ad, pt, &poly_key);
+            poly_key.zeroize();
+            nonce12.zeroize();
             rest[..16].copy_from_slice(&tag);
             Ok(len + 16)
         }
@@ -184,15 +190,18 @@ pub(crate) mod chacha20poly1305 {
             let mut tag = [0u8; 16];
             tag.copy_from_slice(&tag_in[..16]);
 
-            let nonce12 = self.make_nonce(counter);
-            let poly_key = self.one_time_key(0, &nonce12);
+            let mut nonce12 = self.make_nonce(counter);
+            let mut poly_key = self.one_time_key(0, &nonce12);
 
             let tag_calc = poly1305::aead_tag_chacha20poly1305(ad, ct, &poly_key);
+            poly_key.zeroize();
             if !crate::crypto::subtle_ct_eq(&tag_calc, &tag) {
+                nonce12.zeroize();
                 return Err(ConnectionError::CryptoError("crypto failure".into()));
             }
 
             self.process_in_place(1, &nonce12, ct);
+            nonce12.zeroize();
             Ok(ct_len)
         }
     }
@@ -225,9 +234,10 @@ fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
             //   accelerated round-key path below
             // - inputs are fixed-size stack values, so the helper never sees
             //   invalid lengths or dangling pointers
-            let rk = expand_aes128_schedule(key);
+            let mut rk = expand_aes128_schedule(key);
             let mut out = *block;
             aes128_encrypt_block_rk(&rk, &mut out);
+            zeroize_aes128_schedule(&mut rk);
             return out;
         }
     }
@@ -320,6 +330,17 @@ unsafe fn aes128_encrypt_block_rk(rk: &[core::arch::x86_64::__m128i; 11], block:
     }
     state = _mm_aesenclast_si128(state, rk[10]);
     _mm_storeu_si128(block.as_mut_ptr() as *mut __m128i, state);
+}
+
+#[cfg(target_arch = "x86_64")]
+fn zeroize_aes128_schedule(rk: &mut [core::arch::x86_64::__m128i; 11]) {
+    for word in rk {
+        // SAFETY: __m128i is an opaque 128-bit value and zero is a valid bit
+        // pattern. The schedule contains no borrowed pointers.
+        unsafe {
+            *word = core::arch::x86_64::_mm_setzero_si128();
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -419,7 +440,10 @@ impl AesGcm128 {
         key.copy_from_slice(aead_key);
         let mut iv_array = [0u8; 12];
         iv_array.copy_from_slice(iv);
-        Ok(Self::from_arrays(&key, &iv_array))
+        let cipher = Self::from_arrays(&key, &iv_array);
+        key.zeroize();
+        iv_array.zeroize();
+        Ok(cipher)
     }
 
     pub(crate) fn from_arrays(aead_key: &[u8; 16], iv: &[u8; 12]) -> Self {
@@ -471,13 +495,7 @@ impl Drop for AesGcm128 {
         // The expanded round keys also contain key material.
         #[cfg(target_arch = "x86_64")]
         if let Some(rk) = &mut self.rk {
-            for word in rk.iter_mut() {
-                // SAFETY: __m128i is a 128-bit opaque type; storing zeros via
-                // _mm_setzero_si128 is the canonical way to zero it.
-                unsafe {
-                    *word = core::arch::x86_64::_mm_setzero_si128();
-                }
-            }
+            zeroize_aes128_schedule(rk);
         }
     }
 }
