@@ -1431,7 +1431,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Live Audit Gate Recheck (2026-08-07)
 
-- `verify-audit-completeness.sh` currently enumerates `991` tracked, `26,731` ignored, `0` non-ignored untracked, and `27,722` accounted paths, then fails closed on stale Graphify evidence relative to the current Git revision. TODO-759 owns that evidence boundary.
+- The final `verify-audit-completeness.sh` refresh passes structural register/detail/archive/Git-scope integrity with `graphify=BLOCKED`; stale or missing Graphify evidence fails closed instead of being promoted to green. TODO-759 owns that evidence boundary.
 - `audit-all-comprehensive.sh --strict` completes all `38` result objects with `31 PASS`, `3 FAIL`, and `2 UNAVAILABLE` plus an aggregate `FAIL`. The failed checks are strict runtime Clippy, all-target quality Clippy, and runtime guardrails; the unavailable checks are PowerShell parsing and the ARM64-host AMX proof lane. Native, frontend, Omega, privileged, and external evidence remain unclaimed.
 - Contract fixtures under `scripts/tests/audits/fixtures/`, `scripts/tests/analysis/fixtures/`, and `scripts/tests/fast/fixtures/` prove failable command status, Rust and secret scope, parser dialects, scoped PID ownership, benchmark propagation, environment JSON, and strict/advisory result semantics.
 - Current local proof is deliberately non-green: the complete strict runner returns `FAIL`; readiness returns `UNAVAILABLE` in deny-only mode and `FAIL` in strict-Geiger mode. Product remediation, native/external runtime evidence, Graphify/feature boundaries, and Omega checkout attribution remain with their existing TODO owners.
