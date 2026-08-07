@@ -4263,7 +4263,7 @@ The constructor/runtime boundary is explicit:
 ### Standalone FEC file configuration
 - `--fec-config PATH` is an explicit standalone input. File I/O, TOML parsing, enum decoding, and semantic validation must all succeed before `AdaptiveFec` construction; any failure returns a nonzero startup result and never selects `FecConfig::product_default()` as a fallback.
 - The standalone file schema is `[adaptive_fec]`. `initial_mode` accepts `auto`, `off`, `zero`, `light`, `normal`, `on`, `medium`, `strong`, `extreme`, `ultra`, `fountain`, or `streaming`. `modes[].name` accepts the nine public codec modes: `zero`, `light`, `normal`, `medium`, `strong`, `extreme`, `ultra`, `fountain`, and `streaming`. Unknown values are rejected with the field and submitted value.
-- Scalar validation requires `lambda` in `0..=1`, `hysteresis` in `0..1`, positive `burst_window`, finite positive `kalman_q` and `kalman_r`, and positive `stream_every` when supplied. Window validation requires `Zero=0`, every other mode in `1..=2048`, and `Fountain` in `1..=128`.
+- Scalar validation requires `lambda` in `0..=1`, `hysteresis` in `0..1`, `burst_window` in `1..=wire::MAX_SOURCE_COUNT`, finite positive `kalman_q` and `kalman_r`, positive `stream_every` when supplied, and every window size within the wire maximum. Window validation requires `Zero=0`, every non-Zero mode `> 0`, and `Fountain` in `1..=MAX_FOUNTAIN_WINDOW`.
 - `--config` and `--fec-config` are mutually exclusive because the standalone path must not silently discard one of two submitted FEC sources. The accepted source is recorded by the runtime log as `Accepted FEC policy source=product-default`, `standalone-file:<path>`, or `unified-config:<path>`.
 
 The unified engine `[fec]` adapter is intentionally narrower than the standalone file: `mode` and `initial_mode` are limited to `auto`/`off`, product windows are projected into the canonical `FecConfig`, and `stream_every = 0` is rejected before the adapter can normalize it. Environment controls remain the owner for partial recovery and advanced codec behavior.
@@ -4272,20 +4272,20 @@ The unified engine `[fec]` adapter is intentionally narrower than the standalone
 - `QUICFUSCATE_FEC_PARTIAL`: `0|1|true|false` - controls partial recovery emission (default: enabled).
 - `QUICFUSCATE_FEC_LAZY`: `0|1|true|false` - lazy decoder gating (default: enabled).
 - `QUICFUSCATE_FEC_INTERLEAVE`: `0|1|true|false` - enable interleaving for burst protection (default: enabled).
-- `QUICFUSCATE_FEC_INTERLEAVE_DEPTH`: integer `1..8` - depth for interleaving (default: `4` when `k > 16`, else `1`).
 - `QUICFUSCATE_FEC_DECODER`: `auto|gauss|wiedemann` - advanced/internal decoder override; `auto` keeps the canonical runtime policy and selects by large-window threshold.
 - `QUICFUSCATE_FEC_WIEDEMANN_K`: integer (default `256`) - advanced/internal threshold for enabling the large-window decoder strategy at high `k`.
-- `QUICFUSCATE_FEC_STREAM_EVERY`: integer `N` (min `1`) - streaming cadence override; computed from CPU profile when unset.
+- `QUICFUSCATE_FEC_STREAM_EVERY`: integer `1..=32` - streaming cadence override; computed from CPU profile when unset.
+- `QUICFUSCATE_FEC_INTERLEAVE_DEPTH`: integer `1..=8` - depth for interleaving (default: `4` when `k > 16`, else `1`).
 - `QUICFUSCATE_FEC_AUTO_STREAM`: `0|1|true|false` - allow Streaming mode in auto switch (default: enabled).
 - `QUICFUSCATE_FEC_AUTO_GF4`: `0|1|true|false` - allow GF4 for ultra-low loss in auto (default: enabled).
 - `QUICFUSCATE_FEC_SWITCH_THRESH`: float `0.0..1.0` - mode switch threshold (default: `0.02`).
-- `QUICFUSCATE_FEC_SWITCH_MIN_UP_MS`: integer milliseconds (default: `120`) - minimum dwell time before Auto-Mode may escalate to a higher FEC tier.
-- `QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS`: integer milliseconds (default: `450`) - minimum dwell time before Auto-Mode may de-escalate to a lower FEC tier.
+- `QUICFUSCATE_FEC_SWITCH_MIN_UP_MS`: integer milliseconds `0..=3_600_000` (default: `120`) - minimum dwell time before Auto-Mode may escalate to a higher FEC tier.
+- `QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS`: integer milliseconds `0..=3_600_000` (default: `450`) - minimum dwell time before Auto-Mode may de-escalate to a lower FEC tier.
 - `QUICFUSCATE_FEC_FOUNTAIN_WINDOW`: integer `1..128` - bounded source window when switching to Fountain (default and maximum: `128`).
-- `QUICFUSCATE_FEC_EXTREME_WINDOW`: integer - window size for extreme loss escalation (default: `1024`).
-- `QUICFUSCATE_FOUNTAIN_SYMBOL`: integer bytes - fountain symbol size (default: `MTU_HINT-80`, fallback `1500`, clamp `600..16384`).
-- `QUICFUSCATE_KALMAN_Q`: float - process noise override (default: `0.001`).
-- `QUICFUSCATE_KALMAN_R`: float - measurement noise override (default: `0.01`).
+- `QUICFUSCATE_FEC_EXTREME_WINDOW`: integer `1..=wire::MAX_SOURCE_COUNT` - window size for extreme loss escalation (default: `1024`).
+- `QUICFUSCATE_FOUNTAIN_SYMBOL`: integer bytes `600..=16384` - fountain symbol size (default: `MTU_HINT-80`, fallback `1500`, clamp `600..16384`).
+- `QUICFUSCATE_KALMAN_Q`: float `1e-8..=1.0` - process noise override (default: `0.001`, non-finite/non-positive values are rejected and fall back to the default).
+- `QUICFUSCATE_KALMAN_R`: float `1e-8..=1.0` - measurement noise override (default: `0.01`, non-finite/non-positive values are rejected and fall back to the default).
 - `QUICFUSCATE_PROFILE`: `mobile|server|desktop` - transport profile override for FEC observer.
 - `QUICFUSCATE_MTU_HINT`: integer - used by fountain symbol sizing and memory pool sizing.
 - `QUICFUSCATE_RAYON_THREADS`: integer - cap Rayon thread pool used by parallel FEC paths.

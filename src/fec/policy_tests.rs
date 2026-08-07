@@ -470,6 +470,89 @@ fn decoder_override_remains_immutable_during_auto_tuning() {
 }
 
 #[test]
+fn runtime_policy_clamps_raw_environment_values() {
+    let environment = crate::env_utils::EnvSnapshot::from_pairs([
+        ("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "999999999"),
+        ("QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS", "0"),
+        ("QUICFUSCATE_FEC_EXTREME_WINDOW", "999999"),
+        ("QUICFUSCATE_FEC_STREAM_EVERY", "0"),
+        ("QUICFUSCATE_FEC_INTERLEAVE_DEPTH", "99"),
+    ]);
+
+    let policy = FecRuntimePolicy::detect_with_snapshot(&environment);
+
+    assert_eq!(policy.switch_min_up_ms, 3_600_000);
+    assert_eq!(policy.switch_min_down_ms, 0);
+    assert_eq!(policy.extreme_window, crate::fec::wire::MAX_SOURCE_COUNT as usize);
+    assert_eq!(policy.stream_every_override, Some(1));
+    assert_eq!(policy.interleave_depth_override, Some(8));
+}
+
+#[test]
+fn config_validate_rejects_oversized_burst_window_and_invalid_window_entries() {
+    let mut config = FecConfig::default();
+    config.burst_window = crate::fec::wire::MAX_SOURCE_COUNT as usize + 1;
+    assert!(config.validate().is_err());
+
+    config.burst_window = 16;
+    config.window_sizes.insert(FecMode::Light, crate::fec::wire::MAX_SOURCE_COUNT as usize + 1);
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn config_from_toml_rejects_invalid_lambda() {
+    let toml = r#"
+[adaptive_fec]
+lambda = 1.5
+"#;
+    let config = FecConfig::from_toml(toml).expect("parse succeeds");
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn adaptive_fec_falls_back_to_default_on_invalid_config() {
+    let _env_lock = acquire_env_lock();
+    let mut invalid = FecConfig::default();
+    invalid.burst_window = 0;
+    let fec = AdaptiveFec::new(invalid);
+    assert_eq!(fec.current_mode(), FecMode::Zero);
+}
+
+#[test]
+fn transport_feedback_normalizes_impossible_tuples() {
+    let _env_lock = acquire_env_lock();
+    let _g_up = EnvGuard::set("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS", "0");
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+    fec.telemetry.enabled = true;
+
+    // delayed loss with sent=0 should be visible in telemetry but not drive fountain
+    fec.report_transport_loss(0, 0, 1, 0.10);
+    let snapshot = fec.telemetry_snapshot();
+    assert_eq!(snapshot.observed_packets, 0);
+    assert_eq!(snapshot.observed_lost_packets, 1);
+    assert_ne!(fec.current_mode(), FecMode::Fountain);
+
+    // ack + lost must not exceed sent for adaptation; use smoothed=1.0 for 100% loss
+    for _ in 0..12 {
+        fec.report_transport_loss(10, 0, 20, 1.0);
+    }
+    // normalized lost = min(20, 10) = 10 -> 100% loss -> fountain eventually
+    assert_eq!(fec.current_mode(), FecMode::Fountain);
+}
+
+#[test]
+fn mode_manager_clamps_non_finite_loss_and_force_state_window() {
+    use crate::fec::internal::ModeManager;
+    let policy = FecRuntimePolicy::detect();
+    let mut mgr = ModeManager::with_runtime_policy(FecMode::Zero, 0.1, &policy);
+    mgr.update(f32::NAN);
+    mgr.update(2.0);
+    assert!(mgr.current_window() <= crate::fec::wire::MAX_SOURCE_COUNT as usize);
+    mgr.force_state(FecMode::Normal, crate::fec::wire::MAX_SOURCE_COUNT as usize + 10);
+    assert_eq!(mgr.current_window(), crate::fec::wire::MAX_SOURCE_COUNT as usize);
+}
+
+#[test]
 fn wiedemann_threshold_is_snapshotted_before_feedback_processing() {
     let _env_lock = acquire_env_lock();
     let _decoder = EnvGuard::set("QUICFUSCATE_FEC_DECODER", "auto");

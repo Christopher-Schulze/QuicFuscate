@@ -333,7 +333,7 @@ impl FecRuntimePlan {
         };
         let stream_every_override =
             ambient.stream_every_override.or(config.configured_stream_every);
-        let stream_every = stream_every_override.unwrap_or(base_stream_every);
+        let stream_every = stream_every_override.unwrap_or(base_stream_every).clamp(1, 32);
         let base_interleave_depth = if mode == FecMode::Fountain {
             1
         } else if requested_k > 16 {
@@ -384,9 +384,13 @@ impl AdaptiveFec {
     }
 
     pub(crate) fn new_with_snapshot(
-        config: FecConfig,
+        mut config: FecConfig,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Self {
+        if let Err(error) = config.validate() {
+            log::warn!("FecConfig validation failed: {error}; using product defaults");
+            config = FecConfig::product_default();
+        }
         let global_resources = FecGlobalResources::detect_with_snapshot(environment);
         global_resources.initialize();
         let ambient = FecAmbientInputs::detect_with_snapshot(environment);

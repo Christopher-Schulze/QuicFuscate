@@ -1230,7 +1230,12 @@ impl ModeManager {
         } else {
             target_from_mode(mode, default_window).effective_window
         };
-        let n = if k == 0 { 0 } else { ((k as f32) * target.redundancy).ceil() as usize };
+        let n = if k == 0 {
+            0
+        } else {
+            ((k as f32) * target.redundancy).ceil().min(wire::MAX_TOTAL_COUNT as f32).max(0.0)
+                as usize
+        };
         (mode, k, n.max(k))
     }
 
@@ -1248,6 +1253,7 @@ impl ModeManager {
 
     /// Feed a new loss observation and return the previous (mode, window) if a switch occurred.
     pub fn update(&mut self, loss_rate: f32) -> Option<(FecMode, usize)> {
+        let loss_rate = if loss_rate.is_finite() { loss_rate.clamp(0.0, 1.0) } else { 0.0 };
         self.loss_history.push_back(loss_rate);
         if self.loss_history.len() > 100 {
             self.loss_history.pop_front();
@@ -1351,7 +1357,7 @@ impl ModeManager {
     /// Force a specific mode and window, bypassing hysteresis and cooldown.
     pub fn force_state(&mut self, mode: FecMode, window: usize) {
         self.current_mode = mode;
-        self.window_size = window.max(1);
+        self.window_size = window.max(1).min(wire::MAX_SOURCE_COUNT as usize);
         self.last_switch_time = crate::time_source::now_instant();
         self.window_history.push_back(self.window_size);
         if self.window_history.len() > 10 {

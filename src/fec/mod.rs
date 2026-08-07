@@ -151,10 +151,12 @@ impl FecRuntimePolicy {
                 }),
             switch_min_up_ms: environment
                 .parse::<u64>("QUICFUSCATE_FEC_SWITCH_MIN_UP_MS")
-                .unwrap_or(120),
+                .unwrap_or(120)
+                .clamp(0, 3_600_000),
             switch_min_down_ms: environment
                 .parse::<u64>("QUICFUSCATE_FEC_SWITCH_MIN_DOWN_MS")
-                .unwrap_or(450),
+                .unwrap_or(450)
+                .clamp(0, 3_600_000),
             auto_gf4_enabled: environment.flag("QUICFUSCATE_FEC_AUTO_GF4", true),
             fountain_window: environment
                 .parse::<usize>("QUICFUSCATE_FEC_FOUNTAIN_WINDOW")
@@ -162,13 +164,15 @@ impl FecRuntimePolicy {
                 .clamp(1, MAX_FOUNTAIN_WINDOW),
             extreme_window: environment
                 .parse::<usize>("QUICFUSCATE_FEC_EXTREME_WINDOW")
-                .unwrap_or(1024),
+                .unwrap_or(1024)
+                .clamp(1, wire::MAX_SOURCE_COUNT as usize),
             fountain_symbol_size: resolve_fountain_symbol_size(environment),
             stream_every_override: environment
                 .parse::<usize>("QUICFUSCATE_FEC_STREAM_EVERY")
-                .map(|value| value.max(1)),
+                .map(|value| value.clamp(1, 32)),
             interleave_depth_override: environment
-                .parse::<usize>("QUICFUSCATE_FEC_INTERLEAVE_DEPTH"),
+                .parse::<usize>("QUICFUSCATE_FEC_INTERLEAVE_DEPTH")
+                .map(|value| value.clamp(1, 8)),
             partial_enabled: environment.flag("QUICFUSCATE_FEC_PARTIAL", true),
             kalman_q_override: environment.parse_positive_f32("QUICFUSCATE_KALMAN_Q"),
             kalman_r_override: environment.parse_positive_f32("QUICFUSCATE_KALMAN_R"),

@@ -433,11 +433,20 @@ impl AdaptiveFec {
             self.red_ppm_hint = 0;
             return;
         }
+        // Reject non-finite trend inputs by treating them as neutral.
+        let clamp_trend = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+        let rtt_trend = clamp_trend(rtt_trend);
+        let cwnd_trend = clamp_trend(cwnd_trend);
+        let throughput_trend = clamp_trend(throughput_trend);
+
         // Combine signals: negative sum = bandwidth scarce, positive = plentiful
         let signal = rtt_trend + cwnd_trend + throughput_trend;
 
         // Current loss estimate from estimator
-        let current_loss = self.loss_estimator.smoothed_loss();
+        let current_loss = self
+            .loss_estimator
+            .smoothed_loss()
+            .clamp(0.0, 1.0);
 
         // Minimum redundancy for current loss level (parts-per-million)
         // At 0% loss: 0 ppm (Zero mode)
@@ -544,8 +553,13 @@ impl AdaptiveFec {
         diagnostics_enabled: bool,
     ) {
         let feedback_started = diagnostics_enabled.then(std::time::Instant::now);
+        // Normalize the feedback tuple so reported lost never exceeds sent. Acknowledged
+        // packets are preserved as provided so that clean-ack proof (sent=0, ack>0) still
+        // drives the clean-streak counter. Telemetry still records the raw caller values
+        // so delayed or misattributed loss remains observable.
         let observed_total = sent_packets as u64;
         let observed_lost = lost_packets as u64;
+        let adaptation_lost = lost_packets.min(sent_packets);
         if self.telemetry.enabled {
             self.telemetry.observed_packets =
                 self.telemetry.observed_packets.saturating_add(observed_total);
@@ -557,9 +571,10 @@ impl AdaptiveFec {
             return;
         }
         Self::run_feedback_phase(diagnostics_enabled, "estimator-actual", || {
-            self.loss_estimator.report_actual_observation(acknowledged_packets, lost_packets);
+            self.loss_estimator
+                .report_actual_observation(acknowledged_packets, adaptation_lost);
         });
-        let observation_weight = sent_packets.max(lost_packets);
+        let observation_weight = sent_packets;
         Self::run_feedback_phase(diagnostics_enabled, "estimator-smoothed", || {
             self.loss_estimator.report_smoothed_rate(smoothed_loss, observation_weight);
         });
@@ -1212,8 +1227,11 @@ impl FecConfig {
         if !(0.0..=1.0).contains(&self.lambda) {
             return Err("lambda must be between 0 and 1".into());
         }
-        if self.burst_window == 0 {
-            return Err("burst_window must be > 0".into());
+        if self.burst_window == 0 || self.burst_window > wire::MAX_SOURCE_COUNT as usize {
+            return Err(format!(
+                "burst_window must be between 1 and {}",
+                wire::MAX_SOURCE_COUNT
+            ));
         }
         if !self.hysteresis.is_finite() || self.hysteresis < 0.0 || self.hysteresis >= 1.0 {
             return Err("hysteresis must be between 0 (inclusive) and 1".into());

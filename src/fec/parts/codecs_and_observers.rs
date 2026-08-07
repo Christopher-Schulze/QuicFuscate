@@ -503,7 +503,7 @@ impl LossEstimator {
         if observation_weight == 0 {
             return;
         }
-        let loss_rate = loss_rate.clamp(0.0, 1.0);
+        let loss_rate = if loss_rate.is_finite() { loss_rate.clamp(0.0, 1.0) } else { 0.0 };
         let estimated_lost = (loss_rate * observation_weight as f32).round() as usize;
         self.report_rate(loss_rate, observation_weight, estimated_lost);
     }
@@ -650,11 +650,16 @@ pub(crate) struct KalmanFilter {
 
 impl KalmanFilter {
     pub(crate) fn new(q: f32, r: f32) -> Self {
+        let q = if q.is_finite() && q > 0.0 { q.clamp(1e-8, 1.0) } else { 0.001 };
+        let r = if r.is_finite() && r > 0.0 { r.clamp(1e-8, 1.0) } else { 0.01 };
         Self { q, r, x: 0.0, p: 1.0 }
     }
 
     /// One-dimensional Kalman update: returns the smoothed estimate
     pub(crate) fn update(&mut self, z: f32) -> f32 {
+        if !z.is_finite() {
+            return self.x;
+        }
         // Predict
         self.p += self.q;
         // Update
@@ -1582,5 +1587,30 @@ impl Encoder16 {
             Arc::clone(pool),
         )
         .ok()
+    }
+}
+
+#[cfg(test)]
+mod estimator_tests {
+    use super::{KalmanFilter, LossEstimator};
+
+    #[test]
+    fn loss_estimator_ignores_non_finite_smoothed_input() {
+        let mut estimator = LossEstimator::new();
+        estimator.report_smoothed_rate(f32::NAN, 100);
+        assert!(estimator.smoothed_loss().is_finite());
+        assert_eq!(estimator.smoothed_loss(), 0.0);
+        estimator.report_smoothed_rate(f32::INFINITY, 100);
+        assert!(estimator.smoothed_loss().is_finite());
+    }
+
+    #[test]
+    fn kalman_filter_rejects_non_finite_q_r_and_measurement() {
+        let mut kf = KalmanFilter::new(f32::NAN, f32::NEG_INFINITY);
+        assert!(kf.q.is_finite() && kf.q > 0.0);
+        assert!(kf.r.is_finite() && kf.r > 0.0);
+        assert_eq!(kf.update(f32::NAN), 0.0);
+        let after = kf.update(0.5);
+        assert!(after.is_finite() && after > 0.0 && after < 0.5);
     }
 }
