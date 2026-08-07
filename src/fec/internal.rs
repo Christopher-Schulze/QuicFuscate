@@ -188,7 +188,7 @@ impl EncoderVariant {
             EncoderVariant::Fountain(e) => {
                 // Add source symbol to LT encoder
                 if let Some(data) = p.payload_slice() {
-                    e.add_source_symbol(data.to_vec());
+                    let _ = e.add_source_symbol(data.to_vec());
                 }
             }
         }

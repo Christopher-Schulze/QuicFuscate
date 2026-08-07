@@ -5740,3 +5740,15 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `matrix_multiply_scalar()` returns `MatrixError` for empty, ragged, mismatched, and overflowed shapes. `WireProfile::try_block_source_count()` validates source/depth/divisibility before division, legacy `block_source_count()` is non-panicking, coefficient helpers reject zero/out-of-range widths and systematic ordinals, and GF4/GF8/GF16 repair arithmetic is checked.
 - Source-only wire receive now rejects a decoded source payload that cannot fit the configured pool block instead of silently creating a truncated compatibility packet. New malformed regressions cover stream flags/metadata, decoder coefficient widths and active membership, matrix shapes, direct wire helpers, and the small-pool source-only path.
 - Evidence: `cargo check` and `cargo clippy` pass with five pre-existing warnings; the serial stream/decoder filter passes `17/17`, the Wire FEC filter passes `24/24`, and the malformed matrix test passes `1/1`. Tests run with `--test-threads=1` to avoid environment-variable races between parallel tests. Native x86/SVE2, sanitizer/Miri, privileged, Omega, and full external proof remain unclaimed and are owned by their adjacent tasks where applicable.
+
+## Fountain Constructor and Source-Index Contracts (2026-08-07, TODO-857)
+
+- `LTEncoder::new` and `new_with_seed` clamp `k` to `[1, MAX_TOTAL_COUNT]` and `symbol_size` to `[1, MAX_FOUNTAIN_PAYLOAD_BYTES]`, bounding the degree distribution and source buffer before allocation.
+- `LTDecoder::new`, `new_with_seed`, and `new_with_repair_limit` clamp `k` to the same range, clamp `symbol_size` to `[1, min(pool.block_size, MAX_FOUNTAIN_PAYLOAD_BYTES)]`, and ensure the repair limit is at least one and at most `MAX_TOTAL_COUNT`.
+- `LTEncoder::add_source_symbol` now returns `bool`, rejects symbols longer than the configured `symbol_size` or beyond the configured source count, and accepts shorter symbols.
+- `LTDecoder::add_source_symbol` rejects out-of-range source indices, duplicate indices, and payloads exceeding `symbol_size`.
+- `LTDecoder::add_encoded_symbol` rejects empty, oversized, or out-of-range source-index sets and payloads larger than `symbol_size` before mutating decoder state.
+- `propagate_decoded_symbol` validates the decoded index against `k` and the decoded data length against `symbol_size`.
+- `decoding_progress()` returns the finite value `1.0` for `k == 0`.
+- New malformed and boundary tests cover constructor clamping, long/short source symbols, duplicate source indices, oversized repair payloads, and zero-dimension normalization.
+- Evidence: `cargo check` and `cargo clippy` pass with five pre-existing warnings; the 32 Fountain-code tests in the serial FEC filter pass; `cargo fmt --all` and `git diff --check` pass. Native x86/SVE2, sanitizer/Miri, privileged, Omega, and external proof remain unclaimed.

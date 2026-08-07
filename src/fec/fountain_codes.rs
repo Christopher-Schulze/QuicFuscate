@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 const SPLITMIX64_GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 const MAX_FOUNTAIN_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FOUNTAIN_SOURCE_SYMBOLS: usize = super::wire::MAX_TOTAL_COUNT as usize;
 
 #[inline]
 fn splitmix64_next(state: &mut u64) -> u64 {
@@ -58,6 +59,8 @@ impl LTEncoder {
 
     /// Create an LT encoder with an explicit connection-local PRNG seed.
     pub fn new_with_seed(k: usize, symbol_size: usize, rng_seed: u64) -> Self {
+        let k = k.clamp(1, MAX_FOUNTAIN_SOURCE_SYMBOLS);
+        let symbol_size = symbol_size.clamp(1, MAX_FOUNTAIN_PAYLOAD_BYTES);
         let degree_dist = Self::robust_soliton_distribution(k);
         Self { k, symbols: Vec::with_capacity(k), degree_dist, rng_seed, symbol_size }
     }
@@ -132,10 +135,17 @@ impl LTEncoder {
     }
 
     /// Add a source symbol to the encoder's symbol buffer.
-    pub fn add_source_symbol(&mut self, symbol: Vec<u8>) {
-        if self.symbols.len() < self.k() {
-            self.symbols.push(symbol);
+    /// Rejects symbols longer than the configured `symbol_size` or beyond the
+    /// configured source count. Shorter symbols are accepted and zero-padded.
+    pub fn add_source_symbol(&mut self, symbol: Vec<u8>) -> bool {
+        if self.symbols.len() >= self.k() {
+            return false;
         }
+        if symbol.len() > self.symbol_size {
+            return false;
+        }
+        self.symbols.push(symbol);
+        true
     }
 
     /// Return the fixed symbol size in bytes.
@@ -214,10 +224,13 @@ impl LTDecoder {
         rng_seed: u64,
         requested_max_symbols: usize,
     ) -> Self {
-        let max_symbols = requested_max_symbols.max(1).min(super::wire::MAX_TOTAL_COUNT as usize);
+        let k = k.clamp(1, MAX_FOUNTAIN_SOURCE_SYMBOLS);
+        let symbol_size =
+            symbol_size.clamp(1, mem_pool.block_size().min(MAX_FOUNTAIN_PAYLOAD_BYTES));
+        let max_symbols = requested_max_symbols.clamp(1, super::wire::MAX_TOTAL_COUNT as usize);
         let max_payload_bytes =
             max_symbols.saturating_mul(symbol_size).clamp(1, MAX_FOUNTAIN_PAYLOAD_BYTES);
-        let max_propagation_work = max_symbols.saturating_mul(k.max(1));
+        let max_propagation_work = max_symbols.saturating_mul(k);
         Self {
             k,
             symbol_size,
@@ -319,11 +332,11 @@ impl LTDecoder {
     }
 
     pub fn add_source_symbol(&mut self, source_index: usize, data: Vec<u8>) -> bool {
-        if source_index >= self.k {
-            return false;
+        if source_index >= self.k || data.len() > self.symbol_size {
+            return self.reject_symbol("invalid source index or oversized source data");
         }
         if self.decoded_symbols[source_index].is_some() {
-            return false;
+            return self.reject_symbol("duplicate source index");
         }
         self.decoded_symbols[source_index] = Some(data.clone());
         let _ = self.propagate_decoded_symbol(source_index, &data);
@@ -355,6 +368,9 @@ impl LTDecoder {
         data: Vec<u8>,
         source_indices: HashSet<usize>,
     ) -> bool {
+        if data.len() > self.symbol_size {
+            return self.reject_symbol("encoded data exceeds configured symbol size");
+        }
         if source_indices.is_empty()
             || source_indices.len() > self.k
             || source_indices.iter().any(|&index| index >= self.k)
@@ -432,6 +448,9 @@ impl LTDecoder {
     ///
     /// The returned flag is false only when the per-window propagation budget was exhausted.
     pub fn propagate_decoded_symbol(&mut self, decoded_idx: usize, decoded_data: &[u8]) -> bool {
+        if decoded_idx >= self.k || decoded_data.len() > self.symbol_size {
+            return self.reject_symbol("invalid decoded symbol index or length");
+        }
         let mut to_update = Vec::new();
 
         for (&symbol_id, indices) in &self.symbol_degrees {
@@ -879,6 +898,64 @@ mod tests {
         assert!(dec.received_symbols.is_empty());
         assert!(dec.symbol_degrees.is_empty());
         assert_eq!(dec.retained_payload_bytes, 0);
+    }
+
+    #[test]
+    fn encoder_rejects_long_source_symbols() {
+        let mut enc = LTEncoder::new(4, 8);
+        assert!(!enc.add_source_symbol(vec![0; 9]));
+        assert_eq!(enc.packets_in_window(), 0);
+    }
+
+    #[test]
+    fn encoder_accepts_short_source_symbols_and_bounds_output_to_max_source_len() {
+        let mut enc = LTEncoder::new(4, 8);
+        assert!(enc.add_source_symbol(vec![0xAB; 4]));
+        let (data, _) = enc.generate_symbol_with_indices(1);
+        // Output length tracks the longest buffered source, bounded by symbol_size.
+        assert_eq!(data.len(), 4);
+        assert_eq!(&data[..4], &[0xAB; 4]);
+    }
+
+    #[test]
+    fn decoder_rejects_oversized_source_symbol() {
+        let pool = make_pool();
+        let mut dec = LTDecoder::new(2, 4, pool);
+        assert!(!dec.add_source_symbol(0, vec![0; 5]));
+        assert!(dec.decoded_symbols[0].is_none());
+    }
+
+    #[test]
+    fn decoder_rejects_duplicate_source_index() {
+        let pool = make_pool();
+        let mut dec = LTDecoder::new(2, 4, pool);
+        assert!(dec.add_source_symbol(0, vec![0x11; 4]));
+        assert!(!dec.add_source_symbol(0, vec![0x22; 4]));
+        assert_eq!(dec.decoded_symbols[0].as_ref().unwrap(), &vec![0x11; 4]);
+    }
+
+    #[test]
+    fn encoder_constructor_clamps_zero_dimensions() {
+        let enc = LTEncoder::new(0, 0);
+        assert_eq!(enc.k(), 1);
+        assert_eq!(enc.symbol_size(), 1);
+    }
+
+    #[test]
+    fn decoder_constructor_clamps_zero_dimensions() {
+        let pool = make_pool();
+        let dec = LTDecoder::new(0, 0, pool);
+        assert_eq!(dec.k, 1);
+        assert_eq!(dec.symbol_size, 1);
+        assert_eq!(dec.decoding_progress(), 0.0);
+    }
+
+    #[test]
+    fn decoder_clamps_zero_repair_limit() {
+        let pool = make_pool();
+        let dec = LTDecoder::new_with_repair_limit(4, 8, pool, 0, 0);
+        assert_eq!(dec.max_symbols, 1);
+        assert_eq!(dec.max_queue_len, 1);
     }
 
     // ---------------------------------------------------------------
