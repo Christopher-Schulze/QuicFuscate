@@ -36,6 +36,49 @@ pub const MAX_CID_LEN: usize = 20;
 pub const MAX_PKT_NUM_LEN: usize = 4;
 /// Bytes of sample used for HP
 pub const SAMPLE_LEN: usize = 16;
+const AEAD_TAG_LEN: usize = 16;
+const MAX_QUIC_VARINT: u64 = 0x3fff_ffff_ffff_ffff;
+
+#[inline]
+fn checked_usize_add(left: usize, right: usize) -> Result<usize, ConnectionError> {
+    left.checked_add(right).ok_or(ConnectionError::InvalidPacket)
+}
+
+#[inline]
+fn checked_buffer_end(
+    buffer_len: usize,
+    start: usize,
+    length: usize,
+) -> Result<usize, ConnectionError> {
+    let end = checked_usize_add(start, length)?;
+    if end > buffer_len {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    Ok(end)
+}
+
+#[inline]
+fn checked_cid_wire_len(length: usize) -> Result<u8, ConnectionError> {
+    if length > MAX_CID_LEN || length > u8::MAX as usize {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    Ok(length as u8)
+}
+
+#[inline]
+fn checked_varint_value(length: usize) -> Result<u64, ConnectionError> {
+    let value = u64::try_from(length).map_err(|_| ConnectionError::InvalidPacket)?;
+    if value > MAX_QUIC_VARINT {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    Ok(value)
+}
+
+#[inline]
+fn checked_u64_add_offset(offset: u64, length: usize) -> Result<u64, ConnectionError> {
+    let length = u64::try_from(length).map_err(|_| ConnectionError::InvalidPacket)?;
+    offset.checked_add(length).ok_or(ConnectionError::InvalidPacket)
+}
 
 /// Header protection trait for masking packet numbers
 pub trait HeaderProtector {
@@ -251,6 +294,9 @@ use std::arch::x86_64::*;
 
 /// SIMD-optimized packet number encoding
 pub fn encode_pkt_num(pn: u64, pn_len: usize, out: &mut [u8]) -> Result<usize, ConnectionError> {
+    if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) {
+        return Err(ConnectionError::InvalidPacket);
+    }
     if out.len() < pn_len {
         return Err(ConnectionError::BufferTooShort);
     }
@@ -312,10 +358,14 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
         if unlikely((first & crate::transport::packet::FIXED_BIT) == 0) {
             return Err(ConnectionError::InvalidPacket);
         }
-        if unlikely(buf.len() < 1 + short_dcid_len) {
+        if short_dcid_len > MAX_CID_LEN {
+            return Err(ConnectionError::InvalidPacket);
+        }
+        let pn_off = checked_usize_add(1, short_dcid_len)?;
+        if unlikely(buf.len() < pn_off) {
             return Err(ConnectionError::BufferTooShort);
         }
-        let dcid = buf[1..1 + short_dcid_len].to_vec();
+        let dcid = buf[1..pn_off].to_vec();
         let hdr = Header {
             ty: PacketType::Short,
             version: 0,
@@ -327,7 +377,6 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
             versions: None,
             key_phase: (first & crate::transport::packet::KEY_PHASE_BIT) != 0,
         };
-        let pn_off = 1 + short_dcid_len;
         return Ok((hdr, pn_off));
     }
     // Long header parsing
@@ -338,36 +387,23 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
     if version != 0 && unlikely((first & crate::transport::packet::FIXED_BIT) == 0) {
         return Err(ConnectionError::InvalidPacket);
     }
-    let mut off = 5;
-    if buf.len() < off + 1 {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let dcid_len = buf[off] as usize;
-    off += 1;
-    if version != 0
-        && crate::transport::is_supported_version(version)
-        && dcid_len > crate::transport::MAX_CONN_ID_LEN
-    {
+    let mut off = 5usize;
+    let dcid_len = *buf.get(off).ok_or(ConnectionError::BufferTooShort)? as usize;
+    off = checked_usize_add(off, 1)?;
+    if dcid_len > MAX_CID_LEN {
         return Err(ConnectionError::InvalidPacket);
     }
-    if buf.len() < off + dcid_len + 1 {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let dcid = buf[off..off + dcid_len].to_vec();
-    off += dcid_len;
-    let scid_len = buf[off] as usize;
-    off += 1;
-    if version != 0
-        && crate::transport::is_supported_version(version)
-        && scid_len > crate::transport::MAX_CONN_ID_LEN
-    {
+    let dcid_start = off;
+    let dcid_end = checked_buffer_end(buf.len(), dcid_start, dcid_len)?;
+    let scid_len = *buf.get(dcid_end).ok_or(ConnectionError::BufferTooShort)? as usize;
+    off = checked_usize_add(dcid_end, 1)?;
+    if scid_len > MAX_CID_LEN {
         return Err(ConnectionError::InvalidPacket);
     }
-    if buf.len() < off + scid_len {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let scid = buf[off..off + scid_len].to_vec();
-    off += scid_len;
+    let scid_end = checked_buffer_end(buf.len(), off, scid_len)?;
+    let dcid = buf[dcid_start..dcid_end].to_vec();
+    let scid = buf[off..scid_end].to_vec();
+    off = scid_end;
     let ty_bits = first & crate::transport::packet::TYPE_MASK;
     let ty = crate::transport::version::packet_type_from_long_header(version, ty_bits)?;
     let mut token = None;
@@ -386,24 +422,24 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
         off = buf.len();
     } else if ty == PacketType::Initial {
         let (tok_len, used) = crate::transport::varint::read_varint(&buf[off..])?;
-        let tok_len = tok_len as usize;
-        off += used;
-        if buf.len() < off + tok_len {
-            return Err(ConnectionError::BufferTooShort);
-        }
+        let tok_len = usize::try_from(tok_len).map_err(|_| ConnectionError::InvalidPacket)?;
+        off = checked_usize_add(off, used)?;
+        let token_end = checked_buffer_end(buf.len(), off, tok_len)?;
         if tok_len > 0 {
-            token = Some(buf[off..off + tok_len].to_vec());
+            token = Some(buf[off..token_end].to_vec());
         }
-        off += tok_len;
+        off = token_end;
     } else if ty == PacketType::Retry {
-        if buf.len() < off + 16 {
+        let tag_start =
+            buf.len().checked_sub(AEAD_TAG_LEN).ok_or(ConnectionError::BufferTooShort)?;
+        if tag_start < off {
             return Err(ConnectionError::BufferTooShort);
         }
-        let tok_len = buf.len() - off - 16;
+        let tok_len = tag_start - off;
         if tok_len > 0 {
-            token = Some(buf[off..off + tok_len].to_vec());
+            token = Some(buf[off..tag_start].to_vec());
         }
-        off += tok_len;
+        off = tag_start;
     }
     let hdr = Header {
         ty,
@@ -429,84 +465,85 @@ pub fn format_short_header(
     key_phase: bool,
     out: &mut [u8],
 ) -> Result<usize, ConnectionError> {
-    if out.is_empty() {
-        return Err(ConnectionError::BufferTooShort);
-    }
+    checked_cid_wire_len(dcid.len())?;
+    let end = checked_buffer_end(out.len(), 1, dcid.len())?;
     let mut first = crate::transport::packet::FIXED_BIT; // 0x40
     if key_phase {
         first |= crate::transport::packet::KEY_PHASE_BIT;
     }
     out[0] = first;
-    if out.len() < 1 + dcid.len() {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    out[1..1 + dcid.len()].copy_from_slice(dcid);
-    Ok(1 + dcid.len())
+    out[1..end].copy_from_slice(dcid);
+    Ok(end)
 }
 
 /// Minimal header formatting to get PN offset and header fields
 pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionError> {
-    if out.is_empty() {
-        return Err(ConnectionError::BufferTooShort);
-    }
     match h.ty {
         PacketType::Short => {
+            checked_cid_wire_len(h.dcid.len())?;
+            if !h.scid.is_empty() || h.token.is_some() || h.versions.is_some() {
+                return Err(ConnectionError::InvalidPacket);
+            }
+            let end = checked_buffer_end(out.len(), 1, h.dcid.len())?;
             let mut first = crate::transport::packet::FIXED_BIT; // 0x40
             if h.key_phase {
                 first |= crate::transport::packet::KEY_PHASE_BIT;
             }
             out[0] = first;
-            if out.len() < 1 + h.dcid.len() {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[1..1 + h.dcid.len()].copy_from_slice(&h.dcid);
-            Ok(1 + h.dcid.len())
+            out[1..end].copy_from_slice(&h.dcid);
+            Ok(end)
         }
         PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT | PacketType::Retry => {
             // Long header: [first][version:4][dcid_len:1][dcid][scid_len:1][scid]
-            let mut first = FORM_BIT | FIXED_BIT; // long header with fixed bit
-            first |= crate::transport::version::long_header_type_bits(h.version, h.ty)?;
-            out[0] = first;
-            if out.len() < 1 + 4 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[1..5].copy_from_slice(&h.version.to_be_bytes());
-            let mut off = 5;
-            if out.len() < off + 1 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off] = h.dcid.len() as u8;
-            off += 1;
-            if out.len() < off + h.dcid.len() {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + h.dcid.len()].copy_from_slice(&h.dcid);
-            off += h.dcid.len();
-            if out.len() < off + 1 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off] = h.scid.len() as u8;
-            off += 1;
-            if out.len() < off + h.scid.len() {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            out[off..off + h.scid.len()].copy_from_slice(&h.scid);
-            off += h.scid.len();
+            let dcid_len = checked_cid_wire_len(h.dcid.len())?;
+            let scid_len = checked_cid_wire_len(h.scid.len())?;
+            let token = h.token.as_deref().unwrap_or(&[]);
+            let token_value = checked_varint_value(token.len())?;
+            let type_bits = crate::transport::version::long_header_type_bits(h.version, h.ty)?;
+            let mut required = 5usize;
+            required = checked_usize_add(required, 1)?;
+            required = checked_usize_add(required, h.dcid.len())?;
+            required = checked_usize_add(required, 1)?;
+            required = checked_usize_add(required, h.scid.len())?;
             if h.ty == PacketType::Initial {
-                let token = h.token.as_deref().unwrap_or(&[]);
-                off += crate::transport::varint::write_varint(token.len() as u64, &mut out[off..])?;
-                if out.len() < off + token.len() {
-                    return Err(ConnectionError::BufferTooShort);
-                }
-                out[off..off + token.len()].copy_from_slice(token);
-                off += token.len();
+                required = checked_usize_add(
+                    required,
+                    crate::transport::pn::varint::varint_len(token_value),
+                )?;
+            }
+            if h.ty == PacketType::Initial || h.ty == PacketType::Retry {
+                required = checked_usize_add(required, token.len())?;
+            } else if h.token.is_some() {
+                return Err(ConnectionError::InvalidPacket);
+            }
+            if out.len() < required {
+                return Err(ConnectionError::BufferTooShort);
+            }
+            let mut first = FORM_BIT | FIXED_BIT; // long header with fixed bit
+            first |= type_bits;
+            out[0] = first;
+            out[1..5].copy_from_slice(&h.version.to_be_bytes());
+            let mut off = 5usize;
+            off = checked_usize_add(off, 1)?;
+            let dcid_end = checked_buffer_end(out.len(), off, h.dcid.len())?;
+            let scid_len_offset = dcid_end;
+            let scid_bytes_start = checked_usize_add(scid_len_offset, 1)?;
+            let scid_end = checked_buffer_end(out.len(), scid_bytes_start, h.scid.len())?;
+            out[5] = dcid_len;
+            out[6..dcid_end].copy_from_slice(&h.dcid);
+            out[scid_len_offset] = scid_len;
+            out[scid_bytes_start..scid_end].copy_from_slice(&h.scid);
+            off = scid_end;
+            if h.ty == PacketType::Initial {
+                let written = crate::transport::varint::write_varint(token_value, &mut out[off..])?;
+                off = checked_usize_add(off, written)?;
+                let token_end = checked_buffer_end(out.len(), off, token.len())?;
+                out[off..token_end].copy_from_slice(token);
+                off = token_end;
             } else if h.ty == PacketType::Retry {
-                let token = h.token.as_deref().unwrap_or(&[]);
-                if out.len() < off + token.len() {
-                    return Err(ConnectionError::BufferTooShort);
-                }
-                out[off..off + token.len()].copy_from_slice(token);
-                off += token.len();
+                let token_end = checked_buffer_end(out.len(), off, token.len())?;
+                out[off..token_end].copy_from_slice(token);
+                off = token_end;
             }
             Ok(off)
         }
@@ -543,6 +580,11 @@ fn unprotect_and_decrypt_with_key(
         hdr.key_phase = (first_unprotected & crate::transport::packet::KEY_PHASE_BIT) != 0;
     }
     hdr.pkt_num_len = pn_len;
+    let aad_len = checked_usize_add(pn_off, pn_len)?;
+    let payload_len = buf.len() - aad_len;
+    if payload_len < AEAD_TAG_LEN {
+        return Err(ConnectionError::BufferTooShort);
+    }
     for i in 0..pn_len {
         buf[pn_off + i] ^= mask[1 + i];
     }
@@ -553,14 +595,6 @@ fn unprotect_and_decrypt_with_key(
     }
     hdr.pkt_num =
         crate::optimize::transport::decode_packet_number(encoded_pn, largest_pn_hint, pn_len as u8);
-
-    let aad_len = pn_off + pn_len;
-    let payload_off = aad_len;
-    let payload_len = buf.len() - payload_off;
-
-    if payload_len < 16 {
-        return Err(ConnectionError::BufferTooShort);
-    }
 
     let (aad_buf, payload_buf) = buf.split_at_mut(aad_len);
     let aad = &aad_buf[..aad_len];
@@ -793,13 +827,45 @@ mod tests {
     }
 
     #[test]
+    fn packet_boundaries_reject_oversized_cids_before_mutation() {
+        let header = Header {
+            ty: PacketType::Initial,
+            version: crate::transport::PROTOCOL_VERSION,
+            dcid: vec![0x11; MAX_CID_LEN + 1],
+            scid: vec![0x22],
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token: None,
+            versions: None,
+            key_phase: false,
+        };
+        let mut output = [0xA5u8; 64];
+        let original = output;
+        assert_eq!(format_header(&header, &mut output), Err(ConnectionError::InvalidPacket));
+        assert_eq!(output, original);
+        assert_eq!(
+            format_short_header(&vec![0x33; MAX_CID_LEN + 1], false, &mut output),
+            Err(ConnectionError::InvalidPacket)
+        );
+        assert_eq!(output, original);
+    }
+
+    #[test]
+    fn packet_number_encoding_supports_unaligned_output() {
+        let mut storage = [0u8; 8];
+        assert_eq!(encode_pkt_num(0x01_02_03_04, 4, &mut storage[1..5]), Ok(4));
+        assert_eq!(&storage[1..5], &[0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
     fn version_negotiation_sets_recommended_fixed_bit_and_parses() {
         let pkt = generate_version_negotiation_packet(
             &[crate::transport::PROTOCOL_VERSION],
             &[crate::transport::PROTOCOL_VERSION],
             &[0x22], // dcid (echoes client SCID)
             &[0x11], // scid (echoes client DCID)
-        );
+        )
+        .expect("generate VN");
         assert_eq!(pkt[0] & FORM_BIT, FORM_BIT);
         assert_eq!(pkt[0] & FIXED_BIT, FIXED_BIT);
         let (parsed, _) = parse_header(&pkt, 0).expect("parse vn");
@@ -835,9 +901,27 @@ mod tests {
             &server_versions,
             &[0xaa, 0xbb], // dcid
             &[0xcc],       // scid
-        );
+        )
+        .expect("generate VN");
         let parsed = parse_version_negotiation(&pkt).expect("VN must parse");
         assert_eq!(parsed, server_versions);
+    }
+
+    #[test]
+    fn vn_generation_rejects_invalid_cid_and_version_lengths() {
+        assert_eq!(
+            generate_version_negotiation_packet(
+                &[],
+                &[crate::transport::PROTOCOL_VERSION],
+                &vec![0u8; MAX_CID_LEN + 1],
+                &[],
+            ),
+            Err(ConnectionError::InvalidPacket)
+        );
+        assert_eq!(
+            generate_version_negotiation_packet(&[], &[], &[], &[]),
+            Err(ConnectionError::InvalidPacket)
+        );
     }
 
     #[test]
@@ -855,6 +939,16 @@ mod tests {
         assert!(parse_version_negotiation(&bad3).is_none());
         // Empty packet.
         assert!(parse_version_negotiation(&[]).is_none());
+    }
+
+    #[test]
+    fn vn_parser_rejects_oversized_connection_ids() {
+        let mut packet = vec![FORM_BIT, 0, 0, 0, 0, (MAX_CID_LEN + 1) as u8];
+        packet.extend_from_slice(&[0u8; MAX_CID_LEN + 1]);
+        packet.push(0);
+        packet.extend_from_slice(&crate::transport::PROTOCOL_VERSION.to_be_bytes());
+        assert!(parse_version_negotiation(&packet).is_none());
+        assert_eq!(parse_header(&packet, 0), Err(ConnectionError::InvalidPacket));
     }
 
     #[test]
@@ -897,7 +991,8 @@ mod tests {
             &server_versions,
             &[0x01],
             &[0x02],
-        );
+        )
+        .expect("generate VN");
         assert_eq!(parse_version_negotiation(&pkt).unwrap(), server_versions);
     }
 
@@ -914,7 +1009,8 @@ mod tests {
             &server_versions,
             &[0x11],
             &[0x22],
-        );
+        )
+        .expect("generate VN");
         let parsed = parse_version_negotiation(&pkt).expect("VN response must parse");
         assert_eq!(parsed, server_versions);
         assert!(!parsed.contains(&0xdeadbeef));
@@ -1290,15 +1386,65 @@ mod tests {
     }
 
     #[test]
+    fn tls_cover_open_failure_preserves_sequence_state() {
+        let mut crypto = CryptoContext::default();
+        let key = [0xA1u8; 32];
+        let iv = [0xA2u8; 12];
+        crypto
+            .install_tls_cover_cipher(TlsCoverKeyMaterial::ChaCha20Poly1305 { key: &key, iv: &iv })
+            .expect("install");
+
+        let mut truncated = [0u8; AEAD_TAG_LEN - 1];
+        assert_eq!(
+            crypto.decrypt_tls_cover_record(b"aad", &mut truncated),
+            Err(ConnectionError::BufferTooShort)
+        );
+        assert_eq!(crypto.tls_cover_read_seq, 0);
+    }
+
+    #[test]
+    fn packet_payload_boundaries_reject_overflow_before_aead() {
+        let aead = AesGcm128::from_arrays(&[0xB1; 16], &[0xB2; 12]);
+        let mut packet = [0xC3u8; 64];
+        let original = packet;
+        assert!(encrypt_packet(&mut packet, usize::MAX, 0, 8, &aead).is_err());
+        assert_eq!(packet, original);
+        assert!(decrypt_payload(&mut packet, 0, 1, usize::MAX, &aead).is_err());
+        assert_eq!(packet, original);
+        let crypto = CryptoContext::default();
+        assert!(
+            encrypt_and_protect(&crypto, &mut packet, usize::MAX, 0, 1, PacketType::Short).is_err()
+        );
+        assert_eq!(packet, original);
+    }
+
+    #[test]
+    fn crypto_stream_range_overflow_is_typed_and_atomic() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"pending").expect("queue data");
+        stream.send_off = u64::MAX;
+        assert_eq!(stream.next_crypto_frame(7), Err(ConnectionError::InvalidPacket));
+        assert_eq!(stream.send_off, u64::MAX);
+        assert_eq!(stream.send_buf, b"pending");
+        assert!(stream.unacked.is_empty());
+        assert_eq!(stream.recv(u64::MAX, vec![0x01]), Err(ConnectionError::InvalidPacket));
+        assert_eq!(stream.ack_crypto(u64::MAX, 1), Err(ConnectionError::InvalidPacket));
+        assert_eq!(stream.requeue_crypto(u64::MAX, 1), Err(ConnectionError::InvalidPacket));
+    }
+
+    #[test]
     fn pending_handshake_send_tracks_only_unsent_handshake_flights() {
         let mut crypto = CryptoContext::default();
         assert!(!crypto.has_pending_handshake_send());
 
-        crypto.crypto_handshake.send(b"client-finished");
+        crypto.crypto_handshake.send(b"client-finished").expect("queue handshake flight");
         assert!(crypto.has_pending_handshake_send());
 
-        let (_, bytes) =
-            crypto.crypto_handshake.next_crypto_frame(usize::MAX).expect("queued handshake flight");
+        let (_, bytes) = crypto
+            .crypto_handshake
+            .next_crypto_frame(usize::MAX)
+            .expect("next handshake frame")
+            .expect("queued handshake flight");
         assert_eq!(bytes, b"client-finished");
         assert!(!crypto.has_pending_handshake_send());
     }
@@ -1431,6 +1577,26 @@ pub fn encrypt_and_protect(
     pn_len: usize,
     pkt_type: PacketType,
 ) -> Result<usize, ConnectionError> {
+    if hdr_len > buf.len() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    if !matches!(
+        pkt_type,
+        PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT | PacketType::Short
+    ) {
+        return Ok(hdr_len);
+    }
+    if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) || hdr_len < pn_len {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    let pn_off = hdr_len - pn_len;
+    hp_packet_number_bounds(buf.len(), pn_off, pn_len)?;
+    hp_sample_bounds(buf.len(), pn_off)?;
+    let payload_len = buf.len() - hdr_len;
+    if payload_len < AEAD_TAG_LEN {
+        return Err(ConnectionError::BufferTooShort);
+    }
+
     // Select AEAD based on packet type
     let aead: Option<&dyn tls_aead::AeadSeal> = match pkt_type {
         PacketType::Initial => crypto.seal_initial.as_deref().map(|a| a as &dyn tls_aead::AeadSeal),
@@ -1447,32 +1613,19 @@ pub fn encrypt_and_protect(
         None => return Ok(hdr_len), // No AEAD available yet
     };
 
-    if hdr_len < pn_len {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    if buf.len() < hdr_len + 16 {
-        return Err(ConnectionError::BufferTooShort);
-    }
-
     // Encode packet number length (pn_len - 1) into the low 2 bits of the first header byte.
     // This is required for correct header protection removal on the peer.
-    if pn_len == 0 || pn_len > 4 {
-        return Err(ConnectionError::InvalidPacket);
-    }
     buf[0] = (buf[0] & !PKT_NUM_MASK) | (((pn_len as u8) - 1) & PKT_NUM_MASK);
-
-    // The packet number offset
-    let pn_off = hdr_len - pn_len;
 
     // Encrypt payload in-place. Reserve 16 bytes for AEAD tag at the tail of the payload buffer.
     let (aad, payload) = buf.split_at_mut(hdr_len);
-    let plaintext_len = payload.len().saturating_sub(16);
+    let plaintext_len = payload.len() - AEAD_TAG_LEN;
     let ciphertext_len = aead.seal_with_u64_counter(pn, aad, payload, plaintext_len, None)?;
 
     // Apply header protection
     protect_header(crypto, buf, pn_off, pn_len, pkt_type)?;
 
-    Ok(hdr_len + ciphertext_len)
+    checked_usize_add(hdr_len, ciphertext_len)
 }
 
 /// Seal multiple 1-RTT/0-RTT payloads through the installed data-plane AEAD sealer.
@@ -1524,9 +1677,20 @@ pub fn generate_version_negotiation_packet(
     server_versions: &[u32],
     dcid: &[u8],
     scid: &[u8],
-) -> Vec<u8> {
-    let mut pkt =
-        Vec::with_capacity(1 + 4 + 1 + dcid.len() + 1 + scid.len() + server_versions.len() * 4);
+) -> Result<Vec<u8>, ConnectionError> {
+    checked_cid_wire_len(dcid.len())?;
+    checked_cid_wire_len(scid.len())?;
+    if server_versions.is_empty() {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    let versions_len =
+        server_versions.len().checked_mul(4).ok_or(ConnectionError::InvalidPacket)?;
+    let base_len = checked_usize_add(1 + 4, 1)?;
+    let base_len = checked_usize_add(base_len, dcid.len())?;
+    let base_len = checked_usize_add(base_len, 1)?;
+    let base_len = checked_usize_add(base_len, scid.len())?;
+    let capacity = checked_usize_add(base_len, versions_len)?;
+    let mut pkt = Vec::with_capacity(capacity);
     // Only the form bit is invariant. RFC 9000 recommends setting the fixed-bit
     // position so VN packets resemble other QUIC packets on multiplexed ports.
     let first = crate::transport::rand::rand_u8() | FORM_BIT | FIXED_BIT;
@@ -1534,16 +1698,16 @@ pub fn generate_version_negotiation_packet(
     // Version field is 0x00000000 for VN packets.
     pkt.extend_from_slice(&0u32.to_be_bytes());
     // DCID (echoes the client's SCID).
-    pkt.push(dcid.len() as u8);
+    pkt.push(checked_cid_wire_len(dcid.len())?);
     pkt.extend_from_slice(dcid);
     // SCID (echoes the client's DCID).
-    pkt.push(scid.len() as u8);
+    pkt.push(checked_cid_wire_len(scid.len())?);
     pkt.extend_from_slice(scid);
     // Supported versions, big-endian.
     for v in server_versions {
         pkt.extend_from_slice(&v.to_be_bytes());
     }
-    pkt
+    Ok(pkt)
 }
 
 /// Extracts the version list from a Version Negotiation packet.
@@ -1569,37 +1733,38 @@ pub fn parse_version_negotiation(pkt: &[u8]) -> Option<Vec<u32>> {
     }
     let mut off = 5usize;
     // DCID length + bytes.
-    if off >= pkt.len() {
+    let dcid_len = usize::from(*pkt.get(off)?);
+    if dcid_len > MAX_CID_LEN {
         return None;
     }
-    let dcid_len = pkt[off] as usize;
-    off += 1;
-    if off + dcid_len > pkt.len() {
+    off = off.checked_add(1)?;
+    let dcid_end = off.checked_add(dcid_len)?;
+    if dcid_end > pkt.len() {
         return None;
     }
-    off += dcid_len;
+    off = dcid_end;
     // SCID length + bytes.
-    if off >= pkt.len() {
+    let scid_len = usize::from(*pkt.get(off)?);
+    if scid_len > MAX_CID_LEN {
         return None;
     }
-    let scid_len = pkt[off] as usize;
-    off += 1;
-    if off + scid_len > pkt.len() {
+    off = off.checked_add(1)?;
+    let scid_end = off.checked_add(scid_len)?;
+    if scid_end > pkt.len() {
         return None;
     }
-    off += scid_len;
+    off = scid_end;
     // Remaining bytes must be a whole number of 4-byte version entries.
     let remaining = pkt.len().saturating_sub(off);
     if remaining == 0 || !remaining.is_multiple_of(4) {
         return None;
     }
-    let count = remaining / 4;
-    let mut versions = Vec::with_capacity(count);
-    for _ in 0..count {
-        versions.push(u32::from_be_bytes([pkt[off], pkt[off + 1], pkt[off + 2], pkt[off + 3]]));
-        off += 4;
-    }
-    Some(versions)
+    Some(
+        pkt[off..]
+            .chunks_exact(4)
+            .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect(),
+    )
 }
 
 /// Builds a stateless server VN response for an unsupported long-header packet.
@@ -1625,6 +1790,9 @@ pub fn server_version_negotiation_response(
 
     let mut offset = 5usize;
     let dcid_len = usize::from(packet[offset]);
+    if dcid_len > MAX_CID_LEN {
+        return Err(ConnectionError::InvalidPacket);
+    }
     offset += 1;
     let dcid_end = offset.checked_add(dcid_len).ok_or(ConnectionError::InvalidPacket)?;
     if dcid_end >= packet.len() {
@@ -1633,6 +1801,9 @@ pub fn server_version_negotiation_response(
     let dcid = &packet[offset..dcid_end];
     offset = dcid_end;
     let scid_len = usize::from(packet[offset]);
+    if scid_len > MAX_CID_LEN {
+        return Err(ConnectionError::InvalidPacket);
+    }
     offset += 1;
     let scid_end = offset.checked_add(scid_len).ok_or(ConnectionError::InvalidPacket)?;
     if scid_end > packet.len() {
@@ -1649,7 +1820,7 @@ pub fn server_version_negotiation_response(
         return Err(ConnectionError::InvalidState);
     }
     offered.push(crate::transport::version::generate_reserved_version());
-    Ok(Some(generate_version_negotiation_packet(&[], &offered, scid, dcid)))
+    Ok(Some(generate_version_negotiation_packet(&[], &offered, scid, dcid)?))
 }
 
 fn retry_integrity_material(
@@ -1680,9 +1851,12 @@ pub fn append_retry_tag(
     odcid: &[u8],
     version: u32,
 ) -> Result<(), ConnectionError> {
+    checked_cid_wire_len(odcid.len())?;
     let hdr_len = buf.len();
-    let mut pseudo = Vec::with_capacity(1 + odcid.len() + hdr_len);
-    pseudo.push(odcid.len() as u8);
+    let capacity = checked_usize_add(1, odcid.len())?;
+    let capacity = checked_usize_add(capacity, hdr_len)?;
+    let mut pseudo = Vec::with_capacity(capacity);
+    pseudo.push(checked_cid_wire_len(odcid.len())?);
     pseudo.extend_from_slice(odcid);
     pseudo.extend_from_slice(&buf[..hdr_len]);
     let (key, nonce) = retry_integrity_material(version)?;
@@ -1696,10 +1870,13 @@ pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], version: u32) -> Result<(),
     if packet.len() < 16 {
         return Err(ConnectionError::BufferTooShort);
     }
+    checked_cid_wire_len(odcid.len())?;
     let hdr_len = packet.len() - 16;
     let tag_in = &packet[hdr_len..];
-    let mut pseudo = Vec::with_capacity(1 + odcid.len() + hdr_len);
-    pseudo.push(odcid.len() as u8);
+    let capacity = checked_usize_add(1, odcid.len())?;
+    let capacity = checked_usize_add(capacity, hdr_len)?;
+    let mut pseudo = Vec::with_capacity(capacity);
+    pseudo.push(checked_cid_wire_len(odcid.len())?);
     pseudo.extend_from_slice(odcid);
     pseudo.extend_from_slice(&packet[..hdr_len]);
     let (key, nonce) = retry_integrity_material(version)?;
@@ -1803,13 +1980,19 @@ pub fn remove_hp(
 pub fn decrypt_payload(
     buf: &mut [u8],
     pn: u64,
-    _pn_len: usize,
+    pn_len: usize,
     hdr_len: usize,
     aead: &dyn crate::crypto::aead::AeadOpen,
 ) -> Result<usize, ConnectionError> {
-    if buf.len() < hdr_len + 16 {
-        // Need at least header + AEAD tag
+    if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) || hdr_len < pn_len {
         return Err(ConnectionError::InvalidPacket);
+    }
+    if hdr_len > buf.len() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    if buf.len() - hdr_len < AEAD_TAG_LEN {
+        // Need at least header + AEAD tag
+        return Err(ConnectionError::BufferTooShort);
     }
 
     // Split buffer to avoid borrowing conflicts
@@ -1820,7 +2003,7 @@ pub fn decrypt_payload(
     let _payload_len = payload_buf.len();
     let plaintext_len = aead.open_with_u64_counter(pn, aad, payload_buf)?;
 
-    Ok(hdr_len + plaintext_len)
+    checked_usize_add(hdr_len, plaintext_len)
 }
 
 /// Encrypt a QUIC packet payload
@@ -1831,6 +2014,12 @@ pub fn encrypt_packet(
     hdr_len: usize,
     aead: &dyn crate::crypto::aead::AeadSeal,
 ) -> Result<usize, ConnectionError> {
+    if hdr_len > buf.len() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    let payload_end = checked_buffer_end(buf.len(), hdr_len, payload_len)?;
+    checked_buffer_end(buf.len(), payload_end, AEAD_TAG_LEN)?;
+
     // Zero-copy AAD: copy header to stack buffer (eliminates heap allocation)
     const MAX_AAD_STACK: usize = 64;
     let mut aad_stack = [0u8; MAX_AAD_STACK];
@@ -1842,7 +2031,7 @@ pub fn encrypt_packet(
     };
 
     // Encrypt in-place
-    let ciphertext_len = aead.seal_with_u64_counter(pn, aad, buf, hdr_len + payload_len, None)?;
+    let ciphertext_len = aead.seal_with_u64_counter(pn, aad, buf, payload_end, None)?;
 
     Ok(ciphertext_len)
 }
@@ -1883,8 +2072,10 @@ impl CryptoStream {
     }
 
     /// Queue data to be sent in CRYPTO frames
-    pub fn send(&mut self, data: &[u8]) {
+    pub fn send(&mut self, data: &[u8]) -> Result<(), ConnectionError> {
+        self.send_buf.len().checked_add(data.len()).ok_or(ConnectionError::CryptoBufferExceeded)?;
         self.send_buf.extend_from_slice(data);
+        Ok(())
     }
 
     /// Get next CRYPTO frame to send (up to max_len bytes).
@@ -1892,7 +2083,10 @@ impl CryptoStream {
     /// Loss/PTO-requeued ranges are re-emitted first (original offsets), then
     /// fresh bytes. Every emitted range stays in `unacked` until
     /// [`ack_crypto`](Self::ack_crypto) confirms it.
-    pub fn next_crypto_frame(&mut self, max_len: usize) -> Option<(u64, Vec<u8>)> {
+    pub fn next_crypto_frame(
+        &mut self,
+        max_len: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError> {
         while let Some(&off) = self.retx.front() {
             let Some(data) = self.unacked.get(&off) else {
                 // Range already acknowledged; drop the stale requeue entry.
@@ -1902,81 +2096,129 @@ impl CryptoStream {
             if data.len() <= max_len {
                 let data = data.clone();
                 self.retx.pop_front();
-                return Some((off, data));
+                return Ok(Some((off, data)));
             }
             if max_len == 0 {
-                return None;
+                return Ok(None);
             }
             // Split the range: emit a prefix now, keep the suffix queued.
+            let suffix_offset = checked_u64_add_offset(off, max_len)?;
             let (prefix, suffix) = data.split_at(max_len);
             let prefix = prefix.to_vec();
             let suffix = suffix.to_vec();
             self.unacked.remove(&off);
             self.unacked.insert(off, prefix.clone());
-            self.unacked.insert(off + max_len as u64, suffix);
+            self.unacked.insert(suffix_offset, suffix);
             self.retx.pop_front();
-            self.retx.push_front(off + max_len as u64);
-            return Some((off, prefix));
+            self.retx.push_front(suffix_offset);
+            return Ok(Some((off, prefix)));
         }
         if self.send_buf.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let len = max_len.min(self.send_buf.len());
         let offset = self.send_off;
+        let next_offset = checked_u64_add_offset(offset, len)?;
+        let retained_bytes =
+            self.unacked_bytes.checked_add(len).ok_or(ConnectionError::CryptoBufferExceeded)?;
         let data: Vec<u8> = self.send_buf.drain(..len).collect();
-        self.send_off += len as u64;
-        self.unacked_bytes += data.len();
+        self.send_off = next_offset;
+        self.unacked_bytes = retained_bytes;
         self.unacked.insert(offset, data.clone());
         self.evict_unacked_overflow();
 
-        Some((offset, data))
+        Ok(Some((offset, data)))
     }
 
     /// Drops the acknowledged range `[offset, offset+len)` from retention,
     /// splitting retained entries on partial overlap.
-    pub fn ack_crypto(&mut self, offset: u64, len: u64) {
+    pub fn ack_crypto(&mut self, offset: u64, len: u64) -> Result<(), ConnectionError> {
         if len == 0 {
-            return;
+            return Ok(());
         }
-        let ack_end = offset + len;
+        let ack_end = offset.checked_add(len).ok_or(ConnectionError::InvalidPacket)?;
         let overlapping: Vec<u64> = self.unacked.range(..ack_end).map(|(o, _)| *o).collect();
+        let mut plans = Vec::with_capacity(overlapping.len());
+        let mut removed_bytes = 0usize;
+        let mut added_bytes = 0usize;
         for start in overlapping {
             let Some(data) = self.unacked.get(&start).cloned() else {
                 continue;
             };
-            let end = start + data.len() as u64;
+            let end = checked_u64_add_offset(start, data.len())?;
             if end <= offset {
                 continue; // no overlap
             }
-            self.unacked_bytes -= data.len();
-            self.unacked.remove(&start);
-            if start < offset {
-                let head = data[..(offset - start) as usize].to_vec();
-                self.unacked_bytes += head.len();
-                self.unacked.insert(start, head);
+            let head_len = if start < offset {
+                Some(usize::try_from(offset - start).map_err(|_| ConnectionError::InvalidPacket)?)
+            } else {
+                None
+            };
+            let tail_start = if end > ack_end {
+                Some(
+                    usize::try_from(
+                        ack_end.checked_sub(start).ok_or(ConnectionError::InvalidPacket)?,
+                    )
+                    .map_err(|_| ConnectionError::InvalidPacket)?,
+                )
+            } else {
+                None
+            };
+            removed_bytes = removed_bytes
+                .checked_add(data.len())
+                .ok_or(ConnectionError::CryptoBufferExceeded)?;
+            if let Some(head_len) = head_len {
+                added_bytes = added_bytes
+                    .checked_add(head_len)
+                    .ok_or(ConnectionError::CryptoBufferExceeded)?;
             }
-            if end > ack_end {
-                let tail = data[(ack_end - start) as usize..].to_vec();
-                self.unacked_bytes += tail.len();
-                self.unacked.insert(ack_end, tail);
+            if let Some(tail_start) = tail_start {
+                added_bytes = added_bytes
+                    .checked_add(data.len() - tail_start)
+                    .ok_or(ConnectionError::CryptoBufferExceeded)?;
+            }
+            plans.push((start, data, head_len, tail_start));
+        }
+        if self.unacked_bytes < removed_bytes {
+            return Err(ConnectionError::InvalidState);
+        }
+        let retained_bytes = self.unacked_bytes - removed_bytes;
+        let retained_bytes =
+            retained_bytes.checked_add(added_bytes).ok_or(ConnectionError::CryptoBufferExceeded)?;
+
+        for (start, data, head_len, tail_start) in plans {
+            self.unacked.remove(&start);
+            if let Some(head_len) = head_len {
+                self.unacked.insert(start, data[..head_len].to_vec());
+            }
+            if let Some(tail_start) = tail_start {
+                self.unacked.insert(ack_end, data[tail_start..].to_vec());
             }
         }
+        self.unacked_bytes = retained_bytes;
+        Ok(())
     }
 
     /// Requeues the lost range `[offset, offset+len)` for retransmission.
     /// Overlapping retained ranges are re-emitted whole (the receiver accepts
     /// overlapping CRYPTO data), ordered by offset.
-    pub fn requeue_crypto(&mut self, offset: u64, len: u64) {
+    pub fn requeue_crypto(&mut self, offset: u64, len: u64) -> Result<(), ConnectionError> {
         if len == 0 {
-            return;
+            return Ok(());
         }
-        let end = offset + len;
+        let end = offset.checked_add(len).ok_or(ConnectionError::InvalidPacket)?;
         let offsets: Vec<u64> = self
             .unacked
             .range(..end)
-            .filter(|(o, d)| **o + d.len() as u64 > offset)
-            .map(|(o, _)| *o)
+            .map(|(o, d)| {
+                let data_end = checked_u64_add_offset(*o, d.len())?;
+                Ok((*o, data_end))
+            })
+            .collect::<Result<Vec<_>, ConnectionError>>()?
+            .into_iter()
+            .filter(|(_, data_end)| *data_end > offset)
+            .map(|(off, _)| off)
             .collect();
         for off in offsets {
             if !self.retx.contains(&off) {
@@ -1986,6 +2228,7 @@ impl CryptoStream {
         let mut sorted: Vec<u64> = self.retx.iter().copied().collect();
         sorted.sort_unstable();
         self.retx = sorted.into_iter().collect();
+        Ok(())
     }
 
     /// Requeues every retained unacked range for retransmission.
@@ -2027,12 +2270,15 @@ impl CryptoStream {
 
     /// Receive a CRYPTO frame (may be out of order)
     pub fn recv(&mut self, offset: u64, data: Vec<u8>) -> Result<(), ConnectionError> {
-        if offset + data.len() as u64 > self.recv_max + 65536 {
+        let data_end = checked_u64_add_offset(offset, data.len())?;
+        let receive_window_end =
+            self.recv_max.checked_add(65536).ok_or(ConnectionError::FlowControl)?;
+        if data_end > receive_window_end {
             // Reject data too far ahead
             return Err(ConnectionError::FlowControl);
         }
 
-        self.recv_max = self.recv_max.max(offset + data.len() as u64);
+        self.recv_max = self.recv_max.max(data_end);
         self.recv_buf.insert(offset, data);
         Ok(())
     }
@@ -2358,12 +2604,13 @@ impl CryptoContext {
             .ok_or(ConnectionError::CryptoError("crypto failure".into()))?;
 
         let seq = self.tls_cover_write_seq;
-        self.tls_cover_write_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
+        let next_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
+        let ciphertext_len = checked_usize_add(plaintext.len(), AEAD_TAG_LEN)?;
 
-        let mut buffer = Vec::with_capacity(plaintext.len() + 16);
+        let mut buffer = Vec::with_capacity(ciphertext_len);
         buffer.extend_from_slice(plaintext);
         let pt_len = plaintext.len();
-        buffer.resize(pt_len + 16, 0);
+        buffer.resize(ciphertext_len, 0);
 
         let result = cipher.seal(seq, aad, buffer.as_mut_slice(), pt_len);
         match result {
@@ -2374,6 +2621,7 @@ impl CryptoContext {
             Err(_) => telemetry::FAKETLS_CIPHER_FAILURES.inc(),
         }
         result?;
+        self.tls_cover_write_seq = next_seq;
 
         Ok(buffer)
     }
@@ -2390,9 +2638,19 @@ impl CryptoContext {
             .ok_or(ConnectionError::CryptoError("crypto failure".into()))?;
 
         let seq = self.tls_cover_read_seq;
-        self.tls_cover_read_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
+        let next_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
 
-        cipher.open(seq, aad, ciphertext).inspect_err(|_| telemetry::FAKETLS_CIPHER_FAILURES.inc())
+        let result = cipher.open(seq, aad, ciphertext);
+        match result {
+            Ok(length) => {
+                self.tls_cover_read_seq = next_seq;
+                Ok(length)
+            }
+            Err(error) => {
+                telemetry::FAKETLS_CIPHER_FAILURES.inc();
+                Err(error)
+            }
+        }
     }
 
     /// Install AES-GCM for Initial packets (compatibility path).

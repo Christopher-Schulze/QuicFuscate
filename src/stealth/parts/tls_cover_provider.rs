@@ -267,28 +267,39 @@ impl TlsCoverProvider {
         &mut self,
         _level: crate::qftls::Level,
         max_len: usize,
-    ) -> Option<(u64, Vec<u8>)> {
+    ) -> Result<Option<(u64, Vec<u8>)>, crate::error::ConnectionError> {
         // Generate sophisticated TLS Cover frames for cover traffic
         if !self.handshake_complete {
-            let frame = self.generate_fake_crypto_frame(max_len);
+            let frame = self.generate_fake_crypto_frame(max_len)?;
             if !frame.is_empty() {
-                return Some((0, frame));
+                return Ok(Some((0, frame)));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Generate sophisticated fake crypto frame based on stealth mode
-    fn generate_fake_crypto_frame(&self, max_len: usize) -> Vec<u8> {
+    fn generate_fake_crypto_frame(
+        &self,
+        max_len: usize,
+    ) -> Result<Vec<u8>, crate::error::ConnectionError> {
         // In performance mode: Full TLS Cover but no artificial delays/padding/jitter
         // We still generate realistic TLS frames for cover traffic!
 
         // Stealth mode: full sophistication
         use rand::Rng;
         let mut rng = rand::rng();
+        const TLS_RECORD_HEADER_LEN: usize = 5;
+        const AEAD_TAG_LEN: usize = 16;
+        let record_overhead = TLS_RECORD_HEADER_LEN + AEAD_TAG_LEN;
+        if max_len < record_overhead {
+            return Ok(Vec::new());
+        }
+        let payload_capacity = max_len - record_overhead;
+        let max_payload = payload_capacity.min(u16::MAX as usize - AEAD_TAG_LEN);
 
         // Generate realistic TLS record structure
-        let mut frame = Vec::with_capacity(5 + max_len.min(1300));
+        let mut frame = Vec::with_capacity(TLS_RECORD_HEADER_LEN);
 
         // TLS Record Header (5 bytes): Type(1) + Version(2) + Length(2)
         frame.push(0x16); // Handshake
@@ -298,32 +309,43 @@ impl TlsCoverProvider {
         let mut payload_size = if self.performance_mode {
             // Performance mode: choose an optimal size depending on role.
             let base = if self.is_server { 800 } else { 1200 };
-            max_len.min(base).saturating_sub(5)
+            max_payload.min(base)
         } else {
             // Stealth mode: realistische Variation
-            let base_range = if self.is_server { 150..700 } else { 200..800 };
-            let base_size = if max_len > 1000 {
-                rng.random_range(base_range)
+            let upper = max_payload.min(if self.is_server { 700 } else { 800 });
+            let lower = max_payload.min(if self.is_server { 150 } else { 200 });
+            let base_size = if max_payload > 1000 {
+                rng.random_range(lower..=upper)
+            } else if lower == upper {
+                lower
             } else {
-                rng.random_range(50..max_len.min(300))
+                rng.random_range(lower..=upper)
             };
             let jitter = rng.random_range(0..50);
-            (base_size + jitter).min(max_len.saturating_sub(5))
+            base_size
+                .checked_add(jitter)
+                .ok_or(crate::error::ConnectionError::InvalidPacket)?
+                .min(max_payload)
         };
 
         // Optional extra padding for cover traffic (stealth mode only)
         if !self.performance_mode {
             let pad_max_env = Self::padding_cap_override(&self.environment).unwrap_or(0);
             if pad_max_env > 0 {
-                let headroom = max_len.saturating_sub(5).saturating_sub(payload_size);
+                let headroom = payload_capacity.saturating_sub(payload_size);
                 if headroom > 0 {
                     let pad = rng.random_range(0..=pad_max_env.min(headroom));
-                    payload_size = payload_size.saturating_add(pad);
+                    payload_size = payload_size
+                        .checked_add(pad)
+                        .ok_or(crate::error::ConnectionError::InvalidPacket)?;
                 }
             }
         }
 
-        frame.extend_from_slice(&(payload_size as u16).to_be_bytes());
+        let cipher_len = payload_size
+            .checked_add(AEAD_TAG_LEN)
+            .ok_or(crate::error::ConnectionError::InvalidPacket)?;
+        frame.extend_from_slice(&(cipher_len as u16).to_be_bytes());
 
         // Generate realistic handshake payload
         let mut payload = vec![0u8; payload_size];
@@ -347,27 +369,18 @@ impl TlsCoverProvider {
             payload[idx] ^= tag;
         }
 
-        let cipher_len = payload_size + 16;
-        let mut header = frame;
-        if header.len() >= 5 {
-            header[3..5].copy_from_slice(&(cipher_len as u16).to_be_bytes());
-        }
+        let header = frame;
 
         // Installation is constructor-owned. If the shared context is cleared or
         // replaced unexpectedly, encryption fails closed instead of reinstalling
         // session material and risking sequence-number reuse.
-        let ciphertext = self.crypto.write().encrypt_tls_cover_record(&header, &payload);
+        let ciphertext = self
+            .crypto
+            .write()
+            .encrypt_tls_cover_record(&header, &payload)?;
 
         let mut frame_out = header;
-        match ciphertext {
-            Ok(ct) => frame_out.extend_from_slice(&ct),
-            Err(_) => {
-                // Encryption failed: discard this cover frame entirely rather than
-                // sending a structurally anomalous TLS record with unencrypted payload,
-                // which would be trivially detectable by DPI.
-                return Vec::new();
-            }
-        }
+        frame_out.extend_from_slice(&ciphertext);
 
         if !self.performance_mode {
             // Runtime-configurable jitter in microseconds (0 disables).
@@ -380,7 +393,7 @@ impl TlsCoverProvider {
             }
         }
 
-        frame_out
+        Ok(frame_out)
     }
 
     /// Marks the TLS Cover handshake as complete once transport secrets are ready.

@@ -2,7 +2,8 @@
 
 use quicfuscate::error::ConnectionError;
 use quicfuscate::transport::packet::{
-    encode_pkt_num, format_header, parse_header, Header, PacketType,
+    encode_pkt_num, format_header, format_short_header, parse_header, Header, PacketType,
+    MAX_CID_LEN,
 };
 
 #[test]
@@ -94,4 +95,50 @@ fn encode_packet_number_rejects_short_buffer() {
     let mut out = [0u8; 1];
     let err = encode_pkt_num(pn, 2, &mut out).expect_err("buffer too short");
     assert!(matches!(err, ConnectionError::BufferTooShort));
+}
+
+#[test]
+fn malformed_headers_fail_before_output_mutation() {
+    let hdr = Header {
+        ty: PacketType::Initial,
+        version: 1,
+        dcid: vec![0xAA; MAX_CID_LEN + 1],
+        scid: vec![0xBB],
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: None,
+        versions: None,
+        key_phase: false,
+    };
+    let mut out = [0xA5u8; 64];
+    let original = out;
+    assert_eq!(format_header(&hdr, &mut out), Err(ConnectionError::InvalidPacket));
+    assert_eq!(out, original);
+    assert_eq!(
+        format_short_header(&vec![0xCC; MAX_CID_LEN + 1], false, &mut out),
+        Err(ConnectionError::InvalidPacket)
+    );
+    assert_eq!(out, original);
+}
+
+#[test]
+fn packet_number_encoding_supports_unaligned_output() {
+    let mut storage = [0xCCu8; 8];
+    assert_eq!(encode_pkt_num(0x01_02_03_04, 4, &mut storage[1..5]), Ok(4));
+    assert_eq!(&storage[1..5], &[0x01, 0x02, 0x03, 0x04]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[test]
+fn native_avx2_packet_number_encoding_matches_scalar_unaligned() {
+    assert!(std::is_x86_feature_detected!("avx2"));
+    assert!(
+        quicfuscate::optimize::FeatureDetector::instance()
+            .features_full()
+            .simd_dispatch_matrix()
+            .avx2
+    );
+    let mut storage = [0xCCu8; 8];
+    assert_eq!(encode_pkt_num(0xA1_B2_C3_D4, 4, &mut storage[1..5]), Ok(4));
+    assert_eq!(&storage[1..5], &[0xA1, 0xB2, 0xC3, 0xD4]);
 }

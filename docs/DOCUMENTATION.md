@@ -77,9 +77,12 @@ This section is the fast path for skeptical review. It is not a marketing summar
   This removes the io_uring-to-FEC memcpy on the Linux client fast path. Fallback to Tokio
   `recv()` + `try_recv()` when io_uring is unavailable.
 - MSG_ZEROCOPY is not part of the final runtime story.
-- Packet-number decode on packet open is centralized in `src/optimize/transport.rs`:
-  `src/transport/packet.rs` removes header protection, rebuilds the encoded packet-number field,
-  then dispatches through BMI2 on x86_64, SVE2/NEON on aarch64, or the scalar fallback.
+- Packet-number and packet-boundary ownership is centralized in `src/transport/packet.rs`:
+  header-protection removal rebuilds the encoded packet-number field and dispatches through
+  BMI2 on x86_64, SVE2/NEON on aarch64, or the scalar fallback; packet, header, CID, token, and
+  AEAD arithmetic is checked before caller-buffer mutation. `encode_pkt_num()` retains a native
+  AVX2 big-endian store lane with an explicit unaligned-output regression target; native x86_64
+  execution remains an external evidence gate.
 - busy-poll socket tuning is not used.
 - busy-poll socket tuning is not part of the final runtime story.
 - The repository is not reducible to `quinn-udp` plus trivial glue.
@@ -99,7 +102,7 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 |---|---|---|---|
 | Data-plane AEAD posture | `src/crypto/`, `src/simd/` | Product contract is `Aegis128L` or `Morus1280_128`; internal width variants remain backend machine room only | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs` |
 | TLS-visible handshake boundary | `src/qftls.rs` | rustls owns real TLS protocol semantics; TLS Cover is overlay/cover only | `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
-| Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection/` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
+| Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection/` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims; public packet, CID, token, and CRYPTO ranges fail closed before mutation | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, `scripts/tests/rust/rt-transport-packet-headers.rs`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
 | Unsafe SIMD / crypto machine room | `src/crypto/`, `src/simd/`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Stealth/TLS-cover boundary | `src/stealth/`, `src/qftls.rs` | Stealth owns persona and cover policy; rustls still owns real TLS protocol semantics | `docs/todo/done/todo-81-stealth-capability-preservation-and-simplification.md`, `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md` |
 | Raw-IP fingerprint boundary | `src/stealth/fingerprint.rs`, `src/core_parts/connection.rs`, `src/implementations/server/parts/` | normalize decoded client-to-server raw-IP ingress exactly once; apply the frozen profile to server-generated control ICMP; never mutate sealed QUIC or ordinary server-to-client downlink; preserve fragments and PMTUD | fingerprint units, routing ICMP tests, `rt-core-connection-basics`, `rt-stealth-config-toml`, `fingerprint_normalizer` benchmark |
@@ -1903,7 +1906,7 @@ pub trait QuicTlsProvider: Send + Sync {
     fn configure(&mut self, profile: &TlsProfile) -> Result<(), ConnectionError>;
     fn set_server_name(&mut self, name: &str) -> Result<(), ConnectionError>;
     fn provide_quic_data(&mut self, level: Level, data: &[u8]) -> Result<(), ConnectionError>;
-    fn next_crypto_frame(&mut self, level: Level, max_len: usize) -> Option<(u64, Vec<u8>)>;
+    fn next_crypto_frame(&mut self, level: Level, max_len: usize) -> Result<Option<(u64, Vec<u8>)>, ConnectionError>;
     fn poll_secrets_and_install(&mut self, crypto: &Arc<RwLock<CryptoContext>>) -> Result<(), ConnectionError>;
     fn handshake_complete(&self) -> bool;
     fn alpn(&self) -> Option<&str>;
@@ -1918,6 +1921,31 @@ pub trait QuicTlsProvider: Send + Sync {
     fn supports_ch_override(&self) -> bool;
     fn apply_ch_override(&mut self, template: &[u8]) -> Result<(), ConnectionError>;
 }
+
+#### Packet and CRYPTO Boundary
+
+`src/transport/packet.rs` owns checked public packet boundaries. Packet-number
+encoding accepts only one to four bytes and preserves big-endian wire order,
+including the compiled AVX2 path. Header parsing and formatting validate every
+CID against `MAX_CID_LEN`, reject incompatible short-header fields, bound token
+and Version Negotiation lengths, and validate Retry integrity-tag space before
+copying or mutating caller buffers. AEAD and header-protection helpers validate
+packet-number, sample, header, payload, and tag ranges before slicing or
+encryption.
+
+`CryptoStream::{send,next_crypto_frame,ack_crypto,requeue_crypto,recv}` return
+typed errors for offset, range, flow-control, and retention arithmetic
+failures. Each checked update computes its mutation plan before changing the
+stream. TLS Cover record encryption and decryption advance their direction
+counters only after successful AEAD and reject plaintext-plus-tag overflow.
+`QuicTlsProvider::next_crypto_frame` propagates these failures through the
+Rustls and optional TLS Cover providers instead of silently dropping a frame.
+
+The portable malformed-input and unaligned-output contract is covered by
+`scripts/tests/rust/rt-transport-packet-headers.rs`. The native AVX2 test in
+that target is compiled only with `target_feature="avx2"`; an actual native
+x86_64 AVX2 run remains a separate evidence gate and is never inferred from
+the ARM64 macOS workspace.
 
 #### TUN Device Abstraction
 

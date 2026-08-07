@@ -30,6 +30,12 @@ impl Connection {
         error
     }
 
+    fn fail_crypto_stream(&mut self, error: crate::error::ConnectionError) {
+        self.record_local_error(error.clone());
+        let reason = error.to_string();
+        let _ = self.close(false, 0x0001, reason.as_bytes());
+    }
+
     fn configured_recovery_with_snapshot(
         config: &Config,
         max_datagram_size: usize,
@@ -607,14 +613,24 @@ impl Connection {
             }
         }
         if !outcome.crypto_lost.is_empty() {
-            let mut crypto = self.crypto.write();
-            for (space, off, len) in &outcome.crypto_lost {
-                let stream = match space {
-                    recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
-                    recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
-                    recovery::PacketSpace::Application => &mut crypto.crypto_application,
-                };
-                stream.requeue_crypto(*off, *len);
+            let mut crypto_error = None;
+            {
+                let mut crypto = self.crypto.write();
+                for (space, off, len) in &outcome.crypto_lost {
+                    let stream = match space {
+                        recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+                        recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+                        recovery::PacketSpace::Application => &mut crypto.crypto_application,
+                    };
+                    if let Err(error) = stream.requeue_crypto(*off, *len) {
+                        crypto_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = crypto_error {
+                self.fail_crypto_stream(error);
+                return;
             }
         }
         if !outcome.lost.is_empty() {
@@ -650,17 +666,32 @@ impl Connection {
         now: Instant,
     ) {
         if !outcome.crypto_acked.is_empty() || !outcome.crypto_lost.is_empty() {
-            let mut crypto = self.crypto.write();
-            let stream = match space {
-                recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
-                recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
-                recovery::PacketSpace::Application => &mut crypto.crypto_application,
-            };
-            for (off, len) in &outcome.crypto_acked {
-                stream.ack_crypto(*off, *len);
+            let mut crypto_error = None;
+            {
+                let mut crypto = self.crypto.write();
+                let stream = match space {
+                    recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+                    recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+                    recovery::PacketSpace::Application => &mut crypto.crypto_application,
+                };
+                for (off, len) in &outcome.crypto_acked {
+                    if let Err(error) = stream.ack_crypto(*off, *len) {
+                        crypto_error = Some(error);
+                        break;
+                    }
+                }
+                if crypto_error.is_none() {
+                    for (off, len) in &outcome.crypto_lost {
+                        if let Err(error) = stream.requeue_crypto(*off, *len) {
+                            crypto_error = Some(error);
+                            break;
+                        }
+                    }
+                }
             }
-            for (off, len) in &outcome.crypto_lost {
-                stream.requeue_crypto(*off, *len);
+            if let Some(error) = crypto_error {
+                self.fail_crypto_stream(error);
+                return;
             }
         }
         let mut above_floor_acked = false;
@@ -1439,7 +1470,7 @@ impl Connection {
         &mut self,
         level: crate::qftls::Level,
         max_len: usize,
-    ) -> Option<(u64, Vec<u8>)> {
+    ) -> Result<Option<(u64, Vec<u8>)>, crate::error::ConnectionError> {
         if let Some(provider) = &mut self.tls_provider {
             provider.next_crypto_frame(level, max_len)
         } else {

@@ -190,7 +190,7 @@ impl Connection {
                 if max_len < 32 {
                     continue;
                 }
-                let crypto_frame = self.next_crypto_frame(lvl, max_len);
+                let crypto_frame = self.next_crypto_frame(lvl, max_len)?;
                 let probe_pos = self
                     .pending_probe_spaces
                     .iter()

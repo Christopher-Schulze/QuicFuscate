@@ -781,6 +781,7 @@ mod tests {
             provider.configure(&profile).expect("configure profile");
             let (_, frame) = provider
                 .next_crypto_frame(Level::Initial, usize::MAX)
+                .expect("next initial frame")
                 .expect("initial ClientHello");
             let suites = client_hello_cipher_suites(&frame);
             assert!(
@@ -984,7 +985,11 @@ pub trait QuicTlsProvider: Send + Sync {
     /// Provide incoming CRYPTO frame data
     fn provide_quic_data(&mut self, level: Level, data: &[u8]) -> Result<(), ConnectionError>;
     /// Get next outgoing CRYPTO frame
-    fn next_crypto_frame(&mut self, level: Level, max_len: usize) -> Option<(u64, Vec<u8>)>;
+    fn next_crypto_frame(
+        &mut self,
+        level: Level,
+        max_len: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError>;
     /// Poll for new secrets and install them
     fn poll_secrets_and_install(
         &mut self,
@@ -1322,10 +1327,14 @@ impl QuicTlsProvider for CombinedProvider {
         self.rustls.provide_quic_data(level, data)
     }
 
-    fn next_crypto_frame(&mut self, level: Level, max_len: usize) -> Option<(u64, Vec<u8>)> {
+    fn next_crypto_frame(
+        &mut self,
+        level: Level,
+        max_len: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError> {
         // rustls-driven handshake frames always take priority.
-        if let Some(frame) = self.rustls.next_crypto_frame(level, max_len) {
-            return Some(frame);
+        if let Some(frame) = self.rustls.next_crypto_frame(level, max_len)? {
+            return Ok(Some(frame));
         }
         // Emit optional cover decoy frames before real handshake completion.
         if let Some(ref mut c) = self.cover {
@@ -1333,7 +1342,7 @@ impl QuicTlsProvider for CombinedProvider {
                 return c.next_crypto_frame(level, max_len);
             }
         }
-        None
+        Ok(None)
     }
 
     fn poll_secrets_and_install(
@@ -1625,7 +1634,10 @@ mod rustls_provider {
                 provider.profile_ready_at.is_some_and(|ready_at| ready_at > provider.clock.now()),
                 "profile configuration must retain a future readiness deadline"
             );
-            assert!(provider.next_crypto_frame(Level::Initial, 1200).is_none());
+            assert!(provider
+                .next_crypto_frame(Level::Initial, 1200)
+                .expect("profile delay probe")
+                .is_none());
         }
     }
 
@@ -1928,17 +1940,23 @@ mod rustls_provider {
             }
         }
 
-        fn queue_crypto_bytes(&mut self, level: super::Level, data: &[u8]) {
+        fn queue_crypto_bytes(
+            &mut self,
+            level: super::Level,
+            data: &[u8],
+        ) -> Result<(), ConnectionError> {
             if data.is_empty() {
-                return;
+                return Ok(());
             }
             let mut crypto = self.crypto.write();
-            match level {
+            let result = match level {
                 super::Level::Initial => crypto.crypto_initial.send(data),
                 super::Level::Handshake => crypto.crypto_handshake.send(data),
                 _ => crypto.crypto_application.send(data),
-            }
+            };
+            result?;
             self.bytes_sent = self.bytes_sent.saturating_add(data.len());
+            Ok(())
         }
 
         fn install_key_change(
@@ -1978,7 +1996,7 @@ mod rustls_provider {
                 if produced {
                     let level = self.write_level;
                     let pending = std::mem::take(&mut self.crypto_buffer);
-                    self.queue_crypto_bytes(level, &pending);
+                    self.queue_crypto_bytes(level, &pending)?;
                 }
                 if let Some(kc) = kc {
                     self.install_key_change(kc)?;
@@ -2594,10 +2612,12 @@ mod rustls_provider {
             self.flush_handshake_io()?;
             Ok(())
         }
-        fn next_crypto_frame(&mut self, level: Level, max_len: usize) -> Option<(u64, Vec<u8>)> {
-            if let Err(e) = self.flush_handshake_io() {
-                log::debug!("flush_handshake_io before next_crypto_frame failed: {}", e);
-            }
+        fn next_crypto_frame(
+            &mut self,
+            level: Level,
+            max_len: usize,
+        ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError> {
+            self.flush_handshake_io()?;
             let mut crypto = self.crypto.write();
             let stream = match level {
                 Level::Initial => &mut crypto.crypto_initial,
@@ -2914,7 +2934,11 @@ impl QuicTlsProvider for RustlsProvider {
     fn provide_quic_data(&mut self, level: Level, data: &[u8]) -> Result<(), ConnectionError> {
         self.0.provide_quic_data(level, data)
     }
-    fn next_crypto_frame(&mut self, level: Level, max_len: usize) -> Option<(u64, Vec<u8>)> {
+    fn next_crypto_frame(
+        &mut self,
+        level: Level,
+        max_len: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError> {
         self.0.next_crypto_frame(level, max_len)
     }
     fn poll_secrets_and_install(

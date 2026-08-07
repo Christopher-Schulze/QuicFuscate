@@ -124,7 +124,8 @@ mod tests {
             &[PROTOCOL_VERSION],
             connection.scid.as_ref(),
             connection.initial_dcid.as_ref(),
-        );
+        )
+        .expect("generate VN");
         assert_eq!(connection.recv(&mut vn, &recv_info()), Ok(vn.len()));
         assert_eq!(connection.config.version(), PROTOCOL_VERSION);
         assert_reno_window_grows(&mut connection);
@@ -150,7 +151,8 @@ mod tests {
             &[PROTOCOL_VERSION, super::super::version::generate_reserved_version()],
             original_scid.as_ref(),
             original_dcid.as_ref(),
-        );
+        )
+        .expect("generate VN");
         assert_eq!(client.recv(&mut vn, &recv_info()), Ok(vn.len()));
         assert_eq!(client.config.version(), PROTOCOL_VERSION);
         assert!(client.version_negotiation.reacted_to_vn);
@@ -166,7 +168,8 @@ mod tests {
             &[crate::transport::PROTOCOL_VERSION_V2],
             selected_scid.as_ref(),
             selected_dcid.as_ref(),
-        );
+        )
+        .expect("generate VN");
         assert_eq!(client.recv(&mut second, &recv_info()), Ok(second.len()));
         assert_eq!(client.config.version(), PROTOCOL_VERSION);
     }
@@ -219,7 +222,8 @@ mod tests {
             &[PROTOCOL_VERSION],
             b"wrong",
             original_dcid.as_ref(),
-        );
+        )
+        .expect("generate VN");
         assert_eq!(client.recv(&mut wrong_cid, &recv_info()), Ok(wrong_cid.len()));
         assert!(!client.version_negotiation.reacted_to_vn);
 
@@ -228,7 +232,8 @@ mod tests {
             &[crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION],
             client.scid.as_ref(),
             original_dcid.as_ref(),
-        );
+        )
+        .expect("generate VN");
         assert_eq!(client.recv(&mut injected, &recv_info()), Ok(injected.len()));
         assert!(!client.version_negotiation.reacted_to_vn);
         assert_eq!(client.config.version(), crate::transport::PROTOCOL_VERSION_V2);
@@ -242,7 +247,8 @@ mod tests {
             &[super::super::version::generate_reserved_version()],
             client.scid.as_ref(),
             client.initial_dcid.as_ref(),
-        );
+        )
+        .expect("generate VN");
         assert_eq!(client.recv(&mut vn, &recv_info()), Err(ConnectionError::VersionMismatch));
         assert!(client.is_closed);
     }
@@ -673,12 +679,17 @@ mod tests {
     fn post_handshake_envelope_waits_for_pending_handshake_flight() {
         let mut c = make_conn();
         c.is_established = true;
-        c.crypto.write().crypto_handshake.send(b"client-finished");
+        c.crypto
+            .write()
+            .crypto_handshake
+            .send(b"client-finished")
+            .expect("queue handshake flight");
 
         assert!(!c.post_handshake_datagram_ready().expect("readiness probe"));
 
         let (_, flight) = c
             .next_crypto_frame(crate::qftls::Level::Handshake, usize::MAX)
+            .expect("next handshake frame")
             .expect("pending handshake flight");
         assert_eq!(flight, b"client-finished");
         assert!(c.post_handshake_datagram_ready().expect("readiness probe"));
