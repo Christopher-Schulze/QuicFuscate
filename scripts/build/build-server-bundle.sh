@@ -65,9 +65,24 @@ main() {
 
   mkdir -p "$out_dir"
 
+  # The release version has one owner and the bundle must not be able to ship without it.
+  # Masking the extraction with `|| true` and substituting the literal "unknown" produced a
+  # distributable tarball whose filename and provenance identified no validated product version,
+  # which the release workflow's separate gate does not prevent when this helper is invoked
+  # directly.
   local version
-  version="$(awk -F '"' '/^[[:space:]]*version[[:space:]]*=[[:space:]]*"/ {print $2; exit}' "$PROJECT_ROOT/Cargo.toml" || true)"
-  [[ -n "$version" ]] || version="unknown"
+  version="$(awk -F '"' '/^[[:space:]]*version[[:space:]]*=[[:space:]]*"/ {print $2; exit}' \
+    "$PROJECT_ROOT/Cargo.toml")"
+  [[ -n "$version" ]] || die "cannot read the release version from $PROJECT_ROOT/Cargo.toml"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$ ]] \
+    || die "release version is not semantic versioned: $version"
+
+  # Cross-check against the shared release-version owner so the bundle cannot disagree with the
+  # audited product identity.
+  if [[ -x "$PROJECT_ROOT/scripts/audits/verify-release-version.sh" ]]; then
+    "$PROJECT_ROOT/scripts/audits/verify-release-version.sh" >/dev/null \
+      || die "release version audit failed; refusing to stage a bundle"
+  fi
 
   local ts
   ts="$(date +%Y%m%d_%H%M%S)"
@@ -77,7 +92,7 @@ main() {
   mkdir -p "$stage/bin" "$stage/share/admin-web" "$stage/ops"
 
   cp -a "$binary" "$stage/bin/quicfuscate"
-  chmod 0755 "$stage/bin/quicfuscate" || true
+  chmod 0755 "$stage/bin/quicfuscate"
 
   cp -a "$assets/." "$stage/share/admin-web/"
   cp -a "$PROJECT_ROOT/scripts/install/quicfuscate-server.service" "$stage/ops/quicfuscate-server.service"

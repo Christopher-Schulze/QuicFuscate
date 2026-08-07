@@ -3181,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "quicfuscate-desktop"
-version = "0.3.0"
+version = "0.4.4"
 dependencies = [
  "arboard",
  "env_logger",

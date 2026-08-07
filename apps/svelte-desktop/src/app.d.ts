@@ -11,3 +11,7 @@ declare global {
 }
 
 export {};
+
+/// Release version injected by Vite from the workspace package version in the root Cargo.toml.
+/// See `releaseVersion()` in vite.config.ts and scripts/audits/verify-release-version.sh.
+declare const __RELEASE_VERSION__: string;

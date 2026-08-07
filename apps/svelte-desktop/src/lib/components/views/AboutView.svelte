@@ -5,7 +5,8 @@
 
   let cpuFeatures = $state<string[]>([]);
   let error = $state<string | null>(null);
-  const version = "v0.2.0";
+  // Injected from the single release-version owner; never a literal.
+  const version = `v${__RELEASE_VERSION__}`;
 
   $effect(() => {
     let cancelled = false;
