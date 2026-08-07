@@ -127,6 +127,12 @@ run_cargo test --release --test rt-core-connection-basics -- --nocapture
 run_cargo test --release --test rt-interface -- --nocapture
 run_verified_library_target "interface-unaligned-write" \
   "interface::tests::write_packet_accepts_intentionally_unaligned_ipv4_slice" rust-tests
+run_verified_library_target "interface-read-result-contract" \
+  "interface::tests::external_factory_read_result_contract_rejects_zero_and_oversized_lengths" rust-tests
+run_verified_library_target "interface-write-result-contract" \
+  "interface::tests::external_factory_write_result_contract_rejects_zero_short_and_oversized_results" rust-tests
+run_verified_library_target "interface-write-packet-result-contract" \
+  "interface::tests::write_packet_rejects_short_external_factory_result" rust-tests
 if [[ "$(detect_arch)" == "x86_64" ]]; then
   run_verified_library_target "interface-bmi2-dispatch" \
     "interface::tests::bmi2_dispatch_requires_profile_and_runtime_feature_intersection" rust-tests

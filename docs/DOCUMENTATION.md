@@ -1222,10 +1222,11 @@ pub struct MacTun {
 - Control socket configuration via `ioctl(CTLIOCGINFO)`
 - IPv4/IPv6 addresses, link-up, and MTU are configured before the descriptor is published; MTU updates are read back from `ifconfig`.
 - Descriptor ownership remains armed until all configuration succeeds, so intermediate failures close the utun socket.
-- The current unsafe audit found that the shared data-plane owner still needs
-  explicit `readv` result bounds, `writev` zero-progress handling, and a
-  bounded kernel-reported interface-name contract; these are remediation
-  owners TODO-844 and TODO-845, not closed guarantees.
+- The shared `TunInterface` result boundary now validates generic read lengths
+  and complete writes under TODO-844. The native unsafe audit still needs
+  explicit raw `readv` result bounds, `writev` zero-progress handling, and a
+  bounded kernel-reported interface-name contract under TODO-845; these native
+  guarantees are not closed here.
 
 **Windows (`WintunDevice`, feature `tun-windows`):**
 - Dynamically loads the upstream `wintun.dll` only from the executable directory or protected System32 search directory.
@@ -1253,7 +1254,7 @@ pub struct MacTun {
 - IPv4 TUN MTU must be at least 576 bytes. An IPv6-enabled TUN must remain at or above 1280 bytes for initial configuration and every live update.
 - A registered external factory must apply or already expose the requested MTU and report the exact value before `TunInterface::open` publishes the device.
 - `TunInterface` publishes a new MTU only after the backend reports the requested value. Backend and client provisioning errors preserve command spawn, exit status, and diagnostics; exact idempotent postconditions are inspected instead of treating arbitrary failures as duplicates.
-- `TunDevice::read_contract()` makes executor ownership explicit. Native Linux and macOS descriptors publish `NonBlocking`; external/custom backends default to `Blocking` and the generic client `IoDriver` rejects them before entering its async outbound loop, so they must use an owned reader boundary. Generic read lengths and short writes remain open under TODO-844.
+- `TunDevice::read_contract()` makes executor ownership explicit. Native Linux and macOS descriptors publish `NonBlocking`; external/custom backends default to `Blocking` and the generic client `IoDriver` rejects them before entering its async outbound loop, so they must use an owned reader boundary. `TunInterface` now rejects zero or oversized reads, zero, short, or oversized writes, and incomplete packet results under TODO-844; native Unix syscall progress and raw vectored-result handling remain under TODO-845.
 - Client TUN provisioning rolls back the owned descriptor/interface on every failure after creation. Server Linux routing rejects an IPv4 or IPv6 address already owned by another interface, verifies TUN addresses, prefixes, link-up state, forwarding, and the selected firewall rules before readiness, then rolls back only mutations recorded as owned.
 - Shipped server TUN mode is Linux-only. The embedded and standalone server runtimes reject server TUN mode on macOS, Windows, and other platforms before host mutation because those platforms do not yet have a shipped native server routing owner and proof. `RoutingManager::setup()`, `cleanup_stale()`, and `teardown()` also fail closed with `UnsupportedPlatform` on macOS and Windows; those builds retain only pure rule/script generators for tests and future native work. macOS, Windows, and iOS remain client-side TUN platforms through their respective native or external-factory paths.
 - Linux routing writes an atomic 0600 ownership record under `/run/quicfuscate/routing/` before the first address, link, or forwarding mutation. Both embedded and standalone startup run `cleanup_stale()` before opening a new TUN, including all persisted records when the standalone CLI lets Linux choose the interface name, so a process-loss restart cannot collide with a newly allocated ifindex. The record binds the requested configuration to the original Linux TUN ifindex and the owning boot ID, PID, and `/proc` start time. Startup `cleanup_stale()` refuses an active owner, rejects boot-identity changes, validates the interface identity, restores only recorded before/after states, preserves externally changed forwarding or interface state, treats a disappeared TUN as already absent, and retains the record when any recovery step fails. Graceful teardown removes the record only after all owned host-state postconditions and firewall cleanup succeed.
@@ -4957,7 +4958,8 @@ A full deep-audit sweep of `src/` was performed with parallel read-only module s
   CI/audit script, documentation claim, and relevant history. The initial
   blanket Linux/macOS syscall finding is stale. Open remediation covers CPU
   profile/BMI2 dispatch (TODO-843, with the unaligned load in TODO-654), the
-  generic TUN read/write result contract (TODO-844), Unix syscall progress,
+  generic TUN read/write result contract (TODO-844, implemented at the shared
+  wrapper boundary), Unix syscall progress,
   lengths, kernel-name rollback, and close ownership (TODO-845), Wintun
   lifecycle and concurrency proof (TODO-846), WFP engine/transaction
   ownership (TODO-847), and negative proof/guardrails (TODO-848). No product
@@ -5598,7 +5600,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Evidence boundary: this reconciliation is a current-source and task-truth audit only. No implementation, Rust build, test, Clippy, H3 wire, native transport, or live runtime gate was run for these findings. The referenced TODOs remain the authoritative remediation queue.
 ## Deep Audit Reconciliation (2026-08-07, Platform, Tooling, and Coverage)
 
-- Native transport and interface ownership remains source-audited but not fully cross-platform proven. TODO-837 now implements the bounded UDP batch result, address-length, partial-send, timeout, aligned-buffer, and caller-fd contracts; local ARM64 macOS gates pass, while native Linux/Windows/Omega execution remains unclaimed. PMTU/prefetch, generic TUN results, Unix TUN syscalls, Wintun cleanup, WFP transactions, and privilege/memory-lock negative proof remain owned by TODO-841, TODO-842, TODO-844 through TODO-848, and TODO-850 through TODO-854.
+- Native transport and interface ownership remains source-audited but not fully cross-platform proven. TODO-837 now implements the bounded UDP batch result, address-length, partial-send, timeout, aligned-buffer, and caller-fd contracts; local ARM64 macOS gates pass, while native Linux/Windows/Omega execution remains unclaimed. PMTU/prefetch, Unix TUN syscalls, Wintun cleanup, WFP transactions, and privilege/memory-lock negative proof remain owned by TODO-841, TODO-842, TODO-845 through TODO-848, and TODO-850 through TODO-854; TODO-844's generic TUN result contract is implemented and statically wired.
 - Current operational surfaces retain open fail-closed gaps in server shutdown ownership, installer secret handling, release-version propagation, CI baseline restoration, admin request bounds, macOS kill-switch/DNS state, runtime reload atomicity, blocked-IP durability, benchmark result propagation, release updater completeness, and local UI process readiness. The current owners are recorded in TODO-699 through TODO-748, TODO-757, TODO-782, and TODO-798 through TODO-807.
 - The current TODO register is structurally accounted for: the post-push validator at commit `ea528d9` reports 777 tracker entries, 371 current detail files, 441 archived detail files, 36 explicit archive exceptions, 991 tracked paths, 35,527 ignored paths, and zero unexpected untracked paths. The increase from the preceding snapshot is generated Graphify evidence and related ignored audit output, not production scope. The canonical validator passes register/detail/archive/path integrity while Graphify remains explicitly BLOCKED. The legacy `docs/todo/audit-todo-consistency.sh` was also run and returned 75 obsolete-status violations across the 371 details because its allowlist predates the current canonical status vocabulary; it is not the authoritative structural gate.
 - The audit boundary is source and documentation truth, not a release claim. No production implementation, UI change, privileged native run, authenticated live tunnel, or remote Omega mutation was performed in this reconciliation.
@@ -5635,3 +5637,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `src/engine/config.rs` contains failable validation and schema regressions for every legacy non-TUN value, removed-field rejection, and default serialization. The runtime guardrail checks the source, tests, and both canonical templates.
 - Static verification passes `cargo fmt --all -- --check`, Bash syntax, TOML parsing, `git diff --check`, and the new XDP guardrail item. The aggregate runtime guardrail remains at four pre-existing critical findings and one warning. Rust unit-test execution was not admitted because the local 2.2 GiB free-space boundary would be crossed by a fresh test build; Omega was not used because both permitted QuicFuscate folders exist there and are dirty or revision-mismatched.
 - No AF_XDP implementation, Cargo feature, or runtime path was reintroduced. Any future AF_XDP work requires a separate product and kernel-ownership decision.
+
+## Generic TUN I/O Result Contract (2026-08-07, TODO-844)
+
+- `TunDevice::read()` now has an explicit `1..=buf.len()` result contract; `WouldBlock` represents no packet. `TunDevice::write()` must report exactly the input length for a complete packet write. Zero or oversized reads and zero, short, or oversized writes fail with typed `io::ErrorKind` values at `TunInterface`.
+- `read_block()` validates before exposing the pooled block, borrowed and owned reader loops share that invariant, and `TunPacket` no longer clamps an invalid length. `write()` and `write_packet()` validate before accepted-byte telemetry or caller success.
+- Fault-injection backends representing external-factory results cover zero and oversized reads, zero, short, and oversized writes, the client `write_packet()` path, and owned-packet oversized construction. `test-core.sh` wires exact library targets; runtime guardrail 4h is green.
+- Static format, Bash syntax, diff hygiene, and guardrail checks pass. Rust test execution is not claimed because local free space is below the 2-GiB safety boundary and both Omega checkouts are dirty or revision-mismatched. Native Linux/macOS syscall progress and raw `readv`/`writev` semantics remain TODO-845.

@@ -72,10 +72,44 @@ pub struct TunPacket {
     len: usize,
 }
 
+fn validate_tun_read_len(len: usize, capacity: usize) -> io::Result<usize> {
+    if len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "TUN backend returned zero bytes for a packet read",
+        ));
+    }
+    if len > capacity {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("TUN backend returned {len} bytes for a {capacity}-byte read buffer"),
+        ));
+    }
+    Ok(len)
+}
+
+fn validate_tun_write_len(written: usize, expected: usize) -> io::Result<usize> {
+    if written > expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("TUN backend reported {written} written bytes for a {expected}-byte packet"),
+        ));
+    }
+    if written != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!(
+                "TUN backend completed {written} of {expected} bytes; complete packet writes are required"
+            ),
+        ));
+    }
+    Ok(written)
+}
+
 impl TunPacket {
-    fn new(block: PooledBlock, len: usize) -> Self {
-        let len = len.min(block.len());
-        Self { block, len }
+    fn new(block: PooledBlock, len: usize) -> io::Result<Self> {
+        let len = validate_tun_read_len(len, block.len())?;
+        Ok(Self { block, len })
     }
 
     /// Return the valid layer-3 frame bytes.
@@ -420,9 +454,13 @@ pub trait TunDevice: Send + Sync {
             ))
         }
     }
-    /// Reads one IP packet into `buf`, returning the number of bytes read.
+    /// Reads one IP packet into `buf`, returning a count in `1..=buf.len()`.
+    /// A backend must report `WouldBlock` when no packet is available; zero or
+    /// oversized counts are invalid and are rejected by `TunInterface`.
     fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
-    /// Writes one IP packet from `buf`, returning the number of bytes written.
+    /// Writes one IP packet from `buf`, returning exactly `buf.len()` on
+    /// success. TUN packet writes are complete, non-retryable operations at
+    /// this boundary: zero, short, and oversized counts are invalid.
     fn write(&self, buf: &[u8]) -> io::Result<usize>;
     /// Wake a potentially blocking reader so its owner can observe shutdown.
     /// Backends whose read operation is already nonblocking may keep the
@@ -631,12 +669,13 @@ impl TunInterface {
         Ok(())
     }
 
-    /// Reads one packet into a pooled block and returns (block, len).
-    /// The block remains zero-initialized outside the valid frame region and returns to its pool
-    /// automatically when the returned `PooledBlock` is dropped.
+    /// Reads one packet into a pooled block and returns `(block, len)`.
+    /// The block remains zero-initialized outside the valid frame region and
+    /// returns to its pool automatically when the returned `PooledBlock` is
+    /// dropped. The result count has already been checked against the block.
     pub fn read_block(&self) -> io::Result<(PooledBlock, usize)> {
         let mut block = PooledBlock::new(Arc::clone(&self.pool));
-        let len = self.dev.read(&mut block[..])?;
+        let len = validate_tun_read_len(self.dev.read(&mut block[..])?, block.len())?;
         if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
             crate::telemetry::BYTES_RECEIVED.inc_by(len as u64);
         }
@@ -645,6 +684,7 @@ impl TunInterface {
 
     /// Write a packet to the TUN device with hardware acceleration
     pub fn write_packet(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.write(buf)?;
         // Parse IP headers with BMI2 only when the exact runtime feature is present.
         #[cfg(target_arch = "x86_64")]
         {
@@ -661,7 +701,7 @@ impl TunInterface {
         #[cfg(not(target_arch = "x86_64"))]
         self.parse_ip_header_scalar(buf);
 
-        self.dev.write(buf)
+        Ok(written)
     }
 
     /// Parse IP header with BMI2 PEXT/PDEP - 2x faster
@@ -736,9 +776,10 @@ impl TunInterface {
         }
     }
 
-    /// Writes a single packet from a provided slice.
+    /// Writes a single packet from a provided slice and accepts it only after
+    /// the backend reports the complete packet length.
     pub fn write(&self, packet: &[u8]) -> io::Result<usize> {
-        let n = self.dev.write(packet)?;
+        let n = validate_tun_write_len(self.dev.write(packet)?, packet.len())?;
         if TELEMETRY_ENABLED.load(Ordering::Relaxed) {
             crate::telemetry::BYTES_SENT.inc_by(n as u64);
         }
@@ -814,10 +855,9 @@ impl TunInterface {
                 return Ok(());
             }
             match self.read_block() {
-                Ok((block, len)) if len > 0 => {
+                Ok((block, len)) => {
                     on_packet(&block[..len]);
                 }
-                Ok((_block, _)) => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if !self.wait_for_readable(shutdown)? {
                         return Ok(());
@@ -848,8 +888,7 @@ impl TunInterface {
                 return Ok(());
             }
             match self.read_block() {
-                Ok((block, len)) if len > 0 => on_packet(TunPacket::new(block, len)),
-                Ok((_block, _)) => {}
+                Ok((block, len)) => on_packet(TunPacket::new(block, len)?),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if !self.wait_for_readable(shutdown)? {
                         return Ok(());
@@ -901,8 +940,10 @@ static TUN_FACTORY: OnceLock<TunFactory> = OnceLock::new();
 /// impl TunDevice for MyTun {
 ///     fn name(&self) -> &str { "wintun0" }
 ///     fn mtu(&self) -> u16 { 1500 }
-///     fn read(&self, _buf: &mut [u8]) -> io::Result<usize> { Ok(0) }
-///     fn write(&self, _buf: &[u8]) -> io::Result<usize> { Ok(0) }
+///     fn read(&self, _buf: &mut [u8]) -> io::Result<usize> {
+///         Err(io::Error::from(io::ErrorKind::WouldBlock))
+///     }
+///     fn write(&self, buf: &[u8]) -> io::Result<usize> { Ok(buf.len()) }
 /// }
 /// let _ = register_tun_factory(Box::new(|_cfg: &TunConfig| -> io::Result<Box<dyn TunDevice>> {
 ///     Ok(Box::new(MyTun))
@@ -1896,7 +1937,7 @@ mod tests {
             }
             let mut reads = self.reads.lock().expect("dummy read lock poisoned");
             if reads.is_empty() {
-                return Ok(0);
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }
             let data = reads.remove(0);
             let len = data.len().min(buf.len());
@@ -1909,6 +1950,118 @@ mod tests {
             self.last_write_len.store(buf.len(), Ordering::Relaxed);
             Ok(buf.len())
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FaultReadResult {
+        Zero,
+        Oversized,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FaultWriteResult {
+        Zero,
+        Short(usize),
+        Oversized,
+    }
+
+    /// Fault-injection backend representing a device returned by an external
+    /// factory. The wrapper, rather than the backend, owns result validation.
+    struct FaultTun {
+        read_result: FaultReadResult,
+        write_result: FaultWriteResult,
+    }
+
+    impl FaultTun {
+        fn new(read_result: FaultReadResult, write_result: FaultWriteResult) -> Self {
+            Self { read_result, write_result }
+        }
+    }
+
+    impl TunDevice for FaultTun {
+        fn name(&self) -> &str {
+            "fault-injection"
+        }
+
+        fn mtu(&self) -> u16 {
+            1500
+        }
+
+        fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.read_result {
+                FaultReadResult::Zero => Ok(0),
+                FaultReadResult::Oversized => Ok(buf.len().saturating_add(1)),
+            }
+        }
+
+        fn write(&self, buf: &[u8]) -> io::Result<usize> {
+            match self.write_result {
+                FaultWriteResult::Zero => Ok(0),
+                FaultWriteResult::Short(len) => Ok(len.min(buf.len())),
+                FaultWriteResult::Oversized => Ok(buf.len().saturating_add(1)),
+            }
+        }
+    }
+
+    #[test]
+    fn external_factory_read_result_contract_rejects_zero_and_oversized_lengths() {
+        for (read_result, expected_kind) in [
+            (FaultReadResult::Zero, io::ErrorKind::UnexpectedEof),
+            (FaultReadResult::Oversized, io::ErrorKind::InvalidData),
+        ] {
+            let tun = TunInterface::from_device_for_test(
+                Box::new(FaultTun::new(read_result, FaultWriteResult::Zero)),
+                crate::optimize::global_pool(),
+                false,
+            );
+            let error = match tun.read_block() {
+                Err(error) => error,
+                Ok((_block, _len)) => panic!("invalid external read result must fail"),
+            };
+            assert_eq!(error.kind(), expected_kind);
+        }
+    }
+
+    #[test]
+    fn external_factory_write_result_contract_rejects_zero_short_and_oversized_results() {
+        let packet = [0x45u8; 32];
+        for (write_result, expected_kind) in [
+            (FaultWriteResult::Zero, io::ErrorKind::WriteZero),
+            (FaultWriteResult::Short(1), io::ErrorKind::WriteZero),
+            (FaultWriteResult::Oversized, io::ErrorKind::InvalidData),
+        ] {
+            let tun = TunInterface::from_device_for_test(
+                Box::new(FaultTun::new(FaultReadResult::Zero, write_result)),
+                crate::optimize::global_pool(),
+                false,
+            );
+            let error = tun.write(&packet).expect_err("invalid external write result must fail");
+            assert_eq!(error.kind(), expected_kind);
+        }
+    }
+
+    #[test]
+    fn write_packet_rejects_short_external_factory_result() {
+        let mut tun = TunInterface::from_device_for_test(
+            Box::new(FaultTun::new(FaultReadResult::Zero, FaultWriteResult::Short(1))),
+            crate::optimize::global_pool(),
+            false,
+        );
+        let error = tun
+            .write_packet(&[0x45u8; 32])
+            .expect_err("client write_packet must reject a short backend write");
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+    }
+
+    #[test]
+    fn owned_packet_constructor_rejects_oversized_length() {
+        let block = PooledBlock::new(crate::optimize::global_pool());
+        let capacity = block.len();
+        let error = match TunPacket::new(block, capacity.saturating_add(1)) {
+            Ok(_) => panic!("owned packet constructor must reject an oversized length"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

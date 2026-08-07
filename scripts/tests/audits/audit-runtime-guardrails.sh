@@ -590,6 +590,38 @@ else
   append_item "xdp_config_surface_truth" "fail" "removed-field, validation, test, or template contract is incomplete"
 fi
 
+# 4h) Generic TUN I/O must validate backend result counts before exposing a
+#     pooled slice or reporting telemetry. External-factory fault fixtures and
+#     the exact core-suite targets keep the contract executable.
+if rg -F -- 'fn validate_tun_read_len' src/interface.rs >/dev/null \
+  && rg -F -- 'fn validate_tun_write_len' src/interface.rs >/dev/null \
+  && rg -F -- 'validate_tun_read_len(self.dev.read(&mut block[..])?, block.len())?' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'validate_tun_write_len(self.dev.write(packet)?, packet.len())?' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'let written = self.write(buf)?;' src/interface.rs >/dev/null \
+  && ! rg -F -- 'len.min(block.len())' src/interface.rs >/dev/null \
+  && rg -F -- 'fn external_factory_read_result_contract_rejects_zero_and_oversized_lengths()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'fn external_factory_write_result_contract_rejects_zero_short_and_oversized_results()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'fn write_packet_rejects_short_external_factory_result()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'fn owned_packet_constructor_rejects_oversized_length()' \
+    src/interface.rs >/dev/null \
+  && rg -F -- 'run_verified_library_target "interface-read-result-contract"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "interface-write-result-contract"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "interface-write-packet-result-contract"' \
+    scripts/tests/suites/test-core.sh >/dev/null; then
+  pass "Generic TUN read/write result counts fail closed before slicing, telemetry, and caller success"
+  append_item "generic_tun_result_contract" "ok" "bounded reads, complete writes, owned-packet validation, external fault fixtures, and exact core-suite wiring present"
+else
+  fail_critical "Generic TUN read/write result contract or its executable fault coverage is incomplete"
+  append_item "generic_tun_result_contract" "fail" "missing result validator, caller routing, regression fixture, or core-suite target"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then
