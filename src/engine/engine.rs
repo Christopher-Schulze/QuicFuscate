@@ -975,6 +975,15 @@ impl QuicFuscateEngine {
                         self.config.engine.shutdown_timeout_ms.max(30_000),
                     );
                     let (startup_tx, startup_rx) = crossbeam_channel::bounded(1);
+                    // The admin sender only exists once ServerRuntime is constructed inside the
+                    // thread, so it cannot be captured before the acknowledgement. Publishing it
+                    // through a shared slot lets a startup timeout still reach a runtime that came
+                    // up just after the deadline, instead of retaining a handle it can never
+                    // signal.
+                    let shutdown_slot: std::sync::Arc<
+                        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<AdminAction>>>,
+                    > = std::sync::Arc::new(std::sync::Mutex::new(None));
+                    let thread_shutdown_slot = std::sync::Arc::clone(&shutdown_slot);
 
                     let handle = thread::Builder::new()
                         .name("quicfuscate-server-runtime".to_string())
@@ -1009,6 +1018,11 @@ impl QuicFuscateEngine {
                                     };
                                 let server_metrics = server_runtime.standalone_metrics();
                                 let admin_actions_tx = server_runtime.admin_actions_sender();
+                                // Publish before acknowledging, so the sender is reachable even if
+                                // the engine has already given up waiting.
+                                if let Ok(mut slot) = thread_shutdown_slot.lock() {
+                                    *slot = Some(admin_actions_tx.clone());
+                                }
                                 if startup_tx.send(Ok((admin_actions_tx, server_metrics))).is_err()
                                 {
                                     return;
@@ -1040,6 +1054,12 @@ impl QuicFuscateEngine {
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                             self.server_loop_handle = Some(handle);
+                            // Retain the ability to signal the loop. Without this the engine kept
+                            // a handle it could only ever join, so a runtime that finished coming
+                            // up after the deadline could keep accepting connections while the
+                            // public state said Error.
+                            self.server_loop_shutdown_tx =
+                                shutdown_slot.lock().ok().and_then(|mut slot| slot.take());
                             Err(EngineError::Internal(format!(
                                 "server runtime did not acknowledge startup within {}ms",
                                 startup_timeout.as_millis()
@@ -1118,6 +1138,7 @@ impl QuicFuscateEngine {
                 self.client_runtime = Some(runtime);
             }
         }
+        let mut server_loop_stop_error: Option<EngineError> = None;
         if let Some(sender) = self.server_loop_shutdown_tx.take() {
             if let Err(error) = sender.send(AdminAction::Shutdown) {
                 log::warn!("Server loop shutdown signal failed: {}", error);
@@ -1137,6 +1158,13 @@ impl QuicFuscateEngine {
                     "[engine] Server loop did not stop within {}ms; continuing shutdown.",
                     timeout.as_millis()
                 );
+                // Reporting Stopped here would be untruthful: the loop may still hold listeners,
+                // sessions, and descriptors. Record the unresolved state so the caller sees an
+                // error instead of a clean shutdown.
+                server_loop_stop_error = Some(EngineError::Internal(format!(
+                    "server loop did not stop within {}ms and may still be running",
+                    timeout.as_millis()
+                )));
             }
         }
         self.server_metrics = None;
@@ -1154,7 +1182,8 @@ impl QuicFuscateEngine {
             None
         };
 
-        let shutdown_error = client_runtime_stop_error.or(kill_switch_cleanup_error);
+        let shutdown_error =
+            client_runtime_stop_error.or(server_loop_stop_error).or(kill_switch_cleanup_error);
         match shutdown_error {
             Some(error) => {
                 self.set_state(EngineState::Error);
@@ -2199,6 +2228,42 @@ mod tests {
         assert_eq!(transport.traffic_analysis_policy(), active);
         assert_eq!(transport.qkey_traffic_analysis_ceiling(), qkey_ceiling);
         assert_eq!(transport.intelligent_traffic_analysis_ceiling(), intelligent_ceiling);
+    }
+
+    /// A stop that cannot reap the server loop must not report a clean shutdown.
+    ///
+    /// The join previously timed out with a warning and the engine still published `Stopped`,
+    /// while the loop could still hold listeners, sessions, and descriptors.
+    #[test]
+    fn stop_reports_an_error_when_the_server_loop_cannot_be_reaped() {
+        let mut engine = QuicFuscateEngine::new(engine_tun_test_config()).expect("engine");
+        engine.set_state(EngineState::Running);
+        // A loop that never exits, standing in for a runtime that outlived its shutdown budget.
+        let (block_tx, block_rx) = crossbeam_channel::bounded::<()>(1);
+        engine.server_loop_handle = Some(
+            std::thread::Builder::new()
+                .name("test-unreapable-server-loop".to_string())
+                .spawn(move || {
+                    let _ = block_rx.recv();
+                })
+                .expect("spawn test loop"),
+        );
+        engine.config.engine.shutdown_timeout_ms = 50;
+
+        let outcome = engine.stop();
+
+        assert!(
+            outcome.is_err(),
+            "an unreaped server loop must surface as an error, not a clean Stopped"
+        );
+        assert_eq!(
+            engine.state(),
+            EngineState::Error,
+            "the published state must not claim the engine stopped"
+        );
+
+        // Release the loop so the test leaves no live thread behind.
+        let _ = block_tx.send(());
     }
 
     #[test]
