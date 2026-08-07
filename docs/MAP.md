@@ -1428,9 +1428,14 @@ The audit remains open. These reconciliations document current evidence and owne
 - `scripts/tests/analysis/` owns portable analysis contracts: `analysis-dead-code-report.sh` emits a completed report, `analysis-scripts-quality.sh` emits strict/advisory findings, and `analysis-suite-matrix.sh` accounts for all 28 suite scripts and their seven explicit exclusions.
 - `scripts/tests/utils/util-run-full-suite.sh` invokes the comprehensive audit in strict mode and propagates stealth benchmark preflight failure. Optimization, performance-regression, and security-fuzzing suites serialize `COMMAND_ENVIRONMENT_JSON` through the shared JSON writer without malformed default expansion.
 - `scripts/tests/audits/audit-readiness-gates.sh` exposes deny-only versus strict Geiger policy, retains dependency-unsafe package names, and classifies unavailable advisory databases as `UNAVAILABLE`. Local PowerShell parser absence is retained by the dialect result rather than treated as a pass.
+
+## Live Audit Gate Recheck (2026-08-07)
+
+- `verify-audit-completeness.sh` currently enumerates `991` tracked, `26,731` ignored, `0` non-ignored untracked, and `27,722` accounted paths, then fails closed on stale Graphify evidence relative to the current Git revision. TODO-759 owns that evidence boundary.
+- `audit-all-comprehensive.sh --strict` completes all `38` result objects with `31 PASS`, `3 FAIL`, and `2 UNAVAILABLE` plus an aggregate `FAIL`. The failed checks are strict runtime Clippy, all-target quality Clippy, and runtime guardrails; the unavailable checks are PowerShell parsing and the ARM64-host AMX proof lane. Native, frontend, Omega, privileged, and external evidence remain unclaimed.
 - Contract fixtures under `scripts/tests/audits/fixtures/`, `scripts/tests/analysis/fixtures/`, and `scripts/tests/fast/fixtures/` prove failable command status, Rust and secret scope, parser dialects, scoped PID ownership, benchmark propagation, environment JSON, and strict/advisory result semantics.
 - Current local proof is deliberately non-green: the complete strict runner returns `FAIL`; readiness returns `UNAVAILABLE` in deny-only mode and `FAIL` in strict-Geiger mode. Product remediation, native/external runtime evidence, Graphify/feature boundaries, and Omega checkout attribution remain with their existing TODO owners.
-- Post-staging validator refresh: `verify-audit-completeness.sh` passes with tracker `769`, Active `1`, Blocked `4`, Queue `189`, Completed `575`, current details `411/411`, tracked paths `956`, ignored paths `28,123`, and zero non-ignored untracked paths. The earlier `927`/`37,803` counts in the preceding register snapshot are historical pre-infrastructure-change values.
+- Historical post-staging validator snapshot (2026-08-04): `verify-audit-completeness.sh` passed with tracker `769`, Active `1`, Blocked `4`, Queue `189`, Completed `575`, current details `411/411`, tracked paths `956`, ignored paths `28,123`, and zero non-ignored untracked paths. The current live result is recorded above and fails closed on stale Graphify evidence.
 
 ## Implementation Reconciliation (2026-08-04, QUIC KDF secret-length validation)
 
