@@ -44,7 +44,7 @@ pub struct EngineConfig {
     pub nat_traversal: NatTraversalSection,
     /// Cryptographic settings (AEAD, PQ)
     pub crypto: CryptoConfig,
-    /// TUN/TAP interface settings
+    /// TUN interface settings
     pub interface: InterfaceConfig,
     /// Telemetry and metrics settings
     pub telemetry: TelemetryConfig,
@@ -756,7 +756,7 @@ fn ipv6_netmask_prefix(mask: Ipv6Addr) -> Result<u8, ConfigError> {
     Ok(prefix)
 }
 
-/// TUN/TAP interface configuration.
+/// TUN interface configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct InterfaceConfig {
@@ -787,10 +787,6 @@ pub struct InterfaceConfig {
     pub tun_subnet_prefix: Option<u8>,
     /// DNS servers to use when VPN is active (default: [1.1.1.1, 8.8.8.8])
     pub dns_servers: Vec<IpAddr>,
-    /// XDP mode (Linux only)
-    pub xdp_mode: XdpMode,
-    /// XDP flags
-    pub xdp_flags: Vec<String>,
 }
 
 impl Default for InterfaceConfig {
@@ -812,8 +808,6 @@ impl Default for InterfaceConfig {
                 IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
                 IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
             ],
-            xdp_mode: XdpMode::Skb,
-            xdp_flags: vec!["update_if_noexist".to_string()],
         }
     }
 }
@@ -891,6 +885,21 @@ impl InterfaceConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        match self.interface_type {
+            InterfaceType::Tun => {}
+            InterfaceType::Xdp => {
+                return Err(ConfigError::Validation(
+                    "interface.type = \"xdp\" is unsupported because AF_XDP was removed; use \"tun\""
+                        .to_string(),
+                ));
+            }
+            InterfaceType::Tap | InterfaceType::RawSocket => {
+                return Err(ConfigError::Validation(
+                    "interface.type is unsupported by the current runtime; only \"tun\" is supported"
+                        .to_string(),
+                ));
+            }
+        }
         if self.tun_mtu < 576 {
             return Err(ConfigError::Validation(format!(
                 "tun_mtu must be at least 576, got {}",
@@ -909,26 +918,16 @@ pub enum InterfaceType {
     /// Layer 3 TUN device (IP packets).
     #[default]
     Tun,
-    /// Layer 2 TAP device (Ethernet frames).
+    /// Legacy Layer 2 TAP value. Validation rejects it because the current
+    /// runtime supports only the TUN interface.
     Tap,
-    /// Linux XDP fast-path (AF_XDP socket).
+    /// Legacy Linux XDP fast-path value. Validation rejects it because AF_XDP
+    /// is not implemented by the current runtime.
     Xdp,
-    /// Raw socket interface.
+    /// Legacy raw socket value. Validation rejects it because the current
+    /// runtime supports only the TUN interface.
     #[serde(rename = "raw_socket")]
     RawSocket,
-}
-
-/// XDP operation mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum XdpMode {
-    /// Generic SKB mode (software fallback, any NIC).
-    #[default]
-    Skb,
-    /// Native driver mode (requires NIC driver support).
-    Driver,
-    /// Hardware offload mode (requires NIC hardware support).
-    Hardware,
 }
 
 // ============================================================================
@@ -1898,6 +1897,43 @@ mod tests {
         assert_eq!(config.crypto.aead_preference, AeadPreference::Auto);
         assert!(config.stealth.enable_network_fingerprint_normalization);
         assert!(!config.stealth.suppress_icmp_unreachable);
+    }
+
+    #[test]
+    fn interface_validation_rejects_legacy_non_tun_types() {
+        for (interface_type, expected_fragment) in [
+            (InterfaceType::Xdp, "AF_XDP was removed"),
+            (InterfaceType::Tap, "only \"tun\" is supported"),
+            (InterfaceType::RawSocket, "only \"tun\" is supported"),
+        ] {
+            let mut interface = InterfaceConfig::default();
+            interface.interface_type = interface_type;
+            let error =
+                interface.validate().expect_err("legacy non-TUN interface types must fail closed");
+            assert!(
+                error.to_string().contains(expected_fragment),
+                "unexpected validation error for {interface_type:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn interface_schema_removes_xdp_fields_and_rejects_legacy_input() {
+        let encoded = toml::to_string(&EngineConfig::default()).expect("serialize default config");
+        assert!(!encoded.contains("xdp_mode"));
+        assert!(!encoded.contains("xdp_flags"));
+
+        let error = EngineConfig::from_toml(
+            "[interface]\nxdp_mode = \"skb\"\nxdp_flags = [\"update_if_noexist\"]\n",
+        )
+        .expect_err("removed XDP fields must not remain accepted by the schema");
+        assert!(error.to_string().contains("xdp_mode"));
+
+        let config = EngineConfig::from_toml("[interface]\ntype = \"xdp\"\n")
+            .expect("legacy XDP type remains parseable for an explicit validation error");
+        let error =
+            config.validate().expect_err("legacy XDP type must fail closed during validation");
+        assert!(error.to_string().contains("AF_XDP was removed"));
     }
 
     #[test]

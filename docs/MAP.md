@@ -1849,8 +1849,17 @@ The audit remains open. These reconciliations document current evidence and owne
 - `scripts/tests/rust/rt-transport-frames-roundtrip.rs` covers malformed ACK ranges, Connection IDs, ARM stream cursors, and cumulative batch capacity. `rt-transport-packet-headers.rs` compares scalar and compile-gated AVX2 packet-number output at an unaligned offset; `rt-packet-number-parity` remains the decode reference lane.
 - `scripts/tests/suites/test-transport.sh` executes exact library targets and records explicit ARM, non-Linux, non-x86_64, and no-AVX2 skips. `scripts/tests/audits/audit-runtime-guardrails.sh` checks the new wiring fail-closed. The new checks pass, while the aggregate guardrail retains four pre-existing critical findings and one warning.
 - The host is ARM64 macOS. No Linux, Windows, x86_64 AVX2, privileged, or Omega runtime evidence is inferred. AF_XDP feature-on proof is N/A after TODO-838 removed that implementation and target; batch pool-cleanup proof is N/A after TODO-831 made the encoder allocation-free. The focused release library compile reached dependency compilation and was interrupted with exit 130 at approximately 2.0 GiB free before test execution; `cargo clean` restored 2.4 GiB. No test result is claimed.
-- `src/engine/config.rs` still exposes an XDP interface configuration surface without a current production caller. TODO-874 owns that adjacent configuration-truth reconciliation.
+- `src/engine/config.rs` no longer serializes XDP mode/flag fields. Legacy `InterfaceType::Xdp`, `Tap`, and `RawSocket` values remain parseable only to fail closed during validation; TODO-874 records the resulting TUN-only configuration contract.
 - The TODO completeness validator reaches tracker/detail/archive/path coverage and then stops because the existing Graphify evidence manifest is stale relative to the current Git revision. Graphify freshness remains explicitly blocked; no structural TODO failure is inferred.
+
+## XDP Configuration Surface Reconciliation (2026-08-07, TODO-874)
+
+- `InterfaceConfig` is now a TUN-only serialized configuration surface. The stale `xdp_mode` and `xdp_flags` fields, their defaults, and the unused `XdpMode` enum were removed, so generated TOML cannot advertise an AF_XDP mode.
+- `InterfaceType::Xdp` remains deserializable as a legacy value only so existing input receives an explicit validation error stating that AF_XDP was removed. Legacy `Tap` and `RawSocket` values also fail closed because the current runtime dispatch supports only TUN.
+- `config/quicfuscate.toml` and `config/server-linux.default.toml` now document the TUN-only contract and no longer contain XDP fields. GSO/GRO comments retain their compatibility/harness boundary without implying an XDP fallback.
+- `src/engine/config.rs` contains failable validation and schema regressions for every legacy non-TUN value, removed-field rejection, and default serialization. The runtime guardrail checks the source, tests, and both canonical templates.
+- Static verification passes `cargo fmt --all -- --check`, Bash syntax, TOML parsing, `git diff --check`, and the new XDP guardrail item. The aggregate runtime guardrail remains at four pre-existing critical findings and one warning. Rust unit-test execution was not admitted because the local 2.2 GiB free-space boundary would be crossed by a fresh test build; Omega was not used because both permitted QuicFuscate folders exist there and are dirty or revision-mismatched.
+- No AF_XDP implementation, Cargo feature, or runtime path was reintroduced. Any future AF_XDP work requires a separate product and kernel-ownership decision.
 
 ## Interface BMI2 Dispatch and Profile Proof Wiring (2026-08-07, TODO-843)
 

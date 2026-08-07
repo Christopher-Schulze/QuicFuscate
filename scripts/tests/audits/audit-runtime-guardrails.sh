@@ -565,6 +565,31 @@ else
   append_item "interface_bmi2_dispatch_regression" "fail" "missing profile intersection, test coverage, SIMD skip, or core-suite wiring"
 fi
 
+# 4g) The public interface schema must match the runtime that is actually
+#     shipped. Removed XDP fields stay absent from serialization, while legacy
+#     interface type values fail closed during validation.
+if ! rg -F -- 'pub xdp_mode:' src/engine/config.rs >/dev/null \
+  && ! rg -F -- 'pub xdp_flags:' src/engine/config.rs >/dev/null \
+  && ! rg -F -- 'pub enum XdpMode' src/engine/config.rs >/dev/null \
+  && rg -F -- 'AF_XDP was removed; use' \
+    src/engine/config.rs >/dev/null \
+  && rg -F -- 'fn interface_validation_rejects_legacy_non_tun_types()' \
+    src/engine/config.rs >/dev/null \
+  && rg -F -- 'fn interface_schema_removes_xdp_fields_and_rejects_legacy_input()' \
+    src/engine/config.rs >/dev/null \
+  && ! rg -n --no-messages 'xdp_mode|xdp_flags' config/quicfuscate.toml \
+    config/server-linux.default.toml >/dev/null \
+  && rg -F -- '# The current runtime supports only the layer-3 TUN interface.' \
+    config/quicfuscate.toml >/dev/null \
+  && rg -F -- '# type = "tun"                 # The current runtime supports only "tun".' \
+    config/server-linux.default.toml >/dev/null; then
+  pass "Interface configuration surface matches the TUN-only runtime and rejects stale XDP input"
+  append_item "xdp_config_surface_truth" "ok" "removed XDP fields, fail-closed legacy types, schema tests, and canonical templates are aligned"
+else
+  fail_critical "Interface configuration surface still advertises or accepts stale XDP configuration"
+  append_item "xdp_config_surface_truth" "fail" "removed-field, validation, test, or template contract is incomplete"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

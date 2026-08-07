@@ -424,12 +424,10 @@ num_worker_threads = 0
 # ==============================================================================
 
 [interface]
-# Interface type
-# Options: "tun", "tap", "xdp", "raw_socket"
-# "xdp" is compatibility/experimental only in this fork and is not the canonical production runtime path.
+# The current runtime supports only the layer-3 TUN interface.
 type = "tun"
 
-# TUN/TAP configuration
+# TUN configuration
 tun_name = "quicfuse0"
 tun_mtu = 1500
 
@@ -443,14 +441,10 @@ tun_mtu = 1500
 
 # Enable packet coalescing
 # Wired: UdpFastPath::new_with_flags() accepts GSO/GRO toggles. The main server runtime
-# uses tokio UdpSocket (not UdpFastPath) so these flags affect the harness/xdp fallback
+# uses tokio UdpSocket (not UdpFastPath) so these flags affect compatibility/harness
 # paths only. Values flow through interface config for future server path integration.
 enable_gso = true
 enable_gro = true
-
-# XDP configuration (Linux only, compatibility/experimental only in this fork)
-xdp_mode = "skb"  # Options: "skb", "driver", "hardware"
-xdp_flags = ["update_if_noexist"]
 
 # ==============================================================================
 # TELEMETRY AND LOGGING

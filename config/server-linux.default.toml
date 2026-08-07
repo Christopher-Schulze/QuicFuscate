@@ -166,13 +166,11 @@ mode = "performance"
 # ==============================================================================
 
 # [interface]
-# type = "tun"                 # Options: "tun", "tap", "xdp", "raw_socket"
+# type = "tun"                 # The current runtime supports only "tun".
 # tun_name = "quicfuse0"
 # tun_mtu = 1500
 # enable_gso = true
 # enable_gro = true
-# xdp_mode = "disabled"        # disabled | native | generic
-# xdp_flags = 0
 
 # ==============================================================================
 # TELEMETRY AND LOGGING
