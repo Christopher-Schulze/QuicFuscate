@@ -132,8 +132,89 @@ impl<const N: usize> Default for ConstBuffer<N> {
     }
 }
 
+/// Pure classification of Windows NUMA API results.
+///
+/// Split out from the FFI module so the decision logic is provable on a non-Windows workspace.
+/// The Windows adapter owns the calls; this owns what their outputs mean.
+#[cfg(any(target_os = "windows", test))]
+mod numa_classification {
+    /// Node count implied by a successful `GetNumaHighestNodeNumber`.
+    ///
+    /// The API reports the highest node *number*, so the count is one more. Saturating rather than
+    /// wrapping: a `u32::MAX` highest node is nonsensical but must not overflow into zero nodes.
+    pub(super) fn node_count_from_highest(highest_node: u32) -> usize {
+        (highest_node as usize).saturating_add(1)
+    }
+
+    /// Whether a successful `GetNumaHighestNodeNumber` means NUMA is usable.
+    ///
+    /// A successful query describes a valid topology even when the machine has exactly one node,
+    /// which reports `highest_node == 0`. Treating that as unavailable made every single-node
+    /// Windows host look like it had no NUMA support at all, so binding and node queries were
+    /// skipped on hardware where they would have worked.
+    pub(super) fn available_from_query(query_succeeded: bool) -> bool {
+        query_succeeded
+    }
+
+    /// Node index implied by a `GetNumaProcessorNodeEx` result.
+    ///
+    /// `u16::MAX` is the documented sentinel for "this processor has no NUMA node". A failed call
+    /// or the sentinel both fall back to node zero, which is the only node guaranteed to exist.
+    pub(super) fn node_from_processor_result(query_succeeded: bool, node: u16) -> usize {
+        if query_succeeded && node != u16::MAX {
+            node as usize
+        } else {
+            0
+        }
+    }
+}
+
+/// Proof for the Windows NUMA result classification.
+///
+/// Runs on every target. The FFI calls themselves are Windows-only and remain unproven here, but
+/// what their outputs mean is decided by these pure functions and is provable anywhere.
+#[cfg(test)]
+mod numa_classification_tests {
+    use super::numa_classification::*;
+
+    #[test]
+    fn single_node_topology_counts_as_available() {
+        // `GetNumaHighestNodeNumber` reports the highest node number, so a machine with one node
+        // reports 0. Requiring `highest_node > 0` made every single-node Windows host report no
+        // NUMA support, skipping binding and node queries that would have worked.
+        assert!(available_from_query(true), "a successful query means the topology is usable");
+        assert_eq!(node_count_from_highest(0), 1, "highest node 0 means exactly one node");
+
+        assert!(!available_from_query(false), "a failed query means unavailable");
+    }
+
+    #[test]
+    fn node_count_is_one_more_than_the_highest_and_never_overflows() {
+        assert_eq!(node_count_from_highest(1), 2);
+        assert_eq!(node_count_from_highest(63), 64);
+        // A nonsensical maximum must saturate rather than wrap to zero nodes.
+        assert_eq!(node_count_from_highest(u32::MAX), u32::MAX as usize + 1);
+        assert!(node_count_from_highest(u32::MAX) > 0);
+    }
+
+    #[test]
+    fn processor_node_result_honours_failure_and_the_no_node_sentinel() {
+        assert_eq!(node_from_processor_result(true, 0), 0);
+        assert_eq!(node_from_processor_result(true, 3), 3);
+
+        // u16::MAX is the documented "no NUMA node for this processor" sentinel and must not be
+        // reported as node 65535.
+        assert_eq!(node_from_processor_result(true, u16::MAX), 0);
+
+        // A failed query falls back to node zero, the only node guaranteed to exist.
+        assert_eq!(node_from_processor_result(false, 7), 0);
+        assert_eq!(node_from_processor_result(false, u16::MAX), 0);
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod numa {
+    use super::numa_classification;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use windows_sys::Win32::System::Kernel::PROCESSOR_NUMBER;
     use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
@@ -145,15 +226,19 @@ mod numa {
     static NUMA_NODES: AtomicUsize = AtomicUsize::new(0);
 
     pub fn is_available() -> bool {
-        unsafe {
-            let mut highest_node = 0u32;
-            if GetNumaHighestNodeNumber(&mut highest_node) != 0 {
-                NUMA_NODES.store((highest_node + 1) as usize, Ordering::Relaxed);
-                highest_node > 0
-            } else {
-                false
-            }
+        let mut highest_node = 0u32;
+        // SAFETY: `highest_node` is an initialized local `u32` that outlives the call, and the
+        // callee only writes through the pointer on success. The API takes no other input and
+        // borrows nothing beyond this call. A non-zero BOOL means the output was written; the
+        // value is not read on failure.
+        let query_succeeded = unsafe { GetNumaHighestNodeNumber(&mut highest_node) } != 0;
+        if query_succeeded {
+            NUMA_NODES.store(
+                numa_classification::node_count_from_highest(highest_node),
+                Ordering::Relaxed,
+            );
         }
+        numa_classification::available_from_query(query_succeeded)
     }
 
     pub fn bind_to_node(node: usize) -> Result<(), std::io::Error> {
@@ -164,6 +249,14 @@ mod numa {
             )
         })?;
 
+        // SAFETY: `affinity` is a zeroed `GROUP_AFFINITY`, which is a plain POD struct for which
+        // all-zero is a valid bit pattern, and it outlives both calls. `GetNumaNodeProcessorMaskEx`
+        // writes through the pointer only on success and reads only the `u16` node, which the
+        // checked conversion above bounded to the API range. `GetCurrentThread()` returns a
+        // pseudo-handle that is always valid for the calling thread and needs no close.
+        // `SetThreadGroupAffinity` reads `affinity` and writes nothing through the null previous
+        // pointer, which the API documents as "discard the previous affinity". Neither pointer
+        // escapes this scope, and `last_os_error()` is read only after a checked zero return.
         unsafe {
             let mut affinity: GROUP_AFFINITY = std::mem::zeroed();
             if GetNumaNodeProcessorMaskEx(node, &mut affinity) == 0 {
@@ -190,17 +283,24 @@ mod numa {
     }
 
     pub fn current_node() -> usize {
-        unsafe {
-            let mut processor: PROCESSOR_NUMBER = std::mem::zeroed();
-            GetCurrentProcessorNumberEx(&mut processor);
+        let mut processor: PROCESSOR_NUMBER = unsafe {
+            // SAFETY: `PROCESSOR_NUMBER` is a POD struct of integer fields, so an all-zero bit
+            // pattern is valid and inhabited. It is fully overwritten by the call below.
+            std::mem::zeroed()
+        };
 
-            let mut node = 0u16;
-            if GetNumaProcessorNodeEx(&processor, &mut node) != 0 && node != u16::MAX {
-                node as usize
-            } else {
-                0
-            }
-        }
+        // SAFETY: `GetCurrentProcessorNumberEx` returns no status. It is declared
+        // `fn(*mut PROCESSOR_NUMBER)` and the Win32 contract is that it always populates the
+        // structure for the calling processor, so there is nothing to classify here. The pointer
+        // targets an initialized local that outlives the call and is not aliased.
+        unsafe { GetCurrentProcessorNumberEx(&mut processor) };
+
+        let mut node = 0u16;
+        // SAFETY: `processor` was populated above and is passed by shared reference, which the
+        // callee only reads. `node` is an initialized local written through only on success. Both
+        // outlive the call and neither pointer escapes it.
+        let query_succeeded = unsafe { GetNumaProcessorNodeEx(&processor, &mut node) } != 0;
+        numa_classification::node_from_processor_result(query_succeeded, node)
     }
 }
 
