@@ -701,9 +701,17 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both paths are stable, NUL-terminated UTF-16 buffers for the duration of the call.
+    let source = encode_wide_nul_terminated(source.as_os_str().encode_wide(), "source")?;
+    let destination =
+        encode_wide_nul_terminated(destination.as_os_str().encode_wide(), "destination")?;
+
+    // SAFETY: `source` and `destination` are owned locals holding UTF-16 with exactly one NUL, at
+    // the end; interior NULs were rejected above, so neither pointer can address a truncated path.
+    // Both buffers outlive the call and are not moved during it. `MoveFileExW` reads through both
+    // pointers and writes through neither, so no aliasing or lifetime obligation escapes this
+    // scope. MOVEFILE_REPLACE_EXISTING permits overwriting an existing registry file and
+    // MOVEFILE_WRITE_THROUGH does not return until the change reaches disk. A zero return means
+    // failure and is the only path on which `last_os_error()` is read.
     let result = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -721,6 +729,32 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(not(windows))]
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     std::fs::rename(source, destination)
+}
+
+/// Encode UTF-16 path units into the NUL-terminated buffer a wide Win32 call requires.
+///
+/// The accepted shape is any UTF-16 sequence with no interior NUL. An interior NUL would end the
+/// string inside the kernel, so `MoveFileExW` would replace a file named by a prefix of the
+/// requested path instead of the registry file the caller asked for.
+///
+/// Compiled on Windows, where `replace_file` uses it, and under `cfg(test)` on every target so the
+/// contract stays provable on a non-Windows workspace.
+#[cfg(any(windows, test))]
+fn encode_wide_nul_terminated(
+    units: impl IntoIterator<Item = u16>,
+    label: &str,
+) -> io::Result<Vec<u16>> {
+    let mut buffer: Vec<u16> = units.into_iter().collect();
+    if buffer.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "QKey registry {label} path contains an interior NUL and cannot be passed to Win32"
+            ),
+        ));
+    }
+    buffer.push(0);
+    Ok(buffer)
 }
 
 #[cfg(unix)]
@@ -1167,5 +1201,73 @@ mod tests {
         assert!(!error.to_string().contains(secret_marker));
 
         std::fs::remove_dir_all(root).expect("clean test root");
+    }
+
+    /// Windows replacement path contract for the encrypted QKey registry file.
+    ///
+    /// Runs on every target so a non-Windows workspace still proves that an interior NUL is
+    /// refused. Native `MoveFileExW` success and failure remain unavailable off Windows.
+    #[test]
+    fn windows_registry_path_encoding_rejects_interior_nul() {
+        let encoded = encode_wide_nul_terminated(
+            "C:\\ProgramData\\quicfuscate\\qkeys.bin".encode_utf16(),
+            "destination",
+        )
+        .expect("a path without interior NUL must encode");
+        assert_eq!(encoded.last(), Some(&0), "buffer must be NUL terminated");
+        assert_eq!(
+            encoded.iter().filter(|unit| **unit == 0).count(),
+            1,
+            "exactly one NUL, at the end, so the kernel sees the whole path"
+        );
+
+        // Without rejection this would replace "C:\\ProgramData\\quicfuscate" rather than the
+        // registry file, silently mutating an unintended target.
+        let smuggled: Vec<u16> =
+            "C:\\ProgramData\\quicfuscate\u{0}\\qkeys.bin".encode_utf16().collect();
+        let error = encode_wide_nul_terminated(smuggled, "destination")
+            .expect_err("interior NUL must be rejected before the FFI call");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("destination"),
+            "error must name which path was rejected, got {error}"
+        );
+
+        let source_error = encode_wide_nul_terminated("tmp\u{0}.partial".encode_utf16(), "source")
+            .expect_err("source paths are checked too");
+        assert!(source_error.to_string().contains("source"));
+    }
+
+    /// The host-native branch must still replace atomically. This is the branch that actually
+    /// executes on this workspace and it anchors the non-Windows half of the contract.
+    #[test]
+    fn host_native_replacement_publishes_source_over_destination() {
+        let root = std::env::temp_dir().join(format!(
+            "quicfuscate_qkey_replace_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create test root");
+
+        let source = root.join("registry.partial");
+        let destination = root.join("registry.bin");
+        std::fs::write(&destination, b"stale").expect("seed destination");
+        std::fs::write(&source, b"fresh").expect("seed source");
+
+        replace_file(&source, &destination).expect("replacement must succeed");
+
+        assert_eq!(std::fs::read(&destination).expect("read destination"), b"fresh");
+        assert!(!source.exists(), "source must not survive a successful replacement");
+
+        let missing = root.join("absent.partial");
+        replace_file(&missing, &destination).expect_err("a missing source must fail, not silently");
+        assert_eq!(
+            std::fs::read(&destination).expect("destination survives"),
+            b"fresh",
+            "a failed replacement must leave the destination untouched"
+        );
+
+        std::fs::remove_dir_all(&root).expect("clean test root");
     }
 }

@@ -1645,7 +1645,7 @@ Server implementation (`src/implementations/server/`):
 - `src/implementations/server/limits.rs` - rate limiting and connection limiting primitives.
 - `src/implementations/server/metrics.rs` - runtime metrics registry and HTTP metrics server surface (`MetricsServer` active in CLI/runtime, `GlobalMetricsServer` retained for test/compat coverage).
 - `src/implementations/server/qkey_registry.rs` - persistent QKey records, ids, token hash management.
-- `src/implementations/server/qkey_registry_storage.rs` - versioned authenticated QKey registry envelope, zeroizing keyring, atomic migration, recovery, and rotation.
+- `src/implementations/server/qkey_registry_storage.rs` - versioned authenticated QKey registry envelope, zeroizing keyring, atomic migration, recovery, and rotation. Atomic replacement is durable on both host branches; on Windows the source and destination paths are rejected before `MoveFileExW` when they contain an interior NUL, so the kernel cannot replace a file named by a truncated prefix of the requested path.
 - `src/implementations/server/routing.rs` - routing/NAT/forwarding integration and WAN interface detection.
 - `src/implementations/server/session.rs` - session ids, session state and session manager.
 - `src/implementations/server/systemd.rs` - systemd-oriented service/unit integration helpers.
