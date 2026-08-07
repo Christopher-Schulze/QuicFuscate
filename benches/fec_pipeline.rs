@@ -30,12 +30,12 @@ fn mk_src_packet(id: u64, len: usize, pool: &Arc<quicfuscate::optimize::MemoryPo
         for (i, b) in exact.iter_mut().enumerate() {
             *b = (id as u8).wrapping_add(i as u8);
         }
-        FecPacket::new(id, Some(exact), len, true, None, 0, Arc::clone(pool))
+        FecPacket::try_new(id, Some(exact), len, true, None, 0, Arc::clone(pool)).unwrap()
     } else {
         for (i, b) in buf.iter_mut().take(len).enumerate() {
             *b = (id as u8).wrapping_add(i as u8);
         }
-        FecPacket::new(id, Some(buf), len, true, None, 0, Arc::clone(pool))
+        FecPacket::try_new(id, Some(buf), len, true, None, 0, Arc::clone(pool)).unwrap()
     }
 }
 
@@ -368,29 +368,35 @@ fn make_peeling_benchmark_batch(
         coefficients[..PEEL_BENCH_K].fill(0);
         coefficients[equation_index] = 1;
         coefficients[equation_index + PEEL_BENCH_EQUATIONS] = 1;
-        packets.push(FecPacket::new(
-            (PEEL_BENCH_K - 1) as u64,
-            Some(data),
-            PEEL_BENCH_SYMBOL_LEN,
-            false,
-            Some(coefficients),
-            PEEL_BENCH_K,
-            Arc::clone(pool),
-        ));
+        packets.push(
+            FecPacket::try_new(
+                (PEEL_BENCH_K - 1) as u64,
+                Some(data),
+                PEEL_BENCH_SYMBOL_LEN,
+                false,
+                Some(coefficients),
+                PEEL_BENCH_K,
+                Arc::clone(pool),
+            )
+            .unwrap(),
+        );
     }
 
     for source_id in 0..PEEL_BENCH_EQUATIONS {
         let mut data = pool.alloc();
         data[..PEEL_BENCH_SYMBOL_LEN].fill(source_id as u8);
-        packets.push(FecPacket::new(
-            source_id as u64,
-            Some(data),
-            PEEL_BENCH_SYMBOL_LEN,
-            true,
-            None,
-            0,
-            Arc::clone(pool),
-        ));
+        packets.push(
+            FecPacket::try_new(
+                source_id as u64,
+                Some(data),
+                PEEL_BENCH_SYMBOL_LEN,
+                true,
+                None,
+                0,
+                Arc::clone(pool),
+            )
+            .unwrap(),
+        );
     }
 
     (decoder, packets)
@@ -443,15 +449,18 @@ fn make_wiedemann_benchmark_batch(
         coefficients[equation_index] = 1;
         let next_index = (equation_index + 1) % k;
         coefficients[next_index] = if next_index == 0 { 2 } else { 1 };
-        packets.push(FecPacket::new(
-            (k - 1) as u64,
-            Some(data),
-            WIEDEMANN_BENCH_SYMBOL_LEN,
-            false,
-            Some(coefficients),
-            k,
-            Arc::clone(pool),
-        ));
+        packets.push(
+            FecPacket::try_new(
+                (k - 1) as u64,
+                Some(data),
+                WIEDEMANN_BENCH_SYMBOL_LEN,
+                false,
+                Some(coefficients),
+                k,
+                Arc::clone(pool),
+            )
+            .unwrap(),
+        );
     }
 
     (decoder, packets)

@@ -4,8 +4,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use libfuzzer_sys::fuzz_target;
 
-use quicfuscate::transport::{Config, RecvInfo};
 use quicfuscate::transport::packet;
+use quicfuscate::transport::{Config, RecvInfo};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -23,11 +23,7 @@ fuzz_target!(|data: &[u8]| {
         Ok(conn) => conn,
         Err(_) => return,
     };
-    let info = RecvInfo {
-        from: peer,
-        to: local,
-        ecn: None,
-    };
+    let info = RecvInfo { from: peer, to: local, ecn: None };
     let mut buf = data.to_vec();
     let _ = conn.recv(&mut buf, &info);
 });

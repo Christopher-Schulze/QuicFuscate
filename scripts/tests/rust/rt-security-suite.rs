@@ -317,7 +317,7 @@ fn fec_properties_single_repair_recovers_missing() {
         (4u64, b"four".to_vec()),
     ];
     for (id, data) in payloads.iter() {
-        let pkt = FecPacket::new(
+        let pkt = FecPacket::try_new(
             *id,
             Some(pool.alloc_from_slice(data)),
             data.len(),
@@ -325,7 +325,8 @@ fn fec_properties_single_repair_recovers_missing() {
             None,
             0,
             Arc::clone(&pool),
-        );
+        )
+        .unwrap();
         enc.take_packet(pkt);
     }
     let repair = enc.generate_repair_packet(0, &pool).expect("repair packet");
@@ -334,7 +335,7 @@ fn fec_properties_single_repair_recovers_missing() {
         if *id == 2 {
             continue;
         }
-        let pkt = FecPacket::new(
+        let pkt = FecPacket::try_new(
             *id,
             Some(pool.alloc_from_slice(data)),
             data.len(),
@@ -342,7 +343,8 @@ fn fec_properties_single_repair_recovers_missing() {
             None,
             0,
             Arc::clone(&pool),
-        );
+        )
+        .unwrap();
         dec.take_packet(pkt);
     }
     dec.take_packet(repair);

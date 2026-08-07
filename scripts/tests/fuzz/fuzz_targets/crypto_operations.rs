@@ -19,7 +19,8 @@ fuzz_target!(|data: &[u8]| {
     let mut buf = vec![0u8; payload_len + 16];
     buf[..payload_len].copy_from_slice(&data[44..44 + payload_len]);
 
-    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("fuzz fixture uses exact key and IV lengths");
+    let seal =
+        ChaCha20Poly1305::new(&key, &nonce).expect("fuzz fixture uses exact key and IV lengths");
     let sealed = seal.seal_with_u64_counter(1, b"ad", &mut buf, payload_len, None);
     if sealed.is_err() {
         return;
@@ -50,10 +51,7 @@ fuzz_target!(|data: &[u8]| {
         .expect("fuzz fixture uses exact data-plane key and IV lengths");
     let mut data_aead_buf = vec![0u8; payload_len + 16];
     data_aead_buf[..payload_len].copy_from_slice(&data[44..44 + payload_len]);
-    if seal
-        .seal_with_u64_counter(7, b"fuzz-ad", &mut data_aead_buf, payload_len, None)
-        .is_err()
-    {
+    if seal.seal_with_u64_counter(7, b"fuzz-ad", &mut data_aead_buf, payload_len, None).is_err() {
         return;
     }
     let _ = open.open_with_u64_counter(7, b"fuzz-ad", &mut data_aead_buf);

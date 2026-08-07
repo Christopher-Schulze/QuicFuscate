@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
             &data[..len.min(data.len())]
         };
         offset = offset.saturating_add(len);
-        let pkt = FecPacket::new(
+        let pkt = FecPacket::try_new(
             id,
             Some(pool.alloc_from_slice(slice)),
             slice.len(),
@@ -30,7 +30,8 @@ fuzz_target!(|data: &[u8]| {
             None,
             0,
             Arc::clone(&pool),
-        );
+        )
+        .unwrap();
         enc.take_packet(pkt);
     }
     let repair = enc.generate_repair_packet(0, &pool);

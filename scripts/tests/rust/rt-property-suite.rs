@@ -202,7 +202,7 @@ proptest! {
 
         for (idx, payload) in payloads.iter().enumerate() {
             let id = (idx + 1) as u64;
-            let pkt = FecPacket::new(
+            let pkt = FecPacket::try_new(
                 id,
                 Some(pool.alloc_from_slice(payload)),
                 payload.len(),
@@ -210,7 +210,8 @@ proptest! {
                 None,
                 0,
                 Arc::clone(&pool),
-            );
+            )
+            .unwrap();
             enc.take_packet(pkt);
         }
 
@@ -222,7 +223,7 @@ proptest! {
                 continue;
             }
             let id = (idx + 1) as u64;
-            let pkt = FecPacket::new(
+            let pkt = FecPacket::try_new(
                 id,
                 Some(pool.alloc_from_slice(payload)),
                 payload.len(),
@@ -230,7 +231,8 @@ proptest! {
                 None,
                 0,
                 Arc::clone(&pool),
-            );
+            )
+            .unwrap();
             dec.take_packet(pkt);
         }
         dec.take_packet(repair);
