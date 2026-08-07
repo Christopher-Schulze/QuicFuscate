@@ -949,13 +949,20 @@ impl FecPacket {
     /// Legacy streaming format retained for compatibility tests. Production
     /// transport framing uses [`wire::write_packet`].
     pub fn to_raw(&self, buf: &mut [u8]) -> Result<usize, String> {
-        if let Some(data) = self.payload_slice() {
-            let len = data.len().min(buf.len());
-            buf[..len].copy_from_slice(&data[..len]);
-            Ok(len)
-        } else {
-            Err("No data available".to_string())
+        let Some(data) = self.payload_slice() else {
+            return Err("No data available".to_string());
+        };
+        // Fail closed on an undersized buffer. Clamping to `buf.len()` copied a prefix and
+        // reported success, so the caller emitted a truncated FEC packet as if it were whole.
+        if buf.len() < data.len() {
+            return Err(format!(
+                "raw FEC payload needs {} bytes but the output buffer holds {}",
+                data.len(),
+                buf.len()
+            ));
         }
+        buf[..data.len()].copy_from_slice(data);
+        Ok(data.len())
     }
 
     /// Serialize a streaming-friendly raw format for transport DATAGRAM:

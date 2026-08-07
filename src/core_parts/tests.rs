@@ -345,6 +345,59 @@ mod tests {
         assert_eq!(output[0].payload_slice(), Some(&quic_payload[..]));
     }
 
+    /// A queued FEC packet must survive a failed write instead of being silently discarded.
+    ///
+    /// The send path previously popped the packet before `write_to()` could fail, so an
+    /// output-capacity failure lost application data while backpressure counters stayed at zero.
+    #[test]
+    fn buffered_fec_packet_survives_an_output_capacity_failure() {
+        let mut connection = test_connection();
+        *connection.conn = crate::transport::connection::bench_paired_1rtt_connections().client;
+
+        let payload = [0x40, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            packet: fec_packet(7, &payload, None),
+            wire_meta: None,
+            send_info: test_send_info(),
+            congestion_controlled: true,
+        });
+        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            packet: fec_packet(8, &payload, None),
+            wire_meta: None,
+            send_info: test_send_info(),
+            congestion_controlled: true,
+        });
+
+        // A buffer far too small for the packet forces the write to fail.
+        let mut tiny = [0u8; 2];
+        assert!(
+            connection.send_with_info(&mut tiny).is_err(),
+            "an undersized output buffer must fail rather than truncate"
+        );
+        assert_eq!(
+            connection.outgoing_fec_packets.len(),
+            2,
+            "a failed write must leave both packets queued"
+        );
+
+        // The retry with adequate capacity emits the same first packet, preserving FIFO order.
+        let mut wire = [0u8; 2048];
+        let (written, _) = connection.send_with_info(&mut wire).expect("retry must succeed");
+        assert!(written > 0);
+        assert_eq!(
+            connection.outgoing_fec_packets.len(),
+            1,
+            "exactly one packet is committed per successful send"
+        );
+
+        let (second, _) = connection.send_with_info(&mut wire).expect("second retry");
+        assert!(second > 0);
+        assert!(
+            connection.outgoing_fec_packets.is_empty(),
+            "the queue drains in order once capacity allows"
+        );
+    }
+
     #[test]
     fn pending_path_control_preempts_buffered_fec_datagram() {
         let mut connection = test_connection();

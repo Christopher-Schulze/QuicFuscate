@@ -1967,16 +1967,28 @@ impl QuicFuscateConnection {
         // new send() call would generate another FEC packet and push it onto
         // outgoing_fec_packets without ever draining the buffer.
         if !path_control_pending {
-            if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-                let len = packet.write_to(buf)?;
-                let mut send_info = packet.send_info;
+            if !self.outgoing_fec_packets.is_empty() {
+                // Write from the queued item without removing it. A capacity or serialization
+                // failure must leave the packet exactly where it was, in order, for the next
+                // send; popping first silently discarded a locally queued packet that was never
+                // emitted while backpressure counters stayed at zero.
+                let (len, mut send_info, shape, congestion_controlled) = {
+                    let packet = self
+                        .outgoing_fec_packets
+                        .front()
+                        .ok_or_else(|| "buffered FEC queue emptied unexpectedly".to_string())?;
+                    let len = packet.write_to(buf)?;
+                    (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
+                };
+                // Commit: the bytes are in the caller's buffer, so ownership transfers now.
+                // Dropping the popped packet recycles its pool block.
+                self.outgoing_fec_packets.pop_front();
                 send_info.at = now;
                 if self.fec.telemetry_enabled() {
-                    let (systematic, source_payload_bytes) = packet.telemetry_shape();
+                    let (systematic, source_payload_bytes) = shape;
                     self.fec.observe_wire_send(systematic, source_payload_bytes, len);
                 }
-                self.record_paced_packet(now, len, packet.congestion_controlled);
-                // Drop handles pool recycling automatically.
+                self.record_paced_packet(now, len, congestion_controlled);
                 return Ok((len, send_info));
             }
         }
@@ -2178,9 +2190,18 @@ impl QuicFuscateConnection {
         }
 
         // Pop the first packet from the buffer to send it now.
-        if let Some(packet) = self.outgoing_fec_packets.pop_front() {
-            let len = packet.write_to(buf)?;
-            let mut send_info = packet.send_info;
+        if !self.outgoing_fec_packets.is_empty() {
+            // Same transactional shape as the buffered flush above: write from the front, and
+            // transfer ownership only once the bytes are committed to the caller's buffer.
+            let (len, mut send_info, shape, congestion_controlled) = {
+                let packet = self
+                    .outgoing_fec_packets
+                    .front()
+                    .ok_or_else(|| "FEC queue emptied unexpectedly".to_string())?;
+                let len = packet.write_to(buf)?;
+                (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
+            };
+            self.outgoing_fec_packets.pop_front();
             send_info.at = now;
             log::trace!(
                 "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
@@ -2189,11 +2210,10 @@ impl QuicFuscateConnection {
                 self.outgoing_fec_packets.len()
             );
             if self.fec.telemetry_enabled() {
-                let (systematic, source_payload_bytes) = packet.telemetry_shape();
+                let (systematic, source_payload_bytes) = shape;
                 self.fec.observe_wire_send(systematic, source_payload_bytes, len);
             }
-            self.record_paced_packet(now, len, packet.congestion_controlled);
-            // Drop handles pool recycling automatically.
+            self.record_paced_packet(now, len, congestion_controlled);
             Ok((len, send_info))
         } else {
             Ok((
