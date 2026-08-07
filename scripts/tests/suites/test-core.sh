@@ -141,6 +141,10 @@ run_verified_library_target "unix-close-ownership" \
   "interface::tests::unix_close_failure_is_reported_and_descriptor_number_is_terminalized" rust-tests
 run_verified_library_target "compatibility-tun-handle-close" \
   "implementations::client::platform::traits::tests::tun_handle_close_failure_is_reported_and_terminalized" rust-tests
+run_verified_library_target "wintun-cleanup-state" \
+  "interface::wintun::tests::wintun_cleanup_state_retains_failed_resources_for_retry" rust-tests
+run_verified_library_target "wintun-send-sync-contract" \
+  "interface::wintun::tests::wintun_device_send_sync_contract_is_compile_checked" rust-tests
 case "$(detect_os)" in
   macos)
     run_verified_library_target "macos-utun-iovec-contract" \

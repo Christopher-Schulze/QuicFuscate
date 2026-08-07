@@ -671,6 +671,34 @@ else
   append_item "unix_tun_syscall_boundaries" "fail" "missing raw result validation, bounded identity parsing, rollback, close ownership, tests, or platform skip wiring"
 fi
 
+# 4j) Wintun native owners must retain failed cleanup state, keep constructor
+#     rollback ownership, and expose executable lifecycle/Send/Sync gates.
+if rg -F -- 'struct WintunCleanupState' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'struct WintunStartupOwner' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'fn initialization_failure(' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'fn rollback(&mut self) -> io::Result<()>' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'Wintun cleanup incomplete; pending resources:' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'unsafe impl Send for WintunDevice {}' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'unsafe impl Sync for WintunDevice {}' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'fn wintun_cleanup_state_retains_failed_resources_for_retry()' \
+    src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'fn wintun_device_send_sync_contract_is_compile_checked()' \
+    src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'fn native_adapter_packet_io_and_bounded_close()' \
+    src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'cleanup_state_for_test().is_complete()' src/interface/wintun.rs >/dev/null \
+  && rg -F -- 'run_verified_library_target "wintun-cleanup-state"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'run_verified_library_target "wintun-send-sync-contract"' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && ! rg -F -- 'self.closed.store(true' src/interface/wintun.rs >/dev/null; then
+  pass "Wintun cleanup ownership, constructor rollback, and concurrent lifecycle contracts are fail-closed"
+  append_item "wintun_cleanup_ownership" "ok" "retryable state ledger, startup owner rollback, exact Send/Sync contract, native close gate, and core-suite wiring are present"
+else
+  fail_critical "Wintun cleanup ownership or its executable lifecycle proof is incomplete"
+  append_item "wintun_cleanup_ownership" "fail" "missing retryable owner state, startup rollback, Send/Sync gate, native close assertion, or core-suite wiring"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

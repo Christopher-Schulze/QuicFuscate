@@ -62,6 +62,57 @@ fn validate_config(config: &TunConfig) -> Result<(), TunError> {
     Ok(())
 }
 
+/// State of every resource owned by a Wintun lifecycle.
+///
+/// A cleanup failure must leave the corresponding resource pending so an
+/// explicit retry can attempt the same operation again. The last failure is
+/// retained for Drop diagnostics and native residue investigation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct WintunCleanupState {
+    shutdown_signaled: bool,
+    session_ended: bool,
+    adapter_closed: bool,
+    shutdown_event_closed: bool,
+    library_unloaded: bool,
+    last_error: Option<String>,
+}
+
+impl WintunCleanupState {
+    fn is_complete(&self) -> bool {
+        self.session_ended
+            && self.adapter_closed
+            && self.shutdown_event_closed
+            && self.library_unloaded
+    }
+
+    fn pending_resources(&self) -> String {
+        let mut pending = Vec::new();
+        if !self.session_ended {
+            pending.push("session");
+        }
+        if !self.adapter_closed {
+            pending.push("adapter");
+        }
+        if !self.shutdown_event_closed {
+            pending.push("shutdown event");
+        }
+        if !self.library_unloaded {
+            pending.push("wintun.dll");
+        }
+        if pending.is_empty() {
+            "none".to_string()
+        } else {
+            pending.join(", ")
+        }
+    }
+
+    fn record_failure(&mut self, resource: &str, detail: impl std::fmt::Display) -> String {
+        let message = format!("{resource}: {detail}");
+        self.last_error = Some(message.clone());
+        message
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Windows implementation
 // ---------------------------------------------------------------------------
@@ -163,11 +214,55 @@ mod imp {
     type WintunAllocateSendPacketFn = unsafe extern "system" fn(*mut c_void, u32) -> *mut c_void;
     type WintunSendPacketFn = unsafe extern "system" fn(*mut c_void, *const c_void);
 
+    /// Temporary module owner used while resolving the Wintun exports.
+    ///
+    /// If resolution fails, the owner keeps the module handle alive through a
+    /// bounded Drop retry instead of discarding a failed `FreeLibrary` result.
+    #[derive(Debug)]
+    struct ModuleRollbackGuard {
+        handle: HMODULE,
+    }
+
+    impl ModuleRollbackGuard {
+        fn new(handle: HMODULE) -> Self {
+            Self { handle }
+        }
+
+        fn unload(&mut self) -> io::Result<()> {
+            if self.handle.is_null() {
+                return Ok(());
+            }
+            if unsafe { FreeLibrary(self.handle) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.handle = ptr::null_mut();
+            Ok(())
+        }
+
+        fn disarm(&mut self) -> HMODULE {
+            let handle = self.handle;
+            self.handle = ptr::null_mut();
+            handle
+        }
+    }
+
+    impl Drop for ModuleRollbackGuard {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                if let Err(error) = self.unload() {
+                    log::error!("Wintun loader rollback could not unload module owner: {error}");
+                }
+            }
+        }
+    }
+
     /// Dynamically loaded Wintun library bundling a module handle and all
-    /// resolved entry points. Dropping is handled by the owning `WintunDevice`.
+    /// resolved entry points. The owning lifecycle must explicitly unload the
+    /// module after the session and adapter have ended.
     #[derive(Debug)]
     struct WintunLib {
         handle: HMODULE,
+        unloaded: Mutex<bool>,
         create_adapter: WintunCreateAdapterFn,
         close_adapter: WintunCloseAdapterFn,
         get_adapter_luid: WintunGetAdapterLuidFn,
@@ -204,6 +299,7 @@ mod imp {
                     "wintun.dll not found; install Wintun beside the executable",
                 ));
             }
+            let mut module = ModuleRollbackGuard::new(handle);
 
             // Resolve each proc address. transmute the generic FARPROC
             // (Option<unsafe fn() -> isize>) into the specific nullable fn
@@ -217,10 +313,14 @@ mod imp {
                     match typed {
                         Some(f) => f,
                         None => {
-                            unsafe { FreeLibrary(handle) };
-                            return Err(TunError::Config(
-                                "wintun.dll missing required export; incompatible version",
-                            ));
+                            let message =
+                                "wintun.dll missing required export; incompatible version";
+                            return match module.unload() {
+                                Ok(()) => Err(TunError::Config(message)),
+                                Err(error) => Err(TunError::Io(io::Error::other(format!(
+                                    "{message}; failed to unload module owner: {error}"
+                                )))),
+                            };
                         }
                     }
                 }};
@@ -241,7 +341,8 @@ mod imp {
             let send_packet = resolve!("WintunSendPacket" as WintunSendPacketFn);
 
             Ok(Self {
-                handle,
+                handle: module.disarm(),
+                unloaded: Mutex::new(false),
                 create_adapter,
                 close_adapter,
                 get_adapter_luid,
@@ -253,6 +354,149 @@ mod imp {
                 allocate_send_packet,
                 send_packet,
             })
+        }
+
+        fn unload(&self) -> io::Result<()> {
+            let mut unloaded = self.unloaded.lock();
+            if *unloaded {
+                return Ok(());
+            }
+            if unsafe { FreeLibrary(self.handle) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            *unloaded = true;
+            Ok(())
+        }
+    }
+
+    /// Partial constructor owner. All acquired native resources remain in this
+    /// owner until their individual rollback step succeeds.
+    #[derive(Debug)]
+    struct WintunStartupOwner {
+        lib: Option<WintunLib>,
+        adapter: Option<*mut c_void>,
+        session: Option<*mut c_void>,
+        shutdown_event: Option<HANDLE>,
+    }
+
+    impl WintunStartupOwner {
+        fn new(lib: WintunLib) -> Self {
+            Self { lib: Some(lib), adapter: None, session: None, shutdown_event: None }
+        }
+
+        fn lib(&self) -> Option<&WintunLib> {
+            self.lib.as_ref()
+        }
+
+        fn pending_resources(&self) -> String {
+            let mut pending = Vec::new();
+            if self.session.is_some() {
+                pending.push("session");
+            }
+            if self.adapter.is_some() {
+                pending.push("adapter");
+            }
+            if self.shutdown_event.is_some() {
+                pending.push("shutdown event");
+            }
+            if self.lib.is_some() {
+                pending.push("wintun.dll");
+            }
+            if pending.is_empty() {
+                "none".to_string()
+            } else {
+                pending.join(", ")
+            }
+        }
+
+        fn rollback(&mut self) -> io::Result<()> {
+            let mut failures = Vec::new();
+
+            // WintunEndSession and WintunCloseAdapter are void APIs. Removing
+            // each owner from this ledger only happens immediately after its
+            // corresponding call, so later rollback cannot repeat it.
+            if let Some(session) = self.session.take() {
+                if let Some(lib) = self.lib() {
+                    unsafe { (lib.end_session)(session) };
+                } else {
+                    self.session = Some(session);
+                    failures.push("session: Wintun library owner is unavailable".to_string());
+                }
+            }
+            if let Some(adapter) = self.adapter.take() {
+                if let Some(lib) = self.lib() {
+                    unsafe { (lib.close_adapter)(adapter) };
+                } else {
+                    self.adapter = Some(adapter);
+                    failures.push("adapter: Wintun library owner is unavailable".to_string());
+                }
+            }
+            if let Some(event) = self.shutdown_event {
+                if unsafe { CloseHandle(event) } == 0 {
+                    let error = io::Error::last_os_error();
+                    failures.push(format!("shutdown event: {error}"));
+                } else {
+                    self.shutdown_event = None;
+                }
+            }
+            if self.lib.is_some() {
+                let unload_result = self.lib.as_ref().map(WintunLib::unload);
+                match unload_result {
+                    Some(Ok(())) => self.lib = None,
+                    Some(Err(error)) => failures.push(format!("wintun.dll: {error}")),
+                    None => {}
+                }
+            }
+
+            if failures.is_empty() && self.pending_resources() == "none" {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "Wintun startup rollback incomplete; pending resources: {}; {}",
+                    self.pending_resources(),
+                    if failures.is_empty() {
+                        "resource owner state is inconsistent".to_string()
+                    } else {
+                        failures.join("; ")
+                    }
+                )))
+            }
+        }
+
+        fn into_parts(self) -> Result<(WintunLib, *mut c_void, *mut c_void, HANDLE), io::Error> {
+            let Self { lib, adapter, session, shutdown_event } = self;
+            match (lib, adapter, session, shutdown_event) {
+                (Some(lib), Some(adapter), Some(session), Some(shutdown_event)) => {
+                    Ok((lib, adapter, session, shutdown_event))
+                }
+                (lib, adapter, session, shutdown_event) => {
+                    let mut owner = Self { lib, adapter, session, shutdown_event };
+                    let rollback_error = owner.rollback().err();
+                    Err(io::Error::other(format!(
+                        "Wintun startup owner was incomplete; pending resources: {}; rollback: {}",
+                        owner.pending_resources(),
+                        rollback_error
+                            .map_or_else(|| "not required".to_string(), |error| error.to_string())
+                    )))
+                }
+            }
+        }
+    }
+
+    impl Drop for WintunStartupOwner {
+        fn drop(&mut self) {
+            if self.pending_resources() == "none" {
+                return;
+            }
+            for _ in 0..2 {
+                if self.rollback().is_ok() {
+                    return;
+                }
+            }
+            log::error!(
+                "Wintun startup owner dropped with pending resources: {}",
+                self.pending_resources()
+            );
         }
     }
 
@@ -370,16 +614,51 @@ mod imp {
         mtu: AtomicU16,
         operations: RwLock<()>,
         close_guard: Mutex<()>,
+        cleanup_state: Mutex<WintunCleanupState>,
         closing: AtomicBool,
-        closed: AtomicBool,
     }
 
-    // Wintun packet operations are thread-safe per the upstream contract.
-    // `operations` keeps the opaque pointers and resolved DLL entry points
-    // alive until every in-flight operation drains, while `shutdown_event`
-    // wakes a reader before teardown acquires the exclusive operation lock.
+    // Safety contract for the manual Send/Sync implementations:
+    // - The upstream wintun.h contract marks receive, release, allocate, and
+    //   send packet calls as thread-safe. Allocation order defines send order;
+    //   this type intentionally makes no stronger ordering guarantee.
+    // - `operations` keeps the session and resolved DLL entry points alive
+    //   until every in-flight packet operation drains.
+    // - `close_guard` serializes teardown, and the shutdown event wakes a
+    //   blocked reader before teardown acquires the exclusive operation lock.
+    // - Session and adapter teardown only runs while the exclusive operation
+    //   lock is held, so no thread can call a Wintun function after unload.
     unsafe impl Send for WintunDevice {}
     unsafe impl Sync for WintunDevice {}
+
+    fn initialization_failure(owner: &mut WintunStartupOwner, primary: io::Error) -> TunError {
+        let detail = match owner.rollback() {
+            Ok(()) => primary.to_string(),
+            Err(cleanup) => format!("{primary}; startup cleanup failed: {cleanup}"),
+        };
+        TunError::Io(io::Error::new(primary.kind(), detail))
+    }
+
+    fn remember_cleanup_failure(
+        state: &mut WintunCleanupState,
+        failures: &mut Vec<String>,
+        resource: &str,
+        detail: impl std::fmt::Display,
+    ) {
+        failures.push(state.record_failure(resource, detail));
+    }
+
+    fn incomplete_cleanup_error(state: &WintunCleanupState, failures: &[String]) -> io::Error {
+        let detail = if failures.is_empty() {
+            state.last_error.as_deref().unwrap_or("resource owner state is incomplete").to_string()
+        } else {
+            failures.join("; ")
+        };
+        io::Error::other(format!(
+            "Wintun cleanup incomplete; pending resources: {}; {detail}",
+            state.pending_resources()
+        ))
+    }
 
     impl WintunDevice {
         /// Create a Wintun adapter, start a session, and assign the configured
@@ -387,76 +666,109 @@ mod imp {
         pub fn new(config: &TunConfig) -> Result<Self, TunError> {
             validate_config(config)?;
 
-            let lib = WintunLib::load()?;
+            let mut owner = WintunStartupOwner::new(WintunLib::load()?);
 
             let name_str =
                 config.name.as_deref().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_ADAPTER_NAME);
             let name_wide = wide_z(name_str);
             let tunnel_wide = wide_z(WINTUN_TUNNEL_TYPE);
 
-            let adapter = unsafe {
-                (lib.create_adapter)(name_wide.as_ptr(), tunnel_wide.as_ptr(), ptr::null())
+            let adapter = {
+                let Some(lib) = owner.lib() else {
+                    return Err(TunError::Io(io::Error::other(
+                        "Wintun startup owner lost its library before adapter creation",
+                    )));
+                };
+                unsafe {
+                    (lib.create_adapter)(name_wide.as_ptr(), tunnel_wide.as_ptr(), ptr::null())
+                }
             };
             if adapter.is_null() {
                 let code = unsafe { GetLastError() };
-                unsafe { FreeLibrary(lib.handle) };
-                return Err(TunError::Io(io::Error::other(format!(
-                    "WintunCreateAdapter failed (GetLastError={code})"
-                ))));
+                return Err(initialization_failure(
+                    &mut owner,
+                    io::Error::other(format!("WintunCreateAdapter failed (GetLastError={code})")),
+                ));
             }
+            owner.adapter = Some(adapter);
 
-            let session = unsafe { (lib.start_session)(adapter, ring_capacity(config.mtu)) };
+            let session = {
+                let Some(lib) = owner.lib() else {
+                    return Err(initialization_failure(
+                        &mut owner,
+                        io::Error::other(
+                            "Wintun startup owner lost its library before session start",
+                        ),
+                    ));
+                };
+                unsafe { (lib.start_session)(adapter, ring_capacity(config.mtu)) }
+            };
             if session.is_null() {
                 let code = unsafe { GetLastError() };
-                unsafe {
-                    (lib.close_adapter)(adapter);
-                    FreeLibrary(lib.handle);
-                }
-                return Err(TunError::Io(io::Error::other(format!(
-                    "WintunStartSession failed (GetLastError={code})"
-                ))));
+                return Err(initialization_failure(
+                    &mut owner,
+                    io::Error::other(format!("WintunStartSession failed (GetLastError={code})")),
+                ));
             }
+            owner.session = Some(session);
 
-            let read_wait_event = unsafe { (lib.get_read_wait_event)(session) };
+            let read_wait_event = {
+                let Some(lib) = owner.lib() else {
+                    return Err(initialization_failure(
+                        &mut owner,
+                        io::Error::other(
+                            "Wintun startup owner lost its library before read-event lookup",
+                        ),
+                    ));
+                };
+                unsafe { (lib.get_read_wait_event)(session) }
+            };
             if read_wait_event.is_null() {
                 let code = unsafe { GetLastError() };
-                unsafe {
-                    (lib.end_session)(session);
-                    (lib.close_adapter)(adapter);
-                    FreeLibrary(lib.handle);
-                }
-                return Err(TunError::Io(io::Error::other(format!(
-                    "WintunGetReadWaitEvent failed (GetLastError={code})"
-                ))));
+                return Err(initialization_failure(
+                    &mut owner,
+                    io::Error::other(format!(
+                        "WintunGetReadWaitEvent failed (GetLastError={code})"
+                    )),
+                ));
             }
 
             let shutdown_event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null() as PCWSTR) };
             if shutdown_event.is_null() {
                 let code = unsafe { GetLastError() };
-                unsafe {
-                    (lib.end_session)(session);
-                    (lib.close_adapter)(adapter);
-                    FreeLibrary(lib.handle);
-                }
-                return Err(TunError::Io(io::Error::other(format!(
-                    "CreateEventW for Wintun shutdown failed (GetLastError={code})"
-                ))));
+                return Err(initialization_failure(
+                    &mut owner,
+                    io::Error::other(format!(
+                        "CreateEventW for Wintun shutdown failed (GetLastError={code})"
+                    )),
+                ));
             }
+            owner.shutdown_event = Some(shutdown_event);
 
             let mut luid = NET_LUID_LH { Value: 0 };
-            unsafe { (lib.get_adapter_luid)(adapter, &mut luid) };
+            {
+                let Some(lib) = owner.lib() else {
+                    return Err(initialization_failure(
+                        &mut owner,
+                        io::Error::other(
+                            "Wintun startup owner lost its library before LUID lookup",
+                        ),
+                    ));
+                };
+                unsafe { (lib.get_adapter_luid)(adapter, &mut luid) };
+            }
             let adapter_luid = unsafe { luid.Value };
             if adapter_luid == 0 {
-                unsafe {
-                    CloseHandle(shutdown_event);
-                    (lib.end_session)(session);
-                    (lib.close_adapter)(adapter);
-                    FreeLibrary(lib.handle);
-                }
-                return Err(TunError::Io(io::Error::other(
-                    "WintunGetAdapterLUID returned an invalid zero LUID",
-                )));
+                return Err(initialization_failure(
+                    &mut owner,
+                    io::Error::other("WintunGetAdapterLUID returned an invalid zero LUID"),
+                ));
             }
+
+            let (lib, adapter, session, shutdown_event) = match owner.into_parts() {
+                Ok(parts) => parts,
+                Err(error) => return Err(TunError::Io(error)),
+            };
 
             let mut device = Self {
                 lib,
@@ -470,8 +782,8 @@ mod imp {
                 mtu: AtomicU16::new(config.mtu),
                 operations: RwLock::new(()),
                 close_guard: Mutex::new(()),
+                cleanup_state: Mutex::new(WintunCleanupState::default()),
                 closing: AtomicBool::new(false),
-                closed: AtomicBool::new(false),
             };
 
             // Assign the unicast IP address. A failure here tears down the
@@ -518,44 +830,90 @@ mod imp {
             Ok(())
         }
 
-        /// Tear down the session, adapter, event, and library. Idempotent.
+        /// Tear down the session, adapter, event, and library in order.
+        ///
+        /// Failed event or module cleanup remains pending in `cleanup_state`;
+        /// a later explicit `close()` retries only the failed owner. Session
+        /// and adapter teardown is never repeated because those APIs are void.
         fn close_inner(&self) -> io::Result<()> {
             let _close_guard = self.close_guard.lock();
-            if self.closed.load(Ordering::Acquire) {
+            let mut state = self.cleanup_state.lock();
+            if state.is_complete() {
                 return Ok(());
             }
 
             self.closing.store(true, Ordering::Release);
-            if unsafe { SetEvent(self.shutdown_event) } == 0 {
-                return Err(io::Error::last_os_error());
+            let mut failures = Vec::new();
+            if !state.shutdown_signaled {
+                if unsafe { SetEvent(self.shutdown_event) } == 0 {
+                    let error = io::Error::last_os_error();
+                    remember_cleanup_failure(
+                        &mut state,
+                        &mut failures,
+                        "shutdown event signal",
+                        error,
+                    );
+                    return Err(incomplete_cleanup_error(&state, &failures));
+                }
+                state.shutdown_signaled = true;
             }
 
-            let Some(_operations) = self.operations.try_write_for(CLOSE_DRAIN_TIMEOUT) else {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Wintun operations did not drain within the close deadline",
-                ));
-            };
+            if !state.session_ended || !state.adapter_closed {
+                let Some(_operations) = self.operations.try_write_for(CLOSE_DRAIN_TIMEOUT) else {
+                    let error = io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Wintun operations did not drain within the close deadline",
+                    );
+                    remember_cleanup_failure(&mut state, &mut failures, "operation drain", error);
+                    return Err(incomplete_cleanup_error(&state, &failures));
+                };
 
-            unsafe {
-                (self.lib.end_session)(self.session);
-                (self.lib.close_adapter)(self.adapter);
+                if !state.session_ended {
+                    unsafe { (self.lib.end_session)(self.session) };
+                    state.session_ended = true;
+                }
+                if !state.adapter_closed {
+                    unsafe { (self.lib.close_adapter)(self.adapter) };
+                    state.adapter_closed = true;
+                }
             }
 
-            let event_result = unsafe { CloseHandle(self.shutdown_event) };
-            let event_error = (event_result == 0).then(io::Error::last_os_error);
-            let library_result = unsafe { FreeLibrary(self.lib.handle) };
-            let library_error = (library_result == 0).then(io::Error::last_os_error);
+            if !state.shutdown_event_closed {
+                if unsafe { CloseHandle(self.shutdown_event) } == 0 {
+                    let error = io::Error::last_os_error();
+                    remember_cleanup_failure(
+                        &mut state,
+                        &mut failures,
+                        "shutdown event close",
+                        error,
+                    );
+                } else {
+                    state.shutdown_event_closed = true;
+                }
+            }
+            if !state.library_unloaded {
+                match self.lib.unload() {
+                    Ok(()) => state.library_unloaded = true,
+                    Err(error) => {
+                        remember_cleanup_failure(
+                            &mut state,
+                            &mut failures,
+                            "wintun.dll unload",
+                            error,
+                        );
+                    }
+                }
+            }
 
-            self.closed.store(true, Ordering::Release);
-            match (event_error, library_error) {
-                (Some(error), _) | (None, Some(error)) => Err(error),
-                (None, None) => Ok(()),
+            if state.is_complete() {
+                Ok(())
+            } else {
+                Err(incomplete_cleanup_error(&state, &failures))
             }
         }
 
         /// Close the adapter and unload `wintun.dll`. Safe to call multiple
-        /// times; subsequent calls are no-ops.
+        /// times; failed owner steps are retried on subsequent calls.
         pub fn close(&self) -> io::Result<()> {
             self.close_inner()
         }
@@ -564,6 +922,11 @@ mod imp {
         /// and address verification.
         pub fn adapter_luid(&self) -> u64 {
             self.adapter_luid
+        }
+
+        #[cfg(test)]
+        pub(super) fn cleanup_state_for_test(&self) -> WintunCleanupState {
+            *self.cleanup_state.lock()
         }
     }
 
@@ -719,7 +1082,7 @@ mod imp {
         }
 
         fn request_read_shutdown(&self) -> io::Result<()> {
-            if self.closed.load(Ordering::Acquire) {
+            if self.closing.load(Ordering::Acquire) {
                 return Ok(());
             }
             if unsafe { SetEvent(self.shutdown_event) } == 0 {
@@ -731,8 +1094,21 @@ mod imp {
 
     impl Drop for WintunDevice {
         fn drop(&mut self) {
-            if let Err(error) = self.close_inner() {
-                log::error!("Wintun shutdown failed: {error}");
+            for attempt in 1..=2 {
+                match self.close_inner() {
+                    Ok(()) => return,
+                    Err(error) if attempt == 1 => {
+                        log::warn!("Wintun shutdown retry after cleanup failure: {error}");
+                    }
+                    Err(error) => {
+                        let state = self.cleanup_state.lock();
+                        log::error!(
+                            "Wintun shutdown failed after bounded retry: {error}; pending resources: {}; last error: {:?}",
+                            state.pending_resources(),
+                            state.last_error
+                        );
+                    }
+                }
             }
         }
     }
@@ -857,6 +1233,35 @@ mod tests {
             "expected Config error for low MTU, got {:?}",
             res
         );
+    }
+
+    #[test]
+    fn wintun_cleanup_state_retains_failed_resources_for_retry() {
+        let mut state = WintunCleanupState {
+            shutdown_signaled: true,
+            session_ended: true,
+            adapter_closed: true,
+            ..WintunCleanupState::default()
+        };
+        state.record_failure("shutdown event close", "ERROR_INVALID_HANDLE");
+        state.record_failure("wintun.dll unload", "ERROR_MOD_NOT_FOUND");
+
+        assert!(!state.is_complete());
+        assert_eq!(state.pending_resources(), "shutdown event, wintun.dll");
+        assert_eq!(state.last_error.as_deref(), Some("wintun.dll unload: ERROR_MOD_NOT_FOUND"));
+
+        state.shutdown_event_closed = true;
+        assert!(!state.is_complete());
+        state.library_unloaded = true;
+        assert!(state.is_complete());
+        assert_eq!(state.pending_resources(), "none");
+    }
+
+    #[test]
+    fn wintun_device_send_sync_contract_is_compile_checked() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<WintunDevice>();
     }
 
     #[cfg(target_os = "windows")]
@@ -1427,6 +1832,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         let close_started = Instant::now();
         device.close().expect("Wintun close must succeed");
+        assert!(
+            device.cleanup_state_for_test().is_complete(),
+            "successful close must release every Wintun owner"
+        );
         assert!(
             close_started.elapsed() <= Duration::from_secs(3),
             "Wintun close exceeded its bounded deadline"
