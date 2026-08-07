@@ -47,16 +47,58 @@ impl FileStateStore {
             suffix
         ));
 
-        let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
-        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        // Restrict before any content exists, not after the rename. Creating with default
+        // permissions and tightening afterwards left a window in which the state file, which can
+        // carry credential-adjacent data, was readable by other local users, and the tightening
+        // result was discarded so a failure left it that way permanently.
+        let create = || -> std::io::Result<File> {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&tmp)
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)
+            }
+        };
 
+        // Any failure after the temporary file exists must not leave it behind holding content
+        // that never became the real state.
+        let cleanup = |error: String| -> String {
+            let _ = std::fs::remove_file(&tmp);
+            error
+        };
+
+        let mut file = create().map_err(|e| cleanup(e.to_string()))?;
+        file.write_all(json.as_bytes()).map_err(|e| cleanup(e.to_string()))?;
+        file.sync_all().map_err(|e| cleanup(e.to_string()))?;
+
+        // Assert the mode on the temporary file before it becomes the state file, so the rename
+        // publishes something already restricted and a permission failure aborts the write.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| cleanup(e.to_string()))?;
+            let mode = std::fs::metadata(&tmp)
+                .map_err(|e| cleanup(e.to_string()))?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode != 0o600 {
+                return Err(cleanup(format!(
+                    "refusing to publish desktop state: temporary file has mode {mode:#o}, expected 0o600"
+                )));
+            }
         }
+
+        drop(file);
+        std::fs::rename(&tmp, path).map_err(|e| cleanup(e.to_string()))?;
 
         Ok(())
     }

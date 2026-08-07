@@ -2422,6 +2422,84 @@ mod tests {
         );
     }
 
+    /// The published state file must be owner-only, and it must be restricted before publication.
+    ///
+    /// The writer previously created the temporary file with default permissions, wrote the state
+    /// into it, renamed it into place, and only then tried to tighten the mode, discarding the
+    /// result. That left a window in which the state file was readable by other local users, and a
+    /// failed tightening left it that way permanently.
+    #[cfg(unix)]
+    #[test]
+    fn state_file_is_owner_only_and_leaves_no_temporary_behind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let store = secrets::MemorySecretStore::new();
+        let state_store = state_store::FileStateStore::new();
+        let base = std::env::temp_dir().join(format!("qf-desktop-state-mode-{}", test_nonce()));
+        let _ = std::fs::create_dir_all(&base);
+        let path = base.join("desktop_state.json");
+
+        let state = PersistedState {
+            schema_version: 1,
+            tunnels: Vec::new(),
+            selected_tunnel_id: None,
+            settings: serde_json::json!({}),
+        };
+        state_store.save_state_to_path(&path, state, &store).expect("save state");
+
+        let mode = std::fs::metadata(&path).expect("state metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the published state file must be owner-only, got {mode:#o}");
+
+        // No temporary file may survive a successful write.
+        let leftovers: Vec<_> = std::fs::read_dir(&base)
+            .expect("read state dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A write that cannot be published must not leave its temporary file behind.
+    #[test]
+    fn a_failed_state_write_leaves_no_temporary_file() {
+        let store = secrets::MemorySecretStore::new();
+        let state_store = state_store::FileStateStore::new();
+        let base =
+            std::env::temp_dir().join(format!("qf-desktop-state-failwrite-{}", test_nonce()));
+        let _ = std::fs::create_dir_all(&base);
+        // A directory at the target path makes the rename fail while the temporary file already
+        // exists and holds content.
+        let path = base.join("desktop_state.json");
+        std::fs::create_dir(&path).expect("directory in the way of the state file");
+
+        let state = PersistedState {
+            schema_version: 1,
+            tunnels: Vec::new(),
+            selected_tunnel_id: None,
+            settings: serde_json::json!({}),
+        };
+        assert!(
+            state_store.save_state_to_path(&path, state, &store).is_err(),
+            "publishing over a directory must fail"
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(&base)
+            .expect("read state dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed publish must clean up its temporary file, found: {leftovers:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// No successful redaction may return a non-empty QKey, whatever the keychain does.
     #[test]
     fn no_successful_redaction_ever_returns_a_plaintext_qkey() {
