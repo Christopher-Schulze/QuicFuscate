@@ -190,6 +190,20 @@ jobs:
         run: |
           cargo test --workspace --all-targets --features rust-tests --locked
 
+      - name: Run privilege, memory-lock, and TLS negative-proof suite
+        shell: bash
+        run: |
+          scripts/tests/suites/test-privilege-memory-tls-proof.sh \
+            --output-dir scripts/out/tests/privilege-memory-tls-proof
+
+      - name: Upload privilege, memory-lock, and TLS proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: privilege-memory-tls-proof
+          path: scripts/out/tests/privilege-memory-tls-proof/
+          if-no-files-found: error
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:

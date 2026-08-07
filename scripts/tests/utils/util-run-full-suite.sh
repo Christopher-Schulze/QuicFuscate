@@ -105,6 +105,7 @@ fi
 
 # 3) Core integration suite (run individually, sequential)
 run "$SCRIPT_DIR/../suites/test-core.sh" --output-dir "$OUTPUT_DIR/tests-core"
+run "$SCRIPT_DIR/../suites/test-privilege-memory-tls-proof.sh" --output-dir "$OUTPUT_DIR/tests-privilege-memory-tls-proof"
 run "$SCRIPT_DIR/../suites/test-desktop-webadmin-rust-integration.sh" --output-dir "$OUTPUT_DIR/tests-desktop-webadmin-rust"
 
 # 4) Core suite coverage (run individually, sequential)

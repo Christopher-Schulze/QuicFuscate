@@ -1028,6 +1028,61 @@ else
   append_item "tls_identity_and_secret_output" "fail" "missing correspondence validator, preload regression, zeroizing exporter boundary, erasure test, or documentation"
 fi
 
+# 4t) Privilege, memory-lock, and TLS negative proof must run through one
+#     deterministic suite with an explicit native-platform boundary. The
+#     Windows portability check must precede any Windows test compilation.
+WINDOWS_PROOF_ORDER_ERRORS="$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+match = re.search(
+    r"(?ms)^  windows-core-checks:\n(?P<job>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+    ci,
+)
+job = match.group("job") if match else ""
+checks = [
+    ("runs-on: windows-latest", "Windows core job is not Windows-hosted"),
+    (
+        "cargo check --locked --lib --features tun-windows,rust-tests",
+        "Windows CurrentIds compile gate is missing",
+    ),
+    (
+        "cargo test --locked --lib --features tun-windows,rust-tests --no-run",
+        "Windows test compilation gate is missing",
+    ),
+]
+errors = [message for token, message in checks if token not in job]
+check_index = job.find(checks[1][0])
+test_index = job.find(checks[2][0])
+if check_index < 0 or test_index < 0 or check_index >= test_index:
+    errors.append("Windows library check does not precede Windows test compilation")
+print("; ".join(errors))
+PY
+)"
+if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
+  && test -f scripts/tests/suites/test-privilege-memory-tls-proof.sh \
+  && rg -F -- 'privilege::drop::tests::partial_transition_error_preserves_state_and_operation' \
+    scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
+  && rg -F -- 'memory_lock::tests::failure_policy_distinguishes_best_effort_from_fail_closed' \
+    scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
+  && rg -F -- 'qftls::tests::preload_identity_duplicate_and_conflict_contract_is_isolated' \
+    scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
+  && rg -F -- 'PRIVILEGE_PROOF_UNAVAILABLE' \
+    scripts/tests/suites/test-privilege-memory-tls-proof.sh scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
+  && rg -F -- 'windows_compile_gate_status' scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
+  && rg -F -- 'test-privilege-memory-tls-proof.sh' scripts/tests/utils/util-run-full-suite.sh .github/workflows/ci.yml >/dev/null \
+  && rg -F -- 'root_regain_result_contract_is_deterministic_without_syscalls' src/privilege/drop.rs >/dev/null \
+  && rg -F -- 'process_memory_lock_guard_cleans_up_during_unwind' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'deferred_process_lock_status_is_explicit_before_privilege_transition' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'Privilege, Lock, and TLS Negative-Proof Guardrails' docs/todo/done/todo-854-privilege-lock-negative-proof.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
+  pass "Privilege, memory-lock, TLS, native-boundary, and Windows portability proof wiring is explicit"
+  append_item "privilege_memory_tls_negative_proof" "ok" "deterministic local suite, explicit native skip manifest, startup ordering, and Windows compile-before-test CI gate are present"
+else
+  fail_critical "Privilege, memory-lock, TLS negative proof or Windows portability guardrail wiring is incomplete"
+  append_item "privilege_memory_tls_negative_proof" "fail" "missing deterministic suite, explicit skip boundary, ordering assertion, CI compile gate, or documentation: ${WINDOWS_PROOF_ORDER_ERRORS:-contract probe failed}"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

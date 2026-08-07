@@ -517,6 +517,9 @@ mod tests {
     };
     use crate::engine::SecurityConfig;
     use crate::optimize::{MemoryPool, LOCK_BLOCKS_TEST_MUTEX};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     struct PoolLockSettingRestore(bool);
 
@@ -640,6 +643,21 @@ mod tests {
         assert!(MemoryPool::lock_blocks_enabled());
     }
 
+    #[test]
+    fn deferred_process_lock_status_is_explicit_before_privilege_transition() {
+        let status = MemoryLockPolicy {
+            lock_memory: true,
+            lock_blocks: true,
+            failure_policy: MemoryLockFailurePolicy::FailClosed,
+        }
+        .apply_before_tls_identity(true)
+        .expect("deferred process lock must publish a pending status");
+
+        assert_eq!(status.state, MemoryLockState::Deferred);
+        assert_eq!(status.process_mode, MemoryLockProcessMode::Deferred);
+        assert!(status.is_not_ready());
+    }
+
     #[cfg(unix)]
     #[test]
     fn finite_memlock_limit_never_enables_future_allocation_locking() {
@@ -704,7 +722,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn production_memory_lock_boundary_locks_pages_or_reports_supported_limit_error() {
-        let _guard = ProcessMemoryLockGuard;
+        let (_guard, _cleanup_observed) = ProcessMemoryLockGuard::new();
         match super::lock_process_memory(MemoryLockFailurePolicy::BestEffort) {
             Ok(outcome) => {
                 assert_ne!(outcome.process_mode, MemoryLockProcessMode::None);
@@ -732,7 +750,17 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct ProcessMemoryLockGuard;
+    struct ProcessMemoryLockGuard {
+        cleanup_observed: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl ProcessMemoryLockGuard {
+        fn new() -> (Self, Arc<AtomicBool>) {
+            let cleanup_observed = Arc::new(AtomicBool::new(false));
+            (Self { cleanup_observed: cleanup_observed.clone() }, cleanup_observed)
+        }
+    }
 
     #[cfg(unix)]
     impl Drop for ProcessMemoryLockGuard {
@@ -745,6 +773,20 @@ mod tests {
                     std::io::Error::last_os_error()
                 );
             }
+            self.cleanup_observed.store(true, Ordering::Release);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_memory_lock_guard_cleans_up_during_unwind() {
+        let (guard, cleanup_observed) = ProcessMemoryLockGuard::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = guard;
+            panic!("exercise panic-safe process-lock cleanup");
+        }));
+
+        assert!(result.is_err());
+        assert!(cleanup_observed.load(Ordering::Acquire));
     }
 }

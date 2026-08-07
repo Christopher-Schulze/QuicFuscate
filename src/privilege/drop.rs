@@ -1238,12 +1238,20 @@ fn verify_root_regain_result(
     operation: &'static str,
     result: libc::c_int,
 ) -> Result<(), DropError> {
+    verify_root_regain_result_with_errno(operation, result, errno())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_root_regain_result_with_errno(
+    operation: &'static str,
+    result: libc::c_int,
+    error: i32,
+) -> Result<(), DropError> {
     if result == 0 {
         return Err(DropError::VerificationFailed(format!(
             "{operation}(0,0,0) unexpectedly regained root"
         )));
     }
-    let error = errno();
     if error != libc::EPERM {
         return Err(DropError::VerificationFailed(format!(
             "root-regain probe {operation} failed with errno {error}, expected EPERM"
@@ -1422,6 +1430,26 @@ mod tests {
             verify_linux_thread_status(&filesystem_mismatch, &identity, path),
             Err(DropError::VerificationFailed(detail)) if detail.contains("filesystem")
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_regain_result_contract_is_deterministic_without_syscalls() {
+        let regained = verify_root_regain_result_with_errno("setresuid", 0, 0).unwrap_err();
+        assert!(matches!(
+            regained,
+            DropError::VerificationFailed(detail) if detail.contains("unexpectedly regained root")
+        ));
+
+        let wrong_errno =
+            verify_root_regain_result_with_errno("setresgid", -1, libc::EACCES).unwrap_err();
+        assert!(matches!(
+            wrong_errno,
+            DropError::VerificationFailed(detail) if detail.contains("expected EPERM")
+        ));
+
+        verify_root_regain_result_with_errno("setresuid", -1, libc::EPERM)
+            .expect("EPERM is the only accepted root-regain result");
     }
 
     #[cfg(unix)]
