@@ -822,12 +822,74 @@ jobs:
         run: cargo install critcmp --version "0.1.8" --locked
 
       - name: Run baseline benchmarks (main)
+        shell: bash
         run: |
-          git stash --include-untracked || true
-          git checkout origin/main -- . 2>/dev/null || git checkout main -- . 2>/dev/null || true
-          cargo bench --bench ci_regression --features benches -- --save-baseline main 2>&1 || echo "Baseline build skipped (bench target may not exist on main yet)"
-          git checkout - -- . 2>/dev/null || true
-          git stash pop 2>/dev/null || true
+          # Every step here used to be masked with `|| true`, so a missing baseline, a failed
+          # checkout, a failed benchmark, or a failed restore all reported success. The PR
+          # comparison could then measure against an unknown tree, or later steps could run
+          # against a baseline-only or mixed checkout, while the job stayed green.
+          set -euo pipefail
+
+          pr_tree="$(git rev-parse HEAD^{tree})"
+          echo "pr_tree=$pr_tree"
+
+          baseline_ref=""
+          for candidate in origin/main main; do
+            if git rev-parse --verify --quiet "$candidate^{commit}" >/dev/null; then
+              baseline_ref="$candidate"
+              break
+            fi
+          done
+          if [ -z "$baseline_ref" ]; then
+            echo "::error::no baseline ref (origin/main or main) is available; refusing a green comparison against an unknown tree"
+            exit 1
+          fi
+          baseline_commit="$(git rev-parse "$baseline_ref")"
+          baseline_tree="$(git rev-parse "$baseline_ref^{tree}")"
+          echo "baseline_ref=$baseline_ref"
+          echo "baseline_commit=$baseline_commit"
+          echo "baseline_tree=$baseline_tree"
+
+          stashed=0
+          restore() {
+            local status=$?
+            # Always put the PR tree back, even when the benchmark failed, so later steps and the
+            # uploaded artifacts belong to the commit under test.
+            git checkout --force HEAD -- . || {
+              echo "::error::failed to restore the PR tree"
+              exit 1
+            }
+            if [ "$stashed" = "1" ]; then
+              git stash pop || {
+                echo "::error::failed to pop the stash; the working tree is not the PR tree"
+                exit 1
+              }
+              stashed=0
+            fi
+            local restored
+            restored="$(git rev-parse HEAD^{tree})"
+            if [ "$restored" != "$pr_tree" ]; then
+              echo "::error::restored tree $restored does not match the PR tree $pr_tree"
+              exit 1
+            fi
+            echo "restored_tree=$restored"
+            exit "$status"
+          }
+          trap restore EXIT
+
+          if ! git diff --quiet HEAD || [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+            git stash push --include-untracked --message "ci-baseline-benchmark"
+            stashed=1
+          fi
+
+          git checkout --force "$baseline_ref" -- .
+          checked_out="$(git write-tree)"
+          echo "checked_out_tree=$checked_out"
+
+          # A benchmark failure is a real result, not something to swallow. If the bench target
+          # genuinely does not exist on the baseline yet, that is a missing baseline and the
+          # comparison must not be reported as green.
+          cargo bench --bench ci_regression --features benches -- --save-baseline main
 
       - name: Run PR benchmarks and compare
         run: |
