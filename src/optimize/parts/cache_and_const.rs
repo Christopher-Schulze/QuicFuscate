@@ -134,12 +134,16 @@ impl<const N: usize> ConstBuffer<N> {
     }
 }
 
-/// Const-size ring buffer for lock-free operations
+/// Const-size ring buffer holding exactly `N` elements.
+///
+/// Occupancy is tracked with an explicit length rather than by reserving a slot to distinguish
+/// full from empty. That makes the usable capacity equal to `N`, which is what the type name
+/// promises, and it makes `N == 0` a representable empty ring instead of a modulo-zero hazard.
 #[cfg(any(test, feature = "rust-tests"))]
 pub(crate) struct ConstRingBuffer<T, const N: usize> {
     buffer: [Option<T>; N],
     head: usize,
-    tail: usize,
+    len: usize,
 }
 
 #[cfg(any(test, feature = "rust-tests"))]
@@ -152,28 +156,38 @@ impl<T, const N: usize> Default for ConstRingBuffer<T, N> {
 #[cfg(any(test, feature = "rust-tests"))]
 impl<T, const N: usize> ConstRingBuffer<T, N> {
     pub(crate) fn new() -> Self {
-        Self { buffer: [(); N].map(|_| None), head: 0, tail: 0 }
+        Self { buffer: [(); N].map(|_| None), head: 0, len: 0 }
     }
 
+    /// Append an element. Returns `false` when the ring is full, which for `N == 0` is always.
     #[inline(always)]
     pub(crate) fn push(&mut self, item: T) -> bool {
-        let next_tail = (self.tail + 1) % N;
-        if next_tail == self.head {
+        if self.len >= N {
             return false;
         }
-        self.buffer[self.tail] = Some(item);
-        self.tail = next_tail;
+        // `len < N` implies `N > 0`, so the modulo below is well defined.
+        let tail = (self.head + self.len) % N;
+        self.buffer[tail] = Some(item);
+        self.len += 1;
         true
     }
 
     #[inline(always)]
     pub(crate) fn pop(&mut self) -> Option<T> {
-        if self.head == self.tail {
+        if self.len == 0 {
             return None;
         }
         let item = self.buffer[self.head].take();
+        // `len > 0` implies `N > 0`, so the modulo below is well defined.
         self.head = (self.head + 1) % N;
+        self.len -= 1;
         item
+    }
+
+    /// Number of elements currently held.
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
     }
 }
 
@@ -194,30 +208,43 @@ impl<const N: usize, const SIZE: usize> Default for ConstPacketPool<N, SIZE> {
 
 #[cfg(any(test, feature = "rust-tests"))]
 impl<const N: usize, const SIZE: usize> ConstPacketPool<N, SIZE> {
-    /// Creates a new packet pool with all N slots available.
+    /// Creates a new packet pool with all `N` slots available.
+    ///
+    /// `N == 0` is a valid empty pool whose [`Self::alloc`] always returns `None`.
     pub fn new() -> Self {
         let mut pool = Self {
             packets: [(); N].map(|_| ConstBuffer::new()),
             free_list: ConstRingBuffer::new(),
             in_use: [false; N],
         };
-        for i in 0..N {
-            pool.free_list.push(i);
+        for index in 0..N {
+            // The free list holds exactly `N` slots, so every index fits. Asserting the result
+            // keeps a silently dropped slot from reappearing as a mysteriously smaller capacity.
+            debug_assert!(
+                pool.free_list.push(index),
+                "free list must accept every one of the {N} slots"
+            );
+            #[cfg(not(debug_assertions))]
+            let _ = pool.free_list.push(index);
         }
+        debug_assert_eq!(pool.free_list.len(), N, "a fresh pool offers its full capacity");
         pool
     }
 
     /// Allocates and clears a buffer from the pool, or returns None if empty.
     #[inline(always)]
     pub fn alloc(&mut self) -> Option<&mut ConstBuffer<SIZE>> {
-        self.free_list.pop().map(|idx| {
-            if idx < N {
-                self.in_use[idx] = true;
-            }
-            let buf = &mut self.packets[idx];
-            buf.clear();
-            buf
-        })
+        let index = self.free_list.pop()?;
+        // The free list is only ever fed indices from `0..N` in `new()` and from the bounds-checked
+        // `free()` path, so this holds. Enforcing it here rather than in a comment keeps the bound
+        // at the indexing site.
+        if index >= N {
+            return None;
+        }
+        self.in_use[index] = true;
+        let buffer = &mut self.packets[index];
+        buffer.clear();
+        Some(buffer)
     }
 
     /// Returns a buffer to the pool. No-op if the buffer did not originate from this pool.

@@ -111,23 +111,62 @@ fn double_free_guard_prevents_duplicate_allocation() {
     };
     unsafe {
         pool.free(&*buf_ptr);
+        // The second free must be rejected. Otherwise the slot would be handed out twice and the
+        // pool would appear to hold three buffers instead of two.
         pool.free(&*buf_ptr);
     }
-    let first = pool.alloc().is_some();
-    let second = pool.alloc().is_none();
-    assert!(first);
-    assert!(second);
+    assert!(pool.alloc().is_some(), "the freed slot is available again");
+    assert!(pool.alloc().is_some(), "the untouched second slot is still available");
+    assert!(pool.alloc().is_none(), "a double free must not create a third slot");
 }
 
 #[test]
 fn resource_exhaustion_prevents_overalloc() {
+    // A ConstPacketPool<N, _> yields exactly N buffers. The previous reserved-slot ring silently
+    // dropped the last index, so this pool used to hand out only two.
     let mut pool: ConstPacketPool<3, 32> = ConstPacketPool::new();
-    let first = pool.alloc().is_some();
-    let second = pool.alloc().is_some();
-    let third = pool.alloc().is_none();
-    assert!(first);
-    assert!(second);
-    assert!(third);
+    assert!(pool.alloc().is_some(), "slot 1 of 3");
+    assert!(pool.alloc().is_some(), "slot 2 of 3");
+    assert!(pool.alloc().is_some(), "slot 3 of 3 must not be lost to a reserved ring slot");
+    assert!(pool.alloc().is_none(), "the fourth allocation must fail");
+}
+
+#[test]
+fn const_packet_pool_reports_its_full_declared_capacity() {
+    let mut single: ConstPacketPool<1, 16> = ConstPacketPool::new();
+    assert!(single.alloc().is_some(), "a pool of one must yield one buffer");
+    assert!(single.alloc().is_none());
+
+    let mut pair: ConstPacketPool<2, 16> = ConstPacketPool::new();
+    assert!(pair.alloc().is_some());
+    assert!(pair.alloc().is_some(), "a pool of two must yield two buffers");
+    assert!(pair.alloc().is_none());
+}
+
+#[test]
+fn zero_capacity_pool_is_representable_and_never_allocates() {
+    // The old ring computed `(tail + 1) % N` on push, so a zero-capacity pool was a modulo-zero
+    // hazard rather than a representable empty pool.
+    let mut empty: ConstPacketPool<0, 16> = ConstPacketPool::new();
+    assert!(empty.alloc().is_none(), "a zero-capacity pool can never allocate");
+    assert!(empty.alloc().is_none(), "and stays deterministic on repeat");
+}
+
+#[test]
+fn freed_buffers_return_to_the_pool_and_preserve_total_capacity() {
+    let mut pool: ConstPacketPool<2, 32> = ConstPacketPool::new();
+    let first = pool.alloc().expect("first") as *const _;
+    let second = pool.alloc().expect("second") as *const _;
+    assert!(pool.alloc().is_none(), "both slots are checked out");
+
+    unsafe {
+        pool.free(&*first);
+        pool.free(&*second);
+    }
+
+    assert!(pool.alloc().is_some(), "slot 1 returns");
+    assert!(pool.alloc().is_some(), "slot 2 returns");
+    assert!(pool.alloc().is_none(), "capacity is unchanged by a full cycle");
 }
 
 #[test]
