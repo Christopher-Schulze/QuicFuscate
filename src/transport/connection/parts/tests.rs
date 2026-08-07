@@ -546,6 +546,76 @@ mod tests {
     }
 
     /// Terminal timeout must retire recovery state, not only the connection's own counters.
+    /// A terminal close must not sit behind ordinary control traffic.
+    ///
+    /// Under congestion bypass the control flush stops at the first ack-eliciting frame, so a
+    /// PING or MAX_DATA queued earlier used to hide a later CONNECTION_CLOSE until congestion
+    /// reopened or the idle timeout fired.
+    #[test]
+    fn queued_close_is_hoisted_ahead_of_ack_eliciting_control_frames() {
+        let mut c = make_conn();
+
+        c.pending_control.push_back(Frame::Ping { mtu_probe: None });
+        c.pending_control.push_back(Frame::MaxData { max: 1_000_000 });
+        c.pending_control.push_back(Frame::ConnectionClose {
+            error_code: 0,
+            frame_type: 0,
+            reason: std::borrow::Cow::Borrowed(&[]),
+        });
+        c.pending_control.push_back(Frame::Ping { mtu_probe: None });
+
+        let mut out = [0u8; 512];
+        let (off, wrote_ack_eliciting) = c
+            .flush_pending_control_frames(&mut out, 0, true)
+            .expect("bypass flush must succeed");
+
+        assert!(off > 0, "the close must be emitted under congestion bypass");
+        assert!(
+            !wrote_ack_eliciting,
+            "congestion bypass must not emit unrelated ack-eliciting control frames"
+        );
+        assert!(
+            !c.pending_control
+                .iter()
+                .any(|f| matches!(f, Frame::ConnectionClose { .. })),
+            "the close must be consumed, not left queued behind the PING"
+        );
+        // The ack-eliciting frames stay queued for a later send that respects the cwnd.
+        assert_eq!(
+            c.pending_control.len(),
+            3,
+            "only the close is emitted under bypass; the rest remain queued in order"
+        );
+        assert!(matches!(c.pending_control.front(), Some(Frame::Ping { .. })));
+    }
+
+    /// Hoisting must preserve the relative order of everything else.
+    #[test]
+    fn hoisting_a_close_preserves_the_order_of_remaining_control_frames() {
+        let mut c = make_conn();
+        c.pending_control.push_back(Frame::MaxData { max: 1 });
+        c.pending_control.push_back(Frame::MaxData { max: 2 });
+        c.pending_control.push_back(Frame::ApplicationClose { error_code: 7, reason: std::borrow::Cow::Borrowed(&[]) });
+        c.pending_control.push_back(Frame::MaxData { max: 3 });
+
+        c.hoist_pending_close_to_front();
+
+        assert!(matches!(c.pending_control.front(), Some(Frame::ApplicationClose { .. })));
+        let remaining: Vec<u64> = c
+            .pending_control
+            .iter()
+            .filter_map(|f| match f {
+                Frame::MaxData { max } => Some(*max),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(remaining, vec![1, 2, 3], "non-close frames keep their relative order");
+
+        // Idempotent: a close already at the front stays there.
+        c.hoist_pending_close_to_front();
+        assert!(matches!(c.pending_control.front(), Some(Frame::ApplicationClose { .. })));
+    }
+
     #[test]
     fn on_timeout_retires_recovery_state_and_is_idempotent() {
         let mut conn = make_conn();

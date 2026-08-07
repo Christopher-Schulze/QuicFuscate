@@ -717,12 +717,39 @@ impl Connection {
     /// congestion window"). Ack-eliciting control frames are left in the queue
     /// and flushed on a later non-bypassed send.
     #[inline(always)]
+    /// Move a queued terminal close to the front of the control queue.
+    ///
+    /// Close frames are not ack-eliciting, so once one is at the front it is emitted even under
+    /// congestion bypass. Relative order of the remaining frames is preserved, and the queue holds
+    /// at most one close because `close()` is first-close-wins; if several were ever present, the
+    /// earliest is the one promoted.
+    fn hoist_pending_close_to_front(&mut self) {
+        let close_index = self.pending_control.iter().position(|frame| {
+            matches!(frame, Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. })
+        });
+        let Some(index) = close_index else {
+            return;
+        };
+        if index == 0 {
+            return;
+        }
+        if let Some(close) = self.pending_control.remove(index) {
+            self.pending_control.push_front(close);
+        }
+    }
+
     fn flush_pending_control_frames(
         &mut self,
         out: &mut [u8],
         mut off: usize,
         congestion_bypass: bool,
     ) -> Result<(usize, bool), crate::error::ConnectionError> {
+        // A terminal close is a unique, highest-priority state and must not sit behind ordinary
+        // control traffic. Under congestion bypass the loop below stops at the first ack-eliciting
+        // frame, so a PING or MAX_DATA queued earlier would hide a later CONNECTION_CLOSE until
+        // congestion reopened or the idle timeout fired.
+        self.hoist_pending_close_to_front();
+
         let mut wrote_ack_eliciting = false;
         while let Some(ctrl) = self.pending_control.front() {
             // When bypassing the congestion gate, skip ack-eliciting control
