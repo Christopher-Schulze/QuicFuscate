@@ -273,13 +273,21 @@ unsafe fn base64_encode_sve2(data: &[u8]) -> String {
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2", any(test, feature = "rust-tests")))]
 #[target_feature(enable = "sve2")]
+/// # Safety
+///
+/// The caller must prove SVE2 support. `groups` keeps both input and output
+/// predicates within one vector, and every temporary slice is bounded by
+/// `MAX_BUFFER` before the vector loads and store.
 unsafe fn base64_encode_sve2_impl(data: &[u8]) -> String {
     use std::arch::aarch64::*;
 
     const MAX_BUFFER: usize = 512;
 
     let vl_bytes = svcntb() as usize;
-    let groups = vl_bytes / 3;
+    // Four output bytes are produced for every three input bytes. Keep the
+    // output predicate within one SVE vector; using vl/3 here activated only
+    // the first vector lanes and then extended unwritten bytes into the String.
+    let groups = (vl_bytes / 4).min(MAX_BUFFER / 4);
     if groups == 0 {
         return base64_encode_neon(data);
     }
@@ -1177,6 +1185,14 @@ mod tests {
                 "scalar parity failed for {:?}",
                 data,
             );
+        }
+    }
+
+    #[test]
+    fn base64_encode_matches_scalar_at_chunk_boundaries() {
+        for len in [0usize, 1, 2, 3, 11, 12, 13, 15, 16, 31, 32, 63, 64, 127, 256, 511, 1024] {
+            let data: Vec<u8> = (0..len).map(|index| index as u8).collect();
+            assert_eq!(base64_encode(&data), base64_encode_scalar(&data), "length={len}");
         }
     }
 }

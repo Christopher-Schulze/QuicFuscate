@@ -23,6 +23,10 @@ fn sort_f32_neon(data: &mut [f32]) {
     use std::arch::aarch64::*;
 
     #[inline(always)]
+    /// # Safety
+    ///
+    /// The input vector is constructed from a local four-element array, so
+    /// every lane is initialized and aligned according to the NEON ABI.
     unsafe fn sort4(vec: float32x4_t) -> float32x4_t {
         let mut mask_pair = vdupq_n_u32(0);
         mask_pair = vsetq_lane_u32(u32::MAX, mask_pair, 1);
@@ -52,11 +56,17 @@ fn sort_f32_neon(data: &mut [f32]) {
     }
 
     #[inline(always)]
+    /// # Safety
+    ///
+    /// The input vector is a valid NEON value and the reversal uses only
+    /// register operations with no memory access.
     unsafe fn reverse(vec: float32x4_t) -> float32x4_t {
         let rev = vrev64q_f32(vec);
         vextq_f32(rev, rev, 2)
     }
 
+    // SAFETY: every vector load and store uses one of the local four-element
+    // arrays, and each source/destination slice is bounded by data.len().
     unsafe {
         match data.len() {
             0 | 1 => {}
@@ -154,10 +164,14 @@ pub fn sort_f32(data: &mut [f32]) {
 #[inline(always)]
 pub fn argsort<T: PartialOrd + 'static>(data: &[T]) -> Vec<usize> {
     if TypeId::of::<T>() == TypeId::of::<f32>() {
+        // SAFETY: TypeId equality proves T is exactly f32; the original slice
+        // pointer and element count therefore have the same layout.
         let slice = unsafe { slice::from_raw_parts(data.as_ptr() as *const f32, data.len()) };
         return argsort_f32(slice);
     }
     if TypeId::of::<T>() == TypeId::of::<f64>() {
+        // SAFETY: TypeId equality proves T is exactly f64; the original slice
+        // pointer and element count therefore have the same layout.
         let slice = unsafe { slice::from_raw_parts(data.as_ptr() as *const f64, data.len()) };
         return argsort_f64(slice);
     }

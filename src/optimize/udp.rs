@@ -118,6 +118,8 @@ pub(crate) fn sockaddr_storage_for(addr: SocketAddr) -> (sockaddr_storage, sockl
     // The const assertions above prove that the storage is large and aligned
     // enough for both address families. Zeroing the C storage gives every
     // padding byte a defined value before the family-specific prefix is copied.
+    // SAFETY: sockaddr_storage is a plain C storage type whose size and
+    // alignment are asserted above; zero initializes every byte.
     let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
     let length = match addr {
         SocketAddr::V4(v4) => {
@@ -136,6 +138,9 @@ pub(crate) fn sockaddr_storage_for(addr: SocketAddr) -> (sockaddr_storage, sockl
                 sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
                 sin_zero: [0; 8],
             };
+            // SAFETY: `raw` and `storage` are valid non-overlapping byte
+            // ranges, and the copied prefix is exactly the initialized C
+            // sockaddr_in representation.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     &raw as *const _ as *const u8,
@@ -163,6 +168,9 @@ pub(crate) fn sockaddr_storage_for(addr: SocketAddr) -> (sockaddr_storage, sockl
                 sin6_addr: libc::in6_addr { s6_addr: v6.ip().octets() },
                 sin6_scope_id: v6.scope_id(),
             };
+            // SAFETY: `raw` and `storage` are valid non-overlapping byte
+            // ranges, and the copied prefix is exactly the initialized C
+            // sockaddr_in6 representation.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     &raw as *const _ as *const u8,
@@ -259,6 +267,8 @@ impl UdpGsoConfig {
 
         let mut current_size: libc::c_int = 0;
         let mut current_size_len = std::mem::size_of::<libc::c_int>() as socklen_t;
+        // SAFETY: the output pointer and length pointer reference live local
+        // values, and the caller supplies the socket descriptor.
         let ret = unsafe {
             libc::getsockopt(
                 fd,
@@ -332,6 +342,8 @@ pub(crate) fn send_batch_fd(fd: RawFd, packets: &[(&[u8], SocketAddr)]) -> std::
         messages.push(libc::mmsghdr { msg_hdr, msg_len: 0 });
     }
 
+    // SAFETY: `messages` and its pointed-to address/iovec storage remain alive
+    // and immovable for the duration of the synchronous syscall.
     let ret = unsafe {
         libc::sendmmsg(
             fd,
@@ -396,6 +408,8 @@ pub(crate) fn send_batch_connected(fd: RawFd, payloads: &[&[u8]]) -> std::io::Re
         });
     }
 
+    // SAFETY: `msgs` and its iovec storage remain alive and immovable for the
+    // duration of the synchronous syscall; the batch length is prevalidated.
     let rc =
         unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), msgs.len() as u32, libc::MSG_DONTWAIT) };
     let completed = checked_syscall_count(rc, msgs.len())?;
@@ -447,6 +461,8 @@ pub(crate) fn recv_batch_connected(fd: RawFd, bufs: &mut [&mut [u8]]) -> std::io
         });
     }
 
+    // SAFETY: `msgs` and its iovec storage remain alive and immovable for the
+    // duration of the synchronous syscall; the batch length is prevalidated.
     let rc = unsafe {
         libc::recvmmsg(
             fd,
@@ -508,6 +524,8 @@ pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io:
 
     #[cfg(target_os = "macos")]
     {
+        // SAFETY: all message, address, and iovec storage remains alive and
+        // immovable for the synchronous platform syscall.
         let result = unsafe { sendmsg_x(fd, messages.as_ptr(), messages.len() as u32, flags) };
         if result >= 0 {
             sent = checked_syscall_count(result, messages.len())?;
@@ -527,6 +545,8 @@ pub fn send_batch(sock: &UdpSocket, packets: &[(&[u8], SocketAddr)]) -> std::io:
     }
 
     for (index, msg) in messages.iter().enumerate().skip(sent) {
+        // SAFETY: `msg` points into the live message vector and its referenced
+        // address/iovec storage remains alive for this synchronous call.
         let rc = unsafe { libc::sendmsg(fd, msg as *const _ as *const _, flags) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());
@@ -570,15 +590,50 @@ pub struct NicParallelism;
 
 #[cfg(target_os = "linux")]
 #[cfg(any(test, feature = "rust-tests"))]
+const LINUX_INTERFACE_NAME_MAX: usize = 15;
+
+#[cfg(target_os = "linux")]
+#[cfg(any(test, feature = "rust-tests"))]
+fn validate_rps_interface(interface: &str) -> std::io::Result<()> {
+    if interface.is_empty()
+        || !interface.is_ascii()
+        || interface.len() > LINUX_INTERFACE_NAME_MAX
+        || interface == "."
+        || interface == ".."
+        || interface.bytes().any(|byte| byte == b'/' || byte == b'\\' || byte.is_ascii_control())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPS interface name must be one bounded ASCII sysfs path component",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(any(test, feature = "rust-tests"))]
+fn rps_cpu_mask(cpu_count: usize) -> std::io::Result<u128> {
+    if !(1..=128).contains(&cpu_count) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("RPS CPU count {cpu_count} is outside the supported 1..=128 mask"),
+        ));
+    }
+    Ok(if cpu_count == 128 { u128::MAX } else { (1u128 << cpu_count) - 1 })
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(any(test, feature = "rust-tests"))]
 impl NicParallelism {
     pub fn configure_rps(interface: &str) -> std::io::Result<()> {
+        validate_rps_interface(interface)?;
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_all();
         let cpu_count = sys.cpus().len().max(1);
-        let cpu_mask = (1u128 << cpu_count) - 1;
+        let cpu_mask = rps_cpu_mask(cpu_count)?;
         let mask_str = format!("{:x}", cpu_mask);
 
-        let base = format!("/sys/class/net/{}/queues", interface);
+        let base = std::path::Path::new("/sys/class/net").join(interface).join("queues");
         for entry in std::fs::read_dir(&base)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -715,6 +770,19 @@ mod tests {
 
         let error = send_batch(&sock, &packets).expect_err("batch limit must be enforced");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_rps_contract_rejects_path_traversal_and_unrepresentable_cpu_masks() {
+        for interface in ["", ".", "..", "eth/0", "eth\\0", "eth\0"] {
+            let error = validate_rps_interface(interface).expect_err("invalid interface");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        assert!(validate_rps_interface("eth0").is_ok());
+        assert_eq!(rps_cpu_mask(1).expect("one CPU"), 1);
+        assert_eq!(rps_cpu_mask(128).expect("128 CPUs"), u128::MAX);
+        assert!(rps_cpu_mask(129).is_err());
     }
 
     #[test]

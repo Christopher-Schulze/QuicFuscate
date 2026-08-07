@@ -103,26 +103,38 @@ fn aggregate_congestion_scalar(samples: &[CongestionSample]) -> CongestionSummar
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "avx512vnni")]
+/// # Safety
+///
+/// The caller must execute this function only after proving AVX-512F and
+/// AVX-512VNNI at runtime. The function limits each scratch-array chunk to
+/// `CONGESTION_WINDOW_SIZE` and does not dereference caller-owned pointers
+/// beyond the provided slice.
 unsafe fn aggregate_congestion_vnni(samples: &[CongestionSample]) -> CongestionSummary {
     CONGESTION_VNNI_BATCHES.inc_by(samples.len() as u64);
 
-    // Stack buffers: congestion window is bounded by CONGESTION_WINDOW_SIZE (64).
-    let mut cwnd = [0u32; CONGESTION_WINDOW_SIZE];
-    let mut inflight = [0u32; CONGESTION_WINDOW_SIZE];
-    let mut delivery = [0u32; CONGESTION_WINDOW_SIZE];
-    let mut lost = [0u32; CONGESTION_WINDOW_SIZE];
-    let n = samples.len().min(CONGESTION_WINDOW_SIZE);
-    for (i, sample) in samples.iter().take(n).enumerate() {
-        cwnd[i] = sample.cwnd;
-        inflight[i] = sample.bytes_in_flight;
-        delivery[i] = sample.delivery_rate;
-        lost[i] = sample.lost_packets;
-    }
+    // Keep the fixed scratch arrays bounded, but process every public input
+    // sample instead of silently truncating at the active connection window.
+    let mut total_cwnd = 0u64;
+    let mut total_inflight = 0u64;
+    let mut total_delivery = 0u64;
+    let mut total_lost = 0u64;
+    for chunk in samples.chunks(CONGESTION_WINDOW_SIZE) {
+        let mut cwnd = [0u32; CONGESTION_WINDOW_SIZE];
+        let mut inflight = [0u32; CONGESTION_WINDOW_SIZE];
+        let mut delivery = [0u32; CONGESTION_WINDOW_SIZE];
+        let mut lost = [0u32; CONGESTION_WINDOW_SIZE];
+        for (i, sample) in chunk.iter().enumerate() {
+            cwnd[i] = sample.cwnd;
+            inflight[i] = sample.bytes_in_flight;
+            delivery[i] = sample.delivery_rate;
+            lost[i] = sample.lost_packets;
+        }
 
-    let total_cwnd = sum_u32_vnni(&cwnd[..n]);
-    let total_inflight = sum_u32_vnni(&inflight[..n]);
-    let total_delivery = sum_u32_vnni(&delivery[..n]);
-    let total_lost = sum_u32_vnni(&lost[..n]);
+        total_cwnd += sum_u32_vnni(&cwnd[..chunk.len()]);
+        total_inflight += sum_u32_vnni(&inflight[..chunk.len()]);
+        total_delivery += sum_u32_vnni(&delivery[..chunk.len()]);
+        total_lost += sum_u32_vnni(&lost[..chunk.len()]);
+    }
 
     let congestion_score =
         total_inflight / 1024 + total_lost * 4096 + total_cwnd * 64 + total_delivery / 8192;
@@ -350,13 +362,16 @@ unsafe fn sum_u32_vnni(values: &[u32]) -> u64 {
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn bitmap_set_range(bitmap: &mut [u64], start: usize, end: usize) {
+    let Some(effective_end) = bounded_bitmap_end(bitmap, start, end) else {
+        return;
+    };
     let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
     if features.bmi2 {
         // SAFETY: the exact BMI2 runtime feature is proven above.
         unsafe {
-            bitmap_set_range_bmi2(bitmap, start, end);
+            bitmap_set_range_bmi2(bitmap, start, effective_end);
             return;
         }
     }
@@ -366,27 +381,38 @@ pub fn bitmap_set_range(bitmap: &mut [u64], start: usize, end: usize) {
         if features.sve2 {
             // SAFETY: the exact runtime SVE2 feature is proven above.
             unsafe {
-                bitmap_set_range_sve2(bitmap, start, end);
+                bitmap_set_range_sve2(bitmap, start, effective_end);
                 return;
             }
         }
         if features.neon {
             // SAFETY: the exact runtime NEON feature is proven above.
             unsafe {
-                bitmap_set_range_neon(bitmap, start, end);
+                bitmap_set_range_neon(bitmap, start, effective_end);
                 return;
             }
         }
     }
 
     // Scalar fallback
-    for i in start..=end {
+    for i in start..=effective_end {
         let word = i / 64;
         let bit = i % 64;
-        if word < bitmap.len() {
-            bitmap[word] |= 1u64 << bit;
-        }
+        bitmap[word] |= 1u64 << bit;
     }
+}
+
+#[cfg(any(test, feature = "rust-tests"))]
+#[inline(always)]
+fn bounded_bitmap_end(bitmap: &[u64], start: usize, end: usize) -> Option<usize> {
+    if bitmap.is_empty() || start > end {
+        return None;
+    }
+    let max_bit = bitmap.len().checked_mul(64)?.checked_sub(1)?;
+    if start > max_bit {
+        return None;
+    }
+    Some(end.min(max_bit))
 }
 
 #[cfg(all(target_arch = "aarch64", any(test, feature = "rust-tests")))]
@@ -538,7 +564,14 @@ unsafe fn bitmap_set_range_sve2_impl(bitmap: &mut [u64], start: usize, end: usiz
 
 #[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 #[target_feature(enable = "bmi2")]
+/// # Safety
+///
+/// The caller must prove BMI2 support. `start` and `end` are validated against
+/// the bitmap before any BMI2 mask arithmetic or indexed access occurs.
 unsafe fn bitmap_set_range_bmi2(bitmap: &mut [u64], start: usize, end: usize) {
+    let Some(end) = bounded_bitmap_end(bitmap, start, end) else {
+        return;
+    };
     let start_word = start / 64;
     let start_bit = start % 64;
     let end_word = end / 64;
@@ -696,10 +729,13 @@ unsafe fn count_ecn_marks_sve2(bitmap: &[u64]) -> u32 {
     bitmap.iter().map(|&w| w.count_ones()).sum()
 }
 
-/// Fast packet number decoding with BMI2 PEXT
+/// Fast packet number decoding with BMI2 PEXT.
+///
+/// Invalid packet-number lengths outside QUIC's 1..=4-byte contract fail
+/// closed by returning `expected` unchanged.
 #[inline(always)]
 pub fn decode_packet_number(encoded: u32, expected: u64, pn_len: u8) -> u64 {
-    if pn_len == 0 {
+    if !(1..=4).contains(&pn_len) {
         return expected;
     }
 
@@ -780,7 +816,7 @@ unsafe fn decode_packet_number_neon(encoded: u32, expected: u64, pn_len: u8) -> 
     let encoded_vec = vdupq_n_u64(encoded as u64);
     let truncated_vec = vandq_u64(encoded_vec, mask_vec);
 
-    let expected_pn = expected + 1;
+    let expected_pn = expected.wrapping_add(1);
     let expected_vec = vdupq_n_u64(expected_pn);
     let cleared_vec = vbicq_u64(expected_vec, mask_vec);
     let candidate_vec = vorrq_u64(cleared_vec, truncated_vec);
@@ -815,7 +851,7 @@ unsafe fn decode_packet_number_sve2_impl(encoded: u32, expected: u64, pn_len: u8
     let encoded_vec = svdup_u64(encoded as u64);
     let truncated_vec = svand_u64_x(pg, encoded_vec, mask_vec);
 
-    let expected_pn = expected + 1;
+    let expected_pn = expected.wrapping_add(1);
     let expected_vec = svdup_u64(expected_pn);
     let cleared_vec = svbic_u64_x(pg, expected_vec, mask_vec);
     let candidate_vec = svorr_u64_x(pg, cleared_vec, truncated_vec);
@@ -952,6 +988,25 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_congestion_processes_samples_beyond_window() {
+        let samples: Vec<CongestionSample> = (0..(CONGESTION_WINDOW_SIZE + 3))
+            .map(|index| CongestionSample {
+                cwnd: index as u32,
+                bytes_in_flight: (index * 2) as u32,
+                delivery_rate: (index * 3) as u32,
+                lost_packets: (index % 5) as u32,
+            })
+            .collect();
+        let summary = aggregate_congestion(&samples);
+        let scalar = aggregate_congestion_scalar(&samples);
+        assert_eq!(summary.total_cwnd, scalar.total_cwnd);
+        assert_eq!(summary.total_bytes_in_flight, scalar.total_bytes_in_flight);
+        assert_eq!(summary.total_delivery_rate, scalar.total_delivery_rate);
+        assert_eq!(summary.total_lost_packets, scalar.total_lost_packets);
+        assert_eq!(summary.congestion_score, scalar.congestion_score);
+    }
+
+    #[test]
     fn test_bitmap_set_range_single_bit() {
         let mut bitmap = [0u64; 2];
         bitmap_set_range(&mut bitmap, 5, 5);
@@ -969,6 +1024,21 @@ mod tests {
             let b = bit % 64;
             assert_ne!(bitmap[word] & (1u64 << b), 0, "bit {} should be set", bit);
         }
+    }
+
+    #[test]
+    fn test_bitmap_set_range_rejects_reversed_and_clips_overflowing_end() {
+        let mut bitmap = [0u64; 2];
+        bitmap_set_range(&mut bitmap, 10, 9);
+        assert_eq!(bitmap, [0, 0]);
+
+        bitmap_set_range(&mut bitmap, 60, usize::MAX);
+        assert_eq!(bitmap[0], !0u64 << 60);
+        assert_eq!(bitmap[1], u64::MAX);
+
+        bitmap_set_range(&mut bitmap, usize::MAX, usize::MAX);
+        assert_eq!(bitmap[0], !0u64 << 60);
+        assert_eq!(bitmap[1], u64::MAX);
     }
 
     #[test]
@@ -1004,8 +1074,16 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_packet_number_zero_len_returns_expected() {
-        let decoded = decode_packet_number(0xFF, 100, 0);
-        assert_eq!(decoded, 100);
+    fn test_decode_packet_number_4byte() {
+        let decoded = decode_packet_number(0xDEAD_BEEF, 0x1_0000_0000, 4);
+        assert_eq!(decoded, 0x1_DEAD_BEEF);
+    }
+
+    #[test]
+    fn test_decode_packet_number_invalid_len_returns_expected() {
+        for pn_len in [0, 5, u8::MAX] {
+            let decoded = decode_packet_number(0xFF, 100, pn_len);
+            assert_eq!(decoded, 100, "invalid pn_len={pn_len} must fail closed");
+        }
     }
 }

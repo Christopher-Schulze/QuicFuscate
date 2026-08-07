@@ -762,6 +762,41 @@ else
   append_item "interface_platform_negative_proof_matrix" "fail" "missing manifest schema, explicit unavailable status, workflow boundary, or TODO-848 reconciliation"
 fi
 
+# 4m) The Optimize unsafe-boundary owner must fail closed for malformed
+#     bitmap/pattern/percentile inputs, preserve SIMD parity, bound SVE output,
+#     process all VNNI samples, and validate test-only Linux RPS inputs.
+if rg -F -- 'fn bounded_bitmap_end(' src/optimize/transport.rs >/dev/null \
+  && rg -F -- 'test_bitmap_set_range_rejects_reversed_and_clips_overflowing_end()' \
+    src/optimize/transport.rs >/dev/null \
+  && rg -F -- 'if !(1..=4).contains(&pn_len)' src/optimize/transport.rs >/dev/null \
+  && rg -F -- 'test_decode_packet_number_invalid_len_returns_expected()' \
+    src/optimize/transport.rs >/dev/null \
+  && rg -F -- 'test_aggregate_congestion_processes_samples_beyond_window()' \
+    src/optimize/transport.rs >/dev/null \
+  && rg -F -- 'fn complete_pattern_end(' src/optimize/stealth.rs >/dev/null \
+  && rg -F -- 'inject_pattern_sse2_short_pattern_writes_exact_length()' \
+    src/optimize/stealth.rs >/dev/null \
+  && ! rg -n --no-messages 'pos \+ pattern\.len\(\)' src/optimize/stealth.rs >/dev/null \
+  && rg -F -- 'let groups = (vl_bytes / 4).min(MAX_BUFFER / 4);' \
+    src/optimize/string.rs >/dev/null \
+  && rg -F -- 'base64_encode_matches_scalar_at_chunk_boundaries()' \
+    src/optimize/string.rs >/dev/null \
+  && rg -F -- 'fn percentile_index(' src/optimize/brain.rs >/dev/null \
+  && rg -F -- 'test_compute_percentile_invalid_input_fails_closed_without_mutation()' \
+    src/optimize/brain.rs >/dev/null \
+  && rg -F -- 'fn validate_rps_interface(' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'fn rps_cpu_mask(' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'test_rps_contract_rejects_path_traversal_and_unrepresentable_cpu_masks()' \
+    src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'Optimize unsafe-boundary remediation' docs/DOCUMENTATION.md docs/MAP.md \
+    >/dev/null; then
+  pass "Optimize malformed-input, SIMD parity, VNNI, percentile, FFI, and RPS contracts are wired"
+  append_item "optimize_unsafe_contracts" "ok" "bitmap, packet-number, pattern, SVE2, VNNI, percentile, RPS, and safety-doc proof surfaces are present"
+else
+  fail_critical "Optimize unsafe-boundary remediation or its malformed-input proof wiring is incomplete"
+  append_item "optimize_unsafe_contracts" "fail" "missing fail-closed input contract, parity regression, or documentation owner"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then

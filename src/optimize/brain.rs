@@ -991,9 +991,9 @@ unsafe fn moving_average_neon(data: &[f32], window: usize) -> Vec<f32> {
 /// Percentile calculation with AVX2 minmax - 2x faster
 #[inline(always)]
 pub fn compute_percentile(data: &mut [f32], percentile: f32) -> f32 {
-    if data.is_empty() {
+    let Some(index) = percentile_index(data.len(), percentile) else {
         return 0.0;
-    }
+    };
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let features = FeatureDetector::instance().features_full();
 
@@ -1001,11 +1001,11 @@ pub fn compute_percentile(data: &mut [f32], percentile: f32) -> f32 {
     {
         if features.simd_dispatch_matrix().avx2 {
             // SAFETY: the exact AVX2 runtime feature is proven by the dispatch matrix.
-            return unsafe { compute_percentile_avx2(data, percentile) };
+            return unsafe { compute_percentile_avx2(data, index) };
         }
         if features.sse2 {
             // SAFETY: SSE2 is a required x86_64 baseline and is checked explicitly.
-            return unsafe { compute_percentile_sse2(data, percentile) };
+            return unsafe { compute_percentile_sse2(data, index) };
         }
     }
 
@@ -1013,68 +1013,92 @@ pub fn compute_percentile(data: &mut [f32], percentile: f32) -> f32 {
     {
         if features.sve2 {
             // SAFETY: the exact runtime SVE2 feature is proven above.
-            return unsafe { compute_percentile_sve2(data, percentile) };
+            return unsafe { compute_percentile_sve2(data, index) };
         }
         if features.neon {
             // SAFETY: the exact runtime NEON feature is proven above.
-            return unsafe { compute_percentile_neon(data, percentile) };
+            return unsafe { compute_percentile_neon(data, index) };
         }
     }
 
     // Scalar fallback - partial sort
-    let n = data.len();
-    let k = ((percentile / 100.0) * n as f32) as usize;
-    data.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    data[k]
+    data.select_nth_unstable_by(index, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    data[index]
+}
+
+#[inline(always)]
+fn percentile_index(len: usize, percentile: f32) -> Option<usize> {
+    if len == 0 || !percentile.is_finite() || !(0.0..=100.0).contains(&percentile) {
+        return None;
+    }
+
+    let scaled = (percentile / 100.0) * len as f32;
+    Some((scaled as usize).min(len - 1))
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn compute_percentile_avx2(data: &mut [f32], percentile: f32) -> f32 {
+/// # Safety
+///
+/// The caller must prove AVX2 support and pass an index smaller than `data.len()`.
+unsafe fn compute_percentile_avx2(data: &mut [f32], index: usize) -> f32 {
     // Use AVX2 for faster partitioning in quickselect
-    let n = data.len();
-    let k = ((percentile / 100.0) * n as f32) as usize;
-
     // AVX2-accelerated partial sort (use total order via partial_cmp)
-    data.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    data[k]
+    data.select_nth_unstable_by(index, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    data[index]
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-unsafe fn compute_percentile_sse2(data: &mut [f32], percentile: f32) -> f32 {
-    let n = data.len();
-    let k = ((percentile / 100.0) * n as f32) as usize;
-    data.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    data[k]
+/// # Safety
+///
+/// The caller must prove SSE2 support and pass an index smaller than `data.len()`.
+unsafe fn compute_percentile_sse2(data: &mut [f32], index: usize) -> f32 {
+    data.select_nth_unstable_by(index, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    data[index]
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn compute_percentile_neon(data: &mut [f32], percentile: f32) -> f32 {
-    let n = data.len();
-    let k = ((percentile / 100.0) * n as f32) as usize;
-    data.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    data[k]
+/// # Safety
+///
+/// The caller must prove NEON support and pass an index smaller than `data.len()`.
+unsafe fn compute_percentile_neon(data: &mut [f32], index: usize) -> f32 {
+    data.select_nth_unstable_by(index, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    data[index]
 }
 
 #[cfg(target_arch = "aarch64")]
-unsafe fn compute_percentile_sve2(data: &mut [f32], percentile: f32) -> f32 {
+/// # Safety
+///
+/// The caller must prove SVE2 support and pass an index smaller than `data.len()`.
+unsafe fn compute_percentile_sve2(data: &mut [f32], index: usize) -> f32 {
     #[cfg(target_feature = "sve2")]
     {
-        compute_percentile_sve2_impl(data, percentile)
+        compute_percentile_sve2_impl(data, index)
     }
 
     #[cfg(not(target_feature = "sve2"))]
     {
-        compute_percentile_neon(data, percentile)
+        compute_percentile_neon(data, index)
     }
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
 #[target_feature(enable = "sve2")]
-unsafe fn compute_percentile_sve2_impl(data: &mut [f32], percentile: f32) -> f32 {
-    compute_percentile_neon(data, percentile)
+/// # Safety
+///
+/// The caller must prove SVE2 support and pass an index smaller than `data.len()`.
+unsafe fn compute_percentile_sve2_impl(data: &mut [f32], index: usize) -> f32 {
+    compute_percentile_neon(data, index)
 }
 
 /// Activation functions with AVX2 approximation - 4x faster
@@ -1836,6 +1860,22 @@ mod tests {
         let p99 = compute_percentile(&mut data, 99.0);
         // k = floor(0.99*100) = 99 -> 100.0
         assert!((p99 - 100.0).abs() < 1e-5, "99th percentile of 1..100 should be 100.0, got {p99}");
+    }
+
+    #[test]
+    fn test_compute_percentile_invalid_input_fails_closed_without_mutation() {
+        for percentile in [-1.0, 100.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut data = vec![10.0, 20.0, 30.0];
+            let original = data.clone();
+            assert_eq!(compute_percentile(&mut data, percentile), 0.0);
+            assert_eq!(data, original, "invalid percentile must not mutate input");
+        }
+    }
+
+    #[test]
+    fn test_compute_percentile_hundred_returns_maximum() {
+        let mut data = vec![5.0, 1.0, 3.0, 9.0, 7.0];
+        assert_eq!(compute_percentile(&mut data, 100.0), 9.0);
     }
 
     // ---------------------------------------------------------------

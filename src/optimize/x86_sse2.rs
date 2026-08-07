@@ -6,6 +6,12 @@ use std::arch::x86_64::*;
 
 /// XOR a buffer in-place with a repeating 32-byte key using SSE2.
 /// Falls back internally for tail bytes < 16.
+///
+/// # Safety
+///
+/// The caller must execute this function only on an x86_64 CPU with SSE2.
+/// `key32` contains exactly 32 initialized bytes and all vector accesses stay
+/// within `dst` or that key.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn xor_repeating_key32_sse2(dst: &mut [u8], key32: &[u8; 32]) {
@@ -46,6 +52,12 @@ pub unsafe fn xor_repeating_key32_sse2(dst: &mut [u8], key32: &[u8; 32]) {
 }
 
 /// SSE2-accelerated in-place XOR with an arbitrary key slice (repeats key).
+///
+/// # Safety
+///
+/// The caller must execute this function only on an x86_64 CPU with SSE2.
+/// `key` must remain valid for the duration of the call; an empty key returns
+/// before any modulo or vector access.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 pub unsafe fn xor_repeating_sse2(dst: &mut [u8], key: &[u8]) {

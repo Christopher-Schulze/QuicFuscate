@@ -269,6 +269,10 @@ unsafe fn append_ascii_neon(dst: &mut Vec<u8>, src: &[u8]) {
 #[inline(always)]
 #[cfg(any(test, feature = "rust-tests"))]
 pub fn inject_pattern(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
+    if pattern.is_empty() || positions.is_empty() {
+        return;
+    }
+
     let features = *FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
@@ -302,33 +306,50 @@ pub fn inject_pattern(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
 
     // Scalar fallback
     for &pos in positions {
-        if pos + pattern.len() <= data.len() {
-            data[pos..pos + pattern.len()].copy_from_slice(pattern);
+        if let Some(end) = complete_pattern_end(data.len(), pos, pattern.len()) {
+            data[pos..end].copy_from_slice(pattern);
         }
     }
 }
 
+#[inline(always)]
+fn complete_pattern_end(data_len: usize, position: usize, pattern_len: usize) -> Option<usize> {
+    let available = data_len.checked_sub(position)?;
+    if pattern_len > available {
+        return None;
+    }
+    position.checked_add(pattern_len)
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// The caller must prove AVX2 support. Every position is admitted only when
+/// the complete pattern fits in `data`; raw vector offsets stay inside those
+/// validated windows.
 unsafe fn inject_pattern_avx2(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
     if pattern.len() <= 32 {
         for &pos in positions {
-            if pos + pattern.len() <= data.len() {
-                data[pos..pos + pattern.len()].copy_from_slice(pattern);
+            if let Some(end) = complete_pattern_end(data.len(), pos, pattern.len()) {
+                data[pos..end].copy_from_slice(pattern);
             }
         }
     } else {
         // Pattern larger than 32 bytes - process in chunks
         for &pos in positions {
+            let Some(end) = complete_pattern_end(data.len(), pos, pattern.len()) else {
+                continue;
+            };
             let mut i = 0;
-            while i + 32 <= pattern.len() && pos + i + 32 <= data.len() {
+            while i + 32 <= pattern.len() {
                 let pattern_chunk = _mm256_loadu_si256(pattern.as_ptr().add(i) as *const __m256i);
                 _mm256_storeu_si256(data.as_mut_ptr().add(pos + i) as *mut __m256i, pattern_chunk);
                 i += 32;
             }
             // Handle remainder
-            if i < pattern.len() && pos + pattern.len() <= data.len() {
-                data[pos + i..pos + pattern.len()].copy_from_slice(&pattern[i..]);
+            if i < pattern.len() {
+                data[pos + i..end].copy_from_slice(&pattern[i..]);
             }
         }
     }
@@ -336,6 +357,11 @@ unsafe fn inject_pattern_avx2(data: &mut [u8], pattern: &[u8], positions: &[usiz
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
+/// # Safety
+///
+/// The caller must prove SSE2 support. Every position is admitted only when
+/// the complete pattern fits in `data`; the long-pattern vector loop uses
+/// offsets bounded by that validated pattern length.
 unsafe fn inject_pattern_sse2(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
     use std::arch::x86_64::*;
 
@@ -344,35 +370,20 @@ unsafe fn inject_pattern_sse2(data: &mut [u8], pattern: &[u8], positions: &[usiz
     }
 
     if pattern.len() <= 16 {
-        let mut pattern_buf = [0u8; 16];
-        pattern_buf[..pattern.len()].copy_from_slice(pattern);
-        let pattern_vec = _mm_loadu_si128(pattern_buf.as_ptr() as *const __m128i);
-
         for &pos in positions {
-            if pos + pattern.len() > data.len() {
-                if pos < data.len() {
-                    let available = data.len() - pos;
-                    data[pos..pos + available].copy_from_slice(&pattern[..available]);
-                }
-                continue;
-            }
-
-            if pos + 16 <= data.len() {
-                _mm_storeu_si128(data.as_mut_ptr().add(pos) as *mut __m128i, pattern_vec);
-            } else {
-                data[pos..pos + pattern.len()].copy_from_slice(pattern);
+            if let Some(end) = complete_pattern_end(data.len(), pos, pattern.len()) {
+                data[pos..end].copy_from_slice(pattern);
             }
         }
         return;
     }
 
     for &pos in positions {
-        if pos >= data.len() {
+        if complete_pattern_end(data.len(), pos, pattern.len()).is_none() {
             continue;
         }
 
-        let max_copy = data.len() - pos;
-        let chunk_len = pattern.len().min(max_copy);
+        let chunk_len = pattern.len();
         let mut offset = 0usize;
 
         while offset + 16 <= chunk_len {
@@ -391,6 +402,11 @@ unsafe fn inject_pattern_sse2(data: &mut [u8], pattern: &[u8], positions: &[usiz
 /// NEON-optimized pattern injection on aarch64.
 #[cfg(all(target_arch = "aarch64", any(test, feature = "rust-tests")))]
 #[target_feature(enable = "neon")]
+/// # Safety
+///
+/// The caller must prove NEON support. Every position is admitted only when
+/// the complete pattern fits in `data`; vector loads and stores use bounded
+/// 16-byte chunks within that window.
 unsafe fn inject_pattern_neon(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
     use std::arch::aarch64::*;
 
@@ -415,7 +431,7 @@ unsafe fn inject_pattern_neon(data: &mut [u8], pattern: &[u8], positions: &[usiz
         let mask = vld1q_u8(mask_bytes.as_ptr());
 
         for &pos in positions {
-            if pos + tail > data.len() {
+            if complete_pattern_end(data.len(), pos, tail).is_none() {
                 continue;
             }
 
@@ -430,7 +446,7 @@ unsafe fn inject_pattern_neon(data: &mut [u8], pattern: &[u8], positions: &[usiz
     }
 
     for &pos in positions {
-        if pos + len > data.len() {
+        if complete_pattern_end(data.len(), pos, len).is_none() {
             continue;
         }
 
@@ -689,6 +705,11 @@ unsafe fn inject_pattern_sve2(data: &mut [u8], pattern: &[u8], positions: &[usiz
 
 #[cfg(all(target_arch = "aarch64", target_feature = "sve2", any(test, feature = "rust-tests")))]
 #[target_feature(enable = "sve2")]
+/// # Safety
+///
+/// The caller must prove SVE2 support. Each active predicate is bounded by
+/// the remaining pattern length and every position is validated as a complete
+/// destination window before pointer arithmetic.
 unsafe fn inject_pattern_sve2_impl(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
     use std::arch::aarch64::*;
 
@@ -700,7 +721,7 @@ unsafe fn inject_pattern_sve2_impl(data: &mut [u8], pattern: &[u8], positions: &
     let vl = svcntb() as usize;
 
     for &pos in positions {
-        if pos + pat_len > data.len() {
+        if complete_pattern_end(data.len(), pos, pat_len).is_none() {
             continue;
         }
 
@@ -746,5 +767,28 @@ mod tests {
             STEALTH_ASCII_INTERNAL_TARGETS,
         );
         assert!(!fail);
+    }
+
+    #[test]
+    fn inject_pattern_preserves_short_pattern_length_and_rejects_overflow_positions() {
+        for pattern_len in 1..=15 {
+            let mut data = vec![0xA5u8; 32];
+            let pattern = vec![pattern_len as u8; pattern_len];
+            inject_pattern(&mut data, &pattern, &[4, usize::MAX]);
+            assert_eq!(&data[4..4 + pattern_len], pattern.as_slice());
+            assert!(data[4 + pattern_len..].iter().all(|&byte| byte == 0xA5));
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn inject_pattern_sse2_short_pattern_writes_exact_length() {
+        let mut data = vec![0x5Au8; 32];
+        let pattern = [1u8, 2, 3, 4, 5];
+        // SAFETY: x86_64 guarantees SSE2, and the helper validates the full
+        // destination window before using its raw vector stores.
+        unsafe { inject_pattern_sse2(&mut data, &pattern, &[8]) };
+        assert_eq!(&data[8..13], &pattern);
+        assert!(data[13..].iter().all(|&byte| byte == 0x5A));
     }
 }
