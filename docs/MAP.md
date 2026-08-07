@@ -1719,7 +1719,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - Current tracked-source inventory: `919` locations, `0` unclassified; production `156`, tests `384`, benchmarks `58`, probes `31`, scripts `262`, browser `25`, archive `3`.
 - The earlier TODO-824 `957` and TODO-825 `962` counts are historical snapshots before the TODO-868 through TODO-872 follow-through. The current gate is the authoritative source for the current checkout.
 - Explicit non-clock runtime delays remain owned by `native-cleanup-runtime` at `src/firewall/cleanup.rs:185` and `qftls-stealth-jitter` at `src/stealth/parts/tls_cover_provider.rs:379`; they are deliberate native delays, not canonical-clock bypasses.
-- The post-reconciliation Graphify evidence at `scripts/out/audits/graphify-20260807T012617Z/graphify-evidence.json` is explicitly `BLOCKED` for unavailable semantic extraction, incomplete/unsupported coverage, and raw/normalized/legacy relationship limitations.
+- The post-push Graphify evidence at `scripts/out/audits/graphify-20260807T012815Z/graphify-evidence.json` is explicitly `BLOCKED` for unavailable semantic extraction, incomplete/unsupported coverage, and raw/normalized/legacy relationship limitations.
 - TODO-677 closes the umbrella inventory. TODO-820 through TODO-825 and TODO-868 through TODO-872 retain the detailed implementation and proof ownership; unavailable native Linux/Windows/AMX/Miri/Omega evidence remains explicitly unavailable.
 
 ## Frontend and Tauri Timestamp Boundary Wiring (2026-08-06, TODO-868)
