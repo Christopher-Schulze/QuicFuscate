@@ -1389,6 +1389,13 @@ async fn run_client(
         ));
     }
 
+    let cli_profile = FingerprintProfile::try_new(profile, os).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid profile/OS selection: {error}"),
+        )
+    })?;
+
     let target = resolve_client_target(url, remote_addr_str)?;
     let server_addr = target.transport_destination;
     let alternate_server_ip = target.alternate_transport_ip;
@@ -1502,6 +1509,53 @@ async fn run_client(
         disable_http3,
     );
 
+    let profiles: Vec<FingerprintProfile> = match profile_seq {
+        Some(seq) => quicfuscate::implementations::server::resolve_runtime_profiles(
+            profile, os, seq, false,
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid profile sequence: {error}"),
+            )
+        })?,
+        None => {
+            let configured = stealth_config.rotation_profiles();
+            if configured.is_empty() {
+                vec![cli_profile.clone()]
+            } else {
+                configured
+            }
+        }
+    };
+    if profile_seq.is_some() && profiles.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--profile-seq must contain at least one profile",
+        ));
+    }
+
+    if let Some(first) = profiles.first() {
+        stealth_config.initial_browser = first.browser;
+        stealth_config.initial_os = first.os;
+    }
+    let rotation_interval = if profile_seq.is_some() {
+        profile_interval
+    } else {
+        stealth_config.fingerprint_rotation_interval
+    };
+    let should_rotate = profiles.len() > 1 && rotation_interval > 0;
+    if profile_seq.is_some() {
+        stealth_config.fingerprint_rotation_profiles = profiles
+            .iter()
+            .map(|profile| (profile.browser, profile.os))
+            .collect();
+        stealth_config.fingerprint_rotation_mode = quicfuscate::stealth::RotationMode::Slots;
+        stealth_config.enable_fingerprint_rotation = should_rotate;
+        stealth_config.fingerprint_rotation_interval = rotation_interval;
+    }
+    let shared_stealth_config = Arc::new(std::sync::Mutex::new(stealth_config.clone()));
+
     let host = target.host.as_str();
     let opt_params = runtime_optimize_config(
         config_path,
@@ -1555,29 +1609,12 @@ async fn run_client(
         }
     };
 
-    let profiles: Vec<FingerprintProfile> = match profile_seq {
-        Some(seq) => {
-            quicfuscate::implementations::server::resolve_runtime_profiles(profile, os, seq, false)
-        }
-        None => {
-            quicfuscate::implementations::server::resolve_runtime_profiles(profile, os, &[], true)
-        }
-    };
-
-    if profile_interval > 0 && profiles.is_empty() {
-        error!("No valid profiles supplied with --profile-seq");
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid profile sequence",
-        ));
-    }
-
-    if profile_interval > 0 && profiles.len() > 1 {
-        let sm = conn.stealth_manager();
-        sm.start_profile_rotation(profiles, std::time::Duration::from_secs(profile_interval));
-    }
     stealth_runtime
-        .start(None, Vec::new(), 0)
+        .start(
+            should_rotate.then_some(shared_stealth_config),
+            if should_rotate { profiles } else { Vec::new() },
+            if should_rotate { rotation_interval } else { 0 },
+        )
         .map_err(|error| std::io::Error::other(format!("stealth runtime start failed: {error}")))?;
 
     let mut buf = [0; 65535];

@@ -288,6 +288,43 @@ mod stealth_coverage_tests {
     }
 
     #[test]
+    fn slot_rotation_selects_only_configured_profiles_for_next_sessions() {
+        let mut cfg = StealthConfig::stealth();
+        cfg.enable_fingerprint_rotation = true;
+        cfg.fingerprint_rotation_mode = RotationMode::Slots;
+        cfg.fingerprint_rotation_interval = 1;
+        cfg.fingerprint_rotation_profiles = vec![
+            (BrowserProfile::Firefox, OsProfile::Linux),
+            (BrowserProfile::Safari, OsProfile::MacOS),
+        ];
+        let m = make_manager(cfg);
+        let active = m.current_persona_name();
+
+        let first = m.next_session_profile().expect("configured slot pool");
+        assert_eq!(first.browser, BrowserProfile::Firefox);
+        assert_eq!(first.os, OsProfile::Linux);
+
+        {
+            let mut last = m.last_rotation.lock().expect("last rotation lock");
+            *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        }
+        m.maybe_rotate_fingerprint();
+        let second = m.next_session_profile().expect("second configured slot");
+        assert_eq!(second.browser, BrowserProfile::Safari);
+        assert_eq!(second.os, OsProfile::MacOS);
+        assert_eq!(m.current_persona_name(), active);
+
+        {
+            let mut last = m.last_rotation.lock().expect("last rotation lock");
+            *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        }
+        m.maybe_rotate_fingerprint();
+        let wrapped = m.next_session_profile().expect("wrapped configured slot");
+        assert_eq!(wrapped.browser, BrowserProfile::Firefox);
+        assert_eq!(wrapped.os, OsProfile::Linux);
+    }
+
+    #[test]
     fn config_off_disables_everything() {
         let cfg = StealthConfig::off();
         assert!(!cfg.enable_traffic_padding);
@@ -512,6 +549,15 @@ mod stealth_coverage_tests {
         let fp = FingerprintProfile::new(BrowserProfile::Edge, OsProfile::IOS);
         assert_eq!(fp.browser, BrowserProfile::Chrome);
         assert_eq!(fp.os, OsProfile::Windows);
+    }
+
+    #[test]
+    fn fingerprint_try_new_rejects_unsupported_combo_without_fallback() {
+        assert!(FingerprintProfile::try_new(BrowserProfile::Edge, OsProfile::IOS).is_err());
+        let profile = FingerprintProfile::try_new(BrowserProfile::Firefox, OsProfile::Linux)
+            .expect("supported browser/OS pair");
+        assert_eq!(profile.browser, BrowserProfile::Firefox);
+        assert_eq!(profile.os, OsProfile::Linux);
     }
 
     // =========================================================================

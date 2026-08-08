@@ -113,7 +113,7 @@ mode = "performance"
 # enabled = false
 # interval_secs = 300          # Rotation interval (0 = disabled)
 # mode = "fixed"               # Options: "fixed", "slots", "all"
-# profile_slots = ["chrome:linux", "firefox:linux"]
+# profile_slots = ["chrome@linux", "firefox@linux"]
 
 # ==============================================================================
 # FEC (Forward Error Correction)

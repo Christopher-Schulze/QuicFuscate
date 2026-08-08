@@ -237,12 +237,13 @@ fn load_runtime_profile_values(
     let os = config.stealth.initial_os.parse::<crate::stealth::OsProfile>().map_err(|_| {
         EngineError::Config(format!("invalid initial_os profile: {}", config.stealth.initial_os))
     })?;
-    let profiles = crate::implementations::server::resolve_runtime_profiles(
-        browser,
-        os,
-        &config.fingerprint_rotation.profile_slots,
-        true,
-    );
+    crate::stealth::FingerprintProfile::try_new(browser, os)
+        .map_err(|error| EngineError::Config(format!("invalid initial profile: {error}")))?;
+    let runtime =
+        config.stealth.to_runtime_config(&config.fingerprint_rotation).map_err(|error| {
+            EngineError::Config(format!("invalid stealth rotation projection: {error}"))
+        })?;
+    let profiles = runtime.rotation_profiles();
 
     Ok((browser, os, profiles))
 }
@@ -275,6 +276,18 @@ fn reject_started_client_config_changes(
     candidate: &EngineConfig,
     state: EngineState,
 ) -> Result<(), EngineError> {
+    let current_rotation = &current.fingerprint_rotation;
+    let candidate_rotation = &candidate.fingerprint_rotation;
+    if current_rotation.enabled != candidate_rotation.enabled
+        || current_rotation.interval_secs != candidate_rotation.interval_secs
+        || current_rotation.mode != candidate_rotation.mode
+        || current_rotation.profile_slots != candidate_rotation.profile_slots
+    {
+        return Err(EngineError::InvalidState(
+            state,
+            "configuration update (fingerprint rotation policy requires a stopped client runtime)",
+        ));
+    }
     if current.engine != candidate.engine
         || current.interface != candidate.interface
         || current.telemetry != candidate.telemetry
@@ -933,8 +946,9 @@ impl QuicFuscateEngine {
                     let (fec_cfg, stealth_cfg) = build_server_runtime_profiles(&self.config)?;
                     let transport = build_runtime_transport_config(&self.config)?;
                     let (profile, os, mut profiles) = load_runtime_profile_values(&self.config)?;
-                    if !self.config.fingerprint_rotation.enabled {
-                        profiles = vec![crate::stealth::FingerprintProfile::new(profile, os)];
+                    if profiles.is_empty() {
+                        profiles = vec![crate::stealth::FingerprintProfile::try_new(profile, os)
+                            .map_err(EngineError::Config)?];
                     }
                     let fec_mode_override = Some(self.config.fec.mode);
                     let opt_params = normalize_runtime_optimize_config(
@@ -2030,6 +2044,39 @@ mod tests {
             .expect_err("started client must reject TUN replacement");
 
         assert!(matches!(error, EngineError::InvalidState(EngineState::Running, _)));
+        assert_eq!(toml::to_string(engine.config()).expect("serialize config"), before);
+        assert_eq!(
+            toml::to_string(engine.client_runtime.as_ref().expect("client runtime").next_config())
+                .expect("serialize next config"),
+            before
+        );
+    }
+
+    #[test]
+    fn started_client_rejects_fingerprint_rotation_policy_changes() {
+        let config = EngineConfig::default();
+        let runtime = ClientRuntime::new(config.clone()).expect("client runtime");
+        let mut engine = QuicFuscateEngine::new(config).expect("engine");
+        engine.client_runtime = Some(runtime);
+        engine.state = EngineState::Running;
+        let before = toml::to_string(engine.config()).expect("serialize config");
+
+        let error = engine
+            .update_config(|candidate| {
+                candidate.fingerprint_rotation.enabled = true;
+                candidate.fingerprint_rotation.interval_secs = 60;
+                candidate.fingerprint_rotation.mode = crate::engine::RotationMode::Slots;
+                candidate.fingerprint_rotation.profile_slots =
+                    vec!["chrome@windows".to_string(), "firefox@windows".to_string()];
+            })
+            .expect_err("started client must reject rotation policy replacement");
+
+        match error {
+            EngineError::InvalidState(EngineState::Running, message) => {
+                assert!(message.contains("fingerprint rotation policy"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
         assert_eq!(toml::to_string(engine.config()).expect("serialize config"), before);
         assert_eq!(
             toml::to_string(engine.client_runtime.as_ref().expect("client runtime").next_config())

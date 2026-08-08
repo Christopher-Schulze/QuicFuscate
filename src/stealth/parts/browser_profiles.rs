@@ -72,6 +72,48 @@ impl std::str::FromStr for OsProfile {
     }
 }
 
+/// Parse one fingerprint rotation slot.
+///
+/// The single wire/configuration grammar is `browser[@os]`. Omitting the OS
+/// keeps the caller's initial OS, while `:` is deliberately rejected so every
+/// configuration surface reports the same spelling contract.
+pub(crate) fn parse_profile_slot(
+    value: &str,
+    default_os: OsProfile,
+) -> Result<(BrowserProfile, OsProfile), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("profile slot must not be empty".to_string());
+    }
+    if value.contains(':') {
+        return Err(format!(
+            "profile slot '{value}' uses ':', expected browser[@os]"
+        ));
+    }
+
+    let mut parts = value.split('@');
+    let browser_value = parts.next().unwrap_or_default().trim();
+    let browser = browser_value
+        .parse::<BrowserProfile>()
+        .map_err(|_| format!("unsupported browser profile '{browser_value}'"))?;
+    let os = match parts.next() {
+        Some(os_value) => {
+            let os_value = os_value.trim();
+            if os_value.is_empty() {
+                return Err(format!("profile slot '{value}' has an empty OS profile"));
+            }
+            os_value
+                .parse::<OsProfile>()
+                .map_err(|_| format!("unsupported OS profile '{os_value}'"))?
+        }
+        None => default_os,
+    };
+    if parts.next().is_some() {
+        return Err(format!("profile slot '{value}' contains more than one '@'"));
+    }
+    Ok((browser, os))
+}
+
 /// Represents a complete client fingerprint profile.
 #[derive(Debug, Clone)]
 pub struct FingerprintProfile {
@@ -108,6 +150,19 @@ impl FingerprintProfile {
     pub fn new(browser: BrowserProfile, os: OsProfile) -> Self {
         let environment = crate::env_utils::EnvSnapshot::capture();
         Self::new_with_snapshot(browser, os, &environment)
+    }
+
+    /// Creates a profile only when the requested browser/OS pair is supported.
+    ///
+    /// [`FingerprintProfile::new`] retains a compatibility fallback for legacy
+    /// callers. Configuration and CLI boundaries use this constructor so an
+    /// unsupported pair cannot silently become Chrome/Windows.
+    pub fn try_new(browser: BrowserProfile, os: OsProfile) -> Result<Self, String> {
+        let profile = Self::new(browser, os);
+        if profile.browser != browser || profile.os != os {
+            return Err(format!("unsupported browser/OS combination {browser:?}@{os:?}"));
+        }
+        Ok(profile)
     }
 
     pub(crate) fn new_with_snapshot(
@@ -325,4 +380,18 @@ impl FingerprintProfile {
         profile.certificate = None;
         profile
     }
+}
+
+/// Resolve one validated rotation slot into a concrete fingerprint.
+///
+/// `FingerprintProfile::new` has a historical fallback for unsupported
+/// browser/OS combinations. Rotation configuration must not inherit that
+/// fallback because it would silently replace the requested persona.
+pub(crate) fn parse_fingerprint_profile_slot(
+    value: &str,
+    default_os: OsProfile,
+) -> Result<FingerprintProfile, String> {
+    let (browser, os) = parse_profile_slot(value, default_os)?;
+    FingerprintProfile::try_new(browser, os)
+        .map_err(|_| format!("unsupported browser/OS combination '{value}'"))
 }

@@ -131,7 +131,7 @@ impl StealthManager {
 
         let domain_fronting = Self::domain_fronting_for_config(&config);
 
-        let profile_pool = Arc::new(TlsClientHelloProfileCatalog::available_profiles());
+        let profile_pool = Arc::new(config.rotation_profile_slots());
 
         let probe_detector = if config.dynamic_enabled
             || config.enable_traffic_padding
@@ -377,12 +377,30 @@ impl StealthManager {
         };
 
         if should_rotate {
-            if !self.profile_pool.is_empty() {
-                self.profile_index.fetch_add(1, Ordering::Relaxed);
+            if let Some(pool_len) = (!self.profile_pool.is_empty()).then_some(self.profile_pool.len()) {
+                self.profile_index
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |index| {
+                        Some((index + 1) % pool_len)
+                    })
+                    .ok();
             }
             *self.last_rotation.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = now;
             debug!("Deferred fingerprint rotation to the next connection; active persona remains frozen");
         }
+    }
+
+    /// Returns the selected persona for the next connection.
+    ///
+    /// The active connection keeps its original fingerprint. Callers that
+    /// create a new connection may use this snapshot after a rotation tick.
+    pub fn next_session_profile(&self) -> Option<FingerprintProfile> {
+        let pool_len = self.profile_pool.len();
+        if pool_len == 0 {
+            return None;
+        }
+        let index = self.profile_index.load(Ordering::Acquire) % pool_len;
+        let (browser, os) = self.profile_pool[index];
+        Some(FingerprintProfile::new(browser, os))
     }
 
     /// Returns a clone of the current fingerprint profile for TLS/ALPN mapping.
@@ -596,27 +614,6 @@ impl StealthManager {
         } else {
             config.set_stealth_mimic_bias(bias_default);
         }
-    }
-
-    /// Registers profile rotation as a next-session policy.
-    ///
-    /// The active connection persona is intentionally frozen. This method is
-    /// kept for compatibility with callers that configure profile rotation, but
-    /// it no longer mutates an in-flight TLS/H3 identity.
-    pub fn start_profile_rotation(
-        self: &Arc<Self>,
-        profiles: Vec<FingerprintProfile>,
-        interval: std::time::Duration,
-    ) {
-        if profiles.is_empty() {
-            return;
-        }
-        self.profile_index.fetch_add(1, Ordering::Relaxed);
-        info!(
-            "Fingerprint rotation configured for next sessions only ({} profiles, interval {:?}); active connection persona remains frozen",
-            profiles.len(),
-            interval
-        );
     }
 
     /// Returns the SNI and Host header values for a connection.

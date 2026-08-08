@@ -35,7 +35,6 @@ impl TlsClientHelloProfileCatalog {
             (B::Edge, O::Android),
             // iOS
             (B::Safari, O::IOS),
-            (B::Chrome, O::IOS),
         ]
     }
 }

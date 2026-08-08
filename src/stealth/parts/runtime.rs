@@ -76,6 +76,8 @@ pub struct StealthRuntimeOwner {
     reality_cache: Option<Arc<CoverHandshakeCache>>,
     reality_proxies: Arc<parking_lot::Mutex<Vec<Weak<RealityProxy>>>>,
     cleanup_worker_started: AtomicBool,
+    next_session_stealth_config:
+        parking_lot::Mutex<Option<Arc<std::sync::Mutex<StealthConfig>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +108,7 @@ impl StealthRuntimeOwner {
             reality_cache,
             reality_proxies: Arc::new(parking_lot::Mutex::new(Vec::new())),
             cleanup_worker_started: AtomicBool::new(false),
+            next_session_stealth_config: parking_lot::Mutex::new(None),
         })
     }
 
@@ -124,6 +127,21 @@ impl StealthRuntimeOwner {
 
     pub(crate) fn cover_cache(&self) -> Option<Arc<CoverHandshakeCache>> {
         self.reality_cache.clone()
+    }
+
+    /// Return the current configuration snapshot for the next connection.
+    pub(crate) fn next_session_stealth_config(&self) -> Option<StealthConfig> {
+        let shared = self.next_session_stealth_config.lock().clone()?;
+        let snapshot = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        Some(snapshot)
+    }
+
+    /// Publish a validated next-connection configuration update.
+    pub(crate) fn update_next_session_stealth_config(&self, config: StealthConfig) {
+        let Some(shared) = self.next_session_stealth_config.lock().clone() else {
+            return;
+        };
+        *shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
     }
 
     /// Register a proxy for the owner's periodic, packet-independent session sweep.
@@ -180,6 +198,7 @@ impl StealthRuntimeOwner {
             }
             state.started = true;
         }
+        *self.next_session_stealth_config.lock() = stealth_config.clone();
 
         let result = (|| {
             if let Some(cache) = self.reality_cache.clone() {
@@ -206,6 +225,7 @@ impl StealthRuntimeOwner {
         if let Err(error) = result {
             self.shutdown.store(true, Ordering::Release);
             self.cancel_tx.send_replace(true);
+            *self.next_session_stealth_config.lock() = None;
             let mut state = self.worker_state.lock();
             for worker in state.workers.drain(..) {
                 worker.handle.abort();
@@ -384,6 +404,7 @@ impl StealthRuntimeOwner {
             }
         }
         self.active_workers.store(0, Ordering::Release);
+        *self.next_session_stealth_config.lock() = None;
         let mut proxies = self.reality_proxies.lock();
         proxies.retain(|weak| {
             let Some(proxy) = weak.upgrade() else {

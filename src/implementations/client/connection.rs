@@ -49,6 +49,16 @@ impl ClientConnection {
         config.validate().map_err(|error| {
             EngineError::Config(format!("Invalid engine configuration: {error}"))
         })?;
+        let stealth_config = Self::resolve_stealth_config(config, runtime_owner.as_ref())?;
+        Self::connect_with_stealth_config(config, runtime_owner, stealth_config, clock)
+    }
+
+    fn connect_with_stealth_config(
+        config: &EngineConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        stealth_config: crate::stealth::StealthConfig,
+        clock: &ProtocolClock,
+    ) -> Result<Self, EngineError> {
         // Record connection attempt
         crate::instrumentation::global().client.connection_attempt();
 
@@ -69,9 +79,6 @@ impl ClientConnection {
 
         // Build transport config
         let transport_config = Self::build_transport_config(config)?;
-
-        // Build stealth config from EngineConfig
-        let stealth_config = Self::build_stealth_config(config)?;
 
         // Build FEC config
         let fec_config = Self::build_fec_config(config)?;
@@ -112,6 +119,20 @@ impl ClientConnection {
         log::info!("QUIC connection established to {}", remote_addr);
 
         Ok(Self { inner: Arc::new(parking_lot::Mutex::new(conn)), remote_addr, local_addr })
+    }
+
+    fn resolve_stealth_config(
+        config: &EngineConfig,
+        runtime_owner: Option<&Arc<StealthRuntimeOwner>>,
+    ) -> Result<crate::stealth::StealthConfig, EngineError> {
+        if let Some(snapshot) = runtime_owner.and_then(|owner| owner.next_session_stealth_config())
+        {
+            snapshot.validate().map_err(|error| {
+                EngineError::Config(format!("Invalid next-session stealth configuration: {error}"))
+            })?;
+            return Ok(snapshot);
+        }
+        Self::build_stealth_config(config)
     }
 
     /// Send data through the QUIC connection.
@@ -493,6 +514,51 @@ mod tests {
 
         let oc = ClientConnection::build_optimize_config(&config).unwrap();
         assert!(oc.pool_capacity > 0);
+    }
+
+    #[test]
+    fn client_stealth_projection_carries_validated_rotation_slots() {
+        let mut config = EngineConfig::default();
+        config.fingerprint_rotation.enabled = true;
+        config.fingerprint_rotation.interval_secs = 21;
+        config.fingerprint_rotation.mode = crate::engine::RotationMode::Slots;
+        config.fingerprint_rotation.profile_slots =
+            vec!["firefox@linux".to_string(), "safari@macos".to_string()];
+        config.validate().expect("rotation config validates");
+
+        let runtime = ClientConnection::build_stealth_config(&config).expect("runtime config");
+        assert!(runtime.enable_fingerprint_rotation);
+        assert_eq!(runtime.fingerprint_rotation_interval, 21);
+        assert_eq!(runtime.fingerprint_rotation_mode, crate::stealth::RotationMode::Slots);
+        assert_eq!(
+            runtime.fingerprint_rotation_profiles,
+            vec![
+                (crate::stealth::BrowserProfile::Firefox, crate::stealth::OsProfile::Linux),
+                (crate::stealth::BrowserProfile::Safari, crate::stealth::OsProfile::MacOS),
+            ]
+        );
+    }
+
+    #[test]
+    fn client_connection_prefers_runtime_owner_next_session_snapshot() {
+        let owner = Arc::new(
+            StealthRuntimeOwner::new(crate::reality::RealityConfig::default())
+                .expect("runtime owner"),
+        );
+        let shared = Arc::new(std::sync::Mutex::new(crate::stealth::StealthConfig::default()));
+        owner.start(Some(shared.clone()), Vec::new(), 0).expect("publish next-session snapshot");
+        {
+            let mut config = shared.lock().expect("shared stealth config");
+            config.initial_browser = crate::stealth::BrowserProfile::Firefox;
+            config.initial_os = crate::stealth::OsProfile::Linux;
+        }
+
+        let runtime =
+            ClientConnection::resolve_stealth_config(&EngineConfig::default(), Some(&owner))
+                .expect("next-session snapshot");
+        assert_eq!(runtime.initial_browser, crate::stealth::BrowserProfile::Firefox);
+        assert_eq!(runtime.initial_os, crate::stealth::OsProfile::Linux);
+        owner.request_shutdown();
     }
 
     #[test]

@@ -1506,6 +1506,13 @@ impl StealthSection {
                 self.initial_os
             ))
         })?;
+        crate::stealth::FingerprintProfile::try_new(runtime.initial_browser, runtime.initial_os)
+            .map_err(|error| {
+                ConfigError::Validation(format!(
+                    "stealth.initial_browser/initial_os has unsupported combination '{}@{}': {error}",
+                    self.initial_browser, self.initial_os
+                ))
+            })?;
         runtime.padding_strategy = Self::parse_padding_strategy(&self.padding_strategy)
             .ok_or_else(|| {
                 ConfigError::Validation(format!(
@@ -1549,6 +1556,19 @@ impl StealthSection {
             RotationMode::Slots => crate::stealth::RotationMode::Slots,
             RotationMode::All => crate::stealth::RotationMode::All,
         };
+        runtime.fingerprint_rotation_profiles = rotation
+            .profile_slots
+            .iter()
+            .map(|slot| {
+                crate::stealth::parse_fingerprint_profile_slot(slot, runtime.initial_os)
+                    .map(|profile| (profile.browser, profile.os))
+                    .map_err(|error| {
+                        ConfigError::Validation(format!(
+                            "fingerprint_rotation.profile_slots entry '{slot}': {error}"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         runtime.normalize_protocol_mimicry_bundle();
         runtime.validate().map_err(|error| {
             ConfigError::Validation(format!("stealth runtime projection: {error}"))
@@ -1608,9 +1628,9 @@ impl Default for FingerprintRotationConfig {
             interval_secs: 300,
             mode: RotationMode::Fixed,
             profile_slots: vec![
-                "chrome:windows".to_string(),
-                "firefox:windows".to_string(),
-                "safari:macos".to_string(),
+                "chrome@windows".to_string(),
+                "firefox@windows".to_string(),
+                "safari@macos".to_string(),
             ],
         }
     }
@@ -1618,26 +1638,13 @@ impl Default for FingerprintRotationConfig {
 
 impl FingerprintRotationConfig {
     fn validate_profile_slot(slot: &str) -> Result<(), ConfigError> {
-        let mut parts = slot.split(['@', ':']);
-        let browser = parts.next().unwrap_or_default().trim();
-        if browser.is_empty() || browser.parse::<crate::stealth::BrowserProfile>().is_err() {
-            return Err(ConfigError::Validation(format!(
-                "fingerprint_rotation.profile_slots contains an invalid browser profile: '{slot}'"
-            )));
-        }
-        if let Some(os) = parts.next() {
-            if os.trim().parse::<crate::stealth::OsProfile>().is_err() {
-                return Err(ConfigError::Validation(format!(
-                    "fingerprint_rotation.profile_slots contains an invalid OS profile: '{slot}'"
-                )));
-            }
-        }
-        if parts.next().is_some() {
-            return Err(ConfigError::Validation(format!(
-                "fingerprint_rotation.profile_slots entry has more than one separator: '{slot}'"
-            )));
-        }
-        Ok(())
+        crate::stealth::parse_profile_slot(slot, crate::stealth::OsProfile::Windows)
+            .map(|_| ())
+            .map_err(|error| {
+                ConfigError::Validation(format!(
+                    "fingerprint_rotation.profile_slots entry '{slot}': {error}"
+                ))
+            })
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -2541,8 +2548,24 @@ mode = "roaming"
         config.stealth.initial_browser = "invalid".to_string();
         assert!(config.validate().is_err());
         config.stealth.initial_browser = "chrome".to_string();
-        config.fingerprint_rotation.profile_slots = vec!["chrome:invalid".to_string()];
+        config.fingerprint_rotation.profile_slots = vec!["chrome@invalid".to_string()];
         assert!(config.validate().is_err());
+
+        config.fingerprint_rotation.profile_slots = vec!["chrome:windows".to_string()];
+        assert!(config.validate().is_err(), "the legacy ':' slot grammar must be rejected");
+
+        config.fingerprint_rotation.profile_slots = vec!["safari@windows".to_string()];
+        assert!(config.validate().is_err(), "unsupported browser/OS pairs must be rejected");
+
+        config.fingerprint_rotation.profile_slots =
+            FingerprintRotationConfig::default().profile_slots.clone();
+        config.stealth.initial_browser = "safari".to_string();
+        config.stealth.initial_os = "windows".to_string();
+        assert!(
+            config.validate().is_err(),
+            "unsupported initial browser/OS pairs must be rejected"
+        );
+        config.stealth.initial_browser = "chrome".to_string();
 
         config.fingerprint_rotation.profile_slots =
             FingerprintRotationConfig::default().profile_slots;
@@ -2557,6 +2580,65 @@ mode = "roaming"
         config.optimization.memory_pool_alignment = 64;
         config.anti_replay.max_entries = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn fingerprint_rotation_projection_preserves_slots_and_mode_semantics() {
+        let mut config = EngineConfig::default();
+        config.fingerprint_rotation.enabled = true;
+        config.fingerprint_rotation.interval_secs = 17;
+        config.fingerprint_rotation.mode = RotationMode::Slots;
+        config.fingerprint_rotation.profile_slots =
+            vec!["firefox@linux".to_string(), "safari@macos".to_string()];
+        config.validate().expect("slot rotation configuration validates");
+        let runtime = config
+            .stealth
+            .to_runtime_config(&config.fingerprint_rotation)
+            .expect("slot rotation projects into runtime");
+        assert!(runtime.enable_fingerprint_rotation);
+        assert_eq!(runtime.fingerprint_rotation_interval, 17);
+        assert_eq!(runtime.fingerprint_rotation_mode, crate::stealth::RotationMode::Slots);
+        assert_eq!(
+            runtime.fingerprint_rotation_profiles,
+            vec![
+                (crate::stealth::BrowserProfile::Firefox, crate::stealth::OsProfile::Linux),
+                (crate::stealth::BrowserProfile::Safari, crate::stealth::OsProfile::MacOS),
+            ]
+        );
+        assert_eq!(runtime.rotation_profile_slots(), runtime.fingerprint_rotation_profiles);
+
+        let mut fixed = config.fingerprint_rotation.clone();
+        fixed.mode = RotationMode::Fixed;
+        let fixed_runtime = config
+            .stealth
+            .to_runtime_config(&fixed)
+            .expect("fixed rotation configuration projects");
+        assert!(fixed_runtime.rotation_profile_slots().is_empty());
+
+        let mut all = config.fingerprint_rotation.clone();
+        all.mode = RotationMode::All;
+        all.profile_slots.clear();
+        let all_runtime =
+            config.stealth.to_runtime_config(&all).expect("all rotation configuration projects");
+        assert!(!all_runtime.rotation_profile_slots().is_empty());
+
+        config.stealth.initial_os = "macos".to_string();
+        config.fingerprint_rotation.profile_slots = vec!["safari".to_string()];
+        config.fingerprint_rotation.mode = RotationMode::Slots;
+        config.validate().expect("browser-only slots inherit the initial OS");
+        let inherited_runtime = config
+            .stealth
+            .to_runtime_config(&config.fingerprint_rotation)
+            .expect("browser-only slot projects with the initial OS");
+        assert_eq!(
+            inherited_runtime.rotation_profile_slots(),
+            vec![(crate::stealth::BrowserProfile::Safari, crate::stealth::OsProfile::MacOS)]
+        );
+
+        let mut empty_slots = config.fingerprint_rotation.clone();
+        empty_slots.profile_slots.clear();
+        empty_slots.mode = RotationMode::Slots;
+        assert!(empty_slots.validate().is_err());
     }
 
     #[test]

@@ -264,6 +264,20 @@ impl ClientRuntime {
             },
         };
 
+        let stealth_config =
+            match self.config.stealth.to_runtime_config(&self.config.fingerprint_rotation) {
+                Ok(config) => config,
+                Err(error) => {
+                    runtime_owner.request_shutdown();
+                    self.state = ClientState::Error;
+                    return Err(EngineError::Config(format!("Stealth config error: {error}")));
+                }
+            };
+        let profiles = stealth_config.rotation_profiles();
+        let profile_interval_secs = stealth_config.fingerprint_rotation_interval;
+        let should_rotate = profiles.len() > 1 && profile_interval_secs > 0;
+        let shared_stealth_config = Arc::new(std::sync::Mutex::new(stealth_config));
+
         // Initialize subsystems against the runtime owner before any worker starts.
         self.subsystems = match subsystems::init_subsystems_with_runtime_and_clock(
             &self.config,
@@ -287,7 +301,11 @@ impl ClientRuntime {
         };
         let start_result = {
             let _runtime_guard = runtime.enter();
-            runtime_owner.start(None, Vec::new(), 0)
+            runtime_owner.start(
+                Some(shared_stealth_config),
+                if should_rotate { profiles } else { Vec::new() },
+                if should_rotate { profile_interval_secs } else { 0 },
+            )
         };
         if let Err(error) = start_result {
             runtime_owner.request_shutdown();
@@ -889,6 +907,13 @@ impl ClientRuntime {
         config.validate().map_err(|error| {
             EngineError::Config(format!("Invalid engine configuration: {error}"))
         })?;
+        let stealth_config = config
+            .stealth
+            .to_runtime_config(&config.fingerprint_rotation)
+            .map_err(|error| EngineError::Config(format!("Stealth config error: {error}")))?;
+        if let Some(owner) = self.stealth_runtime.as_ref() {
+            owner.update_next_session_stealth_config(stealth_config);
+        }
         self.config = config.clone();
         Ok(())
     }

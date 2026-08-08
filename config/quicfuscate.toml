@@ -257,12 +257,12 @@ interval_secs = 300  # 5 minutes
 mode = "fixed"
 
 # Profile slots for rotation (up to 64)
-# Format: ["browser:os", "browser:os", "browser:os"]
+# Format: ["browser@os", "browser@os", "browser@os"]
 # Leave empty to use defaults based on mode
 profile_slots = [
-    "chrome:windows",
-    "firefox:windows",
-    "safari:macos"
+    "chrome@windows",
+    "firefox@windows",
+    "safari@macos"
 ]
 
 # ==============================================================================

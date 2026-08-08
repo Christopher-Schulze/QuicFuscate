@@ -327,46 +327,20 @@ pub fn parse_runtime_profile_entry(
     entry: &str,
     default_os: OsProfile,
 ) -> Option<FingerprintProfile> {
-    let separator = entry.find('@').or_else(|| entry.find(':'));
-    let (browser_part, os_part) = match separator {
-        Some(index) => (&entry[..index], Some(&entry[index + 1..])),
-        None => (entry, None),
-    };
-    if os_part.is_some_and(|part| part.contains('@') || part.contains(':')) {
-        log::warn!("Invalid fingerprint profile slot: {}", entry);
-        return None;
-    }
-    let browser_part = browser_part.trim();
-    let browser = match browser_part.parse::<BrowserProfile>() {
-        Ok(browser) => browser,
-        Err(_) => {
-            log::warn!("Invalid browser profile: {}", browser_part);
-            return None;
+    match parse_runtime_profile_entry_checked(entry, default_os) {
+        Ok(profile) => Some(profile),
+        Err(error) => {
+            log::warn!("Invalid fingerprint profile slot '{}': {}", entry, error);
+            None
         }
-    };
-
-    let os = match os_part {
-        Some(part) => match part.trim().parse::<OsProfile>() {
-            Ok(os) => os,
-            Err(_) => {
-                log::warn!("Invalid OS profile: {}", part.trim());
-                return None;
-            }
-        },
-        None => default_os,
-    };
-
-    let profile = FingerprintProfile::new(browser, os);
-    if profile.client_hello.is_none() {
-        log::warn!(
-            "No ClientHello found for {}@{}",
-            browser_part,
-            format!("{:?}", os).to_lowercase()
-        );
-        return None;
     }
+}
 
-    Some(profile)
+fn parse_runtime_profile_entry_checked(
+    entry: &str,
+    default_os: OsProfile,
+) -> Result<FingerprintProfile, String> {
+    crate::stealth::parse_fingerprint_profile_slot(entry, default_os)
 }
 
 pub fn resolve_runtime_profiles(
@@ -374,18 +348,21 @@ pub fn resolve_runtime_profiles(
     initial_os: OsProfile,
     profile_slots: &[String],
     fallback_to_default: bool,
-) -> Vec<FingerprintProfile> {
-    let default_profile = FingerprintProfile::new(initial_browser, initial_os);
-    let mut profiles = profile_slots
-        .iter()
-        .filter_map(|slot| parse_runtime_profile_entry(slot, initial_os))
-        .collect::<Vec<_>>();
+) -> Result<Vec<FingerprintProfile>, String> {
+    let default_profile = FingerprintProfile::try_new(initial_browser, initial_os)?;
+    let mut profiles = Vec::with_capacity(profile_slots.len().max(1));
+    for slot in profile_slots {
+        profiles.push(
+            parse_runtime_profile_entry_checked(slot, initial_os)
+                .map_err(|error| format!("invalid fingerprint profile slot '{slot}': {error}"))?,
+        );
+    }
 
     if profiles.is_empty() && fallback_to_default {
         profiles.push(default_profile);
     }
 
-    profiles
+    Ok(profiles)
 }
 
 pub fn runtime_components_from_app_config(

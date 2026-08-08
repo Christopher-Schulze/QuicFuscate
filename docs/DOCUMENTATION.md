@@ -2815,7 +2815,7 @@ QUICFUSCATE_CTL_SOCKET=/tmp/quicfuscate.sock quicfuscate-ctl clients
     --profile-interval <s> Interval in seconds for profile switching
 ```
 
-Profile rotation allows QuicFuscate to periodically switch the active browser/OS fingerprint to diversify observable characteristics on the wire.
+Profile rotation allows QuicFuscate to select a different browser/OS template for the next connection. The shared `StealthRuntimeOwner` advances the validated profile sequence after the configured interval; an established connection keeps one coherent TLS/H3/QPACK persona and is never mutated mid-session. The admin/frontend field exposure for this contract is intentionally deferred.
 
 ### Performance Options
 
@@ -3309,7 +3309,7 @@ Valid defenses are `off`, `full-padding`, and `constant-rate`. Enabled policies 
 
 The unified `[fec]` section accepts product control modes `auto` and `off`. Its `initial_mode` compatibility hint accepts `auto` or `off`; complete codec modes belong to the standalone `[adaptive_fec]` source. Partial recovery is controlled by `QUICFUSCATE_FEC_PARTIAL`, so `fec.enable_partial = false` is rejected instead of being ignored; `enable_pid = false` is likewise rejected because the adaptive controller owns that behavior. `optimization.memory_pool_size = 0` resolves through the shared automatic pool-sizing policy, and every adapter derives the same block size and capacity contract.
 
-Fingerprint slots use canonical `browser:os` strings; the server parser also accepts the legacy `browser@os` spelling. Persona rotation remains connection-scoped and therefore applies to the next connection or reconnect only. Transactional reload publication remains owned by TODO-724, while full rotation lifecycle and selection semantics remain owned by TODO-751.
+Fingerprint slots use the single `browser@os` grammar across TOML, CLI, engine, client, and server boundaries. Browser-only slots inherit the configured initial OS; `:` separators, unsupported browser/OS pairs, empty slots, and malformed sequences are rejected instead of silently dropped. Fixed mode exposes no rotation pool, Slots uses the validated typed sequence, and All uses the curated supported catalog. Persona rotation remains connection-scoped: the active TLS/H3 identity is frozen, while the shared runtime owner selects the next-session template and advances it only after the configured interval. A running embedded client rejects rotation-policy changes and requires a stop/restart so the worker sequence and interval cannot become stale. Transactional reload publication remains owned by TODO-724.
 
 ### Environment Variable Overrides
 
@@ -3619,16 +3619,16 @@ enabled = true
 interval_secs = 180  # 3 minutes
 mode = "slots"  # fixed, slots, all
 profile_slots = [
-    "chrome:windows",
-    "firefox:macos",
-    "safari:ios",
+    "chrome@windows",
+    "firefox@macos",
+    "safari@ios",
 ]
 ```
 
 #### Rotation Modes
 - **Fixed**: single profile, no rotation
-- **Slots**: rotate through configured slots (up to 64)
-- **All**: rotate through all available profiles
+- **Slots**: rotate through the validated `browser@os` slots (up to 64)
+- **All**: rotate through the supported profile catalog
 
 ### Browser Profile
 
@@ -3637,7 +3637,7 @@ Available combinations:
 - **macOS**: Safari, Chrome, Firefox, Edge
 - **Linux**: Chrome, Firefox
 - **Android**: Chrome, Firefox, Edge
-- **iOS**: Safari, Chrome
+- **iOS**: Safari
 
 ### Traffic Obfuscation
 
@@ -3729,7 +3729,7 @@ The following consolidated profiles are available and validated at startup:
 
 | Browser | OS |
 |---|---|
-| Chrome | Windows, MacOS, Linux, Android, iOS |
+| Chrome | Windows, MacOS, Linux, Android |
 | Firefox | Windows, MacOS, Linux, Android |
 | Safari | MacOS, iOS |
 | Edge | Windows, MacOS, Linux, Android |

@@ -1892,18 +1892,53 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_profile_slots_accept_canonical_colon_and_legacy_at_syntax() {
-        let colon = parse_runtime_profile_entry("firefox:linux", OsProfile::Windows)
-            .expect("colon profile slot");
-        assert_eq!(colon.browser, BrowserProfile::Firefox);
-        assert_eq!(colon.os, OsProfile::Linux);
-
+    fn test_runtime_profile_slots_accept_canonical_at_syntax_only() {
         let at = parse_runtime_profile_entry("safari@macos", OsProfile::Windows)
-            .expect("legacy at profile slot");
+            .expect("canonical profile slot");
         assert_eq!(at.browser, BrowserProfile::Safari);
         assert_eq!(at.os, OsProfile::MacOS);
 
-        assert!(parse_runtime_profile_entry("chrome:windows:extra", OsProfile::Windows).is_none());
+        let default_os = parse_runtime_profile_entry("firefox", OsProfile::Linux)
+            .expect("browser-only profile slot");
+        assert_eq!(default_os.browser, BrowserProfile::Firefox);
+        assert_eq!(default_os.os, OsProfile::Linux);
+
+        assert!(parse_runtime_profile_entry("firefox:linux", OsProfile::Windows).is_none());
+        assert!(parse_runtime_profile_entry("chrome@windows@linux", OsProfile::Windows).is_none());
+        assert!(parse_runtime_profile_entry("safari@windows", OsProfile::Windows).is_none());
+    }
+
+    #[test]
+    fn runtime_profile_resolution_rejects_invalid_slots_instead_of_dropping_them() {
+        let invalid = vec!["firefox@linux".to_string(), "chrome:windows".to_string()];
+        let error = resolve_runtime_profiles(
+            BrowserProfile::Chrome,
+            OsProfile::Windows,
+            &invalid,
+            true,
+        )
+        .expect_err("an invalid slot must fail the whole sequence");
+        assert!(error.contains("chrome:windows"));
+
+        let empty = resolve_runtime_profiles(
+            BrowserProfile::Chrome,
+            OsProfile::Windows,
+            &[],
+            false,
+        )
+        .expect("an explicitly empty optional sequence is representable");
+        assert!(empty.is_empty());
+
+        let fallback = resolve_runtime_profiles(
+            BrowserProfile::Firefox,
+            OsProfile::Linux,
+            &[],
+            true,
+        )
+        .expect("empty server sequence falls back to the initial profile");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].browser, BrowserProfile::Firefox);
+        assert_eq!(fallback[0].os, OsProfile::Linux);
     }
 
     #[test]

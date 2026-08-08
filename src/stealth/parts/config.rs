@@ -31,6 +31,8 @@ pub struct StealthConfig {
     pub max_padding_size: usize,
     /// Fingerprint rotation interval in seconds.
     pub fingerprint_rotation_interval: u64,
+    /// Typed browser/OS slots propagated from the engine configuration.
+    pub fingerprint_rotation_profiles: Vec<(BrowserProfile, OsProfile)>,
     /// Enable DNS-over-HTTPS for domain resolution.
     pub enable_doh: bool,
     /// DoH provider endpoint URL (e.g. Cloudflare DNS JSON API).
@@ -140,19 +142,6 @@ pub enum FecMode {
     Off,
     /// Auto - adaptive FEC based on network conditions.
     Auto,
-}
-
-/// Fingerprint rotation configuration.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct FingerprintRotationConfig {
-    /// Enable rotation.
-    pub enabled: bool,
-    /// Rotation interval in seconds.
-    pub interval_secs: u64,
-    /// Rotation mode.
-    pub mode: RotationMode,
-    /// Profile slots for rotation (up to 3).
-    pub profile_slots: Vec<(BrowserProfile, OsProfile)>,
 }
 
 /// Controls how fingerprint profiles are cycled during rotation.
@@ -335,6 +324,7 @@ impl StealthConfig {
             padding_strategy: PaddingStrategy::Adaptive,
             max_padding_size: 86, // Slightly higher for better smoothing
             fingerprint_rotation_interval: 0,
+            fingerprint_rotation_profiles: Vec::new(),
             enable_doh: true,
             doh_provider: "https://cloudflare-dns.com/dns-query".to_string(),
             // Real-time choke: light smoothing in Stealth (disabled by default to avoid perf hits)
@@ -392,6 +382,7 @@ impl StealthConfig {
             padding_strategy: PaddingStrategy::BrowserMimic,
             max_padding_size: 256,
             fingerprint_rotation_interval: 120, // 2 minutes - aggressive enough to break persistent DPI correlations
+            fingerprint_rotation_profiles: Vec::new(),
             enable_doh: true,
             doh_provider: "https://cloudflare-dns.com/dns-query".to_string(),
             enable_realtime_choke: false,
@@ -434,6 +425,30 @@ impl StealthConfig {
         }
     }
 
+    /// Return the effective typed rotation pool for one connection runtime.
+    ///
+    /// Fixed mode has no rotation pool. Slots use the validated engine
+    /// projection, while All uses the curated catalog shared by TLS metadata
+    /// and runtime selection.
+    pub fn rotation_profile_slots(&self) -> Vec<(BrowserProfile, OsProfile)> {
+        if !self.enable_fingerprint_rotation {
+            return Vec::new();
+        }
+        match self.fingerprint_rotation_mode {
+            RotationMode::Fixed => Vec::new(),
+            RotationMode::Slots => self.fingerprint_rotation_profiles.clone(),
+            RotationMode::All => TlsClientHelloProfileCatalog::available_profiles(),
+        }
+    }
+
+    /// Return the effective profiles as complete, deterministic fingerprints.
+    pub fn rotation_profiles(&self) -> Vec<FingerprintProfile> {
+        self.rotation_profile_slots()
+            .into_iter()
+            .map(|(browser, os)| FingerprintProfile::new(browser, os))
+            .collect()
+    }
+
     /// Creates Off mode - no stealth features.
     pub fn off() -> Self {
         Self {
@@ -451,6 +466,7 @@ impl StealthConfig {
             padding_strategy: PaddingStrategy::Random,
             max_padding_size: 0,
             fingerprint_rotation_interval: 0,
+            fingerprint_rotation_profiles: Vec::new(),
             enable_doh: false,
             doh_provider: String::new(),
             enable_realtime_choke: false,
@@ -499,6 +515,7 @@ impl StealthConfig {
             padding_strategy: PaddingStrategy::Random,
             max_padding_size: 0,
             fingerprint_rotation_interval: 0,
+            fingerprint_rotation_profiles: Vec::new(),
             enable_doh: false,
             doh_provider: String::new(),
             enable_realtime_choke: false,
@@ -556,6 +573,7 @@ impl StealthConfig {
             padding_strategy: PaddingStrategy::Random,
             max_padding_size: 0,
             fingerprint_rotation_interval: 0,
+            fingerprint_rotation_profiles: Vec::new(),
             // DNS over HTTPS: ON in Performance per spec (Cloudflare)
             enable_doh: true,
             doh_provider: "https://cloudflare-dns.com/dns-query".to_string(),
@@ -830,6 +848,15 @@ impl StealthConfig {
         }
         if self.enable_realtime_choke && self.choke_target_mbps == 0 {
             return Err("realtime choke requires choke_target_mbps > 0".into());
+        }
+        if self.enable_fingerprint_rotation && self.fingerprint_rotation_interval == 0 {
+            return Err("fingerprint rotation requires fingerprint_rotation_interval > 0".into());
+        }
+        if self.enable_fingerprint_rotation
+            && matches!(self.fingerprint_rotation_mode, RotationMode::Slots)
+            && self.fingerprint_rotation_profiles.is_empty()
+        {
+            return Err("slots rotation requires at least one profile slot".into());
         }
         if matches!(self.mode, StealthMode::Intelligent) && !self.dynamic_enabled {
             return Err("intelligent mode requires dynamic_enabled to remain enabled".into());

@@ -865,6 +865,12 @@ async fn run_server(
     quicfuscate::implementations::server::validate_admin_web_operation_timeout_ms(
         admin_web_operation_timeout_ms,
     )?;
+    let cli_profile = FingerprintProfile::try_new(profile, os).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid profile/OS selection: {error}"),
+        )
+    })?;
     #[cfg(not(target_os = "linux"))]
     let _ = (no_drop_privileges, drop_user, drop_group);
 
@@ -976,7 +982,7 @@ async fn run_server(
         &format!("Server starting on {listen_addr}"),
     );
 
-    let (fec_cfg, stealth_cfg, opt_cfg, anti_replay_section) =
+    let (fec_cfg, mut stealth_cfg, opt_cfg, anti_replay_section) =
         load_runtime_profiles(config_path, fec_config, fec_mode)?;
 
     // Reuse the configuration validated before global logger and runtime setup.
@@ -1054,20 +1060,55 @@ async fn run_server(
         "server runtime config",
     );
     let profiles: Vec<FingerprintProfile> = match profile_seq {
-        Some(seq) => {
-            quicfuscate::implementations::server::resolve_runtime_profiles(profile, os, seq, false)
-        }
+        Some(seq) => quicfuscate::implementations::server::resolve_runtime_profiles(
+            profile, os, seq, false,
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid profile sequence: {error}"),
+            )
+        })?,
         None => {
-            quicfuscate::implementations::server::resolve_runtime_profiles(profile, os, &[], true)
+            let configured = stealth_cfg.rotation_profiles();
+            if configured.is_empty() {
+                vec![cli_profile.clone()]
+            } else {
+                configured
+            }
         }
     };
-
-    if profile_interval > 0 && profiles.is_empty() {
-        error!("No valid profiles supplied with --profile-seq");
+    if profile_seq.is_some() && profiles.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "invalid profile sequence",
+            "--profile-seq must contain at least one profile",
         ));
+    }
+
+    let (effective_profile, effective_os) = if profile_seq.is_some() {
+        let first = profiles.first().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--profile-seq must contain at least one profile",
+            )
+        })?;
+        (first.browser, first.os)
+    } else {
+        (profile, os)
+    };
+    let rotation_interval = if profile_seq.is_some() {
+        profile_interval
+    } else {
+        stealth_cfg.fingerprint_rotation_interval
+    };
+    if profile_seq.is_some() {
+        stealth_cfg.fingerprint_rotation_profiles = profiles
+            .iter()
+            .map(|profile| (profile.browser, profile.os))
+            .collect();
+        stealth_cfg.fingerprint_rotation_mode = quicfuscate::stealth::RotationMode::Slots;
+        stealth_cfg.enable_fingerprint_rotation = profiles.len() > 1 && rotation_interval > 0;
+        stealth_cfg.fingerprint_rotation_interval = rotation_interval;
     }
 
     let standalone_tun_config = if tun_enable {
@@ -1120,10 +1161,10 @@ async fn run_server(
             stealth_cfg,
             fec_mode_override,
             profiles,
-            profile_interval,
+            rotation_interval,
             quicfuscate::implementations::server::RuntimeStealthPolicy {
-                profile,
-                os,
+                profile: effective_profile,
+                os: effective_os,
                 disable_doh,
                 doh_provider,
                 disable_fronting,
