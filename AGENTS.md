@@ -424,8 +424,8 @@ After `bun run build`:
 QuicFuscate is a QUIC-based VPN with advanced stealth, cryptography, adaptive FEC, and performance optimizations. The codebase has three main areas:
 
 ### 1. Rust Core (`src/` + `crates/`)
-- Cargo workspace with the root `quicfuscate` package and eleven backend leaf crates: `qf-audit`, `qf-common`, `qf-control-plane`, `qf-dns`, `qf-error`, `qf-firewall`, `qf-instrumentation`, `qf-logging`, `qf-pki`, `qf-privilege`, and `qf-reality`
-- The remaining product runtime stays under `src/`; key modules are `core.rs`, `transport/`, `stealth/`, `fec/`, `brain.rs`, `crypto/`, `qftls.rs`, `compress.rs`, and `optimize/`. The audit implementation is owned by `crates/qf-audit/src/lib.rs`, the logging implementation by `crates/qf-logging/src/lib.rs`, the DNS implementation by `crates/qf-dns/src/lib.rs`, and the REALITY implementation by `crates/qf-reality/src/lib.rs`; all are re-exported from the root.
+- Cargo workspace with the root `quicfuscate` package and twelve backend leaf crates: `qf-audit`, `qf-common`, `qf-control-plane`, `qf-dns`, `qf-error`, `qf-firewall`, `qf-instrumentation`, `qf-logging`, `qf-metrics`, `qf-pki`, `qf-privilege`, and `qf-reality`
+- The remaining product runtime stays under `src/`; key modules are `core.rs`, `transport/`, `stealth/`, `fec/`, `brain.rs`, `crypto/`, `qftls.rs`, `compress.rs`, and `optimize/`. The audit implementation is owned by `crates/qf-audit/src/lib.rs`, the logging implementation by `crates/qf-logging/src/lib.rs`, the metrics server by `crates/qf-metrics/src/lib.rs`, the DNS implementation by `crates/qf-dns/src/lib.rs`, and the REALITY implementation by `crates/qf-reality/src/lib.rs`; all are re-exported from the root.
 - Root compatibility modules preserve existing `crate::` paths while each extracted leaf is independently checked as its own workspace package
 - Build: `cargo check` / `cargo build`
 - Tests: `cargo test --features rust-tests`
@@ -480,6 +480,7 @@ Wire -> Pooled Buffer
 - **qf-firewall**: Platform firewall command abstraction, backend selection, owned-resource inspection, and bounded cleanup contracts for kill-switch and routing callers.
 - **qf-audit**: Hash-chained, bounded NDJSON audit persistence with rotation, checkpoint recovery, tamper verification, and fail-closed file hardening.
 - **qf-logging**: Structured production logging with bounded admission, file rotation/reopen, RFC 5424 syslog, flush barriers, and observable worker counters.
+- **qf-metrics**: Bounded telemetry HTTP serving with exporter injection, request classification, and concurrent connection admission.
 - **qf-reality**: RealityProxy and cover-site TLS handshake cache - tokio::spawn UDP proxy to Cloudflare/Google/Quad9 plus captured TLS material for active-probe fallback.
 
 ---
@@ -506,7 +507,7 @@ Wire -> Pooled Buffer
 | Architecture overview + file map + wiring map (canonical SSOT) | `docs/MAP.md` |
 | Agent instructions | `AGENTS.md` |
 | Rust core | `src/` |
-| Backend workspace leaf crates | `crates/qf-audit/`, `crates/qf-common/`, `crates/qf-control-plane/`, `crates/qf-dns/`, `crates/qf-error/`, `crates/qf-firewall/`, `crates/qf-instrumentation/`, `crates/qf-logging/`, `crates/qf-pki/`, `crates/qf-privilege/`, `crates/qf-reality/` |
+| Backend workspace leaf crates | `crates/qf-audit/`, `crates/qf-common/`, `crates/qf-control-plane/`, `crates/qf-dns/`, `crates/qf-error/`, `crates/qf-firewall/`, `crates/qf-instrumentation/`, `crates/qf-logging/`, `crates/qf-metrics/`, `crates/qf-pki/`, `crates/qf-privilege/`, `crates/qf-reality/` |
 | Web Admin UI | `apps/svelte-admin/` |
 | Desktop frontend | `apps/svelte-desktop/` |
 | Desktop Tauri host | `apps/tauri/` |
