@@ -1109,15 +1109,13 @@ mod tests {
         let (decoded, consumed) =
             from_bytes(&no_length, PacketType::Short).expect("no-length DATAGRAM must decode");
         assert_eq!(consumed, no_length.len());
-        assert!(
-            matches!(decoded, Frame::Datagram { data } if data.as_ref() == &[0xA1, 0xB2, 0xC3])
-        );
+        assert!(matches!(decoded, Frame::Datagram { data } if data.as_ref() == [0xA1, 0xB2, 0xC3]));
 
         let length_delimited = [0x31, 0x02, 0xA1, 0xB2, 0x01];
         let (decoded, consumed) = from_bytes(&length_delimited, PacketType::Short)
             .expect("length-delimited DATAGRAM must decode");
         assert_eq!(consumed, 4);
-        assert!(matches!(decoded, Frame::Datagram { data } if data.as_ref() == &[0xA1, 0xB2]));
+        assert!(matches!(decoded, Frame::Datagram { data } if data.as_ref() == [0xA1, 0xB2]));
     }
 
     #[test]
@@ -1129,7 +1127,7 @@ mod tests {
         assert!(matches!(
             decoded,
             Frame::Stream { stream_id: 0, offset: 0, fin: false, data }
-                if data.as_ref() == &[0x10, 0x20, 0x30]
+                if data.as_ref() == [0x10, 0x20, 0x30]
         ));
     }
 

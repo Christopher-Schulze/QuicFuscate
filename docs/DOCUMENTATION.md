@@ -2159,6 +2159,9 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 | runtime dependency | `rcgen` | `dep:rcgen` | Implicit selector enabled by `server` or `dev-certs`; do not select directly |
 | runtime dependency | `time` | `dep:time` | Implicit selector enabled by `server` or `dev-certs`; do not select directly |
 | runtime dependency | `maxminddb` | `dep:maxminddb` | Implicit selector enabled by `server`; do not select directly |
+- Product/default runtime: `default`, `client`, `server`, `rate_limiter`.
+- Internal-only: `internal_wiedemann`, `internal_avx10_preview`, and the aggregate `experimental` profile.
+- Backend/build knobs retained for dispatch or specialized integration: `io_uring`, `compression_zstd_ffi`, `orchestrator`, `prefetch`, `stream_ring_buffer`, `zero_copy_dgram`, `unsafe_rust`, platform selectors, and test/benchmark selectors.
 - TODO-176's proposed public groups `cpu-simd`, `stealth`, `fec`, `crypto`, `transport`, and `test-crypto`, plus the historical `simd-all` selector, are retired and are not current Cargo features. Cargo must reject direct selection of each name. TODO-760 owns the separate hardware/SIMD semantics; this matrix makes no hardware proof or broad subsystem meta-feature claim.
 - Product posture notes:
   - The canonical product contract is still the default `client`/`server` runtime.
@@ -5800,3 +5803,11 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `RuntimePolicySnapshot::capture()` holds one read lease while cloning all four domains. `build_live_server_client_init()` uses that immutable snapshot for QKey policy bounds, version selection, and connection construction, then exposes `LiveClientInit.runtime_generation` for the resulting next-connection state.
 - Stealth profile rotation uses the same write lease before mutating the shared stealth policy and advances the generation, so background rotation cannot race a reload or produce an untagged mixed snapshot. `StandaloneReloadOutcome`, runtime logs, and audit text expose the committed generation.
 - The generation regression holds a writer after a deliberate partial domain update and proves a concurrent reader waits until all four values and the generation have committed. Frontend surfaces remain untouched; any generation display or new admin field is deferred to the protected UI scope.
+
+## Implementation Reconciliation (2026-08-08, TODO-752 strict backend lint truth)
+
+- The crate root no longer contains target- or feature-gated `allow(warnings)` attributes. Strict warning visibility now applies equally to the default, x86, `rust-tests`, unsafe, SIMD, and internal feature lanes.
+- The exposed diagnostics were repaired in place: loss-rate calculation uses checked division, frame tests compare slices without borrowing the right operand, and unsafe-pool alignment checks use `is_multiple_of()`.
+- `src/simd/x86_ack.rs` no longer suppresses dead code at module scope. The scalar parity helper is explicitly limited to tests and `rust-tests`; AVX2 and AVX-512 helpers retain production transport callers.
+- `scripts/tests/audits/audit-runtime-guardrails.sh` contains negative source guards that fail if crate-root `allow(warnings)` or module-level x86 ACK `allow(dead_code)` returns. The feature matrix already runs strict `-D warnings` lanes for the supported non-UI feature set.
+- Local ARM64 macOS evidence passes `cargo clippy --all-features -- -D warnings`, `cargo clippy --all-targets --features rust-tests -- -D warnings`, `cargo clippy --all-features --lib --bins --examples -- -D warnings`, `cargo check --all-features`, `cargo test --lib` (`2,656/2,656`), `cargo test --all-features --lib` (`2,698/2,698`), formatting, and diff hygiene. The all-target all-feature command remains intentionally unavailable on macOS because the Linux-only io_uring integration target emits its explicit compile error; x86_64 Linux execution remains a hosted CI boundary because this host lacks the GNU/Linux C toolchain and sysroot.

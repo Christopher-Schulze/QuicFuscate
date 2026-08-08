@@ -200,7 +200,7 @@ impl UnsafeMemoryPool {
     }
 
     fn validate_live_block(&self, ptr: NonNull<u8>) -> Result<(), UnsafeError> {
-        if (ptr.as_ptr() as usize) % self.layout.align() != 0 {
+        if !(ptr.as_ptr() as usize).is_multiple_of(self.layout.align()) {
             return Err(UnsafeError::InvalidPointer);
         }
 
@@ -301,7 +301,7 @@ impl UnsafeMemoryPool {
     pub unsafe fn free(&self, ptr: NonNull<u8>) -> Result<(), UnsafeError> {
         telemetry::UNSAFE_FREE_CALLS.inc();
 
-        if (ptr.as_ptr() as usize) % self.layout.align() != 0 {
+        if !(ptr.as_ptr() as usize).is_multiple_of(self.layout.align()) {
             return Err(UnsafeError::InvalidPointer);
         }
 

@@ -1095,6 +1095,24 @@ else
   append_item "dead_code_suppression" "ok" "no broad suppression found"
 fi
 
+CRATE_WARNING_SUPPRESSIONS="$(rg -n --no-messages 'allow\(warnings\)' src/lib.rs || true)"
+if [[ -n "$CRATE_WARNING_SUPPRESSIONS" ]]; then
+  fail_critical "Crate-wide warning suppression reappeared in src/lib.rs"
+  append_item "crate_warning_suppression" "fail" "$CRATE_WARNING_SUPPRESSIONS"
+else
+  pass "src/lib.rs keeps strict warning visibility without crate-wide suppression"
+  append_item "crate_warning_suppression" "ok" "no allow(warnings) attribute remains in the crate root"
+fi
+
+X86_ACK_DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/simd/x86_ack.rs || true)"
+if [[ -n "$X86_ACK_DEADCODE_SUPPRESSIONS" ]]; then
+  fail_critical "x86 ACK helpers regained broad module-level dead_code suppression"
+  append_item "x86_ack_dead_code_suppression" "fail" "$X86_ACK_DEADCODE_SUPPRESSIONS"
+else
+  pass "x86 ACK helpers keep dead_code ownership item-scoped or cfg-scoped"
+  append_item "x86_ack_dead_code_suppression" "ok" "no module-level dead_code suppression remains in x86 ACK helpers"
+fi
+
 FEC_INTERNAL_DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '#\[allow\(dead_code\)\]' src/fec/internal.rs || true)"
 if [[ -n "$FEC_INTERNAL_DEADCODE_SUPPRESSIONS" ]]; then
   fail_critical "FEC internal implementation regained item-level dead_code suppression"

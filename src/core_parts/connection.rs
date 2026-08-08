@@ -948,11 +948,11 @@ impl QuicFuscateConnection {
                         let stats = self.conn.stats();
                         let sent = stats.sent as u64;
                         let lost = stats.lost as u64;
-                        let loss_rate_permille = if sent > 0 {
-                            (((lost.saturating_mul(1000)) / sent).min(1000)) as u32
-                        } else {
-                            0
-                        };
+                        let loss_rate_permille = lost
+                            .saturating_mul(1000)
+                            .checked_div(sent)
+                            .map_or(0, |rate| rate.min(1000))
+                            as u32;
                         let delivery_rate_bps =
                             self.conn.delivery_rate().max(self.stats.congestion_delivery_rate);
                         let stealth_active = self.stealth_manager.runtime_stealth_active();

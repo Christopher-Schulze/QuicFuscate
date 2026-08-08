@@ -1,6 +1,5 @@
 //! x86 SIMD helpers for ACK range canonicalization/merge
 //! AVX2/AVX-512 implementations used by transport layer
-#![allow(dead_code)]
 
 use std::arch::x86_64::*;
 
@@ -205,6 +204,7 @@ pub(crate) unsafe fn canonical_ack_blocks_avx512(ranges: &[(u64, u64)]) -> Vec<(
 }
 
 /// Canonicalize ACK ranges without an ISA requirement for test wrappers.
+#[cfg(any(test, feature = "rust-tests"))]
 pub(crate) fn canonical_ack_blocks_scalar(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let mut sorted = ranges.to_vec();
     sorted.sort_by_key(|range| range.0);
