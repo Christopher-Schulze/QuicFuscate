@@ -747,6 +747,39 @@ mod tests {
         crate::transport::packet::connect(None, &scid, local, peer, &mut cfg).unwrap()
     }
 
+    fn pump_paired_1rtt_once(
+        client: &mut super::super::Connection,
+        server: &mut super::super::Connection,
+        recv_info: &crate::transport::RecvInfo,
+        packet: &mut [u8],
+    ) -> bool {
+        let mut progress = false;
+        match client.send(packet) {
+            Ok((len, _)) => {
+                server.recv(&mut packet[..len], recv_info).expect("server recv");
+                progress = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {
+            }
+            Err(error) => panic!("client send failed: {:?}", error),
+        }
+        let reverse = crate::transport::RecvInfo {
+            from: recv_info.to,
+            to: recv_info.from,
+            ecn: None,
+        };
+        match server.send(packet) {
+            Ok((len, _)) => {
+                client.recv(&mut packet[..len], &reverse).expect("client recv");
+                progress = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {
+            }
+            Err(error) => panic!("server send failed: {:?}", error),
+        }
+        progress
+    }
+
     fn current_rss_bytes() -> Option<u64> {
         #[cfg(unix)]
         {
@@ -835,6 +868,7 @@ mod tests {
                     fin_received: true,
                     masque_established: true,
                     masque_capsule_buffer: Vec::new(),
+                    settings_received: false,
                 },
             );
             h3.finished_streams.insert(stream_id);
@@ -863,6 +897,7 @@ mod tests {
                     fin_received: false,
                     masque_established: false,
                     masque_capsule_buffer: Vec::new(),
+                    settings_received: false,
                 },
             );
             h3.finished_streams.insert(push_id);
@@ -1380,6 +1415,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_frame_header_decodes_multibyte_frame_type() {
+        let mut buf = Vec::new();
+        Connection::encode_varint(0x40, &mut buf);
+        Connection::encode_varint(3, &mut buf);
+        buf.extend_from_slice(&[1, 2, 3]);
+        let (frame_type, frame_len, header_len) =
+            Connection::parse_frame_header(&buf).expect("parse extension frame");
+        assert_eq!(frame_type, 0x40);
+        assert_eq!(frame_len, 3);
+        assert_eq!(header_len, 3);
+    }
+
+    #[test]
     fn parse_frame_header_empty_buffer_returns_error() {
         let buf: Vec<u8> = vec![];
         let result = Connection::parse_frame_header(&buf);
@@ -1672,6 +1720,69 @@ mod tests {
     }
 
     #[test]
+    fn client_and_server_use_peer_owned_unidirectional_control_ids() {
+        use crate::transport::connection::bench_paired_1rtt_connections;
+        let crate::transport::connection::BenchConnectionPair { mut client, mut server, .. } =
+            bench_paired_1rtt_connections();
+        let cfg = Config::new().expect("cfg");
+        let client_h3 =
+            super::h3::Connection::with_transport(&mut client, &cfg).expect("client h3");
+        let server_h3 =
+            super::h3::Connection::with_transport(&mut server, &cfg).expect("server h3");
+
+        assert_eq!(client_h3.control_stream_id, Some(2));
+        assert_eq!(server_h3.control_stream_id, Some(3));
+        assert!(client_h3
+            .streams
+            .get(&2)
+            .is_some_and(|stream| stream.settings_received));
+        assert!(server_h3
+            .streams
+            .get(&3)
+            .is_some_and(|stream| stream.settings_received));
+    }
+
+    #[test]
+    fn duplicate_peer_control_stream_is_rejected() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+        let _client_h3 = Connection::with_transport(&mut client, &Config::new().unwrap()).unwrap();
+        let mut server_h3 =
+            Connection::with_transport(&mut server, &Config::new().unwrap()).unwrap();
+        let mut packet = [0u8; 2048];
+        let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+        let _ = server_h3.poll(&mut server);
+
+        client
+            .stream_send(6, &[0x00, 0x04, 0x00], false)
+            .expect("queue duplicate control stream");
+        let (len, _) = client.send(&mut packet).expect("send duplicate control stream");
+        server.recv(&mut packet[..len], &recv_info).expect("server recv");
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::ClosedCriticalStream)));
+    }
+
+    #[test]
+    fn control_stream_rejects_data_after_settings() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+        let _client_h3 = Connection::with_transport(&mut client, &Config::new().unwrap()).unwrap();
+        let mut server_h3 =
+            Connection::with_transport(&mut server, &Config::new().unwrap()).unwrap();
+        let mut packet = [0u8; 2048];
+        let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+        let _ = server_h3.poll(&mut server);
+
+        client
+            .stream_send(2, &[0x00, 0x00], false)
+            .expect("queue invalid control frame");
+        let (len, _) = client.send(&mut packet).expect("send invalid control frame");
+        server.recv(&mut packet[..len], &recv_info).expect("server recv");
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::FrameUnexpected)));
+    }
+
+    #[test]
     fn h3_config_default_field_section_size() {
         let cfg = Config::new().expect("default H3 config must succeed");
         assert!(cfg.max_field_section_size > 0, "default field section size must be positive");
@@ -1702,23 +1813,27 @@ mod tests {
             .expect("register_datagram_context");
 
         let mut packet = [0u8; 2048];
-        let (len, _) = client.send(&mut packet).expect("client send");
-        server.recv(&mut packet[..len], &recv_info).expect("server recv");
-
-        match server_h3.poll(&mut server) {
-            Ok(Some((rx_sid, Event::Headers { list, .. }))) => {
-                assert_eq!(rx_sid, sid, "server must see the same request stream id");
-                assert!(
-                    list.iter().any(|h| {
-                        h.name().eq_ignore_ascii_case(b":method")
-                            && h.value().eq_ignore_ascii_case(b"CONNECT")
-                    }),
-                    "expected CONNECT method in request headers"
-                );
+        let mut request_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            match server_h3.poll(&mut server) {
+                Ok(Some((rx_sid, Event::Headers { list, .. }))) => {
+                    assert_eq!(rx_sid, sid, "server must see the same request stream id");
+                    assert!(
+                        list.iter().any(|h| {
+                            h.name().eq_ignore_ascii_case(b":method")
+                                && h.value().eq_ignore_ascii_case(b"CONNECT")
+                        }),
+                        "expected CONNECT method in request headers"
+                    );
+                    request_seen = true;
+                    break;
+                }
+                Ok(_) | Err(Error::Done) => {}
+                Err(error) => panic!("server H3 poll failed: {:?}", error),
             }
-            Ok(other) => panic!("expected Headers event, got {:?}", other),
-            Err(error) => panic!("server H3 poll failed: {:?}", error),
         }
+        assert!(request_seen, "request headers must reach the peer");
 
         assert!(
             server_h3.accept_masque_connect(&mut server, sid).expect("accept CONNECT-UDP"),
@@ -1730,25 +1845,23 @@ mod tests {
             "accepted flow must not emit duplicate responses"
         );
 
-        let (len, _) = server.send(&mut packet).expect("server response send");
-        let client_recv_info = crate::transport::RecvInfo {
-            from: recv_info.to,
-            to: recv_info.from,
-            ecn: None,
-        };
-        client
-            .recv(&mut packet[..len], &client_recv_info)
-            .expect("client response receive");
-        match client_h3.poll(&mut client) {
-            Ok(Some((rx_sid, Event::Headers { list, .. }))) => {
-                assert_eq!(rx_sid, sid);
-                assert!(list.iter().any(|header| {
-                    header.name() == b":status" && header.value() == b"200"
-                }));
+        let mut response_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            match client_h3.poll(&mut client) {
+                Ok(Some((rx_sid, Event::Headers { list, .. }))) => {
+                    assert_eq!(rx_sid, sid);
+                    assert!(list.iter().any(|header| {
+                        header.name() == b":status" && header.value() == b"200"
+                    }));
+                    response_seen = true;
+                    break;
+                }
+                Ok(_) | Err(Error::Done) => {}
+                Err(error) => panic!("client H3 poll failed: {:?}", error),
             }
-            Ok(other) => panic!("expected successful response Headers, got {:?}", other),
-            Err(error) => panic!("client H3 poll failed: {:?}", error),
         }
+        assert!(response_seen, "response headers must reach the peer");
         assert!(
             client_h3.masque_established(sid),
             "client readiness requires the peer's 2xx response"
@@ -1769,12 +1882,19 @@ mod tests {
             .connect_udp(&mut client, "proxy.test", "target.test:443")
             .expect("connect_udp");
         let mut packet = [0u8; 2048];
-        let (len, _) = client.send(&mut packet).expect("client send");
-        server.recv(&mut packet[..len], &recv_info).expect("server recv");
-        assert!(matches!(
-            server_h3.poll(&mut server),
-            Ok(Some((_, Event::Headers { .. })))
-        ));
+        let mut request_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            match server_h3.poll(&mut server) {
+                Ok(Some((_, Event::Headers { .. }))) => {
+                    request_seen = true;
+                    break;
+                }
+                Ok(_) | Err(Error::Done) => {}
+                Err(error) => panic!("server H3 poll failed: {:?}", error),
+            }
+        }
+        assert!(request_seen, "request headers must reach the peer");
 
         server_h3
             .send_response(
@@ -1784,19 +1904,19 @@ mod tests {
                 false,
             )
             .expect("reject CONNECT-UDP");
-        let (len, _) = server.send(&mut packet).expect("server response send");
-        let client_recv_info = crate::transport::RecvInfo {
-            from: recv_info.to,
-            to: recv_info.from,
-            ecn: None,
-        };
-        client
-            .recv(&mut packet[..len], &client_recv_info)
-            .expect("client response receive");
-        assert!(matches!(
-            client_h3.poll(&mut client),
-            Ok(Some((_, Event::Headers { .. })))
-        ));
+        let mut response_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            match client_h3.poll(&mut client) {
+                Ok(Some((_, Event::Headers { .. }))) => {
+                    response_seen = true;
+                    break;
+                }
+                Ok(_) | Err(Error::Done) => {}
+                Err(error) => panic!("client H3 poll failed: {:?}", error),
+            }
+        }
+        assert!(response_seen, "response headers must reach the peer");
         assert!(
             !client_h3.masque_established(sid),
             "non-2xx response must keep the data plane closed"
@@ -1813,6 +1933,10 @@ mod tests {
         let mut server_h3 =
             Connection::with_transport(&mut server, &Config::new().unwrap()).expect("server h3");
 
+        let mut packet = [0u8; 2048];
+        let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+        let _ = server_h3.poll(&mut server);
+
         const STREAM_ID: u64 = 248;
         server_h3.streams.insert(
             STREAM_ID,
@@ -1827,6 +1951,7 @@ mod tests {
                 fin_received: false,
                 masque_established: true,
                 masque_capsule_buffer: Vec::new(),
+                settings_received: false,
             },
         );
 
@@ -1839,7 +1964,6 @@ mod tests {
             .stream_send(STREAM_ID, &frame, true)
             .expect("send malformed MASQUE DATA frame");
 
-        let mut packet = [0u8; 2048];
         let (len, _) = client.send(&mut packet).expect("client send");
         server.recv(&mut packet[..len], &recv_info).expect("server recv");
 
@@ -1867,16 +1991,22 @@ mod tests {
         let mut server_h3 =
             Connection::with_transport(&mut server, &Config::new().unwrap()).expect("server h3");
 
+        let mut packet = [0u8; 2048];
+        let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+        let _ = server_h3.poll(&mut server);
+
         const RAW_STREAM_ID: u64 = 248;
-        let raw = vec![0xd1, 0xaa, 0xf0, 0x1e, 0xe6, 0x93, 0x7e, 0xc6];
+        // DATA with a 1,048,577-byte length is a malformed bounded frame, not an
+        // unknown extension. The parser must reject it before waiting for that body.
+        let raw = vec![0x00, 0x80, 0x10, 0x00, 0x01];
         client
             .stream_send(RAW_STREAM_ID, &raw, false)
             .expect("send malformed H3 stream data");
 
-        let mut packet = [0u8; 2048];
         let (len, _) = client.send(&mut packet).expect("client send");
         server.recv(&mut packet[..len], &recv_info).expect("server recv");
 
-        assert!(matches!(server_h3.poll(&mut server), Err(Error::ExcessiveLoad)));
+        let result = server_h3.poll(&mut server);
+        assert!(matches!(result, Err(Error::ExcessiveLoad)));
     }
 }

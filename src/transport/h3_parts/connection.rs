@@ -163,6 +163,7 @@ pub struct Connection {
     clock: crate::time_source::ProtocolClock,
     config: Config,
     next_stream_id: u64,
+    next_uni_stream_id: u64,
     streams: HashMap<u64, StreamState>,
     finished_streams: HashSet<u64>,
     pending_events: VecDeque<(u64, Event)>,
@@ -197,10 +198,15 @@ struct StreamState {
     fin_received: bool,
     masque_established: bool,
     masque_capsule_buffer: Vec<u8>,
+    settings_received: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StreamType {
+    /// A peer-initiated unidirectional stream whose type prefix is incomplete.
+    Unidirectional,
+    /// A unidirectional stream type that this implementation does not consume.
+    UnknownUnidirectional,
     Request,
     Response,
     Control,
@@ -287,6 +293,7 @@ impl Connection {
             clock: conn.protocol_clock(),
             config: config.clone(),
             next_stream_id: if conn.is_server() { 1 } else { 0 },
+            next_uni_stream_id: if conn.is_server() { 3 } else { 2 },
             streams: HashMap::new(),
             finished_streams: HashSet::new(),
             pending_events: VecDeque::new(),
@@ -298,15 +305,17 @@ impl Connection {
             goaway_received: false,
             push_streams: HashMap::new(),
             masque_flow: HashMap::new(),
-            next_push_id: if conn.is_server() { 2 } else { 3 }, // Server uses even IDs for push
+            // Server push streams are locally-created unidirectional streams, so their
+            // transport IDs use the server-initiated class (3, 7, 11, ...).
+            next_push_id: 3,
             stream_recv_buffer: vec![0u8; STREAM_RECV_BUFFER_SIZE],
             masque_recv_buffer: vec![0u8; masque_buffer_len],
         };
 
-        // Initialize control stream if client
-        if !conn.is_server() {
-            h3_conn.init_control_stream(conn)?;
-        }
+        // Try to emit the mandatory control-stream prologue immediately. A connection can be
+        // constructed before peer flow-control limits are available, so a flow-control refusal
+        // is deferred to the first operation that can make progress rather than failing setup.
+        h3_conn.init_control_stream(conn)?;
         Ok(h3_conn)
     }
 
@@ -315,18 +324,44 @@ impl Connection {
         self.encoder.set_index_policy(prefer);
     }
 
-    /// Initialize control stream
-    fn init_control_stream(&mut self, _conn: &mut super::Connection) -> Result<(), Error> {
-        // Create unidirectional control stream
-        let stream_id = self.next_stream_id;
-        self.next_stream_id += 4;
+    /// Initialize the local unidirectional control stream and emit its SETTINGS prologue.
+    ///
+    /// The transport's stream API is transactional: it either queues the complete byte slice or
+    /// returns an error. We therefore only publish `control_stream_id` after the stream type and
+    /// first SETTINGS frame have both been accepted. Flow-control refusal is intentionally
+    /// retryable because H3 construction can precede transport parameter establishment.
+    fn init_control_stream(&mut self, conn: &mut super::Connection) -> Result<(), Error> {
+        if self.control_stream_id.is_some() {
+            return Ok(());
+        }
+
+        let stream_id = self.next_uni_stream_id;
+        let mut settings_payload = Vec::with_capacity(32);
+        for (setting, value) in [
+            (0x01u64, self.config.qpack_max_table_capacity),
+            (0x06u64, self.config.max_field_section_size),
+            (0x07u64, self.config.qpack_blocked_streams),
+        ] {
+            Self::encode_varint(setting, &mut settings_payload);
+            Self::encode_varint(value, &mut settings_payload);
+        }
+
+        let mut prologue = Vec::with_capacity(settings_payload.len() + 4);
+        Self::encode_varint(0, &mut prologue); // H3 control stream type
+        Self::encode_varint(0x04, &mut prologue); // SETTINGS frame type
+        Self::encode_varint(settings_payload.len() as u64, &mut prologue);
+        prologue.extend_from_slice(&settings_payload);
+
+        let sent = match conn.stream_send(stream_id, &prologue, false) {
+            Ok(sent) if sent == prologue.len() => sent,
+            Ok(_) => return Err(Error::InternalError),
+            Err(crate::error::ConnectionError::FlowControl)
+            | Err(crate::error::ConnectionError::StreamLimit) => return Ok(()),
+            Err(_) => return Err(Error::InternalError),
+        };
+
+        self.next_uni_stream_id = stream_id.checked_add(4).ok_or(Error::StreamCreationError)?;
         self.control_stream_id = Some(stream_id);
-        // Send SETTINGS frame (omitted actual send)
-        let _settings = [
-            (0x01, self.config.qpack_max_table_capacity),
-            (0x07, self.config.qpack_blocked_streams),
-            (0x06, self.config.max_field_section_size),
-        ];
         self.streams.insert(
             stream_id,
             StreamState {
@@ -340,8 +375,12 @@ impl Connection {
                 fin_received: false,
                 masque_established: false,
                 masque_capsule_buffer: Vec::new(),
+                settings_received: true,
             },
         );
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.sent_bytes = sent;
+        }
         Ok(())
     }
 
@@ -354,6 +393,10 @@ impl Connection {
     ) -> Result<u64, Error> {
         if self.goaway_sent || self.goaway_received {
             return Err(Error::ClosedCriticalStream);
+        }
+        self.init_control_stream(conn)?;
+        if self.control_stream_id.is_none() {
+            return Err(Error::StreamCreationError);
         }
         let stream_id = self.next_stream_id;
         self.next_stream_id += 4;
@@ -381,6 +424,7 @@ impl Connection {
                 fin_received: false,
                 masque_established: false,
                 masque_capsule_buffer: Vec::new(),
+                settings_received: false,
             },
         );
         if fin {
@@ -397,6 +441,10 @@ impl Connection {
         headers: &[Header],
         fin: bool,
     ) -> Result<(), Error> {
+        self.init_control_stream(conn)?;
+        if self.control_stream_id.is_none() {
+            return Err(Error::StreamCreationError);
+        }
         let encoded = self.encode_headers_block(headers)?;
         let mut frame = Vec::with_capacity(encoded.len().saturating_add(10));
         frame.push(0x01);
@@ -414,6 +462,7 @@ impl Connection {
             fin_received: false,
             masque_established: false,
             masque_capsule_buffer: Vec::new(),
+            settings_received: false,
         });
         stream._headers = headers.to_vec();
         stream._stream_type = StreamType::Response;
@@ -437,6 +486,10 @@ impl Connection {
     ) -> Result<usize, Error> {
         if self.finished_streams.contains(&stream_id) {
             return Err(Error::Done);
+        }
+        self.init_control_stream(conn)?;
+        if self.control_stream_id.is_none() {
+            return Err(Error::StreamCreationError);
         }
         let stream_state = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
         if stream_state.fin_sent {
@@ -540,6 +593,7 @@ impl Connection {
 
     /// Process HTTP/3 frames and generate events
     pub fn poll(&mut self, conn: &mut super::Connection) -> Result<Option<(u64, Event)>, Error> {
+        self.init_control_stream(conn)?;
         // Process scheduled push streams and continue sending bodies
         self.process_scheduled_push_streams(conn);
         self.process_push_data(conn);
@@ -633,6 +687,9 @@ impl Connection {
 
     /// Process scheduled push streams (called from poll)
     fn process_scheduled_push_streams(&mut self, conn: &mut super::Connection) {
+        if self.init_control_stream(conn).is_err() || self.control_stream_id.is_none() {
+            return;
+        }
         let now = self.clock.now();
         let mut ready_streams = Vec::new();
 
@@ -679,6 +736,7 @@ impl Connection {
                     fin_received: false,
                     masque_established: false,
                     masque_capsule_buffer: Vec::new(),
+                    settings_received: false,
                 },
             );
             if let Some(promise) = self.push_streams.get_mut(&stream_id) {
@@ -749,6 +807,58 @@ impl Connection {
 
         Ok(push_ids)
     }
+
+    fn classify_peer_unidirectional_stream(
+        &mut self,
+        conn: &super::Connection,
+        stream_id: u64,
+        stream_type: u64,
+    ) -> Result<StreamType, Error> {
+        let peer_initiator = stream_id & 0x01;
+        let expected_initiator = if conn.is_server() { 0 } else { 1 };
+        if peer_initiator != expected_initiator {
+            return Err(Error::FrameUnexpected);
+        }
+
+        match stream_type {
+            0x00 => {
+                if self._peer_control_stream_id.is_some() {
+                    return Err(Error::ClosedCriticalStream);
+                }
+                self._peer_control_stream_id = Some(stream_id);
+                Ok(StreamType::Control)
+            }
+            0x01 if !conn.is_server() => Ok(StreamType::Push),
+            0x01 => Err(Error::FrameUnexpected),
+            0x54 => Ok(StreamType::WebTransportCover),
+            0x02 | 0x03 => Ok(StreamType::UnknownUnidirectional),
+            _ => Ok(StreamType::UnknownUnidirectional),
+        }
+    }
+
+    fn validate_settings_payload(&self, payload: &[u8]) -> Result<(), Error> {
+        let mut offset = 0usize;
+        let mut seen = HashSet::new();
+        while offset < payload.len() {
+            let (setting, setting_len) = Self::decode_varint(&payload[offset..])?;
+            offset = offset.checked_add(setting_len).ok_or(Error::FrameError)?;
+            let (value, value_len) = Self::decode_varint(&payload[offset..])?;
+            offset = offset.checked_add(value_len).ok_or(Error::FrameError)?;
+            if !seen.insert(setting) {
+                return Err(Error::FrameError);
+            }
+            match setting {
+                0x01 | 0x07 if value > 16 * 1024 * 1024 => return Err(Error::ExcessiveLoad),
+                0x06 if value > 16 * 1024 * 1024 => return Err(Error::ExcessiveLoad),
+                _ => {}
+            }
+        }
+        if offset != payload.len() {
+            return Err(Error::FrameError);
+        }
+        Ok(())
+    }
+
     fn process_stream(
         &mut self,
         conn: &mut super::Connection,
@@ -764,19 +874,25 @@ impl Connection {
         // Track state for peer-initiated streams (e.g. incoming requests) so DATA payload
         // can be buffered and returned by recv_body(). Locally-opened streams are already
         // present; this fills in the gap for streams we first observe here.
+        let is_unidirectional = stream_id & 0x02 != 0;
         self.streams.entry(stream_id).or_insert_with(|| StreamState {
             _headers: Vec::new(),
             body_buffer: Vec::new(),
             frame_buffer: Vec::new(),
             _received_bytes: 0,
-            _stream_type: StreamType::Request,
+            _stream_type: if is_unidirectional {
+                StreamType::Unidirectional
+            } else {
+                StreamType::Request
+            },
             sent_bytes: 0,
             fin_sent: false,
             fin_received: false,
             masque_established: false,
             masque_capsule_buffer: Vec::new(),
+            settings_received: false,
         });
-        let buffered = {
+        let mut buffered = {
             let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
             let buffered_len =
                 stream
@@ -797,6 +913,55 @@ impl Connection {
             stream.frame_buffer.extend_from_slice(received);
             std::mem::take(&mut stream.frame_buffer)
         };
+
+        if is_unidirectional
+            && self
+                .streams
+                .get(&stream_id)
+                .is_some_and(|stream| stream._stream_type == StreamType::Unidirectional)
+        {
+            let (stream_type, type_len) = match Self::decode_varint(&buffered) {
+                Ok(decoded) => decoded,
+                Err(Error::BufferTooShort) => {
+                    let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                    stream.frame_buffer.extend_from_slice(&buffered);
+                    if fin {
+                        return Err(Error::FrameError);
+                    }
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            let classified = self.classify_peer_unidirectional_stream(conn, stream_id, stream_type)?;
+            let mut prefix_len = type_len;
+            if stream_type == 0x01 {
+                let (_, push_id_len) = match Self::decode_varint(&buffered[type_len..]) {
+                    Ok(decoded) => decoded,
+                    Err(Error::BufferTooShort) => {
+                        let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                        stream.frame_buffer.extend_from_slice(&buffered);
+                        if fin {
+                            return Err(Error::FrameError);
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                prefix_len = prefix_len.checked_add(push_id_len).ok_or(Error::ExcessiveLoad)?;
+            }
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                stream._stream_type = classified;
+            }
+            buffered.drain(..prefix_len);
+            if classified == StreamType::UnknownUnidirectional {
+                if fin {
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.fin_received = true;
+                    }
+                }
+                return Ok(());
+            }
+        }
 
         // Parse complete frames and retain an incomplete tail for the next STREAM chunk.
         // MASQUE events are staged until the complete H3 DATA batch is valid so a malformed
@@ -829,6 +994,44 @@ impl Connection {
                 _ => break,
             };
             let frame_data = &buffered[body_start..body_end];
+            let stream_type = self
+                .streams
+                .get(&stream_id)
+                .map(|stream| stream._stream_type)
+                .ok_or(Error::IdError)?;
+            if stream_type == StreamType::Control {
+                let settings_received = self
+                    .streams
+                    .get(&stream_id)
+                    .is_some_and(|stream| stream.settings_received);
+                if (!settings_received && frame_type != 0x04)
+                    || (settings_received && frame_type == 0x04)
+                {
+                    return Err(if frame_type == 0x04 {
+                        Error::FrameError
+                    } else {
+                        Error::FrameUnexpected
+                    });
+                }
+                if frame_type == 0x04 {
+                    self.validate_settings_payload(frame_data)?;
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.settings_received = true;
+                    }
+                } else if matches!(frame_type, 0x00 | 0x01) {
+                    return Err(Error::FrameUnexpected);
+                }
+            } else if matches!(
+                stream_type,
+                StreamType::Request
+                    | StreamType::Response
+                    | StreamType::Masque
+                    | StreamType::Push
+                    | StreamType::WebTransportCover
+            ) && frame_type == 0x04
+            {
+                return Err(Error::FrameUnexpected);
+            }
             match frame_type {
                 0x00 => {
                     // DATA frame; if this stream is MASQUE, decode capsules
@@ -879,16 +1082,26 @@ impl Connection {
                         }
                     }
                 }
-                0x04 => { /* SETTINGS */ }
+                0x04 => { /* SETTINGS was validated and recorded above. */ }
                 _ => {}
             }
-            offset += frame_offset + frame_len;
+            offset = offset
+                .checked_add(frame_offset)
+                .and_then(|value| value.checked_add(frame_len))
+                .ok_or(Error::ExcessiveLoad)?;
         }
         if offset != buffered.len() {
             let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
             stream.frame_buffer.extend_from_slice(&buffered[offset..]);
         }
         if fin {
+            if self
+                .streams
+                .get(&stream_id)
+                .is_some_and(|stream| stream._stream_type == StreamType::Control)
+            {
+                return Err(Error::ClosedCriticalStream);
+            }
             if self.streams.get(&stream_id).is_some_and(|stream| !stream.frame_buffer.is_empty()) {
                 return Err(Error::FrameError);
             }
@@ -910,13 +1123,12 @@ impl Connection {
     }
 
     /// Parse frame header
-    fn parse_frame_header(buf: &[u8]) -> Result<(u8, usize, usize), Error> {
-        if buf.is_empty() {
-            return Err(Error::BufferTooShort);
-        }
-        let frame_type = buf[0];
-        let (frame_len, offset) = Self::decode_varint(&buf[1..])?;
-        Ok((frame_type, frame_len as usize, 1 + offset))
+    fn parse_frame_header(buf: &[u8]) -> Result<(u64, usize, usize), Error> {
+        let (frame_type, type_offset) = Self::decode_varint(buf)?;
+        let (frame_len, len_offset) = Self::decode_varint(&buf[type_offset..])?;
+        let frame_len = usize::try_from(frame_len).map_err(|_| Error::ExcessiveLoad)?;
+        let header_len = type_offset.checked_add(len_offset).ok_or(Error::ExcessiveLoad)?;
+        Ok((frame_type, frame_len, header_len))
     }
 
     /// Encode variable-length integer (SIMD-dispatched)

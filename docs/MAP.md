@@ -435,6 +435,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |   |       `-- TunnelsView.svelte
 |   |   |   |   |-- domain-fronting-policy.ts
 |   |   |   |   |-- format.ts
+|   |   |   |   |-- ipc-contracts.ts
 |   |   |   |   |-- pill-styles.ts
 |   |   |   |   |-- policy-display.ts
 |   |   |   |   |-- qkey-utils.ts
@@ -476,6 +477,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   `-- todo/
 |       `-- done/          (completed detail files)
 |-- examples
+|   |-- bench_cli
+|   |   `-- mod.rs
 |   |-- brain_probe.rs
 |   |-- compress_bench.rs
 |   |-- crypto_backend_bench.rs
@@ -621,6 +624,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |           |   |-- format.test.ts
 |   |   |   |           |   |-- policy-display.test.ts
 |   |   |   |           |   |-- qkey-utils.test.ts
+|   |   |   |           |   |-- ipc-contracts.test.ts
 |   |   |   |           |   |-- tunnel-validators.test.ts
 |   |   |   |           |   `-- updater.test.ts
 |   |   |   |           |-- routes
@@ -778,6 +782,10 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   `-- rt-xor-sse2-parity.rs
 |   |   |-- smoke
 |   |   |   |-- smoke-avx10.sh
+|   |   |   |-- smoke-bench-example-cli.sh
+|   |   |   |-- smoke-engine-example.sh
+|   |   |   |-- smoke-netfilter-fastpath.sh
+|   |   |   |-- smoke-shell-portability.sh
 |   |   |   |-- smoke-sve2.sh
 |   |   |   `-- smoke-ui-frontends.sh
 |   |   |-- suites
@@ -1826,7 +1834,7 @@ The audit remains open. These reconciliations document current evidence and owne
 ## Audit Reconciliation (2026-08-07, Solver/H3/Transport ownership)
 
 - Solver: `src/fec/parts/decoders.rs` still returns the Wiedemann right-hand side after candidate construction; validation and fallback do not establish a non-identity solve. TODO-690 remains open, independent of the AMX path in TODO-816/TODO-676.
-- H3: `src/transport/h3_parts/connection.rs` initializes only client-local control bookkeeping, does not emit a control stream/SETTINGS frame, parses frame types as `u8`, and lacks unidirectional stream-type and fragmented-control state. TODO-691/TODO-692 remain open.
+- H3: `src/transport/h3_parts/connection.rs` now emits transactional client/server unidirectional control-stream prologues with SETTINGS, buffers and classifies peer unidirectional prefixes, validates control ownership and SETTINGS/frame legality, and parses full QUIC-varint frame types and lengths. The shared transport writable queue skips drained entries so H3 responses are not starved behind the control stream. TODO-691/TODO-692 are locally complete; native/external proof boundaries remain separate.
 - Flow control and ACK ownership: receive accounting precedes overlap trimming, and ACK state is cleared before capacity/serialization admission. TODO-693/TODO-694 remain open.
 - Recovery and lifecycle: loss detection materializes an unbounded acknowledged prefix, timeout handling resets aggregate bytes without proving recovery-space discard, and close priority can remain behind a front ACK-eliciting frame. TODO-695/TODO-696/TODO-697 remain open.
 - FEC/DATAGRAM commit: buffered FEC packets and DATAGRAM items can be removed before later write/seal success. TODO-698 remains open; pooled-buffer return work in TODO-831/TODO-832/TODO-833 covers allocation ownership, not queue commit ownership.

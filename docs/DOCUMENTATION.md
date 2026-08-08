@@ -652,6 +652,7 @@ Notes:
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
 - Core H3/MASQUE is the production VPN/TUN carrier and the only active MASQUE implementation. Its H3 capsule parser buffers split DATA frames, rejects malformed/truncated FIN tails, and stages decoded events until the enclosing batch is valid.
+- HTTP/3 transport compliance: both endpoint roles emit a transactional unidirectional control-stream type plus one SETTINGS frame (`2,6,...` client IDs and `3,7,...` server IDs); peer control ownership is validated before frame dispatch, SETTINGS values and duplicate identifiers are bounded, and frame type/length parsing uses checked QUIC varints. Drained transport stream-queue entries are removed before later writable streams so a control prologue cannot starve a response.
 - Per-packet MASQUE TX/downlink logs are `trace`-only in the production hot path. CONNECT-UDP lifecycle and peer-flow registration remain `info` for operator observability without packet-rate log amplification.
 
 Production Mode Policy

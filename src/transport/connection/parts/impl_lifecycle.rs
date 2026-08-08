@@ -345,21 +345,20 @@ impl Connection {
         }) {
             return true;
         }
-        let Some(stream_id) = self.writable_streams.front() else {
-            return false;
-        };
-        let Some(stream) = self.streams.get(stream_id) else {
-            return false;
-        };
-        #[cfg(not(feature = "stream_ring_buffer"))]
-        let has_data = !stream.send_buf.is_empty();
-        #[cfg(feature = "stream_ring_buffer")]
-        let has_data = !stream.send_ring.is_empty();
-        if has_data {
-            self.stream_ledger_has_capacity(1)
-        } else {
-            stream.send_fin && self.stream_ledger_has_capacity(0)
-        }
+        self.writable_streams.iter().any(|stream_id| {
+            let Some(stream) = self.streams.get(stream_id) else {
+                return false;
+            };
+            #[cfg(not(feature = "stream_ring_buffer"))]
+            let has_data = !stream.send_buf.is_empty();
+            #[cfg(feature = "stream_ring_buffer")]
+            let has_data = !stream.send_ring.is_empty();
+            if has_data {
+                self.stream_ledger_has_capacity(1)
+            } else {
+                stream.send_fin && self.stream_ledger_has_capacity(0)
+            }
+        })
     }
 
     fn stage_stream_transmission(

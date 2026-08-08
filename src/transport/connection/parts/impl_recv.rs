@@ -1057,6 +1057,7 @@ impl Connection {
                     // forever because maybe_flush_one_writable_stream only looks
                     // at the front of the queue.
                     self.remove_front_writable_stream(stream_id);
+                    return self.maybe_flush_one_writable_stream(out, off);
                 }
             }
         }
