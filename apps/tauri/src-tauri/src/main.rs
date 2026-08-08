@@ -187,6 +187,26 @@ fn parse_qkey_domain_fronting_sni_policy(extra: Option<&str>) -> Option<DomainFr
     None
 }
 
+/// Count Unicode scalar values, which is what the `MAX_*_CHARS` limits mean.
+///
+/// `String::len()` is a byte count, so it disagreed with these constants for any
+/// non-ASCII text and, worse, the byte index it produced was then handed to
+/// `String::truncate`, which panics when the index is not a character boundary. A
+/// hostile or merely non-English persisted state could therefore abort the host
+/// during startup sanitization.
+fn char_count(value: &str) -> usize {
+    value.chars().count()
+}
+
+/// Truncate to `max` scalar values, never inside a code point.
+///
+/// Used only for human-readable display fields. Identifiers, endpoints, and
+/// credentials are rejected instead, because a shortened one silently means something
+/// different rather than the same thing abbreviated.
+fn truncate_chars(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
+}
+
 fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState, String> {
     if state.schema_version == 0 {
         state.schema_version = 1;
@@ -212,32 +232,37 @@ fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState,
         if t.id.is_empty() {
             continue;
         }
-        if t.id.len() > MAX_ID_CHARS {
-            t.id.truncate(MAX_ID_CHARS);
+        // A truncated identifier is a different identifier: it can collide with
+        // another tunnel or orphan the selected-tunnel reference. Drop the entry.
+        if char_count(&t.id) > MAX_ID_CHARS {
+            continue;
         }
 
         t.name = t.name.trim().to_string();
         if t.name.is_empty() {
             t.name = "Tunnel".to_string();
         }
-        if t.name.len() > MAX_NAME_CHARS {
-            t.name.truncate(MAX_NAME_CHARS);
+        // A display name is the one field where shortening keeps its meaning.
+        if char_count(&t.name) > MAX_NAME_CHARS {
+            t.name = truncate_chars(&t.name, MAX_NAME_CHARS);
         }
 
         t.remote = t.remote.trim().to_string();
         if t.remote.is_empty() {
             continue;
         }
-        if t.remote.len() > MAX_REMOTE_CHARS {
-            t.remote.truncate(MAX_REMOTE_CHARS);
+        // A truncated endpoint points somewhere else, so it is rejected rather than
+        // silently rewritten to a different destination.
+        if char_count(&t.remote) > MAX_REMOTE_CHARS {
+            continue;
         }
 
         t.sni = t.sni.trim().to_string();
         if t.sni.is_empty() {
             continue;
         }
-        if t.sni.len() > MAX_SNI_CHARS {
-            t.sni.truncate(MAX_SNI_CHARS);
+        if char_count(&t.sni) > MAX_SNI_CHARS {
+            continue;
         }
         if !is_valid_sni_host(&t.sni) {
             continue;
@@ -247,11 +272,12 @@ fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState,
             .debug_sni_override
             .as_deref()
             .and_then(normalize_sni_host)
-            .filter(|v| v.len() <= MAX_SNI_CHARS);
+            .filter(|v| char_count(v) <= MAX_SNI_CHARS);
 
+        // A truncated credential is not a shorter credential, it is an invalid one.
+        // Dropping it here means `has_token` below reports the truth.
         let qk = t.qkey.trim().to_string();
-        t.qkey =
-            if qk.len() > MAX_QKEY_CHARS { qk.chars().take(MAX_QKEY_CHARS).collect() } else { qk };
+        t.qkey = if char_count(&qk) > MAX_QKEY_CHARS { String::new() } else { qk };
 
         t.has_token = qkey_is_valid_bearer(&t.qkey);
 
@@ -275,8 +301,8 @@ fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState,
             let loc = loc.trim().to_string();
             if loc.is_empty() {
                 None
-            } else if loc.len() > MAX_LOCATION_CHARS {
-                Some(loc.chars().take(MAX_LOCATION_CHARS).collect())
+            } else if char_count(&loc) > MAX_LOCATION_CHARS {
+                Some(truncate_chars(&loc, MAX_LOCATION_CHARS))
             } else {
                 Some(loc)
             }
@@ -2544,8 +2570,7 @@ mod tests {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
 
-        let base =
-            std::env::temp_dir().join(format!("qf-desktop-state-corrupt-{}", test_nonce()));
+        let base = std::env::temp_dir().join(format!("qf-desktop-state-corrupt-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
         std::fs::write(&path, "not-json").expect("write");
@@ -2562,8 +2587,8 @@ mod tests {
     fn load_state_from_path_propagates_unreadable_state_path() {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
-        let base = std::env::temp_dir()
-            .join(format!("qf-desktop-state-unreadable-{}", test_nonce()));
+        let base =
+            std::env::temp_dir().join(format!("qf-desktop-state-unreadable-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
         std::fs::create_dir(&path).expect("directory state path");
@@ -2578,8 +2603,7 @@ mod tests {
     fn restart_loads_persisted_start_at_login_without_fabricating_state() {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
-        let base =
-            std::env::temp_dir().join(format!("qf-desktop-state-restart-{}", test_nonce()));
+        let base = std::env::temp_dir().join(format!("qf-desktop-state-restart-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
         let state = PersistedState {
@@ -2610,8 +2634,7 @@ mod tests {
         let store = secrets::MemorySecretStore::new();
         let state_store = state_store::FileStateStore::new();
 
-        let base =
-            std::env::temp_dir().join(format!("qf-desktop-state-redact-{}", test_nonce()));
+        let base = std::env::temp_dir().join(format!("qf-desktop-state-redact-{}", test_nonce()));
         let _ = std::fs::create_dir_all(&base);
         let path = base.join("desktop_state.json");
 
@@ -2688,14 +2711,107 @@ mod tests {
         assert!(sanitized.tunnels[0].name == "Tunnel");
         assert_eq!(sanitized.tunnels[0].country_code.as_deref(), Some("DE"));
         assert!(sanitized.tunnels[0].location.as_deref().unwrap_or("").len() <= MAX_LOCATION_CHARS);
-        assert!(sanitized.tunnels[0].qkey.len() <= MAX_QKEY_CHARS);
+        // An over-long credential is now cleared rather than shortened into an invalid
+        // one, so `has_token` reports the truth about what is actually stored.
+        assert!(sanitized.tunnels[0].qkey.is_empty());
+        assert!(!sanitized.tunnels[0].has_token);
         assert!(sanitized.tunnels[0].created_at > 0);
+    }
+
+    /// A tunnel whose fields are all valid, so a test can vary exactly one of them.
+    fn valid_tunnel() -> PersistedTunnel {
+        PersistedTunnel {
+            id: "tunnel-1".to_string(),
+            name: "Frankfurt".to_string(),
+            remote: "1.2.3.4:4433".to_string(),
+            sni: "example.com".to_string(),
+            qkey: String::new(),
+            created_at: 1,
+            country_code: None,
+            location: None,
+            has_token: false,
+            debug_sni_override: None,
+        }
+    }
+
+    fn sanitize_one(tunnel: PersistedTunnel) -> Vec<PersistedTunnel> {
+        sanitize_persisted_state(PersistedState {
+            schema_version: 1,
+            tunnels: vec![tunnel],
+            selected_tunnel_id: None,
+            settings: serde_json::json!({}),
+        })
+        .expect("sanitize state")
+        .tunnels
+    }
+
+    #[test]
+    fn multibyte_persisted_state_never_panics_on_a_character_boundary() {
+        // Each of these exceeds its byte limit while the fixed byte index falls inside
+        // a code point, which is what made `String::truncate` abort the host. The
+        // characters span 2, 3, and 4 byte encodings plus a combining sequence.
+        for filler in ["\u{e9}", "\u{5b57}", "\u{1f680}", "e\u{301}"] {
+            let long_name: String = filler.repeat(MAX_NAME_CHARS + 10);
+            let sanitized = sanitize_one(PersistedTunnel { name: long_name, ..valid_tunnel() });
+            assert_eq!(sanitized.len(), 1, "a long name must keep the tunnel");
+            let name = &sanitized[0].name;
+            assert!(
+                name.chars().count() <= MAX_NAME_CHARS,
+                "{filler}: name must be limited in scalars, got {}",
+                name.chars().count()
+            );
+            assert!(name.is_char_boundary(name.len()), "{filler}: name must stay valid UTF-8");
+
+            let long_location: String = filler.repeat(MAX_LOCATION_CHARS + 10);
+            let sanitized =
+                sanitize_one(PersistedTunnel { location: Some(long_location), ..valid_tunnel() });
+            let location = sanitized[0].location.clone().expect("location retained");
+            assert!(location.chars().count() <= MAX_LOCATION_CHARS, "{filler}: location limit");
+        }
+    }
+
+    #[test]
+    fn oversized_identity_fields_are_rejected_rather_than_silently_rewritten() {
+        // Shortening any of these produces a different tunnel, a different endpoint, or
+        // an invalid credential, so the entry is dropped instead.
+        let long = "\u{e9}".repeat(MAX_REMOTE_CHARS + 10);
+        assert!(
+            sanitize_one(PersistedTunnel { id: long.clone(), ..valid_tunnel() }).is_empty(),
+            "an over-long id must not become a different id"
+        );
+        assert!(
+            sanitize_one(PersistedTunnel { remote: long.clone(), ..valid_tunnel() }).is_empty(),
+            "an over-long remote must not become a different endpoint"
+        );
+        assert!(
+            sanitize_one(PersistedTunnel { sni: long, ..valid_tunnel() }).is_empty(),
+            "an over-long SNI must not become a different host"
+        );
+
+        let long_key = "\u{1f680}".repeat(MAX_QKEY_CHARS + 10);
+        let sanitized = sanitize_one(PersistedTunnel { qkey: long_key, ..valid_tunnel() });
+        assert_eq!(sanitized.len(), 1, "the tunnel itself stays; only the credential is dropped");
+        assert!(sanitized[0].qkey.is_empty());
+        assert!(!sanitized[0].has_token);
+    }
+
+    #[test]
+    fn values_at_the_scalar_limit_are_accepted_unchanged() {
+        // The boundary itself must be legal, otherwise the limit is off by one and
+        // multibyte values are rejected far below the documented size.
+        let name = "\u{5b57}".repeat(MAX_NAME_CHARS);
+        let sanitized = sanitize_one(PersistedTunnel { name: name.clone(), ..valid_tunnel() });
+        assert_eq!(sanitized[0].name, name);
+
+        let id = "\u{e9}".repeat(MAX_ID_CHARS);
+        let sanitized = sanitize_one(PersistedTunnel { id: id.clone(), ..valid_tunnel() });
+        assert_eq!(sanitized.len(), 1, "an id at the limit must be accepted");
+        assert_eq!(sanitized[0].id, id);
     }
 
     #[test]
     fn desktop_timestamp_conversion_rejects_pre_epoch_without_epoch_zero() {
-        let before_epoch =
-            std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let before_epoch = std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
         let error = timestamp_ms_at(before_epoch).expect_err("pre-epoch timestamp");
         assert!(error.contains("before the Unix epoch"), "{error}");
     }
@@ -2843,7 +2959,7 @@ mod tests {
             remote: "1.2.3.4:4433".to_string(),
             sni: "example.com".to_string(),
             qkey: "QKey-abc".to_string(),
-                created_at: test_timestamp_ms(),
+            created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: true,
@@ -2855,7 +2971,7 @@ mod tests {
             remote: "5.6.7.8:4433".to_string(),
             sni: "fallback.example.com".to_string(),
             qkey: "QKey-def".to_string(),
-                created_at: test_timestamp_ms(),
+            created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: true,
@@ -2879,7 +2995,7 @@ mod tests {
             remote: "1.1.1.1:4433".to_string(),
             sni: "empty.example.com".to_string(),
             qkey: String::new(),
-                created_at: test_timestamp_ms(),
+            created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: false,
@@ -2891,7 +3007,7 @@ mod tests {
             remote: "2.2.2.2:4433".to_string(),
             sni: "valid.example.com".to_string(),
             qkey: "QKey-xyz".to_string(),
-                created_at: test_timestamp_ms(),
+            created_at: test_timestamp_ms(),
             country_code: None,
             location: None,
             has_token: true,

@@ -55,11 +55,7 @@ impl FileStateStore {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&tmp)
+                std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)
             }
             #[cfg(not(unix))]
             {
@@ -85,11 +81,9 @@ impl FileStateStore {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| cleanup(e.to_string()))?;
-            let mode = std::fs::metadata(&tmp)
-                .map_err(|e| cleanup(e.to_string()))?
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode =
+                std::fs::metadata(&tmp).map_err(|e| cleanup(e.to_string()))?.permissions().mode()
+                    & 0o777;
             if mode != 0o600 {
                 return Err(cleanup(format!(
                     "refusing to publish desktop state: temporary file has mode {mode:#o}, expected 0o600"
