@@ -72,14 +72,34 @@ impl std::fmt::Display for RestartPolicy {
     }
 }
 
+/// Installed executable path used by both the generated unit and the shipped one.
+pub const DEFAULT_EXECUTABLE: &str = "/usr/local/bin/quicfuscate";
+/// Default listen address for a generated server unit.
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:4433";
+/// Default certificate path for a generated server unit.
+pub const DEFAULT_CERT: &str = "/etc/quicfuscate/certs/server.crt";
+/// Default private-key path for a generated server unit.
+pub const DEFAULT_KEY: &str = "/etc/quicfuscate/certs/server.key";
+/// Default server configuration path.
+pub const DEFAULT_SERVER_CONFIG: &str = "/etc/quicfuscate/server.toml";
+/// Default client configuration path.
+pub const DEFAULT_CLIENT_CONFIG: &str = "/etc/quicfuscate/client.toml";
+/// Project URL published in generated unit metadata.
+pub const PROJECT_URL: &str = "https://github.com/Christopher-Schulze/QuicFuscate";
+
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             name: "quicfuscate".to_string(),
             description: "QuicFuscate VPN Server".to_string(),
-            exec_start:
-                "/usr/local/bin/quicfuscate --mode server --config /etc/quicfuscate/server.toml"
-                    .to_string(),
+            // The CLI takes a `server` subcommand with required --cert and --key. The
+            // old `--mode server` form has not existed for some time, so a unit
+            // generated from this default could not start, while the separately
+            // shipped installer unit worked. Both now describe the same invocation.
+            exec_start: format!(
+                "{DEFAULT_EXECUTABLE} server --listen {DEFAULT_LISTEN} \
+                 --cert {DEFAULT_CERT} --key {DEFAULT_KEY} --config {DEFAULT_SERVER_CONFIG}"
+            ),
             working_directory: Some("/var/lib/quicfuscate".to_string()),
             user: None,
             group: None,
@@ -114,9 +134,7 @@ impl ServiceConfig {
         Self {
             name: "quicfuscate-client".to_string(),
             description: "QuicFuscate VPN Client".to_string(),
-            exec_start:
-                "/usr/local/bin/quicfuscate --mode client --config /etc/quicfuscate/client.toml"
-                    .to_string(),
+            exec_start: format!("{DEFAULT_EXECUTABLE} client --config {DEFAULT_CLIENT_CONFIG}"),
             user: None, // Run as root for TUN
             group: None,
             health_port: None,
@@ -131,7 +149,7 @@ impl ServiceConfig {
         // [Unit] section
         content.push_str("[Unit]\n");
         content.push_str(&format!("Description={}\n", self.description));
-        content.push_str("Documentation=https://github.com/your-org/quicfuscate\n");
+        content.push_str(&format!("Documentation={PROJECT_URL}\n"));
 
         for dep in &self.after {
             content.push_str(&format!("After={}\n", dep));
@@ -567,5 +585,59 @@ mod tests {
         let config = ServiceConfig::client();
         assert_eq!(config.name, "quicfuscate-client");
         assert!(config.user.is_none());
+    }
+
+    #[test]
+    fn the_generated_command_matches_the_shipped_unit_and_the_current_cli() {
+        // The generator emitted `--mode server`, a form the CLI has not accepted for a
+        // long time, so a unit built from it could not start while the separately
+        // shipped installer unit worked. This compares both against each other and
+        // against the argument names the CLI actually declares, so a rename in either
+        // place fails here instead of at a customer's first boot.
+        let shipped = include_str!("../../../scripts/install/quicfuscate-server.service");
+        let generated = ServiceConfig::default().generate_service();
+
+        assert!(
+            !generated.contains("--mode"),
+            "the removed --mode form must not reappear: {generated}"
+        );
+        assert!(
+            shipped.contains("/usr/local/bin/quicfuscate server"),
+            "the shipped unit is the reference for the invocation form"
+        );
+        assert!(
+            generated.contains(&format!("ExecStart={DEFAULT_EXECUTABLE} server ")),
+            "the generated unit must use the same executable and subcommand: {generated}"
+        );
+
+        // Every argument the shipped unit passes must be one the generator knows about,
+        // and the arguments the CLI marks required must be present in both.
+        for required in ["--listen", "--cert", "--key", "--config"] {
+            assert!(shipped.contains(required), "the shipped unit must pass {required}");
+            assert!(
+                generated.contains(required),
+                "the generated unit must pass {required}: {generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_metadata_points_at_the_real_project() {
+        let generated = ServiceConfig::default().generate_service();
+        assert!(
+            generated.contains(&format!("Documentation={PROJECT_URL}")),
+            "generated metadata must name the real repository: {generated}"
+        );
+        assert!(
+            !generated.contains("your-org"),
+            "the placeholder repository URL must not reappear: {generated}"
+        );
+    }
+
+    #[test]
+    fn the_client_command_uses_the_client_subcommand() {
+        let generated = ServiceConfig::client().generate_service();
+        assert!(generated.contains(&format!("ExecStart={DEFAULT_EXECUTABLE} client ")));
+        assert!(!generated.contains("--mode"));
     }
 }
