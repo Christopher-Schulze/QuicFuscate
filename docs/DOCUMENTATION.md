@@ -4161,7 +4161,7 @@ Guardrail remediation playbook:
 - E2E profile utilities: `util-e2e-decode-all-profiles.sh`, `util-e2e-verify-all.sh`, `util-e2e-verify-current.sh`
  
 General utilities (`scripts/utils/`):
-- `util-analyze-codebase.sh`, `util-check-quality.sh`, `util-release-source-package.sh`
+- `util-analyze-codebase.sh`, `util-check-quality.sh`, `util-release-source-package.sh`. `util-release-source-package.sh` builds from the filesystem, not from Git, so being gitignored keeps nothing out of the archive (TODO-739). It excludes `config/local`, credential and key material by name (`*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `.env*`, `admin-auth.json`, `*qkeys.json`, `dev-certs`, `id_rsa`, `id_ed25519`) and the internal task registry under `docs/todo`, which had been removed from the public tree but would have been republished from disk. Exclusion is the intent, not the proof: after the archive is built the gate lists every member against the same sensitive patterns and greps the decompressed contents for private-key PEM headers, so a key stored under an innocuous name is caught too. Any hit deletes the archive and exits nonzero, retaining the manifest, because a mistyped exclusion fails silently and a published secret cannot be recalled.
 - `util-cleanup-workspace.sh` - primary cleanup entrypoint (`--safe|--full`, `--keep-releases N`, optional `--cargo-clean`)
 - `util-dev-uis-start.sh`, `util-dev-uis-stop.sh` - start/stop local frontend dev servers with PID tracking under `scripts/out/run/dev-uis`
 - `util-run-local-ui.sh`, `util-stop-local-ui.sh` - local stack orchestration helpers for UI + server workflows
