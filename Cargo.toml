@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/qf-common",
 ]
 exclude = [
     "apps/tauri/src-tauri",
@@ -22,6 +23,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+qf-common = { path = "crates/qf-common" }
 aligned_box = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-native-certs = "0.8"

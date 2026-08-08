@@ -313,6 +313,7 @@ pub fn inject_pattern(data: &mut [u8], pattern: &[u8], positions: &[usize]) {
 }
 
 #[inline(always)]
+#[cfg(any(test, feature = "rust-tests"))]
 fn complete_pattern_end(data_len: usize, position: usize, pattern_len: usize) -> Option<usize> {
     let available = data_len.checked_sub(position)?;
     if pattern_len > available {

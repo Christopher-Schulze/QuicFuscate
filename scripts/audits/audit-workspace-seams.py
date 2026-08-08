@@ -40,7 +40,12 @@ def run(root: Path, command: list[str]) -> str:
 
 
 def relative_owner(path: Path, root: Path, top_modules: set[str]) -> str:
-    parts = path.relative_to(root / "src").parts
+    relative = path.relative_to(root)
+    if relative.parts[0] == "crates":
+        if len(relative.parts) < 3 or relative.parts[2] != "src":
+            fail(f"workspace crate source path is outside its src directory: {path}")
+        return relative.parts[1]
+    parts = relative.relative_to(Path("src")).parts
     first = parts[0]
     if first == "lib.rs":
         return "__root__"
@@ -58,7 +63,13 @@ def relative_owner(path: Path, root: Path, top_modules: set[str]) -> str:
 def source_inventory(root: Path) -> dict[str, Any]:
     lib_path = root / "src/lib.rs"
     top_modules = set(MOD_RE.findall(lib_path.read_text(encoding="utf-8")))
-    files = sorted((root / "src").rglob("*.rs"))
+    source_roots = [root / "src"]
+    source_roots.extend(
+        path / "src"
+        for path in sorted((root / "crates").iterdir())
+        if path.is_dir() and (path / "src").is_dir()
+    )
+    files = sorted({path for source_root in source_roots for path in source_root.rglob("*.rs")})
     stats: dict[str, dict[str, int]] = collections.defaultdict(lambda: {"files": 0, "lines": 0})
     edges: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -155,31 +166,66 @@ def cargo_inventory(root: Path) -> dict[str, Any]:
     metadata = json.loads(run(root, ["cargo", "metadata", "--no-deps", "--format-version", "1"]))
     workspace_ids = set(metadata["workspace_members"])
     packages = [package for package in metadata["packages"] if package["id"] in workspace_ids]
-    if len(packages) != 1:
-        fail(f"expected one current workspace package, found {len(packages)}")
-    package = packages[0]
-    dependency_names = sorted({dependency["name"] for dependency in package["dependencies"]})
-    dependencies_by_kind: dict[str, set[str]] = collections.defaultdict(set)
-    for dependency in package["dependencies"]:
-        dependencies_by_kind[dependency.get("kind") or "normal"].add(dependency["name"])
-    targets = [
-        {
-            "name": target["name"],
-            "kind": sorted(target["kind"]),
-            "required_features": sorted(target.get("required-features") or []),
+    if not packages:
+        fail("current workspace has no package metadata")
+
+    def package_inventory(package: dict[str, Any]) -> dict[str, Any]:
+        dependency_names = sorted({dependency["name"] for dependency in package["dependencies"]})
+        dependencies_by_kind: dict[str, set[str]] = collections.defaultdict(set)
+        for dependency in package["dependencies"]:
+            dependencies_by_kind[dependency.get("kind") or "normal"].add(dependency["name"])
+        targets = [
+            {
+                "name": target["name"],
+                "kind": sorted(target["kind"]),
+                "required_features": sorted(target.get("required-features") or []),
+            }
+            for target in package["targets"]
+        ]
+        return {
+            "name": package["name"],
+            "version": package["version"],
+            "dependencies": dependency_names,
+            "dependencies_by_kind": {
+                kind: sorted(names) for kind, names in sorted(dependencies_by_kind.items())
+            },
+            "features": sorted(package["features"]),
+            "targets": sorted(targets, key=lambda target: (target["name"], target["kind"])),
         }
-        for target in package["targets"]
+
+    root_manifest = (root / "Cargo.toml").resolve()
+    root_packages = [
+        package
+        for package in packages
+        if Path(package["manifest_path"]).resolve() == root_manifest
     ]
+    if len(root_packages) != 1:
+        fail(f"expected one root package, found {len(root_packages)}")
+    package = root_packages[0]
+    workspace_names = {item["name"] for item in packages}
+    workspace_dependency_edges = [
+        {
+            "source": item["name"],
+            "target": dependency["name"],
+            "kind": dependency.get("kind") or "normal",
+        }
+        for item in packages
+        for dependency in item["dependencies"]
+        if dependency["name"] in workspace_names
+    ]
+    workspace_dependency_edges.sort(key=lambda edge: (edge["source"], edge["target"], edge["kind"]))
+    inventories = [package_inventory(item) for item in packages]
     return {
-        "workspace_members": sorted(workspace_ids),
+        "workspace_members": sorted(workspace_names),
+        "workspace_packages": sorted(inventories, key=lambda item: item["name"]),
+        "workspace_dependency_edges": workspace_dependency_edges,
         "package": package["name"],
         "version": package["version"],
-        "dependencies": dependency_names,
-        "dependencies_by_kind": {
-            kind: sorted(names) for kind, names in sorted(dependencies_by_kind.items())
+        **{
+            key: value
+            for key, value in package_inventory(package).items()
+            if key not in {"name", "version"}
         },
-        "features": sorted(package["features"]),
-        "targets": sorted(targets, key=lambda target: (target["name"], target["kind"])),
     }
 
 

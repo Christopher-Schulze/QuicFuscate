@@ -1,0 +1,12 @@
+[package]
+name = "qf-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+getrandom = "0.2"
+log = "0.4"
+zeroize = "1.8"

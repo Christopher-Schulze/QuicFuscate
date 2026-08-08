@@ -1790,6 +1790,7 @@ fn metrics_response(request: &[u8], metrics: &Metrics) -> String {
     }
 }
 
+#[cfg(any(test, feature = "rust-tests"))]
 fn global_metrics_response(request: &[u8]) -> String {
     let Some((method, path)) = parse_request_line(request) else {
         return bad_request_response();

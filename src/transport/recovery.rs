@@ -480,6 +480,7 @@ impl Recovery {
         }
     }
 
+    #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) fn stealth_mode_active(&self) -> bool {
         matches!(
             &self.cc,

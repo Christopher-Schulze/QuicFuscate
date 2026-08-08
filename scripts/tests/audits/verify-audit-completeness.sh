@@ -83,6 +83,7 @@ def tracked_class(path: str) -> str | None:
         ("assets/", "runtime-assets"),
         ("benches/", "benchmarks"),
         ("config/", "configuration"),
+        ("crates/", "rust-production"),
         ("docs/", "documentation"),
         ("examples/", "examples"),
         ("packages/", "frontend-packages"),
