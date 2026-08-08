@@ -478,7 +478,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stealth_config,
         fec_config,
         opt_config,
-        Some(token_hex.clone()),
+        Some(token_hex),
         None, // qkey_initial_token
         false,
     )

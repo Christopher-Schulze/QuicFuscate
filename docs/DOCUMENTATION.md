@@ -5811,3 +5811,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `src/simd/x86_ack.rs` no longer suppresses dead code at module scope. The scalar parity helper is explicitly limited to tests and `rust-tests`; AVX2 and AVX-512 helpers retain production transport callers.
 - `scripts/tests/audits/audit-runtime-guardrails.sh` contains negative source guards that fail if crate-root `allow(warnings)` or module-level x86 ACK `allow(dead_code)` returns. The feature matrix already runs strict `-D warnings` lanes for the supported non-UI feature set.
 - Local ARM64 macOS evidence passes `cargo clippy --all-features -- -D warnings`, `cargo clippy --all-targets --features rust-tests -- -D warnings`, `cargo clippy --all-features --lib --bins --examples -- -D warnings`, `cargo check --all-features`, `cargo test --lib` (`2,656/2,656`), `cargo test --all-features --lib` (`2,698/2,698`), formatting, and diff hygiene. The all-target all-feature command remains intentionally unavailable on macOS because the Linux-only io_uring integration target emits its explicit compile error; x86_64 Linux execution remains a hosted CI boundary because this host lacks the GNU/Linux C toolchain and sysroot.
+
+## Implementation Reconciliation (2026-08-08, TODO-803 redundant ownership clones)
+
+- `src/bin/qf-e2e-client.rs` transfers the validated `QKeyToken` into `QuicFuscateConnection::new_client` instead of cloning an owned value that is not used afterward.
+- `src/main_parts/runtime.rs` transfers the standalone TUN setup's owned `Arc<MemoryPool>` into `TunInterface::open`; the local handle has no later consumer.
+- Existing error handling and shared ownership semantics remain unchanged. Strict all-feature library/bin/example Clippy, backend check, formatting, and diff hygiene pass; frontend paths remain untouched.

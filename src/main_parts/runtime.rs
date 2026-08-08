@@ -1752,7 +1752,7 @@ async fn run_client(
         tcfg.mtu = effective_tun_mtu;
         let optm = OptimizationManager::from_cfg(opt_params);
         let pool = optm.memory_pool();
-        match quicfuscate::interface::TunInterface::open(tcfg, pool.clone()) {
+        match quicfuscate::interface::TunInterface::open(tcfg, pool) {
             Ok(tun) => {
                 // Share the TUN via a plain Arc (no Mutex): read_block() and write()
                 // both take &self and the kernel serializes the fd, so the blocking
