@@ -1599,13 +1599,89 @@ fn audit_file_name(path: &Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// Largest single audit entry accepted when reading an existing segment.
+///
+/// The writer bounds an event's dynamic payload to
+/// [`MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES`], and the remaining fields (sequence,
+/// timestamp, type, severity, and two 64-character hashes) are fixed-width. This
+/// ceiling leaves generous headroom above that and still refuses a single line that
+/// no writer of this format could have produced, so a crafted file cannot force one
+/// unbounded allocation.
+const MAX_AUDIT_ENTRY_BYTES: usize = 64 * 1024;
+
+/// Open an existing audit segment for bounded streaming.
+///
+/// The size is checked against the retention ceiling before any content is read.
+/// A file larger than the largest segment this writer would ever create is outside
+/// the configured contract, and reading it to find that out is precisely the
+/// resource-exhaustion path being closed.
+fn open_bounded_audit_segment(
+    path: &Path,
+) -> Result<std::io::BufReader<std::fs::File>, AuditError> {
+    let file = std::fs::File::open(path).map_err(AuditError::IoError)?;
+    let size = file.metadata().map_err(AuditError::IoError)?.len();
+    if size > MAX_AUDIT_SEGMENT_BYTES {
+        return Err(AuditError::HashError(format!(
+            "{} is {size} bytes, above the {MAX_AUDIT_SEGMENT_BYTES}-byte audit segment ceiling",
+            path.display()
+        )));
+    }
+    Ok(std::io::BufReader::new(file))
+}
+
+/// Read one line into `buf`, refusing an entry larger than a writer could produce.
+///
+/// Returns `false` at end of file. The newline is stripped, so callers see the entry
+/// exactly as `parse_entry` expects.
+fn next_audit_line(
+    reader: &mut std::io::BufReader<std::fs::File>,
+    path: &Path,
+    buf: &mut Vec<u8>,
+) -> Result<bool, AuditError> {
+    use std::io::{BufRead, Read};
+
+    buf.clear();
+    let read = reader
+        .by_ref()
+        .take(MAX_AUDIT_ENTRY_BYTES as u64 + 1)
+        .read_until(b'\n', buf)
+        .map_err(AuditError::IoError)?;
+    if read == 0 {
+        return Ok(false);
+    }
+    while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    if buf.len() > MAX_AUDIT_ENTRY_BYTES {
+        return Err(AuditError::HashError(format!(
+            "{} contains an entry above the {MAX_AUDIT_ENTRY_BYTES}-byte limit",
+            path.display()
+        )));
+    }
+    Ok(true)
+}
+
+/// Interpret one bounded line as UTF-8 text.
+fn audit_line_str<'a>(buf: &'a [u8], path: &Path) -> Result<&'a str, AuditError> {
+    std::str::from_utf8(buf).map_err(|error| {
+        AuditError::HashError(format!("{} contains non-UTF-8 audit data: {error}", path.display()))
+    })
+}
+
 fn read_first_entry(path: &Path) -> Result<AuditEntry, AuditError> {
-    let content = std::fs::read_to_string(path).map_err(AuditError::IoError)?;
-    content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .and_then(parse_entry)
-        .ok_or_else(|| AuditError::HashError(format!("no valid entry in {}", path.display())))
+    let mut reader = open_bounded_audit_segment(path)?;
+    let mut buf = Vec::new();
+    while next_audit_line(&mut reader, path, &mut buf)? {
+        let line = audit_line_str(&buf, path)?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(entry) = parse_entry(line) {
+            return Ok(entry);
+        }
+        break;
+    }
+    Err(AuditError::HashError(format!("no valid entry in {}", path.display())))
 }
 
 fn read_checkpoint(base: &Path) -> Result<Option<AuditCheckpoint>, AuditError> {
@@ -1763,10 +1839,18 @@ fn verify_segment(
     mut expected_seq: u64,
     initial_previous_hash: &str,
 ) -> Result<(Option<u64>, String), AuditError> {
-    let content = std::fs::read_to_string(path).map_err(AuditError::IoError)?;
+    let mut reader = open_bounded_audit_segment(path)?;
     let mut previous_hash = initial_previous_hash.to_string();
     let mut tail_seq = None;
-    for (line_index, line) in content.lines().enumerate() {
+    let mut buf = Vec::new();
+    let mut line_index = 0usize;
+    while next_audit_line(&mut reader, path, &mut buf)? {
+        let line = audit_line_str(&buf, path)?;
+        let line_index = {
+            let current = line_index;
+            line_index += 1;
+            current
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -1922,13 +2006,9 @@ fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
 }
 
 fn read_first_sequence(path: &Path) -> Result<u64, AuditError> {
-    let content = std::fs::read_to_string(path).map_err(AuditError::IoError)?;
-    content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .and_then(parse_entry)
+    read_first_entry(path)
         .map(|entry| entry.seq)
-        .ok_or_else(|| AuditError::HashError("active audit segment has no valid entry".to_string()))
+        .map_err(|_| AuditError::HashError("active audit segment has no valid entry".to_string()))
 }
 
 fn rotated_segment_path(base: &Path, start_seq: u64, end_seq: u64) -> PathBuf {
@@ -1977,16 +2057,26 @@ fn read_tail_state(path: &Path) -> Result<(u64, String), AuditError> {
     if let Some(checkpoint) = read_checkpoint(path)? {
         return Ok((checkpoint.tail_seq.saturating_add(1), checkpoint.tail_hash));
     }
-    let content = std::fs::read_to_string(path).map_err(AuditError::IoError)?;
-    for line in content.lines().rev() {
+    // Stream forward and retain only the last entry seen. Reversing over a
+    // whole-file string would make startup memory scale with the retained file, which
+    // is the exhaustion path this bound closes; keeping one entry costs a constant.
+    let mut reader = open_bounded_audit_segment(path)?;
+    let mut buf = Vec::new();
+    let mut last = None;
+    while next_audit_line(&mut reader, path, &mut buf)? {
+        let line = audit_line_str(&buf, path)?;
         if line.trim().is_empty() {
             continue;
         }
-        let entry = parse_entry(line)
-            .ok_or_else(|| AuditError::HashError("malformed final audit entry".to_string()))?;
-        return Ok((entry.seq.saturating_add(1), entry.hash));
+        last = Some(
+            parse_entry(line)
+                .ok_or_else(|| AuditError::HashError("malformed final audit entry".to_string()))?,
+        );
     }
-    Ok((0, "0".repeat(64)))
+    match last {
+        Some(entry) => Ok((entry.seq.saturating_add(1), entry.hash)),
+        None => Ok((0, "0".repeat(64))),
+    }
 }
 
 // --- Minimal SHA-256 ---
@@ -2636,6 +2726,92 @@ mod tests {
             flush_timeout: Duration::ZERO,
         };
         (log, receiver)
+    }
+
+    #[test]
+    fn an_oversized_segment_is_rejected_before_its_contents_are_read() {
+        // Reading the file to discover it is too large is the exhaustion path itself.
+        // The size check must come from metadata, before any content is allocated.
+        let tmp = audit_test_path("oversized-segment");
+        let file = std::fs::File::create(&tmp).expect("segment file");
+        file.set_len(MAX_AUDIT_SEGMENT_BYTES + 1).expect("sparse oversize");
+        drop(file);
+
+        for label in ["first entry", "tail state", "chain verification"] {
+            let error = match label {
+                "first entry" => read_first_entry(&tmp).expect_err("oversized must be rejected"),
+                "tail state" => read_tail_state(&tmp).expect_err("oversized must be rejected"),
+                _ => AuditLog::verify_chain(&tmp).expect_err("oversized must be rejected"),
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains("ceiling") || message.contains("above the"),
+                "{label} must name the exceeded bound, got {message}"
+            );
+        }
+
+        // The ceiling itself is not size-rejected, so the bound refuses only what is
+        // out of contract. Such a file is still refused, by the per-entry bound rather
+        // than the segment bound, which is the point: neither path allocates it.
+        let file = std::fs::File::create(&tmp).expect("segment file");
+        file.set_len(MAX_AUDIT_SEGMENT_BYTES).expect("sparse at limit");
+        drop(file);
+        let message = read_first_entry(&tmp).expect_err("no valid entries").to_string();
+        assert!(
+            message.contains(&MAX_AUDIT_ENTRY_BYTES.to_string()),
+            "a file at the ceiling must pass the segment bound and hit the entry bound, \
+             got {message}"
+        );
+        assert!(
+            !message.contains(&MAX_AUDIT_SEGMENT_BYTES.to_string()),
+            "the segment bound must not reject a file at the ceiling, got {message}"
+        );
+        remove_audit_set(&tmp);
+    }
+
+    #[test]
+    fn an_oversized_entry_is_rejected_without_allocating_the_rest_of_the_line() {
+        let tmp = audit_test_path("oversized-entry");
+        let mut line = vec![b'x'; MAX_AUDIT_ENTRY_BYTES + 1];
+        line.push(b'\n');
+        std::fs::write(&tmp, &line).expect("write oversized entry");
+
+        let message = read_first_entry(&tmp).expect_err("oversized entry").to_string();
+        assert!(
+            message.contains(&MAX_AUDIT_ENTRY_BYTES.to_string()),
+            "the failure must name the entry limit, got {message}"
+        );
+        let message = read_tail_state(&tmp).expect_err("oversized entry").to_string();
+        assert!(message.contains(&MAX_AUDIT_ENTRY_BYTES.to_string()));
+        remove_audit_set(&tmp);
+    }
+
+    #[test]
+    fn a_bounded_valid_chain_still_resumes_with_its_sequence_and_hash() {
+        // The bound must not change what a valid file means: verification, sequence,
+        // and hash continuation are the behaviour being preserved.
+        let tmp = audit_test_path("bounded-valid");
+        let log = AuditLog::open(tmp.clone()).expect("audit log");
+        for index in 0..4 {
+            log.log(
+                AuditEventType::AdminAction,
+                AuditSeverity::Info,
+                None,
+                None,
+                &format!("event {index}"),
+            )
+            .expect("event accepted");
+        }
+        log.shutdown().expect("clean shutdown");
+
+        AuditLog::verify_chain(&tmp).expect("a bounded valid chain verifies");
+        let first = read_first_entry(&tmp).expect("first entry");
+        assert_eq!(first.seq, 0);
+        let (next_seq, tail_hash) = read_tail_state(&tmp).expect("tail state");
+        assert_eq!(next_seq, 4, "the next sequence must follow the last entry");
+        assert_eq!(tail_hash.len(), 64, "the tail hash must be a full SHA-256 hex digest");
+        assert_ne!(tail_hash, "0".repeat(64));
+        remove_audit_set(&tmp);
     }
 
     #[test]
