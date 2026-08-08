@@ -73,8 +73,25 @@ impl Drop for FdGuard {
 pub struct MacOSPlatform {
     utun_counter: std::sync::atomic::AtomicU32,
     dns_service: Mutex<Option<String>>,
-    /// Original DNS servers saved before VPN connection for proper restore
-    original_dns: Mutex<Option<Vec<String>>>,
+    /// DNS state captured before this connection overwrote it.
+    ///
+    /// `None` means nothing was captured, so this process does not own the current DNS
+    /// configuration and must not modify it on restore.
+    original_dns: Mutex<Option<CapturedDns>>,
+}
+
+/// The DNS configuration a network service had before this connection touched it.
+///
+/// A capture failure is deliberately not representable here. It used to collapse into an empty
+/// vector, indistinguishable from a genuine DHCP service, so a `networksetup` that failed to spawn
+/// or exited non-zero would later cause restore to set `Empty` and erase the user's explicit DNS
+/// servers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CapturedDns {
+    /// The service had these explicit servers configured, in this order.
+    Servers(Vec<String>),
+    /// The service had no DNS servers set, which is what DHCP looks like.
+    Dhcp,
 }
 
 impl MacOSPlatform {
@@ -222,17 +239,46 @@ impl MacOSPlatform {
     }
 
     /// Capture current DNS servers for a given network service.
-    fn capture_current_dns(&self, service: &str) -> Vec<String> {
-        let output = match Command::new("networksetup").args(["-getdnsservers", service]).output() {
-            Ok(o) => o,
-            Err(_) => return Vec::new(),
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // "There aren't any DNS Servers set on ..." means DHCP - return empty
-        if stdout.contains("There aren't any DNS Servers") {
-            return Vec::new();
+    ///
+    /// Spawn failure and a non-zero exit are errors, not an empty configuration. Conflating them
+    /// with DHCP is what allowed a failed capture to erase explicit DNS servers on disconnect.
+    fn capture_current_dns(&self, service: &str) -> Result<CapturedDns, PlatformError> {
+        let output = Command::new("networksetup")
+            .args(["-getdnsservers", service])
+            .output()
+            .map_err(|error| {
+                PlatformError::CommandFailed(format!(
+                    "networksetup -getdnsservers {service} could not run: {error}"
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(PlatformError::CommandFailed(format!(
+                "networksetup -getdnsservers {service} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
-        stdout.lines().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).collect()
+        Ok(Self::parse_captured_dns(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    /// Classify `networksetup -getdnsservers` output.
+    ///
+    /// Split out from the command so the classification is testable without a network service.
+    fn parse_captured_dns(stdout: &str) -> CapturedDns {
+        // "There aren't any DNS Servers set on ..." is how DHCP presents.
+        if stdout.contains("There aren't any DNS Servers") {
+            return CapturedDns::Dhcp;
+        }
+        let servers: Vec<String> = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        if servers.is_empty() {
+            CapturedDns::Dhcp
+        } else {
+            CapturedDns::Servers(servers)
+        }
     }
 
     fn prefix_to_netmask(prefix: u8) -> String {
@@ -456,13 +502,15 @@ impl PlatformBackend for MacOSPlatform {
     fn set_dns(&self, config: &DnsConfig) -> Result<(), PlatformError> {
         let service = self.dns_service_name()?;
 
-        // Save original DNS servers before overwriting (only if not already saved)
+        // Capture before overwriting, and fail closed if the capture does not succeed. Proceeding
+        // without a recorded original means disconnect has nothing correct to restore, which is
+        // how a failed capture used to end with the user's DNS erased.
         {
             let mut guard = self.original_dns.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_none() {
-                let current = self.capture_current_dns(&service);
+                let current = self.capture_current_dns(&service)?;
+                log::debug!("Captured original DNS state: {current:?}");
                 *guard = Some(current);
-                log::debug!("Saved original DNS servers: {:?}", guard.as_ref());
             }
         }
 
@@ -485,22 +533,34 @@ impl PlatformBackend for MacOSPlatform {
         let saved = self.original_dns.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         match saved {
-            Some(servers) if !servers.is_empty() => {
-                // Restore the exact original DNS servers
+            Some(CapturedDns::Servers(servers)) => {
+                // Restore the exact original DNS servers, in their original order.
                 let mut args = vec!["-setdnsservers", &service];
                 let server_refs: Vec<&str> = servers.iter().map(String::as_str).collect();
                 args.extend(server_refs);
                 self.run_networksetup(&args)?;
-                log::info!("DNS restored to original servers: {:?}", servers);
+                log::info!("DNS restored to original servers: {servers:?}");
             }
-            _ => {
-                // Original was DHCP (no DNS set) - "Empty" is correct here
+            Some(CapturedDns::Dhcp) => {
+                // The service genuinely had no servers set, so Empty is the original state.
                 self.run_networksetup(&["-setdnsservers", &service, "Empty"])?;
-                log::info!("DNS restored to DHCP (original state)");
+                log::info!("DNS restored to DHCP, which was the captured original state");
+            }
+            None => {
+                // Nothing was captured, so this process never took ownership of the DNS
+                // configuration. Setting Empty here would erase servers it did not set.
+                log::warn!(
+                    "no captured DNS state for service {service}; leaving the current configuration untouched"
+                );
+                return Ok(());
             }
         }
 
+        // Ownership released: drop the captured state and the cached service, so the next
+        // connection resolves the service that is actually active rather than reusing a stale one
+        // after an interface change.
         *self.original_dns.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.dns_service.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 
@@ -535,5 +595,68 @@ mod tests {
     fn test_macos_platform_name() {
         let platform = MacOSPlatform::new();
         assert_eq!(platform.name(), "macOS");
+    }
+
+    /// A failed capture must never look like DHCP.
+    ///
+    /// `capture_current_dns` returned an empty vector for a spawn failure as well as for a genuine
+    /// DHCP service, so a failed capture later caused restore to set `Empty` and erase the user's
+    /// explicit DNS servers.
+    #[test]
+    fn captured_dns_distinguishes_explicit_servers_from_dhcp() {
+        // Explicit servers, order preserved.
+        assert_eq!(
+            MacOSPlatform::parse_captured_dns("1.1.1.1\n9.9.9.9\n"),
+            CapturedDns::Servers(vec!["1.1.1.1".to_string(), "9.9.9.9".to_string()])
+        );
+
+        // Surrounding whitespace and blank lines are not servers.
+        assert_eq!(
+            MacOSPlatform::parse_captured_dns("\n  8.8.8.8  \n\n"),
+            CapturedDns::Servers(vec!["8.8.8.8".to_string()])
+        );
+
+        // The DHCP sentence macOS prints.
+        assert_eq!(
+            MacOSPlatform::parse_captured_dns("There aren't any DNS Servers set on Wi-Fi.\n"),
+            CapturedDns::Dhcp
+        );
+
+        // Genuinely empty output is also DHCP, not an empty server list.
+        assert_eq!(MacOSPlatform::parse_captured_dns(""), CapturedDns::Dhcp);
+        assert_eq!(MacOSPlatform::parse_captured_dns("   \n\n"), CapturedDns::Dhcp);
+    }
+
+    /// A capture failure is an error the caller must see, not an empty configuration.
+    #[test]
+    fn capture_failure_is_an_error_rather_than_a_silent_dhcp_state() {
+        let platform = MacOSPlatform::new();
+        // No network service is named like this, so networksetup exits non-zero.
+        let error = platform
+            .capture_current_dns("quicfuscate-nonexistent-service")
+            .expect_err("an unknown service must not be reported as DHCP");
+        let text = error.to_string();
+        assert!(
+            text.contains("getdnsservers"),
+            "the error must name the command that failed: {text}"
+        );
+    }
+
+    /// Restore must not touch DNS it never captured.
+    #[test]
+    fn restore_without_a_captured_state_leaves_dns_untouched() {
+        let platform = MacOSPlatform::new();
+        assert!(
+            platform.original_dns.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
+            "a fresh platform owns no DNS state"
+        );
+
+        // With nothing captured, restore must be a no-op rather than setting Empty, which would
+        // erase servers this process never set. It must also not fail.
+        platform.restore_dns().expect("restore without ownership must succeed as a no-op");
+        assert!(
+            platform.original_dns.lock().unwrap_or_else(|e| e.into_inner()).is_none(),
+            "a no-op restore must not invent captured state"
+        );
     }
 }
