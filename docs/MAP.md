@@ -2060,6 +2060,13 @@ The audit remains open. These reconciliations document current evidence and owne
 - The extracted crate does not touch any Svelte, Tauri, package, asset, or generated frontend path. Any future UI projection remains a separate frontend task.
 - Workspace check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass after correcting two protocol-invalid integration assertions: CRYPTO is exercised in Initial packets, and the first client request correctly accepts stream ID `0`.
 
+## Error Contract Workspace Crate (2026-08-08, TODO-562)
+
+- `crates/qf-error/` owns the std-only `ConnectionError` contract, including display, `std::error::Error`, and string conversions. The root `quicfuscate::error` module re-exports it without changing existing caller paths.
+- Root-only adapters convert `crypto::aead::KeyMaterialError` and `transport::h3::Error` into the shared error type. The child has no product dependency; the only workspace edge is `quicfuscate -> qf-error` and no reverse edge exists.
+- The refreshed workspace audit reports `quicfuscate`, `qf-common`, `qf-control-plane`, and `qf-error`, with 240 Rust files, 203,474 source lines, the same 16-module product SCC, and an empty protected frontend/Tauri change set.
+- Workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the full all-target `rust-tests` suite pass with 28 `qf-common`, 8 `qf-control-plane`, 2 `qf-error`, and 2,655 root library tests plus green integration targets. Frontend field projection remains deferred.
+
 ## Omega Proof Ownership Preflight (2026-08-08, TODO-804)
 
 - `scripts/audits/verify-omega-proof-ownership.py` plus its shell entrypoint perform a read-only SSH preflight. They discover every candidate `QuicFuscate` checkout under the declared remote roots, inspect Git status/diffs/object connectivity, bind source/bundle/binary/runtime/evidence provenance, and refuse to overwrite a local JSON report.

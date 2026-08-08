@@ -5903,6 +5903,13 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The workspace dependency direction is `quicfuscate -> qf-control-plane`; the control-plane crate has no reverse edge. Its existing unit tests remain in the extracted crate and are executed through the workspace package target.
 - Verification: workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass. The suite includes 28 `qf-common` tests, 8 `qf-control-plane` tests, 2,655 root library tests, and all registered integration targets; no frontend projection was added.
 
+## Error Contract Workspace Crate (2026-08-08, TODO-562)
+
+- `crates/qf-error/` now owns the std-only `ConnectionError` enum, display contract, standard error implementation, and string conversion adapters. The root `quicfuscate::error` module re-exports that contract so existing callers keep their paths and variant behavior.
+- Root-only conversion adapters remain at the compatibility boundary for `crypto::aead::KeyMaterialError` and `transport::h3::Error`; the child crate therefore has no dependency on product transport or crypto modules and Cargo records only `quicfuscate -> qf-error`.
+- The refreshed seam inventory reports four workspace packages (`quicfuscate`, `qf-common`, `qf-control-plane`, and `qf-error`), 240 Rust files, 203,474 source lines, and the unchanged 16-module product SCC. No reverse workspace edge or protected frontend/Tauri change exists.
+- Verification: workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass. The suite reports 28 `qf-common` tests, 8 `qf-control-plane` tests, 2 `qf-error` tests, 2,655 root library tests, and green integration targets; no frontend projection was added.
+
 ## Omega Proof Ownership Preflight (2026-08-08, TODO-804)
 
 - `scripts/audits/verify-omega-proof-ownership.py` and `verify-omega-proof-ownership.sh` define the backend-only, read-only ownership gate for exact Omega proofs. The gate discovers candidate remote checkouts, verifies status/diff/object readability, records source/bundle/binary/runtime/evidence binding, and writes reports only through create-new semantics.

@@ -24,161 +24,19 @@ pub mod crypto;
 pub mod env_utils;
 /// Unified error types for the QuicFuscate runtime.
 pub mod error {
-    use std::fmt;
+    pub use qf_error::*;
 
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum ConnectionError {
-        CryptoError(String),
-        ProtocolViolation,
-        InvalidState,
-        Timeout,
-        InvalidFrame,
-        Done,
-        TlsError(String),
-        TlsAlert(u64),
-        BufferTooShort,
-        PeerCertificateUnsupported,
-        InvalidPacket,
-        InvalidStreamState(u64),
-        FinalSize,
-        InternalError,
-        Fec(String),
-        Transport(String),
-        StreamReset,
-        StreamStopped,
-        IdLimit,
-        FlowControl,
-        ApplicationError(u64),
-        StreamLimit,
-        ApplicationProtoError,
-        VersionMismatch,
-        FrameEncoding,
-        InvalidToken,
-        CryptoBufferExceeded,
-        KeyUpdateError,
-        AeadLimitReached,
-        NoViablePath,
-        ConnectionRefused,
-        InvalidStreamId,
-        /// QUIC DATAGRAM send queue is at capacity; the caller should apply
-        /// backpressure and retry rather than drop the packet.
-        DgramQueueFull,
-        /// The local endpoint closed the transport connection.
-        LocalConnectionClosed {
-            error_code: u64,
-            frame_type: u64,
-            reason: Vec<u8>,
-        },
-        /// The local endpoint closed the application connection.
-        LocalApplicationClosed {
-            error_code: u64,
-            reason: Vec<u8>,
-        },
-        /// The peer closed the transport connection.
-        PeerConnectionClosed {
-            error_code: u64,
-            frame_type: u64,
-            reason: Vec<u8>,
-        },
-        /// The peer closed the application connection.
-        PeerApplicationClosed {
-            error_code: u64,
-            reason: Vec<u8>,
-        },
-    }
-
-    impl fmt::Display for ConnectionError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                ConnectionError::InvalidPacket => write!(f, "Invalid packet"),
-                ConnectionError::InvalidFrame => write!(f, "Invalid frame"),
-                ConnectionError::InvalidStreamId => write!(f, "Invalid stream ID"),
-                ConnectionError::InvalidStreamState(_) => write!(f, "Invalid stream state"),
-                ConnectionError::FlowControl => write!(f, "Flow control violation"),
-                ConnectionError::StreamLimit => write!(f, "Stream limit exceeded"),
-                ConnectionError::FinalSize => write!(f, "Final size error"),
-                ConnectionError::FrameEncoding => write!(f, "Frame encoding error"),
-                ConnectionError::ProtocolViolation => write!(f, "Protocol violation"),
-                ConnectionError::InvalidToken => write!(f, "Invalid token"),
-                ConnectionError::ApplicationError(code) => write!(f, "Application error: {}", code),
-                ConnectionError::CryptoBufferExceeded => write!(f, "Crypto buffer exceeded"),
-                ConnectionError::KeyUpdateError => write!(f, "Key update error"),
-                ConnectionError::AeadLimitReached => write!(f, "AEAD limit reached"),
-                ConnectionError::NoViablePath => write!(f, "No viable path"),
-                ConnectionError::InternalError => write!(f, "Internal error"),
-                ConnectionError::ConnectionRefused => write!(f, "Connection refused"),
-                ConnectionError::Timeout => write!(f, "Timeout"),
-                ConnectionError::Transport(msg) => write!(f, "Transport error: {}", msg),
-                ConnectionError::TlsAlert(code) => write!(f, "TLS alert: {}", code),
-                ConnectionError::PeerCertificateUnsupported => {
-                    write!(f, "Peer certificate unsupported")
-                }
-                ConnectionError::Done => write!(f, "Connection done"),
-                ConnectionError::BufferTooShort => write!(f, "Buffer too short"),
-                ConnectionError::InvalidState => write!(f, "Invalid state"),
-                ConnectionError::Fec(ref msg) => write!(f, "FEC error: {}", msg),
-                ConnectionError::StreamReset => write!(f, "Stream reset"),
-                ConnectionError::StreamStopped => write!(f, "Stream stopped"),
-                ConnectionError::IdLimit => write!(f, "ID limit exceeded"),
-                ConnectionError::LocalConnectionClosed { error_code, frame_type, reason } => {
-                    write!(
-                        f,
-                        "Local connection closed: code={} frame_type={} reason={}",
-                        error_code,
-                        frame_type,
-                        String::from_utf8_lossy(reason)
-                    )
-                }
-                ConnectionError::LocalApplicationClosed { error_code, reason } => write!(
-                    f,
-                    "Local application closed: code={} reason={}",
-                    error_code,
-                    String::from_utf8_lossy(reason)
-                ),
-                ConnectionError::PeerConnectionClosed { error_code, frame_type, reason } => write!(
-                    f,
-                    "Peer connection closed: code={} frame_type={} reason={}",
-                    error_code,
-                    frame_type,
-                    String::from_utf8_lossy(reason)
-                ),
-                ConnectionError::PeerApplicationClosed { error_code, reason } => write!(
-                    f,
-                    "Peer application closed: code={} reason={}",
-                    error_code,
-                    String::from_utf8_lossy(reason)
-                ),
-                ConnectionError::CryptoError(msg) => write!(f, "Crypto error: {}", msg),
-                ConnectionError::TlsError(msg) => write!(f, "TLS error: {}", msg),
-                ConnectionError::ApplicationProtoError => write!(f, "Application protocol error"),
-                ConnectionError::VersionMismatch => write!(f, "Version mismatch"),
-                ConnectionError::DgramQueueFull => write!(f, "DATAGRAM send queue full"),
-            }
-        }
-    }
-
-    impl std::error::Error for ConnectionError {}
-
-    impl From<String> for ConnectionError {
-        fn from(s: String) -> Self {
-            ConnectionError::Transport(s)
-        }
-    }
-    impl From<&str> for ConnectionError {
-        fn from(s: &str) -> Self {
-            ConnectionError::Transport(s.to_string())
-        }
-    }
-    impl From<crate::crypto::aead::KeyMaterialError> for ConnectionError {
+    impl From<crate::crypto::aead::KeyMaterialError> for qf_error::ConnectionError {
         fn from(error: crate::crypto::aead::KeyMaterialError) -> Self {
-            ConnectionError::CryptoError(error.to_string())
+            Self::CryptoError(error.to_string())
         }
     }
-    impl From<crate::transport::h3::Error> for ConnectionError {
-        fn from(e: crate::transport::h3::Error) -> Self {
-            match e {
-                crate::transport::h3::Error::Done => ConnectionError::Done,
-                other => ConnectionError::Transport(format!("H3 error: {:?}", other)),
+
+    impl From<crate::transport::h3::Error> for qf_error::ConnectionError {
+        fn from(error: crate::transport::h3::Error) -> Self {
+            match error {
+                crate::transport::h3::Error::Done => Self::Done,
+                other => Self::Transport(format!("H3 error: {:?}", other)),
             }
         }
     }

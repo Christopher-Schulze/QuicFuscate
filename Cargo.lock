@@ -1473,6 +1473,10 @@ name = "qf-control-plane"
 version = "0.4.4"
 
 [[package]]
+name = "qf-error"
+version = "0.4.4"
+
+[[package]]
 name = "quicfuscate"
 version = "0.4.4"
 dependencies = [
@@ -1504,6 +1508,7 @@ dependencies = [
  "proptest",
  "qf-common",
  "qf-control-plane",
+ "qf-error",
  "rand",
  "rayon",
  "rcgen",
