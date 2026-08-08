@@ -1385,7 +1385,25 @@ pub struct StealthSection {
     pub enable_network_fingerprint_normalization: bool,
     /// Suppress ICMP destination-unreachable traffic except PMTUD signals.
     pub suppress_icmp_unreachable: bool,
+    /// Total size, in bytes, that every 1-RTT packet is padded to when
+    /// `padding_strategy = "normalize"`.
+    ///
+    /// Required by, and only meaningful for, that strategy. It was absent from this schema
+    /// entirely, so selecting `normalize` produced a configuration error that named the gap
+    /// instead of a working setting: the strategy was visible but unusable, and any path that
+    /// skipped this validation would have emitted ordinary variable-sized packets while the
+    /// configuration claimed normalization.
+    pub normalize_target_size: usize,
 }
+
+/// Smallest packet-normalize target that can carry a QUIC datagram.
+///
+/// Below the 1200-byte QUIC minimum the target could not hold a conformant packet, so padding to
+/// it would be meaningless.
+pub const MIN_NORMALIZE_TARGET_SIZE: usize = 1200;
+
+/// Largest packet-normalize target, bounded by the maximum UDP payload.
+pub const MAX_NORMALIZE_TARGET_SIZE: usize = 65_527;
 
 impl Default for StealthSection {
     fn default() -> Self {
@@ -1402,6 +1420,7 @@ impl Default for StealthSection {
             enable_doh: true,
             doh_provider: "https://cloudflare-dns.com/dns-query".to_string(),
             padding_strategy: "adaptive".to_string(),
+            normalize_target_size: 0,
             max_padding_size: 256,
             fronting_domains: Vec::new(),
             initial_browser: "chrome".to_string(),
@@ -1478,12 +1497,29 @@ impl StealthSection {
                     self.padding_strategy
                 ))
             })?;
-        if runtime.padding_strategy == crate::stealth::PaddingStrategy::PacketNormalize
-            && runtime.normalize_target_size == 0
-        {
-            return Err(ConfigError::Validation(
-                "stealth.padding_strategy=normalize requires a runtime normalize target, which is not part of the engine schema".into(),
-            ));
+        runtime.normalize_target_size = self.normalize_target_size;
+        if runtime.padding_strategy == crate::stealth::PaddingStrategy::PacketNormalize {
+            if self.normalize_target_size == 0 {
+                return Err(ConfigError::Validation(
+                    "stealth.padding_strategy=normalize requires stealth.normalize_target_size"
+                        .into(),
+                ));
+            }
+            if !(MIN_NORMALIZE_TARGET_SIZE..=MAX_NORMALIZE_TARGET_SIZE)
+                .contains(&self.normalize_target_size)
+            {
+                return Err(ConfigError::Validation(format!(
+                    "stealth.normalize_target_size must be in {MIN_NORMALIZE_TARGET_SIZE}..={MAX_NORMALIZE_TARGET_SIZE}, got {}",
+                    self.normalize_target_size
+                )));
+            }
+        } else if self.normalize_target_size != 0 {
+            // A target with any other strategy is a contradiction: it would never be applied, and
+            // silently ignoring it is how a configuration comes to claim stealth it does not have.
+            return Err(ConfigError::Validation(format!(
+                "stealth.normalize_target_size is only valid with padding_strategy=normalize, but the strategy is '{}'",
+                self.padding_strategy
+            )));
         }
         if runtime.enable_traffic_padding && runtime.max_padding_size == 0 {
             return Err(ConfigError::Validation(
@@ -2059,6 +2095,103 @@ suppress_icmp_unreachable = true
             "an operator cannot act on an error that does not name the key: {error}"
         );
         assert!(text.contains("1200"), "the error must state the floor: {error}");
+    }
+
+    /// Selecting packet normalization must produce a working configuration, not an error.
+    ///
+    /// `stealth.normalize_target_size` did not exist in this schema, so `padding_strategy =
+    /// "normalize"` always failed validation with a message that named the missing field. The
+    /// strategy was visible and selectable but unusable, and any path that skipped this validation
+    /// would have emitted ordinary variable-sized packets while the configuration claimed
+    /// normalization.
+    #[test]
+    fn packet_normalize_requires_and_propagates_a_bounded_target_size() {
+        let config = EngineConfig::from_toml(
+            "[stealth]\npadding_strategy = \"normalize\"\nnormalize_target_size = 1350\n",
+        )
+        .expect("parse");
+        config.validate().expect("a normalize configuration with a target must validate");
+
+        let runtime = config
+            .stealth
+            .to_runtime_config(&FingerprintRotationConfig::default())
+            .expect("runtime stealth config");
+        assert_eq!(
+            runtime.padding_strategy,
+            crate::stealth::PaddingStrategy::PacketNormalize,
+            "the selected strategy must survive conversion"
+        );
+        assert_eq!(
+            runtime.normalize_target_size, 1350,
+            "the target must reach the runtime config, otherwise normalization is a no-op"
+        );
+    }
+
+    /// Missing, undersized, and oversized targets each fail closed with a named key.
+    #[test]
+    fn packet_normalize_rejects_missing_and_out_of_range_targets() {
+        let missing = EngineConfig::from_toml("[stealth]\npadding_strategy = \"normalize\"\n")
+            .expect("parse")
+            .stealth
+            .to_runtime_config(&FingerprintRotationConfig::default())
+            .err()
+            .expect("normalize without a target must fail");
+        assert!(
+            missing.to_string().contains("stealth.normalize_target_size"),
+            "the error must name the key an operator has to set: {missing}"
+        );
+
+        for target in [1usize, MIN_NORMALIZE_TARGET_SIZE - 1, MAX_NORMALIZE_TARGET_SIZE + 1] {
+            let error = EngineConfig::from_toml(&format!(
+                "[stealth]\npadding_strategy = \"normalize\"\nnormalize_target_size = {target}\n"
+            ))
+            .expect("parse")
+            .stealth
+            .to_runtime_config(&FingerprintRotationConfig::default())
+            .err()
+            .expect("an out-of-range target must fail");
+            assert!(
+                error.to_string().contains("normalize_target_size"),
+                "the error must name the key for target {target}: {error}"
+            );
+        }
+
+        // The exact bounds are accepted.
+        for target in [MIN_NORMALIZE_TARGET_SIZE, MAX_NORMALIZE_TARGET_SIZE] {
+            EngineConfig::from_toml(&format!(
+                "[stealth]\npadding_strategy = \"normalize\"\nnormalize_target_size = {target}\n"
+            ))
+            .expect("parse")
+            .stealth
+            .to_runtime_config(&FingerprintRotationConfig::default())
+            .map_err(|error| panic!("boundary target {target} must be accepted: {error}"))
+            .ok();
+        }
+    }
+
+    /// A target set alongside any other strategy is a contradiction, not a harmless leftover.
+    #[test]
+    fn a_normalize_target_with_another_strategy_is_rejected() {
+        let error = EngineConfig::from_toml(
+            "[stealth]\npadding_strategy = \"adaptive\"\nnormalize_target_size = 1350\n",
+        )
+        .expect("parse")
+        .stealth
+        .to_runtime_config(&FingerprintRotationConfig::default())
+        .err()
+        .expect("a target without the normalize strategy must fail");
+        assert!(
+            error.to_string().contains("only valid with padding_strategy=normalize"),
+            "silently ignoring the target is how a configuration claims stealth it lacks: {error}"
+        );
+
+        // Other strategies without a target remain unaffected.
+        EngineConfig::from_toml("[stealth]\npadding_strategy = \"adaptive\"\n")
+            .expect("parse")
+            .stealth
+            .to_runtime_config(&FingerprintRotationConfig::default())
+            .map_err(|error| panic!("an ordinary strategy must still work: {error}"))
+            .ok();
     }
 
     #[test]

@@ -471,6 +471,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - Padding is applied just before AEAD sealing in `transport::Connection::send()` to ensure full authentication and confidentiality.
 - Strategies (configurable via `StealthConfig` -> wired into `transport::Config.set_stealth_padding`):
   - Random (0..=max), Fixed (up to `max`), Adaptive (to next 64-byte boundary), BrowserMimic (small skew up to ~`max/4`), PacketNormalize (pads all 1-RTT packets to `normalize_target_size` bytes).
+  - `stealth.normalize_target_size` is required by, and only valid with, `padding_strategy = "normalize"`. It must lie in `1200..=65527`: below the QUIC minimum datagram the target could not carry a conformant packet. Selecting `normalize` without it, or with an out-of-range value, fails validation naming the key; setting it alongside any other strategy is rejected as a contradiction rather than ignored, because a silently unused target is how a configuration comes to claim normalization it does not perform. The value flows `StealthSection` -> `StealthConfig` -> `Config::set_stealth_normalize_target()` -> transport strategy 5, which pads each 1-RTT packet up to the target where capacity allows.
 - Mode defaults:
   - Stealth: Adaptive with a small cap (`max_padding_size = 86`) - low overhead, smooths packet sizes.
   - Anti-DPI: BrowserMimic with larger cap (`max_padding_size = 256`).
