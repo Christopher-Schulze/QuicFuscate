@@ -618,8 +618,14 @@ pub async fn flush_live_server_outgoing(
 
     if !staging.is_empty() {
         // Try io_uring batch on Linux when the feature is compiled in.
-        // Full success returns early; partial success falls through for the unsent tail.
-        let already_sent = {
+        // Every fallback candidate is selected from the exact per-slot result;
+        // an out-of-order CQE can never make a later successful datagram part
+        // of a retried contiguous prefix.
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        let mut sent = vec![false; staging.len()];
+        #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+        let sent = vec![false; staging.len()];
+        {
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             {
                 use std::os::unix::io::AsRawFd;
@@ -627,11 +633,14 @@ pub async fn flush_live_server_outgoing(
                 let packets: Vec<(SocketAddr, &[u8])> =
                     staging.iter().map(|(target, packet)| (*target, packet.as_slice())).collect();
                 match uring_worker {
-                    Some(worker) => match worker.send_batch_to(fd, &packets).await {
-                        Ok(sent) => sent.min(staging.len()),
+                    Some(worker) => match worker.send_batch_to_with_disposition(fd, &packets).await {
+                        Ok(result) => {
+                            for index in 0..staging.len() {
+                                sent[index] = result.is_sent(index);
+                            }
+                        }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             log::debug!("io_uring server worker busy, using async tail: {error}");
-                            0
                         }
                         Err(error) => {
                             return Err(DataPlaneFault::TransportSend {
@@ -640,26 +649,26 @@ pub async fn flush_live_server_outgoing(
                             });
                         }
                     },
-                    None => 0,
+                    None => {}
                 }
             }
 
             #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
-            {
-                0usize
-            }
+            let _ = uring_worker;
         };
-        #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
-        let _ = uring_worker;
-        if already_sent == staging.len() {
+        if sent.iter().all(|slot| *slot) {
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             {
                 record_live_snapshot_bytes_out(client_snapshots, addr, bytes_sent, session_id);
                 return Ok((bytes_sent, packets_sent));
             }
         }
-        // io_uring unavailable, failed, or partially sent: finish via individual async calls.
-        for (target, packet) in staging.iter().skip(already_sent) {
+        // io_uring unavailable or partial: finish only slots not accepted by
+        // the batch operation via individual async calls.
+        for (index, (target, packet)) in staging.iter().enumerate() {
+            if sent[index] {
+                continue;
+            }
             send_live_datagram_to(socket, target, packet).await.map_err(|error| {
                 DataPlaneFault::TransportSend {
                     component: format!("server UDP send to {target}"),

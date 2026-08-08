@@ -720,9 +720,7 @@ impl IoDriver {
                     #[cfg(all(target_os = "linux", feature = "io_uring"))]
                     let dispatch = { resolve_outbound_dispatch(queued, self.has_uring()) };
                     #[cfg(target_os = "linux")]
-                    let mut already_sent = 0usize;
-                    #[cfg(not(target_os = "linux"))]
-                    let already_sent = 0usize;
+                    let mut sent = vec![false; queued];
                     #[cfg(target_os = "linux")]
                     {
                         use std::os::fd::AsRawFd;
@@ -741,11 +739,16 @@ impl IoDriver {
                         #[cfg(feature = "io_uring")]
                         if matches!(dispatch, OutboundDispatch::IoUringBatch) {
                             if let Some(worker) = self.uring_worker.as_ref() {
-                                match worker.send_batch(socket_fd, &batch_refs).await {
-                                    Ok(n) => {
-                                        already_sent = n.min(queued);
+                                match worker
+                                    .send_batch_with_disposition(socket_fd, &batch_refs)
+                                    .await
+                                {
+                                    Ok(result) => {
+                                        for index in 0..queued {
+                                            sent[index] = result.is_sent(index);
+                                        }
                                         crate::telemetry::IO_URING_SUBMIT_PACKETS
-                                            .inc_by(already_sent as u64);
+                                            .inc_by(result.sent_count() as u64);
                                     }
                                     Err(error)
                                         if error.kind() == std::io::ErrorKind::WouldBlock =>
@@ -766,20 +769,37 @@ impl IoDriver {
                             }
                         }
 
+                        // sendmmsg receives only the slots not already accepted by
+                        // io_uring. Its contiguous prefix is therefore relative to
+                        // a retry subset, never to the original batch.
+                        let mut fallback_indices: smallvec::SmallVec<[usize; 256]> =
+                            smallvec::SmallVec::new();
+                        let mut fallback_refs: smallvec::SmallVec<[&[u8]; 256]> =
+                            smallvec::SmallVec::new();
+                        for (index, payload) in batch_payloads.iter().take(queued).enumerate() {
+                            if !sent[index] {
+                                fallback_indices.push(index);
+                                fallback_refs.push(payload.as_slice());
+                            }
+                        }
+
                         // sendmmsg batch path (fallback from io_uring, or primary).
-                        if already_sent == 0 && queued > 1 {
+                        if fallback_refs.len() > 1 {
                             match try_sendmmsg_batch(
                                 self.hotpath_adapter.as_ref(),
                                 socket_fd,
                                 OutboundDispatch::SendmmsgBatch,
-                                &batch_refs,
+                                &fallback_refs,
                             ) {
                                 Ok(n) => {
-                                    already_sent = n.min(queued);
+                                    let sent_by_batch = n.min(fallback_indices.len());
+                                    for index in fallback_indices.iter().take(sent_by_batch) {
+                                        sent[*index] = true;
+                                    }
                                     crate::optimize::telemetry::IO_DRIVER_SENDMMSG_CALLS
                                         .fetch_add(1, Ordering::Relaxed);
                                     crate::optimize::telemetry::IO_DRIVER_SENDMMSG_PACKETS
-                                        .fetch_add(already_sent as u64, Ordering::Relaxed);
+                                        .fetch_add(sent_by_batch as u64, Ordering::Relaxed);
                                 }
                                 Err(error)
                                     if matches!(
@@ -800,7 +820,10 @@ impl IoDriver {
                         }
                     }
 
-                    for payload in batch_payloads.iter().take(queued).skip(already_sent) {
+                    for (index, payload) in batch_payloads.iter().take(queued).enumerate() {
+                        if sent[index] {
+                            continue;
+                        }
                         if let Err(e) = socket.send(payload).await {
                             log::warn!("UDP send error: {}", e);
                             return Err(self.transport_send_error("client TUN UDP send", e));
@@ -813,7 +836,10 @@ impl IoDriver {
                             global.transport.record_packet_out();
                         }
                     }
-                    for payload in batch_payloads.iter().take(already_sent) {
+                    for (index, payload) in batch_payloads.iter().take(queued).enumerate() {
+                        if !sent[index] {
+                            continue;
+                        }
                         self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
                         let global = crate::instrumentation::global();
                         global.transport.record_bytes_out(payload.len() as u64);

@@ -98,9 +98,125 @@ pub struct UringBatchSender {
 // storage before another batch can rebuild it.
 unsafe impl Send for UringBatchSender {}
 
+/// Disposition of one packet in a completed io_uring batch.
+///
+/// `Failed` and `NotSubmitted` are safe fallback candidates. `Quarantined`
+/// means that submission or completion ownership could not be proven after a
+/// protocol error; the caller must not retry it because the kernel may already
+/// have accepted the datagram. Keeping this distinction explicit prevents a
+/// count-only fallback from duplicating an out-of-order successful CQE.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchSendDisposition {
+    Sent,
+    Failed,
+    NotSubmitted,
+    Quarantined,
+}
+
+/// Exact per-input disposition returned by a successful batch operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSendResult {
+    dispositions: Vec<BatchSendDisposition>,
+}
+
+impl BatchSendResult {
+    fn not_submitted(len: usize) -> Self {
+        Self { dispositions: vec![BatchSendDisposition::NotSubmitted; len] }
+    }
+
+    fn from_chunk(dispositions: Vec<BatchSendDisposition>) -> Self {
+        Self { dispositions }
+    }
+
+    /// Number of input packets represented by this result.
+    pub fn len(&self) -> usize {
+        self.dispositions.len()
+    }
+
+    /// Whether the input packet at `index` was accepted as a complete send.
+    pub fn is_sent(&self, index: usize) -> bool {
+        self.dispositions.get(index) == Some(&BatchSendDisposition::Sent)
+    }
+
+    /// Exact disposition for one input packet.
+    pub fn disposition(&self, index: usize) -> Option<BatchSendDisposition> {
+        self.dispositions.get(index).copied()
+    }
+
+    /// Number of packets accepted as complete sends.
+    pub fn sent_count(&self) -> usize {
+        self.dispositions.iter().filter(|status| **status == BatchSendDisposition::Sent).count()
+    }
+
+    fn set_chunk(&mut self, start: usize, chunk: &[BatchSendDisposition]) {
+        let end = start.saturating_add(chunk.len());
+        if end <= self.dispositions.len() {
+            self.dispositions[start..end].copy_from_slice(chunk);
+        }
+    }
+
+    fn with_chunk_error(
+        &self,
+        start: usize,
+        chunk: &BatchSendResult,
+        error: std::io::Error,
+    ) -> BatchSendError {
+        let mut disposition = self.clone();
+        disposition.set_chunk(start, &chunk.dispositions);
+        BatchSendError { error, disposition }
+    }
+}
+
+/// Error carrying the exact disposition known before a batch was quarantined.
+#[derive(Debug)]
+pub struct BatchSendError {
+    error: std::io::Error,
+    disposition: BatchSendResult,
+}
+
+impl BatchSendError {
+    fn not_submitted(error: std::io::Error, len: usize) -> Self {
+        Self { error, disposition: BatchSendResult::not_submitted(len) }
+    }
+
+    fn quarantined(error: std::io::Error, queued: usize) -> Self {
+        let mut disposition = BatchSendResult::not_submitted(queued);
+        disposition.dispositions.fill(BatchSendDisposition::Quarantined);
+        Self { error, disposition }
+    }
+
+    /// Exact disposition retained at the failure boundary.
+    pub fn disposition(&self) -> &BatchSendResult {
+        &self.disposition
+    }
+
+    /// I/O kind of the underlying failure for compatibility fallback policy.
+    pub fn kind(&self) -> std::io::ErrorKind {
+        self.error.kind()
+    }
+
+    /// Convert to the legacy I/O error surface while retaining the fail-closed
+    /// no-retry policy in the detailed API.
+    pub fn into_io_error(self) -> std::io::Error {
+        self.error
+    }
+}
+
+impl std::fmt::Display for BatchSendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for BatchSendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 struct SubmitOutcome {
     queued: usize,
-    sent: usize,
+    dispositions: BatchSendResult,
 }
 
 struct SendControl<'a> {
@@ -292,6 +408,17 @@ impl UringBatchSender {
     /// Payloads that exceed the submission queue capacity are sent in
     /// chunks (flush-and-refill).
     pub fn send_batch(&mut self, fd: RawFd, payloads: &[&[u8]]) -> std::io::Result<usize> {
+        self.send_batch_with_disposition(fd, payloads)
+            .map(|result| result.sent_count())
+            .map_err(BatchSendError::into_io_error)
+    }
+
+    /// Submit a connected-socket batch with exact per-input dispositions.
+    pub fn send_batch_with_disposition(
+        &mut self,
+        fd: RawFd,
+        payloads: &[&[u8]],
+    ) -> Result<BatchSendResult, BatchSendError> {
         self.send_batch_with_wait(fd, payloads, None)
     }
 
@@ -300,19 +427,27 @@ impl UringBatchSender {
         fd: RawFd,
         payloads: &[&[u8]],
         control: Option<&SendControl<'_>>,
-    ) -> std::io::Result<usize> {
-        self.ensure_usable()?;
+    ) -> Result<BatchSendResult, BatchSendError> {
+        let input_len = payloads.len();
+        if let Err(error) = self.ensure_usable() {
+            return Err(BatchSendError::quarantined(error, input_len));
+        }
         if payloads.is_empty() {
-            return Ok(0);
+            return Ok(BatchSendResult::not_submitted(0));
         }
         if control.is_some() && self.zc_supported {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "controlled io_uring sends do not permit SendMsgZc notification ownership",
+            return Err(BatchSendError::not_submitted(
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "controlled io_uring sends do not permit SendMsgZc notification ownership",
+                ),
+                input_len,
             ));
         }
-        let payload_bytes = Self::checked_payload_bytes(payloads.iter().copied())?;
-        Self::validate_batch_admission(payloads.len(), payload_bytes)?;
+        let payload_bytes = Self::checked_payload_bytes(payloads.iter().copied())
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        Self::validate_batch_admission(payloads.len(), payload_bytes)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
 
         // Keep every kernel-visible payload alive inside the sender. This is
         // required for the submit-error quarantine and for SendMsgZc's later
@@ -348,18 +483,24 @@ impl UringBatchSender {
         }
 
         let sq_cap = self.ring.params().sq_entries() as usize;
-        let mut total_sent: usize = 0;
+        let mut result = BatchSendResult::not_submitted(input_len);
 
         if self.zc_supported {
             // Zero-copy path: SendMsgZc with dual-CQE drain.
             let mut chunk_start = 0usize;
             while chunk_start < self.msgs.len() {
                 let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
-                let outcome = self.submit_chunk_zc(fd, chunk_start, chunk_end - chunk_start)?;
+                let outcome = match self.submit_chunk_zc(fd, chunk_start, chunk_end - chunk_start) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let BatchSendError { error: io_error, disposition } = error;
+                        return Err(result.with_chunk_error(chunk_start, &disposition, io_error));
+                    }
+                };
                 chunk_start += outcome.queued;
-                total_sent += outcome.sent;
-                if outcome.sent < outcome.queued {
-                    return Ok(total_sent);
+                result.set_chunk(chunk_start - outcome.queued, &outcome.dispositions.dispositions);
+                if outcome.dispositions.sent_count() < outcome.queued {
+                    return Ok(result);
                 }
             }
         } else {
@@ -368,16 +509,26 @@ impl UringBatchSender {
             while chunk_start < self.msgs.len() {
                 let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
                 let outcome =
-                    self.submit_chunk(fd, chunk_start, chunk_end - chunk_start, control)?;
+                    match self.submit_chunk(fd, chunk_start, chunk_end - chunk_start, control) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            let BatchSendError { error: io_error, disposition } = error;
+                            return Err(result.with_chunk_error(
+                                chunk_start,
+                                &disposition,
+                                io_error,
+                            ));
+                        }
+                    };
                 chunk_start += outcome.queued;
-                total_sent += outcome.sent;
-                if outcome.sent < outcome.queued {
-                    return Ok(total_sent);
+                result.set_chunk(chunk_start - outcome.queued, &outcome.dispositions.dispositions);
+                if outcome.dispositions.sent_count() < outcome.queued {
+                    return Ok(result);
                 }
             }
         }
 
-        Ok(total_sent)
+        Ok(result)
     }
 
     /// Submit a batch of datagrams on an **unconnected** UDP socket, each to a
@@ -392,6 +543,17 @@ impl UringBatchSender {
         fd: RawFd,
         packets: &[(SocketAddr, &[u8])],
     ) -> std::io::Result<usize> {
+        self.send_batch_to_with_disposition(fd, packets)
+            .map(|result| result.sent_count())
+            .map_err(BatchSendError::into_io_error)
+    }
+
+    /// Submit an unconnected-socket batch with exact per-input dispositions.
+    pub fn send_batch_to_with_disposition(
+        &mut self,
+        fd: RawFd,
+        packets: &[(SocketAddr, &[u8])],
+    ) -> Result<BatchSendResult, BatchSendError> {
         self.send_batch_to_with_wait(fd, packets, None)
     }
 
@@ -400,20 +562,28 @@ impl UringBatchSender {
         fd: RawFd,
         packets: &[(SocketAddr, &[u8])],
         control: Option<&SendControl<'_>>,
-    ) -> std::io::Result<usize> {
-        self.ensure_usable()?;
+    ) -> Result<BatchSendResult, BatchSendError> {
+        let input_len = packets.len();
+        if let Err(error) = self.ensure_usable() {
+            return Err(BatchSendError::quarantined(error, input_len));
+        }
         if packets.is_empty() {
-            return Ok(0);
+            return Ok(BatchSendResult::not_submitted(0));
         }
         if control.is_some() && self.zc_supported {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "controlled io_uring sends do not permit SendMsgZc notification ownership",
+            return Err(BatchSendError::not_submitted(
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "controlled io_uring sends do not permit SendMsgZc notification ownership",
+                ),
+                input_len,
             ));
         }
         let payload_bytes =
-            Self::checked_payload_bytes(packets.iter().map(|(_, payload)| *payload))?;
-        Self::validate_batch_admission(packets.len(), payload_bytes)?;
+            Self::checked_payload_bytes(packets.iter().map(|(_, payload)| *payload))
+                .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        Self::validate_batch_admission(packets.len(), payload_bytes)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
 
         // Copy payloads into sender-owned slots before any raw pointer is
         // published to io_uring. The input staging vector can be dropped as
@@ -460,22 +630,29 @@ impl UringBatchSender {
         }
 
         let sq_cap = self.ring.params().sq_entries() as usize;
-        let mut total_sent = 0usize;
+        let mut result = BatchSendResult::not_submitted(input_len);
 
         let mut chunk_start = 0usize;
         while chunk_start < self.msgs.len() {
             let chunk_end = (chunk_start + sq_cap).min(self.msgs.len());
-            let outcome = self.submit_chunk(fd, chunk_start, chunk_end - chunk_start, control)?;
+            let outcome = match self.submit_chunk(fd, chunk_start, chunk_end - chunk_start, control)
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let BatchSendError { error: io_error, disposition } = error;
+                    return Err(result.with_chunk_error(chunk_start, &disposition, io_error));
+                }
+            };
             chunk_start += outcome.queued;
-            total_sent += outcome.sent;
-            if outcome.sent < outcome.queued {
-                crate::telemetry::IO_URING_SERVER_PACKETS.inc_by(total_sent as u64);
-                return Ok(total_sent);
+            result.set_chunk(chunk_start - outcome.queued, &outcome.dispositions.dispositions);
+            if outcome.dispositions.sent_count() < outcome.queued {
+                crate::telemetry::IO_URING_SERVER_PACKETS.inc_by(result.sent_count() as u64);
+                return Ok(result);
             }
         }
 
-        crate::telemetry::IO_URING_SERVER_PACKETS.inc_by(total_sent as u64);
-        Ok(total_sent)
+        crate::telemetry::IO_URING_SERVER_PACKETS.inc_by(result.sent_count() as u64);
+        Ok(result)
     }
 
     /// Push one chunk of SendMsg SQEs (by index range into `self.msgs`) and reap completions.
@@ -485,7 +662,7 @@ impl UringBatchSender {
         start: usize,
         count: usize,
         control: Option<&SendControl<'_>>,
-    ) -> std::io::Result<SubmitOutcome> {
+    ) -> Result<SubmitOutcome, BatchSendError> {
         let fd = io_uring::types::Fd(fd);
 
         // Drain any stale CQEs from previous operations to ensure
@@ -518,9 +695,12 @@ impl UringBatchSender {
             }
         }
         if queued == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "io_uring submission queue accepted no SendMsg SQEs",
+            return Err(BatchSendError::not_submitted(
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "io_uring submission queue accepted no SendMsg SQEs",
+                ),
+                0,
             ));
         }
 
@@ -528,9 +708,13 @@ impl UringBatchSender {
         // runtime-owned worker uses a submit-and-poll boundary so shutdown and
         // the operation deadline remain observable without blocking Tokio.
         if let Some(control) = control {
-            self.submit_and_poll(queued, control)?;
+            if let Err(error) = self.submit_and_poll(queued, control) {
+                return Err(BatchSendError::quarantined(error, queued));
+            }
         } else {
-            self.submit_and_wait(queued)?;
+            if let Err(error) = self.submit_and_wait(queued) {
+                return Err(BatchSendError::quarantined(error, queued));
+            }
         }
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
@@ -573,21 +757,35 @@ impl UringBatchSender {
             }
         }
         if let Some(error) = completion_error {
-            return Err(
-                self.quarantine(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-            );
+            return Err(BatchSendError::quarantined(
+                self.quarantine(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                queued,
+            ));
         }
         if overflow != 0 || completion_count != queued {
-            return Err(self.quarantine(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "io_uring SendMsg completion set incomplete: {completion_count}/{queued}, cq_overflow={overflow}"
-                ),
-            )));
+            return Err(BatchSendError::quarantined(
+                self.quarantine(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "io_uring SendMsg completion set incomplete: {completion_count}/{queued}, cq_overflow={overflow}"
+                    ),
+                )),
+                queued,
+            ));
         }
-        let sent = self.send_success.iter().take_while(|&&ok| ok).count();
+        let dispositions = BatchSendResult::from_chunk(
+            self.send_seen
+                .iter()
+                .zip(self.send_success.iter())
+                .map(|(seen, success)| match (*seen, *success) {
+                    (true, true) => BatchSendDisposition::Sent,
+                    (true, false) => BatchSendDisposition::Failed,
+                    (false, _) => BatchSendDisposition::Quarantined,
+                })
+                .collect(),
+        );
 
-        Ok(SubmitOutcome { queued, sent })
+        Ok(SubmitOutcome { queued, dispositions })
     }
 
     fn submit_and_poll(&mut self, queued: usize, control: &SendControl<'_>) -> std::io::Result<()> {
@@ -630,7 +828,7 @@ impl UringBatchSender {
         fd: RawFd,
         start: usize,
         count: usize,
-    ) -> std::io::Result<SubmitOutcome> {
+    ) -> Result<SubmitOutcome, BatchSendError> {
         let fd_typed = io_uring::types::Fd(fd);
 
         // No CQE from a previous ZC chunk may remain: a notification exists
@@ -642,10 +840,13 @@ impl UringBatchSender {
             cq.count()
         };
         if stale_cqes != 0 {
-            return Err(self.quarantine(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("io_uring SendMsgZc found {stale_cqes} stale CQEs before submission"),
-            )));
+            return Err(BatchSendError::quarantined(
+                self.quarantine(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("io_uring SendMsgZc found {stale_cqes} stale CQEs before submission"),
+                )),
+                count,
+            ));
         }
 
         // Push SendMsgZc SQEs.
@@ -669,9 +870,12 @@ impl UringBatchSender {
             }
         }
         if queued == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "io_uring submission queue accepted no SendMsgZc SQEs",
+            return Err(BatchSendError::not_submitted(
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "io_uring submission queue accepted no SendMsgZc SQEs",
+                ),
+                0,
             ));
         }
 
@@ -679,7 +883,9 @@ impl UringBatchSender {
         // until all primary send CQEs have been observed. SendMsgZc completion
         // ordering is kernel-dependent: notification CQEs can satisfy the first
         // wait without proving that every packet in this chunk was accepted.
-        self.submit_and_wait(queued)?;
+        if let Err(error) = self.submit_and_wait(queued) {
+            return Err(BatchSendError::quarantined(error, queued));
+        }
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
 
         self.send_success.clear();
@@ -752,15 +958,19 @@ impl UringBatchSender {
                 }
             }
             if let Some(error) = completion_error {
-                return Err(
-                    self.quarantine(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-                );
+                return Err(BatchSendError::quarantined(
+                    self.quarantine(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                    queued,
+                ));
             }
             if overflow != 0 {
-                return Err(self.quarantine(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("io_uring SendMsgZc CQ overflow: {overflow}"),
-                )));
+                return Err(BatchSendError::quarantined(
+                    self.quarantine(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("io_uring SendMsgZc CQ overflow: {overflow}"),
+                    )),
+                    queued,
+                ));
             }
             if primary_seen_count == queued
                 && self
@@ -769,10 +979,13 @@ impl UringBatchSender {
                     .zip(self.zc_notification_expected.iter())
                     .any(|(seen, expected)| *seen && !*expected)
             {
-                return Err(self.quarantine(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "io_uring SendMsgZc produced an unannounced notification",
-                )));
+                return Err(BatchSendError::quarantined(
+                    self.quarantine(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "io_uring SendMsgZc produced an unannounced notification",
+                    )),
+                    queued,
+                ));
             }
             let notifications_complete = self
                 .zc_notification_expected
@@ -780,13 +993,25 @@ impl UringBatchSender {
                 .zip(self.zc_notification_seen.iter())
                 .all(|(expected, seen)| !*expected || *seen);
             if (primary_seen_count < queued || !notifications_complete) && drained == 0 {
-                self.submit_and_wait(1)?;
+                if let Err(error) = self.submit_and_wait(1) {
+                    return Err(BatchSendError::quarantined(error, queued));
+                }
             }
         }
 
-        let sent = self.send_success.iter().take_while(|&&ok| ok).count();
+        let dispositions = BatchSendResult::from_chunk(
+            self.zc_primary_seen
+                .iter()
+                .zip(self.send_success.iter())
+                .map(|(seen, success)| match (*seen, *success) {
+                    (true, true) => BatchSendDisposition::Sent,
+                    (true, false) => BatchSendDisposition::Failed,
+                    (false, _) => BatchSendDisposition::Quarantined,
+                })
+                .collect(),
+        );
 
-        Ok(SubmitOutcome { queued, sent })
+        Ok(SubmitOutcome { queued, dispositions })
     }
 }
 
@@ -826,12 +1051,12 @@ enum WorkerRequest {
     Connected {
         fd: RawFd,
         payloads: Vec<Vec<u8>>,
-        reply: tokio::sync::oneshot::Sender<std::io::Result<usize>>,
+        reply: tokio::sync::oneshot::Sender<Result<BatchSendResult, BatchSendError>>,
     },
     To {
         fd: RawFd,
         packets: Vec<(SocketAddr, Vec<u8>)>,
-        reply: tokio::sync::oneshot::Sender<std::io::Result<usize>>,
+        reply: tokio::sync::oneshot::Sender<Result<BatchSendResult, BatchSendError>>,
     },
 }
 
@@ -872,7 +1097,10 @@ impl UringBatchWorker {
                     match request {
                         WorkerRequest::Connected { fd, payloads, reply } => {
                             if shutdown_for_worker.load(Ordering::Acquire) {
-                                let _ = reply.send(Err(worker_shutdown_error()));
+                                let _ = reply.send(Err(BatchSendError::not_submitted(
+                                    worker_shutdown_error(),
+                                    payloads.len(),
+                                )));
                                 continue;
                             }
                             let payload_refs: Vec<&[u8]> =
@@ -890,7 +1118,10 @@ impl UringBatchWorker {
                         }
                         WorkerRequest::To { fd, packets, reply } => {
                             if shutdown_for_worker.load(Ordering::Acquire) {
-                                let _ = reply.send(Err(worker_shutdown_error()));
+                                let _ = reply.send(Err(BatchSendError::not_submitted(
+                                    worker_shutdown_error(),
+                                    packets.len(),
+                                )));
                                 continue;
                             }
                             let packet_refs: Vec<(SocketAddr, &[u8])> = packets
@@ -929,52 +1160,106 @@ impl UringBatchWorker {
     async fn submit_request(
         &self,
         request: WorkerRequest,
-        reply: tokio::sync::oneshot::Receiver<std::io::Result<usize>>,
-    ) -> std::io::Result<usize> {
+        reply: tokio::sync::oneshot::Receiver<Result<BatchSendResult, BatchSendError>>,
+        input_len: usize,
+    ) -> Result<BatchSendResult, BatchSendError> {
         if !self.is_available() {
-            return Err(worker_shutdown_error());
+            return Err(BatchSendError::not_submitted(worker_shutdown_error(), input_len));
         }
         let request_tx = self
             .request_tx
             .lock()
-            .map_err(|_| std::io::Error::other("io_uring worker state lock poisoned"))?
+            .map_err(|_| {
+                BatchSendError::not_submitted(
+                    std::io::Error::other("io_uring worker state lock poisoned"),
+                    input_len,
+                )
+            })?
             .as_ref()
             .cloned()
-            .ok_or_else(worker_shutdown_error)?;
+            .ok_or_else(|| BatchSendError::not_submitted(worker_shutdown_error(), input_len))?;
         match request_tx.try_send(request) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "io_uring blocking worker queue is full",
+                return Err(BatchSendError::not_submitted(
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "io_uring blocking worker queue is full",
+                    ),
+                    input_len,
                 ));
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                return Err(worker_shutdown_error());
+                return Err(BatchSendError::not_submitted(worker_shutdown_error(), input_len));
             }
         }
         match tokio::time::timeout(BLOCKING_WORKER_RESPONSE_TIMEOUT, reply).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "io_uring blocking worker dropped the request response",
+            Ok(Err(_)) => Err(BatchSendError::quarantined(
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "io_uring blocking worker dropped the request response",
+                ),
+                input_len,
             )),
-            Err(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "io_uring blocking worker response deadline exceeded",
+            Err(_) => Err(BatchSendError::quarantined(
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "io_uring blocking worker response deadline exceeded",
+                ),
+                input_len,
             )),
         }
     }
 
-    /// Submit a connected-socket batch without blocking the caller's executor.
-    pub async fn send_batch(&self, fd: RawFd, payloads: &[&[u8]]) -> std::io::Result<usize> {
-        let payload_bytes = UringBatchSender::checked_payload_bytes(payloads.iter().copied())?;
-        UringBatchSender::validate_batch_admission(payloads.len(), payload_bytes)?;
+    /// Submit a connected-socket batch with exact per-input dispositions.
+    pub async fn send_batch_with_disposition(
+        &self,
+        fd: RawFd,
+        payloads: &[&[u8]],
+    ) -> Result<BatchSendResult, BatchSendError> {
+        let input_len = payloads.len();
+        let payload_bytes = UringBatchSender::checked_payload_bytes(payloads.iter().copied())
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        UringBatchSender::validate_batch_admission(payloads.len(), payload_bytes)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let owned_payloads = payloads.iter().map(|payload| payload.to_vec()).collect();
         self.submit_request(
             WorkerRequest::Connected { fd, payloads: owned_payloads, reply: reply_tx },
             reply_rx,
+            input_len,
+        )
+        .await
+    }
+
+    /// Submit a connected-socket batch without blocking the caller's executor.
+    pub async fn send_batch(&self, fd: RawFd, payloads: &[&[u8]]) -> std::io::Result<usize> {
+        self.send_batch_with_disposition(fd, payloads)
+            .await
+            .map(|result| result.sent_count())
+            .map_err(BatchSendError::into_io_error)
+    }
+
+    /// Submit an unconnected-socket batch with exact per-input dispositions.
+    pub async fn send_batch_to_with_disposition(
+        &self,
+        fd: RawFd,
+        packets: &[(SocketAddr, &[u8])],
+    ) -> Result<BatchSendResult, BatchSendError> {
+        let input_len = packets.len();
+        let payload_bytes =
+            UringBatchSender::checked_payload_bytes(packets.iter().map(|(_, payload)| *payload))
+                .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        UringBatchSender::validate_batch_admission(packets.len(), payload_bytes)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let owned_packets =
+            packets.iter().map(|(addr, payload)| (*addr, payload.to_vec())).collect();
+        self.submit_request(
+            WorkerRequest::To { fd, packets: owned_packets, reply: reply_tx },
+            reply_rx,
+            input_len,
         )
         .await
     }
@@ -985,17 +1270,10 @@ impl UringBatchWorker {
         fd: RawFd,
         packets: &[(SocketAddr, &[u8])],
     ) -> std::io::Result<usize> {
-        let payload_bytes =
-            UringBatchSender::checked_payload_bytes(packets.iter().map(|(_, payload)| *payload))?;
-        UringBatchSender::validate_batch_admission(packets.len(), payload_bytes)?;
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let owned_packets =
-            packets.iter().map(|(addr, payload)| (*addr, payload.to_vec())).collect();
-        self.submit_request(
-            WorkerRequest::To { fd, packets: owned_packets, reply: reply_tx },
-            reply_rx,
-        )
-        .await
+        self.send_batch_to_with_disposition(fd, packets)
+            .await
+            .map(|result| result.sent_count())
+            .map_err(BatchSendError::into_io_error)
     }
 
     /// Stop admission and make the owned worker observable to its join owner.
@@ -1033,7 +1311,7 @@ fn worker_shutdown_error() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::BrokenPipe, "io_uring blocking worker is shut down")
 }
 
-fn worker_operation_failed(result: &std::io::Result<usize>) -> bool {
+fn worker_operation_failed(result: &Result<BatchSendResult, BatchSendError>) -> bool {
     match result {
         Ok(_) => false,
         Err(error) => error.kind() != std::io::ErrorKind::WouldBlock,
@@ -1111,13 +1389,22 @@ thread_local! {
 /// Returns `Some(sent_count)` when at least one packet was sent, `None` when
 /// io_uring is unavailable or no progress was made.
 pub fn server_send_batch_to(fd: RawFd, packets: &[(SocketAddr, &[u8])]) -> Option<usize> {
+    server_send_batch_to_with_disposition(fd, packets).map(|result| result.sent_count())
+}
+
+/// Send a server batch through the synchronous compatibility sender while
+/// preserving exact per-input ownership for callers that need a fallback.
+pub fn server_send_batch_to_with_disposition(
+    fd: RawFd,
+    packets: &[(SocketAddr, &[u8])],
+) -> Option<BatchSendResult> {
     SERVER_URING_SENDER.with(|cell| {
         let mut guard = cell.borrow_mut();
         if let Some(ref mut sender) = *guard {
-            match sender.send_batch_to(fd, packets) {
-                Ok(n) if n > 0 => {
+            match sender.send_batch_to_with_disposition(fd, packets) {
+                Ok(result) if result.sent_count() > 0 => {
                     crate::telemetry::IO_URING_SERVER_SUBMIT_CALLS.inc();
-                    Some(n)
+                    Some(result)
                 }
                 Ok(_) => None,
                 Err(e) => {
@@ -1753,6 +2040,40 @@ mod tests {
         assert_eq!(checked_slot_index(3, 4).expect("last slot"), 3);
         assert!(checked_slot_index(4, 4).is_err());
         assert!(checked_slot_index(u64::MAX, 4).is_err());
+    }
+
+    #[test]
+    fn batch_result_preserves_out_of_order_successes() {
+        let mut result = BatchSendResult::not_submitted(3);
+        result.set_chunk(
+            0,
+            &[BatchSendDisposition::Sent, BatchSendDisposition::Failed, BatchSendDisposition::Sent],
+        );
+
+        assert_eq!(result.sent_count(), 2);
+        assert!(result.is_sent(0));
+        assert!(!result.is_sent(1));
+        assert!(result.is_sent(2));
+        assert_eq!(result.disposition(1), Some(BatchSendDisposition::Failed));
+    }
+
+    #[test]
+    fn quarantined_batch_result_is_not_retryable() {
+        let error = BatchSendError::quarantined(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "completion mismatch"),
+            3,
+        );
+
+        assert_eq!(error.disposition().len(), 3);
+        assert_eq!(error.disposition().sent_count(), 0);
+        assert_eq!(
+            (0..3).map(|index| error.disposition().disposition(index)).collect::<Vec<_>>(),
+            vec![
+                Some(BatchSendDisposition::Quarantined),
+                Some(BatchSendDisposition::Quarantined),
+                Some(BatchSendDisposition::Quarantined),
+            ]
+        );
     }
 
     #[test]
