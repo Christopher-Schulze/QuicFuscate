@@ -61,11 +61,22 @@ impl BrainFecHints {
 pub(crate) struct IntelligentLevelHints {
     brain_level: AtomicU32,
     probe_level: AtomicU32,
+    /// Whether this connection's brain currently prefers MASQUE.
+    ///
+    /// Connection-owned, like the levels beside it. This used to travel through the process-global
+    /// `telemetry::MASQUE_HINT` atomic, so one connection's telemetry could flip another
+    /// connection's MASQUE preference. That counter is still exported for observability, but it is
+    /// never read back for policy.
+    prefer_masque: AtomicU32,
 }
 
 impl IntelligentLevelHints {
     pub(crate) fn new() -> Self {
-        Self { brain_level: AtomicU32::new(0), probe_level: AtomicU32::new(0) }
+        Self {
+            brain_level: AtomicU32::new(0),
+            probe_level: AtomicU32::new(0),
+            prefer_masque: AtomicU32::new(0),
+        }
     }
 
     #[inline(always)]
@@ -76,6 +87,18 @@ impl IntelligentLevelHints {
     #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) fn set_brain_level_for_test(&self, level: u8) {
         self.set_brain_level(level);
+    }
+
+    /// Record this connection's MASQUE preference.
+    #[inline(always)]
+    pub(crate) fn set_prefer_masque(&self, prefer: bool) {
+        self.prefer_masque.store(u32::from(prefer), Ordering::Relaxed);
+    }
+
+    /// Whether this connection's brain prefers MASQUE.
+    #[inline(always)]
+    pub(crate) fn prefer_masque(&self) -> bool {
+        self.prefer_masque.load(Ordering::Relaxed) == 1
     }
 
     #[inline(always)]
@@ -1340,8 +1363,11 @@ impl TransportObserver for StealthBrain {
         }
         let ce_scaled = (actuators.ce_ratio_recent * 1000.0).clamp(0.0, 1000.0) as u32;
         self.loss_rate.store(ce_scaled, Ordering::Relaxed);
+        // Connection-owned preference. The global telemetry counter below is observability only
+        // and is deliberately never read back for policy.
+        self.level_hints.set_prefer_masque(actuators.prefer_masque_effective);
         crate::optimize::telemetry::MASQUE_HINT
-            .store(if actuators.prefer_masque_effective { 1 } else { 0 }, Ordering::Relaxed);
+            .store(u64::from(actuators.prefer_masque_effective), Ordering::Relaxed);
         let ce_ratio_recent = actuators.ce_ratio_recent;
         let ack_us = actuators.ack_us;
         let ack_us_long = actuators.ack_us_long;

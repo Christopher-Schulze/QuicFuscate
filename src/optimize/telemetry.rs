@@ -21,6 +21,12 @@ pub static MASQUE_ACTIVE: AtomicU64 = AtomicU64::new(0);
 pub static AEGIS_PLAN: AtomicU64 = AtomicU64::new(0);
 
 /// Brain MASQUE hint: 0 = no preference, 1 = prefer MASQUE path.
+/// Last MASQUE preference any connection's brain computed.
+///
+/// Observability only. This used to be the channel through which a brain told the stealth manager
+/// its preference, which meant one connection's telemetry flipped every other connection's MASQUE
+/// preference. The policy value is now connection-owned in `IntelligentLevelHints`, and nothing
+/// reads this back.
 pub static MASQUE_HINT: AtomicU64 = AtomicU64::new(0);
 
 /// Total IPv4 packets processed through TUN device.

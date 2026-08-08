@@ -1285,3 +1285,90 @@ fn test_chaff_generator_debug_format() {
     assert!(s.contains("rate_pps: 10"));
     assert!(s.contains("chaff_size_bytes: 1280"));
 }
+
+/// Two connections must not be able to change each other's MASQUE preference.
+///
+/// The brain wrote `telemetry::MASQUE_HINT`, a process-global atomic, and every stealth manager
+/// read it back for policy. One connection's telemetry therefore flipped every other connection's
+/// MASQUE preference. The hint is now connection-owned, and the global counter is observability
+/// only.
+#[test]
+fn masque_preference_is_connection_owned_and_does_not_leak_between_connections() {
+    let optimization = Arc::new(OptimizationManager::new());
+    let crypto = Arc::new(CryptoManager::new());
+
+    let first = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::clone(&optimization),
+        Arc::clone(&crypto),
+    );
+    let second = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::clone(&optimization),
+        Arc::clone(&crypto),
+    );
+
+    let first_hints = first.intelligent_level_hints();
+    let second_hints = second.intelligent_level_hints();
+
+    // Distinct connections must not share the hint channel.
+    assert!(
+        !Arc::ptr_eq(&first_hints, &second_hints),
+        "each connection must own its own hint state"
+    );
+
+    assert!(!first_hints.prefer_masque(), "a fresh connection prefers nothing");
+    assert!(!second_hints.prefer_masque());
+
+    // One connection's brain decides it prefers MASQUE.
+    first_hints.set_prefer_masque(true);
+
+    assert!(first_hints.prefer_masque(), "the deciding connection sees its own preference");
+    assert!(
+        !second_hints.prefer_masque(),
+        "the other connection must be unaffected by its peer's telemetry"
+    );
+
+    // And the reverse direction, so the isolation is not one-way by accident.
+    second_hints.set_prefer_masque(false);
+    assert!(first_hints.prefer_masque(), "clearing one connection must not clear the other");
+
+    second_hints.set_prefer_masque(true);
+    first_hints.set_prefer_masque(false);
+    assert!(!first_hints.prefer_masque());
+    assert!(second_hints.prefer_masque());
+}
+
+/// Interleaved updates from two connections must stay deterministic per connection.
+#[test]
+fn interleaved_masque_updates_keep_per_connection_outcomes_deterministic() {
+    let optimization = Arc::new(OptimizationManager::new());
+    let crypto = Arc::new(CryptoManager::new());
+
+    let first = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::clone(&optimization),
+        Arc::clone(&crypto),
+    );
+    let second = StealthManager::new(
+        StealthConfig::intelligent(),
+        Arc::clone(&optimization),
+        Arc::clone(&crypto),
+    );
+    let first_hints = first.intelligent_level_hints();
+    let second_hints = second.intelligent_level_hints();
+
+    // The first connection is driven to a stable "prefers MASQUE" state while the second is
+    // driven to the opposite, with the writes interleaved.
+    for round in 0..64 {
+        first_hints.set_prefer_masque(true);
+        second_hints.set_prefer_masque(round % 2 == 0);
+        second_hints.set_prefer_masque(false);
+        assert!(
+            first_hints.prefer_masque(),
+            "the first connection's preference must survive the second's churn at round {round}"
+        );
+    }
+    assert!(first_hints.prefer_masque());
+    assert!(!second_hints.prefer_masque());
+}

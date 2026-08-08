@@ -1176,8 +1176,10 @@ impl StealthManager {
     }
 
     fn desired_masque_preference(&self) -> bool {
-        let telemetry_hint = crate::optimize::telemetry::MASQUE_HINT.load(Ordering::Relaxed);
-        self.desired_masque_preference_with_hint(telemetry_hint)
+        // Read this connection's own brain hint, not the process-global telemetry counter. The
+        // global read let one connection's telemetry flip another connection's MASQUE preference.
+        let hint = u64::from(self.intelligent_level_hints.prefer_masque());
+        self.desired_masque_preference_with_hint(hint)
     }
 
     fn server_push_cover_active(&self) -> bool {
