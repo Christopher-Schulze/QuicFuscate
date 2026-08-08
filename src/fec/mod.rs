@@ -81,8 +81,11 @@ impl SharedFecBuffer {
     }
 
     fn bytes(&self, len: usize) -> &[u8] {
-        let buf = self.inner.buf.as_ref().expect("shared FEC buffer already freed");
-        &buf[..len.min(buf.len())]
+        // The option is cleared only by the final Arc owner during Drop. A
+        // missing buffer is therefore an impossible lifecycle state for a
+        // live handle; return an empty slice defensively if ownership changes
+        // in the future rather than panicking from a data-plane accessor.
+        self.inner.buf.as_deref().map_or(&[], |buf| &buf[..len.min(buf.len())])
     }
 
     /// Number of strong references to the underlying pool buffer.

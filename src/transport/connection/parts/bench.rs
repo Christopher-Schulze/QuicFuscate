@@ -14,6 +14,7 @@ pub fn bench_paired_1rtt_connections() -> BenchConnectionPair {
 
 #[cfg(any(test, feature = "benches"))]
 /// Build a matched client/server pair for 1-RTT benches with stealth knobs toggled.
+#[allow(clippy::expect_used)]
 pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectionPair {
     use std::net::{Ipv4Addr, SocketAddr};
 
@@ -88,6 +89,7 @@ pub struct BenchRetryCase {
 
 #[cfg(feature = "benches")]
 /// Build a client and valid Retry packet without opening a socket.
+#[allow(clippy::expect_used)]
 pub fn bench_retry_case() -> BenchRetryCase {
     use std::net::{Ipv4Addr, SocketAddr};
 

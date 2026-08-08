@@ -130,7 +130,7 @@ impl ReplayWindow {
         msg[..8].copy_from_slice(&timestamp.to_be_bytes());
         msg[8..].copy_from_slice(nonce);
         let h = sha256(&msg);
-        let raw = u64::from_be_bytes(h[0..8].try_into().expect("8 bytes"));
+        let raw = u64::from_be_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]]);
         raw & SLOT_MASK
     }
 }

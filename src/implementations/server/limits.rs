@@ -1002,6 +1002,12 @@ impl EwmaAnomalyDetector {
     }
 
     /// Create a detector bound to an explicit protocol clock.
+    ///
+    /// This legacy infallible API accepts arbitrary parameters. Validation is
+    /// retained by [`Self::with_config_and_clock`]; the narrow disposition
+    /// preserves the established API for callers that have already validated
+    /// their configuration.
+    #[allow(clippy::expect_used)]
     pub fn new_with_clock(alpha: f64, spike_multiplier: f64, clock: &ProtocolClock) -> Self {
         let config =
             DdosPolicyConfig { ewma_alpha: alpha, spike_multiplier, ..DdosPolicyConfig::default() };
@@ -1030,6 +1036,7 @@ impl EwmaAnomalyDetector {
     }
 
     /// Create a detector with sensible defaults (α=0.1, spike=3×).
+    #[allow(clippy::expect_used)]
     pub fn with_defaults() -> Self {
         Self::with_config(DdosPolicyConfig::default()).expect("default DDoS policy must be valid")
     }
@@ -1550,6 +1557,11 @@ impl BlacklistSync {
     }
 
     /// Create a blacklist synchronizer bound to an explicit protocol clock.
+    ///
+    /// The legacy constructor supplies fixed validated bounds and keeps the
+    /// original infallible API. Call [`Self::new_bounded_with_clock`] when the
+    /// caller needs typed validation errors.
+    #[allow(clippy::expect_used)]
     pub fn new_with_clock(
         default_ttl: Duration,
         sync_url: Option<String>,

@@ -25,10 +25,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_no_new_privileges()?;
     let identity = resolve_identity(&user, &group)?;
     let runtime = if tokio_threads {
+        let hardening_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let hardening_error_for_workers = std::sync::Arc::clone(&hardening_error);
         let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(thread_count).enable_all().on_thread_start(|| {
-            harden_runtime_worker_thread()
-                .unwrap_or_else(|error| panic!("Tokio worker hardening failed: {error}"));
+        builder.worker_threads(thread_count).enable_all().on_thread_start(move || {
+            if let Err(error) = harden_runtime_worker_thread() {
+                let mut slot = match hardening_error_for_workers.lock() {
+                    Ok(slot) => slot,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if slot.is_none() {
+                    *slot = Some(error.to_string());
+                }
+            }
         });
         let runtime = builder.build()?;
         runtime.block_on(async {
@@ -37,9 +46,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workers.push(tokio::spawn(async { tokio::task::yield_now().await }));
             }
             for worker in workers {
-                worker.await.expect("Tokio probe worker failed");
+                worker.await.map_err(|error| {
+                    std::io::Error::other(format!("Tokio probe worker failed: {error}"))
+                })?;
             }
-        });
+            Ok::<(), std::io::Error>(())
+        })?;
+        let hardening_error = match hardening_error.lock() {
+            Ok(slot) => slot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(error) = hardening_error {
+            return Err(format!("Tokio worker hardening failed: {error}").into());
+        }
         Some(runtime)
     } else {
         None

@@ -404,8 +404,7 @@ impl SharedServerDomain {
                 PerClientBandwidthManager::new_with_clock(
                     server_config.bandwidth_policy.clone(),
                     clock,
-                )
-                    .expect("validated server bandwidth policy"),
+                )?,
             ))),
             forwarding_policy: Arc::new(ClientIsolationManager::with_network(
                 server_config.server_ip,
@@ -433,21 +432,19 @@ impl SharedServerDomain {
                 crate::implementations::server::limits::EwmaAnomalyDetector::with_config_and_clock(
                     server_config.ddos_policy.clone(),
                     clock,
-                )
-                .expect("validated server DDoS policy"),
+                )?,
             ),
             #[cfg(feature = "rate_limiter")]
             retry_token_manager: (server_config.ddos_policy.enabled
                 && server_config.ddos_policy.retry_enabled)
                 .then(|| {
-                    Arc::new(
-                        crate::implementations::server::ddos::RetryTokenManager::new_with_clock(
-                            server_config.ddos_policy.retry_token_lifetime,
-                            clock,
-                        )
-                        .expect("validated Retry token lifetime"),
+                    crate::implementations::server::ddos::RetryTokenManager::new_with_clock(
+                        server_config.ddos_policy.retry_token_lifetime,
+                        clock,
                     )
-                }),
+                    .map(Arc::new)
+                })
+                .transpose()?,
             #[cfg(feature = "rate_limiter")]
             geoip_blocker: Arc::new(
                 crate::implementations::server::limits::GeoIpBlocker::try_new(
@@ -471,7 +468,7 @@ impl SharedServerDomain {
                     server_config.blacklist.custom_ca_path.clone(),
                     clock,
                 )
-                .expect("validated server blacklist policy"),
+                .map_err(|error| error.to_string())?,
             ),
             max_clients: server_config.max_clients,
             client_timeout_secs: server_config.client_timeout_secs,

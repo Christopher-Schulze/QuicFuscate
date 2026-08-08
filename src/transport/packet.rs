@@ -201,7 +201,7 @@ pub fn connect_with_clock(
     let browser_profile = crate::transport::recovery::BrowserProfile::Chrome;
     conn.recovery_mut()
         .set_stealth_mode(false, browser_profile)
-        .expect("disabling stealth mode must not require entropy");
+        .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
 
     Ok(conn)
 }
@@ -261,7 +261,7 @@ pub fn accept_with_clock(
     let browser_profile = crate::transport::recovery::BrowserProfile::Chrome;
     conn.recovery_mut()
         .set_stealth_mode(false, browser_profile)
-        .expect("disabling stealth mode must not require entropy");
+        .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
 
     Ok(conn)
 }

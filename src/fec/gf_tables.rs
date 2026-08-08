@@ -1,16 +1,18 @@
 use crate::optimize::{self};
 use log::warn;
-use std::sync::{Once, OnceLock};
+use std::sync::OnceLock;
 
 // GF(2^8) constants
 const IRREDUCIBLE_POLY: u16 = 0x11D;
 
-static LOG_TABLE: OnceLock<[u8; 256]> = OnceLock::new();
-static EXP_TABLE: OnceLock<[u8; 512]> = OnceLock::new();
-static TABLES_INIT: Once = Once::new();
+static TABLES: OnceLock<([u8; 256], [u8; 512])> = OnceLock::new();
 
 pub(crate) fn init_tables() {
-    TABLES_INIT.call_once(|| {
+    let _ = tables();
+}
+
+fn tables() -> &'static ([u8; 256], [u8; 512]) {
+    TABLES.get_or_init(|| {
         let mut log = [0u8; 256];
         let mut exp = [0u8; 512];
         let mut x = 1u8;
@@ -23,19 +25,18 @@ pub(crate) fn init_tables() {
             x = y as u8;
         }
         log[0] = 0;
-        let _ = LOG_TABLE.set(log);
-        let _ = EXP_TABLE.set(exp);
-    });
+        (log, exp)
+    })
 }
 
 #[inline(always)]
 fn log_table() -> &'static [u8; 256] {
-    LOG_TABLE.get().expect("GF tables not initialized")
+    &tables().0
 }
 
 #[inline(always)]
 fn exp_table() -> &'static [u8; 512] {
-    EXP_TABLE.get().expect("GF tables not initialized")
+    &tables().1
 }
 
 #[inline(always)]

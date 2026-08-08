@@ -184,8 +184,15 @@ async fn run_blacklist(
         )
         .into());
     }
-    let refresh_error =
-        reloaded.sync().await.expect_err("unreachable refresh endpoint unexpectedly succeeded");
+    let refresh_error = match reloaded.sync().await {
+        Ok(count) => {
+            return Err(format!(
+                "unreachable refresh endpoint unexpectedly succeeded with {count} entries"
+            )
+            .into())
+        }
+        Err(error) => error,
+    };
     if reloaded.len() != expected_entries {
         return Err("failed blacklist refresh replaced the last-known-good entries".into());
     }

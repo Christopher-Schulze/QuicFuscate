@@ -483,6 +483,15 @@ impl PerClientBandwidthManager {
         Ok(Self { clients: HashMap::new(), default_policy, clock: clock.clone() })
     }
 
+    /// Create a manager with the compile-time validated default policy.
+    pub fn with_default_policy_with_clock(clock: &ProtocolClock) -> Self {
+        Self {
+            clients: HashMap::new(),
+            default_policy: BandwidthPolicy::default(),
+            clock: clock.clone(),
+        }
+    }
+
     fn entry_from_policy(
         policy: BandwidthPolicy,
         clock: &ProtocolClock,
@@ -1021,6 +1030,14 @@ mod tests {
         let mut invalid_weight = policy(0, 0, 0, 0);
         invalid_weight.weight = 0;
         assert!(PerClientBandwidthManager::new(invalid_weight).is_err());
+    }
+
+    #[test]
+    fn default_policy_constructor_is_infallible_and_validated() {
+        let manager =
+            PerClientBandwidthManager::with_default_policy_with_clock(&ProtocolClock::default());
+        assert_eq!(manager.default_policy, BandwidthPolicy::default());
+        assert!(manager.default_policy.validate().is_ok());
     }
 
     #[test]

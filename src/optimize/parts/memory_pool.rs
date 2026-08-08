@@ -685,7 +685,10 @@ impl MemoryPool {
     /// Creates a pool with an explicit block-size contract.
     ///
     /// The requested block size is retained, subject only to the minimum safe
-    /// size. Use [`MemoryPool::new_adaptive`] when MTU-based sizing is desired.
+    /// size. This compatibility constructor is intentionally infallible for
+    /// existing callers; use [`MemoryPool::try_new`] when configuration or
+    /// allocation failures must be handled by the caller.
+    #[allow(clippy::panic)]
     pub fn new(capacity: usize, block_size: usize) -> Self {
         Self::try_new(capacity, block_size).unwrap_or_else(|error| {
             panic!("MemoryPool::new failed: {error}")
@@ -699,6 +702,9 @@ impl MemoryPool {
     }
 
     /// Creates a pool using one immutable environment generation.
+    ///
+    /// This compatibility constructor preserves the original infallible API.
+    #[allow(clippy::panic)]
     pub(crate) fn new_with_snapshot(
         capacity: usize,
         block_size: usize,
@@ -721,7 +727,9 @@ impl MemoryPool {
     /// Creates a pool whose block size follows the configured MTU profile.
     ///
     /// `QUICFUSCATE_POOL_ADAPTIVE_BLOCK=0|false` disables the MTU selection and
-    /// retains the requested size, subject to the minimum safe size.
+    /// retains the requested size, subject to the minimum safe size. Use the
+    /// fallible counterpart when allocation errors must be recovered.
+    #[allow(clippy::panic)]
     pub fn new_adaptive(capacity: usize, block_size: usize) -> Self {
         Self::try_new_adaptive(capacity, block_size).unwrap_or_else(|error| {
             panic!("MemoryPool::new_adaptive failed: {error}")
@@ -735,6 +743,9 @@ impl MemoryPool {
     }
 
     /// Creates an adaptive pool using one immutable environment generation.
+    ///
+    /// This compatibility constructor preserves the original infallible API.
+    #[allow(clippy::panic)]
     pub(crate) fn new_adaptive_with_snapshot(
         capacity: usize,
         block_size: usize,
@@ -1083,8 +1094,10 @@ impl MemoryPool {
     }
 
     /// Allocates a 64-byte aligned memory block from the pool.
-    /// If the pool is empty, a new block is created.
+    /// If the pool is empty, a new block is created. Use [`MemoryPool::try_alloc`]
+    /// when allocation failure must be handled by the caller.
     #[inline(always)]
+    #[allow(clippy::panic)]
     pub fn alloc(&self) -> AlignedBox<[u8]> {
         self.try_alloc().unwrap_or_else(|error| {
             panic!("MemoryPool::alloc failed: {error}")
@@ -1118,6 +1131,9 @@ impl MemoryPool {
     }
 
     /// Allocates an aligned buffer and copies data from the provided slice
+    /// using the compatibility infallible API. Use [`MemoryPool::try_alloc_from_slice`]
+    /// when oversize input or allocation failure must be handled.
+    #[allow(clippy::panic)]
     pub fn alloc_from_slice(&self, data: &[u8]) -> AlignedBox<[u8]> {
         self.try_alloc_from_slice(data).unwrap_or_else(|error| {
             panic!("MemoryPool::alloc_from_slice failed: {error}")
@@ -1286,6 +1302,10 @@ impl MemoryPool {
     }
 
     /// Adjusts the maximum number of cached blocks at runtime.
+    ///
+    /// The compatibility API remains infallible; callers that need an error
+    /// result must use [`MemoryPool::try_set_capacity`].
+    #[allow(clippy::panic)]
     pub fn set_capacity(&self, new_capacity: usize) {
         self.try_set_capacity(new_capacity).unwrap_or_else(|error| {
             panic!("MemoryPool::set_capacity failed: {error}")

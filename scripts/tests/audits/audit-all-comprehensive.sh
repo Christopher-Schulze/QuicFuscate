@@ -198,6 +198,26 @@ else
 fi
 
 echo -e "\n> Checking for panic-inducing code..."
+# Keep the production and benchmark/test scopes explicit. The aggregate all-feature
+# command below remains the compatibility coverage gate, while these two records
+# prevent benchmark-only helpers from being mistaken for runtime execution.
+PRODUCTION_FEATURES="client,server,rate_limiter,io_uring,aggressive_inline,compression_zstd_ffi,orchestrator,prefetch,std,stream_ring_buffer,throughput,unsafe_rust,zero_copy_dgram,dev-certs,tun-windows,tun-ios,internal_wiedemann,internal_avx10_preview,experimental"
+STRICT_PRODUCTION_CLIPPY="$OUTPUT_DIR/strict-production-clippy.log"
+set +e
+PRODUCTION_CLIPPY_OUTPUT=$(cargo clippy --lib --bins --no-default-features --features "$PRODUCTION_FEATURES" -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>&1)
+PRODUCTION_CLIPPY_RC=$?
+set -e
+printf "%s\n" "$PRODUCTION_CLIPPY_OUTPUT" > "$STRICT_PRODUCTION_CLIPPY"
+record_command_check "strict_production_clippy" "$PRODUCTION_CLIPPY_RC" "features=$PRODUCTION_FEATURES;artifact=$STRICT_PRODUCTION_CLIPPY"
+
+STRICT_BENCHMARK_CLIPPY="$OUTPUT_DIR/strict-benchmark-clippy.log"
+set +e
+BENCHMARK_CLIPPY_OUTPUT=$(cargo clippy --lib --bins --no-default-features --features "server,benches" -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>&1)
+BENCHMARK_CLIPPY_RC=$?
+set -e
+printf "%s\n" "$BENCHMARK_CLIPPY_OUTPUT" > "$STRICT_BENCHMARK_CLIPPY"
+record_command_check "strict_benchmark_clippy" "$BENCHMARK_CLIPPY_RC" "features=server,benches;artifact=$STRICT_BENCHMARK_CLIPPY"
+
 STRICT_RUNTIME_CLIPPY="$OUTPUT_DIR/strict-runtime-clippy.log"
 set +e
 RUNTIME_CLIPPY_OUTPUT=$(cargo clippy --lib --bins --all-features -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>&1)

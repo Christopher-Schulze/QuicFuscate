@@ -1183,9 +1183,12 @@ async fn process_live_server_client_datagram(
             let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
             let dns_admission = Arc::clone(&dns_intercept_admission);
             let dns_workers = Arc::clone(&dns_intercept_workers);
-            let dns_downlink_queue = conn
-                .masque_downlink_queue()
-                .expect("MASQUE downlink queue installed before callback");
+            let Some(dns_downlink_queue) = conn.masque_downlink_queue() else {
+                return Err(DataPlaneFault::TransportReceive {
+                    component: "MASQUE downlink queue installation".to_string(),
+                    error: "queue was absent after installation".to_string(),
+                });
+            };
             let masque_response_queue = Arc::clone(&dns_downlink_queue);
             let tun_mtu = tun.mtu();
             let datagram_auth_gate = Arc::clone(&auth_gate);

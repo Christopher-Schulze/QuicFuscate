@@ -490,64 +490,66 @@ fn run_fec_bench(
             "payload must be > 0 and <= block_size",
         ));
     }
-    let bench_once = |parallel: bool| -> (f64, usize) {
+    let bench_once = |parallel: bool| -> std::io::Result<(f64, usize)> {
         // configure env toggle used by fec emit path
         std::env::set_var("QUICFUSCATE_FEC_PARALLEL", if parallel { "1" } else { "0" });
-        let opt = OptimizationManager::new_with_config(pool_capacity, block_size);
-        let mem_pool = opt.memory_pool();
-        let cfg = FecConfig { initial_mode: mode, ..Default::default() };
-        // fresh FEC per run for fairness
-        let mut fec = AdaptiveFec::new(cfg);
-        let mut out = VecDeque::with_capacity(256);
+        let result = (|| -> std::io::Result<(f64, usize)> {
+            let opt = OptimizationManager::new_with_config(pool_capacity, block_size);
+            let mem_pool = opt.memory_pool();
+            let cfg = FecConfig { initial_mode: mode, ..Default::default() };
+            // fresh FEC per run for fairness
+            let mut fec = AdaptiveFec::new(cfg);
+            let mut out = VecDeque::with_capacity(256);
 
-        // small helper to make packet with payload bytes; id increments
-        let mut id: u64 = 1;
-        let make_pkt = |id: u64| -> FecPacket {
-            let mut block = opt.alloc_block();
-            if !block.is_empty() {
-                block[0] = 1;
-            }
-            let len = payload.min(block.len());
-            if len > 8 {
-                block[1] = (id & 0xff) as u8;
-                block[2] = ((id >> 8) & 0xff) as u8;
-                block[3] = ((id >> 16) & 0xff) as u8;
-                block[4] = ((id >> 24) & 0xff) as u8;
-            }
-            FecPacket::try_new(id, Some(block), len, true, None, 0, mem_pool.clone())
-                .expect("early test packet fits the pool block")
-        };
+            // small helper to make packet with payload bytes; id increments
+            let mut id: u64 = 1;
+            let make_pkt = |id: u64| -> std::io::Result<FecPacket> {
+                let mut block = opt.alloc_block();
+                if !block.is_empty() {
+                    block[0] = 1;
+                }
+                let len = payload.min(block.len());
+                if len > 8 {
+                    block[1] = (id & 0xff) as u8;
+                    block[2] = ((id >> 8) & 0xff) as u8;
+                    block[3] = ((id >> 16) & 0xff) as u8;
+                    block[4] = ((id >> 24) & 0xff) as u8;
+                }
+                FecPacket::try_new(id, Some(block), len, true, None, 0, mem_pool.clone())
+                    .map_err(|error| {
+                        std::io::Error::other(format!("FEC benchmark packet: {error}"))
+                    })
+            };
 
-        // optional warmup
-        for _ in 0..warmup {
-            let p = make_pkt(id);
-            id += 1;
-            for pkt in fec.on_send(p) {
-                out.push_back(pkt);
+            // optional warmup
+            for _ in 0..warmup {
+                let p = make_pkt(id)?;
+                id += 1;
+                for pkt in fec.on_send(p) {
+                    out.push_back(pkt);
+                }
+                // drain emitted to keep memory bounded
+                while let Some(_q) = out.pop_front() {}
             }
-            // drain emitted to keep memory bounded
-            while let Some(_q) = out.pop_front() {}
-        }
 
-        let start = Instant::now();
-        for _ in 0..packets {
-            let p = make_pkt(id);
-            id += 1;
-            for pkt in fec.on_send(p) {
-                out.push_back(pkt);
+            let start = Instant::now();
+            for _ in 0..packets {
+                let p = make_pkt(id)?;
+                id += 1;
+                for pkt in fec.on_send(p) {
+                    out.push_back(pkt);
+                }
+                while let Some(_q) = out.pop_front() {}
             }
-            while let Some(_q) = out.pop_front() {}
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        // clear env to avoid side-effects on caller
-        if parallel {
-            std::env::set_var("QUICFUSCATE_FEC_PARALLEL", "0");
-        }
-        (elapsed, packets)
+            Ok((start.elapsed().as_secs_f64(), packets))
+        })();
+        // clear env to avoid side-effects on caller even when packet validation fails
+        std::env::set_var("QUICFUSCATE_FEC_PARALLEL", "0");
+        result
     };
 
-    let (t_seq, n_seq) = bench_once(false);
-    let (t_par, n_par) = bench_once(true);
+    let (t_seq, n_seq) = bench_once(false)?;
+    let (t_par, n_par) = bench_once(true)?;
 
     if json {
         let mut map = serde_json::Map::new();

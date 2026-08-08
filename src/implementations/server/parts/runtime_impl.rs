@@ -800,12 +800,14 @@ impl ServerRuntime {
 
     // SAFETY: `live` is always `Some` after standalone-mode construction.
     // Callers are exclusively standalone-mode methods; `None` here is a logic bug.
+    #[allow(clippy::expect_used)]
     fn live(&self) -> &ServerLiveRuntime {
         self.live.as_ref().expect("standalone live runtime is only available in standalone mode")
     }
 
     // SAFETY: `live` is always `Some` after standalone-mode construction.
     // Callers are exclusively standalone-mode methods; `None` here is a logic bug.
+    #[allow(clippy::expect_used)]
     fn live_mut(&mut self) -> &mut ServerLiveRuntime {
         self.live.as_mut().expect("standalone live runtime is only available in standalone mode")
     }

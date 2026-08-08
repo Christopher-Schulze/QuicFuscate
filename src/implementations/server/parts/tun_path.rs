@@ -1,4 +1,8 @@
 impl Default for LiveServerState {
+    // `ServerConfig::default()` is validated by the fallible constructor; the
+    // legacy Default API has no error channel, so preserve its infallible
+    // contract with a narrow disposition rather than hiding the failure.
+    #[allow(clippy::panic)]
     fn default() -> Self {
         Self::try_new(ServerConfig::default())
             .unwrap_or_else(|error| panic!("default live server state construction failed: {error}"))

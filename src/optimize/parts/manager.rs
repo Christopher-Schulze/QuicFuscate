@@ -6,6 +6,10 @@ pub struct OptimizationManager {
 
 impl OptimizationManager {
     /// Creates a new optimization manager with the adaptive packet-pool default.
+    ///
+    /// This compatibility constructor is intentionally infallible. Use
+    /// [`OptimizationManager::try_new`] when allocation failure must be handled.
+    #[allow(clippy::panic)]
     pub fn new() -> Self {
         Self::try_new().unwrap_or_else(|error| panic!("OptimizationManager::new failed: {error}"))
     }
@@ -16,6 +20,11 @@ impl OptimizationManager {
     }
 
     /// Creates a new optimization manager with explicit pool capacity and block size.
+    ///
+    /// This compatibility constructor is intentionally infallible. Use
+    /// [`OptimizationManager::try_new_with_config`] when invalid configuration
+    /// or allocation failure must be handled.
+    #[allow(clippy::panic)]
     pub fn new_with_config(capacity: usize, block_size: usize) -> Self {
         Self::try_new_with_config(capacity, block_size)
             .unwrap_or_else(|error| panic!("OptimizationManager::new_with_config failed: {error}"))

@@ -204,11 +204,7 @@ impl SessionManager {
             by_client_ipv6: HashMap::new(),
             by_remote_addr: HashMap::new(),
             max_sessions,
-            bandwidth_manager: PerClientBandwidthManager::new_with_clock(
-                BandwidthPolicy::default(),
-                clock,
-            )
-            .expect("default bandwidth policy is valid"),
+            bandwidth_manager: PerClientBandwidthManager::with_default_policy_with_clock(clock),
         }
     }
 

@@ -622,7 +622,7 @@ fn der_to_pem(der: &[u8], label: &str) -> String {
     let _ = writeln!(pem, "-----BEGIN {label}-----");
     for chunk in b64.as_bytes().chunks(64) {
         // base64 output is always valid ASCII/UTF-8.
-        pem.push_str(std::str::from_utf8(chunk).unwrap());
+        pem.push_str(&String::from_utf8_lossy(chunk));
         pem.push('\n');
     }
     let _ = writeln!(pem, "-----END {label}-----");
