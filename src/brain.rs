@@ -58,6 +58,42 @@ impl BrainFecHints {
 /// The two levels remain separate so a pressure decision cannot erase a
 /// probe-threshold decision, and a quiet probe window cannot erase an active
 /// Brain pressure decision. Consumers use the maximum of both levels.
+/// Half-life of the reorder observation window.
+///
+/// Policy reads a decaying recent window rather than lifetime totals, so a burst of reordering
+/// stops influencing decisions once it has aged out instead of being retained forever.
+pub(crate) const REORDER_WINDOW_HALF_LIFE_SECS: f64 = 30.0;
+
+/// Advance the decaying reorder window by `elapsed` and fold in the newly observed counts.
+///
+/// Both accumulators decay by the same factor, so the ratio between them is preserved across
+/// idle time and only shifts when new observations arrive. Idle periods therefore shrink the
+/// window's weight without inventing or erasing reordering. The result is clamped to be
+/// non-negative and finite: a non-finite accumulator would poison every later ratio.
+pub(crate) fn decay_reorder_window(
+    recent_packets: f64,
+    recent_reorders: f64,
+    observed_packets: u64,
+    observed_reorders: u64,
+    elapsed: Duration,
+) -> (f64, f64) {
+    let decay = 0.5f64.powf(elapsed.as_secs_f64() / REORDER_WINDOW_HALF_LIFE_SECS);
+    let sanitize = |value: f64| if value.is_finite() && value > 0.0 { value } else { 0.0 };
+    let packets = sanitize(recent_packets) * decay + observed_packets as f64;
+    let reorders = sanitize(recent_reorders) * decay + observed_reorders as f64;
+    // Reordered packets can never exceed observed packets in the same window.
+    (packets, reorders.min(packets))
+}
+
+/// Reorder ratio for the current window, or zero when the window holds no observations.
+pub(crate) fn reorder_ratio_from_window(recent_packets: f64, recent_reorders: f64) -> f64 {
+    if recent_packets > 0.0 && recent_packets.is_finite() && recent_reorders.is_finite() {
+        (recent_reorders / recent_packets).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 pub(crate) struct IntelligentLevelHints {
     brain_level: AtomicU32,
     probe_level: AtomicU32,
@@ -421,9 +457,17 @@ struct StealthBrainState {
     ack_delay_long_ewma_us: f64,
     // Reordering
     max_pn_seen: u64,
+    /// Lifetime reordered-packet total. Observability only: no policy reads it.
+    ///
+    /// Saturating, so it stops at `u64::MAX` rather than wrapping, and it is never reset. Any
+    /// future consumer must treat it as a monotonic counter over the connection's whole life, not
+    /// as a recent measure; `reorder_recent_count` is the windowed value.
     reorder_count: u64,
+    /// Lifetime observed-packet total, with the same contract as `reorder_count`.
     pkt_count: u64,
+    /// Reordered packets in the decaying recent window. Policy reads this.
     reorder_recent_count: f64,
+    /// Observed packets in the decaying recent window. Policy reads this.
     reorder_recent_packets: f64,
     reorder_window_updated_at: Instant,
     // Throughput trend
@@ -934,12 +978,15 @@ impl TransportObserver for StealthBrain {
             let now = crate::time_source::now_instant();
             let elapsed =
                 now.checked_duration_since(st.reorder_window_updated_at).unwrap_or_default();
-            let half_life_secs = 30.0;
-            let decay = 0.5f64.powf(elapsed.as_secs_f64() / half_life_secs);
-            st.reorder_recent_packets *= decay;
-            st.reorder_recent_count *= decay;
-            st.reorder_recent_packets += pending_packet_count as f64;
-            st.reorder_recent_count += pending_reorder_count as f64;
+            let (recent_packets, recent_reorders) = decay_reorder_window(
+                st.reorder_recent_packets,
+                st.reorder_recent_count,
+                pending_packet_count,
+                pending_reorder_count,
+                elapsed,
+            );
+            st.reorder_recent_packets = recent_packets;
+            st.reorder_recent_count = recent_reorders;
             st.reorder_window_updated_at = now;
 
             let pending_ack = {
@@ -1007,11 +1054,7 @@ impl TransportObserver for StealthBrain {
             st.prev_ect1 = st.ect1;
             st.prev_ce = st.ce;
             // Reorder ratio over recent window (approx):
-            let rr = if st.reorder_recent_packets > 0.0 {
-                (st.reorder_recent_count / st.reorder_recent_packets).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
+            let rr = reorder_ratio_from_window(st.reorder_recent_packets, st.reorder_recent_count);
             let ce_ratio_recent = ce_ratio_recent_local;
             let ack_us = st.ack_delay_ewma_us;
             let ack_us_long = st.ack_delay_long_ewma_us;
@@ -2078,5 +2121,110 @@ mod orchestrator_tests {
         orchestrator.update_runtime_signals(60, 90, 50, 10_000_000, true);
         let should_not_trigger = orchestrator.should_trigger_server_push();
         assert!(!should_not_trigger);
+    }
+}
+
+#[cfg(test)]
+mod reorder_window_tests {
+    use super::{decay_reorder_window, reorder_ratio_from_window, REORDER_WINDOW_HALF_LIFE_SECS};
+    use core::time::Duration;
+
+    fn half_life() -> Duration {
+        Duration::from_secs_f64(REORDER_WINDOW_HALF_LIFE_SECS)
+    }
+
+    /// A reordering burst must stop influencing policy once a clean period ages it out.
+    #[test]
+    fn a_burst_decays_away_under_subsequent_clean_traffic() {
+        // 100 packets, 50 of them reordered: a severe burst.
+        let (packets, reorders) = decay_reorder_window(0.0, 0.0, 100, 50, Duration::ZERO);
+        let burst_ratio = reorder_ratio_from_window(packets, reorders);
+        assert!((burst_ratio - 0.5).abs() < 1e-9, "the burst must be visible: {burst_ratio}");
+
+        // Clean traffic arriving over several half-lives.
+        let mut packets = packets;
+        let mut reorders = reorders;
+        for _ in 0..6 {
+            let advanced = decay_reorder_window(packets, reorders, 100, 0, half_life());
+            packets = advanced.0;
+            reorders = advanced.1;
+        }
+        let settled = reorder_ratio_from_window(packets, reorders);
+        assert!(
+            settled < 0.01,
+            "a burst followed by sustained clean traffic must stop driving policy, got {settled}"
+        );
+    }
+
+    /// Idle time shrinks the window's weight without inventing or erasing reordering.
+    #[test]
+    fn idle_time_decays_both_accumulators_and_preserves_the_ratio() {
+        let (packets, reorders) = decay_reorder_window(0.0, 0.0, 200, 40, Duration::ZERO);
+        let before = reorder_ratio_from_window(packets, reorders);
+        assert!((before - 0.2).abs() < 1e-9);
+
+        // A long idle gap with no new observations.
+        let (idle_packets, idle_reorders) =
+            decay_reorder_window(packets, reorders, 0, 0, half_life() * 3);
+        let after = reorder_ratio_from_window(idle_packets, idle_reorders);
+        assert!(
+            (after - before).abs() < 1e-9,
+            "idle time must not change the ratio, only the weight: {before} -> {after}"
+        );
+        assert!(idle_packets < packets, "idle time must reduce the window's weight");
+        assert!(idle_packets > 0.0, "decay must not collapse to zero at three half-lives");
+
+        // One half-life halves the weight.
+        let (halved, _) = decay_reorder_window(packets, reorders, 0, 0, half_life());
+        assert!(
+            (halved - packets / 2.0).abs() < 1e-6,
+            "one half-life must halve the weight: {packets} -> {halved}"
+        );
+    }
+
+    /// An empty window reports no reordering rather than dividing by zero.
+    #[test]
+    fn an_empty_window_reports_no_reordering() {
+        assert_eq!(reorder_ratio_from_window(0.0, 0.0), 0.0);
+        assert_eq!(reorder_ratio_from_window(0.0, 5.0), 0.0);
+        let (packets, reorders) = decay_reorder_window(0.0, 0.0, 0, 0, half_life());
+        assert_eq!(reorder_ratio_from_window(packets, reorders), 0.0);
+    }
+
+    /// The ratio is bounded, and reorders can never exceed the packets they were seen among.
+    #[test]
+    fn the_window_cannot_report_more_reordering_than_traffic() {
+        // A caller reporting more reorders than packets must not produce a ratio above one.
+        let (packets, reorders) = decay_reorder_window(0.0, 0.0, 10, 50, Duration::ZERO);
+        assert!(reorders <= packets, "reorders must be clamped to observed packets");
+        assert_eq!(reorder_ratio_from_window(packets, reorders), 1.0);
+
+        // Every packet reordered is exactly one.
+        let (packets, reorders) = decay_reorder_window(0.0, 0.0, 10, 10, Duration::ZERO);
+        assert_eq!(reorder_ratio_from_window(packets, reorders), 1.0);
+    }
+
+    /// A non-finite or negative accumulator must not poison every later ratio.
+    #[test]
+    fn non_finite_accumulators_are_sanitised_rather_than_propagated() {
+        for poisoned in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let (packets, reorders) =
+                decay_reorder_window(poisoned, poisoned, 100, 10, Duration::ZERO);
+            assert!(packets.is_finite() && reorders.is_finite(), "state must stay finite");
+            let ratio = reorder_ratio_from_window(packets, reorders);
+            assert!(ratio.is_finite(), "ratio must stay finite for {poisoned}");
+            assert!((0.0..=1.0).contains(&ratio), "ratio must stay bounded: {ratio}");
+            // The fresh observation still lands, so the window recovers rather than staying stuck.
+            assert!((ratio - 0.1).abs() < 1e-9, "recovered ratio should reflect the new sample");
+        }
+    }
+
+    /// A saturating lifetime total must never wrap into a small number.
+    #[test]
+    fn lifetime_counters_saturate_rather_than_wrapping() {
+        // This mirrors the saturating_add the drain path uses for the observability totals.
+        let nearly_full = u64::MAX - 5;
+        assert_eq!(nearly_full.saturating_add(10), u64::MAX);
+        assert_eq!(u64::MAX.saturating_add(1), u64::MAX);
     }
 }
