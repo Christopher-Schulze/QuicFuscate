@@ -477,6 +477,7 @@ Wire -> Pooled Buffer
 - **brain.rs**: StealthBrain with Kalman-filtered CE ratio, histogram JS-divergence, epsilon-greedy bandit for ACK threshold. Sets: ACK threshold, pacing, timing jitter, padding strategy, CC profile, MASQUE hint.
 - **qftls.rs**: CombinedProvider = RustlsProvider (real handshake) + TlsCoverProvider (cover frames).
 - **qf-dns**: Bounded DNS parser, DoH client, UDP fallback, response binding, and admission control for client/server forwarding.
+- **qf-firewall**: Platform firewall command abstraction, backend selection, owned-resource inspection, and bounded cleanup contracts for kill-switch and routing callers.
 - **qf-reality**: RealityProxy and cover-site TLS handshake cache - tokio::spawn UDP proxy to Cloudflare/Google/Quad9 plus captured TLS material for active-probe fallback.
 
 ---
@@ -503,7 +504,7 @@ Wire -> Pooled Buffer
 | Architecture overview + file map + wiring map (canonical SSOT) | `docs/MAP.md` |
 | Agent instructions | `AGENTS.md` |
 | Rust core | `src/` |
-| Backend workspace leaf crates | `crates/qf-common/`, `crates/qf-control-plane/`, `crates/qf-dns/`, `crates/qf-error/`, `crates/qf-instrumentation/`, `crates/qf-pki/`, `crates/qf-privilege/`, `crates/qf-reality/` |
+| Backend workspace leaf crates | `crates/qf-common/`, `crates/qf-control-plane/`, `crates/qf-dns/`, `crates/qf-error/`, `crates/qf-firewall/`, `crates/qf-instrumentation/`, `crates/qf-pki/`, `crates/qf-privilege/`, `crates/qf-reality/` |
 | Web Admin UI | `apps/svelte-admin/` |
 | Desktop frontend | `apps/svelte-desktop/` |
 | Desktop Tauri host | `apps/tauri/` |
