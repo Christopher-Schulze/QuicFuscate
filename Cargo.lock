@@ -1503,6 +1503,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "qf-reality"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "parking_lot",
+ "qf-common",
+ "rustls-native-certs",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "quicfuscate"
 version = "0.4.4"
 dependencies = [
@@ -1538,6 +1551,7 @@ dependencies = [
  "qf-instrumentation",
  "qf-pki",
  "qf-privilege",
+ "qf-reality",
  "rand",
  "rayon",
  "rcgen",

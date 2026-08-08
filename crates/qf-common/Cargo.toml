@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+rust-tests = []
+
 [dependencies]
 getrandom = "0.2"
 log = "0.4"

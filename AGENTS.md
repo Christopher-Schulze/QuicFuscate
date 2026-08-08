@@ -424,8 +424,8 @@ After `bun run build`:
 QuicFuscate is a QUIC-based VPN with advanced stealth, cryptography, adaptive FEC, and performance optimizations. The codebase has three main areas:
 
 ### 1. Rust Core (`src/` + `crates/`)
-- Cargo workspace with the root `quicfuscate` package and six backend leaf crates: `qf-common`, `qf-control-plane`, `qf-error`, `qf-instrumentation`, `qf-pki`, and `qf-privilege`
-- The remaining product runtime stays under `src/`; key modules are `core.rs`, `transport/`, `stealth/`, `fec/`, `brain.rs`, `crypto/`, `qftls.rs`, `reality.rs`, `compress.rs`, and `optimize/`
+- Cargo workspace with the root `quicfuscate` package and seven backend leaf crates: `qf-common`, `qf-control-plane`, `qf-error`, `qf-instrumentation`, `qf-pki`, `qf-privilege`, and `qf-reality`
+- The remaining product runtime stays under `src/`; key modules are `core.rs`, `transport/`, `stealth/`, `fec/`, `brain.rs`, `crypto/`, `qftls.rs`, `compress.rs`, and `optimize/`. The REALITY implementation is owned by `crates/qf-reality/src/lib.rs` and re-exported from the root.
 - Root compatibility modules preserve existing `crate::` paths while each extracted leaf is independently checked as its own workspace package
 - Build: `cargo check` / `cargo build`
 - Tests: `cargo test --features rust-tests`
@@ -476,7 +476,7 @@ Wire -> Pooled Buffer
 - **fec/**: AdaptiveFec (Zero/Streaming/Block modes, cross-fade transitions). FecTransportObserver adapts streaming interval from ECN/ACK.
 - **brain.rs**: StealthBrain with Kalman-filtered CE ratio, histogram JS-divergence, epsilon-greedy bandit for ACK threshold. Sets: ACK threshold, pacing, timing jitter, padding strategy, CC profile, MASQUE hint.
 - **qftls.rs**: CombinedProvider = RustlsProvider (real handshake) + TlsCoverProvider (cover frames).
-- **reality.rs**: RealityProxy - tokio::spawn UDP proxy to Cloudflare/Google/Quad9 for active probe fallback.
+- **qf-reality**: RealityProxy and cover-site TLS handshake cache - tokio::spawn UDP proxy to Cloudflare/Google/Quad9 plus captured TLS material for active-probe fallback.
 
 ---
 
@@ -502,7 +502,7 @@ Wire -> Pooled Buffer
 | Architecture overview + file map + wiring map (canonical SSOT) | `docs/MAP.md` |
 | Agent instructions | `AGENTS.md` |
 | Rust core | `src/` |
-| Backend workspace leaf crates | `crates/qf-common/`, `crates/qf-control-plane/`, `crates/qf-error/`, `crates/qf-instrumentation/`, `crates/qf-pki/`, `crates/qf-privilege/` |
+| Backend workspace leaf crates | `crates/qf-common/`, `crates/qf-control-plane/`, `crates/qf-error/`, `crates/qf-instrumentation/`, `crates/qf-pki/`, `crates/qf-privilege/`, `crates/qf-reality/` |
 | Web Admin UI | `apps/svelte-admin/` |
 | Desktop frontend | `apps/svelte-desktop/` |
 | Desktop Tauri host | `apps/tauri/` |

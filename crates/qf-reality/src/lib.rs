@@ -60,13 +60,13 @@ struct SessionHandle {
 impl RealityProxy {
     /// Create a new reality proxy with the given response channel.
     pub fn new(tx: mpsc::Sender<FallbackResponse>) -> Self {
-        let environment = crate::env_utils::EnvSnapshot::capture();
+        let environment = qf_common::env_utils::EnvSnapshot::capture();
         Self::new_with_snapshot(tx, &environment)
     }
 
-    pub(crate) fn new_with_snapshot(
+    pub fn new_with_snapshot(
         tx: mpsc::Sender<FallbackResponse>,
-        environment: &crate::env_utils::EnvSnapshot,
+        environment: &qf_common::env_utils::EnvSnapshot,
     ) -> Self {
         Self {
             tx,
@@ -74,7 +74,7 @@ impl RealityProxy {
             target_idx: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             targets: load_targets_with_snapshot(environment),
-            last_cleanup: Mutex::new(crate::time_source::now_instant()),
+            last_cleanup: Mutex::new(qf_common::time_source::now_instant()),
         }
     }
 
@@ -110,7 +110,7 @@ impl RealityProxy {
 
     fn cleanup_stale_sessions_locked(&self, sessions: &mut HashMap<SocketAddr, SessionHandle>) {
         let before = sessions.len();
-        let now = crate::time_source::now_instant();
+        let now = qf_common::time_source::now_instant();
         sessions.retain(|_, session| {
             let keep =
                 now.checked_duration_since(session.last_active).unwrap_or_default() < SESSION_TTL;
@@ -130,14 +130,14 @@ impl RealityProxy {
     }
 
     /// Sweep all stale sessions independently of probe traffic.
-    pub(crate) fn cleanup_stale_sessions_now(&self) {
+    pub fn cleanup_stale_sessions_now(&self) {
         let mut sessions = self.sessions.lock();
         self.cleanup_stale_sessions_locked(&mut sessions);
-        *self.last_cleanup.lock() = crate::time_source::now_instant();
+        *self.last_cleanup.lock() = qf_common::time_source::now_instant();
     }
 
     /// Abort every upstream task owned by this proxy during runtime teardown.
-    pub(crate) fn shutdown_sessions(&self) {
+    pub fn shutdown_sessions(&self) {
         self.closed.store(true, Ordering::Release);
         let mut sessions = self.sessions.lock();
         for session in sessions.values() {
@@ -160,16 +160,17 @@ impl RealityProxy {
         // Deterministic session cleanup: time-based interval or capacity pressure.
         {
             let mut last = self.last_cleanup.lock();
-            if crate::time_source::now_instant().saturating_duration_since(*last) > CLEANUP_INTERVAL
+            if qf_common::time_source::now_instant().saturating_duration_since(*last)
+                > CLEANUP_INTERVAL
                 || sessions.len() > MAX_SESSIONS
             {
                 self.cleanup_stale_sessions_locked(&mut sessions);
-                *last = crate::time_source::now_instant();
+                *last = qf_common::time_source::now_instant();
             }
         }
 
         if let Some(session) = sessions.get_mut(&source) {
-            session.last_active = crate::time_source::now_instant();
+            session.last_active = qf_common::time_source::now_instant();
             if let Err(e) = session.sender.try_send(packet.to_vec()) {
                 log::debug!(
                     "Reality Proxy: failed to enqueue probe packet for existing session {}: {}",
@@ -267,7 +268,7 @@ impl RealityProxy {
             sessions.insert(
                 source,
                 SessionHandle {
-                    last_active: crate::time_source::now_instant(),
+                    last_active: qf_common::time_source::now_instant(),
                     sender: pkt_tx,
                     task,
                 },
@@ -284,11 +285,11 @@ impl Drop for RealityProxy {
 
 #[cfg(test)]
 fn load_targets() -> Vec<String> {
-    let environment = crate::env_utils::EnvSnapshot::capture();
+    let environment = qf_common::env_utils::EnvSnapshot::capture();
     load_targets_with_snapshot(&environment)
 }
 
-fn load_targets_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Vec<String> {
+fn load_targets_with_snapshot(environment: &qf_common::env_utils::EnvSnapshot) -> Vec<String> {
     if let Some(raw) = environment.first(["QUICFUSCATE_REALITY_TARGETS"]) {
         let parsed: Vec<String> = raw.split(',').map(|s| s.trim()).map(|s| s.to_string()).collect();
         if !parsed.is_empty() && parsed.iter().all(|target| valid_reality_target(target)) {
@@ -365,11 +366,11 @@ impl Default for RealityConfig {
 impl RealityConfig {
     /// Parse reality config from environment variables.
     pub fn from_env() -> Self {
-        let environment = crate::env_utils::EnvSnapshot::capture();
+        let environment = qf_common::env_utils::EnvSnapshot::capture();
         Self::from_env_with_snapshot(&environment)
     }
 
-    pub(crate) fn from_env_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
+    pub fn from_env_with_snapshot(environment: &qf_common::env_utils::EnvSnapshot) -> Self {
         let cover_port = match environment.parse::<u16>("QUICFUSCATE_REALITY_COVER_PORT") {
             Some(port) if port > 0 => port,
             Some(_) => {
@@ -475,7 +476,7 @@ impl CoverHandshakeCache {
     pub fn get(&self) -> Option<Arc<CoverMaterial>> {
         let guard = self.material.read();
         guard.as_ref().and_then(|m| {
-            let now = crate::time_source::now_system()
+            let now = qf_common::time_source::now_system()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
@@ -584,7 +585,7 @@ impl CoverHandshakeCache {
                 format!("failed to parse TLS flight from {} ({} bytes)", addr, raw.len())
             })?;
 
-        let now = crate::time_source::now_system()
+        let now = qf_common::time_source::now_system()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -901,7 +902,7 @@ mod tests {
 
     #[test]
     fn malformed_target_override_retains_the_complete_default_set() {
-        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([(
             "QUICFUSCATE_REALITY_TARGETS",
             "1.1.1.1:443,not-a-target",
         )]);
@@ -911,7 +912,7 @@ mod tests {
 
     #[test]
     fn target_override_accepts_trimmed_host_port_entries() {
-        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([(
             "QUICFUSCATE_REALITY_TARGETS",
             "  cover.example:443, [::1]:8443 ",
         )]);
@@ -923,7 +924,7 @@ mod tests {
 
     #[test]
     fn unbracketed_ipv6_target_is_rejected() {
-        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([(
             "QUICFUSCATE_REALITY_TARGETS",
             "::1:8443",
         )]);
@@ -935,7 +936,7 @@ mod tests {
 
     #[test]
     fn mismatched_ipv6_brackets_are_rejected() {
-        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([(
             "QUICFUSCATE_REALITY_TARGETS",
             "[::1:8443",
         )]);
@@ -947,7 +948,7 @@ mod tests {
 
     #[test]
     fn reality_snapshot_retains_defaults_for_invalid_values() {
-        let environment = crate::env_utils::EnvSnapshot::from_pairs([
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([
             ("QUICFUSCATE_REALITY_ENABLED", "true"),
             ("QUICFUSCATE_REALITY_FALLBACK_SYNTHETIC", "malformed"),
             ("QUICFUSCATE_REALITY_COVER_HOST", "  "),
@@ -1083,7 +1084,7 @@ mod tests {
             client_hello: vec![],
             certificate_chain: vec![vec![0x01, 0x02, 0x03]],
             sni: "example.com".to_string(),
-            captured_at: crate::time_source::now_system()
+            captured_at: qf_common::time_source::now_system()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
@@ -1105,7 +1106,7 @@ mod tests {
             client_hello: vec![],
             certificate_chain: vec![],
             sni: "test.com".to_string(),
-            captured_at: crate::time_source::now_system()
+            captured_at: qf_common::time_source::now_system()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),

@@ -22,7 +22,7 @@ impl EnvSnapshot {
         Self { values }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "rust-tests"))]
     pub fn from_pairs<const N: usize>(pairs: [(&str, &str); N]) -> Self {
         Self {
             values: pairs
@@ -269,13 +269,13 @@ pub fn parse_bool(v: &str) -> Option<bool> {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "rust-tests"))]
+pub mod test_support {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
-    pub(crate) fn acquire_env_lock() -> MutexGuard<'static, ()> {
+    pub fn acquire_env_lock() -> MutexGuard<'static, ()> {
         ENV_MUTEX
             .get_or_init(|| Mutex::new(()))
             .lock()

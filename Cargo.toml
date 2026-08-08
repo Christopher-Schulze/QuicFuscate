@@ -7,6 +7,7 @@ members = [
     "crates/qf-instrumentation",
     "crates/qf-pki",
     "crates/qf-privilege",
+    "crates/qf-reality",
 ]
 exclude = [
     "apps/tauri/src-tauri",
@@ -34,6 +35,7 @@ qf-error = { path = "crates/qf-error" }
 qf-instrumentation = { path = "crates/qf-instrumentation" }
 qf-pki = { path = "crates/qf-pki" }
 qf-privilege = { path = "crates/qf-privilege" }
+qf-reality = { path = "crates/qf-reality" }
 aligned_box = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-native-certs = "0.8"
@@ -105,6 +107,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+qf-common = { path = "crates/qf-common", features = ["rust-tests"] }
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 
@@ -144,7 +147,7 @@ internal_avx10_preview = []
 # pq = ["dep:pqcrypto-mlkem", "dep:pqcrypto-mldsa"]
 
 # --- Test-only features ---
-rust-tests = []
+rust-tests = ["qf-reality/rust-tests"]
 benches = []
 masque-tests = []
 tun-tests = []

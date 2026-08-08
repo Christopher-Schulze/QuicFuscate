@@ -96,7 +96,9 @@ pub mod profile;
 /// TLS provider system - rustls integration with custom ClientHello and ALPN handling.
 pub mod qftls;
 /// REALITY fallback reverse proxy for censorship-resistant server fronting.
-pub mod reality;
+pub mod reality {
+    pub use qf_reality::*;
+}
 /// Cryptographically secure random number generation with hardware entropy sources.
 pub mod rng;
 mod secret;
