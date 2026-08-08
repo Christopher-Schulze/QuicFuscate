@@ -128,7 +128,11 @@ fi
 if command -v shellcheck >/dev/null 2>&1; then
   info "[INFO] ShellCheck analysis across scripts..."
   SC_OUT="$OUTPUT_DIR/shellcheck.txt"
-  mapfile -t SHS < <(find "$SCRIPT_DIR/../.." -type f -name '*.sh' -not -path '*/out/*' | sort)
+  # Portable to macOS Bash 3.2, which has no `mapfile`.
+  SHS=()
+  while IFS= read -r shell_file; do
+    [[ -n "$shell_file" ]] && SHS+=("$shell_file")
+  done < <(find "$SCRIPT_DIR/../.." -type f -name '*.sh' -not -path '*/out/*' | sort)
   : > "$SC_OUT"
   SC_ISSUES=0
   SC_TOOL_FAILURES=0

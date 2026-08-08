@@ -110,7 +110,11 @@ rule_spec() {
   printf '%s\n' -p udp --dport "$PORT" -m comment --comment "$RULE_COMMENT" -j ACCEPT
 }
 
-mapfile -t RULE_SPEC < <(rule_spec)
+# Built with a read loop rather than `mapfile`, which macOS Bash 3.2 does not provide.
+RULE_SPEC=()
+while IFS= read -r spec_field; do
+  RULE_SPEC+=("$spec_field")
+done < <(rule_spec)
 
 delete_owned_rules() {
   local removed=0

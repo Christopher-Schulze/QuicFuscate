@@ -29,7 +29,12 @@ prune_releases() {
   fi
   (
     cd "$rel"
-    mapfile -t old < <(ls -1t 2>/dev/null | tail -n "+$((keep + 1))")
+    # `mapfile` is a Bash 4 builtin and macOS ships Bash 3.2 as /bin/bash, where this
+    # script failed before doing any work. A read loop is portable to both.
+    old=()
+    while IFS= read -r entry; do
+      [[ -n "$entry" ]] && old+=("$entry")
+    done < <(ls -1t 2>/dev/null | tail -n "+$((keep + 1))")
     if [[ "${#old[@]}" -eq 0 ]]; then
       echo "[cleanup] releases already within keep=$keep"
       return 0

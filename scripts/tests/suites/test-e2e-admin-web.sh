@@ -584,7 +584,11 @@ print(qkey)
 print(expires_at)
 PY
 )"
-mapfile -t QKEY_LINES <<< "$QKEY_INFO"
+# This suite runs on macOS too, where /bin/bash is 3.2 and has no `mapfile`.
+QKEY_LINES=()
+while IFS= read -r qkey_line; do
+  QKEY_LINES+=("$qkey_line")
+done <<< "$QKEY_INFO"
 QKEY_VALUE="${QKEY_LINES[0]:-}"
 QKEY_EXPIRES_AT="${QKEY_LINES[1]:-}"
 [[ -n "$QKEY_VALUE" ]] || die "Missing qkey value"
