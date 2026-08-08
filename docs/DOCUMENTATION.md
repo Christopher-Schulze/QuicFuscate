@@ -5829,3 +5829,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `test_doh_client_is_cached_and_shared` now builds its cache-only configuration with `https://127.0.0.1/dns-query`, leaving the cache empty before the first call and avoiding host DNS resolution entirely.
 - The test clones `DnsProxyConfig` after the first build and proves the cloned configuration observes and reuses the same cached `reqwest::Client`. Production hostname endpoint pre-resolution remains unchanged and enforced by `for_client_endpoints`.
 - The focused DNS module passes `41/41`; strict all-feature library Clippy, formatting, and diff hygiene pass. No network request is made by this coverage.
+
+## Implementation Reconciliation (2026-08-08, TODO-782 artifact-writer consumer proof)
+
+- The shared artifact writer and the optimization, performance-regression, and security-fuzzing suite consumers all pass structured environment JSON through `qf_json_append_object`; a populated `COMMAND_ENVIRONMENT_JSON` value is substituted as one complete object.
+- The bounded contract fixture passes for all three suites and each emitted document parses with the expected `items[0].environment` object. The shared writer contract suite also passes its escaped-value, malformed-input, create-new, backup-replacement, and profiling ownership checks.
+- This closes the stale consumer finding without changing foreign Cargo/curl/iperf/probe artifacts or any frontend surface.
