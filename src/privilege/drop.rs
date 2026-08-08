@@ -531,6 +531,14 @@ pub fn drop_privileges_resolved(
     {
         validate_resolved_identity(identity)?;
         let mut state = PrivilegeTransitionState::TransitionStarted;
+        // Supplementary groups must go before the identity change, because after
+        // setuid the process no longer holds the privilege required to drop them.
+        // Retained memberships keep granting access to every file and resource
+        // reachable through them, so a drop that skips this step reports a
+        // reduction it did not perform.
+        clear_supplementary_groups()
+            .map_err(|error| partial_transition_error(state, "setgroups", error))?;
+        state = PrivilegeTransitionState::SupplementaryGroupsCleared;
         // SAFETY: the final identity validator rejects zero IDs and confirms
         // the account database mapping before these scalar libc calls.
         call_zero("setgid", unsafe { libc::setgid(identity.gid) })
@@ -554,6 +562,9 @@ pub fn drop_privileges_resolved(
                 ),
             ));
         }
+        check_supplementary_groups_cleared(&report.supplementary_groups, identity.gid).map_err(
+            |error| partial_transition_error(state, "post-drop group verification", error),
+        )?;
         Ok(report)
     }
     #[cfg(not(unix))]
@@ -1033,7 +1044,7 @@ fn has_capability(mask: u64, capability: u32) -> bool {
     mask & (1u64 << capability) != 0
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn clear_supplementary_groups() -> Result<(), DropError> {
     // SAFETY: the count is zero, so the null pointer is explicitly permitted
     // by setgroups and no group memory is read.
@@ -1080,6 +1091,24 @@ fn clear_process_capabilities() -> Result<(), DropError> {
     } else {
         Err(DropError::SystemCallFailed { operation: "capset(clear)", errno: errno() })
     }
+}
+
+/// Prove that no supplementary group survived the drop.
+///
+/// POSIX leaves it unspecified whether `getgroups()` reports the effective GID,
+/// and the BSD-derived platforms this path covers do report it. The new primary
+/// GID is therefore accepted, and nothing else is: any other entry is a
+/// membership that outlived the reduction and still grants access. Linux keeps
+/// its stricter empty-set contract, which its own kernel semantics allow.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn check_supplementary_groups_cleared(groups: &[u32], gid: u32) -> Result<(), DropError> {
+    let retained: Vec<u32> = groups.iter().copied().filter(|group| *group != gid).collect();
+    if !retained.is_empty() {
+        return Err(DropError::VerificationFailed(format!(
+            "supplementary groups remain after the drop: {retained:?}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1605,5 +1634,86 @@ mod tests {
     fn test_drop_privileges_not_supported_on_non_unix() {
         let result = drop_privileges("nobody", "nogroup");
         assert!(matches!(result, Err(DropError::NotSupported)));
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    mod non_linux_supplementary_groups {
+        use super::super::{
+            check_supplementary_groups_cleared, clear_supplementary_groups, current_groups,
+            DropError,
+        };
+
+        #[test]
+        fn an_empty_group_set_passes_verification() {
+            check_supplementary_groups_cleared(&[], 501).expect("no groups is a cleared set");
+        }
+
+        #[test]
+        fn the_new_primary_gid_is_the_only_tolerated_entry() {
+            // POSIX leaves it unspecified whether getgroups() reports the effective
+            // GID, and this platform family does. Tolerating it is required; it must
+            // not become a licence to tolerate anything else.
+            check_supplementary_groups_cleared(&[501], 501)
+                .expect("the new primary GID may be reported");
+        }
+
+        #[test]
+        fn a_retained_membership_fails_verification_and_names_itself() {
+            for (label, groups) in [
+                ("a single retained group", vec![20u32]),
+                ("a retained group beside the primary GID", vec![501, 20]),
+                ("the previous root membership", vec![0]),
+                ("several retained groups", vec![0, 20, 80]),
+            ] {
+                let error = check_supplementary_groups_cleared(&groups, 501)
+                    .expect_err("a retained membership must fail the drop");
+                let message = match error {
+                    DropError::VerificationFailed(message) => message,
+                    other => panic!("{label} must fail verification, got {other:?}"),
+                };
+                assert!(
+                    message.contains("supplementary groups remain"),
+                    "{label} must name the defect, got {message}"
+                );
+                for group in groups.iter().filter(|group| **group != 501) {
+                    assert!(
+                        message.contains(&group.to_string()),
+                        "{label} must name the retained group {group}, got {message}"
+                    );
+                }
+                assert!(
+                    !message.contains("[501"),
+                    "{label} must not report the new primary GID as retained, got {message}"
+                );
+            }
+        }
+
+        #[test]
+        fn clearing_groups_without_privilege_fails_instead_of_reporting_success() {
+            // An unprivileged test process cannot call setgroups, which is exactly the
+            // case that must never be swallowed: the drop path propagates it and can
+            // therefore never report a reduction it did not perform. Under a
+            // privileged runner the call succeeds and the group set is genuinely
+            // cleared, so both outcomes are asserted against the observed state.
+            let before = current_groups().expect("group set is readable");
+            match clear_supplementary_groups() {
+                Ok(()) => {
+                    let after = current_groups().expect("group set is readable after clearing");
+                    let gid = unsafe { libc::getegid() };
+                    check_supplementary_groups_cleared(&after, gid)
+                        .expect("a successful clear must leave no retained membership");
+                }
+                Err(DropError::SystemCallFailed { operation, errno }) => {
+                    assert_eq!(operation, "setgroups");
+                    assert_ne!(errno, 0, "a failed clear must carry a real errno");
+                    assert_eq!(
+                        current_groups().expect("group set is readable after a failed clear"),
+                        before,
+                        "a failed clear must not partially modify the group set"
+                    );
+                }
+                Err(other) => panic!("unexpected setgroups failure shape: {other:?}"),
+            }
+        }
     }
 }
