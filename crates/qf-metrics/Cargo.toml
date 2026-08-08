@@ -1,0 +1,19 @@
+[package]
+name = "qf-metrics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = []
+
+[dependencies]
+log = "0.4"
+qf-common = { path = "../qf-common" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+[dev-dependencies]
+qf-common = { path = "../qf-common", features = ["rust-tests"] }

@@ -1526,6 +1526,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qf-metrics"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-common",
+ "tokio",
+]
+
+[[package]]
 name = "qf-pki"
 version = "0.4.4"
 dependencies = [
@@ -1598,6 +1607,7 @@ dependencies = [
  "qf-firewall",
  "qf-instrumentation",
  "qf-logging",
+ "qf-metrics",
  "qf-pki",
  "qf-privilege",
  "qf-reality",
