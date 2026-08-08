@@ -377,6 +377,7 @@ impl Connection {
         // CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, etc.) are ack-eliciting.
         let mut wrote_ack_eliciting = false;
         let mut stream_transmission_id = None;
+        let mut staged_datagram = false;
         let mut packet_contents = recovery::SentPacketContents::default();
 
         // Post-handshake Application-level CRYPTO (e.g. NewSessionTicket) is not
@@ -432,9 +433,10 @@ impl Connection {
                 }
                 // FEC feed removed (handled by core)
                 let (off_after_dgram, dgram_ack_eliciting) =
-                    self.maybe_flush_one_datagram_frame(out, off)?;
+                    self.maybe_stage_one_datagram_frame(out, off)?;
                 off = off_after_dgram;
                 wrote_ack_eliciting |= dgram_ack_eliciting;
+                staged_datagram = dgram_ack_eliciting;
                 packet_contents.datagram |= dgram_ack_eliciting;
             }
         }
@@ -506,6 +508,9 @@ impl Connection {
         }
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
+        if staged_datagram {
+            self.commit_staged_datagram_frame()?;
+        }
         if let Some(scheduler) = self.traffic_analysis.as_mut() {
             if emitted_chaff {
                 scheduler.record_chaff_emitted();

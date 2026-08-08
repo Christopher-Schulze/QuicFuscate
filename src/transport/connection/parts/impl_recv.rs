@@ -1082,10 +1082,13 @@ impl Connection {
         Some(1 + 2 + payload_len)
     }
 
-    /// Flushes one DATAGRAM frame. Returns `(new_off, wrote_ack_eliciting)`.
-    /// DATAGRAM frames are ack-eliciting per RFC 9221 §2.
+    /// Stages one DATAGRAM frame without transferring queue ownership.
+    ///
+    /// The caller must commit the front item only after the complete packet has
+    /// passed padding, header protection, and AEAD sealing. DATAGRAM frames are
+    /// ack-eliciting per RFC 9221 §2.
     #[inline(always)]
-    fn maybe_flush_one_datagram_frame(
+    fn maybe_stage_one_datagram_frame(
         &mut self,
         out: &mut [u8],
         mut off: usize,
@@ -1097,48 +1100,40 @@ impl Connection {
             if off + need + tag_reserve <= out.len() {
                 #[cfg(not(feature = "zero_copy_dgram"))]
                 {
-                    let Some(front_owned) = self.dgram_send_queue.pop_front() else {
+                    let Some(front) = self.dgram_send_queue.front() else {
                         return Err(crate::error::ConnectionError::Done);
                     };
-                    let frame = Frame::Datagram { data: Cow::Owned(front_owned) };
+                    let frame = Frame::Datagram { data: Cow::Borrowed(front.as_slice()) };
                     log::trace!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={:?}", frames::wire_len(&frame));
-                    match frames::to_bytes(&frame, &mut out[off..]) {
-                        Ok(written) => {
-                            log::trace!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
-                            off += written;
-                            // DATAGRAM frames are ack-eliciting (RFC 9221 §2).
-                            return Ok((off, true));
-                        }
-                        Err(e) => {
-                            log::trace!("maybe_flush_one_datagram_frame: to_bytes failed: {:?}", e);
-                            if let Frame::Datagram { data } = frame {
-                                self.dgram_send_queue.push_front(data.into_owned());
-                            }
-                            return Err(e);
-                        }
-                    }
+                    let written = frames::to_bytes(&frame, &mut out[off..])?;
+                    log::trace!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
+                    off += written;
+                    return Ok((off, true));
                 }
                 #[cfg(feature = "zero_copy_dgram")]
                 {
-                    let Some(front) = self.dgram_send_queue.pop_front() else {
+                    let Some(front) = self.dgram_send_queue.front() else {
                         return Err(crate::error::ConnectionError::Done);
                     };
                     let frame =
-                        Frame::Datagram { data: Cow::Owned(front.data[..front.len].to_vec()) };
-                    match frames::to_bytes(&frame, &mut out[off..]) {
-                        Ok(written) => {
-                            off += written;
-                            return Ok((off, true));
-                        }
-                        Err(error) => {
-                            self.dgram_send_queue.push_front(front);
-                            return Err(error);
-                        }
-                    }
+                        Frame::Datagram { data: Cow::Borrowed(&front.data[..front.len]) };
+                    let written = frames::to_bytes(&frame, &mut out[off..])?;
+                    off += written;
+                    return Ok((off, true));
                 }
             }
         }
         Ok((off, false))
+    }
+
+    /// Commits a previously staged DATAGRAM frame after packet sealing succeeds.
+    #[inline(always)]
+    fn commit_staged_datagram_frame(&mut self) -> Result<(), crate::error::ConnectionError> {
+        if self.dgram_send_queue.pop_front().is_none() {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        self.stats.dgram_sent = self.stats.dgram_sent.saturating_add(1);
+        Ok(())
     }
 
     #[inline(always)]

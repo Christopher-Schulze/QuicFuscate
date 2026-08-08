@@ -328,7 +328,6 @@ impl Connection {
             data[..buf.len()].copy_from_slice(buf);
             self.dgram_send_queue.push_back(DatagramBuffer { data, len: buf.len() });
         }
-        self.stats.dgram_sent += 1;
         Ok(())
     }
 

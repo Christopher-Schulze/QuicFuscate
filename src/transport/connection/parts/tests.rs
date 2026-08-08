@@ -81,6 +81,14 @@ mod tests {
         ));
     }
 
+    struct FailingHeaderProtector;
+
+    impl crate::transport::packet::HeaderProtector for FailingHeaderProtector {
+        fn new_mask(&self, _sample: &[u8]) -> Result<[u8; 5], ConnectionError> {
+            Err(ConnectionError::CryptoError("injected header-protection failure".into()))
+        }
+    }
+
     fn make_v2_client() -> Connection {
         let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
         config
@@ -1801,6 +1809,67 @@ mod tests {
     }
 
     #[test]
+    fn datagrams_remain_queued_when_short_header_seal_fails() {
+        let mut pair = bench_paired_1rtt_connections();
+        pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
+        pair.server.pmtu = pmtu_state(false, PmtuPolicy::default());
+        pair.client.enable_datagrams(16, 16);
+        let first = b"first datagram".to_vec();
+        let second = b"second datagram".to_vec();
+        pair.client.dgram_send(&first).expect("first datagram enqueue");
+        pair.client.dgram_send(&second).expect("second datagram enqueue");
+        assert_eq!(pair.client.stats.dgram_sent, 0);
+
+        let (write_seal, write_hp) = {
+            let crypto = pair.client.crypto.read();
+            (crypto.seal_1rtt.clone(), crypto.hp_1rtt.clone())
+        };
+        {
+            let mut crypto = pair.client.crypto.write();
+            crypto.seal_1rtt = None;
+            crypto.hp_1rtt = None;
+        }
+        pair.client.refresh_short_header_tag_reserve();
+
+        let mut packet = [0u8; 1500];
+        let error = pair.client.send(&mut packet).expect_err("missing sealer must fail send");
+        assert!(matches!(error, ConnectionError::TlsError(_)));
+        assert_eq!(pair.client.dgram_send_queue_len(), 2);
+        assert_eq!(pair.client.dgram_send_queue_byte_size(), first.len() + second.len());
+        assert_eq!(pair.client.stats.dgram_sent, 0);
+
+        {
+            let mut crypto = pair.client.crypto.write();
+            crypto.seal_1rtt = write_seal;
+            crypto.hp_1rtt = Some(std::sync::Arc::new(FailingHeaderProtector));
+        }
+        pair.client.refresh_short_header_tag_reserve();
+
+        let error = pair.client.send(&mut packet).expect_err("header protection failure must fail send");
+        assert!(matches!(error, ConnectionError::CryptoError(_)));
+        assert_eq!(pair.client.dgram_send_queue_len(), 2);
+        assert_eq!(pair.client.stats.dgram_sent, 0);
+
+        {
+            let mut crypto = pair.client.crypto.write();
+            crypto.hp_1rtt = write_hp;
+        }
+        pair.client.refresh_short_header_tag_reserve();
+
+        let (written, _) = pair.client.send(&mut packet).expect("retry first datagram");
+        pair.server.recv(&mut packet[..written], &pair.recv_info).expect("receive first datagram");
+        assert_eq!(pair.server.dgram_recv_vec().expect("first datagram delivery"), first);
+        assert_eq!(pair.client.dgram_send_queue_len(), 1);
+        assert_eq!(pair.client.stats.dgram_sent, 1);
+
+        let (written, _) = pair.client.send(&mut packet).expect("retry second datagram");
+        pair.server.recv(&mut packet[..written], &pair.recv_info).expect("receive second datagram");
+        assert_eq!(pair.server.dgram_recv_vec().expect("second datagram delivery"), second);
+        assert_eq!(pair.client.dgram_send_queue_len(), 0);
+        assert_eq!(pair.client.stats.dgram_sent, 2);
+    }
+
+    #[test]
     fn pto_probe_bypasses_congestion_gate_and_emits_ack_eliciting_packet() {
         // RFC 9002 §7.5/§6.2.4: a PTO probe bypasses the congestion gate but
         // still counts as in flight (tracked ack-eliciting packet).
@@ -2271,6 +2340,27 @@ mod tests {
         assert_eq!(c.dgram_send_queue_byte_size(), 10);
     }
 
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    #[test]
+    fn owned_datagram_serialization_error_preserves_queue() {
+        let mut c = make_conn();
+        c.enable_datagrams(16, 16);
+        let payload_len = 16_384;
+        c.dgram_send_queue.push_back(vec![0xAB; payload_len]);
+        let mut output = vec![0u8; 1 + 2 + payload_len];
+
+        assert!(matches!(
+            c.maybe_stage_one_datagram_frame(&mut output, 0),
+            Err(ConnectionError::BufferTooShort)
+        ));
+        assert_eq!(c.dgram_send_queue_len(), 1);
+        assert_eq!(c.dgram_send_queue_byte_size(), payload_len);
+        assert!(c
+            .dgram_send_queue
+            .front()
+            .is_some_and(|payload| payload.iter().all(|byte| *byte == 0xAB)));
+    }
+
     #[test]
     fn zero_copy_dgram_byte_equivalence_for_accepted_payload() {
         let mut c = make_conn();
@@ -2310,9 +2400,10 @@ mod tests {
         c.dgram_send(&[0x5A; 32]).expect("second DATAGRAM enqueue must allocate one block");
         let mut output = [0u8; 128];
         let (written, ack_eliciting) =
-            c.maybe_flush_one_datagram_frame(&mut output, 0).expect("DATAGRAM serialization");
+            c.maybe_stage_one_datagram_frame(&mut output, 0).expect("DATAGRAM serialization");
         assert!(written > 0);
         assert!(ack_eliciting);
+        c.commit_staged_datagram_frame().expect("DATAGRAM commit");
         assert_eq!(pool.accounting_snapshot(), before);
 
         c.dgram_send(&[0x3C; 32]).expect("teardown DATAGRAM enqueue");
@@ -2407,7 +2498,7 @@ mod tests {
         assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
 
         let mut output = vec![0u8; 1 + 2 + payload_len];
-        assert!(c.maybe_flush_one_datagram_frame(&mut output, 0).is_err());
+        assert!(c.maybe_stage_one_datagram_frame(&mut output, 0).is_err());
         assert_eq!(c.dgram_send_queue_len(), 1);
         assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
 
