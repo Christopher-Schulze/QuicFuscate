@@ -2,6 +2,19 @@
 //!
 //! This example demonstrates the basic usage of the QuicFuscateEngine API
 //! for embedding QuicFuscate in applications.
+//!
+//! It is offline by default: it configures, starts, and stops the engine without
+//! opening a network connection, so it runs deterministically with no server. Peer
+//! verification stays on, because an example is copied, and a copied
+//! `.verify_peer(false)` silently removes TLS peer authentication from whatever it
+//! lands in.
+//!
+//! Two opt-ins exist, both explicit and both announced at runtime:
+//!
+//! ```text
+//! cargo run --example engine_basic -- --connect            # attempt a real connection
+//! cargo run --example engine_basic -- --insecure-no-verify # disable peer verification
+//! ```
 
 use quicfuscate::engine::{
     DisconnectReason, EngineCallback, EngineConfig, EngineError, EngineState, QuicFuscateEngine,
@@ -41,7 +54,38 @@ impl EngineCallback for LoggingCallback {
     }
 }
 
+/// What the caller explicitly asked this example to do.
+///
+/// Both default to off. Nothing here is inferred, because the whole point of the
+/// defaults is that copying this file cannot weaken a deployment or make an
+/// unannounced network attempt.
+struct ExampleOptions {
+    connect: bool,
+    insecure_no_verify: bool,
+}
+
+fn parse_options() -> Result<ExampleOptions, String> {
+    let mut options = ExampleOptions { connect: false, insecure_no_verify: false };
+    for argument in std::env::args().skip(1) {
+        match argument.as_str() {
+            "--connect" => options.connect = true,
+            "--insecure-no-verify" => options.insecure_no_verify = true,
+            "--help" | "-h" => {
+                println!(
+                    "Usage: engine_basic [--connect] [--insecure-no-verify]\n\n\
+                     --connect              attempt a real connection to the configured remote\n\
+                     --insecure-no-verify   disable TLS peer verification (never for production)"
+                );
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown option {other:?}; try --help")),
+        }
+    }
+    Ok(options)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_options()?;
     println!("=== QuicFuscate Engine Example ===\n");
 
     // ========================================================================
@@ -66,10 +110,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================================================
     println!("\n2. Building configuration programmatically...");
 
+    if options.insecure_no_verify {
+        eprintln!(
+            "   WARNING: --insecure-no-verify disables TLS peer verification. This accepts any \
+             certificate and must never be used outside a throwaway local test."
+        );
+    }
     let config = EngineConfig::builder()
         .mode(quicfuscate::engine::EngineMode::Client)
         .remote("127.0.0.1:4433")
-        .verify_peer(false) // Disable for local testing
+        // Verification stays on by default. To connect to a server with a private CA,
+        // point the client at that CA rather than turning this off.
+        .verify_peer(!options.insecure_no_verify)
         .stealth_mode(StealthMode::Auto)
         .aead_preference(quicfuscate::engine::AeadPreference::Auto)
         .cc_algorithm(quicfuscate::engine::CcAlgorithm::Bbr3)
@@ -78,6 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Mode: {:?}", config.engine.mode);
     println!("   Remote: {}", config.connection.remote);
     println!("   Stealth: {:?}", config.stealth.mode);
+    println!("   Verify peer: {}", config.connection.verify_peer);
 
     // ========================================================================
     // Create and configure the engine
@@ -123,29 +176,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Current stats: {} packets sent", stats.packets_sent);
 
     // ========================================================================
-    // Connect (would fail without actual server, but demonstrates API)
+    // Connection lifecycle (opt-in; nothing here touches the network by default)
     // ========================================================================
     println!("\n6. Connection lifecycle...");
 
-    // Note: This would actually connect to the server
-    // For demo purposes, we'll show the API without actual connection
-    if engine.is_running() {
-        println!("   Engine is running, ready for connections");
-
-        // Demonstrate connect/disconnect cycle
+    if !options.connect {
+        // The comment here used to say no connection was made while the code called
+        // connect() anyway, so running the example made an unannounced network attempt
+        // that could be mistaken for a connectivity smoke test.
+        println!("   Skipping connection: pass --connect to attempt one.");
+        println!("   Engine is running and ready: {}", engine.is_running());
+    } else if !engine.is_running() {
+        println!("   Engine is not running; nothing to connect.");
+    } else {
+        println!("   Connecting to {} ...", engine.config().connection.remote);
         match engine.connect() {
             Ok(()) => {
                 println!("   Connected! State: {}", engine.state());
-
-                // Simulate some work
                 std::thread::sleep(std::time::Duration::from_millis(100));
-
-                // Disconnect
                 engine.disconnect()?;
                 println!("   Disconnected, state: {}", engine.state());
             }
-            Err(e) => {
-                println!("   Connection would fail in demo: {}", e);
+            Err(error) => {
+                // An explicitly requested connection that fails is a real failure, not a
+                // demo outcome to print and move past.
+                engine.stop()?;
+                return Err(format!("--connect was requested but failed: {error}").into());
             }
         }
     }

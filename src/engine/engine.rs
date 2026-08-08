@@ -1669,7 +1669,12 @@ impl QuicFuscateEngine {
         self.apply_config_candidate(candidate)
     }
 
-    fn apply_config_candidate(&mut self, candidate: EngineConfig) -> Result<(), EngineError> {
+    fn apply_config_candidate(&mut self, mut candidate: EngineConfig) -> Result<(), EngineError> {
+        // `from_toml` normalizes before validating, so the same document was accepted
+        // from a file and rejected programmatically: lowering `transport.mtu` without
+        // also lowering `pmtu_max_mtu` failed here but was clamped there. Both paths
+        // must mean the same thing.
+        candidate.normalize();
         candidate.validate()?;
         let state = self.state();
         let started = matches!(

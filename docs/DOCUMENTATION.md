@@ -4000,6 +4000,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `build-server-bundle.sh` - Produces a server bundle into `scripts/out/build/` for deployment packaging.
 
 #### Build (`scripts/tests/build/`)
+- `smoke/smoke-engine-example.sh` - Offline contract check for the `engine_basic` example (TODO-737): proves the default run completes with no server, states that it skipped the connection, keeps peer verification enabled, and never reports a connection; that `--insecure-no-verify` warns visibly and actually disables verification; and that an unknown option fails instead of being ignored.
 - `build-check.sh` - Format, Clippy, compile checks, test/bench compilation. Fail closed (TODO-740): formatting, Clippy, compilation, test compilation, and benchmark compilation each record PASS, FAIL, or SKIP with the exact command status in `results.json`, and any FAIL makes the runner exit 1. Failures were previously downgraded to warnings under an unconditional `[OK]` line, so a green result proved nothing. Low disk and `--skip-clippy` are machine-readable SKIPs with a reason, never PASS, and the final line names every skipped check so a partial run cannot read as a full quality pass.
 - `build-clippy-matrix.sh` - Clippy feature-matrix sweep (aligns with CI variants)
 - `build-env-doctor.sh` - Environment/Toolchain diagnostics
