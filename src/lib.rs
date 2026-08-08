@@ -76,7 +76,9 @@ pub mod firewall;
 /// Test harness utilities for integration and property-based testing.
 pub mod harness;
 /// Tracing and span instrumentation for runtime observability.
-pub mod instrumentation;
+pub mod instrumentation {
+    pub use qf_instrumentation::*;
+}
 /// TUN/TAP interface management and platform-specific network device abstraction.
 pub mod interface;
 /// Production logging: structured JSON, size-rotating file appender, and RFC 5424 syslog.

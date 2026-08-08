@@ -5910,6 +5910,13 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The refreshed seam inventory reports four workspace packages (`quicfuscate`, `qf-common`, `qf-control-plane`, and `qf-error`), 240 Rust files, 203,474 source lines, and the unchanged 16-module product SCC. No reverse workspace edge or protected frontend/Tauri change exists.
 - Verification: workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass. The suite reports 28 `qf-common` tests, 8 `qf-control-plane` tests, 2 `qf-error` tests, 2,655 root library tests, and green integration targets; no frontend projection was added.
 
+## Instrumentation Workspace Crate (2026-08-08, TODO-562)
+
+- `crates/qf-instrumentation/` now owns the std-only global metrics registry, Prometheus/health export, and client, server, transport, stealth, and FEC counters. The root `quicfuscate::instrumentation` module remains a compatibility re-export for all runtime callers.
+- The child has no product, logging, transport, crypto, or frontend dependency. Cargo records the one-way edge `quicfuscate -> qf-instrumentation`, and the moved five unit tests execute under the child package target.
+- The refreshed seam inventory reports five workspace packages, 240 Rust files, 203,476 source lines, the unchanged 16-module product SCC, and an empty protected frontend/Tauri change set. The four root-to-leaf edges are `qf-common`, `qf-control-plane`, `qf-error`, and `qf-instrumentation`.
+- Verification: workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass. The suite reports 28 `qf-common`, 8 `qf-control-plane`, 2 `qf-error`, 5 `qf-instrumentation`, and 2,650 root library tests plus green integration targets; no frontend projection was added.
+
 ## Omega Proof Ownership Preflight (2026-08-08, TODO-804)
 
 - `scripts/audits/verify-omega-proof-ownership.py` and `verify-omega-proof-ownership.sh` define the backend-only, read-only ownership gate for exact Omega proofs. The gate discovers candidate remote checkouts, verifies status/diff/object readability, records source/bundle/binary/runtime/evidence binding, and writes reports only through create-new semantics.

@@ -4,6 +4,7 @@ members = [
     "crates/qf-common",
     "crates/qf-control-plane",
     "crates/qf-error",
+    "crates/qf-instrumentation",
 ]
 exclude = [
     "apps/tauri/src-tauri",
@@ -28,6 +29,7 @@ license.workspace = true
 qf-common = { path = "crates/qf-common" }
 qf-control-plane = { path = "crates/qf-control-plane" }
 qf-error = { path = "crates/qf-error" }
+qf-instrumentation = { path = "crates/qf-instrumentation" }
 aligned_box = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-native-certs = "0.8"
