@@ -485,7 +485,7 @@ impl ServerRuntime {
             );
         }
 
-        self.state = ServerState::Starting;
+        self.set_state(ServerState::Starting);
         self.shutdown.store(false, Ordering::SeqCst);
 
         if self.live.is_none() {
@@ -498,7 +498,7 @@ impl ServerRuntime {
                     self.host_resources = Some(resources);
                 }
                 Err(error) => {
-                    self.state = ServerState::Stopped;
+                    self.set_state(ServerState::Stopped);
                     return Err(error);
                 }
             }
@@ -513,7 +513,7 @@ impl ServerRuntime {
             );
         }
 
-        self.state = ServerState::Running;
+        self.set_state(ServerState::Running);
         self.graceful_shutdown.set_running();
 
         Ok(())
@@ -591,7 +591,7 @@ impl ServerRuntime {
             return Err(EngineError::Io(cleanup_errors.join("; ")));
         }
 
-        self.state = ServerState::Stopping;
+        self.set_state(ServerState::Stopping);
         self.shutdown.store(true, Ordering::SeqCst);
 
         // Signal every registered auxiliary service. The async drain and live-shutdown paths
@@ -625,7 +625,7 @@ impl ServerRuntime {
             }
         }
 
-        self.state = ServerState::Stopped;
+        self.set_state(ServerState::Stopped);
         self.graceful_shutdown.set_stopped();
         if cleanup_errors.is_empty() {
             log::info!("Server stopped");
@@ -633,6 +633,11 @@ impl ServerRuntime {
         } else {
             let detail = cleanup_errors.join("; ");
             log::error!("Server stopped with incomplete owned cleanup: {}", detail);
+            // Distinct from a clean stop: host state was left behind, and a probe that
+            // cannot tell the two apart cannot know an operator has to intervene.
+            self.publish_lifecycle(
+                crate::implementations::server::metrics::LifecyclePhase::StoppedIncomplete,
+            );
             Err(EngineError::Io(detail))
         }
     }
@@ -731,6 +736,37 @@ impl ServerRuntime {
         }
         self.stats.active_connections.fetch_sub(removed_len as u64, Ordering::Relaxed);
         removed_len
+    }
+
+    /// Publish `state` and mirror it to every health surface.
+    ///
+    /// The lifecycle must never be assigned without publishing it, because that is how
+    /// the surfaces came to report `up=1` and `status=ok` for a stopped runtime.
+    pub(crate) fn set_state(&mut self, state: ServerState) {
+        self.state = state;
+        self.publish_lifecycle(match state {
+            ServerState::Stopped => crate::implementations::server::metrics::LifecyclePhase::Stopped,
+            ServerState::Starting => {
+                crate::implementations::server::metrics::LifecyclePhase::Starting
+            }
+            ServerState::Running => crate::implementations::server::metrics::LifecyclePhase::Running,
+            ServerState::Draining => {
+                crate::implementations::server::metrics::LifecyclePhase::Draining
+            }
+            ServerState::Stopping => {
+                crate::implementations::server::metrics::LifecyclePhase::Stopping
+            }
+        });
+    }
+
+    /// Publish a lifecycle phase that has no `ServerState` of its own.
+    pub(crate) fn publish_lifecycle(
+        &self,
+        phase: crate::implementations::server::metrics::LifecyclePhase,
+    ) {
+        if let Some(live) = self.live.as_ref() {
+            live.metrics.set_lifecycle_phase(phase);
+        }
     }
 
     /// Get server state.
@@ -1800,7 +1836,7 @@ impl ServerRuntime {
         if !self.graceful_shutdown.begin_drain() {
             return false;
         }
-        self.state = ServerState::Draining;
+        self.set_state(ServerState::Draining);
         let grace_ms = self.graceful_shutdown.grace().as_millis();
         if let Some(dns_workers) = self.dns_intercept_workers.as_ref() {
             dns_workers.close_admission();

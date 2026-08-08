@@ -4402,7 +4402,7 @@ The server metrics and systemd health surfaces use the shared bounded HTTP reade
 
 The default server metrics endpoint (`implementations::server::metrics::Metrics::export`) includes:
 
-- `quicfuscate_up`, `quicfuscate_uptime_seconds`
+- `quicfuscate_up`, `quicfuscate_lifecycle_phase{phase}`, `quicfuscate_uptime_seconds`. Health is lifecycle-aware (TODO-729): the runtime publishes every `ServerState` transition into one phase read by the Prometheus text export, the JSON health body, and the admin metrics JSON, so all three agree. `quicfuscate_up` is 1 only while `running`; `starting`, `draining`, `stopping`, and `stopped` each report themselves as the health status rather than `ok`, and a stop that left owned cleanup incomplete publishes the distinct `stopped_incomplete` phase with status `failed`, because host state remains behind and an operator has to act. Readiness (GeoIP, TUN data plane, memory lock) decides the status only while the runtime is running; no readiness result makes a stopped runtime healthy.
 - `quicfuscate_clients_active`, `quicfuscate_clients_total`, `quicfuscate_connections_accepted`, `quicfuscate_connections_rejected`
 - `quicfuscate_bytes_in_total`, `quicfuscate_bytes_out_total`, `quicfuscate_packets_in_total`, `quicfuscate_packets_out_total`
 - `quicfuscate_stealth_http3_active`, `quicfuscate_stealth_tls13_active`

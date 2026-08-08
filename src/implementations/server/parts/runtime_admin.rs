@@ -1332,7 +1332,8 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
     fn handle_metrics_json(&self) -> AdminResponse {
         use std::sync::atomic::Ordering;
         let mut metrics = serde_json::json!({
-                "quicfuscate_up": 1,
+                "quicfuscate_up": u8::from(self.core.metrics().lifecycle_phase().is_up()),
+                "quicfuscate_lifecycle_phase": self.core.metrics().lifecycle_phase().as_str(),
                 "quicfuscate_uptime_seconds": self.core.metrics().uptime_secs(),
                 "quicfuscate_clients_active": self.core.metrics().clients_active.load(Ordering::Relaxed),
                 "quicfuscate_clients_total": self.core.metrics().clients_total.load(Ordering::Relaxed),

@@ -14,6 +14,71 @@ use super::isolation::{UplinkDrop, UplinkRoute};
 use super::{BandwidthDecision, BandwidthDirection};
 use crate::time_source::ProtocolClock;
 
+/// Lifecycle phase published to every health surface.
+///
+/// Health answers a different question than readiness. A stopped runtime is not
+/// merely unready, and reporting `up=1` and `status=ok` while it is stopping or
+/// stopped tells a probe the service is fine and masks exactly the failure an
+/// operator needs to see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LifecyclePhase {
+    Stopped = 0,
+    Starting = 1,
+    Running = 2,
+    Draining = 3,
+    Stopping = 4,
+    /// The runtime reached `Stopped`, but owned cleanup did not complete. This is
+    /// distinct from a clean stop because it leaves host state behind.
+    StoppedIncomplete = 5,
+}
+
+impl LifecyclePhase {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Starting,
+            2 => Self::Running,
+            3 => Self::Draining,
+            4 => Self::Stopping,
+            5 => Self::StoppedIncomplete,
+            _ => Self::Stopped,
+        }
+    }
+
+    /// Stable identifier used in the JSON health body and the metric label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Draining => "draining",
+            Self::Stopping => "stopping",
+            Self::StoppedIncomplete => "stopped_incomplete",
+        }
+    }
+
+    /// Whether the runtime is serving traffic. Only `Running` is up.
+    pub fn is_up(self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// The health status this phase forces, if any.
+    ///
+    /// `Running` returns `None` so the existing readiness checks decide; every other
+    /// phase answers on its own, because no amount of readiness makes a stopped
+    /// runtime healthy.
+    fn forced_health(self) -> Option<&'static str> {
+        match self {
+            Self::Running => None,
+            Self::Starting => Some("starting"),
+            Self::Draining => Some("draining"),
+            Self::Stopping => Some("stopping"),
+            Self::Stopped => Some("stopped"),
+            Self::StoppedIncomplete => Some("failed"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum FecProcessCounterKind {
     Emitted,
@@ -181,6 +246,8 @@ pub struct Metrics {
     pub tun_downlink_backpressure_drop_shutdown: AtomicU64,
     /// Whether the server's requested TUN data plane is available.
     pub tun_data_plane_ready: AtomicU64,
+    /// Current lifecycle phase, published by the runtime on every transition.
+    lifecycle_phase: AtomicU8,
     /// Number of terminal server TUN data-plane faults.
     pub tun_data_plane_faults: AtomicU64,
     /// Process-wide memory-lock readiness and failure state.
@@ -328,6 +395,7 @@ impl Metrics {
             tun_downlink_backpressure_drop_terminal_transport_error: AtomicU64::new(0),
             tun_downlink_backpressure_drop_shutdown: AtomicU64::new(0),
             tun_data_plane_ready: AtomicU64::new(1),
+            lifecycle_phase: AtomicU8::new(LifecyclePhase::Starting as u8),
             tun_data_plane_faults: AtomicU64::new(0),
             memory_lock_status: parking_lot::RwLock::new(
                 crate::memory_lock::MemoryLockStartupStatus::not_configured(),
@@ -749,6 +817,16 @@ impl Metrics {
         self.tun_downlink_backpressure_pending_bytes.store(bytes as u64, Ordering::Relaxed);
     }
 
+    /// Publish the current lifecycle phase to every health surface.
+    pub fn set_lifecycle_phase(&self, phase: LifecyclePhase) {
+        self.lifecycle_phase.store(phase as u8, Ordering::Release);
+    }
+
+    /// Read the currently published lifecycle phase.
+    pub fn lifecycle_phase(&self) -> LifecyclePhase {
+        LifecyclePhase::from_u8(self.lifecycle_phase.load(Ordering::Acquire))
+    }
+
     /// Publish the availability of the requested server TUN data plane.
     pub fn set_tun_data_plane_ready(&self, ready: bool) {
         self.tun_data_plane_ready.store(u64::from(ready), Ordering::Release);
@@ -889,9 +967,14 @@ impl Metrics {
         }
 
         // Server info
-        out.push_str("# HELP quicfuscate_up Server is up\n");
+        let phase = self.lifecycle_phase();
+        out.push_str("# HELP quicfuscate_up Server is serving traffic\n");
         out.push_str("# TYPE quicfuscate_up gauge\n");
-        out.push_str("quicfuscate_up 1\n\n");
+        write_metric!("quicfuscate_up {}\n\n", u8::from(phase.is_up()));
+
+        out.push_str("# HELP quicfuscate_lifecycle_phase Current server lifecycle phase\n");
+        out.push_str("# TYPE quicfuscate_lifecycle_phase gauge\n");
+        write_metric!("quicfuscate_lifecycle_phase{{phase=\"{}\"}} 1\n\n", phase.as_str());
 
         out.push_str("# HELP quicfuscate_uptime_seconds Server uptime\n");
         out.push_str("# TYPE quicfuscate_uptime_seconds counter\n");
@@ -1598,7 +1681,10 @@ impl Metrics {
         let geoip_status = self.geoip_status();
         let uptime = self.uptime_secs();
         let memory_lock = self.memory_lock_status();
-        let health = if geoip_status == crate::implementations::server::limits::GeoIpStatus::Failed
+        let phase = self.lifecycle_phase();
+        let health = if let Some(forced) = phase.forced_health() {
+            forced
+        } else if geoip_status == crate::implementations::server::limits::GeoIpStatus::Failed
             || self.tun_data_plane_ready.load(Ordering::Acquire) == 0
             || memory_lock.is_not_ready()
         {
@@ -1626,6 +1712,7 @@ impl Metrics {
         };
         serde_json::json!({
             "status": health,
+            "lifecycle": phase.as_str(),
             "version": env!("CARGO_PKG_VERSION"),
             "uptime": uptime,
             "clients": self.clients_active.load(Ordering::Relaxed),
@@ -1953,9 +2040,102 @@ mod tests {
         server_task.await.unwrap().unwrap();
     }
 
+    /// Read the top-level `status` field of a health body.
+    fn top_level_status(health: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(health)
+            .expect("health body is JSON")
+            .get("status")
+            .and_then(|status| status.as_str())
+            .expect("health body has a top-level status")
+            .to_string()
+    }
+
+    #[test]
+    fn every_lifecycle_phase_agrees_across_text_and_json_health() {
+        // The nested memory-lock object carries its own `status`, so a substring match
+        // would silently read the wrong field.
+        // Prometheus, JSON health, and the admin metrics JSON all read one published
+        // phase. They used to hardcode up=1 and status=ok, so a probe could not tell a
+        // stopped runtime from a live one.
+        let metrics = Metrics::new();
+        for (phase, expected_status, expected_up) in [
+            (LifecyclePhase::Starting, "starting", 0u8),
+            (LifecyclePhase::Running, "ok", 1),
+            (LifecyclePhase::Draining, "draining", 0),
+            (LifecyclePhase::Stopping, "stopping", 0),
+            (LifecyclePhase::Stopped, "stopped", 0),
+            (LifecyclePhase::StoppedIncomplete, "failed", 0),
+        ] {
+            metrics.set_lifecycle_phase(phase);
+            assert_eq!(metrics.lifecycle_phase(), phase);
+
+            let health = metrics.export_health();
+            assert_eq!(
+                top_level_status(&health),
+                expected_status,
+                "{} must report status {expected_status}, got {health}",
+                phase.as_str()
+            );
+            assert!(
+                health.contains(&format!("\"lifecycle\":\"{}\"", phase.as_str())),
+                "{} must name itself in health, got {health}",
+                phase.as_str()
+            );
+
+            let text = metrics.export();
+            assert!(
+                text.contains(&format!("quicfuscate_up {expected_up}\n")),
+                "{} must export up={expected_up}",
+                phase.as_str()
+            );
+            assert!(
+                text.contains(&format!(
+                    "quicfuscate_lifecycle_phase{{phase=\"{}\"}} 1",
+                    phase.as_str()
+                )),
+                "{} must export its phase label",
+                phase.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_stopped_runtime_is_never_reported_healthy_by_readiness_alone() {
+        // Every readiness input is at its healthiest here. That must not make a stopped
+        // runtime look serviceable, which is the exact failure this closes.
+        let metrics = Metrics::new();
+        metrics.set_tun_data_plane_ready(true);
+        metrics.set_lifecycle_phase(LifecyclePhase::Running);
+        assert_eq!(top_level_status(&metrics.export_health()), "ok");
+
+        for phase in
+            [LifecyclePhase::Stopping, LifecyclePhase::Stopped, LifecyclePhase::StoppedIncomplete]
+        {
+            metrics.set_lifecycle_phase(phase);
+            let health = metrics.export_health();
+            assert_ne!(
+                top_level_status(&health),
+                "ok",
+                "{} must not claim healthy service, got {health}",
+                phase.as_str()
+            );
+            assert!(metrics.export().contains("quicfuscate_up 0\n"));
+        }
+
+        // Incomplete cleanup is distinct from a clean stop, because it leaves host
+        // state behind and an operator has to act.
+        metrics.set_lifecycle_phase(LifecyclePhase::StoppedIncomplete);
+        assert_eq!(top_level_status(&metrics.export_health()), "failed");
+        metrics.set_lifecycle_phase(LifecyclePhase::Stopped);
+        assert_eq!(top_level_status(&metrics.export_health()), "stopped");
+    }
+
     #[test]
     fn test_metrics_export() {
         let metrics = Metrics::new();
+        // Readiness only decides health while the runtime is running; a fresh Metrics
+        // starts in `Starting`, which answers on its own.
+        metrics.set_lifecycle_phase(LifecyclePhase::Running);
         metrics.record_connection_accepted();
         metrics.record_connection_rejected();
         metrics.record_ingress_datagram(1_000_000);
@@ -2010,6 +2190,9 @@ mod tests {
     #[test]
     fn tun_data_plane_faults_fail_health_and_are_exported() {
         let metrics = Metrics::new();
+        // Readiness only decides health while the runtime is running; a fresh Metrics
+        // starts in `Starting`, which answers on its own.
+        metrics.set_lifecycle_phase(LifecyclePhase::Running);
         metrics.record_tun_data_plane_fault();
 
         let output = metrics.export();
@@ -2271,6 +2454,9 @@ mod tests {
     #[test]
     fn geoip_metrics_expose_activation_state_lookup_counters_and_failed_health() {
         let metrics = Metrics::new();
+        // Readiness only decides health while the runtime is running; a fresh Metrics
+        // starts in `Starting`, which answers on its own.
+        metrics.set_lifecycle_phase(LifecyclePhase::Running);
         use crate::implementations::server::limits::GeoIpStatus;
 
         metrics.record_geoip_lookup();
