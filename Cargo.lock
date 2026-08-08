@@ -1460,6 +1460,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "qf-audit"
+version = "0.4.4"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "log",
+ "qf-common",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "qf-common"
 version = "0.4.4"
 dependencies = [
@@ -1566,6 +1579,7 @@ dependencies = [
  "parking_lot",
  "password-hash",
  "proptest",
+ "qf-audit",
  "qf-common",
  "qf-control-plane",
  "qf-dns",

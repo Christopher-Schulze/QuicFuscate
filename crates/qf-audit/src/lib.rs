@@ -1046,7 +1046,7 @@ impl AuditWriter {
     }
 
     fn try_write_event(&mut self, event: PendingAuditEvent) -> std::io::Result<()> {
-        let timestamp = unix_timestamp(crate::time_source::now_system())?;
+        let timestamp = unix_timestamp(qf_common::time_source::now_system())?;
         let mut entry = AuditEntry {
             version: 2,
             seq: self.next_seq,
@@ -1169,7 +1169,7 @@ impl AuditWriter {
 }
 
 fn unix_timestamp(now: SystemTime) -> std::io::Result<u64> {
-    crate::time_source::unix_epoch_seconds(now).map_err(|error| {
+    qf_common::time_source::unix_epoch_seconds(now).map_err(|error| {
         std::io::Error::other(format!("audit wall-clock timestamp unavailable: {error}"))
     })
 }
@@ -2239,6 +2239,33 @@ mod tests {
     // Tiny segments intentionally force dozens of synchronous checkpoint replacements.
     // Windows write-through durability needs a wider bound under parallel CI load.
     const ROTATION_DURABILITY_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[cfg(unix)]
+    mod test_support {
+        use std::sync::{Mutex, MutexGuard, OnceLock};
+
+        static UMASK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+        pub struct UmaskGuard {
+            previous: libc::mode_t,
+            _lock: MutexGuard<'static, ()>,
+        }
+
+        pub fn permissive_umask() -> UmaskGuard {
+            let lock = UMASK_LOCK.get_or_init(|| Mutex::new(()));
+            let guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = unsafe { libc::umask(0) };
+            UmaskGuard { previous, _lock: guard }
+        }
+
+        impl Drop for UmaskGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::umask(self.previous);
+                }
+            }
+        }
+    }
 
     fn audit_test_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -3418,7 +3445,7 @@ mod tests {
     fn open_existing_audit_file_reasserts_private_mode_before_append() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-        let _umask = crate::test_support::permissive_umask();
+        let _umask = test_support::permissive_umask();
         let path = audit_test_path("reopen-mode");
         remove_audit_set(&path);
         let _file =

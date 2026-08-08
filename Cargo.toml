@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/qf-audit",
     "crates/qf-common",
     "crates/qf-control-plane",
     "crates/qf-dns",
@@ -31,6 +32,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+qf-audit = { path = "crates/qf-audit" }
 qf-common = { path = "crates/qf-common" }
 qf-control-plane = { path = "crates/qf-control-plane" }
 qf-dns = { path = "crates/qf-dns" }

@@ -224,7 +224,9 @@ pub mod privilege {
 }
 
 /// Security audit logging - hash-chained, SIEM-compatible (TODO-439).
-pub mod audit;
+pub mod audit {
+    pub use qf_audit::*;
+}
 
 /// Production PKI - CA hierarchy, cert generation, chain validation (TODO-434).
 pub mod pki {
