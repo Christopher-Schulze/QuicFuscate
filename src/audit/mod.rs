@@ -1339,10 +1339,16 @@ fn secure_audit_file(
     owner: Option<(u32, u32)>,
 ) -> Result<(), AuditError> {
     use std::os::unix::fs::PermissionsExt;
+    // Open once with O_NOFOLLOW and do every hardening step through that handle. The
+    // pathname versions of chmod and chown resolve the name again on each call, so a
+    // replacement between them would tighten permissions on one inode and hand
+    // ownership to another. Binding both to one descriptor removes the window instead
+    // of narrowing it.
+    let file = open_no_follow_for_hardening(path)?;
     // Fail closed. An audit log whose mode could not be tightened to owner-only must not be
     // published as the process audit owner, because every later reader would treat it as the
     // documented secure state.
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(AUDIT_FILE_MODE))
+    file.set_permissions(std::fs::Permissions::from_mode(AUDIT_FILE_MODE))
         .map_err(AuditError::IoError)?;
 
     // Only chown the parent dir if we just created it. Never reown a
@@ -1354,10 +1360,11 @@ fn secure_audit_file(
     let running_as_root = unsafe { libc::geteuid() } == 0;
     if running_as_root {
         if let Some((uid, gid)) = owner {
-            chown_to_identity(path, uid, gid)?;
+            fchown_to_identity(&file, path, uid, gid)?;
             if parent_newly_created {
                 if let Some(parent) = path.parent() {
-                    chown_to_identity(parent, uid, gid)?;
+                    let dir = open_directory_no_follow(parent)?;
+                    fchown_to_identity(&dir, parent, uid, gid)?;
                 }
             }
         }
@@ -1365,31 +1372,66 @@ fn secure_audit_file(
     Ok(())
 }
 
-/// Chown `path` to the pre-resolved privilege target.
+/// Open `path` for hardening without following a symlink at its final component.
+#[cfg(unix)]
+fn open_no_follow_for_hardening(path: &std::path::Path) -> Result<File, AuditError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(AuditError::IoError)?;
+    if !file.metadata().map_err(AuditError::IoError)?.is_file() {
+        return Err(AuditError::HashError(format!(
+            "audit path must be a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Open a directory for hardening without following a symlink at its final component.
+#[cfg(unix)]
+fn open_directory_no_follow(path: &std::path::Path) -> Result<File, AuditError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)
+        .map_err(AuditError::IoError)?;
+    if !dir.metadata().map_err(AuditError::IoError)?.is_dir() {
+        return Err(AuditError::HashError(format!(
+            "audit parent must be a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(dir)
+}
+
+/// Chown an already-opened audit object to the pre-resolved privilege target.
 ///
 /// Fails closed. A failed ownership transfer means audit logging breaks after the privilege
 /// drop, so the caller must not publish the audit owner as if hardening had succeeded.
+/// `path` is used only for reporting; the operation itself is bound to the descriptor, so
+/// no pathname is resolved a second time and no replacement can redirect it.
 #[cfg(unix)]
-fn chown_to_identity(path: &std::path::Path, uid: u32, gid: u32) -> Result<(), AuditError> {
-    use std::ffi::CString;
-    // An interior NUL would silently truncate the path handed to the kernel, so reject it here
-    // rather than chowning a different file than the caller named.
-    let c_path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| {
-        AuditError::IoError(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("audit path {} is not representable as a C string: {e}", path.display()),
-        ))
-    })?;
+fn fchown_to_identity(
+    file: &File,
+    path: &std::path::Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(), AuditError> {
+    use std::os::unix::io::AsRawFd;
 
-    // SAFETY: `c_path` owns a NUL-terminated buffer that outlives the call, and `as_ptr()`
-    // borrows it without transferring ownership. `chown` reads the path and the two ids, writes
-    // through no caller pointer, and reports failure through its return value, which is checked
-    // below before `errno` is read.
-    let status = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    // SAFETY: `fchown` receives a file descriptor this process owns and keeps alive for
+    // the duration of the call, plus two scalar ids. It dereferences no caller pointer
+    // and reports failure through its return value, which is checked before `errno` is
+    // read.
+    let status = unsafe { libc::fchown(file.as_raw_fd(), uid, gid) };
     if status != 0 {
         let err = std::io::Error::last_os_error();
         log::warn!(
-            "chown failed for {} (uid={}, gid={}): {} — audit logging would break after privilege drop",
+            "fchown failed for {} (uid={}, gid={}): {} - audit logging would break after privilege drop",
             path.display(),
             uid,
             gid,
@@ -1898,13 +1940,27 @@ fn open_private_append_file(path: &Path, create_new: bool) -> std::io::Result<Fi
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(AUDIT_FILE_MODE);
+        // O_NOFOLLOW makes the refusal atomic with the open. A separate
+        // `symlink_metadata` check cannot do this: between the check and the open the
+        // name can be replaced, and every later append, chmod, and chown would then
+        // target the attacker's inode while the process believes it validated the
+        // audit path.
+        options.mode(AUDIT_FILE_MODE).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
+    // Bind the type check to the opened object rather than to the name. A directory or
+    // device at the audit path must not become the evidence file.
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("audit path is not a regular file: {}", path.display()),
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = file.metadata()?.permissions().mode() & 0o777;
+        let mode = metadata.permissions().mode() & 0o777;
         if mode != AUDIT_FILE_MODE {
             file.set_permissions(std::fs::Permissions::from_mode(AUDIT_FILE_MODE))?;
         }
@@ -1922,7 +1978,7 @@ fn atomic_write_checkpoint(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let result = (|| {
         let mut file = options.open(&temporary)?;
@@ -2726,6 +2782,73 @@ mod tests {
             flush_timeout: Duration::ZERO,
         };
         (log, receiver)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_audit_path_is_refused_without_touching_its_target() {
+        // The old shape checked the name and then opened it again, so a replacement
+        // between the two steps redirected every later append, chmod, and chown. The
+        // refusal must be atomic with the open, not a separate inspection.
+        let victim = audit_test_path("toctou-victim");
+        std::fs::write(&victim, b"not audit data").expect("victim file");
+        let link = audit_test_path("toctou-link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+
+        let error =
+            open_private_append_file(&link, false).expect_err("a symlinked audit path must fail");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::ELOOP),
+            "the open itself must refuse the link, got {error}"
+        );
+
+        assert!(
+            AuditLog::open(link.clone()).is_err(),
+            "the audit owner must not be published on a symlinked path"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("victim survives"),
+            b"not audit data",
+            "nothing may be written through the link"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link).expect("link survives").file_type().is_symlink(),
+            "the link must be left as it was found"
+        );
+
+        let _ = std::fs::remove_file(&link);
+        remove_audit_set(&victim);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardening_refuses_a_symlinked_target_and_a_non_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let victim = audit_test_path("harden-victim");
+        std::fs::write(&victim, b"payload").expect("victim file");
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644))
+            .expect("victim mode");
+        let link = audit_test_path("harden-link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+
+        secure_audit_file(&link, false, None).expect_err("hardening must refuse a symlink");
+        let mode = std::fs::metadata(&victim).expect("victim metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "the link target's permissions must not be modified");
+
+        // A directory at the audit path must not be hardened as if it were the
+        // evidence file.
+        let dir = audit_test_path("harden-dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("directory");
+        secure_audit_file(&dir, false, None).expect_err("hardening must refuse a directory");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let _ = std::fs::remove_file(&link);
+        remove_audit_set(&victim);
     }
 
     #[test]
