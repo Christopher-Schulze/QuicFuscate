@@ -1944,7 +1944,109 @@ mod tests {
 
     #[test]
     fn test_load_persisted_blocked_ips_defaults_empty_without_config() {
-        assert!(load_persisted_blocked_ips(None).is_empty());
+        assert_eq!(
+            load_persisted_blocked_ips(None).expect("no configured path is not an error"),
+            PersistedBlockedIpsState::Absent
+        );
+    }
+
+    /// A config path whose sibling blocked-IP store this test owns for its duration.
+    fn blocked_ips_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let config_path = std::env::temp_dir()
+            .join(format!("qf-blocked-{name}-{}-{id}.toml", std::process::id()));
+        let store = resolve_blocked_ips_store_path(Some(config_path.as_path()))
+            .expect("a config path resolves a blocked-IP store");
+        let _ = std::fs::remove_file(&store);
+        (config_path, store)
+    }
+
+    #[test]
+    fn an_absent_blocked_ip_store_is_distinct_from_an_explicitly_empty_one() {
+        // These look identical in memory. Collapsing them is what let an unreadable
+        // policy become allow-all, so the loader keeps them apart.
+        let (config_path, store) = blocked_ips_fixture("absent");
+        assert_eq!(
+            load_persisted_blocked_ips(Some(config_path.as_path())).expect("absent is not an error"),
+            PersistedBlockedIpsState::Absent
+        );
+
+        std::fs::write(&store, b"[]").expect("write empty policy");
+        assert_eq!(
+            load_persisted_blocked_ips(Some(config_path.as_path())).expect("empty is valid"),
+            PersistedBlockedIpsState::Valid(std::collections::HashSet::new())
+        );
+        let _ = std::fs::remove_file(&store);
+    }
+
+    #[test]
+    fn a_valid_blocked_ip_policy_round_trips_through_persistence() {
+        let (config_path, store) = blocked_ips_fixture("roundtrip");
+        let mut policy = std::collections::HashSet::new();
+        policy.insert("203.0.113.7".to_string());
+        policy.insert("2001:db8::1".to_string());
+        persist_blocked_ips(&store, &policy).expect("persist policy");
+
+        let loaded = load_persisted_blocked_ips(Some(config_path.as_path())).expect("valid policy");
+        assert_eq!(loaded, PersistedBlockedIpsState::Valid(policy));
+        let _ = std::fs::remove_file(&store);
+    }
+
+    #[test]
+    fn an_unusable_blocked_ip_policy_is_an_error_and_never_an_empty_set() {
+        // Every one of these used to produce an empty allow-all set, silently readmitting
+        // every address the operator had denied.
+        for (label, contents) in [
+            ("malformed JSON", "{ not json".to_string()),
+            ("a JSON object instead of a list", "{\"a\":1}".to_string()),
+            ("a non-string entry", "[1]".to_string()),
+            ("an entry that is not an address", "[\"definitely-not-an-ip\"]".to_string()),
+            ("an empty entry", "[\"\"]".to_string()),
+        ] {
+            let (config_path, store) = blocked_ips_fixture("invalid");
+            std::fs::write(&store, contents.as_bytes()).expect("write policy");
+
+            let error = load_persisted_blocked_ips(Some(config_path.as_path()))
+                .expect_err(&format!("{label} must be rejected"));
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::InvalidData,
+                "{label} must be reported as invalid data"
+            );
+            assert!(
+                error.to_string().contains(&store.display().to_string()),
+                "{label} must name the file, got {error}"
+            );
+            let _ = std::fs::remove_file(&store);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_blocked_ip_policy_is_an_error_and_never_an_empty_set() {
+        use std::os::unix::fs::PermissionsExt;
+        let (config_path, store) = blocked_ips_fixture("unreadable");
+        std::fs::write(&store, b"[\"203.0.113.7\"]").expect("write policy");
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000))
+            .expect("deny reads");
+
+        let result = load_persisted_blocked_ips(Some(config_path.as_path()));
+        // A privileged runner can read it anyway; then the policy must still load intact
+        // rather than be silently emptied. Either way the empty-set outcome is excluded.
+        match result {
+            Err(error) => assert!(
+                error.to_string().contains("read failed"),
+                "an unreadable policy must say so, got {error}"
+            ),
+            Ok(PersistedBlockedIpsState::Valid(blocked)) => {
+                assert!(blocked.contains("203.0.113.7"), "a readable policy must load intact")
+            }
+            Ok(other) => panic!("an unreadable policy must never become {other:?}"),
+        }
+
+        let _ = std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::remove_file(&store);
     }
 
     #[test]
@@ -2633,6 +2735,100 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
 
         assert!(shutdown.deadline_reached());
+    }
+
+    fn blocked_ip_handler(
+        blocked_ips_path: Option<std::path::PathBuf>,
+    ) -> (ServerAdminHttpRuntimeHandler, Arc<parking_lot::RwLock<std::collections::HashSet<String>>>)
+    {
+        let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let (tx, _rx) = mpsc::unbounded_channel::<AdminAction>();
+        let core = ServerAdminCore::new(
+            Arc::new(Metrics::new()),
+            blocked_ips.clone(),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            Arc::new(RwLock::new(SessionManager::new(16))),
+            ServerAdminControlPlane {
+                actions: tx,
+                listen_addr: "127.0.0.1:4433".to_string(),
+                front_domain: vec![],
+                qkeys: Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None))),
+                graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
+            },
+            #[cfg(feature = "rate_limiter")]
+            GeoIpStatus::Disabled,
+        );
+        let handler = ServerAdminHttpRuntimeHandler::new(
+            core,
+            blocked_ips_path,
+            None,
+            Arc::new(parking_lot::RwLock::new("normal".to_string())),
+            Arc::new(crate::implementations::server::admin_logs::AdminLogBuffer::new(16)),
+        );
+        (handler, blocked_ips)
+    }
+
+    #[test]
+    fn a_blocked_ip_change_that_cannot_be_persisted_is_not_reported_as_success() {
+        // The caller used to receive success while the change lived only in this process
+        // and would vanish on restart, which is exactly the evidence a security policy
+        // change must not fabricate.
+        // The atomic writer creates missing parent directories, so a merely absent path
+        // is not a failure. A parent that exists as a regular file is one that cannot be
+        // created, which is what makes this reach the error branch.
+        let blocking_file = std::env::temp_dir()
+            .join(format!("qf-blocked-parent-{}-{:?}.dat", std::process::id(), std::thread::current().id()));
+        std::fs::write(&blocking_file, b"not a directory").expect("occupy the parent name");
+        let unwritable = blocking_file.join("state.blocked.json");
+        let (handler, blocked_ips) = blocked_ip_handler(Some(unwritable.clone()));
+
+        let response = handler.handle_block("203.0.113.7");
+        assert!(!response.success, "an unpersisted block must not report success");
+        let message = response.message.clone().expect("the failure must explain itself");
+        assert!(message.contains("203.0.113.7"), "the failure must name the address: {message}");
+        assert!(
+            message.contains("running server") && message.contains("lost on restart"),
+            "the failure must state the live consequence: {message}"
+        );
+
+        // The live block deliberately stands. Rolling it back would readmit the address
+        // the operator just denied, which is the worse of the two outcomes.
+        assert!(
+            blocked_ips.read().contains("203.0.113.7"),
+            "the requested denial must remain in force"
+        );
+
+        let response = handler.handle_unblock("203.0.113.7");
+        assert!(!response.success, "an unpersisted unblock must not report success");
+        assert!(
+            !blocked_ips.read().contains("203.0.113.7"),
+            "the requested release must remain in force"
+        );
+
+        let _ = std::fs::remove_file(&blocking_file);
+    }
+
+    #[test]
+    fn a_durable_blocked_ip_change_reports_success_and_survives_a_reload() {
+        let (config_path, store) = blocked_ips_fixture("durable");
+        let (handler, _blocked_ips) = blocked_ip_handler(Some(store.clone()));
+
+        assert!(handler.handle_block("203.0.113.7").success);
+        assert_eq!(
+            load_persisted_blocked_ips(Some(config_path.as_path())).expect("policy loads"),
+            PersistedBlockedIpsState::Valid(["203.0.113.7".to_string()].into_iter().collect())
+        );
+
+        assert!(handler.handle_unblock("203.0.113.7").success);
+        assert_eq!(
+            load_persisted_blocked_ips(Some(config_path.as_path())).expect("policy loads"),
+            PersistedBlockedIpsState::Valid(std::collections::HashSet::new())
+        );
+
+        // An address that was never blocked is still an error, and must not be reported
+        // as a durable change either.
+        assert!(!handler.handle_unblock("203.0.113.8").success);
+        let _ = std::fs::remove_file(&store);
     }
 
     #[test]

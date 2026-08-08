@@ -427,10 +427,18 @@ pub fn initialize_standalone_server_bootstrap_with_clock(
     let initial_logging_mode = logging_mode_name(&initial_mode).to_string();
 
     let blocked_ips_path = resolve_blocked_ips_store_path(config_path);
-    let initial_blocked = load_persisted_blocked_ips(config_path);
-    if !initial_blocked.is_empty() {
-        log::info!("Loaded {} blocked IPs from disk", initial_blocked.len());
-    }
+    let initial_blocked = match load_persisted_blocked_ips(config_path)? {
+        PersistedBlockedIpsState::Absent => {
+            log::info!("No persisted blocked-IP policy; starting with an empty set");
+            std::collections::HashSet::new()
+        }
+        PersistedBlockedIpsState::Valid(blocked) => {
+            // Log the empty case too. An empty policy and a missing one look identical
+            // in memory, and only the log distinguishes them for an operator.
+            log::info!("Loaded {} blocked IPs from disk", blocked.len());
+            blocked
+        }
+    };
     let blocked_ips = Arc::new(parking_lot::RwLock::new(initial_blocked));
 
     let qkey_ttl_secs = resolve_qkey_ttl_secs(qkey_ttl_override);

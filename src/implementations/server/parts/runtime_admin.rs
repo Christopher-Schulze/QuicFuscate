@@ -1227,6 +1227,45 @@ impl AdminHandler for ServerAdminRuntimeHandler {
     }
 }
 
+impl ServerAdminHttpRuntimeHandler {
+    /// Report a blocked-IP mutation only as durable as it actually is.
+    ///
+    /// The live set is deliberately not rolled back on a persistence failure. Rolling
+    /// back a block would readmit an address the operator just denied, and rolling back
+    /// an unblock would keep denying one they just released, so the safer state is the
+    /// one that was requested. What must not happen is reporting it as durable: the
+    /// caller previously received success while the change existed only in this process
+    /// and would vanish on restart. The response therefore fails and states the live
+    /// consequence explicitly.
+    fn persist_blocked_ip_change(
+        &self,
+        response: AdminResponse,
+        operation: &str,
+        ip: &str,
+    ) -> AdminResponse {
+        if !response.success {
+            return response;
+        }
+        let Some(path) = self.blocked_ips_path.as_ref() else {
+            return response;
+        };
+        match persist_blocked_ips(path, &self.core.blocked_ips().read()) {
+            Ok(()) => response,
+            Err(error) => {
+                log::error!(
+                    "blocked IP {operation} for {ip} applied in memory but not persisted to {}: {error}",
+                    path.display()
+                );
+                AdminResponse::error(format!(
+                    "{operation} of {ip} is applied to the running server but was not persisted \
+                     to {}: {error}. It will be lost on restart.",
+                    path.display()
+                ))
+            }
+        }
+    }
+}
+
 impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
     fn handle_status(&self) -> AdminResponse {
         let mut data = self.core.base_status_json();
@@ -1261,24 +1300,12 @@ impl AdminHttpHandler for ServerAdminHttpRuntimeHandler {
 
     fn handle_block(&self, ip: &str) -> AdminResponse {
         let response = self.core.block_ip(ip);
-        if let Some(path) = self.blocked_ips_path.as_ref() {
-            if let Err(e) = persist_blocked_ips(path, &self.core.blocked_ips().read()) {
-                log::warn!("blocked IPs persist failed: {}", e);
-            }
-        }
-        response
+        self.persist_blocked_ip_change(response, "block", ip)
     }
 
     fn handle_unblock(&self, ip: &str) -> AdminResponse {
         let response = self.core.unblock_ip(ip);
-        if response.success {
-            if let Some(path) = self.blocked_ips_path.as_ref() {
-                if let Err(e) = persist_blocked_ips(path, &self.core.blocked_ips().read()) {
-                    log::warn!("blocked IPs persist failed: {}", e);
-                }
-            }
-        }
-        response
+        self.persist_blocked_ip_change(response, "unblock", ip)
     }
 
     fn handle_list_blocked_ips(&self) -> AdminResponse {

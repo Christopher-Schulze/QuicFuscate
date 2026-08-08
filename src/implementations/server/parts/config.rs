@@ -939,15 +939,61 @@ pub(crate) fn resolve_blocked_ips_store_path(
     config_path.map(|p| p.with_extension("blocked.json"))
 }
 
+/// Outcome of reading the manually managed blocked-IP admission policy.
+///
+/// `Absent` and an empty `Valid` set are deliberately different: no configured policy
+/// and a policy that is explicitly empty are the same in memory but not the same
+/// operationally, and collapsing them is how an unreadable file used to become
+/// allow-all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PersistedBlockedIpsState {
+    Absent,
+    Valid(std::collections::HashSet<String>),
+}
+
 pub(crate) fn load_persisted_blocked_ips(
     config_path: Option<&std::path::Path>,
-) -> std::collections::HashSet<String> {
-    resolve_blocked_ips_store_path(config_path)
-        .as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .map(|v| v.into_iter().collect())
-        .unwrap_or_default()
+) -> std::io::Result<PersistedBlockedIpsState> {
+    let Some(path) = resolve_blocked_ips_store_path(config_path) else {
+        return Ok(PersistedBlockedIpsState::Absent);
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PersistedBlockedIpsState::Absent)
+        }
+        Err(error) => {
+            // A policy we cannot read is not an empty policy. Returning the error keeps
+            // a denied source denied instead of admitting it after a restart.
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("blocked IP state read failed for {}: {error}", path.display()),
+            ));
+        }
+    };
+    let entries = serde_json::from_str::<Vec<String>>(&contents).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("blocked IP state invalid for {}: {error}", path.display()),
+        )
+    })?;
+    let mut blocked = std::collections::HashSet::with_capacity(entries.len());
+    for entry in entries {
+        // An entry that admission could never match is a silently ineffective rule, so
+        // it is rejected here rather than loaded and never enforced.
+        let normalized = crate::implementations::server::admin::normalize_admin_ip(&entry)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "blocked IP state in {} contains the invalid entry {entry:?}",
+                        path.display()
+                    ),
+                )
+            })?;
+        blocked.insert(normalized);
+    }
+    Ok(PersistedBlockedIpsState::Valid(blocked))
 }
 
 pub(crate) fn resolve_qkey_store_path(
