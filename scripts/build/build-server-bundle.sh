@@ -37,6 +37,18 @@ Example:
 EOF
 }
 
+# SHA-256 of a file, using whichever tool the host provides.
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "error: no sha256 tool available (need sha256sum or shasum)" >&2
+    return 1
+  fi
+}
+
 die() { echo "error: $*" >&2; exit 1; }
 
 main() {
@@ -99,11 +111,44 @@ main() {
   cp -a "$PROJECT_ROOT/scripts/install/install-server-linux.sh" "$stage/ops/install-server-linux.sh"
   cp -a "$PROJECT_ROOT/config/server-linux.default.toml" "$stage/ops/server-linux.default.toml"
 
+  # Prove the staged binary is actually usable before it is packaged. A bundle whose service
+  # binary is not executable, or is not the binary that was built, only fails at install or
+  # startup time on the operator's machine.
+  local staged_binary="$stage/bin/quicfuscate"
+  [[ -f "$staged_binary" ]] || die "staged binary is missing: $staged_binary"
+  [[ -x "$staged_binary" ]] || die "staged binary is not executable: $staged_binary"
+
+  local source_hash staged_hash
+  source_hash="$(hash_file "$binary")"
+  staged_hash="$(hash_file "$staged_binary")"
+  [[ "$source_hash" == "$staged_hash" ]] \
+    || die "staged binary does not match the built binary: $source_hash != $staged_hash"
+
+  # Direct execution proof. Skipped only when the host cannot run the target architecture, which
+  # is reported rather than silently treated as success.
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    "$staged_binary" --version >/dev/null 2>&1 \
+      || die "staged binary is not runnable: $staged_binary --version failed"
+    echo "binary_execution=verified"
+  else
+    echo "binary_execution=unavailable host=$(uname -s) reason=cannot execute the Linux target"
+  fi
+
   local tarball
   tarball="${out_dir}/${name}-${version}-${ts}.tar.gz"
   tar -C "$out_dir" -czf "$tarball" "$(basename "$stage")"
 
+  # The packaged file must be the same executable that was verified above.
+  local packaged_mode
+  packaged_mode="$(tar -tvzf "$tarball" \
+    | awk -v path="$(basename "$stage")/bin/quicfuscate" '$NF == path {print $1; exit}')"
+  [[ -n "$packaged_mode" ]] || die "tarball does not contain bin/quicfuscate"
+  [[ "$packaged_mode" == *x*x*x* ]] \
+    || die "packaged binary is not executable in the tarball: mode $packaged_mode"
+
   echo "bundle: $tarball"
+  echo "binary_sha256=$staged_hash"
+  echo "packaged_mode=$packaged_mode"
 }
 
 main "$@"
