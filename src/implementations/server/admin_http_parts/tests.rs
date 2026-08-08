@@ -1622,6 +1622,158 @@ mod tests {
         assert_eq!(parse_status(&resp), 413);
     }
 
+    /// The bound must be applied before the append, not after the whole body is in memory.
+    ///
+    /// This is the actual defect: the previous code produced the same 413 status, but only after
+    /// `collect()` had already allocated the entire body, so the configured cap bounded nothing.
+    #[test]
+    fn body_accumulation_stops_before_exceeding_the_cap() {
+
+        let limit = 1024usize;
+        let mut collected = Vec::new();
+
+        // Chunks up to the cap are accepted and accumulate exactly.
+        append_bounded(&mut collected, &[b'a'; 512], limit).expect("first chunk fits");
+        assert_eq!(collected.len(), 512);
+        append_bounded(&mut collected, &[b'b'; 512], limit).expect("second chunk reaches the cap");
+        assert_eq!(collected.len(), limit, "the cap itself is allowed");
+
+        // The next byte is refused, and nothing is appended.
+        assert_eq!(
+            append_bounded(&mut collected, &[b'c'; 1], limit),
+            Err(BodyReadError::TooLarge)
+        );
+        assert_eq!(collected.len(), limit, "a refused chunk must not be appended");
+
+        // A single chunk larger than the cap is refused without allocating it.
+        let mut fresh = Vec::new();
+        assert_eq!(
+            append_bounded(&mut fresh, &vec![b'd'; limit + 1], limit),
+            Err(BodyReadError::TooLarge)
+        );
+        assert!(fresh.is_empty(), "an oversized first chunk must not be buffered at all");
+
+        // The length check saturates rather than wrapping.
+        let mut near_max = Vec::new();
+        assert_eq!(
+            append_bounded(&mut near_max, &[b'e'; 8], usize::MAX),
+            Ok(()),
+            "a huge limit must not overflow the comparison"
+        );
+    }
+
+    /// Content-Length parsing: absent, valid, duplicate-but-equal, conflicting, unparsable.
+    #[test]
+    fn content_length_parsing_covers_every_header_shape() {
+
+        let mut headers = hyper::HeaderMap::new();
+        assert_eq!(parse_content_length(&headers), Ok(None), "absent is legitimate for chunked");
+
+        headers.insert("content-length", "42".parse().unwrap());
+        assert_eq!(parse_content_length(&headers), Ok(Some(42)));
+
+        // Duplicate headers that agree are not a smuggling shape.
+        headers.append("content-length", "42".parse().unwrap());
+        assert_eq!(parse_content_length(&headers), Ok(Some(42)));
+
+        // Disagreeing duplicates are.
+        headers.append("content-length", "9".parse().unwrap());
+        assert_eq!(parse_content_length(&headers), Err(()));
+
+        let mut bad = hyper::HeaderMap::new();
+        bad.insert("content-length", "not-a-number".parse().unwrap());
+        assert_eq!(
+            parse_content_length(&bad),
+            Err(()),
+            "an unparsable length must be refused, not treated as zero"
+        );
+
+        let mut negative = hyper::HeaderMap::new();
+        negative.insert("content-length", "-1".parse().unwrap());
+        assert_eq!(parse_content_length(&negative), Err(()));
+    }
+
+    /// A chunked body over the cap must be refused while streaming, not after buffering it.
+    ///
+    /// Content-Length was the only guard, so a chunked or lengthless request could hold memory
+    /// until the operation timeout no matter what the configured cap said.
+    #[test]
+    fn oversized_chunked_payload_returns_413_without_content_length() {
+        let web_root = std::env::temp_dir();
+        let (addr, _thr) = start_short_unauth_server(1, web_root);
+
+        // Chunks that together exceed the cap, with no Content-Length to reject early on.
+        let chunk = "a".repeat(64 * 1024);
+        let mut req = String::from(
+            "POST /api/qkey HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Transfer-Encoding: chunked\r\n\r\n",
+        );
+        for _ in 0..((MAX_BODY_BYTES / chunk.len()) + 2) {
+            req.push_str(&format!("{:x}\r\n{}\r\n", chunk.len(), chunk));
+        }
+        req.push_str("0\r\n\r\n");
+
+        let resp = send_req(addr, &req);
+        assert_eq!(
+            parse_status(&resp),
+            413,
+            "a chunked body past the cap must be refused while streaming"
+        );
+    }
+
+    /// A chunked body inside the cap must still be accepted, so the bound is not a blanket reject.
+    #[test]
+    fn chunked_payload_within_the_cap_is_accepted() {
+        let web_root = std::env::temp_dir();
+        let (addr, _thr) = start_short_unauth_server(1, web_root);
+
+        let body = "{}";
+        let req = format!(
+            "POST /api/qkey HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Transfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            body.len(),
+            body
+        );
+        let resp = send_req(addr, &req);
+        assert_ne!(
+            parse_status(&resp),
+            413,
+            "a body inside the cap must not be rejected as too large"
+        );
+    }
+
+    /// Disagreeing Content-Length headers are a request-smuggling shape, not a length.
+    #[test]
+    fn conflicting_content_length_headers_return_400() {
+        let web_root = std::env::temp_dir();
+        let (addr, _thr) = start_short_unauth_server(1, web_root);
+
+        let req = "POST /api/qkey HTTP/1.1\r\nHost: localhost\r\n\
+                   Content-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 9\r\n\r\n{}";
+        let resp = send_req(addr, req);
+        assert!(
+            matches!(parse_status(&resp), 400),
+            "disagreeing Content-Length headers must be refused, got {}",
+            parse_status(&resp)
+        );
+    }
+
+    /// An unparsable Content-Length must be refused rather than silently treated as zero.
+    #[test]
+    fn unparsable_content_length_returns_400() {
+        let web_root = std::env::temp_dir();
+        let (addr, _thr) = start_short_unauth_server(1, web_root);
+
+        let req = "POST /api/qkey HTTP/1.1\r\nHost: localhost\r\n\
+                   Content-Type: application/json\r\nContent-Length: not-a-number\r\n\r\n";
+        let resp = send_req(addr, req);
+        assert!(
+            matches!(parse_status(&resp), 400),
+            "an unparsable Content-Length must be refused, got {}",
+            parse_status(&resp)
+        );
+    }
+
     #[test]
     fn oversized_headers_return_431() {
         let web_root = std::env::temp_dir();

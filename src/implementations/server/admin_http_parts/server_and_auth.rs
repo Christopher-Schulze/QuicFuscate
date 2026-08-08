@@ -1670,27 +1670,90 @@ async fn collect_http_request(
         return Err(text_response(431, "Request Header Fields Too Large"));
     }
 
-    // Check Content-Length before collecting body.
-    let content_length: usize = req
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    if content_length > MAX_BODY_BYTES {
+    // Content-Length is an early rejection, not the boundary. A duplicate or unparsable value is
+    // refused outright: disagreeing lengths are a request-smuggling shape, and treating an
+    // unparsable one as zero would silently hand an unbounded body to the reader below.
+    let declared_length = match parse_content_length(req.headers()) {
+        Ok(length) => length,
+        Err(()) => return Err(text_response(400, "Bad Request")),
+    };
+    if declared_length.is_some_and(|length| length > MAX_BODY_BYTES) {
         return Err(text_response(413, "Payload Too Large"));
     }
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes().to_vec(),
-        Err(_) => return Err(text_response(400, "Bad Request")),
+    let body_bytes = match read_body_bounded(body, MAX_BODY_BYTES, declared_length).await {
+        Ok(bytes) => bytes,
+        Err(BodyReadError::TooLarge) => return Err(text_response(413, "Payload Too Large")),
+        Err(BodyReadError::Transport) => return Err(text_response(400, "Bad Request")),
     };
-    if body_bytes.len() > MAX_BODY_BYTES {
-        return Err(text_response(413, "Payload Too Large"));
-    }
 
     Ok(hyper_to_http_request(&parts, body_bytes))
+}
+
+/// Why a bounded body read stopped.
+#[derive(Debug, PartialEq, Eq)]
+enum BodyReadError {
+    /// The body exceeded the configured cap while streaming.
+    TooLarge,
+    /// The peer or transport failed before the body was complete.
+    Transport,
+}
+
+/// Resolve the declared body length.
+///
+/// Returns `Ok(None)` when the header is absent, which is legitimate for chunked and lengthless
+/// requests. Returns `Err(())` for a value that cannot be parsed and for multiple headers that do
+/// not agree, since a disagreeing pair is a request-smuggling shape rather than a length.
+fn parse_content_length(headers: &hyper::HeaderMap) -> Result<Option<usize>, ()> {
+    let mut resolved: Option<usize> = None;
+    for value in headers.get_all("content-length") {
+        let parsed: usize = value.to_str().map_err(|_| ())?.trim().parse().map_err(|_| ())?;
+        match resolved {
+            Some(existing) if existing != parsed => return Err(()),
+            _ => resolved = Some(parsed),
+        }
+    }
+    Ok(resolved)
+}
+
+/// Append one body chunk, refusing to grow the accumulator past `limit`.
+///
+/// Split out from the async reader so the bound itself is directly testable: the defect this
+/// closes is not the status code, which the previous post-collection check also produced, but that
+/// the whole body was allocated before any check ran. The check must happen before the append.
+fn append_bounded(collected: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), BodyReadError> {
+    if collected.len().saturating_add(chunk.len()) > limit {
+        return Err(BodyReadError::TooLarge);
+    }
+    collected.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Read a request body, refusing to accumulate more than `limit` bytes.
+///
+/// `Incoming::collect()` buffers the whole body before any size check can run, so `Content-Length`
+/// was the only guard and a chunked or lengthless request could hold memory until the operation
+/// timeout regardless of the configured cap. Frames are consumed one at a time and the accumulator
+/// is checked before each append, so peak allocation is bounded by `limit` plus one frame.
+///
+/// `declared_length` only sizes the initial reservation; it is never trusted as the actual length.
+async fn read_body_bounded(
+    mut body: Incoming,
+    limit: usize,
+    declared_length: Option<usize>,
+) -> Result<Vec<u8>, BodyReadError> {
+    let reserve = declared_length.unwrap_or(0).min(limit);
+    let mut collected: Vec<u8> = Vec::with_capacity(reserve);
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| BodyReadError::Transport)?;
+        let Some(chunk) = frame.data_ref() else {
+            // Trailers carry no body bytes.
+            continue;
+        };
+        append_bounded(&mut collected, chunk, limit)?;
+    }
+    Ok(collected)
 }
 
 fn admin_operation_timeout_response() -> Response<Full<Bytes>> {
