@@ -157,9 +157,7 @@ pub(crate) mod chacha20poly1305 {
             len: usize,
             _extra_in: Option<&[u8]>,
         ) -> Result<usize, ConnectionError> {
-            if buf.len() < len + 16 {
-                return Err(ConnectionError::BufferTooShort);
-            }
+            let sealed = crate::crypto::checked_seal_capacity(buf.len(), len)?;
             let (pt, rest) = buf.split_at_mut(len);
 
             let mut nonce12 = self.make_nonce(counter);
@@ -171,7 +169,7 @@ pub(crate) mod chacha20poly1305 {
             poly_key.zeroize();
             nonce12.zeroize();
             rest[..16].copy_from_slice(&tag);
-            Ok(len + 16)
+            Ok(sealed)
         }
     }
 
@@ -314,6 +312,34 @@ pub mod hkdf;
 pub mod quic_kdf;
 
 /// AEAD/header-protection trait abstractions for QUIC packet protection.
+/// Length of an AEAD authentication tag across every retained construction here.
+pub(crate) const AEAD_TAG_LEN: usize = 16;
+
+/// Total sealed length for `plaintext_len` bytes plus an authentication tag.
+///
+/// Returns `BufferTooShort` on overflow rather than wrapping. Every seal path used to compute
+/// `len + 16` directly, so a caller-supplied length near `usize::MAX` wrapped in release builds
+/// and panicked in debug ones. A wrapped total can also pass the capacity comparison that guards
+/// `split_at_mut`, which turns a malformed length into an in-process abort instead of a typed
+/// error.
+#[inline]
+pub(crate) fn sealed_len(plaintext_len: usize) -> Result<usize, crate::error::ConnectionError> {
+    plaintext_len.checked_add(AEAD_TAG_LEN).ok_or(crate::error::ConnectionError::BufferTooShort)
+}
+
+/// Validate that `buf` can hold `plaintext_len` bytes plus a tag, returning the sealed length.
+#[inline]
+pub(crate) fn checked_seal_capacity(
+    buf_len: usize,
+    plaintext_len: usize,
+) -> Result<usize, crate::error::ConnectionError> {
+    let required = sealed_len(plaintext_len)?;
+    if buf_len < required {
+        return Err(crate::error::ConnectionError::BufferTooShort);
+    }
+    Ok(required)
+}
+
 pub mod aead;
 
 #[cfg(target_arch = "x86_64")]
@@ -535,10 +561,7 @@ impl AeadSeal for AesGcm128 {
         len: usize,
         _extra_in: Option<&[u8]>,
     ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if buf.len() < len + 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
+        let sealed = crate::crypto::checked_seal_capacity(buf.len(), len)?;
         let (pt, rest) = buf.split_at_mut(len);
 
         // Use QUIC-compliant nonce construction via make_nonce16
@@ -572,7 +595,7 @@ impl AeadSeal for AesGcm128 {
             tag[i] = s_enc[i] ^ s[i];
         }
         rest[..16].copy_from_slice(&tag);
-        Ok(len + 16)
+        Ok(sealed)
     }
 }
 

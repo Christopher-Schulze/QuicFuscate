@@ -428,3 +428,101 @@ fn crypto_constructors_reject_invalid_key_and_iv_lengths() {
     assert!(super::select_data_aead(&[0u8; 15], &[0u8; 12]).is_err());
     assert!(super::select_data_aead(&[0u8; 16], &[0u8; 13]).is_err());
 }
+
+/// AEAD length arithmetic must be checked before it can wrap.
+///
+/// Every seal path computed `len + 16` directly. On a caller-supplied length near `usize::MAX`
+/// that wraps in release builds and panics in debug ones, and a wrapped total can pass the
+/// capacity comparison guarding `split_at_mut`, turning a malformed length into an in-process
+/// abort instead of a typed error.
+#[cfg(test)]
+mod aead_length_bounds {
+    use crate::crypto::{checked_seal_capacity, sealed_len, AEAD_TAG_LEN};
+    use crate::error::ConnectionError;
+
+    #[test]
+    fn sealed_length_is_checked_rather_than_wrapping() {
+        assert_eq!(sealed_len(0), Ok(AEAD_TAG_LEN), "an empty plaintext still needs a tag");
+        assert_eq!(sealed_len(1), Ok(AEAD_TAG_LEN + 1));
+        assert_eq!(sealed_len(1500), Ok(1516));
+
+        // The exact boundary where the tag still fits.
+        let largest = usize::MAX - AEAD_TAG_LEN;
+        assert_eq!(sealed_len(largest), Ok(usize::MAX));
+
+        // One past it must be a typed error, not a wrapped small number.
+        assert_eq!(sealed_len(largest + 1), Err(ConnectionError::BufferTooShort));
+        assert_eq!(sealed_len(usize::MAX), Err(ConnectionError::BufferTooShort));
+    }
+
+    #[test]
+    fn seal_capacity_rejects_overflow_before_comparing_against_the_buffer() {
+        // A generous buffer must still not admit an overflowing length. Before the fix,
+        // `usize::MAX + 16` wrapped to 15, which is smaller than almost any buffer, so the
+        // capacity test passed and `split_at_mut(usize::MAX)` was reached.
+        assert_eq!(
+            checked_seal_capacity(64 * 1024, usize::MAX),
+            Err(ConnectionError::BufferTooShort),
+            "an overflowing length must be refused regardless of buffer size"
+        );
+
+        // Exact capacity is accepted and reports the sealed length.
+        assert_eq!(checked_seal_capacity(1516, 1500), Ok(1516));
+        // One byte short is refused.
+        assert_eq!(checked_seal_capacity(1515, 1500), Err(ConnectionError::BufferTooShort));
+        // Zero-length plaintext needs exactly the tag.
+        assert_eq!(checked_seal_capacity(AEAD_TAG_LEN, 0), Ok(AEAD_TAG_LEN));
+        assert_eq!(
+            checked_seal_capacity(AEAD_TAG_LEN - 1, 0),
+            Err(ConnectionError::BufferTooShort)
+        );
+    }
+
+    /// The wrapped value the old arithmetic produced would have passed the capacity test.
+    #[test]
+    fn the_previous_wrapping_arithmetic_would_have_admitted_an_overflowing_length() {
+        let buffer_len = 64 * 1024usize;
+        let malformed = usize::MAX;
+        // What the old code computed.
+        let wrapped = malformed.wrapping_add(AEAD_TAG_LEN);
+        assert!(
+            buffer_len >= wrapped,
+            "the wrapped total is smaller than the buffer, which is exactly why the old capacity \
+             test passed and reached split_at_mut"
+        );
+        // What the checked path does instead.
+        assert_eq!(
+            checked_seal_capacity(buffer_len, malformed),
+            Err(ConnectionError::BufferTooShort)
+        );
+    }
+
+    /// The real seal path must reject an overflowing length with a typed error, not panic.
+    #[test]
+    fn chacha_seal_rejects_an_overflowing_plaintext_length() {
+        use crate::crypto::aead::AeadSeal;
+
+        let key = [0x42u8; 32];
+        let nonce = [0x24u8; 12];
+        let seal = crate::crypto::ChaCha20Poly1305::new(&key, &nonce).expect("exact key sizes");
+        let mut buf = vec![0u8; 4096];
+
+        assert_eq!(
+            seal.seal_with_u64_counter(0, b"ad", &mut buf, usize::MAX, None),
+            Err(ConnectionError::BufferTooShort),
+            "an overflowing plaintext length must be a typed error"
+        );
+
+        // A length that merely exceeds the buffer is the same typed error, not a panic.
+        assert_eq!(
+            seal.seal_with_u64_counter(0, b"ad", &mut buf, 5000, None),
+            Err(ConnectionError::BufferTooShort)
+        );
+
+        // A valid length still seals and reports plaintext plus tag.
+        assert_eq!(
+            seal.seal_with_u64_counter(0, b"ad", &mut buf, 100, None),
+            Ok(100 + AEAD_TAG_LEN)
+        );
+    }
+}

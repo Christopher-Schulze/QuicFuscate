@@ -1703,17 +1703,14 @@ impl AeadSeal for MorusAead {
         len: usize,
         _extra_in: Option<&[u8]>,
     ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if buf.len() < len + 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
+        let sealed = crate::crypto::checked_seal_capacity(buf.len(), len)?;
         let (pt, rest) = buf.split_at_mut(len);
         #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         super::prefetch_morus_buffer(pt.as_ptr(), len);
         let nonce16 = super::make_nonce16(&self.iv, counter);
         let tag = self.encrypt_in_place_optimized(pt, ad, &nonce16);
         rest[..16].copy_from_slice(&tag);
-        Ok(len + 16)
+        Ok(sealed)
     }
 }
 

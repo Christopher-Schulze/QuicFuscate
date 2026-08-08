@@ -1695,16 +1695,14 @@ impl AeadSeal for Aegis128LAead {
         _extra_in: Option<&[u8]>,
     ) -> Result<usize, crate::error::ConnectionError> {
         use crate::error::ConnectionError;
-        if buf.len() < len + 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
+        let sealed = crate::crypto::checked_seal_capacity(buf.len(), len)?;
         let nonce16 = super::make_nonce16(&self.iv, counter);
         let mut cipher = crate::crypto::Aegis128L::new(&self.key, &nonce16)
             .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         let (pt, rest) = buf.split_at_mut(len);
         let tag = cipher.encrypt_in_place(pt, ad);
         rest[..16].copy_from_slice(&tag);
-        Ok(len + 16)
+        Ok(sealed)
     }
 
     fn supports_batch_seal(&self) -> bool {
@@ -1721,7 +1719,7 @@ impl AeadSeal for Aegis128LAead {
         }
         let homogeneous = aegis_batch_homogeneous_seal(items);
         let first = &items[0];
-        if first.buf.len() < first.plaintext_len + 16 {
+        if first.buf.len() < crate::crypto::sealed_len(first.plaintext_len)? {
             return Err(ConnectionError::BufferTooShort);
         }
         let first_nonce = super::make_nonce16(&self.iv, first.counter);
@@ -1729,7 +1727,7 @@ impl AeadSeal for Aegis128LAead {
             .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
         for (index, item) in items.iter_mut().enumerate() {
             if index > 0 {
-                if item.buf.len() < item.plaintext_len + 16 {
+                if item.buf.len() < crate::crypto::sealed_len(item.plaintext_len)? {
                     return Err(ConnectionError::BufferTooShort);
                 }
                 let nonce16 = super::make_nonce16(&self.iv, item.counter);
@@ -1822,9 +1820,10 @@ impl AeadSeal for Aegis128X4Aead {
         len: usize,
         _extra_in: Option<&[u8]>,
     ) -> Result<usize, crate::error::ConnectionError> {
+        let sealed = crate::crypto::sealed_len(len)?;
         let mut item = AeadSealItem { counter, ad, buf, plaintext_len: len };
         self.seal_batch(core::slice::from_mut(&mut item))?;
-        Ok(len + 16)
+        Ok(sealed)
     }
 
     fn supports_batch_seal(&self) -> bool {
@@ -1877,9 +1876,10 @@ impl AeadSeal for Aegis128X8Aead {
         len: usize,
         _extra_in: Option<&[u8]>,
     ) -> Result<usize, crate::error::ConnectionError> {
+        let sealed = crate::crypto::sealed_len(len)?;
         let mut item = AeadSealItem { counter, ad, buf, plaintext_len: len };
         self.seal_batch(core::slice::from_mut(&mut item))?;
-        Ok(len + 16)
+        Ok(sealed)
     }
 
     fn supports_batch_seal(&self) -> bool {
@@ -1934,7 +1934,7 @@ fn aegis_x4_seal_batch(
     }
     let homogeneous = aegis_batch_homogeneous_seal(items);
     let first = &items[0];
-    if first.buf.len() < first.plaintext_len + 16 {
+    if first.buf.len() < crate::crypto::sealed_len(first.plaintext_len)? {
         return Err(ConnectionError::BufferTooShort);
     }
     let first_nonce = super::make_nonce16(iv, first.counter);
@@ -1942,7 +1942,7 @@ fn aegis_x4_seal_batch(
         .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
     for (index, item) in items.iter_mut().enumerate() {
         if index > 0 {
-            if item.buf.len() < item.plaintext_len + 16 {
+            if item.buf.len() < crate::crypto::sealed_len(item.plaintext_len)? {
                 return Err(ConnectionError::BufferTooShort);
             }
             let nonce16 = super::make_nonce16(iv, item.counter);
@@ -2008,7 +2008,7 @@ fn aegis_x8_seal_batch(
     }
     let homogeneous = aegis_batch_homogeneous_seal(items);
     let first = &items[0];
-    if first.buf.len() < first.plaintext_len + 16 {
+    if first.buf.len() < crate::crypto::sealed_len(first.plaintext_len)? {
         return Err(ConnectionError::BufferTooShort);
     }
     let first_nonce = super::make_nonce16(iv, first.counter);
@@ -2016,7 +2016,7 @@ fn aegis_x8_seal_batch(
         .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
     for (index, item) in items.iter_mut().enumerate() {
         if index > 0 {
-            if item.buf.len() < item.plaintext_len + 16 {
+            if item.buf.len() < crate::crypto::sealed_len(item.plaintext_len)? {
                 return Err(ConnectionError::BufferTooShort);
             }
             let nonce16 = super::make_nonce16(iv, item.counter);
