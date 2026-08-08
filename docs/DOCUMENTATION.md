@@ -4133,7 +4133,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `bench-linux-send-path-decision.sh` - Linux send-path decision benchmark
 - `bench-retained-crypto-backends.sh` - Crypto backend comparison benchmark
 - `bench-fec-all.sh` - Dispatcher: runs all FEC benchmarks
-- `bench-ci-regression.sh` - CI regression benchmark gate (Criterion)
+- `bench-ci-regression.sh` - CI regression benchmark gate (Criterion). Benchmark preflight is classified, not guessed (TODO-735): `qf_bench_preflight` in `scripts/tests/lib/lib-common.sh` reads the declared benchmark targets from `cargo metadata` and separates two outcomes that a nonzero `cargo bench --no-run` used to merge. No declared target is a legitimate SKIP with exit 0; a declared target that fails to build is a FAIL with the build output, so a compile error can no longer produce a green skip that reads as a completed performance check. Every suite and the CI regression gate use it. A failed baseline creation in the gate now exits nonzero instead of reporting a created baseline, and the orchestrator exits nonzero when its selection is empty. Per-cell result status and artifact identity remain open under TODO-877
 - Root Criterion target `fingerprint_normalizer` - allocation and throughput proof for decoded raw-IP normalization (`cargo bench --bench fingerprint_normalizer --features benches`)
 
 **Micro (`scripts/benchmarks/micro/`)**

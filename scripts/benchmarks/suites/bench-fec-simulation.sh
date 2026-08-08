@@ -36,8 +36,15 @@ echo "===============================================================" | tee -a 
 print_system_banner | tee -a "$LOG_FILE"
 
 # Try cargo bench harness; skip gracefully if not present.
-if ! cargo bench --no-run --features benches >/dev/null 2>&1; then
-  warn "No Rust bench harness; falling back to timed test loops"
+# This suite measures with timed test loops, so an absent bench harness is genuinely
+# fine. A declared harness that fails to build is not: it means the tree does not
+# compile, and every timing produced afterwards would be measuring nothing meaningful.
+if ! BENCH_PREFLIGHT="$(qf_bench_preflight benches)"; then
+  echo "[FAIL] declared benchmark targets did not build; refusing to report timings." >&2
+  exit 1
+fi
+if [[ "$BENCH_PREFLIGHT" == "absent" ]]; then
+  warn "Cargo declares no benchmark targets; using timed test loops"
 fi
 
 MODES=(normal streaming extreme)

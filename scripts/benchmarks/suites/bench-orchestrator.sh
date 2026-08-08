@@ -70,8 +70,10 @@ if [[ -n "$SUITE_FILTER" ]]; then
 fi
 
 if [[ ${#SUITE_NAMES[@]} -eq 0 ]]; then
-  echo "No suites selected; exiting."
-  exit 0
+  # Running nothing is not a passing benchmark bundle. Exiting zero here would let an
+  # empty selection be recorded as a completed run.
+  error "No suites selected; nothing was measured."
+  exit 2
 fi
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"

@@ -66,9 +66,18 @@ fi
 echo "==============================================================="
 
 # Skip gracefully if bench harness absent
-if ! cargo bench --no-run --features benches >/dev/null 2>&1; then
-  echo "No Rust benches detected; skipping stealth benches."
-  qf_json_append_object "$JSON" "status=skipped" "reason=no_rust_benches"
+# Absence and build failure are different answers. A nonzero --no-run used to report
+# both as "no benches detected", so a compile error produced a green skip and could be
+# read as a completed performance check.
+BENCH_PREFLIGHT="$(qf_bench_preflight benches)" || {
+  echo "[FAIL] declared benchmark targets did not build; refusing to report a skip." >&2
+  qf_json_append_object "$JSON" "status=failed" "reason=bench_build_failed"
+  json_end "$JSON"
+  exit 1
+}
+if [[ "$BENCH_PREFLIGHT" == "absent" ]]; then
+  echo "[SKIP] Cargo declares no benchmark targets; skipping stealth benches."
+  qf_json_append_object "$JSON" "status=skipped" "reason=no_bench_targets"
   json_end "$JSON"
   exit 0
 fi

@@ -459,6 +459,66 @@ sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
 PY
 }
 
+# Classify the benchmark harness before running it.
+#
+# A nonzero `cargo bench --no-run` used to be reported as "no benches detected",
+# so a compile error, a dependency failure, or an unsupported feature was
+# indistinguishable from a repository that declares no benchmarks. Those demand
+# opposite responses: absence is a legitimate skip, a build failure is not.
+#
+# Prints one of:
+#   present            the declared targets build; run them
+#   absent             Cargo declares no benchmark targets
+# and returns 1 with the build output on stderr when declared targets fail to
+# build, so callers can fail closed instead of skipping.
+#
+# Usage: qf_bench_preflight [feature] [bench-name]
+qf_bench_preflight() {
+  local features="${1:-benches}"
+  local bench_name="${2:-}"
+  local declared
+  if ! declared="$(qf_bench_declared_targets)"; then
+    echo "cannot read benchmark targets from cargo metadata" >&2
+    return 1
+  fi
+  if [[ -n "$bench_name" ]]; then
+    if ! grep -qx -- "$bench_name" <<<"$declared"; then
+      echo "absent"
+      return 0
+    fi
+  elif [[ -z "$declared" ]]; then
+    echo "absent"
+    return 0
+  fi
+
+  local -a build=(cargo bench --no-run --features "$features")
+  [[ -n "$bench_name" ]] && build=(cargo bench --bench "$bench_name" --no-run --features "$features")
+  local output
+  if ! output="$("${build[@]}" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "declared benchmark targets failed to build: ${build[*]}" >&2
+    return 1
+  fi
+  echo "present"
+}
+
+# List the benchmark target names Cargo declares for this workspace.
+qf_bench_declared_targets() {
+  cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    metadata = json.load(sys.stdin)
+except (ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+for package in metadata.get("packages", []):
+    for target in package.get("targets", []):
+        if "bench" in target.get("kind", []):
+            print(target["name"])
+'
+}
+
 qf_json_append_object() {
   local file="$1"
   shift

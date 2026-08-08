@@ -5,6 +5,17 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# qf_bench_preflight lives here; the gate must not silently lose its ability to tell a
+# missing benchmark target from one that failed to build.
+if [[ ! -f "$PROJECT_ROOT/scripts/tests/lib/lib-common.sh" ]]; then
+  echo "ERROR: scripts/tests/lib/lib-common.sh is required by this gate" >&2
+  exit 2
+fi
+# shellcheck source=../tests/lib/lib-common.sh
+source "$PROJECT_ROOT/scripts/tests/lib/lib-common.sh"
+
 BASELINE="main"
 WARN_THRESHOLD=15
 ERROR_THRESHOLD=30
@@ -46,8 +57,15 @@ summary() {
   fi
 }
 
-if ! cargo bench --bench ci_regression --features benches --no-run 2>/dev/null; then
-  echo "[SKIP] No criterion bench targets found; skipping CI regression benchmarks."
+# ci_regression is declared in Cargo metadata, so a nonzero --no-run here is a build
+# failure, not an absent harness. Reporting it as a skip let this gate pass with a
+# tree that does not compile, which is the opposite of what a regression gate is for.
+if ! BENCH_PREFLIGHT="$(qf_bench_preflight benches ci_regression)"; then
+  echo "ERROR: the ci_regression benchmark is declared but did not build" >&2
+  exit 2
+fi
+if [[ "$BENCH_PREFLIGHT" == "absent" ]]; then
+  echo "[SKIP] Cargo declares no ci_regression benchmark target; skipping regression detection."
   exit 0
 fi
 
@@ -77,7 +95,12 @@ cargo bench --bench ci_regression --features benches -- --save-baseline pr 2>&1 
 BASELINE_DIR="target/criterion/${BASELINE}"
 if [[ ! -d "$BASELINE_DIR" ]]; then
   echo "WARNING: No baseline '$BASELINE' found. Saving current run as baseline."
-  cargo bench --bench ci_regression --features benches -- --save-baseline "$BASELINE" 2>&1 || true
+  # A failed baseline creation must not be reported as a created baseline. The next
+  # run would compare against nothing and call that a pass.
+  if ! cargo bench --bench ci_regression --features benches -- --save-baseline "$BASELINE" 2>&1; then
+    echo "ERROR: failed to create baseline '$BASELINE'" >&2
+    exit 2
+  fi
   summary "## Benchmark Results"
   summary ""
   summary "Baseline \`$BASELINE\` created (first run). No comparison possible."
