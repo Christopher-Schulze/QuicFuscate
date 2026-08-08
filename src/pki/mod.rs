@@ -28,6 +28,8 @@ pub enum PkiError {
     ParseFailed(String),
     /// Chain validation failed.
     ValidationFailed(String),
+    /// A PKI output path is not safe to write through.
+    UnsafePath(String),
     /// I/O error.
     IoError(std::io::Error),
     /// Feature not enabled (rcgen not compiled).
@@ -42,6 +44,7 @@ impl std::fmt::Display for PkiError {
             Self::InvalidValidity(s) => write!(f, "invalid certificate validity: {s}"),
             Self::ParseFailed(s) => write!(f, "cert parse failed: {s}"),
             Self::ValidationFailed(s) => write!(f, "chain validation failed: {s}"),
+            Self::UnsafePath(s) => write!(f, "unsafe PKI path: {s}"),
             Self::IoError(e) => write!(f, "I/O error: {e}"),
             Self::FeatureNotEnabled => write!(f, "PKI feature not enabled (rcgen required)"),
         }
@@ -307,6 +310,125 @@ pub fn generate_hierarchy(
     Err(PkiError::FeatureNotEnabled)
 }
 
+/// Report whether a path exists without following a final symlink.
+///
+/// `Path::exists()` resolves the link, so a dangling symlink reports absent and a
+/// link to an unrelated file reports the target's existence. Both readings are wrong
+/// for PKI material: the question is whether something occupies the name we intend
+/// to create, not what it points at.
+fn path_exists_no_follow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Reject a PKI output path that is a symlink, without following it.
+fn reject_symlinked_output(path: &Path) -> Result<(), PkiError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(PkiError::UnsafePath(format!(
+            "{} is a symlink; PKI material is never written through a link",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(PkiError::IoError(error)),
+    }
+}
+
+/// Write PKI material to `path` without ever following a symlink at that name.
+///
+/// The content is created in a fresh sibling file that cannot pre-exist, is flushed
+/// to disk, and is then renamed onto the target. `rename` does not follow a symlink
+/// at its final component, so even if a link is planted between the check and the
+/// rename the link itself is replaced and the write never reaches the attacker's
+/// target. Checking `is_symlink()` and then reopening the same pathname for writing
+/// would be the unsound version of this, and is deliberately not what happens here:
+/// the rejection reports an existing link, and the rename is what makes the write
+/// itself safe.
+///
+/// `mode` is applied at creation on Unix, so private key bytes are never briefly
+/// readable under a wider mode.
+fn write_pki_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), PkiError> {
+    reject_symlinked_output(path)?;
+    let parent =
+        path.parent().filter(|parent| !parent.as_os_str().is_empty()).ok_or_else(|| {
+            PkiError::UnsafePath(format!("{} has no parent directory", path.display()))
+        })?;
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if !parent_metadata.is_dir() {
+        return Err(PkiError::UnsafePath(format!("{} is not a directory", parent.display())));
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| PkiError::UnsafePath(format!("{} has no file name", path.display())))?;
+
+    let temp_path = create_pki_temp_file(parent, file_name, contents, mode)?;
+    if let Err(error) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(PkiError::IoError(error));
+    }
+    // Persist the directory entry itself, so a crash cannot leave the name pointing
+    // at nothing after the content was already durable.
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Create the staging file for [`write_pki_file`] and return its path.
+///
+/// The name must not already exist, so `create_new` both prevents reuse of an
+/// attacker-planted file and turns a name collision into an error instead of an
+/// overwrite. `O_NOFOLLOW` makes the creation refuse a symlink outright.
+fn create_pki_temp_file(
+    parent: &Path,
+    file_name: &std::ffi::OsStr,
+    contents: &[u8],
+    mode: u32,
+) -> Result<std::path::PathBuf, PkiError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut last_error = None;
+    for _ in 0..PKI_TEMP_NAME_ATTEMPTS {
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut temp_name = file_name.to_os_string();
+        temp_name.push(format!(".tmp-{}-{unique}", std::process::id()));
+        let temp_path = parent.join(temp_name);
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode).custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+
+        let mut file = match options.open(&temp_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => return Err(PkiError::IoError(error)),
+        };
+        let written = file.write_all(contents).and_then(|()| file.sync_all());
+        if let Err(error) = written {
+            drop(file);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(PkiError::IoError(error));
+        }
+        return Ok(temp_path);
+    }
+    Err(PkiError::IoError(last_error.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AlreadyExists, "PKI staging name is unavailable")
+    })))
+}
+
+/// How many staging names to try before reporting the directory unusable.
+const PKI_TEMP_NAME_ATTEMPTS: u32 = 16;
+
 /// Write a private key to disk in PEM format with restrictive permissions
 /// (0600 on Unix). The intermediate PEM string copy is wrapped in
 /// `Zeroizing<String>` so it is scrubbed on every exit path — including
@@ -320,32 +442,16 @@ pub fn generate_hierarchy(
 /// caller forgets to call this function the key is still scrubbed when the
 /// `GeneratedCert` is dropped.
 pub fn write_key_pem(key_der: &mut [u8], key_path: &Path) -> Result<(), PkiError> {
-    use std::io::Write;
     use zeroize::Zeroize;
 
     // Zeroizing<String> guarantees the PEM-encoded key material is scrubbed
     // via volatile writes on drop, regardless of which `?` early-returns.
     let key_pem = zeroize::Zeroizing::new(der_to_pem(key_der, "PRIVATE KEY"));
 
-    // On Unix, open the file with mode 0600 atomically via OpenOptions::mode
-    // so the private key is never briefly world-readable on disk. This
-    // eliminates the TOCTOU window that File::create (default 0644) +
-    // post-hoc set_permissions would leave.
-    #[cfg(unix)]
-    let mut key_file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(key_path)?
-    };
-    #[cfg(not(unix))]
-    let mut key_file = std::fs::File::create(key_path)?;
-
-    key_file.write_all(key_pem.as_bytes())?;
-    key_file.sync_all()?;
+    // The staging file is created with mode 0600, so the private key is never
+    // briefly readable under a wider mode, and the write never follows a symlink
+    // at the target name.
+    write_pki_file(key_path, key_pem.as_bytes(), PKI_KEY_MODE)?;
 
     // Zeroize the caller's key_der slice on the success path. On early
     // return, GeneratedCert::drop (if the caller owns one) still scrubs it.
@@ -354,28 +460,26 @@ pub fn write_key_pem(key_der: &mut [u8], key_path: &Path) -> Result<(), PkiError
     Ok(())
 }
 
+/// Private keys are readable only by the owning account.
+const PKI_KEY_MODE: u32 = 0o600;
+/// Certificates are public material and stay world-readable.
+const PKI_CERT_MODE: u32 = 0o644;
+
 /// Write a certificate chain (leaf + intermediate) to a single PEM file.
 pub fn write_cert_chain_pem(
     leaf_der: &[u8],
     intermediate_der: &[u8],
     chain_path: &Path,
 ) -> Result<(), PkiError> {
-    use std::io::Write;
-    let leaf_pem = der_to_pem(leaf_der, "CERTIFICATE");
-    let inter_pem = der_to_pem(intermediate_der, "CERTIFICATE");
-    let mut file = std::fs::File::create(chain_path)?;
-    file.write_all(leaf_pem.as_bytes())?;
-    file.write_all(inter_pem.as_bytes())?;
-    Ok(())
+    let mut chain_pem = der_to_pem(leaf_der, "CERTIFICATE");
+    chain_pem.push_str(&der_to_pem(intermediate_der, "CERTIFICATE"));
+    write_pki_file(chain_path, chain_pem.as_bytes(), PKI_CERT_MODE)
 }
 
 /// Write a CA certificate to disk in PEM format.
 pub fn write_ca_cert_pem(ca_der: &[u8], ca_path: &Path) -> Result<(), PkiError> {
-    use std::io::Write;
     let pem = der_to_pem(ca_der, "CERTIFICATE");
-    let mut file = std::fs::File::create(ca_path)?;
-    file.write_all(pem.as_bytes())?;
-    Ok(())
+    write_pki_file(ca_path, pem.as_bytes(), PKI_CERT_MODE)
 }
 
 fn parse_certificates(
@@ -489,14 +593,14 @@ fn quarantine_existing_pki(
 ) -> Result<std::path::PathBuf, PkiError> {
     let stamp = pki_time.quarantine_stamp();
     let quarantine_dir = pki_dir.join(format!(".invalid-pki-{stamp}-{}", std::process::id()));
-    if quarantine_dir.exists() {
+    if path_exists_no_follow(&quarantine_dir) {
         return Err(PkiError::IoError(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("quarantine path already exists: {}", quarantine_dir.display()),
         )));
     }
     std::fs::create_dir(&quarantine_dir)?;
-    for path in paths.iter().copied().filter(|path| path.exists()) {
+    for path in paths.iter().copied().filter(|path| path_exists_no_follow(path)) {
         let file_name = path.file_name().ok_or_else(|| {
             PkiError::IoError(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -556,7 +660,7 @@ fn ensure_pki_at(
     ];
     // Existing material is reusable only after parsing, key matching, hostname,
     // expiry, and full chain validation against the local root CA.
-    if server_cert_path.exists() && server_key_path.exists() {
+    if path_exists_no_follow(&server_cert_path) && path_exists_no_follow(&server_key_path) {
         match validate_existing_pki_at(pki_dir, server_hostname, pki_time) {
             Ok(()) => {
                 log::info!(
@@ -573,7 +677,7 @@ fn ensure_pki_at(
         }
     }
 
-    if pki_paths.iter().any(|path| path.exists()) {
+    if pki_paths.iter().any(|path| path_exists_no_follow(path)) {
         let quarantine_dir = quarantine_existing_pki(pki_dir, &pki_paths, pki_time)?;
         log::warn!("PKI: Moved invalid or incomplete material to {}", quarantine_dir.display());
     }
@@ -614,6 +718,156 @@ mod tests {
         static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let sequence = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!("qf_pki-{name}-{}-{sequence}", std::process::id()))
+    }
+
+    /// A directory that exists for the duration of one test and is removed after.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = test_directory(name);
+            std::fs::create_dir_all(&path).expect("scratch directory");
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn pki_writes_replace_existing_material_and_leave_no_staging_file() {
+        let scratch = Scratch::new("write-replace");
+        let target = scratch.join("ca-root.crt");
+
+        write_ca_cert_pem(b"first", &target).expect("initial write");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("first read"),
+            der_to_pem(b"first", "CERTIFICATE")
+        );
+        write_ca_cert_pem(b"second", &target).expect("replacing write");
+
+        let replaced = std::fs::read_to_string(&target).expect("second read");
+        assert!(replaced.contains("BEGIN CERTIFICATE"), "content must be the new PEM");
+        assert_ne!(replaced, der_to_pem(b"first", "CERTIFICATE"), "content must be replaced");
+        assert_eq!(replaced, der_to_pem(b"second", "CERTIFICATE"));
+
+        let leftovers: Vec<_> = std::fs::read_dir(&scratch.0)
+            .expect("scratch listing")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging files must not survive: {leftovers:?}");
+    }
+
+    #[test]
+    fn pki_writers_reject_a_symlinked_target_without_touching_its_destination() {
+        #[cfg(unix)]
+        {
+            let scratch = Scratch::new("symlink-reject");
+            let victim = scratch.join("victim");
+            std::fs::write(&victim, b"untouched").expect("victim file");
+
+            for name in ["server.key", "server.crt", "ca-root.crt"] {
+                let link = scratch.join(name);
+                std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+
+                let mut key = b"key material".to_vec();
+                let key_error =
+                    write_key_pem(&mut key, &link).expect_err("key writer must reject a symlink");
+                let chain_error = write_cert_chain_pem(b"leaf", b"inter", &link)
+                    .expect_err("chain writer must reject a symlink");
+                let ca_error =
+                    write_ca_cert_pem(b"ca", &link).expect_err("CA writer must reject a symlink");
+
+                for error in [key_error, chain_error, ca_error] {
+                    match error {
+                        PkiError::UnsafePath(message) => assert!(
+                            message.contains("symlink"),
+                            "{name} rejection must name the defect, got {message}"
+                        ),
+                        other => panic!("{name} must be rejected as an unsafe path, got {other}"),
+                    }
+                }
+
+                assert_eq!(
+                    std::fs::read(&victim).expect("victim survives"),
+                    b"untouched",
+                    "{name} must not write through the link"
+                );
+                assert!(
+                    std::fs::symlink_metadata(&link)
+                        .expect("link survives")
+                        .file_type()
+                        .is_symlink(),
+                    "{name} must be left as it was found"
+                );
+                std::fs::remove_file(&link).expect("cleanup link");
+            }
+        }
+    }
+
+    #[test]
+    fn private_keys_are_created_unreadable_to_other_accounts() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let scratch = Scratch::new("key-mode");
+            let key_path = scratch.join("server.key");
+            let mut key = b"key material".to_vec();
+
+            write_key_pem(&mut key, &key_path).expect("key write");
+
+            let mode = std::fs::metadata(&key_path).expect("key metadata").permissions().mode();
+            assert_eq!(mode & 0o777, PKI_KEY_MODE, "private key mode must be 0600");
+            assert!(key.iter().all(|byte| *byte == 0), "the caller's DER must be zeroized");
+
+            // Replacement must not widen the mode either: the staging file carries it,
+            // so a pre-existing permissive file cannot survive the rename.
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o666))
+                .expect("widen mode");
+            let mut second = b"key material".to_vec();
+            write_key_pem(&mut second, &key_path).expect("replacing key write");
+            let mode = std::fs::metadata(&key_path).expect("key metadata").permissions().mode();
+            assert_eq!(mode & 0o777, PKI_KEY_MODE, "replacement must not inherit a wider mode");
+        }
+    }
+
+    #[test]
+    fn a_dangling_symlink_is_seen_as_present_and_is_still_rejected() {
+        #[cfg(unix)]
+        {
+            // `Path::exists()` resolves the link and reports absent here, which is how a
+            // planted link would otherwise slip past an existence check and then be
+            // written through.
+            let scratch = Scratch::new("dangling");
+            let link = scratch.join("server.crt");
+            std::os::unix::fs::symlink(scratch.join("nowhere"), &link).expect("dangling symlink");
+
+            assert!(!link.exists(), "the resolving check is the one that is wrong here");
+            assert!(path_exists_no_follow(&link), "the link occupies the name");
+            assert!(matches!(write_ca_cert_pem(b"ca", &link), Err(PkiError::UnsafePath(_))));
+            assert!(!scratch.join("nowhere").exists(), "the link target must not be created");
+        }
+    }
+
+    #[test]
+    fn a_missing_parent_directory_is_reported_and_nothing_is_created() {
+        let scratch = Scratch::new("missing-parent");
+        let target = scratch.join("absent").join("ca-root.crt");
+        let error = write_ca_cert_pem(b"ca", &target).expect_err("a missing parent must fail");
+        assert!(
+            matches!(error, PkiError::IoError(ref io) if io.kind() == std::io::ErrorKind::NotFound),
+            "expected a not-found parent, got {error}"
+        );
+        assert!(!scratch.join("absent").exists(), "no directory may be created implicitly");
     }
 
     #[test]
