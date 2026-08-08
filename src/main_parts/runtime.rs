@@ -655,6 +655,17 @@ fn apply_standalone_tun_server_config(
     tun_ip6: Option<&str>,
     tun_prefix6: Option<u8>,
 ) -> std::io::Result<()> {
+    // A netmask without an address has nothing to apply to. The IPv4 branch below only
+    // runs when an address is supplied, so accepting the flag here would silently drop
+    // it from the server configuration while the TUN construction still used it, which
+    // is the divergence this contract exists to prevent.
+    if tun_ip.is_none() && tun_netmask.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--tun-netmask requires --tun-ip",
+        ));
+    }
+
     if let Some(tun_ip) = tun_ip {
         let server_ip = tun_ip.parse::<Ipv4Addr>().map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid --tun-ip: {e}"))

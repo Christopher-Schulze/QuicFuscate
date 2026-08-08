@@ -489,6 +489,73 @@ w0 = 80
         assert_eq!(config.ipv6_pool_end, Some("fd42:53::fe".parse().unwrap()));
     }
 
+    #[test]
+    fn malformed_tun_addresses_are_rejected_and_name_their_flag() {
+        // These used to be reparsed at TUN construction with `parse().ok()`, which turned
+        // a typo into an absent field. One validated parse means a bad value can only
+        // stop startup, never quietly change the interface contract.
+        for (label, ip, netmask, ip6, prefix6) in [
+            ("--tun-ip", Some("10.0.1.256"), None, None, None),
+            ("--tun-netmask", Some("10.0.1.1"), Some("not-a-mask"), None, None),
+            ("--tun-ip6", None, None, Some("fd42::zz"), None),
+        ] {
+            let mut config = quicfuscate::implementations::server::ServerConfig::default();
+            let error = apply_standalone_tun_server_config(&mut config, ip, netmask, ip6, prefix6)
+                .expect_err("a malformed address must be rejected");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                error.to_string().contains(label),
+                "the failure must name {label}, got {error}"
+            );
+            let untouched = quicfuscate::implementations::server::ServerConfig::default();
+            assert_eq!(config.server_ip, untouched.server_ip, "{label} must change nothing");
+            assert_eq!(config.ipv6_server_ip, untouched.ipv6_server_ip);
+        }
+    }
+
+    #[test]
+    fn a_netmask_without_an_address_is_rejected_rather_than_half_applied() {
+        // The IPv4 branch only runs when an address is supplied, so a lone netmask never
+        // reached the server configuration while the old TUN construction still parsed
+        // and used it. The two would then describe different interfaces.
+        let mut config = quicfuscate::implementations::server::ServerConfig::default();
+        let error =
+            apply_standalone_tun_server_config(&mut config, None, Some("255.255.255.0"), None, None)
+                .expect_err("a lone netmask must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("--tun-netmask requires --tun-ip"));
+        assert_eq!(
+            config.server_netmask,
+            quicfuscate::implementations::server::ServerConfig::default().server_netmask
+        );
+    }
+
+    #[test]
+    fn valid_dual_stack_and_omitted_values_keep_their_current_meaning() {
+        let mut config = quicfuscate::implementations::server::ServerConfig::default();
+        apply_standalone_tun_server_config(
+            &mut config,
+            Some("10.9.0.1"),
+            Some("255.255.255.0"),
+            Some("fd42:99::1"),
+            Some(64),
+        )
+        .expect("a valid dual-stack set applies");
+        assert_eq!(config.server_ip, Ipv4Addr::new(10, 9, 0, 1));
+        assert_eq!(config.server_netmask, Ipv4Addr::new(255, 255, 255, 0));
+        assert_eq!(config.ipv6_server_ip, Some("fd42:99::1".parse().unwrap()));
+        assert_eq!(config.ipv6_prefix_len, 64);
+
+        // Omitting everything must leave the defaults exactly as they were.
+        let mut untouched = quicfuscate::implementations::server::ServerConfig::default();
+        let defaults = quicfuscate::implementations::server::ServerConfig::default();
+        apply_standalone_tun_server_config(&mut untouched, None, None, None, None)
+            .expect("omitted values are the default path");
+        assert_eq!(untouched.server_ip, defaults.server_ip);
+        assert_eq!(untouched.server_netmask, defaults.server_netmask);
+        assert_eq!(untouched.ipv6_server_ip, defaults.ipv6_server_ip);
+    }
+
     fn write_temp_config(contents: &str) -> std::path::PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -1006,8 +1073,13 @@ async fn run_server(
     let standalone_tun_config = if tun_enable {
         Some(quicfuscate::interface::TunConfig {
             name: tun_name,
-            ip: tun_ip.and_then(|s| s.parse().ok()),
-            netmask: tun_netmask.and_then(|s| s.parse().ok()),
+            // Consume the values `apply_standalone_tun_server_config` already parsed and
+            // validated instead of parsing the strings a second time. Reparsing here with
+            // `parse().ok()` turned any error into an absent field, and duplicating the
+            // boundary let the two paths drift apart. Presence still follows the flag, so
+            // an unsupplied address keeps the platform default.
+            ip: tun_ip.map(|_| std::net::IpAddr::V4(server_config.server_ip)),
+            netmask: tun_netmask.map(|_| std::net::IpAddr::V4(server_config.server_netmask)),
             mtu: tun_mtu.unwrap_or(1500),
             ip6: server_config.ipv6_server_ip,
             prefix6: server_config.ipv6_server_ip.map(|_| server_config.ipv6_prefix_len),
