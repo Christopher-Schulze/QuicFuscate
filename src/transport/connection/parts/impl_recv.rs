@@ -1,4 +1,29 @@
 impl Connection {
+    /// Validates the complete decrypted frame payload before receive-side state is mutated.
+    #[inline(always)]
+    fn preflight_frame_payload(
+        payload: &[u8],
+        pkt_ty: PacketType,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if payload.is_empty() {
+            return Err(crate::error::ConnectionError::InvalidFrame);
+        }
+
+        let mut off = 0usize;
+        while off < payload.len() {
+            prefetch_frame_parse_window(payload, off);
+            let (_, used) = frames::from_bytes(&payload[off..], pkt_ty)?;
+            if used == 0 {
+                return Err(crate::error::ConnectionError::InvalidFrame);
+            }
+            off = off.checked_add(used).ok_or(crate::error::ConnectionError::InvalidFrame)?;
+        }
+        if off != payload.len() {
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+        Ok(())
+    }
+
     /// Bytes of `[start, end)` this stream has not already received.
     ///
     /// The already-received set is the contiguous delivered prefix `[0, recv_next)` plus every
@@ -212,6 +237,67 @@ impl Connection {
             }
         };
         let pkt_ty = hdr_native.ty;
+        let space_idx = match pkt_ty {
+            PacketType::Initial => 0,
+            PacketType::Handshake => 1,
+            _ => 2,
+        };
+        let end = aad_len.saturating_add(pt_len).min(buf.len());
+        if aad_len > end {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        if aad_len == end {
+            return Err(ConnectionError::InvalidFrame);
+        }
+
+        // Preflight every frame before changing packet-number, connection, or stream state.
+        // A malformed, truncated, or packet-space-invalid frame must not turn into a successful
+        // receive merely because an earlier frame in the same payload was valid.
+        Self::preflight_frame_payload(&buf[aad_len..end], pkt_ty)?;
+
+        // Duplicate PN detection: if already observed, count and return after the frame contract
+        // has been validated so malformed input cannot take the successful receive path.
+        if hdr_native.pkt_num_len > 0 && self.pkt_spaces[space_idx].contains(hdr_native.pkt_num) {
+            let len = aad_len.saturating_add(pt_len).min(buf.len());
+            self.stats.recv += 1;
+            self.stats.recv_bytes += len as u64;
+            return Ok(len);
+        }
+
+        if hdr_native.pkt_num_len > 0 && !self.pkt_spaces[space_idx].on_packet_recv(hdr_native.pkt_num)
+        {
+            // Duplicate or overflow PN - silently discard per RFC 9000 Section 12.3
+            self.stats.recv += 1;
+            self.stats.recv_bytes += end as u64;
+            return Ok(end);
+        }
+
+        // 0-RTT anti-replay gate (RFC 8446 Section 8, RFC 9001 Section 9.2).
+        // After AEAD decryption, frame preflight, and PN dedup.
+        // Silently discard replayed 0-RTT packets - matches duplicate-PN pattern.
+        if pkt_ty == PacketType::ZeroRTT {
+            if let Some(ref strike_register) = self.strike_register {
+                let end_replay = aad_len.saturating_add(pt_len).min(buf.len());
+                let payload = &buf[aad_len..end_replay];
+                let fingerprint = super::anti_replay::StrikeRegister::compute_fingerprint(
+                    &hdr_native.dcid,
+                    &hdr_native.scid,
+                    payload,
+                );
+                if !strike_register.check_and_insert(&fingerprint, self.clock.now()) {
+                    crate::telemetry!(
+                        crate::optimize::telemetry::ZERO_RTT_REPLAY_REJECT_TOTAL.inc()
+                    );
+                    log::warn!("0-RTT replay detected and rejected");
+                    let len = end_replay;
+                    self.stats.recv += 1;
+                    self.stats.recv_bytes += len as u64;
+                    return Ok(len);
+                }
+                crate::telemetry!(crate::optimize::telemetry::ZERO_RTT_ACCEPT_TOTAL.inc());
+            }
+        }
+
         self.received_non_vn_packet = true;
 
         // Receiving a valid 1-RTT (Short) packet confirms the peer has the
@@ -247,61 +333,13 @@ impl Connection {
                 }
             }
         }
-        // Observer hook: notify after header processed and payload length known
+        // Observer hook: notify after header processed and payload length known.
         if let Some(obs) = &self.observer {
             obs.on_packet_recv(hdr_native.pkt_num, pt_len);
-        }
-        let space_idx = match pkt_ty {
-            PacketType::Initial => 0,
-            PacketType::Handshake => 1,
-            _ => 2,
-        };
-        // Duplicate PN detection: if already observed, count and return.
-        if hdr_native.pkt_num_len > 0 {
-            if self.pkt_spaces[space_idx].contains(hdr_native.pkt_num) {
-                let len = aad_len.saturating_add(pt_len).min(buf.len());
-                self.stats.recv += 1;
-                self.stats.recv_bytes += len as u64;
-                return Ok(len);
-            }
-            if !self.pkt_spaces[space_idx].on_packet_recv(hdr_native.pkt_num) {
-                // Duplicate or overflow PN - silently discard per RFC 9000 Section 12.3
-                let len = aad_len.saturating_add(pt_len).min(buf.len());
-                self.stats.recv += 1;
-                self.stats.recv_bytes += len as u64;
-                return Ok(len);
-            }
-        }
-
-        // 0-RTT anti-replay gate (RFC 8446 Section 8, RFC 9001 Section 9.2).
-        // After AEAD decryption and PN dedup, but before frame parsing.
-        // Silently discard replayed 0-RTT packets - matches duplicate-PN pattern.
-        if pkt_ty == PacketType::ZeroRTT {
-            if let Some(ref strike_register) = self.strike_register {
-                let end_replay = aad_len.saturating_add(pt_len).min(buf.len());
-                let payload = &buf[aad_len..end_replay];
-                let fingerprint = super::anti_replay::StrikeRegister::compute_fingerprint(
-                    &hdr_native.dcid,
-                    &hdr_native.scid,
-                    payload,
-                );
-                if !strike_register.check_and_insert(&fingerprint, self.clock.now()) {
-                    crate::telemetry!(
-                        crate::optimize::telemetry::ZERO_RTT_REPLAY_REJECT_TOTAL.inc()
-                    );
-                    log::warn!("0-RTT replay detected and rejected");
-                    let len = end_replay;
-                    self.stats.recv += 1;
-                    self.stats.recv_bytes += len as u64;
-                    return Ok(len);
-                }
-                crate::telemetry!(crate::optimize::telemetry::ZERO_RTT_ACCEPT_TOTAL.inc());
-            }
         }
 
         // Parse frames from decrypted payload region
         let mut off = aad_len;
-        let end = aad_len.saturating_add(pt_len).min(buf.len());
         self.observe_incoming_path(info.to, info.from, end);
         let mut ack_eliciting = false;
         while off < end {
@@ -310,14 +348,9 @@ impl Connection {
             match frames::from_bytes(&buf[off..end], pkt_ty) {
                 Ok((frame, used)) => {
                     if used == 0 {
-                        break;
+                        return Err(ConnectionError::InvalidFrame);
                     }
-                    off += used;
-                    // Minimal: handle accounting for Stream/Crypto sizes
-                    // 0-RTT must not carry CRYPTO frames.
-                    if pkt_ty == PacketType::ZeroRTT && matches!(frame, Frame::Crypto { .. }) {
-                        continue;
-                    }
+                    off = off.checked_add(used).ok_or(ConnectionError::InvalidFrame)?;
                     match frame {
                         Frame::Stream { stream_id, offset, data, fin } => {
                             ack_eliciting = true;
@@ -612,9 +645,7 @@ impl Connection {
                         _ => {}
                     }
                 }
-                Err(_) => {
-                    break;
-                }
+                Err(error) => return Err(error),
             }
         }
         if ack_eliciting {
@@ -1079,7 +1110,10 @@ impl Connection {
         let payload_len = self.dgram_send_queue.front()?.len();
         #[cfg(feature = "zero_copy_dgram")]
         let payload_len = self.dgram_send_queue.front()?.len;
-        Some(1 + 2 + payload_len)
+        let payload_len_u64 = u64::try_from(payload_len).ok()?;
+        1usize
+            .checked_add(crate::transport::varint::varint_len(payload_len_u64))?
+            .checked_add(payload_len)
     }
 
     /// Stages one DATAGRAM frame without transferring queue ownership.

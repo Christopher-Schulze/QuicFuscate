@@ -1,11 +1,10 @@
 use crate::error::ConnectionError;
-use crate::transport::varint::{read_varint, varint_len, write_varint, write_varint_with_len};
+use crate::transport::varint::{read_varint, varint_len, write_varint};
 use std::borrow::Cow;
 use std::sync::Arc;
 
 const MAX_FRAME_DATA_LEN: usize = 64 * 1024;
 const MAX_ACK_BLOCKS: usize = MAX_FRAME_DATA_LEN / 2;
-const MAX_TWO_BYTE_VARINT: usize = 0x3fff;
 
 #[inline]
 fn checked_len_add(total: usize, value: usize) -> Result<usize, ConnectionError> {
@@ -23,8 +22,8 @@ fn checked_u64_len(len: usize) -> Result<u64, ConnectionError> {
 }
 
 #[inline]
-fn checked_two_byte_len(len: usize) -> Result<u64, ConnectionError> {
-    if len > MAX_TWO_BYTE_VARINT {
+fn checked_frame_data_len(len: usize) -> Result<u64, ConnectionError> {
+    if len > MAX_FRAME_DATA_LEN {
         return Err(ConnectionError::InvalidFrame);
     }
     checked_u64_len(len)
@@ -56,8 +55,17 @@ fn check_frame_len(len: usize, remaining: usize) -> Result<(), ConnectionError> 
 
 #[inline(always)]
 pub fn stream_frame_wire_len(stream_id: u64, offset: u64, data_len: usize) -> usize {
-    checked_len_sum(&[1, varint_len(stream_id), varint_len(offset), 2, data_len])
-        .unwrap_or(usize::MAX)
+    let Ok(data_len_varint) = checked_frame_data_len(data_len) else {
+        return usize::MAX;
+    };
+    checked_len_sum(&[
+        1,
+        varint_len(stream_id),
+        varint_len(offset),
+        varint_len(data_len_varint),
+        data_len,
+    ])
+    .unwrap_or(usize::MAX)
 }
 
 #[inline(always)]
@@ -68,7 +76,7 @@ pub fn write_stream_frame(
     fin: bool,
     out: &mut [u8],
 ) -> Result<usize, ConnectionError> {
-    checked_two_byte_len(data.len())?;
+    let data_len = checked_frame_data_len(data.len())?;
     let need = stream_frame_wire_len(stream_id, offset, data.len());
     if need == usize::MAX || out.len() < need {
         return Err(ConnectionError::BufferTooShort);
@@ -79,7 +87,7 @@ pub fn write_stream_frame(
     write_varint_at(ty, out, &mut off)?;
     write_varint_at(stream_id, out, &mut off)?;
     write_varint_at(offset, out, &mut off)?;
-    write_varint_with_len_at(checked_two_byte_len(data.len())?, 2, out, &mut off)?;
+    write_varint_at(data_len, out, &mut off)?;
     write_bytes_at(data, out, &mut off)?;
     Ok(off)
 }
@@ -109,16 +117,22 @@ pub fn wire_len(frame: &crate::transport::Frame<'_>) -> Result<usize, Connection
             checked_len_sum(&[1, varint_len(*stream_id), varint_len(*error_code)])
         }
         F::Crypto { offset, data } => {
-            checked_two_byte_len(data.len())?;
-            checked_len_sum(&[1, varint_len(*offset), 2, data.len()])
+            let data_len = checked_frame_data_len(data.len())?;
+            checked_len_sum(&[1, varint_len(*offset), varint_len(data_len), data.len()])
         }
         F::NewToken { token } => {
-            let token_len = checked_u64_len(token.len())?;
+            let token_len = checked_frame_data_len(token.len())?;
             checked_len_sum(&[1, varint_len(token_len), token.len()])
         }
         F::Stream { stream_id, offset, data, .. } => {
-            checked_two_byte_len(data.len())?;
-            checked_len_sum(&[1, varint_len(*stream_id), varint_len(*offset), 2, data.len()])
+            let data_len = checked_frame_data_len(data.len())?;
+            checked_len_sum(&[
+                1,
+                varint_len(*stream_id),
+                varint_len(*offset),
+                varint_len(data_len),
+                data.len(),
+            ])
         }
         F::MaxData { max } => checked_len_sum(&[1, varint_len(*max)]),
         F::MaxStreamData { stream_id, max } => {
@@ -147,7 +161,7 @@ pub fn wire_len(frame: &crate::transport::Frame<'_>) -> Result<usize, Connection
         F::PathChallenge { .. } => Ok(1 + 8),
         F::PathResponse { .. } => Ok(1 + 8),
         F::ConnectionClose { error_code, frame_type, reason } => {
-            let reason_len = checked_u64_len(reason.len())?;
+            let reason_len = checked_frame_data_len(reason.len())?;
             checked_len_sum(&[
                 1,
                 varint_len(*error_code),
@@ -157,15 +171,15 @@ pub fn wire_len(frame: &crate::transport::Frame<'_>) -> Result<usize, Connection
             ])
         }
         F::ApplicationClose { error_code, reason } => {
-            let reason_len = checked_u64_len(reason.len())?;
+            let reason_len = checked_frame_data_len(reason.len())?;
             checked_len_sum(&[1, varint_len(*error_code), varint_len(reason_len), reason.len()])
         }
         F::Datagram { data } => {
-            let data_len = checked_u64_len(data.len())?;
+            let data_len = checked_frame_data_len(data.len())?;
             checked_len_sum(&[1, varint_len(data_len), data.len()])
         }
         F::DatagramHeader { length } => {
-            let length = checked_u64_len(*length)?;
+            let length = checked_frame_data_len(*length)?;
             checked_len_sum(&[1, varint_len(length)])
         }
     }
@@ -175,19 +189,6 @@ pub fn wire_len(frame: &crate::transport::Frame<'_>) -> Result<usize, Connection
 fn write_varint_at(value: u64, out: &mut [u8], off: &mut usize) -> Result<(), ConnectionError> {
     let tail = out.get_mut(*off..).ok_or(ConnectionError::BufferTooShort)?;
     let written = write_varint(value, tail)?;
-    *off = off.checked_add(written).ok_or(ConnectionError::InvalidFrame)?;
-    Ok(())
-}
-
-#[inline]
-fn write_varint_with_len_at(
-    value: u64,
-    len: usize,
-    out: &mut [u8],
-    off: &mut usize,
-) -> Result<(), ConnectionError> {
-    let tail = out.get_mut(*off..).ok_or(ConnectionError::BufferTooShort)?;
-    let written = write_varint_with_len(value, len, tail)?;
     *off = off.checked_add(written).ok_or(ConnectionError::InvalidFrame)?;
     Ok(())
 }
@@ -260,12 +261,12 @@ pub fn to_bytes(
         F::Crypto { offset, data } => {
             write_varint_at(0x06, out, &mut off)?;
             write_varint_at(*offset, out, &mut off)?;
-            write_varint_with_len_at(checked_two_byte_len(data.len())?, 2, out, &mut off)?;
+            write_varint_at(checked_frame_data_len(data.len())?, out, &mut off)?;
             write_bytes_at(data, out, &mut off)?;
         }
         F::NewToken { token } => {
             write_varint_at(0x07, out, &mut off)?;
-            write_varint_at(checked_u64_len(token.len())?, out, &mut off)?;
+            write_varint_at(checked_frame_data_len(token.len())?, out, &mut off)?;
             write_bytes_at(token, out, &mut off)?;
         }
         F::Stream { stream_id, offset, data, fin } => {
@@ -332,23 +333,23 @@ pub fn to_bytes(
             write_varint_at(0x1c, out, &mut off)?;
             write_varint_at(*error_code, out, &mut off)?;
             write_varint_at(*frame_type, out, &mut off)?;
-            write_varint_at(checked_u64_len(reason.len())?, out, &mut off)?;
+            write_varint_at(checked_frame_data_len(reason.len())?, out, &mut off)?;
             write_bytes_at(reason, out, &mut off)?;
         }
         F::ApplicationClose { error_code, reason } => {
             write_varint_at(0x1d, out, &mut off)?;
             write_varint_at(*error_code, out, &mut off)?;
-            write_varint_at(checked_u64_len(reason.len())?, out, &mut off)?;
+            write_varint_at(checked_frame_data_len(reason.len())?, out, &mut off)?;
             write_bytes_at(reason, out, &mut off)?;
         }
         F::Datagram { data } => {
             write_varint_at(0x31, out, &mut off)?;
-            write_varint_at(checked_u64_len(data.len())?, out, &mut off)?;
+            write_varint_at(checked_frame_data_len(data.len())?, out, &mut off)?;
             write_bytes_at(data, out, &mut off)?;
         }
         F::DatagramHeader { length } => {
             write_varint_at(0x31, out, &mut off)?;
-            write_varint_at(checked_u64_len(*length)?, out, &mut off)?;
+            write_varint_at(checked_frame_data_len(*length)?, out, &mut off)?;
         }
     }
     Ok(off)
@@ -614,6 +615,26 @@ fn checked_varint_usize(value: u64) -> Result<usize, ConnectionError> {
     usize::try_from(value).map_err(|_| ConnectionError::InvalidFrame)
 }
 
+#[inline]
+fn stream_frame_type(ty: u64) -> bool {
+    (0x08..=0x0f).contains(&ty)
+}
+
+#[inline]
+fn frame_type_allowed(ty: u64, pkt: crate::transport::PacketType) -> bool {
+    use crate::transport::PacketType as PT;
+
+    match pkt {
+        PT::Initial | PT::Handshake => matches!(ty, 0x00 | 0x01 | 0x02 | 0x03 | 0x06 | 0x1c),
+        PT::ZeroRTT => {
+            stream_frame_type(ty)
+                || matches!(ty, 0x00 | 0x01 | 0x04 | 0x05 | 0x10..=0x17 | 0x1c | 0x1d | 0x30 | 0x31)
+        }
+        PT::Short => matches!(ty, 0x00..=0x05 | 0x07..=0x1d | 0x30 | 0x31),
+        PT::Retry | PT::VersionNegotiation => false,
+    }
+}
+
 #[inline(always)]
 pub fn from_bytes<'a>(
     input: &'a [u8],
@@ -622,6 +643,9 @@ pub fn from_bytes<'a>(
     use crate::transport::{Frame as F, PacketType as PT};
     let mut c = Cursor::new(input);
     let ty = c.get_varint()?;
+    if !frame_type_allowed(ty, pkt) {
+        return Err(ConnectionError::InvalidFrame);
+    }
     let frame = match ty {
         0x00 => {
             let mut len = 1usize;
@@ -702,14 +726,15 @@ pub fn from_bytes<'a>(
             let token = Cow::Borrowed(c.get_bytes(len)?);
             F::NewToken { token }
         }
-        ty if (ty & 0xf8) == 0x08 => {
+        ty if stream_frame_type(ty) => {
             // SIMD-optimierter Header-Parse auf ARM (SVE2/NEON), sonst Scalar
             #[cfg(target_arch = "aarch64")]
             let parsed = {
-                if crate::simd::FeatureDetector::instance()
-                    .has_feature(crate::simd::CpuFeature::SVE2)
-                    || crate::simd::FeatureDetector::instance()
-                        .has_feature(crate::simd::CpuFeature::NEON)
+                if ty & 0x02 != 0
+                    && (crate::simd::FeatureDetector::instance()
+                        .has_feature(crate::simd::CpuFeature::SVE2)
+                        || crate::simd::FeatureDetector::instance()
+                            .has_feature(crate::simd::CpuFeature::NEON))
                 {
                     if let Some((sid, offv, dlen, fin, used)) =
                         crate::simd::arm_stream::parse_stream_header(c.tail()?, ty)
@@ -752,7 +777,9 @@ pub fn from_bytes<'a>(
                     check_frame_len(len, c.remaining())?;
                     Cow::Borrowed(c.get_bytes(len)?)
                 } else {
-                    Cow::Borrowed(&[] as &[u8])
+                    let len = c.remaining();
+                    check_frame_len(len, len)?;
+                    Cow::Borrowed(c.get_bytes(len)?)
                 };
                 let fin = (ty & 0x01) != 0;
                 F::Stream { stream_id, offset, data, fin }
@@ -830,8 +857,9 @@ pub fn from_bytes<'a>(
             let reason = Cow::Borrowed(c.get_bytes(len)?);
             F::ApplicationClose { error_code, reason }
         }
-        0x31 => {
-            let len = checked_varint_usize(c.get_varint()?)?;
+        0x30 | 0x31 => {
+            let len =
+                if ty == 0x30 { c.remaining() } else { checked_varint_usize(c.get_varint()?)? };
             check_frame_len(len, c.remaining())?;
             let data = Cow::Borrowed(c.get_bytes(len)?);
             F::Datagram { data }
@@ -1070,6 +1098,135 @@ mod tests {
             reset_token: [0u8; 16],
         };
         let mut out = [0xA5u8; 64];
+        assert!(matches!(wire_len(&frame), Err(ConnectionError::InvalidFrame)));
+        assert!(matches!(to_bytes(&frame, &mut out), Err(ConnectionError::InvalidFrame)));
+        assert!(out.iter().all(|byte| *byte == 0xA5));
+    }
+
+    #[test]
+    fn datagram_length_and_no_length_forms_decode_at_packet_boundary() {
+        let no_length = [0x30, 0xA1, 0xB2, 0xC3];
+        let (decoded, consumed) =
+            from_bytes(&no_length, PacketType::Short).expect("no-length DATAGRAM must decode");
+        assert_eq!(consumed, no_length.len());
+        assert!(
+            matches!(decoded, Frame::Datagram { data } if data.as_ref() == &[0xA1, 0xB2, 0xC3])
+        );
+
+        let length_delimited = [0x31, 0x02, 0xA1, 0xB2, 0x01];
+        let (decoded, consumed) = from_bytes(&length_delimited, PacketType::Short)
+            .expect("length-delimited DATAGRAM must decode");
+        assert_eq!(consumed, 4);
+        assert!(matches!(decoded, Frame::Datagram { data } if data.as_ref() == &[0xA1, 0xB2]));
+    }
+
+    #[test]
+    fn stream_without_length_consumes_remaining_packet_payload() {
+        let input = [0x08, 0x00, 0x10, 0x20, 0x30];
+        let (decoded, consumed) =
+            from_bytes(&input, PacketType::Short).expect("no-length STREAM must decode");
+        assert_eq!(consumed, input.len());
+        assert!(matches!(
+            decoded,
+            Frame::Stream { stream_id: 0, offset: 0, fin: false, data }
+                if data.as_ref() == &[0x10, 0x20, 0x30]
+        ));
+    }
+
+    #[test]
+    fn frame_packet_space_matrix_rejects_illegal_frames() {
+        let crypto = [0x06, 0x00, 0x00];
+        assert!(from_bytes(&crypto, PacketType::Initial).is_ok());
+        assert!(from_bytes(&crypto, PacketType::Handshake).is_ok());
+        assert!(matches!(
+            from_bytes(&crypto, PacketType::ZeroRTT),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&crypto, PacketType::Short),
+            Err(ConnectionError::InvalidFrame)
+        ));
+
+        let stream = [0x0A, 0x00, 0x00];
+        assert!(from_bytes(&stream, PacketType::ZeroRTT).is_ok());
+        assert!(from_bytes(&stream, PacketType::Short).is_ok());
+        assert!(matches!(
+            from_bytes(&stream, PacketType::Initial),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&stream, PacketType::Handshake),
+            Err(ConnectionError::InvalidFrame)
+        ));
+
+        assert!(matches!(
+            from_bytes(&[0x30], PacketType::Initial),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        let application_close = [0x1D, 0x00, 0x00];
+        assert!(from_bytes(&application_close, PacketType::ZeroRTT).is_ok());
+        assert!(matches!(
+            from_bytes(&application_close, PacketType::Initial),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&[0x1E], PacketType::Short),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&[0x80, 0x00, 0x40, 0x08], PacketType::Short),
+            Err(ConnectionError::InvalidFrame)
+        ));
+    }
+
+    #[test]
+    fn large_frame_payload_uses_four_byte_length_varint() {
+        let payload = vec![0x5A; 16_384];
+        let frame = Frame::Stream {
+            stream_id: 0,
+            offset: 0,
+            data: Cow::Borrowed(payload.as_slice()),
+            fin: false,
+        };
+        let expected = 1 + 1 + 1 + 4 + payload.len();
+        assert_eq!(wire_len(&frame).expect("boundary STREAM length"), expected);
+
+        let mut encoded = vec![0u8; expected];
+        let written = to_bytes(&frame, &mut encoded).expect("boundary STREAM encode");
+        assert_eq!(written, expected);
+        assert_eq!(&encoded[..6], &[0x0E, 0x00, 0x00, 0x80, 0x00, 0x40]);
+
+        let (decoded, consumed) =
+            from_bytes(&encoded, PacketType::Short).expect("boundary STREAM decode");
+        assert_eq!(consumed, encoded.len());
+        assert!(
+            matches!(decoded, Frame::Stream { data, .. } if data.as_ref() == payload.as_slice())
+        );
+
+        let crypto = Frame::Crypto { offset: 0, data: Cow::Borrowed(payload.as_slice()) };
+        let crypto_expected = 1 + 1 + 4 + payload.len();
+        assert_eq!(wire_len(&crypto).expect("boundary CRYPTO length"), crypto_expected);
+        let mut crypto_encoded = vec![0u8; crypto_expected];
+        assert_eq!(
+            to_bytes(&crypto, &mut crypto_encoded).expect("boundary CRYPTO encode"),
+            crypto_expected
+        );
+
+        let max_payload = vec![0xA6; MAX_FRAME_DATA_LEN];
+        let max_frame = Frame::Datagram { data: Cow::Borrowed(max_payload.as_slice()) };
+        let max_expected = 1 + 4 + MAX_FRAME_DATA_LEN;
+        assert_eq!(wire_len(&max_frame).expect("maximum DATAGRAM length"), max_expected);
+        let mut max_encoded = vec![0u8; max_expected];
+        assert_eq!(
+            to_bytes(&max_frame, &mut max_encoded).expect("maximum DATAGRAM encode"),
+            max_expected
+        );
+    }
+
+    #[test]
+    fn frame_payload_limit_fails_before_serialization() {
+        let frame = Frame::Datagram { data: Cow::Borrowed(&[0u8; 65_537]) };
+        let mut out = [0xA5u8; 16];
         assert!(matches!(wire_len(&frame), Err(ConnectionError::InvalidFrame)));
         assert!(matches!(to_bytes(&frame, &mut out), Err(ConnectionError::InvalidFrame)));
         assert!(out.iter().all(|byte| *byte == 0xA5));

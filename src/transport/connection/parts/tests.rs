@@ -2315,6 +2315,26 @@ mod tests {
         assert_eq!(s.lost, 0);
     }
 
+    #[test]
+    fn receive_frame_preflight_rejects_empty_and_malformed_suffixes() {
+        assert!(matches!(
+            Connection::preflight_frame_payload(&[], PacketType::Short),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            Connection::preflight_frame_payload(&[0x01, 0x1E], PacketType::Short),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            Connection::preflight_frame_payload(&[0x0E, 0x40], PacketType::Short),
+            Err(ConnectionError::BufferTooShort)
+        ));
+        assert_eq!(
+            Connection::preflight_frame_payload(&[0x01, 0x00], PacketType::Short),
+            Ok(())
+        );
+    }
+
     // ---- Stream Priority -------------------------------------------------
 
     #[test]
@@ -2342,17 +2362,17 @@ mod tests {
 
     #[cfg(not(feature = "zero_copy_dgram"))]
     #[test]
-    fn owned_datagram_serialization_error_preserves_queue() {
+    fn owned_datagram_insufficient_output_preserves_queue() {
         let mut c = make_conn();
         c.enable_datagrams(16, 16);
         let payload_len = 16_384;
         c.dgram_send_queue.push_back(vec![0xAB; payload_len]);
         let mut output = vec![0u8; 1 + 2 + payload_len];
 
-        assert!(matches!(
-            c.maybe_stage_one_datagram_frame(&mut output, 0),
-            Err(ConnectionError::BufferTooShort)
-        ));
+        assert_eq!(
+            c.maybe_stage_one_datagram_frame(&mut output, 0).expect("insufficient output is a no-op"),
+            (0, false)
+        );
         assert_eq!(c.dgram_send_queue_len(), 1);
         assert_eq!(c.dgram_send_queue_byte_size(), payload_len);
         assert!(c
@@ -2484,7 +2504,7 @@ mod tests {
 
     #[cfg(feature = "zero_copy_dgram")]
     #[test]
-    fn zero_copy_dgram_serialization_error_restores_pool_owned_buffer() {
+    fn zero_copy_dgram_insufficient_output_preserves_pool_owned_buffer() {
         let mut c = make_conn();
         c.enable_datagrams(16, 16);
         let pool = Arc::new(crate::optimize::MemoryPool::new(2, 16_384));
@@ -2498,7 +2518,10 @@ mod tests {
         assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
 
         let mut output = vec![0u8; 1 + 2 + payload_len];
-        assert!(c.maybe_stage_one_datagram_frame(&mut output, 0).is_err());
+        assert_eq!(
+            c.maybe_stage_one_datagram_frame(&mut output, 0).expect("insufficient output is a no-op"),
+            (0, false)
+        );
         assert_eq!(c.dgram_send_queue_len(), 1);
         assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
 
@@ -2523,6 +2546,29 @@ mod tests {
 
         assert_eq!(pair.client.dgram_send_queue_len(), 0);
         assert_eq!(pair.server.dgram_recv_vec().expect("datagram receive"), vec![0xD1; 1100]);
+    }
+
+    #[test]
+    fn datagram_frame_reservation_matches_four_byte_length_varint() {
+        let mut c = make_conn();
+        c.enable_datagrams(16, 16);
+        c.dgram_send_max_size = 65_536;
+        #[cfg(feature = "zero_copy_dgram")]
+        {
+            c.dgram_pool = Arc::new(crate::optimize::MemoryPool::new(2, 16_384));
+        }
+        let payload = vec![0xD4; 16_384];
+        c.dgram_send(&payload).expect("boundary DATAGRAM enqueue");
+
+        let reserve = c.pending_datagram_frame_reserve().expect("queued DATAGRAM reserve");
+        assert_eq!(reserve, 1 + 4 + payload.len());
+        let mut output = vec![0u8; reserve];
+        let (written, ack_eliciting) =
+            c.maybe_stage_one_datagram_frame(&mut output, 0).expect("boundary DATAGRAM encode");
+        assert_eq!(written, reserve);
+        assert!(ack_eliciting);
+        c.commit_staged_datagram_frame().expect("boundary DATAGRAM commit");
+        assert_eq!(c.dgram_send_queue_len(), 0);
     }
 
     // ---- Recovery / FEC Escalation ---------------------------------------
