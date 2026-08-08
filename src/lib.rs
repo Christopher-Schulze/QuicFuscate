@@ -119,7 +119,9 @@ pub mod implementations;
 pub mod optimize;
 
 /// Privilege management - post-bind privilege dropping (TODO-441).
-pub mod privilege;
+pub mod privilege {
+    pub use qf_privilege::*;
+}
 
 /// Security audit logging - hash-chained, SIEM-compatible (TODO-439).
 pub mod audit;

@@ -2074,6 +2074,13 @@ The audit remains open. These reconciliations document current evidence and owne
 - The latest seam report contains five workspace packages, 240 Rust files, 203,476 source lines, and the same 16-module product SCC. The complete root-to-leaf edge set is `quicfuscate -> qf-common`, `qf-control-plane`, `qf-error`, and `qf-instrumentation`.
 - Workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the full all-target `rust-tests` suite pass with 28 `qf-common`, 8 `qf-control-plane`, 2 `qf-error`, 5 `qf-instrumentation`, and 2,650 root library tests plus green integration targets. Frontend field projection remains deferred.
 
+## Privilege Workspace Crate (2026-08-08, TODO-562)
+
+- `crates/qf-privilege/` owns privilege inspection, account resolution, capability validation, irreversible post-bind dropping, per-thread verification, and the Linux root-regain proof. The root `quicfuscate::privilege` path remains a direct compatibility re-export.
+- The extracted crate has only its libc/serde platform dependencies and keeps all 23 existing unit tests. Cargo enforces `quicfuscate -> qf-privilege` with no reverse edge; frontend and Tauri paths remain outside the boundary.
+- The latest seam report contains six workspace packages, 240 Rust files, 203,478 source lines, the same 16-module product SCC, and an empty protected frontend/Tauri change set. The root-to-leaf edge set is `qf-common`, `qf-control-plane`, `qf-error`, `qf-instrumentation`, and `qf-privilege`.
+- Workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the full all-target `rust-tests` suite pass with 28 `qf-common`, 8 `qf-control-plane`, 2 `qf-error`, 5 `qf-instrumentation`, 23 `qf-privilege`, and 2,627 root library tests plus green integration targets. Frontend field projection remains deferred.
+
 ## Omega Proof Ownership Preflight (2026-08-08, TODO-804)
 
 - `scripts/audits/verify-omega-proof-ownership.py` plus its shell entrypoint perform a read-only SSH preflight. They discover every candidate `QuicFuscate` checkout under the declared remote roots, inspect Git status/diffs/object connectivity, bind source/bundle/binary/runtime/evidence provenance, and refuse to overwrite a local JSON report.

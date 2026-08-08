@@ -1,0 +1,10 @@
+[package]
+name = "qf-privilege"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }

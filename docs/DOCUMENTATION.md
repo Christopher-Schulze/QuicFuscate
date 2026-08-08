@@ -5917,6 +5917,13 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The refreshed seam inventory reports five workspace packages, 240 Rust files, 203,476 source lines, the unchanged 16-module product SCC, and an empty protected frontend/Tauri change set. The four root-to-leaf edges are `qf-common`, `qf-control-plane`, `qf-error`, and `qf-instrumentation`.
 - Verification: workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass. The suite reports 28 `qf-common`, 8 `qf-control-plane`, 2 `qf-error`, 5 `qf-instrumentation`, and 2,650 root library tests plus green integration targets; no frontend projection was added.
 
+## Privilege Workspace Crate (2026-08-08, TODO-562)
+
+- `crates/qf-privilege/` now owns the platform privilege inspection, identity resolution, capability validation, post-bind drop, thread-state verification, and root-regain proof contract. The root `quicfuscate::privilege` module re-exports the public API without changing CLI or runtime call paths.
+- The child has no product dependency and carries the existing libc/serde boundary plus all 23 privilege unit tests. Cargo records the one-way edge `quicfuscate -> qf-privilege`; no reverse edge or frontend/Tauri path exists.
+- The latest seam inventory reports six workspace packages, 240 Rust files, 203,478 source lines, the unchanged 16-module product SCC, and an empty protected frontend/Tauri change set. The five root-to-leaf edges are `qf-common`, `qf-control-plane`, `qf-error`, `qf-instrumentation`, and `qf-privilege`.
+- Verification: workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass. The suite reports 28 `qf-common`, 8 `qf-control-plane`, 2 `qf-error`, 5 `qf-instrumentation`, 23 `qf-privilege`, and 2,627 root library tests plus green integration targets; no frontend projection was added.
+
 ## Omega Proof Ownership Preflight (2026-08-08, TODO-804)
 
 - `scripts/audits/verify-omega-proof-ownership.py` and `verify-omega-proof-ownership.sh` define the backend-only, read-only ownership gate for exact Omega proofs. The gate discovers candidate remote checkouts, verifies status/diff/object readability, records source/bundle/binary/runtime/evidence binding, and writes reports only through create-new semantics.
