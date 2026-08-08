@@ -28,6 +28,7 @@ import {
   type ByteCounterSample,
 } from "@quicfuscate/time";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { parseEngineStats, parseEngineStatus } from "$lib/ipc-contracts";
 
 /** Shape returned by the Tauri `load_state` command. */
 interface PersistedState {
@@ -38,22 +39,6 @@ interface PersistedState {
     general?: Partial<GeneralSettings>;
     hardware?: Partial<HardwareSettings>;
   } | null;
-}
-
-/** Shape returned by the Tauri `engine_stats` command. */
-interface RawEngineStats {
-  latencyMs?: number;
-  lossPercent?: number;
-  bytesIn?: number;
-  bytesOut?: number;
-  packetsIn?: number;
-  packetsOut?: number;
-  uptimeSecs?: number;
-  stealthMode?: string;
-  fecMode?: string;
-  fecActivityPercent?: number;
-  fecRecoveredPackets?: number;
-  currentSni?: string;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -198,9 +183,15 @@ export function startEnginePollers(): () => void {
     statusInFlight = true;
     try {
       if (!isCurrent()) return;
-      const status = await tauriInvoke<{ state: string; activeTunnelId?: string | null; lastError?: string | null }>("engine_status");
+      // `invoke<T>` is a cast, so the shape is checked here rather than trusted.
+      const rawStatus = await tauriInvoke<unknown>("engine_status");
       if (!isCurrent() || !isBrowserDocumentVisible()) return;
-      const activeTunnelId = status.activeTunnelId ?? null;
+      const status = parseEngineStatus(rawStatus);
+      if (!status) {
+        setError("Engine status could not be read: the native response was malformed.");
+        return;
+      }
+      const activeTunnelId = status.activeTunnelId;
       const signature = `${status.state}:${activeTunnelId ?? ""}:${status.lastError ?? ""}`;
       if (signature !== previousStatusSignature) {
         previousStatusSignature = signature;
@@ -232,33 +223,42 @@ export function startEnginePollers(): () => void {
     const activeTunnelIdAtStart = getActiveTunnelId();
     try {
       if (!isCurrent()) return;
-      const stats = await tauriInvoke<RawEngineStats | null>("engine_stats");
+      const rawStats = await tauriInvoke<unknown>("engine_stats");
       if (!isCurrent() || stateVersionAtStart !== statusStateVersion || activeTunnelIdAtStart !== getActiveTunnelId()) return;
       if (!isBrowserDocumentVisible()) {
         resetThroughput();
         return;
       }
-      if (!activeTunnelIdAtStart || !stats) {
+      if (!activeTunnelIdAtStart || rawStats === null || rawStats === undefined) {
         updateTunnelStats(() => ({}));
+        resetThroughput();
+        return;
+      }
+      // A malformed sample is dropped rather than partially trusted. `?? 0` only
+      // substitutes for null and undefined, so NaN, Infinity, and negative counters
+      // used to reach the store and then the throughput calculation below, producing
+      // a figure that looks measured and is not.
+      const stats = parseEngineStats(rawStats);
+      if (!stats) {
+        setError("Engine statistics were discarded: the native response was malformed.");
         resetThroughput();
         return;
       }
       updateTunnelStats((prev) => ({
         ...prev,
         [activeTunnelIdAtStart]: {
-          latencyMs: stats.latencyMs ?? 0,
-          lossPercent: stats.lossPercent ?? 0,
-          rxBytes: stats.bytesIn ?? 0,
-          txBytes: stats.bytesOut ?? 0,
-          rxPackets: stats.packetsIn ?? 0,
-          txPackets: stats.packetsOut ?? 0,
-          uptimeSecs: stats.uptimeSecs ?? 0,
-          stealthMode: stats.stealthMode ?? "auto",
-          fecMode: stats.fecMode ?? "auto",
-          fecActivityPercent: stats.fecActivityPercent ?? 0,
-          fecRecoveredPackets: stats.fecRecoveredPackets ?? 0,
-          currentSni: typeof stats.currentSni === "string" && stats.currentSni.trim().length > 0
-            ? stats.currentSni.trim() : undefined,
+          latencyMs: stats.latencyMs,
+          lossPercent: stats.lossPercent,
+          rxBytes: stats.rxBytes,
+          txBytes: stats.txBytes,
+          rxPackets: stats.rxPackets,
+          txPackets: stats.txPackets,
+          uptimeSecs: stats.uptimeSecs,
+          stealthMode: stats.stealthMode,
+          fecMode: stats.fecMode,
+          fecActivityPercent: stats.fecActivityPercent,
+          fecRecoveredPackets: stats.fecRecoveredPackets,
+          currentSni: stats.currentSni,
         },
       }));
 

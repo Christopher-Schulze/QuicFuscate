@@ -53,6 +53,22 @@ describe("tunnel-validators", () => {
       expect(parseRemote("[::1]")).toEqual({ server: "::1", port: 4433 });
     });
 
+    test("rejects trailing text after the closing bracket", () => {
+      // These used to be read as "no port given" and normalized to :4433, turning an
+      // invalid endpoint into a different, valid-looking one.
+      expect(parseRemote("[2001:db8::1]junk")).toBeNull();
+      expect(parseRemote("[::1]4433")).toBeNull();
+      expect(parseRemote("[::1] :4433")).toBeNull();
+      expect(parseRemote("[::1]-")).toBeNull();
+    });
+
+    test("rejects a bracketed host with an empty or invalid port after the colon", () => {
+      expect(parseRemote("[::1]:")).toBeNull();
+      expect(parseRemote("[::1]:notaport")).toBeNull();
+      expect(parseRemote("[::1]:0")).toBeNull();
+      expect(parseRemote("[::1]:65536")).toBeNull();
+    });
+
     test("parses bracketed full IPv6 with port", () => {
       expect(parseRemote("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:443")).toEqual({
         server: "2001:0db8:85a3:0000:0000:8a2e:0370:7334",

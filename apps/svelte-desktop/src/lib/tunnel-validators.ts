@@ -21,7 +21,16 @@ export function parseRemote(remote: string): { server: string; port: number } | 
     if (end < 0) return null;
     const host = trimmed.slice(1, end);
     if (!host || /\s/.test(host)) return null;
-    const portStr = trimmed.slice(end + 1).startsWith(":") ? trimmed.slice(end + 2) : "";
+    // Anything after "]" must be either nothing or ":port". The old form treated any
+    // other suffix as an absent port and defaulted to 4433, so "[2001:db8::1]junk"
+    // was silently normalized into a different, valid-looking endpoint.
+    const suffix = trimmed.slice(end + 1);
+    if (suffix === "") return { server: host, port: 4433 };
+    if (!suffix.startsWith(":")) return null;
+    // A colon with nothing after it is malformed, not "no port given"; only an absent
+    // suffix means the default applies.
+    const portStr = suffix.slice(1);
+    if (portStr === "") return null;
     const port = parsePort(portStr);
     if (!port) return null;
     return { server: host, port };

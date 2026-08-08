@@ -53,6 +53,7 @@ export interface UpdaterDriver {
 }
 
 import { toErrorMessage } from "$lib/format";
+import { parseUpdaterResult } from "$lib/ipc-contracts";
 
 function isSignatureFailure(message: string): boolean {
   const normalized = message.toLowerCase();
@@ -62,7 +63,25 @@ function isSignatureFailure(message: string): boolean {
 export async function createTauriUpdaterDriver(): Promise<UpdaterDriver> {
   const plugin = await import("@tauri-apps/plugin-updater");
   return {
-    check: () => plugin.check() as Promise<UpdaterHandle | null>,
+    check: async (): Promise<UpdaterHandle | null> => {
+      const result = await plugin.check();
+      if (result === null || result === undefined) return null;
+      // Casting the plugin result meant a drifted or malformed object could reach the
+      // version display, and an install could be offered for an update object with no
+      // working install callable.
+      const validated = parseUpdaterResult(result);
+      if (!validated) {
+        throw new Error("The updater returned a malformed update object; refusing to use it.");
+      }
+      return {
+        currentVersion: validated.currentVersion,
+        version: validated.version,
+        date: validated.date,
+        body: validated.body,
+        downloadAndInstall: (onEvent?: (progress: PluginDownloadEvent) => void) =>
+          (result as UpdaterHandle).downloadAndInstall(onEvent),
+      };
+    },
   };
 }
 
