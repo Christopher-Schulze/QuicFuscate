@@ -791,19 +791,99 @@ impl NftablesKillSwitch {
 struct MacOSKillSwitch {
     rules_active: AtomicBool,
     anchor_name: String,
-    /// PID-scoped config file path to avoid multi-instance conflicts
+    /// Unpredictable per-instance rule file.
+    ///
+    /// The path was previously `/tmp/quicfuscate_killswitch_<pid>.conf`. A local attacker who can
+    /// predict or observe the PID could place a symlink there before this privileged process
+    /// wrote it, and `std::fs::write` follows symlinks, so privileged pf rule content could be
+    /// redirected to another file. PID reuse and concurrent instances could also collide on it.
     config_path: String,
 }
 
 #[cfg(target_os = "macos")]
 impl MacOSKillSwitch {
     fn new() -> Self {
-        let pid = std::process::id();
+        let mut nonce = [0u8; 16];
+        crate::rng::fill_secure_or_abort(&mut nonce, "killswitch::config_path");
+        let mut suffix = String::with_capacity(nonce.len() * 2);
+        for byte in nonce {
+            use std::fmt::Write as _;
+            let _ = write!(&mut suffix, "{byte:02x}");
+        }
         Self {
             rules_active: AtomicBool::new(false),
             anchor_name: "com.quicfuscate.killswitch".to_string(),
-            config_path: format!("/tmp/quicfuscate_killswitch_{}.conf", pid),
+            config_path: format!("/tmp/quicfuscate_killswitch_{suffix}.conf"),
         }
+    }
+
+    /// Write pf rules to a file this process exclusively created.
+    ///
+    /// The old path was written with `std::fs::write`, which follows symlinks and happily reuses
+    /// an existing file. This removes any prior entry and then creates the file with
+    /// `O_CREAT | O_EXCL | O_NOFOLLOW` and mode `0600`, so the handle can only ever refer to a
+    /// regular file this call just made. The result is verified through the handle itself, not by
+    /// re-examining the path, so nothing can be swapped in between the check and the load.
+    fn write_rules_exclusive(&self, rules: &str) -> Result<(), KillSwitchError> {
+        use std::io::Write as _;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        // Remove any prior file, including one left by a previous run. NotFound is the normal case.
+        match std::fs::remove_file(&self.config_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(KillSwitchError::CommandFailed(format!(
+                    "cannot clear kill-switch rule path {}: {error}",
+                    self.config_path
+                )))
+            }
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&self.config_path)
+            .map_err(|error| {
+                KillSwitchError::CommandFailed(format!(
+                    "cannot create kill-switch rule file {}: {error}",
+                    self.config_path
+                ))
+            })?;
+
+        // Verify through the open handle so no path-based race can intervene.
+        let metadata = file.metadata().map_err(|error| {
+            KillSwitchError::CommandFailed(format!("cannot inspect kill-switch rule file: {error}"))
+        })?;
+        if !metadata.is_file() {
+            return Err(KillSwitchError::CommandFailed(
+                "kill-switch rule path is not a regular file".to_string(),
+            ));
+        }
+        // SAFETY: `geteuid` takes no arguments, dereferences nothing, and cannot fail.
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid {
+            return Err(KillSwitchError::CommandFailed(format!(
+                "kill-switch rule file is owned by uid {}, expected {effective_uid}",
+                metadata.uid()
+            )));
+        }
+        if metadata.mode() & 0o777 != 0o600 {
+            return Err(KillSwitchError::CommandFailed(format!(
+                "kill-switch rule file has mode {:#o}, expected 0o600",
+                metadata.mode() & 0o777
+            )));
+        }
+
+        file.write_all(rules.as_bytes()).map_err(|error| {
+            KillSwitchError::CommandFailed(format!("cannot write kill-switch rules: {error}"))
+        })?;
+        file.sync_all().map_err(|error| {
+            KillSwitchError::CommandFailed(format!("cannot flush kill-switch rules: {error}"))
+        })?;
+        Ok(())
     }
 
     fn run_pfctl(args: &[&str], action: &str) -> Result<(), KillSwitchError> {
@@ -881,9 +961,7 @@ impl MacOSKillSwitch {
         // Create pf rules
         let rules = "block out all\npass out on lo0\n".to_string();
 
-        // Write to PID-scoped temp file
-        std::fs::write(&self.config_path, rules)
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        self.write_rules_exclusive(&rules)?;
 
         // Load rules
         Self::run_pfctl(
@@ -937,9 +1015,7 @@ impl MacOSKillSwitch {
         }
         rules.push_str("block out all\n");
 
-        // Write to PID-scoped temp file
-        std::fs::write(&self.config_path, &rules)
-            .map_err(|e| KillSwitchError::CommandFailed(e.to_string()))?;
+        self.write_rules_exclusive(&rules)?;
 
         Self::run_pfctl(
             &["-a", &self.anchor_name, "-f", &self.config_path],
@@ -1295,5 +1371,93 @@ mod tests {
         // Both must drop all other traffic.
         assert!(iptables_rules.contains("-j DROP"));
         assert!(nft_rules.contains("policy drop;"));
+    }
+
+    /// The rule file must be unpredictable, exclusively created, and never a symlink.
+    ///
+    /// The path was `/tmp/quicfuscate_killswitch_<pid>.conf` and was written with
+    /// `std::fs::write`, which follows symlinks. A local attacker who could predict the PID could
+    /// place a symlink there before this privileged process wrote it and redirect pf rule content
+    /// to another file.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn killswitch_rule_file_is_unpredictable_exclusive_and_symlink_safe() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let switch = MacOSKillSwitch::new();
+        let path = std::path::PathBuf::from(&switch.config_path);
+
+        // Unpredictable: the path must not be derived from the process id.
+        assert!(
+            !switch.config_path.contains(&std::process::id().to_string()),
+            "the rule path must not be PID-derived: {}",
+            switch.config_path
+        );
+        // Two instances must not collide.
+        let other = MacOSKillSwitch::new();
+        assert_ne!(switch.config_path, other.config_path, "instances must not share a rule path");
+
+        // A normal write produces an owner-only regular file with exactly the requested content.
+        switch.write_rules_exclusive("block out all\n").expect("first write");
+        let metadata = std::fs::metadata(&path).expect("rule file metadata");
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600, "rule file must be owner-only");
+        // SAFETY: `geteuid` takes no arguments and cannot fail.
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(std::fs::read_to_string(&path).expect("read rules"), "block out all\n");
+
+        // A rewrite replaces the content rather than appending, and keeps the same guarantees.
+        switch.write_rules_exclusive("pass out on lo0\n").expect("rewrite");
+        assert_eq!(std::fs::read_to_string(&path).expect("read rules"), "pass out on lo0\n");
+        assert_eq!(std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777, 0o600);
+
+        // A symlink planted at the path must not be followed: the target must stay untouched.
+        let _ = std::fs::remove_file(&path);
+        let victim =
+            std::env::temp_dir().join(format!("qf-killswitch-victim-{}", switch.config_path.len()));
+        let _ = std::fs::remove_file(&victim);
+        std::fs::write(&victim, "ORIGINAL").expect("seed victim");
+        std::os::unix::fs::symlink(&victim, &path).expect("plant symlink");
+
+        switch.write_rules_exclusive("block out all\n").expect("write over a planted symlink");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim survives"),
+            "ORIGINAL",
+            "a planted symlink must not redirect privileged rule content"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&path).expect("rule path").file_type().is_symlink(),
+            "the rule path must be a regular file after the write, not the planted symlink"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&victim);
+        let _ = std::fs::remove_file(&other.config_path);
+    }
+
+    /// A pre-existing regular file at the path must be replaced, not appended to or reused.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn killswitch_replaces_a_preexisting_rule_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let switch = MacOSKillSwitch::new();
+        let path = std::path::PathBuf::from(&switch.config_path);
+
+        // Something world-readable left behind by an earlier run or another user.
+        std::fs::write(&path, "STALE RULES").expect("seed stale file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+            .expect("seed permissive mode");
+
+        switch.write_rules_exclusive("block out all\n").expect("write over stale file");
+
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "block out all\n");
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o600,
+            "a permissive stale mode must not be inherited"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }
