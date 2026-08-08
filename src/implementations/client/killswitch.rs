@@ -788,6 +788,9 @@ impl NftablesKillSwitch {
 // ============================================================================
 
 #[cfg(target_os = "macos")]
+const MACOS_PF_ANCHOR: &str = "com.quicfuscate.killswitch";
+
+#[cfg(target_os = "macos")]
 struct MacOSKillSwitch {
     rules_active: AtomicBool,
     anchor_name: String,
@@ -812,7 +815,7 @@ impl MacOSKillSwitch {
         }
         Self {
             rules_active: AtomicBool::new(false),
-            anchor_name: "com.quicfuscate.killswitch".to_string(),
+            anchor_name: MACOS_PF_ANCHOR.to_string(),
             config_path: format!("/tmp/quicfuscate_killswitch_{suffix}.conf"),
         }
     }
@@ -1064,7 +1067,7 @@ impl MacOSKillSwitch {
     }
 
     fn cleanup_stale() -> Result<(), KillSwitchError> {
-        crate::firewall::cleanup_pf_anchor("com.quicfuscate.killswitch")
+        crate::firewall::cleanup_pf_anchor(MACOS_PF_ANCHOR)
             .map_err(|error| KillSwitchError::CommandFailed(error.to_string()))?;
         log::info!("Stale pf anchor rules verified absent");
         Ok(())
@@ -1175,9 +1178,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn pf_main_ruleset_reference_requires_an_anchor_statement() {
-        let anchor = "com.quicfuscate.killswitch";
+        let anchor = MACOS_PF_ANCHOR;
         assert!(MacOSKillSwitch::main_ruleset_references_anchor(
-            "anchor \"com.quicfuscate.killswitch\" all\n",
+            &format!("anchor \"{anchor}\" all\n"),
             anchor
         ));
         assert!(MacOSKillSwitch::main_ruleset_references_anchor(
@@ -1185,11 +1188,11 @@ mod tests {
             anchor
         ));
         assert!(!MacOSKillSwitch::main_ruleset_references_anchor(
-            "# anchor \"com.quicfuscate.killswitch\"\n",
+            &format!("# anchor \"{anchor}\"\n"),
             anchor
         ));
         assert!(!MacOSKillSwitch::main_ruleset_references_anchor(
-            "anchor \"com.quicfuscate.killswitch-other\" all\n",
+            &format!("anchor \"{anchor}-other\" all\n"),
             anchor
         ));
     }
