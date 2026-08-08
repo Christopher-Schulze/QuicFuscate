@@ -26,6 +26,8 @@ use std::process::{Command, Stdio};
 
 pub(crate) mod cleanup;
 
+pub use cleanup::{CleanupError, CleanupOutcome};
+
 /// Selected firewall backend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -108,7 +110,7 @@ pub fn probe_availability() -> FirewallAvailability {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn nft_table_exists(family: &str, table: &str) -> Result<bool, std::io::Error> {
+pub fn nft_table_exists(family: &str, table: &str) -> Result<bool, std::io::Error> {
     let output = match Command::new("nft").args(["list", "table", family, table]).output() {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -133,10 +135,7 @@ pub(crate) fn nft_table_exists(family: &str, table: &str) -> Result<bool, std::i
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn delete_nft_table(
-    family: &str,
-    table: &str,
-) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+pub fn delete_nft_table(family: &str, table: &str) -> Result<CleanupOutcome, CleanupError> {
     let resource = cleanup::OwnedResourceId::new(
         cleanup::OwnedResourceKind::NftTable,
         format!("{family} {table}"),
@@ -217,7 +216,7 @@ fn iptables_owned_state(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn inspect_iptables_owned(
+pub fn inspect_iptables_owned(
     program: &str,
     table: &str,
     parent_chain: &str,
@@ -227,7 +226,7 @@ pub(crate) fn inspect_iptables_owned(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn iptables_chain_rules(
+pub fn iptables_chain_rules(
     program: &str,
     table: &str,
     chain: &str,
@@ -303,12 +302,12 @@ fn remove_iptables_owned_once(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn cleanup_iptables_chain(
+pub fn cleanup_iptables_chain(
     program: &str,
     table: &str,
     parent_chain: &str,
     owned_chain: &str,
-) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+) -> Result<CleanupOutcome, CleanupError> {
     let resource = cleanup::OwnedResourceId::new(
         cleanup::OwnedResourceKind::IptablesChain,
         format!("{program}:{table}:{owned_chain}"),
@@ -354,7 +353,7 @@ fn iptables_rule_exists(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn iptables_rule_exists_exact(
+pub fn iptables_rule_exists_exact(
     program: &str,
     table: &str,
     chain: &str,
@@ -414,7 +413,7 @@ fn nft_output_contains_fragment(output: &str, fragment: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn verify_nft_table_rules(
+pub fn verify_nft_table_rules(
     family: &str,
     table: &str,
     required_fragments: &[&str],
@@ -511,12 +510,12 @@ pub(crate) fn verify_nft_table_owner(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn cleanup_iptables_rule(
+pub fn cleanup_iptables_rule(
     program: &str,
     table: &str,
     chain: &str,
     rule_args: &[&str],
-) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+) -> Result<CleanupOutcome, CleanupError> {
     let resource = cleanup::OwnedResourceId::new(
         cleanup::OwnedResourceKind::IptablesRule,
         format!("{program}:{table}:{chain}:{}", rule_args.join(" ")),
@@ -558,9 +557,7 @@ fn pf_anchor_has_rules(anchor: &str) -> Result<bool, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn cleanup_pf_anchor(
-    anchor: &str,
-) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+pub fn cleanup_pf_anchor(anchor: &str) -> Result<CleanupOutcome, CleanupError> {
     let resource =
         cleanup::OwnedResourceId::new(cleanup::OwnedResourceKind::PfAnchor, anchor.to_string());
     cleanup::cleanup_owned_resource(
@@ -642,9 +639,7 @@ fn remove_windows_resource(command: &str, name: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn cleanup_windows_firewall_rule(
-    name: &str,
-) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+pub fn cleanup_windows_firewall_rule(name: &str) -> Result<CleanupOutcome, CleanupError> {
     let resource = cleanup::OwnedResourceId::new(
         cleanup::OwnedResourceKind::WindowsFirewallRule,
         name.to_string(),
@@ -664,9 +659,7 @@ pub(crate) fn cleanup_windows_firewall_rule(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn cleanup_windows_nat(
-    name: &str,
-) -> Result<cleanup::CleanupOutcome, cleanup::CleanupError> {
+pub fn cleanup_windows_nat(name: &str) -> Result<CleanupOutcome, CleanupError> {
     let resource =
         cleanup::OwnedResourceId::new(cleanup::OwnedResourceKind::WindowsNat, name.to_string());
     cleanup::cleanup_owned_resource(

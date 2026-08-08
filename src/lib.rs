@@ -72,7 +72,105 @@ pub mod control_plane {
 /// Forward Error Correction - adaptive Reed-Solomon with PID controller and Kalman filter.
 pub mod fec;
 /// Firewall backend abstraction (iptables / nftables) for kill switch and NAT routing.
-pub mod firewall;
+pub mod firewall {
+    pub use qf_firewall::{
+        iptables_available, nft_available, probe_availability, resolve_backend,
+        FirewallAvailability, FirewallBackend, FirewallOps, FirewallSelectionError,
+        IptablesBackend, NftablesBackend,
+    };
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn nft_table_exists(family: &str, table: &str) -> Result<bool, std::io::Error> {
+        qf_firewall::nft_table_exists(family, table)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn delete_nft_table(
+        family: &str,
+        table: &str,
+    ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
+        qf_firewall::delete_nft_table(family, table)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn inspect_iptables_owned(
+        program: &str,
+        table: &str,
+        parent_chain: &str,
+        owned_chain: &str,
+    ) -> Result<(usize, bool), String> {
+        qf_firewall::inspect_iptables_owned(program, table, parent_chain, owned_chain)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn iptables_chain_rules(
+        program: &str,
+        table: &str,
+        chain: &str,
+    ) -> Result<Vec<String>, String> {
+        qf_firewall::iptables_chain_rules(program, table, chain)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cleanup_iptables_chain(
+        program: &str,
+        table: &str,
+        parent_chain: &str,
+        owned_chain: &str,
+    ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
+        qf_firewall::cleanup_iptables_chain(program, table, parent_chain, owned_chain)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn iptables_rule_exists_exact(
+        program: &str,
+        table: &str,
+        chain: &str,
+        rule_args: &[&str],
+    ) -> Result<bool, String> {
+        qf_firewall::iptables_rule_exists_exact(program, table, chain, rule_args)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify_nft_table_rules(
+        family: &str,
+        table: &str,
+        required_fragments: &[&str],
+    ) -> Result<(), std::io::Error> {
+        qf_firewall::verify_nft_table_rules(family, table, required_fragments)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cleanup_iptables_rule(
+        program: &str,
+        table: &str,
+        chain: &str,
+        rule_args: &[&str],
+    ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
+        qf_firewall::cleanup_iptables_rule(program, table, chain, rule_args)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn cleanup_pf_anchor(
+        anchor: &str,
+    ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
+        qf_firewall::cleanup_pf_anchor(anchor)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn cleanup_windows_firewall_rule(
+        name: &str,
+    ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
+        qf_firewall::cleanup_windows_firewall_rule(name)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn cleanup_windows_nat(
+        name: &str,
+    ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
+        qf_firewall::cleanup_windows_nat(name)
+    }
+}
 /// Test harness utilities for integration and property-based testing.
 pub mod harness;
 /// Tracing and span instrumentation for runtime observability.

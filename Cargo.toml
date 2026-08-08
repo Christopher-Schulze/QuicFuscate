@@ -5,6 +5,7 @@ members = [
     "crates/qf-control-plane",
     "crates/qf-dns",
     "crates/qf-error",
+    "crates/qf-firewall",
     "crates/qf-instrumentation",
     "crates/qf-pki",
     "crates/qf-privilege",
@@ -34,6 +35,7 @@ qf-common = { path = "crates/qf-common" }
 qf-control-plane = { path = "crates/qf-control-plane" }
 qf-dns = { path = "crates/qf-dns" }
 qf-error = { path = "crates/qf-error" }
+qf-firewall = { path = "crates/qf-firewall" }
 qf-instrumentation = { path = "crates/qf-instrumentation" }
 qf-pki = { path = "crates/qf-pki" }
 qf-privilege = { path = "crates/qf-privilege" }

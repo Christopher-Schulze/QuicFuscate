@@ -47,7 +47,7 @@ pub(crate) enum CleanupDisposition {
 
 /// Verified cleanup result.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CleanupOutcome {
+pub struct CleanupOutcome {
     pub(crate) resource: OwnedResourceId,
     pub(crate) disposition: CleanupDisposition,
     pub(crate) attempts: u8,
@@ -55,7 +55,7 @@ pub(crate) struct CleanupOutcome {
 
 impl CleanupOutcome {
     #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn removed(&self) -> bool {
+    pub fn removed(&self) -> bool {
         self.disposition == CleanupDisposition::Removed
     }
 }
@@ -70,7 +70,7 @@ pub(crate) enum CleanupPhase {
 
 /// Exact permanent cleanup failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CleanupError {
+pub struct CleanupError {
     pub(crate) resource: OwnedResourceId,
     pub(crate) attempts: u8,
     pub(crate) phase: CleanupPhase,

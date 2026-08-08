@@ -1489,6 +1489,15 @@ name = "qf-error"
 version = "0.4.4"
 
 [[package]]
+name = "qf-firewall"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qf-instrumentation"
 version = "0.4.4"
 
@@ -1561,6 +1570,7 @@ dependencies = [
  "qf-control-plane",
  "qf-dns",
  "qf-error",
+ "qf-firewall",
  "qf-instrumentation",
  "qf-pki",
  "qf-privilege",
