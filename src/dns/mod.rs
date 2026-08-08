@@ -933,12 +933,13 @@ fn forward_dns_query_until(
     sock.set_write_timeout(Some(remaining_until(deadline)?))?;
     let upstream_addr = SocketAddr::new(std::net::IpAddr::V4(upstream), 53);
     sock.send_to(query, upstream_addr)?;
-    receive_dns_response(&sock, upstream_addr, deadline)
+    receive_dns_response(&sock, upstream_addr, query, deadline)
 }
 
 fn receive_dns_response(
     sock: &std::net::UdpSocket,
     upstream_addr: SocketAddr,
+    query: &[u8],
     deadline: Instant,
 ) -> std::io::Result<Vec<u8>> {
     let mut buf = vec![0u8; DNS_MESSAGE_MAX_SIZE + 1];
@@ -967,6 +968,26 @@ fn receive_dns_response(
                 std::io::ErrorKind::InvalidData,
                 format!("DNS: upstream response exceeds {} bytes", DNS_MESSAGE_MAX_SIZE),
             ));
+        }
+        // The source address only proves who sent the datagram, not which question it
+        // answers. A stale, misdirected, or forged response from the resolver's own
+        // address must not satisfy this query, so bind it to the outstanding
+        // transaction and question before it leaves the forwarding boundary. A
+        // mismatch keeps waiting under the same bounded rejection budget, because the
+        // legitimate answer may still be in flight.
+        let response = buf.get(..len).unwrap_or(&[]);
+        if let Err(reason) = match_response_to_query(query, response) {
+            rejections += 1;
+            log::warn!(
+                "DNS: rejecting unmatched response from {resp_addr}: {reason} [{rejections}/{DNS_MAX_SPOOFED_REJECTIONS}]"
+            );
+            if rejections >= DNS_MAX_SPOOFED_REJECTIONS {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "DNS: too many responses that do not match the outstanding question",
+                ));
+            }
+            continue;
         }
         buf.truncate(len);
         return Ok(buf);
@@ -1160,7 +1181,7 @@ struct DnsQuestionIdentity {
     qclass: u16,
 }
 
-fn parse_doh_question_identity(
+fn parse_dns_question_identity(
     packet: &[u8],
     response: bool,
 ) -> Result<DnsQuestionIdentity, &'static str> {
@@ -1187,8 +1208,8 @@ fn parse_doh_question_identity(
         return Err("DNS message must contain exactly one question");
     }
 
-    let (qname, question_end) =
-        parse_doh_name(packet, DNS_HEADER_SIZE).ok_or("DNS question name is malformed")?;
+    let (qname, question_end) = parse_canonical_dns_name(packet, DNS_HEADER_SIZE)
+        .ok_or("DNS question name is malformed")?;
     let fields_end = question_end.checked_add(4).ok_or("DNS question field offset overflow")?;
     let fields = packet.get(question_end..fields_end).ok_or("DNS question fields are truncated")?;
 
@@ -1206,7 +1227,7 @@ fn parse_doh_question_identity(
 /// reject forward references, reserved label prefixes, loops, and names above
 /// the RFC 1035 255-byte wire limit. Answer and additional sections remain
 /// opaque to preserve valid compression and EDNS records.
-fn parse_doh_name(packet: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+fn parse_canonical_dns_name(packet: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
     let parsed = parse_dns_name(packet, start)?;
     let mut canonical = parsed.wire;
     let mut cursor = 0;
@@ -1228,36 +1249,70 @@ fn parse_doh_name(packet: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
     Some((canonical, parsed.end))
 }
 
-fn validate_doh_response_semantics(query: &[u8], response: &[u8]) -> Result<(), DnsProxyError> {
-    let expected = parse_doh_question_identity(query, false).map_err(|reason| {
-        DnsProxyError::DohError(format!("DoH query semantic validation failed: {reason}"))
-    })?;
-    let actual = parse_doh_question_identity(response, true).map_err(|reason| {
-        DnsProxyError::DohError(format!("DoH response semantic validation failed: {reason}"))
-    })?;
+/// Why a response could not be bound to its outstanding query.
+///
+/// The variants separate the three cases a caller must not conflate: the query we
+/// sent is unparseable (a local defect), the response is unparseable (a remote or
+/// forged message), and a well-formed response that answers a different question.
+#[derive(Debug)]
+enum DnsResponseMismatch {
+    QueryParse(&'static str),
+    ResponseParse(&'static str),
+    Mismatch(String),
+}
+
+impl std::fmt::Display for DnsResponseMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueryParse(reason) => write!(f, "query semantic validation failed: {reason}"),
+            Self::ResponseParse(reason) => {
+                write!(f, "response semantic validation failed: {reason}")
+            }
+            Self::Mismatch(detail) => f.write_str(detail),
+        }
+    }
+}
+
+/// Bind a response to the outstanding query by transaction ID and the complete
+/// question tuple.
+///
+/// Source-address equality is not transaction authentication: a stale, misdirected,
+/// or forged datagram can arrive from the configured resolver's address and answer a
+/// different question. This is transport-neutral and owns that check for both the UDP
+/// forwarder and DoH.
+fn match_response_to_query(query: &[u8], response: &[u8]) -> Result<(), DnsResponseMismatch> {
+    let expected =
+        parse_dns_question_identity(query, false).map_err(DnsResponseMismatch::QueryParse)?;
+    let actual =
+        parse_dns_question_identity(response, true).map_err(DnsResponseMismatch::ResponseParse)?;
 
     if expected.id != actual.id {
-        return Err(DnsProxyError::DohError(format!(
-            "DoH response ID mismatch: expected {}, got {}",
+        return Err(DnsResponseMismatch::Mismatch(format!(
+            "response ID mismatch: expected {}, got {}",
             expected.id, actual.id
         )));
     }
     if expected.qname != actual.qname {
-        return Err(DnsProxyError::DohError("DoH response QNAME mismatch".into()));
+        return Err(DnsResponseMismatch::Mismatch("response QNAME mismatch".into()));
     }
     if expected.qtype != actual.qtype {
-        return Err(DnsProxyError::DohError(format!(
-            "DoH response QTYPE mismatch: expected {}, got {}",
+        return Err(DnsResponseMismatch::Mismatch(format!(
+            "response QTYPE mismatch: expected {}, got {}",
             expected.qtype, actual.qtype
         )));
     }
     if expected.qclass != actual.qclass {
-        return Err(DnsProxyError::DohError(format!(
-            "DoH response QCLASS mismatch: expected {}, got {}",
+        return Err(DnsResponseMismatch::Mismatch(format!(
+            "response QCLASS mismatch: expected {}, got {}",
             expected.qclass, actual.qclass
         )));
     }
     Ok(())
+}
+
+fn validate_doh_response_semantics(query: &[u8], response: &[u8]) -> Result<(), DnsProxyError> {
+    match_response_to_query(query, response)
+        .map_err(|reason| DnsProxyError::DohError(format!("DoH {reason}")))
 }
 
 /// Handle a DNS query by resolving via DoH (client-side). Convenience
@@ -1667,7 +1722,8 @@ mod tests {
         let compressed_start = packet.len();
         packet.extend_from_slice(&[3, b'W', b'W', b'W', 0xc0, 0x0c]);
 
-        let (name, end) = parse_doh_name(&packet, compressed_start).expect("compressed name");
+        let (name, end) =
+            parse_canonical_dns_name(&packet, compressed_start).expect("compressed name");
         assert_eq!(name, vec![3, b'w', b'w', b'w', 3, b'w', b'w', b'w', 0]);
         assert_eq!(end, packet.len());
     }
@@ -2031,9 +2087,107 @@ mod tests {
         let error = receive_dns_response(
             &receiver,
             sender.local_addr().expect("sender address"),
+            &make_dns_query_packet("example.com", 1),
             Instant::now() + Duration::from_secs(1),
         )
         .expect_err("oversized datagram must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// Drive `receive_dns_response` against datagrams delivered from the address it
+    /// trusts, so only question binding can distinguish them.
+    fn receive_from_upstream(query: &[u8], datagrams: &[Vec<u8>]) -> std::io::Result<Vec<u8>> {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("receiver bind");
+        let upstream = std::net::UdpSocket::bind("127.0.0.1:0").expect("upstream bind");
+        let receiver_addr = receiver.local_addr().expect("receiver address");
+        for datagram in datagrams {
+            upstream.send_to(datagram, receiver_addr).expect("datagram send");
+        }
+        receive_dns_response(
+            &receiver,
+            upstream.local_addr().expect("upstream address"),
+            query,
+            Instant::now() + Duration::from_secs(1),
+        )
+    }
+
+    #[test]
+    fn udp_response_matching_the_outstanding_question_is_accepted() {
+        let query = make_dns_query_packet("example.com", 1);
+        let response = response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD);
+        let received = receive_from_upstream(&query, std::slice::from_ref(&response))
+            .expect("matching response must be accepted");
+        assert_eq!(received, response);
+    }
+
+    #[test]
+    fn udp_responses_that_answer_a_different_question_are_rejected() {
+        let query = make_dns_query_packet("example.com", 1);
+
+        let mut stale_id = response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD);
+        stale_id[0] ^= 0xFF;
+
+        let wrong_name = response_from_question_packet(
+            &make_dns_query_packet("attacker.example", 1),
+            DNS_FLAG_QR | DNS_FLAG_RD,
+        );
+        let wrong_type = response_from_question_packet(
+            &make_dns_query_packet("example.com", 28),
+            DNS_FLAG_QR | DNS_FLAG_RD,
+        );
+
+        let mut wrong_class = response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD);
+        let class_offset = wrong_class.len() - 2;
+        wrong_class[class_offset..].copy_from_slice(&3u16.to_be_bytes());
+
+        // A response without QR is a query, not an answer, and must not satisfy this one.
+        let missing_qr = response_from_question_packet(&query, DNS_FLAG_RD);
+
+        for (label, datagram) in [
+            ("stale transaction id", stale_id),
+            ("wrong question name", wrong_name),
+            ("wrong question type", wrong_type),
+            ("wrong question class", wrong_class),
+            ("missing response flag", missing_qr),
+            ("truncated header", vec![0u8; DNS_HEADER_SIZE - 1]),
+        ] {
+            // Saturate the rejection budget so the bounded loop terminates instead of
+            // waiting out the deadline.
+            let flood = vec![datagram; DNS_MAX_SPOOFED_REJECTIONS as usize];
+            match receive_from_upstream(&query, &flood) {
+                Ok(accepted) => panic!("{label} was accepted: {accepted:?}"),
+                Err(error) => assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidData,
+                    "{label} must be rejected as unmatched"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn udp_forwarding_accepts_the_real_answer_after_an_unmatched_one() {
+        // The mismatch path must keep waiting under the same bounded budget: the
+        // legitimate answer can still be in flight behind a stale datagram.
+        let query = make_dns_query_packet("example.com", 1);
+        let mut stale = response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD);
+        stale[1] ^= 0xFF;
+        let real = response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD);
+
+        let received = receive_from_upstream(&query, &[stale, real.clone()])
+            .expect("the matching answer must still be accepted");
+        assert_eq!(received, real);
+    }
+
+    #[test]
+    fn unmatched_udp_responses_stay_within_the_rejection_budget() {
+        let query = make_dns_query_packet("example.com", 1);
+        let mut stale = response_from_question_packet(&query, DNS_FLAG_QR | DNS_FLAG_RD);
+        stale[0] ^= 0xFF;
+        let flood = vec![stale; DNS_MAX_SPOOFED_REJECTIONS as usize + 4];
+
+        let error = receive_from_upstream(&query, &flood)
+            .expect_err("a flood of unmatched responses must be bounded");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
