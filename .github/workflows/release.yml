@@ -217,18 +217,17 @@ jobs:
   # via beforeBuildCommand. No UI changes are made; these jobs only package
   # the existing frontend into native bundles.
   #
-  # macOS and Linux remain non-blocking. Windows is required because its MSI
-  # and updater signature are part of the restored TODO-519 release contract.
-  # The latest.json generator omits only optional platforms whose signed
-  # updater bundles are unavailable.
+  # Every desktop updater platform is required for a tagged publication. The
+  # shared manifest contract owns the platform list and rejects any missing,
+  # empty, or mismatched bundle/signature pair before GitHub Release creation.
   #
   # ---------------------------------------------------------------------------
   desktop-macos:
     needs: release-version-contract
     runs-on: macos-latest
-    continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
+      QUICFUSCATE_DESKTOP_UPDATER_ACTIVE: "true"
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
@@ -256,6 +255,13 @@ jobs:
       - name: Build Tauri desktop app (macOS)
         working-directory: apps/tauri/src-tauri
         run: cargo tauri build --target aarch64-apple-darwin -- --locked
+      - name: Verify signed macOS updater artifacts
+        shell: bash
+        run: |
+          bundle_count=$(find target/aarch64-apple-darwin/release/bundle -type f -name '*.app.tar.gz' | wc -l | tr -d ' ')
+          signature_count=$(find target/aarch64-apple-darwin/release/bundle -type f -name '*.app.tar.gz.sig' | wc -l | tr -d ' ')
+          test "$bundle_count" -eq 1 || { echo "expected one macOS updater bundle, found $bundle_count" >&2; exit 1; }
+          test "$signature_count" -eq 1 || { echo "expected one macOS updater signature, found $signature_count" >&2; exit 1; }
       - name: Upload macOS bundle
         uses: actions/upload-artifact@v7
         with:
@@ -269,14 +275,14 @@ jobs:
             target/aarch64-apple-darwin/release/bundle/**/*.dmg
             target/aarch64-apple-darwin/release/bundle/**/*.app.tar.gz
             target/aarch64-apple-darwin/release/bundle/**/*.app.tar.gz.sig
-          if-no-files-found: warn
+          if-no-files-found: error
 
   desktop-linux:
     needs: release-version-contract
     runs-on: ubuntu-latest
-    continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
+      QUICFUSCATE_DESKTOP_UPDATER_ACTIVE: "true"
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
@@ -311,6 +317,13 @@ jobs:
       - name: Build Tauri desktop app (Linux)
         working-directory: apps/tauri/src-tauri
         run: cargo tauri build -- --locked
+      - name: Verify signed Linux updater artifacts
+        shell: bash
+        run: |
+          bundle_count=$(find target/release/bundle -type f -name '*.AppImage' | wc -l | tr -d ' ')
+          signature_count=$(find target/release/bundle -type f -name '*.AppImage.sig' | wc -l | tr -d ' ')
+          test "$bundle_count" -eq 1 || { echo "expected one Linux updater bundle, found $bundle_count" >&2; exit 1; }
+          test "$signature_count" -eq 1 || { echo "expected one Linux updater signature, found $signature_count" >&2; exit 1; }
       - name: Upload Linux bundle
         uses: actions/upload-artifact@v7
         with:
@@ -325,7 +338,7 @@ jobs:
             target/release/bundle/**/*.deb.sig
             target/release/bundle/**/*.AppImage
             target/release/bundle/**/*.AppImage.sig
-          if-no-files-found: warn
+          if-no-files-found: error
 
   desktop-windows:
     needs: release-version-contract
@@ -333,6 +346,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "2"
+      QUICFUSCATE_DESKTOP_UPDATER_ACTIVE: "true"
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
@@ -417,9 +431,8 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-release:
     # Wait for ALL build jobs so their artifacts are available for download.
-    # macOS and Linux desktop builds are optional through continue-on-error.
-    # Both server architectures and Windows are required dependencies, so a
-    # tag cannot publish without native server bundles and the signed MSI.
+    # Both server architectures and all three signed desktop updater jobs are
+    # required dependencies. A tag cannot publish a partial updater surface.
     needs:
       [
         linux-server-bundle,
@@ -440,85 +453,17 @@ jobs:
           path: release-artifacts
       - name: Display structure
         run: find release-artifacts -type f | head -30
-      - name: Generate latest.json for Tauri updater
-        # Generate the Tauri updater manifest with python3 so the output is
-        # guaranteed-valid JSON regardless of signature content (minisign sigs
-        # contain newlines) or which desktop builds succeeded. Platforms whose
-        # signed updater bundles are missing are omitted from the manifest.
+      - name: Generate and verify complete Tauri updater manifest
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
           REPO="Christopher-Schulze/QuicFuscate"
           BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
-          export TAG VERSION BASE_URL
-
-          # Locate signed updater bundles (if any). The find invocations are
-          # safe even if no desktop artifacts were downloaded.
-          # macOS: Tauri generates .app.tar.gz + .app.tar.gz.sig (updater archive)
-          # Linux: Tauri generates .AppImage + .AppImage.sig (signed directly, no archive)
-          # Windows: Tauri v2 signs the MSI directly as .msi.sig
-          MACOS_TGZ=$(find release-artifacts -name "*.app.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
-          MACOS_SIG=$(find release-artifacts -name "*.app.tar.gz.sig" 2>/dev/null | head -1)
-          LINUX_IMG=$(find release-artifacts -name "*.AppImage" ! -name "*.sig" 2>/dev/null | head -1)
-          LINUX_SIG=$(find release-artifacts -name "*.AppImage.sig" 2>/dev/null | head -1)
-          WINDOWS_MSI=$(find release-artifacts -name "*.msi" 2>/dev/null | head -1)
-          WINDOWS_SIG=""
-          if [ -n "$WINDOWS_MSI" ]; then
-            WINDOWS_SIG="${WINDOWS_MSI}.sig"
-          fi
-          export MACOS_TGZ MACOS_SIG LINUX_IMG LINUX_SIG WINDOWS_MSI WINDOWS_SIG
-
-          python3 - <<'PYEOF'
-          import json
-          import os
-          from datetime import datetime, timezone
-
-          tag = os.environ["TAG"]
-          version = os.environ["VERSION"]
-          base_url = os.environ["BASE_URL"]
-
-          def platform_entry(bundle, sig):
-              """Return (url, signature) if both bundle and signature exist, else None."""
-              if not bundle or not sig:
-                  return None
-              if not os.path.isfile(bundle) or not os.path.isfile(sig):
-                  return None
-              url = f"{base_url}/{os.path.basename(bundle)}"
-              with open(sig, "r", encoding="utf-8") as f:
-                  signature = f.read()
-              return {"signature": signature, "url": url}
-
-          platforms = {}
-          macos = platform_entry(os.environ.get("MACOS_TGZ", ""), os.environ.get("MACOS_SIG", ""))
-          if macos:
-              platforms["darwin-aarch64"] = macos
-          linux = platform_entry(os.environ.get("LINUX_IMG", ""), os.environ.get("LINUX_SIG", ""))
-          if linux:
-              platforms["linux-x86_64"] = linux
-          windows = platform_entry(
-              os.environ.get("WINDOWS_MSI", ""), os.environ.get("WINDOWS_SIG", "")
-          )
-          if windows:
-              platforms["windows-x86_64"] = windows
-
-          if not platforms:
-              print("::warning::No signed desktop updater bundles found. "
-                    "latest.json will have empty platforms.")
-
-          manifest = {
-              "version": version,
-              "notes": f"QuicFuscate {tag}",
-              "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "platforms": platforms,
-          }
-
-          with open("latest.json", "w", encoding="utf-8") as f:
-              json.dump(manifest, f, indent=2)
-              f.write("\n")
-          PYEOF
-
-          echo "Generated latest.json:"
-          cat latest.json
+          bash scripts/audits/verify-release-updater.sh \
+            --artifact-root release-artifacts \
+            --tag "$TAG" \
+            --base-url "$BASE_URL" \
+            --output latest.json \
+            --runtime-source apps/tauri/src-tauri/src/main.rs
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

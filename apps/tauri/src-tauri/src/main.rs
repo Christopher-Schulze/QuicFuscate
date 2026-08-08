@@ -1567,6 +1567,11 @@ fn sync_os_start_at_login(app: &tauri::AppHandle, enabled: bool) -> Result<(), S
     commit_start_at_login_change(&backend, enabled, || Ok(()))
 }
 
+// Release jobs set this variable at compile time. Presence is intentional:
+// the workflow owns the exact value (`true`), while local release builds stay
+// disabled unless the operator explicitly opts into the release updater lane.
+const RELEASE_UPDATER_ACTIVE: bool = option_env!("QUICFUSCATE_DESKTOP_UPDATER_ACTIVE").is_some();
+
 fn env_flag_true(name: &str) -> bool {
     std::env::var(name)
         .ok()
@@ -1575,6 +1580,14 @@ fn env_flag_true(name: &str) -> bool {
             norm == "1" || norm == "true" || norm == "yes" || norm == "on"
         })
         .unwrap_or(false)
+}
+
+fn updater_enabled_for_build() -> bool {
+    if cfg!(debug_assertions) {
+        env_flag_true("QUICFUSCATE_DESKTOP_UPDATER_ACTIVE")
+    } else {
+        RELEASE_UPDATER_ACTIVE
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,7 +1640,7 @@ fn hide_main_window(app: &tauri::AppHandle) {
 fn main() {
     init_logging();
 
-    let updater_enabled = env_flag_true("QUICFUSCATE_DESKTOP_UPDATER_ACTIVE");
+    let updater_enabled = updater_enabled_for_build();
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None::<Vec<&str>>));
 
