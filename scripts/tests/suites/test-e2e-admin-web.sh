@@ -311,6 +311,73 @@ enable_domain_fronting = false
 memory_pool_size = 16777216
 TOML
 
+# Prove the publish boundary before relying on it: a failed staging must leave the existing
+# bundle untouched. The publisher used to delete the destination before a fallible copy, so a
+# disk-full or interrupted copy turned a working admin UI into a missing one.
+verify_atomic_asset_publish() {
+  local sandbox
+  sandbox="$(mktemp -d "${TMPDIR:-/tmp}/qf-web-admin-publish.XXXXXX")"
+  local publisher="$sandbox/publish.sh"
+
+  # Extract just the publish boundary from the real script, so this gate tracks the shipped code.
+  {
+    printf 'set -euo pipefail\nSOURCE="$1"\nDEST="$2"\n\n'
+    awk '/^# Publish through a staging directory and an atomic swap\./,/^echo "Web admin assets published to:/' \
+      "$PROJECT_ROOT/scripts/build/build-web-admin.sh"
+  } >"$publisher"
+
+  local scenario_failed=0
+  _seed() {
+    rm -rf "$sandbox/src" "$sandbox/dest"
+    mkdir -p "$sandbox/src" "$sandbox/dest"
+    printf '<html>new</html>' >"$sandbox/src/index.html"
+    printf '<html>OLD</html>' >"$sandbox/dest/index.html"
+  }
+  _dest_unchanged() {
+    [[ "$(cat "$sandbox/dest/index.html" 2>/dev/null)" == "<html>OLD</html>" ]]
+  }
+  _no_residue() {
+    ! compgen -G "$sandbox/dest.staging.*" >/dev/null \
+      && ! compgen -G "$sandbox/dest.previous.*" >/dev/null
+  }
+
+  # 1. Successful swap publishes the new bundle and leaves nothing behind.
+  _seed
+  bash "$publisher" "$sandbox/src" "$sandbox/dest" >/dev/null \
+    || { echo "publish: successful swap failed" >&2; scenario_failed=1; }
+  [[ "$(cat "$sandbox/dest/index.html")" == "<html>new</html>" ]] \
+    || { echo "publish: new bundle was not published" >&2; scenario_failed=1; }
+  _no_residue || { echo "publish: residue after a successful swap" >&2; scenario_failed=1; }
+
+  # 2. A bundle missing a required asset must not replace a working one.
+  _seed
+  rm "$sandbox/src/index.html"
+  if bash "$publisher" "$sandbox/src" "$sandbox/dest" >/dev/null 2>&1; then
+    echo "publish: a bundle without index.html was accepted" >&2
+    scenario_failed=1
+  fi
+  _dest_unchanged || { echo "publish: destination changed on a rejected bundle" >&2; scenario_failed=1; }
+  _no_residue || { echo "publish: residue after a rejected bundle" >&2; scenario_failed=1; }
+
+  # 3. A copy failure must leave the previous bundle intact.
+  _seed
+  rm -rf "$sandbox/src"
+  if bash "$publisher" "$sandbox/src" "$sandbox/dest" >/dev/null 2>&1; then
+    echo "publish: a missing source was accepted" >&2
+    scenario_failed=1
+  fi
+  _dest_unchanged || { echo "publish: destination changed on a copy failure" >&2; scenario_failed=1; }
+  _no_residue || { echo "publish: residue after a copy failure" >&2; scenario_failed=1; }
+
+  rm -rf "$sandbox"
+  if [[ "$scenario_failed" -ne 0 ]]; then
+    die "web-admin asset publication is not atomic"
+  fi
+  info "web-admin asset publication is atomic (swap, rejected bundle, copy failure)"
+}
+
+verify_atomic_asset_publish
+
 if [[ "$REBUILD_WEB" -eq 1 || ! -f "$ADMIN_WEB_ROOT/index.html" ]]; then
   info "Building web-admin assets"
   run "$PROJECT_ROOT/scripts/build/build-web-admin.sh"

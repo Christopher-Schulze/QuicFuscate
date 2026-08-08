@@ -69,8 +69,56 @@ if [[ "$ARCHIVE_EXISTING" == "1" ]] && [ -d "$DEST" ] && [ "$(ls -A "$DEST" 2>/d
   printf "archived_from=%s\narchived_at=%s\n" "$DEST" "$TS" > "$ARCHIVE_DIR/metadata.txt"
 fi
 
-rm -rf "$DEST"
-mkdir -p "$DEST"
-cp -R "$SOURCE"/. "$DEST"/
+# Publish through a staging directory and an atomic swap.
+#
+# The previous sequence removed the destination before a fallible copy, so a disk-full,
+# permission, or interrupted copy turned a working admin UI into a missing or partial one with no
+# way back. The old tree now survives until a fully copied and verified new tree is ready to
+# replace it.
 
-echo "Web admin assets copied to: $DEST"
+# Required members of a usable bundle. A build that produced a directory but not these is not a
+# bundle, and must not replace one that is.
+REQUIRED_ASSETS=("index.html")
+
+STAGING=""
+PREVIOUS=""
+cleanup_publish() {
+  local status=$?
+  # Remove only directories this script created, never the destination.
+  [[ -n "$STAGING" && -d "$STAGING" ]] && rm -rf "$STAGING"
+  if [[ $status -ne 0 && -n "$PREVIOUS" && -d "$PREVIOUS" && ! -e "$DEST" ]]; then
+    # The swap failed between moving the old tree aside and moving the new one in. Put the old
+    # tree back rather than leaving the server with no admin UI at all.
+    mv "$PREVIOUS" "$DEST" || echo "error: failed to restore the previous bundle from $PREVIOUS" >&2
+    PREVIOUS=""
+  fi
+  [[ -n "$PREVIOUS" && -d "$PREVIOUS" ]] && rm -rf "$PREVIOUS"
+  exit "$status"
+}
+trap cleanup_publish EXIT
+
+mkdir -p "$(dirname "$DEST")"
+STAGING="$(mktemp -d "${DEST}.staging.XXXXXX")"
+cp -R "$SOURCE"/. "$STAGING"/
+
+for asset in "${REQUIRED_ASSETS[@]}"; do
+  [[ -f "$STAGING/$asset" ]] || {
+    echo "error: staged bundle is missing required asset: $asset" >&2
+    exit 1
+  }
+done
+
+staged_files="$(find "$STAGING" -type f | wc -l | tr -d ' ')"
+[[ "$staged_files" -gt 0 ]] || { echo "error: staged bundle contains no files" >&2; exit 1; }
+
+# Swap: move the old tree aside, move the new one in, then discard the old one. Both moves are
+# renames within the same directory, so neither can leave a half-copied tree at $DEST.
+if [[ -d "$DEST" ]]; then
+  PREVIOUS="$(mktemp -d "${DEST}.previous.XXXXXX")"
+  rmdir "$PREVIOUS"
+  mv "$DEST" "$PREVIOUS"
+fi
+mv "$STAGING" "$DEST"
+STAGING=""
+
+echo "Web admin assets published to: $DEST (files=$staged_files)"
