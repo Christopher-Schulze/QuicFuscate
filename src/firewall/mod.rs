@@ -191,10 +191,14 @@ fn iptables_owned_state(
         .filter(|line| line.trim() == expected_jump)
         .count();
 
-    let chain_output = Command::new(program)
-        .args(["-t", table, "-S", owned_chain])
-        .output()
-        .map_err(|error| format!("{program} owned-chain inspect: {error}"))?;
+    let chain_output =
+        Command::new(program).args(["-t", table, "-S", owned_chain]).output().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!("{program} owned-chain inspect: command unavailable")
+            } else {
+                format!("{program} owned-chain inspect: {error}")
+            }
+        })?;
     if chain_output.status.success() {
         return Ok((jump_count, true));
     }
@@ -210,6 +214,51 @@ fn iptables_owned_state(
             stderr.trim(),
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn inspect_iptables_owned(
+    program: &str,
+    table: &str,
+    parent_chain: &str,
+    owned_chain: &str,
+) -> Result<(usize, bool), String> {
+    iptables_owned_state(program, table, parent_chain, owned_chain)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn iptables_chain_rules(
+    program: &str,
+    table: &str,
+    chain: &str,
+) -> Result<Vec<String>, String> {
+    let output =
+        Command::new(program).args(["-t", table, "-S", chain]).output().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!("{program} chain inspect: command unavailable")
+            } else {
+                format!("{program} chain inspect: {error}")
+            }
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lowered = stderr.to_ascii_lowercase();
+        if lowered.contains("no chain/target/match") || lowered.contains("does not exist") {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "{program} chain inspect returned status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let prefix = format!("-A {chain}");
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(&prefix))
+        .map(str::to_owned)
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -387,6 +436,75 @@ pub(crate) fn verify_nft_table_rules(
     {
         return Err(std::io::Error::other(format!(
             "nft table {family} {table} is missing required rule fragment {missing:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_nft_table_owner(
+    family: &str,
+    table: &str,
+    owner_marker: &str,
+    required_fragments: &[&str],
+    expected_rule_count: usize,
+) -> Result<(), std::io::Error> {
+    let output = Command::new("nft")
+        .args(["list", "table", family, table])
+        .output()
+        .map_err(|error| std::io::Error::other(format!("nft table owner verify: {error}")))?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "nft table owner verify returned status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let marker = format!("comment \"{owner_marker}\"");
+    if !stdout.lines().any(|line| line.contains(&marker)) {
+        return Err(std::io::Error::other(format!(
+            "nft table {family} {table} is missing owner marker {owner_marker:?}"
+        )));
+    }
+    if let Some(missing) =
+        required_fragments.iter().find(|fragment| !nft_output_contains_fragment(&stdout, fragment))
+    {
+        return Err(std::io::Error::other(format!(
+            "nft table {family} {table} is missing required rule fragment {missing:?}"
+        )));
+    }
+    let json_output = Command::new("nft")
+        .args(["-j", "list", "table", family, table])
+        .output()
+        .map_err(|error| std::io::Error::other(format!("nft table JSON owner verify: {error}")))?;
+    if !json_output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "nft table JSON owner verify returned status {}: {}",
+            json_output.status,
+            String::from_utf8_lossy(&json_output.stderr).trim(),
+        )));
+    }
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).map_err(|error| {
+        std::io::Error::other(format!("parse nft table JSON owner verify output: {error}"))
+    })?;
+    let mut rule_count = 0usize;
+    if let Some(entries) = json.get("nftables").and_then(serde_json::Value::as_array) {
+        for entry in entries {
+            let Some(rule) = entry.get("rule") else {
+                continue;
+            };
+            rule_count += 1;
+            if rule.get("comment").and_then(serde_json::Value::as_str) != Some(owner_marker) {
+                return Err(std::io::Error::other(format!(
+                    "nft table {family} {table} contains a rule without owner marker {owner_marker:?}"
+                )));
+            }
+        }
+    }
+    if rule_count != expected_rule_count {
+        return Err(std::io::Error::other(format!(
+            "nft table {family} {table} has {rule_count} rule(s), expected {expected_rule_count}"
         )));
     }
     Ok(())

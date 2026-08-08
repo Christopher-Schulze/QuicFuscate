@@ -46,6 +46,8 @@ struct RoutingOwnership {
     ipv4_forwarding_previous: Option<String>,
     ipv6_forwarding_previous: Option<String>,
     state_prepared: bool,
+    firewall_owner_generation: Option<String>,
+    firewall_configured: bool,
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -79,11 +81,34 @@ struct PersistedRoutingOwnership {
     wan_interface: String,
     server_ipv6: Option<String>,
     ipv6_prefix_len: u8,
+    firewall_backend: crate::firewall::FirewallBackend,
+    firewall_owner_generation: String,
+    client_to_client_enabled: bool,
     ipv4_address: BoolMutation,
     ipv6_address: Option<BoolMutation>,
     link_up: BoolMutation,
     ipv4_forwarding: TextMutation,
     ipv6_forwarding: Option<TextMutation>,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedFirewallOwnership {
+    schema: u8,
+    owner_generation: String,
+    tun_name: String,
+    firewall_backend: crate::firewall::FirewallBackend,
+    firewall_identity: String,
+    owner_boot_id: String,
+    owner_pid: u32,
+    owner_start_time: u64,
+    server_ipv4: String,
+    netmask: String,
+    wan_interface: String,
+    server_ipv6: Option<String>,
+    ipv6_prefix_len: u8,
+    client_to_client_enabled: bool,
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -116,6 +141,65 @@ fn active_owner_matches(
 }
 
 #[cfg(any(test, target_os = "linux"))]
+fn firewall_identity(backend: crate::firewall::FirewallBackend) -> &'static str {
+    match backend {
+        crate::firewall::FirewallBackend::Iptables => {
+            "iptables:filter/QUICFUSCATE_RT,nat/QUICFUSCATE_NAT,ip6tables"
+        }
+        crate::firewall::FirewallBackend::Nftables => "nftables:inet/quicfuscate_rt",
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn firewall_owner_generation(
+    tun_name: &str,
+    owner_boot_id: &str,
+    owner_pid: u32,
+    owner_start_time: u64,
+) -> String {
+    format!(
+        "{}-{}-{}-{}",
+        owner_boot_id.replace('-', ""),
+        owner_pid,
+        owner_start_time,
+        routing_state_filename(tun_name).trim_end_matches(".json")
+    )
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirewallClaimDecision {
+    Claim,
+    RejectForeignRoutingOwner,
+    RejectActiveOwner,
+    RejectStaleOwner,
+    RejectExistingResource,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn firewall_claim_decision(
+    requested_tun: &str,
+    existing_routing_tun: Option<&str>,
+    existing_owner_active: bool,
+    existing_owner_present: bool,
+    fixed_resource_present: bool,
+) -> FirewallClaimDecision {
+    if existing_routing_tun.is_some_and(|tun_name| tun_name != requested_tun) {
+        FirewallClaimDecision::RejectForeignRoutingOwner
+    } else if existing_owner_present {
+        if existing_owner_active {
+            FirewallClaimDecision::RejectActiveOwner
+        } else {
+            FirewallClaimDecision::RejectStaleOwner
+        }
+    } else if fixed_resource_present {
+        FirewallClaimDecision::RejectExistingResource
+    } else {
+        FirewallClaimDecision::Claim
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
 fn routing_state_filename(tun_name: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(tun_name.len() * 2 + 5);
@@ -132,6 +216,15 @@ fn routing_state_filename(tun_name: &str) -> String {
 
 #[cfg(target_os = "linux")]
 const ROUTING_STATE_DIR: &str = "/run/quicfuscate/routing";
+
+#[cfg(target_os = "linux")]
+const ROUTING_FIREWALL_OWNER_FILE: &str = "firewall-owner.json";
+
+#[cfg(any(test, target_os = "linux"))]
+const ROUTING_STATE_SCHEMA: u8 = 3;
+
+#[cfg(any(test, target_os = "linux"))]
+const FIREWALL_OWNER_SCHEMA: u8 = 1;
 
 #[cfg(target_os = "linux")]
 fn default_routing_state_path(tun_name: &str) -> PathBuf {
@@ -159,6 +252,9 @@ pub(super) fn persisted_tun_names() -> Result<Vec<String>, RoutingError> {
             })?
             .path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some(ROUTING_FIREWALL_OWNER_FILE) {
             continue;
         }
         if !std::fs::symlink_metadata(&path)
@@ -533,7 +629,7 @@ impl RoutingManager {
         &self,
         state: &PersistedRoutingOwnership,
     ) -> Result<(), RoutingError> {
-        if state.schema != 2 {
+        if state.schema != ROUTING_STATE_SCHEMA {
             return Err(RoutingError::CommandFailed(format!(
                 "unsupported durable routing state schema {}",
                 state.schema
@@ -546,6 +642,8 @@ impl RoutingManager {
             || state.wan_interface != self.wan_interface
             || state.server_ipv6 != expected_ipv6
             || state.ipv6_prefix_len != self.ipv6_prefix_len
+            || state.firewall_backend != self.firewall_backend
+            || state.client_to_client_enabled != self.client_to_client_enabled
         {
             return Err(RoutingError::CommandFailed(
                 "durable routing state identity does not match the requested server routing"
@@ -569,6 +667,11 @@ impl RoutingManager {
         {
             return Err(RoutingError::CommandFailed(
                 "durable routing state has an invalid process ownership identity".to_string(),
+            ));
+        }
+        if state.firewall_owner_generation.trim().is_empty() {
+            return Err(RoutingError::CommandFailed(
+                "durable routing state has no firewall ownership generation".to_string(),
             ));
         }
         if !state.ipv4_address.after || !state.link_up.after {
@@ -706,7 +809,325 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "linux")]
+    fn firewall_owner_path(&self) -> PathBuf {
+        Path::new(ROUTING_STATE_DIR).join(ROUTING_FIREWALL_OWNER_FILE)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_firewall_ownership(&self) -> Result<Option<PersistedFirewallOwnership>, RoutingError> {
+        let path = self.firewall_owner_path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(RoutingError::CommandFailed(format!(
+                    "inspect durable firewall ownership {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        if !metadata.file_type().is_file() {
+            return Err(RoutingError::CommandFailed(format!(
+                "durable firewall ownership {} is not a regular file",
+                path.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                return Err(RoutingError::CommandFailed(format!(
+                    "durable firewall ownership {} has unsafe mode {:o}",
+                    path.display(),
+                    mode
+                )));
+            }
+        }
+        let contents = std::fs::read_to_string(&path).map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "read durable firewall ownership {}: {error}",
+                path.display()
+            ))
+        })?;
+        let owner =
+            serde_json::from_str::<PersistedFirewallOwnership>(&contents).map_err(|error| {
+                RoutingError::CommandFailed(format!(
+                    "parse durable firewall ownership {}: {error}",
+                    path.display()
+                ))
+            })?;
+        Self::validate_firewall_owner_shape(&owner)?;
+        Ok(Some(owner))
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn validate_firewall_owner_shape(
+        owner: &PersistedFirewallOwnership,
+    ) -> Result<(), RoutingError> {
+        if owner.schema != FIREWALL_OWNER_SCHEMA {
+            return Err(RoutingError::CommandFailed(format!(
+                "unsupported durable firewall ownership schema {}",
+                owner.schema
+            )));
+        }
+        if owner.tun_name.is_empty()
+            || owner.owner_boot_id.trim().is_empty()
+            || owner.owner_pid == 0
+            || owner.owner_start_time == 0
+            || owner.owner_generation.trim().is_empty()
+            || owner.firewall_identity != firewall_identity(owner.firewall_backend)
+        {
+            return Err(RoutingError::CommandFailed(
+                "durable firewall ownership has an invalid identity".to_string(),
+            ));
+        }
+        let expected_generation = firewall_owner_generation(
+            &owner.tun_name,
+            &owner.owner_boot_id,
+            owner.owner_pid,
+            owner.owner_start_time,
+        );
+        if owner.owner_generation != expected_generation {
+            return Err(RoutingError::CommandFailed(
+                "durable firewall ownership generation does not match its process identity"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_firewall_owner_for_manager(
+        &self,
+        owner: &PersistedFirewallOwnership,
+    ) -> Result<(), RoutingError> {
+        Self::validate_firewall_owner_shape(owner)?;
+        if owner.tun_name != self.tun_name
+            || owner.firewall_backend != self.firewall_backend
+            || owner.server_ipv4 != self.server_ip.to_string()
+            || owner.netmask != self.netmask.to_string()
+            || owner.wan_interface != self.wan_interface
+            || owner.server_ipv6 != self.server_ipv6.map(|address| address.to_string())
+            || owner.ipv6_prefix_len != self.ipv6_prefix_len
+            || owner.client_to_client_enabled != self.client_to_client_enabled
+        {
+            return Err(RoutingError::CommandFailed(
+                "durable firewall ownership identity does not match the requested server routing"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn firewall_owner_from_state(state: &PersistedRoutingOwnership) -> PersistedFirewallOwnership {
+        PersistedFirewallOwnership {
+            schema: FIREWALL_OWNER_SCHEMA,
+            owner_generation: state.firewall_owner_generation.clone(),
+            tun_name: state.tun_name.clone(),
+            firewall_backend: state.firewall_backend,
+            firewall_identity: firewall_identity(state.firewall_backend).to_string(),
+            owner_boot_id: state.owner_boot_id.clone(),
+            owner_pid: state.owner_pid,
+            owner_start_time: state.owner_start_time,
+            server_ipv4: state.server_ipv4.clone(),
+            netmask: state.netmask.clone(),
+            wan_interface: state.wan_interface.clone(),
+            server_ipv6: state.server_ipv6.clone(),
+            ipv6_prefix_len: state.ipv6_prefix_len,
+            client_to_client_enabled: state.client_to_client_enabled,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn persist_firewall_ownership(
+        &self,
+        owner: &PersistedFirewallOwnership,
+    ) -> Result<(), RoutingError> {
+        use std::io::Write;
+
+        let path = self.firewall_owner_path();
+        let bytes = serde_json::to_vec_pretty(owner).map_err(|error| {
+            RoutingError::CommandFailed(format!("serialize durable firewall ownership: {error}"))
+        })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "create durable firewall ownership {}: {error}",
+                path.display()
+            ))
+        })?;
+        if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+            let _ = std::fs::remove_file(&path);
+            return Err(RoutingError::CommandFailed(format!(
+                "write durable firewall ownership {}: {error}",
+                path.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    let _ = std::fs::remove_file(&path);
+                    RoutingError::CommandFailed(format!(
+                        "secure durable firewall ownership {}: {error}",
+                        path.display()
+                    ))
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove_firewall_ownership(
+        &self,
+        expected: &PersistedFirewallOwnership,
+    ) -> Result<(), RoutingError> {
+        let path = self.firewall_owner_path();
+        let Some(current) = self.read_firewall_ownership()? else {
+            return Err(RoutingError::CommandFailed(format!(
+                "durable firewall ownership {} is missing; refusing release",
+                path.display()
+            )));
+        };
+        if &current != expected {
+            return Err(RoutingError::CommandFailed(
+                "durable firewall ownership changed externally; refusing release".to_string(),
+            ));
+        }
+        std::fs::remove_file(&path).map_err(|error| {
+            RoutingError::CommandFailed(format!(
+                "remove durable firewall ownership {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reject_other_routing_owners(&self) -> Result<(), RoutingError> {
+        for tun_name in persisted_tun_names()? {
+            if firewall_claim_decision(&self.tun_name, Some(&tun_name), false, false, false)
+                == FirewallClaimDecision::RejectForeignRoutingOwner
+            {
+                return Err(RoutingError::CommandFailed(format!(
+                    "durable routing state for TUN {tun_name} already exists; one server firewall owner per network namespace is supported"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixed_firewall_resource_present(&self) -> Result<bool, RoutingError> {
+        for program in ["iptables", "ip6tables"] {
+            for (table, parent, owned) in [
+                ("filter", "FORWARD", Self::IPTABLES_FILTER_CHAIN),
+                ("nat", "POSTROUTING", Self::IPTABLES_NAT_CHAIN),
+            ] {
+                let (jumps, chain) =
+                    crate::firewall::inspect_iptables_owned(program, table, parent, owned)
+                        .map_err(RoutingError::CommandFailed)?;
+                if jumps > 0 || chain {
+                    return Ok(true);
+                }
+            }
+        }
+        crate::firewall::nft_table_exists("inet", Self::NFT_RT_TABLE)
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_fixed_firewall_resources_absent(&self) -> Result<(), RoutingError> {
+        let fixed_resource_present = self.fixed_firewall_resource_present()?;
+        if firewall_claim_decision(&self.tun_name, None, false, false, fixed_resource_present)
+            == FirewallClaimDecision::RejectExistingResource
+        {
+            return Err(RoutingError::CommandFailed(
+                "fixed QuicFuscate server firewall identity already exists; refusing replacement or collision"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn claim_firewall_ownership(
+        &self,
+        state: &PersistedRoutingOwnership,
+    ) -> Result<(), RoutingError> {
+        let owner = Self::firewall_owner_from_state(state);
+        self.ensure_ownership_directory()?;
+        match self.persist_firewall_ownership(&owner) {
+            Ok(()) => {}
+            Err(error) => {
+                if self.firewall_owner_path().exists() {
+                    let existing = self.read_firewall_ownership()?.ok_or_else(|| {
+                        RoutingError::CommandFailed(
+                            "durable firewall ownership disappeared during collision check"
+                                .to_string(),
+                        )
+                    })?;
+                    let current_boot_id = Self::linux_boot_id()?;
+                    let owner_active = active_owner_matches(
+                        &existing.owner_boot_id,
+                        &current_boot_id,
+                        existing.owner_start_time,
+                        Self::linux_process_start_time(existing.owner_pid)?,
+                    );
+                    match firewall_claim_decision(
+                        &self.tun_name,
+                        Some(&existing.tun_name),
+                        owner_active,
+                        true,
+                        false,
+                    ) {
+                        FirewallClaimDecision::RejectActiveOwner => {
+                            return Err(RoutingError::CommandFailed(format!(
+                                "durable firewall identity is owned by active PID {}",
+                                existing.owner_pid
+                            )));
+                        }
+                        FirewallClaimDecision::RejectForeignRoutingOwner => {
+                            return Err(RoutingError::CommandFailed(format!(
+                                "durable firewall identity belongs to TUN {}; refusing cross-TUN claim",
+                                existing.tun_name
+                            )));
+                        }
+                        FirewallClaimDecision::RejectStaleOwner => {
+                            return Err(RoutingError::CommandFailed(
+                                "durable firewall identity has a stale owner; explicit stale recovery is required"
+                                    .to_string(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                return Err(error);
+            }
+        }
+        if let Err(error) = self.ensure_fixed_firewall_resources_absent() {
+            let _ = self.remove_firewall_ownership(&owner);
+            return Err(error);
+        }
+        self.ownership
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .firewall_owner_generation = Some(owner.owner_generation);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn prepare_persisted_ownership(&self) -> Result<(), RoutingError> {
+        self.reject_other_routing_owners()?;
         let ipv4_prefix = self.ipv4_prefix_len()?;
         if self.server_ipv6.is_some() && self.ipv6_prefix_len > 128 {
             return Err(RoutingError::UnsupportedConfiguration(format!(
@@ -742,8 +1163,10 @@ impl RoutingManager {
         } else {
             None
         };
+        let firewall_owner_generation =
+            firewall_owner_generation(&self.tun_name, &owner_boot_id, owner_pid, owner_start_time);
         let state = PersistedRoutingOwnership {
-            schema: 2,
+            schema: ROUTING_STATE_SCHEMA,
             tun_name: self.tun_name.clone(),
             interface_index,
             owner_boot_id,
@@ -754,6 +1177,9 @@ impl RoutingManager {
             wan_interface: self.wan_interface.clone(),
             server_ipv6: self.server_ipv6.map(|address| address.to_string()),
             ipv6_prefix_len: self.ipv6_prefix_len,
+            firewall_backend: self.firewall_backend,
+            firewall_owner_generation,
+            client_to_client_enabled: self.client_to_client_enabled,
             ipv4_address: BoolMutation { before: ipv4_address, after: true },
             ipv6_address: ipv6_address.map(|before| BoolMutation { before, after: true }),
             link_up: BoolMutation { before: link_up, after: true },
@@ -762,7 +1188,16 @@ impl RoutingManager {
                 .map(|before| TextMutation { before, after: "1".to_string() }),
         };
         self.validate_persisted_ownership(&state)?;
-        self.persist_ownership(&state)?;
+        self.claim_firewall_ownership(&state)?;
+        if let Err(error) = self.persist_ownership(&state) {
+            let owner = Self::firewall_owner_from_state(&state);
+            let _ = self.remove_firewall_ownership(&owner);
+            return Err(error);
+        }
+        self.ownership
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .firewall_owner_generation = Some(state.firewall_owner_generation.clone());
         self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).state_prepared =
             true;
         Ok(())
@@ -823,11 +1258,26 @@ impl RoutingManager {
 
     #[cfg(target_os = "linux")]
     fn recover_persisted_ownership(&self) -> Result<bool, RoutingError> {
+        self.recover_persisted_ownership_with_active_check(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recover_current_persisted_ownership(&self) -> Result<bool, RoutingError> {
+        self.recover_persisted_ownership_with_active_check(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recover_persisted_ownership_with_active_check(
+        &self,
+        reject_active: bool,
+    ) -> Result<bool, RoutingError> {
         let Some(state) = self.read_persisted_ownership()? else {
             return Ok(false);
         };
         self.validate_persisted_ownership(&state)?;
-        Self::reject_active_owner(&state)?;
+        if reject_active {
+            Self::reject_active_owner(&state)?;
+        }
         let mut failures = Vec::new();
         if self.linux_interface_exists()? {
             if self.linux_interface_index()? != state.interface_index {
@@ -928,6 +1378,72 @@ impl RoutingManager {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    fn current_firewall_owner(&self) -> Result<PersistedFirewallOwnership, RoutingError> {
+        let state = self.read_persisted_ownership()?.ok_or_else(|| {
+            RoutingError::CommandFailed(
+                "durable routing state is missing; refusing firewall mutation".to_string(),
+            )
+        })?;
+        self.validate_persisted_ownership(&state)?;
+        let expected = Self::firewall_owner_from_state(&state);
+        let current = self.read_firewall_ownership()?.ok_or_else(|| {
+            RoutingError::CommandFailed(
+                "durable firewall ownership is missing; refusing firewall mutation".to_string(),
+            )
+        })?;
+        self.validate_firewall_owner_for_manager(&current)?;
+        if current != expected {
+            return Err(RoutingError::CommandFailed(
+                "durable firewall ownership does not match the routing record; refusing mutation"
+                    .to_string(),
+            ));
+        }
+        Ok(current)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_owned_firewall_resource(
+        &self,
+        owner: &PersistedFirewallOwnership,
+    ) -> Result<(), RoutingError> {
+        let subnet = self.calculate_subnet_checked()?;
+        match owner.firewall_backend {
+            crate::firewall::FirewallBackend::Iptables => {
+                self.verify_iptables_family("iptables", &subnet, false)?;
+                if self.server_ipv6.is_some() {
+                    let v6_subnet = self.calculate_ipv6_subnet_checked()?;
+                    self.verify_iptables_family("ip6tables", &v6_subnet, true)?;
+                }
+            }
+            crate::firewall::FirewallBackend::Nftables => {
+                let required_fragments = self.nftables_required_fragments(&subnet);
+                let required_refs =
+                    required_fragments.iter().map(String::as_str).collect::<Vec<_>>();
+                crate::firewall::verify_nft_table_owner(
+                    "inet",
+                    Self::NFT_RT_TABLE,
+                    &Self::nft_owner_marker(&owner.owner_generation),
+                    &required_refs,
+                    self.nftables_expected_rule_count(),
+                )
+                .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_owned_firewall_absent(&self) -> Result<(), RoutingError> {
+        if self.fixed_firewall_resource_present()? {
+            return Err(RoutingError::CommandFailed(
+                "managed firewall resources remain without a configured ownership generation; refusing guessed cleanup"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Set up routing rules.
     #[cfg(target_os = "linux")]
     pub fn setup(&self) -> Result<(), RoutingError> {
@@ -944,9 +1460,15 @@ impl RoutingManager {
             } else {
                 None
             };
+            self.current_firewall_owner()?;
+            self.ensure_fixed_firewall_resources_absent()?;
             match self.firewall_backend {
                 crate::firewall::FirewallBackend::Nftables => {
                     self.setup_nftables(&subnet)?;
+                    self.ownership
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .firewall_configured = true;
                     log::info!(
                         "Routing configured (nftables): {} via {}",
                         subnet,
@@ -955,6 +1477,10 @@ impl RoutingManager {
                 }
                 crate::firewall::FirewallBackend::Iptables => {
                     self.setup_iptables(&subnet)?;
+                    self.ownership
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .firewall_configured = true;
                     log::info!(
                         "Routing configured (iptables): {} via {}",
                         subnet,
@@ -1029,120 +1555,116 @@ impl RoutingManager {
     /// the durable ownership contract.
     #[cfg(target_os = "linux")]
     pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
-        let durable_state_present = self.recover_persisted_ownership()?;
+        let mut owned_firewall = None;
+        let durable_state_present = if let Some(state) = self.read_persisted_ownership()? {
+            self.validate_persisted_ownership(&state)?;
+            let owner = self.current_firewall_owner()?;
+            Self::reject_active_owner(&state)?;
+            self.verify_owned_firewall_resource(&owner)?;
+            self.recover_persisted_ownership()?;
+            owned_firewall = Some(owner);
+            true
+        } else if let Some(owner) = self.read_firewall_ownership()? {
+            if owner.tun_name != self.tun_name {
+                return Err(RoutingError::CommandFailed(format!(
+                    "durable firewall identity belongs to TUN {}; refusing cross-TUN stale cleanup",
+                    owner.tun_name
+                )));
+            }
+            let current_boot_id = Self::linux_boot_id()?;
+            if active_owner_matches(
+                &owner.owner_boot_id,
+                &current_boot_id,
+                owner.owner_start_time,
+                Self::linux_process_start_time(owner.owner_pid)?,
+            ) {
+                return Err(RoutingError::CommandFailed(format!(
+                    "durable firewall identity is still owned by active PID {}",
+                    owner.owner_pid
+                )));
+            }
+            if self.fixed_firewall_resource_present()? {
+                return Err(RoutingError::CommandFailed(
+                    "durable firewall ownership exists without its routing record; refusing guessed firewall cleanup"
+                        .to_string(),
+                ));
+            }
+            self.remove_firewall_ownership(&owner)?;
+            false
+        } else {
+            false
+        };
         let subnet = self.calculate_subnet();
         log::info!("Cleaning up stale routing rules for subnet {}", subnet);
         let mut failures = Vec::new();
 
-        // Current releases own dedicated chains. Keep the exact legacy-rule
-        // cleanup below for crash residue left by older releases.
-        Self::record_cleanup_failure(&mut failures, Self::cleanup_iptables_owned("iptables"));
-        Self::record_cleanup_failure(&mut failures, Self::cleanup_iptables_owned("ip6tables"));
+        if let Some(owner) = owned_firewall.as_ref() {
+            match self.verify_owned_firewall_resource(owner) {
+                Ok(()) => {
+                    let firewall_result = match owner.firewall_backend {
+                        crate::firewall::FirewallBackend::Nftables => self.teardown_nftables(),
+                        crate::firewall::FirewallBackend::Iptables => self.teardown_iptables(),
+                    };
+                    Self::record_cleanup_failure(&mut failures, firewall_result);
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
 
-        Self::record_cleanup_failure(
-            &mut failures,
-            Self::cleanup_legacy_iptables_rule(
-                "iptables",
-                "nat",
-                "POSTROUTING",
-                &["-s", &subnet, "-o", &self.wan_interface, "-j", "MASQUERADE"],
-            ),
-        );
-        Self::record_cleanup_failure(
-            &mut failures,
-            Self::cleanup_legacy_iptables_rule(
-                "iptables",
-                "filter",
-                "FORWARD",
-                &["-i", &self.tun_name, "-o", &self.wan_interface, "-j", "ACCEPT"],
-            ),
-        );
-        for destination in self.ipv4_fanout_destinations() {
+        if durable_state_present {
             Self::record_cleanup_failure(
                 &mut failures,
                 Self::cleanup_legacy_iptables_rule(
                     "iptables",
-                    "filter",
-                    "FORWARD",
-                    &[
-                        "-i",
-                        &self.tun_name,
-                        "-o",
-                        &self.tun_name,
-                        "-d",
-                        &destination,
-                        "-j",
-                        "ACCEPT",
-                    ],
-                ),
-            );
-        }
-        for action in ["ACCEPT", "DROP"] {
-            Self::record_cleanup_failure(
-                &mut failures,
-                Self::cleanup_legacy_iptables_rule(
-                    "iptables",
-                    "filter",
-                    "FORWARD",
-                    &["-i", &self.tun_name, "-o", &self.tun_name, "-j", action],
-                ),
-            );
-        }
-        Self::record_cleanup_failure(
-            &mut failures,
-            Self::cleanup_legacy_iptables_rule(
-                "iptables",
-                "filter",
-                "FORWARD",
-                &[
-                    "-i",
-                    &self.wan_interface,
-                    "-o",
-                    &self.tun_name,
-                    "-m",
-                    "state",
-                    "--state",
-                    "RELATED,ESTABLISHED",
-                    "-j",
-                    "ACCEPT",
-                ],
-            ),
-        );
-
-        // IPv6 stale cleanup
-        if self.is_ipv6_enabled() {
-            let v6_subnet = self.calculate_ipv6_subnet();
-            Self::record_cleanup_failure(
-                &mut failures,
-                Self::cleanup_legacy_iptables_rule(
-                    "ip6tables",
                     "nat",
                     "POSTROUTING",
-                    &["-s", &v6_subnet, "-o", &self.wan_interface, "-j", "MASQUERADE"],
+                    &["-s", &subnet, "-o", &self.wan_interface, "-j", "MASQUERADE"],
                 ),
             );
             Self::record_cleanup_failure(
                 &mut failures,
                 Self::cleanup_legacy_iptables_rule(
-                    "ip6tables",
+                    "iptables",
                     "filter",
                     "FORWARD",
                     &["-i", &self.tun_name, "-o", &self.wan_interface, "-j", "ACCEPT"],
                 ),
             );
+            for destination in self.ipv4_fanout_destinations() {
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    Self::cleanup_legacy_iptables_rule(
+                        "iptables",
+                        "filter",
+                        "FORWARD",
+                        &[
+                            "-i",
+                            &self.tun_name,
+                            "-o",
+                            &self.tun_name,
+                            "-d",
+                            &destination,
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    ),
+                );
+            }
+            for action in ["ACCEPT", "DROP"] {
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    Self::cleanup_legacy_iptables_rule(
+                        "iptables",
+                        "filter",
+                        "FORWARD",
+                        &["-i", &self.tun_name, "-o", &self.tun_name, "-j", action],
+                    ),
+                );
+            }
             Self::record_cleanup_failure(
                 &mut failures,
                 Self::cleanup_legacy_iptables_rule(
-                    "ip6tables",
-                    "filter",
-                    "FORWARD",
-                    &["-i", &self.tun_name, "-o", &self.tun_name, "-d", "ff00::/8", "-j", "ACCEPT"],
-                ),
-            );
-            Self::record_cleanup_failure(
-                &mut failures,
-                Self::cleanup_legacy_iptables_rule(
-                    "ip6tables",
+                    "iptables",
                     "filter",
                     "FORWARD",
                     &[
@@ -1159,38 +1681,86 @@ impl RoutingManager {
                     ],
                 ),
             );
-            for action in ["ACCEPT", "DROP"] {
+
+            // IPv6 stale cleanup
+            if self.is_ipv6_enabled() {
+                let v6_subnet = self.calculate_ipv6_subnet();
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    Self::cleanup_legacy_iptables_rule(
+                        "ip6tables",
+                        "nat",
+                        "POSTROUTING",
+                        &["-s", &v6_subnet, "-o", &self.wan_interface, "-j", "MASQUERADE"],
+                    ),
+                );
                 Self::record_cleanup_failure(
                     &mut failures,
                     Self::cleanup_legacy_iptables_rule(
                         "ip6tables",
                         "filter",
                         "FORWARD",
-                        &["-i", &self.tun_name, "-o", &self.tun_name, "-j", action],
+                        &["-i", &self.tun_name, "-o", &self.wan_interface, "-j", "ACCEPT"],
                     ),
                 );
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    Self::cleanup_legacy_iptables_rule(
+                        "ip6tables",
+                        "filter",
+                        "FORWARD",
+                        &[
+                            "-i",
+                            &self.tun_name,
+                            "-o",
+                            &self.tun_name,
+                            "-d",
+                            "ff00::/8",
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    ),
+                );
+                Self::record_cleanup_failure(
+                    &mut failures,
+                    Self::cleanup_legacy_iptables_rule(
+                        "ip6tables",
+                        "filter",
+                        "FORWARD",
+                        &[
+                            "-i",
+                            &self.wan_interface,
+                            "-o",
+                            &self.tun_name,
+                            "-m",
+                            "state",
+                            "--state",
+                            "RELATED,ESTABLISHED",
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    ),
+                );
+                for action in ["ACCEPT", "DROP"] {
+                    Self::record_cleanup_failure(
+                        &mut failures,
+                        Self::cleanup_legacy_iptables_rule(
+                            "ip6tables",
+                            "filter",
+                            "FORWARD",
+                            &["-i", &self.tun_name, "-o", &self.tun_name, "-j", action],
+                        ),
+                    );
+                }
             }
-        }
-
-        // Delete the dedicated nftables table exactly when nft is installed.
-        if Command::new("nft")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            Self::record_cleanup_failure(
-                &mut failures,
-                crate::firewall::delete_nft_table("inet", Self::NFT_RT_TABLE)
-                    .map(|_| ())
-                    .map_err(|error| RoutingError::CommandFailed(error.to_string())),
-            );
         }
 
         Self::finish_cleanup(failures)?;
         if durable_state_present {
             self.remove_ownership_file()?;
+            if let Some(owner) = owned_firewall.as_ref() {
+                self.remove_firewall_ownership(owner)?;
+            }
         }
         log::info!("Stale routing cleanup complete");
         Ok(())
@@ -1211,11 +1781,6 @@ impl RoutingManager {
     #[cfg(target_os = "linux")]
     pub fn teardown(&self) -> Result<(), RoutingError> {
         let mut failures = Vec::new();
-        let firewall_result = match self.firewall_backend {
-            crate::firewall::FirewallBackend::Nftables => self.teardown_nftables(),
-            crate::firewall::FirewallBackend::Iptables => self.teardown_iptables(),
-        };
-        Self::record_cleanup_failure(&mut failures, firewall_result);
 
         let (
             ipv4_address_added,
@@ -1224,6 +1789,7 @@ impl RoutingManager {
             ipv4_previous,
             ipv6_previous,
             state_prepared,
+            firewall_configured,
         ) = {
             let ownership = self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
@@ -1233,7 +1799,20 @@ impl RoutingManager {
                 ownership.ipv4_forwarding_previous.clone(),
                 ownership.ipv6_forwarding_previous.clone(),
                 ownership.state_prepared,
+                ownership.firewall_configured,
             )
+        };
+
+        let owned_firewall = if state_prepared {
+            let owner = self.current_firewall_owner()?;
+            if firewall_configured {
+                self.verify_owned_firewall_resource(&owner)?;
+            } else {
+                self.ensure_owned_firewall_absent()?;
+            }
+            Some(owner)
+        } else {
+            None
         };
 
         if !state_prepared && ipv4_address_added {
@@ -1306,7 +1885,7 @@ impl RoutingManager {
             }
         }
         if state_prepared {
-            let recovery = match self.recover_persisted_ownership() {
+            let recovery = match self.recover_current_persisted_ownership() {
                 Ok(true) => Ok(()),
                 Ok(false) => Err(RoutingError::CommandFailed(format!(
                     "durable routing state {} is missing; refusing host-state cleanup",
@@ -1315,6 +1894,21 @@ impl RoutingManager {
                 Err(error) => Err(error),
             };
             Self::record_cleanup_failure(&mut failures, recovery);
+        }
+
+        if state_prepared && firewall_configured {
+            if let Some(owner) = owned_firewall.as_ref() {
+                match self.verify_owned_firewall_resource(owner) {
+                    Ok(()) => {
+                        let firewall_result = match self.firewall_backend {
+                            crate::firewall::FirewallBackend::Nftables => self.teardown_nftables(),
+                            crate::firewall::FirewallBackend::Iptables => self.teardown_iptables(),
+                        };
+                        Self::record_cleanup_failure(&mut failures, firewall_result);
+                    }
+                    Err(error) => failures.push(error.to_string()),
+                }
+            }
         }
 
         Self::finish_cleanup(failures)?;
@@ -1326,8 +1920,19 @@ impl RoutingManager {
             })?;
             self.validate_persisted_ownership(&state)?;
             self.remove_ownership_file()?;
+            if let Some(owner) = owned_firewall.as_ref() {
+                self.remove_firewall_ownership(owner)?;
+            }
             self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).state_prepared =
                 false;
+            self.ownership
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .firewall_owner_generation = None;
+            self.ownership
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .firewall_configured = false;
         }
 
         log::info!("Routing rules removed");
@@ -1547,19 +2152,12 @@ impl RoutingManager {
         subnet: &str,
         ipv6: bool,
     ) -> Result<(), RoutingError> {
-        Self::cleanup_iptables_owned(program)?;
         let rules = self.iptables_ruleset(subnet, ipv6, true, true);
-        let rollback = |error: RoutingError| match Self::cleanup_iptables_owned(program) {
-            Ok(()) => error,
-            Err(cleanup_error) => {
-                RoutingError::CommandFailed(format!("{error}; rollback failed: {cleanup_error}"))
-            }
-        };
         if let Err(error) = Self::apply_iptables_restore(restore_program, &rules) {
-            return Err(rollback(error));
+            return Err(error);
         }
         if let Err(error) = self.verify_iptables_family(program, subnet, ipv6) {
-            return Err(rollback(error));
+            return Err(error);
         }
         Ok(())
     }
@@ -1571,6 +2169,84 @@ impl RoutingManager {
         subnet: &str,
         ipv6: bool,
     ) -> Result<(), RoutingError> {
+        let verify_chain = |table: &str, chain: &str, expected: &[String]| {
+            let actual = crate::firewall::iptables_chain_rules(program, table, chain)
+                .map_err(RoutingError::CommandFailed)?;
+            let actual = actual
+                .iter()
+                .map(|rule| rule.split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>();
+            let expected = expected
+                .iter()
+                .map(|rule| rule.split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>();
+            if actual != expected {
+                return Err(RoutingError::CommandFailed(format!(
+                    "{program} {table}/{chain} rules changed externally: expected {expected:?}, found {actual:?}"
+                )));
+            }
+            Ok(())
+        };
+        for (table, parent, chain) in [
+            ("filter", "FORWARD", Self::IPTABLES_FILTER_CHAIN),
+            ("nat", "POSTROUTING", Self::IPTABLES_NAT_CHAIN),
+        ] {
+            let (jump_count, chain_exists) =
+                crate::firewall::inspect_iptables_owned(program, table, parent, chain)
+                    .map_err(RoutingError::CommandFailed)?;
+            if jump_count != 1 || !chain_exists {
+                return Err(RoutingError::CommandFailed(format!(
+                    "{program} {table}/{parent} ownership is incomplete: jumps={jump_count}, chain_exists={chain_exists}"
+                )));
+            }
+        }
+        let expected_nat = vec![format!(
+            "-A {} -s {} -o {} -j MASQUERADE",
+            Self::IPTABLES_NAT_CHAIN,
+            subnet,
+            self.wan_interface
+        )];
+        let isolation_action = if self.client_to_client_enabled { "ACCEPT" } else { "DROP" };
+        let mut expected_filter = vec![format!(
+            "-A {} -i {} -o {} -j ACCEPT",
+            Self::IPTABLES_FILTER_CHAIN,
+            self.tun_name,
+            self.wan_interface
+        )];
+        if ipv6 {
+            expected_filter.push(format!(
+                "-A {} -i {} -o {} -d ff00::/8 -j ACCEPT",
+                Self::IPTABLES_FILTER_CHAIN,
+                self.tun_name,
+                self.tun_name
+            ));
+        } else {
+            for destination in self.ipv4_fanout_destinations() {
+                expected_filter.push(format!(
+                    "-A {} -i {} -o {} -d {} -j ACCEPT",
+                    Self::IPTABLES_FILTER_CHAIN,
+                    self.tun_name,
+                    self.tun_name,
+                    destination
+                ));
+            }
+        }
+        expected_filter.push(format!(
+            "-A {} -i {} -o {} -j {}",
+            Self::IPTABLES_FILTER_CHAIN,
+            self.tun_name,
+            self.tun_name,
+            isolation_action
+        ));
+        expected_filter.push(format!(
+            "-A {} -i {} -o {} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+            Self::IPTABLES_FILTER_CHAIN,
+            self.wan_interface,
+            self.tun_name
+        ));
+        verify_chain("nat", Self::IPTABLES_NAT_CHAIN, &expected_nat)?;
+        verify_chain("filter", Self::IPTABLES_FILTER_CHAIN, &expected_filter)?;
+
         let require = |table: &str, chain: &str, rule_args: &[&str]| -> Result<(), RoutingError> {
             let exists =
                 crate::firewall::iptables_rule_exists_exact(program, table, chain, rule_args)
@@ -1733,16 +2409,33 @@ impl RoutingManager {
 
     #[cfg(any(test, target_os = "linux"))]
     fn nftables_ruleset(&self, subnet: &str) -> String {
+        self.nftables_ruleset_with_owner(subnet, "unowned")
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn nft_owner_marker(owner_generation: &str) -> String {
+        format!("quicfuscate-owner-{owner_generation}")
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn nftables_ruleset_with_owner(&self, subnet: &str, owner_generation: &str) -> String {
         let v6_masquerade = if self.is_ipv6_enabled() {
             let v6_subnet = self.calculate_ipv6_subnet();
-            format!("ip6 saddr {} oifname \"{}\" masquerade\n", v6_subnet, self.wan_interface)
+            format!(
+                "ip6 saddr {} oifname \"{}\" masquerade comment \"{}\"\n",
+                v6_subnet,
+                self.wan_interface,
+                Self::nft_owner_marker(owner_generation)
+            )
         } else {
             String::new()
         };
         let v6_fanout = if self.is_ipv6_enabled() {
             format!(
-                "iifname \"{}\" oifname \"{}\" ip6 daddr ff00::/8 accept\n",
-                self.tun_name, self.tun_name
+                "iifname \"{}\" oifname \"{}\" ip6 daddr ff00::/8 accept comment \"{}\"\n",
+                self.tun_name,
+                self.tun_name,
+                Self::nft_owner_marker(owner_generation)
             )
         } else {
             String::new()
@@ -1752,21 +2445,23 @@ impl RoutingManager {
 
         format!(
             "table inet {table} {{\n\
+             \x20   comment \"{owner_marker}\"\n\
              \x20   chain postrouting {{\n\
              \x20       type nat hook postrouting priority 100; policy accept;\n\
-             \x20       ip saddr {subnet} oifname \"{wan}\" masquerade\n\
+             \x20       ip saddr {subnet} oifname \"{wan}\" masquerade comment \"{owner_marker}\"\n\
              \x20       {v6_masquerade}\
              \x20   }}\n\
              \x20   chain forward {{\n\
              \x20       type filter hook forward priority 0; policy accept;\n\
-             \x20       iifname \"{tun}\" oifname \"{tun}\" ip daddr {{ 255.255.255.255, {directed_broadcast}, 224.0.0.0/4 }} accept\n\
+             \x20       iifname \"{tun}\" oifname \"{tun}\" ip daddr {{ 255.255.255.255, {directed_broadcast}, 224.0.0.0/4 }} accept comment \"{owner_marker}\"\n\
              \x20       {v6_fanout}\
-             \x20       iifname \"{tun}\" oifname \"{tun}\" {isolation_action}\n\
-             \x20       iifname \"{tun}\" oifname \"{wan}\" accept\n\
-             \x20       iifname \"{wan}\" oifname \"{tun}\" ct state established,related accept\n\
+             \x20       iifname \"{tun}\" oifname \"{tun}\" {isolation_action} comment \"{owner_marker}\"\n\
+             \x20       iifname \"{tun}\" oifname \"{wan}\" accept comment \"{owner_marker}\"\n\
+             \x20       iifname \"{wan}\" oifname \"{tun}\" ct state established,related accept comment \"{owner_marker}\"\n\
              \x20   }}\n\
              }}\n",
             table = Self::NFT_RT_TABLE,
+            owner_marker = Self::nft_owner_marker(owner_generation),
             subnet = subnet,
             wan = self.wan_interface,
             v6_masquerade = v6_masquerade,
@@ -1778,32 +2473,22 @@ impl RoutingManager {
     }
 
     #[cfg(any(test, target_os = "linux"))]
-    fn nftables_replacement_transaction(ruleset: &str, table_exists: bool) -> String {
+    fn nftables_initial_transaction(
+        ruleset: &str,
+        table_exists: bool,
+    ) -> Result<String, RoutingError> {
         if table_exists {
-            format!("delete table inet {}\n{}", Self::NFT_RT_TABLE, ruleset)
+            Err(RoutingError::CommandFailed(format!(
+                "nftables table inet {} already exists; refusing replacement",
+                Self::NFT_RT_TABLE
+            )))
         } else {
-            ruleset.to_string()
+            Ok(ruleset.to_string())
         }
     }
 
-    /// Set up nftables NAT and forwarding rules.
-    ///
-    /// Creates a single `inet` table with two chains:
-    /// - `postrouting`: NAT masquerade for VPN subnet traffic leaving the WAN
-    ///   interface (covers both IPv4 and, when dual-stack, IPv6).
-    /// - `forward`: allows TUN→WAN forwarding and established WAN→TUN return
-    ///   traffic.
-    ///
-    /// The entire table is applied atomically via `nft -f -` (stdin batch).
-    #[cfg(target_os = "linux")]
-    fn setup_nftables(&self, subnet: &str) -> Result<(), RoutingError> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        let ruleset = self.nftables_ruleset(subnet);
-        let table_exists = crate::firewall::nft_table_exists("inet", Self::NFT_RT_TABLE)
-            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
-        let transaction = Self::nftables_replacement_transaction(&ruleset, table_exists);
+    #[cfg(any(test, target_os = "linux"))]
+    fn nftables_required_fragments(&self, subnet: &str) -> Vec<String> {
         let mut required_fragments = vec![
             "chain postrouting".to_string(),
             "chain forward".to_string(),
@@ -1843,6 +2528,38 @@ impl RoutingManager {
                 self.tun_name, self.tun_name
             ));
         }
+        required_fragments
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn nftables_expected_rule_count(&self) -> usize {
+        if self.server_ipv6.is_some() {
+            7
+        } else {
+            5
+        }
+    }
+
+    /// Set up nftables NAT and forwarding rules.
+    ///
+    /// Creates a single `inet` table with two chains:
+    /// - `postrouting`: NAT masquerade for VPN subnet traffic leaving the WAN
+    ///   interface (covers both IPv4 and, when dual-stack, IPv6).
+    /// - `forward`: allows TUN→WAN forwarding and established WAN→TUN return
+    ///   traffic.
+    ///
+    /// The entire table is applied atomically via `nft -f -` (stdin batch).
+    #[cfg(target_os = "linux")]
+    fn setup_nftables(&self, subnet: &str) -> Result<(), RoutingError> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let owner = self.current_firewall_owner()?;
+        let ruleset = self.nftables_ruleset_with_owner(subnet, &owner.owner_generation);
+        let table_exists = crate::firewall::nft_table_exists("inet", Self::NFT_RT_TABLE)
+            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+        let transaction = Self::nftables_initial_transaction(&ruleset, table_exists)?;
+        let required_fragments = self.nftables_required_fragments(subnet);
 
         let mut child = Command::new("nft")
             .arg("-f")
@@ -1877,8 +2594,14 @@ impl RoutingManager {
             )));
         }
         let required_refs = required_fragments.iter().map(String::as_str).collect::<Vec<_>>();
-        crate::firewall::verify_nft_table_rules("inet", Self::NFT_RT_TABLE, &required_refs)
-            .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
+        crate::firewall::verify_nft_table_owner(
+            "inet",
+            Self::NFT_RT_TABLE,
+            &Self::nft_owner_marker(&owner.owner_generation),
+            &required_refs,
+            self.nftables_expected_rule_count(),
+        )
+        .map_err(|error| RoutingError::CommandFailed(error.to_string()))?;
 
         log::debug!("nftables routing table created (inet {})", Self::NFT_RT_TABLE);
         Ok(())
@@ -2256,7 +2979,7 @@ mod tests {
     #[test]
     fn durable_routing_state_rejects_unknown_fields() {
         let state = PersistedRoutingOwnership {
-            schema: 2,
+            schema: ROUTING_STATE_SCHEMA,
             tun_name: "qfserver0".to_string(),
             interface_index: 17,
             owner_boot_id: "boot-id".to_string(),
@@ -2267,6 +2990,9 @@ mod tests {
             wan_interface: "eth0".to_string(),
             server_ipv6: None,
             ipv6_prefix_len: 64,
+            firewall_backend: crate::firewall::FirewallBackend::Iptables,
+            firewall_owner_generation: firewall_owner_generation("qfserver0", "boot-id", 42, 7),
+            client_to_client_enabled: false,
             ipv4_address: BoolMutation { before: false, after: true },
             ipv6_address: None,
             link_up: BoolMutation { before: false, after: true },
@@ -2277,6 +3003,9 @@ mod tests {
         let decoded: PersistedRoutingOwnership =
             serde_json::from_value(encoded.clone()).expect("state round trip");
         assert_eq!(decoded, state);
+        let owner = RoutingManager::firewall_owner_from_state(&state);
+        RoutingManager::validate_firewall_owner_shape(&owner).expect("firewall owner shape");
+        assert_eq!(owner.owner_generation, state.firewall_owner_generation);
 
         let mut with_unknown = encoded;
         with_unknown
@@ -2284,6 +3013,88 @@ mod tests {
             .expect("state object")
             .insert("unexpected".to_string(), serde_json::Value::Bool(true));
         assert!(serde_json::from_value::<PersistedRoutingOwnership>(with_unknown).is_err());
+    }
+
+    #[test]
+    fn durable_firewall_generation_is_bound_to_tun_and_process_identity() {
+        let first = firewall_owner_generation("qfserver0", "boot", 42, 7);
+        let second_tun = firewall_owner_generation("qfserver1", "boot", 42, 7);
+        let second_process = firewall_owner_generation("qfserver0", "boot", 42, 8);
+
+        assert_ne!(first, second_tun);
+        assert_ne!(first, second_process);
+        assert_eq!(
+            firewall_identity(crate::firewall::FirewallBackend::Iptables),
+            "iptables:filter/QUICFUSCATE_RT,nat/QUICFUSCATE_NAT,ip6tables"
+        );
+        assert_eq!(
+            firewall_identity(crate::firewall::FirewallBackend::Nftables),
+            "nftables:inet/quicfuscate_rt"
+        );
+    }
+
+    #[test]
+    fn firewall_claim_rejects_cross_tun_and_fixed_resource_collisions() {
+        assert_eq!(
+            firewall_claim_decision("qfserver0", Some("qfserver1"), false, false, false),
+            FirewallClaimDecision::RejectForeignRoutingOwner
+        );
+        assert_eq!(
+            firewall_claim_decision("qfserver0", Some("qfserver0"), true, true, false),
+            FirewallClaimDecision::RejectActiveOwner
+        );
+        assert_eq!(
+            firewall_claim_decision("qfserver0", Some("qfserver0"), false, true, false),
+            FirewallClaimDecision::RejectStaleOwner
+        );
+        assert_eq!(
+            firewall_claim_decision("qfserver0", None, false, false, true),
+            FirewallClaimDecision::RejectExistingResource
+        );
+        assert_eq!(
+            firewall_claim_decision("qfserver0", None, false, false, false),
+            FirewallClaimDecision::Claim
+        );
+    }
+
+    #[test]
+    fn durable_firewall_owner_shape_rejects_generation_tampering() {
+        let mut owner = PersistedFirewallOwnership {
+            schema: FIREWALL_OWNER_SCHEMA,
+            owner_generation: firewall_owner_generation("qfserver0", "boot", 42, 7),
+            tun_name: "qfserver0".to_string(),
+            firewall_backend: crate::firewall::FirewallBackend::Nftables,
+            firewall_identity: firewall_identity(crate::firewall::FirewallBackend::Nftables)
+                .to_string(),
+            owner_boot_id: "boot".to_string(),
+            owner_pid: 42,
+            owner_start_time: 7,
+            server_ipv4: "10.8.0.1".to_string(),
+            netmask: "255.255.255.0".to_string(),
+            wan_interface: "eth0".to_string(),
+            server_ipv6: None,
+            ipv6_prefix_len: 64,
+            client_to_client_enabled: false,
+        };
+        assert!(RoutingManager::validate_firewall_owner_shape(&owner).is_ok());
+        owner.owner_generation.push('x');
+        assert!(RoutingManager::validate_firewall_owner_shape(&owner).is_err());
+    }
+
+    #[test]
+    fn nftables_required_fragments_cover_fixed_server_rules() {
+        let manager = RoutingManager::new(
+            "qfserver0".to_string(),
+            Ipv4Addr::new(10, 8, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            "eth0".to_string(),
+        );
+        let fragments = manager.nftables_required_fragments("10.8.0.0/24");
+        assert!(fragments.iter().any(|fragment| fragment.contains("masquerade")));
+        assert!(fragments.iter().any(|fragment| fragment.contains("established,related")));
+        let ruleset = manager.nftables_ruleset_with_owner("10.8.0.0/24", "generation");
+        assert!(ruleset.contains("comment \"quicfuscate-owner-generation\""));
+        assert_eq!(manager.nftables_expected_rule_count(), 5);
     }
 
     #[test]
@@ -2510,7 +3321,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nftables_replacement_is_one_delete_and_recreate_transaction() {
+    fn test_nftables_initial_transaction_rejects_existing_table() {
         let manager = RoutingManager::new(
             "qfserver0".to_string(),
             Ipv4Addr::new(10, 8, 0, 1),
@@ -2518,14 +3329,11 @@ mod tests {
             "eth0".to_string(),
         );
         let rules = manager.nftables_ruleset("10.8.0.0/24");
-        let replacement = RoutingManager::nftables_replacement_transaction(&rules, true);
-        let initial = RoutingManager::nftables_replacement_transaction(&rules, false);
+        let existing = RoutingManager::nftables_initial_transaction(&rules, true);
+        let initial = RoutingManager::nftables_initial_transaction(&rules, false);
 
-        assert!(
-            replacement.starts_with("delete table inet quicfuscate_rt\ntable inet quicfuscate_rt")
-        );
-        assert_eq!(replacement.matches("delete table inet quicfuscate_rt").count(), 1);
-        assert_eq!(initial, rules);
+        assert!(existing.is_err());
+        assert!(matches!(initial, Ok(value) if value == rules));
     }
 
     #[cfg(target_os = "macos")]
