@@ -1966,8 +1966,8 @@ impl QuicFuscateConnection {
         // (e.g. a MASQUE datagram was queued but conn.send was blocked), every
         // new send() call would generate another FEC packet and push it onto
         // outgoing_fec_packets without ever draining the buffer.
-        if !path_control_pending {
-            if !self.outgoing_fec_packets.is_empty() {
+        if !path_control_pending
+            && !self.outgoing_fec_packets.is_empty() {
                 // Write from the queued item without removing it. A capacity or serialization
                 // failure must leave the packet exactly where it was, in order, for the next
                 // send; popping first silently discarded a locally queued packet that was never
@@ -1991,7 +1991,6 @@ impl QuicFuscateConnection {
                 self.record_paced_packet(now, len, congestion_controlled);
                 return Ok((len, send_info));
             }
-        }
 
         // Cover PING: inject post-handshake keepalive if the interval has elapsed.
         // The PING lands in pending_control and is flushed by flush_pending_control_frames()

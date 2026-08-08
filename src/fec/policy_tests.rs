@@ -490,8 +490,10 @@ fn runtime_policy_clamps_raw_environment_values() {
 
 #[test]
 fn config_validate_rejects_oversized_burst_window_and_invalid_window_entries() {
-    let mut config = FecConfig::default();
-    config.burst_window = crate::fec::wire::MAX_SOURCE_COUNT as usize + 1;
+    let mut config = FecConfig {
+        burst_window: crate::fec::wire::MAX_SOURCE_COUNT as usize + 1,
+        ..FecConfig::default()
+    };
     assert!(config.validate().is_err());
 
     config.burst_window = 16;
@@ -512,8 +514,7 @@ lambda = 1.5
 #[test]
 fn adaptive_fec_falls_back_to_default_on_invalid_config() {
     let _env_lock = acquire_env_lock();
-    let mut invalid = FecConfig::default();
-    invalid.burst_window = 0;
+    let invalid = FecConfig { burst_window: 0, ..FecConfig::default() };
     let fec = AdaptiveFec::new(invalid);
     assert_eq!(fec.current_mode(), FecMode::Zero);
 }

@@ -1932,8 +1932,7 @@ mod tests {
             (InterfaceType::Tap, "only \"tun\" is supported"),
             (InterfaceType::RawSocket, "only \"tun\" is supported"),
         ] {
-            let mut interface = InterfaceConfig::default();
-            interface.interface_type = interface_type;
+            let interface = InterfaceConfig { interface_type, ..InterfaceConfig::default() };
             let error =
                 interface.validate().expect_err("legacy non-TUN interface types must fail closed");
             assert!(

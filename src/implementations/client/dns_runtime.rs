@@ -345,7 +345,7 @@ mod tests {
                 .expect("client config");
         config.listen_port = 5353;
 
-        let result = ClientDnsRuntime::start_with_config(&runtime.handle(), config, "tun0");
+        let result = ClientDnsRuntime::start_with_config(runtime.handle(), config, "tun0");
 
         assert!(matches!(result, Err(EngineError::Config(_))));
     }
@@ -355,7 +355,7 @@ mod tests {
         let runtime = test_runtime();
 
         let result = ClientDnsRuntime::start_with_config(
-            &runtime.handle(),
+            runtime.handle(),
             DnsProxyConfig::default(),
             "tun0",
         );

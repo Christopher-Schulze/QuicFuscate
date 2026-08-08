@@ -763,9 +763,12 @@ mod tests {
         backend.disconnect().expect("clocked backend disconnect");
     }
 
-    fn config_capture_backend(
-    ) -> (ClientBackend, Arc<StdMutex<Option<TunDeviceConfig>>>, Arc<StdMutex<Vec<RouteConfig>>>)
-    {
+    /// Shared slot the capture platform writes the applied TUN configuration into.
+    type CapturedTunConfig = Arc<StdMutex<Option<TunDeviceConfig>>>;
+    /// Shared slot the capture platform writes the applied routes into.
+    type CapturedRoutes = Arc<StdMutex<Vec<RouteConfig>>>;
+
+    fn config_capture_backend() -> (ClientBackend, CapturedTunConfig, CapturedRoutes) {
         let tun_config = Arc::new(StdMutex::new(None));
         let routes = Arc::new(StdMutex::new(Vec::new()));
         let platform = ConfigCapturePlatform {

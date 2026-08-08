@@ -844,7 +844,7 @@ mod tests {
         assert_eq!(format_header(&header, &mut output), Err(ConnectionError::InvalidPacket));
         assert_eq!(output, original);
         assert_eq!(
-            format_short_header(&vec![0x33; MAX_CID_LEN + 1], false, &mut output),
+            format_short_header(&[0x33; MAX_CID_LEN + 1], false, &mut output),
             Err(ConnectionError::InvalidPacket)
         );
         assert_eq!(output, original);
@@ -913,7 +913,7 @@ mod tests {
             generate_version_negotiation_packet(
                 &[],
                 &[crate::transport::PROTOCOL_VERSION],
-                &vec![0u8; MAX_CID_LEN + 1],
+                &[0u8; MAX_CID_LEN + 1],
                 &[],
             ),
             Err(ConnectionError::InvalidPacket)

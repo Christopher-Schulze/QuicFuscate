@@ -64,9 +64,13 @@ fn validate_config(config: &TunConfig) -> Result<(), TunError> {
 
 /// State of every resource owned by a Wintun lifecycle.
 ///
+/// Windows-only: every constructor and consumer lives inside the `target_os = "windows"` module
+/// below, so compiling it elsewhere produced a type nothing could reach.
+///
 /// A cleanup failure must leave the corresponding resource pending so an
 /// explicit retry can attempt the same operation again. The last failure is
 /// retained for Drop diagnostics and native residue investigation.
+#[cfg(target_os = "windows")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct WintunCleanupState {
     shutdown_signaled: bool,
@@ -77,6 +81,7 @@ struct WintunCleanupState {
     last_error: Option<String>,
 }
 
+#[cfg(target_os = "windows")]
 impl WintunCleanupState {
     fn is_complete(&self) -> bool {
         self.session_ended
@@ -1235,6 +1240,8 @@ mod tests {
         );
     }
 
+    /// Windows-only: the cleanup state type only exists on that target.
+    #[cfg(target_os = "windows")]
     #[test]
     fn wintun_cleanup_state_retains_failed_resources_for_retry() {
         let mut state = WintunCleanupState {

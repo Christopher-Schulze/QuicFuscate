@@ -2011,6 +2011,11 @@ mod macos_tun {
         }
     }
 
+    /// Open the platform-native macOS utun device.
+    pub fn open_platform_tun(cfg: &TunConfig) -> Result<Box<dyn TunDevice>, TunError> {
+        Ok(Box::new(MacTun::open(cfg)?))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -2035,11 +2040,6 @@ mod macos_tun {
 
             assert!(MacTun::writev_iovecs(&mut hdr, &payload, 7).is_err());
         }
-    }
-
-    /// Open the platform-native macOS utun device.
-    pub fn open_platform_tun(cfg: &TunConfig) -> Result<Box<dyn TunDevice>, TunError> {
-        Ok(Box::new(MacTun::open(cfg)?))
     }
 }
 

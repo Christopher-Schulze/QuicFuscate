@@ -869,7 +869,7 @@ mod tests {
     /// construction and define the documented one-time peak.
     #[test]
     fn test_gf16_inverse_table_footprint_matches_documented_sizes() {
-        let retained_bytes = gf16_inverse_table().len() * std::mem::size_of::<u16>();
+        let retained_bytes = std::mem::size_of_val(gf16_inverse_table());
         assert_eq!(retained_bytes, 131_072, "retained GF16 inverse table must stay 128 KiB");
 
         let exponent_bytes = GF16_FIELD_ORDER * std::mem::size_of::<u16>();

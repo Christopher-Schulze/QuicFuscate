@@ -410,7 +410,7 @@ fn mlockall_flags_for_limit(current_limit: libc::rlim_t) -> libc::c_int {
     mlockall_flags_for_budget(if current_limit == libc::RLIM_INFINITY {
         MemoryLockLimit::Unlimited
     } else {
-        MemoryLockLimit::Finite(current_limit as u64)
+        MemoryLockLimit::Finite(current_limit)
     })
 }
 
@@ -459,7 +459,7 @@ fn classify_memlock_limit(
         Ok(current_limit) if current_limit == libc::RLIM_INFINITY => {
             Ok((MemoryLockLimit::Unlimited, false))
         }
-        Ok(current_limit) => Ok((MemoryLockLimit::Finite(current_limit as u64), false)),
+        Ok(current_limit) => Ok((MemoryLockLimit::Finite(current_limit), false)),
         Err(error) if failure_policy == MemoryLockFailurePolicy::BestEffort => {
             log::warn!("RLIMIT_MEMLOCK query failed: {error}; using MCL_CURRENT fallback");
             Ok((MemoryLockLimit::Unknown, true))

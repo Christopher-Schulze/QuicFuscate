@@ -807,9 +807,8 @@ fn test_simd_dispatch_selection_matches_feature_matrix_and_thresholds() {
 
     let incomplete_vbmi2 =
         CpuFeatures { avx512f: true, avx512vbmi2: true, ..CpuFeatures::default() };
-    assert_eq!(
-        incomplete_vbmi2.simd_dispatch_matrix().avx512_vbmi2,
-        false,
+    assert!(
+        !incomplete_vbmi2.simd_dispatch_matrix().avx512_vbmi2,
         "VBMI2 must require AVX512F, AVX512BW, and AVX512VBMI2"
     );
     assert_eq!(fec_simd_level_for_features(&incomplete_vbmi2), SimdLevel::None);
@@ -1255,8 +1254,8 @@ fn test_wiedemann_large_system_uses_scalar_fallback() {
 
     let dim = 64;
     let mut matrix = vec![vec![0u8; dim]; dim];
-    for i in 0..dim {
-        matrix[i][i] = 1;
+    for (index, row) in matrix.iter_mut().enumerate() {
+        row[index] = 1;
     }
 
     let rhs = vec![0xAAu8; dim];
@@ -1275,8 +1274,8 @@ fn test_wiedemann_large_system_uses_scalar_fallback() {
     let scalar_after = telemetry::WIEDEMANN_SCALAR_OPS.get();
     let amx_after = telemetry::WIEDEMANN_AMX_OPS.get();
 
-    assert!(usage_after >= usage_before + 1, "usage counter should increase");
-    assert!(scalar_after >= scalar_before + 1, "scalar fallback counter should increase");
+    assert!(usage_after > usage_before, "usage counter should increase");
+    assert!(scalar_after > scalar_before, "scalar fallback counter should increase");
     assert_eq!(amx_after, amx_before, "inactive AMX path must not claim an operation");
 }
 

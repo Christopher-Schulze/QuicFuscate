@@ -21,15 +21,32 @@ jobs:
     
     strategy:
       matrix:
+        # Every non-platform-specific feature in Cargo.toml must appear here. The
+        # feature-matrix-coverage job below fails if a feature is added to Cargo.toml without
+        # coverage, so the matrix cannot silently fall behind the crate.
         features:
           - ""
+          - "rust-tests"
           - "unsafe_rust"
+          - "unsafe_rust,rust-tests"
           - "unsafe_rust,compression_zstd_ffi"
           - "simd-selfcheck"
           - "internal_wiedemann"
           - "internal_wiedemann,unsafe_rust"
           - "internal_wiedemann,unsafe_rust,compression_zstd_ffi"
+          - "internal_avx10_preview"
           - "io_uring"
+          - "throughput"
+          - "orchestrator"
+          - "zero_copy_dgram"
+          - "benches"
+          - "masque-tests,rust-tests"
+          - "tun-tests,rust-tests"
+          - "dev-certs"
+          - "std,prefetch,aggressive_inline,stream_ring_buffer"
+          # Aggregate features, linted as the umbrellas callers actually enable.
+          - "test-suite"
+          - "experimental"
 
     steps:
     - uses: actions/checkout@v7
@@ -82,3 +99,66 @@ jobs:
 
       - name: Verify Cargo feature taxonomy contract
         run: bash scripts/audits/verify-cargo-feature-taxonomy.sh
+
+  feature-matrix-coverage:
+    name: Clippy Matrix Covers Every Cargo Feature
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Prove no supported feature is omitted from the Clippy matrix
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - <<'CHECK'
+        import re
+        import sys
+        import tomllib
+        from pathlib import Path
+
+        # Features that cannot be linted on this runner, each with the reason it is excluded.
+        PLATFORM_EXCLUDED = {
+            "tun-windows": "Windows-only TUN backend",
+            "tun-ios": "iOS-only TUN backend",
+        }
+        # Role features are on by default and are exercised through the default lane.
+        DEFAULT_COVERED = {"client", "server", "rate_limiter", "default"}
+
+        manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+        declared = set(manifest.get("features", {})) - {"default"}
+
+        workflow = Path(".github/workflows/clippy-matrix.yml").read_text(encoding="utf-8")
+        block = workflow.split("features:", 1)[1].split("steps:", 1)[0]
+        covered = set()
+        for line in block.splitlines():
+            entry = re.match(r'\s*-\s*"([^"]*)"\s*$', line)
+            if not entry:
+                continue
+            for feature in entry.group(1).split(","):
+                feature = feature.strip()
+                if feature:
+                    covered.add(feature)
+
+        missing = sorted(declared - covered - set(PLATFORM_EXCLUDED) - DEFAULT_COVERED)
+        if missing:
+            print("error: Cargo.toml features have no Clippy matrix coverage:", file=sys.stderr)
+            for feature in missing:
+                print(f"  - {feature}", file=sys.stderr)
+            print(
+                "add them to the matrix, or to PLATFORM_EXCLUDED with a stated reason",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        stale = sorted(covered - declared)
+        if stale:
+            print("error: Clippy matrix lists features Cargo.toml does not declare:", file=sys.stderr)
+            for feature in stale:
+                print(f"  - {feature}", file=sys.stderr)
+            raise SystemExit(1)
+
+        for feature, reason in sorted(PLATFORM_EXCLUDED.items()):
+            print(f"excluded={feature} reason={reason}")
+        print(f"covered_features={len(declared)}")
+        print("RESULT: PASS - every supported feature has Clippy matrix coverage")
+        CHECK

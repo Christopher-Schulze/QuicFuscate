@@ -1558,27 +1558,36 @@ mod tests {
     #[cfg(feature = "rate_limiter")]
     #[test]
     fn blacklist_config_rejects_values_above_absolute_resource_caps() {
-        let mut config = BlacklistConfig::default();
-        config.default_ttl_secs =
-            crate::implementations::server::limits::MAX_BLACKLIST_TTL_SECS + 1;
+        use crate::implementations::server::limits;
+
+        let config = BlacklistConfig {
+            default_ttl_secs: limits::MAX_BLACKLIST_TTL_SECS + 1,
+            ..BlacklistConfig::default()
+        };
         assert!(config.validate().is_err());
 
-        let mut config = BlacklistConfig::default();
-        config.sync_interval_secs =
-            crate::implementations::server::limits::MAX_BLACKLIST_SYNC_INTERVAL_SECS + 1;
+        let config = BlacklistConfig {
+            sync_interval_secs: limits::MAX_BLACKLIST_SYNC_INTERVAL_SECS + 1,
+            ..BlacklistConfig::default()
+        };
         assert!(config.validate().is_err());
 
-        let mut config = BlacklistConfig::default();
-        config.max_body_bytes = crate::implementations::server::limits::MAX_BLACKLIST_BODY_BYTES + 1;
+        let config = BlacklistConfig {
+            max_body_bytes: limits::MAX_BLACKLIST_BODY_BYTES + 1,
+            ..BlacklistConfig::default()
+        };
         assert!(config.validate().is_err());
 
-        let mut config = BlacklistConfig::default();
-        config.max_entries = crate::implementations::server::limits::MAX_BLACKLIST_ENTRIES + 1;
+        let config = BlacklistConfig {
+            max_entries: limits::MAX_BLACKLIST_ENTRIES + 1,
+            ..BlacklistConfig::default()
+        };
         assert!(config.validate().is_err());
 
-        let mut config = BlacklistConfig::default();
-        config.request_timeout_secs =
-            crate::implementations::server::limits::MAX_BLACKLIST_REQUEST_TIMEOUT_SECS + 1;
+        let config = BlacklistConfig {
+            request_timeout_secs: limits::MAX_BLACKLIST_REQUEST_TIMEOUT_SECS + 1,
+            ..BlacklistConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 

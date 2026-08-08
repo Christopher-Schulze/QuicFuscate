@@ -1067,7 +1067,13 @@ impl MemoryPool {
         self.update_metrics();
     }
 
-    #[cfg(any(test, feature = "rust-tests"))]
+
+    /// Snapshot of `(capacity, in_use, available)` for pool-accounting assertions.
+    ///
+    /// Gated to `cfg(test)` rather than `rust-tests`: every consumer is an in-crate `#[cfg(test)]`
+    /// module, so the wider gate compiled it into `rust-tests` library builds where nothing could
+    /// reach it, which is what the strict all-target lint reported as dead code.
+    #[cfg(test)]
     pub(crate) fn accounting_snapshot(&self) -> (usize, usize, usize) {
         (
             self.capacity.load(Ordering::Acquire),

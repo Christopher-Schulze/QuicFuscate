@@ -396,7 +396,7 @@ impl BatchProcessor {
         // ManuallyDrop prevents this temporary view from closing the caller-owned
         // descriptor on either success or an early send error.
         let sock = std::mem::ManuallyDrop::new(unsafe { UdpSocket::from_raw_fd(socket) });
-        let result = accelerate::send_batch(&*sock, packets);
+        let result = accelerate::send_batch(&sock, packets);
 
         match result {
             Ok(sent) => {

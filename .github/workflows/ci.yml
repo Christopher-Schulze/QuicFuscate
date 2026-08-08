@@ -178,7 +178,10 @@ jobs:
       - name: Run Clippy
         shell: bash
         run: |
-          cargo clippy --workspace --all-targets --locked -- -D warnings
+          # The documented contract is strict all-target Clippy with rust-tests. Without that
+          # feature the test-only targets and every rust-tests-gated path were linted in their
+          # disabled form, so a warning there could not fail this gate.
+          cargo clippy --workspace --all-targets --locked --features rust-tests -- -D warnings
 
       - name: Verify release compilation
         shell: bash

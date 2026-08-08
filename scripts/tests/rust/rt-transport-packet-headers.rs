@@ -6,21 +6,6 @@ use quicfuscate::transport::packet::{
     MAX_CID_LEN,
 };
 
-fn scalar_encode_packet_number(packet_number: u64, length: usize, output: &mut [u8]) -> usize {
-    match length {
-        1 => output[0] = packet_number as u8,
-        2 => output[..2].copy_from_slice(&(packet_number as u16).to_be_bytes()),
-        3 => {
-            output[0] = (packet_number >> 16) as u8;
-            output[1] = (packet_number >> 8) as u8;
-            output[2] = packet_number as u8;
-        }
-        4 => output[..4].copy_from_slice(&(packet_number as u32).to_be_bytes()),
-        _ => panic!("test vector length must be between 1 and 4"),
-    }
-    length
-}
-
 #[test]
 fn short_header_roundtrip() {
     let hdr = Header {
@@ -130,7 +115,7 @@ fn malformed_headers_fail_before_output_mutation() {
     assert_eq!(format_header(&hdr, &mut out), Err(ConnectionError::InvalidPacket));
     assert_eq!(out, original);
     assert_eq!(
-        format_short_header(&vec![0xCC; MAX_CID_LEN + 1], false, &mut out),
+        format_short_header(&[0xCC; MAX_CID_LEN + 1], false, &mut out),
         Err(ConnectionError::InvalidPacket)
     );
     assert_eq!(out, original);

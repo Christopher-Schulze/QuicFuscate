@@ -1999,7 +1999,7 @@ fn with_override<T>(val: Option<&str>, f: impl FnOnce() -> T) -> T {
 mod tests {
     use super::{
         bitslice_policy_tag, dispatch_bitslice, with_override, AmxCapability, AmxSignals,
-        CpuFeatures, CpuProfile, FeatureDetector, PROFILE_OVERRIDE, TEST_FEC_KERNEL_OVERRIDE,
+        CpuFeatures, FeatureDetector, PROFILE_OVERRIDE, TEST_FEC_KERNEL_OVERRIDE,
     };
     use crate::simd::CpuFeature;
     use std::sync::{Arc, Barrier};
@@ -2139,9 +2139,8 @@ mod tests {
 
     #[test]
     fn simd_dispatch_matrix_requires_every_target_feature() {
-        let mut features = CpuFeatures::default();
+        let mut features = CpuFeatures { avx512f: true, ..CpuFeatures::default() };
 
-        features.avx512f = true;
         assert!(!features.simd_dispatch_matrix().avx512_ack);
         features.avx512vl = true;
         assert!(features.simd_dispatch_matrix().avx512_ack);

@@ -331,7 +331,7 @@ mod mlock_tests {
             // Null is filtered before any architecture lane runs.
             prefetch(std::ptr::null(), hint);
 
-            let buffer = vec![0u8; 128];
+            let buffer = [0u8; 128];
             prefetch(buffer.as_ptr(), hint);
             prefetch(buffer[64..].as_ptr(), hint);
 
