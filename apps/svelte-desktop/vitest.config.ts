@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sveltekit } from "@sveltejs/kit/vite";
@@ -10,7 +11,24 @@ const jestDomVitestPath = fileURLToPath(import.meta.resolve("@testing-library/je
 const testingLibrarySveltePath = fileURLToPath(import.meta.resolve("@testing-library/svelte"));
 const lucideSveltePath = fileURLToPath(import.meta.resolve("@lucide/svelte"));
 
+// Mirror the single release-version owner used by vite.config.ts. Components read the
+// injected `__RELEASE_VERSION__`, so without this define every test that renders one
+// fails with a ReferenceError rather than a real assertion.
+function releaseVersion(): string {
+  const manifest = resolve(workspaceRoot, "Cargo.toml");
+  const source = readFileSync(manifest, "utf8");
+  const workspace = source.split(/^\[workspace\.package\]\s*$/m)[1];
+  const found = workspace?.match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1];
+  if (!found) {
+    throw new Error(`cannot read the release version from ${manifest}`);
+  }
+  return found;
+}
+
 export default defineConfig({
+  define: {
+    __RELEASE_VERSION__: JSON.stringify(releaseVersion()),
+  },
   plugins: [sveltekit(), svelteTesting()],
   resolve: {
     conditions: ["browser"],

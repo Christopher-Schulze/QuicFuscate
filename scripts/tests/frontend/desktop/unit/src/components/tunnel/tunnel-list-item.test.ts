@@ -213,4 +213,44 @@ describe("tunnel/TunnelListItem", () => {
       expect(screen.getByText("XX")).toBeInTheDocument();
     });
   });
+
+  describe("SNI fallback for an empty configured SNI", () => {
+    test("renders the host of a bracketed IPv6 endpoint, not a bracket", async () => {
+      // Splitting on ":" rendered "[" for this record, hiding the endpoint identity
+      // while IPv4 and hostname records looked correct.
+      renderItem({ tunnel: makeTunnel({ sni: "", remote: "[2001:db8::1]:4433" }) });
+
+      await waitFor(() => {
+        expect(screen.getByText("2001:db8::1")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("[")).not.toBeInTheDocument();
+    });
+
+    test("renders the host of an IPv4 endpoint", async () => {
+      renderItem({ tunnel: makeTunnel({ sni: "", remote: "203.0.113.10:4433" }) });
+
+      await waitFor(() => {
+        expect(screen.getByText("203.0.113.10")).toBeInTheDocument();
+      });
+    });
+
+    test("keeps a configured SNI authoritative for an IPv6 endpoint", async () => {
+      renderItem({
+        tunnel: makeTunnel({ sni: "vpn.example.com", remote: "[2001:db8::1]:4433" }),
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("vpn.example.com")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("2001:db8::1")).not.toBeInTheDocument();
+    });
+
+    test("falls back to a placeholder for an unparseable endpoint", async () => {
+      renderItem({ tunnel: makeTunnel({ sni: "", remote: "not a valid endpoint" }) });
+
+      await waitFor(() => {
+        expect(screen.getByText("-")).toBeInTheDocument();
+      });
+    });
+  });
 });

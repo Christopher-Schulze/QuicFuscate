@@ -3,6 +3,7 @@
   import { ripple } from "@quicfuscate/ui";
   import { cn } from "@quicfuscate/ui";
   import { countryCodeToFlag } from "$lib/format";
+  import { parseRemote } from "$lib/tunnel-validators";
   import { WHITE_PILL, PILL_BACKDROP } from "$lib/pill-styles";
   import { displayStealthMode, displayFecMode, displayCcMode, displayMtu } from "$lib/policy-display";
   import type { TunnelConfig, TunnelPolicyView } from "$lib/types";
@@ -19,7 +20,9 @@
   let { tunnel, isSelected, policy, onselect, onconfigure, onremove }: Props = $props();
 
   const flag = $derived(countryCodeToFlag(tunnel.countryCode));
-  const sniDisplay = $derived(tunnel.sni || tunnel.remote.split(":")[0] || "-");
+  // Splitting on ":" is only correct for host:port; for the bracketed IPv6 form
+  // [2001:db8::1]:4433 it renders "[". parseRemote already handles both.
+  const sniDisplay = $derived(tunnel.sni || parseRemote(tunnel.remote)?.server || "-");
 </script>
 
 <div

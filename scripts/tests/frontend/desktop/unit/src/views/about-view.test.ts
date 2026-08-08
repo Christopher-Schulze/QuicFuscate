@@ -1,5 +1,22 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { render, screen, waitFor } from "../../testing-library";
+
+// The About surface reads the injected release version, whose single owner is the
+// workspace package version. Asserting a literal is how this test came to demand
+// v0.2.0 while the product shipped 0.4.4, so it reads the same owner instead.
+const expectedVersion = (() => {
+  const manifest = resolve(__dirname, "../../../../../../../Cargo.toml");
+  const source = readFileSync(manifest, "utf8");
+  const workspace = source.split(/^\[workspace\.package\]\s*$/m)[1];
+  const found = workspace?.match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1];
+  if (!found) {
+    throw new Error(`cannot read the release version from ${manifest}`);
+  }
+  return `v${found}`;
+})();
 
 const detectCpuFeaturesMock = vi.hoisted(() => vi.fn());
 
@@ -41,7 +58,7 @@ describe("desktop about view", () => {
     render(AboutView);
 
     await waitFor(() => {
-      expect(screen.getByText("v0.2.0")).toBeInTheDocument();
+      expect(screen.getByText(expectedVersion)).toBeInTheDocument();
     });
   });
 

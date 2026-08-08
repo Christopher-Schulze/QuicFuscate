@@ -79,13 +79,7 @@ impl ClientConnection {
         // Build optimization config
         let opt_config = Self::build_optimize_config(config)?;
 
-        // Determine SNI
-        let sni = if config.connection.sni.is_empty() {
-            // Extract hostname from remote
-            config.connection.remote.split(':').next().unwrap_or("localhost").to_string()
-        } else {
-            config.connection.sni.clone()
-        };
+        let sni = derive_sni(&config.connection.sni, remote_addr);
 
         log::info!("Connecting to {} (SNI: {}) from {}", remote_addr, sni, local_addr);
 
@@ -409,9 +403,50 @@ impl ClientConnection {
     }
 }
 
+/// Determine the SNI for a connection.
+///
+/// A configured value stays authoritative; only the fallback is derived, and it comes
+/// from the already validated `SocketAddr` rather than from splitting the remote string
+/// on ':'. That split is only correct for `host:port`: for the bracketed IPv6 form
+/// `[2001:db8::1]:4433` it yields `[`, which then travelled into the stealth headers
+/// and the TLS configuration, so a dual-stack deployment failed on one family only.
+/// Because `connection.remote` must parse as a `SocketAddr`, the endpoint is always an
+/// IP literal here, and the fallback is that literal, matching `qf-e2e-client`.
+fn derive_sni(configured: &str, remote: SocketAddr) -> String {
+    if configured.is_empty() {
+        remote.ip().to_string()
+    } else {
+        configured.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sni_falls_back_to_the_endpoint_host_for_every_address_family() {
+        // The old `remote.split(':').next()` derived "[" from a bracketed IPv6
+        // authority and sent that as the SNI, so the defect was invisible on IPv4 and
+        // broke exactly one half of a dual-stack deployment.
+        let ipv4: SocketAddr = "203.0.113.10:4433".parse().expect("IPv4 endpoint");
+        assert_eq!(derive_sni("", ipv4), "203.0.113.10");
+
+        let ipv6: SocketAddr = "[2001:db8::1]:4433".parse().expect("IPv6 endpoint");
+        assert_eq!(derive_sni("", ipv6), "2001:db8::1");
+        assert!(!derive_sni("", ipv6).contains('['), "the bracket is socket syntax, not a host");
+
+        let loopback6: SocketAddr = "[::1]:4433".parse().expect("IPv6 loopback endpoint");
+        assert_eq!(derive_sni("", loopback6), "::1");
+    }
+
+    #[test]
+    fn a_configured_sni_stays_authoritative_for_every_address_family() {
+        for endpoint in ["203.0.113.10:4433", "[2001:db8::1]:4433"] {
+            let remote: SocketAddr = endpoint.parse().expect("endpoint");
+            assert_eq!(derive_sni("vpn.example.com", remote), "vpn.example.com");
+        }
+    }
 
     fn make_client_connection() -> ClientConnection {
         let config = EngineConfig::default();
