@@ -32,11 +32,17 @@ fn main() {
             }
             "--lengths" => {
                 let value = args.next().expect("missing value for --lengths");
-                lengths =
-                    value.split(',').filter_map(|part| part.trim().parse::<usize>().ok()).collect();
+                // `filter_map(.. .ok())` silently dropped every unparseable entry, so
+                // `--lengths 4,oops` measured a different set than was requested.
+                lengths = Vec::new();
+                for part in value.split(',') {
+                    match part.trim().parse::<usize>() {
+                        Ok(length) => lengths.push(length),
+                        Err(error) => fail(format!("--lengths entry {part:?} is invalid: {error}")),
+                    }
+                }
                 if lengths.is_empty() {
-                    eprintln!("--lengths must contain at least one valid integer");
-                    return;
+                    fail("--lengths must contain at least one integer");
                 }
             }
             "--help" | "-h" => {
@@ -44,9 +50,8 @@ fn main() {
                 return;
             }
             other => {
-                eprintln!("unknown argument: {}", other);
                 print_usage();
-                return;
+                fail(format!("unknown argument {other:?}"));
             }
         }
     }
@@ -57,11 +62,15 @@ fn main() {
     println!("# Shuffle benchmark\n# total_ops={} elements", total_ops);
     println!("len\titers\tsimd_MB/s\tscalar_MB/s\tspeedup\tsimd_ms\tscalar_ms");
 
+    // A run where every requested length was skipped printed a header and exited zero,
+    // which is an empty artifact that looks like a measurement.
+    let mut measured = 0usize;
     for len in lengths {
         if !(2..=8).contains(&len) {
             eprintln!("skipping len={} (only 2..=8 supported by NEON path)", len);
             continue;
         }
+        measured += 1;
 
         let iterations = (total_ops / len as u64).max(1);
         let baseline: Vec<u32> = (0..len as u32).collect();
@@ -117,6 +126,10 @@ fn main() {
             scalar_duration.as_secs_f64() * 1000.0
         );
     }
+
+    if measured == 0 {
+        fail("no requested length is supported (only 2..=8); nothing was measured");
+    }
 }
 
 fn scalar_shuffle(data: &mut [u32]) {
@@ -133,6 +146,11 @@ fn bytes_per_second(total_bytes: u64, duration: Duration) -> f64 {
 fn to_mebibytes(bytes_per_second: f64) -> f64 {
     bytes_per_second / (1024.0 * 1024.0)
 }
+
+#[path = "bench_cli/mod.rs"]
+mod bench_cli;
+
+use bench_cli::fail;
 
 fn print_usage() {
     println!("Shuffle benchmark for quicfuscate::accelerate::random::shuffle");

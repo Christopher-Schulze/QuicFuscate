@@ -1,6 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+#[path = "bench_cli/mod.rs"]
+mod bench_cli;
+
+use bench_cli::{fail, parse_in_range, parse_iters};
+
 use quicfuscate::brain::{StealthBrain, StealthBrainConfig};
 use quicfuscate::transport::TransportObserver;
 use quicfuscate::transport::{self, packet};
@@ -20,28 +25,39 @@ fn main() {
     let mut conn =
         packet::connect(Some("example"), scid.as_ref(), local, peer, &mut cfg).expect("connect");
 
-    // Parse CLI args (very simple)
+    // Every malformed value used to fall back to its default and every unknown option
+    // was skipped, so the probe could print DONE without having run what was asked.
     let mut iters: usize = 50;
     let mut sleep_ms: u64 = 10;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
-    while i + 1 < args.len() {
+    while i < args.len() {
         match args[i].as_str() {
             "--iters" => {
-                iters = args[i + 1].parse().unwrap_or(iters);
+                let Some(value) = args.get(i + 1) else {
+                    fail("--iters requires a value");
+                };
+                iters = parse_iters("--iters", value).unwrap_or_else(|error| fail(error)) as usize;
                 i += 2;
             }
             "--jitter" => {
-                // e.g., 5ms
-                let s = &args[i + 1];
-                if s.ends_with("ms") {
-                    sleep_ms = s.trim_end_matches("ms").parse().unwrap_or(sleep_ms);
-                }
+                let Some(value) = args.get(i + 1) else {
+                    fail("--jitter requires a value");
+                };
+                // A value without the `ms` suffix was silently discarded, which looked
+                // exactly like a run at the default jitter.
+                let Some(digits) = value.strip_suffix("ms") else {
+                    fail(format!("--jitter {value:?} must be given in milliseconds, e.g. 5ms"));
+                };
+                sleep_ms = parse_in_range("--jitter", digits, 0, 60_000)
+                    .unwrap_or_else(|error| fail(error));
                 i += 2;
             }
-            _ => {
-                i += 1;
+            "--help" | "-h" => {
+                println!("usage: brain_probe [--iters <n>] [--jitter <n>ms]");
+                return;
             }
+            other => fail(format!("unknown option {other:?}; try --help")),
         }
     }
 

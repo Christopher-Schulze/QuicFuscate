@@ -3,34 +3,72 @@ use quicfuscate::optimize::global_pool;
 use std::collections::HashSet;
 use std::time::Instant;
 
+#[path = "bench_cli/mod.rs"]
+mod bench_cli;
+
+use bench_cli::{fail, parse_in_range, parse_ratio, parse_size};
+
+/// Largest symbol count this model will simulate.
+///
+/// `k` sizes a `HashSet` and is added to the source-id base, so an unbounded value
+/// could allocate without limit or wrap the identifiers the model is built on.
+const MAX_SIM_SYMBOLS: u64 = 1 << 20;
+
+/// Read one optional environment override, refusing a malformed value.
+///
+/// The previous `.ok().and_then(|v| v.parse().ok())` chain fell back to the default,
+/// so an exported typo ran a different workload than the operator configured and the
+/// output never said so.
+fn env_override<T, F>(name: &str, parse: F) -> Option<T>
+where
+    F: Fn(&str) -> Result<T, String>,
+{
+    let raw = std::env::var(name).ok()?;
+    Some(parse(&raw).unwrap_or_else(|error| fail(format!("{name}: {error}"))))
+}
+
 fn main() {
     // Params via env/args
     let args: Vec<String> = std::env::args().collect();
     let mut size: usize =
-        std::env::var("FEC_SIM_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(1200);
-    let mut k: u64 = std::env::var("FEC_SIM_K").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+        env_override("FEC_SIM_SIZE", |raw| parse_size("FEC_SIM_SIZE", raw)).unwrap_or(1200);
+    let mut k: u64 =
+        env_override("FEC_SIM_K", |raw| parse_in_range("FEC_SIM_K", raw, 1, MAX_SIM_SYMBOLS))
+            .unwrap_or(64);
     let mut loss: f64 =
-        std::env::var("FEC_SIM_LOSS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
-    let seed: u64 =
-        std::env::var("FEC_SIM_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(424242);
+        env_override("FEC_SIM_LOSS", |raw| parse_ratio("FEC_SIM_LOSS", raw)).unwrap_or(0.1);
+    let seed: u64 = env_override("FEC_SIM_SEED", |raw| {
+        raw.trim().parse::<u64>().map_err(|error| format!("{raw:?} is not a seed: {error}"))
+    })
+    .unwrap_or(424242);
     let mut i = 1;
-    while i + 1 < args.len() {
+    while i < args.len() {
         match args[i].as_str() {
             "--size" => {
-                size = args[i + 1].parse().unwrap_or(size);
+                let Some(value) = args.get(i + 1) else { fail("--size requires a value") };
+                size = parse_size("--size", value).unwrap_or_else(|error| fail(error));
                 i += 2;
             }
             "--k" => {
-                k = args[i + 1].parse().unwrap_or(k);
+                let Some(value) = args.get(i + 1) else { fail("--k requires a value") };
+                k = parse_in_range("--k", value, 1, MAX_SIM_SYMBOLS)
+                    .unwrap_or_else(|error| fail(error));
                 i += 2;
             }
             "--loss" => {
-                loss = args[i + 1].parse().unwrap_or(loss);
+                let Some(value) = args.get(i + 1) else { fail("--loss requires a value") };
+                // A non-finite or out-of-range loss models nothing; it used to be
+                // accepted and silently produce a meaningless run.
+                loss = parse_ratio("--loss", value).unwrap_or_else(|error| fail(error));
                 i += 2;
             }
-            _ => {
-                i += 1;
+            "--help" | "-h" => {
+                println!(
+                    "usage: fec_sim [--size <bytes>] [--k <1..=1048576>] [--loss <0.0..=1.0>]"
+                );
+                return;
             }
+            other => fail(format!("unknown option {other:?}; try --help")),
         }
     }
 
@@ -45,7 +83,9 @@ fn main() {
     let mut tx = Vec::new();
     // Build K systematic packets
     let source_id_start = 1000u64;
-    let source_id_end = source_id_start + k;
+    let source_id_end = source_id_start
+        .checked_add(k)
+        .unwrap_or_else(|| fail("the requested symbol count overflows the source id range"));
     for i in 0..k {
         let mut buf = pool.alloc();
         let n = size.min(buf.len());

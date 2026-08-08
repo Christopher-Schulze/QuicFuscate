@@ -52,11 +52,34 @@ fn make_dataset(kind: DatasetKind, size: usize) -> Vec<u8> {
     }
 }
 
+#[path = "bench_cli/mod.rs"]
+mod bench_cli;
+
+use bench_cli::{checked_workload, fail, MAX_BENCH_BYTES};
+
 fn main() {
     let opts = Opts::parse();
+    // Clap accepts any `usize` and any `u32`, so the bounds have to be applied here.
+    // Without them the pool sizing below could overflow before allocating, and
+    // `--iterations 0` produced a complete-looking JSON report containing no
+    // compression measurement at all.
+    if opts.size == 0 || opts.size > MAX_BENCH_BYTES {
+        fail(format!("--size must be within 1..={MAX_BENCH_BYTES}, got {}", opts.size));
+    }
+    if opts.iterations == 0 {
+        fail("--iterations must be greater than zero; a zero-work run measures nothing");
+    }
+    checked_workload("workload", opts.size, u64::from(opts.iterations))
+        .unwrap_or_else(|error| fail(error));
+
     let dataset = make_dataset(opts.dataset, opts.size);
     let mgr = CompressionManager::new(CompressionConfig::default());
-    let pool = Arc::new(MemoryPool::new(256, (opts.size + 1024).next_power_of_two()));
+    let block_size = opts
+        .size
+        .checked_add(1024)
+        .map(usize::next_power_of_two)
+        .unwrap_or_else(|| fail("--size overflows the pool block size"));
+    let pool = Arc::new(MemoryPool::new(256, block_size));
 
     // Warmup
     let _ = mgr.compress_to_pool(&pool, &dataset);

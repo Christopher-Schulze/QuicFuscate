@@ -3,6 +3,11 @@ use rand::RngCore;
 use std::env;
 use std::time::Instant;
 
+#[path = "bench_cli/mod.rs"]
+mod bench_cli;
+
+use bench_cli::{checked_workload, fail, parse_iters, parse_size};
+
 fn main() {
     let mut args = env::args().skip(1);
     let mut total_mb: u64 = 128;
@@ -10,30 +15,33 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--total-mb" => {
-                if let Some(val) = args.next() {
-                    total_mb = val.parse().expect("invalid --total-mb value");
-                }
+                let Some(value) = args.next() else {
+                    fail("--total-mb requires a value");
+                };
+                total_mb = parse_iters("--total-mb", &value).unwrap_or_else(|error| fail(error));
             }
             "--block" => {
-                if let Some(val) = args.next() {
-                    block_size = val.parse().expect("invalid --block value");
-                }
+                let Some(value) = args.next() else {
+                    fail("--block requires a value");
+                };
+                block_size = parse_size("--block", &value).unwrap_or_else(|error| fail(error));
             }
-            _ => {
-                eprintln!("usage: rng_bench [--total-mb <u64>] [--block <usize>]");
+            "--help" | "-h" => {
+                println!("usage: rng_bench [--total-mb <u64>] [--block <bytes>]");
                 return;
             }
+            // Ignoring an unknown option ran a different workload than the caller asked
+            // for and still exited zero, so automation accepted it as a valid result.
+            other => fail(format!("unknown option {other:?}; try --help")),
         }
     }
 
-    if block_size == 0 {
-        eprintln!("block size must be > 0");
-        return;
-    }
-
-    let total_bytes = total_mb * 1024 * 1024;
+    let total_bytes = checked_workload("--total-mb", 1024 * 1024, total_mb)
+        .unwrap_or_else(|error| fail(error)) as u64;
     let iterations = std::cmp::max(1, total_bytes / block_size as u64);
-    let effective_bytes = iterations * block_size as u64;
+    let effective_bytes = iterations
+        .checked_mul(block_size as u64)
+        .unwrap_or_else(|| fail("the requested workload overflows the measured byte count"));
 
     println!(
         "# RNG benchmark\n# total ≈ {} MB ({} bytes), block {} bytes, iterations {}",

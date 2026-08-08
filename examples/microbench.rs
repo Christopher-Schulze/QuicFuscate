@@ -22,18 +22,10 @@ use std::time::Instant;
 
 use quicfuscate::optimize::FeatureDetector;
 
-fn parse_usize(s: &str) -> usize {
-    if let Some(stripped) = s.strip_suffix("KiB") {
-        return stripped.parse::<usize>().unwrap() * 1024;
-    }
-    if let Some(stripped) = s.strip_suffix("MiB") {
-        return stripped.parse::<usize>().unwrap() * 1024 * 1024;
-    }
-    if let Some(stripped) = s.strip_suffix("B") {
-        return stripped.parse::<usize>().unwrap();
-    }
-    s.parse::<usize>().unwrap()
-}
+#[path = "bench_cli/mod.rs"]
+mod bench_cli;
+
+use bench_cli::{checked_workload, fail, parse_in_range, parse_iters, parse_size};
 
 fn format_mbps(bytes: usize, ns: u128) -> f64 {
     if ns == 0 {
@@ -395,7 +387,8 @@ fn main() {
             print_help();
             std::process::exit(2);
         }
-        bench_ghash_short(parse_usize(&args[2]));
+        let iters = parse_iters("iters", &args[2]).unwrap_or_else(|error| fail(error));
+        bench_ghash_short(iters as usize);
         return;
     }
 
@@ -404,8 +397,19 @@ fn main() {
         std::process::exit(2);
     }
 
-    let bytes = parse_usize(&args[2]);
-    let iters = parse_usize(&args[3]);
+    // Bit-width commands take a width where the others take a byte count, so they are
+    // bounded by their own legal range rather than by the byte budget.
+    let bytes = match cmd.as_str() {
+        "bitpack" | "bitunpack" => {
+            parse_in_range("bit width", &args[2], 1, 8).unwrap_or_else(|error| fail(error)) as usize
+        }
+        _ => parse_size("bytes per iteration", &args[2]).unwrap_or_else(|error| fail(error)),
+    };
+    let iters = parse_iters("iters", &args[3]).unwrap_or_else(|error| fail(error));
+    // Every throughput figure below is computed from bytes * iters, so a product that
+    // wraps turns the measurement into a fabricated number.
+    checked_workload("workload", bytes, iters).unwrap_or_else(|error| fail(error));
+    let iters = iters as usize;
 
     match cmd.as_str() {
         "aes-block" => bench_aes_block(bytes, iters),
@@ -424,7 +428,10 @@ fn main() {
         "qpack-enc" => bench_qpack_encode(bytes, iters),
         "qpack-dec" => bench_qpack_decode(bytes, iters),
         "popcnt" => bench_popcnt(bytes, iters),
-        _ => print_help(),
+        other => {
+            print_help();
+            fail(format!("unknown benchmark {other:?}"));
+        }
     }
 }
 
