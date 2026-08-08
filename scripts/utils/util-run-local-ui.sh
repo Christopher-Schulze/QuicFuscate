@@ -74,6 +74,28 @@ mkdir -p "$ADMIN_RUNTIME_DIR"
 cp "$ROOT/config/server-linux.default.toml" "$ADMIN_RUNTIME_CONFIG"
 rm -f "$ADMIN_RUNTIME_AUTH"
 
+# Wait until a local TCP port actually accepts a connection.
+#
+# tmux `send-keys` only queues text into a pane, so this script previously printed
+# started URLs while the build had not run and nothing was listening. Automation and
+# operators then acted on a service that did not exist yet or never started at all.
+# A timeout is reported as a distinct state rather than as success.
+wait_for_port() {
+  local host="$1" port="$2" label="$3" timeout_secs="${4:-120}"
+  local waited=0
+  while ((waited < timeout_secs)); do
+    if nc -z "$host" "$port" 2>/dev/null; then
+      echo "[qf] ready: ${label} on ${host}:${port} after ${waited}s"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "[qf] NOT READY: ${label} did not accept a connection on ${host}:${port} within ${timeout_secs}s" >&2
+  echo "[qf]   inspect the build and process output with: tmux attach -t ${SESSION}" >&2
+  return 1
+}
+
 if tmux has-session -t "${SESSION}" 2>/dev/null; then
   tmux kill-session -t "${SESSION}"
 fi
@@ -91,8 +113,20 @@ tmux send-keys -t "${SESSION}:desktop" "bun install" C-m
 tmux send-keys -t "${SESSION}:desktop" "bun run build" C-m
 tmux send-keys -t "${SESSION}:desktop" "./node_modules/.bin/vite preview --port ${DESKTOP_PORT} --strictPort --host 127.0.0.1" C-m
 
-echo "[qf] started tmux session: ${SESSION}"
+echo "[qf] started tmux session: ${SESSION}; waiting for services to accept connections"
+
+READINESS_FAILURES=0
+wait_for_port 127.0.0.1 "${ADMIN_PORT}" "web admin UI" "${QF_READY_TIMEOUT_SECS:-240}" \
+  || READINESS_FAILURES=$((READINESS_FAILURES + 1))
+wait_for_port 127.0.0.1 "${DESKTOP_PORT}" "desktop UI" "${QF_READY_TIMEOUT_SECS:-240}" \
+  || READINESS_FAILURES=$((READINESS_FAILURES + 1))
+
 echo "[qf] web admin UI: http://127.0.0.1:${ADMIN_PORT}/ (login: admin / 123)"
 echo "[qf] desktop UI:   http://127.0.0.1:${DESKTOP_PORT}/"
 echo "[qf] isolated admin auth store: ${ADMIN_RUNTIME_AUTH}"
 echo "[qf] attach: tmux attach -t ${SESSION}"
+
+if ((READINESS_FAILURES)); then
+  echo "[qf] ${READINESS_FAILURES} service(s) are not reachable; the session is left running for inspection" >&2
+  exit 1
+fi

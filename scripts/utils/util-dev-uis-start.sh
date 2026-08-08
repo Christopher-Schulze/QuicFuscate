@@ -44,6 +44,23 @@ fi
 PID_DIR="$ROOT/scripts/out/run/dev-uis"
 mkdir -p "$PID_DIR"
 
+# A PID alone is not ownership. The stop helper used to signal whatever now holds the
+# recorded number, and it only ever signalled the wrapper shell, so Bun and Vite
+# children kept running while it reported success. The record below therefore carries
+# the process group, the process start time, and the command, and stop refuses to act
+# on a PID whose identity does not match.
+record_field() {
+  local file="$1" key="$2"
+  sed -n "s/^${key}=//p" "$file" 2>/dev/null | head -1
+}
+
+# Identity of a live process, as ps reports it. The start time is what distinguishes a
+# reused PID from the original.
+process_identity() {
+  local pid="$1"
+  ps -o lstart=,command= -p "$pid" 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//'
+}
+
 start_one() {
   local name="$1"
   local workdir="$2"
@@ -53,8 +70,11 @@ start_one() {
 
   if [[ -f "$pidfile" ]]; then
     local old_pid
-    old_pid="$(cat "$pidfile" 2>/dev/null || true)"
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+    old_pid="$(record_field "$pidfile" pid)"
+    local old_identity
+    old_identity="$(record_field "$pidfile" identity)"
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null \
+      && [[ "$(process_identity "$old_pid")" == "$old_identity" ]]; then
       echo "[dev-uis] already running: $name (pid=$old_pid)"
       return 0
     fi
@@ -62,21 +82,37 @@ start_one() {
   fi
 
   echo "[dev-uis] starting $name"
-  (
-    cd "$workdir"
-    # Use nohup so the process keeps running if the parent exits.
-    # Redirect to a log file to avoid blocking on stdout pipes.
+  local pid=""
+  pid="$(
+    cd "$workdir" || exit 1
+    # Job control gives the background child its own process group, so stop can signal
+    # the whole tree instead of only the wrapper shell. `setsid` is unavailable on
+    # macOS, and this works on Bash 3.2 as well.
+    set -m
     nohup bash -lc "$cmd" >"$logfile" 2>&1 &
-    echo $! >"$pidfile"
-  )
+    echo $!
+  )"
 
-  local pid
-  pid="$(cat "$pidfile" 2>/dev/null || true)"
   if [[ -z "$pid" ]]; then
-    echo "[dev-uis] failed to start $name (no pid written)" >&2
+    echo "[dev-uis] failed to start $name (no pid)" >&2
     return 1
   fi
-  echo "[dev-uis] $name pid=$pid log=$logfile"
+
+  local pgid identity
+  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  identity="$(process_identity "$pid")"
+  if [[ -z "$pgid" || -z "$identity" ]]; then
+    echo "[dev-uis] failed to start $name (process exited immediately; see $logfile)" >&2
+    return 1
+  fi
+
+  {
+    echo "pid=$pid"
+    echo "pgid=$pgid"
+    echo "identity=$identity"
+  } >"$pidfile"
+
+  echo "[dev-uis] $name pid=$pid pgid=$pgid log=$logfile"
 }
 
 # Web Admin UI

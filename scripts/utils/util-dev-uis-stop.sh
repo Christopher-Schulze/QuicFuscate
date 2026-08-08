@@ -33,11 +33,14 @@ stop_one() {
     return 0
   fi
 
-  local pid
-  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  local pid pgid recorded_identity
+  pid="$(sed -n 's/^pid=//p' "$pidfile" 2>/dev/null | head -1)"
+  pgid="$(sed -n 's/^pgid=//p' "$pidfile" 2>/dev/null | head -1)"
+  recorded_identity="$(sed -n 's/^identity=//p' "$pidfile" 2>/dev/null | head -1)"
+
   if [[ -z "$pid" ]]; then
     rm -f "$pidfile"
-    echo "[dev-uis] not running: $name (empty pid file)"
+    echo "[dev-uis] not running: $name (unreadable record)"
     return 0
   fi
 
@@ -47,24 +50,67 @@ stop_one() {
     return 0
   fi
 
-  echo "[dev-uis] stopping $name pid=$pid"
-  kill "$pid" 2>/dev/null || true
+  # A live PID is not proof it is ours. PIDs are reused, and signalling whatever now
+  # holds the number is how a helper like this kills an unrelated process.
+  local current_identity
+  current_identity="$(ps -o lstart=,command= -p "$pid" 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')"
+  if [[ -n "$recorded_identity" && "$current_identity" != "$recorded_identity" ]]; then
+    echo "[dev-uis] refusing to signal pid=$pid for $name: identity does not match the record" >&2
+    echo "[dev-uis]   recorded: $recorded_identity" >&2
+    echo "[dev-uis]   current:  $current_identity" >&2
+    rm -f "$pidfile"
+    return 1
+  fi
 
-  # Wait a bit, then force kill if needed.
-  for _ in 1 2 3 4 5; do
+  # Signal the process group, not just the wrapper shell. Killing the wrapper alone
+  # left Bun and Vite running while this reported the service stopped.
+  local target="$pid"
+  local group=0
+  if [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null; then
+    target="-$pgid"
+    group=1
+  fi
+
+  echo "[dev-uis] stopping $name pid=$pid${pgid:+ pgid=$pgid}"
+  kill -- "$target" 2>/dev/null || true
+
+  local waited=0
+  while ((waited < 40)); do
     if ! kill -0 "$pid" 2>/dev/null; then
-      rm -f "$pidfile"
-      echo "[dev-uis] stopped $name"
-      return 0
+      break
     fi
     sleep 0.25
+    waited=$((waited + 1))
   done
 
-  echo "[dev-uis] force stopping $name pid=$pid"
-  kill -9 "$pid" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "[dev-uis] force stopping $name pid=$pid"
+    kill -9 -- "$target" 2>/dev/null || true
+    sleep 0.5
+  fi
+
   rm -f "$pidfile"
+
+  # Report survivors instead of claiming success. A surviving descendant holds the dev
+  # port and the next start would fail for a reason this helper had already hidden.
+  if ((group)) && kill -0 -- "-$pgid" 2>/dev/null; then
+    echo "[dev-uis] FAILED to stop $name: processes remain in pgid=$pgid" >&2
+    ps -o pid=,command= -g "$pgid" 2>/dev/null | sed 's/^/[dev-uis]   /' >&2 || true
+    return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "[dev-uis] FAILED to stop $name: pid=$pid is still alive" >&2
+    return 1
+  fi
+
   echo "[dev-uis] stopped $name"
 }
 
-stop_one "desktop-ui"
-stop_one "admin-ui"
+STOP_FAILURES=0
+stop_one "desktop-ui" || STOP_FAILURES=$((STOP_FAILURES + 1))
+stop_one "admin-ui" || STOP_FAILURES=$((STOP_FAILURES + 1))
+
+if ((STOP_FAILURES)); then
+  echo "[dev-uis] ${STOP_FAILURES} helper(s) did not stop cleanly" >&2
+  exit 1
+fi
