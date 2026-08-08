@@ -140,7 +140,7 @@ prepare_artifacts() {
 
 # Run a command, tee output to file if LOG_FILE set
 run() {
-  if [[ -n "${DRY_RUN:-}" ]]; then
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "DRY-RUN: $*"
     return 0
   fi
@@ -154,7 +154,7 @@ run() {
   fi
   local __dur=$(( $(date +%s) - __start ))
   # Optional JSON logging per command
-  if [[ -n "${JSON:-${JSON_FILE:-}}" ]]; then
+  if [[ "${QF_DISABLE_COMMAND_JSON_LOG:-0}" != "1" && -n "${JSON:-${JSON_FILE:-}}" ]]; then
     local __jf="${JSON:-${JSON_FILE}}"
     if [[ -f "$__jf" ]]; then
       if [[ -z "${JSON_FIRST_RUN:-}" ]]; then JSON_FIRST_RUN=1; fi
@@ -230,6 +230,93 @@ run_cargo_with_env() {
     done
     run_cargo "$@"
   )
+}
+
+# Run one benchmark command without allowing the generic command logger to
+# create an unscoped artifact item. The caller records the completed cell with
+# qf_benchmark_record after inspecting these outputs.
+QF_BENCH_COMMAND_STATUS=0
+QF_BENCH_DURATION_SEC=0
+QF_BENCH_OUTPUT_FILE=""
+
+qf_benchmark_run() {
+  local output_file="$1"
+  shift
+  [[ "$#" -gt 0 ]] || { error "qf_benchmark_run requires a command"; return 2; }
+  mkdir -p "$(dirname "$output_file")"
+  local start end status=0
+  start="$(date +%s)"
+  local previous_logger="${QF_DISABLE_COMMAND_JSON_LOG:-0}"
+  QF_DISABLE_COMMAND_JSON_LOG=1
+  if "$@" >"$output_file" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  QF_DISABLE_COMMAND_JSON_LOG="$previous_logger"
+  end="$(date +%s)"
+  QF_BENCH_COMMAND_STATUS="$status"
+  QF_BENCH_DURATION_SEC=$((end - start))
+  QF_BENCH_OUTPUT_FILE="$output_file"
+  return "$status"
+}
+
+# Validate that a Criterion command selected and measured the requested cell.
+# Criterion exits successfully when a filter matches nothing, so callers must
+# inspect both the selected-cell banner and the emitted numeric estimate.
+qf_benchmark_validate_criterion_output() {
+  local output_file="$1"
+  local cell="$2"
+  [[ -s "$output_file" ]] || return 2
+  grep -Fq "Benchmarking $cell" "$output_file" || return 3
+  local metric_line
+  metric_line="$(grep -m1 -E '(time|thrpt):[[:space:]]*\[[^]]+\]' "$output_file")" || return 4
+  local metric_value
+  metric_value="$(sed -E 's/.*\[[[:space:]]*([^] ,]+).*/\1/' <<<"$metric_line")"
+  [[ "$metric_value" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]] || return 5
+}
+
+# Validate that a filtered cargo test executed at least one test and reached a
+# successful test-result line. A zero-test filter is not a benchmark.
+qf_benchmark_validate_cargo_test_output() {
+  local output_file="$1"
+  [[ -s "$output_file" ]] || return 2
+  grep -Eq 'test result: ok\.' "$output_file" || return 3
+  local count
+  count="$(awk '/^[[:space:]]*running[[:space:]]+[0-9]+[[:space:]]+tests?[[:space:]]*$/{ total += $2 } END { print total + 0 }' "$output_file")"
+  [[ "$count" -gt 0 ]] || return 4
+}
+
+qf_benchmark_record() {
+  local file="$1"
+  local cell="$2"
+  local metric="$3"
+  local value="$4"
+  local result="$5"
+  local reason="$6"
+  local command_status="$7"
+  local target="$8"
+  local feature_set="$9"
+  local output_file="${10:-}"
+  local argv_json="${11:-[]}"
+  local environment_json="${12:-$(qf_json_environment)}"
+  local duration_field="${13:-null}"
+  case "$result" in
+    PASS|FAIL|SKIP) ;;
+    *) error "invalid benchmark result status: $result"; return 2 ;;
+  esac
+  local command_status_field="int:$command_status"
+  [[ "$command_status" == json:* ]] && command_status_field="$command_status"
+  if [[ "$metric" == "duration_sec" && "$value" == int:* && "$duration_field" == "null" ]]; then
+    duration_field="${value#int:}"
+  fi
+  qf_json_append_object "$file" \
+    "cell=$cell" "metric=$metric" "value=$value" \
+    "status=$result" "result=$result" "reason=$reason" \
+    "argv=json:$argv_json" "environment=json:$environment_json" \
+    "target=$target" "feature_set=$feature_set" \
+    "command_status=$command_status_field" "output=$output_file" \
+    "duration_sec=$duration_field"
 }
 
 validate_control_free_value() {

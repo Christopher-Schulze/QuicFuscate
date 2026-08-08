@@ -76,10 +76,22 @@ append_mode_metadata() {
       "meta=json:{\"mode\":\"$mode\",\"fast\":$FAST,\"selected_cells\":$cells_json,\"cell_count\":${#SELECTED_CELLS[@]}}"
 }
 
+append_skipped_cells() {
+    local reason="$1"
+    local result="$2"
+    local command_status="${3:-0}"
+    local cell
+    for cell in "${SELECTED_CELLS[@]}"; do
+        qf_benchmark_record "$JSON" "$cell" "not_measured" null "$result" "$reason" \
+            "$command_status" "lib" "$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")" "" \
+            "$(qf_json_array cargo test --release --lib crypto::tests --features "$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")")" "$(qf_json_environment)"
+    done
+}
+
 append_mode_metadata
 if (( DRY_RUN )); then
     echo "DRY-RUN: mode=$([[ "$FAST" -eq 1 ]] && echo fast || echo full) cells=${SELECTED_CELLS[*]}"
-    qf_json_append_object "$JSON" "cell=dry-run" "result=SKIP" "reason=dry_run" "command_status=null"
+    append_skipped_cells "dry_run" SKIP 0
     json_end "$JSON"
     exit 0
 fi
@@ -96,13 +108,13 @@ echo "==============================================================="
 # read as a completed performance check.
 BENCH_PREFLIGHT="$(qf_bench_preflight benches)" || {
   echo "[FAIL] declared benchmark targets did not build; refusing to report a skip." >&2
-  qf_json_append_object "$JSON" "cell=suite" "result=FAIL" "reason=bench_build_failed" "command_status=int:1"
+  append_skipped_cells "bench_build_failed" FAIL 1
   json_end "$JSON"
   exit 1
 }
 if [[ "$BENCH_PREFLIGHT" == "absent" ]]; then
   echo "[SKIP] Cargo declares no benchmark targets; skipping crypto benches."
-  qf_json_append_object "$JSON" "cell=suite" "result=SKIP" "reason=no_bench_targets" "command_status=int:0"
+  append_skipped_cells "no_bench_targets" SKIP 0
   json_end "$JSON"
   exit 0
 fi
@@ -132,38 +144,57 @@ measure_throughput() {
     local command_status=0
     local result="PASS"
     local reason=""
+    local feature_set
+    feature_set="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
+    local -a cargo_command=(cargo test --release --lib "$test_pattern" --features "$feature_set")
+    [[ -n "${JOBS:-}" ]] && cargo_command+=(-j "$JOBS")
     
     echo -e "\n${BLUE}> Benchmarking $name...${NC}"
     
     local command_argv_json
     local command_environment_json
     if [[ "${#env_vars[@]}" -gt 0 ]]; then
-        if run_cargo_with_env "${env_vars[@]}" -- test --release --lib "$test_pattern" >"$output_file" 2>&1; then
+        if qf_benchmark_run "$output_file" run_cargo_with_env "${env_vars[@]}" -- test --release --lib "$test_pattern"; then
             command_status=0
         else
-            command_status=$?
+            command_status="$QF_BENCH_COMMAND_STATUS"
             result="FAIL"
             reason="cargo_test_failed"
             BENCH_FAILURES=$((BENCH_FAILURES + 1))
         fi
-        command_argv_json="$(qf_json_array env "${env_vars[@]}" cargo test --release --lib "$test_pattern")"
+        command_argv_json="$(qf_json_array env "${env_vars[@]}" "${cargo_command[@]}")"
         command_environment_json="$(qf_json_environment_with_assignments "${env_vars[@]}")"
     else
-        if run_cargo_with_env -- test --release --lib "$test_pattern" >"$output_file" 2>&1; then
+        if qf_benchmark_run "$output_file" run_cargo_with_env -- test --release --lib "$test_pattern"; then
             command_status=0
         else
-            command_status=$?
+            command_status="$QF_BENCH_COMMAND_STATUS"
             result="FAIL"
             reason="cargo_test_failed"
             BENCH_FAILURES=$((BENCH_FAILURES + 1))
         fi
-        command_argv_json="$(qf_json_array env cargo test --release --lib "$test_pattern")"
+        command_argv_json="$(qf_json_array env "${cargo_command[@]}")"
         command_environment_json="$(qf_json_environment)"
     fi
+    local duration_sec="$QF_BENCH_DURATION_SEC"
     cat "$output_file"
-    qf_json_append_object "$JSON" "name=$name" "result=$result" "reason=$reason" \
-        "argv=json:$command_argv_json" "environment=json:$command_environment_json" \
-        "command_status=int:$command_status" "output=$output_file"
+    if [[ "$result" == "PASS" ]]; then
+        validation_status=0
+        if qf_benchmark_validate_cargo_test_output "$output_file"; then
+            :
+        else
+            validation_status="$?"
+            result="FAIL"
+            case "$validation_status" in
+                2) reason="benchmark_output_missing";;
+                3) reason="benchmark_test_result_missing";;
+                *) reason="benchmark_zero_test_count";;
+            esac
+            BENCH_FAILURES=$((BENCH_FAILURES + 1))
+        fi
+    fi
+    qf_benchmark_record "$JSON" "$name" "duration_sec" "int:$duration_sec" "$result" "$reason" \
+        "$command_status" "lib" "$feature_set" "$output_file" "$command_argv_json" "$command_environment_json"
     return 0
 }
 

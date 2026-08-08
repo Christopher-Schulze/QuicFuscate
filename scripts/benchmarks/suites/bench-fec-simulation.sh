@@ -35,24 +35,35 @@ echo "  FEC Internal Machine-Room Simulation Benchmark Suite" | tee -a "$LOG_FIL
 echo "===============================================================" | tee -a "$LOG_FILE"
 print_system_banner | tee -a "$LOG_FILE"
 
-# Try cargo bench harness; skip gracefully if not present.
-# This suite measures with timed test loops, so an absent bench harness is genuinely
-# fine. A declared harness that fails to build is not: it means the tree does not
-# compile, and every timing produced afterwards would be measuring nothing meaningful.
-if ! BENCH_PREFLIGHT="$(qf_bench_preflight benches)"; then
-  echo "[FAIL] declared benchmark targets did not build; refusing to report timings." >&2
-  exit 1
-fi
-if [[ "$BENCH_PREFLIGHT" == "absent" ]]; then
-  warn "Cargo declares no benchmark targets; using timed test loops"
-fi
+RESULTS_JSON="$OUTPUT_DIR/bench_results.json"; json_begin "$RESULTS_JSON" "bench_fec_simulation"; JSON_FIRST_RUN=1
 
 MODES=(normal streaming extreme)
 LOSSES=(0.0 0.05 0.20 0.40)
 THREADS=(1 4 8)
 if (( FAST )); then MODES=(normal streaming); LOSSES=(0.0 0.20); THREADS=(4); fi
 
-RESULTS_JSON="$OUTPUT_DIR/bench_results.json"; json_begin "$RESULTS_JSON" "bench_fec_simulation"; JSON_FIRST_RUN=1
+# Try cargo bench harness; skip gracefully if not present.
+# This suite measures with timed test loops, so an absent bench harness is genuinely
+# fine. A declared harness that fails to build is not: it means the tree does not
+# compile, and every timing produced afterwards would be measuring nothing meaningful.
+if ! BENCH_PREFLIGHT="$(qf_bench_preflight benches)"; then
+  echo "[FAIL] declared benchmark targets did not build; refusing to report timings." >&2
+  for m in "${MODES[@]}"; do
+    for l in "${LOSSES[@]}"; do
+      for t in "${THREADS[@]}"; do
+        qf_benchmark_record "$RESULTS_JSON" "fec/${m}/loss-${l}/threads-${t}" "not_measured" null \
+          "FAIL" "bench_build_failed" 1 "bench" "benches" "" \
+          "$(qf_json_array cargo bench --features benches -- fec_pipeline)" "$(qf_json_environment)"
+      done
+    done
+  done
+  json_end "$RESULTS_JSON"
+  exit 1
+fi
+if [[ "$BENCH_PREFLIGHT" == "absent" ]]; then
+  warn "Cargo declares no benchmark targets; using timed test loops"
+fi
+
 TOTAL=0; FAILURES=0
 
 run_cargo_logged() {
@@ -75,34 +86,63 @@ bench_one() {
   )
   if [[ -n "$RUSTFLAGS_EXTRA" ]]; then envs+=("RUSTFLAGS=${RUSTFLAGS_EXTRA}"); fi
   echo -e "\n> Bench: mode=${mode}, loss=${loss}, threads=${th}" | tee -a "$LOG_FILE"
-  local start=$(date +%s)
-  local auto_status=0; local batch_status=0
+  local auto_status=0; local batch_status=0; local auto_duration=0; local batch_duration=0
+  local auto_output="$OUTPUT_DIR/mode-${mode}-loss-${loss}-threads-${th}-auto.log"
+  local batch_output="$OUTPUT_DIR/mode-${mode}-loss-${loss}-threads-${th}-batch.log"
   # Timed run of a tight subset to approximate performance
-  if run_cargo_logged "${envs[@]}" -- test --release --lib \
-      'fec::test_auto_mode_streaming_selection' \
-      -- --nocapture >>"$LOG_FILE" 2>&1; then
-    auto_status=0
+  if qf_benchmark_run "$auto_output" run_cargo_logged "${envs[@]}" -- test --release --lib \
+      'test_auto_mode_streaming_selection' \
+      -- --nocapture; then
+    auto_status="$QF_BENCH_COMMAND_STATUS"
   else
-    auto_status=$?
+    auto_status="$QF_BENCH_COMMAND_STATUS"
   fi
-  if run_cargo_logged "${envs[@]}" -- test --release --lib \
-      'fec::test_batch_normal_par_counts' \
-      -- --nocapture >>"$LOG_FILE" 2>&1; then
-    batch_status=0
+  auto_duration="$QF_BENCH_DURATION_SEC"
+  if qf_benchmark_run "$batch_output" run_cargo_logged "${envs[@]}" -- test --release --lib \
+      'test_batch_normal_par_counts' \
+      -- --nocapture; then
+    batch_status="$QF_BENCH_COMMAND_STATUS"
   else
-    batch_status=$?
+    batch_status="$QF_BENCH_COMMAND_STATUS"
   fi
-  local end=$(date +%s); local dur=$((end-start))
+  batch_duration="$QF_BENCH_DURATION_SEC"
+  cat "$auto_output" "$batch_output" >> "$LOG_FILE"
+  local dur=$((auto_duration + batch_duration))
   TOTAL=$((TOTAL+1))
   local result="PASS"; local reason=""
   if [[ "$auto_status" -ne 0 || "$batch_status" -ne 0 ]]; then
     result="FAIL"
     reason="one_or_more_benchmark_commands_failed"
     FAILURES=$((FAILURES+1))
+  else
+    auto_validation_status=0
+    batch_validation_status=0
+    if qf_benchmark_validate_cargo_test_output "$auto_output"; then
+      :
+    else
+      auto_validation_status="$?"
+    fi
+    if qf_benchmark_validate_cargo_test_output "$batch_output"; then
+      :
+    else
+      batch_validation_status="$?"
+    fi
+    if [[ "$auto_validation_status" -ne 0 || "$batch_validation_status" -ne 0 ]]; then
+      result="FAIL"
+      reason="one_or_more_benchmark_outputs_invalid"
+      FAILURES=$((FAILURES+1))
+    fi
   fi
-  qf_json_append_object "$RESULTS_JSON" "mode=$mode" "loss=float:$loss" "threads=int:$th" \
-    "duration_sec=int:$dur" "result=$result" "reason=$reason" \
-    "command_status=json:{\"auto\":$auto_status,\"batch\":$batch_status}"
+  local feature_set
+  feature_set="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
+  local argv_json
+  argv_json="{\"auto\":$(qf_json_array cargo test --release --lib test_auto_mode_streaming_selection --features "$feature_set" -- --nocapture),\"batch\":$(qf_json_array cargo test --release --lib test_batch_normal_par_counts --features "$feature_set" -- --nocapture)}"
+  local environment_json
+  environment_json="$(qf_json_environment_with_assignments "${envs[@]}")"
+  qf_benchmark_record "$RESULTS_JSON" \
+    "fec/${mode}/loss-${loss}/threads-${th}" "duration_sec" "int:$dur" "$result" "$reason" \
+    "json:{\"auto\":$auto_status,\"batch\":$batch_status}" "lib" "$feature_set" \
+    "$auto_output;$batch_output" "$argv_json" "$environment_json"
 }
 
 for m in "${MODES[@]}"; do

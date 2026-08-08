@@ -582,6 +582,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- test-fast-fec-fail-closed.sh
 |   |   |   |-- test-fast-fec.sh
 |   |   |   |-- test-benchmark-fast-mode-contract.sh
+|   |   |   |-- test-benchmark-cell-contract.sh
 |   |   |   |-- test-harness-argument-safety.sh
 |   |   |   |-- test-profiling-evidence-contract.sh
 |   |   |   `-- test-shared-artifact-writer-contract.sh
@@ -1201,6 +1202,13 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Orchestration and input gates:** `bench-orchestrator.sh` uses fixed executable-plus-argv resolution and structured manifests; QPACK, UDP, crypto microbench, fuzz, and Admin E2E boundaries reject malformed numeric, size, feature, endpoint, credential, timeout, TTL, flag, and path inputs before execution or numeric JSON serialization. Admin E2E dry-run is plan-only and redacts the password.
 - **Negative proof:** `scripts/tests/fast/test-harness-argument-safety.sh` exercises the real orchestrator, Admin E2E, QPACK, UDP, and crypto harnesses with shell metacharacters, malformed sizes, invalid numerics, and paths containing spaces. It requires bounded JSON failure/skip records and proves that no side-effect marker is created.
 - **Ownership boundary:** TODO-735 remains open for the broader benchmark build/export/selection matrix, and TODO-738 remains open for typed parsing and checked workload arithmetic inside the Rust benchmark/probe examples.
+
+## Implementation Reconciliation (2026-08-08, TODO-877 benchmark cell result truth)
+
+- **Shared runner:** `scripts/tests/lib/lib-common.sh` now owns `qf_benchmark_run`, Criterion output validation, cargo-test output validation, and `qf_benchmark_record`. Every requested cell records stable identity, exact argv, environment, target, feature set, command status, bounded reason, status, and a validated metric; duration-bearing rows also expose `duration_sec`. The generic `run` helper treats only `DRY_RUN=1` as dry-run, so the initialized `DRY_RUN=0` state cannot silently suppress real commands.
+- **Suite coverage:** FEC, FEC simulation, StealthBrain, optimization, transport, crypto, compression, QPACK, retained crypto, transport fast-path, and Linux send-path suites record per-cell failures instead of coercing empty filters or invalid outputs into timings. Linux-only paths emit named machine-readable `platform_requires_linux` skips, and transport export failure is an explicit failing cell.
+- **Regression selection:** `test-performance-regression.sh` selects IDs declared by `ci_regression`, requires the Criterion filter banner and numeric estimate, replaces the stale `simd_xor` probe with `sort_simd/1024_elems`, and treats target-build, filter, baseline, metric, and report-merge failures as non-pass states. The FEC simulation suite uses the actual unqualified test-name filters after a real run exposed stale qualified filters that executed zero tests.
+- **Negative and live proof:** `scripts/tests/fast/test-benchmark-cell-contract.sh` covers empty filters, per-cell Criterion failure, export failure, and Linux platform skips. `test-benchmark-fast-mode-contract.sh` and `test-shared-artifact-writer-contract.sh` remain green. The corrected FEC fast matrix passed 4/4 cells and Stealth/Brain passed 1/1 on ARM64 macOS. Frontend paths remain outside this backend-only change.
 
 ## Implementation Reconciliation (2026-08-02, profiling evidence contract)
 

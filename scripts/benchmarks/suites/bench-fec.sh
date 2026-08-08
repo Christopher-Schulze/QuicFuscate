@@ -33,6 +33,7 @@ if (( FAST )); then
 else
   SELECTED_CELLS=(fec_matrix_mul fec_pipeline)
 fi
+FAILURES=0
 
 append_mode_metadata() {
   local mode="full"
@@ -49,10 +50,21 @@ append_mode_metadata() {
     "meta=json:{\"mode\":\"$mode\",\"fast\":$FAST,\"selected_cells\":$cells_json,\"cell_count\":${#SELECTED_CELLS[@]}}"
 }
 
+append_skipped_cells() {
+  local reason="$1"
+  local command_status="${2:-0}"
+  local cell
+  for cell in "${SELECTED_CELLS[@]}"; do
+    qf_benchmark_record "$JSON" "$cell" "not_measured" null "SKIP" "$reason" \
+      "$command_status" "fec_pipeline" "benches" "" \
+      "$(qf_json_array cargo bench --features benches -- "$cell")" "$(qf_json_environment)"
+  done
+}
+
 append_mode_metadata
 if (( DRY_RUN )); then
   echo "DRY-RUN: mode=$([[ "$FAST" -eq 1 ]] && echo fast || echo full) cells=${SELECTED_CELLS[*]}"
-  qf_json_append_object "$JSON" "cell=dry-run" "result=SKIP" "reason=dry_run" "command_status=null"
+  append_skipped_cells "dry_run" 0
   json_end "$JSON"
   exit 0
 fi
@@ -67,26 +79,75 @@ echo "==============================================================="
 # read as a completed performance check.
 BENCH_PREFLIGHT="$(qf_bench_preflight benches)" || {
   echo "[FAIL] declared benchmark targets did not build; refusing to report a skip." >&2
-  qf_json_append_object "$JSON" "status=failed" "reason=bench_build_failed"
+  for cell in "${SELECTED_CELLS[@]}"; do
+    qf_benchmark_record "$JSON" "$cell" "not_measured" null "FAIL" "bench_build_failed" \
+      1 "fec_pipeline" "benches" "" \
+      "$(qf_json_array cargo bench --features benches -- "$cell")" "$(qf_json_environment)"
+  done
   json_end "$JSON"
   exit 1
 }
 if [[ "$BENCH_PREFLIGHT" == "absent" ]]; then
   echo "[SKIP] Cargo declares no benchmark targets; skipping FEC benches."
-  qf_json_append_object "$JSON" "status=skipped" "reason=no_bench_targets"
+  append_skipped_cells "no_bench_targets" 0
   json_end "$JSON"
   exit 0
 fi
 
-run_cargo build --release --features "${CARGO_FEATURES:-benches}"
+BUILD_OUTPUT="$OUTPUT_DIR/build.log"
+if qf_benchmark_run "$BUILD_OUTPUT" run_cargo build --release --features "${CARGO_FEATURES:-benches}"; then
+  BUILD_STATUS=0
+else
+  BUILD_STATUS="$QF_BENCH_COMMAND_STATUS"
+fi
+cat "$BUILD_OUTPUT"
+if [[ "$BUILD_STATUS" -ne 0 ]]; then
+  for cell in "${SELECTED_CELLS[@]}"; do
+    qf_benchmark_record "$JSON" "$cell" "not_measured" null "FAIL" "harness_build_failed" \
+      "$BUILD_STATUS" "fec_pipeline" "${CARGO_FEATURES:-benches}" "$BUILD_OUTPUT" \
+      "$(qf_json_array cargo build --release --features "${CARGO_FEATURES:-benches}")" "$(qf_json_environment)"
+  done
+  json_end "$JSON"
+  exit "$BUILD_STATUS"
+fi
 
 for cell in "${SELECTED_CELLS[@]}"; do
   case "$cell" in
     fec_matrix_mul) echo -e "\n> Benchmarking GF(256) Matrix Multiply (Reed-Solomon core)...";;
     fec_pipeline) echo -e "\n> Benchmarking FEC Encode/Decode Pipeline (TODO-424)...";;
   esac
-  run cargo bench --features benches -- "$cell"
+  output_file="$OUTPUT_DIR/${cell//\//_}.log"
+  if qf_benchmark_run "$output_file" run cargo bench --features benches -- "$cell"; then
+    result="PASS"; reason=""; command_status=0
+  else
+    result="FAIL"; reason="benchmark_command_failed"; command_status="$QF_BENCH_COMMAND_STATUS"
+  fi
+  if [[ "$result" == "PASS" ]]; then
+    validation_status=0
+    if qf_benchmark_validate_criterion_output "$output_file" "$cell"; then
+      :
+    else
+      validation_status="$?"
+      result="FAIL"
+      case "$validation_status" in
+        2) reason="benchmark_output_missing";;
+        3) reason="benchmark_filter_matched_nothing";;
+        4) reason="benchmark_metric_missing";;
+        *) reason="benchmark_metric_invalid";;
+      esac
+    fi
+  fi
+  [[ "$result" == "FAIL" ]] && FAILURES=$((FAILURES + 1))
+  cat "$output_file"
+  qf_benchmark_record "$JSON" "$cell" "duration_sec" "int:$QF_BENCH_DURATION_SEC" \
+    "$result" "$reason" "$command_status" "fec_pipeline" "benches" "$output_file" \
+    "$(qf_json_array cargo bench --features benches -- "$cell")" "$(qf_json_environment)"
 done
 
-echo -e "\n[OK] FEC Benchmarks Complete"
+echo -e "\nFEC benchmark cells: ${#SELECTED_CELLS[@]}"
 json_end "$JSON"
+if [[ "$FAILURES" -gt 0 ]]; then
+  echo "[FAIL] FEC benchmark cells failed: $FAILURES" >&2
+  exit 1
+fi
+echo "[OK] FEC Benchmarks Complete"

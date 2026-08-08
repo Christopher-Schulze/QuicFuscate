@@ -113,10 +113,10 @@ record_search_check() {
 
 for required_command in cargo find grep python3 rg sed; do
     if command -v "$required_command" >/dev/null 2>&1; then
-        record_check "preflight_$required_command" PASS "" "command=$required_command"
+        record_check "preflight_$required_command" PASS "" "tool=$required_command"
     else
         log_critical "Required audit command is unavailable: $required_command"
-        record_check "preflight_$required_command" UNAVAILABLE "" "command=$required_command"
+        record_check "preflight_$required_command" UNAVAILABLE "" "tool=$required_command"
     fi
 done
 

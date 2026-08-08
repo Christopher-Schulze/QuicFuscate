@@ -60,14 +60,16 @@ if (( FAST )); then
   SCALABILITY_STREAMS=(100)
   echo "FAST mode enabled: reduced performance test set"
 else
-  THROUGHPUT_TESTS=(fec_throughput aegis_128l_throughput aes_gcm_throughput chacha20_throughput)
-  LATENCY_TESTS=(packet_processing stream datagram)
-  HOTPATH_TESTS=(varint_encode varint_decode frame_parse)
+  THROUGHPUT_TESTS=(aes_gcm_seal/1024B data_aead_single_seal_batch/aegis128l_1400B morus_encrypt/1024B morus_decrypt/1024B)
+  LATENCY_TESTS=(connection_1rtt_send_recv/payload_1024B stream_frame_encoding/1024B_direct_writer header_validate/short_and_long)
+  HOTPATH_TESTS=(varint/roundtrip_8vals packet_number/encode_all_lengths)
   RUN_MEM_CPU=1
   RUN_SIMD=1
   SCALABILITY_CONNECTIONS=(10 100 1000)
   SCALABILITY_STREAMS=(10 100 1000)
 fi
+
+BENCH_TARGET="ci_regression"
 
 # Keep bench build and bench runs on the same flags to avoid rebuilds.
 BASE_RUSTFLAGS="${RUSTFLAGS:-}"
@@ -88,7 +90,7 @@ append_performance_record() {
   local environment_json="${COMMAND_ENVIRONMENT_JSON:-}"
   [[ -n "$environment_json" ]] || environment_json='{}'
   qf_json_append_object "$SUMMARY_JSON" "name=$name" "metric=$metric" "value=$value" \
-    "status=$legacy_status" "result=$result" "reason=$reason" \
+    "cell=$name" "status=$result" "result=$result" "reason=$reason" \
     "argv=json:${COMMAND_ARGV_JSON:-[]}" \
     "environment=json:$environment_json" \
     "target=$target" "feature_set=$feature_set" \
@@ -106,30 +108,16 @@ if [[ "${QUICFUSCATE_JSON_CONTRACT_TEST:-0}" == "1" ]]; then
   exit 0
 fi
 
-# Detect benchmark harness availability
-detect_bench_targets() {
-  if command -v cargo >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    cargo metadata --no-deps --format-version=1 2>/dev/null | \
-      jq -e '.packages[].targets[] | select(.kind | index("bench"))' >/dev/null
-    return $?
+BENCH_PREFLIGHT_STATUS=""
+if BENCH_PREFLIGHT_STATUS="$(qf_bench_preflight benches "$BENCH_TARGET")" && [[ "$BENCH_PREFLIGHT_STATUS" == "present" ]]; then
+  BENCH_AVAILABLE=1
+else
+  if [[ "$BENCH_PREFLIGHT_STATUS" == "absent" ]]; then
+    warn "Benchmark target $BENCH_TARGET is absent; requested cells will be recorded as SKIP"
+  else
+    warn "Benchmark target $BENCH_TARGET failed to build; requested cells will be recorded as FAIL"
+    FAIL=1
   fi
-  if grep -Eq '^\s*\[\[bench\]\]' "$PROJECT_ROOT/Cargo.toml" 2>/dev/null; then
-    return 0
-  fi
-  if [[ -d "$PROJECT_ROOT/benches" ]]; then
-    return 0
-  fi
-  if grep -Eq '^\s*benches\s*=\s*\[\s*\]\s*$' "$PROJECT_ROOT/Cargo.toml" 2>/dev/null; then
-    return 1
-  fi
-  return 1
-}
-
-if ! detect_bench_targets; then
-  warn "No bench targets declared; skipping benchmark comparisons"
-  BENCH_AVAILABLE=0
-elif ! RUSTFLAGS="$BENCH_RUSTFLAGS" cargo bench --no-run --features benches >/dev/null 2>&1; then
-  warn "Rust benches failed to build; skipping benchmark comparisons"
   BENCH_AVAILABLE=0
 fi
 
@@ -264,40 +252,79 @@ measure_performance() {
     echo -e "\n> Testing: $test_name"
     
     if [[ "$BENCH_AVAILABLE" -ne 1 ]]; then
-        echo "  Skipped: no bench harness available"
-        COMMAND_ARGV_JSON="$(qf_json_array cargo bench --features benches -- "$test_name")"
+        local unavailable_reason="benchmark_target_absent"
+        local unavailable_result="SKIP"
+        local unavailable_command_status=0
+        if [[ "$BENCH_PREFLIGHT_STATUS" != "absent" ]]; then
+          unavailable_reason="benchmark_target_build_failed"
+          unavailable_result="FAIL"
+          unavailable_command_status=1
+        fi
+        echo "  $unavailable_result: $unavailable_reason"
+        COMMAND_ARGV_JSON="$(qf_json_array cargo bench --bench "$BENCH_TARGET" --features benches -- "$test_name")"
         COMMAND_ENVIRONMENT_JSON="$(qf_json_environment_with_assignments "RUSTFLAGS=$BENCH_RUSTFLAGS")"
-        append_performance_record "$test_name" "$metric" "0" "skipped" "SKIP" \
-          "benchmark_harness_unavailable" "not_recorded" "bench" "benches" \
-          null null null "SKIP" ""
+        append_performance_record "$test_name" "$metric" "null" "skipped" "$unavailable_result" \
+          "$unavailable_reason" "cargo bench --bench $BENCH_TARGET" "bench:$BENCH_TARGET" "benches" \
+          null null "$unavailable_command_status" "$unavailable_result" ""
         return 0
     fi
 
-    # Run the benchmark
+    # Run the exact target and filter. Criterion exits zero for an empty
+    # selection, so the output must also name the requested benchmark.
     local safe_test_name="${test_name//\//_}"
     local output_file="$OUTPUT_DIR/bench_${safe_test_name}.txt"
     local output_line=""
     local result=""
     local output_missing=0
     local metric_used="$metric"
-    RUSTFLAGS="$BENCH_RUSTFLAGS" cargo bench --features benches -- "$test_name" 2>&1 | tee "$output_file" >/dev/null
-    if [[ "$metric" == "thrpt" ]]; then
-        output_line=$(grep -E "thrpt:.*\\[.*\\]" "$output_file" | head -1 || true)
-        if [[ -z "$output_line" ]]; then
-            output_line=$(grep -E "time:.*\\[.*\\]" "$output_file" | head -1 || true)
-            if [[ -n "$output_line" ]]; then
-                metric_used="time"
-                warn "Throughput line missing for $test_name; falling back to time metric"
-            fi
-        fi
+    local failure_reason=""
+    local command_status=0
+    local benchmark_argv_json
+    benchmark_argv_json="$(qf_json_array env "RUSTFLAGS=$BENCH_RUSTFLAGS" cargo bench --bench "$BENCH_TARGET" --features benches -- "$test_name")"
+    local benchmark_environment_json
+    benchmark_environment_json="$(qf_json_environment_with_assignments "RUSTFLAGS=$BENCH_RUSTFLAGS")"
+    if qf_benchmark_run "$output_file" env "RUSTFLAGS=$BENCH_RUSTFLAGS" cargo bench --bench "$BENCH_TARGET" --features benches -- "$test_name"; then
+        command_status=0
     else
-        output_line=$(grep -E "time:.*\\[.*\\]" "$output_file" | head -1 || true)
+        command_status="$QF_BENCH_COMMAND_STATUS"
     fi
-    result=$(sed -E 's/.*\[[[:space:]]*([^] ]+).*/\1/' <<< "$output_line" || true)
-    if [[ -z "$result" ]]; then
+    cat "$output_file"
+    if [[ "$command_status" -ne 0 ]]; then
+        output_missing=1
+        result="null"
+        failure_reason="benchmark_command_failed"
+    elif ! grep -Fq "Benchmarking $test_name" "$output_file"; then
+        output_missing=1
+        result="null"
+        failure_reason="benchmark_filter_matched_nothing"
+        warn "Benchmark filter matched no declared cell: $test_name"
+    fi
+    if [[ "$metric" == "thrpt" ]]; then
+        if [[ "$output_missing" -eq 0 ]] && grep -m1 -E "thrpt:.*\\[.*\\]" "$output_file" >"$OUTPUT_DIR/.metric-line"; then
+            output_line="$(<"$OUTPUT_DIR/.metric-line")"
+        elif [[ "$output_missing" -eq 0 ]] && grep -m1 -E "time:.*\\[.*\\]" "$output_file" >"$OUTPUT_DIR/.metric-line"; then
+            output_line="$(<"$OUTPUT_DIR/.metric-line")"
+            metric_used="time"
+            warn "Throughput line missing for $test_name; recording the available time metric"
+        fi
+    elif [[ "$output_missing" -eq 0 ]] && grep -m1 -E "time:.*\\[.*\\]" "$output_file" >"$OUTPUT_DIR/.metric-line"; then
+        output_line="$(<"$OUTPUT_DIR/.metric-line")"
+    fi
+    rm -f -- "$OUTPUT_DIR/.metric-line"
+    if [[ "$output_missing" -eq 0 ]]; then
+        result=$(sed -E 's/.*\[[[:space:]]*([^] ]+).*/\1/' <<< "$output_line")
+    fi
+    if [[ "$output_missing" -eq 1 ]]; then
+        result="null"
+    elif [[ -z "$result" || "$result" == "$output_line" ]]; then
         warn "No benchmark output for $test_name (metric: $metric); check $output_file"
         output_missing=1
-        result="0"
+        result="null"
+        [[ -n "$failure_reason" ]] || failure_reason="benchmark_metric_missing"
+    elif ! [[ "$result" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; then
+        output_missing=1
+        result="null"
+        failure_reason="benchmark_metric_invalid"
     fi
     
     echo "  Current: $result"
@@ -310,12 +337,22 @@ measure_performance() {
         status="no_output"
     elif [ -f "$BASELINE_FILE" ]; then
         if command -v jq >/dev/null 2>&1; then
-            baseline=$(jq -r ".\"$test_name\".\"$metric_used\"" "$BASELINE_FILE" 2>/dev/null || echo "0")
+            if ! baseline=$(jq -r ".\"$test_name\".\"$metric_used\"" "$BASELINE_FILE" 2>/dev/null); then
+                baseline="null"
+                status="no_output"
+                failure_reason="baseline_metric_invalid"
+            elif ! [[ "$baseline" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; then
+                baseline="null"
+                status="no_output"
+                failure_reason="baseline_metric_invalid"
+            fi
         else
-            warn "jq not installed; skipping baseline comparison"
-            baseline="0"
+            warn "jq not installed; cannot validate the baseline metric"
+            baseline="null"
+            status="no_output"
+            failure_reason="baseline_parser_unavailable"
         fi
-        if [ "$baseline" != "0" ] && [ "$baseline" != "null" ]; then
+        if [[ "$status" != "no_output" && "$baseline" != "0" && "$baseline" != "null" ]]; then
             echo "  Baseline: $baseline"
             
             # Calculate percentage change
@@ -336,24 +373,26 @@ measure_performance() {
     local result_reason="benchmark_completed_without_regression"
     case "$status" in
       regression) result_state="FAIL"; result_reason="performance_regression_exceeded_threshold";;
-      no_output) result_state="FAIL"; result_reason="benchmark_output_missing";;
+      no_output) result_state="FAIL"; result_reason="${failure_reason:-benchmark_output_missing}";;
       no_baseline) result_reason="benchmark_completed_without_baseline";;
     esac
+    local value_field="null"
+    [[ "$result" != "null" ]] && value_field="float:$result"
     local -a benchmark_fields=(
-      "name=$test_name" "metric=$metric_used" "value=$result" "result=$result_state"
-      "reason=$result_reason" "argv=json:$(qf_json_array cargo bench --features benches -- "$test_name")" \
-      "environment=json:$(qf_json_environment_with_assignments "RUSTFLAGS=$BENCH_RUSTFLAGS")" \
-      "target=bench" "feature_set=benches"
-      "discovered_test_count=null" "executed_test_count=null" "command_status=null"
-      "discovery_status=not_applicable" "raw_output=$output_file"
+      "name=$test_name" "cell=$test_name" "metric=$metric_used" "value=$value_field" "status=$result_state" "result=$result_state"
+      "reason=$result_reason" "argv=json:$benchmark_argv_json" \
+      "environment=json:$benchmark_environment_json" \
+      "target=bench:$BENCH_TARGET" "feature_set=benches"
+      "discovered_test_count=null" "executed_test_count=null"
+      "discovery_status=not_applicable" "raw_output=$output_file" \
+      "command_status=int:$command_status" "duration_sec=int:$QF_BENCH_DURATION_SEC"
     )
     if [ -f "$BASELINE_FILE" ]; then
       benchmark_fields+=("baseline=$baseline" "change_percent=$change" \
-        "threshold_percent=int:$threshold" "status=$status")
+        "threshold_percent=int:$threshold" "comparison_status=$status")
     fi
     qf_json_append_object "$SUMMARY_JSON" "${benchmark_fields[@]}"
-    [ "$status" = "regression" ] && return 1
-    [ "$status" = "no_output" ] && return 1
+    [[ "$result_state" == "FAIL" ]] && return 1
     return 0
 }
 
@@ -397,17 +436,59 @@ done
 echo -e "\n=== SIMD Performance Verification ==="
 
 if [[ "$RUN_SIMD" -eq 1 && "$BENCH_AVAILABLE" -eq 1 && $(uname -m) == "x86_64" ]]; then
-    echo -e "\n> Verifying AVX2 speedup..."
-    BASELINE=$(RUSTFLAGS="${BENCH_RUSTFLAGS} -C target-feature=-avx2" cargo bench --features benches -- simd_xor 2>&1 | grep "time:" | head -1 | awk '{print $2}' || echo "0")
-    OPTIMIZED=$(RUSTFLAGS="${BENCH_RUSTFLAGS} -C target-feature=+avx2" cargo bench --features benches -- simd_xor 2>&1 | grep "time:" | head -1 | awk '{print $2}' || echo "0")
-    echo "  Without AVX2: $BASELINE"
-    echo "  With AVX2: $OPTIMIZED"
+    echo -e "\n> Verifying AVX2 comparison on sort_simd/1024_elems..."
+    for simd_mode in without_avx2 with_avx2; do
+      if [[ "$simd_mode" == "without_avx2" ]]; then
+        simd_flags="${BENCH_RUSTFLAGS} -C target-feature=-avx2"
+      else
+        simd_flags="${BENCH_RUSTFLAGS} -C target-feature=+avx2"
+      fi
+      simd_output="$OUTPUT_DIR/bench-simd-${simd_mode}.txt"
+      simd_status=0
+      if qf_benchmark_run "$simd_output" env "RUSTFLAGS=$simd_flags" cargo bench --bench "$BENCH_TARGET" --features benches -- sort_simd/1024_elems; then
+        simd_status=0
+      else
+        simd_status="$QF_BENCH_COMMAND_STATUS"
+      fi
+      cat "$simd_output"
+      simd_result="null"
+      simd_state="PASS"
+      simd_reason=""
+      if [[ "$simd_status" -ne 0 ]]; then
+        simd_state="FAIL"
+        simd_reason="benchmark_command_failed"
+      elif ! grep -Fq "Benchmarking sort_simd/1024_elems" "$simd_output"; then
+        simd_state="FAIL"
+        simd_reason="benchmark_filter_matched_nothing"
+      elif ! grep -m1 -E "time:.*\[.*\]" "$simd_output" >"$OUTPUT_DIR/.simd-line"; then
+        simd_state="FAIL"
+        simd_reason="benchmark_metric_missing"
+      else
+        simd_result="$(sed -E 's/.*\[[[:space:]]*([^] ]+).*/\1/' "$OUTPUT_DIR/.simd-line")"
+        if ! [[ "$simd_result" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; then
+          simd_state="FAIL"
+          simd_reason="benchmark_metric_invalid"
+          simd_result="null"
+        fi
+      fi
+      rm -f -- "$OUTPUT_DIR/.simd-line"
+      [[ "$simd_state" == "FAIL" ]] && FAIL=1
+      simd_value="null"
+      [[ "$simd_result" != "null" ]] && simd_value="float:$simd_result"
+      qf_benchmark_record "$SUMMARY_JSON" "simd/${simd_mode}" "time" "$simd_value" \
+        "$simd_state" "$simd_reason" "$simd_status" "bench:$BENCH_TARGET" "benches" "$simd_output" \
+        "$(qf_json_array env "RUSTFLAGS=$simd_flags" cargo bench --bench "$BENCH_TARGET" --features benches -- sort_simd/1024_elems)" \
+        "$(qf_json_environment_with_assignments "RUSTFLAGS=$simd_flags")"
+    done
 elif [[ "$RUN_SIMD" -eq 0 ]]; then
     warn "FAST mode: skipping SIMD verification"
-    COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
-    append_performance_record "SIMD verification" "benchmark" "0" "skipped" "SKIP" \
-      "fast_mode_reduced_selection" "cargo bench --features benches -- simd_xor" "bench" "benches" \
-      null null null "SKIP" ""
+    qf_benchmark_record "$SUMMARY_JSON" "simd/verification" "not_measured" null "SKIP" \
+      "fast_mode_reduced_selection" 0 "bench:$BENCH_TARGET" "benches" "" \
+      "$(qf_json_array cargo bench --bench "$BENCH_TARGET" --features benches -- sort_simd/1024_elems)" "$(qf_json_environment)"
+else
+    qf_benchmark_record "$SUMMARY_JSON" "simd/verification" "not_measured" null "SKIP" \
+      "platform_requires_x86_64" 0 "bench:$BENCH_TARGET" "benches" "" \
+      "$(qf_json_array cargo bench --bench "$BENCH_TARGET" --features benches -- sort_simd/1024_elems)" "$(qf_json_environment)"
 fi
 
 # Scalability tests
@@ -434,7 +515,10 @@ if [ -f "$BASELINE_FILE" ] && [ -f "$CURRENT_FILE" ]; then
     
     # Merge and format results
     if command -v jq >/dev/null 2>&1; then
-      jq -s '.[0] * .[1]' "$BASELINE_FILE" "$CURRENT_FILE" 2>/dev/null || true
+      if ! jq -s '.[0] * .[1]' "$BASELINE_FILE" "$CURRENT_FILE" 2>/dev/null; then
+        warn "failed to merge the benchmark comparison report"
+        FAIL=1
+      fi
     else
       warn "jq not installed; skipping JSON merge report"
     fi

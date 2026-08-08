@@ -55,6 +55,7 @@ BASE_NAME="profile-transport-fastpaths"
 mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"
 RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "bench_transport_fastpaths"; JSON_FIRST_RUN=1
+FAILURES=0
 
 echo "==============================================================="
 echo "  Transport Fast-Path Profiling"
@@ -76,9 +77,27 @@ run_profile() {
   info "$banner"
   if [[ -n "$DRY_RUN" ]]; then
     echo "DRY-RUN: $SCRIPT_DIR/bench-transport.sh ${args[*]}"
+    qf_benchmark_record "$RESULTS_JSON" "transport/${mode}" "not_measured" null "SKIP" "dry_run" 0 \
+      "bench-transport" "${feature_str:-benches}" "" \
+      "$(qf_json_array "$SCRIPT_DIR/bench-transport.sh" "${args[@]}")" "$(qf_json_environment)"
     return 0
   fi
-  run "$SCRIPT_DIR/bench-transport.sh" "${args[@]}"
+  local output_file="$subdir/bench-transport.log"
+  local command_status=0
+  if qf_benchmark_run "$output_file" run "$SCRIPT_DIR/bench-transport.sh" "${args[@]}"; then
+    command_status=0
+    result="PASS"
+    reason=""
+  else
+    command_status="$QF_BENCH_COMMAND_STATUS"
+    result="FAIL"
+    reason="profile_command_failed"
+    FAILURES=$((FAILURES + 1))
+  fi
+  qf_benchmark_record "$RESULTS_JSON" "transport/${mode}" "duration_sec" "int:$QF_BENCH_DURATION_SEC" \
+    "$result" "$reason" "$command_status" "bench-transport" "${feature_str:-benches}" "$output_file" \
+    "$(qf_json_array "$SCRIPT_DIR/bench-transport.sh" "${args[@]}")" "$(qf_json_environment)"
+  cat "$output_file"
 }
 
 # Baseline Tokio run
@@ -95,7 +114,13 @@ if [[ "$(detect_os)" == linux ]]; then
   run_profile "io_uring" "$URING_FEATURES"
 else
   warn "io_uring profiling skipped (requires Linux host)."
+  qf_benchmark_record "$RESULTS_JSON" "transport/io_uring" "not_measured" null "SKIP" \
+    "platform_requires_linux" 0 "bench-transport" "io_uring" "" \
+    "$(qf_json_array "$SCRIPT_DIR/bench-transport.sh" --features "${CARGO_FEATURES:+$CARGO_FEATURES }io_uring")" "$(qf_json_environment)"
 fi
 
 info "Artifacts stored under $OUTPUT_DIR"
 json_end "$RESULTS_JSON"
+if [[ "$FAILURES" -gt 0 ]]; then
+  exit 1
+fi

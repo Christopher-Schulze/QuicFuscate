@@ -31,13 +31,11 @@ mkdir -p "$OUTPUT_DIR"; LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"; exec > >(tee -a
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "bench_qpack_encode"; JSON_FIRST_RUN=1
 
 append_item() {
-  local cell="$1"; local size="$2"; local bytes="$3"; local result="$4"
+  local cell="$1"; local size="$2"; local metric_value="$3"; local result="$4"
   local reason="$5"; local command_status="$6"; local output_file="$7"
   local argv_json="${8:-[]}"
-  qf_json_append_object "$JSON" "cell=int:$cell" "size=$size" "bytes=json:$bytes" \
-    "result=$result" "reason=$reason" "argv=json:$argv_json" \
-    "environment=json:$(qf_json_environment)" \
-    "command_status=int:$command_status" "output=$output_file"
+  qf_benchmark_record "$JSON" "qpack/$cell/$size" "throughput_MiBps" "$metric_value" "$result" "$reason" \
+    "$command_status" "harness" "${FEATURES:-default}" "$output_file" "$argv_json" "$(qf_json_environment)"
 }
 
 if ! validate_control_free_value "RUSTFLAGS_EXTRA" "$RUSTFLAGS_EXTRA" 8192 || \
@@ -110,13 +108,21 @@ fi
 
 info "Building developer harness (src/bin/harness.rs)"
 BUILD_STATUS=0
-if run_cargo build --release; then
+BUILD_OUTPUT="$OUTPUT_DIR/build.log"
+if qf_benchmark_run "$BUILD_OUTPUT" run_cargo build --release; then
   BUILD_STATUS=0
 else
-  BUILD_STATUS=$?
+  BUILD_STATUS="$QF_BENCH_COMMAND_STATUS"
 fi
+cat "$BUILD_OUTPUT"
 if [[ "$BUILD_STATUS" -ne 0 ]]; then
   append_item 0 "<build>" null "FAIL" "harness_build_failed" "$BUILD_STATUS" ""
+  CELL=0
+  for sz in "${SIZES[@]}"; do
+    CELL=$((CELL + 1))
+    append_item "$CELL" "$sz" null "FAIL" "harness_build_failed" "$BUILD_STATUS" "$BUILD_OUTPUT" \
+      "$(qf_json_array cargo build --release)"
+  done
   json_end "$JSON"
   exit "$BUILD_STATUS"
 fi
@@ -136,17 +142,51 @@ for sz in "${SIZES[@]}"; do
   info "Running size=$sz ($BYTES bytes)"
   output_file="$OUTPUT_DIR/run-${CELL}.txt"
   command_status=0
-  if run target/release/harness qpack-encode --input "$BYTES" --iters 200 > "$output_file" 2>&1; then
+  if qf_benchmark_run "$output_file" target/release/harness qpack-encode --input "$BYTES" --iters 200; then
     result="PASS"
     reason=""
   else
-    command_status=$?
+    command_status="$QF_BENCH_COMMAND_STATUS"
     result="FAIL"
     reason="harness_command_failed"
     FAILURES=$((FAILURES + 1))
   fi
+  metric_value="null"
+  if [[ "$result" == "PASS" ]]; then
+    if throughput="$(python3 - "$output_file" "$BYTES" <<'PY'
+import math
+import re
+import sys
+from pathlib import Path
+
+path, expected_size = sys.argv[1:]
+line = Path(path).read_text(encoding="utf-8").strip()
+match = re.fullmatch(
+    r"variant=dispatch size=(?P<size>\d+)B iters=(?P<iters>\d+) total_out=(?P<total>\d+)B "
+    r"time_ms=(?P<time>[0-9.]+) throughput_MiBps=(?P<throughput>[0-9.]+) warmup_ms=(?P<warmup>[0-9.]+)",
+    line,
+)
+if match is None:
+    raise SystemExit("unexpected QPACK harness output")
+if int(match.group("size")) != int(expected_size) or int(match.group("iters")) != 200:
+    raise SystemExit("QPACK workload identity mismatch")
+if int(match.group("total")) <= 0:
+    raise SystemExit("QPACK output byte count is not positive")
+value = float(match.group("throughput"))
+if not math.isfinite(value) or value < 0:
+    raise SystemExit("QPACK throughput is not finite")
+print(value)
+PY
+)"; then
+      metric_value="float:$throughput"
+    else
+      result="FAIL"
+      reason="invalid_benchmark_result"
+      FAILURES=$((FAILURES + 1))
+    fi
+  fi
   cat "$output_file"
-  append_item "$CELL" "$sz" "$BYTES" "$result" "$reason" "$command_status" "$output_file" \
+  append_item "$CELL" "$sz" "$metric_value" "$result" "$reason" "$command_status" "$output_file" \
     "$(qf_json_array target/release/harness qpack-encode --input "$BYTES" --iters 200)"
 
 done

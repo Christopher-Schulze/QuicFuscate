@@ -184,7 +184,7 @@ write_uring_proof_evidence() {
     "source_revision=$(git rev-parse HEAD)" \
     "environment=json:$environment_json" \
     "argv=json:$command_argv_json" \
-    "command=$command_line"
+    "command_line=$command_line"
   qf_json_append_object "$JSON" \
     "name=$name" \
     "status=$status" \
