@@ -1547,6 +1547,7 @@ mod rustls_provider {
         /// True if this is a server-side provider.
         pub is_server: bool,
         /// Immutable environment generation used by this TLS runtime owner.
+        #[cfg(debug_assertions)]
         pub environment: Arc<crate::env_utils::EnvSnapshot>,
         /// Whether the client verifies the server certificate.
         #[cfg(debug_assertions)]
@@ -1966,6 +1967,7 @@ mod rustls_provider {
                 clock: clock.clone(),
                 crypto,
                 is_server,
+                #[cfg(debug_assertions)]
                 environment: Arc::new(environment.clone()),
                 #[cfg(debug_assertions)]
                 verify_peer,
@@ -2175,6 +2177,8 @@ mod rustls_provider {
         ) -> Result<rustls::quic::Connection, ConnectionError> {
             #[cfg(not(debug_assertions))]
             let _ = verify_peer;
+            #[cfg(not(debug_assertions))]
+            let _ = environment;
             let roots = Self::build_client_root_store(ca_path)?;
 
             let builder =
