@@ -1442,7 +1442,8 @@ async fn run_client(
         quicfuscate::implementations::server::apply_transport_overrides_from_file(
             cfg_path,
             &mut config,
-        );
+        )
+        .map_err(std::io::Error::other)?;
     }
     config.verify_peer(true);
     if verify_peer {

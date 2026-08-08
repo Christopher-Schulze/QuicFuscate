@@ -3440,6 +3440,41 @@ cc_algorithm = "not-a-controller"
     }
 
     #[test]
+    fn a_setter_rejection_returns_an_error_and_leaves_the_live_config_untouched() {
+        // Every transport key is currently pre-validated before this helper runs, so
+        // this rejection is not reachable through the reload path today. That is
+        // exactly why it must not be logged and skipped: the safety depends on two
+        // validators staying in step with the setters, and nothing enforces that. The
+        // parser accepts a lone minimum MTU because it checks each key in isolation;
+        // only the setter compares it against the live maximum.
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let before = transport.pmtu_policy();
+        let contents = r#"
+[transport]
+mtu = 1400
+pmtu_min_mtu = 9000
+"#;
+
+        let error = apply_transport_overrides_from_toml(
+            std::path::Path::new("test.toml"),
+            contents,
+            &mut transport,
+        )
+        .expect_err("a rejected setter must be returned, not logged");
+        assert!(error.contains("rejected"), "the failure must name the rejection, got {error}");
+
+        let after = transport.pmtu_policy();
+        assert_eq!(after.min_mtu, before.min_mtu);
+        assert_eq!(after.max_mtu, before.max_mtu);
+        assert_ne!(
+            transport.max_udp_payload_size(),
+            1400,
+            "an earlier setter in the same file must not survive a later rejection"
+        );
+    }
+
+    #[test]
     fn test_transport_overrides_apply_ordered_quic_versions() {
         let mut transport =
             crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
@@ -3452,7 +3487,8 @@ quic_versions = ["v2", "v1"]
             std::path::Path::new("test.toml"),
             contents,
             &mut transport,
-        );
+        )
+        .expect("valid transport overrides apply");
 
         assert_eq!(transport.version(), crate::transport::PROTOCOL_VERSION_V2);
         assert_eq!(
@@ -3490,7 +3526,8 @@ pmtu_black_hole_timeout_ms = 7500
             std::path::Path::new("test.toml"),
             contents,
             &mut transport,
-        );
+        )
+        .expect("valid transport overrides apply");
 
         let policy = transport.pmtu_policy();
         assert_eq!(policy.min_mtu, 1260);
@@ -3543,7 +3580,8 @@ ramp_down_ms = 5000
             std::path::Path::new("test.toml"),
             contents,
             &mut transport,
-        );
+        )
+        .expect("valid transport overrides apply");
 
         assert_eq!(
             transport.traffic_analysis_policy().defense,

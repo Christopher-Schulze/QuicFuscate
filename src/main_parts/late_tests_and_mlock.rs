@@ -638,6 +638,112 @@ mtu = 100
         assert!(err.to_ascii_lowercase().contains("transport.mtu"));
         assert_eq!(transport.max_udp_payload_size(), before);
     }
+
+    #[test]
+    fn a_rejected_reload_leaves_every_domain_on_the_prior_generation() {
+        // Nothing may be published unless every domain succeeds. Today's rejection
+        // still comes from the pre-validators, so this guards the publication contract
+        // rather than the ordering itself; the ordering is proven at the helper
+        // boundary, where a setter rejection is actually reachable.
+        let cfg_path = write_temp_config(
+            r#"
+[fec]
+mode = "auto"
+initial_mode = "zero"
+
+[stealth]
+mode = "auto"
+initial_browser = "firefox"
+
+[optimization]
+memory_pool_size = 655360
+
+[transport]
+mtu = 100
+"#,
+        );
+
+        let fec_shared = Arc::new(Mutex::new(FecConfig::default()));
+        let opt_shared = Arc::new(Mutex::new(OptimizeConfig::default()));
+        let stealth_shared = Arc::new(Mutex::new(StealthConfig::default()));
+        let fec_before = fec_shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let opt_before = *opt_shared.lock().unwrap_or_else(|e| e.into_inner());
+        let stealth_before = stealth_shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut transport = quicfuscate::transport::Config::new_with_version(
+            quicfuscate::transport::PROTOCOL_VERSION,
+        )
+        .expect("transport config");
+
+        quicfuscate::implementations::server::apply_runtime_config_reload(
+            &cfg_path,
+            None,
+            &mut transport,
+            &fec_shared,
+            &opt_shared,
+            &stealth_shared,
+            quicfuscate::implementations::server::RuntimeStealthPolicy {
+                profile: BrowserProfile::Chrome,
+                os: OsProfile::MacOS,
+                disable_doh: false,
+                doh_provider: "runtime-doh",
+                disable_fronting: false,
+                front_domain: &[],
+                disable_http3: false,
+            },
+        )
+        .expect_err("a rejected reload must not publish anything");
+
+        assert_eq!(
+            fec_shared.lock().unwrap_or_else(|e| e.into_inner()).initial_mode,
+            fec_before.initial_mode,
+            "FEC must stay on the prior generation"
+        );
+        let opt_after = *opt_shared.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            (opt_after.pool_capacity, opt_after.block_size),
+            (opt_before.pool_capacity, opt_before.block_size),
+            "optimization must stay on the prior generation"
+        );
+        assert_eq!(
+            stealth_shared.lock().unwrap_or_else(|e| e.into_inner()).initial_browser,
+            stealth_before.initial_browser,
+            "stealth must stay on the prior generation"
+        );
+    }
+
+    #[test]
+    fn a_present_but_invalid_transport_override_file_fails_closed_at_startup() {
+        // Startup used to log this and continue, so the process ran with transport
+        // defaults while the operator's file said otherwise and startup reported
+        // success. Absence is the only acceptable reason to keep the defaults.
+        let cfg_path = write_temp_config(
+            r#"
+[transport]
+quic_versions = ["not-a-quic-version"]
+"#,
+        );
+        let mut transport = quicfuscate::transport::Config::new_with_version(
+            quicfuscate::transport::PROTOCOL_VERSION,
+        )
+        .expect("transport config");
+
+        let err = quicfuscate::implementations::server::apply_transport_overrides_from_file(
+            &cfg_path,
+            &mut transport,
+        )
+        .expect_err("an invalid override file must not be downgraded to defaults");
+        assert!(
+            err.contains(&cfg_path.display().to_string()),
+            "the failure must name the file, got {err}"
+        );
+
+        let missing = cfg_path.with_extension("absent");
+        quicfuscate::implementations::server::apply_transport_overrides_from_file(
+            &missing,
+            &mut transport,
+        )
+        .expect("a missing override file keeps the configured defaults");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -869,7 +975,8 @@ async fn run_server(
         quicfuscate::implementations::server::apply_transport_overrides_from_file(
             cfg_path,
             &mut config,
-        );
+        )
+        .map_err(std::io::Error::other)?;
     }
 
     let opt_params = runtime_optimize_config(

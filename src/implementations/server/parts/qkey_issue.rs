@@ -681,27 +681,29 @@ pub(crate) fn validate_transport_overrides_from_toml(contents: &str) -> Result<(
     parse_transport_overrides_from_toml(contents).map(|_| ())
 }
 
+/// Apply the transport overrides in `contents` to `transport`, or leave it untouched.
+///
+/// Every setter failure is returned instead of logged. A logged-and-skipped setter
+/// leaves transport policy describing a different configuration than the file the
+/// operator wrote, and the caller reports success either way, so the mismatch is
+/// undetectable. The overrides are applied to a private copy that is only committed
+/// once every setter has succeeded, so a rejected constraint cannot leave the live
+/// configuration half-updated.
 pub(crate) fn apply_transport_overrides_from_toml(
     cfg_path: &std::path::Path,
     contents: &str,
-    transport: &mut crate::transport::Config,
-) {
-    let overrides = match parse_transport_overrides_from_toml(contents) {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!(
-                "transport overrides ignored (invalid values, {}): {}",
-                cfg_path.display(),
-                e
-            );
-            return;
-        }
-    };
+    live: &mut crate::transport::Config,
+) -> Result<(), String> {
+    let overrides = parse_transport_overrides_from_toml(contents).map_err(|error| {
+        format!("transport overrides in {} are invalid: {error}", cfg_path.display())
+    })?;
+    let mut candidate = live.clone();
+    let transport = &mut candidate;
 
     if let Some(versions) = overrides.quic_versions {
-        if let Err(error) = transport.set_supported_versions(versions) {
-            log::warn!("transport QUIC version override ignored: {error}");
-        }
+        transport
+            .set_supported_versions(versions)
+            .map_err(|error| format!("transport.quic_versions was rejected: {error}"))?;
     }
     if let Some(algo) = overrides.cc_algorithm {
         transport.set_cc_algorithm(algo);
@@ -767,39 +769,57 @@ pub(crate) fn apply_transport_overrides_from_toml(
                 ),
             ),
         };
-        if let Err(error) = transport.set_pmtu_policy(policy) {
-            log::warn!("transport DPLPMTUD policy ignored: {error}");
-        }
+        transport
+            .set_pmtu_policy(policy)
+            .map_err(|error| format!("transport DPLPMTUD policy was rejected: {error}"))?;
     }
     if let Some(rtt_ms) = overrides.initial_rtt_ms {
         transport.set_initial_rtt_ms(rtt_ms);
     }
     if let Some(policy) = overrides.traffic_analysis {
-        if let Err(error) = transport.set_traffic_analysis_policy(policy) {
-            log::warn!("transport traffic-analysis policy ignored: {error}");
-        }
+        transport
+            .set_traffic_analysis_policy(policy)
+            .map_err(|error| format!("transport.traffic_analysis was rejected: {error}"))?;
     }
     if let Some(policy) = overrides.qkey_traffic_analysis_ceiling {
-        if let Err(error) = transport.set_qkey_traffic_analysis_ceiling(policy) {
-            log::warn!("transport QKey traffic-analysis ceiling ignored: {error}");
-        }
+        transport.set_qkey_traffic_analysis_ceiling(policy).map_err(|error| {
+            format!("transport QKey traffic-analysis ceiling was rejected: {error}")
+        })?;
     }
     if let Some(policy) = overrides.intelligent_traffic_analysis_ceiling {
-        if let Err(error) = transport.set_intelligent_traffic_analysis_ceiling(policy) {
-            log::warn!("transport Intelligent traffic-analysis ceiling ignored: {error}");
-        }
+        transport.set_intelligent_traffic_analysis_ceiling(policy).map_err(|error| {
+            format!("transport Intelligent traffic-analysis ceiling was rejected: {error}")
+        })?;
     }
+
+    *live = candidate;
+    Ok(())
 }
 
+/// Apply the transport overrides in `cfg_path`, treating absence as the only
+/// acceptable reason not to.
+///
+/// The override file is optional, so a missing path keeps the configured defaults.
+/// A file that is present but unreadable or invalid is a different situation: the
+/// operator wrote transport semantics that the process would then not be running,
+/// while startup reported success. That case fails closed.
 pub fn apply_transport_overrides_from_file(
     cfg_path: &std::path::Path,
     transport: &mut crate::transport::Config,
-) {
+) -> Result<(), String> {
     match std::fs::read_to_string(cfg_path) {
         Ok(contents) => apply_transport_overrides_from_toml(cfg_path, &contents, transport),
-        Err(e) => {
-            log::warn!("transport overrides ignored (read failed, {}): {}", cfg_path.display(), e)
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            log::debug!(
+                "no transport override file at {}; using configured defaults",
+                cfg_path.display()
+            );
+            Ok(())
         }
+        Err(error) => Err(format!(
+            "transport override file {} is present but unreadable: {error}",
+            cfg_path.display()
+        )),
     }
 }
 
@@ -830,40 +850,40 @@ pub fn apply_runtime_config_reload(
     cfg.validate().map_err(|e| format!("Config validation failed: {}", e))?;
     validate_transport_overrides_from_toml(&contents)?;
 
+    // Build every domain's candidate before any shared state is written. The
+    // transport setters are the only ones that can still reject a value at this
+    // point, and they used to run last, after the other three domains had already
+    // been published. A rejected constraint therefore left FEC, optimization, and
+    // stealth on the new configuration and transport on the old one, with the
+    // reload reporting success. Applying transport first means a rejection aborts
+    // before anything is published and the prior generation stays intact.
     let mut fec = cfg.fec;
     if let Some(mode) = fec_mode_override {
         fec.apply_engine_mode(mode);
     }
+    let optimize = normalize_runtime_optimize_config(
+        OptimizeConfig {
+            pool_capacity: cfg.optimize.pool_capacity,
+            block_size: cfg.optimize.block_size,
+        },
+        "runtime config reload",
+    );
+    let mut stealth = cfg.stealth;
+    apply_runtime_stealth_overrides(
+        &mut stealth,
+        profile,
+        os,
+        disable_doh,
+        doh_provider,
+        disable_fronting,
+        front_domain,
+        disable_http3,
+    );
 
-    {
-        let mut guard = fec_cfg_shared.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = fec;
-    }
-    {
-        let mut guard = opt_params_shared.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = normalize_runtime_optimize_config(
-            OptimizeConfig {
-                pool_capacity: cfg.optimize.pool_capacity,
-                block_size: cfg.optimize.block_size,
-            },
-            "runtime config reload",
-        );
-    }
-    {
-        let mut guard = stealth_config.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = cfg.stealth;
-        apply_runtime_stealth_overrides(
-            &mut guard,
-            profile,
-            os,
-            disable_doh,
-            doh_provider,
-            disable_fronting,
-            front_domain,
-            disable_http3,
-        );
-    }
+    apply_transport_overrides_from_toml(cfg_path, &contents, transport)?;
 
-    apply_transport_overrides_from_toml(cfg_path, &contents, transport);
+    *fec_cfg_shared.lock().unwrap_or_else(|e| e.into_inner()) = fec;
+    *opt_params_shared.lock().unwrap_or_else(|e| e.into_inner()) = optimize;
+    *stealth_config.lock().unwrap_or_else(|e| e.into_inner()) = stealth;
     Ok(())
 }
