@@ -276,6 +276,9 @@ pub struct AuditEntry {
 pub struct AuditLog {
     sender: Sender<AuditCommand>,
     dropped_events: Arc<AtomicU64>,
+    queue_full_events: Arc<AtomicU64>,
+    worker_closing_events: Arc<AtomicU64>,
+    worker_disconnect_events: Arc<AtomicU64>,
     payload_rejections: Arc<AtomicU64>,
     state: Arc<AuditState>,
     admission_state: AtomicUsize,
@@ -555,8 +558,16 @@ impl AuditPayloadField {
 /// Observable bounded audit-persistence outcomes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AuditStats {
-    /// Events rejected before persistence because admission was full, closing, or disconnected.
+    /// Aggregate of every event rejected before persistence. Retained as the total;
+    /// the fields below name which cause produced it, because a full queue, a
+    /// shutting-down worker, and a dead worker demand different operator responses.
     pub dropped_events: u64,
+    /// Events rejected because the bounded queue was full.
+    pub queue_full_events: u64,
+    /// Events rejected because the writer was shutting down and no longer admits work.
+    pub worker_closing_events: u64,
+    /// Events rejected because the writer is gone and cannot be restarted in place.
+    pub worker_disconnect_events: u64,
     /// Events rejected before queue admission because a dynamic payload bound was exceeded.
     pub payload_rejections: u64,
     /// File write or durability-flush failures observed by the worker.
@@ -680,6 +691,9 @@ impl AuditLog {
         let rotated_segments = discover_rotated_segments(&path)?;
 
         let dropped_events = Arc::new(AtomicU64::new(0));
+        let queue_full_events = Arc::new(AtomicU64::new(0));
+        let worker_closing_events = Arc::new(AtomicU64::new(0));
+        let worker_disconnect_events = Arc::new(AtomicU64::new(0));
         let payload_rejections = Arc::new(AtomicU64::new(0));
         let state = Arc::new(AuditState::default());
         let (sender, receiver) = crossbeam_channel::bounded(options.queue_capacity);
@@ -710,6 +724,9 @@ impl AuditLog {
         Ok(Self {
             sender,
             dropped_events,
+            queue_full_events,
+            worker_closing_events,
+            worker_disconnect_events,
             payload_rejections,
             state,
             admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
@@ -825,7 +842,7 @@ impl AuditLog {
         let _admission = match self.begin_event_admission() {
             Ok(admission) => admission,
             Err(error) => {
-                self.dropped_events.fetch_add(1, Ordering::Relaxed);
+                self.record_dropped_event(&error);
                 return Err(error);
             }
         };
@@ -847,14 +864,31 @@ impl AuditLog {
         match self.sender.try_send(AuditCommand::Event(event)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                self.dropped_events.fetch_add(1, Ordering::Relaxed);
+                self.record_dropped_event(&AuditError::QueueFull);
                 Err(AuditError::QueueFull)
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.dropped_events.fetch_add(1, Ordering::Relaxed);
+                self.record_dropped_event(&AuditError::WorkerDisconnected);
                 Err(AuditError::WorkerDisconnected)
             }
         }
+    }
+
+    /// Count one pre-persistence rejection under its cause and in the aggregate.
+    ///
+    /// A full queue means the writer is behind, a closing worker means shutdown is in
+    /// progress, and a disconnected worker means audit is gone until the process is
+    /// restarted. One shared counter cannot tell an operator which of those happened,
+    /// so each is counted separately and the aggregate is kept as the total.
+    fn record_dropped_event(&self, error: &AuditError) {
+        self.dropped_events.fetch_add(1, Ordering::Relaxed);
+        let counter = match error {
+            AuditError::QueueFull => &self.queue_full_events,
+            AuditError::WorkerClosing => &self.worker_closing_events,
+            AuditError::WorkerDisconnected => &self.worker_disconnect_events,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Flush all events accepted before this bounded barrier.
@@ -879,6 +913,9 @@ impl AuditLog {
     pub fn stats(&self) -> AuditStats {
         AuditStats {
             dropped_events: self.dropped_events.load(Ordering::Relaxed),
+            queue_full_events: self.queue_full_events.load(Ordering::Relaxed),
+            worker_closing_events: self.worker_closing_events.load(Ordering::Relaxed),
+            worker_disconnect_events: self.worker_disconnect_events.load(Ordering::Relaxed),
             payload_rejections: self.payload_rejections.load(Ordering::Relaxed),
             persistence_errors: self.state.persistence_errors.load(Ordering::Relaxed),
             terminal_dropped_events: self.state.terminal_dropped_events.load(Ordering::Relaxed),
@@ -2580,12 +2617,97 @@ mod tests {
         remove_audit_set(&tmp);
     }
 
+    /// Build a producer-only log whose worker is replaced by the given receiver.
+    fn producer_only_log(
+        capacity: usize,
+        admission: usize,
+    ) -> (AuditLog, crossbeam_channel::Receiver<AuditCommand>) {
+        let (sender, receiver) = crossbeam_channel::bounded(capacity);
+        let log = AuditLog {
+            sender,
+            dropped_events: Arc::new(AtomicU64::new(0)),
+            queue_full_events: Arc::new(AtomicU64::new(0)),
+            worker_closing_events: Arc::new(AtomicU64::new(0)),
+            worker_disconnect_events: Arc::new(AtomicU64::new(0)),
+            payload_rejections: Arc::new(AtomicU64::new(0)),
+            state: Arc::new(AuditState::default()),
+            admission_state: AtomicUsize::new(admission),
+            worker: Mutex::new(None),
+            flush_timeout: Duration::ZERO,
+        };
+        (log, receiver)
+    }
+
+    #[test]
+    fn each_rejection_cause_is_counted_separately_and_still_totalled() {
+        // One shared counter cannot tell an operator whether the writer is merely
+        // behind, is shutting down, or is gone until restart. Those demand different
+        // responses, so each cause is counted on its own while the aggregate stays the
+        // total of all of them.
+        let (full_log, _full_receiver) = producer_only_log(1, AUDIT_ADMISSION_OPEN);
+        full_log
+            .log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "accepted")
+            .expect("first event fits");
+        assert!(matches!(
+            full_log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "dropped"),
+            Err(AuditError::QueueFull)
+        ));
+        let stats = full_log.stats();
+        assert_eq!(stats.queue_full_events, 1);
+        assert_eq!(stats.worker_closing_events, 0);
+        assert_eq!(stats.worker_disconnect_events, 0);
+        assert_eq!(stats.dropped_events, 1, "the aggregate must still count it");
+
+        let (closing_log, _closing_receiver) = producer_only_log(4, AUDIT_ADMISSION_CLOSING);
+        assert!(matches!(
+            closing_log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "x"),
+            Err(AuditError::WorkerClosing)
+        ));
+        let stats = closing_log.stats();
+        assert_eq!(stats.worker_closing_events, 1);
+        assert_eq!(stats.queue_full_events, 0);
+        assert_eq!(stats.worker_disconnect_events, 0);
+        assert_eq!(stats.dropped_events, 1);
+
+        let (closed_log, _closed_receiver) = producer_only_log(4, AUDIT_ADMISSION_CLOSED);
+        assert!(matches!(
+            closed_log.log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "x"),
+            Err(AuditError::WorkerDisconnected)
+        ));
+        let stats = closed_log.stats();
+        assert_eq!(stats.worker_disconnect_events, 1);
+        assert_eq!(stats.queue_full_events, 0);
+        assert_eq!(stats.worker_closing_events, 0);
+        assert_eq!(stats.dropped_events, 1);
+    }
+
+    #[test]
+    fn a_terminal_failure_is_not_counted_as_a_queue_rejection() {
+        // Terminal discards have their own counter and must not inflate the queue
+        // causes, otherwise a persistence outage reads as a backlog.
+        let (log, _receiver) = producer_only_log(4, AUDIT_ADMISSION_OPEN);
+        log.state.record_persistence_failure(AuditFailure::Persistence("disk gone".into()));
+
+        assert!(log
+            .log(AuditEventType::AdminAction, AuditSeverity::Info, None, None, "x")
+            .is_err());
+        let stats = log.stats();
+        assert_eq!(stats.terminal_dropped_events, 1);
+        assert_eq!(stats.queue_full_events, 0);
+        assert_eq!(stats.worker_closing_events, 0);
+        assert_eq!(stats.worker_disconnect_events, 0);
+        assert_eq!(stats.dropped_events, 0, "a terminal failure is not a queue rejection");
+    }
+
     #[test]
     fn test_queue_saturation_drops_newest_and_counts_it() {
         let (sender, receiver) = crossbeam_channel::bounded(1);
         let log = AuditLog {
             sender,
             dropped_events: Arc::new(AtomicU64::new(0)),
+            queue_full_events: Arc::new(AtomicU64::new(0)),
+            worker_closing_events: Arc::new(AtomicU64::new(0)),
+            worker_disconnect_events: Arc::new(AtomicU64::new(0)),
             payload_rejections: Arc::new(AtomicU64::new(0)),
             state: Arc::new(AuditState::default()),
             admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
@@ -2640,6 +2762,9 @@ mod tests {
         let log = AuditLog {
             sender,
             dropped_events: Arc::new(AtomicU64::new(0)),
+            queue_full_events: Arc::new(AtomicU64::new(0)),
+            worker_closing_events: Arc::new(AtomicU64::new(0)),
+            worker_disconnect_events: Arc::new(AtomicU64::new(0)),
             payload_rejections: Arc::new(AtomicU64::new(0)),
             state,
             admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),
@@ -2778,6 +2903,9 @@ mod tests {
         let log = AuditLog {
             sender,
             dropped_events: Arc::new(AtomicU64::new(0)),
+            queue_full_events: Arc::new(AtomicU64::new(0)),
+            worker_closing_events: Arc::new(AtomicU64::new(0)),
+            worker_disconnect_events: Arc::new(AtomicU64::new(0)),
             payload_rejections: Arc::new(AtomicU64::new(0)),
             state: Arc::new(AuditState::default()),
             admission_state: AtomicUsize::new(AUDIT_ADMISSION_OPEN),

@@ -1540,6 +1540,22 @@ impl Metrics {
         out.push_str("# TYPE quicfuscate_audit_dropped_events_total counter\n");
         write_metric!("quicfuscate_audit_dropped_events_total {}\n\n", audit.dropped_events);
         out.push_str(
+            "# HELP quicfuscate_audit_dropped_events_by_cause_total Audit events rejected before persistence, by cause\n",
+        );
+        out.push_str("# TYPE quicfuscate_audit_dropped_events_by_cause_total counter\n");
+        write_metric!(
+            "quicfuscate_audit_dropped_events_by_cause_total{{cause=\"queue_full\"}} {}\n",
+            audit.queue_full_events
+        );
+        write_metric!(
+            "quicfuscate_audit_dropped_events_by_cause_total{{cause=\"worker_closing\"}} {}\n",
+            audit.worker_closing_events
+        );
+        write_metric!(
+            "quicfuscate_audit_dropped_events_by_cause_total{{cause=\"worker_disconnected\"}} {}\n\n",
+            audit.worker_disconnect_events
+        );
+        out.push_str(
             "# HELP quicfuscate_audit_payload_rejections_total Audit events rejected before queue admission because a dynamic payload bound was exceeded\n",
         );
         out.push_str("# TYPE quicfuscate_audit_payload_rejections_total counter\n");
