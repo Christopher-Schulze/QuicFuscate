@@ -92,7 +92,7 @@ fn fuzz_matrix_helper(data: &[u8]) {
     let rows = (data[0] % 5) as usize;
     let inner = (data[1] % 5) as usize;
     let cols = (data[2] % 5) as usize;
-    let ragged = data[3] % 2 == 0;
+    let ragged = data[3].is_multiple_of(2);
 
     let mut a: Vec<Vec<u8>> = (0..rows)
         .map(|row| {

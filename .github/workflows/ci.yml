@@ -745,7 +745,13 @@ jobs:
 
   fuzz-targets:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-Zsanitizer=address"
+      ASAN_OPTIONS: "detect_odr_violation=0"
+      FUZZ_DURATION: ${{ github.event_name == 'pull_request' && '60' || '120' }}
+      FUZZ_JOBS: "2"
     steps:
       - uses: actions/checkout@v7
 
@@ -757,32 +763,11 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --version "0.13.2" --locked
 
-      - name: Link fuzz crate for cargo-fuzz
-        run: ln -sfn scripts/tests/fuzz fuzz
+      - name: Verify fuzz contract
+        run: bash scripts/audits/verify-fuzz-contract.sh
 
-      - name: Fuzz packet_parsing
-        working-directory: scripts/tests/fuzz
-        run: cargo +nightly fuzz run packet_parsing -- -max_total_time=60 -runs=1000
-
-      - name: Fuzz frame_decoding
-        working-directory: scripts/tests/fuzz
-        run: cargo +nightly fuzz run frame_decoding -- -max_total_time=60 -runs=1000
-
-      - name: Fuzz crypto_operations
-        working-directory: scripts/tests/fuzz
-        run: cargo +nightly fuzz run crypto_operations -- -max_total_time=60 -runs=1000
-
-      - name: Fuzz fec_encoding
-        working-directory: scripts/tests/fuzz
-        run: cargo +nightly fuzz run fec_encoding -- -max_total_time=60 -runs=1000
-
-      - name: Fuzz varint_parsing
-        working-directory: scripts/tests/fuzz
-        run: cargo +nightly fuzz run varint_parsing -- -max_total_time=60 -runs=1000
-
-      - name: Fuzz connection_handling
-        working-directory: scripts/tests/fuzz
-        run: cargo +nightly fuzz run connection_handling -- -max_total_time=60 -runs=1000
+      - name: Run all fuzz targets with AddressSanitizer
+        run: bash scripts/tests/fuzz/run-ci-fuzz.sh
 
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v7
@@ -790,6 +775,8 @@ jobs:
         with:
           name: fuzz-crashes
           path: scripts/tests/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # TODO-154: Performance Regression Detection (criterion + critcmp)
