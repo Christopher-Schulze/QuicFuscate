@@ -434,6 +434,75 @@ unsafe fn gf16_mul_vpclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
     }
 }
 
+/// Folds required to fully reduce a GF(2^16) carryless product modulo `x^16 + x^12 + x^3 + x + 1`.
+///
+/// Each fold isolates the low 16 bits and XORs in `clmul(high, 0x100B)`. Because that product is
+/// itself up to 27 bits wide, one fold does not finish. Four is sufficient and was established by
+/// exhaustively comparing every `a` in `0..=0xFFFF` against the scalar field for a spread of `b`
+/// values, plus 200,000 random pairs, all with zero mismatches.
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) const GF16_PCLMUL_FOLDS: usize = 4;
+
+/// Scalar model of the exact reduction the PCLMUL kernel performs.
+///
+/// This exists so the *algorithm* is provable on every host, including ones without the
+/// instruction. `gf16_pclmul_reference` differentially tests it against [`gf16_mul_single`].
+#[cfg(test)]
+pub(crate) fn gf16_reduce_folded(mut product: u32) -> u16 {
+    const REDUCTION: u32 = 0x100B;
+    for _ in 0..GF16_PCLMUL_FOLDS {
+        // Isolate the low half before folding: XORing into the untruncated product leaves the
+        // original high-degree terms in place, which is the defect this replaces.
+        product = (product & 0xFFFF) ^ carryless_mul_u32(product >> 16, REDUCTION);
+    }
+    product as u16
+}
+
+/// Carryless (polynomial) multiplication over GF(2), used by the scalar model.
+#[cfg(test)]
+pub(crate) fn carryless_mul_u32(a: u32, b: u32) -> u32 {
+    let mut result = 0u32;
+    let mut left = a;
+    let mut right = b;
+    while right != 0 {
+        if right & 1 != 0 {
+            result ^= left;
+        }
+        left <<= 1;
+        right >>= 1;
+    }
+    result
+}
+
+/// Scalar reference for one GF(2^16) product through the PCLMUL formulation.
+#[cfg(test)]
+pub(crate) fn gf16_pclmul_reference(a: u16, b: u16) -> u16 {
+    gf16_reduce_folded(carryless_mul_u32(a as u32, b as u32))
+}
+
+/// Apply [`GF16_PCLMUL_FOLDS`] reduction folds to a carryless product held in a vector lane.
+///
+/// # Safety
+///
+/// The caller must prove PCLMULQDQ and SSE2 support. Only lane 0 of `product` is meaningful to the
+/// caller; no memory is accessed through either argument.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "pclmulqdq", enable = "sse2")]
+unsafe fn gf16_fold_pclmul(
+    product: std::arch::x86_64::__m128i,
+    poly: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let low_mask = _mm_set1_epi64x(0xFFFF);
+    let mut folded = product;
+    for _ in 0..GF16_PCLMUL_FOLDS {
+        let high = _mm_srli_epi64(folded, 16);
+        let low = _mm_and_si128(folded, low_mask);
+        folded = _mm_xor_si128(low, _mm_clmulepi64_si128(high, poly, 0x00));
+    }
+    folded
+}
+
 /// PCLMULQDQ version for SSE4.2 systems
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "pclmulqdq", enable = "sse4.1")]
@@ -462,13 +531,17 @@ unsafe fn gf16_mul_pclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
         let prod0 = _mm_clmulepi64_si128(a_vec, b_vec, 0x00);
         let prod1 = _mm_clmulepi64_si128(a_vec, b_vec, 0x11);
 
-        // Reduce
-        let hi0 = _mm_srli_epi64(prod0, 16);
-        let hi1 = _mm_srli_epi64(prod1, 16);
-        let red0 = _mm_clmulepi64_si128(hi0, poly_vec, 0x00);
-        let red1 = _mm_clmulepi64_si128(hi1, poly_vec, 0x00);
-        let r0 = _mm_xor_si128(prod0, red0);
-        let r1 = _mm_xor_si128(prod1, red1);
+        // Reduce modulo x^16 + x^12 + x^3 + x + 1.
+        //
+        // The previous code folded once and kept the untruncated product:
+        // `prod ^ clmul(prod >> 16, POLY)`. That is wrong twice over. The low half must be
+        // isolated before the fold is XORed in, otherwise the original high bits survive; and one
+        // fold does not finish, because `clmul(hi, POLY)` is itself wide enough to reintroduce
+        // degrees at or above 16. GF16_PCLMUL_FOLDS folds are required, which
+        // `gf16_reduce_folded` documents and `gf16_pclmul_reference` proves against the scalar
+        // field on every host.
+        let r0 = gf16_fold_pclmul(prod0, poly_vec);
+        let r1 = gf16_fold_pclmul(prod1, poly_vec);
 
         // Extract and store
         dst[i] = _mm_extract_epi16(r0, 0) as u16;
@@ -480,5 +553,92 @@ unsafe fn gf16_mul_pclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
     while i < len {
         dst[i] = gf16_mul_single(a[i], b);
         i += 1;
+    }
+}
+
+#[cfg(test)]
+mod gf16_pclmul_tests {
+    use super::*;
+
+    /// The PCLMUL reduction formulation must equal the scalar field for every input.
+    ///
+    /// The shipped kernel folded once and XORed into the untruncated product, so it returned a
+    /// value in a different ring than `gf16_mul_single` for most inputs. Any caller reaching
+    /// `gf16_mul` on a PCLMUL-capable CPU received mathematically incorrect field products.
+    ///
+    /// This tests the algorithm, not the instruction, so it runs on every host including ones
+    /// without PCLMULQDQ.
+    #[test]
+    fn pclmul_reduction_matches_the_scalar_field_exhaustively_in_a() {
+        // Exhaustive over every `a` for a spread of `b`, including the zero, identity, reduction
+        // constant, high bit, and all-ones cases.
+        for b in [0u16, 1, 2, 3, 0x100B, 0x8000, 0xFFFF, 0x1234, 0xABCD] {
+            for a in 0..=u16::MAX {
+                let expected = gf16_mul_single(a, b);
+                let actual = gf16_pclmul_reference(a, b);
+                assert_eq!(
+                    actual, expected,
+                    "gf16 mismatch for a={a:#06x} b={b:#06x}: pclmul formulation {actual:#06x} != scalar {expected:#06x}"
+                );
+            }
+        }
+    }
+
+    /// Randomised pairs across the whole domain, so the spread of `b` above is not the only cover.
+    #[test]
+    fn pclmul_reduction_matches_the_scalar_field_for_random_pairs() {
+        // Deterministic LCG: reproducible, and independent of any RNG the crate configures.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u16
+        };
+        for _ in 0..200_000 {
+            let a = next();
+            let b = next();
+            assert_eq!(
+                gf16_pclmul_reference(a, b),
+                gf16_mul_single(a, b),
+                "gf16 mismatch for a={a:#06x} b={b:#06x}"
+            );
+        }
+    }
+
+    /// One fold is provably insufficient, which is why the constant is not 1.
+    #[test]
+    fn a_single_fold_is_insufficient_which_is_what_the_defect_was() {
+        const REDUCTION: u32 = 0x100B;
+        let single_fold = |a: u16, b: u16| -> u16 {
+            let product = carryless_mul_u32(a as u32, b as u32);
+            ((product & 0xFFFF) ^ carryless_mul_u32(product >> 16, REDUCTION)) as u16
+        };
+        let mut divergent = 0usize;
+        for a in 0..=u16::MAX {
+            if single_fold(a, 0xFFFF) != gf16_mul_single(a, 0xFFFF) {
+                divergent += 1;
+            }
+        }
+        assert!(
+            divergent > 0,
+            "a single fold must be demonstrably wrong, otherwise the fold count is unjustified"
+        );
+        const _: () = assert!(
+            GF16_PCLMUL_FOLDS > 1,
+            "one fold is provably insufficient, so the constant must exceed it"
+        );
+    }
+
+    /// The public dispatcher must agree with the scalar field, whichever backend it selects.
+    #[test]
+    fn public_gf16_mul_agrees_with_the_scalar_field_including_tails() {
+        // Odd lengths exercise the two-at-a-time loop plus its scalar tail.
+        for len in [0usize, 1, 2, 3, 7, 16, 17] {
+            let a: Vec<u16> = (0..len).map(|i| (i as u16).wrapping_mul(0x9E37) ^ 0x5A5A).collect();
+            let b = 0xBEEFu16;
+            let mut dst = vec![0u16; len];
+            gf16_mul(&a, b, &mut dst);
+            let expected: Vec<u16> = a.iter().map(|&value| gf16_mul_single(value, b)).collect();
+            assert_eq!(dst, expected, "dispatcher disagreed with the scalar field at len={len}");
+        }
     }
 }
