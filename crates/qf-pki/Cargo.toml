@@ -1,0 +1,21 @@
+[package]
+name = "qf-pki"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rcgen = ["dep:rcgen", "dep:time"]
+
+[dependencies]
+base64 = "0.21"
+libc = "0.2"
+log = "0.4"
+qf-common = { path = "../qf-common" }
+rcgen = { version = "0.13", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
+time = { version = "0.3", optional = true }
+zeroize = "1.8"

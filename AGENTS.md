@@ -423,9 +423,10 @@ After `bun run build`:
 
 QuicFuscate is a QUIC-based VPN with advanced stealth, cryptography, adaptive FEC, and performance optimizations. The codebase has three main areas:
 
-### 1. Rust Core (`src/`)
-- Single crate, ~20k lines
-- Key modules: `core.rs`, `transport/`, `stealth/`, `fec/`, `brain.rs`, `crypto/`, `qftls.rs`, `reality.rs`, `compress.rs`, `optimize/`
+### 1. Rust Core (`src/` + `crates/`)
+- Cargo workspace with the root `quicfuscate` package and six backend leaf crates: `qf-common`, `qf-control-plane`, `qf-error`, `qf-instrumentation`, `qf-pki`, and `qf-privilege`
+- The remaining product runtime stays under `src/`; key modules are `core.rs`, `transport/`, `stealth/`, `fec/`, `brain.rs`, `crypto/`, `qftls.rs`, `reality.rs`, `compress.rs`, and `optimize/`
+- Root compatibility modules preserve existing `crate::` paths while each extracted leaf is independently checked as its own workspace package
 - Build: `cargo check` / `cargo build`
 - Tests: `cargo test --features rust-tests`
 
@@ -501,6 +502,7 @@ Wire -> Pooled Buffer
 | Architecture overview + file map + wiring map (canonical SSOT) | `docs/MAP.md` |
 | Agent instructions | `AGENTS.md` |
 | Rust core | `src/` |
+| Backend workspace leaf crates | `crates/qf-common/`, `crates/qf-control-plane/`, `crates/qf-error/`, `crates/qf-instrumentation/`, `crates/qf-pki/`, `crates/qf-privilege/` |
 | Web Admin UI | `apps/svelte-admin/` |
 | Desktop frontend | `apps/svelte-desktop/` |
 | Desktop Tauri host | `apps/tauri/` |

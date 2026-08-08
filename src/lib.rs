@@ -127,7 +127,9 @@ pub mod privilege {
 pub mod audit;
 
 /// Production PKI - CA hierarchy, cert generation, chain validation (TODO-434).
-pub mod pki;
+pub mod pki {
+    pub use qf_pki::*;
+}
 
 /// DNS through tunnel - DoH proxy, DNS forwarding, leak prevention (TODO-435).
 pub mod dns;

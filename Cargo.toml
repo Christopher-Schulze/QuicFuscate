@@ -5,6 +5,7 @@ members = [
     "crates/qf-control-plane",
     "crates/qf-error",
     "crates/qf-instrumentation",
+    "crates/qf-pki",
     "crates/qf-privilege",
 ]
 exclude = [
@@ -31,6 +32,7 @@ qf-common = { path = "crates/qf-common" }
 qf-control-plane = { path = "crates/qf-control-plane" }
 qf-error = { path = "crates/qf-error" }
 qf-instrumentation = { path = "crates/qf-instrumentation" }
+qf-pki = { path = "crates/qf-pki" }
 qf-privilege = { path = "crates/qf-privilege" }
 aligned_box = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
@@ -111,7 +113,7 @@ default = ["client", "server", "rate_limiter"]
 
 # --- Role features ---
 client = []
-server = ["rcgen", "time", "maxminddb"]
+server = ["rcgen", "time", "maxminddb", "qf-pki/rcgen"]
 
 # --- Runtime / transport features ---
 io_uring = ["dep:io-uring"]
@@ -128,7 +130,7 @@ unsafe_rust = []
 zero_copy_dgram = []
 
 # --- Dev / cert features ---
-dev-certs = ["rcgen", "time"]
+dev-certs = ["rcgen", "time", "qf-pki/rcgen"]
 
 # --- Platform features ---
 tun-windows = []

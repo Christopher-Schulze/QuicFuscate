@@ -1481,6 +1481,20 @@ name = "qf-instrumentation"
 version = "0.4.4"
 
 [[package]]
+name = "qf-pki"
+version = "0.4.4"
+dependencies = [
+ "base64 0.21.7",
+ "libc",
+ "log",
+ "qf-common",
+ "rcgen",
+ "rustls",
+ "time",
+ "zeroize",
+]
+
+[[package]]
 name = "qf-privilege"
 version = "0.4.4"
 dependencies = [
@@ -1522,6 +1536,7 @@ dependencies = [
  "qf-control-plane",
  "qf-error",
  "qf-instrumentation",
+ "qf-pki",
  "qf-privilege",
  "rand",
  "rayon",

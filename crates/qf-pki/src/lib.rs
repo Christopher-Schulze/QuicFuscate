@@ -59,6 +59,7 @@ impl From<std::io::Error> for PkiError {
     }
 }
 
+#[cfg(feature = "rcgen")]
 impl From<rcgen::Error> for PkiError {
     fn from(e: rcgen::Error) -> Self {
         Self::GenerationFailed(e.to_string())
@@ -85,7 +86,7 @@ struct CanonicalPkiClock;
 
 impl PkiClock for CanonicalPkiClock {
     fn now_system(&self) -> SystemTime {
-        crate::time_source::now_system()
+        qf_common::time_source::now_system()
     }
 }
 
