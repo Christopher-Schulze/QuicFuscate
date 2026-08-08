@@ -2,6 +2,8 @@
 
 **Status**: This document is the canonical technical reference and reflects the current runtime behavior.
 
+Current task status and evidence ownership are canonical only in `docs/todo.md` and the frontmatter of its linked detail files. Dated audit and reconciliation sections below are historical snapshots for the commit/date named in their heading; their then-current status wording is evidence, not a current task-state claim.
+
 ## Documentation Transparency and Feature Contract
 
 - Runtime correctness is defined by checked-in code, targeted tests, and audit scripts, not by aspirational feature wording.
@@ -267,7 +269,7 @@ Threat to mitigation mapping:
 
 Residual threat profile:
 - False positives in probe-detection paths under extreme jitter/loss remain part of the validation stream.
-- Signed Windows update-channel threats remain partially open until native MSI/signature and tagged manifest verification completes.
+- Signed Windows update-channel threats are controlled by the release workflow. The current `v0.4.4` native MSI, signature, and tagged-manifest evidence is retained in the release checkpoint above; each later release must reproduce that gate before publication.
 
 ### Deployment Hardening Guide
 
@@ -352,7 +354,7 @@ This document provides comprehensive technical documentation for the system arch
 - Profiling runners and evidence semantics: [Profiling Evidence Contract](#profiling-evidence-contract)
 - Full config schema and env overrides: [Configuration Reference (Full)](#configuration-reference-full)
 - Embedded API contracts: [Engine Control Plane (embedded orchestration)](#engine-control-plane-embedded-orchestration)
-- Script entrypoints and suites: [Scripts Reference (Authoritative)](#scripts-reference-authoritative)
+- Script entrypoints and suites: [Scripts Reference](#scripts-reference)
 
 ### Architecture at a Glance
 - Modular Rust crate with focused modules:
@@ -2973,7 +2975,7 @@ GitHub CI validates the native desktop backend through the `app-backend-checks` 
 **Updater Integration (source-first and signed-release boundary):**
 - Updater plugin path is integrated but runtime-gated behind `QUICFUSCATE_DESKTOP_UPDATER_ACTIVE`.
 - Default is disabled for source-first or unsigned builds; signed artifacts and a matching manifest entry are required before enabling update delivery in shipped binaries.
-- The tracked release workflow now includes a required signed Windows MSI path, but native MSI and tagged manifest proof remain open under TODO-519.
+- The tracked release workflow includes a required signed Windows MSI path. Native MSI and tagged-manifest evidence is retained in the release checkpoint above; TODO-519 is `DONE` in the task register.
 - Desktop UI includes updater policy/status so no-update, available, download/install, and signature-failure states are explicit.
 
 **Verification (frontend):**
@@ -3615,7 +3617,7 @@ Fingerprint/persona rotation is connection-scoped. The settings below remain use
 source, but an established connection does not change browser, operating system, TLS, H3, or QPACK
 persona mid-session. Rotation selects the next persona only for a new connection or explicit reconnect.
 
-#### Configuration
+#### Fingerprint Rotation Configuration
 ```toml
 [fingerprint_rotation]
 enabled = true
@@ -4721,7 +4723,7 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 
 ### Kill-Switch Issues
 
-#### Linux
+#### Kill-Switch Linux
 **iptables rules not applied:**
 - Check `iptables -L QUICFUSCATE_KS -n` to verify rules exist in the dedicated chain
 - Ensure the binary has `CAP_NET_ADMIN` capability or runs as root
@@ -4740,7 +4742,7 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 - An unavailable Linux firewall tool is skipped only during cross-backend stale-residue inspection. Explicit selection of that backend still fails closed before firewall mutation, while an installed backend must complete and verify cleanup.
 - The exact ARM64 release artifact `54aa80dca01a67dfb7716aa35853245a7fd0334737fc7ad6af00743a127197fb` passes both privileged nftables and real iptables-only crash/restart lifecycles. The harness retains unrelated firewall fingerprints across atomic replacement failure, stale recovery, restart, and clean shutdown and leaves no owned namespace, link, rule, table, chain, or process residue.
 
-#### macOS
+#### Kill-Switch macOS
 **pf rules not loading:**
 - Check pf status: `sudo pfctl -s info`
 - Verify rules file: `sudo pfctl -s rules`
@@ -4753,7 +4755,7 @@ Enable kill-switch to prevent any traffic outside the tunnel.
 - Stale rules can be cleaned with `quicfuscate client --cleanup-firewall`
 - Cleanup flushes and verifies only `com.quicfuscate.killswitch`. It never disables the shared PF service.
 
-#### Windows
+#### Kill-Switch Windows
 The WFP `Engine` and `Transaction` owners use `WfpOwnerState`. A failed `FwpmEngineClose0`, transaction commit, or abort retains native ownership and the exact status for an explicit retry; `Drop` makes one bounded final attempt and emits a durable pending-resource diagnostic. Deterministic engine-close and transaction-abort fault-injection tests run in the Windows core lane. TODO-848's `quicfuscate.interface_platform_negative_proof.v1` manifest records the deterministic test gate and explicitly marks native Win32/BFE fault injection unavailable. Current Windows/BFE failure execution and new-failure residue proof remain unclaimed; historical native WFP evidence predates these tests.
 The Windows kill switch uses WFP rather than `netsh advfirewall`. One fixed persistent provider and sublayer own IPv4/IPv6 outbound-transport filters, which Windows applies to ordinary, third-party-transport, and raw packets while exposing the exact UDP tuple. Every block-only, connecting, connected, disable, and stale-cleanup transition is one BFE transaction. Loopback, the exact UDP VPN endpoint, and the connected Wintun LUID use higher filter-weight ranges than the same-sublayer catch-all block. A failed transaction retains the previous policy, and an enabled policy survives process exit until exact startup cleanup. The former `netsh` design remains rejected because broad Windows Firewall block rules override narrower allow rules; cleanup still removes only the two exact legacy rule names. The legacy `WindowsPlatform` adapter path remains `Unsupported` before host mutation. Native CI run `30508948149`, job `90764941801` proves exact IPv4/IPv6 packet absence and presence at the real Wintun ring for every policy state, retained blocking after the installer child exits, restored delivery after stale cleanup, and zero managed WFP, adapter, and firewall residue. Signed MSI run `30533862566` and consecutive authenticated Windows-Omega runs `30535603045` / `30536002374` close the packaged-DLL, connected dual-stack traffic, same-process stability, and cleanup proof.
 
@@ -4905,7 +4907,7 @@ level = "debug"
 
 ### Platform-Specific Issues
 
-#### Linux
+#### Platform Issues - Linux
 **io_uring not available:**
 - Requires kernel 5.6+ for basic io_uring support; check with `uname -r`
 - The runtime falls back to sendmmsg automatically
@@ -4914,12 +4916,12 @@ level = "debug"
 - Use the shipped root-started systemd unit with `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_CHOWN`, `CAP_SETGID`, and `CAP_SETUID` in `CapabilityBoundingSet`. Do not add `AmbientCapabilities`; root setup already receives the bounded effective/permitted set and ambient capabilities would populate the inheritable set.
 - Run `quicfuscate capabilities --json --tun` before startup to identify the exact missing capability or target-account failure.
 
-#### macOS
+#### Platform Issues - macOS
 **utun interface creation fails:**
 - Requires root or network extension entitlement
 - Run with `sudo` for development/testing
 
-#### Windows
+#### Platform Issues - Windows
 **Wintun adapter cannot start:**
 - Build with the `tun-windows` feature and place the verified upstream `wintun.dll` beside the executable.
 - On Windows development hosts, run `scripts/utils/provision-wintun.ps1` with explicit destination and evidence paths instead of downloading or copying an unverified DLL manually.
@@ -4947,6 +4949,8 @@ level = "debug"
 ## Deep Audit Findings (2026-08-01)
 
 A full deep-audit sweep of `src/` was performed with parallel read-only module scans and `cargo check`/`cargo clippy` verification. The scan produced new TODO entries (TODO-626 through TODO-689) and augmented existing TODOs with additional evidence. The findings span crypto correctness, FEC resource bounds, transport/stealth hot-path issues, privilege and unsafe-code correctness, client/server lifecycle, DNS behavior, time-source consistency, SIMD static mutables, and a full unsafe-code surface audit (memory pools, SIMD, crypto, transport, interface, privilege, FEC, io_uring, and auxiliary modules).
+
+This and every later dated audit or reconciliation section are historical evidence snapshots. Current task status and open gates are read from `docs/todo.md` and the linked detail-file frontmatter; historical `open`, `complete`, or `pending` wording below must not be read as a current status claim.
 
 ### Security-Critical Findings
 
@@ -5661,13 +5665,11 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 ## Deep Audit Reconciliation (2026-08-07, TODO-690 through TODO-698)
 
-- TODO-690 remains open in the current source: `Decoder8::solve_wiedemann_system()` constructs the Krylov and minimal-polynomial data, then returns the right-hand side as the solution. Candidate validation and fallback containment do not make the Wiedemann solver functional. Existing identity and dimension tests do not prove a non-identity solution, and the all-feature fixture is not a Gaussian-window-compatible non-identity case. The AMX work owned by TODO-816 and TODO-676 does not close this equation-solving boundary.
-- TODO-691 and TODO-692 remain open at the H3 wire boundary. Client construction alone calls `init_control_stream()`, which currently records local stream state and settings without sending a unidirectional control stream or SETTINGS frame. The stream parser uses an 8-bit frame type, handles only a narrow DATA/HEADERS path, accepts empty SETTINGS, drops unknown types, and creates newly observed streams with a default request role without decoding the QUIC unidirectional stream type. No wire-level initialization, fragmentation, duplicate-SETTINGS, or stream-state gate has been run.
-- TODO-693 remains open in receive flow control. The receive path charges the full payload and connection byte count before overlap trimming and delivery, then discards duplicate fragments without reverse accounting. Window growth therefore observes pre-dedup counters; no range-union or property gate proves that repeated retransmission cannot consume credit.
-- TODO-694 remains open in ACK admission. `take_ack_at()` clears ACK state before packet capacity checks and serialization in application, Initial, and Handshake paths. A failed send has no rollback proof, and no retry/error gate covers the state transition.
-- TODO-695 remains open in recovery bounds. Loss detection materializes and sorts every sent-packet key in the acknowledged prefix, while sent-packet storage has no explicit packet, byte, or work bound. ACK processing repeats the prefix materialization pattern; no adversarial bound gate has been run.
-- TODO-696 remains open in timeout ownership. `Connection::on_timeout()` aggregates loss and resets connection-level bytes-in-flight while leaving the recovery maps, timers, and pending probe ownership outside the terminal transition. `Recovery::discard_space()` exists on other teardown paths, but no terminal-state or idempotency gate proves timeout cleanup is complete.
-- TODO-697 remains open in close priority. Close admission is bounded and first-close-wins, but ordinary queue insertion leaves close behind existing ACK-eliciting frames. The congestion bypass stops at a front ACK-eliciting frame, so a later close can remain blocked; no queue-order gate covers this case.
+- Historical snapshot: TODO-690 was open at the 2026-08-07 source boundary described here. Its current closure is recorded in the linked detail file and the task register; this paragraph preserves the pre-closure solver finding.
+- Historical snapshot: TODO-691 and TODO-692 were open at the 2026-08-07 H3 wire boundary described here. Their current implementation reconciliation is recorded in the linked detail files; this paragraph preserves the pre-closure wire findings.
+- Historical snapshot: TODO-693 and TODO-694 were open at the 2026-08-07 flow-control and ACK boundary described here. Their current closure is recorded in the linked detail files; the pre-closure accounting findings are retained for audit history.
+- Historical snapshot: TODO-695 and TODO-696 were open at the 2026-08-07 recovery boundary described here. Their current closure is recorded in the linked detail files; the pre-closure bounded-scan and terminal-owner findings are retained for audit history.
+- Historical snapshot: TODO-697 was open at the 2026-08-07 close-priority boundary described here. Its current closure is recorded in the linked detail file; the pre-closure queue-order finding is retained for audit history.
 - TODO-698's historical send-commit finding is resolved locally on 2026-08-08: FEC writes and DATAGRAM frames retain queue ownership through serialization, padding, header protection, AEAD, and short-header sealing, then commit FIFO removal and sealed-frame telemetry together. TODO-559's sustained throughput/native gates remain separate and are not implied by this transport proof.
 - Evidence boundary: this reconciliation is a current-source and task-truth audit only. No implementation, Rust build, test, Clippy, H3 wire, native transport, or live runtime gate was run for these findings. The referenced TODOs remain the authoritative remediation queue.
 ## Deep Audit Reconciliation (2026-08-07, Platform, Tooling, and Coverage)

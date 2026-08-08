@@ -941,7 +941,7 @@ checks = [
     (
         Path("src/implementations/server/parts/runtime_impl.rs"),
         "current_memory_lock_policy.reject_standalone_reload(candidate_memory_lock_policy)?;",
-        "apply_runtime_config_reload(",
+        "apply_runtime_config_reload_with_generation(",
         "standalone reload applies runtime changes before checking startup-owned memory policy",
     ),
 ]
@@ -1571,7 +1571,7 @@ fi
 
 if rg -F -- '--tun-mtu "$tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- '--tun-mtu "$client_tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- 'start_phase default 0 1280 1280' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'start_phase default 0 1472 1280 60000 10000 1472 1500' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'start_phase opt-in 1 1472 1500 1000 2000' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'DPLPMTUD confirmed path MTU: 1280B -> 1472B' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'DPLPMTUD black hole detected: path MTU 1472B -> 1280B' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
@@ -1794,7 +1794,7 @@ else
 fi
 
 # 11c) The retained AArch64 optimize-random helper path must stay explicitly covered as rust-tests/test-only contract.
-if rg -n --no-messages '^#!\[cfg\(target_arch = "aarch64"\)\]$' scripts/tests/rust/rt-random-aes-ctr.rs >/dev/null \
+if rg -F -- '#[cfg(target_arch = "aarch64")]' scripts/tests/rust/rt-random-aes-ctr.rs >/dev/null \
   && rg -n --no-messages '^#!\[cfg\(feature = "rust-tests"\)\]$' scripts/tests/rust/rt-random-aes-ctr.rs >/dev/null \
   && rg -n --no-messages 'random::random_array_u32\(&mut words\)|random::random_u64\(\)' scripts/tests/rust/rt-random-aes-ctr.rs >/dev/null; then
   pass "AArch64 optimize-random contract remains covered by explicit rust-tests gate"
@@ -1870,7 +1870,7 @@ if [[ -z "$QKEY_AUTH_POLICY_ORDER_ERRORS" ]] \
   && rg -F -- 'max_tracked_ips: 65_536' src/implementations/server/limits.rs >/dev/null \
   && rg -F -- 'max_pending_attempts_per_ip: 4' src/implementations/server/limits.rs >/dev/null \
   && rg -F -- 'QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES' src/implementations/server/parts/config.rs config/server-linux.default.toml docs/DOCUMENTATION.md >/dev/null \
-  && rg -F -- 'AuthRateLimiter::new(' src/implementations/server/parts/live_state.rs >/dev/null \
+  && rg -F -- 'AuthRateLimiter::new_with_clock(' src/implementations/server/parts/live_state.rs >/dev/null \
   && [[ "$(rg -c --no-messages 'qkey_auth_denied' src/implementations/server/parts/live_auth.rs || true)" -ge 3 ]] \
   && rg -F -- 'quicfuscate_auth_backoff_rejected_total' src/implementations/server/metrics.rs docs/DOCUMENTATION.md >/dev/null \
   && rg -F -- 'quicfuscate_auth_blocked_rejected_total' src/implementations/server/metrics.rs docs/DOCUMENTATION.md >/dev/null \

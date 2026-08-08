@@ -638,6 +638,19 @@ else
     log_info "Documentation coverage good: $MISSING_DOCS items missing"
 fi
 
+echo -e "\n> Checking canonical documentation truth..."
+DOC_TRUTH_LOG="$OUTPUT_DIR/documentation-truth.log"
+set +e
+"$SCRIPT_DIR/audit-documentation-truth.sh" >"$DOC_TRUTH_LOG" 2>&1
+DOC_TRUTH_RC=$?
+set -e
+record_command_check "documentation_truth" "$DOC_TRUTH_RC" "artifact=$DOC_TRUTH_LOG"
+if [ "$DOC_TRUTH_RC" -eq 0 ]; then
+    log_info "Canonical documentation truth passed"
+else
+    log_critical "Canonical documentation truth failed with rc=$DOC_TRUTH_RC"
+fi
+
 echo -e "\n> Checking test-file presence (not executed coverage)..."
 TEST_FILES=$(find src -name "*.rs" -exec grep -l "#\[test\]" {} \; | wc -l)
 TOTAL_FILES=$(find src -name "*.rs" | wc -l)
