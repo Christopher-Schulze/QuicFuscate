@@ -22,26 +22,41 @@ fn roundtrip(frame: Frame<'_>, pkt: PacketType) {
 #[test]
 fn roundtrip_basic_frames() {
     let frames = vec![
-        Frame::Ping { mtu_probe: None },
-        Frame::MaxData { max: 12345 },
-        Frame::ResetStream { stream_id: 7, error_code: 1, final_size: 42 },
-        Frame::StopSending { stream_id: 9, error_code: 2 },
-        Frame::Crypto { offset: 3, data: Cow::Owned(b"crypto".to_vec()) },
-        Frame::NewToken { token: Cow::Owned(b"token".to_vec()) },
-        Frame::Stream { stream_id: 4, offset: 0, data: Cow::Owned(b"hello".to_vec()), fin: true },
-        Frame::ConnectionClose {
-            error_code: 0x1a,
-            frame_type: 0x01,
-            reason: Cow::Owned(b"bye".to_vec()),
-        },
-        Frame::ApplicationClose { error_code: 0x02, reason: Cow::Owned(b"app".to_vec()) },
-        Frame::Datagram { data: Cow::Owned(b"payload".to_vec()) },
-        Frame::PathChallenge { data: [0xAB; 8] },
-        Frame::PathResponse { data: [0xCD; 8] },
+        (Frame::Ping { mtu_probe: None }, PacketType::Short),
+        (Frame::MaxData { max: 12345 }, PacketType::Short),
+        (Frame::ResetStream { stream_id: 7, error_code: 1, final_size: 42 }, PacketType::Short),
+        (Frame::StopSending { stream_id: 9, error_code: 2 }, PacketType::Short),
+        // CRYPTO frames are valid only in Initial and Handshake packets.
+        (Frame::Crypto { offset: 3, data: Cow::Owned(b"crypto".to_vec()) }, PacketType::Initial),
+        (Frame::NewToken { token: Cow::Owned(b"token".to_vec()) }, PacketType::Short),
+        (
+            Frame::Stream {
+                stream_id: 4,
+                offset: 0,
+                data: Cow::Owned(b"hello".to_vec()),
+                fin: true,
+            },
+            PacketType::Short,
+        ),
+        (
+            Frame::ConnectionClose {
+                error_code: 0x1a,
+                frame_type: 0x01,
+                reason: Cow::Owned(b"bye".to_vec()),
+            },
+            PacketType::Short,
+        ),
+        (
+            Frame::ApplicationClose { error_code: 0x02, reason: Cow::Owned(b"app".to_vec()) },
+            PacketType::Short,
+        ),
+        (Frame::Datagram { data: Cow::Owned(b"payload".to_vec()) }, PacketType::Short),
+        (Frame::PathChallenge { data: [0xAB; 8] }, PacketType::Short),
+        (Frame::PathResponse { data: [0xCD; 8] }, PacketType::Short),
     ];
 
-    for frame in frames {
-        roundtrip(frame, PacketType::Short);
+    for (frame, pkt) in frames {
+        roundtrip(frame, pkt);
     }
 }
 

@@ -422,7 +422,7 @@ This keeps CLI and embedded control planes aligned on one runtime mutation path.
 
 #### Authenticated Client Assignment and Carrier
 
-`src/control_plane.rs` owns the versioned, bounded client-assignment capsule carried on the
+`crates/qf-control-plane/src/lib.rs` owns the versioned, bounded client-assignment capsule carried on the
 authenticated Core MASQUE CONNECT-UDP flow. The capsule binds the server session identity to
 the client reconnect generation and carries explicit IPv4/IPv6 family order, prefixes, DNS, MTU,
 and an explicit disabled state. The receiver rejects unsupported versions, unknown flags,
@@ -5895,6 +5895,13 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Root compatibility modules preserve existing `crate::env_utils`, `crate::time_source`, `crate::rng`, and `crate::secret` paths. Production builds use explicit re-exports from `qf-common`; root unit tests include the moved source under `cfg(test)` to retain the existing test-only time, entropy, environment, and erasure observers without exposing them as a root public API. `SecretBytes` and `SecretString` remain `pub(crate)` at the root boundary.
 - `audit-workspace-seams.py` now scans both the root source tree and workspace crate source trees. The current backend inventory reports workspace packages `quicfuscate` and `qf-common`, root 51 dependencies (49 normal and 2 dev), qf-common 3 dependencies, 29 root features, 95 root targets, 239 Rust files, 203,446 source lines, 159 product-module edges, and the same 16-module product SCC. Cargo dependency direction is exactly `quicfuscate -> qf-common` with no reverse edge; the protected frontend/Tauri path set is empty.
 - Verification: qf-common check, strict Clippy, and `28/28` tests; root default and `rust-tests` library tests `2,663/2,663`; root default and `rust-tests` library strict Clippy; root library check; formatting; and the protected-path audit all pass. No UI field or frontend projection was needed, so frontend work remains explicitly deferred and untouched.
+
+## Control-plane Workspace Crate (2026-08-08, TODO-562)
+
+- `crates/qf-control-plane/` now owns the versioned authenticated client-assignment capsule and receiver state machine. It has no dependencies beyond the Rust standard library and remains independent from transport, crypto, FEC, platform, frontend, and Tauri code.
+- The root `quicfuscate::control_plane` module is a compatibility re-export of `qf-control-plane`, so existing internal paths and the public assignment API keep the same names and type behavior while the crate boundary becomes independently buildable.
+- The workspace dependency direction is `quicfuscate -> qf-control-plane`; the control-plane crate has no reverse edge. Its existing unit tests remain in the extracted crate and are executed through the workspace package target.
+- Verification: workspace all-target check, strict all-target Clippy with `rust-tests`, formatting, and the complete all-target `rust-tests` suite pass. The suite includes 28 `qf-common` tests, 8 `qf-control-plane` tests, 2,655 root library tests, and all registered integration targets; no frontend projection was added.
 
 ## Omega Proof Ownership Preflight (2026-08-08, TODO-804)
 

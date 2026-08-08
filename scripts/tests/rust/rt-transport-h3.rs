@@ -30,7 +30,7 @@ fn h3_send_request_returns_stream_id() {
         h3::Header::new(b":authority", b"example.com"),
     ];
     let sid = h3c.send_request(&mut conn, &headers, true).expect("send_request");
-    assert!(sid > 0, "stream ID must be positive for non-control streams");
+    assert_eq!(sid % 4, 0, "request stream must be a client-initiated bidirectional stream");
 }
 
 #[test]
