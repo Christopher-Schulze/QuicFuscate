@@ -4000,7 +4000,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `build-server-bundle.sh` - Produces a server bundle into `scripts/out/build/` for deployment packaging.
 
 #### Build (`scripts/tests/build/`)
-- `build-check.sh` - Format, Clippy, compile checks, test/bench compilation
+- `build-check.sh` - Format, Clippy, compile checks, test/bench compilation. Fail closed (TODO-740): formatting, Clippy, compilation, test compilation, and benchmark compilation each record PASS, FAIL, or SKIP with the exact command status in `results.json`, and any FAIL makes the runner exit 1. Failures were previously downgraded to warnings under an unconditional `[OK]` line, so a green result proved nothing. Low disk and `--skip-clippy` are machine-readable SKIPs with a reason, never PASS, and the final line names every skipped check so a partial run cannot read as a full quality pass.
 - `build-clippy-matrix.sh` - Clippy feature-matrix sweep (aligns with CI variants)
 - `build-env-doctor.sh` - Environment/Toolchain diagnostics
 
