@@ -5817,3 +5817,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `src/bin/qf-e2e-client.rs` transfers the validated `QKeyToken` into `QuicFuscateConnection::new_client` instead of cloning an owned value that is not used afterward.
 - `src/main_parts/runtime.rs` transfers the standalone TUN setup's owned `Arc<MemoryPool>` into `TunInterface::open`; the local handle has no later consumer.
 - Existing error handling and shared ownership semantics remain unchanged. Strict all-feature library/bin/example Clippy, backend check, formatting, and diff hygiene pass; frontend paths remain untouched.
+
+## Implementation Reconciliation (2026-08-08, TODO-800 runtime reload PMTU fixtures)
+
+- The successful runtime-reload fixture now sets `transport.pmtu_max_mtu = 1400` with `transport.mtu = 1400`, so complete EngineConfig validation accepts the intended reduced path MTU before shared-state and transport assertions run.
+- The invalid fixture asserts the stable complete-validator diagnostic `transport.mtu must be at least 1200`, preserving the no-publication check for the existing transport state.
+- Default and all-feature focused binary tests pass `2/2` each. The all-target macOS boundary remains the intentional Linux-only io_uring integration target; no frontend surface changed.

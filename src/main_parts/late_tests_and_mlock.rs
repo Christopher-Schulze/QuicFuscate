@@ -598,6 +598,7 @@ memory_pool_size = 7274496
 
 [transport]
 mtu = 1400
+pmtu_max_mtu = 1400
 cc_algorithm = "bbr3"
 enable_pacing = false
 "#,
@@ -702,7 +703,7 @@ mtu = 100
             },
         )
         .unwrap_err();
-        assert!(err.to_ascii_lowercase().contains("transport.mtu"));
+        assert!(err.to_ascii_lowercase().contains("transport.mtu must be at least 1200"));
         assert_eq!(transport.max_udp_payload_size(), before);
     }
 
