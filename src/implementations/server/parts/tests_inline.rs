@@ -1468,6 +1468,7 @@ mod tests {
 
         assert_eq!(runtime.state(), ServerState::Running);
         assert_eq!(runtime.graceful_shutdown.grace(), Duration::from_millis(175));
+        assert_eq!(runtime_config.runtime_policy_generation.current(), 2);
         runtime.stop().unwrap();
         std::fs::remove_file(config_path).unwrap();
     }
@@ -2124,8 +2125,9 @@ mod tests {
         let fec_config = Arc::new(std::sync::Mutex::new(FecConfig::default()));
         let optimize_config =
             Arc::new(std::sync::Mutex::new(crate::optimize::OptimizeConfig::default()));
-        let mut transport =
+        let transport =
             crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let runtime_policy_generation = RuntimePolicyGeneration::new();
 
         let result = build_live_server_client_init(LiveClientBuildRequest {
             packet: b"not-a-valid-initial",
@@ -2137,7 +2139,8 @@ mod tests {
             stealth_config: &stealth_config,
             fec_cfg_shared: &fec_config,
             opt_params_shared: &optimize_config,
-            transport_config: &mut transport,
+            transport_config: &transport,
+            runtime_policy_generation: &runtime_policy_generation,
             stealth_runtime: None,
             auth_rate_limiter,
             retry_token_manager: None,
@@ -3428,10 +3431,49 @@ mod tests {
         let outcome = StandaloneReloadOutcome {
             scope: StandaloneReloadScope::NextConnectionOnly,
             active_sessions_unchanged: 7,
+            runtime_generation: 2,
         };
 
         assert_eq!(outcome.scope, StandaloneReloadScope::NextConnectionOnly);
         assert_eq!(outcome.active_sessions_unchanged, 7);
+        assert_eq!(outcome.runtime_generation, 2);
+    }
+
+    #[test]
+    fn runtime_policy_generation_hides_partial_publication_from_readers() {
+        let generation = RuntimePolicyGeneration::new();
+        let domains = Arc::new(std::sync::Mutex::new([0u8; 4]));
+        let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+        let writer_generation = generation.clone();
+        let writer_domains = domains.clone();
+        let writer = std::thread::spawn(move || {
+            let mut guard = writer_generation.write_guard();
+            writer_domains.lock().unwrap()[0] = 1;
+            writer_ready_tx.send(()).unwrap();
+            continue_rx.recv().unwrap();
+            let mut values = writer_domains.lock().unwrap();
+            values[1..].fill(1);
+            RuntimePolicyGeneration::advance(&mut guard);
+        });
+
+        writer_ready_rx.recv().unwrap();
+        let (reader_started_tx, reader_started_rx) = std::sync::mpsc::sync_channel(0);
+        let reader_generation = generation.clone();
+        let reader_domains = domains.clone();
+        let reader = std::thread::spawn(move || {
+            reader_started_tx.send(()).unwrap();
+            let guard = reader_generation.read_guard();
+            let values = *reader_domains.lock().unwrap();
+            (*guard, values)
+        });
+        reader_started_rx.recv().unwrap();
+        continue_tx.send(()).unwrap();
+
+        writer.join().unwrap();
+        let (observed_generation, observed_domains) = reader.join().unwrap();
+        assert_eq!(observed_generation, 2);
+        assert_eq!(observed_domains, [1, 1, 1, 1]);
     }
 
     // --- resolve_qkey_remote tests ---

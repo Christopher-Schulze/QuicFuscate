@@ -616,6 +616,8 @@ pub struct LiveServerState {
 pub struct LiveClientInit {
     pub connection: QuicFuscateConnection,
     pub pending_qkey_auth: Option<QKeyAuthState>,
+    /// Runtime policy generation used for this immutable connection snapshot.
+    pub runtime_generation: u64,
 }
 
 pub(crate) struct LiveClientBuildRequest<'a> {
@@ -628,7 +630,8 @@ pub(crate) struct LiveClientBuildRequest<'a> {
     pub stealth_config: &'a Arc<std::sync::Mutex<StealthConfig>>,
     pub fec_cfg_shared: &'a Arc<std::sync::Mutex<FecConfig>>,
     pub opt_params_shared: &'a Arc<std::sync::Mutex<OptimizeConfig>>,
-    pub transport_config: &'a mut crate::transport::Config,
+    pub transport_config: &'a crate::transport::Config,
+    pub runtime_policy_generation: &'a RuntimePolicyGeneration,
     pub stealth_runtime: Option<Arc<StealthRuntimeOwner>>,
     pub auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
@@ -779,34 +782,30 @@ pub(crate) fn build_live_server_client_init(
             return None;
         }
     };
+    let runtime_policy = RuntimePolicySnapshot::capture(
+        request.runtime_policy_generation,
+        request.transport_config,
+        request.fec_cfg_shared,
+        request.opt_params_shared,
+        request.stealth_config,
+    );
+    let runtime_generation = runtime_policy.generation;
     if let Some(state) = initial_ctx.pending_qkey_auth.as_mut() {
+        let ceiling = runtime_policy.transport.qkey_traffic_analysis_ceiling();
         state.traffic_analysis_policy = state.traffic_analysis_policy.map(|requested| {
-            requested.bounded_by(request.transport_config.qkey_traffic_analysis_ceiling())
+            requested.bounded_by(ceiling)
         });
     }
 
     log::info!("New client connected: {}", request.remote_addr);
 
-    let cfg = match request.stealth_config.lock() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => {
-            log::warn!("stealth_config mutex poisoned; recovering inner state");
-            poisoned.into_inner().clone()
-        }
-    };
-    let mut conn_stealth_cfg = cfg;
-    let mut conn_fec_cfg = match request.fec_cfg_shared.lock() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    };
+    let mut conn_stealth_cfg = runtime_policy.stealth;
+    let mut conn_fec_cfg = runtime_policy.fec;
     if let Some(ref record) = initial_ctx.qkey_record {
         apply_qkey_policy_overrides(record, &mut conn_stealth_cfg, &mut conn_fec_cfg);
     }
-    let opt_params = match request.opt_params_shared.lock() {
-        Ok(guard) => *guard,
-        Err(poisoned) => *poisoned.into_inner(),
-    };
-    let mut selected_transport = request.transport_config.clone();
+    let opt_params = runtime_policy.optimize;
+    let mut selected_transport = runtime_policy.transport;
     if let Err(error) = selected_transport.select_version(initial_ctx.version) {
         log::warn!("refusing unsupported QUIC version {:#010x}: {}", initial_ctx.version, error);
         request.metrics.record_connection_rejected();
@@ -830,7 +829,11 @@ pub(crate) fn build_live_server_client_init(
         request.clock,
     ) {
         Ok(connection) => {
-            Some(LiveClientInit { connection, pending_qkey_auth: initial_ctx.pending_qkey_auth })
+            Some(LiveClientInit {
+                connection,
+                pending_qkey_auth: initial_ctx.pending_qkey_auth,
+                runtime_generation,
+            })
         }
         Err(error) => {
             log::error!("failed to create server connection: {}", error);

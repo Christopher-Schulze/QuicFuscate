@@ -75,6 +75,7 @@ pub enum StandaloneReloadScope {
 pub struct StandaloneReloadOutcome {
     pub scope: StandaloneReloadScope,
     pub active_sessions_unchanged: usize,
+    pub runtime_generation: u64,
 }
 
 #[derive(Default)]

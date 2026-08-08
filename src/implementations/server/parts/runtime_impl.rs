@@ -1102,11 +1102,12 @@ impl ServerRuntime {
             }
         };
 
-        if let Err(error) = start_runtime_profile_rotation(
+        if let Err(error) = start_runtime_profile_rotation_with_generation(
             &runtime_owner,
             runtime_config.stealth_config.clone(),
             profiles,
             profile_interval_secs,
+            runtime_config.runtime_policy_generation.clone(),
         ) {
             drop(tun_rx);
             self.live_mut().admin_actions_rx = Some(admin_actions_rx);
@@ -1273,7 +1274,9 @@ impl ServerRuntime {
                             let stealth_config = runtime_config.stealth_config.clone();
                             let fec_cfg_shared = runtime_config.fec_cfg_shared.clone();
                             let opt_params_shared = runtime_config.opt_params_shared.clone();
-                            let transport = &mut runtime_config.transport;
+                            let transport = &runtime_config.transport;
+                            let runtime_policy_generation =
+                                runtime_config.runtime_policy_generation.clone();
                             let runtime_client = match runtime_parts.live_state.acquire_runtime_client_with(
                                 from,
                                 &buf[..len],
@@ -1293,6 +1296,7 @@ impl ServerRuntime {
                                             fec_cfg_shared: &fec_cfg_shared,
                                             opt_params_shared: &opt_params_shared,
                                             transport_config: transport,
+                                            runtime_policy_generation: &runtime_policy_generation,
                                             stealth_runtime: Some(stealth_runtime.clone()),
                                             auth_rate_limiter: auth_rate_limiter.clone(),
                                             retry_token_manager: retry_token_manager.clone(),
@@ -1761,9 +1765,10 @@ impl ServerRuntime {
             let candidate_memory_lock_policy =
                 crate::memory_lock::MemoryLockPolicy::from_security(&engine_config.security);
             current_memory_lock_policy.reject_standalone_reload(candidate_memory_lock_policy)?;
-            apply_runtime_config_reload(
+            apply_runtime_config_reload_with_generation(
                 cfg_path,
                 runtime_metadata.reload_policy.fec_mode_override,
+                &runtime_config.runtime_policy_generation,
                 &mut runtime_config.transport,
                 &runtime_config.fec_cfg_shared,
                 &runtime_config.opt_params_shared,
@@ -1782,11 +1787,13 @@ impl ServerRuntime {
                 let outcome = StandaloneReloadOutcome {
                     scope: StandaloneReloadScope::NextConnectionOnly,
                     active_sessions_unchanged: active_sessions,
+                    runtime_generation: runtime_config.runtime_policy_generation.current(),
                 };
                 log::info!(
-                    "Configuration reloaded successfully ({}): scope={:?}, active_sessions_unchanged={}",
+                    "Configuration reloaded successfully ({}): scope={:?}, runtime_generation={}, active_sessions_unchanged={}",
                     origin,
                     outcome.scope,
+                    outcome.runtime_generation,
                     outcome.active_sessions_unchanged
                 );
                 crate::audit::audit_typed(
@@ -1801,7 +1808,8 @@ impl ServerRuntime {
                         reason: Some("next_connection_only_reload"),
                     },
                     &format!(
-                        "{origin} triggered next-connection-only config reload; {active_sessions} active sessions unchanged"
+                        "{origin} triggered next-connection-only config reload at runtime generation {}; {active_sessions} active sessions unchanged",
+                        outcome.runtime_generation,
                     ),
                 );
             }

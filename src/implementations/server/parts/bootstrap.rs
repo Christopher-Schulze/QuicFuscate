@@ -85,11 +85,45 @@ impl OwnedRuntimeStealthPolicy {
     }
 }
 
+/// Immutable, generation-tagged view of the policy domains used to construct
+/// a new server connection.
+pub(crate) struct RuntimePolicySnapshot {
+    pub(crate) generation: u64,
+    pub(crate) transport: crate::transport::Config,
+    pub(crate) fec: FecConfig,
+    pub(crate) optimize: OptimizeConfig,
+    pub(crate) stealth: StealthConfig,
+}
+
+impl RuntimePolicySnapshot {
+    pub(crate) fn capture(
+        generation: &RuntimePolicyGeneration,
+        transport: &crate::transport::Config,
+        fec: &Arc<std::sync::Mutex<FecConfig>>,
+        optimize: &Arc<std::sync::Mutex<OptimizeConfig>>,
+        stealth: &Arc<std::sync::Mutex<StealthConfig>>,
+    ) -> Self {
+        let generation_guard = generation.read_guard();
+        let transport = transport.clone();
+        let fec = fec.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let optimize = *optimize.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stealth = stealth.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        Self {
+            generation: *generation_guard,
+            transport,
+            fec,
+            optimize,
+            stealth,
+        }
+    }
+}
+
 pub(crate) struct PreparedStandaloneRuntimeConfig {
     transport: crate::transport::Config,
     fec_cfg_shared: Arc<std::sync::Mutex<FecConfig>>,
     opt_params_shared: Arc<std::sync::Mutex<OptimizeConfig>>,
     stealth_config: Arc<std::sync::Mutex<StealthConfig>>,
+    runtime_policy_generation: RuntimePolicyGeneration,
     profiles: Vec<FingerprintProfile>,
     profile_interval_secs: u64,
     standalone_runtime_metadata: StandaloneRuntimeMetadata,
@@ -239,6 +273,7 @@ impl PreparedStandaloneRuntimeConfig {
             fec_cfg_shared: Arc::new(std::sync::Mutex::new(fec_cfg)),
             opt_params_shared: Arc::new(std::sync::Mutex::new(opt_params)),
             stealth_config: Arc::new(std::sync::Mutex::new(stealth_cfg)),
+            runtime_policy_generation: RuntimePolicyGeneration::new(),
             profiles,
             profile_interval_secs,
             standalone_runtime_metadata: StandaloneRuntimeMetadata {

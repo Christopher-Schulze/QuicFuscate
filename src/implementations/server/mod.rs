@@ -108,8 +108,8 @@ use crate::optimize::ZeroCopyBuffer;
 #[cfg(unix)]
 use crate::optimize::ZeroCopyRecvBuffer;
 use crate::stealth::{
-    BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, StealthConfig,
-    StealthMode, StealthRuntimeOwner,
+    BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, RuntimePolicyGeneration,
+    StealthConfig, StealthMode, StealthRuntimeOwner,
 };
 
 const SERVER_STATS_LOG_INTERVAL: Duration = Duration::from_secs(1);

@@ -9,6 +9,38 @@ pub const STEALTH_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const REALITY_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 static NEXT_STEALTH_RUNTIME_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// Shared publication gate for standalone runtime policy generations.
+///
+/// Transport, FEC, optimization, and stealth values remain owned by their
+/// existing consumers, but readers and writers hold this gate before touching
+/// those values so one generation is observed across all domains.
+#[derive(Clone)]
+pub(crate) struct RuntimePolicyGeneration {
+    value: Arc<std::sync::RwLock<u64>>,
+}
+
+impl RuntimePolicyGeneration {
+    pub(crate) fn new() -> Self {
+        Self { value: Arc::new(std::sync::RwLock::new(1)) }
+    }
+
+    pub(crate) fn current(&self) -> u64 {
+        *self.read_guard()
+    }
+
+    pub(crate) fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, u64> {
+        self.value.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn write_guard(&self) -> std::sync::RwLockWriteGuard<'_, u64> {
+        self.value.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn advance(guard: &mut std::sync::RwLockWriteGuard<'_, u64>) {
+        **guard = (**guard).saturating_add(1);
+    }
+}
+
 struct OwnedStealthWorker {
     name: &'static str,
     handle: JoinHandle<()>,
@@ -118,6 +150,16 @@ impl StealthRuntimeOwner {
         profiles: Vec<FingerprintProfile>,
         profile_interval_secs: u64,
     ) -> Result<(), String> {
+        self.start_with_policy_generation(stealth_config, profiles, profile_interval_secs, None)
+    }
+
+    pub(crate) fn start_with_policy_generation(
+        self: &Arc<Self>,
+        stealth_config: Option<Arc<std::sync::Mutex<StealthConfig>>>,
+        profiles: Vec<FingerprintProfile>,
+        profile_interval_secs: u64,
+        runtime_policy_generation: Option<RuntimePolicyGeneration>,
+    ) -> Result<(), String> {
         let _gate = self.mutation_gate.lock();
         if self.is_shutdown() {
             return Err(format!("stealth runtime generation {} is shut down", self.generation));
@@ -151,7 +193,12 @@ impl StealthRuntimeOwner {
             }
             if let Some(stealth_config) = stealth_config {
                 if profiles.len() > 1 && profile_interval_secs > 0 {
-                    self.spawn_profile_rotation(stealth_config, profiles, profile_interval_secs)?;
+                    self.spawn_profile_rotation(
+                        stealth_config,
+                        profiles,
+                        profile_interval_secs,
+                        runtime_policy_generation,
+                    )?;
                 }
             }
             Ok::<(), String>(())
@@ -206,6 +253,7 @@ impl StealthRuntimeOwner {
         stealth_config: Arc<std::sync::Mutex<StealthConfig>>,
         profiles: Vec<FingerprintProfile>,
         profile_interval_secs: u64,
+        runtime_policy_generation: Option<RuntimePolicyGeneration>,
     ) -> Result<(), String> {
         let mut cancel = self.cancel_tx.subscribe();
         let shutdown = self.shutdown.clone();
@@ -222,6 +270,8 @@ impl StealthRuntimeOwner {
                 if shutdown.load(Ordering::Acquire) {
                     return;
                 }
+                let mut policy_generation_guard =
+                    runtime_policy_generation.as_ref().map(RuntimePolicyGeneration::write_guard);
                 index = (index + 1) % profiles.len();
                 let profile = &profiles[index];
                 let mut guard = match stealth_config.lock() {
@@ -248,6 +298,9 @@ impl StealthRuntimeOwner {
                     profile.browser,
                     profile.os
                 );
+                if let Some(ref mut policy_generation_guard) = policy_generation_guard {
+                    RuntimePolicyGeneration::advance(policy_generation_guard);
+                }
             }
         })
     }

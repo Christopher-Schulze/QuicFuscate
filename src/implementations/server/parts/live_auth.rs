@@ -46,6 +46,21 @@ pub fn start_runtime_profile_rotation(
     runtime_owner.start(Some(stealth_config), profiles, profile_interval_secs)
 }
 
+pub(crate) fn start_runtime_profile_rotation_with_generation(
+    runtime_owner: &Arc<StealthRuntimeOwner>,
+    stealth_config: Arc<std::sync::Mutex<StealthConfig>>,
+    profiles: Vec<FingerprintProfile>,
+    profile_interval_secs: u64,
+    runtime_policy_generation: RuntimePolicyGeneration,
+) -> Result<(), String> {
+    runtime_owner.start_with_policy_generation(
+        Some(stealth_config),
+        profiles,
+        profile_interval_secs,
+        Some(runtime_policy_generation),
+    )
+}
+
 pub fn start_standalone_metrics_service(runtime: &mut ServerRuntime, port: u16) {
     let server = self::metrics::MetricsServer::new(port, runtime.standalone_metrics());
     runtime.register_metrics_shutdown(server.shutdown_signal());

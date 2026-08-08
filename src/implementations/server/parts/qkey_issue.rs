@@ -829,6 +829,30 @@ pub fn apply_runtime_config_reload(
     stealth_config: &Arc<std::sync::Mutex<StealthConfig>>,
     stealth_policy: RuntimeStealthPolicy<'_>,
 ) -> Result<(), String> {
+    let runtime_policy_generation = RuntimePolicyGeneration::new();
+    apply_runtime_config_reload_with_generation(
+        cfg_path,
+        fec_mode_override,
+        &runtime_policy_generation,
+        transport,
+        fec_cfg_shared,
+        opt_params_shared,
+        stealth_config,
+        stealth_policy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_runtime_config_reload_with_generation(
+    cfg_path: &std::path::Path,
+    fec_mode_override: Option<crate::engine::FecMode>,
+    runtime_policy_generation: &RuntimePolicyGeneration,
+    transport: &mut crate::transport::Config,
+    fec_cfg_shared: &Arc<std::sync::Mutex<FecConfig>>,
+    opt_params_shared: &Arc<std::sync::Mutex<OptimizeConfig>>,
+    stealth_config: &Arc<std::sync::Mutex<StealthConfig>>,
+    stealth_policy: RuntimeStealthPolicy<'_>,
+) -> Result<(), String> {
     let RuntimeStealthPolicy {
         profile,
         os,
@@ -876,10 +900,12 @@ pub fn apply_runtime_config_reload(
         disable_http3,
     );
 
+    let mut generation_guard = runtime_policy_generation.write_guard();
     apply_transport_overrides_from_toml(cfg_path, &contents, transport)?;
 
     *fec_cfg_shared.lock().unwrap_or_else(|e| e.into_inner()) = fec;
     *opt_params_shared.lock().unwrap_or_else(|e| e.into_inner()) = optimize;
     *stealth_config.lock().unwrap_or_else(|e| e.into_inner()) = stealth;
+    RuntimePolicyGeneration::advance(&mut generation_guard);
     Ok(())
 }
