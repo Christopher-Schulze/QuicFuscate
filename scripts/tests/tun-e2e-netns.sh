@@ -28,6 +28,7 @@ QKEY_STORE="${QF_E2E_QKEY_STORE:-/tmp/qf-tun-e2e-qkeys.json}"
 ADMIN_SOCKET="${QF_E2E_ADMIN_SOCKET:-/tmp/qf-tun-e2e-admin.sock}"
 RESTART_ADMIN_SOCKET="${QF_E2E_RESTART_ADMIN_SOCKET:-${ADMIN_SOCKET}.restart}"
 ROUTING_STATE_PATH="/run/quicfuscate/routing/7174756e30.json"
+FIREWALL_OWNER_PATH="/run/quicfuscate/routing/firewall-owner.json"
 SERVER_CONFIG_ARGS=()
 CLIENT_CONFIG_ARGS=()
 SERVER_PROFILE_ARGS=()
@@ -41,6 +42,9 @@ TRAFFIC_CAPTURE_FILE="${QF_E2E_TRAFFIC_CAPTURE_FILE:-}"
 TRAFFIC_CAPTURE_SECONDS="${QF_E2E_TRAFFIC_CAPTURE_SECONDS:-10}"
 TRAFFIC_CAPTURE_DRAIN_SECONDS=1
 READY_HOOK="${QF_E2E_READY_HOOK:-}"
+INITIAL_IPV4_FORWARDING=""
+INITIAL_IPV6_FORWARDING=""
+FIREWALL_BACKEND=""
 if [ -n "${QF_E2E_SERVER_CONFIG:-}" ]; then
   SERVER_CONFIG_ARGS=(--config "$QF_E2E_SERVER_CONFIG")
 fi
@@ -160,6 +164,70 @@ fail() {
   exit 1
 }
 
+read_netns_sysctl() {
+  local namespace="$1"
+  local path="$2"
+  ip netns exec "$namespace" cat "$path" 2>/dev/null | tr -d '[:space:]'
+}
+
+assert_netns_sysctl() {
+  local namespace="$1"
+  local path="$2"
+  local expected="$3"
+  local actual
+  actual="$(read_netns_sysctl "$namespace" "$path")"
+  if [ "$actual" != "$expected" ]; then
+    fail "${namespace} ${path} was not restored: expected ${expected}, observed ${actual:-<missing>}"
+  fi
+}
+
+assert_no_tun_residue() {
+  local namespace
+  local details
+  for namespace in ns-srv ns-cli; do
+    if ! ip netns exec "$namespace" true 2>/dev/null; then
+      fail "network namespace ${namespace} disappeared before residue inspection"
+    fi
+    if details="$(ip netns exec "$namespace" ip -j link show dev qtun0 2>/dev/null)"; then
+      fail "managed TUN qtun0 remains in ${namespace} before namespace cleanup: ${details}"
+    fi
+  done
+}
+
+assert_firewall_residue_free() {
+  local leftover
+  if [ -e "$FIREWALL_OWNER_PATH" ]; then
+    fail "durable firewall ownership remains after graceful teardown: $FIREWALL_OWNER_PATH"
+  fi
+  case "$FIREWALL_BACKEND" in
+    nftables)
+      leftover="$(ip netns exec ns-srv nft list table inet quicfuscate_rt 2>/dev/null || true)"
+      if [ -n "$leftover" ]; then
+        fail "nftables routing table remains after graceful teardown: $leftover"
+      fi
+      ;;
+    iptables)
+      leftover="$({
+        ip netns exec ns-srv iptables-save 2>/dev/null
+        ip netns exec ns-srv ip6tables-save 2>/dev/null
+      } | grep -E 'QUICFUSCATE_(RT|NAT)' || true)"
+      if [ -n "$leftover" ]; then
+        fail "iptables routing chains remain after graceful teardown: $leftover"
+      fi
+      ;;
+    *)
+      fail "routing state selected an unknown firewall backend: ${FIREWALL_BACKEND:-<missing>}"
+      ;;
+  esac
+}
+
+assert_routing_residue_free() {
+  assert_netns_sysctl ns-srv /proc/sys/net/ipv4/ip_forward "$INITIAL_IPV4_FORWARDING"
+  assert_netns_sysctl ns-srv /proc/sys/net/ipv6/conf/all/forwarding "$INITIAL_IPV6_FORWARDING"
+  assert_no_tun_residue
+  assert_firewall_residue_free
+}
+
 # --- fail closed before touching certificates or runtime resources ---
 if pgrep -x quicfuscate >/dev/null && [ "${QF_E2E_ALLOW_EXISTING_RUNTIME:-0}" != "1" ]; then
   echo "FAIL: a pre-existing quicfuscate process is running; refusing broad cleanup" >&2
@@ -246,6 +314,12 @@ for ns in ns-srv ns-cli; do
   ip netns exec "$ns" sysctl -wq net.ipv4.conf.default.rp_filter=0 2>/dev/null
 done
 
+INITIAL_IPV4_FORWARDING="$(read_netns_sysctl ns-srv /proc/sys/net/ipv4/ip_forward)"
+INITIAL_IPV6_FORWARDING="$(read_netns_sysctl ns-srv /proc/sys/net/ipv6/conf/all/forwarding)"
+if ! [[ "$INITIAL_IPV4_FORWARDING" =~ ^[01]$ ]] || ! [[ "$INITIAL_IPV6_FORWARDING" =~ ^[01]$ ]]; then
+  fail "could not capture initial server-namespace forwarding state"
+fi
+
 echo "=== veth connectivity (cli -> srv) ==="
 ip netns exec ns-cli ping -c1 -W2 10.10.0.1 2>&1 | grep -E "bytes from|packet loss"
 
@@ -292,6 +366,12 @@ wait_for_qkey "$ADMIN_SOCKET" /tmp/ns-srv.log
 # --- prove process-loss recovery before opening the client data plane ---
 if [ ! -f "$ROUTING_STATE_PATH" ]; then
   fail "Linux routing did not publish its durable ownership record: $ROUTING_STATE_PATH"
+fi
+if ! FIREWALL_BACKEND="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["firewall_backend"])' "$ROUTING_STATE_PATH" 2>/dev/null)"; then
+  fail "could not read the selected firewall backend from $ROUTING_STATE_PATH"
+fi
+if [ "$FIREWALL_BACKEND" != "nftables" ] && [ "$FIREWALL_BACKEND" != "iptables" ]; then
+  fail "routing state selected an unsupported firewall backend: ${FIREWALL_BACKEND:-<missing>}"
 fi
 echo "=== crash/restart routing ownership proof ==="
 kill -KILL "$SERVER_PID" 2>/dev/null || true
@@ -411,6 +491,12 @@ SERVER_PID=""
 if [ -e "$ROUTING_STATE_PATH" ]; then
   fail "graceful server shutdown left durable routing state behind: $ROUTING_STATE_PATH"
 fi
+
+echo "=== routing teardown residue proof ==="
+assert_routing_residue_free
+echo "forwarding restored: ipv4=${INITIAL_IPV4_FORWARDING} ipv6=${INITIAL_IPV6_FORWARDING}"
+echo "TUN links absent: ns-srv/ns-cli qtun0"
+echo "firewall residue absent: backend=${FIREWALL_BACKEND}"
 
 # cleanup
 cleanup
