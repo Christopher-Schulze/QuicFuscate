@@ -77,8 +77,36 @@ impl EngineConfig {
     }
 
     /// Parse configuration from a TOML string.
+    ///
+    /// Normalization runs here so every parse path, including the runtime reload, sees a
+    /// configuration whose relative defaults have been reconciled against the operator's values.
     pub fn from_toml(s: &str) -> Result<Self, ConfigError> {
-        toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))
+        let mut config: Self = toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        config.normalize();
+        Ok(config)
+    }
+
+    /// Reconcile defaults that only make sense relative to another field.
+    ///
+    /// `pmtu_max_mtu` defaults to 1500 while `transport.mtu` is operator-configurable. Lowering
+    /// the MTU to any ordinary value such as 1400 therefore left the DPLPMTUD probe ceiling above
+    /// it, and validation rejected the whole configuration even though the operator had set
+    /// nothing contradictory. A probe ceiling above the path MTU is meaningless, so it is lowered
+    /// to match rather than treated as a conflict.
+    ///
+    /// Only downward adjustment happens here: a ceiling the operator explicitly set below the MTU
+    /// is left alone, and an explicitly raised ceiling that still exceeds the MTU is clamped
+    /// with a warning rather than silently accepted.
+    pub fn normalize(&mut self) {
+        let ceiling = self.transport.mtu.min(self.transport.max_udp_payload);
+        if self.transport.pmtu_max_mtu > ceiling {
+            log::warn!(
+                "transport.pmtu_max_mtu {} exceeds the configured transport limits; lowering to {}",
+                self.transport.pmtu_max_mtu,
+                ceiling
+            );
+            self.transport.pmtu_max_mtu = ceiling;
+        }
     }
 
     /// Validate all configuration sections.
@@ -442,8 +470,10 @@ impl TransportConfig {
             ));
         }
         if self.mtu < 1200 {
+            // Name the key. An operator reading "MTU must be at least 1200" cannot tell which of
+            // transport.mtu, pmtu_min_mtu, or interface.tun_mtu the message is about.
             return Err(ConfigError::Validation(format!(
-                "MTU must be at least 1200, got {}",
+                "transport.mtu must be at least 1200, got {}",
                 self.mtu
             )));
         }
@@ -473,9 +503,10 @@ impl TransportConfig {
             ));
         }
         if self.pmtu_max_mtu > self.mtu {
-            return Err(ConfigError::Validation(
-                "pmtu_max_mtu must not exceed transport.mtu".into(),
-            ));
+            return Err(ConfigError::Validation(format!(
+                "pmtu_max_mtu ({}) must not exceed transport.mtu ({})",
+                self.pmtu_max_mtu, self.mtu
+            )));
         }
         if self.pmtu_max_mtu > self.max_udp_payload {
             return Err(ConfigError::Validation(
@@ -1985,6 +2016,49 @@ suppress_icmp_unreachable = true
         assert_eq!(scaled_memory_pool_size(128 * 1024 * 1024), MIN_POOL_BYTES);
         assert_eq!(scaled_memory_pool_size(2 * 1024 * 1024 * 1024), MAX_POOL_BYTES);
         assert_eq!(scaled_memory_pool_size(usize::MAX), MAX_POOL_BYTES);
+    }
+
+    /// An ordinary lowered MTU must not be rejected because a relative default outgrew it.
+    ///
+    /// `pmtu_max_mtu` defaults to 1500 while `transport.mtu` is operator-configurable, so setting
+    /// `mtu = 1400`, a completely normal value, left the DPLPMTUD probe ceiling above the MTU and
+    /// validation rejected the whole configuration even though nothing contradictory was set.
+    #[test]
+    fn lowering_transport_mtu_alone_produces_a_valid_configuration() {
+        let config = EngineConfig::from_toml("[transport]\nmtu = 1400\n")
+            .expect("a lowered MTU alone must parse");
+        assert_eq!(
+            config.transport.pmtu_max_mtu, 1400,
+            "the probe ceiling must follow the configured MTU, not stay at its default"
+        );
+        config.validate().expect("a lowered MTU alone must validate");
+
+        // max_udp_payload participates in the same ceiling.
+        let config = EngineConfig::from_toml("[transport]\nmtu = 1400\nmax_udp_payload = 1300\n")
+            .expect("parse");
+        assert_eq!(config.transport.pmtu_max_mtu, 1300, "the lower of the two limits wins");
+        config.validate().expect("validate");
+
+        // A ceiling the operator deliberately set below the MTU is left alone.
+        let config = EngineConfig::from_toml("[transport]\nmtu = 1400\npmtu_max_mtu = 1350\n")
+            .expect("parse");
+        assert_eq!(config.transport.pmtu_max_mtu, 1350, "an explicit lower ceiling is preserved");
+        config.validate().expect("validate");
+    }
+
+    /// Validation errors must name the configuration key they are about.
+    #[test]
+    fn transport_mtu_floor_error_names_the_key() {
+        let error = EngineConfig::from_toml("[transport]\nmtu = 100\n")
+            .expect("parse succeeds; validation is the gate")
+            .validate()
+            .expect_err("an MTU below the floor must fail");
+        let text = error.to_string().to_ascii_lowercase();
+        assert!(
+            text.contains("transport.mtu"),
+            "an operator cannot act on an error that does not name the key: {error}"
+        );
+        assert!(text.contains("1200"), "the error must state the floor: {error}");
     }
 
     #[test]
