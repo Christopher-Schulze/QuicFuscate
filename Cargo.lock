@@ -1515,6 +1515,17 @@ name = "qf-instrumentation"
 version = "0.4.4"
 
 [[package]]
+name = "qf-logging"
+version = "0.4.4"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "log",
+ "qf-common",
+ "serde_json",
+]
+
+[[package]]
 name = "qf-pki"
 version = "0.4.4"
 dependencies = [
@@ -1586,6 +1597,7 @@ dependencies = [
  "qf-error",
  "qf-firewall",
  "qf-instrumentation",
+ "qf-logging",
  "qf-pki",
  "qf-privilege",
  "qf-reality",

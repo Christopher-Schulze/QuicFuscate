@@ -109,6 +109,12 @@ impl AdminLogBuffer {
     }
 }
 
+impl qf_logging::LogSink for AdminLogBuffer {
+    fn push(&self, level: log::Level, msg: &str) {
+        Self::push(self, level, msg);
+    }
+}
+
 fn redact_minimal(input: &str) -> String {
     // Minimal mode should avoid leaking client metadata:
     // - redact ipv4 addresses
