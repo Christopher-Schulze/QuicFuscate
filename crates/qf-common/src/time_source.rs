@@ -83,7 +83,7 @@ pub fn unix_epoch_millis(now: SystemTime) -> Result<u64, WallClockError> {
     unix_epoch_duration(now)?.as_millis().try_into().map_err(|_| WallClockError::UnixMillisOverflow)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "rust-tests"))]
 pub mod test_support {
     use super::TimeSource;
     use std::sync::{Arc, Mutex};
@@ -119,7 +119,7 @@ pub mod test_support {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "rust-tests"))]
 thread_local! {
     /// Test-only override for the current test thread.
     ///
@@ -149,7 +149,7 @@ impl ProtocolClock {
     /// Captures the configured default source, or the current test-thread
     /// override when this code is compiled for crate tests.
     pub fn global() -> Self {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "rust-tests"))]
         if let Some(source) = test_override_source() {
             return Self::from_source(source);
         }
@@ -210,9 +210,34 @@ pub fn now_system() -> SystemTime {
     ProtocolClock::global().now_system()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "rust-tests"))]
 fn test_override_source() -> Option<Arc<dyn TimeSource>> {
     TEST_TIME_SOURCE.with(|source| source.borrow().clone())
+}
+
+#[cfg(any(test, feature = "rust-tests"))]
+pub struct TimeSourceTestGuard {
+    previous: Option<Arc<dyn TimeSource>>,
+}
+
+#[cfg(any(test, feature = "rust-tests"))]
+impl Drop for TimeSourceTestGuard {
+    fn drop(&mut self) {
+        TEST_TIME_SOURCE.with(|source| {
+            *source.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(any(test, feature = "rust-tests"))]
+/// Installs a test source only on the calling thread.
+///
+/// Explicit `ProtocolClock` owners remain the required seam for production
+/// code and spawned tasks. The returned guard restores a previous nested
+/// override on normal scope exit and during unwinding.
+pub fn install_for_test(source: Arc<dyn TimeSource>) -> TimeSourceTestGuard {
+    let previous = TEST_TIME_SOURCE.with(|current| current.borrow_mut().replace(source));
+    TimeSourceTestGuard { previous }
 }
 
 #[cfg(test)]
@@ -384,29 +409,4 @@ mod tests {
         assert!(result.is_err());
         assert!(super::now_system().duration_since(SystemTime::UNIX_EPOCH).is_ok());
     }
-}
-
-#[cfg(test)]
-pub struct TimeSourceTestGuard {
-    previous: Option<Arc<dyn TimeSource>>,
-}
-
-#[cfg(test)]
-impl Drop for TimeSourceTestGuard {
-    fn drop(&mut self) {
-        TEST_TIME_SOURCE.with(|source| {
-            *source.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
-#[cfg(test)]
-/// Installs a test source only on the calling thread.
-///
-/// Explicit `ProtocolClock` owners remain the required seam for production
-/// code and spawned tasks. The returned guard restores a previous nested
-/// override on normal scope exit and during unwinding.
-pub fn install_for_test(source: Arc<dyn TimeSource>) -> TimeSourceTestGuard {
-    let previous = TEST_TIME_SOURCE.with(|current| current.borrow_mut().replace(source));
-    TimeSourceTestGuard { previous }
 }

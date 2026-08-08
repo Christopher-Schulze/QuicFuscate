@@ -1473,6 +1473,18 @@ name = "qf-control-plane"
 version = "0.4.4"
 
 [[package]]
+name = "qf-dns"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "parking_lot",
+ "qf-common",
+ "reqwest",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "qf-error"
 version = "0.4.4"
 
@@ -1547,6 +1559,7 @@ dependencies = [
  "proptest",
  "qf-common",
  "qf-control-plane",
+ "qf-dns",
  "qf-error",
  "qf-instrumentation",
  "qf-pki",

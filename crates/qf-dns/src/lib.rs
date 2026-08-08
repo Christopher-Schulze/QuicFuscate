@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::time_source::ProtocolClock;
+use qf_common::time_source::ProtocolClock;
 
 /// Default upstream DoH providers used when none are configured.
 pub const DEFAULT_DOH_UPSTREAM: &[&str] =
@@ -2312,7 +2312,7 @@ mod tests {
 
     #[test]
     fn dns_admission_prunes_idle_identity_with_explicit_clock() {
-        let source = crate::time_source::test_support::ManualTimeSource::new(
+        let source = qf_common::time_source::test_support::ManualTimeSource::new(
             Instant::now(),
             std::time::SystemTime::UNIX_EPOCH,
         );

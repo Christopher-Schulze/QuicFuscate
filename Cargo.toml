@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/qf-common",
     "crates/qf-control-plane",
+    "crates/qf-dns",
     "crates/qf-error",
     "crates/qf-instrumentation",
     "crates/qf-pki",
@@ -31,6 +32,7 @@ license.workspace = true
 [dependencies]
 qf-common = { path = "crates/qf-common" }
 qf-control-plane = { path = "crates/qf-control-plane" }
+qf-dns = { path = "crates/qf-dns" }
 qf-error = { path = "crates/qf-error" }
 qf-instrumentation = { path = "crates/qf-instrumentation" }
 qf-pki = { path = "crates/qf-pki" }
@@ -147,7 +149,7 @@ internal_avx10_preview = []
 # pq = ["dep:pqcrypto-mlkem", "dep:pqcrypto-mldsa"]
 
 # --- Test-only features ---
-rust-tests = ["qf-reality/rust-tests"]
+rust-tests = ["qf-dns/rust-tests", "qf-reality/rust-tests"]
 benches = []
 masque-tests = []
 tun-tests = []

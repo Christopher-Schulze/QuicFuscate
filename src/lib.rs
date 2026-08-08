@@ -134,7 +134,9 @@ pub mod pki {
 }
 
 /// DNS through tunnel - DoH proxy, DNS forwarding, leak prevention (TODO-435).
-pub mod dns;
+pub mod dns {
+    pub use qf_dns::*;
+}
 
 // TLS Provider System (consolidated)
 // Compatibility aliases for existing paths.

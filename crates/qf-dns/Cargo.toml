@@ -1,0 +1,22 @@
+[package]
+name = "qf-dns"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = []
+
+[dependencies]
+log = "0.4"
+parking_lot = "0.12"
+qf-common = { path = "../qf-common" }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+url = "2.5.0"
+
+[dev-dependencies]
+qf-common = { path = "../qf-common", features = ["rust-tests"] }
