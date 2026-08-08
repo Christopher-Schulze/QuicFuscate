@@ -2257,14 +2257,26 @@ mod tests {
         // The cached client must be built once and reused on subsequent
         // calls. After the first call the cache slot must be populated;
         // the second call must succeed without rebuilding.
-        let config = DnsProxyConfig::default();
+        // Use a numeric endpoint so this cache-only test never enters the
+        // host resolver. Endpoint hostname resolution remains a production
+        // startup contract owned by `for_client_endpoints`.
+        let config = DnsProxyConfig {
+            doh_endpoints: vec!["https://127.0.0.1/dns-query".to_string()],
+            upstream_resolvers: Vec::new(),
+            use_doh: true,
+            listen_port: 53,
+            admission: DnsAdmissionConfig::client_default(),
+            doh_client: Arc::new(parking_lot::Mutex::new(None)),
+        };
         // Before first call: cache is empty.
         assert!(!config.doh_client_inner(), "cache must be empty initially");
         let _c1 = config.doh_client().unwrap();
         // After first call: cache is populated.
         assert!(config.doh_client_inner(), "cache must be populated after first call");
-        // Second call must succeed (returns a clone of the cached client).
-        let _c2 = config.doh_client().unwrap();
+        // A cloned config must observe the same cache and reuse its client.
+        let shared_config = config.clone();
+        assert!(shared_config.doh_client_inner(), "cloned config must share the cache");
+        let _c2 = shared_config.doh_client().unwrap();
         assert!(config.doh_client_inner(), "cache must remain populated");
     }
 

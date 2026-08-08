@@ -5823,3 +5823,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The successful runtime-reload fixture now sets `transport.pmtu_max_mtu = 1400` with `transport.mtu = 1400`, so complete EngineConfig validation accepts the intended reduced path MTU before shared-state and transport assertions run.
 - The invalid fixture asserts the stable complete-validator diagnostic `transport.mtu must be at least 1200`, preserving the no-publication check for the existing transport state.
 - Default and all-feature focused binary tests pass `2/2` each. The all-target macOS boundary remains the intentional Linux-only io_uring integration target; no frontend surface changed.
+
+## Implementation Reconciliation (2026-08-08, TODO-807 hermetic DoH cache coverage)
+
+- `test_doh_client_is_cached_and_shared` now builds its cache-only configuration with `https://127.0.0.1/dns-query`, leaving the cache empty before the first call and avoiding host DNS resolution entirely.
+- The test clones `DnsProxyConfig` after the first build and proves the cloned configuration observes and reuses the same cached `reqwest::Client`. Production hostname endpoint pre-resolution remains unchanged and enforced by `for_client_endpoints`.
+- The focused DNS module passes `41/41`; strict all-feature library Clippy, formatting, and diff hygiene pass. No network request is made by this coverage.
