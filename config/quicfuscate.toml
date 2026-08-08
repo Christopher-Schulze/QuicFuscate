@@ -60,17 +60,12 @@ sni = ""
 # Connection idle timeout (milliseconds, 0 = no timeout)
 idle_timeout_ms = 30000
 
-# Enable 0-RTT early data - ENGINE LEVEL (server + client, controls quiche TransportConfig).
-# Reduces handshake latency by one round-trip.
-# Requires [anti_replay] enabled = true for production use.
-# Relationship to [transport].enable_early_data: both activate the same quiche
-# transport 0-RTT mechanism but at different points:
-#   - This field (connection.enable_0rtt) is applied in the engine initialization path
-#     (engine.rs) and affects server accept + the engine-managed transport config.
-#   - [transport].enable_early_data is applied in the client connection setup path
-#     (client/connection.rs) and controls the per-connection QUIC transport config.
-# For full 0-RTT, enable BOTH fields. Disabling either disables 0-RTT on that path.
-enable_0rtt = true
+# Enable 0-RTT early data - ENGINE LEVEL (server + client).
+# NOT SUPPORTED: setting this to true is rejected by config validation. Packet-level 0-RTT key
+# installation is not wired, so early data would neither be sent nor accepted. The setting is
+# rejected instead of silently ignored so a deployment cannot believe it has 0-RTT when it does
+# not. The same applies to [transport].enable_early_data.
+enable_0rtt = false
 
 # Maximum bidirectional streams
 # Wired: overrides [transport].initial_max_streams_bidi when set to a different non-zero value.
@@ -351,11 +346,8 @@ initial_max_streams_bidi = 100
 # Initial maximum streams (unidirectional)
 initial_max_streams_uni = 100
 
-# Enable 0-RTT early data - CLIENT CONNECTION LEVEL (per-connection QUIC transport config).
-# Relationship to [connection].enable_0rtt: see that field for the full explanation.
-# This field gates 0-RTT on the client-side connection path (client/connection.rs).
-# Default is false here because [connection].enable_0rtt = true already covers the
-# engine-level path. Set both to true to enable 0-RTT on every code path.
+# Enable 0-RTT early data - CLIENT CONNECTION LEVEL.
+# NOT SUPPORTED: see [connection].enable_0rtt. Setting this to true is rejected by validation.
 enable_early_data = false
 
 # QUIC DATAGRAM queue lengths (0 disables datagrams)

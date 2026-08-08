@@ -128,11 +128,22 @@ impl EngineConfig {
         self.stealth
             .to_runtime_config(&self.fingerprint_rotation)
             .map_err(|error| ConfigError::Validation(format!("stealth: {error}")))?;
-        if self.connection.enable_0rtt && !self.anti_replay.enabled {
-            log::warn!(
-                "[config] 0-RTT enabled without anti-replay protection. \
-                 Set [anti_replay] enabled = true for production use."
-            );
+        // Fail closed rather than advertise a capability that does nothing. The TLS and transport
+        // layers set early-data flags, but `get_0rtt_keys()` returns `None` and
+        // `CryptoContext::install_0rtt_keys()` has no production caller, so packet-level 0-RTT
+        // protection is never installed. Accepting either setting would leave a deployment
+        // believing it has 0-RTT, and believing its replay posture matters, while neither is true.
+        // TODO-720 owns the wiring; until it lands, asking for 0-RTT is an error, not a no-op.
+        for (key, requested) in [
+            ("connection.enable_0rtt", self.connection.enable_0rtt),
+            ("transport.enable_early_data", self.transport.enable_early_data),
+        ] {
+            if requested {
+                return Err(ConfigError::Validation(format!(
+                    "{key} is not supported: packet-level 0-RTT key installation is not wired, so \
+                     enabling it would neither send nor accept early data. Set {key} = false."
+                )));
+            }
         }
         Ok(())
     }
@@ -257,6 +268,11 @@ pub struct ConnectionConfig {
     /// Connection idle timeout in milliseconds
     pub idle_timeout_ms: u64,
     /// Enable 0-RTT early data
+    /// Request TLS 1.3 0-RTT early data.
+    ///
+    /// Currently rejected by validation: packet-level 0-RTT key installation is not wired, so
+    /// enabling it would neither send nor accept early data while making a deployment believe
+    /// otherwise. TODO-720 owns that wiring.
     pub enable_0rtt: bool,
     /// Maximum bidirectional streams
     pub max_streams_bidi: u64,
@@ -286,7 +302,7 @@ impl Default for ConnectionConfig {
             qkey_token: None,
             qkey_id: None,
             idle_timeout_ms: 30000,
-            enable_0rtt: true,
+            enable_0rtt: false,
             max_streams_bidi: 100,
             max_streams_uni: 100,
             enable_migration: true,
@@ -2406,6 +2422,33 @@ mode = "roaming"
         let config = EngineConfig::from_toml(toml).unwrap();
         assert_eq!(config.engine.mode, EngineMode::Client);
         assert_eq!(config.connection.remote, "127.0.0.1:4433");
+    }
+
+    #[test]
+    fn zero_rtt_requests_are_rejected_until_packet_keys_are_wired() {
+        // 0-RTT is advertised at the TLS and transport layers but no packet-protection keys are
+        // ever installed, so accepting either key would hand a deployment a capability that
+        // silently does nothing. Both must fail closed, and both must be off by default.
+        let defaults = EngineConfig::default();
+        assert!(!defaults.connection.enable_0rtt, "0-RTT must be off by default");
+        assert!(!defaults.transport.enable_early_data, "early data must be off by default");
+        defaults.validate().expect("defaults validate");
+
+        for mutate in [
+            (|c: &mut EngineConfig| c.connection.enable_0rtt = true) as fn(&mut EngineConfig),
+            |c: &mut EngineConfig| c.transport.enable_early_data = true,
+        ] {
+            let mut config = EngineConfig::default();
+            mutate(&mut config);
+            let message = match config.validate() {
+                Err(ConfigError::Validation(message)) => message,
+                other => panic!("0-RTT request must be rejected, got {other:?}"),
+            };
+            assert!(
+                message.contains("not wired"),
+                "rejection must name the missing wiring, got {message}"
+            );
+        }
     }
 
     #[test]

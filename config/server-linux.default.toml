@@ -27,7 +27,8 @@ remote = "0.0.0.0:4433"        # Server listen address
 # key_file = ""                # Path to TLS private key (required for server)
 # alpn = ["h3", "quicfuscate"]
 # idle_timeout_ms = 30000      # Connection idle timeout (0 = no timeout)
-# enable_0rtt = true           # WARNING: 0-RTT data can be replayed
+# enable_0rtt is NOT SUPPORTED: setting it to true is rejected by config validation
+#                              because packet-level 0-RTT key installation is not wired.
 # max_streams_bidi = 100
 # max_streams_uni = 100
 # enable_migration = true   # candidate paths must validate before activation
@@ -57,7 +58,7 @@ enabled = false
 
 [anti_replay]
 # Enable anti-replay protection for 0-RTT early data (server mode only).
-# Required when connection.enable_0rtt = true to prevent replay attacks
+# Guards the 0-RTT replay window once connection.enable_0rtt becomes supported
 # (RFC 8446 Section 8, RFC 9001 Section 9.2).
 enabled = true
 # max_ticket_age_secs = 10     # Reject 0-RTT tickets older than this

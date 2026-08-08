@@ -494,6 +494,15 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - Risk/Tradeoff: enabling TLS Cover increases cover-byte volume and per-packet processing work.
 - Certificate tooling: development certificates enabled by feature `dev-certs` (rcgen); production uses PEM chain via `--cert/--key` (server) and CA bundle via `--ca-file` (client).
 - Session management: internal session cache for 0-RTT resumption (size-limited, not user-configurable).
+
+**0-RTT is not supported and is rejected by configuration.** `connection.enable_0rtt` and
+`transport.enable_early_data` both fail `EngineConfig::validate()` with a message naming the missing
+wiring. The TLS and transport layers set early-data flags, but the provider's `get_0rtt_keys()`
+returns `None` and `CryptoContext::install_0rtt_keys()` has no production caller, so packet
+protection for early data is never installed. Enabling the keys would therefore neither send nor
+accept early data while leaving a deployment believing it had 0-RTT and that its replay posture
+mattered. The settings fail closed rather than being silently ignored. The anti-replay strike
+register described below stays in place for the point where the wiring lands.
   - Anti-replay: 0-RTT data is protected by a SHA-256 strike register (`src/transport/anti_replay.rs`) per RFC 8446 Section 8 and RFC 9001 Section 9.2. The register uses a Bloom fast-negative in front of the full-fingerprint index and a FIFO ring for O(1) capacity eviction. Replayed 0-RTT packets are silently discarded; clients fall back to 1-RTT automatically. Configurable via `[anti_replay]` TOML section.
 
 #### Fingerprint Source Model
@@ -3587,7 +3596,7 @@ the authenticated Core H3 connection.
 - 1-2 NewSessionTicket records
 - PSK with realistic ages
 - Timer jitter for authenticity
-- Automatic 0-RTT resumption support
+- Session-ticket plumbing for 0-RTT resumption. 0-RTT itself is not supported: see the 0-RTT capability note below.
 
 #### ECH GREASE
 - Encrypted Client Hello GREASE
