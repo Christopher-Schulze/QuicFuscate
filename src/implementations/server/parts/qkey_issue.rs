@@ -558,60 +558,15 @@ fn parse_transport_overrides_from_toml(contents: &str) -> Result<TransportOverri
         }
         out.max_udp_payload = Some(val as usize);
     }
-    if let Some(v) = tbl.get("max_idle_timeout") {
-        let val = v
-            .as_integer()
-            .ok_or_else(|| "transport.max_idle_timeout must be an integer".to_string())?;
-        out.max_idle_timeout = Some(val.max(0) as u64);
-    }
-    if let Some(v) = tbl.get("initial_max_data") {
-        let val = v
-            .as_integer()
-            .ok_or_else(|| "transport.initial_max_data must be an integer".to_string())?;
-        out.initial_max_data = Some(val.max(0) as u64);
-    }
-    if let Some(v) = tbl.get("initial_max_stream_data_bidi_local") {
-        let val = v.as_integer().ok_or_else(|| {
-            "transport.initial_max_stream_data_bidi_local must be an integer".to_string()
-        })?;
-        out.initial_max_stream_data_bidi_local = Some(val.max(0) as u64);
-    }
-    if let Some(v) = tbl.get("initial_max_stream_data_bidi_remote") {
-        let val = v.as_integer().ok_or_else(|| {
-            "transport.initial_max_stream_data_bidi_remote must be an integer".to_string()
-        })?;
-        out.initial_max_stream_data_bidi_remote = Some(val.max(0) as u64);
-    }
-    if let Some(v) = tbl.get("initial_max_stream_data_uni") {
-        let val = v.as_integer().ok_or_else(|| {
-            "transport.initial_max_stream_data_uni must be an integer".to_string()
-        })?;
-        out.initial_max_stream_data_uni = Some(val.max(0) as u64);
-    }
-    if let Some(v) = tbl.get("initial_max_streams_bidi") {
-        let val = v
-            .as_integer()
-            .ok_or_else(|| "transport.initial_max_streams_bidi must be an integer".to_string())?;
-        out.initial_max_streams_bidi = Some(val.max(0) as u64);
-    }
-    if let Some(v) = tbl.get("initial_max_streams_uni") {
-        let val = v
-            .as_integer()
-            .ok_or_else(|| "transport.initial_max_streams_uni must be an integer".to_string())?;
-        out.initial_max_streams_uni = Some(val.max(0) as u64);
-    }
-    if let Some(v) = tbl.get("dgram_recv_queue_len") {
-        let val = v
-            .as_integer()
-            .ok_or_else(|| "transport.dgram_recv_queue_len must be an integer".to_string())?;
-        out.dgram_recv_queue_len = Some(val.max(0) as usize);
-    }
-    if let Some(v) = tbl.get("dgram_send_queue_len") {
-        let val = v
-            .as_integer()
-            .ok_or_else(|| "transport.dgram_send_queue_len must be an integer".to_string())?;
-        out.dgram_send_queue_len = Some(val.max(0) as usize);
-    }
+    out.max_idle_timeout = transport_varint_override(tbl, "max_idle_timeout")?;
+    out.initial_max_data = transport_varint_override(tbl, "initial_max_data")?;
+    out.initial_max_stream_data_bidi_local = transport_varint_override(tbl, "initial_max_stream_data_bidi_local")?;
+    out.initial_max_stream_data_bidi_remote = transport_varint_override(tbl, "initial_max_stream_data_bidi_remote")?;
+    out.initial_max_stream_data_uni = transport_varint_override(tbl, "initial_max_stream_data_uni")?;
+    out.initial_max_streams_bidi = transport_varint_override(tbl, "initial_max_streams_bidi")?;
+    out.initial_max_streams_uni = transport_varint_override(tbl, "initial_max_streams_uni")?;
+    out.dgram_recv_queue_len = transport_len_override(tbl, "dgram_recv_queue_len")?;
+    out.dgram_send_queue_len = transport_len_override(tbl, "dgram_send_queue_len")?;
     if let Some(v) = tbl.get("disable_pmtud") {
         let val =
             v.as_bool().ok_or_else(|| "transport.disable_pmtud must be a boolean".to_string())?;
@@ -658,6 +613,47 @@ fn parse_transport_overrides_from_toml(contents: &str) -> Result<TransportOverri
         parse_traffic_analysis_policy(tbl, "intelligent_traffic_analysis_ceiling")?;
 
     Ok(out)
+}
+
+
+/// The largest value a QUIC varint can carry (RFC 9000 Section 16).
+///
+/// Transport parameters are encoded as varints, so a larger value cannot be put on
+/// the wire at all and is a configuration error rather than a large limit.
+const MAX_TRANSPORT_VARINT: u64 = (1u64 << 62) - 1;
+
+/// Read a non-negative transport override, rejecting the values a clamp would hide.
+///
+/// TOML integers are signed. Clamping a negative with `max(0)` turns an operator
+/// typo into a legal value with distinct runtime semantics: for an idle timeout,
+/// zero disables liveness detection entirely, and for a flow-control limit it
+/// permits no data. Zero stays acceptable where the operator meant it; a negative
+/// never did.
+fn transport_varint_override(tbl: &toml::Table, key: &str) -> Result<Option<u64>, String> {
+    let Some(value) = tbl.get(key) else {
+        return Ok(None);
+    };
+    let value = value.as_integer().ok_or_else(|| format!("transport.{key} must be an integer"))?;
+    if value < 0 {
+        return Err(format!("transport.{key} must not be negative"));
+    }
+    let value = value as u64;
+    if value > MAX_TRANSPORT_VARINT {
+        return Err(format!(
+            "transport.{key} must be at most {MAX_TRANSPORT_VARINT} (QUIC varint range)"
+        ));
+    }
+    Ok(Some(value))
+}
+
+/// Read a non-negative transport override that sizes an in-process queue.
+fn transport_len_override(tbl: &toml::Table, key: &str) -> Result<Option<usize>, String> {
+    let Some(value) = transport_varint_override(tbl, key)? else {
+        return Ok(None);
+    };
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| format!("transport.{key} exceeds the addressable range of this platform"))
 }
 
 fn parse_traffic_analysis_policy(

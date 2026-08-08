@@ -3440,6 +3440,79 @@ cc_algorithm = "not-a-controller"
     }
 
     #[test]
+    fn negative_transport_overrides_are_rejected_instead_of_clamped_to_zero() {
+        // Clamping turned an operator typo into a legal value with different runtime
+        // semantics: a zero idle timeout disables liveness detection and a zero
+        // flow-control limit permits no data, and the reload reported success either
+        // way. Each field must name itself so the typo is findable.
+        for key in [
+            "max_idle_timeout",
+            "initial_max_data",
+            "initial_max_stream_data_bidi_local",
+            "initial_max_stream_data_bidi_remote",
+            "initial_max_stream_data_uni",
+            "initial_max_streams_bidi",
+            "initial_max_streams_uni",
+            "dgram_recv_queue_len",
+            "dgram_send_queue_len",
+        ] {
+            let contents = format!("[transport]\n{key} = -1\n");
+            let error = validate_transport_overrides_from_toml(&contents)
+                .expect_err("a negative value must be rejected");
+            assert!(
+                error.contains(key) && error.contains("negative"),
+                "{key} must name itself and the defect, got {error}"
+            );
+
+            // Zero is a value the operator can mean, so it stays acceptable; only the
+            // negative that used to become zero is rejected.
+            validate_transport_overrides_from_toml(&format!("[transport]\n{key} = 0\n"))
+                .unwrap_or_else(|error| panic!("{key} = 0 must remain accepted, got {error}"));
+
+            // A value that cannot be encoded as a QUIC varint is a configuration error,
+            // not a large limit.
+            let over = format!("[transport]\n{key} = {}\n", MAX_TRANSPORT_VARINT + 1);
+            let error = validate_transport_overrides_from_toml(&over)
+                .expect_err("an unencodable value must be rejected");
+            assert!(
+                error.contains(key),
+                "{key} must name itself when out of varint range, got {error}"
+            );
+
+            // The varint maximum itself is the boundary and stays legal.
+            validate_transport_overrides_from_toml(&format!(
+                "[transport]\n{key} = {MAX_TRANSPORT_VARINT}\n"
+            ))
+            .unwrap_or_else(|error| panic!("{key} at the varint maximum must be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn a_negative_value_rejects_the_whole_override_set_before_any_mutation() {
+        let mut transport =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        let before = transport.max_udp_payload_size();
+        let contents = r#"
+[transport]
+mtu = 1400
+max_idle_timeout = -1
+"#;
+
+        let error = apply_transport_overrides_from_toml(
+            std::path::Path::new("test.toml"),
+            contents,
+            &mut transport,
+        )
+        .expect_err("a negative value must abort the whole set");
+        assert!(error.contains("max_idle_timeout"), "the failure must name the field: {error}");
+        assert_eq!(
+            transport.max_udp_payload_size(),
+            before,
+            "no transport policy may be mutated after a rejected value"
+        );
+    }
+
+    #[test]
     fn a_setter_rejection_returns_an_error_and_leaves_the_live_config_untouched() {
         // Every transport key is currently pre-validated before this helper runs, so
         // this rejection is not reachable through the reload path today. That is
