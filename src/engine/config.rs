@@ -1206,6 +1206,35 @@ impl LoggingConfig {
     }
 }
 
+impl crate::logging::LoggingConfigProjection for LoggingConfig {
+    fn project_logging_config(&self) -> qf_logging::LoggingConfig {
+        qf_logging::LoggingConfig {
+            mode: match self.mode {
+                LoggingMode::Verbose => qf_logging::LoggingMode::Verbose,
+                LoggingMode::Normal => qf_logging::LoggingMode::Normal,
+                LoggingMode::Minimal => qf_logging::LoggingMode::Minimal,
+                LoggingMode::NoLog => qf_logging::LoggingMode::NoLog,
+            },
+            level: self.level.clone(),
+            log_to_file: self.log_to_file,
+            log_file_path: self.log_file_path.clone(),
+            log_to_stdout: self.log_to_stdout,
+            ring_buffer_capacity: self.ring_buffer_capacity,
+            strip_metadata: self.strip_metadata,
+            format: match self.format {
+                LogFormat::Text => qf_logging::LogFormat::Text,
+                LogFormat::Json => qf_logging::LogFormat::Json,
+                LogFormat::Syslog => qf_logging::LogFormat::Syslog,
+            },
+            file_path: self.file_path.clone(),
+            max_file_size_bytes: self.max_file_size_bytes,
+            max_files: self.max_files,
+            syslog_addr: self.syslog_addr,
+            module_levels: self.module_levels.clone(),
+        }
+    }
+}
+
 /// Bounded security audit persistence configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
