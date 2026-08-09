@@ -483,6 +483,8 @@ Wire -> Pooled Buffer
 - **qf-logging**: Structured production logging with bounded admission, file rotation/reopen, RFC 5424 syslog, flush barriers, and observable worker counters.
 - **qf-metrics**: Bounded telemetry HTTP serving with exporter injection, request classification, and concurrent connection admission.
 - **qf-reality**: RealityProxy and cover-site TLS handshake cache - tokio::spawn UDP proxy to Cloudflare/Google/Quad9 plus captured TLS material for active-probe fallback.
+- **accelerate.rs**: Compatibility-only acceleration namespace; runtime modules use `crate::optimize` directly so the compatibility surface does not participate in the product dependency cycle.
+- **logging.rs**: Compatibility-only logger projection; the engine owns the `LoggingConfig` adapter while the root logging namespace stays independent of the engine module.
 
 ---
 
