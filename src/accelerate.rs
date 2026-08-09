@@ -5,15 +5,9 @@
 //! stealth, transport, memory). Each submodule preserves the original
 //! functions, allowing consumers to access them via `crate::accelerate::<area>`.
 
-// Re-export optimization submodules under `accelerate::*` for internal runtime call sites.
-// This avoids compiling the same file twice via `#[path = ...] mod ...`, which causes
-// duplicate modules and bloats compile time/binary size.
-#[cfg(any(test, feature = "rust-tests"))]
-pub(crate) use crate::optimize::compress;
-#[cfg(not(any(test, feature = "rust-tests")))]
-pub(crate) use crate::optimize::udp as transport_io;
-#[cfg(not(any(test, feature = "rust-tests")))]
-pub(crate) use crate::optimize::{brain, compress, stealth, string, transport};
+// Re-export optimization submodules under `accelerate::*` for compatibility callers.
+// Runtime modules use `crate::optimize` directly so this surface stays outside the product
+// dependency cycle and does not create a second owner for any optimization implementation.
 #[cfg(any(test, feature = "rust-tests"))]
 pub use crate::optimize::{
     brain, iter, memory, random, sort, stealth, string, transport, udp as transport_io,

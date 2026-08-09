@@ -77,8 +77,8 @@ Rules-File Guard (Stealth Module)
 */
 
 // clap dependency removed - using manual enum implementation
-use crate::accelerate::stealth::AsciiSimdBackend;
 use crate::crypto::hkdf::{hkdf_expand, hkdf_extract};
+use crate::optimize::stealth::AsciiSimdBackend;
 use log::{debug, error, info, warn};
 // use of sha2 replaced with centralized SIMD dispatch
 use std::collections::VecDeque;

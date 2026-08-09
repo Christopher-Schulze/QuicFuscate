@@ -59,9 +59,8 @@ pub use pn::{cid, pnspace, rand, range_buf, ranges, varint};
 /// Best-effort socket capability setup shared across runtime hotpaths.
 #[doc(hidden)]
 pub fn init_socket_acceleration(socket: &std::net::UdpSocket) -> std::io::Result<()> {
-    let gso_enabled = crate::accelerate::transport_io::UdpGsoConfig::enable(socket)
-        .map(|cfg| cfg.enabled)
-        .unwrap_or(false);
+    let gso_enabled =
+        crate::optimize::udp::UdpGsoConfig::enable(socket).map(|cfg| cfg.enabled).unwrap_or(false);
 
     log::info!("Network acceleration initialized:");
     log::info!("  GSO: {}", gso_enabled);
@@ -73,7 +72,7 @@ pub fn init_socket_acceleration(socket: &std::net::UdpSocket) -> std::io::Result
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub(crate) fn init_socket_acceleration_fd(socket_fd: std::os::fd::RawFd) -> std::io::Result<()> {
-    let gso_enabled = crate::accelerate::transport_io::UdpGsoConfig::enable_fd(socket_fd)
+    let gso_enabled = crate::optimize::udp::UdpGsoConfig::enable_fd(socket_fd)
         .map(|cfg| cfg.enabled)
         .unwrap_or(false);
 

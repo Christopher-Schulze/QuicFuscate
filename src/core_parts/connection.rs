@@ -8,7 +8,7 @@
 // forked QuicFuscate runtime. It orchestrates crypto, FEC, transport, and
 // stealth ownership for the canonical connection lifecycle used by this fork.
 
-use crate::accelerate::transport::{self as transport_accel, CongestionSample};
+use crate::optimize::transport::{self as transport_accel, CongestionSample};
 #[cfg(feature = "orchestrator")]
 use crate::brain::DeepIntegrationOrchestrator;
 use crate::brain::{CombinedObserver, StealthBrain};

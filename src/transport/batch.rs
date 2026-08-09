@@ -2,7 +2,7 @@
 //!
 //! This module is not part of the normal runtime transport surface.
 
-use crate::accelerate::transport_io as accelerate;
+use crate::optimize::udp as accelerate;
 #[cfg(any(test, feature = "rust-tests"))]
 use crate::simd::planner::AccelerationPlanner;
 #[cfg(any(test, feature = "rust-tests"))]

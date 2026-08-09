@@ -13,8 +13,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::env_utils::EnvSnapshot;
 
-use crate::accelerate::brain as brain_accel;
 use crate::fec::KalmanFilter;
+use crate::optimize::brain as brain_accel;
 use crate::transport::{Connection, TransportObserver};
 
 const PACKET_IAT_SAMPLE_INTERVAL: u64 = 8;

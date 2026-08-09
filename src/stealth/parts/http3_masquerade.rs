@@ -503,7 +503,7 @@ impl Http3Masquerade {
             (self.profile.accept_language.len() as u64 + 1) * 987_654 + timestamp % 100_000;
 
         let mut raw = Vec::with_capacity(96);
-        let simd = crate::accelerate::stealth::AsciiSimdBackend::detect();
+        let simd = crate::optimize::stealth::AsciiSimdBackend::detect();
 
         match self.profile.browser {
             BrowserProfile::Chrome | BrowserProfile::Edge => {
@@ -544,7 +544,7 @@ impl Http3Masquerade {
 
     /// Generates realistic referer based on fronting scenario
     fn generate_realistic_referer(&self, host: &str) -> String {
-        let simd = crate::accelerate::stealth::AsciiSimdBackend::detect();
+        let simd = crate::optimize::stealth::AsciiSimdBackend::detect();
 
         if host_contains(host, "cloudflare") || host_contains(host, "cdn") {
             let literal: &[u8] = match self.profile.browser {
@@ -593,7 +593,7 @@ fn host_contains(haystack: &str, needle: &str) -> bool {
     if haystack.len() < needle.len() {
         return false;
     }
-    crate::accelerate::string::string_contains(haystack, needle)
+    crate::optimize::string::string_contains(haystack, needle)
 }
 
 /// Configuration for [`FakeHeaders`].

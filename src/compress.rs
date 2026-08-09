@@ -1,5 +1,5 @@
-use crate::accelerate::compress::classify as classify_bytes;
 use crate::env_utils::EnvSnapshot;
+use crate::optimize::compress::classify as classify_bytes;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool, PooledBlock};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};

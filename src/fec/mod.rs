@@ -1,11 +1,11 @@
 #![allow(clippy::module_inception)]
 #![cfg_attr(any(test, feature = "rust-tests"), allow(unused_variables))]
 
-#[cfg(test)]
-use crate::accelerate;
 use crate::brain::BrainFecHints;
 #[cfg(target_arch = "x86_64")]
 use crate::fec::gf_tables::prefetch_fec_slice;
+#[cfg(test)]
+use crate::optimize as accelerate;
 use crate::optimize::{CpuProfile, FeatureDetector, MemoryPool, PooledBlock};
 use aligned_box::AlignedBox;
 use parking_lot::{Mutex, RwLock};
