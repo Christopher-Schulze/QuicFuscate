@@ -1511,6 +1511,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qf-harness"
+version = "0.4.4"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "qf-instrumentation"
 version = "0.4.4"
 
@@ -1605,6 +1612,7 @@ dependencies = [
  "qf-dns",
  "qf-error",
  "qf-firewall",
+ "qf-harness",
  "qf-instrumentation",
  "qf-logging",
  "qf-metrics",

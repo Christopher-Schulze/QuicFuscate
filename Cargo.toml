@@ -7,6 +7,7 @@ members = [
     "crates/qf-dns",
     "crates/qf-error",
     "crates/qf-firewall",
+    "crates/qf-harness",
     "crates/qf-instrumentation",
     "crates/qf-logging",
     "crates/qf-metrics",
@@ -40,6 +41,7 @@ qf-control-plane = { path = "crates/qf-control-plane" }
 qf-dns = { path = "crates/qf-dns" }
 qf-error = { path = "crates/qf-error" }
 qf-firewall = { path = "crates/qf-firewall" }
+qf-harness = { path = "crates/qf-harness" }
 qf-instrumentation = { path = "crates/qf-instrumentation" }
 qf-logging = { path = "crates/qf-logging" }
 qf-metrics = { path = "crates/qf-metrics" }
@@ -157,7 +159,7 @@ internal_avx10_preview = []
 # pq = ["dep:pqcrypto-mlkem", "dep:pqcrypto-mldsa"]
 
 # --- Test-only features ---
-rust-tests = ["qf-dns/rust-tests", "qf-logging/rust-tests", "qf-metrics/rust-tests", "qf-reality/rust-tests"]
+rust-tests = ["qf-dns/rust-tests", "qf-harness/rust-tests", "qf-logging/rust-tests", "qf-metrics/rust-tests", "qf-reality/rust-tests"]
 benches = []
 masque-tests = []
 tun-tests = []
