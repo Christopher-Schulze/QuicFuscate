@@ -3176,3 +3176,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Self-check flow: query the same `CpuFeatures` instance -> select the expected active x86 counter -> execute public `galois::gf_mul` -> require a monotonic counter increase; hosts without either x86 vector backend emit an explicit SIMD skip.
 - Verification: qf-simd tests `61/61`; locked Linux-x86 qf-simd all-target/all-feature Clippy with warnings denied; strict workspace all-feature library/binary/example Clippy; formatting, diff hygiene, documentation truth, and runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_231825/audit-runtime-guardrails.log`. The root integration binary rebuild was disk-aborted before execution, so hosted Ubuntu remains the x86 runtime owner.
 - The floor-triggered `cargo clean` removed `20,229` files and `2.6 GiB`. Final target/free space is `447,752 / 5,381,352 KiB`; frontend and Tauri paths are unaffected.
+
+## Fuzz Nightly Preflight Integrity (2026-08-10, TODO-562)
+
+- CI flow: install Nightly -> install Cargo Fuzz -> locked metadata -> six-target discovery -> capture complete `rustc -vV` output -> validate Nightly release marker -> AddressSanitizer runs. Capturing before validation prevents early-exit `grep -q` from closing the pipe and turning a valid compiler into `rustup` SIGPIPE status `141` under `pipefail`.
+- Contract flow: `verify-fuzz-contract.sh` requires the capture-and-validate probe and rejects the former direct `rustup | grep -q` pipeline. Toolchain selection, manifests, locks, targets, corpora, sanitizer flags, execution bounds, and crash artifacts are unchanged.
+- Verification: Bash syntax, AddressSanitizer-scoped Nightly preflight, six-target fuzz contract audit, and diff hygiene. Hosted Ubuntu retains authoritative six-target sanitizer execution.

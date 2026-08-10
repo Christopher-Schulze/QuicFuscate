@@ -41,7 +41,9 @@ positive_int "$FUZZ_TIMEOUT" || die "FUZZ_TIMEOUT must be a positive integer"
 
 command -v cargo-fuzz >/dev/null 2>&1 || die "cargo-fuzz is unavailable"
 command -v rustup >/dev/null 2>&1 || die "rustup is unavailable; nightly is required"
-rustup run nightly rustc -vV 2>/dev/null | grep -q nightly || die "nightly rustc is unavailable"
+nightly_rustc_version="$(rustup run nightly rustc -vV 2>/dev/null)" \
+  || die "nightly rustc is unavailable"
+[[ "$nightly_rustc_version" == *"-nightly"* ]] || die "nightly rustc is unavailable"
 
 case " ${RUSTFLAGS:-} " in
   *" -Zsanitizer=address "*) ;;

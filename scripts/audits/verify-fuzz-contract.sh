@@ -63,6 +63,13 @@ for workflow in "$CI_WORKFLOW" "$SCHEDULED_WORKFLOW"; do
 done
 grep -Fq 'scripts/tests/fuzz/run-ci-fuzz.sh' "$CI_WORKFLOW" \
   || fail "ci.yml must call the shared fuzz runner"
+grep -Fq "nightly_rustc_version=\"\$(rustup run nightly rustc -vV 2>/dev/null)\"" "$FUZZ_DIR/run-ci-fuzz.sh" \
+  || fail "fuzz runner must capture the complete Nightly version probe"
+grep -Fq "[[ \"\$nightly_rustc_version\" == *\"-nightly\"* ]]" "$FUZZ_DIR/run-ci-fuzz.sh" \
+  || fail "fuzz runner must validate the captured Nightly version"
+if grep -Fq 'rustup run nightly rustc -vV 2>/dev/null | grep -q' "$FUZZ_DIR/run-ci-fuzz.sh"; then
+  fail "fuzz runner must not combine an early-exit Nightly probe with pipefail"
+fi
 [[ -f "$SCHEDULED_WORKFLOW" ]] || fail "scheduled fuzz workflow is missing"
 grep -Fq 'schedule:' "$SCHEDULED_WORKFLOW" || fail "scheduled fuzz workflow has no schedule trigger"
 grep -Fq 'scripts/tests/fuzz/run-ci-fuzz.sh' "$SCHEDULED_WORKFLOW" \
