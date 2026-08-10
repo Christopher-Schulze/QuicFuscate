@@ -7,6 +7,7 @@
 
 use qf_common::rng::fill_secure_or_abort;
 use qf_error::ConnectionError;
+use qf_transport_pn::varint;
 
 /// QUIC protocol version 1 (RFC 9000 / RFC 9001).
 pub const PROTOCOL_VERSION: u32 = 0x00000001;
@@ -225,66 +226,6 @@ pub fn long_header_type_bits(
         (PROTOCOL_VERSION_V2, LongHeaderPacketType::ZeroRtt) => Ok(0x20),
         (PROTOCOL_VERSION_V2, LongHeaderPacketType::Handshake) => Ok(0x30),
         _ => Err(ConnectionError::InvalidPacket),
-    }
-}
-
-mod varint {
-    use qf_error::ConnectionError;
-
-    #[inline(always)]
-    const fn varint_len(value: u64) -> usize {
-        if value <= 0x3f {
-            1
-        } else if value <= 0x3fff {
-            2
-        } else if value <= 0x3fff_ffff {
-            4
-        } else {
-            8
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn write_varint(value: u64, output: &mut [u8]) -> Result<usize, ConnectionError> {
-        let length = varint_len(value);
-        if output.len() < length {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        if value > 0x3fff_ffff_ffff_ffff {
-            return Err(ConnectionError::InvalidPacket);
-        }
-        let mut bytes = value.to_be_bytes();
-        let start = 8 - length;
-        bytes[start] |= (length_prefix(length) << 6) as u8;
-        output[..length].copy_from_slice(&bytes[start..]);
-        Ok(length)
-    }
-
-    #[inline(always)]
-    pub(super) fn read_varint(input: &[u8]) -> Result<(u64, usize), ConnectionError> {
-        let Some(&first) = input.first() else {
-            return Err(ConnectionError::BufferTooShort);
-        };
-        let length = 1usize << usize::from(first >> 6);
-        if input.len() < length {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let mut value = u64::from(first & 0x3f);
-        for byte in input.iter().take(length).skip(1) {
-            value = (value << 8) | u64::from(*byte);
-        }
-        Ok((value, length))
-    }
-
-    #[inline(always)]
-    const fn length_prefix(length: usize) -> usize {
-        match length {
-            1 => 0,
-            2 => 1,
-            4 => 2,
-            8 => 3,
-            _ => 0,
-        }
     }
 }
 

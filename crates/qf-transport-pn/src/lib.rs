@@ -1,4 +1,8 @@
 use qf_transport_types::ConnectionId;
+
+/// QUIC variable-length integer encoding and decoding (RFC 9000 Section 16).
+pub mod varint;
+
 /// QUIC packet number space tracking and ACK generation.
 pub mod pnspace {
     use super::ranges::RangeSet;

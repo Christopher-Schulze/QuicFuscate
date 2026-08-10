@@ -1794,6 +1794,8 @@ name = "qf-transport-pn"
 version = "0.4.4"
 dependencies = [
  "qf-common",
+ "qf-error",
+ "qf-simd",
  "qf-transport-types",
 ]
 
@@ -1836,6 +1838,7 @@ version = "0.4.4"
 dependencies = [
  "qf-common",
  "qf-error",
+ "qf-transport-pn",
  "serde",
  "serde_json",
 ]

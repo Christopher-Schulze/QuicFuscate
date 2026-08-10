@@ -8,8 +8,10 @@ publish = false
 
 [features]
 default = []
-rust-tests = ["qf-common/rust-tests"]
+rust-tests = ["qf-common/rust-tests", "qf-simd/rust-tests"]
 
 [dependencies]
 qf-common = { path = "../qf-common" }
+qf-error = { path = "../qf-error" }
+qf-simd = { path = "../qf-simd" }
 qf-transport-types = { path = "../qf-transport-types" }
