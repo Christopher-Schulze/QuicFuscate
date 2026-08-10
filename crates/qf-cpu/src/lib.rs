@@ -538,11 +538,34 @@ fn probe_amx_os_tile_state(_cpu_tile: bool, _cpu_int8: bool) -> Option<bool> {
     None
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
+fn decode_amx_cpuid_leaf7(edx: u32) -> (bool, bool, bool) {
+    const AMX_BF16: u32 = 1 << 22;
+    const AMX_TILE: u32 = 1 << 24;
+    const AMX_INT8: u32 = 1 << 25;
+
+    (edx & AMX_TILE != 0, edx & AMX_INT8 != 0, edx & AMX_BF16 != 0)
+}
+
+#[cfg(all(target_arch = "x86_64", not(target_env = "sgx")))]
+fn detect_amx_cpu_support() -> (bool, bool, bool) {
+    use std::arch::x86_64::{__cpuid_count, __get_cpuid_max};
+
+    if __get_cpuid_max(0).0 < 7 {
+        return (false, false, false);
+    }
+
+    decode_amx_cpuid_leaf7(__cpuid_count(7, 0).edx)
+}
+
+#[cfg(all(target_arch = "x86_64", target_env = "sgx"))]
+fn detect_amx_cpu_support() -> (bool, bool, bool) {
+    (false, false, false)
+}
+
 #[cfg(target_arch = "x86_64")]
 fn detect_amx_capability() -> AmxCapability {
-    let cpu_tile = std::arch::is_x86_feature_detected!("amx-tile");
-    let cpu_int8 = std::arch::is_x86_feature_detected!("amx-int8");
-    let cpu_bf16 = std::arch::is_x86_feature_detected!("amx-bf16");
+    let (cpu_tile, cpu_int8, cpu_bf16) = detect_amx_cpu_support();
     AmxCapability::from_signals(AmxSignals {
         cpu_tile,
         cpu_int8,
@@ -2253,6 +2276,18 @@ mod tests {
         assert_eq!(detector.features_full().amx_tile, capability.cpu_tile);
         assert_eq!(detector.features_full().amx_int8, capability.cpu_int8);
         assert_eq!(detector.features_full().amx_bf16, capability.cpu_bf16);
+    }
+
+    #[test]
+    fn amx_cpuid_leaf7_decodes_each_feature_bit_independently() {
+        assert_eq!(super::decode_amx_cpuid_leaf7(0), (false, false, false));
+        assert_eq!(super::decode_amx_cpuid_leaf7(1 << 24), (true, false, false));
+        assert_eq!(super::decode_amx_cpuid_leaf7(1 << 25), (false, true, false));
+        assert_eq!(super::decode_amx_cpuid_leaf7(1 << 22), (false, false, true));
+        assert_eq!(
+            super::decode_amx_cpuid_leaf7((1 << 22) | (1 << 24) | (1 << 25)),
+            (true, true, true)
+        );
     }
 
     #[test]
