@@ -29,6 +29,7 @@ pub use qf_transport_types::{
     TUN_IPV6_MIN_MTU, TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY,
 };
 use std::io::{self};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;

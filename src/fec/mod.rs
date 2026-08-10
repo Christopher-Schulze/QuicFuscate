@@ -127,7 +127,7 @@ mod adaptive_reed_solomon;
 pub mod wire;
 
 pub(crate) mod gf_tables {
-    #[cfg(any(test, target_arch = "x86_64"))]
+    #[cfg(test)]
     pub(crate) use qf_fec::gf_tables::gf_mul_table;
     #[cfg(test)]
     pub(crate) use qf_fec::gf_tables::init_tables;

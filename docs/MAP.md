@@ -3100,3 +3100,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Test inspection clones `WintunCleanupState` while holding the mutex instead of moving through its guard. Device configuration uses immutable ownership because assignment, MTU setup, activation, and failure cleanup all operate through shared references and interior synchronization.
 - Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Complete local Windows cross-compilation remains blocked before root product code by the missing Windows C sysroot.
 - Cleanup removed `35,889` generated files and `7.8 GiB` after the free-space floor fired. Final target/free space is `0 / 9,152,212 KiB`; frontend and Tauri paths are unaffected.
+
+## Windows Conditional-Compilation Ownership (2026-08-10, TODO-562)
+
+- Privilege error flow: Unix privilege transition -> `partial_transition_error`; unit tests -> the same formatter regression; Windows production -> no unreachable formatter.
+- FEC compatibility flow: root FEC unit tests -> `fec::gf_tables::gf_mul_table` -> qf-fec table owner; production builds -> no test-only compatibility export. Native TUN address flow: Linux/macOS backends -> shared `IpAddr` import; Windows/iOS/other backends -> no unused import.
+- Verification: qf-privilege tests `23/23`; serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Complete local Windows root compilation remains blocked before product code by the missing Windows C sysroot.
+- Final target/free space is `3,535,364 / 5,692,884 KiB`; frontend and Tauri paths are unaffected.

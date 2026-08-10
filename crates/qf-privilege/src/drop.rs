@@ -237,6 +237,7 @@ impl std::fmt::Display for DropError {
 
 impl std::error::Error for DropError {}
 
+#[cfg(any(unix, test))]
 fn partial_transition_error(
     state: PrivilegeTransitionState,
     operation: &'static str,
