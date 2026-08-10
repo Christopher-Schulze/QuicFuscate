@@ -8,8 +8,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod qkey;
+
 pub use qf_firewall::FirewallConfig;
 pub use qf_memory_lock::MemoryLockFailurePolicy;
+pub use qkey::{generate, id, parse, QKeyError, QKEY_PREFIX};
 
 /// Failure returned while loading, parsing, or validating the aggregate engine configuration.
 ///

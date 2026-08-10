@@ -11,118 +11,13 @@
 //! QKey-eyJyZW1vdGUiOiIxOTIuMTY4LjEuMTo0NDMzIiwic25pIjoiZXhhbXBsZS5jb20iLCJtZDUiOiJhM2YyYjhjOSJ9
 //! ```
 
-use crate::secret::{SecretBytes, SecretString};
+pub use qf_engine_types::{generate, id, parse, QKeyConfig, QKeyError, QKeyToken, QKEY_PREFIX};
+
+#[cfg(test)]
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URLSAFE, Engine as _};
 
-/// QKey prefix
-pub const QKEY_PREFIX: &str = "QKey-";
-
-pub use qf_engine_types::{QKeyConfig, QKeyToken};
-
-// Hard limits to keep parsing safe for untrusted input (copy/paste, clipboard).
+#[cfg(test)]
 const MAX_QKEY_CHARS: usize = 16 * 1024;
-const MAX_DECODED_JSON_BYTES: usize = 16 * 1024;
-
-/// Stable QKey id for server-side registries.
-///
-/// This is *not* a secret. It is used as a compact identifier and should not be relied on for
-/// authentication. Authentication must use a separate secret (for example a token verified
-/// post-handshake).
-pub fn id(qkey: &str) -> String {
-    let trimmed = qkey.trim();
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    if trimmed
-        .get(..QKEY_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(QKEY_PREFIX))
-    {
-        hasher.update(QKEY_PREFIX.as_bytes());
-        hasher.update(&trimmed.as_bytes()[QKEY_PREFIX.len()..]);
-    } else {
-        hasher.update(trimmed.as_bytes());
-    }
-    let hex = format!("{:x}", hasher.finalize());
-    hex.chars().take(12).collect()
-}
-
-/// Generate a QKey string from config.
-pub fn generate(config: &QKeyConfig) -> String {
-    let json =
-        SecretString::new(serde_json::to_string(config).unwrap_or_default(), "qkey_json_encode");
-    // Prefer URL-safe base64 without padding for copy/paste stability.
-    let encoded = SecretString::new(BASE64_URLSAFE.encode(json.as_bytes()), "qkey_base64_payload");
-    let mut qkey = String::with_capacity(QKEY_PREFIX.len() + encoded.len());
-    qkey.push_str(QKEY_PREFIX);
-    qkey.push_str(&encoded);
-    qkey
-}
-
-/// Parse a QKey string back to config.
-pub fn parse(qkey: &str) -> Result<QKeyConfig, QKeyError> {
-    let qkey = qkey.trim();
-    if qkey.is_empty() {
-        return Err(QKeyError::InvalidPrefix);
-    }
-    if qkey.len() > MAX_QKEY_CHARS {
-        return Err(QKeyError::TooLarge);
-    }
-    // Check prefix
-    if qkey.len() < QKEY_PREFIX.len() {
-        return Err(QKeyError::InvalidPrefix);
-    }
-    let (prefix, rest) = qkey.split_at(QKEY_PREFIX.len());
-    if !prefix.eq_ignore_ascii_case(QKEY_PREFIX) {
-        return Err(QKeyError::InvalidPrefix);
-    }
-
-    // Extract base64 part
-    let encoded = rest;
-
-    let decoded = SecretBytes::new(
-        BASE64_URLSAFE.decode(encoded).map_err(|_| QKeyError::InvalidBase64)?,
-        "qkey_decoded_json",
-    );
-
-    if decoded.len() > MAX_DECODED_JSON_BYTES {
-        return Err(QKeyError::TooLarge);
-    }
-
-    // Parse JSON only after the bounded decoded bytes pass the UTF-8 secret boundary.
-    let decoded = SecretString::try_from_bytes(decoded).map_err(|_| QKeyError::InvalidJson)?;
-    let config: QKeyConfig =
-        serde_json::from_str(decoded.as_str()).map_err(|_| QKeyError::InvalidJson)?;
-
-    // Validate checksum
-    if !config.validate() {
-        return Err(QKeyError::InvalidChecksum);
-    }
-
-    Ok(config)
-}
-
-/// QKey error types.
-#[derive(Debug, Clone, PartialEq)]
-pub enum QKeyError {
-    InvalidPrefix,
-    InvalidBase64,
-    InvalidJson,
-    InvalidChecksum,
-    TooLarge,
-}
-
-impl std::fmt::Display for QKeyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidPrefix => write!(f, "QKey must start with '{}'", QKEY_PREFIX),
-            Self::InvalidBase64 => write!(f, "Invalid base64 encoding"),
-            Self::InvalidJson => write!(f, "Invalid JSON format"),
-            Self::InvalidChecksum => write!(f, "Checksum validation failed"),
-            Self::TooLarge => write!(f, "QKey payload is too large"),
-        }
-    }
-}
-
-impl std::error::Error for QKeyError {}
 
 /// Convert from EngineConfig to QKeyConfig.
 impl From<&crate::engine::EngineConfig> for QKeyConfig {

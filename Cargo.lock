@@ -1541,6 +1541,7 @@ dependencies = [
 name = "qf-engine-types"
 version = "0.4.4"
 dependencies = [
+ "base64 0.21.7",
  "log",
  "qf-common",
  "qf-cpu",
@@ -1552,6 +1553,7 @@ dependencies = [
  "qf-transport-types",
  "qf-transport-version",
  "serde",
+ "serde_json",
  "sha2",
  "sysinfo",
 ]
