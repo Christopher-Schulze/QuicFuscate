@@ -1740,11 +1740,8 @@ mod tests {
 
     #[test]
     fn file_reload_replaces_created_config_and_rejects_invalid_candidate() {
-        let root = std::env::temp_dir().join(format!(
-            "quicfuscate-engine-reload-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = std::env::temp_dir()
+            .join(format!("quicfuscate-engine-reload-{}-file-reload", std::process::id()));
         let valid_path = root.with_extension("valid.toml");
         let invalid_path = root.with_extension("invalid.toml");
 
