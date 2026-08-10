@@ -39,7 +39,7 @@ pub use handlers::{CapsuleHandler, DatagramHandler};
 pub use masque::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
 pub use observer::{TransportObserver, TransportPolicyError, TransportPolicyTarget};
 pub use path::PathEvent;
-pub use protocol::{Epoch, Header, PacketType, TransportError};
+pub use protocol::{Epoch, Header, PacketType, TransportError, QUIC_FIXED_BIT};
 pub use runtime::{BrainRuntimePermissions, FecControlDelta, IntelligentLevelHints};
 pub use stealth::{BrowserProfile, StealthRuntimeDelta, StealthRuntimePolicy};
 pub use traffic::{TrafficAnalysisDefense, TrafficAnalysisPolicy};

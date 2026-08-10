@@ -3,6 +3,9 @@
 use super::ConnectionId;
 use std::ops::{Index, IndexMut};
 
+/// QUIC fixed bit required on protected packet headers by RFC 9000.
+pub const QUIC_FIXED_BIT: u8 = 0x40;
+
 /// QUIC packet epoch used by the transport and TLS handshake paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Epoch {
@@ -209,6 +212,11 @@ mod tests {
         assert_eq!(PacketType::ZeroRTT.to_epoch(), Ok(Epoch::Application));
         assert_eq!(PacketType::Retry.to_epoch(), Err(TransportError::InvalidPacket));
         assert_eq!(PacketType::VersionNegotiation.to_epoch(), Err(TransportError::InvalidPacket));
+    }
+
+    #[test]
+    fn quic_fixed_bit_matches_the_rfc_wire_position() {
+        assert_eq!(QUIC_FIXED_BIT, 1 << 6);
     }
 
     #[test]

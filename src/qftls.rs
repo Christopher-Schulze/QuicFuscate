@@ -11,6 +11,10 @@ use zeroize::Zeroizing;
 
 use crate::error::ConnectionError;
 use crate::transport::packet::CryptoContext;
+use qf_transport_types::QUIC_FIXED_BIT;
+#[cfg(test)]
+use qf_transport_version::VersionInformation;
+use qf_transport_version::{PROTOCOL_VERSION, PROTOCOL_VERSION_V2};
 
 /// Compatibility export for the root TLS namespace. The canonical contract lives in the
 /// dependency-free transport-types leaf.
@@ -459,37 +463,24 @@ mod tests {
     #[test]
     fn v2_provider_carries_version_information_transport_parameter() {
         let crypto = Arc::new(RwLock::new(CryptoContext::default()));
-        let information = crate::transport::version::VersionInformation {
-            chosen: crate::transport::PROTOCOL_VERSION_V2,
-            available: vec![
-                crate::transport::PROTOCOL_VERSION_V2,
-                crate::transport::PROTOCOL_VERSION,
-            ],
+        let information = VersionInformation {
+            chosen: PROTOCOL_VERSION_V2,
+            available: vec![PROTOCOL_VERSION_V2, PROTOCOL_VERSION],
         }
         .encode_parameter()
         .unwrap();
-        let provider = create_provider_for_version(
-            false,
-            crypto,
-            false,
-            crate::transport::PROTOCOL_VERSION_V2,
-            &information,
-        )
-        .expect("create v2 provider");
+        let provider =
+            create_provider_for_version(false, crypto, false, PROTOCOL_VERSION_V2, &information)
+                .expect("create v2 provider");
         assert!(provider.get_quic_transport_params().ends_with(&information));
     }
 
     #[test]
     fn rustls_client_hello_policy_excludes_chacha_for_chrome_and_firefox() {
         let crypto = Arc::new(RwLock::new(CryptoContext::default()));
-        let mut provider = RustlsProvider::new(
-            false,
-            Arc::clone(&crypto),
-            false,
-            crate::transport::PROTOCOL_VERSION,
-            &[],
-        )
-        .expect("client provider");
+        let mut provider =
+            RustlsProvider::new(false, Arc::clone(&crypto), false, PROTOCOL_VERSION, &[])
+                .expect("client provider");
 
         for mut profile in [TlsProfile::chrome_130(), TlsProfile::firefox_133()] {
             // This test owns cipher-suite policy only. Cosmetic profile timing
@@ -564,7 +555,7 @@ mod tests {
 
     #[test]
     fn tls_provider_defaults_to_rustls_owner() {
-        let crypto = Arc::new(RwLock::new(crate::transport::packet::CryptoContext::default()));
+        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
         let provider = create_provider(false, crypto).unwrap();
 
         assert!(provider.provider_name().starts_with("rustls"));
@@ -576,7 +567,7 @@ mod tests {
             .map(|raw| raw != "0" && !raw.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
 
-        let crypto = Arc::new(RwLock::new(crate::transport::packet::CryptoContext::default()));
+        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
         let provider = create_provider(false, crypto).unwrap();
 
         assert!(!provider.supports_ch_override());
@@ -758,13 +749,7 @@ pub(crate) fn create_provider_with_peer_verification(
     crypto: Arc<RwLock<CryptoContext>>,
     verify_peer: bool,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    create_provider_for_version(
-        is_server,
-        crypto,
-        verify_peer,
-        crate::transport::PROTOCOL_VERSION,
-        &[],
-    )
+    create_provider_for_version(is_server, crypto, verify_peer, PROTOCOL_VERSION, &[])
 }
 
 pub(crate) fn create_provider_for_version(
@@ -1322,15 +1307,9 @@ mod rustls_provider {
         #[test]
         fn profile_jitter_is_scheduled_without_blocking_configuration() {
             let crypto = Arc::new(RwLock::new(CryptoContext::default()));
-            let mut provider = RustlsProviderImpl::new_with_ca(
-                false,
-                crypto,
-                false,
-                crate::transport::PROTOCOL_VERSION,
-                &[],
-                None,
-            )
-            .expect("client provider");
+            let mut provider =
+                RustlsProviderImpl::new_with_ca(false, crypto, false, PROTOCOL_VERSION, &[], None)
+                    .expect("client provider");
             let mut profile = TlsProfile::chrome_130();
             profile.timing_jitter = Some(Duration::from_secs(2));
 
@@ -1428,7 +1407,7 @@ mod rustls_provider {
                 false,
                 client_crypto(),
                 false,
-                crate::transport::PROTOCOL_VERSION,
+                PROTOCOL_VERSION,
                 &[],
                 Some(first_path),
             )
@@ -1437,7 +1416,7 @@ mod rustls_provider {
                 false,
                 client_crypto(),
                 false,
-                crate::transport::PROTOCOL_VERSION,
+                PROTOCOL_VERSION,
                 &[],
                 Some(second_path),
             )
@@ -1446,7 +1425,7 @@ mod rustls_provider {
                 false,
                 client_crypto(),
                 false,
-                crate::transport::PROTOCOL_VERSION,
+                PROTOCOL_VERSION,
                 &[],
                 Some(first_path),
             )
@@ -1641,8 +1620,8 @@ mod rustls_provider {
 
         fn map_quic_version(version: u32) -> Result<rustls::quic::Version, ConnectionError> {
             match version {
-                crate::transport::PROTOCOL_VERSION => Ok(rustls::quic::Version::V1),
-                crate::transport::PROTOCOL_VERSION_V2 => Ok(rustls::quic::Version::V2),
+                PROTOCOL_VERSION => Ok(rustls::quic::Version::V1),
+                PROTOCOL_VERSION_V2 => Ok(rustls::quic::Version::V2),
                 _ => Err(ConnectionError::VersionMismatch),
             }
         }
@@ -2288,7 +2267,7 @@ mod rustls_provider {
             // We only need the low 5 bits of mask[0] (short header) and the next 4 bytes.
             // Force a 4-byte PN field in the HP helper call. Some implementations derive how many
             // PN bytes to mask from the low bits of `first`, so we set them to 3 (pn_len = 4).
-            let first_orig: u8 = crate::transport::packet::FIXED_BIT | 0x03;
+            let first_orig: u8 = QUIC_FIXED_BIT | 0x03;
             let mut first: u8 = first_orig;
             let mut pn = [0u8; 4];
             if self.key.encrypt_in_place(sample, &mut first, &mut pn).is_err() {

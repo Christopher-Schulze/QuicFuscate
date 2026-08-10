@@ -24,7 +24,7 @@ pub fn derive_hp_key_for_version(secret: &[u8], version: u32) -> Result<[u8; 16]
 /// Long header form bit (0x80) - set for long headers, clear for short headers.
 pub const FORM_BIT: u8 = 0x80;
 /// Fixed bit (0x40) - set on regular QUIC packets; ignored for Version Negotiation.
-pub const FIXED_BIT: u8 = 0x40;
+pub const FIXED_BIT: u8 = qf_transport_types::QUIC_FIXED_BIT;
 /// Key phase bit (0x04) in short header first byte.
 pub const KEY_PHASE_BIT: u8 = 0x04;
 /// Packet type mask (0x30) for long header type field extraction.

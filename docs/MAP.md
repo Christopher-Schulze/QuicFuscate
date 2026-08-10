@@ -2907,3 +2907,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - H3 environment isolation uses the canonical root environment-lock compatibility path rather than the FEC test-support namespace. Frontend and Tauri are unaffected.
 - Verification: qf-fec `82/82`; focused H3 isolation `1/1`; root all-feature library tests `1,693/1,693`; all-feature checking; strict child/workspace Clippy; formatting and diff hygiene. Final target/free space is `5,894,708 / 16,234,368 KiB`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-transport-fec-observer-postpush/workspace-seams.json` at source revision `4493a0de24ed9ffc8a147e2fc76f1400b9fc2936`; `36` packages, `334` Rust files, `207,115` source lines, `110` module edges, `116` workspace dependency edges, and `protected_changes=[]`. `transport -> fec` is absent, FEC is outside every product SCC, and the remaining transport product SCC is `qftls/stealth/transport`; `qf-fec -> qf-transport-types` is the explicit child-level callback-trait edge.
+
+## QFTLS Transport-Version Contract Dependency (2026-08-10, TODO-562)
+
+- Contract flow: `qf-transport-version::{VersionInformation, PROTOCOL_VERSION, PROTOCOL_VERSION_V2}` and `qf-transport-types::QUIC_FIXED_BIT` -> QFTLS/rustls adapters; root `transport::packet::FIXED_BIT` remains a compatibility alias.
+- Root `CryptoContext` is the sole remaining direct QFTLS-to-transport owner edge. Frontend and Tauri are unaffected.
+- Verification: qf-transport-types `39/39`; focused QFTLS `20/20`; root all-feature library tests `1,693/1,693`; all-feature checking; strict child/workspace Clippy; formatting and diff hygiene. Final target/free space is `6,432,156 / 15,625,616 KiB`.
