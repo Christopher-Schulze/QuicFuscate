@@ -6747,3 +6747,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Focused engine tests pass `79/79`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,211,928 KiB` target usage and `18,216,776 KiB` free.
 - Stealth manager ownership, profile validation, runtime behavior, public engine and stealth compatibility exports, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-engine-stealth-contract-postpush/workspace-seams.json` at source revision `65df4fe97c431d68b211de7b24dd8b203bdf564c`: `36` packages, `334` Rust files, `207,079` source lines, `114` module edges, `115` workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`. The direct `engine -> stealth` edge is removed.
+
+## FEC Engine-Mode Test Dependency (2026-08-10, TODO-562)
+
+- Root FEC policy tests now feed `FecConfig::apply_engine_mode` with the canonical `qf-engine-types::FecMode` contract directly. Both former `fec -> engine` references were test-only compatibility indirections.
+- The focused engine-mode policy test passes `1/1`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,251,332 KiB` target usage and `18,089,340 KiB` free.
+- Production FEC control, engine behavior, public compatibility exports, frontend, and Tauri behavior remain unchanged.

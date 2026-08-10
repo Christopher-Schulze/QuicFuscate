@@ -62,11 +62,11 @@ fn engine_mode_sets_policy_independently_from_codec_bootstrap() {
     let mut config = FecConfig::product_default();
     assert_eq!(config.control_policy, FecControlPolicy::Auto);
 
-    config.apply_engine_mode(crate::engine::FecMode::Off);
+    config.apply_engine_mode(qf_engine_types::FecMode::Off);
     assert_eq!(config.control_policy, FecControlPolicy::Off);
     assert_eq!(config.initial_mode, FecMode::Zero);
 
-    config.apply_engine_mode(crate::engine::FecMode::Auto);
+    config.apply_engine_mode(qf_engine_types::FecMode::Auto);
     assert_eq!(config.control_policy, FecControlPolicy::Auto);
     assert_eq!(config.initial_mode, FecMode::Zero);
 }

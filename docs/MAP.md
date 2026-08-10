@@ -2879,3 +2879,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused engine tests `79/79`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,211,928 / 18,216,776 KiB`.
 - Concrete manager/runtime ownership, frontend, Tauri, and wire behavior remain unchanged.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-engine-stealth-contract-postpush/workspace-seams.json` at source revision `65df4fe97c431d68b211de7b24dd8b203bdf564c`; `36` packages, `334` Rust files, `207,079` source lines, `114` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `engine -> stealth` is absent.
+
+## FEC Engine-Mode Test Dependency (2026-08-10, TODO-562)
+
+- Test contract flow: `qf-engine-types::FecMode` -> root FEC policy tests -> child-owned `FecConfig::apply_engine_mode`. Root FEC tests no longer route the engine mode through the concrete root engine namespace.
+- Verification: focused engine-mode policy test `1/1`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,251,332 / 18,089,340 KiB`.
+- Production FEC, engine, frontend, and Tauri behavior remain unchanged.
