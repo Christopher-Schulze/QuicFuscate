@@ -6894,3 +6894,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `CompressionStrategy::BtOpt` is constructible only when `compression_zstd_ffi` enables the `QUICFUSCATE_ZSTD_STRATEGY=btopt` environment override. The safe fallback deliberately uses only length-based Fast, DFast, Greedy, and Lazy2 selection, so the BtOpt variant and native mapping now share the same FFI feature gate.
 - The exact `cargo clippy --workspace --locked --all-targets --features unsafe_rust -- -D warnings` lane passes. The serial root fallback suite passes `1,646/1,646`, the serial root all-feature suite passes `1,657/1,657`, and strict workspace all-feature library/binary/example Clippy passes.
 - The change removes no supported fallback behavior and preserves the native BtOpt override. Final target/free space is `6,621,332 / 4,546,296 KiB`, below the cleanup threshold and above the build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## qf-transport-udp Linux Dependency Ownership (2026-08-10, TODO-562)
+
+- Hosted Linux jobs compiled the extracted qf-transport-udp leaf directly and exposed three undeclared-crate errors in its GSO/GRO path: the leaf used `log` for offload activation and `socket2` for GSO destination encoding while relying on the root package to declare both dependencies.
+- qf-transport-udp now owns `log 0.4` and `socket2 0.5` as Linux-only dependencies. The workspace lockfile adds only those two existing package edges to the qf-transport-udp entry; no dependency version changed and non-Linux leaf graphs remain unchanged.
+- Locked native `x86_64-unknown-linux-gnu` qf-transport-udp all-target Clippy passes with `rust-tests` and warnings denied. qf-transport-udp all-feature tests pass `11/11`, the Cargo feature-taxonomy audit passes all five positive and seven retired profiles, and strict workspace all-feature library/binary/example Clippy passes.
+- Final target/free space is `7,207,740 / 3,832,516 KiB`, below the cleanup threshold and above the build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.

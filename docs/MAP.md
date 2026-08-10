@@ -3024,3 +3024,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Feature flow: `compression_zstd_ffi` -> environment-selected `btopt` -> `CompressionStrategy::BtOpt` -> native zstd strategy. The fallback path contains only its four length-selected strategies and cannot construct BtOpt.
 - Verification: exact workspace `unsafe_rust` all-target Clippy; serial fallback root library `1,646/1,646`; serial all-feature root library `1,657/1,657`; strict workspace all-feature library/binary/example Clippy.
 - Final target/free space is `6,621,332 / 4,546,296 KiB`; frontend and Tauri are unaffected.
+
+## qf-transport-udp Linux Dependency Ownership (2026-08-10, TODO-562)
+
+- Linux compile flow: qf-transport-udp GSO/GRO activation -> `log`; GSO destination encoding -> `socket2::SockAddr`. Both dependencies are owned by the leaf under `cfg(target_os = "linux")` instead of leaking through the root package graph.
+- Verification: locked x86_64-Linux qf-transport-udp all-target Clippy with `rust-tests` and warnings denied; qf-transport-udp all-feature tests `11/11`; Cargo feature-taxonomy audit; strict workspace all-feature library/binary/example Clippy.
+- Final target/free space is `7,207,740 / 3,832,516 KiB`; frontend and Tauri are unaffected.
