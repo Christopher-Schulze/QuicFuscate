@@ -15,7 +15,7 @@ pub(crate) struct TlsCoverProvider {
 
 impl TlsCoverProvider {
     #[cfg(test)]
-    fn cipher_preference_from_env() -> TlsCoverCipherPreference {
+    pub(crate) fn cipher_preference_from_env() -> TlsCoverCipherPreference {
         let environment = crate::env_utils::EnvSnapshot::capture();
         Self::cipher_preference_from_env_with_snapshot(&environment)
     }
@@ -36,7 +36,7 @@ impl TlsCoverProvider {
         TlsCoverCipherPreference::has_hardware_aes()
     }
 
-    fn resolve_cipher_suite(pref: TlsCoverCipherPreference) -> TlsCoverCipherSuite {
+    pub(crate) fn resolve_cipher_suite(pref: TlsCoverCipherPreference) -> TlsCoverCipherSuite {
         pref.resolve()
     }
 
@@ -112,7 +112,7 @@ impl TlsCoverProvider {
         })
     }
 
-    fn derive_tls_cover_material(
+    pub(crate) fn derive_tls_cover_material(
         profile: &str,
         is_server: bool,
     ) -> Result<([u8; 32], [u8; 12]), crate::error::ConnectionError> {
@@ -124,7 +124,7 @@ impl TlsCoverProvider {
     }
 
     #[cfg(test)]
-    fn derive_tls_cover_material_from_entropy(
+    pub(crate) fn derive_tls_cover_material_from_entropy(
         profile: &str,
         is_server: bool,
         entropy: &[u8; 32],

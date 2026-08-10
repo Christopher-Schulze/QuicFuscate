@@ -11,10 +11,13 @@ use zeroize::Zeroizing;
 
 use crate::error::ConnectionError;
 use crate::transport::packet::CryptoContext;
+use qf_stealth::{TlsCoverCipherPreference, TlsCoverCipherSuite};
 use qf_transport_types::QUIC_FIXED_BIT;
 #[cfg(test)]
 use qf_transport_version::VersionInformation;
 use qf_transport_version::{PROTOCOL_VERSION, PROTOCOL_VERSION_V2};
+
+include!("qftls/tls_cover_provider.rs");
 
 /// Compatibility export for the root TLS namespace. The canonical contract lives in the
 /// dependency-free transport-types leaf.
@@ -841,7 +844,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
 /// Combined TLS provider composing rustls (protocol owner) with an optional TLS cover overlay.
 pub struct CombinedProvider {
     rustls: RustlsProvider,
-    cover: Option<crate::stealth::TlsCoverProvider>,
+    cover: Option<TlsCoverProvider>,
 }
 
 impl CombinedProvider {
@@ -941,11 +944,8 @@ impl CombinedProvider {
             // Check stealth mode to determine TLS Cover behavior
             let stealth_mode = Self::env_string(environment, "QUICFUSCATE_STEALTH_MODE", "stealth");
 
-            let mut tls_cover = crate::stealth::TlsCoverProvider::new_with_snapshot(
-                is_server,
-                crypto.clone(),
-                environment,
-            )?;
+            let mut tls_cover =
+                TlsCoverProvider::new_with_snapshot(is_server, crypto.clone(), environment)?;
 
             // In base/performance mode, TLS Cover still runs but without artificial delays
             if stealth_mode == "base" || stealth_mode == "performance" || stealth_mode == "off" {

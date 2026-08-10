@@ -2914,3 +2914,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Root `CryptoContext` is the sole remaining direct QFTLS-to-transport owner edge. Frontend and Tauri are unaffected.
 - Verification: qf-transport-types `39/39`; focused QFTLS `20/20`; root all-feature library tests `1,693/1,693`; all-feature checking; strict child/workspace Clippy; formatting and diff hygiene. Final target/free space is `6,432,156 / 15,625,616 KiB`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-qftls-version-contract-postpush/workspace-seams.json` at source revision `85f0e3a8cc68a3b305d8ff4d952b4d367efe9c1f`; `36` packages, `334` Rust files, `207,102` source lines, `110` module edges, `116` workspace dependency edges, and `protected_changes=[]`. `qftls -> transport` now contains exactly one `CryptoContext` reference rather than `17`; both product SCC memberships are otherwise unchanged.
+
+## TLS Cover QFTLS Adapter Ownership (2026-08-10, TODO-562)
+
+- Adapter flow: qf-stealth TLS Cover policy/material contracts -> `src/qftls/tls_cover_provider.rs` -> root `CryptoContext` -> QFTLS combined provider. The concrete adapter is no longer owned by the root stealth manager namespace.
+- Stealth retains only a test compatibility projection for its existing adapter invariants. Frontend and Tauri are unaffected.
+- Verification: focused TLS Cover `25/25`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `6,660,308 / 15,375,788 KiB`.
