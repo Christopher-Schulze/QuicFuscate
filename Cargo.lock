@@ -1515,6 +1515,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "log",
  "qf-common",
  "qf-cpu",
  "qf-error",

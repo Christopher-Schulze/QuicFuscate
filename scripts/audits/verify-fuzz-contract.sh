@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 FUZZ_DIR="$PROJECT_ROOT/scripts/tests/fuzz"
+QF_CRYPTO_MANIFEST="$PROJECT_ROOT/crates/qf-crypto/Cargo.toml"
 CI_WORKFLOW="$PROJECT_ROOT/.github/workflows/ci.yml"
 SCHEDULED_WORKFLOW="$PROJECT_ROOT/.github/workflows/fuzz-scheduled.yml"
 SEEDS_IGNORE="/scripts/tests/fuzz/seeds/"
@@ -24,6 +25,8 @@ fail() {
 }
 
 [[ -f "$FUZZ_DIR/Cargo.toml" ]] || fail "fuzz manifest is missing"
+grep -Fqx 'log = "0.4"' "$QF_CRYPTO_MANIFEST" \
+  || fail "qf-crypto must declare its direct logging dependency"
 grep -Fq 'quicfuscate = { path = "../../..", features = ["rust-tests"] }' "$FUZZ_DIR/Cargo.toml" \
   || fail "fuzz manifest must resolve the repository root crate"
 grep -Fq '/scripts/tests/fuzz/corpus/' "$PROJECT_ROOT/.gitignore" \
@@ -34,7 +37,7 @@ if grep -Fq "$SEEDS_IGNORE" "$PROJECT_ROOT/.gitignore"; then
   fail "the retained curated seed corpus must not be ignored"
 fi
 
-cargo +nightly metadata --manifest-path "$FUZZ_DIR/Cargo.toml" --no-deps --format-version 1 --locked >/dev/null \
+cargo +nightly metadata --manifest-path "$FUZZ_DIR/Cargo.toml" --format-version 1 --locked >/dev/null \
   || fail "cargo metadata cannot resolve the fuzz workspace"
 command -v cargo-fuzz >/dev/null 2>&1 || fail "cargo-fuzz is required for target discovery"
 expected_targets="$(printf '%s\n' "${TARGETS[@]}" | sort)"

@@ -18,6 +18,7 @@ internal_avx10_preview = ["qf-cpu/internal_avx10_preview"]
 [dependencies]
 hmac = "0.12"
 hkdf = "0.12"
+log = "0.4"
 qf-common = { path = "../qf-common" }
 qf-cpu = { path = "../qf-cpu" }
 qf-error = { path = "../qf-error" }
