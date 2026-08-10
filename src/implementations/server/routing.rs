@@ -2153,12 +2153,8 @@ impl RoutingManager {
         ipv6: bool,
     ) -> Result<(), RoutingError> {
         let rules = self.iptables_ruleset(subnet, ipv6, true, true);
-        if let Err(error) = Self::apply_iptables_restore(restore_program, &rules) {
-            return Err(error);
-        }
-        if let Err(error) = self.verify_iptables_family(program, subnet, ipv6) {
-            return Err(error);
-        }
+        Self::apply_iptables_restore(restore_program, &rules)?;
+        self.verify_iptables_family(program, subnet, ipv6)?;
         Ok(())
     }
 
@@ -2407,7 +2403,7 @@ impl RoutingManager {
     #[cfg(any(test, target_os = "linux"))]
     const NFT_RT_TABLE: &'static str = "quicfuscate_rt";
 
-    #[cfg(any(test, target_os = "linux"))]
+    #[cfg(test)]
     fn nftables_ruleset(&self, subnet: &str) -> String {
         self.nftables_ruleset_with_owner(subnet, "unowned")
     }

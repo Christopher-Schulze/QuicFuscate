@@ -3128,3 +3128,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - The root wrapper is test plus x86-only; no normal root library profile compiles an unreachable duplicate entry point.
 - Verification: focused root GF16 tests `6/6`; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting. Native VBMI2 execution remains external.
 - Final target/free space is `4,534,900 / 3,551,268 KiB`; frontend and Tauri paths are unaffected.
+
+## unsafe_rust Firewall and Routing Ownership (2026-08-10, TODO-562)
+
+- Production nftables flow: routing owner generation -> owner-tagged ruleset -> qf-firewall `verify_nft_table_owner` -> exact marker, fragment, and rule-count validation. The generic qf-firewall fragment verifier remains leaf-owned, but the unused root wrapper is gone.
+- Test flow: routing unit tests -> test-only unowned ruleset adapter -> the same owner-aware generator. Linux iptables flow remains restore transaction -> exact chain/rule verification, with direct typed error propagation.
+- Verification: focused routing tests `24/24`; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting and diff hygiene; runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_222807/audit-runtime-guardrails.log`. Hosted Linux x86 confirmation remains external.
+- Final target/free space is `4,553,404 / 3,362,780 KiB`; frontend and Tauri paths are unaffected.

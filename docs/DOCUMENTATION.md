@@ -7008,3 +7008,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The wrapper now compiles only for x86 unit tests. qf-fec continues to own and publicly expose the real VBMI2 kernel, runtime dispatch, thresholds, telemetry, bounded length handling, and production behavior.
 - Six focused root GF16 tests pass, exact local `unsafe_rust` workspace all-target Clippy passes with warnings denied, and formatting passes. Native VBMI2 execution and hosted Linux x86 confirmation remain external.
 - Final target/free space is `4,534,900 / 3,551,268 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## unsafe_rust Firewall and Routing Ownership (2026-08-10, TODO-562)
+
+- Clippy Matrix run `31427636274`, `unsafe_rust` job `93583017456`, exposed a dead root `verify_nft_table_rules` wrapper, a production-compiled unowned nftables ruleset adapter used only by tests, and two mechanically verbose iptables error branches.
+- qf-firewall retains the canonical fragment-verification API, while the root compatibility surface exposes only the live owner-verifying API used by routing. The unowned ruleset adapter is unit-test-only, and iptables restore plus ownership verification preserve their existing order and errors through `?` propagation.
+- Focused routing tests pass `24/24`, exact local `unsafe_rust` workspace all-target Clippy passes with warnings denied, formatting and diff hygiene pass, and runtime guardrails report `Critical: 0` plus `Warnings: 0` in `scripts/out/audits/audit-runtime-guardrails-20260810_222807/audit-runtime-guardrails.log`. Hosted Linux x86 confirmation remains external.
+- Final target/free space is `4,553,404 / 3,362,780 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.

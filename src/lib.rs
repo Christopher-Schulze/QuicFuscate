@@ -117,15 +117,6 @@ pub mod firewall {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn verify_nft_table_rules(
-        family: &str,
-        table: &str,
-        required_fragments: &[&str],
-    ) -> Result<(), std::io::Error> {
-        qf_firewall::verify_nft_table_rules(family, table, required_fragments)
-    }
-
-    #[cfg(target_os = "linux")]
     pub(crate) fn verify_nft_table_owner(
         family: &str,
         table: &str,
