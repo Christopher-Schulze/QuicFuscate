@@ -3065,3 +3065,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - Retry ownership: qf-telemetry counter subtraction, qf-instrumentation active-client decrement, qf-memory-pool ownership-ledger decrement, root Stealth profile rotation, and root Stealth worker release -> `Atomic*::try_update`. The API rename preserves each closure, success/failure ordering pair, saturating or modulo transition, and ignored-result behavior.
 - Verification: Nightly 1.99 affected-leaf and all-feature root library checks with warnings denied; affected leaf tests `44/44`; serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `4,059,408 / 5,742,176 KiB`; frontend and Tauri are unaffected.
+
+## qf-fec AVX2 Cast Cleanup (2026-08-10, TODO-562)
+
+- AVX2 GF(2^8) flow: 16 low nibbles plus shifted high nibbles -> two lookup tables -> typed `i8` low-nibble mask -> byte shuffles -> XOR product. The index shift remains `u8`, and the mask literal owns its intrinsic-required type without redundant casts.
+- Verification: locked Linux-x86 qf-fec all-target/all-feature Clippy with Clang-backed sha2-asm; qf-fec tests `82/82`; all five Cargo feature-taxonomy profiles; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `5,960,644 / 3,771,248 KiB`; frontend and Tauri are unaffected.

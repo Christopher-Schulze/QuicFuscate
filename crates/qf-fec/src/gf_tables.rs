@@ -359,13 +359,13 @@ unsafe fn gf_mul_scalar_slice_avx2(coeff: u8, src: &[u8], out_xor: &mut [u8]) {
     let mut t1 = [0u8; 16];
     for i in 0..16 {
         t0[i] = gf_mul_table(coeff, i as u8);
-        t1[i] = gf_mul_table(coeff, ((i as u8) << 4) as u8);
+        t1[i] = gf_mul_table(coeff, (i as u8) << 4);
     }
     let tbl0_128 = _mm_loadu_si128(t0.as_ptr() as *const __m128i);
     let tbl1_128 = _mm_loadu_si128(t1.as_ptr() as *const __m128i);
     let tbl0 = _mm256_broadcastsi128_si256(tbl0_128);
     let tbl1 = _mm256_broadcastsi128_si256(tbl1_128);
-    let mask0f = _mm256_set1_epi8(0x0f as i8);
+    let mask0f = _mm256_set1_epi8(0x0f_i8);
 
     // Heuristic prefetch distance based on total length
     let pf_dist: usize = if len >= 4096 {
