@@ -3162,3 +3162,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - The root `src/optimize/unsafe.rs` remains a test-only UnsafeMemoryPool and direct-compression proof surface. Its uncalled parallel GF, XOR, and entropy implementations plus their self-contained duplicate tests are removed, leaving no second SIMD owner.
 - Verification: focused root Unsafe tests `31/31`; exact workspace all-target Clippy for `internal_wiedemann,unsafe_rust` and `unsafe_rust,rust-tests`; strict workspace all-feature library/binary/example Clippy; formatting, diff hygiene, documentation truth, and runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_225615/audit-runtime-guardrails.log`. Native x86 execution remains external.
 - The pre-build `cargo clean` removed `27,574` files and `6.4 GiB`. Final target/free space is `1,933,732 / 5,416,236 KiB`; frontend and Tauri paths are unaffected.
+
+## io_uring Payload Iterator Mutability (2026-08-10, TODO-562)
+
+- Admission flow: connected or destination-addressed batch -> borrowed payload iterator -> mutable `try_fold` receiver -> checked aggregate bytes -> packet and byte bounds -> sender-owned payload slots -> io_uring submission.
+- Only the local iterator binding changes. All four synchronous and worker callers, overflow errors, bounds, dispositions, pointer ownership, and kernel interaction remain identical.
+- Verification: exact local workspace `io_uring` all-target Clippy and strict workspace all-feature library/binary/example Clippy with warnings denied; formatting, diff hygiene, documentation truth, and runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_230058/audit-runtime-guardrails.log`. The Linux-only owner is cfg-excluded locally, so hosted Ubuntu remains the authoritative changed-line compilation gate.
+- Final target/free space is `1,940,164 / 5,240,264 KiB`; frontend and Tauri paths are unaffected.

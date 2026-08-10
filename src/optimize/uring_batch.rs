@@ -355,7 +355,7 @@ impl UringBatchSender {
         Ok(())
     }
 
-    fn checked_payload_bytes<'a, I>(payloads: I) -> std::io::Result<usize>
+    fn checked_payload_bytes<'a, I>(mut payloads: I) -> std::io::Result<usize>
     where
         I: Iterator<Item = &'a [u8]>,
     {
