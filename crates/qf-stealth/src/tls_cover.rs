@@ -184,7 +184,7 @@ impl TlsCoverCipherSuite {
     }
 }
 
-/// Owned variant of [`ServerHelloParams`] for storing in fingerprint profiles.
+/// Owned synthetic ServerHello parameters for storing in fingerprint profiles.
 #[derive(Debug, Clone)]
 pub struct ServerHelloParamsOwned {
     /// TLS protocol version (e.g. `0x0303` for TLS 1.2 compat).

@@ -179,7 +179,7 @@ Probe-count-based escalation state machine on `StealthManager`.
 - `on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode).
 - `probe_timestamps` is a bounded `ProbeHistory` with independent 60-/120-second counters, same-millisecond aggregation, and a hard maximum of 120,001 millisecond buckets; it remains separate from the detector history (TODO-644).
 
-### IntelligentStealthInputs.level_hint (src/stealth/parts/manager.rs)
+### IntelligentStealthInputs.level_hint (crates/qf-stealth/src/intelligent_policy.rs)
 Brain and `EscalationState` publish separate connection-local levels through `IntelligentLevelHints`; consumers use the maximum and pass it as `level_hint: u8` (0/1/2) to `derive_intelligent_runtime_policy`.
 Level 0 (clean path): padding disabled (near-zero Intelligent-mode overhead). Level 1/2: padding active.
 Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - direction fixed).
@@ -2806,3 +2806,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-stealth `121/121`; root all-feature library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. Final target/free space is `10,640,032 / 12,040,172 KiB`.
 - Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-tls-cover-record-plan-postpush/workspace-seams.json` at source revision `cd56daf80daa5a3c71ead888c46daa4534ddb557`; `36` packages, `332` Rust files, `207,009` source lines, `123` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## Intelligent Stealth Policy Workspace Ownership (2026-08-10, TODO-562)
+
+- Policy flow: Brain signal snapshot -> `qf-stealth::derive_intelligent_runtime_policy` with immutable `EnvSnapshot` -> `qf-transport-types::StealthRuntimePolicy` -> root manager compatibility adapter -> connection runtime delta.
+- Canonical owner: `crates/qf-stealth/src/intelligent_policy.rs`; compatibility owner: `src/stealth/parts/manager.rs`. Brain hysteresis and transport mutation remain root-owned, so the child has no reverse product, frontend, or Tauri dependency.
+- Verification: qf-stealth `124/124`; root all-feature check and library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

@@ -650,7 +650,7 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 Notes:
 - Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled and no H3 cover-request scheduler. Intelligent starts like Performance at Level 0 and can escalate toward Stealth/Anti-DPI features on probe signals.
 - `sec-ch-ua*` hints are emitted only for Chromium family (Chrome/Edge); Firefox and Safari typically omit them.
-- `StealthManager` owns all preset baselines and the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
+- `qf-stealth` owns the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthManager` owns preset baselines and preserves the historical root adapter. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
 - Core H3/MASQUE is the production VPN/TUN carrier and the only active MASQUE implementation. Its H3 capsule parser buffers split DATA frames, rejects malformed/truncated FIN tails, and stages decoded events until the enclosing batch is valid.
@@ -741,7 +741,7 @@ The StealthBrain module (`src/brain.rs`) implements sophisticated ACK policy opt
 
 Runtime wiring is cohesive rather than feature-isolated:
 
-- `StealthManager` enforces mode/profile policy on stealth actuators, remains authoritative for non-Intelligent preset baselines, and derives the concrete Intelligent-mode runtime policy targets.
+- `StealthManager` enforces mode/profile policy on stealth actuators, remains authoritative for non-Intelligent preset baselines, and delegates concrete Intelligent-mode runtime policy targets to the root-independent `qf-stealth` owner.
 - `StealthBrain` is attached via `CombinedObserver` and continuously translates one connection's transport signals into connection-local ACK/FEC hints plus an Intelligent-mode-only `StealthRuntimeDelta`.
 - `Connection::apply_brain_stealth_runtime_delta(...)` centrally applies that delta instead of receiving several scattered setter calls from the Brain observer.
 - `DeepIntegrationOrchestrator` (feature `orchestrator`) contributes cross-signal heuristics for escalation and cover-traffic coordination.
@@ -6674,3 +6674,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Verification passes qf-stealth `121/121`, root all-feature library tests `1,697/1,697`, strict workspace library/binary/example Clippy, qf-stealth all-target strict Clippy, formatting, and diff hygiene. The final disk guard records `10,640,032 KiB` target usage and `12,040,172 KiB` free.
 - Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-tls-cover-record-plan-postpush/workspace-seams.json` at source revision `cd56daf80daa5a3c71ead888c46daa4534ddb557`: `36` workspace packages, `332` Rust files, `207,009` source lines, `123` module edges, `115` Cargo workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## Intelligent Stealth Policy Workspace Ownership (2026-08-10, TODO-562)
+
+- `crates/qf-stealth/src/intelligent_policy.rs` canonically owns `IntelligentStealthInputs` and the pure mapping from one Brain signal snapshot plus immutable `EnvSnapshot` to `StealthRuntimePolicy`: external pacing, pressure-sensitive jitter, padding strategy and rate, mimic bias, adaptive granularity, and browser CC profile.
+- `StealthManager::derive_intelligent_runtime_policy` preserves the historical root call path and captures the process environment once before delegating. Brain hysteresis, live connection mutation, preset baselines, runtime escalation, transport state, frontend, and Tauri behavior remain outside the child.
+- Verification passes qf-stealth `124/124`, root all-feature checking and library tests `1,697/1,697`, strict workspace library/binary/example Clippy, qf-stealth all-target strict Clippy, formatting, and diff hygiene. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

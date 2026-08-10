@@ -25,6 +25,8 @@ pub use flow_shaping::{FlowShaper, StealthPacketClass};
 #[doc(hidden)]
 pub use http3_masquerade::Http3Masquerade;
 #[doc(hidden)]
+pub use intelligent_policy::{derive_intelligent_runtime_policy, IntelligentStealthInputs};
+#[doc(hidden)]
 pub use profiles::{parse_profile_slot, BrowserProfile, OsProfile};
 #[doc(hidden)]
 pub use rotation::FingerprintRotationConfig;
@@ -63,6 +65,8 @@ pub mod fingerprint;
 pub mod fingerprint_profile;
 #[doc(hidden)]
 pub mod http3_masquerade;
+#[doc(hidden)]
+pub mod intelligent_policy;
 #[doc(hidden)]
 pub mod probe_detector;
 #[doc(hidden)]
