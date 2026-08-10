@@ -943,6 +943,7 @@ impl StealthManager {
     }
 
     /// Derives a concrete runtime stealth policy from brain-supplied signal inputs.
+    #[cfg(test)]
     pub(crate) fn derive_intelligent_runtime_policy(
         inputs: IntelligentStealthInputs,
     ) -> crate::transport::StealthRuntimePolicy {
@@ -950,6 +951,7 @@ impl StealthManager {
         Self::derive_intelligent_runtime_policy_with_snapshot(inputs, &environment)
     }
 
+    #[cfg(test)]
     pub(crate) fn derive_intelligent_runtime_policy_with_snapshot(
         inputs: IntelligentStealthInputs,
         environment: &crate::env_utils::EnvSnapshot,

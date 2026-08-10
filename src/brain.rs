@@ -953,23 +953,24 @@ impl TransportObserver for StealthBrain {
             }
             let prefer_masque_effective = st.last_masque_hint;
 
-            let mut stealth_policy =
-                crate::stealth::StealthManager::derive_intelligent_runtime_policy(
-                    crate::stealth::IntelligentStealthInputs {
-                        level_hint: effective_level,
-                        ce_ratio_recent,
-                        ack_us,
-                        size_div,
-                        iat_div,
-                        reorder_ratio,
-                        rtt_spike_weight,
-                        signal_tos,
-                        signal_other,
-                        jitter_max_us: self.cfg.jitter_max_us,
-                        pad_max_low: self.cfg.pad_max_low,
-                        pad_max_high: self.cfg.pad_max_high,
-                    },
-                );
+            let environment = crate::env_utils::EnvSnapshot::capture();
+            let mut stealth_policy = qf_stealth::derive_intelligent_runtime_policy(
+                qf_stealth::IntelligentStealthInputs {
+                    level_hint: effective_level,
+                    ce_ratio_recent,
+                    ack_us,
+                    size_div,
+                    iat_div,
+                    reorder_ratio,
+                    rtt_spike_weight,
+                    signal_tos,
+                    signal_other,
+                    jitter_max_us: self.cfg.jitter_max_us,
+                    pad_max_low: self.cfg.pad_max_low,
+                    pad_max_high: self.cfg.pad_max_high,
+                },
+                &environment,
+            );
             let dither_pct = ((ts >> 7) % 21) as i64 - 10;
             stealth_policy.timing_max_jitter_us = ((stealth_policy.timing_max_jitter_us as i64)
                 + ((stealth_policy.timing_max_jitter_us as i64 * dither_pct) / 100))

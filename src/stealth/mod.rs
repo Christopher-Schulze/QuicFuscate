@@ -85,6 +85,7 @@ pub use fingerprint::{
 // deterministic profile catalog is retained only for compatibility/audit work.
 
 include!("parts/browser_profiles.rs");
+#[cfg(test)]
 pub(crate) use qf_stealth::IntelligentStealthInputs;
 pub use qf_stealth::{
     FecMode, PaddingStrategy, RotationMode, StealthConfig, StealthMode, TlsCoverCipherSuite,

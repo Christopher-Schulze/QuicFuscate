@@ -2844,3 +2844,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-stealth `127/127`; root all-feature check and library `1,693/1,693`; public qftls profiles `4/4`; strict child/workspace Clippy; strict child Rustdoc; formatting and diff hygiene. The threshold clean removed `77,696` files and `15.1 GiB`; final target/free space is `2,537,148 / 20,029,300 KiB`.
 - The concrete reverse edge `qftls -> stealth::TlsCoverProvider` remains root-owned. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-tls-profile-conversion-postpush/workspace-seams.json` at source revision `be2553865781c272e2f6bb3eb901464f6d556ddc`; `36` packages, `334` Rust files, `207,079` source lines, `119` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. The direct `stealth -> qftls` edge is removed; the reverse adapter edge remains at `2` references.
+
+## Brain Intelligent-Policy Dependency (2026-08-10, TODO-562)
+
+- Policy flow: Brain signal snapshot -> `qf-stealth::derive_intelligent_runtime_policy` with one captured `EnvSnapshot` -> `qf-transport-types::StealthRuntimePolicy` -> Brain dither and transport actuator.
+- Root manager conversion helpers remain compiled only for compatibility tests. Brain `65/65`, root all-feature checking, strict workspace Clippy, formatting, and diff hygiene pass; final target/free space is `3,931,084 / 18,602,192 KiB`.
+- The former `brain -> stealth::StealthManager` compatibility hop is removed. Concrete runtime mutation remains root-owned; protected frontend/Tauri paths remain untouched.
