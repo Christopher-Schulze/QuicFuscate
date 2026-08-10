@@ -2316,6 +2316,12 @@ The audit remains open. These reconciliations document current evidence and owne
 - Fresh seam evidence is `scripts/out/audits/workspace-seams-20260809T101237Z/workspace-seams.json`: 29 workspace packages, 268 Rust files, 204,593 source lines, 133 module edges, 71 Cargo workspace dependency edges, and the unchanged 11-module product SCC (`brain`, `core`, `engine`, `fec`, `implementations`, `interface`, `optimize`, `qftls`, `simd`, `stealth`, `transport`). `protected_changes=[]`.
 - No frontend or Tauri path changed, and no frontend field/API projection is required. TODO-562 remains blocked for the coordinated cyclic product-core split and external Linux/native/CI acceptance gates.
 
+## HTTP/3 Header and Event Contract Workspace Ownership (2026-08-10, TODO-562)
+
+- Owner: `crates/qf-transport-types/src/h3.rs` for `Header`, cfg-gated `NameValue`, and `Event`; compatibility projection: `src/transport/h3.rs`.
+- Consumers in stealth and server-auth now depend on the root-independent child contract. Concrete H3 connection/error/QPACK implementation remains in the root transport layer.
+- Verification: qf-transport-types `33/33`, root H3 filter, strict Clippy, formatting, and diff hygiene pass. No frontend/Tauri path changed; the 9-module product SCC remains open.
+
 ## Backend Continuation: TLS Cover and Audit Test Ownership (2026-08-10)
 
 - `crates/qf-stealth/src/tls_cover.rs` -> `TlsCoverCipherSuite` canonical contract; `src/stealth/parts/tls_cover_provider.rs` -> preference parsing and provider installation; `src/stealth/mod.rs` -> historical compatibility reexport.

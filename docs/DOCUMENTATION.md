@@ -6544,3 +6544,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
   remains external and is not inferred locally.
 - Release verification passes with `RUSTFLAGS=-Dwarnings CARGO_BUILD_JOBS=2 cargo build --release --bin quicfuscate --locked --offline`; `target/release/quicfuscate --help` exits `0`, the binary is `9,991,520` bytes, and SHA-256 is `72a4a685da7ec419e63392574ab7e8e803a376d1c6db66a8065617a58ba881e8`. The final post-test target guard records `8,753,128 KiB` with `12,327,008 KiB` free, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. The guard was applied before every Cargo build/test/check/clippy command and triggered a `cargo clean` after a check reached `12,638,284 KiB`, removing `14.2 GiB`.
 - TODO-562 remains blocked only for the coordinated 9-module product-core split and external Linux/native/CI acceptance evidence. The local backend slices are complete to the available proof boundary; frontend field/API projection remains deferred because no frontend path was changed or required.
+
+## HTTP/3 Header and Event Contract Workspace Ownership (2026-08-10, TODO-562)
+
+- `crates/qf-transport-types/src/h3.rs` is the canonical owner of the root-independent HTTP/3 `Header`, cfg-gated `NameValue`, and `Event` contracts. `src/transport/h3.rs` preserves the historical root paths through compatibility re-exports; concrete H3 connection, error, and QPACK behavior remains root-owned.
+- Stealth and server-auth consumers use the child contract directly without changing wire behavior. The move has no frontend or Tauri field/API projection.
+- qf-transport-types tests pass `33/33` with strict Clippy; the root H3 library filter, strict root Clippy, formatting, and diff hygiene pass. The measured 9-module product SCC remains open and is not claimed resolved by this contract slice.
