@@ -2864,3 +2864,4 @@ The audit remains open. These reconciliations document current evidence and owne
 - Contract flow: `qf-engine-types::{QKeyToken, FecMode}` -> root connection parameters/state and core FEC fixture. Root core no longer routes these contracts through the concrete root engine namespace.
 - Verification: focused core tests `33/33`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,171,964 / 18,309,144 KiB`.
 - Runtime engine orchestration, frontend, Tauri, and wire behavior remain unchanged.
+- Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-core-engine-contract-postpush/workspace-seams.json` at source revision `d68afdd41b75a9cc456a2ef32f6dc2ba2ab85a35`; `36` packages, `334` Rust files, `207,083` source lines, `116` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `core -> engine` is absent.
