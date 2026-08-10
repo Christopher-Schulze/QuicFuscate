@@ -749,7 +749,6 @@ unsafe fn xor_slice_simd(dst: &mut [u8], src: &[u8]) {
 /// AES round with AES-NI
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes,sse2")]
-#[inline(always)]
 /// # Safety
 ///
 /// The caller must provide AES-NI and SSE2 support. `state` must be valid
@@ -767,7 +766,6 @@ unsafe fn aes_round_aesni(state: &mut [u8; 16], round_key: &[u8; 16]) {
 /// VAES for parallel AES rounds (AVX-512)
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "vaes,avx512f,aes,sse2")]
-#[inline(always)]
 /// # Safety
 ///
 /// The caller must provide VAES, AVX-512F, AES-NI, and SSE2 support. `state`

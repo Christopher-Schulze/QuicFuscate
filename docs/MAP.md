@@ -3075,3 +3075,9 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - Compile ownership: Linux plus test/rust-tests -> batch metric statics and atomic orderings; test/rust-tests plus Linux/macOS/iOS -> qf-transport-udp acceleration alias; Windows and other fallback targets -> direct socket path without the alias. These boundaries match the cfg-gated `BatchProcessor` implementation and leave production runtime transport unchanged.
 - Verification: locked warning-denied Linux-x86 no-default-feature check; Windows-MSVC all-target/all-feature qf-transport-batch Clippy; qf-transport-batch tests `7/7`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `6,239,120 / 3,482,908 KiB`; frontend and Tauri are unaffected.
+
+## Root x86 Target-Feature Inlining Portability (2026-08-10, TODO-562)
+
+- Dispatch flow: runtime AES/VAES detection -> target-feature AES helper; runtime AVX2/AVX-512 plus FMA detection -> target-feature neural helper; unsupported hosts -> existing scalar fallback. The four target-feature functions no longer carry the compiler-forbidden `inline(always)` attribute.
+- Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting; zero remaining adjacent `inline(always)` and `target_feature` attributes. The complete Windows cross-build is unavailable locally because native C dependencies require a Windows C sysroot before root product code compiles.
+- Final target/free space is `6,694,056 / 2,888,184 KiB`; frontend and Tauri paths are unaffected.
