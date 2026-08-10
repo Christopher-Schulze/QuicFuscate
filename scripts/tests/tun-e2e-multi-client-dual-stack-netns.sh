@@ -249,7 +249,6 @@ start_phase() {
   local probe_interval_ms="${5:-60000}"
   local black_hole_timeout_ms="${6:-10000}"
   local client_pmtu_payload_max="${7:-$pmtu_payload_max}"
-  local client_tun_mtu_ceiling="${8:-$tun_mtu_ceiling}"
   stop_phase_processes
   [[ ! -e "$ADMIN_SOCKET" ]] || fail "admin socket appeared before phase start: $ADMIN_SOCKET"
   ADMIN_SOCKET_OWNED=1
@@ -312,11 +311,6 @@ start_phase() {
       --disable-doh \
       --tun \
       --tun-name "$TUN_NAME" \
-      --tun-mtu "$client_tun_mtu_ceiling" \
-      --tun-ip "${CLIENT_V4[$index]}" \
-      --tun-netmask 255.255.255.0 \
-      --tun-ip6 "${CLIENT_V6[$index]}" \
-      --tun-prefix6 64 \
       --no-utls \
       -v >"$client_log" 2>&1 &
     PHASE_PIDS+=("$!")
@@ -1120,7 +1114,7 @@ main() {
   log 'phase 1: default-deny multi-client dual-stack policy'
   # Keep the server carrier at the 1472-byte Ethernet payload ceiling while
   # its TUN stays at 1280. The inner probe must cross only the TUN boundary.
-  start_phase default 0 1472 1280 60000 10000 1472 1500
+  start_phase default 0 1472 1280 60000 10000 1472
   wait_for_tunnel_readiness default
   prove_server_ptb_from_client
   prove_simultaneous_dual_stack default

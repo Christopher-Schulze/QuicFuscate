@@ -1597,19 +1597,24 @@ else
   append_item "dual_stack_stability_aggregate" "fail" "missing fixed trial count, forced capture, exact child artifact, aggregate, binary identity, receiver, black-hole, or client/server validation"
 fi
 
-if rg -F -- '--tun-mtu "$tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- '--tun-mtu "$client_tun_mtu_ceiling"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- 'start_phase default 0 1472 1280 60000 10000 1472 1500' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+if [[ "$(rg -c -- '--tun-mtu ' "$MULTI_CLIENT_DUAL_STACK_HARNESS")" == "1" ]] \
+  && [[ "$(rg -c -- '--tun-ip ' "$MULTI_CLIENT_DUAL_STACK_HARNESS")" == "1" ]] \
+  && [[ "$(rg -c -- '--tun-netmask ' "$MULTI_CLIENT_DUAL_STACK_HARNESS")" == "1" ]] \
+  && [[ "$(rg -c -- '--tun-ip6 ' "$MULTI_CLIENT_DUAL_STACK_HARNESS")" == "1" ]] \
+  && [[ "$(rg -c -- '--tun-prefix6 ' "$MULTI_CLIENT_DUAL_STACK_HARNESS")" == "1" ]] \
+  && rg -F -- 'start_phase default 0 1472 1280 60000 10000 1472' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'start_phase opt-in 1 1472 1500 1000 2000' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'ip link set "$TUN_NAME" mtu 1500' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
+  && rg -F -- 'ip link set "$TUN_NAME" mtu 1280' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'DPLPMTUD confirmed path MTU: 1280B -> 1472B' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'DPLPMTUD black hole detected: path MTU 1472B -> 1280B' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && ! rg -F -- 'ip link set "$TUN_NAME" mtu 1280 up' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'assert gain >= 0.15, gain' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null; then
   pass "Multi-client PMTU comparison keeps IPv4 Ethernet MTU separate from QUIC UDP payload and retains the 15% gate"
-  append_item "multi_client_dual_stack_pmtu_ceiling" "ok" "default uses 1280-byte UDP payload, opt-in uses 1472 for a 1500-byte IPv4 path, and routes preserve dynamic client TUN MTU"
+  append_item "multi_client_dual_stack_pmtu_ceiling" "ok" "server-only TUN flags preserve authenticated client assignment, default uses a 1280-byte UDP payload, opt-in uses 1472 for a 1500-byte IPv4 path, and the PTB probe isolates its client TUN ceiling"
 else
   fail_critical "Multi-client PMTU comparison no longer models the IPv4 L3 to QUIC UDP-payload boundary or retained 15% gate"
-  append_item "multi_client_dual_stack_pmtu_ceiling" "fail" "missing phase-specific TUN ceiling, 1472-byte UDP payload limit, route preservation, or 15% comparison threshold"
+  append_item "multi_client_dual_stack_pmtu_ceiling" "fail" "missing server-assigned client TUN contract, phase-specific TUN ceiling, 1472-byte UDP payload limit, isolated PTB client ceiling, route preservation, or 15% comparison threshold"
 fi
 
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.

@@ -450,8 +450,8 @@ raw IP payload, and malformed stream bytes cannot be confused by a native bounda
 The standalone client does not negotiate an assignment when TUN bridging is disabled. Its
 legacy local `--tun-*` address and MTU overrides are rejected when TUN is enabled so the server
 assignment remains the sole address/configuration source. Native privileged Linux/macOS/Windows
-proof and authenticated live client/server evidence remain separate gates owned by TODO-866 and
-TODO-867.
+proof and exact external authenticated client/server evidence remain the blocked gates under
+TODO-866 and TODO-867; the local assignment and carrier implementations are complete.
 
 ### Cohesive Stealth Stack (Hard to Classify)
 The stealth design is one coherent browser-like H3/MASQUE flow, not a pile of unrelated
@@ -2832,10 +2832,9 @@ Profile rotation allows QuicFuscate to select a different browser/OS template fo
     --url <url>             HTTPS target URL; omitted uses https://cloudflare-dns.com/
     --tun                   Enable TUN bridging (optional)
     --tun-name <name>       TUN interface name
-    --tun-mtu <mtu>         TUN MTU (default 1500)
-    --tun-ip <addr>         TUN IP address
-    --tun-netmask <addr>    TUN netmask
 ```
+
+Standalone clients receive their IPv4 address/prefix, IPv6 address/prefix, MTU, and DNS servers from the authenticated server assignment. Client-side `--tun-mtu`, `--tun-ip`, `--tun-netmask`, `--tun-ip6`, and `--tun-prefix6` are rejected instead of overriding that assignment.
 
 ### Standard Configuration
 
@@ -3169,11 +3168,11 @@ The user-facing FEC contract is `auto` / `off`. Any other value is a hard error.
 **TUN Options:**
 - `--tun`: Enable TUN bridging
 - `--tun-name`: TUN interface name
-- `--tun-mtu`: TUN MTU
-- `--tun-ip`: TUN IP address
-- `--tun-netmask`: TUN netmask
+- `--tun-mtu`: Server TUN MTU
+- `--tun-ip` / `--tun-netmask`: Server IPv4 TUN address and netmask
+- `--tun-ip6` / `--tun-prefix6`: Server IPv6 TUN address and prefix
 
-Server TUN mode is supported only on Linux. Client-side TUN support remains platform-specific as described in the TUN contract above.
+Server TUN mode is supported only on Linux. Standalone clients accept only `--tun` and the local interface identity `--tun-name`; address, prefix, MTU, and DNS configuration comes from the authenticated server assignment. Client-side TUN support remains platform-specific as described in the TUN contract above.
 
 **Configuration:**
 - `--config`: Path to unified TOML configuration
@@ -4794,18 +4793,19 @@ ipv6_dns_servers = ["2606:4700:4700::1111", "2001:4860:4860::8888"]
 
 **Client CLI:**
 ```
-quicfuscate client --tun-ip6 fd00::2 --tun-prefix6 64 ...
+quicfuscate client --tun --tun-name qtun0 ...
 ```
 
-The standalone CLI and generic `EngineConfig`/`ClientRuntime` paths now share the same typed
-address contract at the TUN boundary. `InterfaceConfig::client_tunnel_addresses()` resolves
-IPv4-only, IPv6-only, and dual-stack state into `ClientTunnelAddresses`; `ClientRuntime::start()`
-projects that model into `TunConfig.ip`, `TunConfig.netmask`, `TunConfig.ip6`, and
-`TunConfig.prefix6`. The legacy `tun_ip`/`tun_netmask` IPv4 pair remains compatible, and a
-legacy IPv6 pair remains accepted for single-family compatibility. Canonical `tun_ip6` plus
-`tun_prefix6` is the explicit IPv6 source for generic dual-stack configuration; conflicting
-IPv6 sources and malformed prefixes fail validation. The public compatibility `ClientBackend`
-remains intentionally single-family and rejects canonical IPv6 fields instead of dropping them.
+The standalone CLI negotiates one authenticated `ClientAssignment` before opening its TUN and
+projects the assigned IPv4, IPv6, prefix, and MTU values into `TunConfig`; local address or MTU
+flags are rejected. The generic `EngineConfig`/`ClientRuntime` path keeps the same typed TUN
+boundary for embedded callers. `InterfaceConfig::client_tunnel_addresses()` resolves IPv4-only,
+IPv6-only, and dual-stack state into `ClientTunnelAddresses`; the legacy `tun_ip`/`tun_netmask`
+IPv4 pair remains compatible, and a legacy IPv6 pair remains accepted for single-family
+compatibility. Canonical `tun_ip6` plus `tun_prefix6` is the explicit IPv6 source for generic
+dual-stack configuration; conflicting IPv6 sources and malformed prefixes fail validation. The
+public compatibility `ClientBackend` remains intentionally single-family and rejects canonical
+IPv6 fields instead of dropping them.
 
 Server TUN network authority is separate and explicit. `ServerConfig.server_ip`/
 `server_netmask` and `ipv6_server_ip`/`ipv6_prefix_len` are the single effective IPv4/IPv6
@@ -4823,11 +4823,10 @@ Local regression coverage proves matching embedded and standalone projections, c
 IPv4/IPv6 rejection before host/TUN startup, and out-of-network pool rejection. Privileged Linux
 TUN/routing/firewall execution and authenticated live-wire proof remain external runtime gates.
 
-Server-side `client_ipv6` assignment is still consumed only by server routing/session ownership
-and is not currently propagated to the generic client through a tunnel-configuration
-control-plane message. TODO-663 closes the static schema and projection boundary; TODO-866 owns
-the authenticated server-assignment/control-plane contract. TODO-731 owns malformed standalone
-CLI address parsing.
+Server-side `client_ipv6` assignment is propagated to generic and standalone clients through the
+bounded authenticated control-plane capsule before TUN open. TODO-663 closes the static schema
+and projection boundary; TODO-866 owns the implemented assignment lifecycle and its remaining
+native/external evidence gates. TODO-731 owns malformed standalone server CLI address parsing.
 
 To disable IPv6, set `ipv6_server_ip = None` and `ipv6_pool_start = None` in the server config.
 
@@ -5050,7 +5049,7 @@ This and every later dated audit or reconciliation section are historical eviden
 - **Retry admission:** TODO-618 is closed. `src/implementations/server/ddos.rs` sets `MAX_RETRY_TOKEN_LEN` to 192, and the real `issue_for_initial` plus `validate` path accepts the exact 169-byte bounded maximum for IPv6, 20-byte original and retry CIDs, and a 64-byte credential. The DDOS policy probe has no duplicate length constant. TODO-659 was fully reconciled and is stale under these active bounds: oversized fields already fail before allocation/HMAC, while every accepted combination fits.
 - **Client runtime lifecycle:** TODO-619 is closed. `ClientRuntime::connect()` routes every failure after connection assignment, including missing runtime, UDP/socket, TUN, driver, and task-setup failures, through explicit transport rollback. The rollback shuts down and joins owned I/O tasks, closes and removes the QUIC connection, clears socket and driver state, and returns to `Running`. Focused client tests pass 5/5, the full library passes 2,179/2,179, and locked all-target checking, strict all-feature Clippy, format, and diff checks pass.
 - **Client backend configuration:** TODO-620 is closed. `src/implementations/client/backend.rs::connect_inner()` resolves `tun_ip`, `tun_netmask`/`tun_subnet_prefix`, and `tun_gateway` through one effective-network path, validates family and contiguous-mask contracts, and installs family-matched split default routes. The legacy IPv4 `10.8.0.2/24` default remains unchanged. Focused backend tests pass 11/11, the full library passes 2,183/2,183, and locked all-target checking, strict all-feature Clippy, format, and diff checks pass. TODO-604 is closed as its duplicate.
-- **Client TUN dual-stack projection:** TODO-663 closes the static generic-client boundary. `InterfaceConfig` now exposes canonical `tun_ip6`/`tun_prefix6` fields and resolves legacy IPv4/IPv6 pairs plus canonical IPv6 into `ClientTunnelAddresses`, which `ClientRuntime` projects into the native typed `TunConfig`. Config projection tests pass 3/3, generic client projection tests pass 5/5, and compatibility backend tests pass 6/6, covering IPv4-only, IPv6-only, dual-stack, round-trip, malformed, MTU, non-contiguous-mask, duplicate-source, and compatibility rejection cases. Format, library check, strict library Clippy, all-target checking, and the complete library test pass 2,295/2,295. The all-target test matrix passes 2,295/2,295 library tests and 41/43 binary tests; the two failures are the known runtime-reload assertions at `src/main_parts/late_tests_and_mlock.rs:566,638`. All-target strict Clippy retains eight pre-existing diagnostics. The public compatibility `ClientBackend` remains explicitly single-family and rejects canonical IPv6 fields. No server-assigned IPv6 control-plane message exists in the generic client path; TODO-866 owns that separate authenticated assignment contract. The standalone CLI's parse-failure boundary remains TODO-731.
+- **Client TUN dual-stack projection:** TODO-663 closes the static generic-client boundary. `InterfaceConfig` now exposes canonical `tun_ip6`/`tun_prefix6` fields and resolves legacy IPv4/IPv6 pairs plus canonical IPv6 into `ClientTunnelAddresses`, which `ClientRuntime` projects into the native typed `TunConfig`. Config projection tests pass 3/3, generic client projection tests pass 5/5, and compatibility backend tests pass 6/6, covering IPv4-only, IPv6-only, dual-stack, round-trip, malformed, MTU, non-contiguous-mask, duplicate-source, and compatibility rejection cases. Format, library check, strict library Clippy, all-target checking, and the complete library test pass 2,295/2,295. The all-target test matrix passes 2,295/2,295 library tests and 41/43 binary tests; the two failures are the known runtime-reload assertions at `src/main_parts/late_tests_and_mlock.rs:566,638`. All-target strict Clippy retains eight pre-existing diagnostics. The public compatibility `ClientBackend` remains explicitly single-family and rejects canonical IPv6 fields. TODO-866 subsequently added the bounded authenticated IPv4/IPv6 assignment capsule and pre-open client projection; its native/external evidence gates remain open. The standalone server CLI parse-failure boundary remains TODO-731.
 - **Linux resolver restoration:** TODO-623 remains the owner of absent-original, stale-ownership, and crash recovery semantics. TODO-649 now supplies the typed `LinuxResolverPaths` contract, schema-3 resolver/source/target/backup identities, create-only and atomic state publication, and fail-closed rollback for broken or replaced symlinks and foreign backup/state objects. The focused resolver suite passes 14/14; host workspace checking and library strict Clippy pass. The full local matrix reaches 2,259/2,261 library tests and 41/43 binary tests, with unchanged external-DNS/qftls and runtime-reload/PMTU baselines. The Linux target gate remains unavailable because this macOS host lacks the required Linux C compiler/sysroot (`x86_64-linux-gnu-gcc`, then `assert.h` under Clang); the configured Omega SSH path is also unavailable.
 - **macOS pf activation:** TODO-624 closes the client activation rollback gap. `MacOSKillSwitch::ensure_pf_enabled()` now requires a successful `pfctl -sr` query with an exact QuicFuscate `anchor` statement or the approved wildcard, emits an actionable diagnostic when absent, and flushes/removes a just-loaded anchor when the later activation check fails. `KillSwitch::enable()` rolls back failed backend activation and exposes a fail-closed retained state only when rollback cannot be proven. The server routing manager rejects macOS before host mutation and retains only pure pf rule generation. Focused client tests pass 74/74 and routing tests pass 20/20; locked all-target checking and strict all-feature Clippy pass. The full local library covered 2,195 tests but remains red on the external-DNS DoH cache test and one intermittent Stealth Cover freshness assertion, which passed in isolation. The privileged live PF proof is exposed by `scripts/tests/macos-pf-anchor-proof.sh` but was not run because this session is UID 501 and must not mutate shared PF state. TODO-548 remains the owner of managed anchor installation and full privileged lifecycle proof.
 - **Client FEC surface:** TODO-625 removes the uncompiled `src/implementations/client/pipeline.rs` adapter, its packet-id-zero `FecCodec` wrapper, and the unused `ClientSubsystems.fec` construction. Client tests pass 74/74; locked all-target checking, strict all-feature Clippy, format, diff, and source-reference gates pass. The full local library reached 2,193/2,195; TODO-768 and TODO-807 own the two unrelated failures. The active FEC wire/framing owner remains `QuicFuscateConnection`/`src/core.rs`; TODO-602 is closed as its duplicate.
@@ -5174,7 +5173,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - **Pre-write boundary:** `src/implementations/server/parts/live_auth.rs::allow_client_uplink()` now emits IPv4 Fragmentation Needed for every IPv4 packet larger than the configured server TUN MTU, regardless of the DF flag. The shared decision returns before the MASQUE callback's `tun_sink.write()` and the framed HTTP/3 callback's `tun.write()`, so no platform backend receives an oversized packet.
 - **Intentional contract:** Userspace RFC 791 fragmentation is not implemented. The server chooses explicit PMTU feedback for DF=0 as a fail-closed, backend-independent disposition rather than relying on unverified driver behavior. Existing IPv6 Packet Too Big and DF=1 IPv4 behavior remain unchanged.
 - **Regression scope:** A crafted 1,428-byte IPv4 UDP packet over a 1,400-byte TUN MTU is checked for PTB in both DF states, including quoted bytes, MTU, router/source and destination addresses, IPv4 checksum, ICMP checksum, and `packet_too_big` routing telemetry. The focused regression `implementations::server::tests::oversized_ipv4_packets_get_ptb_before_any_tun_write_for_both_df_states` passed 1/1 locally; the complete server module passed 134/134 and the full library passed 2,157/2,157. `cargo check --locked --all-targets`, formatting, diff hygiene, and native-harness syntax passed. Strict local Clippy stops only at the pre-existing `src/stealth/tls_cover.rs:393` dead-code lint; no TODO-613 diagnostic was emitted.
-- **Native probe gate:** `scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh::prove_server_ptb_from_client()` sends DF=1 and DF=0 (`ping -M dont`) IPv4 probes plus an IPv6 probe while the client phase uses a separate 1472-byte transport budget and 1500-byte TUN ceiling, the server carrier uses the 1472-byte Ethernet payload ceiling, the server TUN remains at 1280, and the 1300-byte IPv4 echo payload produces a 1,328-byte inner packet. The carrier/TUN split is intentional: the inner probe must reach `allow_client_uplink()` whole so only the server TUN boundary owns the PTB decision. The two IPv4 probes use distinct destinations (`198.51.100.2` for DF=1 and `198.51.100.3` for DF=0) so the first server PTB cannot install a cached 1280-byte client PMTU that fragments the second probe before the server. The gate captures server-sourced IPv4 PTB for both DF states and server-sourced IPv6 Packet Too Big on the client TUN, then checks the server metric deltas. The `.github/workflows/ci.yml` `linux-traffic-analysis-native` job executes the complete multi-client harness with an isolated CA and dedicated `server-ipv4-ptb-native` artifact path. Exact run `30818265053` proved the earlier same-config probe was consumed by the client-local oversized-TUN path (`packet_too_big` stayed at zero and the client TUN capture was empty). Follow-up run `30819134933`, job `91704360063`, reached the harness with the corrected client/server PMTU values but failed earlier at the bidirectional framed-H3 assertion because the 1472-byte client budget leaves no packet range above its MASQUE datagram budget and below its tunnel MTU. Run `30819873718`, job `91706872150`, passed the isolated H3 preflight but exposed the remaining stale client-local PTB assertion. Run `30821179317`, job `91711269455`, reached the corrected server-owned assertion and retained zero server PTB on the client TUN while server `packet_too_big` stayed at zero. Run `30823185685`, job `91718100017`, enabled verbose server evidence and proved the 1,328-byte probe was truncated by the 1,280-byte server carrier receive buffer before routing, producing `MalformedPacket`; the harness now separates the 1,472-byte carrier from the 1,280-byte TUN boundary. Run `30823826169`, job `91720279895`, proved the corrected DF=1 and IPv6 server responses (`packet_too_big` delta 2 and `icmpv6` delta 1), but the same-destination DF=0 probe was fragmented by the client kernel after the DF=1 PMTU update and therefore never reached the server as one oversized packet; the harness now isolates the destinations. Run `30824438300`, job `91722362887`, passed the complete PTB gate: both IPv4 wire captures contain unfragmented 1,328-byte probes, both return `Frag needed and DF set (mtu = 1280)`, IPv6 returns `Packet too big: mtu=1280`, and the server metric deltas are `packet_too_big=3` and `icmpv6=1`. The overall job then stopped in the independent IPv4 TTL-expiry assertion; the corrected native wire proof is closed by TODO-806, and that later backpressure failure does not invalidate the completed TODO-613 PTB gate.
+- **Native probe gate:** `scripts/tests/tun-e2e-multi-client-dual-stack-netns.sh::prove_server_ptb_from_client()` sends DF=1 and DF=0 (`ping -M dont`) IPv4 probes plus an IPv6 probe while the client phase uses a separate 1472-byte transport budget, the authenticated startup assignment supplies the server's 1280-byte TUN MTU, and the probe step temporarily raises only the client TUN to 1500. The server carrier uses the 1472-byte Ethernet payload ceiling, the server TUN remains at 1280, and the 1300-byte IPv4 echo payload produces a 1,328-byte inner packet. The carrier/TUN split is intentional: the inner probe must reach `allow_client_uplink()` whole so only the server TUN boundary owns the PTB decision. The two IPv4 probes use distinct destinations (`198.51.100.2` for DF=1 and `198.51.100.3` for DF=0) so the first server PTB cannot install a cached 1280-byte client PMTU that fragments the second probe before the server. The gate captures server-sourced IPv4 PTB for both DF states and server-sourced IPv6 Packet Too Big on the client TUN, then checks the server metric deltas. The `.github/workflows/ci.yml` `linux-traffic-analysis-native` job executes the complete multi-client harness with an isolated CA and dedicated `server-ipv4-ptb-native` artifact path. Exact run `30818265053` proved the earlier same-config probe was consumed by the client-local oversized-TUN path (`packet_too_big` stayed at zero and the client TUN capture was empty). Follow-up run `30819134933`, job `91704360063`, reached the harness with the corrected client/server PMTU values but failed earlier at the bidirectional framed-H3 assertion because the 1472-byte client budget leaves no packet range above its MASQUE datagram budget and below its tunnel MTU. Run `30819873718`, job `91706872150`, passed the isolated H3 preflight but exposed the remaining stale client-local PTB assertion. Run `30821179317`, job `91711269455`, reached the corrected server-owned assertion and retained zero server PTB on the client TUN while server `packet_too_big` stayed at zero. Run `30823185685`, job `91718100017`, enabled verbose server evidence and proved the 1,328-byte probe was truncated by the 1,280-byte server carrier receive buffer before routing, producing `MalformedPacket`; the harness now separates the 1,472-byte carrier from the 1,280-byte TUN boundary. Run `30823826169`, job `91720279895`, proved the corrected DF=1 and IPv6 server responses (`packet_too_big` delta 2 and `icmpv6` delta 1), but the same-destination DF=0 probe was fragmented by the client kernel after the DF=1 PMTU update and therefore never reached the server as one oversized packet; the harness now isolates the destinations. Run `30824438300`, job `91722362887`, passed the complete PTB gate: both IPv4 wire captures contain unfragmented 1,328-byte probes, both return `Frag needed and DF set (mtu = 1280)`, IPv6 returns `Packet too big: mtu=1280`, and the server metric deltas are `packet_too_big=3` plus `icmpv6=1`. The overall job then stopped in the independent IPv4 TTL-expiry assertion; the corrected native wire proof is closed by TODO-806, and that later backpressure failure does not invalidate the completed TODO-613 PTB gate.
 
 ## Implementation Reconciliation (2026-08-03, IPv4 TTL expiry before ingress fingerprint normalization)
 
