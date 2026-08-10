@@ -2761,3 +2761,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-cpu `85/85`; focused root optimize `3/3`; focused root Stealth `82/82`; root check; strict child/workspace all-target `rust-tests` Clippy; formatting; complete workspace all-target `rust-tests` exit `0`.
 - The post-test disk guard records `10,310,444 KiB` target usage and `13,684,940 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-cpu-ascii-postpush/workspace-seams.json` at source revision `c71d356919604ba9779ac6113d3c8fc6af8de2f5`; `36` packages, `329` Rust files, `206,732` source lines, `125` module edges, `112` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## HTTP/3 Masquerade Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical owner: `crates/qf-stealth/src/http3_masquerade.rs` (`Http3Masquerade`, persona templates, client hints, cookie/referer rendering, qf-cpu acceleration, qf-common wall clock, qf-transport-types H3 headers); compatibility owner: `src/stealth/parts/http3_masquerade.rs` (re-export plus private root-manager adapter).
+- The new workspace edge is `qf-stealth -> qf-transport-types`. Verification: qf-stealth `107/107`; focused root Stealth `168/168`; persona integration `13/13`; strict child/workspace Clippy; complete workspace all-target `rust-tests` exit `0`, including root `1,658/1,658`.
+- The post-matrix threshold cleanup removed `82,898` files and `13.8 GiB` after `target/` reached `12,658,660 KiB`; final free space is `22,398,656 KiB`. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

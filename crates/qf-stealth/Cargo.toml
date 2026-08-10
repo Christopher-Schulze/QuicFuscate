@@ -13,6 +13,7 @@ rust-tests = ["qf-common/rust-tests"]
 [dependencies]
 qf-common = { path = "../qf-common" }
 qf-cpu = { path = "../qf-cpu" }
+qf-transport-types = { path = "../qf-transport-types" }
 clap = { version = "4.5", features = ["derive"] }
 log = "0.4"
 rand = "0.9"

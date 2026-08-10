@@ -1706,6 +1706,7 @@ dependencies = [
  "log",
  "qf-common",
  "qf-cpu",
+ "qf-transport-types",
  "rand",
  "serde",
  "serde_json",

@@ -19,6 +19,8 @@ pub use fingerprint_profile::{
 #[doc(hidden)]
 pub use flow_shaping::{FlowShaper, StealthPacketClass};
 #[doc(hidden)]
+pub use http3_masquerade::Http3Masquerade;
+#[doc(hidden)]
 pub use profiles::{parse_profile_slot, BrowserProfile, OsProfile};
 #[doc(hidden)]
 pub use rotation::FingerprintRotationConfig;
@@ -46,6 +48,8 @@ pub mod config;
 pub mod fingerprint;
 #[doc(hidden)]
 pub mod fingerprint_profile;
+#[doc(hidden)]
+pub mod http3_masquerade;
 #[doc(hidden)]
 pub mod probe_detector;
 #[doc(hidden)]
