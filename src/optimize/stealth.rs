@@ -114,7 +114,7 @@ fn complete_pattern_end(data_len: usize, position: usize, pattern_len: usize) ->
     position.checked_add(pattern_len)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 #[target_feature(enable = "avx2")]
 /// # Safety
 ///
@@ -148,7 +148,7 @@ unsafe fn inject_pattern_avx2(data: &mut [u8], pattern: &[u8], positions: &[usiz
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 #[target_feature(enable = "sse2")]
 /// # Safety
 ///

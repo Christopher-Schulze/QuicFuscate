@@ -3081,3 +3081,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Dispatch flow: runtime AES/VAES detection -> target-feature AES helper; runtime AVX2/AVX-512 plus FMA detection -> target-feature neural helper; unsupported hosts -> existing scalar fallback. The four target-feature functions no longer carry the compiler-forbidden `inline(always)` attribute.
 - Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting; zero remaining adjacent `inline(always)` and `target_feature` attributes. The complete Windows cross-build is unavailable locally because native C dependencies require a Windows C sysroot before root product code compiles.
 - Final target/free space is `6,694,056 / 2,888,184 KiB`; frontend and Tauri paths are unaffected.
+
+## Root Pattern-Injection Test cfg Ownership (2026-08-10, TODO-562)
+
+- Test flow: `test` or `rust-tests` -> `inject_pattern` -> runtime x86 AVX2/SSE2 or AArch64 SVE2/NEON dispatch -> `complete_pattern_end` checked destination window -> vector/scalar copy. Normal product builds compile none of these private test-only injectors.
+- Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting; runtime guardrails. The complete Linux cross-build remains unavailable locally because native C dependencies require a Linux C sysroot before root product code compiles.
+- Final target/free space is `6,684,724 / 2,846,996 KiB`; frontend and Tauri paths are unaffected.
