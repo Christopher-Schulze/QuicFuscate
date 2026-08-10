@@ -198,7 +198,11 @@ run_cargo() {
   if [[ ${#suffix[@]} -gt 0 ]]; then
     cargo_args+=("${suffix[@]}")
   fi
-  run env "${flags[@]}" cargo "${cargo_args[@]}"
+  if [[ "${#flags[@]}" -gt 0 ]]; then
+    run env "${flags[@]}" cargo "${cargo_args[@]}"
+  else
+    run cargo "${cargo_args[@]}"
+  fi
 }
 
 run_cargo_with_env() {

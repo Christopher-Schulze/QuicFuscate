@@ -2984,3 +2984,11 @@ The audit remains open. These reconciliations document current evidence and owne
 - Final pre-commit seam evidence: `scripts/out/audits/workspace-seams-20260810T-qftls-key-install-port-final-precommit/workspace-seams.json` at source revision `22f7a7274cf9578135eb9b46b331b0cb51a7bbab`; `36` packages, `336` Rust files, `207,678` source lines, `106` module edges, `123` workspace dependency edges, no strongly connected components, and `protected_changes=[]`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-qftls-key-install-port-postpush/workspace-seams.json` at published revision `c379057f7e9b63a5254c3a40b72c87a56664e0b0`; counts and edge topology match the final pre-commit report exactly, with no strongly connected components and `protected_changes=[]`.
 - Frontend and Tauri are unaffected; no frontend field/API projection is required.
+
+## Proof Harness and Guardrail Leaf Ownership (2026-08-10, TODO-562)
+
+- Cargo harness flow: suite -> `run_cargo` -> direct Cargo argv when the assignment array is empty, or validated `env` assignments plus Cargo argv when populated. The argument-safety regression proves both forms exactly under Bash `set -u`.
+- Proof ownership: privilege negative contracts -> `qf-privilege`; memory-lock policy contracts -> `qf-memory-lock`; TLS preload contracts -> root QFTLS; native boundary -> privilege integration target. qf-privilege has an empty `rust-tests` harness feature so the shared fail-closed runner can address both leaf packages uniformly.
+- Runtime guardrail ownership: interface schema -> qf-engine-types; TLS Cover cipher ledger -> qf-crypto; TLS Cover entropy and HTTP/3 caller -> qf-stealth; string implementation -> qf-cpu. No guardrail relies on the removed root implementation owners.
+- Verification: qf-privilege `23/23`; qf-memory-lock `12/12`; QFTLS `15/15`; privilege integration `1/1`; proof manifest `PASS`, zero failures, native Linux-root lane `UNAVAILABLE` on macOS; runtime audit `106` items with `Critical: 0` and `Warnings: 0`; strict workspace all-feature library/binary/example Clippy; serial root all-feature library `1,657/1,657`; documentation truth and diff hygiene. Final target/free space is `6,868,956 / 8,023,472 KiB`.
+- Frontend and Tauri paths are unaffected; no frontend field/API projection is required.

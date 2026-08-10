@@ -120,16 +120,16 @@ PY
 run_verified_target \
   "privilege-unit-negative-contracts" \
   "lib" \
-  "privilege::drop::tests" \
-  "privilege::drop::tests::partial_transition_error_preserves_state_and_operation" \
-  --locked --lib -- --nocapture
+  "drop::tests" \
+  "drop::tests::partial_transition_error_preserves_state_and_operation" \
+  --locked --package qf-privilege --lib -- --nocapture
 
 run_verified_target \
   "memory-lock-negative-contracts" \
   "lib" \
-  "memory_lock::tests" \
-  "memory_lock::tests::failure_policy_distinguishes_best_effort_from_fail_closed" \
-  --locked --lib -- --nocapture
+  "tests" \
+  "tests::failure_policy_distinguishes_best_effort_from_fail_closed" \
+  --locked --package qf-memory-lock --lib -- --nocapture
 
 run_verified_target \
   "qftls-negative-contracts" \

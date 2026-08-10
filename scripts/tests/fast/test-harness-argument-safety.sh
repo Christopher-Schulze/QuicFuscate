@@ -117,4 +117,30 @@ expect_failure "$TMP_ROOT/crypto.log" \
 expect_json_item "$CRYPTO_DIR/results.json" "FAIL" "invalid_cli_input_or_size"
 assert_no_marker "$CRYPTO_MARKER"
 
+RUN_CARGO_CAPTURE=(uninitialized)
+run() {
+  RUN_CARGO_CAPTURE=("$@")
+}
+
+unset RUSTFLAGS_EXTRA CARGO_TARGET_DIR CARGO_FEATURES JOBS
+run_cargo metadata --no-deps
+[[ "${#RUN_CARGO_CAPTURE[@]}" -eq 3 ]] \
+  || fail_fixture "empty run_cargo environment changed argv length"
+[[ "${RUN_CARGO_CAPTURE[0]}" == cargo \
+  && "${RUN_CARGO_CAPTURE[1]}" == metadata \
+  && "${RUN_CARGO_CAPTURE[2]}" == --no-deps ]] \
+  || fail_fixture "empty run_cargo environment did not invoke cargo directly"
+
+RUSTFLAGS_EXTRA="-C target-cpu=native"
+run_cargo check --locked
+[[ "${#RUN_CARGO_CAPTURE[@]}" -eq 5 ]] \
+  || fail_fixture "populated run_cargo environment changed argv length"
+[[ "${RUN_CARGO_CAPTURE[0]}" == env \
+  && "${RUN_CARGO_CAPTURE[1]}" == "RUSTFLAGS=-C target-cpu=native" \
+  && "${RUN_CARGO_CAPTURE[2]}" == cargo \
+  && "${RUN_CARGO_CAPTURE[3]}" == check \
+  && "${RUN_CARGO_CAPTURE[4]}" == --locked ]] \
+  || fail_fixture "populated run_cargo environment lost assignment or cargo argv identity"
+unset RUSTFLAGS_EXTRA
+
 echo "[PASS] harness argument safety contract"

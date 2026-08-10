@@ -640,15 +640,15 @@ fi
 # 4g) The public interface schema must match the runtime that is actually
 #     shipped. Removed XDP fields stay absent from serialization, while legacy
 #     interface type values fail closed during validation.
-if ! rg -F -- 'pub xdp_mode:' src/engine/config.rs >/dev/null \
-  && ! rg -F -- 'pub xdp_flags:' src/engine/config.rs >/dev/null \
-  && ! rg -F -- 'pub enum XdpMode' src/engine/config.rs >/dev/null \
+if ! rg -F -- 'pub xdp_mode:' src/engine/config.rs crates/qf-engine-types/src >/dev/null \
+  && ! rg -F -- 'pub xdp_flags:' src/engine/config.rs crates/qf-engine-types/src >/dev/null \
+  && ! rg -F -- 'pub enum XdpMode' src/engine/config.rs crates/qf-engine-types/src >/dev/null \
   && rg -F -- 'AF_XDP was removed; use' \
     src/engine/config.rs crates/qf-engine-types/src/lib.rs >/dev/null \
   && rg -F -- 'fn interface_validation_rejects_legacy_non_tun_types()' \
-    src/engine/config.rs >/dev/null \
+    crates/qf-engine-types/src/config.rs >/dev/null \
   && rg -F -- 'fn interface_schema_removes_xdp_fields_and_rejects_legacy_input()' \
-    src/engine/config.rs >/dev/null \
+    crates/qf-engine-types/src/config.rs >/dev/null \
   && ! rg -n --no-messages 'xdp_mode|xdp_flags' config/quicfuscate.toml \
     config/server-linux.default.toml >/dev/null \
   && rg -F -- '# The current runtime supports only the layer-3 TUN interface.' \
@@ -1079,10 +1079,15 @@ PY
 )"
 if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
   && test -f scripts/tests/suites/test-privilege-memory-tls-proof.sh \
-  && rg -F -- 'privilege::drop::tests::partial_transition_error_preserves_state_and_operation' \
+  && rg -F -- 'drop::tests::partial_transition_error_preserves_state_and_operation' \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
-  && rg -F -- 'memory_lock::tests::failure_policy_distinguishes_best_effort_from_fail_closed' \
+  && rg -F -- '--locked --package qf-privilege --lib -- --nocapture' \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
+  && rg -F -- 'tests::failure_policy_distinguishes_best_effort_from_fail_closed' \
+    scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
+  && rg -F -- '--locked --package qf-memory-lock --lib -- --nocapture' \
+    scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
+  && rg -F -- 'rust-tests = []' crates/qf-privilege/Cargo.toml >/dev/null \
   && rg -F -- 'qftls::tests::preload_identity_duplicate_and_conflict_contract_is_isolated' \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
   && rg -F -- 'PRIVILEGE_PROOF_UNAVAILABLE' \
@@ -1179,9 +1184,13 @@ if [[ -n "$TLS_COVER_REINSTALL_REGRESSIONS" ]]; then
   fail_critical "TLS Cover retained an unsafe or parallel cipher reinstallation path"
   append_item "tls_cover_reinstallation_safety" "fail" "$TLS_COVER_REINSTALL_REGRESSIONS"
 elif rg -n --no-messages 'pub fn install_tls_cover_cipher\(' src/transport/packet.rs >/dev/null \
-  && rg -n --no-messages 'retired_tls_cover_identities' src/transport/packet.rs >/dev/null \
-  && rg -n --no-messages 'checked_add\(1\).*AeadLimitReached' src/transport/packet.rs >/dev/null \
-  && rg -n --no-messages 'crate::rng::fill_secure\(&mut entropy\)' src/stealth >/dev/null; then
+  && rg -F -- 'pub struct TlsCoverCipherState' crates/qf-crypto/src/tls_cover.rs >/dev/null \
+  && rg -F -- 'retired_identities: Vec<[u8; 32]>' crates/qf-crypto/src/tls_cover.rs >/dev/null \
+  && rg -n --no-messages 'checked_add\(1\).*AeadLimitReached' crates/qf-crypto/src/tls_cover.rs >/dev/null \
+  && rg -F -- 'active_reinstall_preserves_sequences_and_retired_material_cannot_return' \
+    crates/qf-crypto/src/tls_cover.rs >/dev/null \
+  && rg -F -- 'qf_common::rng::fill_secure(&mut entropy)' \
+    crates/qf-stealth/src/tls_cover.rs >/dev/null; then
   pass "TLS Cover uses one fresh-entropy, no-reuse cipher installation contract"
   append_item "tls_cover_reinstallation_safety" "ok" "typed install, retired-key rejection, checked counters, and per-provider entropy are present"
 else
@@ -1926,7 +1935,7 @@ else
 fi
 
 # 13) Optimize microprimitives in memory/string must either be runtime-owned or explicitly test/rust-tests gated.
-if ! rg -n --no-messages "crate::(accelerate::string|optimize::string)::string_contains\\(" src/stealth/ >/dev/null \
+if ! rg -F -- 'qf_cpu::string::string_contains(' crates/qf-stealth/src/ >/dev/null \
   || ! rg -n --no-messages '^pub fn string_contains' crates/qf-cpu/src/string.rs >/dev/null; then
   fail_critical "optimize::string::string_contains lost its runtime owner in stealth path"
   append_item "optimize_microprimitives_runtime_owner" "fail" "string_contains runtime owner missing"

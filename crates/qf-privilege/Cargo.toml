@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+rust-tests = []
+
 [dependencies]
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
