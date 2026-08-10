@@ -44,8 +44,9 @@ pub use runtime::{BrainRuntimePermissions, FecControlDelta, IntelligentLevelHint
 pub use stealth::{BrowserProfile, StealthRuntimeDelta, StealthRuntimePolicy};
 pub use traffic::{TrafficAnalysisDefense, TrafficAnalysisPolicy};
 pub use tun::{
-    validate_tun_config, TunCapabilities, TunConfig, TunDevice, TunError, TunFactory,
-    TunReadContract, TUN_IPV6_MIN_MTU, TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY,
+    register_tun_factory, registered_tun_factory, tun_capabilities, validate_tun_config,
+    TunCapabilities, TunConfig, TunDevice, TunError, TunFactory, TunReadContract, TUN_IPV6_MIN_MTU,
+    TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY,
 };
 
 /// QUIC encryption levels used by the TLS and transport handshake paths.

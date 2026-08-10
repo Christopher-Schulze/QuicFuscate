@@ -2,6 +2,7 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::OnceLock;
 
 /// Maximum number of owned packets buffered between a blocking TUN reader and
 /// the async transport loop.
@@ -188,9 +189,42 @@ pub trait TunDevice: Send + Sync {
 pub type TunFactory =
     Box<dyn Fn(&TunConfig) -> io::Result<Box<dyn TunDevice>> + Send + Sync + 'static>;
 
+static TUN_FACTORY: OnceLock<TunFactory> = OnceLock::new();
+
+/// Registers the process-wide external TUN factory exactly once.
+#[doc(hidden)]
+pub fn register_tun_factory(factory: TunFactory) -> bool {
+    TUN_FACTORY.set(factory).is_ok()
+}
+
+/// Returns the registered external TUN factory, if one owns the process slot.
+#[doc(hidden)]
+pub fn registered_tun_factory() -> Option<&'static TunFactory> {
+    TUN_FACTORY.get()
+}
+
+/// Resolves the current target and factory capability profile.
+#[doc(hidden)]
+pub fn tun_capabilities(windows_backend_built_in: bool) -> TunCapabilities {
+    TunCapabilities {
+        built_in: cfg!(target_os = "linux")
+            || cfg!(target_os = "android")
+            || cfg!(target_os = "macos")
+            || (cfg!(target_os = "windows") && windows_backend_built_in),
+        external_factory_registered: TUN_FACTORY.get().is_some(),
+        supports_zero_copy: cfg!(target_os = "linux")
+            || cfg!(target_os = "android")
+            || cfg!(target_os = "macos"),
+        supports_raw_fd: cfg!(unix),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{validate_tun_config, TunConfig, TunError, TUN_IPV6_MIN_MTU, TUN_MIN_MTU};
+    use super::{
+        register_tun_factory, registered_tun_factory, tun_capabilities, validate_tun_config,
+        TunConfig, TunError, TunFactory, TUN_IPV6_MIN_MTU, TUN_MIN_MTU,
+    };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -258,5 +292,17 @@ mod tests {
 
         let low_mtu = TunConfig { mtu: TUN_MIN_MTU - 1, ..TunConfig::default() };
         assert!(matches!(validate_tun_config(&low_mtu), Err(TunError::Config(_))));
+    }
+
+    #[test]
+    fn factory_registry_is_single_owner_and_updates_capabilities() {
+        assert!(registered_tun_factory().is_none());
+        let factory: TunFactory = Box::new(|_| Err(std::io::Error::other("test factory")));
+        assert!(register_tun_factory(factory));
+        assert!(registered_tun_factory().is_some());
+        assert!(tun_capabilities(false).external_factory_registered);
+
+        let rejected: TunFactory = Box::new(|_| Err(std::io::Error::other("rejected factory")));
+        assert!(!register_tun_factory(rejected));
     }
 }

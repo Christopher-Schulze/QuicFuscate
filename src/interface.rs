@@ -31,7 +31,7 @@ pub use qf_transport_types::{
 use std::io::{self};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 #[cfg(unix)]
 fn close_owned_fd_with<F>(fd: &mut std::os::fd::RawFd, close: F) -> io::Result<()>
@@ -303,17 +303,7 @@ pub mod app_config {
 
 /// Return current TUN capability profile for control-plane and diagnostics.
 pub fn tun_capabilities() -> TunCapabilities {
-    TunCapabilities {
-        built_in: cfg!(target_os = "linux")
-            || cfg!(target_os = "android")
-            || cfg!(target_os = "macos")
-            || (cfg!(target_os = "windows") && cfg!(feature = "tun-windows")),
-        external_factory_registered: TUN_FACTORY.get().is_some(),
-        supports_zero_copy: cfg!(target_os = "linux")
-            || cfg!(target_os = "android")
-            || cfg!(target_os = "macos"),
-        supports_raw_fd: cfg!(unix),
-    }
+    qf_transport_types::tun_capabilities(cfg!(feature = "tun-windows"))
 }
 
 /// Validate whether TUN runtime requirements are currently satisfied.
@@ -395,7 +385,7 @@ impl TunInterface {
         // iOS always requires an external NetworkExtension factory.
         let needs_factory = cfg!(target_os = "ios")
             || (cfg!(target_os = "windows") && !cfg!(feature = "tun-windows"));
-        if needs_factory && TUN_FACTORY.get().is_none() {
+        if needs_factory && qf_transport_types::registered_tun_factory().is_none() {
             crate::optimize::telemetry::TUN_REQUIREMENT_REJECTS.fetch_add(1, Ordering::Relaxed);
             return Err(TunError::Config(
                 "TUN factory required on this platform; call register_tun_factory first",
@@ -403,7 +393,7 @@ impl TunInterface {
         }
 
         // Allow external factory override (e.g., iOS NetworkExtension, Windows Wintun)
-        if let Some(f) = TUN_FACTORY.get() {
+        if let Some(f) = qf_transport_types::registered_tun_factory() {
             let dev = match f(&config) {
                 Ok(dev) => dev,
                 Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
@@ -773,8 +763,6 @@ impl TunInterface {
 
 // Platform-specific implementations
 
-static TUN_FACTORY: OnceLock<TunFactory> = OnceLock::new();
-
 /// Registers a global TUN factory. Useful on platforms that require
 /// OS-specific frameworks (e.g., iOS NetworkExtension, Windows Wintun).
 /// Returns false if a factory was already set.
@@ -797,7 +785,7 @@ static TUN_FACTORY: OnceLock<TunFactory> = OnceLock::new();
 /// }));
 /// ```
 pub fn register_tun_factory(factory: TunFactory) -> bool {
-    TUN_FACTORY.set(factory).is_ok()
+    qf_transport_types::register_tun_factory(factory)
 }
 
 #[cfg(target_os = "linux")]

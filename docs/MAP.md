@@ -2928,3 +2928,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Handshake behavior, frontend, and Tauri are unaffected.
 - Verification: focused TLS lifecycle `2/2`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `6,660,828 / 15,331,636 KiB`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-transport-tls-contract-postpush/workspace-seams.json` at source revision `fc636f661a74eeaf4155864d2a775de4eaa049a9`; `36` packages, `334` Rust files, `207,120` source lines, `110` module edges, `116` workspace dependency edges, and `protected_changes=[]`. The `transport -> qftls` edge now has only `2` references; product SCCs remain `qftls/transport` and `engine/implementations/interface`.
+
+## TUN Factory Registry Workspace Ownership (2026-08-10, TODO-562)
+
+- Ownership: `qf-transport-types::tun` owns `TunFactory`, its one-time process registry, registered-factory access, and `TunCapabilities`; root `interface` owns native device I/O and public compatibility wrappers.
+- Flow: engine control command -> qf-transport-types capability projection; interface open -> qf-transport-types registered factory -> external TUN backend. The direct production `engine -> interface` edge is removed; frontend and Tauri are unaffected.
+- Verification: qf-transport-types `40/40`; root interface target `4/4`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `7,636,240 / 15,383,564 KiB`.

@@ -494,9 +494,9 @@ impl QuicFuscateEngine {
             EngineCommand::SetZeroRtt(enable) => {
                 self.set_0rtt(enable).map(|_| EngineCommandResult::Ack)
             }
-            EngineCommand::GetTunCapabilities => {
-                Ok(EngineCommandResult::TunCapabilities(crate::interface::tun_capabilities()))
-            }
+            EngineCommand::GetTunCapabilities => Ok(EngineCommandResult::TunCapabilities(
+                qf_transport_types::tun_capabilities(cfg!(feature = "tun-windows")),
+            )),
             EngineCommand::GetState => Ok(EngineCommandResult::State(self.state())),
             EngineCommand::GetStats => Ok(EngineCommandResult::Stats(self.stats())),
         };
@@ -1582,24 +1582,10 @@ mod tests {
         config
     }
 
-    fn tun_available() -> bool {
-        let pool = crate::optimize::global_pool();
-        let cfg = crate::interface::TunConfig {
-            name: None,
-            ip: None,
-            netmask: None,
-            mtu: 1500,
-            zero_copy: true,
-            ip6: None,
-            prefix6: None,
-        };
-        crate::interface::TunInterface::open(cfg, pool).is_ok()
-    }
-
     #[test]
     fn test_engine_lifecycle() {
         let _tun_guard = engine_tun_test_guard();
-        if !tun_available() {
+        if !crate::tun_available_for_engine_tests() {
             return;
         }
         let config = engine_tun_test_config();
@@ -1808,7 +1794,7 @@ mod tests {
     #[test]
     fn test_engine_connect_disconnect() {
         let _tun_guard = engine_tun_test_guard();
-        if !tun_available() {
+        if !crate::tun_available_for_engine_tests() {
             return;
         }
         let mut config = engine_tun_test_config();
@@ -1978,7 +1964,7 @@ mod tests {
         if !cert_path.exists() || !key_path.exists() {
             return;
         }
-        if !tun_available() {
+        if !crate::tun_available_for_engine_tests() {
             return;
         }
 
@@ -2016,7 +2002,7 @@ mod tests {
     #[test]
     fn test_invalid_state_transitions() {
         let _tun_guard = engine_tun_test_guard();
-        if !tun_available() {
+        if !crate::tun_available_for_engine_tests() {
             return;
         }
         let config = engine_tun_test_config();
@@ -2043,7 +2029,7 @@ mod tests {
     #[test]
     fn test_callbacks() {
         let _tun_guard = engine_tun_test_guard();
-        if !tun_available() {
+        if !crate::tun_available_for_engine_tests() {
             return;
         }
         let config = engine_tun_test_config();

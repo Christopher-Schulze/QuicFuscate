@@ -253,6 +253,21 @@ pub use crate::engine::EngineConfig;
 // Re-export QuicFuscateEngine for convenient access
 pub use crate::engine::QuicFuscateEngine;
 
+#[cfg(test)]
+pub(crate) fn tun_available_for_engine_tests() -> bool {
+    let pool = crate::optimize::global_pool();
+    let config = crate::interface::TunConfig {
+        name: None,
+        ip: None,
+        netmask: None,
+        mtu: 1500,
+        zero_copy: true,
+        ip6: None,
+        prefix6: None,
+    };
+    crate::interface::TunInterface::open(config, pool).is_ok()
+}
+
 #[cfg(all(test, unix))]
 pub(crate) mod test_support {
     use std::sync::{Mutex, MutexGuard, OnceLock};
