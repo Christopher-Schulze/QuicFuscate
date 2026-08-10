@@ -1661,6 +1661,12 @@ The audit remains open. These reconciliations document current evidence and owne
 - **Pushed-source proof:** Isolated Omega commit `5c635a9c7ecd37d3e904457e22789569f366cea7` passes `2409/2409` library tests and strict library Clippy with `-D warnings`; direct remote source guards pass for the removed detector helper and legacy AMX symbols. Remote rustfmt is unavailable because the `cargo-fmt` component is missing from toolchain `1.97.1-aarch64-unknown-linux-gnu`.
 - **Ownership:** TODO-676 closes final compiled/runtime/OS dispatch and tile ownership for the inactive production backend. TODO-817 closes detector execution; TODO-818 retains future native AMX proof; TODO-819 closes profile/documentation mapping; TODO-760 retains Cargo feature semantics.
 
+## Stable AVX10.1 Enumeration (2026-08-10, TODO-562)
+
+- `qf-cpu::FeatureDetector` implements the current Intel versioned AVX10 contract through stable CPUID/XGETBV intrinsics. Runtime support requires `CPUID.07H.01H:EDX[19]`, a defined CPUID leaf `24H` subleaf range, version >= 1 in `CPUID.24H.00H:EBX[7:0]`, and all SSE, AVX, opmask, and ZMM state bits in XCR0. SGX and every incomplete state fail closed.
+- Intel no longer enumerates separate AVX10 vector lengths. The historical `avx10_1_256` and `avx10_1_512` fields remain compatibility projections and are set together for verified AVX10.1; `X86_P4a` remains a synthetic compatibility profile while runtime detection selects `X86_P4b`.
+- Stable Linux x86_64 all-feature checking passes, qf-cpu all-feature tests pass `87/87`, strict qf-cpu test Clippy passes, workspace all-feature library/binary/example Clippy passes, and the serial root all-feature library passes. The removed `avx10.1-256`/`avx10.1-512` Rust feature macros are absent. No frontend or Tauri path changes.
+
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 
 - `AuditOptions::validate()` is the shared owner for queue capacity `1..=65,536`, active segment bytes `1..=128 MiB`, retained segments `1..=64`, and flush/shutdown timeout `1..=60,000 ms`. `AuditConfig::to_audit_options()` and `AuditLog::open_with_options()` use that contract before resource acquisition.

@@ -278,9 +278,9 @@ pub struct CpuFeatures {
     pub avx512vnni: bool,
     /// x86_64: AVX-512 Vector Population Count DW/QW.
     pub avx512vpopcntdq: bool,
-    /// x86_64: AVX10.1 256-bit support.
+    /// x86_64: AVX10.1 support projected onto the legacy 256-bit flag.
     pub avx10_1_256: bool,
-    /// x86_64: AVX10.1 512-bit support.
+    /// x86_64: AVX10.1 support projected onto the legacy 512-bit flag.
     pub avx10_1_512: bool,
 
     /// x86_64: AVX-512 BFloat16 instructions.
@@ -547,6 +547,60 @@ fn decode_amx_cpuid_leaf7(edx: u32) -> (bool, bool, bool) {
     (edx & AMX_TILE != 0, edx & AMX_INT8 != 0, edx & AMX_BF16 != 0)
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
+fn decode_avx10_1_support(
+    avx10_feature: bool,
+    max_avx10_subleaf: u32,
+    avx10_version: u8,
+    xcr0: u64,
+) -> bool {
+    const REQUIRED_XCR0_STATE: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
+
+    avx10_feature
+        && max_avx10_subleaf >= 1
+        && avx10_version >= 1
+        && xcr0 & REQUIRED_XCR0_STATE == REQUIRED_XCR0_STATE
+}
+
+#[cfg(all(target_arch = "x86_64", not(target_env = "sgx"), feature = "internal_avx10_preview"))]
+fn detect_avx10_1_support() -> bool {
+    use std::arch::x86_64::{__cpuid, __cpuid_count, __get_cpuid_max, _xgetbv};
+
+    const AVX10_FEATURE: u32 = 1 << 19;
+    const XSAVE: u32 = 1 << 26;
+    const OSXSAVE: u32 = 1 << 27;
+    const AVX10_CPUID_LEAF: u32 = 0x24;
+
+    let max_basic_leaf = __get_cpuid_max(0).0;
+    if max_basic_leaf < AVX10_CPUID_LEAF {
+        return false;
+    }
+
+    let leaf7 = __cpuid_count(7, 0);
+    if leaf7.eax < 1 {
+        return false;
+    }
+
+    let leaf1 = __cpuid(1);
+    if leaf1.ecx & (XSAVE | OSXSAVE) != XSAVE | OSXSAVE {
+        return false;
+    }
+
+    let avx10_feature = __cpuid_count(7, 1).edx & AVX10_FEATURE != 0;
+    let avx10_leaf = __cpuid_count(AVX10_CPUID_LEAF, 0);
+    let avx10_version = (avx10_leaf.ebx & 0xff) as u8;
+    // SAFETY: CPUID.01H reports both XSAVE and OSXSAVE, which proves that the
+    // processor and operating system permit reading XCR0 with XGETBV.
+    let xcr0 = unsafe { _xgetbv(0) };
+
+    decode_avx10_1_support(avx10_feature, avx10_leaf.eax, avx10_version, xcr0)
+}
+
+#[cfg(all(target_arch = "x86_64", target_env = "sgx", feature = "internal_avx10_preview"))]
+fn detect_avx10_1_support() -> bool {
+    false
+}
+
 #[cfg(all(target_arch = "x86_64", not(target_env = "sgx")))]
 fn detect_amx_cpu_support() -> (bool, bool, bool) {
     use std::arch::x86_64::{__cpuid_count, __get_cpuid_max};
@@ -620,9 +674,9 @@ pub enum CpuProfile {
     X86_P3d,
     /// P3d + GFNI (native GF(2^8) multiply).
     X86_P3e,
-    /// AVX10.1 256-bit baseline.
+    /// Legacy AVX10.1 256-bit compatibility profile.
     X86_P4a,
-    /// AVX10.1 512-bit baseline (full-width vectors).
+    /// AVX10.1 profile selected by the current versioned enumeration.
     X86_P4b,
 
     /// ARM64: NEON baseline.
@@ -711,9 +765,9 @@ pub enum CpuFeature {
     AVX512DQ,
     /// AVX-512 VPOPCNTDQ (vector population count).
     AVX512VPOPCNTDQ,
-    /// AVX10.1 256-bit baseline.
+    /// Legacy AVX10.1 256-bit compatibility marker.
     AVX10_1_256,
-    /// AVX10.1 512-bit baseline (full-width vectors).
+    /// AVX10.1 runtime support under the current versioned enumeration.
     AVX10_1_512,
     /// AVX-VNNI (256-bit integer neural network).
     AVXVNNI,
@@ -1021,22 +1075,19 @@ impl FeatureDetector {
                 features_full.avx512vpopcntdq = true;
             }
 
-            // AVX10 detection (1.1 preview flags exposed by rustc 1.86)
+            // Current AVX10 enumeration is versioned and no longer reports
+            // separate 256-bit and 512-bit capability flags. Preserve both
+            // historical fields as compatibility projections of AVX10.1.
             #[cfg(feature = "internal_avx10_preview")]
             {
-                let has_avx10_512 = is_x86_feature_detected!("avx10.1-512");
-                if has_avx10_512 {
+                if detect_avx10_1_support() {
                     features.insert(CpuFeature::AVX10_1_512);
                     features_full.avx10_1_512 = true;
                     features_full.avx512f = true;
                     optimal_simd_width = optimal_simd_width.max(64);
-                }
-                let has_avx10_256 = has_avx10_512 || is_x86_feature_detected!("avx10.1-256");
-                if has_avx10_256 {
                     features.insert(CpuFeature::AVX10_1_256);
                     features_full.avx10_1_256 = true;
                     features_full.avx2 = true;
-                    optimal_simd_width = optimal_simd_width.max(32);
                 }
             }
 
@@ -2288,6 +2339,26 @@ mod tests {
             super::decode_amx_cpuid_leaf7((1 << 22) | (1 << 24) | (1 << 25)),
             (true, true, true)
         );
+    }
+
+    #[test]
+    fn avx10_1_cpuid_requires_feature_version_subleaf_and_complete_xcr0_state() {
+        const REQUIRED_XCR0_STATE: u64 = 0xe6;
+
+        assert!(super::decode_avx10_1_support(true, 1, 1, REQUIRED_XCR0_STATE));
+        assert!(super::decode_avx10_1_support(true, 4, 2, u64::MAX));
+        assert!(!super::decode_avx10_1_support(false, 1, 1, REQUIRED_XCR0_STATE));
+        assert!(!super::decode_avx10_1_support(true, 0, 1, REQUIRED_XCR0_STATE));
+        assert!(!super::decode_avx10_1_support(true, 1, 0, REQUIRED_XCR0_STATE));
+
+        for state_bit in [1, 2, 5, 6, 7] {
+            assert!(!super::decode_avx10_1_support(
+                true,
+                1,
+                1,
+                REQUIRED_XCR0_STATE & !(1 << state_bit)
+            ));
+        }
     }
 
     #[test]

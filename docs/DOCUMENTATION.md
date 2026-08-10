@@ -981,8 +981,8 @@ CPU feature detection is centralized. The runtime dispatch surface uses exact co
   - `X86_P3c`: AVX512VBMI2 profile route
   - `X86_P3d`: AVX512VPOPCNTDQ profile route
   - `X86_P3e`: AVX-512F + GFNI profile route (Intel AMX is detected independently and is not part of x86 profile selection)
-  - `X86_P4a`: +AVX10.1-256 (internal preview gate `internal_avx10_preview`; inherits AVX2/AVX-512 kernels, telemetry `SIMD_USAGE_AVX10_256`)
-  - `X86_P4b`: +AVX10.1-512 (internal preview gate `internal_avx10_preview`; inherits AVX-512 kernels, telemetry `SIMD_USAGE_AVX10_512`)
+  - `X86_P4a`: legacy synthetic AVX10.1 256-bit compatibility snapshot; retained for profile/API compatibility but not emitted by current runtime detection
+  - `X86_P4b`: AVX10.1 versioned runtime route under `internal_avx10_preview`; requires `CPUID.07H.01H:EDX[19]`, CPUID leaf `24H` version >= 1, and complete SSE/AVX/opmask/ZMM XCR0 state, then sets both historical 256-bit and 512-bit projections and inherits AVX2/AVX-512 kernels
   - `ARM_A0`: NEON, AES, PMULL
   - `ARM_A1a`: +SHA2
   - `ARM_A1b`: +SHA3
