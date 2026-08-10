@@ -9,7 +9,7 @@ fn chacha20_x16_matches_scalar_when_avx512() {
     let key = [0x42u8; 32];
     let nonce = [0x24u8; 12];
     let ctr = 12345u32;
-    let blocks = quicfuscate::optimize::crypto::chacha20_blocks_x16(&key, &nonce, ctr);
+    let blocks = quicfuscate::optimize::simd::crypto::chacha20_blocks_x16(&key, &nonce, ctr);
     for i in 0..16 {
         let scalar =
             quicfuscate::crypto::chacha::chacha20_block(&key, ctr.wrapping_add(i as u32), &nonce);

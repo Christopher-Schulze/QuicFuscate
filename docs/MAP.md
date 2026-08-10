@@ -3182,3 +3182,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - CI flow: install Nightly -> install Cargo Fuzz -> locked metadata -> six-target discovery -> capture complete `rustc -vV` output -> validate Nightly release marker -> AddressSanitizer runs. Capturing before validation prevents early-exit `grep -q` from closing the pipe and turning a valid compiler into `rustup` SIGPIPE status `141` under `pipefail`.
 - Contract flow: `verify-fuzz-contract.sh` requires the capture-and-validate probe and rejects the former direct `rustup | grep -q` pipeline. Toolchain selection, manifests, locks, targets, corpora, sanitizer flags, execution bounds, and crash artifacts are unchanged.
 - Verification: Bash syntax, AddressSanitizer-scoped Nightly preflight, six-target fuzz contract audit, and diff hygiene. Hosted Ubuntu retains authoritative six-target sanitizer execution.
+
+## x86 Integration-Test Feature Ownership (2026-08-10, TODO-562)
+
+- GHASH parity flow: root `rust-tests` -> qf-crypto `rust-tests` -> x86 test override mutex and setter -> shared GHASH selector -> SSE or scalar backend -> telemetry and output parity. Normal product builds compile only the release environment override.
+- ChaCha20 x16 parity flow: registered x86 integration target -> `optimize::simd::crypto::chacha20_blocks_x16` -> AVX-512 runtime gate -> vector kernel or wrapping scalar fallback. `optimize::crypto` retains only its established x4 compatibility export.
+- Verification: exact workspace `tun-tests,rust-tests` all-target Clippy; Linux-x86 qf-crypto all-target Clippy; qf-crypto `140/140`; strict workspace all-feature library/binary/example Clippy; formatting and diff hygiene. Hosted Linux retains authoritative root integration-target compilation because the local cross-build lacks a Linux C sysroot.

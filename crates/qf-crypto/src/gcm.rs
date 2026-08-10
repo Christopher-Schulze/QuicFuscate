@@ -1,4 +1,4 @@
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 use std::sync::Mutex;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::sync::OnceLock;
@@ -21,7 +21,7 @@ enum GhashOverride {
 #[cfg(target_arch = "x86_64")]
 static GHASH_OVERRIDE: OnceLock<Option<GhashOverride>> = OnceLock::new();
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 static GHASH_TEST_OVERRIDE: Mutex<Option<GhashOverride>> = Mutex::new(None);
 
 #[cfg(target_arch = "x86_64")]
@@ -42,7 +42,7 @@ fn parse_ghash_override(value: &str) -> GhashOverride {
 }
 
 /// Test-only: override the GHASH backend selection for deterministic testing.
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 pub fn __test_set_ghash_override(val: Option<&str>) {
     let mut guard = GHASH_TEST_OVERRIDE.lock().unwrap();
     *guard = val.map(parse_ghash_override);
@@ -148,7 +148,7 @@ fn reduce_natural_gf128_product(mut low: u128, mut high: u128) -> u128 {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn ghash_override_value() -> Option<GhashOverride> {
-    #[cfg(all(test, target_arch = "x86_64"))]
+    #[cfg(any(test, feature = "rust-tests"))]
     if let Some(mode) = GHASH_TEST_OVERRIDE.lock().unwrap().as_ref().copied() {
         return Some(mode);
     }
