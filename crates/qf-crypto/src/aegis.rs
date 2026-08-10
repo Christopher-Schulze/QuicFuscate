@@ -259,24 +259,18 @@ mod aegis_aes_block {
     // &[u8; 16] references; _mm_loadu_si128 reads exactly 16 bytes from each.
     // Outputs are stack-owned [u8; 16] arrays. No out-of-bounds access possible.
     unsafe fn aesenc4_vaes512(
-        b0: &[u8; 16],
-        rk0: &[u8; 16],
-        b1: &[u8; 16],
-        rk1: &[u8; 16],
-        b2: &[u8; 16],
-        rk2: &[u8; 16],
-        b3: &[u8; 16],
-        rk3: &[u8; 16],
+        blocks: [&[u8; 16]; 4],
+        round_keys: [&[u8; 16]; 4],
     ) -> ([u8; 16], [u8; 16], [u8; 16], [u8; 16]) {
         use core::arch::x86_64::*;
-        let x0 = _mm_loadu_si128(b0.as_ptr() as *const __m128i);
-        let x1 = _mm_loadu_si128(b1.as_ptr() as *const __m128i);
-        let x2 = _mm_loadu_si128(b2.as_ptr() as *const __m128i);
-        let x3 = _mm_loadu_si128(b3.as_ptr() as *const __m128i);
-        let k0 = _mm_loadu_si128(rk0.as_ptr() as *const __m128i);
-        let k1 = _mm_loadu_si128(rk1.as_ptr() as *const __m128i);
-        let k2 = _mm_loadu_si128(rk2.as_ptr() as *const __m128i);
-        let k3 = _mm_loadu_si128(rk3.as_ptr() as *const __m128i);
+        let x0 = _mm_loadu_si128(blocks[0].as_ptr() as *const __m128i);
+        let x1 = _mm_loadu_si128(blocks[1].as_ptr() as *const __m128i);
+        let x2 = _mm_loadu_si128(blocks[2].as_ptr() as *const __m128i);
+        let x3 = _mm_loadu_si128(blocks[3].as_ptr() as *const __m128i);
+        let k0 = _mm_loadu_si128(round_keys[0].as_ptr() as *const __m128i);
+        let k1 = _mm_loadu_si128(round_keys[1].as_ptr() as *const __m128i);
+        let k2 = _mm_loadu_si128(round_keys[2].as_ptr() as *const __m128i);
+        let k3 = _mm_loadu_si128(round_keys[3].as_ptr() as *const __m128i);
 
         let mut x = _mm512_castsi128_si512(x0);
         x = _mm512_inserti32x4(x, x1, 1);
@@ -317,12 +311,12 @@ mod aegis_aes_block {
             // passed by reference - no out-of-bounds access possible.
             AesEncBackend::Vaes512 => unsafe {
                 let (o7, o6, o5, o4) = aesenc4_vaes512(
-                    &in_b[7], &in_rk[7], &in_b[6], &in_rk[6], &in_b[5], &in_rk[5], &in_b[4],
-                    &in_rk[4],
+                    [&in_b[7], &in_b[6], &in_b[5], &in_b[4]],
+                    [&in_rk[7], &in_rk[6], &in_rk[5], &in_rk[4]],
                 );
                 let (o3, o2, o1, o0) = aesenc4_vaes512(
-                    &in_b[3], &in_rk[3], &in_b[2], &in_rk[2], &in_b[1], &in_rk[1], &in_b[0],
-                    &in_rk[0],
+                    [&in_b[3], &in_b[2], &in_b[1], &in_b[0]],
+                    [&in_rk[3], &in_rk[2], &in_rk[1], &in_rk[0]],
                 );
                 return [o0, o1, o2, o3, o4, o5, o6, o7];
             },

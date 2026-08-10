@@ -370,8 +370,8 @@ unsafe fn aes128_encrypt_block_rk(rk: &[core::arch::x86_64::__m128i; 11], block:
     use core::arch::x86_64::*;
     let mut state = _mm_loadu_si128(block.as_ptr() as *const __m128i);
     state = _mm_xor_si128(state, rk[0]);
-    for r in 1..10 {
-        state = _mm_aesenc_si128(state, rk[r]);
+    for round_key in rk.iter().take(10).skip(1) {
+        state = _mm_aesenc_si128(state, *round_key);
     }
     state = _mm_aesenclast_si128(state, rk[10]);
     _mm_storeu_si128(block.as_mut_ptr() as *mut __m128i, state);

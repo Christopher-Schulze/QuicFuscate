@@ -106,7 +106,7 @@ impl Morus1280State {
     // available. All inputs are by-value __m128i registers; no memory operations.
     unsafe fn rotl_words_pair_ssse3(lo: __m128i, hi: __m128i, k: i32) -> (__m128i, __m128i) {
         use core::arch::x86_64::*;
-        let s = (k & 3) as i32;
+        let s = k & 3;
         match s {
             0 => (lo, hi),
             1 => (
@@ -995,7 +995,7 @@ fn morus_backend() -> MorusBackend {
             if features.sse2 {
                 return MorusBackend::Sse2;
             }
-            return MorusBackend::Scalar;
+            MorusBackend::Scalar
         }
 
         #[cfg(target_arch = "aarch64")]

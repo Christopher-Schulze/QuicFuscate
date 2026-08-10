@@ -817,10 +817,10 @@ impl Aes128Ctx {
             ];
             let ks = aesni_encrypt4_round_keys(&self.round_keys, lanes);
 
-            for lane in 0..4 {
+            for (lane, keystream) in ks.into_iter().enumerate() {
                 let idx = offset + lane * 16;
                 let pt = _mm_loadu_si128(input.as_ptr().add(idx) as *const __m128i);
-                let ct = _mm_xor_si128(pt, ks[lane]);
+                let ct = _mm_xor_si128(pt, keystream);
                 _mm_storeu_si128(output.as_mut_ptr().add(idx) as *mut __m128i, ct);
             }
 
@@ -1054,11 +1054,11 @@ unsafe fn aes128_encrypt_block_ssse3_raw(
     let mut state = _mm_loadu_si128(block.as_ptr() as *const _);
     state = _mm_xor_si128(state, round_keys[0]);
 
-    for round in 1..10 {
+    for round_key in round_keys.iter().take(10).skip(1) {
         state = sub_bytes_ssse3(state);
         state = shift_rows_ssse3(state);
         state = mix_columns_ssse3(state);
-        state = _mm_xor_si128(state, round_keys[round]);
+        state = _mm_xor_si128(state, *round_key);
     }
 
     state = sub_bytes_ssse3(state);
@@ -1086,7 +1086,7 @@ unsafe fn aes128_encrypt_block_ssse3(
 #[target_feature(enable = "aes")]
 // SAFETY: target_feature gate ensures AES-NI. `round_keys` is &[[u8; 16]; 11];
 // each _mm_loadu_si128 reads exactly 16 bytes from a [u8; 16] subarray. `block`
-// is &[u8; 16]. Loop index r in 1..10 stays within array bounds. `out` is
+// is &[u8; 16]. The round-key iterator is bounded to indices 1..10. `out` is
 // stack-owned [u8; 16]; _mm_storeu_si128 writes exactly 16 bytes.
 unsafe fn aes128_encrypt_block_aesni_round_keys(
     round_keys: &[[u8; 16]; 11],
@@ -1096,8 +1096,8 @@ unsafe fn aes128_encrypt_block_aesni_round_keys(
     let mut s = _mm_loadu_si128(block.as_ptr() as *const __m128i);
     let k0 = _mm_loadu_si128(round_keys[0].as_ptr() as *const __m128i);
     s = _mm_xor_si128(s, k0);
-    for r in 1..10 {
-        let kr = _mm_loadu_si128(round_keys[r].as_ptr() as *const __m128i);
+    for round_key in round_keys.iter().take(10).skip(1) {
+        let kr = _mm_loadu_si128(round_key.as_ptr() as *const __m128i);
         s = _mm_aesenc_si128(s, kr);
     }
     let kf = _mm_loadu_si128(round_keys[10].as_ptr() as *const __m128i);
@@ -1110,7 +1110,8 @@ unsafe fn aes128_encrypt_block_aesni_round_keys(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes")]
 // SAFETY: target_feature gate ensures AES-NI. `round_keys` is &[[u8; 16]; 11];
-// indexing r in 0..=10 stays within bounds. Each _mm_loadu_si128 reads 16 bytes
+// the initial, middle, and final round-key accesses stay within 0..=10. Each
+// _mm_loadu_si128 reads 16 bytes
 // from a [u8; 16] subarray. `blocks` is by-value [__m128i; 4]; lane iteration
 // via iter_mut is bounded. Returns owned array of 4 __m128i values.
 unsafe fn aesni_encrypt4_round_keys(
@@ -1122,8 +1123,8 @@ unsafe fn aesni_encrypt4_round_keys(
     for lane in blocks.iter_mut() {
         *lane = _mm_xor_si128(*lane, rk0);
     }
-    for r in 1..10 {
-        let kr = _mm_loadu_si128(round_keys[r].as_ptr() as *const __m128i);
+    for round_key in round_keys.iter().take(10).skip(1) {
+        let kr = _mm_loadu_si128(round_key.as_ptr() as *const __m128i);
         for lane in blocks.iter_mut() {
             *lane = _mm_aesenc_si128(*lane, kr);
         }

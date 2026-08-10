@@ -3037,3 +3037,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Windows buffer lengths use the shared checked aggregate helper; the socket-address length remains the binding's native `i32`. The unused private NUMA affinity mutation is absent, while topology discovery and current-node classification remain unchanged.
 - Verification: locked Windows-MSVC qf-memory-pool all-target/all-feature Clippy; ARM64 qf-memory-pool all-feature tests `23/23`; strict workspace all-feature library/binary/example Clippy. Native Windows runtime proof remains external.
 - Final target/free space is `7,492,296 / 3,036,000 KiB`; frontend and Tauri are unaffected.
+
+## qf-crypto x86 Clippy Portability (2026-08-10, TODO-562)
+
+- VAES flow: eight AEGIS state blocks and round keys -> two fixed four-lane reference arrays -> AVX-512 AESENC -> unchanged output-lane order. Poly1305 flow: four accumulator limbs plus four coefficients -> fixed arrays -> AVX2/AVX-512 widening multiplication -> unchanged five-limb reduction.
+- AES-NI, SSSE3, and root AES schedule loops now traverse the same bounded round-key ranges directly; CTR output traverses the generated four-lane keystream. MORUS backend selection and word rotation retain identical values without redundant syntax.
+- Verification: locked x86_64-Linux qf-crypto all-target `rust-tests` Clippy; qf-crypto all-feature tests `140/140`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy. Final target/free space is `1,887,580 / 7,169,396 KiB`; frontend and Tauri are unaffected.

@@ -202,24 +202,15 @@ fn mac(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-// SAFETY: requires AVX2 (caller ensures). All inputs are scalar u32 values loaded
-// into __m256i via _mm256_set_epi32 (no memory pointers). _mm256_mul_epu32
+// SAFETY: requires AVX2 (caller ensures). Both inputs are fixed-size arrays of
+// scalar u32 values loaded into __m256i via _mm256_set_epi32 (no memory pointers). _mm256_mul_epu32
 // performs register-to-register multiplication. Extract via _mm256_castsi256_si128 /
 // _mm256_extracti128_si256 / _mm_cvtsi128_si64 - all register operations.
-unsafe fn mul_even_u32_avx2(
-    a0: u32,
-    a1: u32,
-    a2: u32,
-    a3: u32,
-    b0: u32,
-    b1: u32,
-    b2: u32,
-    b3: u32,
-) -> [u64; 4] {
+unsafe fn mul_even_u32_avx2(a: [u32; 4], b: [u32; 4]) -> [u64; 4] {
     use core::arch::x86_64::*;
 
-    let va = _mm256_set_epi32(0, a3 as i32, 0, a2 as i32, 0, a1 as i32, 0, a0 as i32);
-    let vb = _mm256_set_epi32(0, b3 as i32, 0, b2 as i32, 0, b1 as i32, 0, b0 as i32);
+    let va = _mm256_set_epi32(0, a[3] as i32, 0, a[2] as i32, 0, a[1] as i32, 0, a[0] as i32);
+    let vb = _mm256_set_epi32(0, b[3] as i32, 0, b[2] as i32, 0, b[1] as i32, 0, b[0] as i32);
     let prod = _mm256_mul_epu32(va, vb);
     let low = _mm256_castsi256_si128(prod);
     let high = _mm256_extracti128_si256(prod, 1);
@@ -233,27 +224,48 @@ unsafe fn mul_even_u32_avx2(
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
-// SAFETY: target_feature gate ensures AVX-512F. All inputs are scalar u32 values
-// loaded into __m512i via _mm512_setr_epi32. _mm512_mul_epu32 performs
+// SAFETY: target_feature gate ensures AVX-512F. Both inputs are fixed-size arrays
+// of scalar u32 values loaded into __m512i via _mm512_setr_epi32. _mm512_mul_epu32 performs
 // register-to-register multiplication. _mm512_storeu_si512 writes 64 bytes into
 // stack-owned [u64; 8] array. Only first 4 elements used.
-unsafe fn mul_even_u32_avx512(
-    a0: u32,
-    a1: u32,
-    a2: u32,
-    a3: u32,
-    b0: u32,
-    b1: u32,
-    b2: u32,
-    b3: u32,
-) -> [u64; 4] {
+unsafe fn mul_even_u32_avx512(a: [u32; 4], b: [u32; 4]) -> [u64; 4] {
     use core::arch::x86_64::*;
 
     let va = _mm512_setr_epi32(
-        a0 as i32, 0, a1 as i32, 0, a2 as i32, 0, a3 as i32, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        a[0] as i32,
+        0,
+        a[1] as i32,
+        0,
+        a[2] as i32,
+        0,
+        a[3] as i32,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     );
     let vb = _mm512_setr_epi32(
-        b0 as i32, 0, b1 as i32, 0, b2 as i32, 0, b3 as i32, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        b[0] as i32,
+        0,
+        b[1] as i32,
+        0,
+        b[2] as i32,
+        0,
+        b[3] as i32,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     );
     let prod = _mm512_mul_epu32(va, vb);
     let mut out = [0u64; 8];
@@ -265,7 +277,7 @@ unsafe fn mul_even_u32_avx512(
 #[target_feature(enable = "avx2")]
 // SAFETY: target_feature gate ensures AVX2. h and r are by-value [u64; 5].
 // m is &[u8]; loop processes 16-byte blocks via load_block (bounds-checked).
-// mul_even_u32_avx2 takes scalar u32 args (no pointers). All SIMD ops are
+// mul_even_u32_avx2 takes fixed-size u32 arrays (no pointers). All SIMD ops are
 // register-to-register.
 unsafe fn mac_avx2(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
     telemetry::POLY1305_AVX2_OPS.inc();
@@ -303,36 +315,37 @@ unsafe fn mac_avx2(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
         let h2u = h2 as u32;
         let h3u = h3 as u32;
         let h4u = h4 as u32;
+        let h_lanes = [h0u, h1u, h2u, h3u];
 
-        let prods0 = mul_even_u32_avx2(h0u, h1u, h2u, h3u, r0, s4, s3, s2);
+        let prods0 = mul_even_u32_avx2(h_lanes, [r0, s4, s3, s2]);
         let d0 = (prods0[0] as u128)
             + (prods0[1] as u128)
             + (prods0[2] as u128)
             + (prods0[3] as u128)
             + ((h4u as u128) * (s1 as u128));
 
-        let prods1 = mul_even_u32_avx2(h0u, h1u, h2u, h3u, r1, r0, s4, s3);
+        let prods1 = mul_even_u32_avx2(h_lanes, [r1, r0, s4, s3]);
         let mut d1 = (prods1[0] as u128)
             + (prods1[1] as u128)
             + (prods1[2] as u128)
             + (prods1[3] as u128)
             + ((h4u as u128) * (s2 as u128));
 
-        let prods2 = mul_even_u32_avx2(h0u, h1u, h2u, h3u, r2, r1, r0, s4);
+        let prods2 = mul_even_u32_avx2(h_lanes, [r2, r1, r0, s4]);
         let mut d2 = (prods2[0] as u128)
             + (prods2[1] as u128)
             + (prods2[2] as u128)
             + (prods2[3] as u128)
             + ((h4u as u128) * (s3 as u128));
 
-        let prods3 = mul_even_u32_avx2(h0u, h1u, h2u, h3u, r3, r2, r1, r0);
+        let prods3 = mul_even_u32_avx2(h_lanes, [r3, r2, r1, r0]);
         let mut d3 = (prods3[0] as u128)
             + (prods3[1] as u128)
             + (prods3[2] as u128)
             + (prods3[3] as u128)
             + ((h4u as u128) * (s4 as u128));
 
-        let prods4 = mul_even_u32_avx2(h0u, h1u, h2u, h3u, r4, r3, r2, r1);
+        let prods4 = mul_even_u32_avx2(h_lanes, [r4, r3, r2, r1]);
         let mut d4 = (prods4[0] as u128)
             + (prods4[1] as u128)
             + (prods4[2] as u128)
@@ -370,7 +383,7 @@ unsafe fn mac_avx2(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
 #[target_feature(enable = "avx512f")]
 // SAFETY: target_feature gate ensures AVX-512F. h and r are by-value [u64; 5].
 // m is &[u8]; loop processes 16-byte blocks via load_block (bounds-checked).
-// mul_even_u32_avx512 takes scalar u32 args (no pointers). All SIMD ops are
+// mul_even_u32_avx512 takes fixed-size u32 arrays (no pointers). All SIMD ops are
 // register-to-register.
 unsafe fn mac_avx512(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
     telemetry::POLY1305_AVX512_OPS.inc();
@@ -408,36 +421,37 @@ unsafe fn mac_avx512(h: [u64; 5], r: [u64; 5], m: &[u8]) -> [u64; 5] {
         let h2u = h2 as u32;
         let h3u = h3 as u32;
         let h4u = h4 as u32;
+        let h_lanes = [h0u, h1u, h2u, h3u];
 
-        let prods0 = mul_even_u32_avx512(h0u, h1u, h2u, h3u, r0, s4, s3, s2);
+        let prods0 = mul_even_u32_avx512(h_lanes, [r0, s4, s3, s2]);
         let d0 = (prods0[0] as u128)
             + (prods0[1] as u128)
             + (prods0[2] as u128)
             + (prods0[3] as u128)
             + ((h4u as u128) * (s1 as u128));
 
-        let prods1 = mul_even_u32_avx512(h0u, h1u, h2u, h3u, r1, r0, s4, s3);
+        let prods1 = mul_even_u32_avx512(h_lanes, [r1, r0, s4, s3]);
         let mut d1 = (prods1[0] as u128)
             + (prods1[1] as u128)
             + (prods1[2] as u128)
             + (prods1[3] as u128)
             + ((h4u as u128) * (s2 as u128));
 
-        let prods2 = mul_even_u32_avx512(h0u, h1u, h2u, h3u, r2, r1, r0, s4);
+        let prods2 = mul_even_u32_avx512(h_lanes, [r2, r1, r0, s4]);
         let mut d2 = (prods2[0] as u128)
             + (prods2[1] as u128)
             + (prods2[2] as u128)
             + (prods2[3] as u128)
             + ((h4u as u128) * (s3 as u128));
 
-        let prods3 = mul_even_u32_avx512(h0u, h1u, h2u, h3u, r3, r2, r1, r0);
+        let prods3 = mul_even_u32_avx512(h_lanes, [r3, r2, r1, r0]);
         let mut d3 = (prods3[0] as u128)
             + (prods3[1] as u128)
             + (prods3[2] as u128)
             + (prods3[3] as u128)
             + ((h4u as u128) * (s4 as u128));
 
-        let prods4 = mul_even_u32_avx512(h0u, h1u, h2u, h3u, r4, r3, r2, r1);
+        let prods4 = mul_even_u32_avx512(h_lanes, [r4, r3, r2, r1]);
         let mut d4 = (prods4[0] as u128)
             + (prods4[1] as u128)
             + (prods4[2] as u128)
