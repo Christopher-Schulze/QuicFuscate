@@ -48,6 +48,112 @@ pub fn derive_tls_cover_material_from_entropy(
     (key, iv)
 }
 
+/// Plaintext and timing plan for one synthetic encrypted TLS Cover record.
+#[doc(hidden)]
+pub struct TlsCoverRecordPlan {
+    /// TLS record header authenticated by the root encryption context.
+    pub header: [u8; 5],
+    /// Synthetic handshake plaintext encrypted by the root context.
+    pub payload: Vec<u8>,
+    /// Optional synchronous delay applied after encryption on the dedicated cover path.
+    pub jitter: Option<std::time::Duration>,
+}
+
+/// Bounded planning failure before any encryption or sequence mutation occurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum TlsCoverRecordPlanError {
+    /// A checked record-length calculation exceeded the platform integer range.
+    LengthOverflow,
+}
+
+/// Plan one synthetic TLS Cover record without accessing root crypto state.
+#[doc(hidden)]
+pub fn plan_tls_cover_record(
+    max_len: usize,
+    performance_mode: bool,
+    is_server: bool,
+    fingerprint_profile: &str,
+    environment: &qf_common::env_utils::EnvSnapshot,
+) -> Result<Option<TlsCoverRecordPlan>, TlsCoverRecordPlanError> {
+    use rand::Rng;
+
+    const TLS_RECORD_HEADER_LEN: usize = 5;
+    const AEAD_TAG_LEN: usize = 16;
+    let record_overhead = TLS_RECORD_HEADER_LEN + AEAD_TAG_LEN;
+    if max_len < record_overhead {
+        return Ok(None);
+    }
+
+    let payload_capacity = max_len - record_overhead;
+    let max_payload = payload_capacity.min(u16::MAX as usize - AEAD_TAG_LEN);
+    let mut rng = rand::rng();
+    let mut payload_size = if performance_mode {
+        max_payload.min(if is_server { 800 } else { 1200 })
+    } else {
+        let upper = max_payload.min(if is_server { 700 } else { 800 });
+        let lower = max_payload.min(if is_server { 150 } else { 200 });
+        let base_size = if max_payload > 1000 {
+            rng.random_range(lower..=upper)
+        } else if lower == upper {
+            lower
+        } else {
+            rng.random_range(lower..=upper)
+        };
+        base_size
+            .checked_add(rng.random_range(0..50))
+            .ok_or(TlsCoverRecordPlanError::LengthOverflow)?
+            .min(max_payload)
+    };
+
+    if !performance_mode {
+        let padding_cap = environment
+            .parse_first(["QUICFUSCATE_STEALTH_PADDING_MAX", "QUICFUSCATE_STEALTH_MAX_PADDING"])
+            .unwrap_or(0usize);
+        let headroom = max_payload.saturating_sub(payload_size);
+        if padding_cap > 0 && headroom > 0 {
+            payload_size = payload_size
+                .checked_add(rng.random_range(0..=padding_cap.min(headroom)))
+                .ok_or(TlsCoverRecordPlanError::LengthOverflow)?;
+        }
+    }
+
+    let cipher_len =
+        payload_size.checked_add(AEAD_TAG_LEN).ok_or(TlsCoverRecordPlanError::LengthOverflow)?;
+    let cipher_len =
+        u16::try_from(cipher_len).map_err(|_| TlsCoverRecordPlanError::LengthOverflow)?;
+    let cipher_len_bytes = cipher_len.to_be_bytes();
+    let header = [0x16, 0x03, 0x03, cipher_len_bytes[0], cipher_len_bytes[1]];
+
+    let mut payload = vec![0u8; payload_size];
+    rng.fill(&mut payload[..]);
+    if payload_size > 10 {
+        payload[0] = 0x01;
+        payload[1..4].copy_from_slice(&((payload_size - 4) as u32).to_be_bytes()[1..]);
+        payload[4..6].copy_from_slice(&[0x03, 0x03]);
+        let profile_tag = match fingerprint_profile {
+            "chrome" => 0xC0,
+            "firefox" => 0xF0,
+            "safari" => 0xA0,
+            "edge" => 0xE0,
+            _ => 0x90,
+        };
+        let tag_index = 6.min(payload.len() - 1);
+        payload[tag_index] ^= profile_tag;
+    }
+
+    let jitter = if performance_mode {
+        None
+    } else {
+        environment
+            .parse_first::<u64, 1>(["QUICFUSCATE_STEALTH_JITTER_US"])
+            .filter(|maximum| *maximum > 0)
+            .map(|maximum| std::time::Duration::from_micros(rng.random_range(1..=maximum)))
+    };
+
+    Ok(Some(TlsCoverRecordPlan { header, payload, jitter }))
+}
+
 /// Cipher suite used by the TLS Cover provider for encrypting synthetic records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
@@ -781,5 +887,43 @@ mod tests {
         let first = derive_tls_cover_material("chrome", false).expect("first material");
         let second = derive_tls_cover_material("chrome", false).expect("second material");
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn performance_record_plan_is_role_bounded_and_has_no_jitter() {
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([]);
+        let client = plan_tls_cover_record(4096, true, false, "chrome", &environment)
+            .expect("plan")
+            .expect("record");
+        let server = plan_tls_cover_record(4096, true, true, "firefox", &environment)
+            .expect("plan")
+            .expect("record");
+        assert_eq!(client.payload.len(), 1200);
+        assert_eq!(server.payload.len(), 800);
+        assert!(client.jitter.is_none());
+        assert!(server.jitter.is_none());
+    }
+
+    #[test]
+    fn record_plan_respects_tls_u16_length_under_large_padding_cap() {
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_STEALTH_PADDING_MAX", "100000"),
+            ("QUICFUSCATE_STEALTH_JITTER_US", "25"),
+        ]);
+        let plan = plan_tls_cover_record(100_000, false, false, "edge", &environment)
+            .expect("plan")
+            .expect("record");
+        let encoded_len = u16::from_be_bytes([plan.header[3], plan.header[4]]) as usize;
+        assert_eq!(encoded_len, plan.payload.len() + 16);
+        assert!(plan.payload.len() <= u16::MAX as usize - 16);
+        assert!(plan.jitter.is_some_and(|jitter| jitter.as_micros() <= 25));
+    }
+
+    #[test]
+    fn record_plan_rejects_capacity_smaller_than_header_and_tag() {
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([]);
+        assert!(plan_tls_cover_record(20, false, false, "chrome", &environment)
+            .expect("plan")
+            .is_none());
     }
 }

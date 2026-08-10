@@ -34,8 +34,8 @@ pub use stealth_config::{FecMode, StealthConfig};
 pub use tls_client_hello::TlsClientHelloProfileCatalog;
 #[doc(hidden)]
 pub use tls_cover::{
-    derive_tls_cover_material, derive_tls_cover_material_from_entropy, TlsCover,
-    TlsCoverCipherSuite,
+    derive_tls_cover_material, derive_tls_cover_material_from_entropy, plan_tls_cover_record,
+    TlsCover, TlsCoverCipherSuite, TlsCoverRecordPlan, TlsCoverRecordPlanError,
 };
 #[doc(hidden)]
 pub use tls_profile::TlsProfile;

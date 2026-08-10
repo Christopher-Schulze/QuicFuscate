@@ -2798,3 +2798,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-stealth `118/118`; root all-feature library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. Final target/free space is `10,040,504 / 12,687,208 KiB`.
 - Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-tls-cover-material-postpush/workspace-seams.json` at source revision `7ce31037e65d4c2f4006c4fba2c2d875ee986b43`; `36` packages, `332` Rust files, `206,956` source lines, `123` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## TLS Cover Record-Plan Workspace Ownership (2026-08-10, TODO-562)
+
+- Planning flow: role/performance/profile plus immutable environment snapshot -> `qf-stealth::plan_tls_cover_record` -> TLS-length-bounded header/plaintext/jitter plan -> root `TlsCoverProvider` -> `CryptoContext::encrypt_tls_cover_record` -> ciphertext assembly -> optional dedicated-path sleep.
+- The child owns all root-independent randomized record shape. The root owns cipher installation, sequence state, encryption, and actual sleeping. TLS `u16` length headroom, not arbitrary caller capacity, now bounds optional padding.
+- Verification: qf-stealth `121/121`; root all-feature library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. Final target/free space is `10,640,032 / 12,040,172 KiB`.
+- Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
