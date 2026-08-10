@@ -152,10 +152,6 @@ impl UnsafeMemoryPool {
                 }
                 return Err(UnsafeError::AllocationFailed);
             }
-            #[cfg(target_os = "linux")]
-            {
-                crate::optimize::numa::move_to_node(raw, block_size, numa_node);
-            }
             // SAFETY: the allocator returned a non-null pointer for this valid layout.
             let block = unsafe { NonNull::new_unchecked(raw) };
             allocations.insert(

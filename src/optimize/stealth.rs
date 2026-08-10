@@ -3,7 +3,7 @@
 
 #[cfg(any(target_arch = "x86_64", test, feature = "rust-tests", feature = "benches"))]
 use crate::optimize::FeatureDetector;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "rust-tests")))]
 use std::arch::x86_64::*;
 #[cfg(test)]
 use std::time::Duration;

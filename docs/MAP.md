@@ -3114,3 +3114,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - CI flow: locked Nightly metadata -> six-target cargo-fuzz inventory -> curated corpora -> AddressSanitizer runs -> bounded crash-artifact upload. The lock repair changes only metadata resolution and leaves every runtime target and workflow command intact.
 - Verification: locked Nightly metadata; Nightly fuzz-workspace all-target check; fuzz contract audit. Hosted Ubuntu remains the execution owner for all six sanitizer runs.
 - Final target/free space is `3,893,020 / 5,335,128 KiB`; frontend and Tauri paths are unaffected.
+
+## unsafe_rust Optimize Ownership (2026-08-10, TODO-562)
+
+- Pattern-injector flow: test/rust-tests plus x86_64 -> shared x86 intrinsic import -> AVX2 injector; normal x86 production -> no unreachable import.
+- Unsafe test-pool flow: allocator -> aligned ownership registry -> pool cache. NUMA behavior belongs exclusively to qf-memory-pool; the removed root adapter reference resolved to no module and its extracted Linux counterpart performs no placement operation.
+- Verification: exact local `unsafe_rust` workspace all-target Clippy with warnings denied; serial root all-feature library `1,657/1,657`; formatting. Hosted Linux x86 confirmation remains pending.
+- Final target/free space is `4,325,868 / 3,758,204 KiB`; frontend and Tauri paths are unaffected.

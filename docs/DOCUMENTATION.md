@@ -6994,3 +6994,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Cargo updated the existing fuzz lock minimally: the qf-transport-udp package entry now records `log` and `socket2 0.5.10`. No package version, checksum, root manifest, fuzz manifest, target, corpus, or sanitizer contract changed.
 - Nightly locked metadata and Nightly all-target checking of the separate fuzz workspace pass. The fuzz contract audit passes the six-target inventory, curated seed bounds, workflow lanes, AddressSanitizer command, artifact upload, and crypto-backend coverage. Hosted Ubuntu still owns actual sanitizer execution for all six targets.
 - Final target/free space is `3,893,020 / 5,335,128 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## unsafe_rust Optimize Ownership (2026-08-10, TODO-562)
+
+- Clippy Matrix run `31427636274`, `unsafe_rust` job `93583017456`, exposed an x86 intrinsic import compiled without its test-only pattern injector and a Linux test build that still referenced the removed root NUMA module.
+- The x86 import now shares the test/rust-tests boundary of its only unqualified intrinsic consumer. The test-only UnsafeMemoryPool no longer invokes the obsolete Linux root NUMA adapter; qf-memory-pool owns the canonical NUMA policy and its Linux adapter is deliberately unavailable, so the removed call had no effect.
+- The exact local `unsafe_rust` workspace all-target Clippy contract passes with warnings denied, the serial root all-feature library passes `1,657/1,657`, and formatting passes. Hosted Linux x86 confirmation remains pending publication.
+- Final target/free space is `4,325,868 / 3,758,204 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
