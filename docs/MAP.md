@@ -3087,3 +3087,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Test flow: `test` or `rust-tests` -> `inject_pattern` -> runtime x86 AVX2/SSE2 or AArch64 SVE2/NEON dispatch -> `complete_pattern_end` checked destination window -> vector/scalar copy. Normal product builds compile none of these private test-only injectors.
 - Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting; runtime guardrails. The complete Linux cross-build remains unavailable locally because native C dependencies require a Linux C sysroot before root product code compiles.
 - Final target/free space is `6,684,724 / 2,846,996 KiB`; frontend and Tauri paths are unaffected.
+
+## Client io_uring Batch-Reference cfg Ownership (2026-08-10, TODO-562)
+
+- Linux outbound flow: owned batch payloads -> optional `io_uring`-only borrowed reference vector -> per-slot disposition -> filtered fallback indices/references -> sendmmsg -> socket-per-packet tail. Builds without `io_uring` start directly at the filtered sendmmsg reference set and do not construct an unused vector.
+- Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. The complete Linux cross-build remains unavailable locally because native C dependencies require a Linux C sysroot before root product code compiles.
+- Final target/free space is `6,752,040 / 2,629,932 KiB`; frontend and Tauri paths are unaffected.

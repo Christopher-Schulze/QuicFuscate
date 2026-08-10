@@ -729,6 +729,7 @@ impl IoDriver {
                         // dispatch phase. It cannot keep borrowing
                         // `batch_payloads` into the next loop iteration, and
                         // SmallVec keeps the configured maximum batch inline.
+                        #[cfg(feature = "io_uring")]
                         let batch_refs: smallvec::SmallVec<[&[u8]; 256]> = batch_payloads
                             .iter()
                             .take(queued)
