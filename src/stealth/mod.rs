@@ -36,30 +36,6 @@
 //! inspection (DPI) systems. It integrates multiple strategies to create a
 //! layered defense against network surveillance.
 
-// User-Agent string constants to avoid repeated allocations.
-// Updated 2026-03: Chrome 136, Firefox 138, Edge 136, Safari 18.3
-const UA_CHROME_WIN: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
-const UA_FIREFOX_WIN: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0";
-const UA_EDGE_WIN: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
-const UA_EDGE_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
-const UA_EDGE_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
-const UA_SAFARI_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
-const UA_CHROME_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
-const UA_FIREFOX_MAC: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15.3; rv:138.0) Gecko/20100101 Firefox/138.0";
-const UA_CHROME_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
-const UA_FIREFOX_LINUX: &str =
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0";
-const UA_CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36";
-const UA_FIREFOX_ANDROID: &str =
-    "Mozilla/5.0 (Android 15; Mobile; rv:138.0) Gecko/138.0 Firefox/138.0";
-const UA_SAFARI_IOS: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1";
-
-// Accept-Language constants
-const LANG_EN_US_09: &str = "en-US,en;q=0.9";
-const LANG_EN_US_05: &str = "en-US,en;q=0.5";
-
 /*
 ===============================================================================
 Rules-File Guard (Stealth Module)
@@ -85,10 +61,10 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use self::tls_cover::ServerHelloParamsOwned;
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::OptimizationManager; // Assumed for integration
 use crate::telemetry;
+pub(crate) use qf_stealth::TlsCoverCipherPreference;
 pub use qf_stealth::{RateChoker, ServerPushState, ServerPushTriggerReason};
 
 // Integrated test module (keeps src layout monolithic; tests live alongside)

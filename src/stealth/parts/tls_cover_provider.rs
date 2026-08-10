@@ -3,26 +3,6 @@
 // Generates synthetic handshake-shaped records without establishing a real
 // TLS session or owning the protocol ClientHello.
 // Ultra-sophisticated TLS Cover Provider for maximum stealth
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TlsCoverCipherPreference {
-    Auto,
-    ChaCha20Poly1305,
-    Aes128Gcm,
-}
-
-impl TlsCoverCipherPreference {
-    fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" | "" => Some(Self::Auto),
-            "chacha" | "chacha20" | "chacha20poly1305" => Some(Self::ChaCha20Poly1305),
-            "aes" | "aesgcm" | "aes-gcm" | "aes128gcm" | "aes-128-gcm" | "ctr" | "aesctr" => {
-                Some(Self::Aes128Gcm)
-            }
-            _ => None,
-        }
-    }
-}
-
 /// Manages synthetic TLS record generation for DPI evasion on a per-connection basis.
 pub(crate) struct TlsCoverProvider {
     crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
@@ -54,9 +34,7 @@ impl TlsCoverProvider {
     fn cipher_preference_from_env_with_snapshot(
         environment: &crate::env_utils::EnvSnapshot,
     ) -> TlsCoverCipherPreference {
-        environment
-            .first_with(["QUICFUSCATE_TLS_COVER_CIPHER"], TlsCoverCipherPreference::parse)
-            .unwrap_or(TlsCoverCipherPreference::Auto)
+        TlsCoverCipherPreference::from_snapshot(environment)
     }
 
     fn tls_cover_profile_name(environment: &crate::env_utils::EnvSnapshot) -> String {
@@ -66,31 +44,11 @@ impl TlsCoverProvider {
     }
 
     fn has_hardware_aes() -> bool {
-        let detector = crate::optimize::FeatureDetector::instance();
-        detector.has_feature(crate::optimize::CpuFeature::AESNI)
-            || detector.has_feature(crate::optimize::CpuFeature::VAES)
-            || detector.has_feature(crate::optimize::CpuFeature::AES)
+        TlsCoverCipherPreference::has_hardware_aes()
     }
 
     fn resolve_cipher_suite(pref: TlsCoverCipherPreference) -> TlsCoverCipherSuite {
-        match pref {
-            TlsCoverCipherPreference::Auto => {
-                if Self::has_hardware_aes() {
-                    TlsCoverCipherSuite::Aes128Gcm
-                } else {
-                    TlsCoverCipherSuite::ChaCha20Poly1305
-                }
-            }
-            TlsCoverCipherPreference::ChaCha20Poly1305 => TlsCoverCipherSuite::ChaCha20Poly1305,
-            TlsCoverCipherPreference::Aes128Gcm => {
-                if !Self::has_hardware_aes() {
-                    log::warn!(
-                        "TLS Cover AES-128-GCM requested but hardware lacks AES acceleration; using scalar fallback"
-                    );
-                }
-                TlsCoverCipherSuite::Aes128Gcm
-            }
-        }
+        pref.resolve()
     }
 
     /// Constructs a provider for the given role, deriving cover-traffic key material.

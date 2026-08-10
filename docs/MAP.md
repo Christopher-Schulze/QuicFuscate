@@ -2324,7 +2324,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Backend Continuation: TLS Cover and Audit Test Ownership (2026-08-10)
 
-- `crates/qf-stealth/src/tls_cover.rs` -> `TlsCoverCipherSuite` canonical contract; `src/stealth/parts/tls_cover_provider.rs` -> preference parsing and provider installation; `src/stealth/mod.rs` -> historical compatibility reexport.
+- `crates/qf-stealth/src/tls_cover.rs` -> `TlsCoverCipherSuite` canonical contract; the later `fingerprint_profile.rs` extraction owns preference parsing and hardware-aware selection; `src/stealth/parts/tls_cover_provider.rs` retains provider installation; `src/stealth/mod.rs` keeps the historical compatibility path.
 - `crates/qf-audit/src/lib.rs` -> unique fixture paths plus complete audit-file-set cleanup for tests, covering active files, checkpoints, and rotated segments.
 - Evidence: qf-stealth `99/99`, root Stealth `190/190`, qf-audit `42/42`, strict workspace Clippy, all-feature workspace check, formatting, diff hygiene, and full workspace all-target `rust-tests` exit `0`. The all-feature/all-target lanes remain platform-bounded by the unchanged Linux-only guards on macOS ARM64.
 - Protected frontend and Tauri paths are unchanged; no frontend field/API projection is required by these backend slices.
@@ -2475,8 +2475,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Stealth Persona Enum Workspace Leaf (2026-08-09, TODO-562)
 
-- `crates/qf-stealth/src/profiles.rs` is the canonical owner for the root-independent `BrowserProfile` and `OsProfile` persona identifiers, serde/CLI derives, case-insensitive parsers, and legacy macOS aliases. The root `src/stealth/parts/browser_profiles.rs` re-exports the child types; `FingerprintProfile` remains root-local because it couples TLS Cover, environment snapshots, and transport-facing metadata.
-- qf-stealth depends on `qf-common`, `clap`, `log`, `rand`, and `serde`; `quicfuscate -> qf-stealth` remains one-way. No engine, transport, H3, implementation, frontend, or Tauri implementation crosses into the child.
+- `crates/qf-stealth/src/profiles.rs` is the canonical owner for the root-independent `BrowserProfile` and `OsProfile` persona identifiers, serde/CLI derives, case-insensitive parsers, and legacy macOS aliases. The later `fingerprint_profile.rs` extraction owns the complete persona matrix; the root `src/stealth/parts/browser_profiles.rs` now only re-exports child contracts.
+- qf-stealth depends on `qf-common`, `qf-cpu`, `clap`, `log`, `rand`, and `serde`; `qf-cpu` supplies the canonical hardware feature detector used by TLS Cover cipher selection. No engine, transport, H3, implementation, frontend, or Tauri implementation crosses into the child.
 - Isolated qf-stealth all-target/all-feature tests pass `19/19`; strict qf-stealth Clippy, root all-target checking with `rust-tests`, root strict `rust-tests` Clippy, and the complete workspace all-target `rust-tests` matrix pass with exit 0. Root contributes `1,748` tests and qf-stealth contributes `19`; the three profile-contract tests are included.
 - Fresh seam evidence is `scripts/out/audits/workspace-seams-20260809T-qf-stealth-profiles-final/workspace-seams.json`: `35` workspace packages, `284` Rust files, `205,067` source lines, `130` module edges, `92` Cargo workspace dependency edges, and the unchanged 9-module product SCC (`brain`, `core`, `engine`, `fec`, `implementations`, `interface`, `qftls`, `stealth`, `transport`). The only qf-stealth workspace dependency is `qf-stealth -> qf-common`; `quicfuscate -> qf-stealth` is the product edge; `protected_changes=[]`.
 - Runtime guardrails are fully green at `scripts/out/audits/runtime-guardrails-20260809T-qf-stealth-profiles-final/audit-runtime-guardrails.log` with `Critical: 0` and `Warnings: 0`; AMX proof and SIMD feature contracts pass. The complete all-feature/all-target Clippy lane remains blocked by the repository-owned Linux-only guards at `scripts/tests/rust/rt-io-hotpath-kernel-integration.rs:4` and `scripts/tests/rust/rt-transport-uring.rs:8` on macOS ARM64, with no guard weakened.
@@ -2746,3 +2746,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-transport-types `38/38`; focused root H3 `76/76`; root/workspace check and strict `rust-tests` Clippy; workspace all-feature check; formatting and diff hygiene; complete workspace all-target `rust-tests` exit `0`, including root `1,658/1,658`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-h3-contract-postpush/workspace-seams.json` at source revision `15c3a1c7e31c1a82ab0a4e36c8814dcff523afb7`; `36` packages, `327` Rust files, `206,622` source lines, `125` module edges, `111` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
 - The post-test disk guard records `4,924,504 KiB` target usage and `21,896,264 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
+
+## Stealth Fingerprint Profile Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical owner: `crates/qf-stealth/src/fingerprint_profile.rs` for `FingerprintProfile`, strict rotation-slot resolution, persona metadata, deterministic TLS audit material, `TlsCoverCipherPreference`, and hardware-aware cipher selection through `qf-cpu`.
+- Compatibility owners: `src/stealth/parts/browser_profiles.rs` for historical type paths and `src/stealth/parts/tls_cover_provider.rs` for root crypto-context installation. No second profile matrix, preference parser, or hardware-selection policy remains in the root.
+- Verification: qf-stealth `103/103`; focused root Stealth `82/82`; root check; strict child/workspace Clippy; formatting and diff hygiene; complete workspace all-target `rust-tests` exit `0`, including root `1,658/1,658`.
+- The final disk guard records `8,571,612 KiB` target usage and `15,515,880 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

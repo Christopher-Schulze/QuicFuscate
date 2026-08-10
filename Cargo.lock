@@ -1705,6 +1705,7 @@ dependencies = [
  "clap",
  "log",
  "qf-common",
+ "qf-cpu",
  "rand",
  "serde",
  "serde_json",

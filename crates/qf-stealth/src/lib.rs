@@ -13,6 +13,10 @@ pub use fingerprint::{
     IpIdBehavior, NormalizeOutcome, NormalizeResult, OsFingerprintProfile, PacketNormalizer,
 };
 #[doc(hidden)]
+pub use fingerprint_profile::{
+    parse_fingerprint_profile_slot, FingerprintProfile, TlsCoverCipherPreference,
+};
+#[doc(hidden)]
 pub use flow_shaping::{FlowShaper, StealthPacketClass};
 #[doc(hidden)]
 pub use profiles::{parse_profile_slot, BrowserProfile, OsProfile};
@@ -40,6 +44,8 @@ pub mod chaff;
 pub mod config;
 #[doc(hidden)]
 pub mod fingerprint;
+#[doc(hidden)]
+pub mod fingerprint_profile;
 #[doc(hidden)]
 pub mod probe_detector;
 #[doc(hidden)]
