@@ -1667,6 +1667,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - Intel no longer enumerates separate AVX10 vector lengths. The historical `avx10_1_256` and `avx10_1_512` fields remain compatibility projections and are set together for verified AVX10.1; `X86_P4a` remains a synthetic compatibility profile while runtime detection selects `X86_P4b`.
 - Stable Linux x86_64 all-feature checking passes, qf-cpu all-feature tests pass `87/87`, strict qf-cpu test Clippy passes, workspace all-feature library/binary/example Clippy passes, and the serial root all-feature library passes. The removed `avx10.1-256`/`avx10.1-512` Rust feature macros are absent. No frontend or Tauri path changes.
 - Post-push seam evidence at `scripts/out/audits/workspace-seams-20260810T-stable-avx10-detection-postpush/workspace-seams.json` records published revision `1fad839e8ebe84767fbea2389eba40edf6fcf476`, 36 packages, 336 Rust files, 207,784 source lines, 106 module edges, 123 workspace dependency edges, no strongly connected components, and `protected_changes=[]`.
+- The AMX proof contract audit uses ripgrep when present and a recursive fixed-string grep fallback otherwise; both local paths produce byte-identical passing output. CI therefore has no undeclared ripgrep requirement.
 
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 

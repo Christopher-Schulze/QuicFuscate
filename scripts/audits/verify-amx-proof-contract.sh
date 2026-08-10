@@ -8,11 +8,21 @@ cd "$PROJECT_ROOT"
 
 FAILURES=0
 
+fixed_match() {
+  local value="$1"
+  shift
+  if command -v rg >/dev/null 2>&1; then
+    rg -n --no-messages -F -- "$value" "$@" >/dev/null
+  else
+    grep -RsnF -- "$value" "$@" >/dev/null 2>&1
+  fi
+}
+
 check_literal() {
   local label="$1"
   local value="$2"
   shift 2
-  if rg -n --no-messages -F -- "$value" "$@" >/dev/null; then
+  if fixed_match "$value" "$@"; then
     printf 'PASS: %s\n' "$label"
   else
     printf 'FAIL: %s\n' "$label"
@@ -24,7 +34,7 @@ check_absent() {
   local label="$1"
   local value="$2"
   shift 2
-  if rg -n --no-messages -F -- "$value" "$@" >/dev/null; then
+  if fixed_match "$value" "$@"; then
     printf 'FAIL: %s\n' "$label"
     FAILURES=$((FAILURES + 1))
   else
