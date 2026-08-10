@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Process-real negative and rollback proof for Linux TUN provisioning.
 #
-# The harness runs the real server binary inside one isolated network
-# namespace and proves that failed creation does not leave an owned TUN
-# interface behind, while pre-existing resources remain untouched.
+# The harness runs the real server binary inside one isolated network namespace
+# and a private mount namespace with an isolated /run. Failed creation must not
+# leave an owned TUN interface behind, while pre-existing resources stay intact.
+# The adversarial missing-interface case retains only isolated ownership evidence.
 #
 # Covered cases:
 #   - overlong requested interface name
@@ -11,15 +12,16 @@
 #   - permission denial without CAP_NET_ADMIN
 #   - conflicting address after TUNSETIFF
 #   - missing interface race during routing setup
-#   - routing setup failure, retry, and zero residue
+#   - routing setup failure, retry, and isolated fail-closed ownership evidence
 #
-# Requirements: Linux, root, iproute2, openssl, runuser, and a built binary.
+# Requirements: Linux, root, iproute2, mount, openssl, runuser, unshare, and a built binary.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 RUNTIME_DIR=""
+ISOLATED_RUN_DIR=""
 CERT=""
 KEY=""
 NOBODY_RUNTIME_DIR=""
@@ -89,7 +91,7 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "SKIP: Linux TUN provisioning proof requires root"
   exit 0
 fi
-for command_name in ip openssl ps runuser; do
+for command_name in ip mount openssl ps runuser unshare; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
 if [ ! -x "$BINARY" ]; then
@@ -102,6 +104,9 @@ fi
 RUNTIME_DIR="$(mktemp -d /tmp/quicfuscate-tun-provisioning.XXXXXX)" ||
   fail "could not create isolated runtime directory"
 chmod 755 "$RUNTIME_DIR" || fail "could not make test certificates readable"
+ISOLATED_RUN_DIR="$RUNTIME_DIR/run"
+mkdir "$ISOLATED_RUN_DIR" || fail "could not create isolated /run backing directory"
+chmod 755 "$ISOLATED_RUN_DIR" || fail "could not make isolated /run backing directory accessible"
 CERT="$RUNTIME_DIR/server.crt"
 KEY="$RUNTIME_DIR/server.key"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
@@ -131,13 +136,12 @@ server_command() {
   local log="$RUNTIME_DIR/${label}.log"
   local binary="$BINARY"
   local qkey_store="$RUNTIME_DIR/${label}-qkeys.json"
-  local -a command=(ip netns exec "$NAMESPACE")
+  local -a payload
   if [ "$run_as" = "nobody" ]; then
     binary="$NOBODY_BINARY"
     qkey_store="$NOBODY_RUNTIME_DIR/${label}-qkeys.json"
-    command+=(runuser -u nobody --)
   fi
-  command+=(
+  payload=(
     "$binary" server
     --cert "$CERT"
     --key "$KEY"
@@ -148,6 +152,21 @@ server_command() {
     --tun-name "$tun_name"
     --tun-ip "$tun_ip"
     --tun-netmask "$tun_netmask"
+  )
+  if [ "$run_as" = "nobody" ]; then
+    payload=(runuser -u nobody -- "${payload[@]}")
+  fi
+  local -a command=(
+    ip netns exec "$NAMESPACE"
+    unshare --mount --propagation private --
+    /bin/bash -c '
+      set -eu
+      isolated_run=$1
+      shift
+      mount --bind "$isolated_run" /run
+      exec "$@"
+    ' qf-tun-provisioning-mount "$ISOLATED_RUN_DIR"
+    "${payload[@]}"
   )
   "${command[@]}" >"$log" 2>&1 &
   SERVER_PID=$!
@@ -231,6 +250,8 @@ expect_failure "routing-failure" root "$PARTIAL_NAME" 10.20.3.1 255.255.255.0
 assert_interface_absent "$PARTIAL_NAME"
 expect_failure "routing-retry" root "$PARTIAL_NAME" 10.20.3.1 255.255.255.0
 assert_interface_absent "$PARTIAL_NAME"
+[ ! -e "$ISOLATED_RUN_DIR/quicfuscate/routing/firewall-owner.json" ] ||
+  fail "ordinary routing rollback left isolated durable firewall ownership residue"
 
 MISSING_NAME="qf-missing"
 ip netns exec "$NAMESPACE" ip link add eth0 type dummy ||
@@ -264,7 +285,9 @@ missing_status=$?
 SERVER_PID=""
 [ "$missing_status" -ne 0 ] || fail "missing-interface case unexpectedly succeeded"
 assert_interface_absent "$MISSING_NAME"
+[ -f "$ISOLATED_RUN_DIR/quicfuscate/routing/firewall-owner.json" ] ||
+  fail "missing-interface case did not retain isolated fail-closed ownership evidence"
 ip netns exec "$NAMESPACE" ip link delete dev eth0 ||
   fail "could not remove the missing-interface WAN sentinel"
 
-echo "PASS: Linux TUN provisioning rejects invalid/conflicting activation and leaves zero owned residue"
+echo "PASS: Linux TUN provisioning rejects invalid/conflicting activation and contains fail-closed ownership evidence inside isolated /run"

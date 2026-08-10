@@ -1227,12 +1227,16 @@ if [[ -x "$TUN_PROVISIONING_NEGATIVE_HARNESS" ]] \
   && rg -F -- 'missing-interface' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
   && rg -F -- 'assert_interface_absent' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
   && rg -F -- 'ip netns add "$NAMESPACE"' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'unshare --mount --propagation private --' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- 'mount --bind "$isolated_run" /run' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- '[ ! -e "$ISOLATED_RUN_DIR/quicfuscate/routing/firewall-owner.json" ]' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
+  && rg -F -- '[ -f "$ISOLATED_RUN_DIR/quicfuscate/routing/firewall-owner.json" ]' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null \
   && ! rg -n --no-messages 'pkill|killall' "$TUN_PROVISIONING_NEGATIVE_HARNESS" >/dev/null; then
-  pass "Linux TUN provisioning has a process-real negative, retry, rollback, and zero-residue namespace harness"
-  append_item "tun_provisioning_negative_namespace_proof" "ok" "overlong names, duplicate state, permission denial, conflicting address, missing interface, retry, and exact residue checks are present"
+  pass "Linux TUN provisioning has a process-real negative, retry, rollback, network, and runtime-isolation harness"
+  append_item "tun_provisioning_negative_namespace_proof" "ok" "negative cases, private mount namespace, isolated /run, ordinary zero residue, adversarial fail-closed evidence, and exact process ownership are present"
 else
   fail_critical "Linux TUN provisioning negative namespace proof is missing or incomplete"
-  append_item "tun_provisioning_negative_namespace_proof" "fail" "missing executable harness, required negative cases, exact residue checks, namespace setup, or safe process ownership"
+  append_item "tun_provisioning_negative_namespace_proof" "fail" "missing executable harness, required negative cases, network/runtime isolation, exact residue checks, or safe process ownership"
 fi
 
 SPECIALIZED_TUN_E2E_HARNESSES=(
