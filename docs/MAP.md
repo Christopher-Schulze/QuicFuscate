@@ -2957,3 +2957,15 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-engine-types `58/58`; workspace all-feature check; strict workspace Clippy; exact admin-auth rerun `1/1`; serial root all-feature library suite `1,655/1,655`; formatting and diff hygiene. Frontend and Tauri are unaffected.
 - Pre-commit seam evidence: `scripts/out/audits/workspace-seams-20260810T-engine-config-owner-dirty/workspace-seams.json` at source revision `7e74718cc89277eb1acd45423a406b859931f3c9`; `36` packages, `335` Rust files, `207,177` source lines, `107` module edges, `123` workspace dependency edges, sole SCC `qftls/transport`, and `protected_changes=[]`. `engine -> implementations` remains one-way at six references; `implementations -> engine` is absent. Final target/free space is `9,954,336 / 7,448,376 KiB`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-engine-config-owner-postpush/workspace-seams.json` at source revision `b8c539c8b9458a974fe994b08e33c58aba0e4b19`; counts and edge topology match the pre-commit report exactly, with `protected_changes=[]`.
+
+## QFTLS Packet-Key Installation Port (2026-08-10, TODO-562)
+
+- Outgoing handshake flow: rustls transcript -> QFTLS-owned `qf-transport-crypto-stream::CryptoStream` -> transport frame scheduling -> transport recovery callbacks -> QFTLS ACK/loss/PTO range ownership.
+- Packet-key flow: rustls `KeyChange` -> `QuicTlsHandshakeKeys` or `QuicTlsOneRttKeys` -> transport-owned `QuicTlsKeyInstaller` -> `CryptoContext` packet and header-protection slots. A rustls 1-RTT install atomically clears stale secret-derived generations and previous-read keys.
+- TLS Cover flow: qf-stealth policy/material -> QFTLS adapter -> `qf-crypto::TlsCoverCipherState`; root `CryptoContext` delegates its compatibility record API to the same cipher owner.
+- The direct `qftls -> transport` edge is absent. `transport -> qftls` remains the intentional provider/factory/installer implementation direction with six references.
+- Transcript reset flow: QFTLS rebuild -> `CryptoStream::reset()` -> unsent/unacknowledged/retransmission/receive state discarded -> fresh ClientHello at offset zero.
+- Focused verification: qf-crypto `140/140`; qf-transport-crypto-stream `2/2`; QFTLS `21/21`; transport connection `134/134`; direct installer `1/1`; TLS Cover integration `3/3`.
+- Full verification: workspace all-feature check; strict workspace library/binary/example Clippy; serial root all-feature library `1,657/1,657`; formatting; documentation truth; diff hygiene. Final pre-commit target/free space: `11,334,752 / 4,207,260 KiB`.
+- Final pre-commit seam evidence: `scripts/out/audits/workspace-seams-20260810T-qftls-key-install-port-final-precommit/workspace-seams.json` at source revision `22f7a7274cf9578135eb9b46b331b0cb51a7bbab`; `36` packages, `336` Rust files, `207,678` source lines, `106` module edges, `123` workspace dependency edges, no strongly connected components, and `protected_changes=[]`.
+- Frontend and Tauri are unaffected; no frontend field/API projection is required.

@@ -691,8 +691,8 @@ impl Connection {
 
     fn try_advance_read_keys(&mut self) -> Result<bool, crate::error::ConnectionError> {
         if let Some(provider) = self.tls_provider.as_mut() {
-            if provider.key_update_read().is_ok() {
-                // The rustls provider rotated the read key inside CryptoContext.
+            if provider.key_update_read(&*self.crypto).is_ok() {
+                // The rustls provider rotated the transport-owned read key through the installer.
                 // Sync the lock-free ArcSwap so the hot path picks up the new key.
                 self.sync_1rtt();
                 return Ok(true);

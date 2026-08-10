@@ -594,11 +594,8 @@ cfg.log_keys();
 #### Provider API (Unified)
 ```rust
 use quicfuscate::qftls::create_provider;
-use parking_lot::RwLock;
-use std::sync::Arc;
 
-let crypto = Arc::new(RwLock::new(quicfuscate::transport::packet::CryptoContext::default()));
-let provider = create_provider(false, crypto)?;
+let provider = create_provider(false)?;
 ```
 
 ### Obfuscation-Modes Overview
@@ -2103,11 +2100,8 @@ Pool-backed compression and decompression return a `PooledBlock` RAII owner. Dro
 #### Unified TLS Provider Usage
 ```rust
 use quicfuscate::qftls::create_provider;
-use std::sync::{Arc};
-use parking_lot::RwLock;
 
-let crypto = Arc::new(RwLock::new(quicfuscate::transport::packet::CryptoContext::default()));
-let mut provider = create_provider(is_server, crypto)?;
+let mut provider = create_provider(is_server)?;
 // provider now drives QUIC CRYPTO frames (RealTLS) and optional TLS Cover internally
 ```
 
@@ -6826,3 +6820,14 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Pre-commit seam evidence is `scripts/out/audits/workspace-seams-20260810T-engine-config-owner-dirty/workspace-seams.json` at source revision `7e74718cc89277eb1acd45423a406b859931f3c9`: `36` packages, `335` Rust files, `207,177` source lines, `107` module edges, `123` workspace dependency edges, and `protected_changes=[]`. `engine -> implementations` remains a one-way concrete runtime edge with six references; `engine/implementations` is no longer an SCC. The only remaining product SCC is `qftls/transport`.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-engine-config-owner-postpush/workspace-seams.json` at source revision `b8c539c8b9458a974fe994b08e33c58aba0e4b19` with the same counts, sole `qftls/transport` SCC, one-way six-reference `engine -> implementations` edge, and empty protected changes.
 - Serialized configuration, runtime behavior, public compatibility paths, frontend, and Tauri remain unchanged. The final build guard records `9,954,336 KiB` target usage and `7,448,376 KiB` free, below the cleanup threshold and above the storage floor.
+
+## QFTLS Packet-Key Installation Port (2026-08-10, TODO-562)
+
+- QFTLS owns rustls transcript state and outgoing Initial, Handshake, and application CRYPTO send streams. Transport recovery acknowledges, requeues, and PTO-requeues those retained ranges through `QuicTlsProvider` instead of reaching into a transport-owned send buffer.
+- `QuicTlsKeyInstaller` is the narrow synchronous port from the TLS owner into transport packet protection. QFTLS emits complete Handshake and 1-RTT AEAD and header-protection bundles; `RwLock<CryptoContext>` installs, rotates, reports, and clears them atomically without QFTLS importing `transport` or `CryptoContext`. Installing a rustls 1-RTT bundle also retires any stale secret-derived update lineage and previous-read window.
+- `qf-crypto::TlsCoverCipherState` is the canonical TLS Cover cipher, sequence-advance, algorithm-telemetry, and retired-material owner. The QFTLS cover adapter and the historical `CryptoContext` API use this single implementation.
+- `CryptoStream::reset()` clears unsent, sent-but-unacknowledged, retransmission, and receive state, so a rebuilt TLS transcript cannot replay retained CRYPTO bytes from the replaced connection.
+- Focused verification passes qf-crypto `140/140`, qf-transport-crypto-stream `2/2`, QFTLS `21/21`, transport connection `134/134`, the direct complete-key-bundle installer regression `1/1`, and the TLS Cover integration target `3/3`.
+- Full verification passes workspace all-feature checking, strict workspace library/binary/example Clippy, the complete serial root all-feature library suite `1,657/1,657`, formatting, documentation truth, and diff hygiene. The final pre-commit guard records `11,334,752 KiB` target usage and `4,207,260 KiB` free.
+- Final pre-commit seam evidence is `scripts/out/audits/workspace-seams-20260810T-qftls-key-install-port-final-precommit/workspace-seams.json` at source revision `22f7a7274cf9578135eb9b46b331b0cb51a7bbab`: `36` packages, `336` Rust files, `207,678` source lines, `106` module edges, `123` workspace dependency edges, zero strongly connected components, and `protected_changes=[]`. The remaining TLS ownership direction is one-way `transport -> qftls` with six references.
+- Frontend and Tauri paths remain untouched. No frontend field or API projection is required.

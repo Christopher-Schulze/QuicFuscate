@@ -264,6 +264,9 @@ impl CryptoStream {
     pub fn reset(&mut self) {
         self.send_buf.clear();
         self.send_off = 0;
+        self.unacked.clear();
+        self.unacked_bytes = 0;
+        self.retx.clear();
         self.recv_buf.clear();
         self.recv_off = 0;
         self.recv_max = 0;
@@ -287,5 +290,26 @@ mod tests {
         assert_eq!(stream.recv(u64::MAX, vec![0x01]), Err(ConnectionError::InvalidPacket));
         assert_eq!(stream.ack_crypto(u64::MAX, 1), Err(ConnectionError::InvalidPacket));
         assert_eq!(stream.requeue_crypto(u64::MAX, 1), Err(ConnectionError::InvalidPacket));
+    }
+
+    #[test]
+    fn reset_discards_unsent_unacked_retransmission_and_receive_state() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"sent").expect("queue sent data");
+        let (sent_offset, sent) =
+            stream.next_crypto_frame(usize::MAX).expect("take sent data").expect("sent frame");
+        stream.requeue_crypto(sent_offset, sent.len() as u64).expect("queue retransmission");
+        stream.send(b"unsent").expect("queue unsent data");
+        stream.recv(0, b"received".to_vec()).expect("queue receive data");
+
+        stream.reset();
+
+        assert_eq!(stream.unacked_bytes(), 0);
+        assert!(!stream.has_pending_send());
+        assert!(!stream.has_data());
+        assert_eq!(stream.next_crypto_frame(usize::MAX), Ok(None));
+        assert_eq!(stream.send_off, 0);
+        assert_eq!(stream.recv_off, 0);
+        assert_eq!(stream.recv_max, 0);
     }
 }

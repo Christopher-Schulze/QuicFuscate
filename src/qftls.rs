@@ -3,14 +3,12 @@
 // Consolidates: tls_provider.rs, tls_combined.rs, RealTLS_rustls.rs
 // Provides a single public surface: Level, TlsProfile, QuicTlsProvider, create_provider()
 
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
 use crate::error::ConnectionError;
-use crate::transport::packet::CryptoContext;
 use qf_stealth::{TlsCoverCipherPreference, TlsCoverCipherSuite};
 use qf_transport_types::QUIC_FIXED_BIT;
 #[cfg(test)]
@@ -465,25 +463,21 @@ mod tests {
 
     #[test]
     fn v2_provider_carries_version_information_transport_parameter() {
-        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
         let information = VersionInformation {
             chosen: PROTOCOL_VERSION_V2,
             available: vec![PROTOCOL_VERSION_V2, PROTOCOL_VERSION],
         }
         .encode_parameter()
         .unwrap();
-        let provider =
-            create_provider_for_version(false, crypto, false, PROTOCOL_VERSION_V2, &information)
-                .expect("create v2 provider");
+        let provider = create_provider_for_version(false, false, PROTOCOL_VERSION_V2, &information)
+            .expect("create v2 provider");
         assert!(provider.get_quic_transport_params().ends_with(&information));
     }
 
     #[test]
     fn rustls_client_hello_policy_excludes_chacha_for_chrome_and_firefox() {
-        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
         let mut provider =
-            RustlsProvider::new(false, Arc::clone(&crypto), false, PROTOCOL_VERSION, &[])
-                .expect("client provider");
+            RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("client provider");
 
         for mut profile in [TlsProfile::chrome_130(), TlsProfile::firefox_133()] {
             // This test owns cipher-suite policy only. Cosmetic profile timing
@@ -558,8 +552,7 @@ mod tests {
 
     #[test]
     fn tls_provider_defaults_to_rustls_owner() {
-        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
-        let provider = create_provider(false, crypto).unwrap();
+        let provider = create_provider(false).unwrap();
 
         assert!(provider.provider_name().starts_with("rustls"));
     }
@@ -570,8 +563,7 @@ mod tests {
             .map(|raw| raw != "0" && !raw.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
 
-        let crypto = Arc::new(RwLock::new(CryptoContext::default()));
-        let provider = create_provider(false, crypto).unwrap();
+        let provider = create_provider(false).unwrap();
 
         assert!(!provider.supports_ch_override());
         assert_eq!(provider.provider_name() == "rustls+tls-cover", cover_enabled);
@@ -664,6 +656,49 @@ mod tests {
 ///
 /// The actual protocol TLS engine is always rustls.
 /// Optional TLS cover behavior is composed on top of it.
+pub struct QuicTlsHandshakeKeys {
+    /// Local packet sealer.
+    pub seal: Box<dyn qf_crypto::aead::AeadSeal + Send + Sync>,
+    /// Remote packet opener.
+    pub open: Box<dyn qf_crypto::aead::AeadOpen + Send + Sync>,
+    /// Local header-protection key.
+    pub hp_seal: Box<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
+    /// Remote header-protection key.
+    pub hp_open: Box<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
+}
+
+/// Directional 1-RTT packet-protection keys emitted by the TLS owner.
+pub struct QuicTlsOneRttKeys {
+    /// Local packet sealer.
+    pub seal: Arc<qf_crypto::PacketAeadSeal>,
+    /// Remote packet opener.
+    pub open: Arc<qf_crypto::PacketAeadOpen>,
+    /// Local header-protection key.
+    pub hp_seal: Arc<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
+    /// Remote header-protection key.
+    pub hp_open: Arc<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
+}
+
+/// Transport-owned packet-key installation port consumed by the TLS provider.
+pub trait QuicTlsKeyInstaller: Send + Sync {
+    /// Clear Handshake and 1-RTT keys after a TLS transcript rebuild.
+    fn clear_handshake_and_one_rtt_keys(&self);
+    /// Replace the directional Handshake packet keys atomically under the transport lock.
+    fn install_handshake_keys(&self, keys: QuicTlsHandshakeKeys);
+    /// Replace the directional 1-RTT packet keys atomically under the transport lock.
+    fn install_one_rtt_keys(&self, keys: QuicTlsOneRttKeys);
+    /// Return whether both directional 1-RTT packet keys are installed.
+    fn has_one_rtt_keys(&self) -> bool;
+    /// Attempt a transport-secret-backed read-key update.
+    fn key_update_1rtt_read(&self) -> Result<bool, ConnectionError>;
+    /// Attempt a transport-secret-backed write-key update.
+    fn key_update_1rtt_write(&self) -> Result<bool, ConnectionError>;
+    /// Install the next rustls-provided read key.
+    fn rotate_1rtt_read_keypair(&self, open: Box<dyn qf_crypto::aead::AeadOpen + Send + Sync>);
+    /// Install the next rustls-provided write key.
+    fn rotate_1rtt_write_keypair(&self, seal: Box<dyn qf_crypto::aead::AeadSeal + Send + Sync>);
+}
+
 pub trait QuicTlsProvider: Send + Sync {
     /// Configure with profile
     fn configure(&mut self, profile: &TlsProfile) -> Result<(), ConnectionError>;
@@ -677,10 +712,24 @@ pub trait QuicTlsProvider: Send + Sync {
         level: Level,
         max_len: usize,
     ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError>;
+    /// Retire an acknowledged CRYPTO range at the selected encryption level.
+    fn ack_crypto(&mut self, level: Level, offset: u64, length: u64)
+        -> Result<(), ConnectionError>;
+    /// Requeue a lost CRYPTO range at the selected encryption level.
+    fn requeue_crypto(
+        &mut self,
+        level: Level,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), ConnectionError>;
+    /// Requeue every retained CRYPTO range for a PTO probe.
+    fn requeue_all_crypto(&mut self, level: Level);
+    /// Return whether an Initial or Handshake flight still has unsent bytes.
+    fn has_pending_handshake_send(&self) -> bool;
     /// Poll for new secrets and install them
     fn poll_secrets_and_install(
         &mut self,
-        crypto: &Arc<RwLock<CryptoContext>>,
+        installer: &dyn QuicTlsKeyInstaller,
     ) -> Result<(), ConnectionError>;
     /// Check if handshake is complete
     fn handshake_complete(&self) -> bool;
@@ -715,14 +764,20 @@ pub trait QuicTlsProvider: Send + Sync {
     /// Returns authenticated peer transport parameters once rustls exposes them.
     fn peer_quic_transport_params(&self) -> Option<Vec<u8>>;
     /// Initiate key update
-    fn key_update(&mut self) -> Result<(), ConnectionError>;
+    fn key_update(&mut self, installer: &dyn QuicTlsKeyInstaller) -> Result<(), ConnectionError>;
     /// Advance read-side 1-RTT keys only.
-    fn key_update_read(&mut self) -> Result<(), ConnectionError> {
-        self.key_update()
+    fn key_update_read(
+        &mut self,
+        installer: &dyn QuicTlsKeyInstaller,
+    ) -> Result<(), ConnectionError> {
+        self.key_update(installer)
     }
     /// Advance write-side 1-RTT keys only.
-    fn key_update_write(&mut self) -> Result<(), ConnectionError> {
-        self.key_update()
+    fn key_update_write(
+        &mut self,
+        installer: &dyn QuicTlsKeyInstaller,
+    ) -> Result<(), ConnectionError> {
+        self.key_update(installer)
     }
     /// Get provider name (for debugging)
     fn provider_name(&self) -> &str;
@@ -740,31 +795,25 @@ pub trait QuicTlsProvider: Send + Sync {
 /// Create the canonical TLS provider.
 ///
 /// This always returns the real rustls transport owner with optional cover-layer composition.
-pub fn create_provider(
-    is_server: bool,
-    crypto: Arc<RwLock<CryptoContext>>,
-) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    create_provider_with_peer_verification(is_server, crypto, true)
+pub fn create_provider(is_server: bool) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    create_provider_with_peer_verification(is_server, true)
 }
 
 pub(crate) fn create_provider_with_peer_verification(
     is_server: bool,
-    crypto: Arc<RwLock<CryptoContext>>,
     verify_peer: bool,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    create_provider_for_version(is_server, crypto, verify_peer, PROTOCOL_VERSION, &[])
+    create_provider_for_version(is_server, verify_peer, PROTOCOL_VERSION, &[])
 }
 
 pub(crate) fn create_provider_for_version(
     is_server: bool,
-    crypto: Arc<RwLock<CryptoContext>>,
     verify_peer: bool,
     version: u32,
     version_information_parameter: &[u8],
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
     create_provider_for_version_with_ca(
         is_server,
-        crypto,
         verify_peer,
         version,
         version_information_parameter,
@@ -774,7 +823,6 @@ pub(crate) fn create_provider_for_version(
 
 pub(crate) fn create_provider_for_version_with_ca(
     is_server: bool,
-    crypto: Arc<RwLock<CryptoContext>>,
     verify_peer: bool,
     version: u32,
     version_information_parameter: &[u8],
@@ -783,7 +831,6 @@ pub(crate) fn create_provider_for_version_with_ca(
     let environment = crate::env_utils::EnvSnapshot::capture();
     create_provider_for_version_with_ca_with_snapshot(
         is_server,
-        crypto,
         verify_peer,
         version,
         version_information_parameter,
@@ -794,7 +841,6 @@ pub(crate) fn create_provider_for_version_with_ca(
 
 pub(crate) fn create_provider_for_version_with_ca_with_snapshot(
     is_server: bool,
-    crypto: Arc<RwLock<CryptoContext>>,
     verify_peer: bool,
     version: u32,
     version_information_parameter: &[u8],
@@ -803,7 +849,6 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot(
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
     create_provider_for_version_with_ca_with_snapshot_and_clock(
         is_server,
-        crypto,
         verify_peer,
         version,
         version_information_parameter,
@@ -816,7 +861,6 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
     is_server: bool,
-    crypto: Arc<RwLock<CryptoContext>>,
     verify_peer: bool,
     version: u32,
     version_information_parameter: &[u8],
@@ -826,7 +870,6 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
     Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot_and_clock(
         is_server,
-        crypto,
         verify_peer,
         version,
         version_information_parameter,
@@ -859,24 +902,15 @@ impl CombinedProvider {
     /// Create a new combined provider (rustls + optional TLS cover).
     pub fn new(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
     ) -> Result<Self, ConnectionError> {
-        Self::new_with_ca(
-            is_server,
-            crypto,
-            verify_peer,
-            version,
-            version_information_parameter,
-            None,
-        )
+        Self::new_with_ca(is_server, verify_peer, version, version_information_parameter, None)
     }
 
     fn new_with_ca(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -885,7 +919,6 @@ impl CombinedProvider {
         let environment = crate::env_utils::EnvSnapshot::capture();
         Self::new_with_ca_with_snapshot(
             is_server,
-            crypto,
             verify_peer,
             version,
             version_information_parameter,
@@ -896,7 +929,6 @@ impl CombinedProvider {
 
     fn new_with_ca_with_snapshot(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -905,7 +937,6 @@ impl CombinedProvider {
     ) -> Result<Self, ConnectionError> {
         Self::new_with_ca_with_snapshot_and_clock(
             is_server,
-            crypto,
             verify_peer,
             version,
             version_information_parameter,
@@ -918,7 +949,6 @@ impl CombinedProvider {
     #[allow(clippy::too_many_arguments)]
     fn new_with_ca_with_snapshot_and_clock(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -928,7 +958,6 @@ impl CombinedProvider {
     ) -> Result<Self, ConnectionError> {
         let rustls = RustlsProvider::new_with_ca_with_snapshot_and_clock(
             is_server,
-            crypto.clone(),
             verify_peer,
             version,
             version_information_parameter,
@@ -944,8 +973,7 @@ impl CombinedProvider {
             // Check stealth mode to determine TLS Cover behavior
             let stealth_mode = Self::env_string(environment, "QUICFUSCATE_STEALTH_MODE", "stealth");
 
-            let mut tls_cover =
-                TlsCoverProvider::new_with_snapshot(is_server, crypto.clone(), environment)?;
+            let mut tls_cover = TlsCoverProvider::new_with_snapshot(is_server, environment)?;
 
             // In base/performance mode, TLS Cover still runs but without artificial delays
             if stealth_mode == "base" || stealth_mode == "performance" || stealth_mode == "off" {
@@ -1023,16 +1051,42 @@ impl QuicTlsProvider for CombinedProvider {
         Ok(None)
     }
 
+    fn ack_crypto(
+        &mut self,
+        level: Level,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), ConnectionError> {
+        self.rustls.ack_crypto(level, offset, length)
+    }
+
+    fn requeue_crypto(
+        &mut self,
+        level: Level,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), ConnectionError> {
+        self.rustls.requeue_crypto(level, offset, length)
+    }
+
+    fn requeue_all_crypto(&mut self, level: Level) {
+        self.rustls.requeue_all_crypto(level);
+    }
+
+    fn has_pending_handshake_send(&self) -> bool {
+        self.rustls.has_pending_handshake_send()
+    }
+
     fn poll_secrets_and_install(
         &mut self,
-        crypto: &Arc<RwLock<CryptoContext>>,
+        installer: &dyn QuicTlsKeyInstaller,
     ) -> Result<(), ConnectionError> {
         if let Some(ref mut c) = self.cover {
-            if let Err(e) = c.poll_secrets_and_install(crypto) {
+            if let Err(e) = c.poll_secrets_and_install() {
                 log::debug!("TLS cover provider secret poll/install failed: {}", e);
             }
         }
-        self.rustls.poll_secrets_and_install(crypto)
+        self.rustls.poll_secrets_and_install(installer)
     }
 
     fn handshake_complete(&self) -> bool {
@@ -1073,14 +1127,20 @@ impl QuicTlsProvider for CombinedProvider {
     fn peer_quic_transport_params(&self) -> Option<Vec<u8>> {
         self.rustls.peer_quic_transport_params()
     }
-    fn key_update(&mut self) -> Result<(), ConnectionError> {
-        self.rustls.key_update()
+    fn key_update(&mut self, installer: &dyn QuicTlsKeyInstaller) -> Result<(), ConnectionError> {
+        self.rustls.key_update(installer)
     }
-    fn key_update_read(&mut self) -> Result<(), ConnectionError> {
-        self.rustls.key_update_read()
+    fn key_update_read(
+        &mut self,
+        installer: &dyn QuicTlsKeyInstaller,
+    ) -> Result<(), ConnectionError> {
+        self.rustls.key_update_read(installer)
     }
-    fn key_update_write(&mut self) -> Result<(), ConnectionError> {
-        self.rustls.key_update_write()
+    fn key_update_write(
+        &mut self,
+        installer: &dyn QuicTlsKeyInstaller,
+    ) -> Result<(), ConnectionError> {
+        self.rustls.key_update_write(installer)
     }
     fn provider_name(&self) -> &str {
         if self.cover.is_some() {
@@ -1115,6 +1175,11 @@ mod rustls_provider {
     use std::sync::Arc;
     use std::time::Instant;
     use webpki_roots;
+
+    enum PendingKeyChange {
+        Handshake(QuicTlsHandshakeKeys),
+        OneRtt(QuicTlsOneRttKeys),
+    }
 
     pub(super) fn validate_server_identity_pem(
         cert_pem: &[u8],
@@ -1170,8 +1235,16 @@ mod rustls_provider {
         pub connection: rustls::quic::Connection,
         /// Monotonic clock shared with the owning QUIC connection.
         pub clock: crate::time_source::ProtocolClock,
-        /// Shared crypto context for installing packet protection keys.
-        pub crypto: Arc<RwLock<CryptoContext>>,
+        /// Outgoing Initial CRYPTO stream owned by this TLS transcript.
+        pub crypto_initial: qf_transport_crypto_stream::CryptoStream,
+        /// Outgoing Handshake CRYPTO stream owned by this TLS transcript.
+        pub crypto_handshake: qf_transport_crypto_stream::CryptoStream,
+        /// Outgoing application-level CRYPTO stream owned by this TLS transcript.
+        pub crypto_application: qf_transport_crypto_stream::CryptoStream,
+        /// Packet-key changes awaiting synchronous transport installation.
+        pending_key_changes: VecDeque<PendingKeyChange>,
+        /// Whether the transport must discard keys from a replaced TLS transcript.
+        reset_packet_keys: bool,
         /// True if this is a server-side provider.
         pub is_server: bool,
         /// Immutable environment generation used by this TLS runtime owner.
@@ -1306,9 +1379,8 @@ mod rustls_provider {
 
         #[test]
         fn profile_jitter_is_scheduled_without_blocking_configuration() {
-            let crypto = Arc::new(RwLock::new(CryptoContext::default()));
             let mut provider =
-                RustlsProviderImpl::new_with_ca(false, crypto, false, PROTOCOL_VERSION, &[], None)
+                RustlsProviderImpl::new_with_ca(false, false, PROTOCOL_VERSION, &[], None)
                     .expect("client provider");
             let mut profile = TlsProfile::chrome_130();
             profile.timing_jitter = Some(Duration::from_secs(2));
@@ -1322,6 +1394,43 @@ mod rustls_provider {
             assert!(provider
                 .next_crypto_frame(Level::Initial, 1200)
                 .expect("profile delay probe")
+                .is_none());
+        }
+
+        #[test]
+        fn provider_owned_crypto_range_requeues_and_retires_exact_bytes() {
+            let mut provider =
+                RustlsProviderImpl::new_with_ca(false, false, PROTOCOL_VERSION, &[], None)
+                    .expect("client provider");
+            let mut profile = TlsProfile::chrome_130();
+            profile.timing_jitter = Some(Duration::from_secs(2));
+            provider.apply_profile_to_config(&profile).expect("profile configuration");
+            provider.crypto_initial.send(b"client-hello-range").expect("queue CRYPTO range");
+
+            assert!(provider.has_pending_handshake_send());
+            let (offset, first) = provider
+                .next_crypto_frame(Level::Initial, usize::MAX)
+                .expect("take CRYPTO range")
+                .expect("queued CRYPTO range");
+            assert_eq!((offset, first.as_slice()), (0, b"client-hello-range".as_slice()));
+            assert!(!provider.has_pending_handshake_send());
+
+            provider
+                .requeue_crypto(Level::Initial, offset, first.len() as u64)
+                .expect("requeue lost CRYPTO range");
+            let retransmission = provider
+                .next_crypto_frame(Level::Initial, usize::MAX)
+                .expect("take retransmission")
+                .expect("queued retransmission");
+            assert_eq!(retransmission, (offset, first.clone()));
+
+            provider
+                .ack_crypto(Level::Initial, offset, first.len() as u64)
+                .expect("retire acknowledged CRYPTO range");
+            provider.requeue_all_crypto(Level::Initial);
+            assert!(provider
+                .next_crypto_frame(Level::Initial, usize::MAX)
+                .expect("probe retired range")
                 .is_none());
         }
     }
@@ -1363,10 +1472,6 @@ mod rustls_provider {
             }
         }
 
-        fn client_crypto() -> Arc<RwLock<CryptoContext>> {
-            Arc::new(RwLock::new(CryptoContext::default()))
-        }
-
         #[test]
         fn client_ca_root_store_rejects_missing_and_invalid_pem() {
             let fixture = CaFixture::new("missing-and-invalid");
@@ -1405,7 +1510,6 @@ mod rustls_provider {
 
             let first_provider = RustlsProviderImpl::new_with_ca(
                 false,
-                client_crypto(),
                 false,
                 PROTOCOL_VERSION,
                 &[],
@@ -1414,7 +1518,6 @@ mod rustls_provider {
             .expect("first client provider");
             let second_provider = RustlsProviderImpl::new_with_ca(
                 false,
-                client_crypto(),
                 false,
                 PROTOCOL_VERSION,
                 &[],
@@ -1423,7 +1526,6 @@ mod rustls_provider {
             .expect("second client provider");
             let repeated_provider = RustlsProviderImpl::new_with_ca(
                 false,
-                client_crypto(),
                 false,
                 PROTOCOL_VERSION,
                 &[],
@@ -1518,7 +1620,6 @@ mod rustls_provider {
         #[cfg(test)]
         pub fn new_with_ca(
             is_server: bool,
-            crypto: Arc<RwLock<CryptoContext>>,
             verify_peer: bool,
             version: u32,
             version_information_parameter: &[u8],
@@ -1527,7 +1628,6 @@ mod rustls_provider {
             let environment = crate::env_utils::EnvSnapshot::capture();
             Self::new_with_ca_with_snapshot(
                 is_server,
-                crypto,
                 verify_peer,
                 version,
                 version_information_parameter,
@@ -1539,7 +1639,6 @@ mod rustls_provider {
         #[allow(dead_code)]
         pub fn new_with_ca_with_snapshot(
             is_server: bool,
-            crypto: Arc<RwLock<CryptoContext>>,
             verify_peer: bool,
             version: u32,
             version_information_parameter: &[u8],
@@ -1548,7 +1647,6 @@ mod rustls_provider {
         ) -> Result<Self, ConnectionError> {
             Self::new_with_ca_with_snapshot_and_clock(
                 is_server,
-                crypto,
                 verify_peer,
                 version,
                 version_information_parameter,
@@ -1561,7 +1659,6 @@ mod rustls_provider {
         #[allow(clippy::too_many_arguments)]
         pub fn new_with_ca_with_snapshot_and_clock(
             is_server: bool,
-            crypto: Arc<RwLock<CryptoContext>>,
             verify_peer: bool,
             version: u32,
             version_information_parameter: &[u8],
@@ -1587,7 +1684,11 @@ mod rustls_provider {
             let this = Self {
                 connection,
                 clock: clock.clone(),
-                crypto,
+                crypto_initial: qf_transport_crypto_stream::CryptoStream::new(),
+                crypto_handshake: qf_transport_crypto_stream::CryptoStream::new(),
+                crypto_application: qf_transport_crypto_stream::CryptoStream::new(),
+                pending_key_changes: VecDeque::new(),
+                reset_packet_keys: false,
                 is_server,
                 #[cfg(debug_assertions)]
                 environment: Arc::new(environment.clone()),
@@ -1634,30 +1735,39 @@ mod rustls_provider {
             if data.is_empty() {
                 return Ok(());
             }
-            let mut crypto = self.crypto.write();
             let result = match level {
-                super::Level::Initial => crypto.crypto_initial.send(data),
-                super::Level::Handshake => crypto.crypto_handshake.send(data),
-                _ => crypto.crypto_application.send(data),
+                super::Level::Initial => self.crypto_initial.send(data),
+                super::Level::Handshake => self.crypto_handshake.send(data),
+                _ => self.crypto_application.send(data),
             };
             result?;
             self.bytes_sent = self.bytes_sent.saturating_add(data.len());
             Ok(())
         }
 
-        fn install_key_change(
+        fn crypto_stream_mut(
             &mut self,
-            kc: rustls::quic::KeyChange,
-        ) -> Result<(), ConnectionError> {
+            level: super::Level,
+        ) -> &mut qf_transport_crypto_stream::CryptoStream {
+            match level {
+                super::Level::Initial => &mut self.crypto_initial,
+                super::Level::Handshake => &mut self.crypto_handshake,
+                _ => &mut self.crypto_application,
+            }
+        }
+
+        fn queue_key_change(&mut self, kc: rustls::quic::KeyChange) -> Result<(), ConnectionError> {
             match kc {
                 rustls::quic::KeyChange::Handshake { keys } => {
                     super::trace_key_change(self.is_server, "Handshake");
-                    self.install_handshake_keys(keys)?;
+                    self.pending_key_changes
+                        .push_back(PendingKeyChange::Handshake(Self::handshake_keys(keys)));
                     self.write_level = super::Level::Handshake;
                 }
                 rustls::quic::KeyChange::OneRtt { keys, next } => {
                     super::trace_key_change(self.is_server, "OneRtt");
-                    self.install_1rtt_keys(keys)?;
+                    self.pending_key_changes
+                        .push_back(PendingKeyChange::OneRtt(Self::one_rtt_keys(keys)));
                     self.next_1rtt_secrets = Some(next);
                     self.write_level = super::Level::Application;
                 }
@@ -1685,7 +1795,7 @@ mod rustls_provider {
                     self.queue_crypto_bytes(level, &pending)?;
                 }
                 if let Some(kc) = kc {
-                    self.install_key_change(kc)?;
+                    self.queue_key_change(kc)?;
                     continue;
                 }
                 // No key change signaled; if no data was produced, we're done.
@@ -1696,10 +1806,7 @@ mod rustls_provider {
             Ok(())
         }
 
-        fn install_handshake_keys(
-            &mut self,
-            keys: rustls::quic::Keys,
-        ) -> Result<(), ConnectionError> {
+        fn handshake_keys(keys: rustls::quic::Keys) -> QuicTlsHandshakeKeys {
             let local_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.local.packet.into();
             let remote_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.remote.packet.into();
             let local_hp: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey> =
@@ -1707,15 +1814,15 @@ mod rustls_provider {
             let remote_hp: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey> =
                 keys.remote.header.into();
 
-            let mut crypto = self.crypto.write();
-            crypto.seal_handshake = Some(Box::new(RustlsPacketSeal { key: local_pkt.clone() }));
-            crypto.open_handshake = Some(Box::new(RustlsPacketOpen { key: remote_pkt.clone() }));
-            crypto.hp_handshake = Some(Box::new(RustlsHp { key: local_hp.clone() }));
-            crypto.hp_handshake_open = Some(Box::new(RustlsHp { key: remote_hp.clone() }));
-            Ok(())
+            QuicTlsHandshakeKeys {
+                seal: Box::new(RustlsPacketSeal { key: local_pkt }),
+                open: Box::new(RustlsPacketOpen { key: remote_pkt }),
+                hp_seal: Box::new(RustlsHp { key: local_hp }),
+                hp_open: Box::new(RustlsHp { key: remote_hp }),
+            }
         }
 
-        fn install_1rtt_keys(&mut self, keys: rustls::quic::Keys) -> Result<(), ConnectionError> {
+        fn one_rtt_keys(keys: rustls::quic::Keys) -> QuicTlsOneRttKeys {
             let local_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.local.packet.into();
             let remote_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.remote.packet.into();
             let local_hp: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey> =
@@ -1723,18 +1830,16 @@ mod rustls_provider {
             let remote_hp: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey> =
                 keys.remote.header.into();
 
-            let mut crypto = self.crypto.write();
-            crypto.seal_1rtt = Some(Arc::new(crate::crypto::PacketAeadSeal::dynamic(Box::new(
-                RustlsPacketSeal { key: local_pkt.clone() },
-            ))));
-            crypto.open_1rtt = Some(Arc::new(crate::crypto::PacketAeadOpen::dynamic(Box::new(
-                RustlsPacketOpen { key: remote_pkt.clone() },
-            ))));
-            crypto.hp_1rtt = Some(Arc::new(RustlsHp { key: local_hp.clone() }));
-            crypto.hp_1rtt_open = Some(Arc::new(RustlsHp { key: remote_hp.clone() }));
-            self.pending_local_1rtt.clear();
-            self.pending_remote_1rtt.clear();
-            Ok(())
+            QuicTlsOneRttKeys {
+                seal: Arc::new(qf_crypto::PacketAeadSeal::dynamic(Box::new(RustlsPacketSeal {
+                    key: local_pkt,
+                }))),
+                open: Arc::new(qf_crypto::PacketAeadOpen::dynamic(Box::new(RustlsPacketOpen {
+                    key: remote_pkt,
+                }))),
+                hp_seal: Arc::new(RustlsHp { key: local_hp }),
+                hp_open: Arc::new(RustlsHp { key: remote_hp }),
+            }
         }
 
         /// Build the client root certificate store: native/webpki roots plus any CA
@@ -2114,22 +2219,13 @@ mod rustls_provider {
                     ConnectionError::TlsError(format!("Client connection error: {}", e))
                 })?,
             );
-            {
-                // Drop any CRYPTO bytes produced by the previous client connection instance.
-                // The new connection has a new transcript and will re-emit a fresh ClientHello.
-                let mut crypto = self.crypto.write();
-                crypto.crypto_initial.reset();
-                crypto.crypto_handshake.reset();
-                crypto.crypto_application.reset();
-                crypto.seal_handshake = None;
-                crypto.open_handshake = None;
-                crypto.hp_handshake = None;
-                crypto.hp_handshake_open = None;
-                crypto.seal_1rtt = None;
-                crypto.open_1rtt = None;
-                crypto.hp_1rtt = None;
-                crypto.hp_1rtt_open = None;
-            }
+            // Drop CRYPTO bytes and key changes produced by the previous client connection.
+            // The new connection has a new transcript and will emit a fresh ClientHello.
+            self.crypto_initial.reset();
+            self.crypto_handshake.reset();
+            self.crypto_application.reset();
+            self.pending_key_changes.clear();
+            self.reset_packet_keys = true;
             self.next_1rtt_secrets = None;
             self.pending_local_1rtt.clear();
             self.pending_remote_1rtt.clear();
@@ -2145,12 +2241,11 @@ mod rustls_provider {
     }
 
     impl RustlsProviderImpl {
-        fn ensure_1rtt_ready(&self) -> Result<(), ConnectionError> {
-            let ready = {
-                let crypto = self.crypto.read();
-                crypto.seal_1rtt.is_some() && crypto.open_1rtt.is_some()
-            };
-            if !self.handshake_complete || !ready {
+        fn ensure_1rtt_ready(
+            &self,
+            installer: &dyn QuicTlsKeyInstaller,
+        ) -> Result<(), ConnectionError> {
+            if !self.handshake_complete || !installer.has_one_rtt_keys() {
                 return Err(ConnectionError::TlsError(
                     "key_update requires established 1-RTT keys".to_string(),
                 ));
@@ -2170,7 +2265,10 @@ mod rustls_provider {
             Ok(())
         }
 
-        fn update_write_from_rustls_chain(&mut self) -> Result<(), ConnectionError> {
+        fn update_write_from_rustls_chain(
+            &mut self,
+            installer: &dyn QuicTlsKeyInstaller,
+        ) -> Result<(), ConnectionError> {
             if self.pending_local_1rtt.is_empty() {
                 self.derive_next_1rtt_pair()?;
             }
@@ -2179,12 +2277,14 @@ mod rustls_provider {
                     "missing local 1-RTT key update material".to_string(),
                 ));
             };
-            let mut crypto = self.crypto.write();
-            crypto.rotate_1rtt_write_keypair(Box::new(RustlsPacketSeal { key: packet_key }));
+            installer.rotate_1rtt_write_keypair(Box::new(RustlsPacketSeal { key: packet_key }));
             Ok(())
         }
 
-        fn update_read_from_rustls_chain(&mut self) -> Result<(), ConnectionError> {
+        fn update_read_from_rustls_chain(
+            &mut self,
+            installer: &dyn QuicTlsKeyInstaller,
+        ) -> Result<(), ConnectionError> {
             if self.pending_remote_1rtt.is_empty() {
                 self.derive_next_1rtt_pair()?;
             }
@@ -2193,8 +2293,7 @@ mod rustls_provider {
                     "missing remote 1-RTT key update material".to_string(),
                 ));
             };
-            let mut crypto = self.crypto.write();
-            crypto.rotate_1rtt_read_keypair(Box::new(RustlsPacketOpen { key: packet_key }));
+            installer.rotate_1rtt_read_keypair(Box::new(RustlsPacketOpen { key: packet_key }));
             Ok(())
         }
     }
@@ -2306,27 +2405,54 @@ mod rustls_provider {
             max_len: usize,
         ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError> {
             self.flush_handshake_io()?;
-            let mut crypto = self.crypto.write();
-            let stream = match level {
-                Level::Initial => &mut crypto.crypto_initial,
-                Level::Handshake => &mut crypto.crypto_handshake,
-                _ => &mut crypto.crypto_application,
-            };
-            stream.next_crypto_frame(max_len)
+            self.crypto_stream_mut(level).next_crypto_frame(max_len)
+        }
+        fn ack_crypto(
+            &mut self,
+            level: Level,
+            offset: u64,
+            length: u64,
+        ) -> Result<(), ConnectionError> {
+            self.crypto_stream_mut(level).ack_crypto(offset, length)
+        }
+        fn requeue_crypto(
+            &mut self,
+            level: Level,
+            offset: u64,
+            length: u64,
+        ) -> Result<(), ConnectionError> {
+            self.crypto_stream_mut(level).requeue_crypto(offset, length)
+        }
+        fn requeue_all_crypto(&mut self, level: Level) {
+            self.crypto_stream_mut(level).requeue_all_unacked();
+        }
+        fn has_pending_handshake_send(&self) -> bool {
+            self.crypto_initial.has_pending_send() || self.crypto_handshake.has_pending_send()
         }
         fn poll_secrets_and_install(
             &mut self,
-            _crypto: &Arc<RwLock<CryptoContext>>,
+            installer: &dyn QuicTlsKeyInstaller,
         ) -> Result<(), ConnectionError> {
             self.flush_handshake_io()?;
+            if self.reset_packet_keys {
+                installer.clear_handshake_and_one_rtt_keys();
+                self.reset_packet_keys = false;
+            }
+            while let Some(change) = self.pending_key_changes.pop_front() {
+                match change {
+                    PendingKeyChange::Handshake(keys) => installer.install_handshake_keys(keys),
+                    PendingKeyChange::OneRtt(keys) => {
+                        installer.install_one_rtt_keys(keys);
+                        self.pending_local_1rtt.clear();
+                        self.pending_remote_1rtt.clear();
+                    }
+                }
+            }
             if self.peer_transport_params.is_none() {
                 self.peer_transport_params =
                     self.connection.quic_transport_parameters().map(<[u8]>::to_vec);
             }
-            let have_1rtt = {
-                let crypto = self.crypto.read();
-                crypto.open_1rtt.is_some() && crypto.seal_1rtt.is_some()
-            };
+            let have_1rtt = installer.has_one_rtt_keys();
             if !self.handshake_complete && !self.connection.is_handshaking() && have_1rtt {
                 self.handshake_complete = true;
                 let duration = self.clock.elapsed_since(self.handshake_start);
@@ -2453,23 +2579,32 @@ mod rustls_provider {
         fn peer_quic_transport_params(&self) -> Option<Vec<u8>> {
             self.peer_transport_params.clone()
         }
-        fn key_update(&mut self) -> Result<(), ConnectionError> {
-            self.key_update_write()?;
-            self.key_update_read()
+        fn key_update(
+            &mut self,
+            installer: &dyn QuicTlsKeyInstaller,
+        ) -> Result<(), ConnectionError> {
+            self.key_update_write(installer)?;
+            self.key_update_read(installer)
         }
-        fn key_update_read(&mut self) -> Result<(), ConnectionError> {
-            self.ensure_1rtt_ready()?;
-            if self.crypto.write().key_update_1rtt_read()? {
+        fn key_update_read(
+            &mut self,
+            installer: &dyn QuicTlsKeyInstaller,
+        ) -> Result<(), ConnectionError> {
+            self.ensure_1rtt_ready(installer)?;
+            if installer.key_update_1rtt_read()? {
                 return Ok(());
             }
-            self.update_read_from_rustls_chain()
+            self.update_read_from_rustls_chain(installer)
         }
-        fn key_update_write(&mut self) -> Result<(), ConnectionError> {
-            self.ensure_1rtt_ready()?;
-            if self.crypto.write().key_update_1rtt_write()? {
+        fn key_update_write(
+            &mut self,
+            installer: &dyn QuicTlsKeyInstaller,
+        ) -> Result<(), ConnectionError> {
+            self.ensure_1rtt_ready(installer)?;
+            if installer.key_update_1rtt_write()? {
                 return Ok(());
             }
-            self.update_write_from_rustls_chain()
+            self.update_write_from_rustls_chain(installer)
         }
         fn provider_name(&self) -> &str {
             "rustls"
@@ -2482,7 +2617,6 @@ mod rustls_provider {
     #[allow(dead_code)]
     pub(super) fn make_with_ca_with_snapshot(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -2491,7 +2625,6 @@ mod rustls_provider {
     ) -> Result<RustlsProviderImpl, ConnectionError> {
         RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
             is_server,
-            crypto,
             verify_peer,
             version,
             version_information_parameter,
@@ -2504,7 +2637,6 @@ mod rustls_provider {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn make_with_ca_with_snapshot_and_clock(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -2514,7 +2646,6 @@ mod rustls_provider {
     ) -> Result<RustlsProviderImpl, ConnectionError> {
         RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
             is_server,
-            crypto,
             verify_peer,
             version,
             version_information_parameter,
@@ -2532,24 +2663,15 @@ impl RustlsProvider {
     /// Create a new rustls-backed TLS provider for client or server mode.
     pub fn new(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
     ) -> Result<Self, ConnectionError> {
-        Self::new_with_ca(
-            is_server,
-            crypto,
-            verify_peer,
-            version,
-            version_information_parameter,
-            None,
-        )
+        Self::new_with_ca(is_server, verify_peer, version, version_information_parameter, None)
     }
 
     fn new_with_ca(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -2558,7 +2680,6 @@ impl RustlsProvider {
         let environment = crate::env_utils::EnvSnapshot::capture();
         Self::new_with_ca_with_snapshot(
             is_server,
-            crypto,
             verify_peer,
             version,
             version_information_parameter,
@@ -2569,7 +2690,6 @@ impl RustlsProvider {
 
     fn new_with_ca_with_snapshot(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -2578,7 +2698,6 @@ impl RustlsProvider {
     ) -> Result<Self, ConnectionError> {
         Self::new_with_ca_with_snapshot_and_clock(
             is_server,
-            crypto,
             verify_peer,
             version,
             version_information_parameter,
@@ -2591,7 +2710,6 @@ impl RustlsProvider {
     #[allow(clippy::too_many_arguments)]
     fn new_with_ca_with_snapshot_and_clock(
         is_server: bool,
-        crypto: Arc<RwLock<CryptoContext>>,
         verify_peer: bool,
         version: u32,
         version_information_parameter: &[u8],
@@ -2601,7 +2719,6 @@ impl RustlsProvider {
     ) -> Result<Self, ConnectionError> {
         Ok(Self(rustls_provider::make_with_ca_with_snapshot_and_clock(
             is_server,
-            crypto,
             verify_peer,
             version,
             version_information_parameter,
@@ -2629,11 +2746,33 @@ impl QuicTlsProvider for RustlsProvider {
     ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError> {
         self.0.next_crypto_frame(level, max_len)
     }
+    fn ack_crypto(
+        &mut self,
+        level: Level,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), ConnectionError> {
+        self.0.ack_crypto(level, offset, length)
+    }
+    fn requeue_crypto(
+        &mut self,
+        level: Level,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), ConnectionError> {
+        self.0.requeue_crypto(level, offset, length)
+    }
+    fn requeue_all_crypto(&mut self, level: Level) {
+        self.0.requeue_all_crypto(level);
+    }
+    fn has_pending_handshake_send(&self) -> bool {
+        self.0.has_pending_handshake_send()
+    }
     fn poll_secrets_and_install(
         &mut self,
-        crypto: &Arc<RwLock<CryptoContext>>,
+        installer: &dyn QuicTlsKeyInstaller,
     ) -> Result<(), ConnectionError> {
-        self.0.poll_secrets_and_install(crypto)
+        self.0.poll_secrets_and_install(installer)
     }
     fn handshake_complete(&self) -> bool {
         self.0.handshake_complete()
@@ -2673,14 +2812,20 @@ impl QuicTlsProvider for RustlsProvider {
     fn peer_quic_transport_params(&self) -> Option<Vec<u8>> {
         self.0.peer_quic_transport_params()
     }
-    fn key_update(&mut self) -> Result<(), ConnectionError> {
-        self.0.key_update()
+    fn key_update(&mut self, installer: &dyn QuicTlsKeyInstaller) -> Result<(), ConnectionError> {
+        self.0.key_update(installer)
     }
-    fn key_update_read(&mut self) -> Result<(), ConnectionError> {
-        self.0.key_update_read()
+    fn key_update_read(
+        &mut self,
+        installer: &dyn QuicTlsKeyInstaller,
+    ) -> Result<(), ConnectionError> {
+        self.0.key_update_read(installer)
     }
-    fn key_update_write(&mut self) -> Result<(), ConnectionError> {
-        self.0.key_update_write()
+    fn key_update_write(
+        &mut self,
+        installer: &dyn QuicTlsKeyInstaller,
+    ) -> Result<(), ConnectionError> {
+        self.0.key_update_write(installer)
     }
     fn provider_name(&self) -> &str {
         self.0.provider_name()

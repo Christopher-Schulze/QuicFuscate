@@ -5,7 +5,8 @@
 // Ultra-sophisticated TLS Cover Provider for maximum stealth
 /// Manages synthetic TLS record generation for DPI evasion on a per-connection basis.
 pub(crate) struct TlsCoverProvider {
-    crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
+    cipher: qf_crypto::TlsCoverCipherState,
+    write_sequence: u64,
     environment: Arc<crate::env_utils::EnvSnapshot>,
     is_server: bool,
     handshake_complete: bool,
@@ -42,17 +43,13 @@ impl TlsCoverProvider {
 
     /// Constructs a provider for the given role, deriving cover-traffic key material.
     #[allow(dead_code)]
-    pub(crate) fn new(
-        is_server: bool,
-        crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
-    ) -> Result<Self, crate::error::ConnectionError> {
+    pub(crate) fn new(is_server: bool) -> Result<Self, crate::error::ConnectionError> {
         let environment = crate::env_utils::EnvSnapshot::capture();
-        Self::new_with_snapshot(is_server, crypto, &environment)
+        Self::new_with_snapshot(is_server, &environment)
     }
 
     pub(crate) fn new_with_snapshot(
         is_server: bool,
-        crypto: Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Result<Self, crate::error::ConnectionError> {
         // Load profile from ENV
@@ -63,27 +60,31 @@ impl TlsCoverProvider {
         let cipher_preference = Self::cipher_preference_from_env_with_snapshot(environment);
         let cipher_suite = Self::resolve_cipher_suite(cipher_preference);
 
-        {
-            let mut ctx = crypto.write();
-            match cipher_suite {
-                TlsCoverCipherSuite::ChaCha20Poly1305 => {
-                    ctx.install_tls_cover_cipher(
-                        crate::transport::packet::TlsCoverKeyMaterial::ChaCha20Poly1305 {
-                            key: &tls_cover_key,
-                            iv: &tls_cover_iv,
-                        },
-                    )?;
-                }
-                TlsCoverCipherSuite::Aes128Gcm => {
-                    let mut aes_key = [0u8; 16];
-                    aes_key.copy_from_slice(&tls_cover_key[..16]);
-                    ctx.install_tls_cover_cipher(
-                        crate::transport::packet::TlsCoverKeyMaterial::Aes128Gcm {
-                            key: &aes_key,
-                            iv: &tls_cover_iv,
-                        },
-                    )?;
-                }
+        let mut cipher = qf_crypto::TlsCoverCipherState::default();
+        let mut write_sequence = 0;
+        let mut read_sequence = 0;
+        match cipher_suite {
+            TlsCoverCipherSuite::ChaCha20Poly1305 => {
+                cipher.install(
+                    qf_crypto::TlsCoverKeyMaterial::ChaCha20Poly1305 {
+                        key: &tls_cover_key,
+                        iv: &tls_cover_iv,
+                    },
+                    &mut write_sequence,
+                    &mut read_sequence,
+                )?;
+            }
+            TlsCoverCipherSuite::Aes128Gcm => {
+                let mut aes_key = [0u8; 16];
+                aes_key.copy_from_slice(&tls_cover_key[..16]);
+                cipher.install(
+                    qf_crypto::TlsCoverKeyMaterial::Aes128Gcm {
+                        key: &aes_key,
+                        iv: &tls_cover_iv,
+                    },
+                    &mut write_sequence,
+                    &mut read_sequence,
+                )?;
             }
         }
 
@@ -103,7 +104,8 @@ impl TlsCoverProvider {
         }
 
         Ok(Self {
-            crypto,
+            cipher,
+            write_sequence,
             environment: Arc::new(environment.clone()),
             is_server,
             handshake_complete: false,
@@ -150,8 +152,6 @@ impl TlsCoverProvider {
         level: qf_transport_types::QuicEncryptionLevel,
         data: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
-        // Usage of is_server/crypto: telemetry and handshake status.
-        let _guard = self.crypto.read();
         crate::telemetry::BYTES_RECEIVED.inc_by(data.len() as u64);
         if matches!(level, qf_transport_types::QuicEncryptionLevel::Handshake) && self.is_server {
             self.handshake_complete = true;
@@ -177,7 +177,7 @@ impl TlsCoverProvider {
 
     /// Generate sophisticated fake crypto frame based on stealth mode
     fn generate_fake_crypto_frame(
-        &self,
+        &mut self,
         max_len: usize,
     ) -> Result<Vec<u8>, crate::error::ConnectionError> {
         let Some(plan) = qf_stealth::plan_tls_cover_record(
@@ -192,13 +192,10 @@ impl TlsCoverProvider {
             return Ok(Vec::new());
         };
 
-        // Installation is constructor-owned. If the shared context is cleared or
-        // replaced unexpectedly, encryption fails closed instead of reinstalling
-        // session material and risking sequence-number reuse.
-        let ciphertext = self
-            .crypto
-            .write()
-            .encrypt_tls_cover_record(&plan.header, &plan.payload)?;
+        // Installation is constructor-owned. The connection-local cipher state is never
+        // reinstalled while records are in flight, preventing sequence-number reuse.
+        let ciphertext =
+            self.cipher.encrypt_record(&mut self.write_sequence, &plan.header, &plan.payload)?;
 
         let mut frame_out = Vec::with_capacity(plan.header.len() + ciphertext.len());
         frame_out.extend_from_slice(&plan.header);
@@ -214,10 +211,7 @@ impl TlsCoverProvider {
     }
 
     /// Marks the TLS Cover handshake as complete once transport secrets are ready.
-    pub(crate) fn poll_secrets_and_install(
-        &mut self,
-        _crypto: &Arc<parking_lot::RwLock<crate::transport::packet::CryptoContext>>,
-    ) -> Result<(), crate::error::ConnectionError> {
+    pub(crate) fn poll_secrets_and_install(&mut self) -> Result<(), crate::error::ConnectionError> {
         self.handshake_complete = true;
         Ok(())
     }

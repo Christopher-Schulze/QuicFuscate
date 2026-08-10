@@ -83,7 +83,7 @@ impl Connection {
     /// stacks. Connections without a provider use the transport-owned secret path.
     pub fn key_update(&mut self) -> Result<(), crate::error::ConnectionError> {
         let result = if let Some(provider) = self.tls_provider.as_mut() {
-            provider.key_update_write()
+            provider.key_update_write(&*self.crypto)
         } else if self.crypto.write().key_update_1rtt_write()? {
             Ok(())
         } else {
@@ -483,7 +483,12 @@ impl Connection {
         {
             return Ok(false);
         }
-        Ok(!self.crypto.read().has_pending_handshake_send())
+        let pending_handshake = self
+            .tls_provider
+            .as_ref()
+            .map(|provider| provider.has_pending_handshake_send())
+            .unwrap_or_else(|| self.crypto.read().has_pending_handshake_send());
+        Ok(!pending_handshake)
     }
 
     /// Return the sender-side fountain seed derived from the active 1-RTT secret.

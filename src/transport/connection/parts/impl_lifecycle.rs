@@ -613,18 +613,10 @@ impl Connection {
         }
         if !outcome.crypto_lost.is_empty() {
             let mut crypto_error = None;
-            {
-                let mut crypto = self.crypto.write();
-                for (space, off, len) in &outcome.crypto_lost {
-                    let stream = match space {
-                        recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
-                        recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
-                        recovery::PacketSpace::Application => &mut crypto.crypto_application,
-                    };
-                    if let Err(error) = stream.requeue_crypto(*off, *len) {
-                        crypto_error = Some(error);
-                        break;
-                    }
+            for (space, off, len) in &outcome.crypto_lost {
+                if let Err(error) = self.requeue_crypto_range(*space, *off, *len) {
+                    crypto_error = Some(error);
+                    break;
                 }
             }
             if let Some(error) = crypto_error {
@@ -642,13 +634,7 @@ impl Connection {
             match space {
                 recovery::PacketSpace::Application => {}
                 recovery::PacketSpace::Initial | recovery::PacketSpace::Handshake => {
-                    let mut crypto = self.crypto.write();
-                    let stream = match space {
-                        recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
-                        recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
-                        recovery::PacketSpace::Application => continue,
-                    };
-                    stream.requeue_all_unacked();
+                    self.requeue_all_crypto(space);
                 }
             }
             self.pending_probe_spaces.push_back(space);
@@ -666,25 +652,17 @@ impl Connection {
     ) {
         if !outcome.crypto_acked.is_empty() || !outcome.crypto_lost.is_empty() {
             let mut crypto_error = None;
-            {
-                let mut crypto = self.crypto.write();
-                let stream = match space {
-                    recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
-                    recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
-                    recovery::PacketSpace::Application => &mut crypto.crypto_application,
-                };
-                for (off, len) in &outcome.crypto_acked {
-                    if let Err(error) = stream.ack_crypto(*off, *len) {
+            for (off, len) in &outcome.crypto_acked {
+                if let Err(error) = self.ack_crypto_range(space, *off, *len) {
+                    crypto_error = Some(error);
+                    break;
+                }
+            }
+            if crypto_error.is_none() {
+                for (off, len) in &outcome.crypto_lost {
+                    if let Err(error) = self.requeue_crypto_range(space, *off, *len) {
                         crypto_error = Some(error);
                         break;
-                    }
-                }
-                if crypto_error.is_none() {
-                    for (off, len) in &outcome.crypto_lost {
-                        if let Err(error) = stream.requeue_crypto(*off, *len) {
-                            crypto_error = Some(error);
-                            break;
-                        }
                     }
                 }
             }
@@ -1109,9 +1087,8 @@ impl Connection {
     ) -> Result<(), crate::error::ConnectionError> {
         log::info!("Enabling rustls TLS provider with profile: {}", profile_name);
 
-        // TLS provider must operate on the same CryptoContext as the transport,
-        // otherwise secrets would never be installed into the packet protection keys.
-        let crypto_arc = self.crypto.clone();
+        // The TLS provider emits complete packet-key bundles through the transport-owned
+        // installation port after each rustls key transition.
         let mut available_versions = self.config.supported_versions.clone();
         available_versions.push(self.version_negotiation.grease);
         let version_information = super::version::VersionInformation {
@@ -1123,7 +1100,6 @@ impl Connection {
         // Create the TLS composition stack (rustls + optional TLS Cover).
         let provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock(
             self.is_server,
-            crypto_arc.clone(),
             self.config.verify_peer,
             self.config.version,
             &version_information,
@@ -1378,7 +1354,7 @@ impl Connection {
             let Some(provider) = &mut self.tls_provider else {
                 return Ok(());
             };
-            provider.poll_secrets_and_install(&self.crypto)?;
+            provider.poll_secrets_and_install(&*self.crypto)?;
             provider.peer_quic_transport_params()
         };
         self.refresh_short_header_tag_reserve();
@@ -1477,6 +1453,74 @@ impl Connection {
     }
 
     /// Get next CRYPTO frame to send
+    fn encryption_level_for_space(
+        space: recovery::PacketSpace,
+    ) -> qf_transport_types::QuicEncryptionLevel {
+        match space {
+            recovery::PacketSpace::Initial => qf_transport_types::QuicEncryptionLevel::Initial,
+            recovery::PacketSpace::Handshake => {
+                qf_transport_types::QuicEncryptionLevel::Handshake
+            }
+            recovery::PacketSpace::Application => {
+                qf_transport_types::QuicEncryptionLevel::Application
+            }
+        }
+    }
+
+    fn ack_crypto_range(
+        &mut self,
+        space: recovery::PacketSpace,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if let Some(provider) = &mut self.tls_provider {
+            return provider.ack_crypto(Self::encryption_level_for_space(space), offset, length);
+        }
+        let mut crypto = self.crypto.write();
+        let stream = match space {
+            recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+            recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+            recovery::PacketSpace::Application => &mut crypto.crypto_application,
+        };
+        stream.ack_crypto(offset, length)
+    }
+
+    fn requeue_crypto_range(
+        &mut self,
+        space: recovery::PacketSpace,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if let Some(provider) = &mut self.tls_provider {
+            return provider.requeue_crypto(
+                Self::encryption_level_for_space(space),
+                offset,
+                length,
+            );
+        }
+        let mut crypto = self.crypto.write();
+        let stream = match space {
+            recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+            recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+            recovery::PacketSpace::Application => &mut crypto.crypto_application,
+        };
+        stream.requeue_crypto(offset, length)
+    }
+
+    fn requeue_all_crypto(&mut self, space: recovery::PacketSpace) {
+        if let Some(provider) = &mut self.tls_provider {
+            provider.requeue_all_crypto(Self::encryption_level_for_space(space));
+            return;
+        }
+        let mut crypto = self.crypto.write();
+        let stream = match space {
+            recovery::PacketSpace::Initial => &mut crypto.crypto_initial,
+            recovery::PacketSpace::Handshake => &mut crypto.crypto_handshake,
+            recovery::PacketSpace::Application => &mut crypto.crypto_application,
+        };
+        stream.requeue_all_unacked();
+    }
+
     pub(crate) fn next_crypto_frame(
         &mut self,
         level: qf_transport_types::QuicEncryptionLevel,

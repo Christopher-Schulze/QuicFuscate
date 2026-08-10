@@ -1,10 +1,10 @@
 use crate::crypto::aead::{self as tls_aead, AeadOpen, AeadSeal};
-use crate::crypto::{select_packet_data_aead, AesGcm128, ChaCha20Poly1305};
+use crate::crypto::{select_packet_data_aead, AesGcm128};
 use crate::error::ConnectionError;
-use crate::optimize::telemetry;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+pub use qf_crypto::{TlsCoverCipherKind, TlsCoverInstallOutcome, TlsCoverKeyMaterial};
 pub use qf_transport_crypto_stream::CryptoStream;
 // no direct varint helpers used here
 
@@ -1314,7 +1314,7 @@ mod tests {
         assert_eq!(crypto.install_tls_cover_cipher(second), Ok(TlsCoverInstallOutcome::Installed));
         assert_eq!(crypto.tls_cover_cipher_kind(), Some(TlsCoverCipherKind::Aes128Gcm));
         assert_eq!((crypto.tls_cover_write_seq, crypto.tls_cover_read_seq), (0, 0));
-        assert_eq!(crypto.retired_tls_cover_identities.len(), 1);
+        assert_eq!(crypto.tls_cover_cipher.retired_identity_count(), 1);
         assert_eq!(crypto.install_tls_cover_cipher(first), Err(ConnectionError::KeyUpdateError));
     }
 
@@ -1334,7 +1334,7 @@ mod tests {
         crypto.install_tls_cover_cipher(material_a).expect("install A");
         crypto.install_tls_cover_cipher(material_b).expect("rotate to B");
         crypto.install_tls_cover_cipher(material_c).expect("rotate to C");
-        assert_eq!(crypto.retired_tls_cover_identities.len(), 2);
+        assert_eq!(crypto.tls_cover_cipher.retired_identity_count(), 2);
         assert_eq!(
             crypto.install_tls_cover_cipher(material_a),
             Err(ConnectionError::KeyUpdateError)
@@ -1426,6 +1426,92 @@ mod tests {
             .expect("queued handshake flight");
         assert_eq!(bytes, b"client-finished");
         assert!(!crypto.has_pending_handshake_send());
+    }
+
+    #[test]
+    fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
+        use crate::qftls::{QuicTlsHandshakeKeys, QuicTlsKeyInstaller, QuicTlsOneRttKeys};
+
+        let installer = parking_lot::RwLock::new(CryptoContext::default());
+        let previous_secret = [0x21; 32];
+        {
+            let mut crypto = installer.write();
+            crate::crypto::aead::KeyScheduleHooks::set_read_secret(
+                &mut *crypto,
+                crate::crypto::aead::Level::OneRTT,
+                crate::crypto::aead::Algorithm::AES128_GCM,
+                &previous_secret,
+            )
+            .expect("install previous read secret");
+            crate::crypto::aead::KeyScheduleHooks::set_write_secret(
+                &mut *crypto,
+                crate::crypto::aead::Level::OneRTT,
+                crate::crypto::aead::Algorithm::AES128_GCM,
+                &previous_secret,
+            )
+            .expect("install previous write secret");
+            assert!(crypto.key_update_1rtt_read().expect("advance previous read generation"));
+            assert_eq!(crypto.previous_read_1rtt.len(), 1);
+        }
+        let handshake_key = [0x31; 16];
+        let handshake_iv = [0x32; 12];
+        let handshake_hp_key = [0x33; 16];
+        installer.install_handshake_keys(QuicTlsHandshakeKeys {
+            seal: Box::new(AesGcm128::from_arrays(&handshake_key, &handshake_iv)),
+            open: Box::new(AesGcm128::from_arrays(&handshake_key, &handshake_iv)),
+            hp_seal: Box::new(crate::crypto::aead::AesHp::from_key(&handshake_hp_key)),
+            hp_open: Box::new(crate::crypto::aead::AesHp::from_key(&handshake_hp_key)),
+        });
+
+        let one_rtt_key = [0x41; 16];
+        let one_rtt_iv = [0x42; 12];
+        let one_rtt_hp_key = [0x43; 16];
+        installer.install_one_rtt_keys(QuicTlsOneRttKeys {
+            seal: Arc::new(qf_crypto::PacketAeadSeal::dynamic(Box::new(AesGcm128::from_arrays(
+                &one_rtt_key,
+                &one_rtt_iv,
+            )))),
+            open: Arc::new(qf_crypto::PacketAeadOpen::dynamic(Box::new(AesGcm128::from_arrays(
+                &one_rtt_key,
+                &one_rtt_iv,
+            )))),
+            hp_seal: Arc::new(crate::crypto::aead::AesHp::from_key(&one_rtt_hp_key)),
+            hp_open: Arc::new(crate::crypto::aead::AesHp::from_key(&one_rtt_hp_key)),
+        });
+
+        {
+            let crypto = installer.read();
+            assert!(crypto.seal_handshake.is_some());
+            assert!(crypto.open_handshake.is_some());
+            assert!(crypto.hp_handshake.is_some());
+            assert!(crypto.hp_handshake_open.is_some());
+            assert!(crypto.seal_1rtt.is_some());
+            assert!(crypto.open_1rtt.is_some());
+            assert!(crypto.hp_1rtt.is_some());
+            assert!(crypto.hp_1rtt_open.is_some());
+            assert!(crypto.read_secret_1rtt.is_none());
+            assert!(crypto.write_secret_1rtt.is_none());
+            assert_eq!(crypto.read_generation_1rtt, 0);
+            assert_eq!(crypto.write_generation_1rtt, 0);
+            assert!(crypto.previous_read_1rtt.is_empty());
+        }
+        assert!(installer.has_one_rtt_keys());
+
+        installer.clear_handshake_and_one_rtt_keys();
+        let crypto = installer.read();
+        assert!(crypto.seal_handshake.is_none());
+        assert!(crypto.open_handshake.is_none());
+        assert!(crypto.hp_handshake.is_none());
+        assert!(crypto.hp_handshake_open.is_none());
+        assert!(crypto.seal_1rtt.is_none());
+        assert!(crypto.open_1rtt.is_none());
+        assert!(crypto.hp_1rtt.is_none());
+        assert!(crypto.hp_1rtt_open.is_none());
+        assert!(crypto.read_secret_1rtt.is_none());
+        assert!(crypto.write_secret_1rtt.is_none());
+        assert_eq!(crypto.read_generation_1rtt, 0);
+        assert_eq!(crypto.write_generation_1rtt, 0);
+        assert!(crypto.previous_read_1rtt.is_empty());
     }
 
     fn header_protection_test_context() -> CryptoContext {
@@ -2015,127 +2101,6 @@ pub fn encrypt_packet(
     Ok(ciphertext_len)
 }
 
-/// Identifies the AEAD algorithm used for TLS Cover traffic encryption.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TlsCoverCipherKind {
-    /// ChaCha20-Poly1305 AEAD.
-    ChaCha20Poly1305,
-    /// AES-128-GCM AEAD.
-    Aes128Gcm,
-}
-
-/// Borrowed TLS Cover key material accepted by the single installation contract.
-///
-/// Reinstalling the active material is an idempotent no-op that preserves record
-/// sequence numbers. Installing fresh material retires the previous identity and
-/// resets both directions. A retired identity cannot be installed again in the
-/// same context, which prevents nonce reuse after profile or cipher rotation.
-#[derive(Clone, Copy)]
-pub enum TlsCoverKeyMaterial<'a> {
-    /// ChaCha20-Poly1305 with a 256-bit key and 96-bit base IV.
-    ChaCha20Poly1305 { key: &'a [u8; 32], iv: &'a [u8; 12] },
-    /// AES-128-GCM with a 128-bit key and 96-bit base IV.
-    Aes128Gcm { key: &'a [u8; 16], iv: &'a [u8; 12] },
-}
-
-impl TlsCoverKeyMaterial<'_> {
-    fn identity(self) -> [u8; 32] {
-        let mut encoded = [0u8; 45];
-        let encoded_len = match self {
-            Self::ChaCha20Poly1305 { key, iv } => {
-                encoded[0] = 1;
-                encoded[1..33].copy_from_slice(key);
-                encoded[33..45].copy_from_slice(iv);
-                45
-            }
-            Self::Aes128Gcm { key, iv } => {
-                encoded[0] = 2;
-                encoded[1..17].copy_from_slice(key);
-                encoded[17..29].copy_from_slice(iv);
-                29
-            }
-        };
-        crate::crypto::hkdf::sha256(&encoded[..encoded_len])
-    }
-
-    fn cipher_pair(self) -> (TlsCoverCipher, TlsCoverCipher) {
-        match self {
-            Self::ChaCha20Poly1305 { key, iv } => (
-                TlsCoverCipher::ChaCha(ChaCha20Poly1305::from_arrays(key, iv)),
-                TlsCoverCipher::ChaCha(ChaCha20Poly1305::from_arrays(key, iv)),
-            ),
-            Self::Aes128Gcm { key, iv } => (
-                TlsCoverCipher::AesGcm(AesGcm128::from_arrays(key, iv)),
-                TlsCoverCipher::AesGcm(AesGcm128::from_arrays(key, iv)),
-            ),
-        }
-    }
-}
-
-/// Result of a TLS Cover key installation request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TlsCoverInstallOutcome {
-    /// Fresh key material replaced the active cipher pair.
-    Installed,
-    /// The exact active key material was already installed; counters were preserved.
-    Unchanged,
-}
-
-pub(crate) enum TlsCoverCipher {
-    ChaCha(ChaCha20Poly1305),
-    AesGcm(AesGcm128),
-}
-
-impl TlsCoverCipher {
-    #[inline(always)]
-    fn seal(
-        &self,
-        counter: u64,
-        aad: &[u8],
-        buffer: &mut [u8],
-        plaintext_len: usize,
-    ) -> Result<usize, ConnectionError> {
-        match self {
-            TlsCoverCipher::ChaCha(cipher) => crate::crypto::aead::AeadSeal::seal_with_u64_counter(
-                cipher,
-                counter,
-                aad,
-                buffer,
-                plaintext_len,
-                None,
-            ),
-            TlsCoverCipher::AesGcm(cipher) => tls_aead::AeadSeal::seal_with_u64_counter(
-                cipher,
-                counter,
-                aad,
-                buffer,
-                plaintext_len,
-                None,
-            ),
-        }
-    }
-
-    #[inline(always)]
-    fn open(&self, counter: u64, aad: &[u8], buffer: &mut [u8]) -> Result<usize, ConnectionError> {
-        match self {
-            TlsCoverCipher::ChaCha(cipher) => {
-                crate::crypto::aead::AeadOpen::open_with_u64_counter(cipher, counter, aad, buffer)
-            }
-            TlsCoverCipher::AesGcm(cipher) => {
-                tls_aead::AeadOpen::open_with_u64_counter(cipher, counter, aad, buffer)
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn kind(&self) -> TlsCoverCipherKind {
-        match self {
-            TlsCoverCipher::ChaCha(_) => TlsCoverCipherKind::ChaCha20Poly1305,
-            TlsCoverCipher::AesGcm(_) => TlsCoverCipherKind::Aes128Gcm,
-        }
-    }
-}
-
 const ONE_RTT_READ_KEY_WINDOW: usize = 4;
 
 struct PreviousRead1RttKey {
@@ -2204,10 +2169,7 @@ pub struct CryptoContext {
     /// Whether 0-RTT early data is enabled for this context.
     pub zero_rtt_enabled: bool,
     previous_read_1rtt: VecDeque<PreviousRead1RttKey>,
-    seal_tls_cover: Option<TlsCoverCipher>,
-    open_tls_cover: Option<TlsCoverCipher>,
-    active_tls_cover_identity: Option<[u8; 32]>,
-    retired_tls_cover_identities: Vec<[u8; 32]>,
+    tls_cover_cipher: qf_crypto::TlsCoverCipherState,
     /// TLS Cover write sequence number.
     pub tls_cover_write_seq: u64,
     /// TLS Cover read sequence number.
@@ -2260,29 +2222,17 @@ impl CryptoContext {
         &mut self,
         material: TlsCoverKeyMaterial<'_>,
     ) -> Result<TlsCoverInstallOutcome, ConnectionError> {
-        let identity = material.identity();
-        if self.active_tls_cover_identity == Some(identity) {
-            return Ok(TlsCoverInstallOutcome::Unchanged);
-        }
-        if self.retired_tls_cover_identities.contains(&identity) {
-            return Err(ConnectionError::KeyUpdateError);
-        }
-
-        let (seal, open) = material.cipher_pair();
-        if let Some(active_identity) = self.active_tls_cover_identity.replace(identity) {
-            self.retired_tls_cover_identities.push(active_identity);
-        }
-        self.seal_tls_cover = Some(seal);
-        self.open_tls_cover = Some(open);
-        self.tls_cover_write_seq = 0;
-        self.tls_cover_read_seq = 0;
-        Ok(TlsCoverInstallOutcome::Installed)
+        self.tls_cover_cipher.install(
+            material,
+            &mut self.tls_cover_write_seq,
+            &mut self.tls_cover_read_seq,
+        )
     }
 
     #[inline]
     /// Returns the TLS Cover cipher algorithm in use, if configured.
     pub fn tls_cover_cipher_kind(&self) -> Option<TlsCoverCipherKind> {
-        self.seal_tls_cover.as_ref().map(|cipher| cipher.kind())
+        self.tls_cover_cipher.cipher_kind()
     }
 
     /// Encrypt a TLS Cover record using the configured TLS Cover cipher.
@@ -2291,32 +2241,7 @@ impl CryptoContext {
         aad: &[u8],
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ConnectionError> {
-        let cipher = self
-            .seal_tls_cover
-            .as_ref()
-            .ok_or(ConnectionError::CryptoError("crypto failure".into()))?;
-
-        let seq = self.tls_cover_write_seq;
-        let next_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
-        let ciphertext_len = checked_usize_add(plaintext.len(), AEAD_TAG_LEN)?;
-
-        let mut buffer = Vec::with_capacity(ciphertext_len);
-        buffer.extend_from_slice(plaintext);
-        let pt_len = plaintext.len();
-        buffer.resize(ciphertext_len, 0);
-
-        let result = cipher.seal(seq, aad, buffer.as_mut_slice(), pt_len);
-        match result {
-            Ok(_) => match cipher {
-                TlsCoverCipher::ChaCha(_) => telemetry::FAKETLS_CHACHA_OPS.inc(),
-                TlsCoverCipher::AesGcm(_) => telemetry::FAKETLS_AES_GCM_OPS.inc(),
-            },
-            Err(_) => telemetry::FAKETLS_CIPHER_FAILURES.inc(),
-        }
-        result?;
-        self.tls_cover_write_seq = next_seq;
-
-        Ok(buffer)
+        self.tls_cover_cipher.encrypt_record(&mut self.tls_cover_write_seq, aad, plaintext)
     }
 
     /// Decrypt a TLS Cover record using the configured TLS Cover cipher.
@@ -2325,25 +2250,7 @@ impl CryptoContext {
         aad: &[u8],
         ciphertext: &mut [u8],
     ) -> Result<usize, ConnectionError> {
-        let cipher = self
-            .open_tls_cover
-            .as_ref()
-            .ok_or(ConnectionError::CryptoError("crypto failure".into()))?;
-
-        let seq = self.tls_cover_read_seq;
-        let next_seq = seq.checked_add(1).ok_or(ConnectionError::AeadLimitReached)?;
-
-        let result = cipher.open(seq, aad, ciphertext);
-        match result {
-            Ok(length) => {
-                self.tls_cover_read_seq = next_seq;
-                Ok(length)
-            }
-            Err(error) => {
-                telemetry::FAKETLS_CIPHER_FAILURES.inc();
-                Err(error)
-            }
-        }
+        self.tls_cover_cipher.decrypt_record(&mut self.tls_cover_read_seq, aad, ciphertext)
     }
 
     /// Install AES-GCM for Initial packets (compatibility path).
@@ -2491,6 +2398,70 @@ impl CryptoContext {
         let write = self.key_update_1rtt_write()?;
         let read = self.key_update_1rtt_read()?;
         Ok(write || read)
+    }
+}
+
+impl crate::qftls::QuicTlsKeyInstaller for parking_lot::RwLock<CryptoContext> {
+    fn clear_handshake_and_one_rtt_keys(&self) {
+        let mut crypto = self.write();
+        crypto.seal_handshake = None;
+        crypto.open_handshake = None;
+        crypto.hp_handshake = None;
+        crypto.hp_handshake_open = None;
+        crypto.seal_1rtt = None;
+        crypto.open_1rtt = None;
+        crypto.hp_1rtt = None;
+        crypto.hp_1rtt_open = None;
+        crypto.read_secret_1rtt = None;
+        crypto.write_secret_1rtt = None;
+        crypto.read_generation_1rtt = 0;
+        crypto.write_generation_1rtt = 0;
+        crypto.previous_read_1rtt.clear();
+    }
+
+    fn install_handshake_keys(&self, keys: crate::qftls::QuicTlsHandshakeKeys) {
+        let mut crypto = self.write();
+        crypto.seal_handshake = Some(keys.seal);
+        crypto.open_handshake = Some(keys.open);
+        crypto.hp_handshake = Some(keys.hp_seal);
+        crypto.hp_handshake_open = Some(keys.hp_open);
+    }
+
+    fn install_one_rtt_keys(&self, keys: crate::qftls::QuicTlsOneRttKeys) {
+        let mut crypto = self.write();
+        crypto.seal_1rtt = Some(keys.seal);
+        crypto.open_1rtt = Some(keys.open);
+        crypto.hp_1rtt = Some(keys.hp_seal);
+        crypto.hp_1rtt_open = Some(keys.hp_open);
+        crypto.read_secret_1rtt = None;
+        crypto.write_secret_1rtt = None;
+        crypto.read_generation_1rtt = 0;
+        crypto.write_generation_1rtt = 0;
+        crypto.previous_read_1rtt.clear();
+    }
+
+    fn has_one_rtt_keys(&self) -> bool {
+        let crypto = self.read();
+        crypto.seal_1rtt.is_some()
+            && crypto.open_1rtt.is_some()
+            && crypto.hp_1rtt.is_some()
+            && crypto.hp_1rtt_open.is_some()
+    }
+
+    fn key_update_1rtt_read(&self) -> Result<bool, ConnectionError> {
+        self.write().key_update_1rtt_read()
+    }
+
+    fn key_update_1rtt_write(&self) -> Result<bool, ConnectionError> {
+        self.write().key_update_1rtt_write()
+    }
+
+    fn rotate_1rtt_read_keypair(&self, open: Box<dyn qf_crypto::aead::AeadOpen + Send + Sync>) {
+        self.write().rotate_1rtt_read_keypair(open);
+    }
+
+    fn rotate_1rtt_write_keypair(&self, seal: Box<dyn qf_crypto::aead::AeadSeal + Send + Sync>) {
+        self.write().rotate_1rtt_write_keypair(seal);
     }
 }
 

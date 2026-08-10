@@ -94,6 +94,11 @@ fn prefetch_morus_buffer(_ptr: *const u8, _len: usize) {}
 
 #[cfg(test)]
 mod tests;
+mod tls_cover;
+
+pub use tls_cover::{
+    TlsCoverCipherKind, TlsCoverCipherState, TlsCoverInstallOutcome, TlsCoverKeyMaterial,
+};
 
 pub(crate) mod chacha20poly1305 {
     use super::chacha;
