@@ -2797,6 +2797,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - Canonical derivation owner: `crates/qf-stealth/src/tls_cover.rs`; compatibility/install owner: `src/stealth/parts/tls_cover_provider.rs`. The root module no longer imports HKDF directly; encryption state and sequence ownership do not cross into the child.
 - Verification: qf-stealth `118/118`; root all-feature library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. Final target/free space is `10,040,504 / 12,687,208 KiB`.
 - Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
+- Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-tls-cover-record-plan-postpush/workspace-seams.json` at source revision `cd56daf80daa5a3c71ead888c46daa4534ddb557`; `36` packages, `332` Rust files, `207,009` source lines, `123` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-tls-cover-material-postpush/workspace-seams.json` at source revision `7ce31037e65d4c2f4006c4fba2c2d875ee986b43`; `36` packages, `332` Rust files, `206,956` source lines, `123` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
 
 ## TLS Cover Record-Plan Workspace Ownership (2026-08-10, TODO-562)
