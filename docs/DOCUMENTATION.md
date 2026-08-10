@@ -6726,3 +6726,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Focused traffic-analysis and transport-policy tests pass `25/25`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,170,736 KiB` target usage and `18,332,576 KiB` free.
 - Construction, scheduler lifecycle, cancellation assertions, transport behavior, public paths, wire behavior, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-transport-stealth-contract-postpush/workspace-seams.json` at source revision `1e0b186c254c4161f9b388b933eafc34c8df3bd0`: `36` packages, `334` Rust files, `207,083` source lines, `117` module edges, `115` workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`. The direct `transport -> stealth` edge is removed; the concrete reverse runtime edge remains at `15` references.
+
+## Core Engine-Contract Dependency (2026-08-10, TODO-562)
+
+- Root connection state and constructors now consume the canonical `qf-engine-types::QKeyToken` directly, and the core FEC fixture uses the child-owned engine `FecMode`. The five token paths and one test mode path were compatibility indirections through the root engine namespace.
+- Focused core tests pass `33/33`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,171,964 KiB` target usage and `18,309,144 KiB` free.
+- Token ownership, zeroization, constructor signatures, FEC behavior, public compatibility exports, frontend, and Tauri behavior remain unchanged.

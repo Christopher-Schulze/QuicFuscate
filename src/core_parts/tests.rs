@@ -89,7 +89,7 @@ mod tests {
                 Arc::new(CryptoManager::new()),
             ));
             let mut fec_config = FecConfig::product_default();
-            fec_config.apply_engine_mode(crate::engine::FecMode::Off);
+            fec_config.apply_engine_mode(qf_engine_types::FecMode::Off);
             QuicFuscateConnection::new(ConnectionParams {
                 clock: crate::time_source::ProtocolClock::default(),
                 conn: Box::new(conn),

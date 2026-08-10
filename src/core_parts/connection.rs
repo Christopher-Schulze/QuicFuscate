@@ -217,7 +217,7 @@ pub struct ConnectionParams {
     /// TLS SNI hostname override (None uses host_header).
     pub sni_host: Option<String>,
     /// QKey authentication token in hex (client mode only).
-    pub qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+    pub qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
     /// Shared stealth manager for obfuscation and fingerprint control.
     pub stealth_manager: Arc<StealthManager>,
     /// Shared optimization manager for memory pool and CPU feature detection.
@@ -241,7 +241,7 @@ pub struct QuicFuscateConnection {
     pub peer_addr: SocketAddr,
     local_addr: SocketAddr,
     host_header: String,
-    qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+    qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
     /// Client-selected generation echoed by the server assignment capsule.
     client_connection_generation: Option<u64>,
 
@@ -346,7 +346,7 @@ impl QuicFuscateConnection {
         stealth_config: StealthConfig,
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
-        qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+        qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
         qkey_initial_token: Option<Vec<u8>>,
         use_utls: bool,
     ) -> Result<Self, String> {
@@ -376,7 +376,7 @@ impl QuicFuscateConnection {
         stealth_config: StealthConfig,
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
-        qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+        qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
         qkey_initial_token: Option<Vec<u8>>,
         use_utls: bool,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
@@ -409,7 +409,7 @@ impl QuicFuscateConnection {
         stealth_config: StealthConfig,
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
-        qkey_auth_token_hex: Option<crate::engine::qkey::QKeyToken>,
+        qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
         qkey_initial_token: Option<Vec<u8>>,
         use_utls: bool,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,

@@ -2858,3 +2858,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused transport policy `25/25`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,170,736 / 18,332,576 KiB`.
 - No concrete manager, runtime, frontend, Tauri, or wire-format behavior changes.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-transport-stealth-contract-postpush/workspace-seams.json` at source revision `1e0b186c254c4161f9b388b933eafc34c8df3bd0`; `36` packages, `334` Rust files, `207,083` source lines, `117` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `transport -> stealth` is absent; `stealth -> transport` remains concrete at `15` references.
+
+## Core Engine-Contract Dependency (2026-08-10, TODO-562)
+
+- Contract flow: `qf-engine-types::{QKeyToken, FecMode}` -> root connection parameters/state and core FEC fixture. Root core no longer routes these contracts through the concrete root engine namespace.
+- Verification: focused core tests `33/33`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,171,964 / 18,309,144 KiB`.
+- Runtime engine orchestration, frontend, Tauri, and wire behavior remain unchanged.
