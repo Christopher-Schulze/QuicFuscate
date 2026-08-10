@@ -4,15 +4,18 @@
 
 #[cfg(any(test, feature = "rust-tests"))]
 use qf_cpu::planner::AccelerationPlanner;
-#[cfg(any(test, feature = "rust-tests"))]
+#[cfg(all(
+    any(test, feature = "rust-tests"),
+    any(target_os = "linux", target_os = "macos", target_os = "ios")
+))]
 use qf_transport_udp as accelerate;
 #[cfg(any(test, feature = "rust-tests"))]
 use std::net::SocketAddr;
 #[cfg(any(test, feature = "rust-tests"))]
 use std::net::UdpSocket;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "rust-tests")))]
 use std::sync::atomic::AtomicUsize;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "rust-tests")))]
 use std::sync::atomic::Ordering;
 #[cfg(any(test, feature = "rust-tests"))]
 use std::time::Duration;
@@ -20,11 +23,11 @@ use std::time::Duration;
 #[cfg(all(unix, not(target_os = "linux"), any(test, feature = "rust-tests")))]
 use std::os::unix::io::FromRawFd;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "rust-tests")))]
 static BATCH_SENDS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "rust-tests")))]
 static BATCH_RECVS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "rust-tests")))]
 static PACKETS_BATCHED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(any(test, feature = "rust-tests"))]
 #[allow(dead_code)]

@@ -3070,3 +3070,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - AVX2 GF(2^8) flow: 16 low nibbles plus shifted high nibbles -> two lookup tables -> typed `i8` low-nibble mask -> byte shuffles -> XOR product. The index shift remains `u8`, and the mask literal owns its intrinsic-required type without redundant casts.
 - Verification: locked Linux-x86 qf-fec all-target/all-feature Clippy with Clang-backed sha2-asm; qf-fec tests `82/82`; all five Cargo feature-taxonomy profiles; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `5,960,644 / 3,771,248 KiB`; frontend and Tauri are unaffected.
+
+## qf-transport-batch Test-Surface cfg Ownership (2026-08-10, TODO-562)
+
+- Compile ownership: Linux plus test/rust-tests -> batch metric statics and atomic orderings; test/rust-tests plus Linux/macOS/iOS -> qf-transport-udp acceleration alias; Windows and other fallback targets -> direct socket path without the alias. These boundaries match the cfg-gated `BatchProcessor` implementation and leave production runtime transport unchanged.
+- Verification: locked warning-denied Linux-x86 no-default-feature check; Windows-MSVC all-target/all-feature qf-transport-batch Clippy; qf-transport-batch tests `7/7`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `6,239,120 / 3,482,908 KiB`; frontend and Tauri are unaffected.
