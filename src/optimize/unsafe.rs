@@ -737,6 +737,7 @@ pub mod unsafe_compress {
         DFast,
         Greedy,
         Lazy2,
+        #[cfg(feature = "compression_zstd_ffi")]
         BtOpt,
     }
 
@@ -759,7 +760,6 @@ pub mod unsafe_compress {
                 Self::DFast => zstd::zstd_safe::Strategy::ZSTD_dfast,
                 Self::Greedy => zstd::zstd_safe::Strategy::ZSTD_greedy,
                 Self::Lazy2 => zstd::zstd_safe::Strategy::ZSTD_lazy2,
-                Self::BtOpt => zstd::zstd_safe::Strategy::ZSTD_btopt,
             }
         }
     }

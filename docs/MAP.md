@@ -3016,5 +3016,11 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - Compile flow: x86_64 unit tests or `internal_avx10_preview` builds -> pure AVX10 CPUID decoder; ordinary x86_64 production builds no longer retain the decoder without its only production caller.
 - Hot-path cleanup: compression classifiers -> typed SIMD bounds; AVX2/AVX-512 reductions -> iterator sum; AVX-512 pattern candidates -> one bounded position; BMI2 bitmap range -> slice fill. Dispatch and observable behavior remain unchanged.
-- Verification: native x86_64-Linux qf-cpu all-target Clippy with warnings denied; qf-cpu all-feature tests `87/87`; strict workspace all-feature library/binary/example Clippy. The exact workspace `unsafe_rust` lane proceeds past qf-cpu and stops at the separate root `CompressionStrategy::BtOpt` dead-code diagnostic.
+- Verification: native x86_64-Linux qf-cpu all-target Clippy with warnings denied; qf-cpu all-feature tests `87/87`; strict workspace all-feature library/binary/example Clippy. The exact workspace `unsafe_rust` lane proceeds past qf-cpu and exposed the separate root `CompressionStrategy::BtOpt` dead-code diagnostic closed below.
 - Final target/free space is `4,531,144 / 6,997,628 KiB`; frontend and Tauri are unaffected.
+
+## Zstd BtOpt Feature Ownership (2026-08-10, TODO-562)
+
+- Feature flow: `compression_zstd_ffi` -> environment-selected `btopt` -> `CompressionStrategy::BtOpt` -> native zstd strategy. The fallback path contains only its four length-selected strategies and cannot construct BtOpt.
+- Verification: exact workspace `unsafe_rust` all-target Clippy; serial fallback root library `1,646/1,646`; serial all-feature root library `1,657/1,657`; strict workspace all-feature library/binary/example Clippy.
+- Final target/free space is `6,621,332 / 4,546,296 KiB`; frontend and Tauri are unaffected.
