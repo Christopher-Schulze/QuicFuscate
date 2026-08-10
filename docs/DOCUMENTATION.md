@@ -6874,3 +6874,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The Stealth acceleration module imports `FeatureDetector` only for x86_64 production code or test, benchmark, and rust-tests builds. Default non-x86 library builds no longer retain an unused test-only import.
 - The exact previously failing `cargo clippy --workspace --locked --all-targets -- -D warnings` lane passes. The default root library suite passes `1,615/1,615`; strict workspace all-feature library/binary/example Clippy and formatting also pass.
 - Final target/free space is `3,348,156 / 9,435,932 KiB`, below the cleanup threshold and above the build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## Cargo Feature Taxonomy Leaf Forwarding (2026-08-10, TODO-562)
+
+- The feature-taxonomy audit now records the exact leaf forwarding owned by server, dev-certs, aggressive_inline, prefetch, std, internal_avx10_preview, rust-tests, and benches. The manifest remains the implementation source, while the audit's explicit mirror fails closed if a future edit silently drops or adds a consumer.
+- `verify-cargo-feature-taxonomy.sh` passes with `26` declared features, `29` effective Cargo selectors, `862` tracked Rust feature references, no unknown source or target selectors, all five positive build profiles green, and all seven retired groups rejected with Cargo exit `101`.
+- Bash syntax and diff hygiene pass. Final target/free space is `4,006,764 / 8,770,776 KiB`, below the cleanup threshold and above the build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.

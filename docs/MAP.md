@@ -3005,3 +3005,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Test dependency flow: root unit tests -> six root dev-dependencies with `rust-tests` -> qf-fec, qf-stealth, qf-transport-batch, qf-transport-recovery, qf-transport-types, and qf-transport-udp hidden test contracts. Normal product dependency edges remain feature-free.
 - Compile flow: x86_64 product code or root test/benchmark/rust-tests code -> root Stealth `FeatureDetector` import. Default non-x86 product code does not compile the unused import.
 - Verification: exact default workspace all-target Clippy with warnings denied; default root library `1,615/1,615`; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `3,348,156 / 9,435,932 KiB`; frontend and Tauri are unaffected.
+
+## Cargo Feature Taxonomy Leaf Forwarding (2026-08-10, TODO-562)
+
+- Audit flow: root Cargo feature -> explicit leaf feature consumers in `Cargo.toml` -> exact mirrored dependency tuple in `verify-cargo-feature-taxonomy.sh` -> baseline metadata plus positive and retired-profile Cargo probes.
+- Forwarded groups covered by the mirror are server, dev-certs, aggressive_inline, prefetch, std, internal_avx10_preview, rust-tests, and benches. The gate passes with `26` declared and `29` effective selectors, `862` source references, five positive profiles, seven rejected retired groups, and zero failures.
+- Final target/free space is `4,006,764 / 8,770,776 KiB`; frontend and Tauri are unaffected.
