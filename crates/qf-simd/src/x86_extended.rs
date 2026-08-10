@@ -210,7 +210,7 @@ fn quic_encode_bytes(val: u64, buf: &mut [u8]) -> Option<usize> {
     }
     let mut bytes = val.to_be_bytes();
     let start = 8 - len;
-    bytes[start] = (bytes[start] & 0x3F) | ((prefix as u8) << 6);
+    bytes[start] = (bytes[start] & 0x3F) | (prefix << 6);
     buf[..len].copy_from_slice(&bytes[start..start + len]);
     Some(len)
 }
@@ -300,7 +300,7 @@ pub(super) unsafe fn varint_decode_bmi2(buf: &[u8]) -> Option<(u64, usize)> {
     for (i, &byte) in buf.iter().enumerate().take(10) {
         // Use BMI2 to extract and deposit bits efficiently
         let bits = _pext_u64(byte as u64, 0x7F);
-        value = _pdep_u64(bits, 0x7F << shift) | value;
+        value |= _pdep_u64(bits, 0x7F << shift);
 
         if byte & 0x80 == 0 {
             return Some((value, i + 1));
@@ -750,7 +750,7 @@ pub(super) unsafe fn reed_solomon_encode_gfni(data: &[u8], parity_shards: usize)
 pub(super) unsafe fn reed_solomon_encode_avx2(data: &[u8], parity_shards: usize) -> Vec<u8> {
     use std::arch::x86_64::*;
 
-    let data_shards = (data.len() + 255) / 256;
+    let data_shards = data.len().div_ceil(256);
     let total_shards = data_shards + parity_shards;
     let shard_size = 256;
     let mut output = vec![0u8; total_shards * shard_size];
@@ -833,10 +833,11 @@ fn build_reed_solomon_decode_matrix(
 
     for (row, &index) in indices.iter().enumerate() {
         let x = index as u8;
-        for column in 0..k {
-            matrix[row][column] = scalar::gf_pow(x, column as u8);
+        let matrix_row = &mut matrix[row];
+        for (column, value) in matrix_row.iter_mut().take(k).enumerate() {
+            *value = scalar::gf_pow(x, column as u8);
         }
-        matrix[row][k + row] = 1;
+        matrix_row[k + row] = 1;
     }
 
     for pivot in 0..k {
@@ -850,8 +851,8 @@ fn build_reed_solomon_decode_matrix(
         }
 
         let pivot_inverse = scalar::gf_inv(matrix[pivot][pivot]);
-        for column in pivot..augmented_width {
-            matrix[pivot][column] = scalar::gf_mul_byte(matrix[pivot][column], pivot_inverse);
+        for value in matrix[pivot].iter_mut().take(augmented_width).skip(pivot) {
+            *value = scalar::gf_mul_byte(*value, pivot_inverse);
         }
 
         for row in 0..k {
@@ -862,8 +863,18 @@ fn build_reed_solomon_decode_matrix(
             if factor == 0 {
                 continue;
             }
-            for column in pivot..augmented_width {
-                matrix[row][column] ^= scalar::gf_mul_byte(matrix[pivot][column], factor);
+            let (pivot_row, target_row) = if row < pivot {
+                let (rows_before_pivot, pivot_and_after) = matrix.split_at_mut(pivot);
+                (&pivot_and_after[0], &mut rows_before_pivot[row])
+            } else {
+                let (pivot_and_before, rows_from_target) = matrix.split_at_mut(row);
+                (&pivot_and_before[pivot], &mut rows_from_target[0])
+            };
+            for (target, &pivot_value) in target_row[pivot..augmented_width]
+                .iter_mut()
+                .zip(&pivot_row[pivot..augmented_width])
+            {
+                *target ^= scalar::gf_mul_byte(pivot_value, factor);
             }
         }
     }
@@ -887,10 +898,10 @@ pub(super) unsafe fn reed_solomon_decode_gfni(
     let k = shards.len();
     let mut output = vec![0u8; output_len];
 
-    for output_row in 0..k {
+    for (output_row, coefficients) in matrix.iter().take(k).enumerate() {
         let output_start = output_row * shard_size;
         for shard_index in 0..k {
-            let coeff = matrix[output_row][k + shard_index];
+            let coeff = coefficients[k + shard_index];
             if coeff == 0 {
                 continue;
             }
@@ -972,10 +983,10 @@ pub(super) unsafe fn reed_solomon_decode_avx2(
     let k = shards.len();
     let mut output = vec![0u8; output_len];
 
-    for output_row in 0..k {
+    for (output_row, coefficients) in matrix.iter().take(k).enumerate() {
         let output_start = output_row * shard_size;
         for shard_index in 0..k {
-            let coeff = matrix[output_row][k + shard_index];
+            let coeff = coefficients[k + shard_index];
             if coeff == 0 {
                 continue;
             }
@@ -1151,8 +1162,8 @@ pub(super) unsafe fn qpack_encode_ssse3(input: &[u8], output: &mut [u8]) -> usiz
         let mut idx_arr = [0i32; 4];
         _mm_storeu_si128(idx_arr.as_mut_ptr() as *mut __m128i, idx_vec);
 
-        for lane in 0..4 {
-            let sym = idx_arr[lane] as usize;
+        for lane in idx_arr {
+            let sym = lane as usize;
             let code = HUFF_CODES[sym] as u128;
             let clen = HUFF_LENS[sym] as usize;
 

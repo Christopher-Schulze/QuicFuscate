@@ -3048,3 +3048,10 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - Linux receive flow: optional `Duration` -> checked `time_t` and `c_long` fields -> explicitly typed `std::io::Result<libc::timespec>` -> `Option::transpose` -> borrowed timeout pointer for `recvmmsg`. The explicit error owner removes feature-dependent inference without changing the syscall boundary.
 - Verification: exact `zero_copy_dgram` and default workspace all-target Clippy; all five positive Cargo feature-taxonomy profiles; qf-transport-batch tests `7/7`; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `3,269,876 / 6,667,016 KiB`; frontend and Tauri are unaffected.
+
+## qf-simd x86 Warning and Ownership Cleanup (2026-08-10, TODO-562)
+
+- Active ownership: compression histogram/pattern dispatch -> qf-cpu; neural dot product -> root optimize owner; QUIC varint -> transport codec; LEB128/FEC varint and Reed-Solomon helpers -> qf-simd x86_extended. Eight unreferenced private duplicates are absent from qf-simd x86.
+- Test ownership: SSE4.2 short-pattern intrinsic -> x86 unit test only. AArch64 runtime SVE2 routing -> compile-time SVE2 implementation or AArch64 scalar fallback; x86 does not compile the fallback helper.
+- ACK flow: sorted ranges -> AVX2/AVX-512 low-lane eligibility mask -> consecutive qualifying-lane count -> bounded maximum -> scalar tail. AVX-512 uses `trailing_ones`, so its vector path advances consistently with AVX2 instead of falling through immediately.
+- Verification: locked Linux-x86 and Windows-x86 qf-simd all-target/all-feature Clippy; qf-simd tests `61/61`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `4,007,492 / 5,894,636 KiB`; frontend and Tauri are unaffected.

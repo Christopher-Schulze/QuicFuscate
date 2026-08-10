@@ -60,6 +60,7 @@ static SHA256_PLAN: OnceLock<Sha256Plan> = OnceLock::new();
 
 fn sha256_plan() -> &'static Sha256Plan {
     SHA256_PLAN.get_or_init(|| {
+        #[cfg(not(windows))]
         let features = FeatureDetector::instance();
 
         #[cfg(all(target_arch = "x86_64", not(windows)))]

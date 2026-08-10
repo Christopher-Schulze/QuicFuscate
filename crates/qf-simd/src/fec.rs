@@ -45,7 +45,7 @@ unsafe fn berlekamp_massey_sve2_dispatch(syndrome: &[u8], len: usize) -> Vec<u8>
     super::arm::berlekamp_massey_sve2(syndrome, len)
 }
 
-#[cfg(any(not(target_arch = "aarch64"), not(target_feature = "sve2")))]
+#[cfg(all(target_arch = "aarch64", not(target_feature = "sve2")))]
 #[inline(always)]
 /// # Safety
 ///

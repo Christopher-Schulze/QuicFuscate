@@ -87,9 +87,9 @@ pub(crate) unsafe fn canonical_ack_blocks_avx2_unchecked(ranges: &[(u64, u64)]) 
                 // for scalar comparison. All bit patterns are valid for u64.
                 let tmp: [u64; 4] = core::mem::transmute(e_vec);
                 let mut local_max = max_candidate;
-                for lane in 0..(count as usize) {
-                    if tmp[lane] > local_max {
-                        local_max = tmp[lane];
+                for candidate in tmp.iter().copied().take(count as usize) {
+                    if candidate > local_max {
+                        local_max = candidate;
                     }
                 }
 
@@ -186,11 +186,11 @@ pub(crate) unsafe fn canonical_ack_blocks_avx512_unchecked(
                 let end_bcast = _mm512_set1_epi64(current_end as i64);
                 // 6 == _MM_CMPINT_NLE, which is equivalent to "greater than".
                 let gt_mask = _mm512_cmp_epi64_mask(s_vec, end_bcast, 6);
-                let le_mask = (!gt_mask) & 0xFF; // lanes where start <= end
+                let le_mask = !gt_mask; // lanes where start <= end
                 if le_mask == 0 {
                     break;
                 }
-                let count = le_mask.trailing_zeros().min(8);
+                let count = le_mask.trailing_ones().min(8);
 
                 // SAFETY: Same bounds reasoning as `s_ptr` above - `local + 8 <= len`
                 // guarantees 8 contiguous u64 elements at `ends[local]`.
@@ -201,9 +201,9 @@ pub(crate) unsafe fn canonical_ack_blocks_avx512_unchecked(
                 // for scalar max-finding. All bit patterns are valid for u64.
                 let tmp: [u64; 8] = core::mem::transmute(e_vec);
                 let mut local_max = max_candidate;
-                for lane in 0..(count as usize) {
-                    if tmp[lane] > local_max {
-                        local_max = tmp[lane];
+                for candidate in tmp.iter().copied().take(count as usize) {
+                    if candidate > local_max {
+                        local_max = candidate;
                     }
                 }
                 max_candidate = local_max;

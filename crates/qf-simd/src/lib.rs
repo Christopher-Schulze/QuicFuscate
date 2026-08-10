@@ -8,11 +8,13 @@
 )]
 use std::sync::OnceLock;
 
+#[cfg(not(windows))]
 use qf_cpu::{prefetch, PrefetchHint};
 pub use qf_cpu::{
     AmxCapability, CpuFeature, CpuFeatures, CpuProfile, CryptoAeadPlan, FeatureDetector,
 };
 
+#[cfg(not(windows))]
 const SHA256_H0: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
@@ -45,6 +47,7 @@ pub mod x86_ack;
 #[cfg(target_arch = "x86_64")]
 mod x86_header;
 
+#[cfg(not(windows))]
 #[inline(always)]
 fn sha256_hash_with_batch<F>(data: &[u8], batch: usize, mut compress: F) -> [u8; 32]
 where
