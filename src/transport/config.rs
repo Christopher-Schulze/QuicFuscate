@@ -1,5 +1,5 @@
 use super::{is_supported_version, CongestionControlAlgorithm};
-use crate::stealth::OsFingerprintProfile;
+use qf_stealth::OsFingerprintProfile;
 use rustls::pki_types::pem::PemObject;
 use zeroize::Zeroizing;
 

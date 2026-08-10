@@ -97,7 +97,7 @@ impl Connection {
             policy.estimated_max_bits_per_second(max_udp_payload_size)
         );
         self.traffic_analysis = Some(
-            crate::stealth::TrafficAnalysisScheduler::with_lifecycle_with_clock(
+            qf_stealth::TrafficAnalysisScheduler::with_lifecycle_with_clock(
                 rate_pps.get(),
                 target_size,
                 true,

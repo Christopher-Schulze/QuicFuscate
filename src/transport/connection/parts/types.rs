@@ -144,7 +144,7 @@ pub struct Connection {
     pmtu_above_floor_pns: HashSet<u64>,
     // Single transport-owned deadline and bounded pending slot for idle chaff
     // and constant-rate traffic-analysis defense.
-    traffic_analysis: Option<crate::stealth::TrafficAnalysisScheduler>,
+    traffic_analysis: Option<qf_stealth::TrafficAnalysisScheduler>,
     // Authenticated baseline restored when Intelligent escalation deactivates.
     traffic_analysis_base_policy: crate::transport::config::TrafficAnalysisPolicy,
     // Post-authentication Intelligent escalation ceiling. None is fail-closed.

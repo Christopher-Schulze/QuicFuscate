@@ -52,7 +52,7 @@ mod tests {
         connection.config.set_chaff_size_bytes(target_size);
         connection.pmtu = pmtu_state(false, PmtuPolicy::default());
         connection.traffic_analysis =
-            Some(crate::stealth::TrafficAnalysisScheduler::with_lifecycle(
+            Some(qf_stealth::TrafficAnalysisScheduler::with_lifecycle(
                 rate_pps,
                 target_size,
                 true,
@@ -1671,7 +1671,7 @@ mod tests {
         pair.client.close(true, 0, b"shutdown").expect("close");
 
         let scheduler = pair.client.traffic_analysis.as_ref().expect("scheduler retained");
-        assert_eq!(scheduler.phase(), crate::stealth::TrafficAnalysisPhase::Cancelled);
+        assert_eq!(scheduler.phase(), qf_stealth::TrafficAnalysisPhase::Cancelled);
         assert!(!scheduler.has_pending_chaff());
         assert!(pair.client.traffic_analysis_deadline().is_none());
     }

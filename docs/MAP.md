@@ -2851,3 +2851,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Root manager conversion helpers remain compiled only for compatibility tests. Brain `65/65`, root all-feature checking, strict workspace Clippy, formatting, and diff hygiene pass; final target/free space is `3,931,084 / 18,602,192 KiB`.
 - The former `brain -> stealth::StealthManager` compatibility hop is removed. Concrete runtime mutation remains root-owned; protected frontend/Tauri paths remain untouched.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-brain-intelligent-policy-postpush/workspace-seams.json` at source revision `570223f68b3ef369ded291779355bc689b2fa765`; `36` packages, `334` Rust files, `207,083` source lines, `118` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `brain -> stealth` is absent; the concrete `brain -> transport` edge remains at `4` references.
+
+## Transport Stealth-Contract Dependency (2026-08-10, TODO-562)
+
+- Contract flow: `qf-stealth::{OsFingerprintProfile, TrafficAnalysisScheduler, TrafficAnalysisPhase}` -> root transport configuration/connection lifecycle. Root transport no longer routes these contracts through the root `stealth` compatibility namespace.
+- Verification: focused transport policy `25/25`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,170,736 / 18,332,576 KiB`.
+- No concrete manager, runtime, frontend, Tauri, or wire-format behavior changes.
