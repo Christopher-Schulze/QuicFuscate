@@ -3043,3 +3043,8 @@ The audit remains open. These reconciliations document current evidence and owne
 - VAES flow: eight AEGIS state blocks and round keys -> two fixed four-lane reference arrays -> AVX-512 AESENC -> unchanged output-lane order. Poly1305 flow: four accumulator limbs plus four coefficients -> fixed arrays -> AVX2/AVX-512 widening multiplication -> unchanged five-limb reduction.
 - AES-NI, SSSE3, and root AES schedule loops now traverse the same bounded round-key ranges directly; CTR output traverses the generated four-lane keystream. MORUS backend selection and word rotation retain identical values without redundant syntax.
 - Verification: locked x86_64-Linux qf-crypto all-target `rust-tests` Clippy; qf-crypto all-feature tests `140/140`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy. Final target/free space is `1,887,580 / 7,169,396 KiB`; frontend and Tauri are unaffected.
+
+## qf-transport-batch Timeout Result Typing (2026-08-10, TODO-562)
+
+- Linux receive flow: optional `Duration` -> checked `time_t` and `c_long` fields -> explicitly typed `std::io::Result<libc::timespec>` -> `Option::transpose` -> borrowed timeout pointer for `recvmmsg`. The explicit error owner removes feature-dependent inference without changing the syscall boundary.
+- Verification: exact `zero_copy_dgram` and default workspace all-target Clippy; all five positive Cargo feature-taxonomy profiles; qf-transport-batch tests `7/7`; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `3,269,876 / 6,667,016 KiB`; frontend and Tauri are unaffected.

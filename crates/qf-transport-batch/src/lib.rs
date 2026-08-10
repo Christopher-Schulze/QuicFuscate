@@ -279,7 +279,7 @@ impl BatchProcessor {
 
         // Setup timeout
         let mut ts = timeout
-            .map(|d| {
+            .map(|d| -> std::io::Result<libc::timespec> {
                 let tv_sec = libc::time_t::try_from(d.as_secs()).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
