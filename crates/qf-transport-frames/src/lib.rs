@@ -7,8 +7,8 @@ const MAX_ACK_BLOCKS: usize = MAX_FRAME_DATA_LEN / 2;
 
 /// Variable-length integer codec supplied by the owning transport runtime.
 ///
-/// Keeping the codec behind this narrow contract lets the frame leaf reuse the root SIMD
-/// implementation without importing the monolithic crate or maintaining a second implementation.
+/// Keeping the codec behind this narrow contract lets the frame leaf reuse the canonical packet
+/// number codec while retaining an acceleration seam for the root compatibility adapter.
 pub trait VarIntCodec {
     /// Returns the wire length needed for a QUIC variable-length integer.
     fn varint_len(value: u64) -> usize;
@@ -18,73 +18,29 @@ pub trait VarIntCodec {
     fn read_varint(input: &[u8]) -> Result<(u64, usize), ConnectionError>;
 }
 
-/// Dependency-free scalar variable-length integer codec used by this crate's direct API and tests.
+/// Canonical QUIC variable-length integer codec used by this crate's direct API and tests.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ScalarVarInt;
+pub struct TransportVarInt;
 
-impl VarIntCodec for ScalarVarInt {
+impl VarIntCodec for TransportVarInt {
     #[inline(always)]
     fn varint_len(value: u64) -> usize {
-        if value <= 0x3f {
-            1
-        } else if value <= 0x3fff {
-            2
-        } else if value <= 0x3fff_ffff {
-            4
-        } else {
-            8
-        }
+        qf_transport_pn::varint::varint_len(value)
     }
 
     #[inline(always)]
     fn write_varint(value: u64, out: &mut [u8]) -> Result<usize, ConnectionError> {
-        if value > 0x3fff_ffff_ffff_ffff {
-            return Err(ConnectionError::InvalidPacket);
-        }
-        let len = Self::varint_len(value);
-        if out.len() < len {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        match len {
-            1 => out[0] = value as u8,
-            2 => {
-                let encoded = (value | 0x4000).to_be_bytes();
-                out[..2].copy_from_slice(&encoded[6..]);
-            }
-            4 => {
-                let encoded = (value | 0x8000_0000).to_be_bytes();
-                out[..4].copy_from_slice(&encoded[4..]);
-            }
-            8 => {
-                let encoded = (value | 0xc000_0000_0000_0000).to_be_bytes();
-                out[..8].copy_from_slice(&encoded);
-            }
-            _ => unreachable!("QUIC varint length is one of 1, 2, 4, or 8"),
-        }
-        Ok(len)
+        qf_transport_pn::varint::write_varint(value, out)
     }
 
     #[inline(always)]
     fn read_varint(input: &[u8]) -> Result<(u64, usize), ConnectionError> {
-        let first = *input.first().ok_or(ConnectionError::BufferTooShort)?;
-        let len = 1usize << (first >> 6);
-        if input.len() < len {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let value = match len {
-            1 => (first & 0x3f) as u64,
-            2 => u16::from_be_bytes([input[0], input[1]]) as u64 & 0x3fff,
-            4 => u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as u64 & 0x3fff_ffff,
-            8 => {
-                u64::from_be_bytes([
-                    input[0], input[1], input[2], input[3], input[4], input[5], input[6], input[7],
-                ]) & 0x3fff_ffff_ffff_ffff
-            }
-            _ => unreachable!("QUIC varint length is one of 1, 2, 4, or 8"),
-        };
-        Ok((value, len))
+        qf_transport_pn::varint::read_varint(input)
     }
 }
+
+/// Historical compatibility name for the direct frame-leaf varint codec.
+pub type ScalarVarInt = TransportVarInt;
 
 /// Acceleration hooks supplied by the transport runtime.
 pub trait FrameAcceleration {
@@ -156,7 +112,7 @@ fn check_frame_len(len: usize, remaining: usize) -> Result<(), ConnectionError> 
 
 #[inline(always)]
 pub fn stream_frame_wire_len(stream_id: u64, offset: u64, data_len: usize) -> usize {
-    stream_frame_wire_len_with::<ScalarVarInt>(stream_id, offset, data_len)
+    stream_frame_wire_len_with::<TransportVarInt>(stream_id, offset, data_len)
 }
 
 /// Calculates a STREAM frame's wire length with a caller-supplied varint codec.
@@ -187,7 +143,7 @@ pub fn write_stream_frame(
     fin: bool,
     out: &mut [u8],
 ) -> Result<usize, ConnectionError> {
-    write_stream_frame_with::<ScalarVarInt>(stream_id, offset, data, fin, out)
+    write_stream_frame_with::<TransportVarInt>(stream_id, offset, data, fin, out)
 }
 
 /// Writes a STREAM frame with a caller-supplied varint codec.
@@ -223,7 +179,7 @@ pub fn write_padding(len: usize, out: &mut [u8]) -> Result<usize, ConnectionErro
 
 #[inline(always)]
 pub fn wire_len(frame: &Frame<'_>) -> Result<usize, ConnectionError> {
-    wire_len_with::<ScalarVarInt, ScalarFrameAcceleration>(frame)
+    wire_len_with::<TransportVarInt, ScalarFrameAcceleration>(frame)
 }
 
 /// Calculates a frame's wire length with a caller-supplied varint codec.
@@ -344,7 +300,7 @@ fn write_bytes_at(bytes: &[u8], out: &mut [u8], off: &mut usize) -> Result<(), C
 
 #[inline(always)]
 pub fn to_bytes(frame: &Frame<'_>, out: &mut [u8]) -> Result<usize, ConnectionError> {
-    to_bytes_with::<ScalarVarInt, ScalarFrameAcceleration>(frame, out)
+    to_bytes_with::<TransportVarInt, ScalarFrameAcceleration>(frame, out)
 }
 
 /// Encodes one frame with caller-supplied varint and acceleration contracts.
@@ -506,7 +462,7 @@ pub fn batch_encode_frames(
     frames: &[Frame<'_>],
     out: &mut [u8],
 ) -> Result<Vec<usize>, ConnectionError> {
-    batch_encode_frames_with::<ScalarVarInt, ScalarFrameAcceleration>(frames, out)
+    batch_encode_frames_with::<TransportVarInt, ScalarFrameAcceleration>(frames, out)
 }
 
 /// Batch encodes frames with caller-supplied varint and acceleration contracts.
@@ -679,7 +635,7 @@ pub fn from_bytes<'a>(
     input: &'a [u8],
     pkt: PacketType,
 ) -> Result<(Frame<'a>, usize), ConnectionError> {
-    from_bytes_with::<ScalarVarInt, ScalarFrameAcceleration>(input, pkt)
+    from_bytes_with::<TransportVarInt, ScalarFrameAcceleration>(input, pkt)
 }
 
 /// Decodes one frame with caller-supplied varint and acceleration contracts.

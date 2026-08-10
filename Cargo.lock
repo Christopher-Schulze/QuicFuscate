@@ -1765,6 +1765,7 @@ name = "qf-transport-frames"
 version = "0.4.4"
 dependencies = [
  "qf-error",
+ "qf-transport-pn",
  "qf-transport-types",
 ]
 
