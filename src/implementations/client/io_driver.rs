@@ -308,6 +308,12 @@ pub struct IoDriver {
 }
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
+struct UringInboundRuntime {
+    receiver: crate::optimize::uring_batch::UringRecvBatch,
+    event: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+}
+
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
 fn validate_eventfd_read_len(read_len: isize) -> std::io::Result<()> {
     if read_len == 8 {
         return Ok(());
@@ -745,8 +751,8 @@ impl IoDriver {
                                     .await
                                 {
                                     Ok(result) => {
-                                        for index in 0..queued {
-                                            sent[index] = result.is_sent(index);
+                                        for (index, sent_slot) in sent.iter_mut().enumerate() {
+                                            *sent_slot = result.is_sent(index);
                                         }
                                         crate::telemetry::IO_URING_SUBMIT_PACKETS
                                             .inc_by(result.sent_count() as u64);
@@ -927,17 +933,9 @@ impl IoDriver {
         // Try io_uring recv path on Linux.
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            if let Some((mut uring_recv, async_efd)) = Self::try_init_uring_recv(&socket, &conn) {
+            if let Some(uring) = Self::try_init_uring_recv(&socket, &conn) {
                 return self
-                    .run_inbound_uring(
-                        tun,
-                        conn,
-                        socket,
-                        ingress,
-                        handshake_event,
-                        &mut uring_recv,
-                        async_efd,
-                    )
+                    .run_inbound_uring(tun, conn, socket, ingress, handshake_event, uring)
                     .await;
             }
         }
@@ -1039,9 +1037,9 @@ impl IoDriver {
         socket: Arc<UdpSocket>,
         ingress: ClientTunnelIngress,
         handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
-        uring_recv: &mut crate::optimize::uring_batch::UringRecvBatch,
-        async_efd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+        uring: UringInboundRuntime,
     ) -> Result<(), EngineError> {
+        let UringInboundRuntime { mut receiver, event } = uring;
         let mut send_buf = vec![0u8; 65535];
         let mut handshake_signaled = false;
 
@@ -1049,21 +1047,21 @@ impl IoDriver {
             // Wait for CQ notification via eventfd, capped by the connection's
             // earliest send deadline so recovery/PTO timers are not overslept.
             let timeout = self.recv_timeout(&conn);
-            let readable = tokio::time::timeout(timeout, async_efd.readable()).await;
+            let readable = tokio::time::timeout(timeout, event.readable()).await;
 
             match readable {
                 Ok(Ok(mut guard)) => {
                     // Clear the eventfd counter (read 8 bytes).
                     let mut efd_buf = [0u8; 8];
-                    // SAFETY: `uring_recv.eventfd_fd()` returns the eventfd file descriptor
+                    // SAFETY: `receiver.eventfd_fd()` returns the eventfd file descriptor
                     // created inside `UringRecvBatch::with_defaults`. It is valid and open
-                    // for the lifetime of `uring_recv`. `efd_buf` is an 8-byte stack buffer
+                    // for the lifetime of `receiver`. `efd_buf` is an 8-byte stack buffer
                     // (the exact width mandated by the eventfd ABI). We request exactly 8
                     // bytes, which is the only valid read size for an eventfd. The raw
                     // pointer cast to `*mut c_void` is safe for a `[u8; 8]` stack array.
                     let efd_ret = unsafe {
                         libc::read(
-                            uring_recv.eventfd_fd(),
+                            receiver.eventfd_fd(),
                             efd_buf.as_mut_ptr() as *mut libc::c_void,
                             8,
                         )
@@ -1085,7 +1083,7 @@ impl IoDriver {
                     guard.clear_ready();
 
                     // Drain all completed receives.
-                    let completions = uring_recv.drain_completions().map_err(|e| {
+                    let completions = receiver.drain_completions().map_err(|e| {
                         self.transport_receive_error("client io_uring completion drain", e)
                     })?;
 
@@ -1150,32 +1148,29 @@ impl IoDriver {
     fn try_init_uring_recv(
         socket: &Arc<UdpSocket>,
         conn: &Arc<parking_lot::Mutex<QuicFuscateConnection>>,
-    ) -> Option<(
-        crate::optimize::uring_batch::UringRecvBatch,
-        tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
-    )> {
+    ) -> Option<UringInboundRuntime> {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
         let socket_fd = socket.as_raw_fd();
         let memory_pool = { conn.lock().recv_memory_pool() };
-        let mut uring_recv = crate::optimize::uring_batch::UringRecvBatch::with_defaults_pool(
+        let mut receiver = crate::optimize::uring_batch::UringRecvBatch::with_defaults_pool(
             socket_fd,
             false,
             memory_pool,
         )?;
 
-        if uring_recv.post_initial().is_err() {
+        if receiver.post_initial().is_err() {
             log::debug!("io_uring recv post_initial failed");
             return None;
         }
 
         // dup() the eventfd so AsyncFd can take ownership of the copy
         // while UringRecvBatch retains the original (both sides close safely).
-        // SAFETY: `uring_recv.eventfd_fd()` returns a valid open eventfd descriptor for
-        // the lifetime of `uring_recv`. `dup()` creates a new independent fd referring to
+        // SAFETY: `receiver.eventfd_fd()` returns a valid open eventfd descriptor for
+        // the lifetime of `receiver`. `dup()` creates a new independent fd referring to
         // the same underlying kernel object; the original is unaffected. We check for < 0
         // (error) before using `efd_dup`.
-        let efd_dup = unsafe { libc::dup(uring_recv.eventfd_fd()) };
+        let efd_dup = unsafe { libc::dup(receiver.eventfd_fd()) };
         if efd_dup < 0 {
             log::debug!("eventfd dup failed");
             return None;
@@ -1183,14 +1178,14 @@ impl IoDriver {
         // SAFETY: `efd_dup` is the freshly duplicated file descriptor obtained from the
         // successful `libc::dup()` call above. It is a valid, open fd that we have just
         // created, so we are taking its sole ownership here. `OwnedFd` will close it on
-        // drop; the original eventfd in `uring_recv` is separately managed.
+        // drop; the original eventfd in `receiver` is separately managed.
         let owned_efd = unsafe { OwnedFd::from_raw_fd(efd_dup) };
-        let async_efd = tokio::io::unix::AsyncFd::new(owned_efd).ok()?;
+        let event = tokio::io::unix::AsyncFd::new(owned_efd).ok()?;
 
         log::info!("io_uring recv batch initialised (eventfd bridge active)");
         crate::telemetry::IO_URING_RECV_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
 
-        Some((uring_recv, async_efd))
+        Some(UringInboundRuntime { receiver, event })
     }
 
     fn poll_http3_to_ingress(

@@ -625,37 +625,34 @@ pub async fn flush_live_server_outgoing(
         let mut sent = vec![false; staging.len()];
         #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
         let sent = vec![false; staging.len()];
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
-            {
-                use std::os::unix::io::AsRawFd;
-                let fd = socket.as_raw_fd();
-                let packets: Vec<(SocketAddr, &[u8])> =
-                    staging.iter().map(|(target, packet)| (*target, packet.as_slice())).collect();
-                match uring_worker {
-                    Some(worker) => match worker.send_batch_to_with_disposition(fd, &packets).await {
-                        Ok(result) => {
-                            for index in 0..staging.len() {
-                                sent[index] = result.is_sent(index);
-                            }
+            use std::os::unix::io::AsRawFd;
+            let fd = socket.as_raw_fd();
+            let packets: Vec<(SocketAddr, &[u8])> =
+                staging.iter().map(|(target, packet)| (*target, packet.as_slice())).collect();
+            if let Some(worker) = uring_worker {
+                match worker.send_batch_to_with_disposition(fd, &packets).await {
+                    Ok(result) => {
+                        for (index, sent_slot) in sent.iter_mut().enumerate() {
+                            *sent_slot = result.is_sent(index);
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            log::debug!("io_uring server worker busy, using async tail: {error}");
-                        }
-                        Err(error) => {
-                            return Err(DataPlaneFault::TransportSend {
-                                component: "server io_uring blocking worker".to_string(),
-                                error: error.to_string(),
-                            });
-                        }
-                    },
-                    None => {}
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        log::debug!("io_uring server worker busy, using async tail: {error}");
+                    }
+                    Err(error) => {
+                        return Err(DataPlaneFault::TransportSend {
+                            component: "server io_uring blocking worker".to_string(),
+                            error: error.to_string(),
+                        });
+                    }
                 }
             }
+        }
 
-            #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
-            let _ = uring_worker;
-        };
+        #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+        let _ = uring_worker;
         if sent.iter().all(|slot| *slot) {
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             {

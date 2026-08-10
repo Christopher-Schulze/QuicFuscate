@@ -1265,7 +1265,7 @@ impl LiveServerState {
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             {
                 worker.request_shutdown();
-                return worker.join().err();
+                worker.join().err()
             }
             #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
             {

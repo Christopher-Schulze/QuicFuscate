@@ -133,6 +133,11 @@ impl BatchSendResult {
         self.dispositions.len()
     }
 
+    /// Whether this result represents an empty input batch.
+    pub fn is_empty(&self) -> bool {
+        self.dispositions.is_empty()
+    }
+
     /// Whether the input packet at `index` was accepted as a complete send.
     pub fn is_sent(&self, index: usize) -> bool {
         self.dispositions.get(index) == Some(&BatchSendDisposition::Sent)
@@ -2044,6 +2049,10 @@ mod tests {
 
     #[test]
     fn batch_result_preserves_out_of_order_successes() {
+        let empty = BatchSendResult::not_submitted(0);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+
         let mut result = BatchSendResult::not_submitted(3);
         result.set_chunk(
             0,
@@ -2051,6 +2060,7 @@ mod tests {
         );
 
         assert_eq!(result.sent_count(), 2);
+        assert!(!result.is_empty());
         assert!(result.is_sent(0));
         assert!(!result.is_sent(1));
         assert!(result.is_sent(2));
