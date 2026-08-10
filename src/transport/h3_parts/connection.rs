@@ -1070,26 +1070,21 @@ impl Connection {
         Ok((frame_type, frame_len, header_len))
     }
 
-    /// Encode variable-length integer (SIMD-dispatched)
+    /// Encode a QUIC variable-length integer through the canonical transport codec.
     fn encode_varint(val: u64, buf: &mut Vec<u8>) {
-        let mut tmp = [0u8; 10];
-        let used = crate::simd::transport::encode_varint(val, &mut tmp[..]);
-        buf.extend_from_slice(&tmp[..used]);
+        let mut tmp = [0u8; 8];
+        if let Ok(used) = qf_transport_pn::varint::write_varint(val, &mut tmp) {
+            buf.extend_from_slice(&tmp[..used]);
+        }
     }
 
-    /// Decode variable-length integer (SIMD-dispatched)
+    /// Decode a QUIC variable-length integer through the canonical transport codec.
     fn decode_varint(buf: &[u8]) -> Result<(u64, usize), Error> {
-        if buf.is_empty() {
-            return Err(Error::BufferTooShort);
-        }
-        let required = 1usize << usize::from(buf[0] >> 6);
-        if buf.len() < required {
-            return Err(Error::BufferTooShort);
-        }
-        match crate::simd::transport::decode_varint(buf) {
-            Some((v, used)) => Ok((v, used)),
-            None => Err(Error::FrameError),
-        }
+        qf_transport_pn::varint::read_varint(buf).map_err(|error| match error {
+            crate::error::ConnectionError::BufferTooShort => Error::BufferTooShort,
+            crate::error::ConnectionError::InvalidPacket => Error::FrameError,
+            _ => Error::InternalError,
+        })
     }
 
     /// Decode one MASQUE capsule from a buffer
