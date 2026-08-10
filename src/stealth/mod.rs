@@ -85,7 +85,9 @@ pub use fingerprint::{
 // deterministic profile catalog is retained only for compatibility/audit work.
 
 include!("parts/browser_profiles.rs");
-pub use qf_stealth::{PaddingStrategy, RotationMode, StealthMode, TlsCoverCipherSuite};
+pub use qf_stealth::{
+    FecMode, PaddingStrategy, RotationMode, StealthConfig, StealthMode, TlsCoverCipherSuite,
+};
 include!("parts/http3_masquerade.rs");
 include!("parts/domain_fronting.rs");
 include!("parts/cover_traffic.rs");
@@ -93,7 +95,6 @@ include!("parts/probe_detector.rs");
 include!("parts/flow_shaping.rs");
 include!("parts/chaff.rs");
 include!("parts/tls_client_hello.rs");
-include!("parts/config.rs");
 include!("parts/escalation.rs");
 include!("parts/runtime.rs");
 include!("parts/manager.rs");

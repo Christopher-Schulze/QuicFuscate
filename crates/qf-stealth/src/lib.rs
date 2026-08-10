@@ -29,6 +29,8 @@ pub use profiles::{parse_profile_slot, BrowserProfile, OsProfile};
 #[doc(hidden)]
 pub use rotation::FingerprintRotationConfig;
 #[doc(hidden)]
+pub use stealth_config::{FecMode, StealthConfig};
+#[doc(hidden)]
 pub use tls_client_hello::TlsClientHelloProfileCatalog;
 #[doc(hidden)]
 pub use tls_cover::{TlsCover, TlsCoverCipherSuite};
@@ -64,6 +66,8 @@ pub mod probe_detector;
 pub mod profiles;
 #[doc(hidden)]
 pub mod rotation;
+#[doc(hidden)]
+pub mod stealth_config;
 #[doc(hidden)]
 mod tls_client_hello;
 #[doc(hidden)]

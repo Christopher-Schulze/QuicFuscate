@@ -1705,11 +1705,13 @@ dependencies = [
  "clap",
  "log",
  "qf-common",
+ "qf-compress",
  "qf-cpu",
  "qf-transport-types",
  "rand",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

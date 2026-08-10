@@ -1,5 +1,11 @@
 // --- 7. Stealth Manager and Configuration ---
 
+use crate::{
+    BrowserProfile, DomainFrontingManager, FingerprintProfile, OsProfile, PaddingStrategy,
+    RotationMode, StealthMode, TlsClientHelloProfileCatalog,
+};
+use qf_common::env_utils::EnvSnapshot;
+
 /// Ultra-sophisticated configuration for the main StealthManager.
 #[derive(Clone)]
 pub struct StealthConfig {
@@ -90,39 +96,27 @@ pub enum FecMode {
 }
 
 impl StealthConfig {
-    fn env_first<const N: usize>(
-        environment: &crate::env_utils::EnvSnapshot,
-        names: [&str; N],
-    ) -> Option<String> {
+    fn env_first<const N: usize>(environment: &EnvSnapshot, names: [&str; N]) -> Option<String> {
         environment.first(names)
     }
 
-    fn env_bool_first<const N: usize>(
-        environment: &crate::env_utils::EnvSnapshot,
-        names: [&str; N],
-    ) -> Option<bool> {
+    fn env_bool_first<const N: usize>(environment: &EnvSnapshot, names: [&str; N]) -> Option<bool> {
         environment.flag_first(names)
     }
 
-    fn env_parse_first<T, const N: usize>(
-        environment: &crate::env_utils::EnvSnapshot,
-        names: [&str; N],
-    ) -> Option<T>
+    fn env_parse_first<T, const N: usize>(environment: &EnvSnapshot, names: [&str; N]) -> Option<T>
     where
         T: std::str::FromStr,
     {
         environment.parse_first(names)
     }
 
-    fn env_f32_first<const N: usize>(
-        environment: &crate::env_utils::EnvSnapshot,
-        names: [&str; N],
-    ) -> Option<f32> {
+    fn env_f32_first<const N: usize>(environment: &EnvSnapshot, names: [&str; N]) -> Option<f32> {
         environment.parse_finite_f32_first(names)
     }
 
     fn env_csv_first<const N: usize>(
-        environment: &crate::env_utils::EnvSnapshot,
+        environment: &EnvSnapshot,
         names: [&str; N],
     ) -> Option<Vec<String>> {
         Self::env_first(environment, names).map(|value| {
@@ -135,8 +129,8 @@ impl StealthConfig {
     }
 
     fn apply_compression_env_overrides(
-        policy: &mut crate::compress::CompressionPolicy,
-        environment: &crate::env_utils::EnvSnapshot,
+        policy: &mut qf_compress::CompressionPolicy,
+        environment: &EnvSnapshot,
     ) {
         if let Some(enabled) = Self::env_bool_first(environment, ["QUICFUSCATE_COMPRESS"]) {
             policy.enabled = enabled;
@@ -155,84 +149,73 @@ impl StealthConfig {
         }
     }
 
-    fn transport_ack_threshold_override(
-        &self,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) -> Option<u64> {
-        Self::env_parse_first(environment, ["QUICFUSCATE_ACK_THRESHOLD"])
-            .filter(|n: &u64| *n > 0)
+    #[doc(hidden)]
+    pub fn transport_ack_threshold_override(&self, environment: &EnvSnapshot) -> Option<u64> {
+        Self::env_parse_first(environment, ["QUICFUSCATE_ACK_THRESHOLD"]).filter(|n: &u64| *n > 0)
     }
 
-    fn transport_ack_max_delay_override(
-        &self,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) -> Option<u64> {
+    #[doc(hidden)]
+    pub fn transport_ack_max_delay_override(&self, environment: &EnvSnapshot) -> Option<u64> {
         Self::env_parse_first(environment, ["QUICFUSCATE_ACK_MAX_DELAY_MS"])
     }
 
-    fn transport_external_pacing_override(
-        &self,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) -> Option<bool> {
+    #[doc(hidden)]
+    pub fn transport_external_pacing_override(&self, environment: &EnvSnapshot) -> Option<bool> {
         Self::env_bool_first(environment, ["QUICFUSCATE_EXTERNAL_PACING"])
     }
 
-    fn transport_padding_max_override(
-        &self,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) -> Option<usize> {
-        Self::env_parse_first(environment, [
-            "QUICFUSCATE_STEALTH_PADDING_MAX",
-            "QUICFUSCATE_STEALTH_MAX_PADDING",
-        ])
+    #[doc(hidden)]
+    pub fn transport_padding_max_override(&self, environment: &EnvSnapshot) -> Option<usize> {
+        Self::env_parse_first(
+            environment,
+            ["QUICFUSCATE_STEALTH_PADDING_MAX", "QUICFUSCATE_STEALTH_MAX_PADDING"],
+        )
     }
 
-    fn transport_padding_strategy_override(
+    #[doc(hidden)]
+    pub fn transport_padding_strategy_override(
         &self,
-        environment: &crate::env_utils::EnvSnapshot,
+        environment: &EnvSnapshot,
     ) -> Option<PaddingStrategy> {
-        environment.first_with([
-            "QUICFUSCATE_STEALTH_PADDING_STRATEGY",
-            "QUICFUSCATE_PADDING_STRATEGY",
-        ], |value| match value.to_ascii_lowercase().as_str() {
-            "1" | "random" => Some(PaddingStrategy::Random),
-            "2" | "fixed" => Some(PaddingStrategy::Fixed),
-            "3" | "adaptive" => Some(PaddingStrategy::Adaptive),
-            "4" | "browser" | "browser-mimic" | "browsermimic" => {
-                Some(PaddingStrategy::BrowserMimic)
-            }
-            "5" | "normalize" | "packet-normalize" | "packetnormalize" => {
-                Some(PaddingStrategy::PacketNormalize)
-            }
-            _ => None,
-        })
+        environment.first_with(
+            ["QUICFUSCATE_STEALTH_PADDING_STRATEGY", "QUICFUSCATE_PADDING_STRATEGY"],
+            |value| match value.to_ascii_lowercase().as_str() {
+                "1" | "random" => Some(PaddingStrategy::Random),
+                "2" | "fixed" => Some(PaddingStrategy::Fixed),
+                "3" | "adaptive" => Some(PaddingStrategy::Adaptive),
+                "4" | "browser" | "browser-mimic" | "browsermimic" => {
+                    Some(PaddingStrategy::BrowserMimic)
+                }
+                "5" | "normalize" | "packet-normalize" | "packetnormalize" => {
+                    Some(PaddingStrategy::PacketNormalize)
+                }
+                _ => None,
+            },
+        )
     }
 
-    fn transport_jitter_override_us(
-        &self,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) -> Option<u32> {
+    #[doc(hidden)]
+    pub fn transport_jitter_override_us(&self, environment: &EnvSnapshot) -> Option<u32> {
         Self::env_parse_first(environment, ["QUICFUSCATE_STEALTH_JITTER_US"])
     }
 
-    fn transport_adaptive_granularity_override(
+    #[doc(hidden)]
+    pub fn transport_adaptive_granularity_override(
         &self,
-        environment: &crate::env_utils::EnvSnapshot,
+        environment: &EnvSnapshot,
     ) -> Option<u16> {
         Self::env_parse_first(environment, ["QUICFUSCATE_STEALTH_ADAPTIVE_GRAN"])
     }
 
-    fn transport_mimic_bias_override(
-        &self,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) -> Option<u8> {
+    #[doc(hidden)]
+    pub fn transport_mimic_bias_override(&self, environment: &EnvSnapshot) -> Option<u8> {
         environment.first_with(["QUICFUSCATE_STEALTH_MIMIC_BIAS"], |value| {
             match value.to_ascii_lowercase().as_str() {
-            "1" | "very_small" | "safari" => Some(1),
-            "2" | "small" | "firefox" => Some(2),
-            "4" | "mobile" | "android" => Some(4),
-            "3" | "default" | "chromium" | "chrome" | "edge" => Some(3),
-            _ => None,
+                "1" | "very_small" | "safari" => Some(1),
+                "2" | "small" | "firefox" => Some(2),
+                "4" | "mobile" | "android" => Some(4),
+                "3" | "default" | "chromium" | "chrome" | "edge" => Some(3),
+                _ => None,
             }
         })
     }
@@ -545,7 +528,8 @@ impl StealthConfig {
     /// The flag is intentionally treated as a bundle alias. This prevents a
     /// misleading state where `enable_protocol_mimicry=true` exists in config
     /// but no runtime-visible H3/TLS persona behavior is actually enabled.
-    pub(crate) fn normalize_protocol_mimicry_bundle(&mut self) {
+    #[doc(hidden)]
+    pub fn normalize_protocol_mimicry_bundle(&mut self) {
         if !self.enable_protocol_mimicry {
             return;
         }
@@ -562,11 +546,13 @@ impl Default for StealthConfig {
 }
 
 impl StealthConfig {
-    fn masque_env_flag(environment: &crate::env_utils::EnvSnapshot, name: &str) -> bool {
+    #[doc(hidden)]
+    pub fn masque_env_flag(environment: &EnvSnapshot, name: &str) -> bool {
         Self::env_bool_first(environment, [name]).unwrap_or(false)
     }
 
-    fn masque_proxy_override(environment: &crate::env_utils::EnvSnapshot) -> Option<String> {
+    #[doc(hidden)]
+    pub fn masque_proxy_override(environment: &EnvSnapshot) -> Option<String> {
         Self::env_first(environment, ["QUICFUSCATE_MASQUE_PROXY"])
     }
 
@@ -750,7 +736,7 @@ impl StealthConfig {
                 cfg.compress_deny = v;
             }
             // Push to global compression policy
-            crate::compress::set_global_policy(crate::compress::CompressionPolicy {
+            qf_compress::set_global_policy(qf_compress::CompressionPolicy {
                 enabled: cfg.compress_enabled,
                 min_len: cfg.compress_min_len,
                 level: cfg.compress_level,
@@ -858,14 +844,12 @@ impl StealthConfig {
     /// - QUICFUSCATE_SERVER_PUSH_BASE_PATH: path
     /// - QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL: integer seconds
     pub fn apply_env_overrides(&mut self) {
-        let environment = crate::env_utils::EnvSnapshot::capture();
+        let environment = EnvSnapshot::capture();
         self.apply_env_overrides_with_snapshot(&environment);
     }
 
-    pub(crate) fn apply_env_overrides_with_snapshot(
-        &mut self,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) {
+    #[doc(hidden)]
+    pub fn apply_env_overrides_with_snapshot(&mut self, environment: &EnvSnapshot) {
         // Primary mode override first (sets a known baseline)
         if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_STEALTH_MODE"]) {
             let m = v.trim().to_ascii_lowercase();
@@ -883,16 +867,14 @@ impl StealthConfig {
             };
         }
 
-        if let Some(bp) = environment.first_with(
-            ["QUICFUSCATE_BROWSER", "QUICFUSCATE_BROWSER_PROFILE"],
-            Self::parse_browser,
-        ) {
+        if let Some(bp) = environment
+            .first_with(["QUICFUSCATE_BROWSER", "QUICFUSCATE_BROWSER_PROFILE"], Self::parse_browser)
+        {
             self.initial_browser = bp;
         }
-        if let Some(os) = environment.first_with(
-            ["QUICFUSCATE_OS", "QUICFUSCATE_OS_PROFILE"],
-            Self::parse_os,
-        ) {
+        if let Some(os) =
+            environment.first_with(["QUICFUSCATE_OS", "QUICFUSCATE_OS_PROFILE"], Self::parse_os)
+        {
             self.initial_os = os;
         }
         if let Some(b) =
@@ -900,22 +882,20 @@ impl StealthConfig {
         {
             self.enable_network_fingerprint_normalization = b;
         }
-        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE"])
+        if let Some(b) =
+            Self::env_bool_first(environment, ["QUICFUSCATE_SUPPRESS_ICMP_UNREACHABLE"])
         {
             self.suppress_icmp_unreachable = b;
         }
-        if let Some(b) =
-            Self::env_bool_first(
-                environment,
-                ["QUICFUSCATE_USE_TLS_COVER_EXTRAS", "QUICFUSCATE_USE_TLS_COVER"],
-            )
-        {
-            self.use_tls_cover = b;
-        }
         if let Some(b) = Self::env_bool_first(
             environment,
-            ["QUICFUSCATE_DOH", "QUICFUSCATE_DOH_ENABLED"],
+            ["QUICFUSCATE_USE_TLS_COVER_EXTRAS", "QUICFUSCATE_USE_TLS_COVER"],
         ) {
+            self.use_tls_cover = b;
+        }
+        if let Some(b) =
+            Self::env_bool_first(environment, ["QUICFUSCATE_DOH", "QUICFUSCATE_DOH_ENABLED"])
+        {
             self.enable_doh = b;
         }
         if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_DOH_PROVIDER"]) {
@@ -936,10 +916,10 @@ impl StealthConfig {
         if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_STEALTH_PADDING"]) {
             self.enable_traffic_padding = b;
         }
-        if let Some(n) = Self::env_parse_first(environment, [
-            "QUICFUSCATE_STEALTH_PADDING_MAX",
-            "QUICFUSCATE_STEALTH_MAX_PADDING",
-        ]) {
+        if let Some(n) = Self::env_parse_first(
+            environment,
+            ["QUICFUSCATE_STEALTH_PADDING_MAX", "QUICFUSCATE_STEALTH_MAX_PADDING"],
+        ) {
             self.max_padding_size = n;
         }
         if let Some(strategy) = self.transport_padding_strategy_override(environment) {
@@ -948,14 +928,16 @@ impl StealthConfig {
         if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_FINGERPRINT_ROTATION"]) {
             self.enable_fingerprint_rotation = b;
         }
-        if let Some(n) = Self::env_parse_first(environment, ["QUICFUSCATE_FINGERPRINT_ROTATION_INTERVAL"]) {
+        if let Some(n) =
+            Self::env_parse_first(environment, ["QUICFUSCATE_FINGERPRINT_ROTATION_INTERVAL"])
+        {
             self.fingerprint_rotation_interval = n;
         }
 
         // Compression policy overrides
-        let mut pol = crate::compress::global_policy_with_snapshot(environment);
+        let mut pol = qf_compress::global_policy_with_snapshot(environment);
         Self::apply_compression_env_overrides(&mut pol, environment);
-        crate::compress::set_global_policy(pol);
+        qf_compress::set_global_policy(pol);
 
         // Optional fine-grained overrides
         if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_CHOKE_ENABLE"]) {
@@ -985,7 +967,9 @@ impl StealthConfig {
         if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_SERVER_PUSH_BASE_PATH"]) {
             self.server_push_base_path = v;
         }
-        if let Some(n) = Self::env_parse_first(environment, ["QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL"]) {
+        if let Some(n) =
+            Self::env_parse_first(environment, ["QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL"])
+        {
             self.server_push_burst_interval = n;
         }
         self.normalize_protocol_mimicry_bundle();
@@ -1010,5 +994,89 @@ impl StealthConfig {
             "ios" => Some(OsProfile::IOS),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StealthConfig;
+    use crate::{BrowserProfile, OsProfile, PaddingStrategy, StealthMode};
+    use qf_common::env_utils::EnvSnapshot;
+
+    #[test]
+    fn mode_constructors_preserve_distinct_runtime_contracts() {
+        let off = StealthConfig::off();
+        assert_eq!(off.mode, StealthMode::Off);
+        assert!(!off.enable_http3_masquerading);
+        assert!(!off.enable_traffic_padding);
+
+        let stealth = StealthConfig::stealth();
+        assert_eq!(stealth.mode, StealthMode::Stealth);
+        assert_eq!(stealth.padding_strategy, PaddingStrategy::Adaptive);
+        assert!(stealth.use_tls_cover);
+
+        let intelligent = StealthConfig::intelligent();
+        assert_eq!(intelligent.mode, StealthMode::Intelligent);
+        assert!(intelligent.dynamic_enabled);
+    }
+
+    #[test]
+    fn toml_projection_applies_mode_before_explicit_fields() {
+        let config = StealthConfig::from_toml(
+            "[stealth]\nmode = 'anti-dpi'\ninitial_browser = 'Firefox'\ninitial_os = 'Linux'\nmax_padding_size = 384\n",
+        )
+        .expect("parse stealth configuration");
+
+        assert_eq!(config.mode, StealthMode::AntiDpi);
+        assert_eq!(config.initial_browser, BrowserProfile::Firefox);
+        assert_eq!(config.initial_os, OsProfile::Linux);
+        assert_eq!(config.max_padding_size, 384);
+        assert!(config.enable_domain_fronting);
+    }
+
+    #[test]
+    fn snapshot_mode_baseline_precedes_granular_overrides() {
+        let environment = EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_STEALTH_MODE", "manual"),
+            ("QUICFUSCATE_BROWSER", "safari"),
+            ("QUICFUSCATE_OS", "macos"),
+            ("QUICFUSCATE_STEALTH_PADDING", "true"),
+            ("QUICFUSCATE_STEALTH_PADDING_STRATEGY", "browser-mimic"),
+            ("QUICFUSCATE_STEALTH_PADDING_MAX", "192"),
+            ("QUICFUSCATE_STEALTH_DYNAMIC", "false"),
+            ("QUICFUSCATE_H3_MASQUERADE", "false"),
+            ("QUICFUSCATE_QPACK", "false"),
+            ("QUICFUSCATE_USE_TLS_COVER", "false"),
+            ("QUICFUSCATE_SERVER_PUSH_COVER", "false"),
+        ]);
+        let mut config = StealthConfig::off();
+        config.enable_protocol_mimicry = true;
+        config.apply_env_overrides_with_snapshot(&environment);
+
+        assert_eq!(config.mode, StealthMode::Manual);
+        assert_eq!(config.initial_browser, BrowserProfile::Safari);
+        assert_eq!(config.initial_os, OsProfile::MacOS);
+        assert_eq!(config.padding_strategy, PaddingStrategy::BrowserMimic);
+        assert_eq!(config.max_padding_size, 192);
+        assert!(!config.enable_http3_masquerading);
+        assert!(!config.use_qpack_headers);
+        assert!(!config.use_tls_cover);
+    }
+
+    #[test]
+    fn validation_rejects_cross_field_inconsistencies() {
+        let mut config = StealthConfig::manual();
+        config.use_qpack_headers = true;
+        assert_eq!(
+            config.validate(),
+            Err("qpack headers require HTTP/3 masquerading to be enabled".to_owned())
+        );
+
+        config.use_qpack_headers = false;
+        config.enable_realtime_choke = true;
+        assert_eq!(
+            config.validate(),
+            Err("realtime choke requires choke_target_mbps > 0".to_owned())
+        );
     }
 }

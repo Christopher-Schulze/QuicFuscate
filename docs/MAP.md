@@ -2782,3 +2782,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-stealth `112/112`; focused root escalation filter `10/10`; root check; strict child/workspace all-target `rust-tests` Clippy; complete workspace all-target `rust-tests` exit `0`, including root `1,655/1,655` after owner-test migration.
 - The final disk guard records `6,593,448 KiB` target usage and `15,618,228 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-stealth-escalation-postpush/workspace-seams.json` at source revision `b37256303372b9a938ecf9a60de0b63c25633fdf`; `36` packages, `332` Rust files, `206,842` source lines, `125` module edges, `113` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## Stealth Configuration Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical owner: `crates/qf-stealth/src/stealth_config.rs` (`StealthConfig`, presets, rotation projection, TOML/file parsing, validation, snapshot overrides, transport/compression/MASQUE policy projection, and legacy `FecMode`); compatibility owner: `src/stealth/mod.rs` through direct re-exports.
+- Dependency flow: root manager/engine/implementations -> `qf-stealth::StealthConfig` -> `qf-common::EnvSnapshot` and `qf-compress::CompressionPolicy`. No child-to-root edge, frontend dependency, or Tauri dependency is introduced.
+- Verification: qf-stealth `116/116`; root all-feature check; root all-feature library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. The unchanged Linux-only compile guard at `scripts/tests/rust/rt-io-hotpath-kernel-integration.rs:4` is the sole all-target Clippy stop on macOS ARM64.
+- The final disk guard records `9,083,324 KiB` target usage and `13,785,588 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
