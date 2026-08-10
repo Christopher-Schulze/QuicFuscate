@@ -2619,7 +2619,7 @@ impl RoutingManager {
     #[cfg(test)]
     const WINDOWS_NAT_NAME: &'static str = "QuicFuscateNat";
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn pf_rules(&self, subnet: &str, ipv6_subnet: Option<&str>) -> String {
         let fanout_v4 = format!(
             "pass quick on {} inet from {} to {{ 255.255.255.255, {}, 224.0.0.0/4 }} keep state\n",

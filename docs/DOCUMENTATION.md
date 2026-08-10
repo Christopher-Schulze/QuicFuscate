@@ -7022,3 +7022,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - AVX-512 lane initialization now uses direct mutable iteration with explicit offsets. The x86 x4 SSE core uses `wrapping_add` for all derived counters, preserving the ChaCha20 32-bit counter contract in debug and release builds across SSE4.1, AVX, and AVX2 dispatch.
 - Four focused ChaCha20 tests pass, including x4 and x16 scalar parity across counter wraparound. Exact local `unsafe_rust` workspace all-target Clippy and formatting pass with warnings denied; runtime guardrails report `Critical: 0` plus `Warnings: 0` in `scripts/out/audits/audit-runtime-guardrails-20260810_223229/audit-runtime-guardrails.log`. Native x86 SIMD execution and hosted Linux x86 confirmation remain external.
 - Final target/free space is `4,572,500 / 4,113,444 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## macOS PF Test-Helper Ownership (2026-08-10, TODO-562)
+
+- Clippy Matrix run `31429261499`, job `93588364875`, exposed `RoutingManager::pf_rules` as dead in Linux test builds. Its only repository caller is the macOS-specific PF ruleset unit test.
+- The helper now requires both `test` and `target_os = "macos"`, matching its caller exactly. PF rule generation, production routing, platform support, and test assertions remain unchanged.
+- Focused routing tests pass `24/24`, exact local `unsafe_rust` workspace all-target Clippy passes with warnings denied, and formatting passes. Hosted Linux x86 confirmation remains external.
+- Final target/free space is `4,569,848 / 3,214,704 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.

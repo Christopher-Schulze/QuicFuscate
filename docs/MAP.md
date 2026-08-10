@@ -3142,3 +3142,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - x4 flow: public dispatch -> AVX2, AVX, or SSE4.1 wrapper -> shared SSE2 core with four wrapping counters. AArch64 NEON and scalar paths retain the same modulo-`u32` sequence.
 - Verification: four focused ChaCha20 tests, including x4 and x16 scalar parity across wraparound; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting; runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_223229/audit-runtime-guardrails.log`. Native x86 SIMD execution remains external.
 - Final target/free space is `4,572,500 / 4,113,444 KiB`; frontend and Tauri paths are unaffected.
+
+## macOS PF Test-Helper Ownership (2026-08-10, TODO-562)
+
+- Test flow: macOS unit-test target -> `test_pf_rules_keep_ipv4_and_ipv6_in_one_anchor_ruleset` -> `RoutingManager::pf_rules`. Linux, Windows, and non-test targets compile neither the caller nor the helper.
+- Verification: focused routing tests `24/24`; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting. Hosted Linux x86 confirmation remains external.
+- Final target/free space is `4,569,848 / 3,214,704 KiB`; frontend and Tauri paths are unaffected.
