@@ -2738,3 +2738,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-transport-types `37/37`; focused root path filter `47/47`; root/workspace check and strict `rust-tests` Clippy; workspace all-feature check; formatting and diff hygiene; complete workspace all-target `rust-tests` exit `0`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-path-event-postpush/workspace-seams.json` at source revision `403ef081d3a1befdeabb69871c81db7c9bf5be63`; `36` packages, `327` Rust files, `206,596` source lines, `125` module edges, `111` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. The post-test disk guard records `4,807,672 KiB` target usage and `6,227,812 KiB` free.
 - Protected frontend/Tauri paths remain untouched; no frontend field/API projection is required. TODO-562 remains blocked for the measured product SCC and external Linux/native/CI gates.
+
+## H3 Error and ALPN Contract Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical owner: `crates/qf-transport-types/src/h3.rs` (`Error`, `APPLICATION_PROTOCOL`, transport-error conversion, and H3-to-connection-error projection); compatibility owner: `src/transport/h3.rs`.
+- Root `src/transport/h3_parts/connection.rs` retains concrete H3 behavior but no longer owns the value/error contract. `src/lib.rs` keeps its compatibility tests while the conversion implementation moves with the local child type to satisfy Rust coherence.
+- Verification: qf-transport-types `38/38`; focused root H3 `76/76`; root/workspace check and strict `rust-tests` Clippy; workspace all-feature check; formatting and diff hygiene; complete workspace all-target `rust-tests` exit `0`, including root `1,658/1,658`.
+- The post-test disk guard records `4,924,504 KiB` target usage and `21,896,264 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

@@ -1,5 +1,54 @@
 //! Root-independent HTTP/3 value contracts shared by transport and stealth.
 
+use super::TransportError;
+
+/// HTTP/3 operation and protocol errors exposed by the connection boundary.
+#[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
+pub enum Error {
+    Done,
+    BufferTooShort,
+    InternalError,
+    /// The underlying QUIC DATAGRAM send queue is at capacity; the caller
+    /// should apply backpressure and retry rather than fall back to framed H3.
+    DgramQueueFull,
+    ExcessiveLoad,
+    IdError,
+    StreamCreationError,
+    ClosedCriticalStream,
+    FrameUnexpected,
+    FrameError,
+    QpackDecompressionFailed,
+    TransportError(TransportError),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<TransportError> for Error {
+    fn from(error: TransportError) -> Self {
+        Self::TransportError(error)
+    }
+}
+
+impl From<Error> for qf_error::ConnectionError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Done => Self::Done,
+            other => Self::Transport(format!("H3 error: {other:?}")),
+        }
+    }
+}
+
+/// HTTP/3 application protocols supported by the transport boundary.
+#[doc(hidden)]
+pub const APPLICATION_PROTOCOL: &[&[u8]] = &[b"h3", b"h3-29", b"h3-28", b"h3-27"];
+
 /// HTTP/3 header name/value pair.
 #[derive(Debug, Clone)]
 #[doc(hidden)]
@@ -159,7 +208,8 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Event, Header};
+    use super::{Config, Error, Event, Header, APPLICATION_PROTOCOL};
+    use crate::TransportError;
 
     #[test]
     fn config_contract_preserves_defaults_and_mutations() {
@@ -198,6 +248,26 @@ mod tests {
         assert!(
             matches!(capsule, Event::MasqueCapsule { capsule_type: 0x22, payload } if payload == [1, 2, 3])
         );
+    }
+
+    #[test]
+    fn error_and_application_protocol_contracts_preserve_root_behavior() {
+        let transport_error = Error::from(TransportError::BufferTooShort);
+        assert!(matches!(transport_error, Error::TransportError(TransportError::BufferTooShort)));
+        assert!(!transport_error.to_string().is_empty());
+
+        let done: qf_error::ConnectionError = Error::Done.into();
+        assert_eq!(done, qf_error::ConnectionError::Done);
+        let other: qf_error::ConnectionError = Error::IdError.into();
+        assert!(matches!(
+            other,
+            qf_error::ConnectionError::Transport(message) if message == "H3 error: IdError"
+        ));
+        assert_eq!(APPLICATION_PROTOCOL.len(), 4);
+        assert_eq!(APPLICATION_PROTOCOL[0], b"h3");
+        assert_eq!(APPLICATION_PROTOCOL[1], b"h3-29");
+        assert_eq!(APPLICATION_PROTOCOL[2], b"h3-28");
+        assert_eq!(APPLICATION_PROTOCOL[3], b"h3-27");
     }
 
     #[cfg(feature = "rust-tests")]

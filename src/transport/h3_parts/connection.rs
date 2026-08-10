@@ -2,41 +2,6 @@ use super::*;
 use crate::optimize::PooledBlock;
 use std::collections::{HashSet, VecDeque};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Error {
-    Done,
-    BufferTooShort,
-    InternalError,
-    /// The underlying QUIC DATAGRAM send queue is at capacity; the caller
-    /// should apply backpressure and retry rather than fall back to framed H3.
-    DgramQueueFull,
-    ExcessiveLoad,
-    IdError,
-    StreamCreationError,
-    ClosedCriticalStream,
-    FrameUnexpected,
-    FrameError,
-    QpackDecompressionFailed,
-    TransportError(super::Error),
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<super::Error> for Error {
-    fn from(err: super::Error) -> Self {
-        Error::TransportError(err)
-    }
-}
-
-/// HTTP/3 application protocol
-pub const APPLICATION_PROTOCOL: &[&[u8]] = &[b"h3", b"h3-29", b"h3-28", b"h3-27"];
-
 /// HTTP/3 Server Push Promise for stealth cover traffic
 #[derive(Debug, Clone)]
 struct PushPromise {

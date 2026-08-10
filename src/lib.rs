@@ -26,15 +26,6 @@ pub mod env_utils;
 pub mod error {
     pub use qf_error::*;
 
-    impl From<crate::transport::h3::Error> for qf_error::ConnectionError {
-        fn from(error: crate::transport::h3::Error) -> Self {
-            match error {
-                crate::transport::h3::Error::Done => Self::Done,
-                other => Self::Transport(format!("H3 error: {:?}", other)),
-            }
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         use super::ConnectionError;
