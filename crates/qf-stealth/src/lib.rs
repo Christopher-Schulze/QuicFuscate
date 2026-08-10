@@ -10,6 +10,8 @@ pub use cover_traffic::CoverTrafficScheduler;
 #[doc(hidden)]
 pub use domain_fronting::{CdnProvider, DomainFrontingManager};
 #[doc(hidden)]
+pub use escalation::EscalationState;
+#[doc(hidden)]
 pub use fingerprint::{
     update_ip_checksum_incremental, update_tcp_checksum_incremental, IcmpUnreachablePolicy,
     IpIdBehavior, NormalizeOutcome, NormalizeResult, OsFingerprintProfile, PacketNormalizer,
@@ -48,6 +50,8 @@ pub mod chaff;
 pub mod config;
 #[doc(hidden)]
 pub mod cover_traffic;
+#[doc(hidden)]
+pub mod escalation;
 #[doc(hidden)]
 pub mod fingerprint;
 #[doc(hidden)]

@@ -56,7 +56,6 @@ Rules-File Guard (Stealth Module)
 use crate::crypto::hkdf::{hkdf_expand, hkdf_extract};
 use log::{debug, info, warn};
 // use of sha2 replaced with centralized SIMD dispatch
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 

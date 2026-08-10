@@ -2775,3 +2775,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-stealth `109/109`; focused root cover-traffic filter `4/4`; root check; strict child/workspace all-target `rust-tests` Clippy; complete workspace all-target `rust-tests` exit `0`, including root `1,658/1,658`.
 - The final disk guard records `5,112,680 KiB` target usage and `17,433,844 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-h3-cover-traffic-postpush/workspace-seams.json` at source revision `c84aa75394a212a22bc86c72a89fbb2ab35a892a`; `36` packages, `331` Rust files, `206,840` source lines, `125` module edges, `113` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## Stealth Escalation State Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical owner: `crates/qf-stealth/src/escalation.rs` (`EscalationState`, bounded probe buckets, 60/120-second counts, environment thresholds, wall-clock de-escalation, and `IntelligentLevelHints`); compatibility owner: `src/stealth/parts/escalation.rs`.
+- Verification: qf-stealth `112/112`; focused root escalation filter `10/10`; root check; strict child/workspace all-target `rust-tests` Clippy; complete workspace all-target `rust-tests` exit `0`, including root `1,655/1,655` after owner-test migration.
+- The final disk guard records `6,593,448 KiB` target usage and `15,618,228 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
