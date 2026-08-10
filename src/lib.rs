@@ -126,6 +126,23 @@ pub mod firewall {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn verify_nft_table_owner(
+        family: &str,
+        table: &str,
+        owner_marker: &str,
+        required_fragments: &[&str],
+        expected_rule_count: usize,
+    ) -> Result<(), std::io::Error> {
+        qf_firewall::verify_nft_table_owner(
+            family,
+            table,
+            owner_marker,
+            required_fragments,
+            expected_rule_count,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn cleanup_iptables_rule(
         program: &str,
         table: &str,

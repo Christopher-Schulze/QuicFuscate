@@ -449,7 +449,8 @@ pub fn verify_nft_table_rules(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn verify_nft_table_owner(
+/// Verify that every rule in an owned nftables table carries the expected marker.
+pub fn verify_nft_table_owner(
     family: &str,
     table: &str,
     owner_marker: &str,
