@@ -5,12 +5,14 @@ use serde::{Deserialize, Serialize};
 use std::fs::Metadata;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 use std::time::UNIX_EPOCH;
 
 const RESOLV_CONF_STATE_SCHEMA: u8 = 3;
 const OWNER_MARKER_PREFIX: &str = "# quicfuscate-resolver-owner=";
+#[cfg(unix)]
 pub(super) const RESOLVER_FILE_MODE: u32 = 0o644;
+#[cfg(unix)]
 pub(super) const RESOLVER_PRIVATE_FILE_MODE: u32 = 0o600;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -33,20 +35,76 @@ pub(super) struct ResolverObjectIdentity {
 }
 
 impl ResolverObjectIdentity {
-    fn from_metadata(metadata: &Metadata) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Self {
-                device: Some(metadata.dev()),
-                inode: Some(metadata.ino()),
-                size: 0,
-                modified_nanos: None,
-            }
-        }
+    #[cfg(unix)]
+    fn from_path_metadata(
+        _path: &Path,
+        metadata: &Metadata,
+        _follow_links: bool,
+    ) -> Result<Self, PlatformError> {
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            device: Some(metadata.dev()),
+            inode: Some(metadata.ino()),
+            size: 0,
+            modified_nanos: None,
+        })
+    }
 
-        #[cfg(not(unix))]
-        Self {
+    #[cfg(windows)]
+    fn from_path_metadata(
+        path: &Path,
+        _metadata: &Metadata,
+        follow_links: bool,
+    ) -> Result<Self, PlatformError> {
+        use std::mem::MaybeUninit;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        if !follow_links {
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let file = options.open(path).map_err(|error| {
+            PlatformError::DnsError(format!(
+                "open resolver object {} for identity: {error}",
+                path.display()
+            ))
+        })?;
+        let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: `file` keeps the handle valid, and the output pointer references writable,
+        // correctly aligned storage for the complete result structure.
+        let status =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+        if status == 0 {
+            return Err(PlatformError::DnsError(format!(
+                "inspect resolver object identity {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: a successful `GetFileInformationByHandle` initialized the complete structure.
+        let information = unsafe { information.assume_init() };
+        let file_index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+        Ok(Self {
+            device: Some(u64::from(information.dwVolumeSerialNumber)),
+            inode: Some(file_index),
+            size: 0,
+            modified_nanos: None,
+        })
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    fn from_path_metadata(
+        _path: &Path,
+        metadata: &Metadata,
+        _follow_links: bool,
+    ) -> Result<Self, PlatformError> {
+        Ok(Self {
             device: None,
             inode: None,
             size: metadata.len(),
@@ -55,7 +113,7 @@ impl ResolverObjectIdentity {
                 .ok()
                 .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
                 .map(|value| value.as_nanos()),
-        }
+        })
     }
 
     fn matches(&self, other: &Self) -> bool {
@@ -63,7 +121,10 @@ impl ResolverObjectIdentity {
             (Some(device), Some(inode), Some(other_device), Some(other_inode)) => {
                 device == other_device && inode == other_inode
             }
-            _ => self.size == other.size && self.modified_nanos == other.modified_nanos,
+            (None, None, None, None) => {
+                self.size == other.size && self.modified_nanos == other.modified_nanos
+            }
+            _ => false,
         }
     }
 }
@@ -231,7 +292,7 @@ pub(super) fn capture_resolver_path_identity(
             )))
         }
     };
-    let path_object = ResolverObjectIdentity::from_metadata(&metadata);
+    let path_object = ResolverObjectIdentity::from_path_metadata(source, &metadata, false)?;
     if metadata.file_type().is_file() {
         return Ok(ResolverPathIdentity {
             kind: ResolverPathKind::RegularFile,
@@ -286,7 +347,11 @@ pub(super) fn capture_resolver_path_identity(
         path_object: Some(path_object),
         link_target: Some(link_target),
         canonical_target: Some(canonical_target),
-        target_object: Some(ResolverObjectIdentity::from_metadata(&target_metadata)),
+        target_object: Some(ResolverObjectIdentity::from_path_metadata(
+            &resolved_target,
+            &target_metadata,
+            true,
+        )?),
     })
 }
 
