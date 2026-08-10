@@ -13,14 +13,16 @@ pub fn transpose_matrix<T: Copy>(matrix: &mut [T], rows: usize, cols: usize) {
     let features = FeatureDetector::instance().features_full();
 
     #[cfg(target_arch = "x86_64")]
-    if features.simd_dispatch_matrix().avx2 && std::mem::size_of::<T>() == 4 {
-        if rows.is_multiple_of(8) && cols.is_multiple_of(8) {
-            // SAFETY: the exact AVX2 runtime feature is proven above, and the
-            // shape/alignment contract is enforced by this helper's conditions.
-            unsafe {
-                transpose_matrix_avx2_f32(matrix as *mut _ as *mut f32, rows, cols);
-                return;
-            }
+    if features.simd_dispatch_matrix().avx2
+        && std::mem::size_of::<T>() == 4
+        && rows.is_multiple_of(8)
+        && cols.is_multiple_of(8)
+    {
+        // SAFETY: the exact AVX2 runtime feature is proven above, and the
+        // shape/alignment contract is enforced by this helper's conditions.
+        unsafe {
+            transpose_matrix_avx2_f32(matrix as *mut _ as *mut f32, rows, cols);
+            return;
         }
     }
 
@@ -214,8 +216,8 @@ unsafe fn transpose_8x8_avx2(
 ) {
     // Load 8x8 block
     let mut rows = [_mm256_setzero_ps(); 8];
-    for i in 0..8 {
-        rows[i] = _mm256_loadu_ps(src.add((row + i) * src_stride + col));
+    for (offset, row_vector) in rows.iter_mut().enumerate() {
+        *row_vector = _mm256_loadu_ps(src.add((row + offset) * src_stride + col));
     }
 
     // Transpose using shuffles
@@ -247,8 +249,8 @@ unsafe fn transpose_8x8_avx2(
     rows[7] = _mm256_permute2f128_ps(tt3, tt7, 0x31);
 
     // Store transposed block
-    for i in 0..8 {
-        _mm256_storeu_ps(dst.add((col + i) * dst_stride + row), rows[i]);
+    for (offset, row_vector) in rows.iter().enumerate() {
+        _mm256_storeu_ps(dst.add((col + offset) * dst_stride + row), *row_vector);
     }
 }
 

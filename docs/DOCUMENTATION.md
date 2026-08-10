@@ -7029,3 +7029,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The helper now requires both `test` and `target_os = "macos"`, matching its caller exactly. PF rule generation, production routing, platform support, and test assertions remain unchanged.
 - Focused routing tests pass `24/24`, exact local `unsafe_rust` workspace all-target Clippy passes with warnings denied, and formatting passes. Hosted Linux x86 confirmation remains external.
 - Final target/free space is `4,569,848 / 3,214,704 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## Matrix-Transpose SIMD Iteration Contract (2026-08-10, TODO-562)
+
+- Clippy Matrix run `31429261499`, jobs `93588364875`, `93588364943`, `93588364952`, `93588364963`, `93588364969`, and `93588364980`, exposed one nested AVX2 eligibility guard plus indexed 8x8 load and store loops in the test/rust-tests matrix transpose.
+- AVX2 selection now uses one flat feature, element-width, and tile-shape condition. The 8x8 kernel loads and stores through direct vector iteration with explicit offsets; intrinsic order, addresses, shuffle stages, shape requirements, and scalar/NEON/SVE2 fallbacks are unchanged.
+- Exact local workspace all-target Clippy passes with warnings denied for `internal_wiedemann,unsafe_rust` and `test-suite`; formatting and diff hygiene pass; runtime guardrails report `Critical: 0` plus `Warnings: 0` in `scripts/out/audits/audit-runtime-guardrails-20260810_224150/audit-runtime-guardrails.log`. Native x86 execution and hosted Linux x86 confirmation remain external.
+- Final target/free space is `5,192,724 / 2,570,584 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.

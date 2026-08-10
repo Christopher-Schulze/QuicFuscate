@@ -3148,3 +3148,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Test flow: macOS unit-test target -> `test_pf_rules_keep_ipv4_and_ipv6_in_one_anchor_ruleset` -> `RoutingManager::pf_rules`. Linux, Windows, and non-test targets compile neither the caller nor the helper.
 - Verification: focused routing tests `24/24`; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting. Hosted Linux x86 confirmation remains external.
 - Final target/free space is `4,569,848 / 3,214,704 KiB`; frontend and Tauri paths are unaffected.
+
+## Matrix-Transpose SIMD Iteration Contract (2026-08-10, TODO-562)
+
+- Dispatch flow: test/rust-tests transpose -> AVX2 feature plus 4-byte element plus 8x8 shape guard -> 8x8 AVX2 kernel; otherwise SVE2, NEON, or blocked scalar fallback according to target and runtime support.
+- AVX2 tile flow: direct iteration over eight vector slots -> unaligned row loads -> fixed unpack/shuffle/permute transpose -> direct iteration over eight output vectors -> unaligned column stores.
+- Verification: exact local workspace all-target Clippy for `internal_wiedemann,unsafe_rust` and `test-suite` with warnings denied; formatting and diff hygiene; runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_224150/audit-runtime-guardrails.log`. Native x86 execution remains external.
+- Final target/free space is `5,192,724 / 2,570,584 KiB`; frontend and Tauri paths are unaffected.
