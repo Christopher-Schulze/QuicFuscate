@@ -594,9 +594,7 @@ unsafe fn bitmap_set_range_bmi2(bitmap: &mut [u64], start: usize, end: usize) {
         bitmap[start_word] |= !0u64 << start_bit;
 
         // Set all bits in middle words
-        for word in (start_word + 1)..end_word {
-            bitmap[word] = !0u64;
-        }
+        bitmap[start_word + 1..end_word].fill(u64::MAX);
 
         // Set bits in end word
         bitmap[end_word] |= _bzhi_u64(!0u64, (end_bit + 1) as u32);

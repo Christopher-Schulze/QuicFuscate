@@ -337,7 +337,7 @@ unsafe fn sum_u32_avx512(data: &[u32]) -> u64 {
     }
     let mut tmp = [0u64; 8];
     _mm512_storeu_si512(tmp.as_mut_ptr() as *mut __m512i, acc);
-    let mut sum = tmp.iter().fold(0u64, |acc, &v| acc + v);
+    let mut sum = tmp.iter().copied().sum::<u64>();
     while i < data.len() {
         sum += *data.get_unchecked(i) as u64;
         i += 1;
@@ -364,7 +364,7 @@ unsafe fn sum_u32_avx2(data: &[u32]) -> u64 {
     }
     let mut tmp = [0u64; 4];
     _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
-    let mut sum = tmp.iter().fold(0u64, |acc, &v| acc + v);
+    let mut sum = tmp.iter().copied().sum::<u64>();
     while i < data.len() {
         sum += *data.get_unchecked(i) as u64;
         i += 1;

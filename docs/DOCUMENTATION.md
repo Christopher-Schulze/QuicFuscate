@@ -6880,3 +6880,11 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The feature-taxonomy audit now records the exact leaf forwarding owned by server, dev-certs, aggressive_inline, prefetch, std, internal_avx10_preview, rust-tests, and benches. The manifest remains the implementation source, while the audit's explicit mirror fails closed if a future edit silently drops or adds a consumer.
 - `verify-cargo-feature-taxonomy.sh` passes with `26` declared features, `29` effective Cargo selectors, `862` tracked Rust feature references, no unknown source or target selectors, all five positive build profiles green, and all seven retired groups rejected with Cargo exit `101`.
 - Bash syntax and diff hygiene pass. Final target/free space is `4,006,764 / 8,770,776 KiB`, below the cleanup threshold and above the build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## qf-cpu x86 Clippy Portability (2026-08-10, TODO-562)
+
+- Clippy Matrix run `31414899592`, job `93541482724`, exposed eight qf-cpu diagnostics in the x86_64 `unsafe_rust` lane: one AVX10 decoder dead-code gate, three signed SIMD literal casts, two manual array sums, one nested AVX-512 pattern check, and one indexed bitmap fill loop.
+- The AVX10 pure decoder is now compiled only for unit tests or x86_64 `internal_avx10_preview` production builds. The remaining fixes are equivalent idiomatic expressions: typed `i8` literals, iterator `sum`, one bounded pattern position, and a middle-word slice fill. CPU dispatch, packet-number behavior, compression classification, telemetry, and bitmap semantics are unchanged.
+- Native `x86_64-unknown-linux-gnu` qf-cpu all-target Clippy passes with warnings denied. qf-cpu all-feature tests pass `87/87`, and strict workspace all-feature library/binary/example Clippy passes.
+- The exact workspace `unsafe_rust` all-target lane now compiles qf-cpu and reaches a separate root diagnostic: `CompressionStrategy::BtOpt` is unused in that feature combination. That root warning is the next atomic CI repair and is not hidden inside this qf-cpu change.
+- Final target/free space is `4,531,144 / 6,997,628 KiB`, below the cleanup threshold and above the build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.

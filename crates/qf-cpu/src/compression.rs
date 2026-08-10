@@ -95,7 +95,7 @@ unsafe fn classify_sse2(bytes: &[u8]) -> PayloadCounters {
 
     let mut i = 0usize;
     let ascii_lower = _mm_set1_epi8((0x20 - 1) as i8);
-    let ascii_upper = _mm_set1_epi8(0x7F as i8);
+    let ascii_upper = _mm_set1_epi8(0x7F_i8);
     let newline = _mm_set1_epi8(b'\n' as i8);
     let carriage = _mm_set1_epi8(b'\r' as i8);
     let tab = _mm_set1_epi8(b'\t' as i8);
@@ -149,7 +149,7 @@ unsafe fn classify_avx2(bytes: &[u8]) -> PayloadCounters {
     let mut i = 0usize;
 
     let ascii_lower = _mm256_set1_epi8((0x20 - 1) as i8);
-    let ascii_upper = _mm256_set1_epi8(0x7F as i8);
+    let ascii_upper = _mm256_set1_epi8(0x7F_i8);
     let newline = _mm256_set1_epi8(b'\n' as i8);
     let carriage = _mm256_set1_epi8(b'\r' as i8);
     let tab = _mm256_set1_epi8(b'\t' as i8);
@@ -203,7 +203,7 @@ unsafe fn classify_avx512(bytes: &[u8]) -> PayloadCounters {
     let mut i = 0usize;
 
     let ascii_lower = _mm512_set1_epi8((0x20 - 1) as i8);
-    let ascii_upper = _mm512_set1_epi8(0x7F as i8);
+    let ascii_upper = _mm512_set1_epi8(0x7F_i8);
     let newline = _mm512_set1_epi8(b'\n' as i8);
     let carriage = _mm512_set1_epi8(b'\r' as i8);
     let tab = _mm512_set1_epi8(b'\t' as i8);

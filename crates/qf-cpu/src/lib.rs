@@ -547,7 +547,7 @@ fn decode_amx_cpuid_leaf7(edx: u32) -> (bool, bool, bool) {
     (edx & AMX_TILE != 0, edx & AMX_INT8 != 0, edx & AMX_BF16 != 0)
 }
 
-#[cfg(any(target_arch = "x86_64", test))]
+#[cfg(any(test, all(target_arch = "x86_64", feature = "internal_avx10_preview")))]
 fn decode_avx10_1_support(
     avx10_feature: bool,
     max_avx10_subleaf: u32,

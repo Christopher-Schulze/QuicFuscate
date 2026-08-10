@@ -297,11 +297,12 @@ unsafe fn find_pattern_avx512_vbmi2(haystack: &[u8], needle: &[u8]) -> Option<us
         if cmp_mask != 0 {
             // Found potential match, verify with scalar comparison
             for j in 0..64 {
-                if i + j + needle_len <= haystack_len {
-                    if &haystack[i + j..i + j + needle_len] == needle {
-                        telemetry::PATTERN_AVX512_VBMI2_OPS.inc();
-                        return Some(i + j);
-                    }
+                let position = i + j;
+                if position + needle_len <= haystack_len
+                    && &haystack[position..position + needle_len] == needle
+                {
+                    telemetry::PATTERN_AVX512_VBMI2_OPS.inc();
+                    return Some(position);
                 }
             }
         }
