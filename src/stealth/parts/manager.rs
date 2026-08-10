@@ -376,7 +376,7 @@ impl StealthManager {
         if should_rotate {
             if let Some(pool_len) = (!self.profile_pool.is_empty()).then_some(self.profile_pool.len()) {
                 self.profile_index
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |index| {
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |index| {
                         Some((index + 1) % pool_len)
                     })
                     .ok();

@@ -23,7 +23,7 @@ struct ActiveWorkerGuard(Arc<AtomicUsize>);
 
 impl Drop for ActiveWorkerGuard {
     fn drop(&mut self) {
-        self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        self.0.try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             Some(count.saturating_sub(1))
         }).ok();
     }

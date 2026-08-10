@@ -140,7 +140,7 @@ impl ServerMetrics {
     pub fn client_disconnected(&self) {
         let _ = self
             .clients_active
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
     }
 
     /// Record a rejected connection attempt.

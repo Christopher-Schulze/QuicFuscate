@@ -3060,3 +3060,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - Linux timeout ownership: `Duration::as_secs()` -> checked `time_t`; `Duration::subsec_nanos()` bounded below one billion -> proven infallible cast to signed Linux `c_long`; both fields -> typed `timespec`; `Option::transpose` -> `recvmmsg` timeout pointer. No impossible nanosecond error branch remains.
 - Verification: locked Linux-x86 qf-transport-batch all-target/all-feature Clippy; qf-transport-batch tests `7/7`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. The macOS-hosted complete Linux cross-check stops in ring/zstd before product code because no Linux C sysroot is installed. Final target/free space is `4,181,944 / 5,752,860 KiB`; frontend and Tauri are unaffected.
+
+## Nightly Atomic Retry API Compatibility (2026-08-10, TODO-562)
+
+- Retry ownership: qf-telemetry counter subtraction, qf-instrumentation active-client decrement, qf-memory-pool ownership-ledger decrement, root Stealth profile rotation, and root Stealth worker release -> `Atomic*::try_update`. The API rename preserves each closure, success/failure ordering pair, saturating or modulo transition, and ignored-result behavior.
+- Verification: Nightly 1.99 affected-leaf and all-feature root library checks with warnings denied; affected leaf tests `44/44`; serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `4,059,408 / 5,742,176 KiB`; frontend and Tauri are unaffected.

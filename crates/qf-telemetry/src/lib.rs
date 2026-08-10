@@ -1384,7 +1384,7 @@ pub static FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS: Counter = Counter::new();
 pub static FEC_FOUNTAIN_DECODER_PROPAGATION_WORK: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
-    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = value.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_sub(decrement))
     });
 }

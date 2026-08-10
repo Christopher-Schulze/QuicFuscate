@@ -258,9 +258,8 @@ impl PoolOwnershipLedger {
 
     #[inline]
     fn decrement(counter: &AtomicUsize) {
-        let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-            Some(value.saturating_sub(1))
-        });
+        let _ = counter
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| Some(value.saturating_sub(1)));
     }
 
     fn register(
