@@ -183,9 +183,13 @@ impl Connection {
                 let crypto_budget =
                     out.len().saturating_sub(off + 16 + SEND_FRAME_OVERHEAD_RESERVE);
                 let (lvl, max_len) = match pkt_ty {
-                    PacketType::Initial => (crate::qftls::Level::Initial, crypto_budget),
-                    PacketType::Handshake => (crate::qftls::Level::Handshake, crypto_budget),
-                    _ => (crate::qftls::Level::Application, crypto_budget),
+                    PacketType::Initial => {
+                        (qf_transport_types::QuicEncryptionLevel::Initial, crypto_budget)
+                    }
+                    PacketType::Handshake => {
+                        (qf_transport_types::QuicEncryptionLevel::Handshake, crypto_budget)
+                    }
+                    _ => (qf_transport_types::QuicEncryptionLevel::Application, crypto_budget),
                 };
                 if max_len < 32 {
                     continue;

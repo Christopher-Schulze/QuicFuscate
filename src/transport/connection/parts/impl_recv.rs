@@ -605,9 +605,13 @@ impl Connection {
                         }
                         Frame::Crypto { offset, data } => {
                             let lvl = match pkt_ty {
-                                PacketType::Initial => crate::qftls::Level::Initial,
-                                PacketType::Handshake => crate::qftls::Level::Handshake,
-                                _ => crate::qftls::Level::Application,
+                                PacketType::Initial => {
+                                    qf_transport_types::QuicEncryptionLevel::Initial
+                                }
+                                PacketType::Handshake => {
+                                    qf_transport_types::QuicEncryptionLevel::Handshake
+                                }
+                                _ => qf_transport_types::QuicEncryptionLevel::Application,
                             };
                             self.process_crypto_frame(lvl, offset, data)?;
                             ack_eliciting = true;

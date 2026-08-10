@@ -1173,7 +1173,7 @@ impl Connection {
     /// Configure TLS provider with a specific profile and SNI.
     pub(crate) fn configure_tls(
         &mut self,
-        profile: &crate::qftls::TlsProfile,
+        profile: &qf_stealth::TlsProfile,
         sni: &str,
     ) -> Result<(), crate::error::ConnectionError> {
         let Some(provider) = &mut self.tls_provider else {
@@ -1314,7 +1314,7 @@ impl Connection {
     /// Process incoming CRYPTO frame
     pub(crate) fn process_crypto_frame(
         &mut self,
-        level: crate::qftls::Level,
+        level: qf_transport_types::QuicEncryptionLevel,
         offset: u64,
         data: Cow<'_, [u8]>,
     ) -> Result<(), crate::error::ConnectionError> {
@@ -1325,8 +1325,12 @@ impl Connection {
             {
                 let mut crypto = self.crypto.write();
                 let stream = match level {
-                    crate::qftls::Level::Initial => &mut crypto.crypto_initial,
-                    crate::qftls::Level::Handshake => &mut crypto.crypto_handshake,
+                    qf_transport_types::QuicEncryptionLevel::Initial => {
+                        &mut crypto.crypto_initial
+                    }
+                    qf_transport_types::QuicEncryptionLevel::Handshake => {
+                        &mut crypto.crypto_handshake
+                    }
                     _ => &mut crypto.crypto_application,
                 };
                 stream.recv(offset, data.into_owned())?;
@@ -1357,8 +1361,10 @@ impl Connection {
             // Store in crypto stream for later processing
             let mut crypto = self.crypto.write();
             let stream = match level {
-                crate::qftls::Level::Initial => &mut crypto.crypto_initial,
-                crate::qftls::Level::Handshake => &mut crypto.crypto_handshake,
+                qf_transport_types::QuicEncryptionLevel::Initial => &mut crypto.crypto_initial,
+                qf_transport_types::QuicEncryptionLevel::Handshake => {
+                    &mut crypto.crypto_handshake
+                }
                 _ => &mut crypto.crypto_application,
             };
             stream.recv(offset, data.into_owned())?;
@@ -1473,7 +1479,7 @@ impl Connection {
     /// Get next CRYPTO frame to send
     pub(crate) fn next_crypto_frame(
         &mut self,
-        level: crate::qftls::Level,
+        level: qf_transport_types::QuicEncryptionLevel,
         max_len: usize,
     ) -> Result<Option<(u64, Vec<u8>)>, crate::error::ConnectionError> {
         if let Some(provider) = &mut self.tls_provider {
@@ -1481,8 +1487,10 @@ impl Connection {
         } else {
             let mut crypto = self.crypto.write();
             let stream = match level {
-                crate::qftls::Level::Initial => &mut crypto.crypto_initial,
-                crate::qftls::Level::Handshake => &mut crypto.crypto_handshake,
+                qf_transport_types::QuicEncryptionLevel::Initial => &mut crypto.crypto_initial,
+                qf_transport_types::QuicEncryptionLevel::Handshake => {
+                    &mut crypto.crypto_handshake
+                }
                 _ => &mut crypto.crypto_application,
             };
             stream.next_crypto_frame(max_len)

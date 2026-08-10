@@ -739,7 +739,7 @@ mod tests {
         c.enable_tls("chrome").expect("test rustls provider");
 
         let result = c.process_crypto_frame(
-            crate::qftls::Level::Initial,
+            qf_transport_types::QuicEncryptionLevel::Initial,
             0,
             std::borrow::Cow::Owned(vec![0xff; 64]),
         );
@@ -803,7 +803,7 @@ mod tests {
         assert!(!c.post_handshake_datagram_ready().expect("readiness probe"));
 
         let (_, flight) = c
-            .next_crypto_frame(crate::qftls::Level::Handshake, usize::MAX)
+            .next_crypto_frame(qf_transport_types::QuicEncryptionLevel::Handshake, usize::MAX)
             .expect("next handshake frame")
             .expect("pending handshake flight");
         assert_eq!(flight, b"client-finished");

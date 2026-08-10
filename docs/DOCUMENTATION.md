@@ -6788,3 +6788,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Existing stealth tests retain a test-only crate-internal compatibility projection. Root `CryptoContext` installation, TLS Cover sequence ownership, wire behavior, frontend, and Tauri behavior remain unchanged.
 - Focused TLS Cover tests pass `25/25`; root all-feature library tests pass `1,693/1,693`; all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `6,660,308 KiB` target usage and `15,375,788 KiB` free.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-tls-cover-qftls-adapter-postpush/workspace-seams.json` at source revision `ddf9a582d1fcf41dc535c2a52ff8983e985051f5`: `36` packages, `334` Rust files, `207,104` source lines, `110` module edges, `116` workspace dependency edges, and `protected_changes=[]`. The direct `qftls -> stealth` edge is removed, Stealth is outside every product SCC, and the remaining TLS/transport SCC is only `qftls/transport`.
+
+## Transport TLS Contract Dependency (2026-08-10, TODO-562)
+
+- Root transport connection state and CRYPTO-frame paths consume `qf-stealth::TlsProfile` and `qf-transport-types::QuicEncryptionLevel` directly from their canonical leaves instead of routing those contracts through QFTLS compatibility exports.
+- The only remaining `transport -> qftls` ownership is the concrete provider trait object plus provider factory call. Handshake behavior, public compatibility paths, frontend, and Tauri behavior remain unchanged.
+- Verification passes the focused TLS failure and post-handshake flight tests `2/2`, root all-feature library tests `1,693/1,693`, all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene. The final guard records `6,660,828 KiB` target usage and `15,331,636 KiB` free.

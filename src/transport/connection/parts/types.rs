@@ -82,7 +82,7 @@ pub struct Connection {
 
     // Unified TLS provider (rustls + optional TLS Cover)
     tls_provider: Option<Box<dyn crate::qftls::QuicTlsProvider>>,
-    tls_profile: Option<crate::qftls::TlsProfile>,
+    tls_profile: Option<qf_stealth::TlsProfile>,
     /// Immutable environment generation used by all TLS provider rebuilds for this connection.
     environment: Arc<crate::env_utils::EnvSnapshot>,
     conn_bytes_sent: u64,

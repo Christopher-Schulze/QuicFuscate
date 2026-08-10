@@ -2921,3 +2921,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Stealth retains only a test compatibility projection for its existing adapter invariants. Frontend and Tauri are unaffected.
 - Verification: focused TLS Cover `25/25`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `6,660,308 / 15,375,788 KiB`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-tls-cover-qftls-adapter-postpush/workspace-seams.json` at source revision `ddf9a582d1fcf41dc535c2a52ff8983e985051f5`; `36` packages, `334` Rust files, `207,104` source lines, `110` module edges, `116` workspace dependency edges, and `protected_changes=[]`. `qftls -> stealth` is absent, Stealth is outside every product SCC, and the remaining TLS/transport SCC is `qftls/transport`.
+
+## Transport TLS Contract Dependency (2026-08-10, TODO-562)
+
+- Contract flow: `qf-stealth::TlsProfile` and `qf-transport-types::QuicEncryptionLevel` -> transport connection state/CRYPTO frame processing. QFTLS remains only the concrete provider/factory owner.
+- Handshake behavior, frontend, and Tauri are unaffected.
+- Verification: focused TLS lifecycle `2/2`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `6,660,828 / 15,331,636 KiB`.
