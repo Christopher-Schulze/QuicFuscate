@@ -1707,6 +1707,81 @@ mod tests {
     }
 
     #[test]
+    fn masque_connect_udp_roundtrip_drains_all_peer_events_without_error() {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+        let mut client_config = Config::new().expect("client config");
+        client_config.set_qpack_max_table_capacity(64 * 1024);
+        client_config.set_qpack_blocked_streams(16);
+        let mut client_h3 = Connection::with_transport(&mut client, &client_config)
+            .expect("client h3");
+        let sid = client_h3
+            .connect_udp_with_headers(
+                &mut client,
+                "proxy.test",
+                "target.test:443",
+                &[
+                    Header::new(b"x-qf-auth", b"00112233445566778899aabbccddeeff"),
+                    Header::new(b"x-qf-generation", b"47"),
+                ],
+            )
+            .expect("connect_udp");
+        let mut packet = [0u8; 2048];
+        let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+        let mut server_config = Config::new().expect("server config");
+        server_config.set_qpack_max_table_capacity(64 * 1024);
+        server_config.set_qpack_blocked_streams(16);
+        let mut server_h3 = Connection::with_transport(&mut server, &server_config)
+            .expect("server h3");
+
+        let mut request_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            loop {
+                match server_h3.poll(&mut server) {
+                    Ok(Some((rx_sid, Event::Headers { .. }))) => {
+                        assert_eq!(rx_sid, sid);
+                        request_seen = true;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("server H3 full drain failed: {:?}", error),
+                }
+            }
+            if request_seen {
+                break;
+            }
+        }
+        assert!(request_seen, "request headers must reach the peer");
+
+        assert!(
+            server_h3.accept_masque_connect(&mut server, sid).expect("accept CONNECT-UDP"),
+            "first accept must emit the readiness response"
+        );
+
+        let mut response_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            loop {
+                match client_h3.poll(&mut client) {
+                    Ok(Some((rx_sid, Event::Headers { .. }))) => {
+                        assert_eq!(rx_sid, sid);
+                        response_seen = true;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("client H3 full drain failed: {:?}", error),
+                }
+            }
+            if response_seen {
+                break;
+            }
+        }
+        assert!(response_seen, "response headers must reach the peer");
+    }
+
+    #[test]
     fn masque_connect_udp_rejection_never_establishes_client_flow() {
         use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
         let BenchConnectionPair { mut client, mut server, recv_info } =

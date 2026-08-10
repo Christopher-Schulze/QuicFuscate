@@ -128,6 +128,26 @@ mod tests {
     }
 
     #[test]
+    fn masque_request_headers_bind_auth_and_connection_generation() {
+        let mut connection = test_connection();
+        connection.qkey_auth_token_hex = Some(qf_engine_types::QKeyToken::from(
+            "00112233445566778899aabbccddeeff",
+        ));
+        connection.set_client_connection_generation(47);
+
+        let headers = connection.build_masque_request_headers();
+
+        assert_eq!(headers.len(), 2);
+        assert!(headers.iter().any(|header| {
+            header.name() == b"x-qf-auth"
+                && header.value() == b"00112233445566778899aabbccddeeff"
+        }));
+        assert!(headers.iter().any(|header| {
+            header.name() == b"x-qf-generation" && header.value() == b"47"
+        }));
+    }
+
+    #[test]
     fn send_only_feedback_does_not_replay_stale_loss_into_auto_fec() {
         let mut fec = AdaptiveFec::new(FecConfig::product_default());
         let send_only = crate::transport::connection::FecCallbackFeedback {

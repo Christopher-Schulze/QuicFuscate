@@ -728,6 +728,28 @@ impl QuicFuscateConnection {
         headers.push(crate::transport::h3::Header::new(b"x-qf-auth", token.as_bytes()));
     }
 
+    fn inject_connection_generation_header(
+        generation: Option<u64>,
+        headers: &mut Vec<crate::transport::h3::Header>,
+    ) {
+        let Some(generation) = generation.filter(|generation| *generation != 0) else {
+            return;
+        };
+        let value = generation.to_string();
+        headers.retain(|header| !header.name().eq_ignore_ascii_case(b"x-qf-generation"));
+        headers.push(crate::transport::h3::Header::new(
+            b"x-qf-generation",
+            value.as_bytes(),
+        ));
+    }
+
+    fn build_masque_request_headers(&self) -> Vec<crate::transport::h3::Header> {
+        let mut headers = Vec::new();
+        Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut headers);
+        Self::inject_connection_generation_header(self.client_connection_generation, &mut headers);
+        headers
+    }
+
     #[cfg(feature = "orchestrator")]
     fn update_orchestrator_resource_signals(&mut self) {
         use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate};
@@ -789,8 +811,7 @@ impl QuicFuscateConnection {
         let proxy = self.stealth_manager.masque_proxy().unwrap_or_else(|| format!("{}:443", host));
 
         let target = format!("{}:443", host);
-        let mut extra_headers = Vec::new();
-        Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut extra_headers);
+        let extra_headers = self.build_masque_request_headers();
         let Some(ref mut h3) = self.h3_conn else {
             return Ok(None);
         };
@@ -993,14 +1014,7 @@ impl QuicFuscateConnection {
         headers.insert(0, crate::transport::h3::Header::new(b":scheme", b"https"));
         headers.insert(0, crate::transport::h3::Header::new(b":method", method));
         Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut headers);
-        if let Some(generation) = self.client_connection_generation {
-            let value = generation.to_string();
-            headers.retain(|header| header.name() != b"x-qf-generation");
-            headers.push(crate::transport::h3::Header::new(
-                b"x-qf-generation",
-                value.as_bytes(),
-            ));
-        }
+        Self::inject_connection_generation_header(self.client_connection_generation, &mut headers);
         headers
     }
 
