@@ -2671,6 +2671,12 @@ The audit remains open. These reconciliations document current evidence and owne
 - Fresh seam evidence is `scripts/out/audits/workspace-seams-20260809T-stealth-fingerprint-final-2/workspace-seams.json`: `35` packages, `310` Rust files, `205,501` source lines, `128` module edges, `94` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. The all-feature/all-target check is intentionally blocked only by `scripts/tests/rust/rt-io-hotpath-kernel-integration.rs:4` on macOS ARM64.
 - Release verification passes with a `9,972,768`-byte binary, SHA-256 `90f00497ea181c76104853196f577a4f18145e9439d3436c5aa38b0b7799f314`, CLI help exit `0`, and final target usage `2,179,060 KiB` with `22,922,776 KiB` free. No frontend/Tauri path changed and no frontend field/API projection is required.
 
+## Transport Observer Policy Contract Workspace Ownership (2026-08-10, TODO-562)
+
+- `crates/qf-transport-types/src/observer.rs` owns the root-independent `TransportObserver`, `TransportPolicyTarget`, and `TransportPolicyError` contracts; `src/transport.rs` preserves compatibility exports and `Connection` supplies the concrete adapter.
+- Brain and FEC now share the child observer/policy boundary without changing wire behavior. qf-transport-types `35/35`, the root Brain filter `64/64`, strict Clippy, workspace all-feature checking, and the complete all-target `rust-tests` command pass with no failures. No frontend or Tauri path changed.
+- Seam evidence is `scripts/out/audits/workspace-seams-20260810T-observer-contract/workspace-seams.json`: `36` packages, `324` Rust files, `206,549` source lines, `125` module edges, `106` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. The measured runtime SCC remains open; this slice only removes root coupling from the shared contract surface.
+
 ## Transport Crypto Stream Workspace Leaf (2026-08-09, TODO-562)
 
 - `crates/qf-transport-crypto-stream/` owns the former `CryptoStream` implementation embedded in `src/transport/packet.rs`: reliable CRYPTO-frame buffering, ACK/loss range retention, PTO retransmission queues, bounded handshake-flight memory, and out-of-order receive reassembly. The root packet namespace re-exports the child type, so `CryptoContext` and qftls callers retain their existing paths.

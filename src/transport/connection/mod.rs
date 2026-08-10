@@ -32,3 +32,30 @@ include!("parts/impl_send.rs");
 include!("parts/impl_api.rs");
 include!("parts/bench.rs");
 include!("parts/tests.rs");
+
+/// Adapts the concrete connection state machine to the root-independent Brain policy target.
+impl qf_transport_types::TransportPolicyTarget for Connection {
+    fn delivery_rate(&self) -> u64 {
+        self.delivery_rate()
+    }
+
+    fn intelligent_stealth_runtime_enabled(&self) -> bool {
+        self.intelligent_stealth_runtime_enabled()
+    }
+
+    fn brain_runtime_permissions(&self) -> qf_transport_types::BrainRuntimePermissions {
+        self.brain_runtime_permissions()
+    }
+
+    fn set_ack_eliciting_threshold(&mut self, threshold: u64) {
+        self.set_ack_eliciting_threshold(threshold)
+    }
+
+    fn apply_brain_stealth_runtime_delta(
+        &mut self,
+        delta: qf_transport_types::StealthRuntimeDelta,
+    ) -> Result<(), qf_transport_types::TransportPolicyError> {
+        Connection::apply_brain_stealth_runtime_delta(self, delta)
+            .map_err(|error| qf_transport_types::TransportPolicyError::new(error.to_string()))
+    }
+}

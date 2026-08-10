@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::optimize::brain as brain_accel;
-use crate::transport::{Connection, TransportObserver};
 use qf_fec::{BrainFecHints, KalmanFilter};
+use qf_transport_types::{TransportObserver, TransportPolicyTarget};
 
 const PACKET_IAT_SAMPLE_INTERVAL: u64 = 8;
 
@@ -63,17 +63,17 @@ pub use qf_transport_types::StealthBrainConfig;
 
 /// Thin aggregator that forwards `TransportObserver` calls to multiple observers.
 pub(crate) struct CombinedObserver {
-    observers: Vec<Arc<dyn crate::transport::TransportObserver>>,
+    observers: Vec<Arc<dyn TransportObserver>>,
 }
 
 impl CombinedObserver {
     /// Wraps the given observers into a single `Arc<CombinedObserver>`.
-    pub(crate) fn new(observers: Vec<Arc<dyn crate::transport::TransportObserver>>) -> Arc<Self> {
+    pub(crate) fn new(observers: Vec<Arc<dyn TransportObserver>>) -> Arc<Self> {
         Arc::new(Self { observers })
     }
 }
 
-impl crate::transport::TransportObserver for CombinedObserver {
+impl TransportObserver for CombinedObserver {
     fn on_ack(&self, ack_delay: u64, ranges: &[(u64, u64)]) {
         for o in &self.observers {
             o.on_ack(ack_delay, ranges);
@@ -89,7 +89,7 @@ impl crate::transport::TransportObserver for CombinedObserver {
             o.on_ecn_update(ect0, ect1, ce);
         }
     }
-    fn apply_policy(&self, conn: &mut crate::transport::Connection) {
+    fn apply_policy(&self, conn: &mut dyn TransportPolicyTarget) {
         for o in &self.observers {
             o.apply_policy(conn);
         }
@@ -680,7 +680,7 @@ impl TransportObserver for StealthBrain {
         self.pending_ecn.store(packed, Ordering::Relaxed);
     }
 
-    fn apply_policy(&self, conn: &mut Connection) {
+    fn apply_policy(&self, conn: &mut dyn TransportPolicyTarget) {
         let signal_rtt_spikes =
             crate::optimize::telemetry::STEALTH_SIGNAL_RTT_SPIKES.swap(0, Ordering::Relaxed);
         let signal_rst = crate::optimize::telemetry::STEALTH_SIGNAL_RST.swap(0, Ordering::Relaxed);
@@ -1172,7 +1172,7 @@ impl TransportObserver for StealthBrain {
 
         let intelligent_runtime = conn.intelligent_stealth_runtime_enabled();
         let permissions = conn.brain_runtime_permissions();
-        let mut stealth_delta = crate::transport::StealthRuntimeDelta::default();
+        let mut stealth_delta = qf_transport_types::StealthRuntimeDelta::default();
 
         if permissions.ack_threshold && do_ack {
             conn.set_ack_eliciting_threshold(thr);

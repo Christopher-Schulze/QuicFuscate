@@ -20,6 +20,8 @@ pub mod handlers;
 #[doc(hidden)]
 pub mod masque;
 #[doc(hidden)]
+pub mod observer;
+#[doc(hidden)]
 pub mod protocol;
 #[doc(hidden)]
 pub mod runtime;
@@ -33,6 +35,7 @@ pub use brain::StealthBrainConfig;
 pub use fastpath::FastpathMode;
 pub use handlers::{CapsuleHandler, DatagramHandler};
 pub use masque::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
+pub use observer::{TransportObserver, TransportPolicyError, TransportPolicyTarget};
 pub use protocol::{Epoch, Header, PacketType, TransportError};
 pub use runtime::{BrainRuntimePermissions, FecControlDelta, IntelligentLevelHints};
 pub use stealth::{BrowserProfile, StealthRuntimeDelta, StealthRuntimePolicy};

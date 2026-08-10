@@ -80,13 +80,13 @@ pub use qf_fec::{matrix_multiply_scalar, MatrixError};
 
 #[cfg(test)]
 pub(crate) use crate::optimize::CpuProfile;
-use crate::transport::TransportObserver;
 #[cfg(test)]
 pub(crate) use qf_fec::runtime::STREAM_ADJUST_MIN_MS;
 #[cfg(test)]
 pub(crate) use qf_fec::runtime_plan::{FecAmbientInputs, FecRuntimePlan};
 #[cfg(test)]
 pub(crate) use qf_fec::FecComputeProfile;
+use qf_transport_types::TransportObserver;
 
 pub use qf_fec::decoders::{FecDecoderConfigError, MAX_DECODER_SOURCE_COUNT};
 

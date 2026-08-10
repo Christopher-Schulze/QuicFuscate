@@ -1,7 +1,8 @@
 pub use qf_transport_types::{
     BrainRuntimePermissions, BrowserProfile, CongestionControlAlgorithm, ConnectionId, EcnCounts,
     EcnMark, Epoch, FecControlDelta, Frame, Header, PacketType, PathStats, RecvInfo, SendInfo,
-    Stats, StealthRuntimeDelta, StealthRuntimePolicy, TransportError as Error, MAX_CONN_ID_LEN,
+    Stats, StealthRuntimeDelta, StealthRuntimePolicy, TransportError as Error, TransportObserver,
+    TransportPolicyError, TransportPolicyTarget, MAX_CONN_ID_LEN,
 };
 pub use qf_transport_version::{is_supported_version, PROTOCOL_VERSION, PROTOCOL_VERSION_V2};
 use std::collections::BTreeMap;
@@ -102,19 +103,6 @@ pub const MAX_PKT_NUM_LEN: usize = 4;
 // =========================================================================
 // Integration Hooks (no-op unless set)
 // =========================================================================
-
-/// Observer interface for low-cost transport telemetry callbacks.
-/// Not used unless explicitly set; all hooks are optional at call sites.
-pub trait TransportObserver: Send + Sync {
-    /// Called when an ACK frame is emitted (ack_delay in quic units)
-    fn on_ack(&self, _ack_delay: u64, _ranges: &[(u64, u64)]) {}
-    /// Called when a packet is received (post-decrypt)
-    fn on_packet_recv(&self, _pn: u64, _pt_len: usize) {}
-    /// Called when ECN counters are updated
-    fn on_ecn_update(&self, _ect0: u64, _ect1: u64, _ce: u64) {}
-    /// Optional policy hook to tune transport parameters based on telemetry
-    fn apply_policy(&self, _conn: &mut crate::transport::Connection) {}
-}
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
 // Transport integration remains a root compatibility adapter because the
-// transport observer trait and live Connection type are root-owned.
+// observer implementation still updates the live Connection-owned FEC controls.
 pub(crate) struct FecTransportObserver {
     inner: qf_fec::FecObserver,
 }
