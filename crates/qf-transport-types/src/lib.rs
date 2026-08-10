@@ -22,6 +22,8 @@ pub mod masque;
 #[doc(hidden)]
 pub mod observer;
 #[doc(hidden)]
+pub mod path;
+#[doc(hidden)]
 pub mod protocol;
 #[doc(hidden)]
 pub mod runtime;
@@ -36,6 +38,7 @@ pub use fastpath::FastpathMode;
 pub use handlers::{CapsuleHandler, DatagramHandler};
 pub use masque::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
 pub use observer::{TransportObserver, TransportPolicyError, TransportPolicyTarget};
+pub use path::PathEvent;
 pub use protocol::{Epoch, Header, PacketType, TransportError};
 pub use runtime::{BrainRuntimePermissions, FecControlDelta, IntelligentLevelHints};
 pub use stealth::{BrowserProfile, StealthRuntimeDelta, StealthRuntimePolicy};

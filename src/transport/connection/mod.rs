@@ -7,6 +7,7 @@ use super::{
     MIN_CLIENT_INITIAL_LEN,
 };
 use qf_transport_recovery::PmtuState;
+pub use qf_transport_types::path::PathEvent;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;

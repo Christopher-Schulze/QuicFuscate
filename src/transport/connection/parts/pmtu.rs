@@ -62,40 +62,6 @@ fn trace_send_packet(
     );
 }
 
-/// Path-related events.
-///
-/// Path validation follows a single-candidate RFC 9000-style control path:
-///
-/// - New candidate paths emit `PathEvent::New` immediately.
-/// - The transport generates PATH_CHALLENGE probes proactively.
-/// - Matching PATH_RESPONSE frames are required before `Validated` is emitted.
-/// - Peer-discovered unvalidated paths are subject to a 3x-style amplification cap.
-/// - Local re-migration attempts are gated by a cooldown to avoid rapid path churn.
-///
-/// Current intentional limitation:
-/// - The transport tracks one pending candidate path at a time rather than a full
-///   multi-path validation set.
-#[derive(Debug, Clone)]
-pub enum PathEvent {
-    /// New path has been created
-    New(SocketAddr, SocketAddr),
-
-    /// Path has been validated
-    Validated(SocketAddr, SocketAddr),
-
-    /// Path validation failed
-    FailedValidation(SocketAddr, SocketAddr),
-
-    /// Path has been closed
-    Closed(SocketAddr, SocketAddr),
-
-    /// Connection ID reused
-    ReusedSourceConnectionId(u64, Option<(SocketAddr, SocketAddr)>, (SocketAddr, SocketAddr)),
-
-    /// Peer migrated from the previous peer address to the new peer address.
-    PeerMigrated(SocketAddr, SocketAddr),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PathValidationOrigin {
     LocalMigration,

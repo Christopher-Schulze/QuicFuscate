@@ -2730,3 +2730,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - qf-transport-types `36/36`, root H3 `76/76`, root check/strict Clippy, workspace all-feature check, workspace all-target strict `rust-tests` Clippy, formatting, diff hygiene, and the complete workspace all-target `rust-tests` run pass with no failures. The root library contributes `1,658` passed tests.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-h3-config-postpush/workspace-seams.json`: source revision `3b046e9f495099231a4d1696d01832bec1423d45`, `36` workspace packages, `326` Rust files, `206,555` source lines, `125` module edges, `111` Cargo workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
 - The post-test disk guard records `4,781,140 KiB` target usage and `6,572,096 KiB` free, below the 12-GiB cleanup threshold and above the 2-GiB floor. Frontend/Tauri paths remain untouched.
+
+## Path Event Contract Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical owner: `crates/qf-transport-types/src/path.rs` (`PathEvent`); compatibility owners: `src/transport/connection/mod.rs` and `src/transport.rs`; the former duplicate in `src/transport/connection/parts/pmtu.rs` is removed.
+- Contract payloads are `SocketAddr` pairs plus the reused-source-CID tuple. Connection validation state and policy remain root-owned, so the child has no product runtime or frontend/Tauri dependency.
+- Verification: qf-transport-types `37/37`; focused root path filter `47/47`; root/workspace check and strict `rust-tests` Clippy; workspace all-feature check; formatting and diff hygiene; complete workspace all-target `rust-tests` exit `0`.
+- Protected frontend/Tauri paths remain untouched; no frontend field/API projection is required. TODO-562 remains blocked for the measured product SCC and external Linux/native/CI gates.
