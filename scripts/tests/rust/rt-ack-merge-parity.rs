@@ -6,7 +6,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 #[cfg(target_arch = "x86_64")]
 fn scalar_merge(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     ranges.sort_by_key(|r| r.0);
-    let mut out = Vec::with_capacity(ranges.len());
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
     for (s, e) in ranges.into_iter() {
         if let Some(last) = out.last_mut() {
             if s <= last.1 {
@@ -49,7 +49,7 @@ fn avx512_matches_scalar_random() {
         eprintln!("SIMD_SKIP test=avx512_matches_scalar_random required=avx512f+avx512vl");
         return;
     }
-    let mut rng = SeedableRng::seed_from_u64(0x1234_5678_9ABC_DEF0);
+    let mut rng = StdRng::seed_from_u64(0x1234_5678_9ABC_DEF0);
     for n in [8usize, 16, 24, 32, 64, 96, 128].iter().copied() {
         for _ in 0..64 {
             let mut v = Vec::with_capacity(n);
