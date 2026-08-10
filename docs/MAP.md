@@ -3155,3 +3155,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - AVX2 tile flow: direct iteration over eight vector slots -> unaligned row loads -> fixed unpack/shuffle/permute transpose -> direct iteration over eight output vectors -> unaligned column stores.
 - Verification: exact local workspace all-target Clippy for `internal_wiedemann,unsafe_rust` and `test-suite` with warnings denied; formatting and diff hygiene; runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_224150/audit-runtime-guardrails.log`. Native x86 execution remains external.
 - Final target/free space is `5,192,724 / 2,570,584 KiB`; frontend and Tauri paths are unaffected.
+
+## Root Unsafe SIMD Parity Ownership (2026-08-10, TODO-562)
+
+- Production GF/XOR flow: root callers -> `qf-simd` runtime dispatcher -> x86, AArch64, or scalar kernel. Compression entropy flow: `qf-compress` -> `qf-cpu::simd_compress::histogram` -> architecture dispatcher or scalar histogram.
+- The root `src/optimize/unsafe.rs` remains a test-only UnsafeMemoryPool and direct-compression proof surface. Its uncalled parallel GF, XOR, and entropy implementations plus their self-contained duplicate tests are removed, leaving no second SIMD owner.
+- Verification: focused root Unsafe tests `31/31`; exact workspace all-target Clippy for `internal_wiedemann,unsafe_rust` and `unsafe_rust,rust-tests`; strict workspace all-feature library/binary/example Clippy; formatting, diff hygiene, documentation truth, and runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_225615/audit-runtime-guardrails.log`. Native x86 execution remains external.
+- The pre-build `cargo clean` removed `27,574` files and `6.4 GiB`. Final target/free space is `1,933,732 / 5,416,236 KiB`; frontend and Tauri paths are unaffected.
