@@ -449,11 +449,11 @@ fn test_chacha20_blocks_x4_produces_four_distinct_blocks() {
 }
 
 #[test]
-fn test_chacha20_blocks_x4_matches_scalar() {
+fn test_chacha20_blocks_x4_matches_scalar_across_counter_wrap() {
     use crate::crypto::chacha::chacha20_block;
     let key = [0x55; 32];
     let nonce = [0x77; 12];
-    let counter = 42u32;
+    let counter = u32::MAX - 1;
     let blocks = crypto::chacha20_blocks_x4(&key, &nonce, counter);
     for i in 0..4u32 {
         let scalar = chacha20_block(&key, counter.wrapping_add(i), &nonce);
@@ -462,11 +462,11 @@ fn test_chacha20_blocks_x4_matches_scalar() {
 }
 
 #[test]
-fn test_chacha20_blocks_x16_matches_scalar() {
+fn test_chacha20_blocks_x16_matches_scalar_across_counter_wrap() {
     use crate::crypto::chacha::chacha20_block;
     let key = [0x33; 32];
     let nonce = [0x99; 12];
-    let counter = 100u32;
+    let counter = u32::MAX - 7;
     let blocks = crypto::chacha20_blocks_x16(&key, &nonce, counter);
     for i in 0..16u32 {
         let scalar = chacha20_block(&key, counter.wrapping_add(i), &nonce);

@@ -225,8 +225,8 @@ unsafe fn chacha20_blocks_x16_avx512(
 
     // Counter lanes [ctr..ctr+15]
     let mut ctr_arr = [0i32; 16];
-    for i in 0..16 {
-        ctr_arr[i] = counter.wrapping_add(i as u32) as i32;
+    for (offset, lane) in ctr_arr.iter_mut().enumerate() {
+        *lane = counter.wrapping_add(offset as u32) as i32;
     }
     let ctrv = _mm512_loadu_si512(ctr_arr.as_ptr() as *const __m512i);
 
@@ -387,9 +387,9 @@ unsafe fn chacha20_blocks_x4_sse_core(
     let n2 = _mm_set1_epi32(i32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]));
     // Counter lanes
     let ctr0 = _mm_set_epi32(
-        (counter + 3) as i32,
-        (counter + 2) as i32,
-        (counter + 1) as i32,
+        counter.wrapping_add(3) as i32,
+        counter.wrapping_add(2) as i32,
+        counter.wrapping_add(1) as i32,
         counter as i32,
     );
 

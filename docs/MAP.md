@@ -3135,3 +3135,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Test flow: routing unit tests -> test-only unowned ruleset adapter -> the same owner-aware generator. Linux iptables flow remains restore transaction -> exact chain/rule verification, with direct typed error propagation.
 - Verification: focused routing tests `24/24`; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting and diff hygiene; runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_222807/audit-runtime-guardrails.log`. Hosted Linux x86 confirmation remains external.
 - Final target/free space is `4,553,404 / 3,362,780 KiB`; frontend and Tauri paths are unaffected.
+
+## ChaCha20 SIMD Counter-Lane Contract (2026-08-10, TODO-562)
+
+- x16 flow: public dispatch -> AVX-512F feature gate -> mutable 16-lane counter initialization with wrapping offsets -> vector rounds -> per-lane serialization. Fallback flow uses the same wrapping counter sequence through scalar blocks.
+- x4 flow: public dispatch -> AVX2, AVX, or SSE4.1 wrapper -> shared SSE2 core with four wrapping counters. AArch64 NEON and scalar paths retain the same modulo-`u32` sequence.
+- Verification: four focused ChaCha20 tests, including x4 and x16 scalar parity across wraparound; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting; runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_223229/audit-runtime-guardrails.log`. Native x86 SIMD execution remains external.
+- Final target/free space is `4,572,500 / 4,113,444 KiB`; frontend and Tauri paths are unaffected.
