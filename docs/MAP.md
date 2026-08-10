@@ -2754,3 +2754,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-stealth `103/103`; focused root Stealth `82/82`; root check; strict child/workspace Clippy; formatting and diff hygiene; complete workspace all-target `rust-tests` exit `0`, including root `1,658/1,658`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-fingerprint-profile-postpush/workspace-seams.json` at source revision `62769e46f200272ccba536a6774eb4bad22eae80`; `36` packages, `328` Rust files, `206,706` source lines, `125` module edges, `112` workspace dependency edges, unchanged 9-module product SCC, explicit qf-stealth edges to qf-common and qf-cpu, and `protected_changes=[]`.
 - The final disk guard records `8,571,612 KiB` target usage and `15,515,880 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
+
+## CPU ASCII Backend Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical owner: `crates/qf-cpu/src/ascii.rs` (`AsciiSimdBackend`, runtime AVX2/SSE2/NEON append dispatch, decimal/hex rendering, and ASCII lane telemetry); compatibility owner: `src/optimize/stealth.rs`.
+- Verification: qf-cpu `85/85`; focused root optimize `3/3`; focused root Stealth `82/82`; root check; strict child/workspace all-target `rust-tests` Clippy; formatting; complete workspace all-target `rust-tests` exit `0`.
+- The post-test disk guard records `10,310,444 KiB` target usage and `13,684,940 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

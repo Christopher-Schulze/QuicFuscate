@@ -67,6 +67,8 @@ pub fn count_ascii_printable(bytes: &[u8]) -> usize {
     bytes.iter().filter(|byte| matches!(byte, 0x20..=0x7E)).count()
 }
 
+/// Runtime-dispatched ASCII append and integer formatting.
+pub mod ascii;
 /// SIMD byte classification for compression preprocessing.
 pub mod compression;
 /// SIMD-accelerated iterator reductions.
