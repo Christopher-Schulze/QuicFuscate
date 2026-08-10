@@ -355,9 +355,9 @@ impl FastPathTransport {
     #[inline]
     fn enable_fastpath_from_env(&mut self, bind: std::net::SocketAddr, peer: std::net::SocketAddr) {
         self.default_peer = Some(peer);
-        match crate::interface::FastpathMode::from_env() {
-            crate::interface::FastpathMode::Off => { /* no-op */ }
-            crate::interface::FastpathMode::Auto => {
+        match qf_transport_types::FastpathMode::from_env() {
+            qf_transport_types::FastpathMode::Off => { /* no-op */ }
+            qf_transport_types::FastpathMode::Auto => {
                 if let Err(e) = self.enable_udp_fastpath(bind, peer) {
                     log::warn!("UDP fast path enable failed: {}", e);
                 }

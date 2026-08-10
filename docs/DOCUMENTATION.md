@@ -6754,3 +6754,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The focused engine-mode policy test passes `1/1`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,251,332 KiB` target usage and `18,089,340 KiB` free.
 - Production FEC control, engine behavior, public compatibility exports, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-fec-engine-mode-test-postpush/workspace-seams.json` at source revision `3f02bf7b1238358f09918ceafc7169f154d496ca`: `36` packages, `334` Rust files, `207,079` source lines, `113` module edges, `115` workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`. The direct `fec -> engine` edge is removed.
+
+## Transport Fastpath-Mode Test Dependency (2026-08-10, TODO-562)
+
+- The root transport fastpath compatibility tests now read `FastpathMode` directly from its canonical `qf-transport-types` owner. All three former `transport -> interface` references were test-only compatibility indirections.
+- Focused UDP-fastpath compatibility tests pass `6/6`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,248,376 KiB` target usage and `18,006,276 KiB` free.
+- UDP fastpath fallback behavior, public interface compatibility exports, production transport, frontend, and Tauri behavior remain unchanged.

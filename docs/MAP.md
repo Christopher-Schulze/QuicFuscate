@@ -2886,3 +2886,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused engine-mode policy test `1/1`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,251,332 / 18,089,340 KiB`.
 - Production FEC, engine, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-fec-engine-mode-test-postpush/workspace-seams.json` at source revision `3f02bf7b1238358f09918ceafc7169f154d496ca`; `36` packages, `334` Rust files, `207,079` source lines, `113` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `fec -> engine` is absent.
+
+## Transport Fastpath-Mode Test Dependency (2026-08-10, TODO-562)
+
+- Test contract flow: `qf-transport-types::FastpathMode` -> root transport UDP-fastpath compatibility shim. Root transport no longer routes this child-owned contract through the root interface namespace.
+- Verification: focused UDP-fastpath compatibility tests `6/6`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,248,376 / 18,006,276 KiB`.
+- Production transport, interface, frontend, and Tauri behavior remain unchanged.
