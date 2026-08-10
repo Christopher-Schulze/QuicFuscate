@@ -748,7 +748,6 @@ jobs:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: "-Zsanitizer=address"
       ASAN_OPTIONS: "detect_odr_violation=0"
       FUZZ_DURATION: ${{ github.event_name == 'pull_request' && '60' || '120' }}
       FUZZ_JOBS: "2"
@@ -761,13 +760,13 @@ jobs:
           toolchain: nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version "0.13.2" --locked
+        run: cargo +nightly install cargo-fuzz --version "0.13.2" --locked
 
       - name: Verify fuzz contract
         run: bash scripts/audits/verify-fuzz-contract.sh
 
       - name: Run all fuzz targets with AddressSanitizer
-        run: bash scripts/tests/fuzz/run-ci-fuzz.sh
+        run: RUSTFLAGS="-Zsanitizer=address" bash scripts/tests/fuzz/run-ci-fuzz.sh
 
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v7

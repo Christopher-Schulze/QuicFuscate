@@ -6834,6 +6834,13 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-qftls-key-install-port-postpush/workspace-seams.json` at published revision `c379057f7e9b63a5254c3a40b72c87a56664e0b0` with identical counts, zero strongly connected components, the same one-way six-reference `transport -> qftls` edge, and `protected_changes=[]`.
 - Frontend and Tauri paths remain untouched. No frontend field or API projection is required.
 
+## Fuzz Toolchain and Sanitizer Isolation (2026-08-10, TODO-562)
+
+- CI run `31408910756` proved that job-wide `RUSTFLAGS=-Zsanitizer=address` contaminated `cargo-fuzz` installation while the repository `rust-toolchain.toml` selected stable Rust 1.97.1. Installation stopped before target discovery because stable Rust rejects `-Zsanitizer`.
+- Main and scheduled fuzz workflows now install `cargo-fuzz 0.13.2` with explicit `cargo +nightly`; the sanitizer flag is scoped only to the shared fuzz-runner process. Fuzz metadata resolution and target discovery also select Nightly explicitly, so the repository stable pin cannot silently replace the required toolchain.
+- `verify-fuzz-contract.sh` verifies both workflows' explicit Nightly installation and sanitizer scope. The contract passes locally with all six declared targets and curated seed inventories. Hosted target execution remains pending the post-fix CI run; no fuzz result is inferred from static verification.
+- Frontend and Tauri paths remain untouched.
+
 ## Stable AVX10.1 Detection Repair (2026-08-10, TODO-562)
 
 - `qf-cpu::FeatureDetector` replaces unsupported stable-Rust AVX10 feature macros with the current Intel versioned CPUID/XGETBV contract. The runtime requires `CPUID.07H.01H:EDX[19]`, a defined CPUID leaf `24H` subleaf range, version >= 1, and complete SSE/AVX/opmask/ZMM XCR0 state; SGX and every incomplete contract fail closed.

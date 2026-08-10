@@ -1669,6 +1669,11 @@ The audit remains open. These reconciliations document current evidence and owne
 - Post-push seam evidence at `scripts/out/audits/workspace-seams-20260810T-stable-avx10-detection-postpush/workspace-seams.json` records published revision `1fad839e8ebe84767fbea2389eba40edf6fcf476`, 36 packages, 336 Rust files, 207,784 source lines, 106 module edges, 123 workspace dependency edges, no strongly connected components, and `protected_changes=[]`.
 - The AMX proof contract audit uses ripgrep when present and a recursive fixed-string grep fallback otherwise; both local paths produce byte-identical passing output. CI therefore has no undeclared ripgrep requirement.
 
+## Fuzz Toolchain and Sanitizer Isolation (2026-08-10, TODO-562)
+
+- `.github/workflows/ci.yml` and `.github/workflows/fuzz-scheduled.yml` install `cargo-fuzz 0.13.2` through explicit Nightly and scope `RUSTFLAGS=-Zsanitizer=address` to the shared fuzz runner. Installation and contract verification are no longer contaminated by a job-wide unstable flag under the repository's stable toolchain pin.
+- `scripts/tests/fuzz/run-ci-fuzz.sh` and `scripts/audits/verify-fuzz-contract.sh` select Nightly explicitly for fuzz metadata and target discovery. The local contract resolves the six declared targets and all curated seeds; hosted execution remains pending and is not claimed green.
+
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 
 - `AuditOptions::validate()` is the shared owner for queue capacity `1..=65,536`, active segment bytes `1..=128 MiB`, retained segments `1..=64`, and flush/shutdown timeout `1..=60,000 ms`. `AuditConfig::to_audit_options()` and `AuditLog::open_with_options()` use that contract before resource acquisition.

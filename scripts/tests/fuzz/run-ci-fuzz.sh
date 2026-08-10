@@ -48,7 +48,7 @@ case " ${RUSTFLAGS:-} " in
   *) die "RUSTFLAGS must explicitly contain -Zsanitizer=address" ;;
 esac
 
-cargo metadata --manifest-path "$FUZZ_DIR/Cargo.toml" --no-deps --format-version 1 --locked >/dev/null \
+cargo +nightly metadata --manifest-path "$FUZZ_DIR/Cargo.toml" --no-deps --format-version 1 --locked >/dev/null \
   || die "fuzz manifest metadata resolution failed"
 
 expected_targets="$(printf '%s\n' "${TARGETS[@]}" | sort)"
