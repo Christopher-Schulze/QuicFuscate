@@ -37,13 +37,6 @@ impl From<super::Error> for Error {
 /// HTTP/3 application protocol
 pub const APPLICATION_PROTOCOL: &[&[u8]] = &[b"h3", b"h3-29", b"h3-28", b"h3-27"];
 
-/// HTTP/3 header
-#[derive(Debug, Clone)]
-pub struct Header {
-    name: Vec<u8>,
-    value: Vec<u8>,
-}
-
 /// HTTP/3 Server Push Promise for stealth cover traffic
 #[derive(Debug, Clone)]
 struct PushPromise {
@@ -62,60 +55,6 @@ enum PushState {
     Promised,
     DataSending,
     Complete,
-}
-
-impl Header {
-    /// Creates a new header
-    pub fn new(name: &[u8], value: &[u8]) -> Self {
-        Self { name: name.to_vec(), value: value.to_vec() }
-    }
-
-    /// Builds a header from preallocated vectors (SIMD-friendly callers).
-    #[inline]
-    pub(crate) fn from_parts(name: Vec<u8>, value: Vec<u8>) -> Self {
-        Self { name, value }
-    }
-
-    /// Returns the header name bytes.
-    #[inline]
-    pub fn name(&self) -> &[u8] {
-        &self.name
-    }
-
-    /// Returns the header value bytes.
-    #[inline]
-    pub fn value(&self) -> &[u8] {
-        &self.value
-    }
-
-    /// Returns a mutable reference to the header name bytes.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn name_mut(&mut self) -> &mut [u8] {
-        &mut self.name
-    }
-
-    /// Returns a mutable reference to the header value bytes.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn value_mut(&mut self) -> &mut [u8] {
-        &mut self.value
-    }
-}
-
-/// Trait for accessing header name and value
-#[cfg(any(test, feature = "rust-tests"))]
-pub trait NameValue {
-    fn name(&self) -> &[u8];
-    fn value(&self) -> &[u8];
-}
-
-#[cfg(any(test, feature = "rust-tests"))]
-impl NameValue for Header {
-    fn name(&self) -> &[u8] {
-        &self.name
-    }
-    fn value(&self) -> &[u8] {
-        &self.value
-    }
 }
 
 /// HTTP/3 specific configuration

@@ -3,32 +3,6 @@
 // Generates synthetic handshake-shaped records without establishing a real
 // TLS session or owning the protocol ClientHello.
 // Ultra-sophisticated TLS Cover Provider for maximum stealth
-/// Cipher suite used by the TLS Cover provider for encrypting synthetic records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TlsCoverCipherSuite {
-    /// ChaCha20-Poly1305 (preferred on platforms without hardware AES).
-    ChaCha20Poly1305,
-    /// AES-128-GCM (preferred when hardware AES acceleration is available).
-    Aes128Gcm,
-}
-
-impl TlsCoverCipherSuite {
-    fn as_str(&self) -> &'static str {
-        match self {
-            TlsCoverCipherSuite::ChaCha20Poly1305 => "chacha20-poly1305",
-            TlsCoverCipherSuite::Aes128Gcm => "aes-128-gcm",
-        }
-    }
-
-    /// Returns the TLS wire-format cipher suite ID (for ServerHello).
-    pub(crate) fn tls_id(&self) -> u16 {
-        match self {
-            TlsCoverCipherSuite::ChaCha20Poly1305 => 0x1303,
-            TlsCoverCipherSuite::Aes128Gcm => 0x1301,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TlsCoverCipherPreference {
     Auto,
@@ -89,10 +63,6 @@ impl TlsCoverProvider {
         environment
             .first(["QUICFUSCATE_TLS_COVER_PROFILE"])
             .unwrap_or_else(|| "chrome".to_string())
-    }
-
-    fn ultra_enabled_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> bool {
-        environment.flag("QUICFUSCATE_TLS_COVER_ULTRA", false)
     }
 
     fn has_hardware_aes() -> bool {

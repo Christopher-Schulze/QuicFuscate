@@ -103,7 +103,7 @@ def main() -> int:
         failures.append("hardware names are still consumed as Cargo cfg features")
     if target_feature_source_count == 0:
         failures.append("no Rust target_feature contract was found")
-    if "src/optimize/parts/cpu_dispatch.rs" not in runtime_detector_files:
+    if "crates/qf-cpu/src/lib.rs" not in runtime_detector_files:
         failures.append("FeatureDetector runtime owner is missing")
 
     base_result, base_metadata = metadata()

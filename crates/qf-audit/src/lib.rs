@@ -455,6 +455,48 @@ impl AuditOptions {
     }
 }
 
+/// Operator-facing audit persistence configuration projected into [`AuditOptions`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditConfig {
+    /// Maximum accepted events waiting for the single audit writer.
+    pub queue_capacity: usize,
+    /// Maximum active audit segment size before rotation.
+    pub max_segment_bytes: u64,
+    /// Maximum retained segments, including the active segment.
+    pub max_segments: usize,
+    /// Maximum enqueue and acknowledgement wait for a flush barrier, in milliseconds.
+    pub flush_timeout_ms: u64,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            queue_capacity: DEFAULT_AUDIT_QUEUE_CAPACITY,
+            max_segment_bytes: DEFAULT_AUDIT_MAX_SEGMENT_BYTES,
+            max_segments: DEFAULT_AUDIT_MAX_SEGMENTS,
+            flush_timeout_ms: DEFAULT_AUDIT_FLUSH_TIMEOUT_MS,
+        }
+    }
+}
+
+impl AuditConfig {
+    /// Convert the serialized configuration shape to the validated audit-owner options.
+    pub fn to_audit_options(&self) -> AuditOptions {
+        AuditOptions {
+            queue_capacity: self.queue_capacity,
+            max_segment_bytes: self.max_segment_bytes,
+            max_segments: self.max_segments,
+            flush_timeout: Duration::from_millis(self.flush_timeout_ms),
+        }
+    }
+
+    /// Validate every configured resource and lifecycle bound before acquisition.
+    pub fn validate(&self) -> Result<(), AuditError> {
+        self.to_audit_options().validate()
+    }
+}
+
 fn json_encoded_string_len(value: &str) -> usize {
     let mut length = 2usize;
     for byte in value.bytes() {
@@ -2339,6 +2381,21 @@ mod tests {
     }
 
     #[test]
+    fn audit_config_preserves_engine_wire_shape_and_projects_options() {
+        let config = AuditConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.to_audit_options().flush_timeout, Duration::from_secs(5));
+
+        let encoded = serde_json::to_string(&config).expect("audit config serializes");
+        let decoded: AuditConfig = serde_json::from_str(&encoded).expect("audit config parses");
+        assert_eq!(decoded, config);
+
+        let mut invalid = config;
+        invalid.flush_timeout_ms = MAX_AUDIT_FLUSH_TIMEOUT_MS + 1;
+        assert!(matches!(invalid.validate(), Err(AuditError::InvalidOptions(_))));
+    }
+
+    #[test]
     fn invalid_options_are_rejected_before_audit_path_creation() {
         let base = AuditOptions::default();
         let cases = [
@@ -2441,9 +2498,8 @@ mod tests {
 
     #[test]
     fn test_runtime_boundary_events_round_trip_through_chain_verification() {
-        let tmp = std::env::temp_dir()
-            .join(format!("quicfuscate_audit_runtime_boundaries_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
+        let tmp = audit_test_path("runtime-boundaries");
+        remove_audit_set(&tmp);
         let log = AuditLog::open(tmp.clone()).unwrap();
         let events = [
             AuditEventType::AuthTimeout,
@@ -2466,7 +2522,7 @@ mod tests {
         drop(log);
 
         assert!(AuditLog::verify_chain(&tmp).is_ok());
-        let _ = std::fs::remove_file(&tmp);
+        remove_audit_set(&tmp);
     }
 
     #[test]
@@ -2522,9 +2578,8 @@ mod tests {
 
     #[test]
     fn test_concurrent_producers_preserve_total_order_and_throughput() {
-        let tmp = std::env::temp_dir()
-            .join(format!("quicfuscate_audit_concurrent_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
+        let tmp = audit_test_path("concurrent");
+        remove_audit_set(&tmp);
         let log = Arc::new(AuditLog::open(tmp.clone()).unwrap());
         let started = std::time::Instant::now();
         let mut producers = Vec::new();
@@ -2560,7 +2615,7 @@ mod tests {
         let entries: Vec<AuditEntry> = contents.lines().filter_map(parse_entry).collect();
         assert_eq!(entries.len(), 10_000);
         assert!(entries.iter().enumerate().all(|(index, entry)| entry.seq == index as u64));
-        let _ = std::fs::remove_file(&tmp);
+        remove_audit_set(&tmp);
     }
 
     #[test]
@@ -3418,9 +3473,8 @@ mod tests {
         // process-global OnceLock, which cannot be reliably initialized
         // in parallel test execution). This verifies the same code path
         // that init_audit_log() uses internally.
-        let tmp = std::env::temp_dir()
-            .join(format!("quicfuscate_audit_global_test_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
+        let tmp = audit_test_path("global-test");
+        remove_audit_set(&tmp);
 
         let log = AuditLog::open(tmp.clone()).unwrap();
         log.log(
@@ -3437,7 +3491,7 @@ mod tests {
         assert!(!content.is_empty(), "audit log file should not be empty after emit");
         assert!(AuditLog::verify_chain(&tmp).is_ok(), "audit chain should be valid after emit");
 
-        let _ = std::fs::remove_file(&tmp);
+        remove_audit_set(&tmp);
     }
 
     #[cfg(unix)]
@@ -3548,12 +3602,8 @@ mod tests {
         // A path that does not exist cannot be hardened. Before this contract the failure was
         // warning-only and initialization still published the audit owner as if the file had been
         // tightened to owner-only.
-        let missing = std::env::temp_dir().join(format!(
-            "quicfuscate_audit_missing_{}_{}.jsonl",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_file(&missing);
+        let missing = audit_test_path("missing");
+        remove_audit_set(&missing);
 
         let error = secure_audit_file(&missing, false, None)
             .expect_err("hardening a missing audit file must fail closed");
@@ -3568,11 +3618,7 @@ mod tests {
     fn test_audit_init_does_not_publish_owner_when_hardening_fails() {
         // The parent exists as a regular file, so creating the audit directory under it fails and
         // initialization must return an error rather than publishing a global audit owner.
-        let blocker = std::env::temp_dir().join(format!(
-            "quicfuscate_audit_blocker_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let blocker = audit_test_path("blocker");
         let _ = std::fs::remove_dir_all(&blocker);
         let _ = std::fs::remove_file(&blocker);
         std::fs::write(&blocker, b"not a directory\n").expect("seed blocking file");
@@ -3596,8 +3642,7 @@ mod tests {
         // as root. We cannot easily assert "no chown happened" without root,
         // but we can assert the function returns normally and the parent's
         // ownership is unchanged. This test documents and locks the contract.
-        let parent = std::env::temp_dir()
-            .join(format!("quicfuscate_audit_parent_guard_{}", std::process::id()));
+        let parent = audit_test_path("parent-guard");
         let _ = std::fs::remove_dir_all(&parent);
         std::fs::create_dir_all(&parent).unwrap();
         let file_path = parent.join("audit.jsonl");

@@ -199,7 +199,7 @@ else
   append_item "aead_posture_narrowing" "fail" "$AEAD_POSTURE_REFS"
 fi
 
-AEAD_OVERRIDE_SURFACE_REFS=$(rg -n --no-messages 'DATA_AEAD_OVERRIDE_AEGIS_X4|DATA_AEAD_OVERRIDE_AEGIS_X8' src/crypto/ || true)
+AEAD_OVERRIDE_SURFACE_REFS=$(rg -n --no-messages 'DATA_AEAD_OVERRIDE_AEGIS_X4|DATA_AEAD_OVERRIDE_AEGIS_X8' crates/qf-crypto/src/ || true)
 if [[ -z "$AEAD_OVERRIDE_SURFACE_REFS" ]]; then
   pass "Data-plane AEAD override surface stays narrowed to auto, Aegis128L family, and Morus"
   append_item "aead_override_surface_narrowing" "ok" "no X4/X8-specific data-plane override modes remain"
@@ -208,7 +208,7 @@ else
   append_item "aead_override_surface_narrowing" "fail" "$AEAD_OVERRIDE_SURFACE_REFS"
 fi
 
-UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|aes_encrypt_neon|ghash_pmull|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize src/simd src/simd/arm_varint.rs src/simd/x86_ack.rs || true)
+UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|aes_encrypt_neon|ghash_pmull|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize crates/qf-simd/src crates/qf-simd/src/arm_varint.rs crates/qf-simd/src/x86_ack.rs || true)
 if [[ -z "$UNSAFE_VISIBILITY_REFS" ]]; then
   pass "Unsafe SIMD/prefetch helpers remain internalized behind runtime-owned facades"
   append_item "unsafe_surface_internalization" "ok" "no broad public visibility on narrowed unsafe helper set"
@@ -217,7 +217,7 @@ else
   append_item "unsafe_surface_internalization" "fail" "$UNSAFE_VISIBILITY_REFS"
 fi
 
-SIMD_X86_UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (find_pattern_vbmi2|dot_product_avx512|dot_product_fma|varint_decode_sse2_prefast|sha256_avx2|sha256_vnni|xor_blocks_avx512|xor_blocks_avx2|memcpy_avx512|memcpy_avx2|memcpy_sse42|crc32_sse42|popcnt_hw|gf_mul_avx512_gfni|gf_mul_avx2|find_pattern_sse42_short|aes_encrypt_vaes|aes_encrypt_aesni|ghash_vpclmulqdq|ghash_pclmulqdq|sha256_hw|histogram_avx512|qpack_encode_avx2|histogram_avx2|decode_varint_bmi2|decode_varint_avx2|find_pattern_avx2|amx_init|amx_release|amx_matmul_i8|matmul_gf256_amx|berlekamp_massey_gfni|berlekamp_massey_avx2|matmul_gf256_gfni|matmul_gf256_avx2|encode_varint_sse2|encode_varint_avx2|encode_varint_avx512|varint_encode_bmi2|varint_decode_bmi2|xor_multi_key_avx512|xor_multi_key_avx2|validate_header_avx2|validate_header_sse2|pack_bits_bmi2|unpack_bits_bmi2|string_compare_avx2|string_compare_sse42|popcnt_avx512|batch_crc32_pclmul|reed_solomon_encode_gfni|reed_solomon_encode_avx2|reed_solomon_decode_gfni|reed_solomon_decode_avx2|qpack_encode_ssse3|qpack_decode_avx2|qpack_decode_ssse3)\b' src/simd src/simd/x86_header.rs || true)
+SIMD_X86_UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (find_pattern_vbmi2|dot_product_avx512|dot_product_fma|varint_decode_sse2_prefast|sha256_avx2|sha256_vnni|xor_blocks_avx512|xor_blocks_avx2|memcpy_avx512|memcpy_avx2|memcpy_sse42|crc32_sse42|popcnt_hw|gf_mul_avx512_gfni|gf_mul_avx2|find_pattern_sse42_short|aes_encrypt_vaes|aes_encrypt_aesni|ghash_vpclmulqdq|ghash_pclmulqdq|sha256_hw|histogram_avx512|qpack_encode_avx2|histogram_avx2|decode_varint_bmi2|decode_varint_avx2|find_pattern_avx2|amx_init|amx_release|amx_matmul_i8|matmul_gf256_amx|berlekamp_massey_gfni|berlekamp_massey_avx2|matmul_gf256_gfni|matmul_gf256_avx2|encode_varint_sse2|encode_varint_avx2|encode_varint_avx512|varint_encode_bmi2|varint_decode_bmi2|xor_multi_key_avx512|xor_multi_key_avx2|validate_header_avx2|validate_header_sse2|pack_bits_bmi2|unpack_bits_bmi2|string_compare_avx2|string_compare_sse42|popcnt_avx512|batch_crc32_pclmul|reed_solomon_encode_gfni|reed_solomon_encode_avx2|reed_solomon_decode_gfni|reed_solomon_decode_avx2|qpack_encode_ssse3|qpack_decode_avx2|qpack_decode_ssse3)\b' crates/qf-simd/src crates/qf-simd/src/x86_header.rs || true)
 if [[ -z "$SIMD_X86_UNSAFE_VISIBILITY_REFS" ]]; then
   pass "x86 SIMD backend helpers remain internal to simd selectors and tests"
   append_item "simd_x86_backend_internalization" "ok" "x86 SIMD backend helpers no longer expose broad public unsafe entrypoints"
@@ -236,7 +236,7 @@ from pathlib import Path
 import re
 import sys
 
-roots = (Path("src/simd"), Path("src/optimize/simd"), Path("src/fec"))
+roots = (Path("crates/qf-simd/src"), Path("src/optimize/simd"), Path("src/fec"))
 declaration = re.compile(
     r"^\s*(?:(?:pub(?:\s*\([^)]*\))?|async)\s+)*"
     r"unsafe\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\b"
@@ -315,7 +315,7 @@ SIMD_SAFETY_CONTRACT_RC=$?
 set -e
 printf '%s\n' "$SIMD_SAFETY_CONTRACT_RESULT" >"$SIMD_SAFETY_CONTRACT_LOG"
 if [[ "$SIMD_SAFETY_CONTRACT_RC" -eq 0 ]] \
-  && ! rg -n --no-messages '#!\[allow\(clippy::missing_safety_doc\)\]' src/simd src/optimize/simd src/fec >/dev/null; then
+  && ! rg -n --no-messages '#!\[allow\(clippy::missing_safety_doc\)\]' crates/qf-simd/src src/optimize/simd src/fec >/dev/null; then
   pass "SIMD unsafe inventory has local Safety contracts and exact declared ISA wording"
   append_item "simd_safety_contract_inventory" "ok" "$SIMD_SAFETY_CONTRACT_RESULT; blanket missing_safety_doc suppression absent"
 else
@@ -342,7 +342,7 @@ mismatches = []
 def normalized(value):
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
-for path in sorted(Path("src/crypto").rglob("*.rs")):
+for path in sorted(Path("crates/qf-crypto/src").rglob("*.rs")):
     lines = path.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
         match = declaration.match(line)
@@ -393,8 +393,8 @@ SIMD_SKIP_TEST_RESULT=$(python3 - <<'PY'
 from pathlib import Path
 
 files = [
-    Path("src/simd/tests_arm.rs"),
-    Path("src/simd/x86_extended.rs"),
+    Path("crates/qf-simd/src/tests_arm.rs"),
+    Path("crates/qf-simd/src/x86_extended.rs"),
     Path("scripts/tests/rust/rt-ack-merge-parity.rs"),
     Path("scripts/tests/rust/rt-header-validate-parity.rs"),
     Path("scripts/tests/rust/rt-simd-selfcheck.rs"),
@@ -409,7 +409,7 @@ checked = 0
 for path in files:
     lines = path.read_text(encoding="utf-8").splitlines()
     start = 0
-    if path == Path("src/simd/x86_extended.rs"):
+    if path == Path("crates/qf-simd/src/x86_extended.rs"):
         start = next(
             (index for index, line in enumerate(lines) if line.strip() == "mod tests {"),
             len(lines),
@@ -446,7 +446,7 @@ else
   append_item "simd_skip_accounting" "fail" "artifact=$SIMD_SKIP_TEST_LOG rc=$SIMD_SKIP_TEST_RC"
 fi
 
-AMX_EXTERNAL_DETECTOR_REFS=$(rg -n --no-messages 'Command::new\("cpuid"\)|\bcpuid\b' src/optimize/parts/cpu_dispatch.rs || true)
+AMX_EXTERNAL_DETECTOR_REFS=$(rg -n --no-messages 'Command::new\("cpuid"\)|\bcpuid\b' crates/qf-cpu/src/lib.rs || true)
 if [[ -z "$AMX_EXTERNAL_DETECTOR_REFS" ]]; then
   pass "AMX capability detection stays in-process and has no cpuid helper dependency"
   append_item "amx_detector_process_free" "ok" "cpu_dispatch uses in-process AMX feature detection"
@@ -480,12 +480,13 @@ fi
 
 # 3) udpfast batch send must either use per-packet destination addresses directly
 #    or delegate to the shared optimize::udp batch path that performs per-packet conversion.
-if rg -n --no-messages "socket2::SockAddr::from\\(packet\\.1\\)" src/transport/udpfast.rs >/dev/null \
-  && ! rg -n --no-messages "SockAddr::from\\(packets\\[0\\]\\.1\\)" src/transport/udpfast.rs >/dev/null; then
+if rg -n --no-messages "socket2::SockAddr::from\\(packet\\.1\\)" crates/qf-transport-udp/src/fastpath.rs >/dev/null \
+  && ! rg -n --no-messages "SockAddr::from\\(packets\\[0\\]\\.1\\)" crates/qf-transport-udp/src/fastpath.rs >/dev/null; then
   pass "udpfast uses per-packet destination addressing in batch send"
   append_item "udpfast_per_packet_addr" "ok" "per-packet address conversion present in udpfast"
-elif rg -n --no-messages "send_batch\\(&self\\.socket, batch_packets\\)" src/transport/udpfast.rs >/dev/null \
-  && rg -n --no-messages "SocketAddr::V4\\(v4\\)|SocketAddr::V6\\(v6\\)" src/optimize/udp.rs >/dev/null; then
+elif rg -n --no-messages "send_batch\\(&self\\.socket, batch_packets\\)" crates/qf-transport-udp/src/fastpath.rs >/dev/null \
+  && rg -n --no-messages "SocketAddr::V4\\(v4\\)|SocketAddr::V6\\(v6\\)" \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null; then
   pass "udpfast delegates batch destination handling to shared optimize::udp path"
   append_item "udpfast_per_packet_addr" "ok" "udpfast delegates to shared per-packet address conversion"
 else
@@ -494,7 +495,7 @@ else
 fi
 
 # 3b) Retained MSG_ZEROCOPY and busy-poll runtime machinery must stay removed.
-ZEROCOPY_RUNTIME_REFS=$(rg -n --no-messages "MSG_ZEROCOPY|SO_ZEROCOPY|should_use_msg_zerocopy|msg_zerocopy_requested|should_retry_without_zerocopy|enable_specialized_zerocopy|drain_zerocopy|zerocopy_drain_batch" src/optimize/udp.rs src/transport/udpfast.rs src/transport/xdp.rs src/transport/connection src/transport.rs || true)
+ZEROCOPY_RUNTIME_REFS=$(rg -n --no-messages "MSG_ZEROCOPY|SO_ZEROCOPY|should_use_msg_zerocopy|msg_zerocopy_requested|should_retry_without_zerocopy|enable_specialized_zerocopy|drain_zerocopy|zerocopy_drain_batch" src/optimize/udp.rs crates/qf-transport-udp/src/fastpath.rs src/transport/xdp.rs src/transport/connection src/transport.rs || true)
 if [[ -z "$ZEROCOPY_RUNTIME_REFS" ]]; then
   pass "Retained MSG_ZEROCOPY runtime machinery stays removed"
   append_item "zerocopy_runtime_surface_removed" "ok" "no retained MSG_ZEROCOPY runtime helpers or branches remain"
@@ -532,14 +533,22 @@ fi
 
 # 4b) Shared UDP FFI metadata validators and malformed-result regressions must
 # stay present and must be executed by the transport suite.
-if rg -n --no-messages '^pub\(crate\) fn checked_syscall_count\(' src/optimize/udp.rs >/dev/null \
-  && rg -n --no-messages '^pub\(crate\) fn checked_received_len\(' src/optimize/udp.rs >/dev/null \
-  && rg -n --no-messages '^fn checked_sent_len\(' src/optimize/udp.rs >/dev/null \
-  && rg -F -- 'fn test_udp_syscall_metadata_rejects_malformed_results()' src/optimize/udp.rs >/dev/null \
-  && rg -F -- 'checked_syscall_count(3, 2)' src/optimize/udp.rs >/dev/null \
-  && rg -F -- 'checked_received_len(9, 8, 4)' src/optimize/udp.rs >/dev/null \
-  && rg -F -- 'checked_sent_len(7, 8, 2)' src/optimize/udp.rs >/dev/null \
-  && rg -F -- 'run_verified_library_target udp-syscall-metadata' scripts/tests/suites/test-transport.sh >/dev/null; then
+if rg -n --no-messages '^pub(\(crate\))? fn checked_syscall_count\(' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -n --no-messages '^pub(\(crate\))? fn checked_received_len\(' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -n --no-messages '^fn checked_sent_len\(' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -F -- 'fn test_udp_syscall_metadata_rejects_malformed_results()' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -F -- 'checked_syscall_count(3, 2)' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -F -- 'checked_received_len(9, 8, 4)' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -F -- 'checked_sent_len(7, 8, 2)' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -F -- 'run_verified_package_library_target qf-transport-udp udp-syscall-metadata' \
+    scripts/tests/suites/test-transport.sh >/dev/null; then
   pass "UDP syscall count, receive length, partial-send, batch, datagram, and address metadata guards have a wired malformed-result regression"
   append_item "udp_malformed_metadata_regressions" "ok" "shared validators, malformed fixtures, and transport-suite execution wiring are present"
 else
@@ -549,9 +558,9 @@ fi
 
 # 4c) Linux caller-fd failures must be exercised against the real batch path;
 # non-Linux hosts must record the platform boundary instead of compiling it out.
-if rg -F -- 'fn test_linux_batch_send_rejects_invalid_caller_fd()' src/transport/batch.rs >/dev/null \
-  && rg -F -- 'Some(libc::EBADF)' src/transport/batch.rs >/dev/null \
-  && rg -F -- 'batch-invalid-caller-fd' scripts/tests/suites/test-transport.sh >/dev/null \
+if rg -F -- 'fn test_linux_batch_send_rejects_invalid_caller_fd()' crates/qf-transport-batch/src/lib.rs >/dev/null \
+  && rg -F -- 'Some(libc::EBADF)' crates/qf-transport-batch/src/lib.rs >/dev/null \
+  && rg -F -- 'run_verified_package_library_target qf-transport-batch batch-invalid-caller-fd' scripts/tests/suites/test-transport.sh >/dev/null \
   && rg -F -- 'host_os_not_linux' scripts/tests/suites/test-transport.sh >/dev/null; then
   pass "Linux batch caller-fd failure coverage is real and non-Linux execution is explicitly bounded"
   append_item "batch_invalid_caller_fd_regression" "ok" "Linux EBADF regression plus explicit non-Linux platform boundary present"
@@ -607,9 +616,9 @@ if rg -F -- 'fn bmi2_parser_is_allowed(profile: CpuProfile, features: &CpuFeatur
   && rg -F -- 'if bmi2_parser_is_allowed(detector.profile(), features)' \
     src/interface.rs >/dev/null \
   && rg -F -- 'Self::profile_from_features(features_full)' \
-    src/optimize/parts/cpu_dispatch.rs >/dev/null \
+    crates/qf-cpu/src/lib.rs >/dev/null \
   && rg -F -- 'fn x86_profile_selection_keeps_bmi2_explicit()' \
-    src/optimize/parts/cpu_dispatch.rs >/dev/null \
+    crates/qf-cpu/src/lib.rs >/dev/null \
   && rg -F -- 'fn bmi2_dispatch_requires_profile_and_runtime_feature_intersection()' \
     src/interface.rs >/dev/null \
   && rg -F -- 'SIMD_SKIP test=bmi2_parser_accepts_intentionally_unaligned_ipv4_slice_when_supported required=bmi2' \
@@ -635,7 +644,7 @@ if ! rg -F -- 'pub xdp_mode:' src/engine/config.rs >/dev/null \
   && ! rg -F -- 'pub xdp_flags:' src/engine/config.rs >/dev/null \
   && ! rg -F -- 'pub enum XdpMode' src/engine/config.rs >/dev/null \
   && rg -F -- 'AF_XDP was removed; use' \
-    src/engine/config.rs >/dev/null \
+    src/engine/config.rs crates/qf-engine-types/src/lib.rs >/dev/null \
   && rg -F -- 'fn interface_validation_rejects_legacy_non_tun_types()' \
     src/engine/config.rs >/dev/null \
   && rg -F -- 'fn interface_schema_removes_xdp_fields_and_rejects_legacy_input()' \
@@ -800,6 +809,10 @@ if rg -F -- 'write_interface_platform_negative_proof()' \
     scripts/tests/suites/test-core.sh >/dev/null \
   && rg -F -- 'wintun_native_cleanup_fault_status=UNAVAILABLE' \
     scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'host_os_not_windows_cleanup_state_is_target_gated' \
+    scripts/tests/suites/test-core.sh >/dev/null \
+  && rg -F -- 'if [[ "$(detect_os)" == "windows" ]]' \
+    scripts/tests/suites/test-core.sh >/dev/null \
   && rg -F -- 'wfp_native_cleanup_fault_status=UNAVAILABLE' \
     scripts/tests/suites/test-core.sh >/dev/null \
   && rg -F -- 'Record interface and platform negative-proof boundary' \
@@ -828,14 +841,14 @@ fi
 # 4m) The Optimize unsafe-boundary owner must fail closed for malformed
 #     bitmap/pattern/percentile inputs, preserve SIMD parity, bound SVE output,
 #     process all VNNI samples, and validate test-only Linux RPS inputs.
-if rg -F -- 'fn bounded_bitmap_end(' src/optimize/transport.rs >/dev/null \
+if rg -F -- 'fn bounded_bitmap_end(' crates/qf-cpu/src/transport.rs >/dev/null \
   && rg -F -- 'test_bitmap_set_range_rejects_reversed_and_clips_overflowing_end()' \
-    src/optimize/transport.rs >/dev/null \
-  && rg -F -- 'if !(1..=4).contains(&pn_len)' src/optimize/transport.rs >/dev/null \
+    crates/qf-cpu/src/transport.rs >/dev/null \
+  && rg -F -- 'if !(1..=4).contains(&pn_len)' crates/qf-cpu/src/transport.rs >/dev/null \
   && rg -F -- 'test_decode_packet_number_invalid_len_returns_expected()' \
-    src/optimize/transport.rs >/dev/null \
+    crates/qf-cpu/src/transport.rs >/dev/null \
   && rg -F -- 'test_aggregate_congestion_processes_samples_beyond_window()' \
-    src/optimize/transport.rs >/dev/null \
+    crates/qf-cpu/src/transport.rs >/dev/null \
   && rg -F -- 'fn complete_pattern_end(' src/optimize/stealth.rs >/dev/null \
   && rg -F -- 'inject_pattern_sse2_short_pattern_writes_exact_length()' \
     src/optimize/stealth.rs >/dev/null \
@@ -847,10 +860,12 @@ if rg -F -- 'fn bounded_bitmap_end(' src/optimize/transport.rs >/dev/null \
   && rg -F -- 'fn percentile_index(' src/optimize/brain.rs >/dev/null \
   && rg -F -- 'test_compute_percentile_invalid_input_fails_closed_without_mutation()' \
     src/optimize/brain.rs >/dev/null \
-  && rg -F -- 'fn validate_rps_interface(' src/optimize/udp.rs >/dev/null \
-  && rg -F -- 'fn rps_cpu_mask(' src/optimize/udp.rs >/dev/null \
+  && rg -F -- 'fn validate_rps_interface(' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
+  && rg -F -- 'fn rps_cpu_mask(' \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
   && rg -F -- 'test_rps_contract_rejects_path_traversal_and_unrepresentable_cpu_masks()' \
-    src/optimize/udp.rs >/dev/null \
+    src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
   && rg -F -- 'Optimize unsafe-boundary remediation' docs/DOCUMENTATION.md docs/MAP.md \
     >/dev/null; then
   pass "Optimize malformed-input, SIMD parity, VNNI, percentile, FFI, and RPS contracts are wired"
@@ -863,16 +878,16 @@ fi
 # 4n) Crypto key and nonce material must have explicit local lifecycle owners;
 #     GHASH controls and the AES table fallback must state their release
 #     boundaries instead of implying constant-time or compiler-erasure proof.
-if rg -F -- 'impl Drop for Aes128Ctx' src/crypto/aes.rs >/dev/null \
-  && rg -F -- 'fn zeroize_round_keys(' src/crypto/aes.rs >/dev/null \
-  && rg -F -- 'fn zeroize_aes128_schedule(' src/crypto/mod.rs >/dev/null \
-  && rg -F -- 'self.nonce.zeroize();' src/crypto/mod.rs >/dev/null \
-  && rg -F -- 'poly_key.zeroize();' src/crypto/mod.rs >/dev/null \
-  && ! rg -n --no-messages 'let rk = key_expansion\(' src/crypto/aes.rs >/dev/null \
-  && rg -F -- 'not a constant-time or' src/crypto/aes.rs >/dev/null \
+if rg -F -- 'impl Drop for Aes128Ctx' crates/qf-crypto/src/aes.rs >/dev/null \
+  && rg -F -- 'fn zeroize_round_keys(' crates/qf-crypto/src/aes.rs >/dev/null \
+  && rg -F -- 'fn zeroize_aes128_schedule(' crates/qf-crypto/src/lib.rs >/dev/null \
+  && rg -F -- 'self.nonce.zeroize();' crates/qf-crypto/src/lib.rs >/dev/null \
+  && rg -F -- 'poly_key.zeroize();' crates/qf-crypto/src/lib.rs >/dev/null \
+  && ! rg -n --no-messages 'let rk = key_expansion\(' crates/qf-crypto/src/aes.rs >/dev/null \
+  && rg -F -- 'not a constant-time or' crates/qf-crypto/src/aes.rs >/dev/null \
   && rg -F -- 'ghash_release_override_parser_has_explicit_backend_contract()' \
-    src/crypto/gcm.rs >/dev/null \
-  && rg -F -- 'QUICFUSCATE_GHASH_PMULL' src/crypto/gcm.rs >/dev/null \
+    crates/qf-crypto/src/gcm.rs >/dev/null \
+  && rg -F -- 'QUICFUSCATE_GHASH_PMULL' crates/qf-crypto/src/gcm.rs >/dev/null \
   && rg -F -- 'Crypto key and nonce lifecycle' docs/DOCUMENTATION.md docs/MAP.md \
     >/dev/null; then
   pass "Crypto schedule, nonce, GHASH-control, and AES fallback lifecycle contracts are wired"
@@ -884,15 +899,15 @@ fi
 
 # 4o) Privilege identity and libc result contracts must remain opaque and
 #     fail-closed across Unix and non-Unix compilation paths.
-if rg -n --no-messages '^type CurrentIds =' src/privilege/drop.rs >/dev/null \
-  && rg -F -- 'fn validate_resolved_identity(' src/privilege/drop.rs >/dev/null \
-  && rg -F -- 'fn checked_group_result_count(' src/privilege/drop.rs >/dev/null \
+if rg -n --no-messages '^type CurrentIds =' crates/qf-privilege/src/drop.rs >/dev/null \
+  && rg -F -- 'fn validate_resolved_identity(' crates/qf-privilege/src/drop.rs >/dev/null \
+  && rg -F -- 'fn checked_group_result_count(' crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'final_identity_boundary_rejects_forged_root_target' \
-    src/privilege/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'group_result_rejects_count_larger_than_requested_capacity' \
-    src/privilege/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop.rs >/dev/null \
   && ! rg -n --no-messages '^\s+pub (user_selector|user_name|uid|group_selector|group_name|gid):' \
-    src/privilege/drop.rs >/dev/null; then
+    crates/qf-privilege/src/drop.rs >/dev/null; then
   pass "Privilege identity is opaque and libc count/platform contracts are wired"
   append_item "privilege_identity_ffi_contracts" "ok" "opaque resolved identity, final revalidation, cross-target CurrentIds, and checked getgroups result"
 else
@@ -902,16 +917,16 @@ fi
 
 # 4p) Privilege post-drop proof must cover all Linux ID fields, expose partial
 #     transition state, and keep non-Linux verification explicitly unsupported.
-if rg -F -- 'Result<[u32; 4], DropError>' src/privilege/drop.rs >/dev/null \
-  && rg -F -- 'PartialTransition' src/privilege/drop.rs >/dev/null \
-  && rg -F -- 'verify_root_cannot_be_regained(identity' src/privilege/drop.rs >/dev/null \
+if rg -F -- 'Result<[u32; 4], DropError>' crates/qf-privilege/src/drop.rs >/dev/null \
+  && rg -F -- 'PartialTransition' crates/qf-privilege/src/drop.rs >/dev/null \
+  && rg -F -- 'verify_root_cannot_be_regained(identity' crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'linux_thread_status_requires_filesystem_uid_and_gid_fields' \
-    src/privilege/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'partial_transition_error_preserves_state_and_operation' \
-    src/privilege/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'PRIVILEGE_PROBE_STATE threads_verified=' \
     src/bin/qf-privilege-probe.rs scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
-  && rg -F -- 'Err(DropError::NotSupported)' src/privilege/drop.rs >/dev/null; then
+  && rg -F -- 'Err(DropError::NotSupported)' crates/qf-privilege/src/drop.rs >/dev/null; then
   pass "Privilege post-drop ID, partial-transition, root-regain, and platform contracts are wired"
   append_item "privilege_post_drop_state_proof" "ok" "Linux UID/GID filesystem fields, fail-closed transition state, complete isolated regain probe, and explicit non-Linux boundary"
 else
@@ -956,18 +971,19 @@ print("; ".join(errors))
 PY
 )"
 if [[ -z "$MEMORY_LOCK_POLICY_ORDER_ERRORS" ]] \
-  && rg -F -- 'pub struct MemoryLockPolicy' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'pub struct MemoryLockStartupStatus' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'pub struct MemoryLockStartupError' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'pub fn current_status()' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'pub enum MemoryLockFailurePolicy' src/engine/config.rs >/dev/null \
-  && rg -F -- 'pub fn apply_before_tls_identity(' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'pub fn apply_deferred_process_memory_lock(' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'MemoryPool::set_lock_blocks(self.lock_blocks)' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'pub struct MemoryLockPolicy' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'pub struct MemoryLockStartupStatus' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'pub struct MemoryLockStartupError' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'pub fn current_status()' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'pub use qf_memory_lock::MemoryLockFailurePolicy;' \
+    src/engine/config.rs crates/qf-engine-types/src/lib.rs >/dev/null \
+  && rg -F -- 'pub fn apply_before_tls_identity(' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'pub fn apply_deferred_process_memory_lock(' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'set_lock_blocks(self.lock_blocks)' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'fn security_settings_map_to_startup_policy_without_normalization()' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'fn standalone_reload_rejects_each_changed_startup_setting()' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'fn embedded_startup_policy_applies_pool_setting_before_identity_boundary()' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'fn standalone_restart_reapplies_pool_setting_instead_of_retaining_previous_value()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'fn standalone_reload_rejects_each_changed_startup_setting()' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'fn embedded_startup_policy_applies_pool_setting_before_identity_boundary()' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'fn standalone_restart_reapplies_pool_setting_instead_of_retaining_previous_value()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'fn test_runtime_reload_rejects_startup_owned_memory_settings()' src/implementations/server/parts/tests_inline.rs >/dev/null \
   && rg -F -- 'lock_memory = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
   && rg -F -- 'lock_blocks = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
@@ -979,8 +995,8 @@ if [[ -z "$MEMORY_LOCK_POLICY_ORDER_ERRORS" ]] \
   && rg -F -- 'set_memory_lock_status' src/implementations/server/metrics.rs src/main_parts/late_tests_and_mlock.rs >/dev/null \
   && rg -F -- '"memory_lock": memory_lock.health_json()' src/implementations/server/metrics.rs src/implementations/server/parts/runtime_admin.rs >/dev/null \
   && rg -F -- 'Process Memory-Lock Readiness and Failure Policy' docs/MAP.md docs/DOCUMENTATION.md >/dev/null \
-  && rg -F -- 'struct ProcessMemoryLockGuard' src/memory_lock.rs >/dev/null \
-  && ! rg -F -- 'current_memlock_limit().ok()' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'struct ProcessMemoryLockGuard' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && ! rg -F -- 'current_memlock_limit().ok()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'reject_standalone_reload(candidate_memory_lock_policy)?' src/implementations/server/parts/runtime_impl.rs >/dev/null \
   && ! rg -F -- 'fn apply_process_memory_lock' src/main_parts/late_tests_and_mlock.rs >/dev/null \
   && rg -F -- 'Shared server startup memory-lock policy' docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
@@ -993,18 +1009,18 @@ fi
 
 # 4r) Process-wide memory-lock failures must preserve their cause and expose
 #     an explicit startup policy. The process test cleanup must be panic-safe.
-if rg -F -- 'pub enum MemoryLockFailureKind' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'MemoryLockFailureKind::RlimitQuery' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'MemoryLockFailureKind::Mlockall' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'MemoryLockFailureKind::UnsupportedPlatform' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'fn decide_process_memory_lock_failure(' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'fn mlockall_flags_for_budget(' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'impl Drop for ProcessMemoryLockGuard' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'libc::munlockall()' src/memory_lock.rs >/dev/null \
+if rg -F -- 'pub enum MemoryLockFailureKind' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'MemoryLockFailureKind::RlimitQuery' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'MemoryLockFailureKind::Mlockall' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'MemoryLockFailureKind::UnsupportedPlatform' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'fn decide_process_memory_lock_failure(' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'fn mlockall_flags_for_budget(' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'impl Drop for ProcessMemoryLockGuard' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'libc::munlockall()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'memory_lock_health_exposes_degraded_and_not_ready_states' \
     src/implementations/server/metrics.rs >/dev/null \
-  && rg -F -- 'MemoryLockFailurePolicy::FailClosed' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'memory_lock_failure_policy' src/engine/config.rs src/memory_lock.rs >/dev/null; then
+  && rg -F -- 'MemoryLockFailurePolicy::FailClosed' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'memory_lock_failure_policy' src/engine/config.rs crates/qf-memory-lock/src/lib.rs >/dev/null; then
   pass "Process memory-lock failure causes, policy decisions, health states, and panic-safe cleanup are wired"
   append_item "process_memory_lock_failure_policy" "ok" "typed rlimit/mlockall/platform causes, best-effort/fail-closed decision, current-only fallback, and Drop cleanup are present"
 else
@@ -1073,9 +1089,9 @@ if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
   && rg -F -- 'windows_compile_gate_status' scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
   && rg -F -- 'test-privilege-memory-tls-proof.sh' scripts/tests/utils/util-run-full-suite.sh .github/workflows/ci.yml >/dev/null \
-  && rg -F -- 'root_regain_result_contract_is_deterministic_without_syscalls' src/privilege/drop.rs >/dev/null \
-  && rg -F -- 'process_memory_lock_guard_cleans_up_during_unwind' src/memory_lock.rs >/dev/null \
-  && rg -F -- 'deferred_process_lock_status_is_explicit_before_privilege_transition' src/memory_lock.rs >/dev/null \
+  && rg -F -- 'root_regain_result_contract_is_deterministic_without_syscalls' crates/qf-privilege/src/drop.rs >/dev/null \
+  && rg -F -- 'process_memory_lock_guard_cleans_up_during_unwind' crates/qf-memory-lock/src/lib.rs >/dev/null \
+  && rg -F -- 'deferred_process_lock_status_is_explicit_before_privilege_transition' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'Privilege, Lock, and TLS Negative-Proof Guardrails' docs/todo/done/todo-854-privilege-lock-negative-proof.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
   pass "Privilege, memory-lock, TLS, native-boundary, and Windows portability proof wiring is explicit"
   append_item "privilege_memory_tls_negative_proof" "ok" "deterministic local suite, explicit native skip manifest, startup ordering, and Windows compile-before-test CI gate are present"
@@ -1085,7 +1101,7 @@ else
 fi
 
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
-DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec src/simd || true)"
+DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec crates/qf-simd/src || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then
   warn_guardrail "Broad #![allow(dead_code)] found in production/runtime-critical modules"
   echo "$DEADCODE_SUPPRESSIONS"
@@ -1104,7 +1120,7 @@ else
   append_item "crate_warning_suppression" "ok" "no allow(warnings) attribute remains in the crate root"
 fi
 
-X86_ACK_DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/simd/x86_ack.rs || true)"
+X86_ACK_DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' crates/qf-simd/src/x86_ack.rs || true)"
 if [[ -n "$X86_ACK_DEADCODE_SUPPRESSIONS" ]]; then
   fail_critical "x86 ACK helpers regained broad module-level dead_code suppression"
   append_item "x86_ack_dead_code_suppression" "fail" "$X86_ACK_DEADCODE_SUPPRESSIONS"
@@ -1126,7 +1142,7 @@ FEC_RECOVERY_INTEGRITY_REGRESSIONS="$(rg -n --no-messages 'norm_base|base_id\.wr
 if [[ -n "$FEC_RECOVERY_INTEGRITY_REGRESSIONS" ]]; then
   fail_critical "FEC decoder regained ambiguous anchors, forward GF4 mapping, or unvalidated auto-Wiedemann recovery"
   append_item "fec_recovery_integrity" "fail" "$FEC_RECOVERY_INTEGRITY_REGRESSIONS"
-elif rg -n --no-messages 'valid\.then_some\(solution\)' src/fec >/dev/null \
+elif rg -n --no-messages 'valid\.then_some\(solution\)' crates/qf-fec/src/decoders.rs >/dev/null \
   && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_1000_packets_at_5pct_random_loss' src/fec/e2e_tests.rs >/dev/null \
   && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_four_consecutive_losses_per_sixteen' src/fec/e2e_tests.rs >/dev/null; then
   pass "FEC recovery keeps exact anchors, validated solver output, and deterministic interleaved integrity gates"
@@ -1136,9 +1152,9 @@ else
   append_item "fec_recovery_integrity" "fail" "solver validation or deterministic interleaved recovery gates missing"
 fi
 
-FEC_WRONG_FIELD_GFNI_CALLS="$(rg -n --no-messages '_mm512_gf2p8mul_epi8\(' src/fec/gf_tables.rs src/fec || true)"
+FEC_WRONG_FIELD_GFNI_CALLS="$(rg -n --no-messages '_mm512_gf2p8mul_epi8\(' crates/qf-fec/src/gf_tables.rs src/fec || true)"
 if [[ -z "$FEC_WRONG_FIELD_GFNI_CALLS" ]] \
-  && rg -n --no-messages 'IRREDUCIBLE_POLY: u16 = 0x11D' src/fec/gf_tables.rs >/dev/null; then
+  && rg -n --no-messages 'IRREDUCIBLE_POLY: u16 = 0x11D' crates/qf-fec/src/gf_tables.rs >/dev/null; then
   pass "FEC GF8 kernels preserve the canonical 0x11D wire field"
   append_item "fec_gf8_polynomial" "ok" "no raw Intel GFNI 0x11B multiply remains in canonical FEC kernels"
 else
@@ -1146,11 +1162,11 @@ else
   append_item "fec_gf8_polynomial" "fail" "${FEC_WRONG_FIELD_GFNI_CALLS:-canonical 0x11D polynomial declaration missing}"
 fi
 
-BROKEN_U32_SORT_BACKENDS="$(rg -n --no-messages 'sort_u32_(avx512|avx2|neon)|sort_small_avx(512|2)|partition_avx512' src/optimize/sort.rs || true)"
+BROKEN_U32_SORT_BACKENDS="$(rg -n --no-messages 'sort_u32_(avx512|avx2|neon)|sort_small_avx(512|2)|partition_avx512' crates/qf-cpu/src/sort.rs || true)"
 if [[ -z "$BROKEN_U32_SORT_BACKENDS" ]] \
-  && rg -n --no-messages 'pub fn sort_u32\(data: &mut \[u32\]\).*' src/optimize/sort.rs >/dev/null \
-  && rg -n --no-messages 'data\.sort_unstable\(\)' src/optimize/sort.rs >/dev/null \
-  && rg -n --no-messages 'berlekamp_massey_boundary_lengths_match_scalar' src/simd >/dev/null; then
+  && rg -n --no-messages 'pub fn sort_u32\(data: &mut \[u32\]\).*' crates/qf-cpu/src/sort.rs >/dev/null \
+  && rg -n --no-messages 'data\.sort_unstable\(\)' crates/qf-cpu/src/sort.rs >/dev/null \
+  && rg -n --no-messages 'berlekamp_massey_boundary_lengths_match_scalar' crates/qf-simd/src >/dev/null; then
   pass "Windows SIMD parity paths reject the corrupt u32 sorters and cover Berlekamp boundaries"
   append_item "windows_simd_parity" "ok" "canonical u32 sort and Berlekamp boundary parity gate are present"
 else
@@ -1585,7 +1601,7 @@ else
 fi
 
 # 6) Guardrail warning: shadow runtime modules with no non-test call sites.
-BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src | rg -v "src/transport/batch.rs|src/transport.rs" || true)
+BATCH_RUNTIME_REFS=$(rg -n --no-messages "BatchProcessor" src crates/qf-transport-batch/src | rg -v "src/transport/batch.rs|src/transport.rs|crates/qf-transport-batch/src/lib.rs" || true)
 if [[ -z "$BATCH_RUNTIME_REFS" ]]; then
   pass "BatchProcessor has no runtime call sites and is treated as compatibility/test-only"
   append_item "batchprocessor_runtime_reachability" "ok" "no runtime references found (compat/test-only surface)"
@@ -1633,7 +1649,7 @@ else
   append_item "fastpathtransport_gso_gro_semantics" "fail" "$FASTPATH_GSO_GRO_REFS"
 fi
 
-UDPFAST_PUBLIC_BUFFER_REFS=$(rg -n --no-messages "^pub struct AlignedBuffer" src/transport/udpfast.rs || true)
+UDPFAST_PUBLIC_BUFFER_REFS=$(rg -n --no-messages "^pub struct AlignedBuffer" crates/qf-transport-udp/src/fastpath.rs || true)
 if [[ -z "$UDPFAST_PUBLIC_BUFFER_REFS" ]]; then
   pass "udpfast aligned buffer does not expose a broad public surface"
   append_item "udpfast_internal_buffer_visibility" "ok" "AlignedBuffer remains internal or crate-internal"
@@ -1642,7 +1658,7 @@ else
   append_item "udpfast_internal_buffer_visibility" "fail" "$UDPFAST_PUBLIC_BUFFER_REFS"
 fi
 
-UDPFAST_PUBLIC_SINGLE_REFS=$(rg -n --no-messages "^\\s*pub fn send_single\\(|^\\s*pub\\(crate\\) fn send_single\\(|^\\s*pub fn recv_single\\(|^\\s*pub\\(crate\\) fn recv_single\\(" src/transport/udpfast.rs || true)
+UDPFAST_PUBLIC_SINGLE_REFS=$(rg -n --no-messages "^\\s*pub fn send_single\\(|^\\s*pub\\(crate\\) fn send_single\\(|^\\s*pub fn recv_single\\(|^\\s*pub\\(crate\\) fn recv_single\\(" crates/qf-transport-udp/src/fastpath.rs || true)
 if [[ -z "$UDPFAST_PUBLIC_SINGLE_REFS" ]]; then
   pass "udpfast single-packet helpers remain internal implementation detail"
   append_item "udpfast_single_helper_visibility" "ok" "send_single/recv_single remain internal"
@@ -1722,7 +1738,7 @@ else
 fi
 
 # 8) Broad batch-send MSG_ZEROCOPY path must stay removed.
-if rg -n --no-messages "send_batch_maybe_zerocopy\\(" src/optimize/udp.rs src/transport/udpfast.rs >/dev/null; then
+if rg -n --no-messages "send_batch_maybe_zerocopy\\(" src/optimize/udp.rs crates/qf-transport-udp/src/fastpath.rs >/dev/null; then
   fail_critical "Broad batch-send MSG_ZEROCOPY path reappeared"
   append_item "zerocopy_batch_path_removed" "fail" "send_batch_maybe_zerocopy still present"
 else
@@ -1910,7 +1926,8 @@ else
 fi
 
 # 13) Optimize microprimitives in memory/string must either be runtime-owned or explicitly test/rust-tests gated.
-if ! rg -n --no-messages "crate::accelerate::string::string_contains\\(" src/stealth/ >/dev/null; then
+if ! rg -n --no-messages "crate::(accelerate::string|optimize::string)::string_contains\\(" src/stealth/ >/dev/null \
+  || ! rg -n --no-messages '^pub fn string_contains' crates/qf-cpu/src/string.rs >/dev/null; then
   fail_critical "optimize::string::string_contains lost its runtime owner in stealth path"
   append_item "optimize_microprimitives_runtime_owner" "fail" "string_contains runtime owner missing"
 elif ! rg -n --no-messages '^pub fn base64_encode' src/optimize/string.rs >/dev/null \
@@ -1947,7 +1964,7 @@ CLIENT_CONNECTED_BODY="$(awk '
   /pub fn client_connected\(/ { in_fn=1 }
   in_fn { print }
   in_fn && /^    }$/ { exit }
-' src/instrumentation.rs)"
+' crates/qf-instrumentation/src/lib.rs)"
 if [[ "$CLIENT_CONNECTED_BODY" == *"connections_accepted"* ]]; then
   fail_critical "Global server client_connected() still implies accepted-connection counting"
   append_item "server_observability_client_connected_accept_split" "fail" "client_connected still mutates connections_accepted"
@@ -2031,7 +2048,7 @@ else
 fi
 
 if rg -n --no-messages "forked data-plane AEAD contract.*full-fork assumption|full-fork assumption.*forked data-plane AEAD contract" src/transport/packet.rs >/dev/null \
-  && rg -n --no-messages "fork-specific data-plane decision, not a TLS cipher-suite decision.*full-fork assumption|full-fork assumption.*fork-specific data-plane decision, not a TLS cipher-suite decision" src/crypto/ >/dev/null; then
+  && rg -n --no-messages "fork-specific data-plane decision, not a TLS cipher-suite decision.*full-fork assumption|full-fork assumption.*fork-specific data-plane decision, not a TLS cipher-suite decision" crates/qf-crypto/src/ >/dev/null; then
   pass "Runtime-adjacent AEAD comments keep forked data-plane posture explicit"
   append_item "feature_claims_runtime_aead_comment_truth" "ok" "fork-specific AEAD wording present in packet/crypto comments"
 else

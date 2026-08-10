@@ -1,0 +1,19 @@
+[package]
+name = "qf-transport-batch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-cpu/rust-tests", "qf-transport-udp/rust-tests"]
+
+[dependencies]
+qf-cpu = { path = "../qf-cpu" }
+qf-telemetry = { path = "../qf-telemetry" }
+qf-transport-udp = { path = "../qf-transport-udp" }
+libc = "0.2"
+log = "0.4"
+socket2 = "0.5"

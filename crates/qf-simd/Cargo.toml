@@ -1,0 +1,28 @@
+[package]
+name = "qf-simd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-common/rust-tests", "qf-cpu/rust-tests", "qf-crypto/rust-tests", "qf-telemetry/rust-tests"]
+benches = []
+prefetch = ["qf-cpu/prefetch", "qf-crypto/prefetch"]
+aggressive_inline = ["qf-cpu/aggressive_inline", "qf-crypto/aggressive_inline"]
+internal_avx10_preview = ["qf-cpu/internal_avx10_preview", "qf-crypto/internal_avx10_preview"]
+
+[dependencies]
+qf-common = { path = "../qf-common" }
+qf-cpu = { path = "../qf-cpu" }
+qf-crypto = { path = "../qf-crypto" }
+qf-telemetry = { path = "../qf-telemetry" }
+
+[target.'cfg(not(windows))'.dependencies]
+sha2-asm = "0.6.4"
+
+[dev-dependencies]
+rand = "0.9"
+sha2 = "0.10"

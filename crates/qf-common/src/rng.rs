@@ -1,9 +1,9 @@
 use std::io;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "rust-tests"))]
 use std::cell::Cell;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "rust-tests"))]
 thread_local! {
     static TEST_FORCE_SECURE_ENTROPY_FAILURE: Cell<bool> = const { Cell::new(false) };
 }
@@ -13,7 +13,7 @@ thread_local! {
 /// Returns an error when the entropy source is unavailable.
 #[inline(always)]
 pub fn fill_secure(buf: &mut [u8]) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "rust-tests"))]
     if TEST_FORCE_SECURE_ENTROPY_FAILURE.with(Cell::get) {
         return Err(io::Error::other("forced secure entropy failure"));
     }
@@ -52,7 +52,7 @@ pub fn secure_hex(bytes_len: usize, context: &str) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "rust-tests"))]
 pub fn test_force_secure_entropy_failure(enabled: bool) -> bool {
     TEST_FORCE_SECURE_ENTROPY_FAILURE.with(|state| state.replace(enabled))
 }

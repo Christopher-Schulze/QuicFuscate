@@ -23,19 +23,15 @@ use crate::optimize::{MemoryPool, PooledBlock};
 #[cfg(target_arch = "x86_64")]
 use crate::simd::{CpuFeatures, CpuProfile};
 use crate::telemetry::TELEMETRY_ENABLED;
+pub(crate) use qf_transport_types::validate_tun_config;
+pub use qf_transport_types::{
+    FastpathMode, TunCapabilities, TunConfig, TunDevice, TunError, TunFactory, TunReadContract,
+    TUN_IPV6_MIN_MTU, TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY,
+};
 use std::io::{self};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock};
-
-/// Maximum number of owned packets buffered between a blocking TUN reader and
-/// the async transport loop. The bounded queue propagates transport pressure
-/// back to the kernel instead of allowing unbounded heap growth.
-pub const TUN_PACKET_QUEUE_CAPACITY: usize = 1024;
-/// Minimum valid IPv4 TUN MTU.
-pub const TUN_MIN_MTU: u16 = 576;
-/// Minimum valid TUN MTU while IPv6 is enabled.
-pub const TUN_IPV6_MIN_MTU: u16 = 1280;
 
 #[cfg(unix)]
 fn close_owned_fd_with<F>(fd: &mut std::os::fd::RawFd, close: F) -> io::Result<()>
@@ -407,165 +403,6 @@ memory_pool_alignment = 4096
     }
 }
 
-/// Errors produced by the TUN layer.
-#[derive(Debug)]
-pub enum TunError {
-    /// TUN is not supported on the current platform.
-    Unsupported,
-    /// Operating system I/O error.
-    Io(io::Error),
-    /// Configuration or prerequisite error (e.g., missing factory, MTU too low).
-    Config(&'static str),
-}
-
-impl From<io::Error> for TunError {
-    fn from(e: io::Error) -> Self {
-        TunError::Io(e)
-    }
-}
-
-/// Configuration for creating a TUN device.
-#[derive(Clone, Debug)]
-pub struct TunConfig {
-    /// Requested TUN device name (None for OS-assigned).
-    pub name: Option<String>,
-    /// Static IPv4 address to assign to the TUN interface.
-    pub ip: Option<IpAddr>,
-    /// IPv4 netmask for the TUN interface address.
-    pub netmask: Option<IpAddr>,
-    /// Maximum transmission unit for the TUN device.
-    pub mtu: u16,
-    /// If true, consumers should prefer memory-pool backed I/O.
-    pub zero_copy: bool,
-    /// IPv6 address for dual-stack TUN (None = IPv4-only).
-    pub ip6: Option<Ipv6Addr>,
-    /// IPv6 prefix length (e.g., 64).
-    pub prefix6: Option<u8>,
-}
-
-impl Default for TunConfig {
-    fn default() -> Self {
-        Self {
-            name: None,
-            ip: None,
-            netmask: None,
-            mtu: 1500,
-            zero_copy: true,
-            ip6: None,
-            prefix6: None,
-        }
-    }
-}
-
-/// Validate the shared address and MTU contract before any backend is opened.
-pub(crate) fn validate_tun_config(config: &TunConfig) -> Result<(), TunError> {
-    if config.mtu < TUN_MIN_MTU {
-        return Err(TunError::Config("TUN MTU must be >= 576"));
-    }
-    if let Some(name) = config.name.as_deref() {
-        if name.is_empty() || name.contains('\0') {
-            return Err(TunError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "TUN interface name must be non-empty and must not contain NUL",
-            )));
-        }
-    }
-
-    match (config.ip, config.netmask) {
-        (None, None) => {}
-        (Some(IpAddr::V4(_)), Some(IpAddr::V4(mask))) => {
-            let raw = u32::from(mask);
-            let prefix = raw.leading_ones();
-            let canonical = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
-            if raw != canonical {
-                return Err(TunError::Config("TUN IPv4 netmask must be contiguous"));
-            }
-        }
-        (Some(IpAddr::V6(_)), Some(IpAddr::V6(_))) => {
-            return Err(TunError::Config(
-                "TUN IPv6 address must use ip6 and prefix6, not ip and netmask",
-            ));
-        }
-        (Some(_), Some(_)) => {
-            return Err(TunError::Config("TUN IPv4 address and netmask must use IPv4"));
-        }
-        _ => {
-            return Err(TunError::Config(
-                "TUN IPv4 address and netmask must be configured together",
-            ));
-        }
-    }
-
-    match (config.ip6, config.prefix6) {
-        (None, None) => {}
-        (Some(_), Some(prefix)) if prefix <= 128 => {
-            if config.mtu < TUN_IPV6_MIN_MTU {
-                return Err(TunError::Config("IPv6 TUN MTU must be >= 1280"));
-            }
-        }
-        (Some(_), Some(_)) => {
-            return Err(TunError::Config("IPv6 TUN prefix must be <= 128"));
-        }
-        _ => {
-            return Err(TunError::Config(
-                "IPv6 TUN address and prefix must be configured together",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Runtime capability view for TUN integration.
-#[derive(Clone, Copy, Debug)]
-pub struct TunCapabilities {
-    /// Built-in native implementation exists for current target.
-    pub built_in: bool,
-    /// External factory has been registered for platform-managed TUN backends.
-    pub external_factory_registered: bool,
-    /// Zero-copy can be used on the current platform/runtime path.
-    pub supports_zero_copy: bool,
-    /// Raw file descriptor exposure is available.
-    pub supports_raw_fd: bool,
-}
-
-/// Shared runtime fastpath selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FastpathMode {
-    /// Disable fastpath optimization, use direct syscalls.
-    Off,
-    /// Automatically use best available fastpath (sendmmsg on Linux).
-    Auto,
-}
-
-impl FastpathMode {
-    /// Parse a fastpath mode from a string ("off" or "auto").
-    pub fn parse(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "off" => Self::Off,
-            _ => Self::Auto,
-        }
-    }
-
-    /// Read fastpath mode from the QUICFUSCATE_FASTPATH environment variable.
-    pub fn from_env() -> Self {
-        let environment = crate::env_utils::EnvSnapshot::capture();
-        Self::from_env_with_snapshot(&environment)
-    }
-
-    /// Read fastpath mode from one immutable environment generation.
-    pub(crate) fn from_env_with_snapshot(environment: &crate::env_utils::EnvSnapshot) -> Self {
-        let raw = environment.first(["QUICFUSCATE_FASTPATH"]).unwrap_or_else(|| "auto".to_string());
-        let mode = Self::parse(&raw);
-        if mode == Self::Auto && !raw.trim().eq_ignore_ascii_case("auto") {
-            log::warn!(
-                "Unsupported QUICFUSCATE_FASTPATH='{}'; using canonical fastpath policy 'auto'",
-                raw
-            );
-        }
-        mode
-    }
-}
-
 /// Return current TUN capability profile for control-plane and diagnostics.
 pub fn tun_capabilities() -> TunCapabilities {
     TunCapabilities {
@@ -591,61 +428,6 @@ pub fn validate_tun_runtime_requirements() -> Result<(), TunError> {
         ));
     }
     Ok(())
-}
-
-/// Execution contract for a backend's single-packet read operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TunReadContract {
-    /// `read()` returns promptly with data, `WouldBlock`, or another result.
-    NonBlocking,
-    /// `read()` may wait for device input and must have a dedicated reader owner.
-    Blocking,
-}
-
-/// Basic TUN device contract.
-pub trait TunDevice: Send + Sync {
-    /// Returns the OS-level device name (e.g., "utun3", "quicfuse0").
-    fn name(&self) -> &str;
-    /// Returns the configured MTU for this device.
-    fn mtu(&self) -> u16;
-    /// Declares whether `read()` is safe to call from an async-owned loop.
-    /// Custom backends default to `Blocking` and must use an owned reader
-    /// thread or explicitly implement the nonblocking contract.
-    fn read_contract(&self) -> TunReadContract {
-        TunReadContract::Blocking
-    }
-    /// Applies a new MTU to the live device. A successful implementation must
-    /// make the new value observable through `mtu()` before returning.
-    fn set_mtu(&self, mtu: u16) -> io::Result<()> {
-        if mtu == self.mtu() {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "dynamic TUN MTU updates are unsupported by this backend",
-            ))
-        }
-    }
-    /// Reads one IP packet into `buf`, returning a count in `1..=buf.len()`.
-    /// A backend must report `WouldBlock` when no packet is available; zero or
-    /// oversized counts are invalid and are rejected by `TunInterface`.
-    fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
-    /// Writes one IP packet from `buf`, returning exactly `buf.len()` on
-    /// success. TUN packet writes are complete, non-retryable operations at
-    /// this boundary: zero, short, and oversized counts are invalid.
-    fn write(&self, buf: &[u8]) -> io::Result<usize>;
-    /// Wake a potentially blocking reader so its owner can observe shutdown.
-    /// Backends whose read operation is already nonblocking may keep the
-    /// default no-op implementation. Blocking platform backends must signal
-    /// their native wait primitive here.
-    fn request_read_shutdown(&self) -> io::Result<()> {
-        Ok(())
-    }
-    /// Returns the raw file descriptor for io_uring or epoll integration (Unix only).
-    #[cfg(unix)]
-    fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
-        None
-    }
 }
 
 /// A high-performance wrapper integrating a TUN device with QuicFuscate's
@@ -1092,11 +874,6 @@ impl TunInterface {
 }
 
 // Platform-specific implementations
-
-// Optional global factory to inject platform TUN devices (iOS/Windows or custom).
-/// Factory type alias to simplify signatures and avoid clippy::type_complexity.
-pub type TunFactory =
-    Box<dyn Fn(&TunConfig) -> io::Result<Box<dyn TunDevice>> + Send + Sync + 'static>;
 
 static TUN_FACTORY: OnceLock<TunFactory> = OnceLock::new();
 
@@ -2143,6 +1920,7 @@ use windows_tun::open_platform_tun;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv6Addr;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 

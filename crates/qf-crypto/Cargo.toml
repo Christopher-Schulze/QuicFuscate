@@ -1,0 +1,32 @@
+[package]
+name = "qf-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-common/rust-tests", "qf-cpu/rust-tests", "qf-telemetry/rust-tests"]
+benches = []
+std = []
+prefetch = ["qf-cpu/prefetch"]
+aggressive_inline = ["qf-cpu/aggressive_inline"]
+internal_avx10_preview = ["qf-cpu/internal_avx10_preview"]
+
+[dependencies]
+hmac = "0.12"
+hkdf = "0.12"
+qf-common = { path = "../qf-common" }
+qf-cpu = { path = "../qf-cpu" }
+qf-error = { path = "../qf-error" }
+qf-telemetry = { path = "../qf-telemetry" }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+zeroize = "1.8"
+
+[dev-dependencies]
+hex = "0.4"
+qf-common = { path = "../qf-common", features = ["rust-tests"] }
+serde_json = "1.0"

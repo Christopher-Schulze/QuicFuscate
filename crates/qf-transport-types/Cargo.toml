@@ -1,0 +1,17 @@
+[package]
+name = "qf-transport-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-common/rust-tests"]
+
+[dependencies]
+qf-common = { path = "../qf-common" }
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

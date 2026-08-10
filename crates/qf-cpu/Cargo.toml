@@ -1,0 +1,21 @@
+[package]
+name = "qf-cpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-common/rust-tests"]
+prefetch = []
+aggressive_inline = []
+internal_avx10_preview = []
+
+[dependencies]
+qf-common = { path = "../qf-common" }
+qf-telemetry = { path = "../qf-telemetry" }
+qf-transport-types = { path = "../qf-transport-types" }
+libc = "0.2"
+log = "0.4"

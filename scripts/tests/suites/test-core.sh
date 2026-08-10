@@ -58,6 +58,7 @@ run_verified_library_target() {
   local expected_test_name="$2"
   local feature_set="$3"
   local output_file="$OUTPUT_DIR/${name}.log"
+  local command_status=0
   if qf_cargo_test_run_expect \
     "$output_file" "lib" "$feature_set" "$expected_test_name" "$expected_test_name" \
     --release --lib "$expected_test_name" -- --nocapture --exact; then
@@ -72,8 +73,9 @@ run_verified_library_target() {
       "command_status=int:0" \
       "raw_output=$output_file"
     return 0
+  else
+    command_status="$?"
   fi
-  local command_status="$?"
   qf_json_append_object "$JSON" \
     "name=$name" \
     "status=FAIL" \
@@ -125,12 +127,18 @@ write_interface_platform_negative_proof() {
   local linux_name_reason="host_os_not_linux"
   local macos_iovec_status="SKIP"
   local macos_iovec_reason="host_os_not_macos"
+  local wintun_deterministic_status="SKIP"
+  local wintun_deterministic_reason="host_os_not_windows_cleanup_state_is_target_gated"
   local bmi2_dispatch_status="SKIP"
   local bmi2_dispatch_reason="host_arch_not_x86_64"
   local bmi2_native_status="SKIP"
   local bmi2_native_reason="host_arch_not_x86_64_or_host_cpu_has_no_bmi2"
 
   case "$host_os" in
+    windows)
+      wintun_deterministic_status="PASS"
+      wintun_deterministic_reason="windows_cleanup_state_and_send_sync_targets_executed"
+      ;;
     linux)
       linux_name_status="PASS"
       linux_name_reason="linux_compatibility_kernel_name_test_executed"
@@ -162,8 +170,8 @@ write_interface_platform_negative_proof() {
     "linux_name_reason=$linux_name_reason" \
     "macos_iovec_status=$macos_iovec_status" \
     "macos_iovec_reason=$macos_iovec_reason" \
-    "wintun_deterministic_status=PASS" \
-    "wintun_deterministic_reason=cleanup_state_and_send_sync_targets_executed" \
+    "wintun_deterministic_status=$wintun_deterministic_status" \
+    "wintun_deterministic_reason=$wintun_deterministic_reason" \
     "wintun_native_cleanup_fault_status=UNAVAILABLE" \
     "wintun_native_cleanup_fault_reason=requires_windows_win32_fault_injection_verified_dll_and_administrator" \
     "wfp_deterministic_status=UNAVAILABLE" \
@@ -208,8 +216,12 @@ run_verified_library_target "unix-close-ownership" \
   "interface::tests::unix_close_failure_is_reported_and_descriptor_number_is_terminalized" rust-tests
 run_verified_library_target "compatibility-tun-handle-close" \
   "implementations::client::platform::traits::tests::tun_handle_close_failure_is_reported_and_terminalized" rust-tests
-run_verified_library_target "wintun-cleanup-state" \
-  "interface::wintun::tests::wintun_cleanup_state_retains_failed_resources_for_retry" rust-tests
+if [[ "$(detect_os)" == "windows" ]]; then
+  run_verified_library_target "wintun-cleanup-state" \
+    "interface::wintun::tests::wintun_cleanup_state_retains_failed_resources_for_retry" rust-tests
+else
+  record_platform_skip "wintun-cleanup-state" "host_os_not_windows" "lib" "rust-tests"
+fi
 run_verified_library_target "wintun-send-sync-contract" \
   "interface::wintun::tests::wintun_device_send_sync_contract_is_compile_checked" rust-tests
 case "$(detect_os)" in

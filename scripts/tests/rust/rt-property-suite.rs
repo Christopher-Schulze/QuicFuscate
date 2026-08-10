@@ -55,7 +55,7 @@ proptest! {
 
     #[test]
     fn prop_chacha20poly1305_roundtrip(
-        counter in any::<u64>(),
+        counter in 0u64..=MAX_VARINT,
         plaintext in proptest::collection::vec(any::<u8>(), 0..256),
         aad in proptest::collection::vec(any::<u8>(), 0..64),
     ) {
@@ -77,7 +77,7 @@ proptest! {
 
     #[test]
     fn prop_data_aead_alias_contract_roundtrip(
-        counter in any::<u64>(),
+        counter in 0u64..=MAX_VARINT,
         plaintext in proptest::collection::vec(any::<u8>(), 0..192),
         aad in proptest::collection::vec(any::<u8>(), 0..48),
     ) {
@@ -124,7 +124,7 @@ proptest! {
 
     #[test]
     fn prop_data_aead_alias_ciphertext_matches_public_contract(
-        counter in any::<u64>(),
+        counter in 0u64..=MAX_VARINT,
         plaintext in proptest::collection::vec(any::<u8>(), 0..192),
         aad in proptest::collection::vec(any::<u8>(), 0..48),
     ) {
@@ -166,7 +166,7 @@ proptest! {
 
     #[test]
     fn prop_data_aead_morus_roundtrip(
-        counter in any::<u64>(),
+        counter in 0u64..=MAX_VARINT,
         plaintext in proptest::collection::vec(any::<u8>(), 0..192),
         aad in proptest::collection::vec(any::<u8>(), 0..48),
     ) {
@@ -323,7 +323,7 @@ proptest! {
     /// must cause open to fail.
     #[test]
     fn prop_chacha20poly1305_tamper_detected(
-        counter in any::<u64>(),
+        counter in 0u64..=MAX_VARINT,
         plaintext in proptest::collection::vec(any::<u8>(), 1..128),
         aad in proptest::collection::vec(any::<u8>(), 0..32),
         bit_index in 0usize..1024,

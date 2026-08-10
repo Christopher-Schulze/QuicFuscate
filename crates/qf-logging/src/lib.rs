@@ -11,6 +11,7 @@
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use log::{Level, LevelFilter, Log, Metadata, Record};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -23,7 +24,8 @@ use std::time::{Duration, SystemTime};
 use qf_common::time_source::{now_system, unix_epoch_duration, WallClockError};
 
 /// Logging mode used to derive the effective logger output policy.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub enum LoggingMode {
     /// Full debug logging with all metadata to disk and stdout.
     Verbose,
@@ -37,7 +39,8 @@ pub enum LoggingMode {
 }
 
 /// Logging output format for the production logger.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum LogFormat {
     /// Human-readable text (default).
     #[default]
@@ -49,7 +52,8 @@ pub enum LogFormat {
 }
 
 /// Logger configuration projected from the engine configuration boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub mode: LoggingMode,
     pub level: String,
@@ -109,6 +113,49 @@ impl LoggingConfig {
             }
         }
         config
+    }
+
+    /// Validate the operator-facing logger bounds.
+    pub fn validate(&self) -> Result<(), String> {
+        const VALID_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
+        if !VALID_LEVELS.contains(&self.level.trim().to_ascii_lowercase().as_str()) {
+            return Err(format!(
+                "Invalid logging.level: {}. Must be one of: {:?}",
+                self.level, VALID_LEVELS
+            ));
+        }
+        if self.ring_buffer_capacity == 0 {
+            return Err("logging.ring_buffer_capacity must be greater than zero".to_string());
+        }
+        if self.log_to_file && self.file_path.is_none() && self.log_file_path.trim().is_empty() {
+            return Err(
+                "logging.log_file_path must not be empty when log_to_file is enabled".to_string()
+            );
+        }
+        if self.file_path.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+            return Err("logging.file_path must not be empty".to_string());
+        }
+        if (self.log_to_file || self.file_path.is_some()) && self.max_file_size_bytes == 0 {
+            return Err(
+                "logging.max_file_size_bytes must be greater than zero when file logging is enabled"
+                    .to_string(),
+            );
+        }
+        if self.max_files > 1024 {
+            return Err("logging.max_files must not exceed 1024".to_string());
+        }
+        if self.syslog_addr.is_some_and(|address| address.port() == 0) {
+            return Err("logging.syslog_addr port must be greater than zero".to_string());
+        }
+        for (module, level) in &self.module_levels {
+            if module.trim().is_empty() {
+                return Err("logging.module_levels keys must not be empty".to_string());
+            }
+            if !VALID_LEVELS.contains(&level.trim().to_ascii_lowercase().as_str()) {
+                return Err(format!("Invalid logging.module_levels value for {module}: {level}"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -982,6 +1029,31 @@ mod tests {
         assert_eq!(level_to_severity(Level::Info), 6);
         assert_eq!(level_to_severity(Level::Debug), 7);
         assert_eq!(level_to_severity(Level::Trace), 7);
+    }
+
+    #[test]
+    fn configuration_enums_preserve_engine_wire_names() {
+        assert_eq!(serde_json::to_string(&LoggingMode::NoLog).unwrap(), "\"no-log\"");
+        assert_eq!(serde_json::to_string(&LogFormat::Syslog).unwrap(), "\"syslog\"");
+        assert_eq!(
+            serde_json::from_str::<LoggingMode>("\"minimal\"").unwrap(),
+            LoggingMode::Minimal
+        );
+        assert_eq!(serde_json::from_str::<LogFormat>("\"json\"").unwrap(), LogFormat::Json);
+    }
+
+    #[test]
+    fn logging_config_preserves_wire_shape_and_validation() {
+        let config = LoggingConfig::default();
+        assert!(config.validate().is_ok());
+
+        let encoded = serde_json::to_string(&config).expect("logging config serializes");
+        let decoded: LoggingConfig = serde_json::from_str(&encoded).expect("logging config parses");
+        assert_eq!(decoded, config);
+
+        let mut invalid = config;
+        invalid.ring_buffer_capacity = 0;
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

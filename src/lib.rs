@@ -26,12 +26,6 @@ pub mod env_utils;
 pub mod error {
     pub use qf_error::*;
 
-    impl From<crate::crypto::aead::KeyMaterialError> for qf_error::ConnectionError {
-        fn from(error: crate::crypto::aead::KeyMaterialError) -> Self {
-            Self::CryptoError(error.to_string())
-        }
-    }
-
     impl From<crate::transport::h3::Error> for qf_error::ConnectionError {
         fn from(error: crate::transport::h3::Error) -> Self {
             match error {
@@ -75,7 +69,7 @@ pub mod fec;
 pub mod firewall {
     pub use qf_firewall::{
         iptables_available, nft_available, probe_availability, resolve_backend,
-        FirewallAvailability, FirewallBackend, FirewallOps, FirewallSelectionError,
+        FirewallAvailability, FirewallBackend, FirewallConfig, FirewallOps, FirewallSelectionError,
         IptablesBackend, NftablesBackend,
     };
 

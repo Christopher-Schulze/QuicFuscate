@@ -72,7 +72,7 @@ mod tests {
         assert_eq!(stats.congestion_delivery_rate, 0);
         assert_eq!(stats.congestion_lost, 0);
         assert_eq!(stats.congestion_score, 0);
-        assert!(stats.congestion_samples.is_empty());
+        assert_eq!(stats.congestion_sample_count(), 0);
     }
 
     #[test]
@@ -608,9 +608,9 @@ mod tests {
                 delivery_rate: (i as u32) * 100,
                 lost_packets: i as u32,
             };
-            stats.update_congestion(sample);
+            stats.record_congestion_sample(sample);
         }
-        assert_eq!(stats.congestion_samples.len(), cap);
+        assert_eq!(stats.congestion_sample_count(), cap);
     }
 
     #[test]

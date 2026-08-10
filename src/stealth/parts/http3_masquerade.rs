@@ -104,7 +104,7 @@ impl PersonaTemplate {
         &self,
         backend: &AsciiSimdBackend,
         ctx: &HeaderDynamic<'_>,
-        headers: &mut Vec<crate::transport::h3::Header>,
+        headers: &mut Vec<qf_transport_types::h3::Header>,
     ) {
         for entry in self.entries {
             if let Some(value) = entry.value.resolve(ctx) {
@@ -118,12 +118,12 @@ fn make_header(
     backend: &AsciiSimdBackend,
     name: &[u8],
     value: &[u8],
-) -> crate::transport::h3::Header {
+) -> qf_transport_types::h3::Header {
     let mut name_vec = Vec::with_capacity(name.len());
     backend.append_bytes(&mut name_vec, name);
     let mut value_vec = Vec::with_capacity(value.len());
     backend.append_bytes(&mut value_vec, value);
-    crate::transport::h3::Header::from_parts(name_vec, value_vec)
+    qf_transport_types::h3::Header::from_parts(name_vec, value_vec)
 }
 
 const CHROMIUM_TEMPLATE_ENTRIES: &[HeaderTemplateEntry] = &[
@@ -279,12 +279,12 @@ impl Http3Masquerade {
 
     /// Generates a list of QPACK-style headers for an HTTP/3 request.
     /// The returned list is consumed by the transport's header encoder.
-    pub fn generate_headers(&self, host: &str, path: &str) -> Vec<crate::transport::h3::Header> {
+    pub fn generate_headers(&self, host: &str, path: &str) -> Vec<qf_transport_types::h3::Header> {
         let mut headers = vec![
-            crate::transport::h3::Header::new(b":method", b"GET"),
-            crate::transport::h3::Header::new(b":scheme", b"https"),
-            crate::transport::h3::Header::new(b":authority", host.as_bytes()),
-            crate::transport::h3::Header::new(b":path", path.as_bytes()),
+            qf_transport_types::h3::Header::new(b":method", b"GET"),
+            qf_transport_types::h3::Header::new(b":scheme", b"https"),
+            qf_transport_types::h3::Header::new(b":authority", host.as_bytes()),
+            qf_transport_types::h3::Header::new(b":path", path.as_bytes()),
         ];
 
         let backend = AsciiSimdBackend::detect();
@@ -619,7 +619,7 @@ impl FakeHeaders {
     ///
     /// When `optimize_for_quic` is enabled, TCP-specific headers (like
     /// `connection`) are removed.
-    pub fn header_list(&self, host: &str, path: &str) -> Vec<crate::transport::h3::Header> {
+    pub fn header_list(&self, host: &str, path: &str) -> Vec<qf_transport_types::h3::Header> {
         let mut headers = Http3Masquerade::new(self.profile.clone()).generate_headers(host, path);
         if self.cfg.optimize_for_quic {
             headers.retain(|h| h.name() != b"connection");

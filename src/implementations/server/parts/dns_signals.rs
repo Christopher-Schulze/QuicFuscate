@@ -338,7 +338,7 @@ enum DnsInterceptWorkerResult {
     EmptyResponse,
     ResponseBuildFailed,
     LatePublication,
-    QueueRejected(crate::core::MasqueDownlinkQueueReject),
+    QueueRejected(qf_transport_types::MasqueDownlinkQueueReject),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -550,11 +550,11 @@ fn record_dns_intercept_worker_result(metrics: &Metrics, result: &DnsInterceptWo
             crate::implementations::server::metrics::DnsInterceptWorkerEvent::LatePublication
         }
         DnsInterceptWorkerResult::QueueRejected(reason) => match reason {
-            crate::core::MasqueDownlinkQueueReject::PacketCapacity => {
+            qf_transport_types::MasqueDownlinkQueueReject::PacketCapacity => {
                 metrics.record_masque_downlink_response_drop(*reason);
                 crate::implementations::server::metrics::DnsInterceptWorkerEvent::QueueRejectedPacketCapacity
             }
-            crate::core::MasqueDownlinkQueueReject::ByteCapacity => {
+            qf_transport_types::MasqueDownlinkQueueReject::ByteCapacity => {
                 metrics.record_masque_downlink_response_drop(*reason);
                 crate::implementations::server::metrics::DnsInterceptWorkerEvent::QueueRejectedByteCapacity
             }
@@ -565,7 +565,7 @@ fn record_dns_intercept_worker_result(metrics: &Metrics, result: &DnsInterceptWo
 
 fn publish_dns_intercept_response(
     state: &Arc<Mutex<DnsInterceptWorkerState>>,
-    downlink_queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
+    downlink_queue: &Arc<std::sync::Mutex<qf_transport_types::MasqueDownlinkQueue>>,
     packet: Vec<u8>,
 ) -> DnsInterceptWorkerResult {
     let state_guard = state.lock();
@@ -589,7 +589,7 @@ fn publish_dns_intercept_response(
 fn spawn_dns_intercept(
     pkt: &[u8],
     upstream_resolvers: Arc<Vec<Ipv4Addr>>,
-    downlink_queue: Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
+    downlink_queue: Arc<std::sync::Mutex<qf_transport_types::MasqueDownlinkQueue>>,
     metrics: Arc<Metrics>,
     admission: Arc<crate::dns::DnsAdmission>,
     workers: Arc<DnsInterceptWorkerOwner>,
@@ -951,7 +951,7 @@ mod dns_intercept_worker_tests {
         runtime.block_on(async {
             let metrics = Arc::new(Metrics::new());
             let owner = DnsInterceptWorkerOwner::new(Arc::clone(&metrics));
-            let queue = Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(
+            let queue = Arc::new(std::sync::Mutex::new(qf_transport_types::MasqueDownlinkQueue::new(
                 1, 1024,
             )));
             let worker_started = Arc::new(AtomicBool::new(false));

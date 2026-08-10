@@ -51,6 +51,7 @@ run_verified_target() {
   local feature_set="$3"
   local artifact_name="${4:-$target}"
   local output_file="$OUTPUT_DIR/${artifact_name}.log"
+  local command_status=0
   if qf_cargo_test_run_expect \
     "$output_file" "test:${target}" "$feature_set" "$expected_test_name" \
     "$expected_test_name" --release --test "$target" -- --nocapture; then
@@ -65,8 +66,9 @@ run_verified_target() {
       "command_status=int:0" \
       "raw_output=$output_file"
     return 0
+  else
+    command_status="$?"
   fi
-  local command_status="$?"
   qf_json_append_object "$JSON" \
     "name=$target" \
     "status=FAIL" \
@@ -85,6 +87,7 @@ run_verified_library_target() {
   local expected_test_name="$2"
   local feature_set="$3"
   local output_file="$OUTPUT_DIR/${name}.log"
+  local command_status=0
   if qf_cargo_test_run_expect \
     "$output_file" "lib" "$feature_set" "$expected_test_name" "$expected_test_name" \
     --release --lib "$expected_test_name" -- --nocapture --exact; then
@@ -99,14 +102,55 @@ run_verified_library_target() {
       "command_status=int:0" \
       "raw_output=$output_file"
     return 0
+  else
+    command_status="$?"
   fi
-  local command_status="$?"
   qf_json_append_object "$JSON" \
     "name=$name" \
     "status=FAIL" \
     "result=FAIL" \
     "reason=$QF_CARGO_TEST_REASON" \
     "target=$QF_CARGO_TEST_TARGET" \
+    "feature_set=$QF_CARGO_TEST_FEATURE_SET" \
+    "test_count=int:$QF_CARGO_TEST_COUNT" \
+    "command_status=int:$command_status" \
+    "raw_output=$output_file"
+  return "$command_status"
+}
+
+run_verified_package_library_target() {
+  local package="$1"
+  local name="$2"
+  local expected_test_name="$3"
+  local feature_set="$4"
+  local output_file="$OUTPUT_DIR/${name}.log"
+  local command_status=0
+  if qf_cargo_test_run_expect \
+    "$output_file" "package-lib:${package}" "$feature_set" "$expected_test_name" \
+    "$expected_test_name" --release --package "$package" --lib "$expected_test_name" \
+    -- --nocapture --exact; then
+    qf_json_append_object "$JSON" \
+      "name=$name" \
+      "status=PASS" \
+      "result=PASS" \
+      "reason=expected_package_library_test_executed" \
+      "target=package-lib:${package}" \
+      "package=$package" \
+      "feature_set=$(qf_cargo_test_feature_set "$feature_set")" \
+      "test_count=int:$QF_CARGO_TEST_COUNT" \
+      "command_status=int:0" \
+      "raw_output=$output_file"
+    return 0
+  else
+    command_status="$?"
+  fi
+  qf_json_append_object "$JSON" \
+    "name=$name" \
+    "status=FAIL" \
+    "result=FAIL" \
+    "reason=$QF_CARGO_TEST_REASON" \
+    "target=$QF_CARGO_TEST_TARGET" \
+    "package=$package" \
     "feature_set=$QF_CARGO_TEST_FEATURE_SET" \
     "test_count=int:$QF_CARGO_TEST_COUNT" \
     "command_status=int:$command_status" \
@@ -339,11 +383,11 @@ run_verified_target rt-transport-h3 h3_send_request_returns_stream_id rust-tests
 run_verified_target rt-pnspace-ack-policy ack_elicitation_threshold_and_ranges rust-tests
 run_verified_target rt-udp-batch-send udpfast_send_batch_sends_all_packets rust-tests
 run_verified_target rt-harness-udpfast harness_udpfast_loopback_smoke rust-tests
-run_verified_library_target udp-syscall-metadata \
-  optimize::udp::tests::test_udp_syscall_metadata_rejects_malformed_results rust-tests
+run_verified_package_library_target qf-transport-udp udp-syscall-metadata \
+  tests::test_udp_syscall_metadata_rejects_malformed_results rust-tests
 if [[ "$(detect_os)" == "linux" ]]; then
-  run_verified_library_target batch-invalid-caller-fd \
-    transport::batch::tests::test_linux_batch_send_rejects_invalid_caller_fd rust-tests
+  run_verified_package_library_target qf-transport-batch batch-invalid-caller-fd \
+    tests::test_linux_batch_send_rejects_invalid_caller_fd rust-tests
 else
   record_platform_skip "batch-invalid-caller-fd" "host_os_not_linux" "lib" "rust-tests"
 fi

@@ -1,0 +1,22 @@
+[package]
+name = "qf-engine-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+qf-common = { path = "../qf-common" }
+qf-cpu = { path = "../qf-cpu" }
+qf-firewall = { path = "../qf-firewall" }
+qf-fec = { path = "../qf-fec" }
+qf-memory-lock = { path = "../qf-memory-lock" }
+qf-transport-cc = { path = "../qf-transport-cc" }
+qf-transport-recovery = { path = "../qf-transport-recovery" }
+qf-transport-types = { path = "../qf-transport-types" }
+qf-transport-version = { path = "../qf-transport-version" }
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+sysinfo = "0.35"

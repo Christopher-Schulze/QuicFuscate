@@ -1,0 +1,25 @@
+[package]
+name = "qf-transport-recovery"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = [
+    "qf-common/rust-tests",
+    "qf-transport-cc/rust-tests",
+    "qf-memory-pool/rust-tests",
+    "qf-telemetry/rust-tests",
+]
+
+[dependencies]
+log = "0.4"
+qf-common = { path = "../qf-common" }
+qf-error = { path = "../qf-error" }
+qf-memory-pool = { path = "../qf-memory-pool" }
+qf-telemetry = { path = "../qf-telemetry" }
+qf-transport-cc = { path = "../qf-transport-cc" }
+serde = { version = "1", features = ["derive"] }

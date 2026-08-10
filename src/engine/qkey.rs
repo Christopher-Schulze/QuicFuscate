@@ -11,77 +11,17 @@
 //! QKey-eyJyZW1vdGUiOiIxOTIuMTY4LjEuMTo0NDMzIiwic25pIjoiZXhhbXBsZS5jb20iLCJtZDUiOiJhM2YyYjhjOSJ9
 //! ```
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URLSAFE, Engine as _};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use crate::secret::{SecretBytes, SecretString};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URLSAFE, Engine as _};
 
 /// QKey prefix
 pub const QKEY_PREFIX: &str = "QKey-";
 
+pub use qf_engine_types::{QKeyConfig, QKeyToken};
+
 // Hard limits to keep parsing safe for untrusted input (copy/paste, clipboard).
 const MAX_QKEY_CHARS: usize = 16 * 1024;
 const MAX_DECODED_JSON_BYTES: usize = 16 * 1024;
-
-/// Zeroizing owner for a raw QKey bearer token.
-#[derive(Clone)]
-pub struct QKeyToken(SecretString);
-
-impl QKeyToken {
-    pub fn new(value: String) -> Self {
-        Self(SecretString::new(value, "qkey_token"))
-    }
-}
-
-impl std::fmt::Debug for QKeyToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("QKeyToken([REDACTED])")
-    }
-}
-
-impl std::ops::Deref for QKeyToken {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_str()
-    }
-}
-
-impl AsRef<str> for QKeyToken {
-    fn as_ref(&self) -> &str {
-        self
-    }
-}
-
-impl From<String> for QKeyToken {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for QKeyToken {
-    fn from(value: &str) -> Self {
-        Self::new(value.to_string())
-    }
-}
-
-impl Serialize for QKeyToken {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for QKeyToken {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer).map(Self::new)
-    }
-}
 
 /// Stable QKey id for server-side registries.
 ///
@@ -103,129 +43,6 @@ pub fn id(qkey: &str) -> String {
     }
     let hex = format!("{:x}", hasher.finalize());
     hex.chars().take(12).collect()
-}
-
-/// Compact connection parameters for QKey.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct QKeyConfig {
-    /// Remote server address (host:port)
-    pub remote: String,
-    /// SNI hostname for TLS
-    pub sni: String,
-    /// Stealth mode (optional)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stealth: Option<String>,
-    /// FEC mode (optional)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fec: Option<String>,
-    /// Custom parameters (optional)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra: Option<String>,
-    /// QKey auth token (hex, optional)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<QKeyToken>,
-    /// Checksum string (legacy: 8 hex chars MD5 prefix, current: `s256:<8-hex>`).
-    #[serde(rename = "m")]
-    pub md5: String,
-}
-
-impl QKeyConfig {
-    /// Create a new QKey config.
-    pub fn new(remote: &str, sni: &str) -> Self {
-        let mut cfg = Self {
-            remote: remote.to_string(),
-            sni: sni.to_string(),
-            stealth: None,
-            fec: None,
-            extra: None,
-            token: None,
-            md5: String::new(),
-        };
-        cfg.update_checksum();
-        cfg
-    }
-
-    /// Set stealth mode.
-    pub fn with_stealth(mut self, mode: &str) -> Self {
-        self.stealth = Some(mode.to_string());
-        self.update_checksum();
-        self
-    }
-
-    /// Set FEC mode.
-    pub fn with_fec(mut self, mode: &str) -> Self {
-        self.fec = Some(mode.to_string());
-        self.update_checksum();
-        self
-    }
-
-    /// Set extra parameters.
-    pub fn with_extra(mut self, extra: &str) -> Self {
-        self.extra = Some(extra.to_string());
-        self.update_checksum();
-        self
-    }
-
-    /// Set token (hex-encoded).
-    pub fn with_token(mut self, token: &str) -> Self {
-        self.token = Some(QKeyToken::from(token));
-        self.update_checksum();
-        self
-    }
-
-    /// Set an already-owned token without creating another raw-secret copy.
-    pub fn with_owned_token(mut self, token: QKeyToken) -> Self {
-        self.token = Some(token);
-        self.update_checksum();
-        self
-    }
-
-    fn checksum_prefix8_hex(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        for (index, field) in [
-            self.remote.as_str(),
-            self.sni.as_str(),
-            self.stealth.as_deref().unwrap_or(""),
-            self.fec.as_deref().unwrap_or(""),
-            self.extra.as_deref().unwrap_or(""),
-            self.token.as_deref().unwrap_or(""),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if index > 0 {
-                hasher.update(b"|");
-            }
-            hasher.update(field.as_bytes());
-        }
-        let hex = format!("{:x}", hasher.finalize());
-        hex.chars().take(8).collect()
-    }
-
-    fn is_hex8(s: &str) -> bool {
-        s.len() == 8 && s.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
-    }
-
-    /// Update the checksum.
-    fn update_checksum(&mut self) {
-        // Default to SHA-256 prefix for new keys. Old keys remain valid via validate().
-        let prefix = self.checksum_prefix8_hex();
-        self.md5 = format!("s256:{}", prefix);
-    }
-
-    /// Validate the checksum.
-    pub fn validate(&self) -> bool {
-        let chk = self.md5.trim();
-        let Some(rest) = chk.strip_prefix("s256:") else {
-            return false;
-        };
-        if !Self::is_hex8(rest) {
-            return false;
-        }
-        let expected = self.checksum_prefix8_hex();
-        rest.eq_ignore_ascii_case(&expected)
-    }
 }
 
 /// Generate a QKey string from config.

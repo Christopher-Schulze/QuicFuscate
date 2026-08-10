@@ -8,7 +8,6 @@
 // forked QuicFuscate runtime. It orchestrates crypto, FEC, transport, and
 // stealth ownership for the canonical connection lifecycle used by this fork.
 
-use crate::optimize::transport::{self as transport_accel, CongestionSample};
 #[cfg(feature = "orchestrator")]
 use crate::brain::DeepIntegrationOrchestrator;
 use crate::brain::{CombinedObserver, StealthBrain};
@@ -16,6 +15,8 @@ use crate::crypto::CryptoManager;
 use crate::fec::wire::{self, WireFecReceiver, WirePacketMeta, WireProfile};
 use crate::fec::{AdaptiveFec, FecConfig, FecPacket, FecTransportObserver};
 use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig, PooledBlock};
+#[cfg(test)]
+use qf_cpu::transport::{self as transport_accel, CongestionSample};
 use crate::stealth::{
     IcmpUnreachablePolicy, NormalizeResult, OsFingerprintProfile, PacketNormalizer, StealthConfig,
     StealthManager, StealthMode, StealthRuntimeOwner,
@@ -34,76 +35,16 @@ static ORCHESTRATOR: OnceLock<Arc<DeepIntegrationOrchestrator>> = OnceLock::new(
 use std::net::SocketAddr;
 
 // Type aliases to simplify handler types
-pub type CapsuleHandler = Arc<std::sync::Mutex<Box<dyn FnMut(u64, &[u8]) + Send>>>;
-pub type DatagramHandler = Arc<std::sync::Mutex<Box<dyn FnMut(&[u8]) + Send>>>;
+pub use qf_fec::ActiveFecPolicyChange;
+pub use qf_transport_cc::ConnectionStats;
+pub use qf_transport_types::{CapsuleHandler, DatagramHandler};
+pub use qf_transport_types::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
 
 const H3_TUNNEL_FRAME_MAGIC: &[u8; 4] = b"QFT1";
 const H3_TUNNEL_FRAME_HEADER_LEN: usize = 6;
 const MAX_INNER_IP_PACKET_LEN: usize = u16::MAX as usize;
 const MAX_H3_TUNNEL_PENDING_LEN: usize = 2 * (H3_TUNNEL_FRAME_HEADER_LEN + MAX_INNER_IP_PACKET_LEN);
 const IPV6_MINIMUM_LINK_MTU: usize = 1280;
-
-/// Bounded FIFO for server-generated MASQUE response packets.
-///
-/// The queue is shared with DNS resolution workers, while one dequeued packet
-/// can remain owned by the connection for a retry after QUIC DATAGRAM pressure.
-#[derive(Debug)]
-pub struct MasqueDownlinkQueue {
-    packets: VecDeque<Vec<u8>>,
-    bytes: usize,
-    max_packets: usize,
-    max_bytes: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MasqueDownlinkQueueReject {
-    PacketCapacity,
-    ByteCapacity,
-}
-
-impl MasqueDownlinkQueue {
-    pub fn new(max_packets: usize, max_bytes: usize) -> Self {
-        Self { packets: VecDeque::new(), bytes: 0, max_packets, max_bytes }
-    }
-
-    pub fn enqueue(&mut self, packet: Vec<u8>) -> Result<(), MasqueDownlinkQueueReject> {
-        if self.packets.len() >= self.max_packets {
-            return Err(MasqueDownlinkQueueReject::PacketCapacity);
-        }
-        if self.bytes.saturating_add(packet.len()) > self.max_bytes {
-            return Err(MasqueDownlinkQueueReject::ByteCapacity);
-        }
-        self.bytes = self.bytes.saturating_add(packet.len());
-        self.packets.push_back(packet);
-        Ok(())
-    }
-
-    pub fn pop_front(&mut self) -> Option<Vec<u8>> {
-        let packet = self.packets.pop_front()?;
-        self.bytes = self.bytes.saturating_sub(packet.len());
-        Some(packet)
-    }
-
-    pub fn discard_all(&mut self) -> (usize, usize) {
-        let packets = self.packets.len();
-        let bytes = self.bytes;
-        self.packets.clear();
-        self.bytes = 0;
-        (packets, bytes)
-    }
-
-    pub fn len(&self) -> usize {
-        self.packets.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.packets.is_empty()
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.bytes
-    }
-}
 
 #[derive(Default)]
 struct H3TunnelFrameDecoder {
@@ -192,17 +133,6 @@ impl OutgoingFecPacket {
             Some(_) => (false, 0),
         }
     }
-}
-
-/// Atomic active-connection FEC policy acknowledgement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ActiveFecPolicyChange {
-    /// Controller-level policy and mode transition.
-    pub controller: crate::fec::FecPolicyChange,
-    /// Source datagrams preserved across the command boundary.
-    pub queued_sources_preserved: usize,
-    /// Repair-only datagrams discarded before acknowledgement.
-    pub queued_repairs_discarded: usize,
 }
 
 #[derive(Default)]
@@ -385,63 +315,6 @@ impl Drop for QuicFuscateConnection {
         if let Some(buffer) = self.h3_body_buffer.take() {
             self.optimization_manager.free_block(buffer);
         }
-    }
-}
-
-/// Tracks performance and reliability metrics for a connection.
-#[derive(Debug)]
-pub struct ConnectionStats {
-    /// Smoothed round-trip time in seconds.
-    pub rtt: f32,
-    /// Packet loss rate in [0.0, 1.0].
-    pub loss_rate: f32,
-    /// Total packets sent on this connection.
-    pub packets_sent: u64,
-    /// Total packets lost (detected by transport).
-    pub packets_lost: u64,
-    /// Current congestion window in bytes.
-    pub congestion_cwnd: u64,
-    /// Bytes currently in flight (unacknowledged).
-    pub congestion_bytes_in_flight: u64,
-    /// Estimated delivery rate in bytes per second.
-    pub congestion_delivery_rate: u64,
-    /// Total packets lost as tracked by congestion controller.
-    pub congestion_lost: u64,
-    /// Aggregate congestion score (higher = more congested).
-    pub congestion_score: u64,
-    congestion_samples: VecDeque<CongestionSample>,
-}
-
-impl Default for ConnectionStats {
-    fn default() -> Self {
-        Self {
-            rtt: 0.0,
-            loss_rate: 0.0,
-            packets_sent: 0,
-            packets_lost: 0,
-            congestion_cwnd: 0,
-            congestion_bytes_in_flight: 0,
-            congestion_delivery_rate: 0,
-            congestion_lost: 0,
-            congestion_score: 0,
-            congestion_samples: VecDeque::with_capacity(transport_accel::CONGESTION_WINDOW_SIZE),
-        }
-    }
-}
-
-impl ConnectionStats {
-    fn update_congestion(&mut self, sample: CongestionSample) {
-        if self.congestion_samples.len() == transport_accel::CONGESTION_WINDOW_SIZE {
-            self.congestion_samples.pop_front();
-        }
-        self.congestion_samples.push_back(sample);
-        let summary =
-            transport_accel::aggregate_congestion(self.congestion_samples.make_contiguous());
-        self.congestion_cwnd = summary.total_cwnd;
-        self.congestion_bytes_in_flight = summary.total_bytes_in_flight;
-        self.congestion_delivery_rate = summary.total_delivery_rate;
-        self.congestion_lost = summary.total_lost_packets;
-        self.congestion_score = summary.congestion_score;
     }
 }
 
@@ -728,7 +601,11 @@ impl QuicFuscateConnection {
             host_header: params.host_header,
             qkey_auth_token_hex: params.qkey_auth_token_hex,
             client_connection_generation: None,
-            fec: AdaptiveFec::new_with_snapshot(params.fec_config, &environment),
+            fec: qf_fec::AdaptiveFec::new_with_snapshot_and_pool(
+                params.fec_config,
+                &environment,
+                crate::optimize::global_pool(),
+            ),
             stealth_manager: params.stealth_manager,
             optimization_manager: params.optimization_manager,
             tunnel_ingress_normalizer: params.tunnel_ingress_normalizer,
@@ -2799,13 +2676,9 @@ impl QuicFuscateConnection {
         let clock = self.clock.clone();
         Self::run_update_state_phase(&clock, diagnostics_enabled, "transport-stats", || {
             let stats = self.conn.stats();
-            self.stats.packets_sent = stats.sent as u64;
-            self.stats.rtt =
+            let rtt_seconds =
                 self.conn.path_stats().next().map(|ps| ps.rtt.as_secs_f32()).unwrap_or(0.0);
-            self.stats.packets_lost = stats.lost as u64;
-            self.stats.loss_rate =
-                if stats.sent > 0 { stats.lost as f32 / stats.sent as f32 } else { 0.0 };
-            self.stats.update_congestion(CongestionSample::from_transport_stats(stats));
+            self.stats.update_from_transport_stats(stats, rtt_seconds);
         });
 
         Self::run_update_state_phase(&clock, diagnostics_enabled, "resource-telemetry", || {

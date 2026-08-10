@@ -1,0 +1,19 @@
+[package]
+name = "qf-compress"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-common/rust-tests", "qf-cpu/rust-tests", "qf-memory-pool/rust-tests"]
+
+[dependencies]
+log = "0.4"
+qf-common = { path = "../qf-common" }
+qf-cpu = { path = "../qf-cpu" }
+qf-memory-pool = { path = "../qf-memory-pool" }
+qf-telemetry = { path = "../qf-telemetry" }
+zstd = "0.13"

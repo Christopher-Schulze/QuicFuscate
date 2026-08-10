@@ -114,7 +114,7 @@ struct EscalationState {
     /// Time of the last level change (epoch millis, 0 = none).
     last_level_change_time: AtomicU64,
     /// Connection-local level state shared with the Brain.
-    level_hints: Arc<crate::brain::IntelligentLevelHints>,
+    level_hints: Arc<qf_transport_types::IntelligentLevelHints>,
     /// Threshold for L0→L1 escalation (default: 3 probes in 60s).
     threshold_l1: u32,
     /// Threshold for L1→L2 escalation (default: 8 probes in 120s).
@@ -125,7 +125,7 @@ struct EscalationState {
 
 impl EscalationState {
     fn new(
-        level_hints: Arc<crate::brain::IntelligentLevelHints>,
+        level_hints: Arc<qf_transport_types::IntelligentLevelHints>,
         environment: &crate::env_utils::EnvSnapshot,
     ) -> Self {
         let threshold_l1 = environment

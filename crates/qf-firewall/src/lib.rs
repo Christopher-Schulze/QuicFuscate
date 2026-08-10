@@ -49,6 +49,14 @@ impl FirewallBackend {
     }
 }
 
+/// Engine-facing firewall backend configuration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct FirewallConfig {
+    /// Explicit backend selection. `None` auto-detects at runtime.
+    pub backend: Option<FirewallBackend>,
+}
+
 /// Firewall command availability captured by the single startup probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FirewallAvailability {
@@ -1154,5 +1162,19 @@ mod tests {
     fn test_firewall_backend_equality() {
         assert_eq!(FirewallBackend::Iptables, FirewallBackend::Iptables);
         assert_ne!(FirewallBackend::Iptables, FirewallBackend::Nftables);
+    }
+
+    #[test]
+    fn firewall_config_preserves_engine_wire_shape() {
+        let config = FirewallConfig::default();
+        assert!(config.backend.is_none());
+
+        let encoded = serde_json::to_string(&config).expect("firewall config serializes");
+        let decoded: FirewallConfig =
+            serde_json::from_str(&encoded).expect("firewall config parses");
+        assert_eq!(decoded, config);
+
+        let explicit = FirewallConfig { backend: Some(FirewallBackend::Nftables) };
+        assert_eq!(explicit.backend, Some(FirewallBackend::Nftables));
     }
 }

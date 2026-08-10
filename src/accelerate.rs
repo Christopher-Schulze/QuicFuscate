@@ -13,15 +13,7 @@ pub use crate::optimize::{
     brain, iter, memory, random, sort, stealth, string, transport, udp as transport_io,
 };
 
-/// Count ASCII printable bytes (0x20..=0x7E) with the scalar implementation.
-#[inline(always)]
-pub fn count_ascii_printable(bytes: &[u8]) -> usize {
-    count_ascii_printable_scalar(bytes)
-}
-
-#[inline(always)]
-fn count_ascii_printable_scalar(bytes: &[u8]) -> usize {
-    bytes.iter().filter(|b| matches!(b, 0x20..=0x7E)).count()
-}
+/// Compatibility re-export for the qf-cpu ASCII classifier.
+pub use qf_cpu::count_ascii_printable;
 
 // `transport` and `memory` are re-exported above.

@@ -402,14 +402,8 @@ fn test_runtime_plan_force_on_promotes_zero_target() {
 
 #[test]
 fn test_wire_codec_selection_comes_from_block_width() {
-    assert_eq!(
-        super::wire::WireCodec::for_mode(FecMode::Strong, 128),
-        Ok(super::wire::WireCodec::Gf8)
-    );
-    assert_eq!(
-        super::wire::WireCodec::for_mode(FecMode::Ultra, 256),
-        Ok(super::wire::WireCodec::Gf16)
-    );
+    assert_eq!(super::wire::codec_for_mode(FecMode::Strong, 128), Ok(super::wire::WireCodec::Gf8));
+    assert_eq!(super::wire::codec_for_mode(FecMode::Ultra, 256), Ok(super::wire::WireCodec::Gf16));
 }
 
 #[test]
@@ -1501,8 +1495,8 @@ fn test_observer_streaming_interval_snapshot_is_per_instance() {
     let _g2 = EnvGuard::set("QUICFUSCATE_FEC_STREAM_EVERY", "2");
     let second = FecTransportObserver::new();
 
-    assert_eq!(first.ambient.base_stream_interval, 6);
-    assert_eq!(second.ambient.base_stream_interval, 2);
+    assert_eq!(first.base_stream_interval(), 6);
+    assert_eq!(second.base_stream_interval(), 2);
 }
 
 #[test]

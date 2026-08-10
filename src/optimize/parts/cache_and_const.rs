@@ -10,91 +10,6 @@ pub fn global_cache_hierarchy() -> &'static CacheHierarchy {
     CACHE_HIERARCHY.get_or_init(CacheHierarchy::detect)
 }
 
-// Consolidated telemetry module for performance monitoring
-// Const-size optimizations with compile-time guarantees
-// ===== Cross-Platform Prefetch Hints =====
-/// Hint type for cache prefetching.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PrefetchHint {
-    /// Hint the line into the closest cache (L1).
-    T0,
-    /// Hint the line into the next cache level (L2).
-    T1,
-}
-
-/// Issue a best-effort hardware prefetch for the supplied pointer.
-///
-/// # Contract
-///
-/// This is a pure hint and never a load. Every supported lane compiles to a genuinely
-/// non-faulting instruction: `PRFM PLDL1KEEP` on AArch64 and `PREFETCHh` through `_mm_prefetch`
-/// on x86_64. Both are architecturally defined to have no effect other than a possible cache
-/// line fill, and neither signals on an unmapped, unaligned, or permission-denied address.
-/// Unsupported architectures compile to nothing.
-///
-/// Callers therefore do **not** owe a readable span. `ptr` may be dangling, one past the end of
-/// an allocation, or derived from an empty slice. The null check is a cheap filter for the
-/// common uninitialised case, not a safety requirement.
-///
-/// What callers still owe is provenance discipline for the pointer arithmetic that produced
-/// `ptr`: computing an out-of-bounds address with `ptr::add` is undefined regardless of what this
-/// function does with the result. Offset and allocation-lifetime proof stays with each caller and
-/// its owner, and this facade deliberately makes no claim about it.
-#[cfg_attr(feature = "aggressive_inline", inline(always))]
-pub(crate) fn prefetch(ptr: *const u8, hint: PrefetchHint) {
-    #[cfg(feature = "prefetch")]
-    {
-        if ptr.is_null() {
-            return;
-        }
-        unsafe {
-            prefetch_impl(ptr, hint);
-        }
-    }
-    #[cfg(not(feature = "prefetch"))]
-    {
-        let _ = ptr;
-        let _ = hint;
-    }
-}
-
-/// # Safety
-///
-/// `ptr` must be a pointer value the caller was allowed to compute. It does not need to be
-/// readable, aligned, or inside a live allocation: every lane below emits a non-faulting hint
-/// instruction rather than a load, so no memory is accessed through it. See [`prefetch`] for the
-/// full contract.
-#[cfg(feature = "prefetch")]
-#[cfg_attr(feature = "aggressive_inline", inline(always))]
-unsafe fn prefetch_impl(ptr: *const u8, hint: PrefetchHint) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0, _MM_HINT_T1};
-        // `_mm_prefetch` takes its locality strategy as a const generic, so the hint has to be
-        // resolved at compile time. Passing a runtime value does not compile on x86_64 at all.
-        match hint {
-            PrefetchHint::T0 => _mm_prefetch::<_MM_HINT_T0>(ptr as *const i8),
-            PrefetchHint::T1 => _mm_prefetch::<_MM_HINT_T1>(ptr as *const i8),
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        core::arch::asm!(
-            "prfm pldl1keep, [{ptr}]",
-            ptr = in(reg) ptr,
-            options(nostack, preserves_flags)
-        );
-        let _ = hint;
-    }
-
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        let _ = ptr;
-        let _ = hint;
-    }
-}
-
 /// Fixed-capacity byte buffer backed by a stack-allocated array.
 #[cfg(any(test, feature = "rust-tests"))]
 pub struct ConstBuffer<const N: usize> {
@@ -371,10 +286,7 @@ mod mlock_tests {
 
         // Start from a known-empty slot regardless of what other tests left behind.
         MemoryPool::shutdown_auto_tuner();
-        assert!(
-            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_none(),
-            "teardown must leave no worker behind"
-        );
+        assert!(!MemoryPool::auto_tuner_running_for_tests(), "teardown must leave no worker behind");
 
         // Shutdown with no worker running is a no-op, not a panic or a hang.
         MemoryPool::shutdown_auto_tuner();
@@ -383,21 +295,15 @@ mod mlock_tests {
         let pool = Arc::new(MemoryPool::new(4, 4096));
 
         MemoryPool::start_auto_tuner(Arc::clone(&pool));
-        let started = auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        let started = MemoryPool::auto_tuner_running_for_tests();
         assert!(started, "an auto-tune-enabled pool must start the worker");
 
         // A second start must not spawn a second worker for the same process-global slot.
         MemoryPool::start_auto_tuner(Arc::clone(&pool));
-        assert!(
-            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_some(),
-            "the slot still holds exactly one worker"
-        );
+        assert!(MemoryPool::auto_tuner_running_for_tests(), "the slot still holds exactly one worker");
 
         MemoryPool::shutdown_auto_tuner();
-        assert!(
-            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_none(),
-            "shutdown must stop and join the worker, leaving the slot empty"
-        );
+        assert!(!MemoryPool::auto_tuner_running_for_tests(), "shutdown must stop and join the worker, leaving the slot empty");
 
         // The pool itself outlives its worker and stays usable for allocation.
         let block = pool.alloc();
@@ -406,7 +312,7 @@ mod mlock_tests {
 
         // Tuning can be restarted explicitly after a shutdown.
         MemoryPool::start_auto_tuner(Arc::clone(&pool));
-        assert!(auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_some());
+        assert!(MemoryPool::auto_tuner_running_for_tests());
         MemoryPool::shutdown_auto_tuner();
     }
 
@@ -423,7 +329,7 @@ mod mlock_tests {
 
         MemoryPool::start_auto_tuner(pool);
         assert!(
-            auto_tuner_slot().lock().unwrap_or_else(|p| p.into_inner()).is_none(),
+            !MemoryPool::auto_tuner_running_for_tests(),
             "a pool with auto_tune disabled must not claim the worker slot"
         );
     }

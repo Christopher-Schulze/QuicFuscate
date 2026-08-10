@@ -1099,7 +1099,7 @@ pub(crate) fn persist_logging_mode(
     let Some(path) = resolve_logging_store_path(config_path) else {
         return Ok(());
     };
-    let bytes = serde_json::to_vec_pretty(&PersistedLoggingModeFile { mode: mode.clone() })?;
+    let bytes = serde_json::to_vec_pretty(&PersistedLoggingModeFile { mode: *mode })?;
     fsutil::atomic_write_file(&path, &bytes, Some(0o600), "server::write_logging_config_tmp_nonce")
 }
 

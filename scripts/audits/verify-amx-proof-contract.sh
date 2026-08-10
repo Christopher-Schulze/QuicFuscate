@@ -53,24 +53,24 @@ check_absent "The integration proof has no silent skip path" \
   'skipping' scripts/tests/rust/rt-amx-proof.rs
 
 check_literal "The AMX module requires both target features" \
-  'target_feature = "amx-tile", target_feature = "amx-int8"' src/simd/mod.rs
+  'target_feature = "amx-tile", target_feature = "amx-int8"' crates/qf-simd/src/lib.rs
 check_literal "The AMX backend remains fail-closed until verified" \
-  'pub(crate) const VERIFIED_BACKEND: bool = false;' src/simd/amx.rs
+  'pub const VERIFIED_BACKEND: bool = false;' crates/qf-cpu/src/lib.rs
 check_literal "The capability surface retains backend proof state" \
-  'pub verified_backend: bool,' src/optimize/parts/cpu_dispatch.rs
+  'pub verified_backend: bool,' crates/qf-cpu/src/lib.rs
 check_literal "Linux x86 records OS tile-state permission" \
-  'libc::SYS_arch_prctl' src/optimize/parts/cpu_dispatch.rs
+  'libc::SYS_arch_prctl' crates/qf-cpu/src/lib.rs
 check_literal "Product eligibility requires backend proof" \
-  'let product_dispatch_eligible = signals.verified_backend' src/optimize/parts/cpu_dispatch.rs
+  'let product_dispatch_eligible = signals.verified_backend' crates/qf-cpu/src/lib.rs
 check_absent "The capability detector has no external cpuid process" \
-  'Command::new("cpuid")' src/optimize/parts/cpu_dispatch.rs
+  'Command::new("cpuid")' crates/qf-cpu/src/lib.rs
 
 check_literal "Wiedemann rejects non-square systems" \
-  '|| m != n' src/fec/parts/decoders.rs
+  '|| m != n' crates/qf-fec/src/decoders.rs
 check_literal "Wiedemann validates RHS length" \
-  '|| rhs.len() != m' src/fec/parts/decoders.rs
+  '|| rhs.len() != m' crates/qf-fec/src/decoders.rs
 check_literal "Wiedemann validates every matrix row" \
-  'matrix.iter().any(|row| row.len() != n)' src/fec/parts/decoders.rs
+  'matrix.iter().any(|row| row.len() != n)' crates/qf-fec/src/decoders.rs
 check_literal "The FEC proof covers concurrent scalar execution" \
   'fn test_wiedemann_scalar_solver_is_concurrent_and_amx_free' src/fec/tests.rs
 check_literal "The FEC proof covers malformed dimensions" \
@@ -108,15 +108,15 @@ check_literal "Apple_M documentation names its NEON/crypto caller contract" \
   '`Apple_M`: Apple Silicon NEON + crypto profile' docs/DOCUMENTATION.md
 check_literal "Apple_M source comment excludes an active AMX backend claim" \
   'Apple Silicon: NEON + Crypto profile; the Apple matrix marker is metadata only.' \
-  src/optimize/parts/cpu_dispatch.rs
+  crates/qf-cpu/src/lib.rs
 check_literal "Apple profile logging excludes an active AMX matrix claim" \
   'Apple matrix capability metadata present; no active AMX backend' \
-  src/optimize/parts/cpu_dispatch.rs
+  crates/qf-cpu/src/lib.rs
 check_literal "Brain module documentation excludes an active AMX caller" \
   'No active matrix-multiplication or AMX caller is owned by this module.' \
   src/optimize/brain.rs
 check_absent "Apple profile logging has no stale active matrix claim" \
-  'Apple AMX: matrix acceleration available' src/optimize/parts/cpu_dispatch.rs
+  'Apple AMX: matrix acceleration available' crates/qf-cpu/src/lib.rs
 check_absent "Brain module has no stale complete matrix claim" \
   'Complete HW acceleration for statistics, ML operations, matrix multiply' src/optimize/brain.rs
 

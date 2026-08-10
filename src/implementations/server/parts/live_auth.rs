@@ -400,7 +400,7 @@ pub enum QKeyHeaderAuthOutcome {
 }
 
 pub fn evaluate_qkey_http3_headers(
-    headers: &[crate::transport::h3::Header],
+    headers: &[qf_transport_types::h3::Header],
     expected_token_sha256: Option<&str>,
     already_authed: bool,
 ) -> QKeyHeaderAuthOutcome {
@@ -852,7 +852,7 @@ fn allow_client_uplink(
     fingerprint_profile: OsFingerprintProfile,
     server_ips: ServerTunIps,
     tun_mtu: u16,
-    response_queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
+    response_queue: &Arc<std::sync::Mutex<qf_transport_types::MasqueDownlinkQueue>>,
 ) -> Option<UplinkRoute> {
     let route = match forwarding_policy.evaluate_uplink(packet, assigned_ips) {
         Ok(route) => route,
@@ -956,7 +956,7 @@ fn admit_session_bandwidth(
 }
 
 fn enqueue_routing_response(
-    queue: &Arc<std::sync::Mutex<crate::core::MasqueDownlinkQueue>>,
+    queue: &Arc<std::sync::Mutex<qf_transport_types::MasqueDownlinkQueue>>,
     metrics: &Metrics,
     response: Vec<u8>,
 ) {
@@ -1175,7 +1175,7 @@ async fn process_live_server_client_datagram(
         if let Some(tun) = server_tun {
             if !conn.has_masque_downlink_queue() {
                 conn.set_masque_downlink_queue(Arc::new(std::sync::Mutex::new(
-                    crate::core::MasqueDownlinkQueue::new(
+                    qf_transport_types::MasqueDownlinkQueue::new(
                         MAX_MASQUE_DOWNLINK_RESPONSES,
                         MAX_MASQUE_DOWNLINK_RESPONSE_BYTES,
                     ),

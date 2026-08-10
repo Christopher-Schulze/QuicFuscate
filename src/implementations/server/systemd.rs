@@ -379,7 +379,7 @@ pub mod health {
     }
 
     fn memory_lock_response(path: &str) -> (u16, String) {
-        let memory_lock = crate::memory_lock::current_status();
+        let memory_lock = qf_memory_lock::current_status();
         let status = if path == "/live" { "ok" } else { memory_lock.health_status() };
         let response_status =
             if path == "/live" || !memory_lock.is_not_ready() { 200 } else { 503 };

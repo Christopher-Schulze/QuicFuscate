@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::config::{ConfigError, EngineConfig, EngineMode};
+use super::config::{EngineConfig, EngineMode};
 use crate::implementations::client::{
     ClientDnsRuntime, ClientRuntime, KillSwitch, VpnFirewallPolicy,
 };
@@ -22,15 +22,21 @@ use crate::implementations::server::{
     ServerRuntime,
 };
 use crate::interface::app_config::AppConfig;
-use crate::memory_lock::MemoryLockPolicy;
 use crate::transport::Config;
 use crate::transport::{self, CongestionControlAlgorithm};
+use qf_memory_lock::MemoryLockPolicy;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
+
+pub use qf_engine_types::{
+    DataPlaneFault, DisconnectReason, EngineCallback, EngineCommand, EngineCommandResult,
+    EngineError, EngineEvent, EngineState, EngineStats, FecPolicyCommandResult,
+    FecPolicyCommandScope, StatsSnapshot,
+};
 
 fn build_server_optimize_config(
     config: &EngineConfig,
 ) -> Result<crate::optimize::OptimizeConfig, EngineError> {
-    config.optimization.to_runtime_config().map_err(EngineError::from)
+    config.optimization.to_runtime_config().map_err(|error| EngineError::Config(error.to_string()))
 }
 
 fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, EngineError> {
@@ -352,362 +358,6 @@ pub struct QuicFuscateEngine {
     kill_switch: Option<Arc<KillSwitch>>,
 }
 
-/// Structured control-plane events emitted by the engine runtime.
-#[derive(Clone, Debug)]
-pub enum EngineEvent {
-    /// Engine lifecycle state transition.
-    StateChanged { old: EngineState, new: EngineState },
-    /// Successfully connected to a remote peer.
-    Connected { remote: SocketAddr },
-    /// Connection was closed or lost.
-    Disconnected { reason: DisconnectReason },
-    /// An error occurred during engine operation.
-    Error { error: EngineError },
-    /// Periodic statistics snapshot update.
-    StatsUpdated { stats: StatsSnapshot },
-    /// Stealth level was automatically escalated by the brain.
-    StealthEscalated { from: u8, to: u8 },
-}
-
-/// Structured control-plane command set for app integrations.
-#[derive(Debug)]
-pub enum EngineCommand {
-    /// Start the engine runtime.
-    Start,
-    /// Stop the engine and release resources.
-    Stop,
-    /// Establish a connection to the remote server (client mode).
-    Connect,
-    /// Close the active connection.
-    Disconnect,
-    /// Disconnect and reconnect with current configuration.
-    Reconnect,
-    /// Change the stealth mode at runtime.
-    SetStealthMode(super::config::StealthMode),
-    /// Change the FEC mode at runtime.
-    SetFecMode(super::config::FecMode),
-    /// Change the congestion control algorithm at runtime.
-    SetCongestionControl(super::config::CcAlgorithm),
-    /// Enable or disable traffic padding.
-    SetTrafficPadding(bool),
-    /// Enable or disable timing obfuscation.
-    SetTimingObfuscation(bool),
-    /// Enable or disable 0-RTT early data.
-    SetZeroRtt(bool),
-    /// Query TUN interface capabilities for the current platform.
-    GetTunCapabilities,
-    /// Query the current engine state.
-    GetState,
-    /// Query the current statistics snapshot.
-    GetStats,
-}
-
-/// Structured result for control-plane command execution.
-#[derive(Debug, Clone)]
-pub enum EngineCommandResult {
-    /// Command accepted, no return data.
-    Ack,
-    /// Returns the current engine state.
-    State(EngineState),
-    /// Returns a statistics snapshot.
-    Stats(StatsSnapshot),
-    /// Returns TUN capability information.
-    TunCapabilities(crate::interface::TunCapabilities),
-    /// Returns the exact scope and effective state of an FEC policy command.
-    FecPolicy(FecPolicyCommandResult),
-}
-
-/// Scope of an accepted Engine FEC policy command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FecPolicyCommandScope {
-    /// The active client connection was changed before acknowledgement.
-    ActiveConnection,
-    /// No connection was active; the policy is configured for the next connection.
-    NextConnection,
-}
-
-/// Truthful acknowledgement for a synchronous Engine FEC policy command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FecPolicyCommandResult {
-    /// Policy requested by the caller.
-    pub requested: super::config::FecMode,
-    /// Policy retained in Engine configuration after acceptance.
-    pub configured: super::config::FecMode,
-    /// Policy observed on the active connection, when one exists.
-    pub effective: Option<super::config::FecMode>,
-    /// Whether acknowledgement covers the active or next connection.
-    pub scope: FecPolicyCommandScope,
-    /// Source datagrams preserved across an active transition.
-    pub queued_sources_preserved: usize,
-    /// Repair-only datagrams discarded before active acknowledgement.
-    pub queued_repairs_discarded: usize,
-}
-
-/// Engine lifecycle state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum EngineState {
-    /// Engine created but not started
-    #[default]
-    Created,
-    /// Engine is starting up
-    Starting,
-    /// Engine is running and ready for connections
-    Running,
-    /// Engine is establishing a client connection
-    Connecting,
-    /// Engine is connected (client mode)
-    Connected,
-    /// Engine is stopping
-    Stopping,
-    /// Engine has stopped
-    Stopped,
-    /// Engine encountered an error
-    Error,
-}
-
-impl std::fmt::Display for EngineState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EngineState::Created => write!(f, "Created"),
-            EngineState::Starting => write!(f, "Starting"),
-            EngineState::Running => write!(f, "Running"),
-            EngineState::Connecting => write!(f, "Connecting"),
-            EngineState::Connected => write!(f, "Connected"),
-            EngineState::Stopping => write!(f, "Stopping"),
-            EngineState::Stopped => write!(f, "Stopped"),
-            EngineState::Error => write!(f, "Error"),
-        }
-    }
-}
-
-/// Typed terminal failures of the requested TUN/QUIC data plane.
-///
-/// The process and the QUIC control connection can remain alive while the
-/// packet path is unusable. Keeping these outcomes typed prevents runtime
-/// owners from reducing a reader failure, channel disconnect, device write,
-/// or transport send failure to an ordinary idle poll.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DataPlaneFault {
-    /// The native TUN reader stopped unexpectedly.
-    ReaderStopped { component: String, error: String },
-    /// The bounded reader channel disconnected unexpectedly.
-    ChannelDisconnected { component: String },
-    /// A packet could not be delivered to the local TUN device.
-    TunWrite { component: String, error: String },
-    /// A non-retryable packet or UDP send failed.
-    TransportSend { component: String, error: String },
-    /// A non-retryable receive or datagram decode path failed.
-    TransportReceive { component: String, error: String },
-}
-
-impl std::fmt::Display for DataPlaneFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ReaderStopped { component, error } => {
-                write!(f, "reader stopped ({component}): {error}")
-            }
-            Self::ChannelDisconnected { component } => {
-                write!(f, "channel disconnected ({component})")
-            }
-            Self::TunWrite { component, error } => {
-                write!(f, "TUN write failed ({component}): {error}")
-            }
-            Self::TransportSend { component, error } => {
-                write!(f, "transport send failed ({component}): {error}")
-            }
-            Self::TransportReceive { component, error } => {
-                write!(f, "transport receive failed ({component}): {error}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for DataPlaneFault {}
-
-/// Engine errors.
-#[derive(Debug, Clone)]
-pub enum EngineError {
-    /// Configuration error
-    Config(String),
-    /// Invalid state for operation
-    InvalidState(EngineState, &'static str),
-    /// TUN interface error
-    Tun(String),
-    /// Connection error
-    Connection(String),
-    /// Transport error
-    Transport(String),
-    /// Terminal TUN/QUIC data-plane error
-    DataPlane(DataPlaneFault),
-    /// Crypto error
-    Crypto(String),
-    /// IO error
-    Io(String),
-    /// Internal error
-    Internal(String),
-}
-
-impl std::fmt::Display for EngineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EngineError::Config(e) => write!(f, "Config error: {}", e),
-            EngineError::InvalidState(state, op) => {
-                write!(f, "Invalid state {} for operation: {}", state, op)
-            }
-            EngineError::Tun(e) => write!(f, "TUN error: {}", e),
-            EngineError::Connection(e) => write!(f, "Connection error: {}", e),
-            EngineError::Transport(e) => write!(f, "Transport error: {}", e),
-            EngineError::DataPlane(e) => write!(f, "Data-plane error: {}", e),
-            EngineError::Crypto(e) => write!(f, "Crypto error: {}", e),
-            EngineError::Io(e) => write!(f, "IO error: {}", e),
-            EngineError::Internal(e) => write!(f, "Internal error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for EngineError {}
-
-impl From<ConfigError> for EngineError {
-    fn from(e: ConfigError) -> Self {
-        EngineError::Config(e.to_string())
-    }
-}
-
-impl From<std::io::Error> for EngineError {
-    fn from(e: std::io::Error) -> Self {
-        EngineError::Io(e.to_string())
-    }
-}
-
-/// Runtime statistics for the engine.
-#[derive(Debug, Default)]
-pub struct EngineStats {
-    /// Total bytes sent
-    pub bytes_sent: AtomicU64,
-    /// Total bytes received
-    pub bytes_received: AtomicU64,
-    /// Total packets sent
-    pub packets_sent: AtomicU64,
-    /// Total packets received
-    pub packets_received: AtomicU64,
-    /// Active streams
-    pub active_streams: AtomicU64,
-    /// Connection uptime in seconds
-    pub uptime_secs: AtomicU64,
-    /// Current RTT in milliseconds
-    pub rtt_ms: AtomicU64,
-    /// Packet loss percentage (0-100)
-    pub loss_percent: AtomicU64,
-    /// Current stealth mode (as u8)
-    pub stealth_mode: AtomicU64,
-    /// Current FEC mode (as u8)
-    pub fec_mode: AtomicU64,
-    /// Whether the requested packet data plane is currently available.
-    pub data_plane_ready: AtomicU64,
-    /// Number of terminal data-plane faults observed by the active runtime.
-    pub data_plane_faults: AtomicU64,
-}
-
-impl EngineStats {
-    /// Create a snapshot of current stats.
-    pub fn snapshot(&self) -> StatsSnapshot {
-        StatsSnapshot {
-            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
-            bytes_received: self.bytes_received.load(Ordering::Relaxed),
-            packets_sent: self.packets_sent.load(Ordering::Relaxed),
-            packets_received: self.packets_received.load(Ordering::Relaxed),
-            active_streams: self.active_streams.load(Ordering::Relaxed),
-            uptime_secs: self.uptime_secs.load(Ordering::Relaxed),
-            rtt_ms: self.rtt_ms.load(Ordering::Relaxed),
-            loss_percent: self.loss_percent.load(Ordering::Relaxed),
-            data_plane_ready: self.data_plane_ready.load(Ordering::Relaxed),
-            data_plane_faults: self.data_plane_faults.load(Ordering::Relaxed),
-        }
-    }
-}
-
-/// Immutable snapshot of engine statistics.
-#[derive(Debug, Clone, Default)]
-pub struct StatsSnapshot {
-    /// Total bytes transmitted.
-    pub bytes_sent: u64,
-    /// Total bytes received.
-    pub bytes_received: u64,
-    /// Total packets transmitted.
-    pub packets_sent: u64,
-    /// Total packets received.
-    pub packets_received: u64,
-    /// Currently active streams or connections.
-    pub active_streams: u64,
-    /// Engine uptime in seconds since start.
-    pub uptime_secs: u64,
-    /// Current smoothed RTT in milliseconds.
-    pub rtt_ms: u64,
-    /// Current packet loss percentage (0-100).
-    pub loss_percent: u64,
-    /// Whether the requested packet data plane is currently available.
-    pub data_plane_ready: u64,
-    /// Number of terminal data-plane faults observed by the active runtime.
-    pub data_plane_faults: u64,
-}
-
-/// Callback trait for engine events.
-///
-/// Implement this trait to receive notifications about engine state changes,
-/// connection events, and errors.
-///
-/// # Example
-///
-/// ```ignore
-/// struct MyCallback;
-///
-/// impl EngineCallback for MyCallback {
-///     fn on_state_change(&self, old: EngineState, new: EngineState) {
-///         println!("State changed: {:?} -> {:?}", old, new);
-///     }
-///     
-///     fn on_connected(&self, remote: SocketAddr) {
-///         println!("Connected to {}", remote);
-///     }
-/// }
-/// ```
-pub trait EngineCallback: Send + Sync {
-    /// Called when engine state changes.
-    fn on_state_change(&self, _old: EngineState, _new: EngineState) {}
-
-    /// Called when connected to remote (client mode).
-    fn on_connected(&self, _remote: SocketAddr) {}
-
-    /// Called when disconnected.
-    fn on_disconnected(&self, _reason: DisconnectReason) {}
-
-    /// Called on error.
-    fn on_error(&self, _error: &EngineError) {}
-
-    /// Called periodically with stats update.
-    fn on_stats_update(&self, _stats: &StatsSnapshot) {}
-
-    /// Called when stealth mode is escalated (auto mode).
-    fn on_stealth_escalation(&self, _from: u8, _to: u8) {}
-}
-
-/// Reason for disconnection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DisconnectReason {
-    /// Clean shutdown requested by application
-    Requested,
-    /// Remote closed connection
-    RemoteClosed,
-    /// Connection timed out
-    Timeout,
-    /// Transport error
-    Error(String),
-    /// Idle timeout reached
-    IdleTimeout,
-    /// The requested packet data plane failed while the process was alive.
-    DataPlane(DataPlaneFault),
-}
-
 impl QuicFuscateEngine {
     const CONNECT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -886,8 +536,12 @@ impl QuicFuscateEngine {
         self.start_time = Some(self.clock.now());
 
         if self.config.engine.mode == EngineMode::Server {
-            if let Err(error) = MemoryLockPolicy::from_security(&self.config.security)
-                .apply_before_tls_identity(false)
+            if let Err(error) = (MemoryLockPolicy {
+                lock_memory: self.config.security.lock_memory,
+                lock_blocks: self.config.security.lock_blocks,
+                failure_policy: self.config.security.memory_lock_failure_policy,
+            })
+            .apply_before_tls_identity(false)
             {
                 return Err(self.fail_start(
                     old_state,

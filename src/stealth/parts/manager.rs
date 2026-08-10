@@ -38,7 +38,7 @@ pub struct StealthManager {
     /// Probe-count-based escalation state machine (TODO-416).
     escalation_state: Arc<EscalationState>,
     /// Connection-local Brain/probe level state.
-    intelligent_level_hints: Arc<crate::brain::IntelligentLevelHints>,
+    intelligent_level_hints: Arc<qf_transport_types::IntelligentLevelHints>,
     /// Runtime override: padding rate 0-100 (set on probe detection or escalation).
     /// Level 0 = 0%, Level 1 = 50%, Level 2 = 100%.
     runtime_padding_rate: AtomicU8,
@@ -179,13 +179,10 @@ impl StealthManager {
         )));
 
         // Initialize Server Push Cover Traffic state
-        let server_push_state = Arc::new(Mutex::new(ServerPushState {
-            last_burst: clock.now(),
-            active_promises: 0,
-            total_cover_bytes: 0,
-            current_intensity: config.server_push_intensity,
-            burst_window: VecDeque::with_capacity(128),
-        }));
+        let server_push_state = Arc::new(Mutex::new(ServerPushState::new_with_clock(
+            &clock,
+            config.server_push_intensity,
+        )));
 
         // REALITY PROXY INITIALIZATION
         let (tx, rx) = tokio::sync::mpsc::channel(128);
@@ -228,7 +225,7 @@ impl StealthManager {
                 }
             });
 
-        let intelligent_level_hints = Arc::new(crate::brain::IntelligentLevelHints::new());
+        let intelligent_level_hints = Arc::new(qf_transport_types::IntelligentLevelHints::new());
 
         Self {
             config,
@@ -792,7 +789,7 @@ impl StealthManager {
         let new_level = self.escalation_state.record_probe();
 
         if let Some(level) = new_level {
-            // Threshold met — escalate.
+            // Threshold met - escalate.
             info!("Stealth escalated to level {} due to probe pattern from {}", level, source);
             telemetry!(crate::telemetry::STEALTH_MODE_ESCALATED.inc());
 
@@ -826,7 +823,7 @@ impl StealthManager {
                 }
             }
         } else {
-            // Threshold not met — log but do not escalate.
+            // Threshold not met - log but do not escalate.
             debug!(
                 "Probe from {} recorded but escalation threshold not yet met (level={})",
                 source,
@@ -837,7 +834,7 @@ impl StealthManager {
 
     /// Generates HTTP/3 headers for masquerading a request.
     /// Returns cover-traffic headers when a request is due (rate-limited), otherwise None.
-    pub(crate) fn cover_headers_due(&self) -> Option<Vec<crate::transport::h3::Header>> {
+    pub(crate) fn cover_headers_due(&self) -> Option<Vec<qf_transport_types::h3::Header>> {
         if self.server_push_cover_active() {
             return None;
         }
@@ -868,7 +865,7 @@ impl StealthManager {
         &self,
         host: &str,
         path: &str,
-    ) -> Option<Vec<crate::transport::h3::Header>> {
+    ) -> Option<Vec<qf_transport_types::h3::Header>> {
         if self.config.enable_http3_masquerading {
             let fp = match self.fingerprint.lock() {
                 Ok(g) => g,
@@ -1107,7 +1104,7 @@ impl StealthManager {
     }
 
     /// Returns the connection-local level state shared with its Brain observer.
-    pub(crate) fn intelligent_level_hints(&self) -> Arc<crate::brain::IntelligentLevelHints> {
+    pub(crate) fn intelligent_level_hints(&self) -> Arc<qf_transport_types::IntelligentLevelHints> {
         Arc::clone(&self.intelligent_level_hints)
     }
 
@@ -1115,7 +1112,7 @@ impl StealthManager {
     /// Called periodically (e.g., from the connection tick) to sync runtime
     /// padding/timing/rotation rates with the brain's escalation level.
     /// Also checks probe-count-based de-escalation from `EscalationState`.
-    /// Only active in Intelligent mode — explicit modes set their rates directly.
+    /// Only active in Intelligent mode - explicit modes set their rates directly.
     pub(crate) fn sync_intelligent_level(&self) {
         if !self.is_intelligent_runtime() {
             return;
@@ -1128,7 +1125,7 @@ impl StealthManager {
         if let Some(new_level) = self.escalation_state.check_de_escalation() {
             info!("Stealth de-escalated to level {} after quiet period", new_level);
             self.de_escalate_to_level(new_level);
-            // Return early — the de-escalation already set the rates.
+            // Return early - the de-escalation already set the rates.
             return;
         }
 
@@ -1284,18 +1281,7 @@ impl StealthManager {
         reason: ServerPushTriggerReason,
     ) {
         if let Ok(mut state) = self.server_push_state.lock() {
-            let now = self.clock.now();
-            state.last_burst = now;
-            state.active_promises = promises_created;
-            state.total_cover_bytes += total_bytes;
-            state.burst_window.push_back(now);
-            while let Some(ts) = state.burst_window.front().copied() {
-                if self.clock.elapsed_since(ts) > std::time::Duration::from_secs(60) {
-                    state.burst_window.pop_front();
-                } else {
-                    break;
-                }
-            }
+            state.record_burst(&self.clock, promises_created, total_bytes);
 
             // Dynamic intensity adjustment based on escalation
             if self.escalated.load(Ordering::Relaxed) {
@@ -1314,8 +1300,8 @@ impl StealthManager {
             crate::optimize::telemetry::SERVER_PUSH_TOTAL_COVER_BYTES
                 .fetch_add(total_bytes, std::sync::atomic::Ordering::Relaxed);
             crate::optimize::telemetry::SERVER_PUSH_BURSTS_LAST_MINUTE
-                .store(state.burst_window.len() as u64, std::sync::atomic::Ordering::Relaxed);
-            let intensity_ppm = (state.current_intensity.clamp(0.0, 1.0) * 1_000_000.0) as u64;
+                .store(state.bursts_last_minute() as u64, std::sync::atomic::Ordering::Relaxed);
+            let intensity_ppm = state.intensity_ppm();
             crate::optimize::telemetry::SERVER_PUSH_CURRENT_INTENSITY_PPM
                 .store(intensity_ppm, std::sync::atomic::Ordering::Relaxed);
             match reason {
@@ -1336,7 +1322,7 @@ impl StealthManager {
     }
 
     /// Escalate to Anti-DPI level features (without changing enum mode).
-    /// This is the Level 2 escalation — full padding + timing + rotation.
+    /// This is the Level 2 escalation - full padding + timing + rotation.
     #[allow(dead_code)]
     fn escalate_to_anti_dpi_features(&self) {
         self.escalate_to_level(2);
@@ -1544,7 +1530,7 @@ impl StealthManager {
     ///
     /// When reality-grade TLS mimikry is enabled (TODO-415) and the cover cache
     /// has fresh material, the probe is served the cached cover-site ServerHello
-    /// directly — no upstream relay needed. Otherwise, falls back to the
+    /// directly - no upstream relay needed. Otherwise, falls back to the
     /// `RealityProxy` relay path.
     pub(crate) fn handle_fallback(&self, packet: &[u8], source: std::net::SocketAddr) {
         // Phase 1 (TODO-415): serve cached cover material directly to probes.
@@ -1557,10 +1543,10 @@ impl StealthManager {
             if let Some(proxy) = &self.reality_proxy {
                 // Phase 3 (TODO-415): serve the full cached TLS flight (ServerHello +
                 // encrypted flight) directly to probes. This is byte-identical to
-                // what the real cover site would return — the probe sees a valid
+                // what the real cover site would return - the probe sees a valid
                 // TLS 1.3 handshake response but cannot complete the key exchange
                 // (no private key), exactly matching the XTLS-Reality approach.
-                // Synchronous try_send — no tokio::spawn needed per probe.
+                // Synchronous try_send - no tokio::spawn needed per probe.
                 let raw_flight = material.raw_flight.clone();
                 proxy.send_cached_response(source, raw_flight);
             }
@@ -1573,7 +1559,7 @@ impl StealthManager {
 
     /// Returns cached cover-site TLS handshake material if reality-grade mimikry
     /// is enabled and the cache has fresh material. Returns `None` if disabled,
-    /// cache empty, or material stale — caller should fall back to synthetic TLS.
+    /// cache empty, or material stale - caller should fall back to synthetic TLS.
     pub(crate) fn cover_handshake_material(
         &self,
     ) -> Option<std::sync::Arc<crate::reality::CoverMaterial>> {

@@ -66,7 +66,7 @@ impl ServerRuntime {
         let optimize_config = engine_config
             .optimization
             .to_runtime_config()
-            .map_err(EngineError::from)?;
+            .map_err(|error| EngineError::Config(error.to_string()))?;
         let pool = Arc::new(MemoryPool::new(
             optimize_config.pool_capacity,
             optimize_config.block_size,
@@ -318,7 +318,7 @@ impl ServerRuntime {
         };
 
         let metrics = Arc::new(Metrics::new_with_clock(&clock));
-        metrics.set_memory_lock_status(crate::memory_lock::current_status());
+        metrics.set_memory_lock_status(qf_memory_lock::current_status());
         #[cfg(feature = "rate_limiter")]
         {
             metrics.set_geoip_status(live_state.geoip_status());
@@ -1762,10 +1762,16 @@ impl ServerRuntime {
             engine_config
                 .validate()
                 .map_err(|error| format!("Engine config validation failed: {error}"))?;
-            let current_memory_lock_policy =
-                crate::memory_lock::MemoryLockPolicy::from_security(&self.engine_config.security);
-            let candidate_memory_lock_policy =
-                crate::memory_lock::MemoryLockPolicy::from_security(&engine_config.security);
+            let current_memory_lock_policy = qf_memory_lock::MemoryLockPolicy {
+                lock_memory: self.engine_config.security.lock_memory,
+                lock_blocks: self.engine_config.security.lock_blocks,
+                failure_policy: self.engine_config.security.memory_lock_failure_policy,
+            };
+            let candidate_memory_lock_policy = qf_memory_lock::MemoryLockPolicy {
+                lock_memory: engine_config.security.lock_memory,
+                lock_blocks: engine_config.security.lock_blocks,
+                failure_policy: engine_config.security.memory_lock_failure_policy,
+            };
             current_memory_lock_policy.reject_standalone_reload(candidate_memory_lock_policy)?;
             apply_runtime_config_reload_with_generation(
                 cfg_path,

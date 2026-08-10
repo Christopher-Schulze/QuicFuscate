@@ -79,7 +79,7 @@ Rules-File Guard (Stealth Module)
 // clap dependency removed - using manual enum implementation
 use crate::crypto::hkdf::{hkdf_expand, hkdf_extract};
 use crate::optimize::stealth::AsciiSimdBackend;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 // use of sha2 replaced with centralized SIMD dispatch
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -89,86 +89,10 @@ use self::tls_cover::ServerHelloParamsOwned;
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::OptimizationManager; // Assumed for integration
 use crate::telemetry;
+pub use qf_stealth::{RateChoker, ServerPushState, ServerPushTriggerReason};
 
 // Integrated test module (keeps src layout monolithic; tests live alongside)
 // Test module removed - tests are inline
-
-/// Server Push Cover Traffic state management
-#[derive(Debug)]
-struct ServerPushState {
-    /// Last burst timestamp
-    last_burst: std::time::Instant,
-    /// Active push promises count
-    active_promises: usize,
-    /// Total cover traffic bytes sent
-    total_cover_bytes: u64,
-    /// Current intensity multiplier (dynamic adjustment)
-    current_intensity: f32,
-    /// Sliding 60-second burst window for bursts/minute telemetry.
-    burst_window: VecDeque<std::time::Instant>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ServerPushTriggerReason {
-    Time,
-    Loss,
-    Gating,
-}
-
-/// Real-time rate choker (token bucket) to smooth observable bitrate without heavy CPU.
-struct RateChoker {
-    clock: crate::time_source::ProtocolClock,
-    target_bps: f64,
-    capacity_bytes: f64,
-    tokens: f64,
-    last: std::time::Instant,
-}
-
-impl RateChoker {
-    #[allow(dead_code)]
-    fn new(target_mbps: u32, burst_ms: u32) -> Option<Self> {
-        Self::new_with_clock(target_mbps, burst_ms, &crate::time_source::ProtocolClock::default())
-    }
-
-    fn new_with_clock(
-        target_mbps: u32,
-        burst_ms: u32,
-        clock: &crate::time_source::ProtocolClock,
-    ) -> Option<Self> {
-        if target_mbps == 0 {
-            return None;
-        }
-        let target_bps = (target_mbps as f64) * 1_000_000.0;
-        let capacity_bytes = (target_bps / 8.0) * (burst_ms as f64 / 1000.0);
-        Some(Self {
-            clock: clock.clone(),
-            target_bps,
-            capacity_bytes,
-            tokens: capacity_bytes, // start full burst
-            last: clock.now(),
-        })
-    }
-
-    /// Returns sleep duration needed to respect the target rate for `bytes`.
-    fn shape(&mut self, bytes: usize) -> std::time::Duration {
-        let now = self.clock.now();
-        let dt = self.clock.elapsed_since(self.last).as_secs_f64();
-        // Refill tokens
-        self.tokens = (self.tokens + (self.target_bps / 8.0) * dt).min(self.capacity_bytes);
-        self.last = now;
-
-        let need = bytes as f64;
-        if self.tokens >= need {
-            self.tokens -= need;
-            return std::time::Duration::ZERO;
-        }
-        let deficit = need - self.tokens;
-        // Time to accumulate `deficit` bytes at target_bps
-        let wait_s = (deficit * 8.0) / self.target_bps;
-        self.tokens = 0.0;
-        std::time::Duration::from_secs_f64(wait_s.max(0.0))
-    }
-}
 
 include!("parts/tls_cover_provider.rs");
 
@@ -187,6 +111,7 @@ pub use fingerprint::{
 // deterministic profile catalog is retained only for compatibility/audit work.
 
 include!("parts/browser_profiles.rs");
+pub use qf_stealth::{PaddingStrategy, RotationMode, StealthMode, TlsCoverCipherSuite};
 include!("parts/http3_masquerade.rs");
 include!("parts/domain_fronting.rs");
 include!("parts/cover_traffic.rs");

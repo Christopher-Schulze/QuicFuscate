@@ -1,0 +1,21 @@
+[package]
+name = "qf-stealth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-common/rust-tests"]
+
+[dependencies]
+qf-common = { path = "../qf-common" }
+clap = { version = "4.5", features = ["derive"] }
+log = "0.4"
+rand = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"

@@ -194,17 +194,17 @@ mod tests {
 
 #[inline]
 pub fn observe_erasure(label: &'static str, bytes: &[u8]) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "rust-tests"))]
     test_observation::notify(label, bytes);
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "rust-tests")))]
     {
         let _ = label;
         let _ = bytes;
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "rust-tests"))]
 pub mod test_observation {
     use std::cell::RefCell;
     use std::sync::Arc;

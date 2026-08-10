@@ -59,7 +59,7 @@ impl CoverTrafficScheduler {
     }
 
     /// Generate next cover request if due
-    pub fn get_next_request(&self) -> Option<Vec<crate::transport::h3::Header>> {
+    pub fn get_next_request(&self) -> Option<Vec<qf_transport_types::h3::Header>> {
         if let Ok(mut last) = self.last_request.lock() {
             let elapsed = self.clock.elapsed_since(*last).as_millis() as u64;
             let interval = self.interval_ms.load(Ordering::Relaxed);
@@ -90,8 +90,8 @@ impl CoverTrafficScheduler {
     fn build_request_headers(
         &self,
         req_type: &CoverRequestType,
-    ) -> Vec<crate::transport::h3::Header> {
-        use crate::transport::h3::Header;
+    ) -> Vec<qf_transport_types::h3::Header> {
+        use qf_transport_types::h3::Header;
         use rand::Rng;
 
         let method: &[u8] = match req_type {

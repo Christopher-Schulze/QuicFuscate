@@ -1,9 +1,12 @@
+#[cfg(test)]
+use super::config::PmtuPolicy;
 use super::{
-    cid, config::Config, config::PmtuPolicy, config::TrafficAnalysisDefense, frames, packet,
-    pnspace, recovery, udpfast, ConnectionId, EcnCounts, EcnMark, FecControlDelta, Frame,
-    PacketType, PathStats, RecvInfo, SendInfo, Stats, Stream, TransportObserver, INITIAL_WINDOW,
-    MAX_STREAM_SIZE, MIN_CLIENT_INITIAL_LEN,
+    cid, config::Config, config::TrafficAnalysisDefense, frames, packet, pnspace, recovery,
+    udpfast, ConnectionId, EcnCounts, EcnMark, FecControlDelta, Frame, PacketType, PathStats,
+    RecvInfo, SendInfo, Stats, Stream, TransportObserver, INITIAL_WINDOW, MAX_STREAM_SIZE,
+    MIN_CLIENT_INITIAL_LEN,
 };
+use qf_transport_recovery::PmtuState;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;

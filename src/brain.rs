@@ -11,47 +11,11 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::env_utils::EnvSnapshot;
-
-use crate::fec::KalmanFilter;
 use crate::optimize::brain as brain_accel;
 use crate::transport::{Connection, TransportObserver};
+use qf_fec::{BrainFecHints, KalmanFilter};
 
 const PACKET_IAT_SAMPLE_INTERVAL: u64 = 8;
-
-// ===== Connection-local runtime hints ========================================
-
-/// FEC hints owned by one Brain/FEC observer pair.
-pub(crate) struct BrainFecHints {
-    interval_pkts: AtomicU64,
-    redundancy_ppm: AtomicU32,
-}
-
-impl BrainFecHints {
-    fn new() -> Self {
-        Self { interval_pkts: AtomicU64::new(8), redundancy_ppm: AtomicU32::new(100_000) }
-    }
-
-    #[inline(always)]
-    pub(crate) fn interval_pkts(&self) -> u64 {
-        self.interval_pkts.load(Ordering::Relaxed)
-    }
-
-    #[inline(always)]
-    pub(crate) fn redundancy_ppm(&self) -> u32 {
-        self.redundancy_ppm.load(Ordering::Relaxed)
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_interval_pkts(&self, value: u64) {
-        self.interval_pkts.store(value, Ordering::Relaxed);
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_redundancy_ppm(&self, value: u32) {
-        self.redundancy_ppm.store(value, Ordering::Relaxed);
-    }
-}
 
 /// Brain and probe escalation levels for one StealthManager connection.
 ///
@@ -94,67 +58,8 @@ pub(crate) fn reorder_ratio_from_window(recent_packets: f64, recent_reorders: f6
     }
 }
 
-pub(crate) struct IntelligentLevelHints {
-    brain_level: AtomicU32,
-    probe_level: AtomicU32,
-    /// Whether this connection's brain currently prefers MASQUE.
-    ///
-    /// Connection-owned, like the levels beside it. This used to travel through the process-global
-    /// `telemetry::MASQUE_HINT` atomic, so one connection's telemetry could flip another
-    /// connection's MASQUE preference. That counter is still exported for observability, but it is
-    /// never read back for policy.
-    prefer_masque: AtomicU32,
-}
-
-impl IntelligentLevelHints {
-    pub(crate) fn new() -> Self {
-        Self {
-            brain_level: AtomicU32::new(0),
-            probe_level: AtomicU32::new(0),
-            prefer_masque: AtomicU32::new(0),
-        }
-    }
-
-    #[inline(always)]
-    fn set_brain_level(&self, level: u8) {
-        self.brain_level.store(level.min(2) as u32, Ordering::Relaxed);
-    }
-
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub(crate) fn set_brain_level_for_test(&self, level: u8) {
-        self.set_brain_level(level);
-    }
-
-    /// Record this connection's MASQUE preference.
-    #[inline(always)]
-    pub(crate) fn set_prefer_masque(&self, prefer: bool) {
-        self.prefer_masque.store(u32::from(prefer), Ordering::Relaxed);
-    }
-
-    /// Whether this connection's brain prefers MASQUE.
-    #[inline(always)]
-    pub(crate) fn prefer_masque(&self) -> bool {
-        self.prefer_masque.load(Ordering::Relaxed) == 1
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_probe_level(&self, level: u8) {
-        self.probe_level.store(level.min(2) as u32, Ordering::Relaxed);
-    }
-
-    #[inline(always)]
-    pub(crate) fn probe_level(&self) -> u8 {
-        self.probe_level.load(Ordering::Relaxed).min(2) as u8
-    }
-
-    #[inline(always)]
-    pub(crate) fn effective_level(&self) -> u32 {
-        self.brain_level
-            .load(Ordering::Relaxed)
-            .max(self.probe_level.load(Ordering::Relaxed))
-            .min(2)
-    }
-}
+pub(crate) use qf_transport_types::IntelligentLevelHints;
+pub use qf_transport_types::StealthBrainConfig;
 
 /// Thin aggregator that forwards `TransportObserver` calls to multiple observers.
 pub(crate) struct CombinedObserver {
@@ -194,173 +99,6 @@ impl crate::transport::TransportObserver for CombinedObserver {
 #[inline]
 fn elapsed_since(instant: Instant) -> Duration {
     crate::time_source::now_instant().checked_duration_since(instant).unwrap_or_default()
-}
-
-// ===== Config =================================================================
-/// Configuration for the sensor-fusion stealth brain that drives adaptive transport tuning.
-#[derive(Clone, Debug)]
-pub struct StealthBrainConfig {
-    /// Minimum ACK-eliciting threshold the brain may choose.
-    pub ack_min: u64,
-    /// Maximum ACK-eliciting threshold the brain may choose.
-    pub ack_max: u64,
-    /// Upper bound for jitter hints in microseconds (transport decides actual delay).
-    pub jitter_max_us: u32,
-    /// Number of bins for the packet-size histogram.
-    pub size_bins: usize,
-    /// Number of bins for the inter-arrival-time histogram.
-    pub iat_bins: usize,
-    /// Maximum DPI probes the brain may emit per minute.
-    pub probe_max_per_min: u32,
-    /// Minimum milliseconds between successive probe emissions.
-    pub probe_cooldown_ms: u64,
-    /// Minimum milliseconds between successive policy actuator changes.
-    pub policy_cooldown_ms: u64,
-    /// Epsilon-greedy exploration probability (0.0 - 1.0).
-    pub explore_prob: f32,
-    /// Exponential decay factor applied to histograms each policy tick (0.8 - 1.0).
-    pub hist_decay: f32,
-    /// Lower padding budget bound (bytes) for low-pressure scenarios.
-    pub pad_max_low: usize,
-    /// Upper padding budget bound (bytes) for high-pressure scenarios.
-    pub pad_max_high: usize,
-}
-
-impl Default for StealthBrainConfig {
-    fn default() -> Self {
-        Self {
-            ack_min: 1,
-            ack_max: 12,
-            jitter_max_us: 5000,
-            size_bins: 16,
-            iat_bins: 16,
-            probe_max_per_min: 2,
-            probe_cooldown_ms: 10_000,
-            policy_cooldown_ms: 300,
-            explore_prob: 0.02,
-            hist_decay: 0.98,
-            pad_max_low: 64,
-            pad_max_high: 256,
-        }
-    }
-}
-
-impl StealthBrainConfig {
-    /// Constructs a config by reading environment variable overrides on top of defaults.
-    pub fn from_env() -> Self {
-        let environment = EnvSnapshot::capture();
-        Self::from_env_with_snapshot(&environment)
-    }
-
-    pub(crate) fn from_env_with_snapshot(environment: &EnvSnapshot) -> Self {
-        match Self::try_from_env_with_snapshot(environment) {
-            Ok(cfg) => cfg,
-            Err(error) => {
-                log::warn!(
-                    "Invalid StealthBrain environment configuration: {error}; using defaults"
-                );
-                Self::default()
-            }
-        }
-    }
-
-    /// Constructs and validates a config from environment variable overrides.
-    pub fn try_from_env() -> Result<Self, String> {
-        let environment = EnvSnapshot::capture();
-        Self::try_from_env_with_snapshot(&environment)
-    }
-
-    pub(crate) fn try_from_env_with_snapshot(environment: &EnvSnapshot) -> Result<Self, String> {
-        let mut cfg = Self::default();
-        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_ACK_MAX") {
-            cfg.ack_max = v;
-        }
-        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_JITTER_MAX_US") {
-            cfg.jitter_max_us = v;
-        }
-        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_SIZE_BINS") {
-            cfg.size_bins = v.clamp(8, 64);
-        }
-        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_IAT_BINS") {
-            cfg.iat_bins = v.clamp(8, 64);
-        }
-        if let Some(v) = environment.parse::<u32>("QUICFUSCATE_BRAIN_PROBE_MAX_PER_MIN") {
-            cfg.probe_max_per_min = v.min(30);
-        }
-        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_PROBE_COOLDOWN_MS") {
-            cfg.probe_cooldown_ms = v;
-        }
-        if let Some(v) = environment.parse("QUICFUSCATE_BRAIN_POLICY_COOLDOWN_MS") {
-            cfg.policy_cooldown_ms = v;
-        }
-        if let Some(v) = environment.parse_finite_f32("QUICFUSCATE_BRAIN_EXPLORE") {
-            let clamped = v.clamp(0.0, 0.25);
-            if clamped != v {
-                log::warn!(
-                    "QUICFUSCATE_BRAIN_EXPLORE must be between 0.0 and 0.25; clamping override"
-                );
-            }
-            cfg.explore_prob = clamped;
-        }
-        if let Some(v) = environment.parse_finite_f32("QUICFUSCATE_BRAIN_HIST_DECAY") {
-            let clamped = v.clamp(0.80, 0.999);
-            if clamped != v {
-                log::warn!(
-                    "QUICFUSCATE_BRAIN_HIST_DECAY must be between 0.80 and 0.999; clamping override"
-                );
-            }
-            cfg.hist_decay = clamped;
-        }
-        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_PAD_MAX_LOW") {
-            cfg.pad_max_low = v.clamp(16, 512);
-        }
-        if let Some(v) = environment.parse::<usize>("QUICFUSCATE_BRAIN_PAD_MAX_HIGH") {
-            cfg.pad_max_high = v.min(2048);
-        }
-        cfg.validate()?;
-        Ok(cfg)
-    }
-
-    /// Validates constraints that span multiple brain configuration fields.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.ack_min == 0 {
-            return Err("ack_min must be greater than zero".to_string());
-        }
-        if self.ack_min > self.ack_max {
-            return Err(format!(
-                "ack_min ({}) must not exceed ack_max ({})",
-                self.ack_min, self.ack_max
-            ));
-        }
-        if self.ack_max > i64::MAX as u64 {
-            return Err("ack_max exceeds the supported signed threshold range".to_string());
-        }
-        if !(1..=64).contains(&self.size_bins) || !(1..=64).contains(&self.iat_bins) {
-            return Err("histogram bin counts must be between 1 and 64".to_string());
-        }
-        if self.probe_max_per_min > 30 {
-            return Err("probe_max_per_min must not exceed 30".to_string());
-        }
-        if !self.explore_prob.is_finite() || !(0.0..=0.25).contains(&self.explore_prob) {
-            return Err("explore_prob must be finite and between 0.0 and 0.25".to_string());
-        }
-        if !self.hist_decay.is_finite() || !(0.80..=0.999).contains(&self.hist_decay) {
-            return Err("hist_decay must be finite and between 0.80 and 0.999".to_string());
-        }
-        if self.pad_max_low > 512 {
-            return Err("pad_max_low must not exceed 512".to_string());
-        }
-        if self.pad_max_high < self.pad_max_low {
-            return Err(format!(
-                "pad_max_high ({}) must not be lower than pad_max_low ({})",
-                self.pad_max_high, self.pad_max_low
-            ));
-        }
-        if self.pad_max_high > 2048 {
-            return Err("pad_max_high must not exceed 2048".to_string());
-        }
-        Ok(())
-    }
 }
 
 // ===== State ==================================================================
@@ -1740,7 +1478,7 @@ mod intelligent_hysteresis_tests {
 
     #[test]
     fn brain_snapshot_retains_defaults_for_invalid_numeric_values() {
-        let environment = EnvSnapshot::from_pairs([
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([
             ("QUICFUSCATE_BRAIN_EXPLORE", "NaN"),
             ("QUICFUSCATE_BRAIN_HIST_DECAY", "-inf"),
             ("QUICFUSCATE_BRAIN_ACK_MAX", "not-a-number"),

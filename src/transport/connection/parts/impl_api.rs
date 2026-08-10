@@ -492,7 +492,7 @@ impl Connection {
         crypto
             .write_secret_1rtt
             .as_ref()
-            .map(|secret| crate::fec::derive_fountain_seed(secret.as_slice()))
+            .map(|secret| qf_fec::derive_fountain_seed(secret.as_slice()))
     }
 
     /// Return the receiver-side fountain seed derived from the active 1-RTT secret.
@@ -501,7 +501,7 @@ impl Connection {
         crypto
             .read_secret_1rtt
             .as_ref()
-            .map(|secret| crate::fec::derive_fountain_seed(secret.as_slice()))
+            .map(|secret| qf_fec::derive_fountain_seed(secret.as_slice()))
     }
 
     /// Returns true if the connection is closed

@@ -3,17 +3,39 @@ members = [
     ".",
     "crates/qf-audit",
     "crates/qf-common",
+    "crates/qf-compress",
+    "crates/qf-cpu",
+    "crates/qf-crypto",
     "crates/qf-control-plane",
     "crates/qf-dns",
+    "crates/qf-engine-types",
     "crates/qf-error",
+    "crates/qf-fec",
     "crates/qf-firewall",
     "crates/qf-harness",
     "crates/qf-instrumentation",
     "crates/qf-logging",
+    "crates/qf-memory-lock",
+    "crates/qf-memory-pool",
     "crates/qf-metrics",
     "crates/qf-pki",
     "crates/qf-privilege",
     "crates/qf-reality",
+    "crates/qf-stealth",
+    "crates/qf-simd",
+    "crates/qf-telemetry",
+    "crates/qf-transport-anti-replay",
+    "crates/qf-transport-batch",
+    "crates/qf-transport-cc",
+    "crates/qf-transport-crypto-stream",
+    "crates/qf-transport-frames",
+    "crates/qf-transport-nat",
+    "crates/qf-transport-pn",
+    "crates/qf-transport-path",
+    "crates/qf-transport-recovery",
+    "crates/qf-transport-version",
+    "crates/qf-transport-types",
+    "crates/qf-transport-udp",
 ]
 exclude = [
     "apps/tauri/src-tauri",
@@ -37,17 +59,39 @@ license.workspace = true
 [dependencies]
 qf-audit = { path = "crates/qf-audit" }
 qf-common = { path = "crates/qf-common" }
+qf-compress = { path = "crates/qf-compress" }
+qf-cpu = { path = "crates/qf-cpu" }
+qf-crypto = { path = "crates/qf-crypto" }
 qf-control-plane = { path = "crates/qf-control-plane" }
 qf-dns = { path = "crates/qf-dns" }
+qf-engine-types = { path = "crates/qf-engine-types" }
 qf-error = { path = "crates/qf-error" }
+qf-fec = { path = "crates/qf-fec" }
 qf-firewall = { path = "crates/qf-firewall" }
 qf-harness = { path = "crates/qf-harness" }
 qf-instrumentation = { path = "crates/qf-instrumentation" }
 qf-logging = { path = "crates/qf-logging" }
+qf-memory-lock = { path = "crates/qf-memory-lock" }
+qf-memory-pool = { path = "crates/qf-memory-pool" }
 qf-metrics = { path = "crates/qf-metrics" }
 qf-pki = { path = "crates/qf-pki" }
 qf-privilege = { path = "crates/qf-privilege" }
 qf-reality = { path = "crates/qf-reality" }
+qf-stealth = { path = "crates/qf-stealth" }
+qf-simd = { path = "crates/qf-simd" }
+qf-telemetry = { path = "crates/qf-telemetry" }
+qf-transport-anti-replay = { path = "crates/qf-transport-anti-replay" }
+qf-transport-batch = { path = "crates/qf-transport-batch" }
+qf-transport-cc = { path = "crates/qf-transport-cc" }
+qf-transport-crypto-stream = { path = "crates/qf-transport-crypto-stream" }
+qf-transport-frames = { path = "crates/qf-transport-frames" }
+qf-transport-nat = { path = "crates/qf-transport-nat" }
+qf-transport-pn = { path = "crates/qf-transport-pn" }
+qf-transport-path = { path = "crates/qf-transport-path" }
+qf-transport-recovery = { path = "crates/qf-transport-recovery" }
+qf-transport-version = { path = "crates/qf-transport-version" }
+qf-transport-types = { path = "crates/qf-transport-types" }
+qf-transport-udp = { path = "crates/qf-transport-udp" }
 aligned_box = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-native-certs = "0.8"
@@ -71,14 +115,12 @@ http-body-util = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-cpufeatures = "0.2"
 getrandom = "0.2"
 libc = "0.2"
 sha2 = "0.10"
 hmac = "0.12"
 hkdf = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-rayon = "1.7"
 toml = "0.8"
 sysinfo = "0.35"
 socket2 = "0.5"
@@ -132,12 +174,12 @@ server = ["rcgen", "time", "maxminddb", "qf-pki/rcgen"]
 
 # --- Runtime / transport features ---
 io_uring = ["dep:io-uring"]
-aggressive_inline = []
+aggressive_inline = ["qf-cpu/aggressive_inline", "qf-crypto/aggressive_inline", "qf-simd/aggressive_inline", "qf-transport-udp/aggressive_inline"]
 compression_zstd_ffi = ["dep:zstd-sys", "zstd-sys/zstdmt"]
 orchestrator = []
-prefetch = []
+prefetch = ["qf-cpu/prefetch", "qf-crypto/prefetch", "qf-simd/prefetch", "qf-transport-udp/prefetch"]
 rate_limiter = []
-std = []
+std = ["qf-crypto/std"]
 stream_ring_buffer = []
 # Throughput-oriented transport profile (ring-buffer streams, prefetch hints).
 throughput = ["stream_ring_buffer", "prefetch", "aggressive_inline"]
@@ -153,14 +195,14 @@ tun-ios = []
 
 # --- Internal / experimental features ---
 internal_wiedemann = []
-internal_avx10_preview = []
+internal_avx10_preview = ["qf-cpu/internal_avx10_preview", "qf-crypto/internal_avx10_preview", "qf-simd/internal_avx10_preview"]
 # Post-quantum key exchange: removed in TODO-286 (code + deps were orphaned).
 # Re-add when PQ is ready with pqcrypto-mlkem + pqcrypto-mldsa deps.
 # pq = ["dep:pqcrypto-mlkem", "dep:pqcrypto-mldsa"]
 
 # --- Test-only features ---
-rust-tests = ["qf-dns/rust-tests", "qf-harness/rust-tests", "qf-logging/rust-tests", "qf-metrics/rust-tests", "qf-reality/rust-tests"]
-benches = []
+rust-tests = ["qf-compress/rust-tests", "qf-cpu/rust-tests", "qf-crypto/rust-tests", "qf-dns/rust-tests", "qf-fec/rust-tests", "qf-harness/rust-tests", "qf-logging/rust-tests", "qf-memory-lock/rust-tests", "qf-memory-pool/rust-tests", "qf-metrics/rust-tests", "qf-reality/rust-tests", "qf-stealth/rust-tests", "qf-simd/rust-tests", "qf-transport-anti-replay/rust-tests", "qf-transport-batch/rust-tests", "qf-transport-cc/rust-tests", "qf-transport-nat/rust-tests", "qf-transport-pn/rust-tests", "qf-transport-path/rust-tests", "qf-transport-recovery/rust-tests", "qf-transport-version/rust-tests", "qf-transport-types/rust-tests", "qf-transport-udp/rust-tests"]
+benches = ["qf-crypto/benches", "qf-simd/benches"]
 masque-tests = []
 tun-tests = []
 simd-selfcheck = []

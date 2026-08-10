@@ -12,32 +12,25 @@ use zeroize::Zeroizing;
 use crate::error::ConnectionError;
 use crate::transport::packet::CryptoContext;
 
+/// Compatibility export for the root TLS namespace. The canonical contract lives in the
+/// dependency-free transport-types leaf.
+pub use qf_transport_types::QuicEncryptionLevel as Level;
+
 /// Sensitive keying material returned by the TLS exporter.
 pub type SensitiveKeyingMaterial = Zeroizing<Vec<u8>>;
+
+/// Historical TLS name for the canonical individual memory-lock status.
+pub use qf_memory_lock::MemoryLockAllocationStatus as TlsKeyLockStatus;
 
 static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_SERVER_IDENTITY_OVERRIDE: OnceLock<PreloadedServerIdentity> = OnceLock::new();
 static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
-static PROCESS_MEMORY_LOCK_COVERS_FUTURE: AtomicBool = AtomicBool::new(false);
 /// Configurable max early data size for server TLS config.
 /// RFC 9001 §4.6.1: QUIC requires this to be either 0 (no 0-RTT) or 0xFFFF_FFFF (0-RTT enabled).
 /// Default is u32::MAX (0-RTT offered). Set to 0 to disable 0-RTT.
 /// Set via `set_max_early_data_size()` before server connection creation.
 static MAX_EARLY_DATA_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
-
-/// Reports the ownership state of the preloaded TLS private-key memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TlsKeyLockStatus {
-    /// The configured security policy disabled individual key locking.
-    Disabled,
-    /// This key buffer owns a successful individual `mlock` call.
-    Locked,
-    /// A successful process-wide `mlockall(MCL_FUTURE)` call owns future pages.
-    CoveredByProcess,
-    /// The requested individual lock was not available on this host or failed.
-    Unavailable,
-}
 
 /// Reports the result of publishing a preloaded server identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +50,7 @@ impl LockedKeyMaterial {
     fn new(bytes: Zeroizing<Vec<u8>>, lock_memory: bool) -> Self {
         let status = if !lock_memory {
             TlsKeyLockStatus::Disabled
-        } else if PROCESS_MEMORY_LOCK_COVERS_FUTURE.load(Ordering::Acquire) {
+        } else if qf_memory_lock::process_memory_lock_covers_future_allocations() {
             TlsKeyLockStatus::CoveredByProcess
         } else {
             try_lock_key_material(bytes.as_slice())
@@ -140,7 +133,7 @@ fn unlock_key_material(_ptr: *const u8, _len: usize) {}
 /// sufficient because a later TLS key allocation still needs its own lock.
 #[doc(hidden)]
 pub fn set_process_memory_lock_covers_future_allocations(enabled: bool) {
-    PROCESS_MEMORY_LOCK_COVERS_FUTURE.store(enabled, Ordering::Release);
+    qf_memory_lock::set_process_memory_lock_covers_future_allocations(enabled);
 }
 
 fn publish_preloaded_identity(
@@ -249,248 +242,8 @@ pub fn preload_tls_server_identity(
 // Core Types and Trait
 // ===============================
 
-/// QUIC encryption levels
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
-    /// Initial encryption level (connection establishment).
-    Initial = 0,
-    /// 0-RTT early data encryption level.
-    EarlyData = 1,
-    /// Handshake encryption level (during TLS negotiation).
-    Handshake = 2,
-    /// Application data encryption level (post-handshake).
-    Application = 3,
-}
-
-/// TLS Profile for stealth configuration
-#[derive(Debug, Clone)]
-pub struct TlsProfile {
-    /// Human-readable browser user-agent string (e.g., "Chrome/136.0.0.0").
-    pub name: String,
-    /// TLS cipher suite IDs in preference order.
-    pub cipher_suites: Vec<u16>,
-    /// Supported named groups (key exchange curves) in preference order.
-    pub groups: Vec<u16>,
-    /// Supported signature algorithms in preference order.
-    pub signature_algorithms: Vec<u16>,
-    /// ALPN protocol identifiers (e.g., ["h3", "h2"]).
-    pub alpn_protocols: Vec<String>,
-    /// SNI hostname override (None uses connection default).
-    pub sni: Option<String>,
-    /// Enable 0-RTT early data in this profile.
-    pub enable_0rtt: bool,
-    /// Enable Encrypted Client Hello (ECH) extension.
-    pub enable_ech: bool,
-    /// GREASE values to inject for fingerprint realism.
-    pub grease_values: Vec<u16>,
-    /// ClientHello extension ordering to match browser fingerprint.
-    pub extension_order: Vec<u16>,
-    /// Optional cosmetic timing jitter for fingerprint realism.
-    pub timing_jitter: Option<std::time::Duration>,
-    /// If true, TLS Cover runs without artificial delays.
-    pub cover_performance_mode: bool,
-}
-
-impl TlsProfile {
-    /// Chrome 136 Profile - Most common browser
-    pub fn chrome_130() -> Self {
-        Self {
-            name: "Chrome/136.0.0.0".into(),
-            cipher_suites: vec![
-                0x1301, // TLS_AES_128_GCM_SHA256
-                0x1302, // TLS_AES_256_GCM_SHA384
-                0xc02b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-                0xc02f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-                0xc02c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-                0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
-                        // ChaCha suites removed per policy
-            ],
-            groups: vec![
-                0x001d, // x25519
-                0x0017, // secp256r1
-                0x0018, // secp384r1
-                0x001e, // x448
-            ],
-            signature_algorithms: vec![
-                0x0403, // ecdsa_secp256r1_sha256
-                0x0503, // ecdsa_secp384r1_sha384
-                0x0603, // ecdsa_secp521r1_sha512
-                0x0807, // ed25519
-                0x0808, // ed448
-                0x0804, // rsa_pss_rsae_sha256
-                0x0805, // rsa_pss_rsae_sha384
-                0x0806, // rsa_pss_rsae_sha512
-                0x0401, // rsa_pkcs1_sha256
-                0x0501, // rsa_pkcs1_sha384
-            ],
-            alpn_protocols: vec!["h3".into(), "h2".into(), "http/1.1".into()],
-            sni: None,
-            enable_0rtt: true,
-            enable_ech: true,
-            grease_values: vec![0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a],
-            extension_order: vec![
-                0x0000, // server_name
-                0x0017, // extended_master_secret
-                0xff01, // renegotiation_info
-                0x000d, // supported_groups
-                0xfe0d, // encrypted_client_hello
-                0x0023, // session_ticket
-                0x0010, // application_layer_protocol_negotiation
-                0x002d, // psk_key_exchange_modes
-                0x0033, // key_share
-                0x002b, // supported_versions
-                0x001b, // compress_certificate
-                0x0039, // quic_transport_parameters
-                0x0a0a, // GREASE
-                0x0029, // pre_shared_key (must be last)
-            ],
-            // Non-security jitter: rand::random is fine here; this is cosmetic timing
-            // variation for TLS fingerprint realism, not a cryptographic secret.
-            timing_jitter: Some(std::time::Duration::from_millis(rand::random::<u64>() % 50)),
-            cover_performance_mode: false,
-        }
-    }
-
-    /// Firefox 138 Profile
-    pub fn firefox_133() -> Self {
-        Self {
-            name: "Firefox/138.0".into(),
-            cipher_suites: vec![
-                0x1301, // TLS_AES_128_GCM_SHA256
-                0x1302, // TLS_AES_256_GCM_SHA384
-                0xc02b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-                0xc02f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-                        // ChaCha suites removed per policy
-            ],
-            groups: vec![
-                0x001d, // x25519
-                0x0017, // secp256r1
-                0x0018, // secp384r1
-                0x0019, // secp521r1
-                0x0100, // ffdhe2048
-                0x0101, // ffdhe3072
-            ],
-            signature_algorithms: vec![
-                0x0403, // ecdsa_secp256r1_sha256
-                0x0503, // ecdsa_secp384r1_sha384
-                0x0603, // ecdsa_secp521r1_sha512
-                0x0807, // ed25519
-                0x0808, // ed448
-                0x0804, // rsa_pss_rsae_sha256
-                0x0805, // rsa_pss_rsae_sha384
-                0x0806, // rsa_pss_rsae_sha512
-                0x0401, // rsa_pkcs1_sha256
-            ],
-            alpn_protocols: vec!["h3".into(), "h2".into(), "http/1.1".into()],
-            sni: None,
-            enable_0rtt: true,
-            enable_ech: false, // Firefox doesn't enable ECH by default yet
-            grease_values: vec![],
-            extension_order: vec![
-                0x0000, // server_name
-                0x0023, // session_ticket
-                0x000d, // supported_groups
-                0x000a, // supported_curves (legacy)
-                0x0010, // application_layer_protocol_negotiation
-                0x002d, // psk_key_exchange_modes
-                0x0033, // key_share
-                0x002b, // supported_versions
-                0x001c, // record_size_limit
-                0x0039, // quic_transport_parameters
-            ],
-            // Non-security jitter: cosmetic timing variation for fingerprint realism.
-            timing_jitter: Some(std::time::Duration::from_millis(rand::random::<u64>() % 30)),
-            cover_performance_mode: false,
-        }
-    }
-
-    /// Safari 18.3 Profile
-    pub fn safari_18() -> Self {
-        Self {
-            name: "Safari/18.3".into(),
-            cipher_suites: vec![
-                0x1301, // TLS_AES_128_GCM_SHA256
-                0x1302, // TLS_AES_256_GCM_SHA384
-                0xc02c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-                0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
-                        // ChaCha suites removed per policy
-            ],
-            groups: vec![
-                0x001d, // x25519
-                0x0017, // secp256r1
-                0x0018, // secp384r1
-            ],
-            signature_algorithms: vec![
-                0x0403, // ecdsa_secp256r1_sha256
-                0x0503, // ecdsa_secp384r1_sha384
-                0x0807, // ed25519
-                0x0804, // rsa_pss_rsae_sha256
-                0x0805, // rsa_pss_rsae_sha384
-                0x0401, // rsa_pkcs1_sha256
-            ],
-            alpn_protocols: vec!["h3".into(), "h2".into()],
-            sni: None,
-            enable_0rtt: true,
-            enable_ech: false,
-            grease_values: vec![],
-            extension_order: vec![
-                0x0000, // server_name
-                0x000d, // supported_groups
-                0x0010, // application_layer_protocol_negotiation
-                0x0033, // key_share
-                0x002b, // supported_versions
-                0x0023, // session_ticket
-                0x002d, // psk_key_exchange_modes
-                0x0039, // quic_transport_parameters
-            ],
-            // Non-security jitter: cosmetic timing variation for fingerprint realism.
-            timing_jitter: Some(std::time::Duration::from_millis(rand::random::<u64>() % 20)),
-            cover_performance_mode: false,
-        }
-    }
-
-    /// Edge 130 (Chrome-based)
-    pub fn edge_130() -> Self {
-        let mut profile = Self::chrome_130();
-        profile.name = "Edge/130.0.0.0".into();
-        profile
-    }
-
-    /// Opera 115 (Chrome-based with tweaks)
-    pub fn opera_115() -> Self {
-        let mut profile = Self::chrome_130();
-        profile.name = "Opera/115.0.0.0".into();
-        // Opera adds some custom extensions
-        profile.extension_order.insert(5, 0x5500); // Opera custom
-        profile
-    }
-
-    /// Brave 1.73 (Chrome-based, privacy-focused)
-    pub fn brave_1_73() -> Self {
-        let mut profile = Self::chrome_130();
-        profile.name = "Brave/1.73.0".into();
-        profile.enable_ech = false; // Brave profile keeps ECH disabled.
-        profile.grease_values.clear(); // Less GREASE
-        profile
-    }
-
-    /// Rotate between profiles randomly.
-    ///
-    /// Uses rand::random for non-security profile selection (stealth heuristic,
-    /// not a cryptographic decision).
-    pub fn random() -> Self {
-        use rand::Rng;
-        match rand::rng().random_range(0..6u8) {
-            0 => Self::chrome_130(),
-            1 => Self::firefox_133(),
-            2 => Self::safari_18(),
-            3 => Self::edge_130(),
-            4 => Self::opera_115(),
-            _ => Self::brave_1_73(),
-        }
-    }
-}
+/// Browser-shaped TLS profile contract owned by qf-stealth.
+pub use qf_stealth::TlsProfile;
 
 /// Build a TlsProfile from a Stealth FingerprintProfile (best-effort mapping).
 pub fn profile_from_fingerprint(fp: &crate::stealth::FingerprintProfile) -> TlsProfile {
@@ -2102,10 +1855,10 @@ mod rustls_provider {
                 keys.remote.header.into();
 
             let mut crypto = self.crypto.write();
-            crypto.seal_1rtt = Some(Arc::new(crate::crypto::PacketAeadSeal::Dynamic(Box::new(
+            crypto.seal_1rtt = Some(Arc::new(crate::crypto::PacketAeadSeal::dynamic(Box::new(
                 RustlsPacketSeal { key: local_pkt.clone() },
             ))));
-            crypto.open_1rtt = Some(Arc::new(crate::crypto::PacketAeadOpen::Dynamic(Box::new(
+            crypto.open_1rtt = Some(Arc::new(crate::crypto::PacketAeadOpen::dynamic(Box::new(
                 RustlsPacketOpen { key: remote_pkt.clone() },
             ))));
             crypto.hp_1rtt = Some(Arc::new(RustlsHp { key: local_hp.clone() }));
@@ -2626,7 +2379,7 @@ mod rustls_provider {
         key: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey>,
     }
 
-    impl crate::transport::packet::HeaderProtector for RustlsHp {
+    impl crate::crypto::aead::PacketHeaderProtector for RustlsHp {
         fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5], ConnectionError> {
             let sample_len = self.key.sample_len();
             if sample.len() != sample_len {

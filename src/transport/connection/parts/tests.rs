@@ -1231,7 +1231,7 @@ mod tests {
         pair.client.dgram_send_max_size = 1500;
         pair.server.dgram_send_max_size = 1500;
         pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
-        pair.client.pmtu.confirmed_mtu = 1500;
+        pair.client.pmtu.set_confirmed_mtu_for_test(1500);
         pair.server.pmtu = pmtu_state(false, PmtuPolicy::default());
         let payload = (0..1400).map(|index| (index % 251) as u8).collect::<Vec<_>>();
         pair.client.stream_send(0, &payload, false).unwrap();
@@ -1239,16 +1239,16 @@ mod tests {
         let mut packet = [0u8; 1500];
         let original_pn = pair.client.next_send_pn_by_space[2];
         let (original_len, _) = pair.client.send(&mut packet).unwrap();
-        assert!(original_len > pair.client.pmtu.min_mtu);
+        assert!(original_len > pair.client.pmtu.min_mtu());
         pair.client.lose_stream_transmission_packet(original_pn);
         pair.client.recovery.on_loss_packet(original_pn, original_len, Instant::now());
-        pair.client.pmtu.confirmed_mtu = pair.client.pmtu.min_mtu;
+        pair.client.pmtu.set_confirmed_mtu_for_test(pair.client.pmtu.min_mtu());
 
         let mut retransmitted_packet_numbers = Vec::new();
         while !pair.client.stream_retransmit_queue.is_empty() {
             let packet_number = pair.client.next_send_pn_by_space[2];
             let (packet_len, _) = pair.client.send(&mut packet).unwrap();
-            assert!(packet_len <= pair.client.pmtu.min_mtu);
+            assert!(packet_len <= pair.client.pmtu.min_mtu());
             pair.server.recv(&mut packet[..packet_len], &pair.recv_info).unwrap();
             retransmitted_packet_numbers.push(packet_number);
         }
@@ -1281,7 +1281,7 @@ mod tests {
         let mut pair = bench_paired_1rtt_connections();
         pair.client.dgram_send_max_size = 1500;
         pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
-        pair.client.pmtu.confirmed_mtu = 1500;
+        pair.client.pmtu.set_confirmed_mtu_for_test(1500);
         pair.client.stream_send(0, &[0xA5; 1400], false).unwrap();
 
         let mut packet = [0u8; 1500];
@@ -1289,7 +1289,7 @@ mod tests {
         let (original_size, _) = pair.client.send(&mut packet).unwrap();
         pair.client.lose_stream_transmission_packet(original_pn);
         pair.client.recovery.on_loss_packet(original_pn, original_size, Instant::now());
-        pair.client.pmtu.confirmed_mtu = pair.client.pmtu.min_mtu;
+        pair.client.pmtu.set_confirmed_mtu_for_test(pair.client.pmtu.min_mtu());
 
         let retransmitted_pn = pair.client.next_send_pn_by_space[2];
         pair.client.send(&mut packet).unwrap();

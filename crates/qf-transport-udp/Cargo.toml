@@ -1,0 +1,19 @@
+[package]
+name = "qf-transport-udp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = []
+prefetch = ["qf-cpu/prefetch"]
+aggressive_inline = ["qf-cpu/aggressive_inline"]
+
+[dependencies]
+qf-cpu = { path = "../qf-cpu" }
+libc = "0.2"
+smallvec = "1.13"
+sysinfo = "0.35"

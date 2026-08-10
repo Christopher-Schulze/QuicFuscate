@@ -319,7 +319,7 @@ mod tests {
         assert_eq!((per_target.len(), per_target.bytes()), (1, 1));
 
         let responses =
-            Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(1, 64)));
+            Arc::new(std::sync::Mutex::new(qf_transport_types::MasqueDownlinkQueue::new(1, 64)));
         enqueue_routing_response(&responses, &metrics, vec![3]);
         enqueue_routing_response(&responses, &metrics, vec![4]);
 
@@ -472,7 +472,7 @@ mod tests {
         forwarding_policy.assign_client("client", assigned);
         let metrics = Metrics::new();
         let responses =
-            Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(8, 4096)));
+            Arc::new(std::sync::Mutex::new(qf_transport_types::MasqueDownlinkQueue::new(8, 4096)));
         let packet = test_ipv4_udp_packet(client_ip, server_ip, 40_000, 53, &[1]);
 
         let route = allow_client_uplink(
@@ -505,7 +505,7 @@ mod tests {
         for dont_fragment in [false, true] {
             let metrics = Metrics::new();
             let responses =
-                Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(8, 4096)));
+                Arc::new(std::sync::Mutex::new(qf_transport_types::MasqueDownlinkQueue::new(8, 4096)));
             let mut packet =
                 test_ipv4_udp_packet(client_ip, destination_ip, 40_000, 53, &payload);
             if dont_fragment {
@@ -576,7 +576,7 @@ mod tests {
         );
         let metrics = Metrics::new();
         let responses =
-            Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(8, 4096)));
+            Arc::new(std::sync::Mutex::new(qf_transport_types::MasqueDownlinkQueue::new(8, 4096)));
         let route = allow_client_uplink(
             &forwarding_policy,
             &metrics,
@@ -2564,7 +2564,7 @@ mod tests {
         let metrics = runtime.standalone_metrics();
         let owner = Arc::new(DnsInterceptWorkerOwner::new(Arc::clone(&metrics)));
         runtime.dns_intercept_workers = Some(Arc::clone(&owner));
-        let queue = Arc::new(std::sync::Mutex::new(crate::core::MasqueDownlinkQueue::new(
+        let queue = Arc::new(std::sync::Mutex::new(qf_transport_types::MasqueDownlinkQueue::new(
             1, 1024,
         )));
         let worker_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3282,7 +3282,7 @@ mod tests {
             assert_eq!(*logging_mode.read(), expected_name);
             assert_eq!(
                 load_persisted_logging_mode(Some(&config_path)).expect("persisted mode must load"),
-                PersistedLoggingModeState::Valid(expected_mode.clone())
+                PersistedLoggingModeState::Valid(expected_mode)
             );
 
             let bootstrap = initialize_standalone_server_bootstrap(

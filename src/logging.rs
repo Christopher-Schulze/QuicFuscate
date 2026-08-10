@@ -2,9 +2,9 @@
 
 pub use qf_logging::{
     flush, format_rfc5424, level_to_severity, reopen, rfc3339_utc, rfc3339_utc_checked, rotate,
-    set_admin_sink, stats, FlushGuard, LogInitError, LogSink, LoggerStats, SizeRotatingAppender,
-    SyslogWriter, DEFAULT_MAX_FILES, DEFAULT_MAX_FILE_SIZE, DEFAULT_SYSLOG_FACILITY, LOG_FILE_MODE,
-    LOG_QUEUE_CAPACITY,
+    set_admin_sink, stats, FlushGuard, LogInitError, LogSink, LoggerStats, LoggingConfig,
+    SizeRotatingAppender, SyslogWriter, DEFAULT_MAX_FILES, DEFAULT_MAX_FILE_SIZE,
+    DEFAULT_SYSLOG_FACILITY, LOG_FILE_MODE, LOG_QUEUE_CAPACITY,
 };
 
 #[cfg(feature = "rust-tests")]
@@ -14,6 +14,12 @@ pub use qf_logging::{format_json, format_text};
 pub trait LoggingConfigProjection {
     /// Return the standalone logger configuration for this owner configuration.
     fn project_logging_config(&self) -> qf_logging::LoggingConfig;
+}
+
+impl LoggingConfigProjection for qf_logging::LoggingConfig {
+    fn project_logging_config(&self) -> qf_logging::LoggingConfig {
+        self.clone()
+    }
 }
 
 /// Initialize the standalone logger from an owner configuration.

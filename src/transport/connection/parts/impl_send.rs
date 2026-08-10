@@ -581,7 +581,7 @@ impl Connection {
             }
             let outer_datagram_size = total.saturating_add(datagram_overhead);
             self.pmtu.on_packet_sent(outer_datagram_size, now);
-            if outer_datagram_size > self.pmtu.min_mtu {
+            if outer_datagram_size > self.pmtu.min_mtu() {
                 self.pmtu_above_floor_pns.insert(pn);
             }
             self.cwnd = self.recovery.cwnd;

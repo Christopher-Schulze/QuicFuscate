@@ -2,6 +2,12 @@
 
 use quicfuscate::compress;
 use quicfuscate::stealth::{BrowserProfile, OsProfile, PaddingStrategy, StealthConfig};
+use std::sync::Mutex;
+
+// These tests mutate one process-global compression policy. Keep the capture,
+// mutation, and restoration transaction together when the test binary runs in
+// parallel with another policy-guarded test.
+static POLICY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct PolicyGuard(compress::CompressionPolicy);
 
@@ -19,6 +25,7 @@ impl Drop for PolicyGuard {
 
 #[test]
 fn stealth_config_from_toml_overrides_fields_and_updates_policy() {
+    let _policy_lock = POLICY_TEST_LOCK.lock().expect("policy test lock");
     let _guard = PolicyGuard::capture();
     let toml = r#"
 [stealth]
@@ -78,6 +85,7 @@ deny = ["image/*"]
 
 #[test]
 fn stealth_config_from_toml_ignores_unknown_keys() {
+    let _policy_lock = POLICY_TEST_LOCK.lock().expect("policy test lock");
     let _guard = PolicyGuard::capture();
     let toml = r#"
 [stealth]

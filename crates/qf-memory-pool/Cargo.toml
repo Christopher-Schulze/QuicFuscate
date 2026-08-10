@@ -1,0 +1,33 @@
+[package]
+name = "qf-memory-pool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = ["qf-common/rust-tests", "qf-cpu/rust-tests"]
+prefetch = ["qf-cpu/prefetch"]
+
+[dependencies]
+aligned_box = "0.2"
+crossbeam-queue = "0.3"
+libc = "0.2"
+log = "0.4"
+qf-common = { path = "../qf-common" }
+qf-cpu = { path = "../qf-cpu" }
+qf-memory-lock = { path = "../qf-memory-lock" }
+qf-telemetry = { path = "../qf-telemetry" }
+smallvec = "1.13"
+socket2 = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_System_Kernel",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }

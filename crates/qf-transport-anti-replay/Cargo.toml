@@ -1,0 +1,17 @@
+[package]
+name = "qf-transport-anti-replay"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = []
+
+[dependencies]
+parking_lot = "0.12"
+qf-common = { path = "../qf-common" }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"

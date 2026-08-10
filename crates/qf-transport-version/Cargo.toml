@@ -1,0 +1,19 @@
+[package]
+name = "qf-transport-version"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = []
+
+[dependencies]
+qf-common = { path = "../qf-common" }
+qf-error = { path = "../qf-error" }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"

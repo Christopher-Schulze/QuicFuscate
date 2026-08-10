@@ -1,0 +1,18 @@
+[package]
+name = "qf-telemetry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rust-tests = []
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+sysinfo = "0.35"
+
+[dev-dependencies]
+serde_json = "1.0"

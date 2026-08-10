@@ -71,9 +71,9 @@ jobs:
     - name: "Run clippy check (features: ${{ matrix.features }})"
       run: |
         if [ -n "${{ matrix.features }}" ]; then
-          cargo clippy --locked --all-targets --features "${{ matrix.features }}" -- -D warnings
+          cargo clippy --workspace --locked --all-targets --features "${{ matrix.features }}" -- -D warnings
         else
-          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --workspace --locked --all-targets -- -D warnings
         fi
 
   simd-feature-contract:

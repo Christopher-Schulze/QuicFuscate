@@ -251,7 +251,7 @@ pub struct Metrics {
     /// Number of terminal server TUN data-plane faults.
     pub tun_data_plane_faults: AtomicU64,
     /// Process-wide memory-lock readiness and failure state.
-    memory_lock_status: parking_lot::RwLock<crate::memory_lock::MemoryLockStartupStatus>,
+    memory_lock_status: parking_lot::RwLock<qf_memory_lock::MemoryLockStartupStatus>,
 
     // Per-session bandwidth and fair-scheduler metrics
     pub bandwidth_uplink_allowed_bytes: AtomicU64,
@@ -398,7 +398,7 @@ impl Metrics {
             lifecycle_phase: AtomicU8::new(LifecyclePhase::Starting as u8),
             tun_data_plane_faults: AtomicU64::new(0),
             memory_lock_status: parking_lot::RwLock::new(
-                crate::memory_lock::MemoryLockStartupStatus::not_configured(),
+                qf_memory_lock::MemoryLockStartupStatus::not_configured(),
             ),
             bandwidth_uplink_allowed_bytes: AtomicU64::new(0),
             bandwidth_downlink_allowed_bytes: AtomicU64::new(0),
@@ -839,12 +839,12 @@ impl Metrics {
     }
 
     /// Publish the process-wide memory-lock result for runtime health probes.
-    pub fn set_memory_lock_status(&self, status: crate::memory_lock::MemoryLockStartupStatus) {
+    pub fn set_memory_lock_status(&self, status: qf_memory_lock::MemoryLockStartupStatus) {
         *self.memory_lock_status.write() = status;
     }
 
     /// Read the process-wide memory-lock result exposed by this runtime.
-    pub fn memory_lock_status(&self) -> crate::memory_lock::MemoryLockStartupStatus {
+    pub fn memory_lock_status(&self) -> qf_memory_lock::MemoryLockStartupStatus {
         *self.memory_lock_status.read()
     }
 
@@ -935,13 +935,13 @@ impl Metrics {
 
     pub fn record_masque_downlink_response_drop(
         &self,
-        reason: crate::core::MasqueDownlinkQueueReject,
+        reason: qf_transport_types::MasqueDownlinkQueueReject,
     ) {
         let counter = match reason {
-            crate::core::MasqueDownlinkQueueReject::PacketCapacity => {
+            qf_transport_types::MasqueDownlinkQueueReject::PacketCapacity => {
                 &self.masque_downlink_response_drop_packet_capacity
             }
-            crate::core::MasqueDownlinkQueueReject::ByteCapacity => {
+            qf_transport_types::MasqueDownlinkQueueReject::ByteCapacity => {
                 &self.masque_downlink_response_drop_byte_capacity
             }
         };
@@ -2258,10 +2258,10 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_masque_downlink_response_retry();
         metrics.record_masque_downlink_response_drop(
-            crate::core::MasqueDownlinkQueueReject::PacketCapacity,
+            qf_transport_types::MasqueDownlinkQueueReject::PacketCapacity,
         );
         metrics.record_masque_downlink_response_drop(
-            crate::core::MasqueDownlinkQueueReject::ByteCapacity,
+            qf_transport_types::MasqueDownlinkQueueReject::ByteCapacity,
         );
         metrics.record_masque_downlink_response_terminal_drop(2);
         metrics.record_masque_downlink_response_shutdown_drop(3);
@@ -2427,24 +2427,24 @@ mod tests {
     #[test]
     fn memory_lock_health_exposes_degraded_and_not_ready_states() {
         let metrics = Metrics::new();
-        metrics.set_memory_lock_status(crate::memory_lock::MemoryLockStartupStatus {
-            policy: crate::engine::MemoryLockFailurePolicy::BestEffort,
-            state: crate::memory_lock::MemoryLockState::Degraded,
-            process_mode: crate::memory_lock::MemoryLockProcessMode::None,
-            limit: crate::memory_lock::MemoryLockLimit::Unknown,
-            failure: Some(crate::memory_lock::MemoryLockFailureKind::RlimitQuery),
+        metrics.set_memory_lock_status(qf_memory_lock::MemoryLockStartupStatus {
+            policy: qf_memory_lock::MemoryLockFailurePolicy::BestEffort,
+            state: qf_memory_lock::MemoryLockState::Degraded,
+            process_mode: qf_memory_lock::MemoryLockProcessMode::None,
+            limit: qf_memory_lock::MemoryLockLimit::Unknown,
+            failure: Some(qf_memory_lock::MemoryLockFailureKind::RlimitQuery),
         });
         let degraded = metrics.export_health();
         assert!(degraded.contains("\"status\":\"degraded\""));
         assert!(degraded.contains("\"memory_lock\""));
         assert!(degraded.contains("\"failure\":\"rlimit-query\""));
 
-        metrics.set_memory_lock_status(crate::memory_lock::MemoryLockStartupStatus {
-            policy: crate::engine::MemoryLockFailurePolicy::FailClosed,
-            state: crate::memory_lock::MemoryLockState::Failed,
-            process_mode: crate::memory_lock::MemoryLockProcessMode::None,
-            limit: crate::memory_lock::MemoryLockLimit::Finite(4096),
-            failure: Some(crate::memory_lock::MemoryLockFailureKind::Mlockall),
+        metrics.set_memory_lock_status(qf_memory_lock::MemoryLockStartupStatus {
+            policy: qf_memory_lock::MemoryLockFailurePolicy::FailClosed,
+            state: qf_memory_lock::MemoryLockState::Failed,
+            process_mode: qf_memory_lock::MemoryLockProcessMode::None,
+            limit: qf_memory_lock::MemoryLockLimit::Finite(4096),
+            failure: Some(qf_memory_lock::MemoryLockFailureKind::Mlockall),
         });
         let failed = metrics.export_health();
         assert!(failed.contains("\"status\":\"not_ready\""));

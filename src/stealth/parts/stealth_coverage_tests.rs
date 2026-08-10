@@ -135,9 +135,8 @@ mod stealth_coverage_tests {
         for i in 0..300 {
             shaper.record_and_prune(i, StealthPacketClass::Data);
         }
-        let hist = shaper.packet_history.lock().expect("lock");
         // History capped at 256 + pruning of >2s entries
-        assert!(hist.len() <= 256);
+        assert!(shaper.history_len() <= 256);
     }
 
     #[test]
@@ -486,18 +485,18 @@ mod stealth_coverage_tests {
     #[test]
     fn domain_fronting_from_providers_populates() {
         let df = DomainFrontingManager::from_providers(vec![CdnProvider::Cloudflare]);
-        assert!(!df.domains.is_empty());
+        assert!(!df.domains().is_empty());
         // Should contain known Cloudflare domains
-        assert!(df.domains.iter().any(|d| d.contains("cloudflare")));
+        assert!(df.domains().iter().any(|d| d.contains("cloudflare")));
     }
 
     #[test]
     fn domain_fronting_ultra_stealth_has_many_domains() {
         let df = DomainFrontingManager::ultra_stealth();
         assert!(
-            df.domains.len() >= 20,
+            df.domains().len() >= 20,
             "ultra stealth should have 20+ domains, got {}",
-            df.domains.len()
+            df.domains().len()
         );
     }
 

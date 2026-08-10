@@ -207,7 +207,7 @@ impl ClientConnection {
     pub fn set_fec_control_policy(
         &self,
         policy: crate::fec::FecControlPolicy,
-    ) -> crate::core::ActiveFecPolicyChange {
+    ) -> crate::fec::ActiveFecPolicyChange {
         let mut guard = self.inner.lock();
         guard.set_fec_control_policy(policy)
     }

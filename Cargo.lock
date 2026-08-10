@@ -1482,8 +1482,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "qf-compress"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-common",
+ "qf-cpu",
+ "qf-memory-pool",
+ "qf-telemetry",
+ "zstd",
+]
+
+[[package]]
 name = "qf-control-plane"
 version = "0.4.4"
+
+[[package]]
+name = "qf-cpu"
+version = "0.4.4"
+dependencies = [
+ "libc",
+ "log",
+ "qf-common",
+ "qf-telemetry",
+ "qf-transport-types",
+]
+
+[[package]]
+name = "qf-crypto"
+version = "0.4.4"
+dependencies = [
+ "hex",
+ "hkdf",
+ "hmac",
+ "qf-common",
+ "qf-cpu",
+ "qf-error",
+ "qf-telemetry",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
 
 [[package]]
 name = "qf-dns"
@@ -1498,8 +1538,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "qf-engine-types"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-common",
+ "qf-cpu",
+ "qf-fec",
+ "qf-firewall",
+ "qf-memory-lock",
+ "qf-transport-cc",
+ "qf-transport-recovery",
+ "qf-transport-types",
+ "qf-transport-version",
+ "serde",
+ "sha2",
+ "sysinfo",
+]
+
+[[package]]
 name = "qf-error"
 version = "0.4.4"
+
+[[package]]
+name = "qf-fec"
+version = "0.4.4"
+dependencies = [
+ "aligned_box",
+ "clap",
+ "log",
+ "parking_lot",
+ "qf-common",
+ "qf-cpu",
+ "qf-crypto",
+ "qf-memory-pool",
+ "qf-simd",
+ "qf-telemetry",
+ "rayon",
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "qf-firewall"
@@ -1529,7 +1607,36 @@ dependencies = [
  "libc",
  "log",
  "qf-common",
+ "serde",
  "serde_json",
+]
+
+[[package]]
+name = "qf-memory-lock"
+version = "0.4.4"
+dependencies = [
+ "libc",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qf-memory-pool"
+version = "0.4.4"
+dependencies = [
+ "aligned_box",
+ "crossbeam-queue",
+ "libc",
+ "log",
+ "qf-common",
+ "qf-cpu",
+ "qf-memory-lock",
+ "qf-telemetry",
+ "smallvec",
+ "socket2 0.5.10",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1577,6 +1684,161 @@ dependencies = [
 ]
 
 [[package]]
+name = "qf-simd"
+version = "0.4.4"
+dependencies = [
+ "qf-common",
+ "qf-cpu",
+ "qf-crypto",
+ "qf-telemetry",
+ "rand",
+ "sha2",
+ "sha2-asm",
+]
+
+[[package]]
+name = "qf-stealth"
+version = "0.4.4"
+dependencies = [
+ "clap",
+ "log",
+ "qf-common",
+ "rand",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qf-telemetry"
+version = "0.4.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sysinfo",
+]
+
+[[package]]
+name = "qf-transport-anti-replay"
+version = "0.4.4"
+dependencies = [
+ "parking_lot",
+ "qf-common",
+ "serde",
+ "sha2",
+]
+
+[[package]]
+name = "qf-transport-batch"
+version = "0.4.4"
+dependencies = [
+ "libc",
+ "log",
+ "qf-cpu",
+ "qf-telemetry",
+ "qf-transport-udp",
+ "socket2 0.5.10",
+]
+
+[[package]]
+name = "qf-transport-cc"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-common",
+ "qf-cpu",
+ "qf-transport-types",
+ "serde",
+]
+
+[[package]]
+name = "qf-transport-crypto-stream"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-error",
+]
+
+[[package]]
+name = "qf-transport-frames"
+version = "0.4.4"
+dependencies = [
+ "qf-error",
+ "qf-transport-types",
+]
+
+[[package]]
+name = "qf-transport-nat"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-common",
+ "qf-error",
+ "rand",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "qf-transport-path"
+version = "0.4.4"
+dependencies = [
+ "qf-common",
+ "qf-transport-cc",
+]
+
+[[package]]
+name = "qf-transport-pn"
+version = "0.4.4"
+dependencies = [
+ "qf-common",
+ "qf-transport-types",
+]
+
+[[package]]
+name = "qf-transport-recovery"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-common",
+ "qf-error",
+ "qf-memory-pool",
+ "qf-telemetry",
+ "qf-transport-cc",
+ "serde",
+]
+
+[[package]]
+name = "qf-transport-types"
+version = "0.4.4"
+dependencies = [
+ "log",
+ "qf-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qf-transport-udp"
+version = "0.4.4"
+dependencies = [
+ "libc",
+ "qf-cpu",
+ "smallvec",
+ "sysinfo",
+]
+
+[[package]]
+name = "qf-transport-version"
+version = "0.4.4"
+dependencies = [
+ "qf-common",
+ "qf-error",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "quicfuscate"
 version = "0.4.4"
 dependencies = [
@@ -1585,7 +1847,6 @@ dependencies = [
  "argon2",
  "base64 0.21.7",
  "clap",
- "cpufeatures",
  "criterion",
  "crossbeam",
  "crossbeam-channel",
@@ -1608,19 +1869,40 @@ dependencies = [
  "proptest",
  "qf-audit",
  "qf-common",
+ "qf-compress",
  "qf-control-plane",
+ "qf-cpu",
+ "qf-crypto",
  "qf-dns",
+ "qf-engine-types",
  "qf-error",
+ "qf-fec",
  "qf-firewall",
  "qf-harness",
  "qf-instrumentation",
  "qf-logging",
+ "qf-memory-lock",
+ "qf-memory-pool",
  "qf-metrics",
  "qf-pki",
  "qf-privilege",
  "qf-reality",
+ "qf-simd",
+ "qf-stealth",
+ "qf-telemetry",
+ "qf-transport-anti-replay",
+ "qf-transport-batch",
+ "qf-transport-cc",
+ "qf-transport-crypto-stream",
+ "qf-transport-frames",
+ "qf-transport-nat",
+ "qf-transport-path",
+ "qf-transport-pn",
+ "qf-transport-recovery",
+ "qf-transport-types",
+ "qf-transport-udp",
+ "qf-transport-version",
  "rand",
- "rayon",
  "rcgen",
  "reqwest",
  "rustls",
