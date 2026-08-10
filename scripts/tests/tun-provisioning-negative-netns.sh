@@ -4,7 +4,7 @@
 # The harness runs the real server binary inside one isolated network namespace
 # and a private mount namespace with an isolated /run. Failed creation must not
 # leave an owned TUN interface behind, while pre-existing resources stay intact.
-# The adversarial missing-interface case retains only isolated ownership evidence.
+# The private runtime also prevents a failed proof from contaminating later jobs.
 #
 # Covered cases:
 #   - overlong requested interface name
@@ -12,7 +12,7 @@
 #   - permission denial without CAP_NET_ADMIN
 #   - conflicting address after TUNSETIFF
 #   - missing interface race during routing setup
-#   - routing setup failure, retry, and isolated fail-closed ownership evidence
+#   - routing setup failure, retry, and zero owned residue
 #
 # Requirements: Linux, root, iproute2, mount, openssl, runuser, unshare, and a built binary.
 set -u
@@ -285,9 +285,9 @@ missing_status=$?
 SERVER_PID=""
 [ "$missing_status" -ne 0 ] || fail "missing-interface case unexpectedly succeeded"
 assert_interface_absent "$MISSING_NAME"
-[ -f "$ISOLATED_RUN_DIR/quicfuscate/routing/firewall-owner.json" ] ||
-  fail "missing-interface case did not retain isolated fail-closed ownership evidence"
+[ ! -e "$ISOLATED_RUN_DIR/quicfuscate/routing/firewall-owner.json" ] ||
+  fail "missing-interface rollback left isolated durable firewall ownership residue"
 ip netns exec "$NAMESPACE" ip link delete dev eth0 ||
   fail "could not remove the missing-interface WAN sentinel"
 
-echo "PASS: Linux TUN provisioning rejects invalid/conflicting activation and contains fail-closed ownership evidence inside isolated /run"
+echo "PASS: Linux TUN provisioning rejects invalid/conflicting activation and leaves zero owned residue"
