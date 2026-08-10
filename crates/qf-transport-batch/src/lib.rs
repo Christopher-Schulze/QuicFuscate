@@ -286,12 +286,9 @@ impl BatchProcessor {
                         "UDP receive timeout exceeds the platform time_t range",
                     )
                 })?;
-                let tv_nsec = libc::c_long::try_from(d.subsec_nanos()).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "UDP receive timeout nanoseconds exceed the platform range",
-                    )
-                })?;
+                // `subsec_nanos` is at most 999,999,999, which fits every Linux
+                // `c_long`, including targets where it is a signed 32-bit integer.
+                let tv_nsec = d.subsec_nanos() as libc::c_long;
                 Ok(libc::timespec { tv_sec, tv_nsec })
             })
             .transpose()?;
