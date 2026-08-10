@@ -396,9 +396,13 @@ fn nft_rule_matches_fragment(rule: &str, fragment: &str) -> bool {
         return false;
     };
     let rule_close = rule_open + 1 + rule_close;
-    if normalized_rule[..rule_open].trim() != required_prefix
-        || normalized_rule[rule_close + 1..].trim() != required_suffix
-    {
+    let actual_suffix = normalized_rule[rule_close + 1..].trim();
+    let suffix_matches = required_suffix.is_empty()
+        || actual_suffix == required_suffix
+        || actual_suffix
+            .strip_prefix(required_suffix)
+            .is_some_and(|trailing| trailing.starts_with(' '));
+    if normalized_rule[..rule_open].trim() != required_prefix || !suffix_matches {
         return false;
     }
 
@@ -1110,6 +1114,14 @@ mod tests {
     fn test_nft_rule_fragment_accepts_canonicalized_set_order() {
         let required = r#"iifname "qtun0" oifname "qtun0" ip daddr { 255.255.255.255, 10.0.1.255, 224.0.0.0/4 } accept"#;
         let listed = r#"    iifname "qtun0" oifname "qtun0" ip daddr { 10.0.1.255, 224.0.0.0/4, 255.255.255.255 } accept"#;
+
+        assert!(nft_output_contains_fragment(listed, required));
+    }
+
+    #[test]
+    fn test_nft_rule_fragment_accepts_trailing_owner_comment() {
+        let required = r#"iifname "qtun0" oifname "qtun0" ip daddr { 255.255.255.255, 10.0.1.255, 224.0.0.0/4 } accept"#;
+        let listed = r#"    iifname "qtun0" oifname "qtun0" ip daddr { 10.0.1.255, 224.0.0.0/4, 255.255.255.255 } accept comment "quicfuscate-owner-generation""#;
 
         assert!(nft_output_contains_fragment(listed, required));
     }
