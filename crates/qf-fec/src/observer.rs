@@ -7,6 +7,7 @@
 use crate::{BrainFecHints, FecRuntimePolicy};
 use parking_lot::RwLock;
 use qf_common::env_utils::EnvSnapshot;
+use qf_transport_types::TransportObserver;
 use std::sync::{Arc, OnceLock};
 
 #[derive(Default, Debug, Clone)]
@@ -264,5 +265,42 @@ impl FecObserver {
 impl Default for FecObserver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl TransportObserver for FecObserver {
+    fn on_ack(&self, ack_delay: u64, _ranges: &[(u64, u64)]) {
+        FecObserver::on_ack(self, ack_delay);
+    }
+
+    fn on_ecn_update(&self, ect0: u64, ect1: u64, ce: u64) {
+        FecObserver::on_ecn_update(self, ect0, ect1, ce);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FecObserver, FecObserverAmbientInputs, FecObserverProfilePolicy, FecObserverState,
+        TransportProfile,
+    };
+    use qf_transport_types::TransportObserver;
+    use std::sync::OnceLock;
+
+    #[test]
+    fn transport_trait_callbacks_update_the_child_owned_observer() {
+        let observer = FecObserver {
+            state: parking_lot::RwLock::new(FecObserverState::default()),
+            ambient: FecObserverAmbientInputs::new(
+                FecObserverProfilePolicy::Ambient(TransportProfile::Desktop),
+                8,
+            ),
+            brain_hints: OnceLock::new(),
+        };
+
+        TransportObserver::on_ack(&observer, 500, &[(1, 2)]);
+        TransportObserver::on_ecn_update(&observer, 80, 0, 20);
+
+        assert_eq!(observer.compute_streaming_interval(), 4);
     }
 }

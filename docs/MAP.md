@@ -2900,3 +2900,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused runtime-hint tests `2/2`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,246,792 / 17,953,880 KiB`.
 - Production FEC, Brain, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-fec-brain-hint-test-postpush/workspace-seams.json` at source revision `91cfe266f6f1ba2d1862d13bfcea749772dcb2ae`; `36` packages, `334` Rust files, `207,076` source lines, `111` module edges, `115` workspace dependency edges, and `protected_changes=[]`. `fec -> brain` is absent, Brain is outside every product SCC, and the remaining transport product SCC is `fec/qftls/stealth/transport`.
+
+## Transport FEC-Observer Contract Dependency (2026-08-10, TODO-562)
+
+- Observer flow: root transport connection construction -> `qf-fec::FecObserver` -> `qf-transport-types::TransportObserver`. The product connection-owned root adapter remains responsible for applying Brain FEC deltas to live transport state.
+- H3 environment isolation uses the canonical root environment-lock compatibility path rather than the FEC test-support namespace. Frontend and Tauri are unaffected.
+- Verification: qf-fec `82/82`; focused H3 isolation `1/1`; root all-feature library tests `1,693/1,693`; all-feature checking; strict child/workspace Clippy; formatting and diff hygiene. Final target/free space is `5,894,708 / 16,234,368 KiB`.

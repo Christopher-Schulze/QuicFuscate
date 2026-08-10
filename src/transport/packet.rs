@@ -184,7 +184,7 @@ pub fn connect_with_clock(
     // Attach lightweight FEC transport observer to collect ECN/ACK telemetry
     // (policy application remains optional and external)
     {
-        let obs_arc = crate::fec::FecTransportObserver::new();
+        let obs_arc = std::sync::Arc::new(qf_fec::FecObserver::new());
         let obs_trait: std::sync::Arc<dyn crate::transport::TransportObserver> = obs_arc;
         conn.set_observer(Some(obs_trait));
     }
@@ -244,7 +244,7 @@ pub fn accept_with_clock(
     // Attach lightweight FEC transport observer to collect ECN/ACK telemetry
     // (policy application remains optional and external)
     {
-        let obs_arc = crate::fec::FecTransportObserver::new();
+        let obs_arc = std::sync::Arc::new(qf_fec::FecObserver::new());
         let obs_trait: std::sync::Arc<dyn crate::transport::TransportObserver> = obs_arc;
         conn.set_observer(Some(obs_trait));
     }

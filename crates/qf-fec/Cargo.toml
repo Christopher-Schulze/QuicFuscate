@@ -27,6 +27,7 @@ qf-cpu = { path = "../qf-cpu" }
 qf-memory-pool = { path = "../qf-memory-pool" }
 qf-simd = { path = "../qf-simd" }
 qf-telemetry = { path = "../qf-telemetry" }
+qf-transport-types = { path = "../qf-transport-types" }
 rayon = "1.7"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"

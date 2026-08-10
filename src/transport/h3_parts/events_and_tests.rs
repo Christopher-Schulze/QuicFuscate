@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn h3_constructor_does_not_mutate_fec_environment() {
-        let _env_lock = crate::fec::test_support::acquire_env_lock();
+        let _env_lock = crate::env_utils::test_support::acquire_env_lock();
         let before = std::env::var_os("QUICFUSCATE_FEC_SWITCH_THRESH");
         let mut conn = make_conn();
         let cfg = super::Config::new().expect("cfg");

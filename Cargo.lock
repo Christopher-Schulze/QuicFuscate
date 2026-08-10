@@ -1576,6 +1576,7 @@ dependencies = [
  "qf-memory-pool",
  "qf-simd",
  "qf-telemetry",
+ "qf-transport-types",
  "rayon",
  "serde",
  "toml",

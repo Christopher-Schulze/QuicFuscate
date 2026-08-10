@@ -5,6 +5,7 @@ pub(crate) struct FecTransportObserver {
 }
 
 impl FecTransportObserver {
+    #[cfg(test)]
     pub(crate) fn new() -> Arc<Self> {
         let environment = crate::env_utils::EnvSnapshot::capture();
         Self::new_with_snapshot(&environment)
