@@ -162,6 +162,12 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 qf-common = { path = "crates/qf-common", features = ["rust-tests"] }
+qf-fec = { path = "crates/qf-fec", features = ["rust-tests"] }
+qf-stealth = { path = "crates/qf-stealth", features = ["rust-tests"] }
+qf-transport-batch = { path = "crates/qf-transport-batch", features = ["rust-tests"] }
+qf-transport-recovery = { path = "crates/qf-transport-recovery", features = ["rust-tests"] }
+qf-transport-types = { path = "crates/qf-transport-types", features = ["rust-tests"] }
+qf-transport-udp = { path = "crates/qf-transport-udp", features = ["rust-tests"] }
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 

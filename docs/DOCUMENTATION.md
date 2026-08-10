@@ -6867,3 +6867,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Default package tests pass qf-compress `17/17` and qf-fec `82/82`, and strict default all-target Clippy passes for both packages. Strict workspace all-feature library/binary/example Clippy also passes.
 - The exact default workspace all-target Clippy lane now compiles both accounting consumers and exposes the next independent feature-ownership defect: the root test target references test-only APIs from qf-fec and several transport/stealth leaves without enabling their `rust-tests` features. The observed root compilation stops with `81` errors; no pool-accounting error remains.
 - The broad failed lane reduced free space below the 2-GiB build floor, so `cargo clean` removed `52,002` generated files and `11.7 GiB` before the successful fresh all-feature gate. Final target/free space is `577,064 / 12,466,456 KiB`. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## Root Default Test Feature Ownership (2026-08-10, TODO-562)
+
+- The root unit-test target now enables exactly the six leaf test surfaces it consumes through root dev-dependencies: qf-fec, qf-stealth, qf-transport-batch, qf-transport-recovery, qf-transport-types, and qf-transport-udp. The root's normal dependency declarations remain feature-free, so production builds do not expose these hidden test APIs.
+- The Stealth acceleration module imports `FeatureDetector` only for x86_64 production code or test, benchmark, and rust-tests builds. Default non-x86 library builds no longer retain an unused test-only import.
+- The exact previously failing `cargo clippy --workspace --locked --all-targets -- -D warnings` lane passes. The default root library suite passes `1,615/1,615`; strict workspace all-feature library/binary/example Clippy and formatting also pass.
+- Final target/free space is `3,348,156 / 9,435,932 KiB`, below the cleanup threshold and above the build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.

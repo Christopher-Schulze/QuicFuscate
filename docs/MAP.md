@@ -2999,3 +2999,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Test flow: qf-compress or qf-fec test target -> package-local qf-memory-pool dev-dependency with `rust-tests` -> hidden `MemoryPool::accounting_snapshot` assertion surface. Normal qf-compress/qf-fec dependency edges remain feature-free for production builds.
 - Verification: qf-compress `17/17`; qf-fec `82/82`; strict default all-target Clippy for both packages; strict workspace all-feature library/binary/example Clippy. The exact default workspace all-target lane no longer reports pool-accounting errors and reaches a separate root test-feature forwarding gap with `81` errors.
 - Cleanup: the 2-GiB free-space guard triggered after the broad failed lane; `cargo clean` removed `52,002` generated files and `11.7 GiB`. Final target/free space is `577,064 / 12,466,456 KiB`. Frontend and Tauri paths are unaffected.
+
+## Root Default Test Feature Ownership (2026-08-10, TODO-562)
+
+- Test dependency flow: root unit tests -> six root dev-dependencies with `rust-tests` -> qf-fec, qf-stealth, qf-transport-batch, qf-transport-recovery, qf-transport-types, and qf-transport-udp hidden test contracts. Normal product dependency edges remain feature-free.
+- Compile flow: x86_64 product code or root test/benchmark/rust-tests code -> root Stealth `FeatureDetector` import. Default non-x86 product code does not compile the unused import.
+- Verification: exact default workspace all-target Clippy with warnings denied; default root library `1,615/1,615`; strict workspace all-feature library/binary/example Clippy; formatting. Final target/free space is `3,348,156 / 9,435,932 KiB`; frontend and Tauri are unaffected.

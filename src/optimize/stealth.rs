@@ -1,6 +1,7 @@
 //! Ultra-sophisticated stealth acceleration module
 //! Complete HW acceleration for pattern injection, entropy mixing, HTTP/TLS mimicry
 
+#[cfg(any(target_arch = "x86_64", test, feature = "rust-tests", feature = "benches"))]
 use crate::optimize::FeatureDetector;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
