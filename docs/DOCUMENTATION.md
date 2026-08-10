@@ -6761,3 +6761,8 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Focused UDP-fastpath compatibility tests pass `6/6`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,248,376 KiB` target usage and `18,006,276 KiB` free.
 - UDP fastpath fallback behavior, public interface compatibility exports, production transport, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-transport-fastpath-test-postpush/workspace-seams.json` at source revision `4ec1fb9f072c68d2f85c626baa266eba66480d0a`: `36` packages, `334` Rust files, `207,079` source lines, `112` module edges, `115` workspace dependency edges, and `protected_changes=[]`. The direct `transport -> interface` edge is removed, splitting the former 9-module product SCC into `brain/fec/qftls/stealth/transport` and `engine/implementations/interface`; `core` is no longer in a product SCC.
+
+## FEC Brain-Hint Test Dependency (2026-08-10, TODO-562)
+
+- Root FEC observer tests construct the canonical `qf-fec::BrainFecHints` contract directly instead of using the concrete root `StealthBrain` as a test fixture factory. Production FEC/Brain behavior, public compatibility paths, frontend, and Tauri behavior remain unchanged.
+- The focused runtime-hint tests pass `2/2`; the complete root all-feature library suite passes `1,693/1,693`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,246,792 KiB` target usage and `17,953,880 KiB` free.

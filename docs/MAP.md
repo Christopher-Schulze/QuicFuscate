@@ -2893,3 +2893,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused UDP-fastpath compatibility tests `6/6`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,248,376 / 18,006,276 KiB`.
 - Production transport, interface, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-transport-fastpath-test-postpush/workspace-seams.json` at source revision `4ec1fb9f072c68d2f85c626baa266eba66480d0a`; `36` packages, `334` Rust files, `207,079` source lines, `112` module edges, `115` workspace dependency edges, and `protected_changes=[]`. `transport -> interface` is absent. The former 9-module product SCC is split into `brain/fec/qftls/stealth/transport` and `engine/implementations/interface`; `core` is acyclic relative to those product modules.
+
+## FEC Brain-Hint Test Dependency (2026-08-10, TODO-562)
+
+- Test contract flow: `qf-fec::BrainFecHints` -> root `FecTransportObserver` compatibility tests. The FEC test module no longer routes this child-owned state through the concrete root Brain runtime.
+- Verification: focused runtime-hint tests `2/2`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,246,792 / 17,953,880 KiB`.
+- Production FEC, Brain, frontend, and Tauri behavior remain unchanged.

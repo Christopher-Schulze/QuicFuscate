@@ -1509,8 +1509,7 @@ fn test_observer_sync_runtime_hints_only_pushes_fec_owned_deltas() {
     let mut conn = crate::transport::packet::connect(None, scid.as_ref(), local, peer, &mut cfg)
         .expect("connect");
     let observer = FecTransportObserver::new();
-    let brain = crate::brain::StealthBrain::new(crate::brain::StealthBrainConfig::default());
-    let brain_hints = brain.fec_hints();
+    let brain_hints = Arc::new(qf_fec::BrainFecHints::new());
     observer.attach_brain_hints(brain_hints.clone());
 
     conn.set_ack_eliciting_threshold(9);
@@ -1547,10 +1546,8 @@ fn test_observer_runtime_hints_are_connection_local() {
 
     let first_observer = FecTransportObserver::new();
     let second_observer = FecTransportObserver::new();
-    let first_brain = crate::brain::StealthBrain::new(crate::brain::StealthBrainConfig::default());
-    let second_brain = crate::brain::StealthBrain::new(crate::brain::StealthBrainConfig::default());
-    let first_hints = first_brain.fec_hints();
-    let second_hints = second_brain.fec_hints();
+    let first_hints = Arc::new(qf_fec::BrainFecHints::new());
+    let second_hints = Arc::new(qf_fec::BrainFecHints::new());
     first_hints.set_redundancy_ppm(120_000);
     second_hints.set_redundancy_ppm(280_000);
     first_observer.attach_brain_hints(first_hints);
