@@ -468,18 +468,26 @@ mod imp {
             }
         }
 
-        fn into_parts(self) -> Result<(WintunLib, *mut c_void, *mut c_void, HANDLE), io::Error> {
-            let Self { lib, adapter, session, shutdown_event } = self;
+        fn into_parts(
+            mut self,
+        ) -> Result<(WintunLib, *mut c_void, *mut c_void, HANDLE), io::Error> {
+            let lib = self.lib.take();
+            let adapter = self.adapter.take();
+            let session = self.session.take();
+            let shutdown_event = self.shutdown_event.take();
             match (lib, adapter, session, shutdown_event) {
                 (Some(lib), Some(adapter), Some(session), Some(shutdown_event)) => {
                     Ok((lib, adapter, session, shutdown_event))
                 }
                 (lib, adapter, session, shutdown_event) => {
-                    let mut owner = Self { lib, adapter, session, shutdown_event };
-                    let rollback_error = owner.rollback().err();
+                    self.lib = lib;
+                    self.adapter = adapter;
+                    self.session = session;
+                    self.shutdown_event = shutdown_event;
+                    let rollback_error = self.rollback().err();
                     Err(io::Error::other(format!(
                         "Wintun startup owner was incomplete; pending resources: {}; rollback: {}",
-                        owner.pending_resources(),
+                        self.pending_resources(),
                         rollback_error
                             .map_or_else(|| "not required".to_string(), |error| error.to_string())
                     )))
@@ -775,7 +783,7 @@ mod imp {
                 Err(error) => return Err(TunError::Io(error)),
             };
 
-            let mut device = Self {
+            let device = Self {
                 lib,
                 adapter,
                 session,
@@ -931,7 +939,7 @@ mod imp {
 
         #[cfg(test)]
         pub(super) fn cleanup_state_for_test(&self) -> WintunCleanupState {
-            *self.cleanup_state.lock()
+            self.cleanup_state.lock().clone()
         }
     }
 

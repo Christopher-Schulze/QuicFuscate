@@ -3093,3 +3093,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Linux outbound flow: owned batch payloads -> optional `io_uring`-only borrowed reference vector -> per-slot disposition -> filtered fallback indices/references -> sendmmsg -> socket-per-packet tail. Builds without `io_uring` start directly at the filtered sendmmsg reference set and do not construct an unused vector.
 - Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. The complete Linux cross-build remains unavailable locally because native C dependencies require a Linux C sysroot before root product code compiles.
 - Final target/free space is `6,752,040 / 2,629,932 KiB`; frontend and Tauri paths are unaffected.
+
+## Wintun Startup-Owner Transfer Portability (2026-08-10, TODO-562)
+
+- Constructor flow: loaded library owner -> adapter -> session -> shutdown event -> `Option::take` transfer -> runtime `WintunDevice`. Complete transfer empties the startup Drop ledger; incomplete transfer restores all four owners -> ordered rollback -> bounded Drop retry for any remaining native resource.
+- Test inspection clones `WintunCleanupState` while holding the mutex instead of moving through its guard. Device configuration uses immutable ownership because assignment, MTU setup, activation, and failure cleanup all operate through shared references and interior synchronization.
+- Verification: serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Complete local Windows cross-compilation remains blocked before root product code by the missing Windows C sysroot.
+- Cleanup removed `35,889` generated files and `7.8 GiB` after the free-space floor fired. Final target/free space is `0 / 9,152,212 KiB`; frontend and Tauri paths are unaffected.
