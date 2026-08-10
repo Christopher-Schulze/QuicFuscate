@@ -364,6 +364,8 @@ pub fn gfni_padding_bytes(len: usize, pad_byte: u8, seed_lo: u64, seed_hi: u64) 
 #[target_feature(enable = "avx2")]
 #[cfg(any(test, feature = "rust-tests", feature = "benches"))]
 unsafe fn add_tls_padding_avx2(record: &mut Vec<u8>, target_size: usize, padding_byte: u8) {
+    use std::arch::x86_64::*;
+
     let current_len = record.len();
     if current_len >= target_size {
         return;
