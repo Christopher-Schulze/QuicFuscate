@@ -2813,3 +2813,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Canonical owner: `crates/qf-stealth/src/intelligent_policy.rs`; compatibility owner: `src/stealth/parts/manager.rs`. Brain hysteresis and transport mutation remain root-owned, so the child has no reverse product, frontend, or Tauri dependency.
 - Verification: qf-stealth `124/124`; root all-feature check and library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-intelligent-stealth-policy-postpush/workspace-seams.json` at source revision `cfa3ee80529fd9c716b23e075a8436d3567021d0`; `36` packages, `333` Rust files, `207,092` source lines, `123` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## Runtime Policy Generation Workspace Ownership (2026-08-10, TODO-562)
+
+- Publication flow: server policy writer -> `qf-engine-types::RuntimePolicyGeneration::write_guard` -> atomic multi-domain mutation -> saturating generation advance -> live-auth readers through `read_guard`.
+- Canonical owner: `crates/qf-engine-types/src/lib.rs`; compatibility owner: `src/stealth/mod.rs`. `src/stealth/parts/runtime.rs` consumes the child contract for profile rotation and no longer defines a parallel gate.
+- Verification: qf-engine-types `19/19`; root all-feature check and library `1,697/1,697`; strict child/workspace Clippy; formatting and diff hygiene. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

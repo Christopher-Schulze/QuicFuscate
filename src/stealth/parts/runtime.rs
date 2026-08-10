@@ -9,38 +9,6 @@ pub const STEALTH_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const REALITY_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 static NEXT_STEALTH_RUNTIME_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// Shared publication gate for standalone runtime policy generations.
-///
-/// Transport, FEC, optimization, and stealth values remain owned by their
-/// existing consumers, but readers and writers hold this gate before touching
-/// those values so one generation is observed across all domains.
-#[derive(Clone)]
-pub(crate) struct RuntimePolicyGeneration {
-    value: Arc<std::sync::RwLock<u64>>,
-}
-
-impl RuntimePolicyGeneration {
-    pub(crate) fn new() -> Self {
-        Self { value: Arc::new(std::sync::RwLock::new(1)) }
-    }
-
-    pub(crate) fn current(&self) -> u64 {
-        *self.read_guard()
-    }
-
-    pub(crate) fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, u64> {
-        self.value.read().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    pub(crate) fn write_guard(&self) -> std::sync::RwLockWriteGuard<'_, u64> {
-        self.value.write().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    pub(crate) fn advance(guard: &mut std::sync::RwLockWriteGuard<'_, u64>) {
-        **guard = (**guard).saturating_add(1);
-    }
-}
-
 struct OwnedStealthWorker {
     name: &'static str,
     handle: JoinHandle<()>,

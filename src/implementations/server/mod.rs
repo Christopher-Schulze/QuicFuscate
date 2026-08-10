@@ -108,9 +108,10 @@ use crate::optimize::ZeroCopyBuffer;
 #[cfg(unix)]
 use crate::optimize::ZeroCopyRecvBuffer;
 use crate::stealth::{
-    BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, RuntimePolicyGeneration,
-    StealthConfig, StealthMode, StealthRuntimeOwner,
+    BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, StealthConfig,
+    StealthMode, StealthRuntimeOwner,
 };
+use qf_engine_types::RuntimePolicyGeneration;
 
 const SERVER_STATS_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const LIVE_UDP_DATAGRAM_BUFFER_SIZE: usize = 65_535;

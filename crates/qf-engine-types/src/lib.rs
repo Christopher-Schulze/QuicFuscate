@@ -41,6 +41,48 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Shared publication gate for one coherent runtime policy generation.
+///
+/// Readers and writers hold the returned guards while accessing the transport,
+/// FEC, optimization, and stealth values governed by the generation.
+#[derive(Clone)]
+pub struct RuntimePolicyGeneration {
+    value: std::sync::Arc<std::sync::RwLock<u64>>,
+}
+
+impl RuntimePolicyGeneration {
+    /// Create a publication gate at the initial generation.
+    pub fn new() -> Self {
+        Self { value: std::sync::Arc::new(std::sync::RwLock::new(1)) }
+    }
+
+    /// Read the currently published generation.
+    pub fn current(&self) -> u64 {
+        *self.read_guard()
+    }
+
+    /// Hold the shared publication gate for a coherent read.
+    pub fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, u64> {
+        self.value.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Hold the exclusive publication gate while updating governed values.
+    pub fn write_guard(&self) -> std::sync::RwLockWriteGuard<'_, u64> {
+        self.value.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Publish the next generation without wrapping at the integer boundary.
+    pub fn advance(guard: &mut std::sync::RwLockWriteGuard<'_, u64>) {
+        **guard = (**guard).saturating_add(1);
+    }
+}
+
+impl Default for RuntimePolicyGeneration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Zeroizing owner for an engine configuration QKey bearer token.
 #[derive(Clone)]
 pub struct QKeyToken(qf_common::secret::SecretString);
@@ -1505,6 +1547,22 @@ mod tests {
         assert_eq!(EngineState::Created.to_string(), "Created");
         assert_eq!(EngineState::Connected.to_string(), "Connected");
         assert_eq!(EngineState::Error.to_string(), "Error");
+    }
+
+    #[test]
+    fn runtime_policy_generation_is_shared_and_saturating() {
+        let generation = RuntimePolicyGeneration::new();
+        let observer = generation.clone();
+        assert_eq!(observer.current(), 1);
+
+        let mut guard = generation.write_guard();
+        RuntimePolicyGeneration::advance(&mut guard);
+        assert_eq!(*guard, 2);
+        *guard = u64::MAX;
+        RuntimePolicyGeneration::advance(&mut guard);
+        drop(guard);
+
+        assert_eq!(observer.current(), u64::MAX);
     }
 
     #[test]

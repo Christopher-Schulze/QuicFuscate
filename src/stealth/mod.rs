@@ -61,6 +61,7 @@ use std::sync::{Arc, Mutex};
 use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::OptimizationManager; // Assumed for integration
 use crate::telemetry;
+pub(crate) use qf_engine_types::RuntimePolicyGeneration;
 pub(crate) use qf_stealth::TlsCoverCipherPreference;
 pub use qf_stealth::{RateChoker, ServerPushState, ServerPushTriggerReason};
 
