@@ -11,13 +11,13 @@ fn run_chacha20_x4_backend(backend: &str, counter: &quicfuscate::optimize::telem
     struct OverrideGuard;
     impl Drop for OverrideGuard {
         fn drop(&mut self) {
-            quicfuscate::optimize::crypto::__test_set_chacha20_x4_override(None);
+            quicfuscate::optimize::simd::crypto::__test_set_chacha20_x4_override(None);
         }
     }
 
     let _guard = OverrideGuard;
-    quicfuscate::optimize::crypto::__test_set_chacha20_x4_override(Some(backend));
-    let blocks = quicfuscate::optimize::crypto::chacha20_blocks_x4(&key, &nonce, ctr);
+    quicfuscate::optimize::simd::crypto::__test_set_chacha20_x4_override(Some(backend));
+    let blocks = quicfuscate::optimize::simd::crypto::chacha20_blocks_x4(&key, &nonce, ctr);
 
     for (idx, block) in blocks.iter().enumerate() {
         let expected = chacha20_block(&key, ctr.wrapping_add(idx as u32), &nonce);
