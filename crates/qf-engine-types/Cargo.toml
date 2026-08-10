@@ -8,12 +8,19 @@ publish = false
 
 [dependencies]
 base64 = "0.21"
+qf-audit = { path = "../qf-audit" }
 qf-common = { path = "../qf-common" }
 qf-cpu = { path = "../qf-cpu" }
+qf-crypto = { path = "../qf-crypto" }
 qf-firewall = { path = "../qf-firewall" }
 qf-fec = { path = "../qf-fec" }
+qf-logging = { path = "../qf-logging" }
 qf-memory-lock = { path = "../qf-memory-lock" }
+qf-stealth = { path = "../qf-stealth" }
+qf-telemetry = { path = "../qf-telemetry" }
+qf-transport-anti-replay = { path = "../qf-transport-anti-replay" }
 qf-transport-cc = { path = "../qf-transport-cc" }
+qf-transport-nat = { path = "../qf-transport-nat" }
 qf-transport-recovery = { path = "../qf-transport-recovery" }
 qf-transport-types = { path = "../qf-transport-types" }
 qf-transport-version = { path = "../qf-transport-version" }
@@ -22,3 +29,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 sysinfo = "0.35"
+toml = "0.8"

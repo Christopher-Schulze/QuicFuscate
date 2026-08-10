@@ -19,34 +19,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URLSAFE, Engine 
 #[cfg(test)]
 const MAX_QKEY_CHARS: usize = 16 * 1024;
 
-/// Convert from EngineConfig to QKeyConfig.
-impl From<&crate::engine::EngineConfig> for QKeyConfig {
-    fn from(cfg: &crate::engine::EngineConfig) -> Self {
-        let stealth = match cfg.stealth.mode {
-            crate::engine::StealthMode::Off => None,
-            crate::engine::StealthMode::Performance => Some("performance".to_string()),
-            crate::engine::StealthMode::Stealth => Some("stealth".to_string()),
-            crate::engine::StealthMode::AntiDpi => Some("anti-dpi".to_string()),
-            crate::engine::StealthMode::Manual => Some("manual".to_string()),
-            crate::engine::StealthMode::Auto => Some("auto".to_string()),
-        };
-
-        let fec = match cfg.fec.mode {
-            crate::engine::FecMode::Off => None,
-            crate::engine::FecMode::Auto => Some("auto".to_string()),
-        };
-
-        let mut qkey = QKeyConfig::new(&cfg.connection.remote, &cfg.connection.sni);
-        if let Some(s) = stealth {
-            qkey = qkey.with_stealth(&s);
-        }
-        if let Some(f) = fec {
-            qkey = qkey.with_fec(&f);
-        }
-        qkey
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

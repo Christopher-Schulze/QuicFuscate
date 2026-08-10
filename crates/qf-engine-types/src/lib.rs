@@ -1,24 +1,37 @@
 //! Root-independent engine configuration, lifecycle, error, event, and statistics contracts.
 //!
-//! The runtime engine remains in the root crate because it owns concrete client, server, TUN,
-//! transport, and configuration implementations. These values contain no such implementation
-//! dependencies, so control-plane consumers can share the contracts without importing the
-//! product runtime.
+//! The runtime engine remains in the root crate because it owns concrete client, server, TUN, and
+//! transport implementations. The aggregate configuration and these contracts contain no such
+//! runtime dependencies, so control-plane consumers can share them without importing the product
+//! runtime.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod config;
 mod qkey;
 
+pub use config::{
+    EngineConfig, EngineConfigBuilder, StealthSection, MAX_NORMALIZE_TARGET_SIZE,
+    MIN_NORMALIZE_TARGET_SIZE,
+};
+pub use qf_audit::AuditConfig;
+pub use qf_crypto::{CryptoConfig, DataAeadPreference as AeadPreference};
 pub use qf_firewall::FirewallConfig;
+pub use qf_logging::{LogFormat, LoggingConfig, LoggingMode};
 pub use qf_memory_lock::MemoryLockFailurePolicy;
+pub use qf_stealth::{FingerprintRotationConfig, RotationMode};
+pub use qf_telemetry::TelemetryConfig;
+pub use qf_transport_anti_replay::AntiReplaySection;
+pub use qf_transport_cc::cc::Algorithm as CcAlgorithm;
+pub use qf_transport_nat::NatTraversalSection;
+pub use qf_transport_version::QuicVersion;
 pub use qkey::{generate, id, parse, QKeyError, QKEY_PREFIX};
 
 /// Failure returned while loading, parsing, or validating the aggregate engine configuration.
 ///
-/// The error carries only stable text because the root engine owns the concrete configuration
-/// sections and their implementation-specific error types. Keeping this boundary in the contract
-/// crate lets callers handle configuration failures without importing the runtime engine.
+/// The error carries only stable text so callers can handle configuration failures without
+/// importing implementation-specific error types or the runtime engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// Filesystem I/O error while loading a configuration file.

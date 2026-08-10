@@ -42,12 +42,11 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
-use crate::engine::EngineConfig;
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;
 use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
-use qf_engine_types::{DataPlaneFault, DisconnectReason, EngineError, EngineState};
+use qf_engine_types::{DataPlaneFault, DisconnectReason, EngineConfig, EngineError, EngineState};
 
 /// Client runtime handle for the VPN client.
 ///

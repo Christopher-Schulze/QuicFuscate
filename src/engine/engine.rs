@@ -27,10 +27,12 @@ use crate::transport::{self, CongestionControlAlgorithm};
 use qf_memory_lock::MemoryLockPolicy;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
+#[cfg(test)]
+use qf_engine_types::DataPlaneFault;
+
 pub use qf_engine_types::{
-    DataPlaneFault, DisconnectReason, EngineCallback, EngineCommand, EngineCommandResult,
-    EngineError, EngineEvent, EngineState, EngineStats, FecPolicyCommandResult,
-    FecPolicyCommandScope, StatsSnapshot,
+    DisconnectReason, EngineCallback, EngineCommand, EngineCommandResult, EngineError, EngineEvent,
+    EngineState, EngineStats, FecPolicyCommandResult, FecPolicyCommandScope, StatsSnapshot,
 };
 
 fn build_server_optimize_config(

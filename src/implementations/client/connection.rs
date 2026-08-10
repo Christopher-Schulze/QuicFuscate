@@ -4,10 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::core::QuicFuscateConnection;
-use crate::engine::EngineConfig;
 use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
-use qf_engine_types::EngineError;
+use qf_engine_types::{EngineConfig, EngineError};
 
 /// Client connection wrapper.
 ///

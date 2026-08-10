@@ -10,9 +10,8 @@ use super::connection::ClientConnection;
 use super::platform::{
     self, DnsConfig, PlatformBackend, PlatformError, RouteConfig, TunDeviceConfig, TunHandle,
 };
-use crate::engine::EngineConfig;
 use crate::time_source::ProtocolClock;
-use qf_engine_types::{self as qkey, EngineError};
+use qf_engine_types::{self as qkey, EngineConfig, EngineError};
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

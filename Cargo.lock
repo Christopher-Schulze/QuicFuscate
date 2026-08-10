@@ -1543,12 +1543,19 @@ version = "0.4.4"
 dependencies = [
  "base64 0.21.7",
  "log",
+ "qf-audit",
  "qf-common",
  "qf-cpu",
+ "qf-crypto",
  "qf-fec",
  "qf-firewall",
+ "qf-logging",
  "qf-memory-lock",
+ "qf-stealth",
+ "qf-telemetry",
+ "qf-transport-anti-replay",
  "qf-transport-cc",
+ "qf-transport-nat",
  "qf-transport-recovery",
  "qf-transport-types",
  "qf-transport-version",
@@ -1556,6 +1563,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sysinfo",
+ "toml",
 ]
 
 [[package]]
