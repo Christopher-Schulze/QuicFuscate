@@ -3169,3 +3169,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Only the local iterator binding changes. All four synchronous and worker callers, overflow errors, bounds, dispositions, pointer ownership, and kernel interaction remain identical.
 - Verification: exact local workspace `io_uring` all-target Clippy and strict workspace all-feature library/binary/example Clippy with warnings denied; formatting, diff hygiene, documentation truth, and runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_230058/audit-runtime-guardrails.log`. The Linux-only owner is cfg-excluded locally, so hosted Ubuntu remains the authoritative changed-line compilation gate.
 - Final target/free space is `1,940,164 / 5,240,264 KiB`; frontend and Tauri paths are unaffected.
+
+## SIMD GF Backend Telemetry Ownership (2026-08-10, TODO-562)
+
+- x86 GF(2^8) flow: qf-simd runtime features -> AVX-512F plus GFNI -> GFNI kernel -> `FEC_GFNI_OPS`; otherwise AVX2 -> AVX2 kernel -> `FEC_AVX2_OPS`; otherwise scalar fallback. AArch64 retains SVE2, NEON-PMULL, NEON, and scalar selection with its existing counters.
+- Self-check flow: query the same `CpuFeatures` instance -> select the expected active x86 counter -> execute public `galois::gf_mul` -> require a monotonic counter increase; hosts without either x86 vector backend emit an explicit SIMD skip.
+- Verification: qf-simd tests `61/61`; locked Linux-x86 qf-simd all-target/all-feature Clippy with warnings denied; strict workspace all-feature library/binary/example Clippy; formatting, diff hygiene, documentation truth, and runtime guardrails with zero findings at `scripts/out/audits/audit-runtime-guardrails-20260810_231825/audit-runtime-guardrails.log`. The root integration binary rebuild was disk-aborted before execution, so hosted Ubuntu remains the x86 runtime owner.
+- The floor-triggered `cargo clean` removed `20,229` files and `2.6 GiB`. Final target/free space is `447,752 / 5,381,352 KiB`; frontend and Tauri paths are unaffected.

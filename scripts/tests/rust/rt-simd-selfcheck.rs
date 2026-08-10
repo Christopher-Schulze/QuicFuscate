@@ -156,20 +156,26 @@ fn gf_mul_slice_telemetry_tracks_backend() {
     #[cfg(target_arch = "x86_64")]
     {
         use quicfuscate::optimize::telemetry;
-        if !std::is_x86_feature_detected!("ssse3") {
-            eprintln!("SIMD_SKIP test=gf_mul_slice_telemetry_tracks_backend required=ssse3");
+        let features = quicfuscate::optimize::FeatureDetector::instance().features_full();
+        let (counter, counter_name) = if features.gfni && features.avx512f {
+            (&telemetry::FEC_GFNI_OPS, "FEC_GFNI_OPS")
+        } else if features.simd_dispatch_matrix().avx2 {
+            (&telemetry::FEC_AVX2_OPS, "FEC_AVX2_OPS")
+        } else {
+            eprintln!(
+                "SIMD_SKIP test=gf_mul_slice_telemetry_tracks_backend required=avx2-or-avx512f+gfni"
+            );
             return;
-        }
+        };
 
-        // Ensure SSSE3 counter ticks when fallback SIMD path executes.
-        let before = telemetry::FEC_SSSE3_OPS.get();
+        let before = counter.get();
         let mut dst = vec![0u8; 64];
         let src = make_data(64, 0x4242);
         galois::gf_mul(&src, 0xD3, &mut dst);
-        let after = telemetry::FEC_SSSE3_OPS.get();
+        let after = counter.get();
         assert!(
             after > before,
-            "expected FEC_SSSE3_OPS to increase (before={before}, after={after})"
+            "expected {counter_name} to increase (before={before}, after={after})"
         );
     }
 }

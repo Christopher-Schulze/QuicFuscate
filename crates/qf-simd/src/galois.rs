@@ -15,10 +15,14 @@ pub fn gf_mul(a: &[u8], b: u8, dst: &mut [u8]) {
         let full = features.features_full();
         // GFNI usage requires AVX-512F+GFNI on x86_64 in this codebase
         if full.gfni && full.avx512f {
-            return unsafe { super::x86::gf_mul_avx512_gfni(a, b, dst) };
+            unsafe { super::x86::gf_mul_avx512_gfni(a, b, dst) };
+            qf_telemetry::FEC_GFNI_OPS.inc();
+            return;
         }
         if full.simd_dispatch_matrix().avx2 {
-            return unsafe { super::x86::gf_mul_avx2(a, b, dst) };
+            unsafe { super::x86::gf_mul_avx2(a, b, dst) };
+            qf_telemetry::FEC_AVX2_OPS.inc();
+            return;
         }
     }
 
