@@ -226,24 +226,20 @@ fn map_server_cc_algorithm(cc: super::config::CcAlgorithm) -> CongestionControlA
 fn load_runtime_profile_values(
     config: &EngineConfig,
 ) -> Result<
-    (
-        crate::stealth::BrowserProfile,
-        crate::stealth::OsProfile,
-        Vec<crate::stealth::FingerprintProfile>,
-    ),
+    (qf_stealth::BrowserProfile, qf_stealth::OsProfile, Vec<qf_stealth::FingerprintProfile>),
     EngineError,
 > {
     let browser =
-        config.stealth.initial_browser.parse::<crate::stealth::BrowserProfile>().map_err(|_| {
+        config.stealth.initial_browser.parse::<qf_stealth::BrowserProfile>().map_err(|_| {
             EngineError::Config(format!(
                 "invalid initial_browser profile: {}",
                 config.stealth.initial_browser
             ))
         })?;
-    let os = config.stealth.initial_os.parse::<crate::stealth::OsProfile>().map_err(|_| {
+    let os = config.stealth.initial_os.parse::<qf_stealth::OsProfile>().map_err(|_| {
         EngineError::Config(format!("invalid initial_os profile: {}", config.stealth.initial_os))
     })?;
-    crate::stealth::FingerprintProfile::try_new(browser, os)
+    qf_stealth::FingerprintProfile::try_new(browser, os)
         .map_err(|error| EngineError::Config(format!("invalid initial profile: {error}")))?;
     let runtime =
         config.stealth.to_runtime_config(&config.fingerprint_rotation).map_err(|error| {
@@ -256,7 +252,7 @@ fn load_runtime_profile_values(
 
 fn build_server_runtime_profiles(
     config: &EngineConfig,
-) -> Result<(qf_fec::FecConfig, crate::stealth::StealthConfig), EngineError> {
+) -> Result<(qf_fec::FecConfig, qf_stealth::StealthConfig), EngineError> {
     let config_text = toml::to_string(config).map_err(|error| {
         EngineError::Config(format!("failed to serialize server config: {error}"))
     })?;
@@ -601,7 +597,7 @@ impl QuicFuscateEngine {
                     let transport = build_runtime_transport_config(&self.config)?;
                     let (profile, os, mut profiles) = load_runtime_profile_values(&self.config)?;
                     if profiles.is_empty() {
-                        profiles = vec![crate::stealth::FingerprintProfile::try_new(profile, os)
+                        profiles = vec![qf_stealth::FingerprintProfile::try_new(profile, os)
                             .map_err(EngineError::Config)?];
                     }
                     let fec_mode_override = Some(self.config.fec.mode);
@@ -1191,7 +1187,7 @@ impl QuicFuscateEngine {
     }
 
     /// Get the effective runtime stealth mode from the active client connection.
-    pub fn active_stealth_mode(&self) -> Option<crate::stealth::StealthMode> {
+    pub fn active_stealth_mode(&self) -> Option<qf_stealth::StealthMode> {
         self.client_runtime
             .as_ref()
             .and_then(|runtime| runtime.connection())

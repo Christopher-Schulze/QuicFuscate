@@ -2872,3 +2872,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused engine tests `79/79`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,172,140 / 18,257,012 KiB`.
 - Runtime policy, serialization, public compatibility paths, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-engine-fec-contract-postpush/workspace-seams.json` at source revision `588f51d2fddd207f17f96c049f93e34c5a97a7d1`; `36` packages, `334` Rust files, `207,083` source lines, `115` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `engine -> fec` is absent.
+
+## Engine Stealth-Contract Dependency (2026-08-10, TODO-562)
+
+- Contract flow: canonical `qf-stealth` profile, configuration, padding, rotation, and mode contracts -> engine aggregation, validation, runtime projection, profile construction, and active-mode observation. Root engine no longer routes these contracts through the root `stealth` compatibility namespace.
+- Verification: focused engine tests `79/79`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,211,928 / 18,216,776 KiB`.
+- Concrete manager/runtime ownership, frontend, Tauri, and wire behavior remain unchanged.

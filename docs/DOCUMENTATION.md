@@ -6740,3 +6740,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Focused engine tests pass `79/79`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,172,140 KiB` target usage and `18,257,012 KiB` free.
 - Configuration serialization, runtime policy behavior, public engine and FEC compatibility exports, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-engine-fec-contract-postpush/workspace-seams.json` at source revision `588f51d2fddd207f17f96c049f93e34c5a97a7d1`: `36` packages, `334` Rust files, `207,083` source lines, `115` module edges, `115` workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`. The direct `engine -> fec` edge is removed.
+
+## Engine Stealth-Contract Dependency (2026-08-10, TODO-562)
+
+- Engine configuration aggregation, validation, runtime projection, profile construction, and active-mode observation now consume their browser, OS, fingerprint, padding, rotation, mode, and runtime configuration contracts directly from canonical `qf-stealth` ownership. All 39 former `engine -> stealth` references were compatibility-path indirections.
+- Focused engine tests pass `79/79`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,211,928 KiB` target usage and `18,216,776 KiB` free.
+- Stealth manager ownership, profile validation, runtime behavior, public engine and stealth compatibility exports, frontend, and Tauri behavior remain unchanged.

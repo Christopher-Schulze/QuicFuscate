@@ -34,8 +34,8 @@ pub use qf_transport_version::QuicVersion;
 
 // Re-export existing configs for aggregation
 pub use crate::optimize::OptimizeConfig;
-pub use crate::stealth::StealthConfig;
 pub use qf_fec::FecConfig;
+pub use qf_stealth::StealthConfig;
 
 /// Complete engine configuration aggregating all subsystems.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -271,16 +271,16 @@ impl Default for StealthSection {
 }
 
 impl StealthSection {
-    fn parse_padding_strategy(value: &str) -> Option<crate::stealth::PaddingStrategy> {
+    fn parse_padding_strategy(value: &str) -> Option<qf_stealth::PaddingStrategy> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "random" | "1" => Some(crate::stealth::PaddingStrategy::Random),
-            "fixed" | "constant" | "2" => Some(crate::stealth::PaddingStrategy::Fixed),
-            "adaptive" | "3" => Some(crate::stealth::PaddingStrategy::Adaptive),
+            "random" | "1" => Some(qf_stealth::PaddingStrategy::Random),
+            "fixed" | "constant" | "2" => Some(qf_stealth::PaddingStrategy::Fixed),
+            "adaptive" | "3" => Some(qf_stealth::PaddingStrategy::Adaptive),
             "browser" | "browser_mimic" | "browser-mimic" | "browsermimic" | "mimic" | "4" => {
-                Some(crate::stealth::PaddingStrategy::BrowserMimic)
+                Some(qf_stealth::PaddingStrategy::BrowserMimic)
             }
             "normalize" | "packet_normalize" | "packet-normalize" | "packetnormalize" | "5" => {
-                Some(crate::stealth::PaddingStrategy::PacketNormalize)
+                Some(qf_stealth::PaddingStrategy::PacketNormalize)
             }
             _ => None,
         }
@@ -292,17 +292,17 @@ impl StealthSection {
     pub fn to_runtime_config(
         &self,
         rotation: &FingerprintRotationConfig,
-    ) -> Result<crate::stealth::StealthConfig, ConfigError> {
+    ) -> Result<qf_stealth::StealthConfig, ConfigError> {
         rotation.validate().map_err(ConfigError::Validation)?;
         let runtime_mode = match self.mode {
-            StealthMode::Off => crate::stealth::StealthMode::Off,
-            StealthMode::Performance => crate::stealth::StealthMode::Performance,
-            StealthMode::Stealth => crate::stealth::StealthMode::Stealth,
-            StealthMode::AntiDpi => crate::stealth::StealthMode::AntiDpi,
-            StealthMode::Manual => crate::stealth::StealthMode::Manual,
-            StealthMode::Auto => crate::stealth::StealthMode::Intelligent,
+            StealthMode::Off => qf_stealth::StealthMode::Off,
+            StealthMode::Performance => qf_stealth::StealthMode::Performance,
+            StealthMode::Stealth => qf_stealth::StealthMode::Stealth,
+            StealthMode::AntiDpi => qf_stealth::StealthMode::AntiDpi,
+            StealthMode::Manual => qf_stealth::StealthMode::Manual,
+            StealthMode::Auto => qf_stealth::StealthMode::Intelligent,
         };
-        let mut runtime = crate::stealth::StealthConfig::from_mode(runtime_mode);
+        let mut runtime = qf_stealth::StealthConfig::from_mode(runtime_mode);
         runtime.enable_domain_fronting = self.enable_domain_fronting;
         runtime.enable_http3_masquerading = self.enable_http3_masquerading;
         runtime.use_tls_cover = self.use_tls_cover;
@@ -329,7 +329,7 @@ impl StealthSection {
                 self.initial_os
             ))
         })?;
-        crate::stealth::FingerprintProfile::try_new(runtime.initial_browser, runtime.initial_os)
+        qf_stealth::FingerprintProfile::try_new(runtime.initial_browser, runtime.initial_os)
             .map_err(|error| {
                 ConfigError::Validation(format!(
                     "stealth.initial_browser/initial_os has unsupported combination '{}@{}': {error}",
@@ -344,7 +344,7 @@ impl StealthSection {
                 ))
             })?;
         runtime.normalize_target_size = self.normalize_target_size;
-        if runtime.padding_strategy == crate::stealth::PaddingStrategy::PacketNormalize {
+        if runtime.padding_strategy == qf_stealth::PaddingStrategy::PacketNormalize {
             if self.normalize_target_size == 0 {
                 return Err(ConfigError::Validation(
                     "stealth.padding_strategy=normalize requires stealth.normalize_target_size"
@@ -379,7 +379,7 @@ impl StealthSection {
             .profile_slots
             .iter()
             .map(|slot| {
-                crate::stealth::parse_fingerprint_profile_slot(slot, runtime.initial_os)
+                qf_stealth::parse_fingerprint_profile_slot(slot, runtime.initial_os)
                     .map(|profile| (profile.browser, profile.os))
                     .map_err(|error| {
                         ConfigError::Validation(format!(
@@ -591,7 +591,7 @@ suppress_icmp_unreachable = true
             .expect("runtime stealth config");
         assert_eq!(
             runtime.padding_strategy,
-            crate::stealth::PaddingStrategy::PacketNormalize,
+            qf_stealth::PaddingStrategy::PacketNormalize,
             "the selected strategy must survive conversion"
         );
         assert_eq!(
@@ -1047,12 +1047,12 @@ mode = "roaming"
             .expect("slot rotation projects into runtime");
         assert!(runtime.enable_fingerprint_rotation);
         assert_eq!(runtime.fingerprint_rotation_interval, 17);
-        assert_eq!(runtime.fingerprint_rotation_mode, crate::stealth::RotationMode::Slots);
+        assert_eq!(runtime.fingerprint_rotation_mode, qf_stealth::RotationMode::Slots);
         assert_eq!(
             runtime.fingerprint_rotation_profiles,
             vec![
-                (crate::stealth::BrowserProfile::Firefox, crate::stealth::OsProfile::Linux),
-                (crate::stealth::BrowserProfile::Safari, crate::stealth::OsProfile::MacOS),
+                (qf_stealth::BrowserProfile::Firefox, qf_stealth::OsProfile::Linux),
+                (qf_stealth::BrowserProfile::Safari, qf_stealth::OsProfile::MacOS),
             ]
         );
         assert_eq!(runtime.rotation_profile_slots(), runtime.fingerprint_rotation_profiles);
@@ -1082,7 +1082,7 @@ mode = "roaming"
             .expect("browser-only slot projects with the initial OS");
         assert_eq!(
             inherited_runtime.rotation_profile_slots(),
-            vec![(crate::stealth::BrowserProfile::Safari, crate::stealth::OsProfile::MacOS)]
+            vec![(qf_stealth::BrowserProfile::Safari, qf_stealth::OsProfile::MacOS)]
         );
 
         let mut empty_slots = config.fingerprint_rotation.clone();

@@ -1,7 +1,7 @@
 use super::{AntiReplaySection, EngineConfig};
 use crate::optimize::OptimizeConfig;
-use crate::stealth::StealthConfig;
 use qf_fec::FecConfig;
+use qf_stealth::StealthConfig;
 
 /// Runtime projection for FEC, stealth, optimization, and anti-replay.
 ///
@@ -91,9 +91,9 @@ memory_pool_alignment = 4096
 "#,
         )
         .expect("valid engine projection");
-        assert_eq!(config.stealth.initial_browser, crate::stealth::BrowserProfile::Firefox);
-        assert_eq!(config.stealth.initial_os, crate::stealth::OsProfile::Linux);
-        assert_eq!(config.stealth.padding_strategy, crate::stealth::PaddingStrategy::BrowserMimic);
+        assert_eq!(config.stealth.initial_browser, qf_stealth::BrowserProfile::Firefox);
+        assert_eq!(config.stealth.initial_os, qf_stealth::OsProfile::Linux);
+        assert_eq!(config.stealth.padding_strategy, qf_stealth::PaddingStrategy::BrowserMimic);
         assert_eq!(config.optimize.block_size, 65_536);
         assert_eq!(config.optimize.pool_capacity, 16);
     }
