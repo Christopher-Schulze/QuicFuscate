@@ -6,6 +6,8 @@
 #[doc(hidden)]
 pub use config::{PaddingStrategy, RotationMode, StealthMode};
 #[doc(hidden)]
+pub use cover_traffic::CoverTrafficScheduler;
+#[doc(hidden)]
 pub use domain_fronting::{CdnProvider, DomainFrontingManager};
 #[doc(hidden)]
 pub use fingerprint::{
@@ -44,6 +46,8 @@ pub use probe_detector::{ActiveProbeDetector, ProbeResponseMode};
 pub mod chaff;
 #[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
+pub mod cover_traffic;
 #[doc(hidden)]
 pub mod fingerprint;
 #[doc(hidden)]

@@ -960,7 +960,7 @@ mod stealth_coverage_tests {
     fn cover_traffic_scheduler_set_interval() {
         let sched = CoverTrafficScheduler::new("cdn.example.com".into(), 5000);
         sched.set_interval_ms(1000);
-        assert_eq!(sched.interval_ms.load(std::sync::atomic::Ordering::Relaxed), 1000);
+        assert_eq!(sched.interval_ms(), 1000);
     }
 
     // =========================================================================
