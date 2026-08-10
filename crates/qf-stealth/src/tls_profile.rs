@@ -1,5 +1,8 @@
 //! Browser-shaped TLS profile contracts shared by the stealth and TLS layers.
 
+use crate::fingerprint_profile::FingerprintProfile;
+use crate::profiles::BrowserProfile;
+
 /// TLS profile for browser-shaped handshake configuration.
 #[derive(Debug, Clone)]
 pub struct TlsProfile {
@@ -132,9 +135,32 @@ impl TlsProfile {
     }
 }
 
+/// Build the browser-shaped TLS runtime profile for one fingerprint persona.
+#[doc(hidden)]
+pub fn profile_from_fingerprint(fingerprint: &FingerprintProfile) -> TlsProfile {
+    let mut profile = match fingerprint.browser {
+        BrowserProfile::Chrome => TlsProfile::chrome_130(),
+        BrowserProfile::Firefox => TlsProfile::firefox_133(),
+        BrowserProfile::Safari => TlsProfile::safari_18(),
+        BrowserProfile::Edge => TlsProfile::edge_130(),
+    };
+    if !fingerprint.tls_cipher_suites.is_empty() {
+        profile.cipher_suites = fingerprint.tls_cipher_suites.clone();
+    }
+    profile.alpn_protocols = vec!["h3".into(), "h2".into(), "http/1.1".into()];
+    profile.cipher_suites.retain(|suite| !matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9));
+    profile.cipher_suites.sort_by_key(|suite| match *suite {
+        0x1301 | 0x1302 => 0,
+        0xC02B | 0xC02F | 0xC02C | 0xC030 => 1,
+        _ => 2,
+    });
+    profile
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TlsProfile;
+    use super::{profile_from_fingerprint, TlsProfile};
+    use crate::{BrowserProfile, FingerprintProfile, OsProfile};
 
     #[test]
     fn all_browser_profiles_have_aes_gcm_and_alpn() {
@@ -189,6 +215,50 @@ mod tests {
                     | "Opera/115.0.0.0"
                     | "Brave/1.73.0"
             ));
+        }
+    }
+
+    #[test]
+    fn fingerprint_conversion_is_deterministic_and_prefers_h3() {
+        let fingerprint = FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux);
+        let first = profile_from_fingerprint(&fingerprint);
+        let second = profile_from_fingerprint(&fingerprint);
+        assert_eq!(first.name, second.name);
+        assert_eq!(first.cipher_suites, second.cipher_suites);
+        assert_eq!(first.groups, second.groups);
+        assert_eq!(first.extension_order, second.extension_order);
+        assert_eq!(first.alpn_protocols, second.alpn_protocols);
+        assert_eq!(first.alpn_protocols.first().map(String::as_str), Some("h3"));
+    }
+
+    #[test]
+    fn fingerprint_conversion_maps_every_browser_persona() {
+        let cases = [
+            (BrowserProfile::Chrome, OsProfile::Windows, "Chrome"),
+            (BrowserProfile::Firefox, OsProfile::Linux, "Firefox"),
+            (BrowserProfile::Safari, OsProfile::MacOS, "Safari"),
+            (BrowserProfile::Edge, OsProfile::Windows, "Edge"),
+        ];
+        for (browser, os, expected_name) in cases {
+            let profile = profile_from_fingerprint(&FingerprintProfile::new(browser, os));
+            assert!(profile.name.contains(expected_name));
+        }
+    }
+
+    #[test]
+    fn fingerprint_conversion_enforces_cipher_policy() {
+        for (browser, os) in [
+            (BrowserProfile::Chrome, OsProfile::Windows),
+            (BrowserProfile::Firefox, OsProfile::Linux),
+            (BrowserProfile::Safari, OsProfile::MacOS),
+            (BrowserProfile::Edge, OsProfile::Windows),
+        ] {
+            let profile = profile_from_fingerprint(&FingerprintProfile::new(browser, os));
+            assert!(!profile.cipher_suites.is_empty());
+            assert!(!profile
+                .cipher_suites
+                .iter()
+                .any(|suite| matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9)));
         }
     }
 }

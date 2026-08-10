@@ -4,9 +4,6 @@
 // Provides a single public surface: Level, TlsProfile, QuicTlsProvider, create_provider()
 
 use parking_lot::RwLock;
-#[cfg(test)]
-use qf_stealth::OsProfile;
-use qf_stealth::{BrowserProfile, FingerprintProfile};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -245,34 +242,8 @@ pub fn preload_tls_server_identity(
 // Core Types and Trait
 // ===============================
 
-/// Browser-shaped TLS profile contract owned by qf-stealth.
-pub use qf_stealth::TlsProfile;
-
-/// Build a TlsProfile from a Stealth FingerprintProfile (best-effort mapping).
-pub fn profile_from_fingerprint(fp: &FingerprintProfile) -> TlsProfile {
-    use BrowserProfile as B;
-    let mut p = match fp.browser {
-        B::Chrome => TlsProfile::chrome_130(),
-        B::Firefox => TlsProfile::firefox_133(),
-        B::Safari => TlsProfile::safari_18(),
-        B::Edge => TlsProfile::edge_130(),
-    };
-    // Apply cipher suite preference from fingerprint when available
-    if !fp.tls_cipher_suites.is_empty() {
-        p.cipher_suites = fp.tls_cipher_suites.clone();
-    }
-    // Prefer HTTP/3 first
-    p.alpn_protocols = vec!["h3".into(), "h2".into(), "http/1.1".into()];
-    // Enforce policy: remove ChaCha suites and prefer AES-GCM
-    p.cipher_suites.retain(|cs| *cs != 0x1303 && *cs != 0xCCA8 && *cs != 0xCCA9);
-    p.cipher_suites.sort_by_key(|cs| match *cs {
-        0x1301 | 0x1302 => 0,                   // TLS 1.3 AES-GCM first
-        0xC02B | 0xC02F | 0xC02C | 0xC030 => 1, // TLS 1.2 AES-GCM
-        _ => 2,
-    });
-    // Keep ECH preference per browser profile
-    p
-}
+/// Browser-shaped TLS profile contract and fingerprint conversion owned by qf-stealth.
+pub use qf_stealth::{profile_from_fingerprint, TlsProfile};
 
 #[cfg(test)]
 mod tests {
@@ -486,15 +457,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_from_fp_has_h3_first() {
-        let fp = FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows);
-        let p = profile_from_fingerprint(&fp);
-        assert!(!p.alpn_protocols.is_empty());
-        assert_eq!(p.alpn_protocols[0], "h3");
-        assert!(!p.cipher_suites.is_empty());
-    }
-
-    #[test]
     fn v2_provider_carries_version_information_transport_parameter() {
         let crypto = Arc::new(RwLock::new(CryptoContext::default()));
         let information = crate::transport::version::VersionInformation {
@@ -515,38 +477,6 @@ mod tests {
         )
         .expect("create v2 provider");
         assert!(provider.get_quic_transport_params().ends_with(&information));
-    }
-
-    #[test]
-    fn profile_from_fp_is_deterministic_for_same_input() {
-        let fp = FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux);
-        let p1 = profile_from_fingerprint(&fp);
-        let p2 = profile_from_fingerprint(&fp);
-        assert_eq!(p1.name, p2.name);
-        assert_eq!(p1.cipher_suites, p2.cipher_suites);
-        assert_eq!(p1.groups, p2.groups);
-        assert_eq!(p1.extension_order, p2.extension_order);
-        assert_eq!(p1.alpn_protocols, p2.alpn_protocols);
-    }
-
-    #[test]
-    fn profile_from_fp_enforces_tls_policy_constraints() {
-        let fps = [
-            FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows),
-            FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux),
-            FingerprintProfile::new(BrowserProfile::Safari, OsProfile::MacOS),
-            FingerprintProfile::new(BrowserProfile::Edge, OsProfile::Windows),
-        ];
-
-        for fp in fps {
-            let p = profile_from_fingerprint(&fp);
-            assert_eq!(p.alpn_protocols.first().map(String::as_str), Some("h3"));
-            assert!(
-                !p.cipher_suites.iter().any(|cs| matches!(*cs, 0x1303 | 0xCCA8 | 0xCCA9)),
-                "ChaCha suites must be removed by policy for profile {}",
-                p.name
-            );
-        }
     }
 
     #[test]
@@ -630,31 +560,6 @@ mod tests {
         assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0xff01).count(), 1);
         assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0x001b).count(), 1);
         assert!(!profile.extension_order.contains(&0x0019));
-    }
-
-    #[test]
-    fn profile_from_fingerprint_maps_browser_semantics() {
-        let chrome = profile_from_fingerprint(&FingerprintProfile::new(
-            BrowserProfile::Chrome,
-            OsProfile::Windows,
-        ));
-        let firefox = profile_from_fingerprint(&FingerprintProfile::new(
-            BrowserProfile::Firefox,
-            OsProfile::Linux,
-        ));
-        let safari = profile_from_fingerprint(&FingerprintProfile::new(
-            BrowserProfile::Safari,
-            OsProfile::MacOS,
-        ));
-        let edge = profile_from_fingerprint(&FingerprintProfile::new(
-            BrowserProfile::Edge,
-            OsProfile::Windows,
-        ));
-
-        assert!(chrome.name.contains("Chrome"));
-        assert!(firefox.name.contains("Firefox"));
-        assert!(safari.name.contains("Safari"));
-        assert!(edge.name.contains("Edge"));
     }
 
     #[test]

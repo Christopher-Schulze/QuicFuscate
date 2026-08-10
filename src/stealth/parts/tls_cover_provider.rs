@@ -147,13 +147,13 @@ impl TlsCoverProvider {
     /// Ingests inbound QUIC crypto data and updates handshake state.
     pub(crate) fn provide_quic_data(
         &mut self,
-        level: crate::qftls::Level,
+        level: qf_transport_types::QuicEncryptionLevel,
         data: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
         // Usage of is_server/crypto: telemetry and handshake status.
         let _guard = self.crypto.read();
         crate::telemetry::BYTES_RECEIVED.inc_by(data.len() as u64);
-        if matches!(level, crate::qftls::Level::Handshake) && self.is_server {
+        if matches!(level, qf_transport_types::QuicEncryptionLevel::Handshake) && self.is_server {
             self.handshake_complete = true;
         }
         Ok(())
@@ -162,7 +162,7 @@ impl TlsCoverProvider {
     /// Produces the next synthetic TLS Cover crypto frame for outbound traffic.
     pub(crate) fn next_crypto_frame(
         &mut self,
-        _level: crate::qftls::Level,
+        _level: qf_transport_types::QuicEncryptionLevel,
         max_len: usize,
     ) -> Result<Option<(u64, Vec<u8>)>, crate::error::ConnectionError> {
         // Generate sophisticated TLS Cover frames for cover traffic

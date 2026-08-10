@@ -2836,3 +2836,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused conversion `4/4`; root all-feature check and library `1,697/1,697`; strict workspace library/binary/example Clippy; formatting, documentation truth, and diff hygiene. The all-target macOS boundary remains the unchanged Linux-only kernel integration guard.
 - Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-qftls-stealth-contract-postpush/workspace-seams.json` at source revision `3af4eec3fc1653f5a77d600dd32aaf20bd582301`; `36` packages, `334` Rust files, `207,104` source lines, `120` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `qftls -> stealth` now has exactly the `2` documented adapter references instead of `34` compatibility-routed references.
+
+## TLS Profile Conversion Workspace Ownership (2026-08-10, TODO-562)
+
+- Canonical flow: `qf-stealth::FingerprintProfile` -> `qf-stealth::profile_from_fingerprint` -> `qf-stealth::TlsProfile`; compatibility projection: `qftls::{profile_from_fingerprint, TlsProfile}`.
+- Runtime flow: root stealth manager -> child conversion -> root transport/rustls configuration. TLS Cover levels now use `qf-transport-types::QuicEncryptionLevel` directly, so the root `stealth` module no longer references `qftls`.
+- Verification: qf-stealth `127/127`; root all-feature check and library `1,693/1,693`; public qftls profiles `4/4`; strict child/workspace Clippy; strict child Rustdoc; formatting and diff hygiene. The threshold clean removed `77,696` files and `15.1 GiB`; final target/free space is `2,537,148 / 20,029,300 KiB`.
+- The concrete reverse edge `qftls -> stealth::TlsCoverProvider` remains root-owned. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

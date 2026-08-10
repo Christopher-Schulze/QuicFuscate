@@ -40,7 +40,7 @@ pub use tls_cover::{
     TlsCover, TlsCoverCipherSuite, TlsCoverRecordPlan, TlsCoverRecordPlanError,
 };
 #[doc(hidden)]
-pub use tls_profile::TlsProfile;
+pub use tls_profile::{profile_from_fingerprint, TlsProfile};
 #[doc(hidden)]
 pub use traffic::{RateChoker, ServerPushState, ServerPushTriggerReason};
 

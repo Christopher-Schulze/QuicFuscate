@@ -415,9 +415,9 @@ impl StealthManager {
     pub(crate) fn runtime_tls_profile(
         &self,
         sni_override: Option<&str>,
-    ) -> crate::qftls::TlsProfile {
+    ) -> qf_stealth::TlsProfile {
         let fingerprint = self.current_fingerprint();
-        let mut profile = crate::qftls::profile_from_fingerprint(&fingerprint);
+        let mut profile = qf_stealth::profile_from_fingerprint(&fingerprint);
         if let Some(sni) = sni_override {
             profile.sni = Some(sni.to_string());
         }
