@@ -2865,3 +2865,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused core tests `33/33`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,171,964 / 18,309,144 KiB`.
 - Runtime engine orchestration, frontend, Tauri, and wire behavior remain unchanged.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-core-engine-contract-postpush/workspace-seams.json` at source revision `d68afdd41b75a9cc456a2ef32f6dc2ba2ab85a35`; `36` packages, `334` Rust files, `207,083` source lines, `116` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. `core -> engine` is absent.
+
+## Engine FEC-Contract Dependency (2026-08-10, TODO-562)
+
+- Contract flow: `qf-fec::{FecConfig, FecControlPolicy}` -> engine aggregation, runtime projection, server profile construction, and active FEC command translation. Root engine no longer routes those contracts through the root `fec` compatibility namespace.
+- Verification: focused engine tests `79/79`; root all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `4,172,140 / 18,257,012 KiB`.
+- Runtime policy, serialization, public compatibility paths, frontend, and Tauri behavior remain unchanged.

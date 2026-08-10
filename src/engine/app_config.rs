@@ -1,7 +1,7 @@
 use super::{AntiReplaySection, EngineConfig};
-use crate::fec::FecConfig;
 use crate::optimize::OptimizeConfig;
 use crate::stealth::StealthConfig;
+use qf_fec::FecConfig;
 
 /// Runtime projection for FEC, stealth, optimization, and anti-replay.
 ///

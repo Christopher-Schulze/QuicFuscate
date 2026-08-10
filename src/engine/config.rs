@@ -33,9 +33,9 @@ pub use qf_transport_nat::NatTraversalSection;
 pub use qf_transport_version::QuicVersion;
 
 // Re-export existing configs for aggregation
-pub use crate::fec::FecConfig;
 pub use crate::optimize::OptimizeConfig;
 pub use crate::stealth::StealthConfig;
+pub use qf_fec::FecConfig;
 
 /// Complete engine configuration aggregating all subsystems.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

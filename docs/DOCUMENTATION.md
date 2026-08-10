@@ -6733,3 +6733,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Focused core tests pass `33/33`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,171,964 KiB` target usage and `18,309,144 KiB` free.
 - Token ownership, zeroization, constructor signatures, FEC behavior, public compatibility exports, frontend, and Tauri behavior remain unchanged.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-core-engine-contract-postpush/workspace-seams.json` at source revision `d68afdd41b75a9cc456a2ef32f6dc2ba2ab85a35`: `36` packages, `334` Rust files, `207,083` source lines, `116` module edges, `115` workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`. The direct `core -> engine` edge is removed.
+
+## Engine FEC-Contract Dependency (2026-08-10, TODO-562)
+
+- Engine configuration aggregation, runtime projection, server profile construction, and live FEC policy translation now consume `FecConfig` and `FecControlPolicy` directly from their canonical `qf-fec` owner. All nine former `engine -> fec` references were compatibility-path indirections.
+- Focused engine tests pass `79/79`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `4,172,140 KiB` target usage and `18,257,012 KiB` free.
+- Configuration serialization, runtime policy behavior, public engine and FEC compatibility exports, frontend, and Tauri behavior remain unchanged.

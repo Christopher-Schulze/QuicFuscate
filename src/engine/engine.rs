@@ -256,7 +256,7 @@ fn load_runtime_profile_values(
 
 fn build_server_runtime_profiles(
     config: &EngineConfig,
-) -> Result<(crate::fec::FecConfig, crate::stealth::StealthConfig), EngineError> {
+) -> Result<(qf_fec::FecConfig, crate::stealth::StealthConfig), EngineError> {
     let config_text = toml::to_string(config).map_err(|error| {
         EngineError::Config(format!("failed to serialize server config: {error}"))
     })?;
@@ -1227,8 +1227,8 @@ impl QuicFuscateEngine {
         let active =
             self.client_runtime.as_ref().and_then(ClientRuntime::connection).map(|connection| {
                 let policy = match mode {
-                    super::config::FecMode::Off => crate::fec::FecControlPolicy::Off,
-                    super::config::FecMode::Auto => crate::fec::FecControlPolicy::Auto,
+                    super::config::FecMode::Off => qf_fec::FecControlPolicy::Off,
+                    super::config::FecMode::Auto => qf_fec::FecControlPolicy::Auto,
                 };
                 connection.set_fec_control_policy(policy)
             });
@@ -1247,8 +1247,8 @@ impl QuicFuscateEngine {
 
         let result = if let Some(change) = active {
             let effective = match change.controller.effective_policy {
-                crate::fec::FecControlPolicy::Off => super::config::FecMode::Off,
-                crate::fec::FecControlPolicy::Auto => super::config::FecMode::Auto,
+                qf_fec::FecControlPolicy::Off => super::config::FecMode::Off,
+                qf_fec::FecControlPolicy::Auto => super::config::FecMode::Auto,
             };
             FecPolicyCommandResult {
                 requested: mode,
@@ -1281,8 +1281,8 @@ impl QuicFuscateEngine {
     pub fn active_fec_mode(&self) -> Option<super::config::FecMode> {
         self.client_runtime.as_ref().and_then(ClientRuntime::connection).map(|connection| {
             match connection.fec_telemetry_snapshot().control_policy {
-                crate::fec::FecControlPolicy::Off => super::config::FecMode::Off,
-                crate::fec::FecControlPolicy::Auto => super::config::FecMode::Auto,
+                qf_fec::FecControlPolicy::Off => super::config::FecMode::Off,
+                qf_fec::FecControlPolicy::Auto => super::config::FecMode::Auto,
             }
         })
     }
