@@ -159,7 +159,10 @@ run_static_checks() {
   verify_systemd_env_serialization "$installer"
   verify_installer_never_prints_credentials "$installer"
   verify_unit_quotes_expansions "$PROJECT_ROOT/scripts/install/quicfuscate-server.service"
-  printf 'bash_syntax=PASS\nshellcheck_warning=PASS\nrandom_password_contract=PASS\nsystemd_env_serialization=PASS\ncredential_output=PASS\nunit_quoted_expansions=PASS\n' \
+  verify_memory_lock_service_contract \
+    "$PROJECT_ROOT/scripts/install/quicfuscate-server.service" \
+    "$host_suite"
+  printf 'bash_syntax=PASS\nshellcheck_warning=PASS\nrandom_password_contract=PASS\nsystemd_env_serialization=PASS\ncredential_output=PASS\nunit_quoted_expansions=PASS\nmemory_lock_service_contract=PASS\n' \
     >"$OUTPUT_DIR/static-checks.txt"
 }
 
@@ -243,6 +246,23 @@ verify_unit_quotes_expansions() {
     return 1
   fi
   printf 'unit_quoted_expansions=PASS\n' >"$OUTPUT_DIR/unit-expansions.txt"
+}
+
+# The service individually locks its TLS key during privileged setup, then requests fail-closed
+# process locking after dropping every capability. CAP_IPC_LOCK must survive both outer bounding
+# sets for the first boundary, while the unlimited budget authorizes the later unprivileged call.
+verify_memory_lock_service_contract() {
+  local unit="$1"
+  local host_suite="$2"
+
+  grep -Fx 'LimitMEMLOCK=infinity' "$unit" >/dev/null \
+    || fail "systemd unit does not grant the required unlimited memory-lock budget"
+  grep -Eq '^CapabilityBoundingSet=.*CAP_IPC_LOCK([[:space:]]|$)' "$unit" \
+    || fail "systemd unit does not retain CAP_IPC_LOCK during privileged startup"
+  grep -Eq -- '--capability=[^[:space:]]*CAP_IPC_LOCK([,[:space:]]|$)' "$host_suite" \
+    || fail "systemd-nspawn proof does not grant CAP_IPC_LOCK to the guest"
+
+  printf 'memory_lock_service_contract=PASS\n' >"$OUTPUT_DIR/memory-lock-service.txt"
 }
 
 # The installer must never echo a credential. docs/DOCUMENTATION.md states secrets must not appear
@@ -579,7 +599,7 @@ run_guest_proof() {
       --register=yes \
       --link-journal=no \
       --console=pipe \
-      --capability=CAP_NET_ADMIN,CAP_NET_RAW,CAP_NET_BIND_SERVICE \
+      --capability=CAP_NET_ADMIN,CAP_NET_RAW,CAP_NET_BIND_SERVICE,CAP_IPC_LOCK \
       --bind=/dev/net/tun \
       --bind-ro="$BUNDLE_ROOT:/bundle" \
       --bind-ro="$PROJECT_ROOT/scripts/tests/suites/test-linux-installer-guest.sh:/proof/test-linux-installer-guest.sh" \

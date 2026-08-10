@@ -113,6 +113,7 @@ impl Default for ServiceConfig {
                 "CAP_NET_ADMIN".to_string(),
                 "CAP_NET_BIND_SERVICE".to_string(),
                 "CAP_NET_RAW".to_string(),
+                "CAP_IPC_LOCK".to_string(),
                 "CAP_CHOWN".to_string(),
                 "CAP_SETGID".to_string(),
                 "CAP_SETUID".to_string(),
@@ -556,6 +557,7 @@ mod tests {
         assert!(content.contains("KillSignal=SIGTERM"));
         assert!(content.contains("TimeoutStopSec=10s"));
         assert!(content.contains("CapabilityBoundingSet="));
+        assert!(content.contains("CAP_IPC_LOCK"));
         assert!(!content.contains("AmbientCapabilities="));
         assert!(content.contains("WantedBy=multi-user.target"));
     }
@@ -608,6 +610,10 @@ mod tests {
         assert!(
             generated.contains(&format!("ExecStart={DEFAULT_EXECUTABLE} server ")),
             "the generated unit must use the same executable and subcommand: {generated}"
+        );
+        assert!(
+            shipped.contains("CAP_IPC_LOCK") && generated.contains("CAP_IPC_LOCK"),
+            "both systemd owners must retain memory-lock capability during privileged startup"
         );
 
         // Every argument the shipped unit passes must be one the generator knows about,
