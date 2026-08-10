@@ -57,41 +57,6 @@ enum PushState {
     Complete,
 }
 
-/// HTTP/3 specific configuration
-#[derive(Clone)]
-pub struct Config {
-    qpack_max_table_capacity: u64,
-    qpack_blocked_streams: u64,
-    max_field_section_size: u64,
-}
-
-impl Config {
-    /// Creates a new HTTP/3 config
-    pub fn new() -> Result<Self, crate::error::ConnectionError> {
-        Ok(Self {
-            qpack_max_table_capacity: 0,
-            qpack_blocked_streams: 0,
-            // 1MiB is a common safe default for max header section size.
-            // Keeping this bounded prevents pathological allocations during QPACK decode.
-            max_field_section_size: 1024 * 1024,
-        })
-    }
-
-    /// Sets QPACK max table capacity
-    pub(crate) fn set_qpack_max_table_capacity(&mut self, v: u64) {
-        self.qpack_max_table_capacity = v;
-    }
-    /// Sets QPACK blocked streams
-    pub(crate) fn set_qpack_blocked_streams(&mut self, v: u64) {
-        self.qpack_blocked_streams = v;
-    }
-    /// Sets max field section size
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn set_max_field_section_size(&mut self, v: u64) {
-        self.max_field_section_size = v;
-    }
-}
-
 const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
 const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
@@ -224,7 +189,9 @@ impl Connection {
     pub fn with_transport(conn: &mut super::Connection, config: &Config) -> Result<Self, Error> {
         // Validate config limits for HTTP/3 compliance and safety.
         // max_field_section_size == 0 is invalid; excessively large values can cause memory abuse.
-        if config.max_field_section_size == 0 || config.max_field_section_size > 16 * 1024 * 1024 {
+        if config.max_field_section_size() == 0
+            || config.max_field_section_size() > 16 * 1024 * 1024
+        {
             return Err(Error::ExcessiveLoad);
         }
         let masque_buffer_len = conn.max_recv_udp_payload_size().clamp(1, MAX_QUIC_DATAGRAM_SIZE);
@@ -236,8 +203,8 @@ impl Connection {
             streams: HashMap::new(),
             finished_streams: HashSet::new(),
             pending_events: VecDeque::new(),
-            encoder: qpack::Encoder::with_capacity(config.qpack_max_table_capacity),
-            decoder: qpack::Decoder::with_capacity(config.qpack_max_table_capacity),
+            encoder: qpack::Encoder::with_capacity(config.qpack_max_table_capacity()),
+            decoder: qpack::Decoder::with_capacity(config.qpack_max_table_capacity()),
             control_stream_id: None,
             _peer_control_stream_id: None,
             goaway_sent: false,
@@ -277,9 +244,9 @@ impl Connection {
         let stream_id = self.next_uni_stream_id;
         let mut settings_payload = Vec::with_capacity(32);
         for (setting, value) in [
-            (0x01u64, self.config.qpack_max_table_capacity),
-            (0x06u64, self.config.max_field_section_size),
-            (0x07u64, self.config.qpack_blocked_streams),
+            (0x01u64, self.config.qpack_max_table_capacity()),
+            (0x06u64, self.config.max_field_section_size()),
+            (0x07u64, self.config.qpack_blocked_streams()),
         ] {
             Self::encode_varint(setting, &mut settings_payload);
             Self::encode_varint(value, &mut settings_payload);

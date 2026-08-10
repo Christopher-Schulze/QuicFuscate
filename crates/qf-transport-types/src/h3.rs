@@ -52,6 +52,67 @@ impl Header {
     }
 }
 
+/// HTTP/3 connection settings carried by the transport-owned H3 boundary.
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct Config {
+    qpack_max_table_capacity: u64,
+    qpack_blocked_streams: u64,
+    max_field_section_size: u64,
+}
+
+impl Config {
+    /// Create a configuration with the safe default H3 settings.
+    pub fn new() -> Result<Self, qf_error::ConnectionError> {
+        Ok(Self {
+            qpack_max_table_capacity: 0,
+            qpack_blocked_streams: 0,
+            // 1MiB is a common safe default for max header section size.
+            // The connection owner applies the protocol safety ceiling.
+            max_field_section_size: 1024 * 1024,
+        })
+    }
+
+    /// Set the QPACK dynamic table capacity used by the H3 connection.
+    #[doc(hidden)]
+    pub fn set_qpack_max_table_capacity(&mut self, value: u64) {
+        self.qpack_max_table_capacity = value;
+    }
+
+    /// Set the maximum number of blocked QPACK streams.
+    #[doc(hidden)]
+    pub fn set_qpack_blocked_streams(&mut self, value: u64) {
+        self.qpack_blocked_streams = value;
+    }
+
+    /// Set the maximum H3 field-section size.
+    #[doc(hidden)]
+    pub fn set_max_field_section_size(&mut self, value: u64) {
+        self.max_field_section_size = value;
+    }
+
+    /// Return the configured QPACK dynamic table capacity.
+    #[inline]
+    #[doc(hidden)]
+    pub fn qpack_max_table_capacity(&self) -> u64 {
+        self.qpack_max_table_capacity
+    }
+
+    /// Return the configured maximum number of blocked QPACK streams.
+    #[inline]
+    #[doc(hidden)]
+    pub fn qpack_blocked_streams(&self) -> u64 {
+        self.qpack_blocked_streams
+    }
+
+    /// Return the configured maximum H3 field-section size.
+    #[inline]
+    #[doc(hidden)]
+    pub fn max_field_section_size(&self) -> u64 {
+        self.max_field_section_size
+    }
+}
+
 /// Test-only header accessor retained at the historical HTTP/3 boundary.
 #[cfg(any(test, feature = "rust-tests"))]
 #[doc(hidden)]
@@ -98,7 +159,22 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Header};
+    use super::{Config, Event, Header};
+
+    #[test]
+    fn config_contract_preserves_defaults_and_mutations() {
+        let mut config = Config::new().expect("H3 config");
+        assert_eq!(config.qpack_max_table_capacity(), 0);
+        assert_eq!(config.qpack_blocked_streams(), 0);
+        assert_eq!(config.max_field_section_size(), 1024 * 1024);
+
+        config.set_qpack_max_table_capacity(4096);
+        config.set_qpack_blocked_streams(32);
+        config.set_max_field_section_size(2 * 1024 * 1024);
+        assert_eq!(config.qpack_max_table_capacity(), 4096);
+        assert_eq!(config.qpack_blocked_streams(), 32);
+        assert_eq!(config.max_field_section_size(), 2 * 1024 * 1024);
+    }
 
     #[test]
     fn header_contract_preserves_owned_bytes() {

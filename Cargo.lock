@@ -1819,6 +1819,7 @@ version = "0.4.4"
 dependencies = [
  "log",
  "qf-common",
+ "qf-error",
  "serde",
  "serde_json",
 ]

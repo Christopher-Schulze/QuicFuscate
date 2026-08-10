@@ -1095,9 +1095,9 @@ mod tests {
     fn test_config_new_defaults() {
         let cfg = Config::new().expect("Config::new");
         // Verify defaults are sane (non-zero max_field_section_size)
-        assert_eq!(cfg.qpack_max_table_capacity, 0);
-        assert_eq!(cfg.qpack_blocked_streams, 0);
-        assert_eq!(cfg.max_field_section_size, 1024 * 1024);
+        assert_eq!(cfg.qpack_max_table_capacity(), 0);
+        assert_eq!(cfg.qpack_blocked_streams(), 0);
+        assert_eq!(cfg.max_field_section_size(), 1024 * 1024);
     }
 
     #[test]
@@ -1620,7 +1620,10 @@ mod tests {
     #[test]
     fn h3_config_default_field_section_size() {
         let cfg = Config::new().expect("default H3 config must succeed");
-        assert!(cfg.max_field_section_size > 0, "default field section size must be positive");
+        assert!(
+            cfg.max_field_section_size() > 0,
+            "default field section size must be positive"
+        );
     }
 
     #[test]
