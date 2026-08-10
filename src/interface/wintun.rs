@@ -1718,7 +1718,7 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "tun-windows"))]
     impl Drop for NativeKillSwitchCleanup {
         fn drop(&mut self) {
-            let _ = crate::implementations::client::KillSwitch::cleanup_stale_rules();
+            let _ = crate::native_wfp_test_support::KillSwitch::cleanup_stale_rules();
         }
     }
 
@@ -1873,7 +1873,7 @@ mod tests {
     #[ignore = "requires an administrator and an integrity-checked upstream wintun.dll"]
     fn wfp_native_packet_policy_and_cleanup() {
         use crate::firewall::FirewallBackend;
-        use crate::implementations::client::{KillSwitch, VpnFirewallPolicy};
+        use crate::native_wfp_test_support::{KillSwitch, VpnFirewallPolicy};
         use std::net::SocketAddr;
         use std::sync::{mpsc, Arc};
 
@@ -2179,7 +2179,7 @@ mod tests {
     #[ignore = "invoked only by the elevated native WFP persistence parent"]
     fn wfp_native_install_block_and_exit() {
         use crate::firewall::FirewallBackend;
-        use crate::implementations::client::KillSwitch;
+        use crate::native_wfp_test_support::KillSwitch;
 
         assert!(
             matches!(std::env::var("QUICFUSCATE_WFP_PERSISTENCE_CHILD").as_deref(), Ok("1")),

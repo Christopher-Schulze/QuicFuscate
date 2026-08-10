@@ -2935,3 +2935,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Flow: engine control command -> qf-transport-types capability projection; interface open -> qf-transport-types registered factory -> external TUN backend. The direct production `engine -> interface` edge is removed; frontend and Tauri are unaffected.
 - Verification: qf-transport-types `40/40`; root interface target `4/4`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `7,636,240 / 15,383,564 KiB`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-tun-factory-registry-postpush/workspace-seams.json` at source revision `f5a1b25a537b54d38d941e8c3cab1b866de16a9c`; `36` packages, `334` Rust files, `207,156` source lines, `110` module edges, `116` workspace dependency edges, and `protected_changes=[]`. `engine -> interface` is absent; the remaining three-module cycle is `engine -> implementations -> interface -> engine`.
+
+## Interface Compatibility Dependency Isolation (2026-08-10, TODO-562)
+
+- Compatibility flow: `interface::app_config` -> root `app_config` projection -> canonical engine configuration owner. Interface no longer imports engine internals directly.
+- Windows native WFP test flow: interface test -> crate-root `native_wfp_test_support` -> implementation-owned kill-switch policy. The test-only bridge is outside product ownership; no frontend or Tauri path is involved.
+- Verification: root interface target `4/4`; root all-feature library tests `1,693/1,693`; all-feature checking; strict workspace Clippy; formatting and diff hygiene. Final target/free space is `7,834,776 / 13,686,852 KiB`.

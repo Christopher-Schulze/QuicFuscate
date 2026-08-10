@@ -268,6 +268,11 @@ pub(crate) fn tun_available_for_engine_tests() -> bool {
     crate::interface::TunInterface::open(config, pool).is_ok()
 }
 
+#[cfg(all(test, target_os = "windows", feature = "tun-windows"))]
+pub(crate) mod native_wfp_test_support {
+    pub(crate) use crate::implementations::client::{KillSwitch, VpnFirewallPolicy};
+}
+
 #[cfg(all(test, unix))]
 pub(crate) mod test_support {
     use std::sync::{Mutex, MutexGuard, OnceLock};

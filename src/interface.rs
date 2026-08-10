@@ -298,7 +298,7 @@ impl TunPacket {
 
 /// Application configuration module
 pub mod app_config {
-    pub use crate::engine::app_config::*;
+    pub use crate::app_config::*;
 }
 
 /// Return current TUN capability profile for control-plane and diagnostics.
