@@ -1483,8 +1483,10 @@ name = "qf-transport-udp"
 version = "0.4.4"
 dependencies = [
  "libc",
+ "log",
  "qf-cpu",
  "smallvec",
+ "socket2 0.5.10",
  "sysinfo",
 ]
 

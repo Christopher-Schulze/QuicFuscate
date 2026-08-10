@@ -3107,3 +3107,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - FEC compatibility flow: root FEC unit tests -> `fec::gf_tables::gf_mul_table` -> qf-fec table owner; production builds -> no test-only compatibility export. Native TUN address flow: Linux/macOS backends -> shared `IpAddr` import; Windows/iOS/other backends -> no unused import.
 - Verification: qf-privilege tests `23/23`; serial root all-feature library `1,657/1,657`; exact default and `unsafe_rust,rust-tests` workspace all-target Clippy; strict workspace all-feature library/binary/example Clippy; formatting. Complete local Windows root compilation remains blocked before product code by the missing Windows C sysroot.
 - Final target/free space is `3,535,364 / 5,692,884 KiB`; frontend and Tauri paths are unaffected.
+
+## Fuzz Workspace Lock Synchronization (2026-08-10, TODO-562)
+
+- Fuzz dependency flow: `scripts/tests/fuzz/Cargo.toml` -> root quicfuscate package with `rust-tests` -> qf-transport-udp -> Linux-only `log` and `socket2 0.5.10`; the separate fuzz lock now records both leaf-owned edges.
+- CI flow: locked Nightly metadata -> six-target cargo-fuzz inventory -> curated corpora -> AddressSanitizer runs -> bounded crash-artifact upload. The lock repair changes only metadata resolution and leaves every runtime target and workflow command intact.
+- Verification: locked Nightly metadata; Nightly fuzz-workspace all-target check; fuzz contract audit. Hosted Ubuntu remains the execution owner for all six sanitizer runs.
+- Final target/free space is `3,893,020 / 5,335,128 KiB`; frontend and Tauri paths are unaffected.
