@@ -3030,3 +3030,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Linux compile flow: qf-transport-udp GSO/GRO activation -> `log`; GSO destination encoding -> `socket2::SockAddr`. Both dependencies are owned by the leaf under `cfg(target_os = "linux")` instead of leaking through the root package graph.
 - Verification: locked x86_64-Linux qf-transport-udp all-target Clippy with `rust-tests` and warnings denied; qf-transport-udp all-feature tests `11/11`; Cargo feature-taxonomy audit; strict workspace all-feature library/binary/example Clippy.
 - Final target/free space is `7,207,740 / 3,832,516 KiB`; frontend and Tauri are unaffected.
+
+## qf-memory-pool Windows Winsock Boundary (2026-08-10, TODO-562)
+
+- Windows I/O flow: checked borrowed buffers -> `WSASend*` or `WSARecv*` -> immediate `last_winsock_error()` on failure -> typed `ZeroCopyError::Io`. windows-sys owns the required `Win32_System_IO` binding feature.
+- Windows buffer lengths use the shared checked aggregate helper; the socket-address length remains the binding's native `i32`. The unused private NUMA affinity mutation is absent, while topology discovery and current-node classification remain unchanged.
+- Verification: locked Windows-MSVC qf-memory-pool all-target/all-feature Clippy; ARM64 qf-memory-pool all-feature tests `23/23`; strict workspace all-feature library/binary/example Clippy. Native Windows runtime proof remains external.
+- Final target/free space is `7,492,296 / 3,036,000 KiB`; frontend and Tauri are unaffected.

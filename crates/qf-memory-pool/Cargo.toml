@@ -27,6 +27,7 @@ socket2 = "0.5"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
+    "Win32_System_IO",
     "Win32_System_Kernel",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

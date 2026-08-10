@@ -146,10 +146,8 @@ mod numa {
     use super::numa_classification;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use windows_sys::Win32::System::Kernel::PROCESSOR_NUMBER;
-    use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcessorNumberEx, GetCurrentThread, GetNumaHighestNodeNumber,
-        GetNumaNodeProcessorMaskEx, GetNumaProcessorNodeEx, SetThreadGroupAffinity,
+        GetCurrentProcessorNumberEx, GetNumaHighestNodeNumber, GetNumaProcessorNodeEx,
     };
 
     static NUMA_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -164,25 +162,6 @@ mod numa {
             );
         }
         numa_classification::available_from_query(query_succeeded)
-    }
-
-    pub fn bind_to_node(node: usize) -> Result<(), std::io::Error> {
-        let node = u16::try_from(node).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "NUMA node index exceeds the Windows API range",
-            )
-        })?;
-        unsafe {
-            let mut affinity: GROUP_AFFINITY = std::mem::zeroed();
-            if GetNumaNodeProcessorMaskEx(node, &mut affinity) == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if SetThreadGroupAffinity(GetCurrentThread(), &affinity, std::ptr::null_mut()) == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        }
     }
 
     pub fn num_nodes() -> usize {
@@ -1950,6 +1929,13 @@ fn checked_windows_buffer_length(index: usize, length: usize) -> ZeroCopyResult<
     })
 }
 
+#[cfg(windows)]
+fn last_winsock_error() -> io::Error {
+    // SAFETY: WSAGetLastError has no pointer arguments and reads the calling thread's
+    // Winsock error slot immediately after the failed synchronous operation.
+    io::Error::from_raw_os_error(unsafe { WSAGetLastError() })
+}
+
 #[cfg(unix)]
 fn unix_iovec_max() -> usize {
     let abi_max = i32::MAX as usize;
@@ -2173,12 +2159,10 @@ impl<'a> ZeroCopyBuffer<'a> {
     /// Creates a send-only buffer from borrowed immutable byte slices.
     pub fn new(buffers: &[&'a [u8]]) -> ZeroCopyResult<Self> {
         let buffer_count = checked_windows_buffer_count(buffers.len())?;
-        let mut total_len = 0usize;
+        let total_len = checked_total_buffer_length(buffers.iter().map(|buffer| buffer.len()))?;
         let mut bufs = Vec::with_capacity(buffers.len());
         for (index, buffer) in buffers.iter().enumerate() {
             let len = checked_windows_buffer_length(index, buffer.len())?;
-            total_len =
-                total_len.checked_add(buffer.len()).ok_or(ZeroCopyError::TotalLengthOverflow)?;
             bufs.push(WSABUF { len, buf: buffer.as_ptr() as *mut u8 });
         }
         Ok(Self { bufs, buffer_count, total_len, _marker: std::marker::PhantomData })
@@ -2202,7 +2186,7 @@ impl<'a> ZeroCopyBuffer<'a> {
             )
         };
         if result != 0 {
-            return Err(ZeroCopyError::Io(io::Error::from_raw_os_error(WSAGetLastError())));
+            return Err(ZeroCopyError::Io(last_winsock_error()));
         }
         ZeroCopyTransfer::from_syscall_count(sent as usize, self.total_len)
     }
@@ -2215,12 +2199,7 @@ impl<'a> ZeroCopyBuffer<'a> {
     ) -> ZeroCopyResult<ZeroCopyTransfer> {
         use socket2::SockAddr;
         let sockaddr = SockAddr::from(addr);
-        let address_length = i32::try_from(sockaddr.len()).map_err(|_| {
-            ZeroCopyError::InvalidSocketAddressLength {
-                length: sockaddr.len() as usize,
-                max: i32::MAX as usize,
-            }
-        })?;
+        let address_length = sockaddr.len();
         let mut sent = 0u32;
         let result = unsafe {
             WSASendTo(
@@ -2236,7 +2215,7 @@ impl<'a> ZeroCopyBuffer<'a> {
             )
         };
         if result != 0 {
-            return Err(ZeroCopyError::Io(io::Error::from_raw_os_error(WSAGetLastError())));
+            return Err(ZeroCopyError::Io(last_winsock_error()));
         }
         ZeroCopyTransfer::from_syscall_count(sent as usize, self.total_len)
     }
@@ -2255,12 +2234,10 @@ impl<'a> ZeroCopyRecvBuffer<'a> {
     /// Creates a receive-only buffer from exclusively borrowed mutable slices.
     pub fn new_mut(buffers: &'a mut [&'a mut [u8]]) -> ZeroCopyResult<Self> {
         let buffer_count = checked_windows_buffer_count(buffers.len())?;
-        let mut total_len = 0usize;
+        let total_len = checked_total_buffer_length(buffers.iter().map(|buffer| buffer.len()))?;
         let mut bufs = Vec::with_capacity(buffers.len());
         for (index, buffer) in buffers.iter_mut().enumerate() {
             let len = checked_windows_buffer_length(index, buffer.len())?;
-            total_len =
-                total_len.checked_add(buffer.len()).ok_or(ZeroCopyError::TotalLengthOverflow)?;
             bufs.push(WSABUF { len, buf: buffer.as_mut_ptr() });
         }
         Ok(Self { bufs, buffer_count, total_len, _marker: std::marker::PhantomData })
@@ -2285,7 +2262,7 @@ impl<'a> ZeroCopyRecvBuffer<'a> {
             )
         };
         if result != 0 {
-            return Err(ZeroCopyError::Io(io::Error::from_raw_os_error(WSAGetLastError())));
+            return Err(ZeroCopyError::Io(last_winsock_error()));
         }
         ZeroCopyTransfer::from_syscall_count(received as usize, self.total_len)
     }
@@ -2314,7 +2291,7 @@ impl<'a> ZeroCopyRecvBuffer<'a> {
                 if result == 0 {
                     Ok(received_count as usize)
                 } else {
-                    Err(io::Error::from_raw_os_error(WSAGetLastError()))
+                    Err(last_winsock_error())
                 }
             })
         }
@@ -2357,8 +2334,10 @@ mod memory_pool_growth_tests {
         DEFAULT_POOL_MAX_BYTES, LOCK_BLOCKS_TEST_MUTEX,
     };
 
+    #[cfg(unix)]
+    use super::{ZeroCopyBuffer, ZeroCopyRecvBuffer};
     #[cfg(any(unix, windows))]
-    use super::{ZeroCopyBuffer, ZeroCopyError, ZeroCopyRecvBuffer, ZeroCopyTransfer};
+    use super::{ZeroCopyError, ZeroCopyTransfer};
 
     #[cfg(any(unix, windows))]
     #[test]
