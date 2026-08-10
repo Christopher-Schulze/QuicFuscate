@@ -4,6 +4,9 @@
 // Provides a single public surface: Level, TlsProfile, QuicTlsProvider, create_provider()
 
 use parking_lot::RwLock;
+#[cfg(test)]
+use qf_stealth::OsProfile;
+use qf_stealth::{BrowserProfile, FingerprintProfile};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -246,8 +249,8 @@ pub fn preload_tls_server_identity(
 pub use qf_stealth::TlsProfile;
 
 /// Build a TlsProfile from a Stealth FingerprintProfile (best-effort mapping).
-pub fn profile_from_fingerprint(fp: &crate::stealth::FingerprintProfile) -> TlsProfile {
-    use crate::stealth::BrowserProfile as B;
+pub fn profile_from_fingerprint(fp: &FingerprintProfile) -> TlsProfile {
+    use BrowserProfile as B;
     let mut p = match fp.browser {
         B::Chrome => TlsProfile::chrome_130(),
         B::Firefox => TlsProfile::firefox_133(),
@@ -484,10 +487,7 @@ mod tests {
 
     #[test]
     fn profile_from_fp_has_h3_first() {
-        let fp = crate::stealth::FingerprintProfile::new(
-            crate::stealth::BrowserProfile::Chrome,
-            crate::stealth::OsProfile::Windows,
-        );
+        let fp = FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows);
         let p = profile_from_fingerprint(&fp);
         assert!(!p.alpn_protocols.is_empty());
         assert_eq!(p.alpn_protocols[0], "h3");
@@ -519,10 +519,7 @@ mod tests {
 
     #[test]
     fn profile_from_fp_is_deterministic_for_same_input() {
-        let fp = crate::stealth::FingerprintProfile::new(
-            crate::stealth::BrowserProfile::Firefox,
-            crate::stealth::OsProfile::Linux,
-        );
+        let fp = FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux);
         let p1 = profile_from_fingerprint(&fp);
         let p2 = profile_from_fingerprint(&fp);
         assert_eq!(p1.name, p2.name);
@@ -535,22 +532,10 @@ mod tests {
     #[test]
     fn profile_from_fp_enforces_tls_policy_constraints() {
         let fps = [
-            crate::stealth::FingerprintProfile::new(
-                crate::stealth::BrowserProfile::Chrome,
-                crate::stealth::OsProfile::Windows,
-            ),
-            crate::stealth::FingerprintProfile::new(
-                crate::stealth::BrowserProfile::Firefox,
-                crate::stealth::OsProfile::Linux,
-            ),
-            crate::stealth::FingerprintProfile::new(
-                crate::stealth::BrowserProfile::Safari,
-                crate::stealth::OsProfile::MacOS,
-            ),
-            crate::stealth::FingerprintProfile::new(
-                crate::stealth::BrowserProfile::Edge,
-                crate::stealth::OsProfile::Windows,
-            ),
+            FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows),
+            FingerprintProfile::new(BrowserProfile::Firefox, OsProfile::Linux),
+            FingerprintProfile::new(BrowserProfile::Safari, OsProfile::MacOS),
+            FingerprintProfile::new(BrowserProfile::Edge, OsProfile::Windows),
         ];
 
         for fp in fps {
@@ -649,21 +634,21 @@ mod tests {
 
     #[test]
     fn profile_from_fingerprint_maps_browser_semantics() {
-        let chrome = profile_from_fingerprint(&crate::stealth::FingerprintProfile::new(
-            crate::stealth::BrowserProfile::Chrome,
-            crate::stealth::OsProfile::Windows,
+        let chrome = profile_from_fingerprint(&FingerprintProfile::new(
+            BrowserProfile::Chrome,
+            OsProfile::Windows,
         ));
-        let firefox = profile_from_fingerprint(&crate::stealth::FingerprintProfile::new(
-            crate::stealth::BrowserProfile::Firefox,
-            crate::stealth::OsProfile::Linux,
+        let firefox = profile_from_fingerprint(&FingerprintProfile::new(
+            BrowserProfile::Firefox,
+            OsProfile::Linux,
         ));
-        let safari = profile_from_fingerprint(&crate::stealth::FingerprintProfile::new(
-            crate::stealth::BrowserProfile::Safari,
-            crate::stealth::OsProfile::MacOS,
+        let safari = profile_from_fingerprint(&FingerprintProfile::new(
+            BrowserProfile::Safari,
+            OsProfile::MacOS,
         ));
-        let edge = profile_from_fingerprint(&crate::stealth::FingerprintProfile::new(
-            crate::stealth::BrowserProfile::Edge,
-            crate::stealth::OsProfile::Windows,
+        let edge = profile_from_fingerprint(&FingerprintProfile::new(
+            BrowserProfile::Edge,
+            OsProfile::Windows,
         ));
 
         assert!(chrome.name.contains("Chrome"));

@@ -2828,3 +2828,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: focused AppConfig `2/2`; root all-feature check and library `1,697/1,697`; strict workspace Clippy; formatting and diff hygiene. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Public compatibility verification: `rt-interface` `4/4`; strict all-feature root Rustdoc passes. Final target/free space is `12,270,092 / 10,392,180 KiB`.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-app-config-engine-postpush/workspace-seams.json` at source revision `31ade03c9af03d0d1a4bff711efda6b4a685ea39`; `36` packages, `334` Rust files, `207,119` source lines, `120` module edges, `115` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. The `interface -> fec` and `interface -> stealth` edges are removed; the sole `interface -> engine` reference is the compatibility re-export.
+
+## QFTLS Stealth Contract Dependency (2026-08-10, TODO-562)
+
+- Contract flow: `qf-stealth::{FingerprintProfile, BrowserProfile, OsProfile, TlsProfile}` -> `qftls::profile_from_fingerprint` -> rustls profile configuration. The public root signature and result remain source-compatible.
+- Concrete cover flow remains root-owned: `qftls::CombinedProvider` -> `stealth::TlsCoverProvider` -> root `CryptoContext` and `QuicTlsProvider`. These are the only intentional `qftls -> stealth` references.
+- Verification: focused conversion `4/4`; root all-feature check and library `1,697/1,697`; strict workspace library/binary/example Clippy; formatting, documentation truth, and diff hygiene. The all-target macOS boundary remains the unchanged Linux-only kernel integration guard.
+- Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
