@@ -576,6 +576,16 @@ jobs:
           PROJECT_ROOT="$GITHUB_WORKSPACE"
           scripts/tests/tun-provisioning-negative-netns.sh
 
+      - name: Normalize native TUN provisioning evidence ownership
+        if: always()
+        shell: bash
+        run: |
+          shopt -s nullglob
+          runtime_dirs=(/tmp/quicfuscate-tun-provisioning.*)
+          if ((${#runtime_dirs[@]} > 0)); then
+            sudo chown -R -- "$(id -u):$(id -g)" "${runtime_dirs[@]}"
+          fi
+
       - name: Prove native server IPv4 PTB for DF=0
         shell: bash
         run: |
