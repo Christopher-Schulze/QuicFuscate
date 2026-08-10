@@ -796,7 +796,9 @@ impl UringBatchSender {
     fn submit_and_poll(&mut self, queued: usize, control: &SendControl<'_>) -> std::io::Result<()> {
         self.ring.submit().map_err(|error| self.quarantine(error))?;
         loop {
-            if self.ring.completion().count() >= queued {
+            // `CompletionQueue` is an iterator: `count()` would consume and
+            // acknowledge every ready CQE before the reap boundary below.
+            if self.ring.completion().len() >= queued {
                 return Ok(());
             }
             if control.shutdown.load(Ordering::Acquire) {
