@@ -2681,7 +2681,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - `crates/qf-engine-types/src/qkey.rs` is the canonical owner of the root-independent QKey codec, identifier, bounds, checksum parser, and error contract. `src/engine/qkey.rs` remains the compatibility adapter for `EngineConfig` conversion and historical root paths.
 - Child QKey tests pass `18/18`, the root QKey filter passes `88/88`, strict workspace Clippy and all-feature workspace checking pass, and the complete backend workspace all-target test command exits `0` with no failures. No frontend/Tauri path changed.
-- Pre-commit seam evidence: `scripts/out/audits/workspace-seams-20260810T-qkey-codec-precommit/workspace-seams.json`, source revision `1913dc807fd6a45932c1ca3ebcff22027e1ebcab`, `36` packages, `325` Rust files, `206,581` source lines, `125` module edges, `106` workspace dependency edges, unchanged 9-module product SCC, `protected_changes=[]`.
+- Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-qkey-codec-postpush/workspace-seams.json`, source revision `f2c95b3ca51d378dee91c108a78fcc259f35f520`, `36` packages, `325` Rust files, `206,581` source lines, `125` module edges, `106` workspace dependency edges, unchanged 9-module product SCC, `protected_changes=[]`.
 
 ## Transport Crypto Stream Workspace Leaf (2026-08-09, TODO-562)
 
