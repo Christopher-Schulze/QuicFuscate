@@ -244,8 +244,8 @@ pub use stealth::{StealthConfig, StealthManager};
 
 // ConnectionError is already defined in error module, no need to redefine
 
-// Re-export app_config from interface module
-pub use crate::interface::app_config;
+// Re-export the canonical runtime configuration projection.
+pub use crate::engine::app_config;
 
 // Re-export EngineConfig for convenient access
 pub use crate::engine::EngineConfig;

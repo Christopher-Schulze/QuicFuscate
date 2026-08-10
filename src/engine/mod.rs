@@ -31,6 +31,7 @@
 //! engine.connect()?;
 //! ```
 
+pub mod app_config;
 mod config;
 #[allow(clippy::module_inception)]
 mod engine;

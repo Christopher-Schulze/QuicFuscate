@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use super::app_config::AppConfig;
 use super::config::{EngineConfig, EngineMode};
 use crate::implementations::client::{
     ClientDnsRuntime, ClientRuntime, KillSwitch, VpnFirewallPolicy,
@@ -21,7 +22,6 @@ use crate::implementations::server::{
     metrics::Metrics, normalize_runtime_optimize_config, AdminAction, PreparedStandaloneLaunch,
     ServerRuntime,
 };
-use crate::interface::app_config::AppConfig;
 use crate::transport::Config;
 use crate::transport::{self, CongestionControlAlgorithm};
 use qf_memory_lock::MemoryLockPolicy;

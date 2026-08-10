@@ -864,7 +864,7 @@ pub(crate) fn apply_runtime_config_reload_with_generation(
     } = stealth_policy;
     let contents =
         std::fs::read_to_string(cfg_path).map_err(|e| format!("Config read failed: {}", e))?;
-    let cfg = crate::interface::app_config::AppConfig::from_toml(&contents)
+    let cfg = crate::engine::app_config::AppConfig::from_toml(&contents)
         .map_err(|e| format!("Config parse failed: {}", e))?;
 
     cfg.validate().map_err(|e| format!("Config validation failed: {}", e))?;

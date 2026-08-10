@@ -366,7 +366,7 @@ pub fn resolve_runtime_profiles(
 }
 
 pub fn runtime_components_from_app_config(
-    app_cfg: crate::interface::app_config::AppConfig,
+    app_cfg: crate::engine::app_config::AppConfig,
     fec_mode_override: Option<crate::engine::FecMode>,
 ) -> (FecConfig, StealthConfig, OptimizeConfig, crate::engine::AntiReplaySection) {
     let mut fec = app_cfg.fec;
@@ -487,7 +487,7 @@ pub(crate) fn write_runtime_config(
     let Some(path) = config_path else {
         return AdminResponse::error("Config path not set");
     };
-    match crate::interface::app_config::AppConfig::from_toml(contents) {
+    match crate::engine::app_config::AppConfig::from_toml(contents) {
         Ok(cfg) => {
             if let Err(e) = cfg.validate() {
                 return AdminResponse::error(format!("Config validation failed: {}", e));

@@ -848,7 +848,7 @@ impl Connection {
     ///
     /// Outer datagram owners use this to prioritize validation traffic ahead of
     /// buffered application/FEC output without bypassing the server amplification
-    /// budget enforced by [`Self::pop_targeted_path_frame_for_send`].
+    /// budget enforced by `Self::pop_targeted_path_frame_for_send`.
     pub fn has_sendable_path_control(&mut self) -> bool {
         self.poll_path_validation_timeout(self.clock.now());
 
