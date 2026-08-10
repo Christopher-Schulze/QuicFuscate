@@ -56,7 +56,7 @@ struct ServerLiveRuntime {
 
 #[derive(Clone)]
 struct StandaloneReloadPolicy {
-    fec_mode_override: Option<crate::engine::FecMode>,
+    fec_mode_override: Option<qf_engine_types::FecMode>,
     stealth_policy: OwnedRuntimeStealthPolicy,
 }
 

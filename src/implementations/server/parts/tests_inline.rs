@@ -1367,9 +1367,9 @@ mod tests {
     #[tokio::test]
     async fn test_standalone_runtime_drain_rejects_new_clients_and_reports_lifecycle() {
         let engine_config = EngineConfig {
-            engine: crate::engine::EngineSection {
+            engine: qf_engine_types::EngineSection {
                 shutdown_timeout_ms: 250,
-                ..crate::engine::EngineSection::default()
+                ..qf_engine_types::EngineSection::default()
             },
             ..EngineConfig::default()
         };
@@ -1835,8 +1835,8 @@ mod tests {
         }
 
         let token_hex = "a".repeat(64);
-        let qkey = crate::engine::qkey::generate(
-            &crate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
+        let qkey = qf_engine_types::generate(
+            &qf_engine_types::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_stealth("auto")
                 .with_fec("auto")
                 .with_token(&token_hex),
@@ -3262,10 +3262,10 @@ mod tests {
     fn logging_mode_persistence_round_trips_and_restores_on_restart() {
         let _guard = logging_test_guard();
         let modes = [
-            (crate::engine::LoggingMode::Verbose, "verbose"),
-            (crate::engine::LoggingMode::Normal, "normal"),
-            (crate::engine::LoggingMode::Minimal, "minimal"),
-            (crate::engine::LoggingMode::NoLog, "no-log"),
+            (qf_logging::LoggingMode::Verbose, "verbose"),
+            (qf_logging::LoggingMode::Normal, "normal"),
+            (qf_logging::LoggingMode::Minimal, "minimal"),
+            (qf_logging::LoggingMode::NoLog, "no-log"),
         ];
 
         for (index, (expected_mode, expected_name)) in modes.into_iter().enumerate() {
@@ -3433,7 +3433,7 @@ mod tests {
         assert!(log_buffer.since(0, "no-log", 64).0.is_empty());
         assert_eq!(
             load_persisted_logging_mode(Some(&config_path)).expect("no-log must persist"),
-            PersistedLoggingModeState::Valid(crate::engine::LoggingMode::NoLog)
+            PersistedLoggingModeState::Valid(qf_logging::LoggingMode::NoLog)
         );
         cleanup_logging_test_files(&config_path);
         log::set_max_level(log::LevelFilter::Info);

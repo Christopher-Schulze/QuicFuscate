@@ -250,7 +250,7 @@ fn issue_qkey(
     params: IssueQKeyParams<'_>,
     rng_context: &str,
 ) -> Result<IssuedQKey, String> {
-    use crate::engine::qkey;
+    use qf_engine_types as qkey;
 
     let name = normalize_qkey_name(params.name)?;
     if let Some(policy) = params.bandwidth_policy.as_ref() {
@@ -360,10 +360,10 @@ fn random_hex_8(context: &str) -> String {
     hex_from_bytes(&bytes)
 }
 
-fn random_qkey_token(context: &str) -> crate::engine::qkey::QKeyToken {
+fn random_qkey_token(context: &str) -> qf_engine_types::QKeyToken {
     let mut bytes = crate::secret::SecretBytes::zeroed(32, "qkey_generated_token_bytes");
     crate::rng::fill_secure_or_abort(bytes.as_mut_slice(), context);
-    crate::engine::qkey::QKeyToken::new(hex_from_bytes(bytes.as_slice()))
+    qf_engine_types::QKeyToken::new(hex_from_bytes(bytes.as_slice()))
 }
 
 fn hex_from_bytes(bytes: &[u8]) -> String {
@@ -822,7 +822,7 @@ pub fn apply_transport_overrides_from_file(
 #[allow(clippy::too_many_arguments)]
 pub fn apply_runtime_config_reload(
     cfg_path: &std::path::Path,
-    fec_mode_override: Option<crate::engine::FecMode>,
+    fec_mode_override: Option<qf_engine_types::FecMode>,
     transport: &mut crate::transport::Config,
     fec_cfg_shared: &Arc<std::sync::Mutex<FecConfig>>,
     opt_params_shared: &Arc<std::sync::Mutex<OptimizeConfig>>,
@@ -845,7 +845,7 @@ pub fn apply_runtime_config_reload(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_runtime_config_reload_with_generation(
     cfg_path: &std::path::Path,
-    fec_mode_override: Option<crate::engine::FecMode>,
+    fec_mode_override: Option<qf_engine_types::FecMode>,
     runtime_policy_generation: &RuntimePolicyGeneration,
     transport: &mut crate::transport::Config,
     fec_cfg_shared: &Arc<std::sync::Mutex<FecConfig>>,
@@ -864,7 +864,7 @@ pub(crate) fn apply_runtime_config_reload_with_generation(
     } = stealth_policy;
     let contents =
         std::fs::read_to_string(cfg_path).map_err(|e| format!("Config read failed: {}", e))?;
-    let cfg = crate::engine::app_config::AppConfig::from_toml(&contents)
+    let cfg = crate::app_config::AppConfig::from_toml(&contents)
         .map_err(|e| format!("Config parse failed: {}", e))?;
 
     cfg.validate().map_err(|e| format!("Config validation failed: {}", e))?;

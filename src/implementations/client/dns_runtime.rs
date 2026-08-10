@@ -14,8 +14,9 @@ use crate::dns::{
     process_dns_query_with_admission, DnsAdmission, DnsAdmissionIdentity, DnsAdmissionSnapshot,
     DnsProxyConfig, DnsProxyError, DNS_MESSAGE_MAX_SIZE,
 };
-use crate::engine::{EngineConfig, EngineError};
+use crate::engine::EngineConfig;
 use crate::time_source::ProtocolClock;
+use qf_engine_types::EngineError;
 
 const DNS_LISTEN_PORT: u16 = 53;
 const LOCAL_DNS_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);

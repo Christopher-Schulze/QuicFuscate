@@ -308,10 +308,10 @@ pub fn apply_qkey_policy_overrides(
     if let Some(fec_raw) = record.fec.as_deref() {
         match normalize_qkey_fec(Some(fec_raw)) {
             Ok("off") => {
-                fec_config.apply_engine_mode(crate::engine::FecMode::Off);
+                fec_config.apply_engine_mode(qf_engine_types::FecMode::Off);
             }
             Ok("auto") => {
-                fec_config.apply_engine_mode(crate::engine::FecMode::Auto);
+                fec_config.apply_engine_mode(qf_engine_types::FecMode::Auto);
             }
             Ok(_) => {}
             Err(_) => {}

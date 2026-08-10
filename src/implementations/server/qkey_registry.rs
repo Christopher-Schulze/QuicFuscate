@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::engine::qkey::QKeyToken;
 use crate::secret::{SecretBytes, SecretString};
+use qf_engine_types::QKeyToken;
 
 use super::auth_frame::AuthFrame;
 use super::qkey_registry_storage::{RegistryStorage, RewriteReason};
@@ -14,7 +14,7 @@ pub use super::qkey_registry_storage::QKeyRegistryError;
 /// This is not a secret. Authentication is enforced separately by verifying the per-QKey token
 /// post-handshake.
 pub fn qkey_id(qkey: &str) -> String {
-    crate::engine::qkey::id(qkey)
+    qf_engine_types::id(qkey)
 }
 
 pub fn qkey_token_hex_from_qkey(qkey: &str) -> Option<QKeyToken> {
@@ -22,7 +22,7 @@ pub fn qkey_token_hex_from_qkey(qkey: &str) -> Option<QKeyToken> {
     if trimmed.is_empty() {
         return None;
     }
-    if let Ok(cfg) = crate::engine::qkey::parse(trimmed) {
+    if let Ok(cfg) = qf_engine_types::parse(trimmed) {
         if let Some(token) = cfg.token {
             let token = token.trim();
             if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -308,7 +308,7 @@ impl QKeyRegistry {
                 traffic_analysis_policy: existing.traffic_analysis_policy,
             });
         }
-        let parsed = crate::engine::qkey::parse(qkey.trim()).ok();
+        let parsed = qf_engine_types::parse(qkey.trim()).ok();
         let (stealth, fec) = parsed.as_ref().map(policy_from_parsed_qkey).unwrap_or((None, None));
         let token_sha256 = match token_sha256_hex_from_token_hex(&token_hex) {
             Some(h) => h,
@@ -510,9 +510,7 @@ pub fn token_matches_hash(token_hex: &str, stored_hash: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn policy_from_parsed_qkey(
-    cfg: &crate::engine::qkey::QKeyConfig,
-) -> (Option<String>, Option<String>) {
+fn policy_from_parsed_qkey(cfg: &qf_engine_types::QKeyConfig) -> (Option<String>, Option<String>) {
     let stealth = cfg
         .stealth
         .as_deref()
@@ -548,7 +546,7 @@ fn is_expired(expires_at: Option<u64>, now: u64) -> bool {
 mod tests {
     use super::super::auth_frame::AuthFrame;
     use super::*;
-    use crate::engine::qkey;
+    use qf_engine_types as qkey;
     use std::path::Path;
 
     fn mk_token_hex(ch: char) -> String {
@@ -678,9 +676,9 @@ mod tests {
         let qkey_value = mk_qkey_with_token(&token_hex);
         let rest = qkey_value
             .trim()
-            .strip_prefix(crate::engine::qkey::QKEY_PREFIX)
+            .strip_prefix(qf_engine_types::QKEY_PREFIX)
             .expect("generated key has prefix");
-        let pasted = format!("  {}{}  ", crate::engine::qkey::QKEY_PREFIX.to_lowercase(), rest);
+        let pasted = format!("  {}{}  ", qf_engine_types::QKEY_PREFIX.to_lowercase(), rest);
         assert_eq!(qkey_id(&qkey_value), qkey_id(&pasted));
     }
 
@@ -875,8 +873,8 @@ mod tests {
         assert_eq!(lower.as_ref(), "a".repeat(64));
 
         let mut pasted = qkey_value.clone();
-        if let Some(rest) = pasted.strip_prefix(crate::engine::qkey::QKEY_PREFIX) {
-            pasted = format!("{}{}", crate::engine::qkey::QKEY_PREFIX.to_lowercase(), rest);
+        if let Some(rest) = pasted.strip_prefix(qf_engine_types::QKEY_PREFIX) {
+            pasted = format!("{}{}", qf_engine_types::QKEY_PREFIX.to_lowercase(), rest);
         }
         let lower2 = qkey_token_hex_from_qkey(&pasted).expect("token");
         assert_eq!(lower2.as_ref(), "a".repeat(64));

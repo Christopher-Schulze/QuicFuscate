@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::engine::{EngineConfig, EngineError};
+use crate::engine::EngineConfig;
 use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
+use qf_engine_types::EngineError;
 
 use super::ClientSubsystems;
 
@@ -84,7 +85,7 @@ mod tests {
     #[test]
     fn test_init_subsystems_manual_mode() {
         let mut config = EngineConfig::default();
-        config.stealth.mode = crate::engine::StealthMode::Manual;
+        config.stealth.mode = qf_engine_types::StealthMode::Manual;
         config.stealth.enable_domain_fronting = true;
         config.stealth.enable_traffic_padding = true;
         config.stealth.max_padding_size = 512;

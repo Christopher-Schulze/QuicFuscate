@@ -4,9 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::core::QuicFuscateConnection;
-use crate::engine::{EngineConfig, EngineError};
+use crate::engine::EngineConfig;
 use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
+use qf_engine_types::EngineError;
 
 /// Client connection wrapper.
 ///
@@ -93,7 +94,7 @@ impl ClientConnection {
         // Create QUIC connection using core.rs
         let qkey_token = config.connection.qkey_token.clone().filter(|t| !t.trim().is_empty());
         let qkey_initial_token: Option<Vec<u8>> =
-            qkey_token.as_deref().map(|raw| crate::engine::qkey::id(raw.trim()).into_bytes());
+            qkey_token.as_deref().map(|raw| qf_engine_types::id(raw.trim()).into_bytes());
         let conn = QuicFuscateConnection::new_client_with_runtime_and_clock(
             &sni,
             local_addr,
@@ -363,16 +364,16 @@ impl ClientConnection {
 
         // CC algorithm
         match config.transport.cc_algorithm {
-            crate::engine::CcAlgorithm::Reno => {
+            qf_transport_cc::cc::Algorithm::Reno => {
                 tc.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Reno)
             }
-            crate::engine::CcAlgorithm::Cubic => {
+            qf_transport_cc::cc::Algorithm::Cubic => {
                 tc.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::Cubic)
             }
-            crate::engine::CcAlgorithm::Bbr2 => {
+            qf_transport_cc::cc::Algorithm::Bbr2 => {
                 tc.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::BBR2)
             }
-            crate::engine::CcAlgorithm::Bbr3 => {
+            qf_transport_cc::cc::Algorithm::Bbr3 => {
                 tc.set_cc_algorithm(crate::transport::CongestionControlAlgorithm::BBR3)
             }
         }
@@ -404,7 +405,7 @@ impl ClientConnection {
     }
 
     fn should_use_utls(config: &EngineConfig) -> bool {
-        config.stealth.use_utls && !matches!(config.stealth.mode, crate::engine::StealthMode::Off)
+        config.stealth.use_utls && !matches!(config.stealth.mode, qf_engine_types::StealthMode::Off)
     }
 
     fn build_fec_config(config: &EngineConfig) -> Result<crate::fec::FecConfig, EngineError> {
@@ -521,7 +522,7 @@ mod tests {
         let mut config = EngineConfig::default();
         config.fingerprint_rotation.enabled = true;
         config.fingerprint_rotation.interval_secs = 21;
-        config.fingerprint_rotation.mode = crate::engine::RotationMode::Slots;
+        config.fingerprint_rotation.mode = qf_stealth::RotationMode::Slots;
         config.fingerprint_rotation.profile_slots =
             vec!["firefox@linux".to_string(), "safari@macos".to_string()];
         config.validate().expect("rotation config validates");
@@ -635,10 +636,10 @@ mod tests {
     #[test]
     fn test_utls_disabled_for_off_mode_and_explicit_opt_out() {
         let mut config = EngineConfig::default();
-        config.stealth.mode = crate::engine::StealthMode::Off;
+        config.stealth.mode = qf_engine_types::StealthMode::Off;
         assert!(!ClientConnection::should_use_utls(&config));
 
-        config.stealth.mode = crate::engine::StealthMode::Stealth;
+        config.stealth.mode = qf_engine_types::StealthMode::Stealth;
         config.stealth.use_utls = false;
         assert!(!ClientConnection::should_use_utls(&config));
     }
@@ -646,7 +647,7 @@ mod tests {
     #[test]
     fn test_stealth_builder_applies_persona_and_protocol_bundle() {
         let mut config = EngineConfig::default();
-        config.stealth.mode = crate::engine::StealthMode::Manual;
+        config.stealth.mode = qf_engine_types::StealthMode::Manual;
         config.stealth.enable_protocol_mimicry = true;
         config.stealth.enable_http3_masquerading = false;
         config.stealth.use_qpack_headers = false;

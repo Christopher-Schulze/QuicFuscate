@@ -372,7 +372,7 @@ impl ServerConfig {
 
     fn validate_engine_interface_alignment(
         &self,
-        interface: &crate::engine::InterfaceConfig,
+        interface: &qf_engine_types::InterfaceConfig,
     ) -> Result<(), String> {
         let addresses = interface
             .client_tunnel_addresses()
@@ -1016,32 +1016,32 @@ const SUPPORTED_LOGGING_MODES: [&str; 4] = ["verbose", "normal", "minimal", "no-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PersistedLoggingModeState {
     Absent,
-    Valid(crate::engine::LoggingMode),
+    Valid(qf_logging::LoggingMode),
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedLoggingModeFile {
-    mode: crate::engine::LoggingMode,
+    mode: qf_logging::LoggingMode,
 }
 
-pub(crate) fn logging_mode_name(mode: &crate::engine::LoggingMode) -> &'static str {
+pub(crate) fn logging_mode_name(mode: &qf_logging::LoggingMode) -> &'static str {
     match mode {
-        crate::engine::LoggingMode::Verbose => "verbose",
-        crate::engine::LoggingMode::Normal => "normal",
-        crate::engine::LoggingMode::Minimal => "minimal",
-        crate::engine::LoggingMode::NoLog => "no-log",
+        qf_logging::LoggingMode::Verbose => "verbose",
+        qf_logging::LoggingMode::Normal => "normal",
+        qf_logging::LoggingMode::Minimal => "minimal",
+        qf_logging::LoggingMode::NoLog => "no-log",
     }
 }
 
 pub(crate) fn parse_logging_mode(
     mode: &str,
-) -> Result<crate::engine::LoggingMode, String> {
+) -> Result<qf_logging::LoggingMode, String> {
     match mode {
-        "verbose" => Ok(crate::engine::LoggingMode::Verbose),
-        "normal" => Ok(crate::engine::LoggingMode::Normal),
-        "minimal" => Ok(crate::engine::LoggingMode::Minimal),
-        "no-log" => Ok(crate::engine::LoggingMode::NoLog),
+        "verbose" => Ok(qf_logging::LoggingMode::Verbose),
+        "normal" => Ok(qf_logging::LoggingMode::Normal),
+        "minimal" => Ok(qf_logging::LoggingMode::Minimal),
+        "no-log" => Ok(qf_logging::LoggingMode::NoLog),
         _ => Err(format!(
             "Invalid logging mode '{}'. Valid: {:?}",
             mode, SUPPORTED_LOGGING_MODES
@@ -1077,24 +1077,24 @@ pub(crate) fn load_persisted_logging_mode(
 }
 
 pub(crate) fn apply_logging_mode(
-    mode: &crate::engine::LoggingMode,
+    mode: &qf_logging::LoggingMode,
     log_buffer: &crate::implementations::server::admin_logs::AdminLogBuffer,
 ) {
     let level = match mode {
-        crate::engine::LoggingMode::NoLog => log::LevelFilter::Off,
-        crate::engine::LoggingMode::Minimal => log::LevelFilter::Warn,
-        crate::engine::LoggingMode::Verbose => log::LevelFilter::Trace,
-        crate::engine::LoggingMode::Normal => log::LevelFilter::Info,
+        qf_logging::LoggingMode::NoLog => log::LevelFilter::Off,
+        qf_logging::LoggingMode::Minimal => log::LevelFilter::Warn,
+        qf_logging::LoggingMode::Verbose => log::LevelFilter::Trace,
+        qf_logging::LoggingMode::Normal => log::LevelFilter::Info,
     };
     log::set_max_level(level);
-    if matches!(mode, crate::engine::LoggingMode::NoLog) {
+    if matches!(mode, qf_logging::LoggingMode::NoLog) {
         log_buffer.clear();
     }
 }
 
 pub(crate) fn persist_logging_mode(
     config_path: Option<&std::path::Path>,
-    mode: &crate::engine::LoggingMode,
+    mode: &qf_logging::LoggingMode,
 ) -> std::io::Result<()> {
     let Some(path) = resolve_logging_store_path(config_path) else {
         return Ok(());

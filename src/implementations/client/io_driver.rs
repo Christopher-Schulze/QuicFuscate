@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 use crate::core::QuicFuscateConnection;
-use crate::engine::{DataPlaneFault, EngineError};
 use crate::interface::TunInterface;
 #[cfg(target_os = "linux")]
 use crate::interface::TunReadContract;
 use crate::time_source::ProtocolClock;
+use qf_engine_types::{DataPlaneFault, EngineError};
 
 #[inline]
 fn profile_prefers_wide_batches(profile: crate::optimize::CpuProfile) -> bool {

@@ -131,7 +131,7 @@ pub(crate) struct PreparedStandaloneRuntimeConfig {
     /// Shared 0-RTT anti-replay strike register (server only).
     strike_register: Option<Arc<crate::transport::anti_replay::StrikeRegister>>,
     /// Anti-replay configuration loaded from [anti_replay] TOML section.
-    anti_replay_section: crate::engine::AntiReplaySection,
+    anti_replay_section: qf_transport_anti_replay::AntiReplaySection,
 }
 
 pub struct PreparedStandaloneLaunch {
@@ -159,7 +159,7 @@ impl PreparedStandaloneLaunch {
         fec_cfg: FecConfig,
         opt_params: OptimizeConfig,
         stealth_cfg: StealthConfig,
-        fec_mode_override: Option<crate::engine::FecMode>,
+        fec_mode_override: Option<qf_engine_types::FecMode>,
         profiles: Vec<FingerprintProfile>,
         profile_interval_secs: u64,
         stealth_policy: RuntimeStealthPolicy<'_>,
@@ -197,7 +197,7 @@ impl PreparedStandaloneLaunch {
         fec_cfg: FecConfig,
         opt_params: OptimizeConfig,
         stealth_cfg: StealthConfig,
-        fec_mode_override: Option<crate::engine::FecMode>,
+        fec_mode_override: Option<qf_engine_types::FecMode>,
         profiles: Vec<FingerprintProfile>,
         profile_interval_secs: u64,
         stealth_policy: RuntimeStealthPolicy<'_>,
@@ -234,7 +234,7 @@ impl PreparedStandaloneRuntimeConfig {
         fec_cfg: FecConfig,
         opt_params: OptimizeConfig,
         mut stealth_cfg: StealthConfig,
-        fec_mode_override: Option<crate::engine::FecMode>,
+        fec_mode_override: Option<qf_engine_types::FecMode>,
         profiles: Vec<FingerprintProfile>,
         profile_interval_secs: u64,
         stealth_policy: OwnedRuntimeStealthPolicy,
@@ -262,7 +262,7 @@ impl PreparedStandaloneRuntimeConfig {
         fec_cfg: FecConfig,
         opt_params: OptimizeConfig,
         stealth_cfg: StealthConfig,
-        fec_mode_override: Option<crate::engine::FecMode>,
+        fec_mode_override: Option<qf_engine_types::FecMode>,
         profiles: Vec<FingerprintProfile>,
         profile_interval_secs: u64,
         stealth_policy: OwnedRuntimeStealthPolicy,
@@ -286,14 +286,14 @@ impl PreparedStandaloneRuntimeConfig {
             },
             tun_enable,
             strike_register: None,
-            anti_replay_section: crate::engine::AntiReplaySection::default(),
+            anti_replay_section: qf_transport_anti_replay::AntiReplaySection::default(),
         }
     }
 }
 
 impl PreparedStandaloneLaunch {
     /// Override the anti-replay section (called after construction when config is available).
-    pub fn set_anti_replay_section(&mut self, section: crate::engine::AntiReplaySection) {
+    pub fn set_anti_replay_section(&mut self, section: qf_transport_anti_replay::AntiReplaySection) {
         self.runtime.anti_replay_section = section;
     }
 }
@@ -366,9 +366,9 @@ pub fn resolve_runtime_profiles(
 }
 
 pub fn runtime_components_from_app_config(
-    app_cfg: crate::engine::app_config::AppConfig,
-    fec_mode_override: Option<crate::engine::FecMode>,
-) -> (FecConfig, StealthConfig, OptimizeConfig, crate::engine::AntiReplaySection) {
+    app_cfg: crate::app_config::AppConfig,
+    fec_mode_override: Option<qf_engine_types::FecMode>,
+) -> (FecConfig, StealthConfig, OptimizeConfig, qf_transport_anti_replay::AntiReplaySection) {
     let mut fec = app_cfg.fec;
     if let Some(mode) = fec_mode_override {
         fec.apply_engine_mode(mode);
@@ -432,7 +432,7 @@ pub fn initialize_standalone_server_bootstrap_with_clock(
     let admin_log_buffer = admin_log_buffer_override
         .unwrap_or_else(|| Arc::new(self::admin_logs::AdminLogBuffer::new_with_clock(4096, &clock)));
     let initial_mode = match load_persisted_logging_mode(config_path)? {
-        PersistedLoggingModeState::Absent => crate::engine::LoggingMode::Normal,
+        PersistedLoggingModeState::Absent => qf_logging::LoggingMode::Normal,
         PersistedLoggingModeState::Valid(mode) => mode,
     };
     apply_logging_mode(&initial_mode, &admin_log_buffer);
@@ -487,7 +487,7 @@ pub(crate) fn write_runtime_config(
     let Some(path) = config_path else {
         return AdminResponse::error("Config path not set");
     };
-    match crate::engine::app_config::AppConfig::from_toml(contents) {
+    match crate::app_config::AppConfig::from_toml(contents) {
         Ok(cfg) => {
             if let Err(e) = cfg.validate() {
                 return AdminResponse::error(format!("Config validation failed: {}", e));

@@ -1596,7 +1596,7 @@ impl LiveServerState {
         out: &mut [u8],
         metrics: &Metrics,
         accept_loop: &AcceptLoop,
-    ) -> Result<(), crate::engine::DataPlaneFault> {
+    ) -> Result<(), qf_engine_types::DataPlaneFault> {
         let now = self.clock.now();
         let log_client_stats = now >= self.next_stats_log;
         if log_client_stats {

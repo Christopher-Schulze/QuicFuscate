@@ -620,7 +620,7 @@ impl AdminHandler for DefaultAdminHandler {
 
     fn handle_qkey(&self) -> String {
         // Test-only fallback handler emits a deterministic synthetic server profile.
-        use crate::engine::qkey;
+        use qf_engine_types as qkey;
 
         let config =
             qkey::QKeyConfig::new("vpn.example.com:4433", "cdn.example.com").with_stealth("auto");
@@ -629,7 +629,7 @@ impl AdminHandler for DefaultAdminHandler {
         let extra: String = nonce.iter().map(|b| format!("{:02x}", b)).collect();
         let mut token_bytes = crate::secret::SecretBytes::zeroed(32, "qkey_generated_token_bytes");
         crate::rng::fill_secure_or_abort(token_bytes.as_mut_slice(), "admin::handle_qkey_token");
-        let token = crate::engine::qkey::QKeyToken::new(
+        let token = qf_engine_types::QKeyToken::new(
             token_bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
         );
         let config = config.with_extra(&format!("nonce={}", extra)).with_owned_token(token);

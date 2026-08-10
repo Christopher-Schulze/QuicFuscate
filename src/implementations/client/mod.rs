@@ -42,11 +42,12 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
-use crate::engine::{DataPlaneFault, DisconnectReason, EngineConfig, EngineError, EngineState};
+use crate::engine::EngineConfig;
 use crate::interface::{TunConfig, TunInterface};
 use crate::optimize::MemoryPool;
 use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
+use qf_engine_types::{DataPlaneFault, DisconnectReason, EngineError, EngineState};
 
 /// Client runtime handle for the VPN client.
 ///
@@ -135,12 +136,12 @@ pub fn tun_config_from_assignment(
             "server explicitly disabled client TUN activation".to_string(),
         ));
     }
-    let addresses = crate::engine::ClientTunnelAddresses {
-        ipv4: assignment.ipv4.map(|address| crate::engine::ClientTunnelIpv4 {
+    let addresses = qf_engine_types::ClientTunnelAddresses {
+        ipv4: assignment.ipv4.map(|address| qf_engine_types::ClientTunnelIpv4 {
             address: address.address,
             prefix: address.prefix,
         }),
-        ipv6: assignment.ipv6.map(|address| crate::engine::ClientTunnelIpv6 {
+        ipv6: assignment.ipv6.map(|address| qf_engine_types::ClientTunnelIpv6 {
             address: address.address,
             prefix: address.prefix,
         }),
@@ -895,7 +896,7 @@ impl ClientRuntime {
     }
 
     /// Retain an accepted FEC policy for the next connection or reconnect.
-    pub fn set_next_fec_mode(&mut self, mode: crate::engine::FecMode) {
+    pub fn set_next_fec_mode(&mut self, mode: qf_engine_types::FecMode) {
         self.config.fec.mode = mode;
     }
 
@@ -926,7 +927,7 @@ impl ClientRuntime {
     }
 
     /// Return the policy that will construct the next connection.
-    pub fn next_fec_mode(&self) -> crate::engine::FecMode {
+    pub fn next_fec_mode(&self) -> qf_engine_types::FecMode {
         self.config.fec.mode
     }
 

@@ -11,8 +11,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::engine::qkey;
 use crate::time_source::{ProtocolClock, WallClockError};
+use qf_engine_types as qkey;
 
 const PROFILE_ID_BYTES: usize = 16;
 const PROFILE_FILE_MODE: u32 = 0o600;

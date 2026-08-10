@@ -473,7 +473,7 @@ impl ServerRuntime {
     pub fn start(&mut self) -> Result<(), EngineError> {
         if self.state != ServerState::Stopped {
             return Err(EngineError::InvalidState(
-                crate::engine::EngineState::Running,
+                qf_engine_types::EngineState::Running,
                 "start (already running)",
             ));
         }

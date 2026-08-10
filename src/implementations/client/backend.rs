@@ -10,8 +10,9 @@ use super::connection::ClientConnection;
 use super::platform::{
     self, DnsConfig, PlatformBackend, PlatformError, RouteConfig, TunDeviceConfig, TunHandle,
 };
-use crate::engine::{qkey, EngineConfig, EngineError};
+use crate::engine::EngineConfig;
 use crate::time_source::ProtocolClock;
+use qf_engine_types::{self as qkey, EngineError};
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,21 +394,23 @@ impl ClientBackend {
         if let Some(stealth) = qkey_config.stealth {
             let s = stealth.trim().to_ascii_lowercase();
             config.stealth.mode = match s.as_str() {
-                "off" => crate::engine::StealthMode::Off,
-                "performance" => crate::engine::StealthMode::Performance,
-                "stealth" => crate::engine::StealthMode::Stealth,
-                "anti-dpi" | "antidpi" | "anti_dpi" | "max" => crate::engine::StealthMode::AntiDpi,
-                "manual" => crate::engine::StealthMode::Manual,
-                _ => crate::engine::StealthMode::Auto,
+                "off" => qf_engine_types::StealthMode::Off,
+                "performance" => qf_engine_types::StealthMode::Performance,
+                "stealth" => qf_engine_types::StealthMode::Stealth,
+                "anti-dpi" | "antidpi" | "anti_dpi" | "max" => {
+                    qf_engine_types::StealthMode::AntiDpi
+                }
+                "manual" => qf_engine_types::StealthMode::Manual,
+                _ => qf_engine_types::StealthMode::Auto,
             };
         }
 
         if let Some(fec) = qkey_config.fec {
             let f = fec.trim().to_ascii_lowercase();
             config.fec.mode = match f.as_str() {
-                "off" | "zero" => crate::engine::FecMode::Off,
-                "auto" | "dynamic" | "on" | "manual" | "normal" => crate::engine::FecMode::Auto,
-                _ => crate::engine::FecMode::Auto,
+                "off" | "zero" => qf_engine_types::FecMode::Off,
+                "auto" | "dynamic" | "on" | "manual" | "normal" => qf_engine_types::FecMode::Auto,
+                _ => qf_engine_types::FecMode::Auto,
             };
         }
 
