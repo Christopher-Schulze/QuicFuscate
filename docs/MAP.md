@@ -1666,6 +1666,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - `qf-cpu::FeatureDetector` implements the current Intel versioned AVX10 contract through stable CPUID/XGETBV intrinsics. Runtime support requires `CPUID.07H.01H:EDX[19]`, a defined CPUID leaf `24H` subleaf range, version >= 1 in `CPUID.24H.00H:EBX[7:0]`, and all SSE, AVX, opmask, and ZMM state bits in XCR0. SGX and every incomplete state fail closed.
 - Intel no longer enumerates separate AVX10 vector lengths. The historical `avx10_1_256` and `avx10_1_512` fields remain compatibility projections and are set together for verified AVX10.1; `X86_P4a` remains a synthetic compatibility profile while runtime detection selects `X86_P4b`.
 - Stable Linux x86_64 all-feature checking passes, qf-cpu all-feature tests pass `87/87`, strict qf-cpu test Clippy passes, workspace all-feature library/binary/example Clippy passes, and the serial root all-feature library passes. The removed `avx10.1-256`/`avx10.1-512` Rust feature macros are absent. No frontend or Tauri path changes.
+- Post-push seam evidence at `scripts/out/audits/workspace-seams-20260810T-stable-avx10-detection-postpush/workspace-seams.json` records published revision `1fad839e8ebe84767fbea2389eba40edf6fcf476`, 36 packages, 336 Rust files, 207,784 source lines, 106 module edges, 123 workspace dependency edges, no strongly connected components, and `protected_changes=[]`.
 
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 

@@ -6833,3 +6833,11 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Final pre-commit seam evidence is `scripts/out/audits/workspace-seams-20260810T-qftls-key-install-port-final-precommit/workspace-seams.json` at source revision `22f7a7274cf9578135eb9b46b331b0cb51a7bbab`: `36` packages, `336` Rust files, `207,678` source lines, `106` module edges, `123` workspace dependency edges, zero strongly connected components, and `protected_changes=[]`. The remaining TLS ownership direction is one-way `transport -> qftls` with six references.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-qftls-key-install-port-postpush/workspace-seams.json` at published revision `c379057f7e9b63a5254c3a40b72c87a56664e0b0` with identical counts, zero strongly connected components, the same one-way six-reference `transport -> qftls` edge, and `protected_changes=[]`.
 - Frontend and Tauri paths remain untouched. No frontend field or API projection is required.
+
+## Stable AVX10.1 Detection Repair (2026-08-10, TODO-562)
+
+- `qf-cpu::FeatureDetector` replaces unsupported stable-Rust AVX10 feature macros with the current Intel versioned CPUID/XGETBV contract. The runtime requires `CPUID.07H.01H:EDX[19]`, a defined CPUID leaf `24H` subleaf range, version >= 1, and complete SSE/AVX/opmask/ZMM XCR0 state; SGX and every incomplete contract fail closed.
+- Intel no longer enumerates separate AVX10 vector lengths. The historical 256-bit and 512-bit fields remain compatibility projections and are set together for verified AVX10.1. `X86_P4a` remains a synthetic compatibility profile, while runtime detection selects `X86_P4b`.
+- Verification passes stable Linux x86_64 qf-cpu all-feature checking, qf-cpu tests `87/87`, strict qf-cpu test Clippy, workspace all-feature library/binary/example Clippy, the serial root all-feature library, formatting, documentation truth, and diff hygiene.
+- Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-stable-avx10-detection-postpush/workspace-seams.json` at published revision `1fad839e8ebe84767fbea2389eba40edf6fcf476`: 36 packages, 336 Rust files, 207,784 source lines, 106 module edges, 123 workspace dependency edges, no strongly connected components, and `protected_changes=[]`.
+- Frontend and Tauri paths remain untouched. No frontend field or API projection is required.
