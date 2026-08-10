@@ -2466,7 +2466,9 @@ mod tests {
                 None,
                 panicking_test_handler(),
                 1,
-                MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS,
+                // Timeout behavior has dedicated slow-worker coverage. This fixture isolates
+                // panic conversion from platform-dependent spawn_blocking scheduling latency.
+                DEFAULT_ADMIN_WEB_OPERATION_TIMEOUT_MS,
             )
             .expect("admin server"),
         );
