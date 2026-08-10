@@ -65,7 +65,7 @@ pub fn gf16_mul_slice_selfcheck(coeff: u16, src: &[u16], dst: &mut [u16]) {
     qf_fec::gf16_mul_slice(coeff, src, dst);
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(test, target_arch = "x86_64"))]
 #[inline]
 /// # Safety
 ///

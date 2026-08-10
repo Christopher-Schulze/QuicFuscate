@@ -3121,3 +3121,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Unsafe test-pool flow: allocator -> aligned ownership registry -> pool cache. NUMA behavior belongs exclusively to qf-memory-pool; the removed root adapter reference resolved to no module and its extracted Linux counterpart performs no placement operation.
 - Verification: exact local `unsafe_rust` workspace all-target Clippy with warnings denied; serial root all-feature library `1,657/1,657`; formatting. Hosted Linux x86 confirmation remains pending.
 - Final target/free space is `4,325,868 / 3,758,204 KiB`; frontend and Tauri paths are unaffected.
+
+## Root VBMI2 Test Compatibility Ownership (2026-08-10, TODO-562)
+
+- Production flow: FEC controller -> qf-fec runtime dispatch -> qf-fec VBMI2 kernel. Root test flow: x86 unit test -> root compatibility wrapper -> the same qf-fec kernel.
+- The root wrapper is test plus x86-only; no normal root library profile compiles an unreachable duplicate entry point.
+- Verification: focused root GF16 tests `6/6`; exact local `unsafe_rust` workspace all-target Clippy with warnings denied; formatting. Native VBMI2 execution remains external.
+- Final target/free space is `4,534,900 / 3,551,268 KiB`; frontend and Tauri paths are unaffected.

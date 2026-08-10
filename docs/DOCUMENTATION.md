@@ -7001,3 +7001,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The x86 import now shares the test/rust-tests boundary of its only unqualified intrinsic consumer. The test-only UnsafeMemoryPool no longer invokes the obsolete Linux root NUMA adapter; qf-memory-pool owns the canonical NUMA policy and its Linux adapter is deliberately unavailable, so the removed call had no effect.
 - The exact local `unsafe_rust` workspace all-target Clippy contract passes with warnings denied, the serial root all-feature library passes `1,657/1,657`, and formatting passes. Hosted Linux x86 confirmation remains pending publication.
 - Final target/free space is `4,325,868 / 3,758,204 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
+
+## Root VBMI2 Test Compatibility Ownership (2026-08-10, TODO-562)
+
+- Clippy Matrix run `31427636274`, `unsafe_rust` job `93583017456`, compiled the root `gf16_mul_slice_vbmi2` compatibility wrapper in x86 production despite its only two consumers being root unit tests.
+- The wrapper now compiles only for x86 unit tests. qf-fec continues to own and publicly expose the real VBMI2 kernel, runtime dispatch, thresholds, telemetry, bounded length handling, and production behavior.
+- Six focused root GF16 tests pass, exact local `unsafe_rust` workspace all-target Clippy passes with warnings denied, and formatting passes. Native VBMI2 execution and hosted Linux x86 confirmation remain external.
+- Final target/free space is `4,534,900 / 3,551,268 KiB`, below the `12,582,912 KiB` cleanup threshold and above the `2,097,152 KiB` build floor. Frontend and Tauri paths remain untouched; no frontend field or API projection is required.
