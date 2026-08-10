@@ -2993,3 +2993,9 @@ The audit remains open. These reconciliations document current evidence and owne
 - Runtime guardrail ownership: interface schema -> qf-engine-types; TLS Cover cipher ledger -> qf-crypto; TLS Cover entropy and HTTP/3 caller -> qf-stealth; string implementation -> qf-cpu. No guardrail relies on the removed root implementation owners.
 - Verification: qf-privilege `23/23`; qf-memory-lock `12/12`; QFTLS `15/15`; privilege integration `1/1`; proof manifest `PASS`, zero failures, native Linux-root lane `UNAVAILABLE` on macOS; runtime audit `106` items with `Critical: 0` and `Warnings: 0`; strict workspace all-feature library/binary/example Clippy; serial root all-feature library `1,657/1,657`; documentation truth and diff hygiene. Final target/free space is `6,868,956 / 8,023,472 KiB`.
 - Frontend and Tauri paths are unaffected; no frontend field/API projection is required.
+
+## Pool Accounting Test Feature Ownership (2026-08-10, TODO-562)
+
+- Test flow: qf-compress or qf-fec test target -> package-local qf-memory-pool dev-dependency with `rust-tests` -> hidden `MemoryPool::accounting_snapshot` assertion surface. Normal qf-compress/qf-fec dependency edges remain feature-free for production builds.
+- Verification: qf-compress `17/17`; qf-fec `82/82`; strict default all-target Clippy for both packages; strict workspace all-feature library/binary/example Clippy. The exact default workspace all-target lane no longer reports pool-accounting errors and reaches a separate root test-feature forwarding gap with `81` errors.
+- Cleanup: the 2-GiB free-space guard triggered after the broad failed lane; `cargo clean` removed `52,002` generated files and `11.7 GiB`. Final target/free space is `577,064 / 12,466,456 KiB`. Frontend and Tauri paths are unaffected.

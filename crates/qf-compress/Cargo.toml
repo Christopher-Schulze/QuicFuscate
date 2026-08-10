@@ -17,3 +17,6 @@ qf-cpu = { path = "../qf-cpu" }
 qf-memory-pool = { path = "../qf-memory-pool" }
 qf-telemetry = { path = "../qf-telemetry" }
 zstd = "0.13"
+
+[dev-dependencies]
+qf-memory-pool = { path = "../qf-memory-pool", features = ["rust-tests"] }
