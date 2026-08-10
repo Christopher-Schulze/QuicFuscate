@@ -6658,3 +6658,10 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Verification passes qf-stealth `116/116`, root all-feature checking, root all-feature library tests `1,697/1,697`, strict workspace library/binary/example Clippy, qf-stealth all-target strict Clippy, formatting, and diff hygiene. Workspace all-target Clippy remains explicitly platform-blocked only by the existing Linux-only compile guard at `scripts/tests/rust/rt-io-hotpath-kernel-integration.rs:4` on macOS ARM64.
 - The final disk guard records `9,083,324 KiB` target usage and `13,785,588 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-stealth-config-postpush/workspace-seams.json` at source revision `da1160d215e885deffe0b0f1edfcef063722727c`: `36` workspace packages, `332` Rust files, `206,915` source lines, `124` module edges, `114` Cargo workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## TLS Cover Material Workspace Ownership (2026-08-10, TODO-562)
+
+- `crates/qf-stealth/src/tls_cover.rs` canonically owns fresh OS-entropy acquisition and domain-separated HKDF derivation for TLS Cover key/IV material. Browser profile plus client/server role bind each derivation, and entropy, PRK, and expanded intermediate bytes are zeroized after use.
+- The root `TlsCoverProvider` keeps only compatibility error mapping, root `CryptoContext` installation, sequence lifecycle, synthetic frame construction, and record encryption. It delegates deterministic and fresh derivation to qf-stealth, so the root `stealth` module no longer imports the root crypto HKDF implementation.
+- Verification passes qf-stealth `118/118`, root all-feature library tests `1,697/1,697`, strict workspace library/binary/example Clippy, qf-stealth all-target strict Clippy, formatting, and diff hygiene. The final disk guard records `10,040,504 KiB` target usage and `12,687,208 KiB` free.
+- Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

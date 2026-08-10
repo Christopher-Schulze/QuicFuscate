@@ -2790,3 +2790,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Verification: qf-stealth `116/116`; root all-feature check; root all-feature library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. The unchanged Linux-only compile guard at `scripts/tests/rust/rt-io-hotpath-kernel-integration.rs:4` is the sole all-target Clippy stop on macOS ARM64.
 - The final disk guard records `9,083,324 KiB` target usage and `13,785,588 KiB` free. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence: `scripts/out/audits/workspace-seams-20260810T-stealth-config-postpush/workspace-seams.json` at source revision `da1160d215e885deffe0b0f1edfcef063722727c`; `36` packages, `332` Rust files, `206,915` source lines, `124` module edges, `114` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`.
+
+## TLS Cover Material Workspace Ownership (2026-08-10, TODO-562)
+
+- Derivation flow: OS entropy -> `qf-stealth::derive_tls_cover_material` -> qf-crypto HKDF extract/expand with profile and role domain -> zeroized intermediates -> root `TlsCoverProvider` -> root `CryptoContext::install_tls_cover_cipher`.
+- Canonical derivation owner: `crates/qf-stealth/src/tls_cover.rs`; compatibility/install owner: `src/stealth/parts/tls_cover_provider.rs`. The root module no longer imports HKDF directly; encryption state and sequence ownership do not cross into the child.
+- Verification: qf-stealth `118/118`; root all-feature library `1,697/1,697`; strict workspace library/binary/example Clippy; qf-stealth all-target strict Clippy; formatting and diff hygiene. Final target/free space is `10,040,504 / 12,687,208 KiB`.
+- Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.

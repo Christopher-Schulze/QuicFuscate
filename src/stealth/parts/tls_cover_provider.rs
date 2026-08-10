@@ -127,40 +127,20 @@ impl TlsCoverProvider {
         profile: &str,
         is_server: bool,
     ) -> Result<([u8; 32], [u8; 12]), crate::error::ConnectionError> {
-        use zeroize::Zeroize;
-
-        let mut entropy = [0u8; 32];
-        crate::rng::fill_secure(&mut entropy).map_err(|_| {
+        qf_stealth::derive_tls_cover_material(profile, is_server).map_err(|_| {
             crate::error::ConnectionError::CryptoError(
                 "TLS cover entropy source unavailable".to_string(),
             )
-        })?;
-        let result = Self::derive_tls_cover_material_from_entropy(profile, is_server, &entropy);
-        entropy.zeroize();
-        Ok(result)
+        })
     }
 
+    #[cfg(test)]
     fn derive_tls_cover_material_from_entropy(
         profile: &str,
         is_server: bool,
         entropy: &[u8; 32],
     ) -> ([u8; 32], [u8; 12]) {
-        use zeroize::Zeroize;
-
-        let mut prk = hkdf_extract(b"quicfuscate:tls-cover:salt:v2", entropy);
-        let info = format!(
-            "quicfuscate:tls-cover:{}:{}",
-            profile,
-            if is_server { "server" } else { "client" }
-        );
-        let mut okm = hkdf_expand(&prk, info.as_bytes(), 44);
-        let mut key = [0u8; 32];
-        let mut iv = [0u8; 12];
-        key.copy_from_slice(&okm[..32]);
-        iv.copy_from_slice(&okm[32..44]);
-        prk.zeroize();
-        okm.zeroize();
-        (key, iv)
+        qf_stealth::derive_tls_cover_material_from_entropy(profile, is_server, entropy)
     }
 
     /// Enable/disable performance mode

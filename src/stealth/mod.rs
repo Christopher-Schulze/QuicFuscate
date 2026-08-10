@@ -53,7 +53,6 @@ Rules-File Guard (Stealth Module)
 */
 
 // clap dependency removed - using manual enum implementation
-use crate::crypto::hkdf::{hkdf_expand, hkdf_extract};
 use log::{debug, info, warn};
 // use of sha2 replaced with centralized SIMD dispatch
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};

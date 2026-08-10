@@ -1707,11 +1707,13 @@ dependencies = [
  "qf-common",
  "qf-compress",
  "qf-cpu",
+ "qf-crypto",
  "qf-transport-types",
  "rand",
  "serde",
  "serde_json",
  "toml",
+ "zeroize",
 ]
 
 [[package]]

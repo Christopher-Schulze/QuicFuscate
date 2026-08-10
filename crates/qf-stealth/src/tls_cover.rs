@@ -5,6 +5,49 @@
 //! a real session. This is used when `StealthConfig::use_tls_cover` is enabled to
 //! decouple QUIC transport from observable TLS handshakes.
 
+use zeroize::Zeroize;
+
+const TLS_COVER_HKDF_SALT: &[u8] = b"quicfuscate:tls-cover:salt:v2";
+const TLS_COVER_KEY_LEN: usize = 32;
+const TLS_COVER_IV_LEN: usize = 12;
+const TLS_COVER_MATERIAL_LEN: usize = TLS_COVER_KEY_LEN + TLS_COVER_IV_LEN;
+
+/// Derive fresh connection-local TLS Cover key and IV material from OS entropy.
+#[doc(hidden)]
+pub fn derive_tls_cover_material(
+    profile: &str,
+    is_server: bool,
+) -> std::io::Result<([u8; TLS_COVER_KEY_LEN], [u8; TLS_COVER_IV_LEN])> {
+    let mut entropy = [0u8; TLS_COVER_KEY_LEN];
+    qf_common::rng::fill_secure(&mut entropy)?;
+    let material = derive_tls_cover_material_from_entropy(profile, is_server, &entropy);
+    entropy.zeroize();
+    Ok(material)
+}
+
+/// Deterministically derive TLS Cover material from explicit entropy.
+#[doc(hidden)]
+pub fn derive_tls_cover_material_from_entropy(
+    profile: &str,
+    is_server: bool,
+    entropy: &[u8; TLS_COVER_KEY_LEN],
+) -> ([u8; TLS_COVER_KEY_LEN], [u8; TLS_COVER_IV_LEN]) {
+    let mut prk = qf_crypto::hkdf::hkdf_extract(TLS_COVER_HKDF_SALT, entropy);
+    let info = format!(
+        "quicfuscate:tls-cover:{}:{}",
+        profile,
+        if is_server { "server" } else { "client" }
+    );
+    let mut output = qf_crypto::hkdf::hkdf_expand(&prk, info.as_bytes(), TLS_COVER_MATERIAL_LEN);
+    let mut key = [0u8; TLS_COVER_KEY_LEN];
+    let mut iv = [0u8; TLS_COVER_IV_LEN];
+    key.copy_from_slice(&output[..TLS_COVER_KEY_LEN]);
+    iv.copy_from_slice(&output[TLS_COVER_KEY_LEN..]);
+    prk.zeroize();
+    output.zeroize();
+    (key, iv)
+}
+
 /// Cipher suite used by the TLS Cover provider for encrypting synthetic records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
@@ -722,5 +765,21 @@ mod tests {
         assert_eq!(TlsCoverCipherSuite::Aes128Gcm.tls_id(), 0x1301);
         assert_eq!(TlsCoverCipherSuite::ChaCha20Poly1305.as_str(), "chacha20-poly1305");
         assert_eq!(TlsCoverCipherSuite::ChaCha20Poly1305.tls_id(), 0x1303);
+    }
+
+    #[test]
+    fn tls_cover_material_derivation_is_deterministic_and_domain_separated() {
+        let entropy = [0x5a; TLS_COVER_KEY_LEN];
+        let client = derive_tls_cover_material_from_entropy("chrome", false, &entropy);
+        assert_eq!(client, derive_tls_cover_material_from_entropy("chrome", false, &entropy));
+        assert_ne!(client, derive_tls_cover_material_from_entropy("chrome", true, &entropy));
+        assert_ne!(client, derive_tls_cover_material_from_entropy("firefox", false, &entropy));
+    }
+
+    #[test]
+    fn fresh_tls_cover_material_is_not_reused_between_connections() {
+        let first = derive_tls_cover_material("chrome", false).expect("first material");
+        let second = derive_tls_cover_material("chrome", false).expect("second material");
+        assert_ne!(first, second);
     }
 }
