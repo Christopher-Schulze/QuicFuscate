@@ -416,8 +416,7 @@ start_client() {
     --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
     --url "https://$SERVER_UNDERLAY_IP/" --qkey "$qkey" \
     --ca-file "$CERT_DIR/ca.crt" --verify-peer --disable-doh --no-utls \
-    --tun --tun-name qtun0 --tun-ip "$CLIENT_TUN_IP" \
-    --tun-netmask 255.255.255.0 --kill-switch \
+    --tun --tun-name qtun0 --kill-switch \
     --vpn-dns "$SERVER_TUN_IP" \
     --heartbeat-timeout-ms "$HEARTBEAT_TIMEOUT_MS" -v \
     >"$CLIENT_LOG" 2>&1 &
@@ -427,11 +426,15 @@ start_client() {
   wait_for 10 connected_tun_rule_present
 }
 
-ensure_tun_interfaces() {
-  ip netns exec "$SERVER_NS" ip address replace "$SERVER_TUN_IP/24" dev qtun0
-  ip netns exec "$SERVER_NS" ip link set qtun0 up
-  ip netns exec "$CLIENT_NS" ip address replace "$CLIENT_TUN_IP/24" dev qtun0
-  ip netns exec "$CLIENT_NS" ip link set qtun0 up
+require_runtime_owned_tun_assignment() {
+  local namespace="$1"
+  local expected_ipv4="$2"
+  if ! ip netns exec "$namespace" ip -j addr show dev qtun0 | python3 -c \
+    'import json,sys; expected=sys.argv[1]; data=json.load(sys.stdin); assert len(data)==1,data; link=data[0]; addresses={(item["family"],item["local"],item["prefixlen"]) for item in link["addr_info"]}; assert ("inet",expected,24) in addresses,(expected,addresses); assert "UP" in link["flags"],link' \
+    "$expected_ipv4"; then
+    echo "runtime-owned TUN assignment is incomplete in $namespace" >&2
+    exit 1
+  fi
 }
 
 assert_connected_policy() {
@@ -602,7 +605,8 @@ assert_atomic_replacement_failure
 start_server
 QKEY="$(fetch_qkey)"
 start_client "$QKEY"
-ensure_tun_interfaces
+require_runtime_owned_tun_assignment "$SERVER_NS" "$SERVER_TUN_IP"
+require_runtime_owned_tun_assignment "$CLIENT_NS" "$CLIENT_TUN_IP"
 assert_connected_policy
 assert_dns_and_ipv6_policy
 assert_unexpected_loss_retains_block

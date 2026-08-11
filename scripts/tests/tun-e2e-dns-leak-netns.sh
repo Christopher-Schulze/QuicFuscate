@@ -50,6 +50,17 @@ require_cmd() {
   }
 }
 
+require_runtime_owned_tun_assignment() {
+  local namespace="$1"
+  local expected_ipv4="$2"
+  if ! ip netns exec "$namespace" ip -j addr show dev qtun0 | python3 -c \
+    'import json,sys; expected=sys.argv[1]; data=json.load(sys.stdin); assert len(data)==1,data; link=data[0]; addresses={(item["family"],item["local"],item["prefixlen"]) for item in link["addr_info"]}; assert ("inet",expected,24) in addresses,(expected,addresses); assert "UP" in link["flags"],link' \
+    "$expected_ipv4"; then
+    echo "runtime-owned TUN assignment is incomplete in $namespace" >&2
+    exit 1
+  fi
+}
+
 cleanup() {
   set +e
   [ -n "${TCPDUMP_PID:-}" ] && kill "$TCPDUMP_PID" 2>/dev/null
@@ -142,17 +153,14 @@ ip netns exec "$CLIENT_NS" unshare --mount --propagation private \
   --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
   --url "https://$SERVER_UNDERLAY_IP/" --qkey "$QKEY" --ca-file "$CA" --verify-peer \
   --doh-provider "$DOH_PROVIDER" \
-  --tun --tun-name qtun0 --tun-ip "$CLIENT_TUN_IP" --tun-netmask 255.255.255.0 \
+  --tun --tun-name qtun0 \
   --no-utls -v \
   > "$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
 sleep 5
 
-ip netns exec "$SERVER_NS" ip addr add "$SERVER_TUN_IP/24" dev qtun0 2>/dev/null || true
-ip netns exec "$SERVER_NS" ip link set qtun0 up 2>/dev/null || true
-ip netns exec "$CLIENT_NS" ip addr add "$CLIENT_TUN_IP/24" dev qtun0 2>/dev/null || true
-ip netns exec "$CLIENT_NS" ip link set qtun0 up 2>/dev/null || true
-sleep 2
+require_runtime_owned_tun_assignment "$SERVER_NS" "$SERVER_TUN_IP"
+require_runtime_owned_tun_assignment "$CLIENT_NS" "$CLIENT_TUN_IP"
 
 echo "=== tunnel status ==="
 echo "srv: $(ip netns exec "$SERVER_NS" ip -br addr show qtun0 2>&1)"
