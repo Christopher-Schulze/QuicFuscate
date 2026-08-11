@@ -924,8 +924,12 @@ if rg -F -- 'Result<[u32; 4], DropError>' crates/qf-privilege/src/drop.rs >/dev/
     crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'partial_transition_error_preserves_state_and_operation' \
     crates/qf-privilege/src/drop.rs >/dev/null \
-  && rg -F -- 'PRIVILEGE_PROBE_STATE threads_verified=' \
-    src/bin/qf-privilege-probe.rs scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
+  && rg -F -- 'PRIVILEGE_PROBE_STATE mode={probe_mode} threads_verified=' \
+    src/bin/qf-privilege-probe.rs >/dev/null \
+  && rg -F -- 'PRIVILEGE_PROBE_STATE mode=standard threads_verified=' \
+    scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
+  && rg -F -- 'PRIVILEGE_PROBE_STATE mode=tokio threads_verified=' \
+    scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
   && rg -F -- 'Err(DropError::NotSupported)' crates/qf-privilege/src/drop.rs >/dev/null; then
   pass "Privilege post-drop ID, partial-transition, root-regain, and platform contracts are wired"
   append_item "privilege_post_drop_state_proof" "ok" "Linux UID/GID filesystem fields, fail-closed transition state, complete isolated regain probe, and explicit non-Linux boundary"
@@ -1077,7 +1081,36 @@ if check_index < 0 or test_index < 0 or check_index >= test_index:
 print("; ".join(errors))
 PY
 )"
+LINUX_PRIVILEGE_GATE_ERRORS="$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+match = re.search(
+    r"(?ms)^  linux-fastpath-gates:\n(?P<job>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+    ci,
+)
+job = match.group("job") if match else ""
+checks = [
+    ("runs-on: ubuntu-latest", "native privilege gate is not Linux-hosted"),
+    (
+        "test-privilege-memory-tls-proof.sh",
+        "native privilege suite is missing from the Linux job",
+    ),
+    (
+        "--require-native-privilege",
+        "Linux privilege suite does not fail closed when sudo proof is unavailable",
+    ),
+    (
+        "scripts/out/tests/linux-privilege-proof",
+        "native privilege proof artifact is not retained",
+    ),
+]
+print("; ".join(message for token, message in checks if token not in job))
+PY
+)"
 if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
+  && [[ -z "$LINUX_PRIVILEGE_GATE_ERRORS" ]] \
   && test -f scripts/tests/suites/test-privilege-memory-tls-proof.sh \
   && rg -F -- 'drop::tests::partial_transition_error_preserves_state_and_operation' \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
@@ -1092,6 +1125,8 @@ if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
   && rg -F -- 'PRIVILEGE_PROOF_UNAVAILABLE' \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
+  && rg -F -- 'PRIVILEGE_NATIVE_PROOF status=PASS modes=standard,tokio parent_root_preserved=1' \
+    scripts/tests/suites/test-privilege-memory-tls-proof.sh scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
   && rg -F -- 'windows_compile_gate_status' scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
   && rg -F -- 'test-privilege-memory-tls-proof.sh' scripts/tests/utils/util-run-full-suite.sh .github/workflows/ci.yml >/dev/null \
   && rg -F -- 'root_regain_result_contract_is_deterministic_without_syscalls' crates/qf-privilege/src/drop.rs >/dev/null \
@@ -1099,10 +1134,10 @@ if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
   && rg -F -- 'deferred_process_lock_status_is_explicit_before_privilege_transition' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'Privilege, Lock, and TLS Negative-Proof Guardrails' docs/todo/done/todo-854-privilege-lock-negative-proof.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
   pass "Privilege, memory-lock, TLS, native-boundary, and Windows portability proof wiring is explicit"
-  append_item "privilege_memory_tls_negative_proof" "ok" "deterministic local suite, explicit native skip manifest, startup ordering, and Windows compile-before-test CI gate are present"
+  append_item "privilege_memory_tls_negative_proof" "ok" "deterministic local suite, required Linux sudo proof, startup ordering, and Windows compile-before-test CI gate are present"
 else
   fail_critical "Privilege, memory-lock, TLS negative proof or Windows portability guardrail wiring is incomplete"
-  append_item "privilege_memory_tls_negative_proof" "fail" "missing deterministic suite, explicit skip boundary, ordering assertion, CI compile gate, or documentation: ${WINDOWS_PROOF_ORDER_ERRORS:-contract probe failed}"
+  append_item "privilege_memory_tls_negative_proof" "fail" "missing deterministic suite, required Linux proof, ordering assertion, CI compile gate, or documentation: ${WINDOWS_PROOF_ORDER_ERRORS:-${LINUX_PRIVILEGE_GATE_ERRORS:-contract probe failed}}"
 fi
 
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.

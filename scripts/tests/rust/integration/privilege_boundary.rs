@@ -103,9 +103,12 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
     assert_eq!(proof["inheritable_capabilities"], 0);
     assert_eq!(proof["ambient_capabilities"], 0);
     assert_eq!(proof["no_new_privileges"], true);
+    let standard_stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("PRIVILEGE_PROBE_STATE threads_verified=")
+        standard_stderr.contains("PRIVILEGE_PROBE_STATE mode=standard threads_verified="),
+        "standard probe did not emit its exact state marker: {standard_stderr}"
     );
+    eprint!("{standard_stderr}");
 
     let tokio_output = std::process::Command::new(env!("CARGO_BIN_EXE_qf-privilege-probe"))
         .arg(identity.uid().to_string())
@@ -132,9 +135,14 @@ fn privileged_drop_is_isolated_in_a_subprocess() {
     assert_eq!(tokio_proof["inheritable_capabilities"], 0);
     assert_eq!(tokio_proof["ambient_capabilities"], 0);
     assert_eq!(tokio_proof["no_new_privileges"], true);
-    assert!(String::from_utf8_lossy(&tokio_output.stderr)
-        .contains("PRIVILEGE_PROBE_STATE threads_verified="));
+    let tokio_stderr = String::from_utf8_lossy(&tokio_output.stderr);
+    assert!(
+        tokio_stderr.contains("PRIVILEGE_PROBE_STATE mode=tokio threads_verified="),
+        "Tokio probe did not emit its exact state marker: {tokio_stderr}"
+    );
+    eprint!("{tokio_stderr}");
 
     // SAFETY: parent identity is inspected only; the child performed the drop.
     assert_eq!(unsafe { libc::geteuid() }, 0);
+    eprintln!("PRIVILEGE_NATIVE_PROOF status=PASS modes=standard,tokio parent_root_preserved=1");
 }

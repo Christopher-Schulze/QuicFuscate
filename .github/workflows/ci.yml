@@ -561,6 +561,13 @@ jobs:
             qftls::tests::native_rejected_preload_values_release_only_their_own_key_mapping \
             -- --ignored --exact --nocapture --test-threads=1
 
+      - name: Prove native Linux privilege reduction
+        shell: bash
+        run: |
+          scripts/tests/suites/test-privilege-memory-tls-proof.sh \
+            --require-native-privilege \
+            --output-dir scripts/out/tests/linux-privilege-proof
+
       - name: Run Linux fastpath transport suite
         shell: bash
         run: |
@@ -573,6 +580,7 @@ jobs:
           name: linux-fastpath-gates
           path: |
             scripts/out/tests/linux-fastpath-gates
+            scripts/out/tests/linux-privilege-proof
 
   linux-firewall-ownership-native:
     name: Linux firewall ownership (${{ matrix.backend }})

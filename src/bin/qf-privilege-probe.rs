@@ -80,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ready.wait();
     let report = drop_privileges_resolved(&identity)?;
     let verified_threads = verify_process_privilege_state(&identity)?;
-    eprintln!("PRIVILEGE_PROBE_STATE threads_verified={verified_threads}");
+    let probe_mode = if tokio_threads { "tokio" } else { "standard" };
+    eprintln!("PRIVILEGE_PROBE_STATE mode={probe_mode} threads_verified={verified_threads}");
     if let Some(runtime) = runtime {
         runtime.shutdown_timeout(std::time::Duration::from_secs(5));
     } else {

@@ -10,14 +10,16 @@ cd "$PROJECT_ROOT"
 OUTPUT_DIR=""
 JOBS=""
 CARGO_FEATURES="rust-tests"
+REQUIRE_NATIVE_PRIVILEGE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --jobs) JOBS="$2"; shift;;
     --features) CARGO_FEATURES="$2"; shift;;
+    --require-native-privilege) REQUIRE_NATIVE_PRIVILEGE=1;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1; export QUICFUSCATE_DEBUG_SCRIPTS;;
     --help|-h)
-      echo "Usage: $(basename "$0") [--output-dir DIR] [--jobs N] [--features STR] [--verbose]"
+      echo "Usage: $(basename "$0") [--output-dir DIR] [--jobs N] [--features STR] [--require-native-privilege] [--verbose]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 2;;
@@ -117,6 +119,64 @@ PY
   fi
 }
 
+native_privilege_markers_pass() {
+  local output_file="$1"
+  grep -Fq -- 'privileged_drop_is_isolated_in_a_subprocess' "$output_file" \
+    && grep -Fq -- 'test result: ok. 1 passed; 0 failed;' "$output_file" \
+    && grep -Fq -- \
+      'PRIVILEGE_PROBE_STATE mode=standard threads_verified=' "$output_file" \
+    && grep -Fq -- \
+      'PRIVILEGE_PROBE_STATE mode=tokio threads_verified=' "$output_file" \
+    && grep -Fq -- \
+      'PRIVILEGE_NATIVE_PROOF status=PASS modes=standard,tokio parent_root_preserved=1' \
+      "$output_file" \
+    && ! grep -Fq -- 'PRIVILEGE_PROOF_UNAVAILABLE' "$output_file"
+}
+
+compile_privilege_integration_binary() {
+  local messages_file="$OUTPUT_DIR/privileged-native-build.jsonl"
+  local errors_file="$OUTPUT_DIR/privileged-native-build.stderr.log"
+  local -a cargo_args=(
+    test
+    --locked
+    --test it-privilege-boundary
+    --features "$CARGO_FEATURES"
+    --no-run
+    --message-format=json
+  )
+  if [[ -n "$JOBS" ]]; then
+    cargo_args+=(--jobs "$JOBS")
+  fi
+  if ! cargo "${cargo_args[@]}" >"$messages_file" 2>"$errors_file"; then
+    cat "$errors_file" >&2
+    return 1
+  fi
+  python3 - "$messages_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+executables = []
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if message.get("reason") != "compiler-artifact":
+        continue
+    target = message.get("target", {})
+    executable = message.get("executable")
+    if target.get("name") == "it-privilege-boundary" and executable:
+        executables.append(executable)
+unique = list(dict.fromkeys(executables))
+if len(unique) != 1:
+    raise SystemExit(
+        f"expected exactly one it-privilege-boundary executable, found {len(unique)}"
+    )
+print(unique[0])
+PY
+}
+
 run_verified_target \
   "privilege-unit-negative-contracts" \
   "lib" \
@@ -138,7 +198,6 @@ run_verified_target \
   "qftls::tests::preload_identity_duplicate_and_conflict_contract_is_isolated" \
   --locked --lib -- --nocapture
 
-PRIVILEGE_INTEGRATION_LOG="$OUTPUT_DIR/privilege-boundary-integration.log"
 run_verified_target \
   "privilege-boundary-integration" \
   "it-privilege-boundary" \
@@ -150,23 +209,68 @@ check_startup_order
 
 PRIVILEGED_STATUS="UNAVAILABLE"
 PRIVILEGED_REASON="host_os_not_linux"
+PRIVILEGED_COMMAND_STATUS=0
+PRIVILEGED_LOG="$OUTPUT_DIR/privileged-native-regain-proof.log"
 if [[ "$HOST_OS" == "linux" ]]; then
   if [[ "$(id -u)" == "0" ]]; then
-    if rg -F -- 'PRIVILEGE_PROOF_UNAVAILABLE' "$PRIVILEGE_INTEGRATION_LOG" >/dev/null; then
-      PRIVILEGED_STATUS="FAIL"
-      PRIVILEGED_REASON="root_host_reported_privilege_proof_unavailable"
-      FAILURES=$((FAILURES + 1))
-    elif rg -F -- 'PRIVILEGE_PROBE_STATE threads_verified=' "$PRIVILEGE_INTEGRATION_LOG" >/dev/null; then
+    if qf_cargo_test_run \
+      "$PRIVILEGED_LOG" "it-privilege-boundary" "$CARGO_FEATURES" \
+      "privileged_drop_is_isolated_in_a_subprocess" \
+      --locked --test it-privilege-boundary \
+      privileged_drop_is_isolated_in_a_subprocess -- --exact --nocapture \
+      && native_privilege_markers_pass "$PRIVILEGED_LOG"; then
       PRIVILEGED_STATUS="PASS"
       PRIVILEGED_REASON="isolated_linux_root_regain_probe_executed"
     else
       PRIVILEGED_STATUS="FAIL"
-      PRIVILEGED_REASON="root_host_did_not_emit_isolated_privilege_probe_state"
+      PRIVILEGED_REASON="root_host_did_not_pass_exact_standard_and_tokio_privilege_proof"
+      PRIVILEGED_COMMAND_STATUS=1
       FAILURES=$((FAILURES + 1))
+    fi
+  elif [[ "$REQUIRE_NATIVE_PRIVILEGE" == "1" ]]; then
+    if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true; then
+      PRIVILEGED_STATUS="FAIL"
+      PRIVILEGED_REASON="passwordless_sudo_unavailable_for_required_native_privilege_proof"
+      PRIVILEGED_COMMAND_STATUS=1
+      FAILURES=$((FAILURES + 1))
+    else
+      if ! PRIVILEGE_TEST_BINARY="$(compile_privilege_integration_binary)"; then
+        PRIVILEGED_STATUS="FAIL"
+        PRIVILEGED_REASON="privilege_integration_binary_compilation_failed"
+        PRIVILEGED_COMMAND_STATUS=1
+        FAILURES=$((FAILURES + 1))
+      elif [[ -z "$PRIVILEGE_TEST_BINARY" || ! -x "$PRIVILEGE_TEST_BINARY" ]]; then
+        PRIVILEGED_STATUS="FAIL"
+        PRIVILEGED_REASON="privilege_integration_binary_unavailable"
+        PRIVILEGED_COMMAND_STATUS=1
+        FAILURES=$((FAILURES + 1))
+      else
+        set +e
+        sudo -n -- "$PRIVILEGE_TEST_BINARY" \
+          privileged_drop_is_isolated_in_a_subprocess \
+          --exact --nocapture --test-threads=1 \
+          2>&1 | tee "$PRIVILEGED_LOG"
+        PRIVILEGED_COMMAND_STATUS="${PIPESTATUS[0]}"
+        set -e
+        if [[ "$PRIVILEGED_COMMAND_STATUS" == "0" ]] \
+          && native_privilege_markers_pass "$PRIVILEGED_LOG"; then
+          PRIVILEGED_STATUS="PASS"
+          PRIVILEGED_REASON="isolated_linux_root_regain_probe_executed_via_sudo"
+        else
+          PRIVILEGED_STATUS="FAIL"
+          PRIVILEGED_REASON="required_standard_or_tokio_privilege_proof_failed"
+          FAILURES=$((FAILURES + 1))
+        fi
+      fi
     fi
   else
     PRIVILEGED_REASON="requires_root_for_isolated_uid_gid_regain_probe"
   fi
+elif [[ "$REQUIRE_NATIVE_PRIVILEGE" == "1" ]]; then
+  PRIVILEGED_STATUS="FAIL"
+  PRIVILEGED_REASON="required_native_privilege_proof_requires_linux"
+  PRIVILEGED_COMMAND_STATUS=1
+  FAILURES=$((FAILURES + 1))
 else
   PRIVILEGED_REASON="requires_linux_proc_and_setresuid_setresgid_semantics"
 fi
@@ -180,8 +284,8 @@ qf_json_append_object "$JSON" \
   "reason=$PRIVILEGED_REASON" \
   "target=linux-root-only" \
   "feature_set=$CARGO_FEATURES" \
-  "command_status=int:0" \
-  "raw_output=$PRIVILEGE_INTEGRATION_LOG"
+  "command_status=int:$PRIVILEGED_COMMAND_STATUS" \
+  "raw_output=$PRIVILEGED_LOG"
 
 OVERALL_STATUS="PASS"
 if (( FAILURES > 0 )); then
