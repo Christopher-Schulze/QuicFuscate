@@ -10,6 +10,8 @@
 #   - A real DNS query sent explicitly to the server TUN IP receives a DNS response.
 #   - A normal OS resolver query reaches the client-owned localhost proxy.
 #   - tcpdump on the client veth underlay observes zero TCP/UDP port 53 packets.
+#   - Only exact child PIDs and resources created by this run are cleaned.
+#   - Binary identity, logs, DNS output, and capture evidence use one new artifact path.
 #
 # Requirements: root, Linux, iproute2, tcpdump, openssl, python3, nc, dig,
 # nsenter, unshare, mount.
@@ -18,10 +20,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 B="${BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
-CERT="$PROJECT_ROOT/config/local/server.crt"
-KEY="$PROJECT_ROOT/config/local/server.key"
-CA="$PROJECT_ROOT/config/local/ca.crt"
-CERT_DIR="$PROJECT_ROOT/config/local"
+CA="${QF_E2E_CA:-$PROJECT_ROOT/config/local/ca.crt}"
+CA_KEY="${QF_E2E_CA_KEY:-$PROJECT_ROOT/config/local/ca.key}"
+CERT=""
+KEY=""
 
 SERVER_NS="${SERVER_NS:-ns-srv}"
 CLIENT_NS="${CLIENT_NS:-ns-cli}"
@@ -32,22 +34,97 @@ CLIENT_TUN_IP="${CLIENT_TUN_IP:-10.0.1.2}"
 LISTEN_PORT="${LISTEN_PORT:-4433}"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 LOCK_TIMEOUT="${QF_E2E_LOCK_TIMEOUT:-300}"
+ARTIFACT_DIR="${QF_E2E_ARTIFACT_DIR:-/tmp/quicfuscate-dns-leak-evidence-$$}"
+RUNTIME_DIR=""
+ADMIN_SOCKET=""
+SERVER_PID=""
+CLIENT_PID=""
+TCPDUMP_PID=""
+SERVER_NAMESPACE_CREATED=0
+CLIENT_NAMESPACE_CREATED=0
+VETH_CREATED=0
 
-TCPDUMP_LOG="/tmp/qf-dns-leak-tcpdump.log"
-TCPDUMP_PCAP="/tmp/qf-dns-leak.pcap"
-DNS_OUT="/tmp/qf-dns-leak-dig.out"
-DNS_OS_OUT="/tmp/qf-dns-leak-os-dig.out"
-PRIVATE_RESOLV_CONF="/tmp/qf-dns-leak-private-resolv.conf"
+TCPDUMP_LOG=""
+TCPDUMP_PCAP=""
+DNS_OUT=""
+DNS_OS_OUT=""
+PRIVATE_RESOLV_CONF=""
 PRIVATE_RESOLVE_DIR=""
 DOH_PROVIDER="${QF_E2E_DOH_PROVIDER:-https://127.0.0.1:1/dns-query}"
-SERVER_LOG="/tmp/qf-dns-leak-server.log"
-CLIENT_LOG="/tmp/qf-dns-leak-client.log"
+SERVER_LOG=""
+CLIENT_LOG=""
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "missing required command: $1" >&2
     exit 2
   }
+}
+
+namespace_exists() {
+  ip netns list | awk '{print $1}' | grep -Fxq -- "$1"
+}
+
+stop_owned_process() {
+  local pid="$1"
+  [ -n "$pid" ] || return
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in {1..50}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  wait "$pid" 2>/dev/null || true
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+cleanup_owned_resources() {
+  local cleanup_failed=0
+  stop_owned_process "$TCPDUMP_PID" || cleanup_failed=1
+  TCPDUMP_PID=""
+  stop_owned_process "$CLIENT_PID" || cleanup_failed=1
+  CLIENT_PID=""
+  stop_owned_process "$SERVER_PID" || cleanup_failed=1
+  SERVER_PID=""
+  if [ "$CLIENT_NAMESPACE_CREATED" = "1" ]; then
+    ip netns del "$CLIENT_NS" 2>/dev/null || true
+    if namespace_exists "$CLIENT_NS"; then
+      cleanup_failed=1
+    else
+      CLIENT_NAMESPACE_CREATED=0
+    fi
+  fi
+  if [ "$SERVER_NAMESPACE_CREATED" = "1" ]; then
+    ip netns del "$SERVER_NS" 2>/dev/null || true
+    if namespace_exists "$SERVER_NS"; then
+      cleanup_failed=1
+    else
+      SERVER_NAMESPACE_CREATED=0
+    fi
+  fi
+  if [ "$VETH_CREATED" = "1" ]; then
+    ip link del veth-srv 2>/dev/null || ip link del veth-cli 2>/dev/null || true
+    if ip link show dev veth-srv >/dev/null 2>&1 || \
+      ip link show dev veth-cli >/dev/null 2>&1; then
+      cleanup_failed=1
+    else
+      VETH_CREATED=0
+    fi
+  fi
+  return "$cleanup_failed"
+}
+
+remove_runtime_dir() {
+  [ -n "$RUNTIME_DIR" ] || return
+  case "$RUNTIME_DIR" in
+    /tmp/quicfuscate-dns-leak.*) rm -rf -- "$RUNTIME_DIR" ;;
+    *) echo "refusing to remove unexpected runtime path: $RUNTIME_DIR" >&2; return 1 ;;
+  esac
+  RUNTIME_DIR=""
 }
 
 require_runtime_owned_tun_assignment() {
@@ -63,16 +140,12 @@ require_runtime_owned_tun_assignment() {
 
 cleanup() {
   set +e
-  [ -n "${TCPDUMP_PID:-}" ] && kill "$TCPDUMP_PID" 2>/dev/null
-  pkill -9 -f "$B" 2>/dev/null
-  ip netns del "$SERVER_NS" 2>/dev/null
-  ip netns del "$CLIENT_NS" 2>/dev/null
-  rm -f "$PRIVATE_RESOLV_CONF"
-  [ -z "${PRIVATE_RESOLVE_DIR:-}" ] || rmdir "$PRIVATE_RESOLVE_DIR" 2>/dev/null
+  cleanup_owned_resources
+  remove_runtime_dir
 }
 trap cleanup EXIT
 
-for cmd in ip tcpdump openssl python3 nc dig nsenter unshare mount; do
+for cmd in ip tcpdump openssl python3 nc dig nsenter unshare mount sha256sum sysctl; do
   require_cmd "$cmd"
 done
 require_cmd flock
@@ -91,36 +164,73 @@ if [ ! -x "$B" ]; then
   echo "missing executable: $B" >&2
   exit 2
 fi
+if [ ! -r "$CA" ] || [ ! -r "$CA_KEY" ]; then
+  echo "CA certificate or key fixture is unreadable" >&2
+  exit 2
+fi
+if [ "${ARTIFACT_DIR#/}" = "$ARTIFACT_DIR" ]; then
+  echo "QF_E2E_ARTIFACT_DIR must be an absolute path" >&2
+  exit 2
+fi
+if [ -e "$ARTIFACT_DIR" ]; then
+  echo "refusing to replace existing artifact path: $ARTIFACT_DIR" >&2
+  exit 2
+fi
+if [ ! -d "$(dirname "$ARTIFACT_DIR")" ]; then
+  echo "artifact parent directory does not exist: $(dirname "$ARTIFACT_DIR")" >&2
+  exit 2
+fi
+if namespace_exists "$SERVER_NS" || namespace_exists "$CLIENT_NS"; then
+  echo "server or client namespace already exists; refusing unowned cleanup" >&2
+  exit 2
+fi
+if ip link show dev veth-srv >/dev/null 2>&1 || ip link show dev veth-cli >/dev/null 2>&1; then
+  echo "server or client veth already exists; refusing unowned cleanup" >&2
+  exit 2
+fi
 
-mkdir -p "$CERT_DIR"
-cd "$CERT_DIR"
-cat > /tmp/qf-dns-leaf-ext.cnf <<EOF
+mkdir "$ARTIFACT_DIR"
+RUNTIME_DIR="$(mktemp -d /tmp/quicfuscate-dns-leak.XXXXXX)"
+ADMIN_SOCKET="$RUNTIME_DIR/admin.sock"
+CERT="$RUNTIME_DIR/server.crt"
+KEY="$RUNTIME_DIR/server.key"
+TCPDUMP_LOG="$ARTIFACT_DIR/tcpdump.log"
+TCPDUMP_PCAP="$ARTIFACT_DIR/underlay.pcap"
+DNS_OUT="$ARTIFACT_DIR/explicit-dns.txt"
+DNS_OS_OUT="$ARTIFACT_DIR/os-resolver-dns.txt"
+PRIVATE_RESOLV_CONF="$RUNTIME_DIR/resolv.conf"
+PRIVATE_RESOLVE_DIR="$RUNTIME_DIR/systemd-resolve"
+SERVER_LOG="$ARTIFACT_DIR/server.log"
+CLIENT_LOG="$ARTIFACT_DIR/client.log"
+mkdir "$PRIVATE_RESOLVE_DIR"
+sha256sum "$B" >"$ARTIFACT_DIR/binary.sha256"
+
+CERT_EXT="$RUNTIME_DIR/leaf-ext.cnf"
+CSR="$RUNTIME_DIR/server.csr"
+LEAF_CERT="$RUNTIME_DIR/leaf.crt"
+CA_SERIAL="$RUNTIME_DIR/ca.srl"
+cat > "$CERT_EXT" <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectAltName=DNS:cdn.cloudflare.com,DNS:cloudflare-dns.com,DNS:one.one.one.one,DNS:warp.plus,DNS:workers.dev,DNS:localhost,IP:127.0.0.1,IP:$SERVER_UNDERLAY_IP
 EOF
-if [ ! -s ca.crt ] || [ ! -s ca.key ]; then
-  openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.crt -days 365 \
-    -nodes -subj "/CN=QuicFuscate Test CA" 2>/dev/null
-fi
-openssl req -newkey rsa:2048 -keyout server.key -out /tmp/qf-dns-server.csr \
+openssl req -newkey rsa:2048 -keyout "$KEY" -out "$CSR" \
   -nodes -subj "/CN=cdn.cloudflare.com" 2>/dev/null
-openssl x509 -req -in /tmp/qf-dns-server.csr -CA ca.crt -CAkey ca.key \
-  -CAcreateserial -out /tmp/qf-dns-leaf.crt -days 365 \
-  -extfile /tmp/qf-dns-leaf-ext.cnf 2>/dev/null
-cat /tmp/qf-dns-leaf.crt ca.crt > server.crt
-chmod 600 server.key ca.key 2>/dev/null || true
-cd "$PROJECT_ROOT"
+openssl x509 -req -in "$CSR" -CA "$CA" -CAkey "$CA_KEY" \
+  -CAserial "$CA_SERIAL" -CAcreateserial -out "$LEAF_CERT" -days 365 \
+  -extfile "$CERT_EXT" 2>/dev/null
+cat "$LEAF_CERT" "$CA" > "$CERT"
+chmod 600 "$KEY"
 
-cleanup
-rm -f "$TCPDUMP_LOG" "$TCPDUMP_PCAP" "$DNS_OUT" "$DNS_OS_OUT" "$SERVER_LOG" "$CLIENT_LOG"
 printf 'nameserver 127.0.0.1\n' > "$PRIVATE_RESOLV_CONF"
-PRIVATE_RESOLVE_DIR="$(mktemp -d /tmp/qf-dns-leak-resolve.XXXXXX)"
 
 ip netns add "$SERVER_NS"
+SERVER_NAMESPACE_CREATED=1
 ip netns add "$CLIENT_NS"
+CLIENT_NAMESPACE_CREATED=1
 ip link add veth-srv type veth peer name veth-cli
+VETH_CREATED=1
 ip link set veth-srv netns "$SERVER_NS"
 ip link set veth-cli netns "$CLIENT_NS"
 ip netns exec "$SERVER_NS" ip addr add "$SERVER_UNDERLAY_IP/24" dev veth-srv
@@ -138,13 +248,14 @@ echo "=== underlay connectivity ==="
 ip netns exec "$CLIENT_NS" ping -c1 -W2 "$SERVER_UNDERLAY_IP" 2>&1 | grep -E "bytes from|packet loss"
 
 ip netns exec "$SERVER_NS" "$B" server --cert "$CERT" --key "$KEY" \
-  --listen "$SERVER_UNDERLAY_IP:$LISTEN_PORT" --admin-socket /tmp/qf-dns-admin.sock \
+  --listen "$SERVER_UNDERLAY_IP:$LISTEN_PORT" --admin-socket "$ADMIN_SOCKET" \
   --tun --tun-name qtun0 --tun-ip "$SERVER_TUN_IP" --tun-netmask 255.255.255.0 \
   --no-drop-privileges -v \
   > "$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
 sleep 3
 
-QKEY=$(echo '{"cmd":"qkey"}' | nc -U /tmp/qf-dns-admin.sock 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])')
+QKEY=$(echo '{"cmd":"qkey"}' | nc -U "$ADMIN_SOCKET" 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])')
 echo "qkey len: ${#QKEY}"
 
 ip netns exec "$CLIENT_NS" unshare --mount --propagation private \
@@ -219,8 +330,7 @@ if [ "$LEAK_COUNT" != "0" ]; then
   exit 1
 fi
 
-kill "$CLIENT_PID" 2>/dev/null || true
-wait "$CLIENT_PID" 2>/dev/null || true
+stop_owned_process "$CLIENT_PID"
 CLIENT_PID=""
 if ! grep -q 'Client DoH DNS proxy stopped and system DNS restored' "$CLIENT_LOG"; then
   echo "client DoH DNS proxy did not report resolver restoration" >&2
@@ -228,4 +338,10 @@ if ! grep -q 'Client DoH DNS proxy stopped and system DNS restored' "$CLIENT_LOG
   exit 1
 fi
 
-echo "PASS: explicit and OS-resolver DNS responses received, resolver restored, and zero raw port 53 packets observed on client underlay"
+stop_owned_process "$SERVER_PID"
+SERVER_PID=""
+cleanup_owned_resources
+remove_runtime_dir
+trap - EXIT
+
+echo "PASS: explicit and OS-resolver DNS responses received, resolver restored, zero raw port 53 packets observed on the client underlay, and evidence retained in $ARTIFACT_DIR"
