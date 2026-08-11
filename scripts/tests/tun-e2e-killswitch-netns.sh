@@ -505,7 +505,9 @@ fetch_qkey() {
 start_client() {
   local qkey="$1"
   rm -f "$CLIENT_LOG"
-  ip netns exec "$CLIENT_NS" env PATH="$RUNTIME_PATH" "$BINARY" client \
+  ip netns exec "$CLIENT_NS" env \
+    PATH="$RUNTIME_PATH" QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS=1 \
+    "$BINARY" client \
     "${RUNTIME_CONFIG_ARGS[@]}" \
     --remote "$SERVER_UNDERLAY_IP:$LISTEN_PORT" \
     --url "https://$SERVER_UNDERLAY_IP/" --qkey "$qkey" \
@@ -603,7 +605,7 @@ assert_dns_and_ipv6_policy() {
 }
 
 assert_unexpected_loss_retains_block() {
-  local start_ms end_ms elapsed_ms
+  local start_ms end_ms elapsed_ms runtime_idle_ms
   ip netns exec "$CLIENT_NS" ping -c 1 -W 2 "$SERVER_TUN_IP" >/dev/null
   start_ms="$(date +%s%3N)"
   kill -STOP "$SERVER_PID"
@@ -611,8 +613,15 @@ assert_unexpected_loss_retains_block() {
   wait_for 2 endpoint_rule_absent
   end_ms="$(date +%s%3N)"
   elapsed_ms="$((end_ms - start_ms))"
-  if [ "$elapsed_ms" -lt "$((HEARTBEAT_TIMEOUT_MS - 100))" ]; then
-    echo "fail-closed transition preceded the configured timeout: ${elapsed_ms}ms" >&2
+  runtime_idle_ms="$(
+    sed -n 's/.*last_activity_elapsed_ms=\([0-9][0-9]*\).*/\1/p' "$CLIENT_LOG" | tail -n 1
+  )"
+  if ! [[ "$runtime_idle_ms" =~ ^[0-9]+$ ]]; then
+    echo "heartbeat timeout omitted its runtime idle measurement" >&2
+    exit 1
+  fi
+  if [ "$runtime_idle_ms" -lt "$HEARTBEAT_TIMEOUT_MS" ]; then
+    echo "fail-closed transition preceded the runtime idle timeout: ${runtime_idle_ms}ms" >&2
     exit 1
   fi
   if [ "$elapsed_ms" -gt "$TRANSITION_LIMIT_MS" ]; then
@@ -634,7 +643,7 @@ assert_unexpected_loss_retains_block() {
     echo "underlay traffic escaped after unexpected loss" >&2
     exit 1
   fi
-  echo "unexpected-loss transition: ${elapsed_ms}ms"
+  echo "unexpected-loss transition: wall=${elapsed_ms}ms runtime_idle=${runtime_idle_ms}ms"
 }
 
 assert_stale_cleanup() {
