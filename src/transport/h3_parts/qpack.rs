@@ -139,10 +139,7 @@ pub(crate) mod qpack {
 
     impl DynamicTable {
         fn new(maximum_capacity: u64) -> Self {
-            let maximum_capacity = match usize::try_from(maximum_capacity) {
-                Ok(capacity) => capacity,
-                Err(_) => usize::MAX,
-            };
+            let maximum_capacity = maximum_capacity.min(usize::MAX as u64) as usize;
             Self {
                 entries: VecDeque::new(),
                 maximum_capacity,
@@ -384,14 +381,14 @@ pub(crate) mod qpack {
             let mut ordered: Vec<&Header> = headers.iter().collect();
             if !next.index_prefer.is_empty() {
                 ordered.sort_by_key(|header| {
-                    match next
-                        .index_prefer
-                        .iter()
-                        .position(|preferred| preferred.as_slice() == header.name())
-                    {
-                        Some(position) => position,
-                        None => next.index_prefer.len(),
+                    let mut rank = next.index_prefer.len();
+                    for (position, preferred) in next.index_prefer.iter().enumerate() {
+                        if preferred.as_slice() == header.name() {
+                            rank = position;
+                            break;
+                        }
                     }
+                    rank
                 });
             }
 
@@ -455,15 +452,15 @@ pub(crate) mod qpack {
                 encode_literal_field(&mut field_lines, name, value, sensitive)?;
             }
 
-            let required_insert_count = match references
+            let required_insert_count = references
                 .iter()
                 .copied()
-                .max()
-                .and_then(|index| index.checked_add(1))
-            {
-                Some(count) => count,
-                None => 0,
-            };
+                .try_fold(0u64, |maximum, index| {
+                    index
+                        .checked_add(1)
+                        .map(|count| maximum.max(count))
+                        .ok_or(Error::InternalError)
+                })?;
             let mut field_section = Vec::with_capacity(field_lines.len().saturating_add(16));
             encode_field_section_prefix(
                 &mut field_section,
@@ -710,10 +707,7 @@ pub(crate) mod qpack {
         }
 
         pub(super) fn process_encoder_stream(&mut self, data: &[u8]) -> Result<(), Error> {
-            let maximum_buffer = match self.table.maximum_capacity.checked_add(64) {
-                Some(capacity) => capacity.max(256),
-                None => usize::MAX,
-            };
+            let maximum_buffer = self.table.maximum_capacity.saturating_add(64).max(256);
             let buffered_len = self
                 .encoder_stream_buffer
                 .len()
@@ -1355,13 +1349,7 @@ pub(crate) mod qpack {
         if !huffman {
             return Ok((encoded.to_vec(), end));
         }
-        let estimated_len = match encoded_len
-            .checked_mul(2)
-            .and_then(|length| length.checked_add(1))
-        {
-            Some(length) => length,
-            None => usize::MAX,
-        };
+        let estimated_len = encoded_len.saturating_mul(2).saturating_add(1);
         let initial_len = estimated_len.min(maximum_decoded_len).max(1);
         let mut decoded = vec![0u8; initial_len];
         match huff_decode_into(encoded, &mut decoded) {
