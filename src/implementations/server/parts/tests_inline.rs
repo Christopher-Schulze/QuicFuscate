@@ -1673,6 +1673,44 @@ mod tests {
     }
 
     #[cfg(feature = "rate_limiter")]
+    #[tokio::test]
+    async fn blacklist_shutdown_retains_owned_publication_past_deadline() {
+        let owner = Arc::new(BlacklistSyncOwner::new());
+        let metrics = Arc::new(Metrics::new());
+        metrics.configure_blacklist_sync(true, Duration::from_secs(60));
+        let control = Arc::new(
+            crate::implementations::server::limits::BlacklistSyncControl::new(),
+        );
+        assert!(control.begin_publication());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let release_for_task = Arc::clone(&release);
+        let control_for_task = Arc::clone(&control);
+        let handle = tokio::spawn(async move {
+            release_for_task.notified().await;
+            control_for_task.finish();
+            Err(crate::implementations::server::limits::BlacklistError::Cancelled)
+        });
+        owner.state.lock().task = Some(BlacklistSyncTask { handle, control });
+
+        let owner_for_shutdown = Arc::clone(&owner);
+        let metrics_for_shutdown = Arc::clone(&metrics);
+        let shutdown = tokio::spawn(async move {
+            owner_for_shutdown.shutdown(&metrics_for_shutdown).await;
+        });
+        tokio::time::sleep(BLACKLIST_SYNC_SHUTDOWN_TIMEOUT + Duration::from_millis(25)).await;
+
+        assert!(!shutdown.is_finished(), "publication task was detached at the deadline");
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("owned publication shutdown timed out")
+            .expect("owned publication shutdown task panicked");
+        assert!(!owner.has_task());
+        assert_eq!(metrics.blacklist_sync_cancelled.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.blacklist_sync_shutdown_expired.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "rate_limiter")]
     #[test]
     fn test_shared_server_domain_uses_configured_geoip() {
         use crate::implementations::server::limits::GeoIpConfig;

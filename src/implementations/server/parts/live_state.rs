@@ -371,7 +371,7 @@ const BLACKLIST_SYNC_RETRY_MAX: Duration = Duration::from_secs(300);
 #[cfg(feature = "rate_limiter")]
 struct BlacklistSyncTask {
     handle: tokio::task::JoinHandle<Result<usize, crate::implementations::server::limits::BlacklistError>>,
-    cancellation: Arc<AtomicBool>,
+    control: Arc<crate::implementations::server::limits::BlacklistSyncControl>,
 }
 
 #[cfg(feature = "rate_limiter")]
@@ -434,12 +434,16 @@ impl BlacklistSyncOwner {
             return BlacklistSyncClaim::NotDue;
         }
 
-        let cancellation = Arc::new(AtomicBool::new(false));
-        let cancellation_for_task = Arc::clone(&cancellation);
-        let handle = tokio::spawn(async move { blacklist.sync_with_cancel(cancellation_for_task).await });
+        let control = Arc::new(crate::implementations::server::limits::BlacklistSyncControl::new());
+        let control_for_task = Arc::clone(&control);
+        let handle = tokio::spawn(async move {
+            let result = blacklist.sync_with_cancel(Arc::clone(&control_for_task)).await;
+            control_for_task.finish();
+            result
+        });
         state.next_due = None;
         state.interval = interval;
-        state.task = Some(BlacklistSyncTask { handle, cancellation });
+        state.task = Some(BlacklistSyncTask { handle, control });
         BlacklistSyncClaim::Claimed
     }
 
@@ -534,20 +538,29 @@ impl BlacklistSyncOwner {
         let Some(task) = self.take_task() else {
             return;
         };
-        task.cancellation.store(true, Ordering::Release);
+        task.control.request_cancel();
         let mut handle = task.handle;
         match tokio::time::timeout(BLACKLIST_SYNC_SHUTDOWN_TIMEOUT, &mut handle).await {
             Ok(result) => {
                 Self::observe_join_result(metrics, result);
             }
             Err(_) => {
-                handle.abort();
-                let _ = tokio::time::timeout(BLACKLIST_SYNC_REAP_INTERVAL, handle).await;
+                if task.control.cancel_before_publication() {
+                    handle.abort();
+                    let _ = tokio::time::timeout(BLACKLIST_SYNC_REAP_INTERVAL, handle).await;
+                } else {
+                    debug_assert!(
+                        task.control.publication_in_flight()
+                            || task.control.is_cancelled()
+                    );
+                    let result = handle.await;
+                    Self::observe_join_result(metrics, result);
+                }
                 metrics.record_blacklist_sync_event(
                     crate::implementations::server::metrics::BlacklistSyncEvent::ShutdownExpired,
                 );
                 log::warn!(
-                    "Blacklist synchronization exceeded the bounded shutdown deadline; task was abandoned"
+                    "Blacklist synchronization exceeded the shutdown deadline; publication ownership was retained through its commit barrier"
                 );
             }
         }
@@ -558,7 +571,8 @@ impl BlacklistSyncOwner {
         let Some(task) = self.take_task() else {
             return;
         };
-        task.cancellation.store(true, Ordering::Release);
+        task.control.request_cancel();
+        task.control.synchronize_publication_commit();
         task.handle.abort();
         metrics.record_blacklist_sync_event(
             crate::implementations::server::metrics::BlacklistSyncEvent::Cancelled,
@@ -583,7 +597,8 @@ impl Drop for BlacklistSyncOwner {
         let mut state = self.state.lock();
         state.closed = true;
         if let Some(task) = state.task.take() {
-            task.cancellation.store(true, Ordering::Release);
+            task.control.request_cancel();
+            task.control.synchronize_publication_commit();
             task.handle.abort();
         }
     }

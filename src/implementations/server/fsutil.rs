@@ -49,6 +49,28 @@ pub fn atomic_write_file(
     mode: Option<u32>,
     nonce_context: &str,
 ) -> std::io::Result<()> {
+    atomic_write_file_with_commit(path, bytes, mode, nonce_context, |tmp_path, path| {
+        std::fs::rename(tmp_path, path)?;
+        Ok(true)
+    })
+    .map(|_| ())
+}
+
+/// Atomically write a file while delegating the final rename commit.
+///
+/// The callback runs after the temporary file is fully written and synced. It
+/// must rename `tmp_path` to `path` before returning `true`; returning `false`
+/// rejects publication and removes the temporary file.
+pub fn atomic_write_file_with_commit<F>(
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+    nonce_context: &str,
+    commit: F,
+) -> std::io::Result<bool>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<bool>,
+{
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
@@ -69,7 +91,9 @@ pub fn atomic_write_file(
     file.write_all(bytes)?;
     file.sync_all()?;
 
-    std::fs::rename(&tmp_path, path)?;
+    if !commit(&tmp_path, path)? {
+        return Ok(false);
+    }
     temporary_file_guard.mark_committed();
 
     #[cfg(unix)]
@@ -80,7 +104,7 @@ pub fn atomic_write_file(
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 fn hex_from_bytes(bytes: &[u8]) -> String {
@@ -179,6 +203,34 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .collect();
         assert!(temporary_files.is_empty(), "failed commit left temporary files");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_atomic_write_file_rejected_commit_preserves_destination() {
+        let dir = temp_dir_for_test("rejected_commit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("destination");
+        atomic_write_file(&path, b"original", None, "test::rejected_commit_original").unwrap();
+
+        let committed = atomic_write_file_with_commit(
+            &path,
+            b"replacement",
+            None,
+            "test::rejected_commit_replacement",
+            |_, _| Ok(false),
+        )
+        .unwrap();
+
+        assert!(!committed);
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        let temporary_files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(temporary_files.is_empty(), "rejected commit left temporary files");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

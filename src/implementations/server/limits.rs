@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1486,6 +1486,99 @@ impl std::fmt::Display for BlacklistError {
 
 impl std::error::Error for BlacklistError {}
 
+const BLACKLIST_SYNC_PHASE_FETCHING: u8 = 0;
+const BLACKLIST_SYNC_PHASE_PUBLISHING: u8 = 1;
+const BLACKLIST_SYNC_PHASE_FINISHED: u8 = 2;
+const BLACKLIST_SYNC_PHASE_CANCELLED: u8 = 3;
+
+/// Cancellation and publication-commit ownership shared by the runtime and
+/// the blocking blacklist worker.
+pub(crate) struct BlacklistSyncControl {
+    cancel_requested: AtomicBool,
+    phase: AtomicU8,
+    cache_commit: parking_lot::Mutex<()>,
+}
+
+impl BlacklistSyncControl {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancel_requested: AtomicBool::new(false),
+            phase: AtomicU8::new(BLACKLIST_SYNC_PHASE_FETCHING),
+            cache_commit: parking_lot::Mutex::new(()),
+        }
+    }
+
+    pub(crate) fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel_requested.load(Ordering::Acquire)
+            || self.phase.load(Ordering::Acquire) == BLACKLIST_SYNC_PHASE_CANCELLED
+    }
+
+    pub(crate) fn begin_publication(&self) -> bool {
+        if self.is_cancelled() {
+            return false;
+        }
+        if self
+            .phase
+            .compare_exchange(
+                BLACKLIST_SYNC_PHASE_FETCHING,
+                BLACKLIST_SYNC_PHASE_PUBLISHING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if self.cancel_requested.load(Ordering::Acquire) {
+            self.phase.store(BLACKLIST_SYNC_PHASE_CANCELLED, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn cancel_before_publication(&self) -> bool {
+        self.request_cancel();
+        match self.phase.compare_exchange(
+            BLACKLIST_SYNC_PHASE_FETCHING,
+            BLACKLIST_SYNC_PHASE_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(BLACKLIST_SYNC_PHASE_CANCELLED) => true,
+            Err(BLACKLIST_SYNC_PHASE_PUBLISHING) | Err(BLACKLIST_SYNC_PHASE_FINISHED) => false,
+            Err(_) => false,
+        }
+    }
+
+    pub(crate) fn publication_in_flight(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == BLACKLIST_SYNC_PHASE_PUBLISHING
+    }
+
+    pub(crate) fn finish(&self) {
+        self.phase.store(BLACKLIST_SYNC_PHASE_FINISHED, Ordering::Release);
+    }
+
+    pub(crate) fn synchronize_publication_commit(&self) {
+        drop(self.cache_commit.lock());
+    }
+
+    fn commit_publication<F>(&self, commit: F) -> std::io::Result<bool>
+    where
+        F: FnOnce() -> std::io::Result<()>,
+    {
+        let _commit = self.cache_commit.lock();
+        if self.is_cancelled() {
+            return Ok(false);
+        }
+        commit()?;
+        Ok(true)
+    }
+}
+
 fn load_blacklist_ca_bundle(
     path: &std::path::Path,
 ) -> Result<Vec<reqwest::Certificate>, BlacklistError> {
@@ -1813,19 +1906,22 @@ impl BlacklistSync {
     /// context should wrap this in `tokio::task::spawn_blocking` + a
     /// `Runtime::block_on`, or use a dedicated runtime.
     pub async fn sync(&self) -> Result<usize, BlacklistError> {
-        self.sync_with_cancel(Arc::new(AtomicBool::new(false))).await
+        let control = Arc::new(BlacklistSyncControl::new());
+        let result = self.sync_with_cancel(Arc::clone(&control)).await;
+        control.finish();
+        result
     }
 
     /// Synchronize the feed while honoring the owning worker's cancellation flag.
     pub(crate) async fn sync_with_cancel(
         &self,
-        cancellation: Arc<AtomicBool>,
+        cancellation: Arc<BlacklistSyncControl>,
     ) -> Result<usize, BlacklistError> {
         let url = match &self.sync_url {
             Some(u) => u.clone(),
             None => return Err(BlacklistError::NoSyncUrl),
         };
-        if cancellation.load(Ordering::Acquire) {
+        if cancellation.is_cancelled() {
             return Err(BlacklistError::Cancelled);
         }
 
@@ -1874,7 +1970,7 @@ impl BlacklistSync {
             .await
             .map_err(|error| BlacklistError::FetchError(format!("body read: {error}")))?
         {
-            if cancellation.load(Ordering::Acquire) {
+            if cancellation.is_cancelled() {
                 return Err(BlacklistError::Cancelled);
             }
             if body.len().saturating_add(chunk.len()) > self.max_body_bytes {
@@ -1886,7 +1982,7 @@ impl BlacklistSync {
             body.extend_from_slice(&chunk);
         }
 
-        if cancellation.load(Ordering::Acquire) {
+        if !cancellation.begin_publication() {
             return Err(BlacklistError::Cancelled);
         }
 
@@ -1898,24 +1994,22 @@ impl BlacklistSync {
         let clock = self.clock.clone();
         let cancellation_for_blocking = Arc::clone(&cancellation);
         let ips = tokio::task::spawn_blocking(move || {
-            if cancellation_for_blocking.load(Ordering::Acquire) {
+            if cancellation_for_blocking.is_cancelled() {
                 return Err(BlacklistError::Cancelled);
             }
             let ips = parse_blacklist_feed(&body, max_body_bytes, max_entries)?;
-            if cancellation_for_blocking.load(Ordering::Acquire) {
+            if cancellation_for_blocking.is_cancelled() {
                 return Err(BlacklistError::Cancelled);
             }
-            persist_blacklist_cache(
+            publish_blacklist_feed(
                 cache_path.as_deref(),
                 default_ttl,
                 max_body_bytes,
                 &ips,
                 &clock,
+                &blocked,
+                &cancellation_for_blocking,
             )?;
-            if cancellation_for_blocking.load(Ordering::Acquire) {
-                return Err(BlacklistError::Cancelled);
-            }
-            replace_blacklist_entries(&blocked, default_ttl, &ips, &clock);
             Ok(ips.len())
         })
         .await
@@ -2057,6 +2151,7 @@ fn replace_blacklist_entries(
     }
 }
 
+#[cfg(test)]
 fn persist_blacklist_cache(
     path: Option<&std::path::Path>,
     default_ttl: Duration,
@@ -2067,6 +2162,62 @@ fn persist_blacklist_cache(
     let Some(path) = path else {
         return Ok(());
     };
+    let bytes = serialize_blacklist_cache(default_ttl, max_body_bytes, ips, clock)?;
+    crate::implementations::server::fsutil::atomic_write_file(
+        path,
+        &bytes,
+        Some(0o600),
+        "server::blacklist_cache_tmp_nonce",
+    )
+    .map_err(|error| BlacklistError::CacheError(format!("atomic write: {error}")))
+}
+
+fn publish_blacklist_feed(
+    path: Option<&std::path::Path>,
+    default_ttl: Duration,
+    max_body_bytes: usize,
+    ips: &[IpAddr],
+    clock: &ProtocolClock,
+    blocked: &parking_lot::RwLock<HashMap<IpAddr, Instant>>,
+    control: &BlacklistSyncControl,
+) -> Result<(), BlacklistError> {
+    let committed = if let Some(path) = path {
+        let bytes = serialize_blacklist_cache(default_ttl, max_body_bytes, ips, clock)?;
+        crate::implementations::server::fsutil::atomic_write_file_with_commit(
+            path,
+            &bytes,
+            Some(0o600),
+            "server::blacklist_cache_tmp_nonce",
+            |temporary_path, destination_path| {
+                control.commit_publication(|| {
+                    std::fs::rename(temporary_path, destination_path)?;
+                    replace_blacklist_entries(blocked, default_ttl, ips, clock);
+                    Ok(())
+                })
+            },
+        )
+        .map_err(|error| BlacklistError::CacheError(format!("atomic write: {error}")))?
+    } else {
+        control
+            .commit_publication(|| {
+                replace_blacklist_entries(blocked, default_ttl, ips, clock);
+                Ok(())
+            })
+            .map_err(|error| BlacklistError::CacheError(format!("publication: {error}")))?
+    };
+    if committed {
+        Ok(())
+    } else {
+        Err(BlacklistError::Cancelled)
+    }
+}
+
+fn serialize_blacklist_cache(
+    default_ttl: Duration,
+    max_body_bytes: usize,
+    ips: &[IpAddr],
+    clock: &ProtocolClock,
+) -> Result<Vec<u8>, BlacklistError> {
     let now_secs = crate::time_source::unix_epoch_seconds(clock.now_system())
         .map_err(BlacklistError::Clock)?;
     let expires_at_secs = now_secs.checked_add(default_ttl.as_secs()).ok_or_else(|| {
@@ -2080,13 +2231,7 @@ fn persist_blacklist_cache(
             "serialized cache exceeds {max_body_bytes} bytes"
         )));
     }
-    crate::implementations::server::fsutil::atomic_write_file(
-        path,
-        &bytes,
-        Some(0o600),
-        "server::blacklist_cache_tmp_nonce",
-    )
-    .map_err(|error| BlacklistError::CacheError(format!("atomic write: {error}")))
+    Ok(bytes)
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -2929,6 +3074,36 @@ mod tests {
             BlacklistError::Clock(crate::time_source::WallClockError::BeforeUnixEpoch)
         ));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn blacklist_cache_cancellation_rejects_atomic_commit() {
+        let path = blacklist_cache_path("cancelled-commit");
+        std::fs::write(&path, b"last-known-good").unwrap();
+        let control = BlacklistSyncControl::new();
+        assert!(control.begin_publication());
+        control.request_cancel();
+
+        let blocked = parking_lot::RwLock::new(HashMap::new());
+        blocked
+            .write()
+            .insert("198.51.100.1".parse().unwrap(), Instant::now() + Duration::from_secs(60));
+        let error = publish_blacklist_feed(
+            Some(&path),
+            Duration::from_secs(60),
+            4096,
+            &["192.0.2.1".parse().unwrap()],
+            &ProtocolClock::default(),
+            &blocked,
+            &control,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, BlacklistError::Cancelled));
+        assert_eq!(std::fs::read(&path).unwrap(), b"last-known-good");
+        assert!(blocked.read().contains_key(&"198.51.100.1".parse().unwrap()));
+        assert!(!blocked.read().contains_key(&"192.0.2.1".parse().unwrap()));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
