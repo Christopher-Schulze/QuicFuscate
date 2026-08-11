@@ -14,6 +14,7 @@ SERVER_UNDERLAY_IP6="2001:db8:91::1"
 CLIENT_UNDERLAY_IP6="2001:db8:91::2"
 SERVER_TUN_IP="10.92.0.1"
 CLIENT_TUN_IP="10.92.0.2"
+PRIMARY_ASSIGNED_DNS_IP="1.1.1.1"
 LISTEN_PORT="4433"
 HEARTBEAT_TIMEOUT_MS="${HEARTBEAT_TIMEOUT_MS:-15000}"
 TRANSITION_LIMIT_MS="$((HEARTBEAT_TIMEOUT_MS + 100))"
@@ -510,7 +511,6 @@ start_client() {
     --url "https://$SERVER_UNDERLAY_IP/" --qkey "$qkey" \
     --ca-file "$CERT_DIR/ca.crt" --verify-peer --disable-doh --no-utls \
     --tun --tun-name qtun0 --kill-switch \
-    --vpn-dns "$SERVER_TUN_IP" \
     --heartbeat-timeout-ms "$HEARTBEAT_TIMEOUT_MS" -v \
     >"$CLIENT_LOG" 2>&1 &
   CLIENT_PID=$!
@@ -535,7 +535,9 @@ assert_connected_policy() {
   if [ "$RULE_BACKEND" = "nftables" ]; then
     rules="$(kill_switch_rules)"
     grep -q "ip daddr $SERVER_UNDERLAY_IP udp dport $LISTEN_PORT accept" <<<"$rules"
-    grep -q "oifname \"qtun0\" ip daddr $SERVER_TUN_IP udp dport 53 accept" <<<"$rules"
+    grep -q \
+      "oifname \"qtun0\" ip daddr $PRIMARY_ASSIGNED_DNS_IP udp dport 53 accept" \
+      <<<"$rules"
     grep -q 'udp dport 53 drop' <<<"$rules"
     grep -q 'tcp dport 53 drop' <<<"$rules"
     grep -q 'oifname "qtun0" accept' <<<"$rules"
@@ -544,10 +546,10 @@ assert_connected_policy() {
       -C QUICFUSCATE_KS -d "$SERVER_UNDERLAY_IP" \
       -p udp --dport "$LISTEN_PORT" -j ACCEPT
     ip netns exec "$CLIENT_NS" iptables \
-      -C QUICFUSCATE_KS -o qtun0 -d "$SERVER_TUN_IP" \
+      -C QUICFUSCATE_KS -o qtun0 -d "$PRIMARY_ASSIGNED_DNS_IP" \
       -p udp --dport 53 -j ACCEPT
     ip netns exec "$CLIENT_NS" iptables \
-      -C QUICFUSCATE_KS -o qtun0 -d "$SERVER_TUN_IP" \
+      -C QUICFUSCATE_KS -o qtun0 -d "$PRIMARY_ASSIGNED_DNS_IP" \
       -p tcp --dport 53 -j ACCEPT
     for program in iptables ip6tables; do
       ip netns exec "$CLIENT_NS" "$program" \
@@ -575,7 +577,7 @@ assert_dns_and_ipv6_policy() {
 
   ip netns exec "$CLIENT_NS" ping -c 3 -W 2 "$SERVER_TUN_IP" \
     >/tmp/qf-killswitch-tun-ping.log
-  ip netns exec "$CLIENT_NS" dig @"$SERVER_TUN_IP" example.com A \
+  ip netns exec "$CLIENT_NS" dig @"$PRIMARY_ASSIGNED_DNS_IP" example.com A \
     +tries=1 +time=1 +norecurse +stats >/tmp/qf-killswitch-vpn-dns.log || true
   if ip netns exec "$CLIENT_NS" dig @"$SERVER_UNDERLAY_IP" example.com A \
     +tries=1 +time=1 +norecurse >/tmp/qf-killswitch-direct-dns.log 2>&1; then
