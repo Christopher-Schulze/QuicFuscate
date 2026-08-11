@@ -5780,6 +5780,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - The evidence artifact is `scripts/out/tests/test-core-20260810T-backend-continuation-fixed/results.json`. The target ended at `640,996 KiB` with `19,842,912 KiB` free, below the 12-GiB cleanup threshold and above the 2-GiB build floor.
 - `test-core.sh` now fails closed when a named test body is not executed and records the Windows-only Wintun cleanup-state fixture as `SKIP` on non-Windows hosts. The negative-proof manifest therefore distinguishes executed portable contracts from target-gated and native-unavailable evidence.
 - Native privileged Linux/macOS syscall execution, Windows compilation and Win32/WFP fault injection, verified-DLL residue, and Omega proof remain external boundaries and are not inferred.
+- TODO-846 hosted completion at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`: Main CI run `31455010980`, Windows job `93666880422`, passes the complete `tun-windows,rust-tests` library (`1,601` passed) plus `2/2` privileged verified-DLL Wintun lifecycle targets. Bidirectional packet I/O, blocked-reader bounded close, repeated open/close, and zero adapter residue pass. Direct Win32 cleanup fault injection remains explicitly `UNAVAILABLE` rather than inferred.
 
 ## Optimize unsafe-boundary remediation (2026-08-07, TODO-680)
 
