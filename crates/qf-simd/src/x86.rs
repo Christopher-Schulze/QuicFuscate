@@ -74,6 +74,7 @@ pub(super) unsafe fn varint_decode_sse2_prefast(buf: &[u8]) -> Option<(u64, usiz
     Some((result, len))
 }
 
+#[cfg(any(not(windows), feature = "benches"))]
 #[target_feature(enable = "avx2")]
 /// # Safety
 ///
@@ -95,6 +96,7 @@ pub(super) unsafe fn sha256_avx2(data: &[u8]) -> [u8; 32] {
     }
 }
 
+#[cfg(any(not(windows), feature = "benches"))]
 #[target_feature(enable = "avx512f", enable = "avx512vl", enable = "avx512vnni")]
 /// # Safety
 ///
