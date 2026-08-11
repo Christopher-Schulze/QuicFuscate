@@ -4987,7 +4987,7 @@ This and every later dated audit or reconciliation section are historical eviden
 ### Resource and Performance Findings
 
 - **Fountain decoder admission and storage**: TODO-634 is closed. `LTDecoder` bounds retained symbols, payload bytes, degree-one queue depth, and cumulative propagation work; validated wire ordinals bind one-to-one to global Fountain symbol IDs before allocation.
-- **Adaptive FEC emitted_ids unbounded**: `src/fec/parts/adaptive_controller.rs` emitted ID tracking can grow without a hard cap. Tracked in TODO-635.
+- **Adaptive FEC emitted-ID ownership**: TODO-635 is closed as a stale finding. The canonical `qf-fec` controller retains repair IDs in insertion order, evicts the oldest entry whenever depth exceeds `4096`, and removes the same ID from the uniqueness set. The current 10,000-send resource regression proves both retained order depth and unique-ID telemetry remain at or below `4096`.
 - **FEC decoder equation peeling**: TODO-636 is closed. GF8, GF4, and GF16 use order-preserving `VecDeque` passes that process each retained equation once without `Vec::remove`/`Vec::insert` shifts.
 - **Wiedemann scratch ownership**: TODO-637 is closed. Producer-local `WiedemannScratch` instances reuse decoder-bounded column and SpMV storage across payload-byte solves, while telemetry keeps the remaining allocation classes distinct.
 - **Retry and destination-CID ownership**: TODO-638 is closed. The authenticated client Retry path moves the parsed token after integrity verification, destination-CID tracking stores inline `ConnectionId` values without per-insert `Vec` conversion, and the normal 1-RTT receive path retains its pre-parsed-header move.
