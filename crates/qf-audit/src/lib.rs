@@ -52,6 +52,7 @@ pub const MAX_AUDIT_MESSAGE_ENCODED_BYTES: usize = 8 * 1024;
 pub const MAX_AUDIT_EVENT_PAYLOAD_ENCODED_BYTES: usize = 8 * 1024;
 const DEFAULT_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(DEFAULT_AUDIT_FLUSH_TIMEOUT_MS);
 const MAX_AUDIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(MAX_AUDIT_FLUSH_TIMEOUT_MS);
+#[cfg(unix)]
 const AUDIT_FILE_MODE: u32 = 0o600;
 const AUDIT_ADMISSION_STATE_MASK: usize = 0b11;
 const AUDIT_ADMISSION_OPEN: usize = 0;
@@ -1341,9 +1342,12 @@ pub fn init_audit_log_with_options(
     options: AuditOptions,
 ) -> Result<(), AuditError> {
     options.validate()?;
+    #[cfg(not(unix))]
+    let _ = owner;
     if let Some(p) = path {
         // Track whether *we* created the parent dir so we only chown
         // directories we own — never pre-existing system dirs like /var/log.
+        #[cfg(unix)]
         let parent_newly_created = p.parent().map(|parent| !parent.exists()).unwrap_or(false);
         if let Some(parent) = p.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
