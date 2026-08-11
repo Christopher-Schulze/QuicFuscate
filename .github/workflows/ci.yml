@@ -193,6 +193,18 @@ jobs:
         run: |
           cargo test --workspace --all-targets --features rust-tests --locked
 
+      - name: Test macOS Unix TUN syscall contracts
+        shell: bash
+        run: |
+          cargo test --locked --lib --features rust-tests \
+            interface::tests::unix_ -- --nocapture
+          cargo test --locked --lib --features rust-tests \
+            interface::macos_tun::tests::utun_writev_iovecs_follow_bounded_progress \
+            -- --exact --nocapture
+          cargo test --locked --lib --features rust-tests \
+            implementations::client::platform::traits::tests::tun_handle_close_failure_is_reported_and_terminalized \
+            -- --exact --nocapture
+
       - name: Run privilege, memory-lock, and TLS negative-proof suite
         shell: bash
         run: |
@@ -526,6 +538,18 @@ jobs:
             ~/.cargo/git
             target
           key: linux-fastpath-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Test Linux Unix TUN syscall contracts
+        shell: bash
+        run: |
+          cargo test --locked --lib --features rust-tests \
+            interface::tests::unix_ -- --nocapture
+          cargo test --locked --lib --features rust-tests \
+            implementations::client::platform::linux::tests::compatibility_kernel_name_contract_rejects_unterminated_identity \
+            -- --exact --nocapture
+          cargo test --locked --lib --features rust-tests \
+            implementations::client::platform::traits::tests::tun_handle_close_failure_is_reported_and_terminalized \
+            -- --exact --nocapture
 
       - name: Run Linux fastpath transport suite
         shell: bash
