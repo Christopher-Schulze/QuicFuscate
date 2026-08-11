@@ -626,12 +626,30 @@ jobs:
           set -o pipefail
           output_dir="scripts/out/tests/firewall-ownership-${{ matrix.backend }}"
           mkdir -p "$output_dir"
+          set +e
           sudo --preserve-env=GITHUB_SHA \
             env BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate" \
             FIREWALL_BACKEND="${{ matrix.backend }}" \
             PROJECT_ROOT="$GITHUB_WORKSPACE" \
             scripts/tests/tun-e2e-killswitch-netns.sh \
             2>&1 | tee "$output_dir/proof.log"
+          proof_status="${PIPESTATUS[0]}"
+          set -e
+          if [ "$proof_status" -ne 0 ]; then
+            for runtime_log in \
+              /tmp/qf-killswitch-server.log \
+              /tmp/qf-killswitch-server-secondary.log \
+              /tmp/qf-killswitch-client.log; do
+              if sudo test -f "$runtime_log"; then
+                diagnostic_log="$output_dir/$(basename "$runtime_log").diagnostics.log"
+                sudo grep -Eia \
+                  'error|fail|refus|firewall|routing|tun|panic|unsupported|unavailable' \
+                  "$runtime_log" >"$diagnostic_log" || true
+                tail -n 100 "$diagnostic_log"
+              fi
+            done
+            exit "$proof_status"
+          fi
           grep -Fq \
             "QF_FIREWALL_OWNERSHIP_STATUS=SUPPORTED backend=${{ matrix.backend }}" \
             "$output_dir/proof.log"
