@@ -1184,19 +1184,11 @@ impl Connection {
                 }
             }
 
-            // Check handshake completion
-            let done = provider.handshake_complete();
-            if done {
-                // If ALPN negotiated HTTP/3, enable H3 binding
-                if let Some(alpn) = provider.alpn() {
-                    if alpn.starts_with("h3") {
-                        if let Err(e) = self.enable_h3() {
-                            log::warn!("Failed to enable HTTP/3 after ALPN negotiation: {:?}", e);
-                        }
-                    }
-                }
-            }
-            Ok(done)
+            // HTTP/3 is an application-layer owner configured by
+            // QuicFuscateConnection after transport establishment. Creating a
+            // second default H3 owner here would queue another control-stream
+            // SETTINGS prologue before the persona-configured owner starts.
+            Ok(provider.handshake_complete())
         } else {
             // No TLS provider configured, consider handshake complete
             Ok(true)
@@ -1210,6 +1202,7 @@ impl Connection {
     }
 
     /// Enable HTTP/3 connection bound to this transport (idempotent)
+    #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) fn enable_h3(&mut self) -> Result<(), crate::transport::h3::Error> {
         if self.h3.is_some() {
             return Ok(());
