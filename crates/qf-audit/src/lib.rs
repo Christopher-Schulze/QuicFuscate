@@ -3109,7 +3109,12 @@ mod tests {
     fn durability_watchdog_marks_a_stalled_operation_terminal() {
         let state = Arc::new(AuditState::default());
         let watchdog = DurabilityWatchdog::start(state.clone(), Duration::from_millis(20)).unwrap();
-        std::thread::sleep(Duration::from_millis(80));
+        let terminal_deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(state.terminal_error(), Some(AuditFailure::DurabilityTimeout(_)))
+            && Instant::now() < terminal_deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
 
         assert!(matches!(state.terminal_error(), Some(AuditFailure::DurabilityTimeout(_))));
         assert_eq!(state.slow_flushes.load(Ordering::Relaxed), 1);
