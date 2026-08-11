@@ -17,6 +17,7 @@ import {
   getThroughput,
   setActiveTunnelId,
   getActiveTunnelId,
+  setPersistenceStatus,
 } from "./app.svelte";
 import type { TunnelConfig, AppSettings, GeneralSettings, HardwareSettings } from "$lib/types";
 import { parseTauriLogLine, type RawTauriLogLine } from "$lib/timestamp-boundary";
@@ -29,16 +30,42 @@ import {
 } from "@quicfuscate/time";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { parseEngineStats, parseEngineStatus } from "$lib/ipc-contracts";
+import { toErrorMessage } from "$lib/format";
 
 /** Shape returned by the Tauri `load_state` command. */
 interface PersistedState {
   schemaVersion?: number;
   tunnels?: unknown;
-  selectedTunnelId?: string;
+  selectedTunnelId?: string | null;
   settings?: {
     general?: Partial<GeneralSettings>;
     hardware?: Partial<HardwareSettings>;
   } | null;
+}
+
+export type PersistenceLoadResult =
+  | { status: "browser" | "missing" | "loaded" }
+  | { status: "failed"; message: string };
+
+export const PERSISTENCE_LOAD_TIMEOUT_MILLISECONDS = 5_000;
+
+async function loadNativePersistedState(): Promise<PersistedState | null> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(
+        `Native desktop state loading did not complete within ${PERSISTENCE_LOAD_TIMEOUT_MILLISECONDS} ms.`,
+      ));
+    }, PERSISTENCE_LOAD_TIMEOUT_MILLISECONDS);
+  });
+  try {
+    return await Promise.race([
+      tauriInvoke<PersistedState | null>("load_state"),
+      timeout,
+    ]);
+  } finally {
+    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+  }
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -91,25 +118,30 @@ export function normalizePersistedTunnels(input: unknown): {
 
 export async function persistState(): Promise<void> {
   if (!isTauri()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("save_state", {
-      data: {
-        schemaVersion: 1,
-        tunnels: getTunnels(),
-        selectedTunnelId: getSelectedId(),
-        settings: getSettings(),
-      },
-    });
-  } catch { /* Best-effort persistence. */ }
+  await tauriInvoke("save_state", {
+    data: {
+      schemaVersion: 1,
+      tunnels: getTunnels(),
+      selectedTunnelId: getSelectedId(),
+      settings: getSettings(),
+    },
+  });
 }
 
-export async function loadPersistedState(): Promise<void> {
-  if (!isTauri()) { setHydrationDone(true); return; }
+export async function loadPersistedState(): Promise<PersistenceLoadResult> {
+  setHydrationDone(false);
+  setPersistenceStatus({ phase: "loading", dirty: false, error: null });
+  if (!isTauri()) {
+    setPersistenceStatus({ phase: "browser", dirty: false, error: null });
+    setHydrationDone(true);
+    return { status: "browser" };
+  }
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const loaded = await invoke<PersistedState | null>("load_state");
-    if (!loaded) { setHydrationDone(true); return; }
+    const loaded = await loadNativePersistedState();
+    if (!loaded) {
+      setPersistenceStatus({ phase: "ready", dirty: false, error: null });
+      return { status: "missing" };
+    }
     const loadedTunnels = normalizePersistedTunnels(loaded.tunnels);
     if (loadedTunnels.invalidTimestampCount > 0) {
       setError(
@@ -118,7 +150,7 @@ export async function loadPersistedState(): Promise<void> {
     }
     const loadedSettings = isRecord(loaded.settings) ? loaded.settings as PersistedState["settings"] : null;
     const loadedSelected = typeof loaded.selectedTunnelId === "string" ? loaded.selectedTunnelId : null;
-    if (loadedTunnels.tunnels.length > 0) setTunnels(loadedTunnels.tunnels);
+    setTunnels(loadedTunnels.tunnels);
     if (loadedSettings) {
       updateSettings((prev: AppSettings): AppSettings => ({
         general: { ...prev.general, ...(isRecord(loadedSettings.general) ? loadedSettings.general : {}) },
@@ -128,7 +160,14 @@ export async function loadPersistedState(): Promise<void> {
     const selectedIsValid = !!loadedSelected && loadedTunnels.tunnels.some((t) => t.id === loadedSelected);
     if (selectedIsValid) setSelectedId(loadedSelected);
     else if (loadedTunnels.tunnels.length > 0) setSelectedId(loadedTunnels.tunnels[0].id);
-  } catch { /* Ignore: dev browser mode or missing file. */ }
+    else setSelectedId(null);
+    setPersistenceStatus({ phase: "ready", dirty: false, error: null });
+    return { status: "loaded" };
+  } catch (cause) {
+    const message = toErrorMessage(cause, "Stored desktop state could not be loaded");
+    setPersistenceStatus({ phase: "load-error", dirty: false, error: message });
+    return { status: "failed", message };
+  }
   finally { setHydrationDone(true); }
 }
 

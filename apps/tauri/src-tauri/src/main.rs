@@ -1220,6 +1220,7 @@ const TRAY_CONNECT_ITEM_ID: &str = "tray_connect_toggle";
 const TRAY_AUTOCONNECT_ITEM_ID: &str = "tray_auto_connect";
 const TRAY_START_LOGIN_ITEM_ID: &str = "tray_start_login";
 const SETTINGS_CHANGED_EVENT: &str = "qf://settings-changed";
+const PERSISTENCE_CLOSE_REQUESTED_EVENT: &str = "qf://persistence-close-requested";
 const SETTINGS_GENERAL_AUTO_CONNECT_ON_LAUNCH: &str = "autoConnectOnLaunch";
 const SETTINGS_GENERAL_START_AT_LOGIN: &str = "startAtLogin";
 const TRAY_ICON_BLACK_PNG: &[u8] = include_bytes!("../icons/tray_black.png");
@@ -1877,9 +1878,12 @@ fn main() {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hide instead of exiting so the tray can keep the engine alive.
+                // The frontend owns the current in-memory snapshot. Keep the window visible until
+                // its bounded native save succeeds, then let it hide the window explicitly.
                 api.prevent_close();
-                let _ = window.hide();
+                if let Err(error) = window.emit(PERSISTENCE_CLOSE_REQUESTED_EVENT, ()) {
+                    log::error!("Desktop persistence close request could not be emitted: {}", error);
+                }
             }
         })
         .run(tauri::generate_context!())

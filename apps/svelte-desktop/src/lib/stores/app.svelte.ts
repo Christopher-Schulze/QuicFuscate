@@ -84,6 +84,20 @@ let _hydrationDone = $state(false);
 export function getHydrationDone(): boolean { return _hydrationDone; }
 export function setHydrationDone(v: boolean): void { _hydrationDone = v; }
 
+// --- Persistence ---
+export type PersistenceStatus =
+  | { phase: "loading"; dirty: false; error: null }
+  | { phase: "browser"; dirty: false; error: null }
+  | { phase: "ready"; dirty: false; error: null }
+  | { phase: "dirty"; dirty: true; error: null }
+  | { phase: "saving"; dirty: true; error: null }
+  | { phase: "save-error"; dirty: true; error: string }
+  | { phase: "load-error"; dirty: false; error: string };
+
+let _persistenceStatus = $state<PersistenceStatus>({ phase: "loading", dirty: false, error: null });
+export function getPersistenceStatus(): PersistenceStatus { return _persistenceStatus; }
+export function setPersistenceStatus(status: PersistenceStatus): void { _persistenceStatus = status; }
+
 // --- QKey Policy Cache ---
 let _qkeyPolicies = $state<Record<string, TunnelPolicyView>>({});
 export function getQkeyPolicies(): Record<string, TunnelPolicyView> { return _qkeyPolicies; }

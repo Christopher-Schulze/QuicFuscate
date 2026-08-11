@@ -5,7 +5,15 @@
   import Sidebar from "$lib/components/layout/Sidebar.svelte";
   import ErrorBanner from "$lib/components/ui/ErrorBanner.svelte";
   import FatalErrorScreen from "$lib/components/ui/FatalErrorScreen.svelte";
-  import { getError, setError, getHydrationDone, getActiveTab, setActiveTab } from "$lib/stores/app.svelte";
+  import {
+    getError,
+    setError,
+    getHydrationDone,
+    getActiveTab,
+    setActiveTab,
+    getPersistenceStatus,
+    setPersistenceStatus,
+  } from "$lib/stores/app.svelte";
   import {
     isTauri,
     loadPersistedState,
@@ -13,7 +21,15 @@
     startEnginePollers,
     persistState,
   } from "$lib/stores/tauri-bridge.svelte";
-  import { createPersistenceQueue } from "$lib/persistence-queue";
+  import {
+    createPersistenceQueue,
+    type PersistenceFlushResult,
+    type PersistenceQueueState,
+  } from "$lib/persistence-queue";
+  import {
+    PERSISTENCE_CLOSE_TIMEOUT_MILLISECONDS,
+    registerPersistenceCloseGuard,
+  } from "$lib/persistence-lifecycle";
   import {
     getTunnels,
     getSelectedId,
@@ -25,13 +41,20 @@
   let hydrated = $state(false);
   let fatalError = $state<string | null>(null);
   let renderEpoch = $state(0);
+  let observedHydratedState = false;
 
   const error = $derived(getError());
   const hydrationDone = $derived(getHydrationDone());
+  const persistenceStatus = $derived(getPersistenceStatus());
+  const persistenceEnabled = $derived(
+    persistenceStatus.phase !== "loading"
+      && persistenceStatus.phase !== "browser"
+      && persistenceStatus.phase !== "load-error",
+  );
 
   // Debounced persist
   const persistDebounce = createOwnedTimeout();
-  const persistQueue = createPersistenceQueue(persistState);
+  const persistQueue = createPersistenceQueue(persistState, { onChange: applyPersistenceQueueState });
   const tunnels = $derived(getTunnels());
   const selectedId = $derived(getSelectedId());
   const settings = $derived(getSettings());
@@ -51,6 +74,24 @@
     renderEpoch += 1;
   }
 
+  function applyPersistenceQueueState(state: PersistenceQueueState): void {
+    const current = getPersistenceStatus();
+    if (current.phase === "loading" || current.phase === "browser" || current.phase === "load-error") return;
+    if (state.error) {
+      setPersistenceStatus({ phase: "save-error", dirty: true, error: state.error });
+      return;
+    }
+    if (state.saving) {
+      setPersistenceStatus({ phase: "saving", dirty: true, error: null });
+      return;
+    }
+    if (state.dirty) {
+      setPersistenceStatus({ phase: "dirty", dirty: true, error: null });
+      return;
+    }
+    setPersistenceStatus({ phase: "ready", dirty: false, error: null });
+  }
+
   $effect(() => {
     hydrated = true;
     document.body.style.visibility = "visible";
@@ -60,32 +101,81 @@
     void tunnels;
     void selectedId;
     void settings;
-    if (!hydrationDone) {
+    if (!hydrationDone || !persistenceEnabled) {
       persistDebounce.cancel();
+      observedHydratedState = false;
+      return;
+    }
+    if (!observedHydratedState) {
+      observedHydratedState = true;
       return;
     }
     persistDebounce.schedule(persistQueue.queue, 400);
   });
 
-  function persistNow(): void {
+  async function flushPersistence(timeoutMilliseconds: number): Promise<PersistenceFlushResult> {
     persistDebounce.cancel();
-    persistQueue.queue();
+    return await persistQueue.flush(timeoutMilliseconds);
   }
 
-  // Persist on visibility change and before unload
+  function retrySave(): void {
+    void flushPersistence(PERSISTENCE_CLOSE_TIMEOUT_MILLISECONDS);
+  }
+
+  function retryLoad(): void {
+    void loadPersistedState();
+  }
+
+  function useCurrentState(): void {
+    setPersistenceStatus({ phase: "ready", dirty: false, error: null });
+    void flushPersistence(PERSISTENCE_CLOSE_TIMEOUT_MILLISECONDS);
+  }
+
+  // Hidden windows receive the same bounded flush contract as explicit close requests.
   $effect(() => {
     if (!isTauri()) return;
     const handleVisibility = () => {
-      if (document.visibilityState === "hidden") persistNow();
-    };
-    const handleBeforeUnload = () => {
-      persistNow();
+      if (document.visibilityState === "hidden" && persistenceEnabled) {
+        void flushPersistence(PERSISTENCE_CLOSE_TIMEOUT_MILLISECONDS);
+      }
     };
     document.addEventListener("visibilitychange", handleVisibility);
-    window.addEventListener("beforeunload", handleBeforeUnload);
     return () => {
       document.removeEventListener("visibilitychange", handleVisibility);
-      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  });
+
+  $effect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      try {
+        const off = await registerPersistenceCloseGuard(
+          async (timeoutMilliseconds) => {
+            const current = getPersistenceStatus();
+            if (current.phase === "loading" || current.phase === "load-error") {
+              return {
+                status: "failed",
+                message: "Stored desktop state must finish loading, be recovered, or be explicitly replaced before closing.",
+              };
+            }
+            return await flushPersistence(timeoutMilliseconds);
+          },
+          setError,
+        );
+        if (cancelled) {
+          off();
+          return;
+        }
+        unlisten = off;
+      } catch (cause) {
+        setError(`Desktop close protection could not start: ${toErrorMessage(cause)}`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   });
 
@@ -191,6 +281,21 @@
     <main class="flex-1 flex flex-col min-h-0 bg-transparent">
       {#if error}
         <ErrorBanner error={error} ondismiss={() => setError(null)} />
+      {/if}
+      {#if persistenceStatus.phase === "load-error"}
+        <ErrorBanner
+          error={`Stored desktop state could not be loaded: ${persistenceStatus.error}. Retry loading or explicitly replace it with the current state.`}
+          primaryActionLabel="Retry Load"
+          onprimaryaction={retryLoad}
+          secondaryActionLabel="Use Current State"
+          onsecondaryaction={useCurrentState}
+        />
+      {:else if persistenceStatus.phase === "save-error"}
+        <ErrorBanner
+          error={`Changes are not saved: ${persistenceStatus.error}`}
+          primaryActionLabel="Retry Save"
+          onprimaryaction={retrySave}
+        />
       {/if}
       <div class="flex flex-col flex-1 min-h-0 content-typography">
         {#if fatalError}

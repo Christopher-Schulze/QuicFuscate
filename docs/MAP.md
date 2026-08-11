@@ -257,7 +257,7 @@ Uses `StealthConfig::from_mode(runtime_mode)` - was silently using `..Default::d
 8. Probe mitigation path: `src/stealth/` detector -> `src/reality.rs` fallback proxy -> upstream targets
 9. Engine embedding path: `src/engine/engine.rs` -> complete `EngineConfig::validate()` -> `src/implementations/{client,server}/` runtimes; client/server pools, FEC, stealth, and transport policies use the same validated projections.
 10. Admin control plane path: `src/implementations/server/admin_http.rs` -> `qkey_registry.rs` -> `qkey_registry_storage.rs` durable fail-closed commit -> live server policy enforcement
-11. Desktop frontend path: `apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte.ts` -> Tauri invoke -> engine/control runtime
+11. Desktop persistence path: Svelte state mutations -> `apps/svelte-desktop/src/lib/persistence-queue.ts` serialized revisions -> `stores/tauri-bridge.svelte.ts` propagated `save_state`/bounded `load_state` results -> native `apps/tauri/src-tauri/src/state_store.rs`; native window close -> Rust `qf://persistence-close-requested` -> `persistence-lifecycle.ts` bounded flush -> hide only after durable success, while failures remain visible and retryable.
 12. 0-RTT anti-replay path: `src/transport/anti_replay.rs` (`StrikeRegister` with SHA-256 fingerprints, Bloom fast-negative, FIFO ring eviction) -> `src/transport/config.rs` (attached at server startup) -> `src/transport/connection/` `recv()` gate -> silent discard on replay
 13. Desktop native host path: `apps/tauri/src-tauri/src/main.rs` -> Tauri commands -> engine/control runtime
 14. Web-admin path: `apps/svelte-admin/src/lib/api.ts` -> Vite dev proxy (`/api` -> `127.0.0.1:9000`) -> admin HTTP endpoints -> server runtime state
@@ -446,6 +446,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |   |-- domain-fronting-policy.ts
 |   |   |   |   |-- format.ts
 |   |   |   |   |-- ipc-contracts.ts
+|   |   |   |   |-- persistence-lifecycle.ts
+|   |   |   |   |-- persistence-queue.ts
 |   |   |   |   |-- pill-styles.ts
 |   |   |   |   |-- policy-display.ts
 |   |   |   |   |-- qkey-utils.ts
@@ -610,6 +612,8 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |       |-- testing-library.ts
 |   |   |   |       `-- src
 |   |   |   |           |-- app-persistence.test.ts
+|   |   |   |           |-- persistence-lifecycle.test.ts
+|   |   |   |           |-- persistence-queue.test.ts
 |   |   |   |           |-- components
 |   |   |   |           |   |-- layout
 |   |   |   |           |   |   `-- sidebar.test.ts

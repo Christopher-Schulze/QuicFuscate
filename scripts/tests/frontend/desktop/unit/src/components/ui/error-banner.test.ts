@@ -38,4 +38,22 @@ describe("ui/ErrorBanner", () => {
     await fireEvent.click(dismissBtn);
     expect(dismissFn).toHaveBeenCalledOnce();
   });
+
+  test("renders non-dismissible recovery actions and invokes both owners", async () => {
+    const retry = vi.fn();
+    const replace = vi.fn();
+    render(ErrorBanner, {
+      error: "Stored state unavailable",
+      primaryActionLabel: "Retry Load",
+      onprimaryaction: retry,
+      secondaryActionLabel: "Use Current State",
+      onsecondaryaction: replace,
+    });
+
+    expect(screen.queryByLabelText("Dismiss error")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Retry Load" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Use Current State" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(replace).toHaveBeenCalledOnce();
+  });
 });

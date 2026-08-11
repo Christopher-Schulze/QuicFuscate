@@ -1,5 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
-import { createPersistenceQueue } from "../../../../../../apps/svelte-desktop/src/lib/persistence-queue";
+import {
+  createPersistenceQueue,
+  type PersistenceQueueState,
+} from "../../../../../../apps/svelte-desktop/src/lib/persistence-queue";
 
 function deferred(): { promise: Promise<void>; resolve: () => void; reject: () => void } {
   let resolve!: () => void;
@@ -66,5 +69,56 @@ describe("desktop persistence queue", () => {
 
     second.resolve();
     await Promise.resolve();
+  });
+
+  test("retains dirty failure state until a bounded retry succeeds", async () => {
+    const states: PersistenceQueueState[] = [];
+    const persist = vi.fn()
+      .mockRejectedValueOnce(new Error("keychain unavailable"))
+      .mockResolvedValueOnce(undefined);
+    const queue = createPersistenceQueue(persist, {
+      onChange: (state) => states.push(state),
+    });
+
+    expect(await queue.flush(100)).toEqual({
+      status: "failed",
+      message: "keychain unavailable",
+    });
+    expect(states.at(-1)).toEqual({
+      dirty: true,
+      saving: false,
+      error: "keychain unavailable",
+    });
+
+    expect(await queue.flush(100)).toEqual({ status: "saved" });
+    expect(states.at(-1)).toEqual({ dirty: false, saving: false, error: null });
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
+  test("reports an interrupted lifecycle flush at its explicit timeout", async () => {
+    vi.useFakeTimers();
+    const pending = deferred();
+    const states: PersistenceQueueState[] = [];
+    const queue = createPersistenceQueue(() => pending.promise, {
+      onChange: (state) => states.push(state),
+    });
+
+    const resultPromise = queue.flush(25);
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(await resultPromise).toEqual({
+      status: "timed-out",
+      message: "Native persistence did not complete within 25 ms.",
+    });
+    expect(states.at(-1)).toEqual({
+      dirty: true,
+      saving: true,
+      error: "Native persistence did not complete within 25 ms.",
+    });
+
+    pending.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(states.at(-1)).toEqual({ dirty: false, saving: false, error: null });
   });
 });
