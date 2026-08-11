@@ -615,6 +615,43 @@ mod tests {
         progress
     }
 
+    fn make_paired_h3_connections() -> (
+        super::super::Connection,
+        super::super::Connection,
+        crate::transport::RecvInfo,
+        Connection,
+        Connection,
+    ) {
+        use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+        let mut client_h3 =
+            Connection::with_transport(&mut client, &Config::new().expect("client config"))
+                .expect("client h3");
+        let mut server_h3 =
+            Connection::with_transport(&mut server, &Config::new().expect("server config"))
+                .expect("server h3");
+        let mut packet = [0u8; 2048];
+        for _ in 0..4 {
+            if !pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet) {
+                break;
+            }
+            for (h3, transport) in [
+                (&mut client_h3, &mut client),
+                (&mut server_h3, &mut server),
+            ] {
+                loop {
+                    match h3.poll(transport) {
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(Error::Done) => break,
+                        Err(error) => panic!("H3 startup drain failed: {error:?}"),
+                    }
+                }
+            }
+        }
+        (client, server, recv_info, client_h3, server_h3)
+    }
+
     fn current_rss_bytes() -> Option<u64> {
         #[cfg(unix)]
         {
@@ -636,11 +673,15 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_push_stays_promised_when_headers_send_fails() {
+    fn scheduled_push_stays_pending_when_promise_send_fails() {
         let mut conn = make_conn_with_limits(0, 0);
         let mut cfg = super::Config::new().expect("cfg");
         cfg.set_max_field_section_size(1024 * 1024);
         let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+        h3.is_server = true;
+        h3.next_uni_stream_id = 7;
+        h3.peer_request_stream_id = Some(0);
+        h3.peer_max_push_id = Some(MAX_STEALTH_PUSH_ID);
 
         let push_id =
             h3.create_stealth_push_promise("/blocked.css", "text/css", 512).expect("push");
@@ -650,7 +691,10 @@ mod tests {
 
         h3.process_scheduled_push_streams(&mut conn);
 
-        assert_eq!(h3.push_streams.get(&push_id).map(|p| p.state), Some(PushState::Promised));
+        assert_eq!(
+            h3.push_streams.get(&push_id).map(|p| p.state),
+            Some(PushState::PendingPromise)
+        );
         assert!(!h3.streams.contains_key(&push_id));
         assert!(!h3.pending_events.iter().any(|(sid, _)| *sid == push_id));
     }
@@ -662,6 +706,10 @@ mod tests {
         let mut cfg = super::Config::new().expect("cfg");
         cfg.set_max_field_section_size(1024 * 1024);
         let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+        h3.is_server = true;
+        h3.next_uni_stream_id = 7;
+        h3.peer_request_stream_id = Some(0);
+        h3.peer_max_push_id = Some(MAX_STEALTH_PUSH_ID);
 
         let push_id = h3
             .create_stealth_push_promise("/big.js", "application/javascript", CHUNK + 10)
@@ -673,7 +721,12 @@ mod tests {
         h3.process_scheduled_push_streams(&mut conn);
         h3.process_push_data(&mut conn);
 
-        let st = h3.streams.get(&push_id).expect("push stream");
+        let push_stream_id = h3
+            .push_streams
+            .get(&push_id)
+            .and_then(|promise| promise.push_stream_id)
+            .expect("push stream id");
+        let st = h3.streams.get(&push_stream_id).expect("push stream");
         assert_eq!(st.sent_bytes, CHUNK);
         assert!(!st.fin_sent);
     }
@@ -704,6 +757,7 @@ mod tests {
                     masque_established: true,
                     masque_capsule_buffer: Vec::new(),
                     settings_received: false,
+                    receive_message_state: ReceiveMessageState::AwaitingHeaders,
                 },
             );
             h3.finished_streams.insert(stream_id);
@@ -713,7 +767,10 @@ mod tests {
             h3.push_streams.insert(
                 push_id,
                 PushPromise {
-                    headers: Vec::new(),
+                    request_headers: Vec::new(),
+                    response_headers: Vec::new(),
+                    request_stream_id: 0,
+                    push_stream_id: Some(push_id),
                     state: PushState::Complete,
                     cover_payload: vec![0u8; COVER_BYTES],
                     scheduled_at: std::time::Instant::now(),
@@ -733,6 +790,7 @@ mod tests {
                     masque_established: false,
                     masque_capsule_buffer: Vec::new(),
                     settings_received: false,
+                    receive_message_state: ReceiveMessageState::AwaitingHeaders,
                 },
             );
             h3.finished_streams.insert(push_id);
@@ -1404,6 +1462,7 @@ mod tests {
             Error::ClosedCriticalStream,
             Error::FrameUnexpected,
             Error::FrameError,
+            Error::SettingsError,
             Error::QpackDecompressionFailed,
         ];
         for err in variants {
@@ -1618,7 +1677,7 @@ mod tests {
             .expect("queue duplicate control stream");
         let (len, _) = client.send(&mut packet).expect("send duplicate control stream");
         server.recv(&mut packet[..len], &recv_info).expect("server recv");
-        assert!(matches!(server_h3.poll(&mut server), Err(Error::ClosedCriticalStream)));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::StreamCreationError)));
     }
 
     #[test]
@@ -1639,6 +1698,508 @@ mod tests {
         let (len, _) = client.send(&mut packet).expect("send invalid control frame");
         server.recv(&mut packet[..len], &recv_info).expect("server recv");
         assert!(matches!(server_h3.poll(&mut server), Err(Error::FrameUnexpected)));
+    }
+
+    #[test]
+    fn settings_reject_reserved_and_duplicate_identifiers() {
+        let mut conn = make_conn();
+        let h3 = Connection::with_transport(&mut conn, &Config::new().unwrap()).unwrap();
+
+        let mut reserved = Vec::new();
+        Connection::encode_varint(0x02, &mut reserved);
+        Connection::encode_varint(0, &mut reserved);
+        assert!(matches!(h3.validate_settings_payload(&reserved), Err(Error::SettingsError)));
+
+        let mut duplicate = Vec::new();
+        for value in [0, 1] {
+            Connection::encode_varint(0x01, &mut duplicate);
+            Connection::encode_varint(value, &mut duplicate);
+        }
+        assert!(matches!(h3.validate_settings_payload(&duplicate), Err(Error::SettingsError)));
+
+        assert!(matches!(
+            h3.validate_settings_payload(&[0x01]),
+            Err(Error::SettingsError)
+        ));
+    }
+
+    #[test]
+    fn fixed_control_frame_payload_requires_exactly_one_varint() {
+        assert!(matches!(
+            Connection::decode_single_varint_payload(&[]),
+            Err(Error::FrameError)
+        ));
+        assert!(matches!(
+            Connection::decode_single_varint_payload(&[0x01, 0x00]),
+            Err(Error::FrameError)
+        ));
+        assert_eq!(Connection::decode_single_varint_payload(&[0x01]), Ok(1));
+    }
+
+    #[test]
+    fn frame_placement_rejects_reserved_and_cross_stream_frames() {
+        let (client, server, _, _, _) = make_paired_h3_connections();
+        assert!(matches!(
+            Connection::validate_frame_placement(
+                &server,
+                StreamType::Request,
+                0x02,
+                false,
+                ReceiveMessageState::AwaitingHeaders,
+            ),
+            Err(Error::FrameUnexpected)
+        ));
+        assert!(matches!(
+            Connection::validate_frame_placement(
+                &server,
+                StreamType::Request,
+                0x07,
+                false,
+                ReceiveMessageState::AwaitingHeaders,
+            ),
+            Err(Error::FrameUnexpected)
+        ));
+        assert!(matches!(
+            Connection::validate_frame_placement(
+                &client,
+                StreamType::Control,
+                0x0d,
+                true,
+                ReceiveMessageState::AwaitingHeaders,
+            ),
+            Err(Error::FrameUnexpected)
+        ));
+        assert!(matches!(
+            Connection::validate_frame_placement(
+                &server,
+                StreamType::Control,
+                0x05,
+                true,
+                ReceiveMessageState::AwaitingHeaders,
+            ),
+            Err(Error::FrameUnexpected)
+        ));
+        assert!(matches!(
+            Connection::validate_frame_placement(
+                &server,
+                StreamType::Request,
+                0x00,
+                false,
+                ReceiveMessageState::AwaitingHeaders,
+            ),
+            Err(Error::FrameUnexpected)
+        ));
+        assert!(matches!(
+            Connection::validate_frame_placement(
+                &server,
+                StreamType::Request,
+                0x00,
+                false,
+                ReceiveMessageState::Trailers,
+            ),
+            Err(Error::FrameUnexpected)
+        ));
+    }
+
+    #[test]
+    fn client_rejects_server_initiated_bidirectional_stream() {
+        let (mut client, mut server, recv_info, mut client_h3, _server_h3) =
+            make_paired_h3_connections();
+        server.stream_send(1, &[0x01, 0x00], false).expect("server bidi stream");
+        let mut packet = [0u8; 2048];
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(client_h3.poll(&mut client), Err(Error::StreamCreationError)));
+    }
+
+    #[test]
+    fn unknown_unidirectional_stream_discards_every_chunk() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let mut packet = [0u8; 2048];
+
+        client.stream_send(6, &[0x21], false).expect("unknown stream type");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+        assert!(server_h3
+            .streams
+            .get(&6)
+            .is_some_and(|stream| stream._stream_type == StreamType::UnknownUnidirectional));
+
+        let malformed_h3 = [0x00, 0x80, 0x10, 0x00, 0x01];
+        client.stream_send(6, &malformed_h3, true).expect("discarded payload");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+    }
+
+    #[test]
+    fn fragmented_multibyte_unidirectional_type_is_retained_then_discarded() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let mut stream_type = Vec::new();
+        Connection::encode_varint(0x40, &mut stream_type);
+        assert_eq!(stream_type.len(), 2);
+        let mut packet = [0u8; 2048];
+
+        client.stream_send(10, &stream_type[..1], false).expect("first type byte");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+        assert_eq!(
+            server_h3.streams.get(&10).map(|stream| stream.frame_buffer.as_slice()),
+            Some(&stream_type[..1])
+        );
+
+        let second = [stream_type[1], 0xff, 0x00, 0xaa];
+        client.stream_send(10, &second, true).expect("remaining unknown stream");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+    }
+
+    #[test]
+    fn qpack_streams_are_unique_and_critical() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let mut packet = [0u8; 2048];
+        client.stream_send(6, &[0x02], false).expect("QPACK encoder stream");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+        assert_eq!(server_h3.peer_qpack_encoder_stream_id, Some(6));
+
+        client.stream_send(10, &[0x02], false).expect("duplicate QPACK encoder");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::StreamCreationError)));
+
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        client.stream_send(6, &[0x03], true).expect("closed QPACK decoder");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::ClosedCriticalStream)));
+    }
+
+    #[test]
+    fn duplicate_push_stream_identifier_is_rejected() {
+        let (mut client, mut server, recv_info, mut client_h3, _server_h3) =
+            make_paired_h3_connections();
+        let mut packet = [0u8; 2048];
+        server.stream_send(7, &[0x01, 0x00], false).expect("first push stream");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(client_h3.poll(&mut client), Err(Error::Done)));
+
+        server.stream_send(11, &[0x01, 0x00], false).expect("duplicate push id");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(client_h3.poll(&mut client), Err(Error::IdError)));
+    }
+
+    #[test]
+    fn fragmented_push_stream_identifier_is_retained() {
+        let (mut client, mut server, recv_info, mut client_h3, _server_h3) =
+            make_paired_h3_connections();
+        let mut packet = [0u8; 2048];
+        server.stream_send(7, &[0x01], false).expect("push stream type");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(client_h3.poll(&mut client), Err(Error::Done)));
+        assert_eq!(
+            client_h3.streams.get(&7).map(|stream| stream.frame_buffer.as_slice()),
+            Some(&[0x01][..])
+        );
+
+        server.stream_send(7, &[42], false).expect("push identifier");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(client_h3.poll(&mut client), Err(Error::Done)));
+        assert!(client_h3.received_push_ids.contains(&42));
+        assert!(client_h3
+            .streams
+            .get(&7)
+            .is_some_and(|stream| stream._stream_type == StreamType::Push));
+    }
+
+    #[test]
+    fn decreasing_max_push_id_is_rejected() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        assert_eq!(server_h3.peer_max_push_id, Some(MAX_STEALTH_PUSH_ID));
+        let mut payload = Vec::new();
+        Connection::encode_varint(MAX_STEALTH_PUSH_ID - 1, &mut payload);
+        let mut frame = Vec::new();
+        Connection::encode_varint(0x0d, &mut frame);
+        Connection::encode_varint(payload.len() as u64, &mut frame);
+        frame.extend_from_slice(&payload);
+        client.stream_send(2, &frame, false).expect("decreasing MAX_PUSH_ID");
+        let mut packet = [0u8; 2048];
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::IdError)));
+    }
+
+    #[test]
+    fn increasing_goaway_identifier_is_rejected() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let mut packet = [0u8; 2048];
+        for (identifier, expected_error) in [(10, false), (11, true)] {
+            let mut payload = Vec::new();
+            Connection::encode_varint(identifier, &mut payload);
+            let mut frame = Vec::new();
+            Connection::encode_varint(0x07, &mut frame);
+            Connection::encode_varint(payload.len() as u64, &mut frame);
+            frame.extend_from_slice(&payload);
+            client.stream_send(2, &frame, false).expect("GOAWAY frame");
+            assert!(pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet
+            ));
+            let result = server_h3.poll(&mut server);
+            if expected_error {
+                assert!(matches!(result, Err(Error::IdError)));
+            } else {
+                assert!(matches!(result, Ok(Some((2, Event::GoAway)))));
+            }
+        }
+    }
+
+    #[test]
+    fn server_push_uses_distinct_push_and_unidirectional_stream_ids() {
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let request_stream_id = client_h3
+            .send_request(
+                &mut client,
+                &[
+                    Header::new(b":method", b"GET"),
+                    Header::new(b":scheme", b"https"),
+                    Header::new(b":authority", b"example.test"),
+                    Header::new(b":path", b"/"),
+                ],
+                false,
+            )
+            .expect("request");
+        let mut packet = [0u8; 4096];
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(
+            server_h3.poll(&mut server),
+            Ok(Some((id, Event::Headers { .. }))) if id == request_stream_id
+        ));
+        assert_eq!(server_h3.peer_request_stream_id, Some(request_stream_id));
+
+        let push_id = server_h3
+            .create_stealth_push_promise("/cover.css", "text/css", 256)
+            .expect("push promise");
+        server_h3.push_streams.get_mut(&push_id).unwrap().scheduled_at =
+            std::time::Instant::now() - std::time::Duration::from_millis(1);
+        server_h3.process_scheduled_push_streams(&mut server);
+
+        let promise = server_h3.push_streams.get(&push_id).expect("promise state");
+        let push_stream_id = promise.push_stream_id.expect("allocated push stream");
+        assert_eq!(push_id, 0);
+        assert_eq!(push_stream_id, 7);
+        assert_ne!(Some(push_stream_id), server_h3.control_stream_id);
+        assert_eq!(promise.state, PushState::DataSending);
+        assert!(server_h3
+            .streams
+            .get(&push_stream_id)
+            .is_some_and(|stream| stream._stream_type == StreamType::Push));
+
+        let mut promise_seen = false;
+        let mut push_headers_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet,
+            );
+            loop {
+                match client_h3.poll(&mut client) {
+                    Ok(Some((id, Event::PushPromise { push_id: received, .. }))) => {
+                        assert_eq!(id, request_stream_id);
+                        assert_eq!(received, push_id);
+                        promise_seen = true;
+                    }
+                    Ok(Some((id, Event::Headers { .. }))) if id == push_stream_id => {
+                        push_headers_seen = true;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("client push processing failed: {error:?}"),
+                }
+            }
+            if promise_seen && push_headers_seen {
+                break;
+            }
+        }
+        assert!(promise_seen, "PUSH_PROMISE must arrive on the request stream");
+        assert!(push_headers_seen, "push stream must carry its response HEADERS");
+    }
+
+    #[test]
+    fn webtransport_unidirectional_payload_is_not_parsed_as_h3_frames() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        server_h3.established_webtransport_sessions.insert(0);
+        let mut payload = Vec::new();
+        Connection::encode_varint(0x54, &mut payload);
+        Connection::encode_varint(0, &mut payload);
+        payload.extend_from_slice(b"raw-webtransport");
+        client.stream_send(6, &payload, false).expect("WebTransport data stream");
+        let mut packet = [0u8; 2048];
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Ok(Some((6, Event::Data)))));
+        let mut body = [0u8; 32];
+        let read = server_h3.recv_body(&mut server, 6, &mut body).expect("raw body");
+        assert_eq!(&body[..read], b"raw-webtransport");
+        assert_eq!(server_h3.webtransport_session_ids.get(&6), Some(&0));
+    }
+
+    #[test]
+    fn webtransport_payload_waits_for_its_established_session() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let mut payload = Vec::new();
+        Connection::encode_varint(0x54, &mut payload);
+        Connection::encode_varint(0, &mut payload);
+        payload.extend_from_slice(b"buffered");
+        client.stream_send(6, &payload, false).expect("early WebTransport data");
+        let mut packet = [0u8; 2048];
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+        assert!(server_h3.pending_webtransport_streams.contains(&6));
+        assert!(server_h3.pending_events.is_empty());
+
+        server_h3.established_webtransport_sessions.insert(0);
+        server_h3.publish_ready_webtransport_streams();
+        assert!(matches!(server_h3.pending_events.pop_front(), Some((6, Event::Data))));
+        assert!(!server_h3.pending_webtransport_streams.contains(&6));
+    }
+
+    #[test]
+    fn fragmented_h3_frame_body_is_retained_until_complete() {
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let stream_id = client_h3
+            .send_request(
+                &mut client,
+                &[
+                    Header::new(b":method", b"POST"),
+                    Header::new(b":scheme", b"https"),
+                    Header::new(b":authority", b"example.test"),
+                    Header::new(b":path", b"/upload"),
+                ],
+                false,
+            )
+            .expect("request");
+        let mut packet = [0u8; 2048];
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Ok(Some((id, Event::Headers { .. }))) if id == stream_id));
+
+        client.stream_send(stream_id, &[0x00, 0x03, 0xaa], false).expect("partial DATA");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+        assert_eq!(
+            server_h3.streams.get(&stream_id).map(|stream| stream.frame_buffer.as_slice()),
+            Some(&[0x00, 0x03, 0xaa][..])
+        );
+
+        client.stream_send(stream_id, &[0xbb, 0xcc], false).expect("remaining DATA");
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(server_h3.poll(&mut server), Ok(Some((id, Event::Data))) if id == stream_id));
+        let mut body = [0u8; 3];
+        assert_eq!(server_h3.recv_body(&mut server, stream_id, &mut body).unwrap(), 3);
+        assert_eq!(body, [0xaa, 0xbb, 0xcc]);
     }
 
     #[test]
@@ -1889,6 +2450,7 @@ mod tests {
                 masque_established: true,
                 masque_capsule_buffer: Vec::new(),
                 settings_received: false,
+                receive_message_state: ReceiveMessageState::Body,
             },
         );
 

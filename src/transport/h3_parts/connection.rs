@@ -5,8 +5,14 @@ use std::collections::{HashSet, VecDeque};
 /// HTTP/3 Server Push Promise for stealth cover traffic
 #[derive(Debug, Clone)]
 struct PushPromise {
-    /// Promised request headers
-    headers: Vec<Header>,
+    /// Request headers carried by PUSH_PROMISE.
+    request_headers: Vec<Header>,
+    /// Response headers that start the corresponding push stream.
+    response_headers: Vec<Header>,
+    /// Client-initiated request stream that carries PUSH_PROMISE.
+    request_stream_id: u64,
+    /// Server-initiated unidirectional stream allocated after the promise is sent.
+    push_stream_id: Option<u64>,
     /// Push stream state
     state: PushState,
     /// Cover traffic payload (fake resources)
@@ -17,6 +23,7 @@ struct PushPromise {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PushState {
+    PendingPromise,
     Promised,
     DataSending,
     Complete,
@@ -26,11 +33,13 @@ const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
 const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
 const MAX_H3_SETTING_VALUE: u64 = 16 * 1024 * 1024;
+const MAX_STEALTH_PUSH_ID: u64 = 63;
 
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
     /// Monotonic clock shared with the underlying QUIC transport.
     clock: crate::time_source::ProtocolClock,
+    is_server: bool,
     config: Config,
     next_stream_id: u64,
     next_uni_stream_id: u64,
@@ -41,13 +50,23 @@ pub struct Connection {
     decoder: qpack::Decoder,
     control_stream_id: Option<u64>,
     _peer_control_stream_id: Option<u64>,
+    peer_qpack_encoder_stream_id: Option<u64>,
+    peer_qpack_decoder_stream_id: Option<u64>,
+    peer_request_stream_id: Option<u64>,
+    peer_max_push_id: Option<u64>,
+    local_max_push_id: Option<u64>,
+    received_push_ids: HashSet<u64>,
+    webtransport_session_ids: HashMap<u64, u64>,
+    established_webtransport_sessions: HashSet<u64>,
+    pending_webtransport_streams: HashSet<u64>,
     goaway_sent: bool,
     goaway_received: bool,
+    peer_goaway_id: Option<u64>,
     /// Server Push streams for stealth cover traffic
     push_streams: HashMap<u64, PushPromise>,
     /// MASQUE Flow-ID mapping per CONNECT-UDP stream (when datagrams enabled)
     masque_flow: HashMap<u64, u64>,
-    /// Next push stream ID
+    /// Next HTTP/3 push ID, independent of the QUIC push-stream identifier.
     next_push_id: u64,
     /// Reused caller-owned buffer for one transport STREAM receive operation.
     stream_recv_buffer: Vec<u8>,
@@ -69,6 +88,14 @@ struct StreamState {
     masque_established: bool,
     masque_capsule_buffer: Vec<u8>,
     settings_received: bool,
+    receive_message_state: ReceiveMessageState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ReceiveMessageState {
+    AwaitingHeaders,
+    Body,
+    Trailers,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,6 +104,12 @@ enum StreamType {
     Unidirectional,
     /// A unidirectional stream type that this implementation does not consume.
     UnknownUnidirectional,
+    /// The peer's unframed QPACK encoder instruction stream.
+    QpackEncoder,
+    /// The peer's unframed QPACK decoder instruction stream.
+    QpackDecoder,
+    /// A WebTransport unidirectional data stream after its session prefix.
+    WebTransportData,
     Request,
     Response,
     Control,
@@ -167,6 +200,7 @@ impl Connection {
         let masque_buffer_len = conn.max_recv_udp_payload_size().clamp(1, MAX_QUIC_DATAGRAM_SIZE);
         let mut h3_conn = Self {
             clock: conn.protocol_clock(),
+            is_server: conn.is_server(),
             config: config.clone(),
             next_stream_id: if conn.is_server() { 1 } else { 0 },
             next_uni_stream_id: if conn.is_server() { 3 } else { 2 },
@@ -177,13 +211,23 @@ impl Connection {
             decoder: qpack::Decoder::with_capacity(config.qpack_max_table_capacity()),
             control_stream_id: None,
             _peer_control_stream_id: None,
+            peer_qpack_encoder_stream_id: None,
+            peer_qpack_decoder_stream_id: None,
+            peer_request_stream_id: None,
+            peer_max_push_id: None,
+            local_max_push_id: if conn.is_server() { None } else { Some(MAX_STEALTH_PUSH_ID) },
+            received_push_ids: HashSet::new(),
+            webtransport_session_ids: HashMap::new(),
+            established_webtransport_sessions: HashSet::new(),
+            pending_webtransport_streams: HashSet::new(),
             goaway_sent: false,
             goaway_received: false,
+            peer_goaway_id: None,
             push_streams: HashMap::new(),
             masque_flow: HashMap::new(),
             // Server push streams are locally-created unidirectional streams, so their
             // transport IDs use the server-initiated class (3, 7, 11, ...).
-            next_push_id: 3,
+            next_push_id: 0,
             stream_recv_buffer: vec![0u8; STREAM_RECV_BUFFER_SIZE],
             masque_recv_buffer: vec![0u8; masque_buffer_len],
         };
@@ -227,6 +271,13 @@ impl Connection {
         Self::encode_varint(0x04, &mut prologue); // SETTINGS frame type
         Self::encode_varint(settings_payload.len() as u64, &mut prologue);
         prologue.extend_from_slice(&settings_payload);
+        if let Some(max_push_id) = self.local_max_push_id {
+            let mut max_push_payload = Vec::with_capacity(8);
+            Self::encode_varint(max_push_id, &mut max_push_payload);
+            Self::encode_varint(0x0d, &mut prologue);
+            Self::encode_varint(max_push_payload.len() as u64, &mut prologue);
+            prologue.extend_from_slice(&max_push_payload);
+        }
 
         let sent = match conn.stream_send(stream_id, &prologue, false) {
             Ok(sent) if sent == prologue.len() => sent,
@@ -252,6 +303,7 @@ impl Connection {
                 masque_established: false,
                 masque_capsule_buffer: Vec::new(),
                 settings_received: true,
+                receive_message_state: ReceiveMessageState::AwaitingHeaders,
             },
         );
         if let Some(stream) = self.streams.get_mut(&stream_id) {
@@ -301,6 +353,7 @@ impl Connection {
                 masque_established: false,
                 masque_capsule_buffer: Vec::new(),
                 settings_received: false,
+                receive_message_state: ReceiveMessageState::AwaitingHeaders,
             },
         );
         if fin {
@@ -339,11 +392,22 @@ impl Connection {
             masque_established: false,
             masque_capsule_buffer: Vec::new(),
             settings_received: false,
+            receive_message_state: ReceiveMessageState::AwaitingHeaders,
         });
+        let webtransport_response = stream._stream_type == StreamType::WebTransportCover;
         stream._headers = headers.to_vec();
-        stream._stream_type = StreamType::Response;
+        stream._stream_type = if webtransport_response {
+            StreamType::WebTransportCover
+        } else {
+            StreamType::Response
+        };
         stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
         stream.fin_sent = fin;
+        if webtransport_response
+            && Self::masque_response_status(headers).is_some_and(|status| (200..300).contains(&status))
+        {
+            self.established_webtransport_sessions.insert(stream_id);
+        }
         crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::optimize::telemetry::H3_HEADERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if fin {
@@ -482,6 +546,7 @@ impl Connection {
             self.stream_recv_buffer = recv_buffer;
             result?;
         }
+        self.publish_ready_webtransport_streams();
 
         // Lightweight GC using fin_received. Completed push streams are locally
         // terminal after their FIN because peers do not send a reciprocal stream FIN.
@@ -491,24 +556,39 @@ impl Connection {
             .filter_map(|(id, st)| {
                 let push_complete = st._stream_type == StreamType::Push
                     && st.fin_sent
-                    && self
-                        .push_streams
-                        .get(id)
-                        .is_some_and(|promise| promise.state == PushState::Complete);
-                if st.fin_received || push_complete { Some(*id) } else { None }
+                    && self.push_streams.values().any(|promise| {
+                        promise.push_stream_id == Some(*id) && promise.state == PushState::Complete
+                    });
+                let pending_event = self.pending_events.iter().any(|(event_id, _)| event_id == id);
+                if (st.fin_received
+                    && st.body_buffer.is_empty()
+                    && !pending_event
+                    && !self.pending_webtransport_streams.contains(id))
+                    || push_complete
+                {
+                    Some(*id)
+                } else {
+                    None
+                }
             })
             .collect();
         for id in done {
             self.streams.remove(&id);
             self.finished_streams.remove(&id);
             self.masque_flow.remove(&id);
-            if self
-                .push_streams
-                .get(&id)
-                .is_some_and(|promise| promise.state == PushState::Complete)
-            {
-                self.push_streams.remove(&id);
+            self.webtransport_session_ids.remove(&id);
+            self.pending_webtransport_streams.remove(&id);
+            self.established_webtransport_sessions.remove(&id);
+            if self.peer_request_stream_id == Some(id) {
+                self.peer_request_stream_id = None;
             }
+            self.push_streams.retain(|_, promise| {
+                let abandoned_before_promise = promise.request_stream_id == id
+                    && promise.state == PushState::PendingPromise;
+                let completed_push_stream =
+                    promise.push_stream_id == Some(id) && promise.state == PushState::Complete;
+                !abandoned_before_promise && !completed_push_stream
+            });
         }
         self.pending_events.pop_front().map(Some).ok_or(Error::Done)
     }
@@ -521,18 +601,30 @@ impl Connection {
         content_type: &str,
         size_bytes: usize,
     ) -> Result<u64, Error> {
+        if !self.is_server {
+            return Err(Error::StreamCreationError);
+        }
+        let request_stream_id = self.peer_request_stream_id.ok_or(Error::Done)?;
+        let peer_max_push_id = self.peer_max_push_id.ok_or(Error::Done)?;
         let push_id = self.next_push_id;
-        self.next_push_id += 4; // Skip to next server push ID
+        if push_id > peer_max_push_id {
+            return Err(Error::IdError);
+        }
+        self.next_push_id = push_id.checked_add(1).ok_or(Error::IdError)?;
 
-        // Create realistic push promise headers
-        let headers = vec![
+        let request_headers = vec![
             Header::new(b":method", b"GET"),
             Header::new(b":path", path.as_bytes()),
             Header::new(b":scheme", b"https"),
-            Header::new(b":authority", b"cdn.example.com"), // Fake CDN
+            Header::new(b":authority", b"cdn.example.com"),
+            Header::new(b"accept", b"*/*"),
+        ];
+        let response_headers = vec![
+            Header::new(b":status", b"200"),
             Header::new(b"content-type", content_type.as_bytes()),
             Header::new(b"cache-control", b"public, max-age=31536000"),
-            Header::new(b"x-cdn-cache", b"HIT"), // Fake CDN headers for realism
+            Header::new(b"content-length", size_bytes.to_string().as_bytes()),
+            Header::new(b"x-cdn-cache", b"HIT"),
         ];
 
         // Generate realistic cover payload (fake CSS/JS/images)
@@ -544,8 +636,11 @@ impl Connection {
         };
 
         let push_promise = PushPromise {
-            headers,
-            state: PushState::Promised,
+            request_headers,
+            response_headers,
+            request_stream_id,
+            push_stream_id: None,
+            state: PushState::PendingPromise,
             cover_payload,
             scheduled_at: self.clock.now()
                 + std::time::Duration::from_millis(
@@ -567,43 +662,67 @@ impl Connection {
             return;
         }
         let now = self.clock.now();
-        let mut ready_streams = Vec::new();
+        let mut ready_push_ids = Vec::new();
 
-        for (&stream_id, promise) in &self.push_streams {
-            if promise.scheduled_at <= now && promise.state == PushState::Promised {
-                ready_streams.push(stream_id);
+        for (&push_id, promise) in &self.push_streams {
+            if promise.scheduled_at <= now
+                && matches!(promise.state, PushState::PendingPromise | PushState::Promised)
+            {
+                ready_push_ids.push(push_id);
             }
         }
 
-        for stream_id in ready_streams {
-            let Some(promise) = self.push_streams.get(&stream_id) else { continue };
-            let headers = promise.headers.clone();
-            let headers_for_stream = headers.clone();
-            let cover_payload = promise.cover_payload.clone();
-            let encoded = match self.encode_headers_block(&headers) {
+        for push_id in ready_push_ids {
+            let Some(snapshot) = self.push_streams.get(&push_id).cloned() else { continue };
+            if snapshot.state == PushState::PendingPromise {
+                let encoded = match self.encode_headers_block(&snapshot.request_headers) {
+                    Ok(encoded) => encoded,
+                    Err(_) => continue,
+                };
+                let mut payload = Vec::with_capacity(encoded.len().saturating_add(8));
+                Self::encode_varint(push_id, &mut payload);
+                payload.extend_from_slice(&encoded);
+                let mut frame = Vec::with_capacity(payload.len().saturating_add(9));
+                Self::encode_varint(0x05, &mut frame);
+                Self::encode_varint(payload.len() as u64, &mut frame);
+                frame.extend_from_slice(&payload);
+                if conn.stream_send(snapshot.request_stream_id, &frame, false).is_err() {
+                    continue;
+                }
+                if let Some(promise) = self.push_streams.get_mut(&push_id) {
+                    promise.state = PushState::Promised;
+                }
+            }
+
+            let Some(snapshot) = self.push_streams.get(&push_id).cloned() else { continue };
+            if snapshot.state != PushState::Promised {
+                continue;
+            }
+            let encoded = match self.encode_headers_block(&snapshot.response_headers) {
                 Ok(encoded) => encoded,
                 Err(_) => continue,
             };
-
-            let mut frame = Vec::new();
-            frame.push(0x01); // HEADERS
-            Self::encode_varint(encoded.len() as u64, &mut frame);
-            frame.extend_from_slice(&encoded);
-            if conn.stream_send(stream_id, &frame, false).is_err() {
-                // Retry on next poll once flow-control or transport pressure clears.
+            let stream_id = self.next_uni_stream_id;
+            let mut prologue = Vec::with_capacity(encoded.len().saturating_add(18));
+            Self::encode_varint(0x01, &mut prologue);
+            Self::encode_varint(push_id, &mut prologue);
+            Self::encode_varint(0x01, &mut prologue);
+            Self::encode_varint(encoded.len() as u64, &mut prologue);
+            prologue.extend_from_slice(&encoded);
+            let Some(next_stream_id) = stream_id.checked_add(4) else {
+                continue;
+            };
+            if conn.stream_send(stream_id, &prologue, false).is_err() {
                 continue;
             }
-
-            // Queue push promise event only once HEADERS are really queued at transport level.
-            self.pending_events
-                .push_back((stream_id, Event::PushPromise { push_id: stream_id, headers }));
+            self.next_uni_stream_id = next_stream_id;
 
             // Register stream with body and switch to DataSending
             self.streams.insert(
                 stream_id,
                 StreamState {
-                    _headers: headers_for_stream,
-                    body_buffer: cover_payload,
+                    _headers: snapshot.response_headers,
+                    body_buffer: snapshot.cover_payload,
                     frame_buffer: Vec::new(),
                     _received_bytes: 0,
                     _stream_type: StreamType::Push,
@@ -613,9 +732,11 @@ impl Connection {
                     masque_established: false,
                     masque_capsule_buffer: Vec::new(),
                     settings_received: false,
+                    receive_message_state: ReceiveMessageState::AwaitingHeaders,
                 },
             );
-            if let Some(promise) = self.push_streams.get_mut(&stream_id) {
+            if let Some(promise) = self.push_streams.get_mut(&push_id) {
+                promise.push_stream_id = Some(stream_id);
                 promise.state = PushState::DataSending;
             }
             crate::optimize::telemetry::H3_FRAMES
@@ -660,7 +781,11 @@ impl Connection {
             self.finished_streams.insert(sid);
             self.pending_events.push_back((sid, Event::Finished));
             // Mark corresponding push promise as complete
-            if let Some(p) = self.push_streams.get_mut(&sid) {
+            if let Some(p) = self
+                .push_streams
+                .values_mut()
+                .find(|promise| promise.push_stream_id == Some(sid))
+            {
                 p.state = PushState::Complete;
             }
         }
@@ -672,11 +797,23 @@ impl Connection {
         &mut self,
         base_path: &str,
     ) -> Result<Vec<u64>, Error> {
+        if !self.is_server
+            || self.peer_request_stream_id.is_none()
+            || self.peer_max_push_id.is_none()
+        {
+            return Ok(Vec::new());
+        }
         let mut push_ids = Vec::new();
         let plan =
             Self::build_stealth_cover_resource_plan(base_path, crate::transport::rand::rand_u64());
+        let available = self
+            .peer_max_push_id
+            .and_then(|maximum| maximum.checked_sub(self.next_push_id))
+            .and_then(|remaining| remaining.checked_add(1))
+            .and_then(|remaining| usize::try_from(remaining).ok())
+            .unwrap_or(0);
 
-        for (path, content_type, size) in plan {
+        for (path, content_type, size) in plan.into_iter().take(available) {
             let push_id = self.create_stealth_push_promise(&path, content_type, size)?;
             push_ids.push(push_id);
         }
@@ -699,15 +836,28 @@ impl Connection {
         match stream_type {
             0x00 => {
                 if self._peer_control_stream_id.is_some() {
-                    return Err(Error::ClosedCriticalStream);
+                    return Err(Error::StreamCreationError);
                 }
                 self._peer_control_stream_id = Some(stream_id);
                 Ok(StreamType::Control)
             }
             0x01 if !conn.is_server() => Ok(StreamType::Push),
-            0x01 => Err(Error::FrameUnexpected),
-            0x54 => Ok(StreamType::WebTransportCover),
-            0x02 | 0x03 => Ok(StreamType::UnknownUnidirectional),
+            0x01 => Err(Error::StreamCreationError),
+            0x02 => {
+                if self.peer_qpack_encoder_stream_id.is_some() {
+                    return Err(Error::StreamCreationError);
+                }
+                self.peer_qpack_encoder_stream_id = Some(stream_id);
+                Ok(StreamType::QpackEncoder)
+            }
+            0x03 => {
+                if self.peer_qpack_decoder_stream_id.is_some() {
+                    return Err(Error::StreamCreationError);
+                }
+                self.peer_qpack_decoder_stream_id = Some(stream_id);
+                Ok(StreamType::QpackDecoder)
+            }
+            0x54 => Ok(StreamType::WebTransportData),
             _ => Ok(StreamType::UnknownUnidirectional),
         }
     }
@@ -716,14 +866,19 @@ impl Connection {
         let mut offset = 0usize;
         let mut seen = HashSet::new();
         while offset < payload.len() {
-            let (setting, setting_len) = Self::decode_varint(&payload[offset..])?;
+            let (setting, setting_len) = Self::decode_varint(&payload[offset..]).map_err(|error| {
+                if error == Error::BufferTooShort { Error::SettingsError } else { error }
+            })?;
             offset = offset.checked_add(setting_len).ok_or(Error::FrameError)?;
-            let (value, value_len) = Self::decode_varint(&payload[offset..])?;
+            let (value, value_len) = Self::decode_varint(&payload[offset..]).map_err(|error| {
+                if error == Error::BufferTooShort { Error::SettingsError } else { error }
+            })?;
             offset = offset.checked_add(value_len).ok_or(Error::FrameError)?;
             if !seen.insert(setting) {
-                return Err(Error::FrameError);
+                return Err(Error::SettingsError);
             }
             match setting {
+                0x00 | 0x02..=0x05 => return Err(Error::SettingsError),
                 0x01 | 0x06 | 0x07 if value > MAX_H3_SETTING_VALUE => {
                     return Err(Error::ExcessiveLoad);
                 }
@@ -734,6 +889,163 @@ impl Connection {
             return Err(Error::FrameError);
         }
         Ok(())
+    }
+
+    fn decode_single_varint_payload(payload: &[u8]) -> Result<u64, Error> {
+        let (value, used) = Self::decode_varint(payload).map_err(|error| {
+            if error == Error::BufferTooShort { Error::FrameError } else { error }
+        })?;
+        if used != payload.len() {
+            return Err(Error::FrameError);
+        }
+        Ok(value)
+    }
+
+    fn validate_frame_placement(
+        conn: &super::Connection,
+        stream_type: StreamType,
+        frame_type: u64,
+        settings_received: bool,
+        receive_message_state: ReceiveMessageState,
+    ) -> Result<(), Error> {
+        if matches!(frame_type, 0x02 | 0x06 | 0x08 | 0x09) {
+            return Err(Error::FrameUnexpected);
+        }
+        if frame_type == 0x41 {
+            return Err(Error::FrameError);
+        }
+
+        let known_frame = matches!(frame_type, 0x00 | 0x01 | 0x03 | 0x04 | 0x05 | 0x07 | 0x0d);
+        match stream_type {
+            StreamType::Control => {
+                if !settings_received {
+                    return if frame_type == 0x04 {
+                        Ok(())
+                    } else {
+                        Err(Error::FrameUnexpected)
+                    };
+                }
+                if frame_type == 0x04 {
+                    return Err(Error::FrameUnexpected);
+                }
+                if known_frame && !matches!(frame_type, 0x03 | 0x07 | 0x0d) {
+                    return Err(Error::FrameUnexpected);
+                }
+                if frame_type == 0x03 && !conn.is_server() {
+                    return Err(Error::FrameUnexpected);
+                }
+                if frame_type == 0x0d && !conn.is_server() {
+                    return Err(Error::FrameUnexpected);
+                }
+                Ok(())
+            }
+            StreamType::Push => {
+                if known_frame && !matches!(frame_type, 0x00 | 0x01) {
+                    return Err(Error::FrameUnexpected);
+                }
+                if (frame_type == 0x00
+                    && receive_message_state != ReceiveMessageState::Body)
+                    || (frame_type == 0x01
+                        && receive_message_state == ReceiveMessageState::Trailers)
+                {
+                    return Err(Error::FrameUnexpected);
+                }
+                Ok(())
+            }
+            StreamType::Request
+            | StreamType::Response
+            | StreamType::Masque
+            | StreamType::WebTransportCover => {
+                if known_frame && !matches!(frame_type, 0x00 | 0x01 | 0x05) {
+                    return Err(Error::FrameUnexpected);
+                }
+                if frame_type == 0x05 && conn.is_server() {
+                    return Err(Error::FrameUnexpected);
+                }
+                if (frame_type == 0x00
+                    && receive_message_state != ReceiveMessageState::Body)
+                    || (frame_type == 0x01
+                        && receive_message_state == ReceiveMessageState::Trailers)
+                {
+                    return Err(Error::FrameUnexpected);
+                }
+                Ok(())
+            }
+            StreamType::Unidirectional
+            | StreamType::UnknownUnidirectional
+            | StreamType::QpackEncoder
+            | StreamType::QpackDecoder
+            | StreamType::WebTransportData => Err(Error::InternalError),
+        }
+    }
+
+    fn buffer_raw_stream_data(
+        &mut self,
+        stream_id: u64,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<(), Error> {
+        let session_ready = self.webtransport_session_ids.get(&stream_id).is_some_and(|session_id| {
+            self.established_webtransport_sessions.contains(session_id)
+        });
+        if !data.is_empty() {
+            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+            let buffered_len = stream
+                .body_buffer
+                .len()
+                .checked_add(data.len())
+                .ok_or(Error::ExcessiveLoad)?;
+            if buffered_len > MAX_BUFFERED_H3_FRAME {
+                return Err(Error::ExcessiveLoad);
+            }
+            stream.body_buffer.extend_from_slice(data);
+            if session_ready {
+                self.pending_events.push_back((stream_id, Event::Data));
+            } else {
+                self.pending_webtransport_streams.insert(stream_id);
+            }
+        }
+        if fin {
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                stream.fin_received = true;
+            }
+            if session_ready {
+                self.pending_events.push_back((stream_id, Event::Finished));
+            } else {
+                self.pending_webtransport_streams.insert(stream_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn publish_ready_webtransport_streams(&mut self) {
+        let ready: Vec<u64> = self
+            .pending_webtransport_streams
+            .iter()
+            .copied()
+            .filter(|stream_id| {
+                self.webtransport_session_ids.get(stream_id).is_some_and(|session_id| {
+                    self.established_webtransport_sessions.contains(session_id)
+                })
+            })
+            .collect();
+        for stream_id in ready {
+            self.pending_webtransport_streams.remove(&stream_id);
+            if self
+                .streams
+                .get(&stream_id)
+                .is_some_and(|stream| !stream.body_buffer.is_empty())
+            {
+                self.pending_events.push_back((stream_id, Event::Data));
+            }
+            if self
+                .streams
+                .get(&stream_id)
+                .is_some_and(|stream| stream.fin_received)
+            {
+                self.pending_events.push_back((stream_id, Event::Finished));
+            }
+        }
     }
 
     fn process_stream(
@@ -748,10 +1060,35 @@ impl Connection {
             return Ok(());
         }
         let received = &recv_buffer[..len];
+        let existing_type = self.streams.get(&stream_id).map(|stream| stream._stream_type);
+        match existing_type {
+            Some(StreamType::UnknownUnidirectional) => {
+                if fin {
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.fin_received = true;
+                    }
+                }
+                return Ok(());
+            }
+            Some(StreamType::QpackEncoder | StreamType::QpackDecoder) => {
+                return if fin { Err(Error::ClosedCriticalStream) } else { Ok(()) };
+            }
+            Some(StreamType::WebTransportData) => {
+                return self.buffer_raw_stream_data(stream_id, received, fin);
+            }
+            _ => {}
+        }
         // Track state for peer-initiated streams (e.g. incoming requests) so DATA payload
         // can be buffered and returned by recv_body(). Locally-opened streams are already
         // present; this fills in the gap for streams we first observe here.
         let is_unidirectional = stream_id & 0x02 != 0;
+        if existing_type.is_none() && !is_unidirectional {
+            let expected_peer_initiator = if conn.is_server() { 0 } else { 1 };
+            if stream_id & 0x01 != expected_peer_initiator || !conn.is_server() {
+                return Err(Error::StreamCreationError);
+            }
+            self.peer_request_stream_id = Some(stream_id);
+        }
         self.streams.entry(stream_id).or_insert_with(|| StreamState {
             _headers: Vec::new(),
             body_buffer: Vec::new(),
@@ -768,6 +1105,7 @@ impl Connection {
             masque_established: false,
             masque_capsule_buffer: Vec::new(),
             settings_received: false,
+            receive_message_state: ReceiveMessageState::AwaitingHeaders,
         });
         let mut buffered = {
             let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
@@ -812,7 +1150,7 @@ impl Connection {
             let classified = self.classify_peer_unidirectional_stream(conn, stream_id, stream_type)?;
             let mut prefix_len = type_len;
             if stream_type == 0x01 {
-                let (_, push_id_len) = match Self::decode_varint(&buffered[type_len..]) {
+                let (push_id, push_id_len) = match Self::decode_varint(&buffered[type_len..]) {
                     Ok(decoded) => decoded,
                     Err(Error::BufferTooShort) => {
                         let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
@@ -824,19 +1162,51 @@ impl Connection {
                     }
                     Err(error) => return Err(error),
                 };
+                if self.local_max_push_id.is_none_or(|maximum| push_id > maximum)
+                    || !self.received_push_ids.insert(push_id)
+                {
+                    return Err(Error::IdError);
+                }
                 prefix_len = prefix_len.checked_add(push_id_len).ok_or(Error::ExcessiveLoad)?;
+            } else if stream_type == 0x54 {
+                let (session_id, session_id_len) = match Self::decode_varint(&buffered[type_len..]) {
+                    Ok(decoded) => decoded,
+                    Err(Error::BufferTooShort) => {
+                        let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                        stream.frame_buffer.extend_from_slice(&buffered);
+                        if fin {
+                            return Err(Error::FrameError);
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                if session_id & 0x03 != 0 {
+                    return Err(Error::IdError);
+                }
+                self.webtransport_session_ids.insert(stream_id, session_id);
+                prefix_len = prefix_len.checked_add(session_id_len).ok_or(Error::ExcessiveLoad)?;
             }
             if let Some(stream) = self.streams.get_mut(&stream_id) {
                 stream._stream_type = classified;
             }
             buffered.drain(..prefix_len);
-            if classified == StreamType::UnknownUnidirectional {
-                if fin {
-                    if let Some(stream) = self.streams.get_mut(&stream_id) {
-                        stream.fin_received = true;
+            match classified {
+                StreamType::UnknownUnidirectional => {
+                    if fin {
+                        if let Some(stream) = self.streams.get_mut(&stream_id) {
+                            stream.fin_received = true;
+                        }
                     }
+                    return Ok(());
                 }
-                return Ok(());
+                StreamType::QpackEncoder | StreamType::QpackDecoder => {
+                    return if fin { Err(Error::ClosedCriticalStream) } else { Ok(()) };
+                }
+                StreamType::WebTransportData => {
+                    return self.buffer_raw_stream_data(stream_id, &buffered, fin);
+                }
+                _ => {}
             }
         }
 
@@ -865,10 +1235,11 @@ impl Connection {
                 );
                 return Err(Error::ExcessiveLoad);
             }
-            let body_start = offset + frame_offset;
+            let body_start = offset.checked_add(frame_offset).ok_or(Error::ExcessiveLoad)?;
             let body_end = match body_start.checked_add(frame_len) {
                 Some(end) if end <= buffered.len() => end,
-                _ => break,
+                Some(_) => break,
+                None => return Err(Error::ExcessiveLoad),
             };
             let frame_data = &buffered[body_start..body_end];
             let stream_type = self
@@ -876,39 +1247,22 @@ impl Connection {
                 .get(&stream_id)
                 .map(|stream| stream._stream_type)
                 .ok_or(Error::IdError)?;
-            if stream_type == StreamType::Control {
-                let settings_received = self
-                    .streams
-                    .get(&stream_id)
-                    .is_some_and(|stream| stream.settings_received);
-                if (!settings_received && frame_type != 0x04)
-                    || (settings_received && frame_type == 0x04)
-                {
-                    return Err(if frame_type == 0x04 {
-                        Error::FrameError
-                    } else {
-                        Error::FrameUnexpected
-                    });
-                }
-                if frame_type == 0x04 {
-                    self.validate_settings_payload(frame_data)?;
-                    if let Some(stream) = self.streams.get_mut(&stream_id) {
-                        stream.settings_received = true;
-                    }
-                } else if matches!(frame_type, 0x00 | 0x01) {
-                    return Err(Error::FrameUnexpected);
-                }
-            } else if matches!(
+            let settings_received = self
+                .streams
+                .get(&stream_id)
+                .is_some_and(|stream| stream.settings_received);
+            let receive_message_state = self
+                .streams
+                .get(&stream_id)
+                .map(|stream| stream.receive_message_state)
+                .ok_or(Error::IdError)?;
+            Self::validate_frame_placement(
+                conn,
                 stream_type,
-                StreamType::Request
-                    | StreamType::Response
-                    | StreamType::Masque
-                    | StreamType::Push
-                    | StreamType::WebTransportCover
-            ) && frame_type == 0x04
-            {
-                return Err(Error::FrameUnexpected);
-            }
+                frame_type,
+                settings_received,
+                receive_message_state,
+            )?;
             match frame_type {
                 0x00 => {
                     // DATA frame; if this stream is MASQUE, decode capsules
@@ -945,12 +1299,41 @@ impl Connection {
                 }
                 0x01 => {
                     let headers = self.decoder.decode(frame_data)?;
-                    let masque_response_accepted = self
+                    let current_stream_type = self
                         .streams
                         .get(&stream_id)
-                        .is_some_and(|stream| matches!(stream._stream_type, StreamType::Masque))
+                        .map(|stream| stream._stream_type)
+                        .ok_or(Error::IdError)?;
+                    let success_response = Self::masque_response_status(&headers)
+                        .is_some_and(|status| (200..300).contains(&status));
+                    let masque_response_accepted = current_stream_type == StreamType::Masque
+                        && success_response;
+                    let webtransport_request = conn.is_server()
+                        && current_stream_type == StreamType::Request
+                        && Self::is_webtransport_connect(&headers);
+                    let webtransport_response_accepted =
+                        current_stream_type == StreamType::WebTransportCover && success_response;
+                    let informational_response = !conn.is_server()
                         && Self::masque_response_status(&headers)
-                            .is_some_and(|status| (200..300).contains(&status));
+                            .is_some_and(|status| (100..200).contains(&status));
+                    if webtransport_request {
+                        if let Some(stream) = self.streams.get_mut(&stream_id) {
+                            stream._stream_type = StreamType::WebTransportCover;
+                        }
+                    }
+                    if webtransport_response_accepted {
+                        self.established_webtransport_sessions.insert(stream_id);
+                    }
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.receive_message_state = match stream.receive_message_state {
+                            ReceiveMessageState::AwaitingHeaders if informational_response => {
+                                ReceiveMessageState::AwaitingHeaders
+                            }
+                            ReceiveMessageState::AwaitingHeaders => ReceiveMessageState::Body,
+                            ReceiveMessageState::Body => ReceiveMessageState::Trailers,
+                            ReceiveMessageState::Trailers => ReceiveMessageState::Trailers,
+                        };
+                    }
                     let event = Event::Headers { list: headers, has_body: !fin };
                     self.pending_events.push_back((stream_id, event));
                     if masque_response_accepted {
@@ -959,7 +1342,49 @@ impl Connection {
                         }
                     }
                 }
-                0x04 => { /* SETTINGS was validated and recorded above. */ }
+                0x03 => {
+                    let push_id = Self::decode_single_varint_payload(frame_data)?;
+                    if self.peer_max_push_id.is_none_or(|maximum| push_id > maximum) {
+                        return Err(Error::IdError);
+                    }
+                }
+                0x04 => {
+                    self.validate_settings_payload(frame_data)?;
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.settings_received = true;
+                    }
+                }
+                0x05 => {
+                    let (push_id, push_id_len) =
+                        Self::decode_varint(frame_data).map_err(|error| {
+                            if error == Error::BufferTooShort { Error::FrameError } else { error }
+                        })?;
+                    if self.local_max_push_id.is_none_or(|maximum| push_id > maximum) {
+                        return Err(Error::IdError);
+                    }
+                    let headers = self.decoder.decode(&frame_data[push_id_len..])?;
+                    self.pending_events
+                        .push_back((stream_id, Event::PushPromise { push_id, headers }));
+                }
+                0x07 => {
+                    let identifier = Self::decode_single_varint_payload(frame_data)?;
+                    if !conn.is_server() && identifier & 0x03 != 0 {
+                        return Err(Error::IdError);
+                    }
+                    if self.peer_goaway_id.is_some_and(|current| identifier > current) {
+                        return Err(Error::IdError);
+                    }
+                    self.peer_goaway_id = Some(identifier);
+                    self.goaway_received = true;
+                    self.pending_events.push_back((stream_id, Event::GoAway));
+                }
+                0x0d => {
+                    let maximum = Self::decode_single_varint_payload(frame_data)?;
+                    if self.peer_max_push_id.is_some_and(|current| maximum <= current) {
+                        return Err(Error::IdError);
+                    }
+                    self.peer_max_push_id = Some(maximum);
+                }
                 _ => {}
             }
             offset = offset
@@ -972,10 +1397,12 @@ impl Connection {
             stream.frame_buffer.extend_from_slice(&buffered[offset..]);
         }
         if fin {
-            if self
-                .streams
-                .get(&stream_id)
-                .is_some_and(|stream| stream._stream_type == StreamType::Control)
+            if self.streams.get(&stream_id).is_some_and(|stream| {
+                matches!(
+                    stream._stream_type,
+                    StreamType::Control | StreamType::QpackEncoder | StreamType::QpackDecoder
+                )
+            })
             {
                 return Err(Error::ClosedCriticalStream);
             }
@@ -1143,6 +1570,18 @@ impl Connection {
             }
             std::str::from_utf8(header.value()).ok()?.parse::<u16>().ok()
         })
+    }
+
+    fn is_webtransport_connect(headers: &[Header]) -> bool {
+        let method_is_connect = headers.iter().any(|header| {
+            header.name().eq_ignore_ascii_case(b":method")
+                && header.value().eq_ignore_ascii_case(b"CONNECT")
+        });
+        let protocol_is_webtransport = headers.iter().any(|header| {
+            header.name().eq_ignore_ascii_case(b":protocol")
+                && header.value().eq_ignore_ascii_case(b"webtransport")
+        });
+        method_is_connect && protocol_is_webtransport
     }
 
     /// Open a bounded WebTransport-looking H3 cover session.

@@ -18,6 +18,7 @@ pub enum Error {
     ClosedCriticalStream,
     FrameUnexpected,
     FrameError,
+    SettingsError,
     QpackDecompressionFailed,
     TransportError(TransportError),
 }

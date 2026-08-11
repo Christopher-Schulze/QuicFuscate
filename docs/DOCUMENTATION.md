@@ -3769,7 +3769,7 @@ TLS Cover is optional and does not replace native TLS security semantics.
 
 2. **PacketNormalize padding** (`PaddingStrategy::PacketNormalize`): all 1-RTT packets are padded to `normalize_target_size` bytes so wire-visible packet sizes are uniform. Prevents length-based traffic analysis.
 
-3. **Native H3 cover**: `CoverTrafficScheduler` emits persona-shaped H3 request headers, while Server Push and escalated WebTransport use H3-framed application cover. The H3 parser remains fail-closed for malformed or oversized frames; no fixed stream is reserved and no raw random payload bypasses H3 framing.
+3. **Native H3 cover**: `CoverTrafficScheduler` emits persona-shaped H3 request headers. Server Push uses standard H3 `PUSH_PROMISE`, push-stream, `HEADERS`, and `DATA` framing. Escalated WebTransport cover starts as an H3 Extended CONNECT session; an associated unidirectional data stream then carries the WebTransport stream-type and session-ID prefixes followed by opaque application bytes rather than nested H3 frames. The H3 parser remains fail-closed for malformed or oversized framed input, and no fixed stream is reserved.
 
 To force TLS Cover via the configuration file add:
 
@@ -3793,37 +3793,22 @@ randomized bursts according to their cover budget.
   - `server_push_base_path`: base URI path for pushed resources (e.g., `/assets`).
   - `server_push_burst_interval`: minimum seconds between bursts.
 - Generation (Transport):
-  - `create_server_push_promise()` and `generate_stealth_cover_burst()` synthesize push promises with realistic content types.
+  - `generate_stealth_cover_burst()` schedules bounded push promises with realistic content types after the peer has advertised `MAX_PUSH_ID` and a client request stream exists.
   - Payloads: generated CSS, JS and small image blobs with deterministic variability to evade static signatures.
-  - State: maintains `next_push_id`, tracks open push streams, and injects cover DATA frames interleaved with real traffic.
+  - Wire state: the server allocates a monotonic HTTP/3 push ID independently from the server-initiated unidirectional QUIC stream ID. `PUSH_PROMISE` is emitted on the associated request stream; the push stream starts with stream type `0x01`, the push ID, and response `HEADERS` before cover `DATA`.
+  - Admission: the client advertises a bounded maximum push ID, incoming push-stream IDs must be unique and within that limit, and the server never schedules a burst beyond the peer's remaining push-ID capacity.
   - Lifecycle: completed push streams are released by the H3 polling GC together with their stream state and cover payload; terminal stream IDs and MASQUE flow mappings are released at the same boundary.
 - Telemetry: MASQUE/cover traffic counters under `optimize::telemetry::*` record bytes and capsule usage (when applicable).
 
 Example (runtime behavior)
 ```text
 Anti-DPI escalates -> enable_server_push_cover=true, intensity~0.8, burst_interval=15 s.
-Transport emits PUSH_PROMISE and DATA with CSS/JS payloads across multiple streams.
+Transport emits `PUSH_PROMISE` on request streams and `HEADERS` plus `DATA` on distinct push streams.
 ```
 
-#### Cover Burst Example
+#### Cover Burst Ownership
 
-```rust
-use quicfuscate::transport;
-
-// Assume an established transport connection `conn` and a configured H3 connection
-let mut cfg = transport::Config::new().expect("config");
-let mut h3 = transport::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
-
-// Generate a burst of realistic cover pushes under /assets
-let push_ids: Vec<u64> = h3.generate_stealth_cover_burst("/assets").expect("cover burst");
-
-// Typical content-types generated per push:
-//  - text/css (CSS)
-//  - application/javascript (JS)
-//  - image/jpeg or image/png (images)
-
-// Application may continue polling events; pushed streams carry DATA frames with the cover payloads.
-```
+`generate_stealth_cover_burst()` is a crate-private transport operation invoked by the Core cover scheduler after runtime policy and peer admission checks. It is not part of the public application API. Generated resources use CSS, JavaScript, JPEG, and PNG content shapes; callers continue polling H3 events while the transport advances promised push streams.
 
 #### Handling Server Push Events
 
@@ -3831,11 +3816,19 @@ let push_ids: Vec<u64> = h3.generate_stealth_cover_burst("/assets").expect("cove
 use quicfuscate::transport::h3::{Connection as H3, Event};
 
 fn poll_h3_events(h3: &mut H3, conn: &mut quicfuscate::transport::Connection) {
-    while let Ok(Some(ev)) = h3.poll(conn) {
-        match ev {
+    while let Ok(Some((stream_id, event))) = h3.poll(conn) {
+        match event {
             Event::PushPromise { push_id, headers } => {
                 // Observe pushed resource headers for realism
-                for h in &headers { log::debug!("push {}: {:?} -> {:?}", push_id, h.name(), h.value()); }
+                for header in &headers {
+                    log::debug!(
+                        "stream {} push {}: {:?} -> {:?}",
+                        stream_id,
+                        push_id,
+                        header.name(),
+                        header.value()
+                    );
+                }
             }
             Event::Data => {
                 // Read DATA frames for active/pushed streams internally
@@ -3854,11 +3847,14 @@ Core H3/MASQUE is the canonical VPN/TUN data-plane carrier and the only active C
 - DATAGRAM: registers Flow-ID/Context-ID; sends UDP payloads over QUIC DATAGRAM frames.
 - Capsules: encodes/decodes MASQUE capsules using varints.
   - Common types observed in telemetry: `0x00` (DATAGRAM), `0x21`, `0x22` (implementation-specific control/data hints).
-- QPACK: MASQUE headers use QPACK with dynamic table; preferred indexing keys are set via `set_qpack_index_policy()`.
+- QPACK: MASQUE headers use the local QPACK codec and preferred indexing keys are set via `set_qpack_index_policy()`. The negotiated dynamic-table capacity defaults to zero. Peer encoder/decoder instruction streams are uniquely classified and treated as critical, but RFC 9204 instruction synchronization is not yet implemented; TODO-882 owns that interoperability boundary before non-zero dynamic-table use can be claimed.
 - Telemetry: `MASQUE_BYTES_SENT`, `MASQUE_BYTES_RECEIVED`, and capsule counters per type.
 
 Notes
 - Canonical Stealth, Anti-DPI, Performance, and Intelligent modes use the production H3/MASQUE TUN carrier when TUN mode is active.
+- Peer unidirectional stream prefixes are retained across transport chunks. Unknown stream types discard all subsequent bytes; duplicate control or QPACK streams fail with `StreamCreationError`; closure of control or QPACK streams fails with `ClosedCriticalStream`.
+- Control streams require SETTINGS first and reject duplicate SETTINGS, HTTP/2-reserved frame types, reserved or duplicate setting identifiers, illegal frame placement, malformed fixed-size control payloads, increasing GOAWAY identifiers, and non-increasing `MAX_PUSH_ID` updates. Request and push streams reject DATA before initial HEADERS and reject HEADERS or DATA after trailers; informational responses retain the awaiting-final-headers state.
+- Client endpoints reject server-initiated bidirectional streams in the current profile. Full WebTransport SETTINGS negotiation and bidirectional data-stream acceptance remain TODO-471-owned; the implemented unidirectional cover-data path buffers bytes until its Extended CONNECT session is established.
 - Split capsule varints use the full 1/2/4/8-byte QUIC widths, including 16,384-byte payload lengths. A malformed capsule or truncated FIN suffix fails closed before staged events are exposed.
 - `src/dns/mod.rs` remains the owner of shared DoH primitives, and `src/implementations/client/dns_runtime.rs` owns the active client lifecycle; the retired `stealth/parts/doh.rs` resolver and `stealth::MasqueManager` source are preserved under `archive/stealth/` for historical inspection only. TODO-771 completed the runtime wiring.
 - If you maintain external profile dumps, `scripts/tests/utils/util-tls-export-active-profile.sh` exports them under `scripts/out/utils/.../profiles/` by default (or a caller-provided `--output-dir`) for regression tracking.
