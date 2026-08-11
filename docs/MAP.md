@@ -2047,6 +2047,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - Standalone reload publication -> `RuntimePolicyGeneration` write lease -> transport private-copy commit -> FEC/optimization/stealth shared-state commit -> one generation advance. Profile rotation takes the same lease before changing stealth state.
 - New-client construction -> `RuntimePolicySnapshot::capture()` read lease -> generation-tagged transport/FEC/optimization/stealth clones -> `LiveClientInit.runtime_generation`; concurrent readers cannot cross the writer boundary.
 - TODO-794 owns complete `EngineConfig` validation and strict adapter projection. UI generation fields are intentionally deferred because frontend files are frozen for the current backend-only continuation.
+- Archive revalidation on 2026-08-11 confirms implementation commit `a19b8ea` remains in `main`; `crates/qf-engine-types/src/lib.rs` is the current generation owner and `src/engine/app_config.rs` is the current validated projection owner. Clippy Matrix run `31500690078` is green at revision `9ada4361ff12c35e59ec45538727f89a3908b312`; protected frontend and Tauri paths remain unchanged.
 
 ## Fuzz Contract (2026-08-08, TODO-758)
 
