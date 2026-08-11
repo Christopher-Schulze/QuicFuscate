@@ -256,6 +256,17 @@ issue_qkey() {
     'import json,sys; response=json.load(sys.stdin); assert response["success"]; print(response["data"]["qkey"])'
 }
 
+require_runtime_owned_tun_assignment() {
+  local namespace="$1"
+  local expected_ipv4="$2"
+  wait_for_tun "$namespace"
+  if ! ip netns exec "$namespace" ip -j addr show dev "$TUN_NAME" | python3 -c \
+    'import json,sys; expected=sys.argv[1]; data=json.load(sys.stdin); assert len(data)==1,data; link=data[0]; addresses={(item["family"],item["local"],item["prefixlen"]) for item in link["addr_info"]}; assert ("inet",expected,24) in addresses,(expected,addresses); assert link["mtu"]==1280,link; assert "UP" in link["flags"],link' \
+    "$expected_ipv4"; then
+    fail "runtime-owned TUN assignment is incomplete in $namespace"
+  fi
+}
+
 start_stack() {
   local phase="$1"
   local fec_mode="$2"
@@ -304,9 +315,6 @@ start_stack() {
       --disable-doh \
       --tun \
       --tun-name "$TUN_NAME" \
-      --tun-mtu 1280 \
-      --tun-ip "${CLIENT_TUN_IP[$index]}" \
-      --tun-netmask 255.255.255.0 \
       --no-utls \
       -v >"$log_file" 2>&1 &
     STACK_PIDS+=("$!")
@@ -319,12 +327,10 @@ start_stack() {
 
 configure_tuns() {
   local client_count="$1"
-  wait_for_tun "$SERVER_NS"
-  ip netns exec "$SERVER_NS" ip link set "$TUN_NAME" mtu 1280 up
+  require_runtime_owned_tun_assignment "$SERVER_NS" 10.0.1.1
   local index
   for ((index = 0; index < client_count; index++)); do
-    wait_for_tun "${CLIENT_NS[$index]}"
-    ip netns exec "${CLIENT_NS[$index]}" ip link set "$TUN_NAME" mtu 1280 up
+    require_runtime_owned_tun_assignment "${CLIENT_NS[$index]}" "${CLIENT_TUN_IP[$index]}"
     local ready=0
     for ((attempt = 0; attempt < 20; attempt++)); do
       if ip netns exec "${CLIENT_NS[$index]}" ping -c 1 -W 1 \

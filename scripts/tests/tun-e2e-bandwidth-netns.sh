@@ -245,6 +245,17 @@ issue_qkey() {
     'import json,sys; response=json.load(sys.stdin); assert response["success"]; print(response["data"]["qkey"])'
 }
 
+require_runtime_owned_tun_assignment() {
+  local namespace="$1"
+  local expected_ipv4="$2"
+  local expected_ipv6="$3"
+  if ! ip netns exec "$namespace" ip -j addr show dev "$TUN_NAME" | python3 -c \
+    'import json,sys; expected4,expected6=sys.argv[1:]; data=json.load(sys.stdin); assert len(data)==1,data; link=data[0]; addresses={(item["family"],item["local"],item["prefixlen"]) for item in link["addr_info"]}; assert ("inet",expected4,24) in addresses,(expected4,addresses); assert ("inet6",expected6,64) in addresses,(expected6,addresses); assert link["mtu"]==1280,link; assert "UP" in link["flags"],link' \
+    "$expected_ipv4" "$expected_ipv6"; then
+    fail "runtime-owned TUN assignment is incomplete in $namespace"
+  fi
+}
+
 start_runtime() {
   local config="$ARTIFACT_DIR/config.toml"
   printf '%s\n' \
@@ -311,11 +322,6 @@ start_runtime() {
       --disable-doh \
       --tun \
       --tun-name "$TUN_NAME" \
-      --tun-mtu 1280 \
-      --tun-ip "${CLIENT_V4[$index]}" \
-      --tun-netmask 255.255.255.0 \
-      --tun-ip6 "${CLIENT_V6[$index]}" \
-      --tun-prefix6 64 \
       --no-utls \
       "${RUNTIME_LOG_ARGS[@]}" >"$ARTIFACT_DIR/client-$((index + 1)).log" 2>&1 &
     PHASE_PIDS+=("$!")
@@ -324,9 +330,10 @@ start_runtime() {
   done
   wait_for_log_count "$ARTIFACT_DIR/server.log" 'New client connected:' 3
 
-  ip netns exec "$SERVER_NS" ip link set "$TUN_NAME" up
+  require_runtime_owned_tun_assignment "$SERVER_NS" 10.29.0.1 fd29::1
   for index in 0 1 2; do
-    ip netns exec "${CLIENT_NS[$index]}" ip link set "$TUN_NAME" up
+    require_runtime_owned_tun_assignment \
+      "${CLIENT_NS[$index]}" "${CLIENT_V4[$index]}" "${CLIENT_V6[$index]}"
     for ((attempt = 0; attempt < 20; attempt++)); do
       if ip netns exec "${CLIENT_NS[$index]}" ping -6 -c 1 -W 1 \
         -I "${CLIENT_V6[$index]}" fd29::1 >/dev/null 2>&1; then
