@@ -1163,17 +1163,12 @@ fn client_housekeeping_delay(
         return CLIENT_HOUSEKEEPING_ACTIVE;
     }
 
-    // QUIC release and recovery deadlines belong to the connection's injected
-    // protocol clock. Only the resulting duration crosses into Tokio.
+    // The canonical connection deadline owns pacing, stealth, recovery, and
+    // traffic-analysis scheduling in one protocol clock domain. Only the
+    // resulting duration crosses into Tokio.
     let now = conn.protocol_clock().now();
     let mut delay = CLIENT_HOUSEKEEPING_IDLE;
-    for deadline in [
-        conn.next_outbound_release_deadline(),
-        conn.conn.recovery_deadline(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    if let Some(deadline) = conn.next_send_deadline() {
         delay = delay.min(deadline.saturating_duration_since(now));
     }
     if let Some(deadline) = heartbeat_deadline {

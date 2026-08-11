@@ -752,6 +752,29 @@ mod tests {
     }
 
     #[test]
+    fn next_send_deadline_includes_full_padding_cadence() {
+        let mut connection = test_connection();
+        *connection.conn = crate::transport::connection::bench_paired_1rtt_connections().client;
+        connection
+            .conn
+            .apply_traffic_analysis_policy(crate::transport::config::TrafficAnalysisPolicy {
+                defense: crate::transport::config::TrafficAnalysisDefense::FullPadding,
+                chaff_rate_pps: 10,
+                chaff_size_bytes: 1500,
+                constant_rate_pps: 0,
+                idle_timeout_ms: 60_000,
+                ramp_down_ms: 5_000,
+            })
+            .expect("valid full-padding policy");
+        let traffic_deadline =
+            connection.conn.traffic_analysis_deadline().expect("traffic-analysis deadline");
+        let recovery_deadline = connection.conn.recovery_deadline();
+
+        assert!(recovery_deadline.is_none_or(|deadline| traffic_deadline < deadline));
+        assert_eq!(connection.next_send_deadline(), Some(traffic_deadline));
+    }
+
+    #[test]
     fn outbound_pacer_reset_removes_release_and_partial_burst() {
         let now = Instant::now();
         let mut pacer = OutboundPacer::default();
