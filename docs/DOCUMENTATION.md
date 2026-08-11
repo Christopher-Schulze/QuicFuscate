@@ -5274,8 +5274,8 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 ## Audit Register Reconciliation (2026-08-04, TODO-799 complete)
 
 - TODO-799 repaired the completeness validator's canonical tracker contract. It now accepts and validates `Active`/`ACTIVE|IN_PROGRESS`, `Blocked`/`BLOCKED`, `Queue`/`OPEN|QUEUED|AUDIT_COMPLETE`, and `Completed`/`DONE|SCRAP|COMPLETE|COMPLETED|CLOSED|AUDIT_COMPLETE`, enforces section order and presence, and derives the global status allowlist from the same contract.
-- The live validator passes with tracker `769` headings across Active `1`, Blocked `3`, Queue `190`, and Completed `575`; current details `411/411`; archived Markdown files `393` with `36` explicit exceptions; tracked paths `927`; ignored paths `37,803`; and zero non-ignored untracked paths. The fixture suite passes the valid blocked/audit-status corpus and fails closed for malformed sections, duplicate IDs, missing details, and status mismatches.
-- TODO-754 is active again. This closes the register/schema/Git-scope gate only; the broader target, runtime, native, feature, Graphify, frontend, Omega, and external-evidence boundaries remain with their existing owners. No production Rust or UI code was changed.
+- The current validator passes with tracker `785` headings across Blocked `18`, Queue `5`, and Completed `762`; current details `230/230`; archived Markdown files `590` with `36` explicit exceptions; tracked paths `1,005`; ignored paths `30,948`; and zero non-ignored untracked paths. The fixture suite passes the valid blocked/audit-status corpus and fails closed for malformed sections, duplicate IDs, missing details, and status mismatches.
+- TODO-799 is archived after current revalidation. TODO-754 remains blocked and retains the broader Graphify, evidence, and coverage boundaries; the current Graphify manifest is explicitly `BLOCKED` and accepted only as fail-closed evidence. No production Rust or UI code was changed.
 
 ## Implementation Reconciliation (2026-08-03, crypto key and IV constructor boundaries)
 
