@@ -1958,6 +1958,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - `src/engine/config.rs` contains failable validation and schema regressions for every legacy non-TUN value, removed-field rejection, and default serialization. The runtime guardrail checks the source, tests, and both canonical templates.
 - Static verification passes `cargo fmt --all -- --check`, Bash syntax, TOML parsing, `git diff --check`, and the new XDP guardrail item. The aggregate runtime guardrail remains at four pre-existing critical findings and one warning. Rust unit-test execution was not admitted because the local 2.2 GiB free-space boundary would be crossed by a fresh test build; Omega was not used because both permitted QuicFuscate folders exist there and are dirty or revision-mismatched.
 - No AF_XDP implementation, Cargo feature, or runtime path was reintroduced. Any future AF_XDP work requires a separate product and kernel-ownership decision.
+- Hosted closure: Main CI run `31455010980`, macOS job `93666880395`, executes the fail-closed legacy-interface validation and removed-XDP-field schema regressions at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`. The complete workspace matrix passes with the TUN-only configuration owner intact.
 
 ## Interface BMI2 Dispatch and Profile Proof Wiring (2026-08-07, TODO-843)
 

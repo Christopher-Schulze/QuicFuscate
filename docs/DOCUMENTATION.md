@@ -5761,6 +5761,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `src/engine/config.rs` contains failable validation and schema regressions for every legacy non-TUN value, removed-field rejection, and default serialization. The runtime guardrail checks the source, tests, and both canonical templates.
 - Static verification passes `cargo fmt --all -- --check`, Bash syntax, TOML parsing, `git diff --check`, and the new XDP guardrail item. The aggregate runtime guardrail remains at four pre-existing critical findings and one warning. Rust unit-test execution was not admitted because the local 2.2 GiB free-space boundary would be crossed by a fresh test build; Omega was not used because both permitted QuicFuscate folders exist there and are dirty or revision-mismatched.
 - No AF_XDP implementation, Cargo feature, or runtime path was reintroduced. Any future AF_XDP work requires a separate product and kernel-ownership decision.
+- TODO-874 hosted closure at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`: Main CI run `31455010980`, macOS job `93666880395`, executes `interface_validation_rejects_legacy_non_tun_types` and `interface_schema_removes_xdp_fields_and_rejects_legacy_input` inside the complete passing workspace matrix. The supported TUN-only schema and fail-closed legacy migration path are therefore runtime-tested without reintroducing AF_XDP.
 
 ## Generic TUN I/O Result Contract (2026-08-07, TODO-844)
 
