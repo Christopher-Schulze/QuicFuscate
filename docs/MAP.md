@@ -1892,6 +1892,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - `PmtuState` admits only probe sizes inside its validated bounds, uses saturating monotonic-time comparison for earlier timestamps, and keeps ACK, loss, and black-hole reset targets inside the configured range with overflow-safe midpoint/reset arithmetic.
 - Receive prefetch wiring passes a bounded byte slice into `prefetch_frame_parse_window()`. Empty input returns without a hint, over-bound offsets clamp to the final byte, and no one-past-end pointer is formed. Non-iOS AArch64 now uses the non-dereferencing `prfm` hint; the former volatile-load fallback is removed.
 - Deterministic constructor, timestamp, arithmetic, empty-buffer, exact-window, and over-bound-window regressions are present without network setup. Formatting, diff hygiene, and one-job library checking pass with the pre-existing `accounting_snapshot` warning; the focused test-target build was stopped at 1.7 GiB free and cleaned, so no test execution is claimed.
+- TODO-841 closure executes the guarded release PMTU/prefetch target `1/1`, covering the complete deterministic boundary without privileged network setup. Main CI run `31455640097` also passes the Linux recovery integration target `2/2` at revision `abb9c8149ee5d4e46983e129720fc2d88698a45f`.
 
 ## Transport Malformed-Boundary and Native ISA Proof Wiring (2026-08-07, TODO-842)
 
