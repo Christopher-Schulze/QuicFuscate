@@ -542,6 +542,30 @@ jobs:
             target
           key: linux-fastpath-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Prove native Linux resolver ownership
+        shell: bash
+        run: |
+          if [[ "$(uname -s)" != "Linux" ]]; then
+            echo "native resolver proof requires Linux" >&2
+            exit 1
+          fi
+          if [[ "$(id -u)" -eq 0 ]]; then
+            echo "native resolver proof requires an unprivileged runner" >&2
+            exit 1
+          fi
+          mkdir -p scripts/out/tests/linux-resolver-ownership
+          resolver_log="scripts/out/tests/linux-resolver-ownership/proof.log"
+          cargo test --locked --lib --features rust-tests \
+            implementations::client::platform::dns_restore::tests:: -- \
+            --nocapture --test-threads=1 2>&1 | tee "$resolver_log"
+          grep -Fq "test result: ok. 15 passed; 0 failed" "$resolver_log"
+          cargo test --locked --lib --features rust-tests \
+            implementations::client::platform::linux::tests::resolver_ -- \
+            --nocapture --test-threads=1 2>&1 | tee -a "$resolver_log"
+          grep -Fq "test result: ok. 3 passed; 0 failed" "$resolver_log"
+          echo "LINUX_RESOLVER_OWNERSHIP_PROOF status=PASS dns_restore=15 resolver_paths=3 unprivileged=1" \
+            | tee -a "$resolver_log"
+
       - name: Test Linux Unix TUN syscall contracts
         shell: bash
         run: |
@@ -581,6 +605,7 @@ jobs:
           path: |
             scripts/out/tests/linux-fastpath-gates
             scripts/out/tests/linux-privilege-proof
+            scripts/out/tests/linux-resolver-ownership
 
   linux-firewall-ownership-native:
     name: Linux firewall ownership (${{ matrix.backend }})

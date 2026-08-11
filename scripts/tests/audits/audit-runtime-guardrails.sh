@@ -1140,6 +1140,66 @@ else
   append_item "privilege_memory_tls_negative_proof" "fail" "missing deterministic suite, required Linux proof, ordering assertion, CI compile gate, or documentation: ${WINDOWS_PROOF_ORDER_ERRORS:-${LINUX_PRIVILEGE_GATE_ERRORS:-contract probe failed}}"
 fi
 
+# 4u) Linux resolver ownership must execute the complete temporary-filesystem
+#     contract on an unprivileged native Linux runner and retain exact evidence.
+LINUX_RESOLVER_GATE_ERRORS="$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+match = re.search(
+    r"(?ms)^  linux-fastpath-gates:\n(?P<job>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+    ci,
+)
+job = match.group("job") if match else ""
+checks = [
+    ("runs-on: ubuntu-latest", "resolver proof is not Linux-hosted"),
+    ('if [[ "$(uname -s)" != "Linux" ]]', "resolver proof does not verify the host OS"),
+    ('if [[ "$(id -u)" -eq 0 ]]', "resolver proof does not require an unprivileged runner"),
+    (
+        "implementations::client::platform::dns_restore::tests::",
+        "complete resolver restore suite is missing",
+    ),
+    (
+        "implementations::client::platform::linux::tests::resolver_",
+        "Linux resolver path suite is missing",
+    ),
+    ("test result: ok. 15 passed; 0 failed", "resolver restore count is not fail-closed"),
+    ("test result: ok. 3 passed; 0 failed", "Linux path count is not fail-closed"),
+    (
+        "LINUX_RESOLVER_OWNERSHIP_PROOF status=PASS dns_restore=15 resolver_paths=3 unprivileged=1",
+        "resolver proof terminal marker is missing",
+    ),
+    (
+        "scripts/out/tests/linux-resolver-ownership",
+        "resolver proof artifact is not retained",
+    ),
+]
+print("; ".join(message for token, message in checks if token not in job))
+PY
+)"
+if [[ -z "$LINUX_RESOLVER_GATE_ERRORS" ]] \
+  && rg -F -- 'fn broken_source_symlink_is_rejected_without_mutation()' \
+    src/implementations/client/platform/dns_restore.rs >/dev/null \
+  && rg -F -- 'fn valid_resolver_symlink_round_trip_preserves_link_and_target()' \
+    src/implementations/client/platform/dns_restore.rs >/dev/null \
+  && rg -F -- 'fn replaced_symlink_target_is_refused_without_consuming_backup()' \
+    src/implementations/client/platform/dns_restore.rs >/dev/null \
+  && rg -F -- 'fn read_only_backup_parent_preserves_original_without_partial_state()' \
+    src/implementations/client/platform/dns_restore.rs >/dev/null \
+  && rg -F -- 'fn resolver_paths_reject_invalid_contracts()' \
+    src/implementations/client/platform/linux.rs >/dev/null \
+  && rg -F -- 'fn resolver_lock_is_private_under_permissive_umask()' \
+    src/implementations/client/platform/linux.rs >/dev/null \
+  && rg -F -- 'Native Linux resolver ownership proof' \
+    docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
+  pass "Native Linux resolver source, target, backup, state, and lock ownership proof is wired"
+  append_item "linux_resolver_ownership_proof" "ok" "unprivileged native Linux CI executes 15 restore and 3 path/lock tests with exact retained evidence"
+else
+  fail_critical "Native Linux resolver ownership proof wiring is incomplete"
+  append_item "linux_resolver_ownership_proof" "fail" "missing Linux host/admission check, non-vacuous tests, terminal marker, artifact, or documentation: ${LINUX_RESOLVER_GATE_ERRORS:-contract probe failed}"
+fi
+
 # 5) Guardrail warning: broad dead_code suppression in production/runtime-critical modules.
 DEADCODE_SUPPRESSIONS="$(rg -n --no-messages '^#!\[allow\(dead_code\)\]' src/optimize src/transport src/fec crates/qf-simd/src || true)"
 if [[ -n "$DEADCODE_SUPPRESSIONS" ]]; then
