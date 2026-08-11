@@ -717,6 +717,9 @@ mod tests {
 
     #[test]
     fn deferred_process_lock_status_is_explicit_before_privilege_transition() {
+        let _guard = LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _restore = PoolLockSettingRestore(lock_blocks_enabled());
+
         let status = MemoryLockPolicy {
             lock_memory: true,
             lock_blocks: true,
