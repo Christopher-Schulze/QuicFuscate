@@ -6,6 +6,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+#[cfg(unix)]
+use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 use crate::error::ConnectionError;
@@ -46,25 +48,65 @@ pub enum TlsIdentityPreloadStatus {
     AlreadyLoaded,
 }
 
+enum KeyMaterialStorage {
+    Heap(Zeroizing<Vec<u8>>),
+    #[cfg(unix)]
+    Mapped(MappedKeyMaterial),
+}
+
+impl KeyMaterialStorage {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Heap(bytes) => bytes.as_slice(),
+            #[cfg(unix)]
+            Self::Mapped(bytes) => bytes.as_slice(),
+        }
+    }
+}
+
 struct LockedKeyMaterial {
-    bytes: Zeroizing<Vec<u8>>,
+    storage: KeyMaterialStorage,
     status: TlsKeyLockStatus,
 }
 
 impl LockedKeyMaterial {
     fn new(bytes: Zeroizing<Vec<u8>>, lock_memory: bool) -> Self {
-        let status = if !lock_memory {
-            TlsKeyLockStatus::Disabled
+        let (storage, status) = if !lock_memory {
+            (KeyMaterialStorage::Heap(bytes), TlsKeyLockStatus::Disabled)
         } else if qf_memory_lock::process_memory_lock_covers_future_allocations() {
-            TlsKeyLockStatus::CoveredByProcess
+            (KeyMaterialStorage::Heap(bytes), TlsKeyLockStatus::CoveredByProcess)
         } else {
-            try_lock_key_material(bytes.as_slice())
+            Self::individually_locked_storage(bytes)
         };
-        Self { bytes, status }
+        Self { storage, status }
+    }
+
+    #[cfg(unix)]
+    fn individually_locked_storage(
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> (KeyMaterialStorage, TlsKeyLockStatus) {
+        match MappedKeyMaterial::new(bytes) {
+            Ok(mapped) => {
+                let status = mapped.status();
+                (KeyMaterialStorage::Mapped(mapped), status)
+            }
+            Err((bytes, error)) => {
+                log::warn!("Failed to allocate page-exclusive TLS private-key memory: {error}");
+                (KeyMaterialStorage::Heap(bytes), TlsKeyLockStatus::Unavailable)
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn individually_locked_storage(
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> (KeyMaterialStorage, TlsKeyLockStatus) {
+        log::debug!("Individual TLS private-key memory locking is unsupported on this platform");
+        (KeyMaterialStorage::Heap(bytes), TlsKeyLockStatus::Unavailable)
     }
 
     fn as_slice(&self) -> &[u8] {
-        self.bytes.as_slice()
+        self.storage.as_slice()
     }
 
     fn status(&self) -> TlsKeyLockStatus {
@@ -72,11 +114,90 @@ impl LockedKeyMaterial {
     }
 }
 
-impl Drop for LockedKeyMaterial {
+#[cfg(unix)]
+struct MappedKeyMaterial {
+    ptr: *mut u8,
+    len: usize,
+    status: TlsKeyLockStatus,
+}
+
+#[cfg(unix)]
+impl MappedKeyMaterial {
+    fn new(mut bytes: Zeroizing<Vec<u8>>) -> Result<Self, (Zeroizing<Vec<u8>>, std::io::Error)> {
+        if bytes.is_empty() {
+            return Err((
+                bytes,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "TLS private-key bytes must not be empty",
+                ),
+            ));
+        }
+
+        // SAFETY: the anonymous private mapping has a non-zero length, no file
+        // descriptor owner, and no caller-provided address. MAP_FAILED is handled
+        // before the returned pointer is used.
+        let len = bytes.len();
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if mapping == libc::MAP_FAILED {
+            return Err((bytes, std::io::Error::last_os_error()));
+        }
+
+        let ptr = mapping.cast::<u8>();
+        // SAFETY: mmap returned a live writable mapping of at least bytes.len()
+        // bytes, and the source allocation is distinct and live for the copy.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len) };
+        bytes.zeroize();
+
+        let mut mapped = Self { ptr, len, status: TlsKeyLockStatus::Unavailable };
+        mapped.status = try_lock_key_material(mapped.as_slice());
+        Ok(mapped)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: ptr and len identify the live mapping exclusively owned by self.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    fn status(&self) -> TlsKeyLockStatus {
+        self.status
+    }
+}
+
+// SAFETY: the mapping is exclusively owned by this value. It exposes only
+// immutable slices, and destruction requires exclusive access to the owner.
+#[cfg(unix)]
+unsafe impl Send for MappedKeyMaterial {}
+// SAFETY: shared access exposes immutable bytes only; mutation occurs solely
+// during Drop after exclusive ownership has been established.
+#[cfg(unix)]
+unsafe impl Sync for MappedKeyMaterial {}
+
+#[cfg(unix)]
+impl Drop for MappedKeyMaterial {
     fn drop(&mut self) {
-        self.bytes.as_mut_slice().fill(0);
+        // SAFETY: ptr and len still identify this owner's live writable mapping.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }.zeroize();
         if self.status == TlsKeyLockStatus::Locked {
-            unlock_key_material(self.bytes.as_ptr(), self.bytes.len());
+            let _ = unlock_key_material(self.ptr, self.len);
+        }
+        // SAFETY: ptr and len are the exact mapping returned by mmap and have
+        // not been unmapped previously.
+        if unsafe { libc::munmap(self.ptr.cast(), self.len) } != 0 {
+            log::error!(
+                "Failed to unmap preloaded TLS private-key memory ({} bytes): {}",
+                self.len,
+                std::io::Error::last_os_error()
+            );
         }
     }
 }
@@ -109,27 +230,38 @@ fn try_lock_key_material(bytes: &[u8]) -> TlsKeyLockStatus {
     }
 }
 
-#[cfg(not(unix))]
-fn try_lock_key_material(_bytes: &[u8]) -> TlsKeyLockStatus {
-    log::debug!("Individual TLS private-key memory locking is unsupported on this platform");
-    TlsKeyLockStatus::Unavailable
-}
-
 #[cfg(unix)]
-fn unlock_key_material(ptr: *const u8, len: usize) {
+fn unlock_key_material(ptr: *const u8, len: usize) -> bool {
     // SAFETY: the pointer and length are the exact allocation range previously
     // locked by this guard, and the allocation remains alive during the call.
-    if unsafe { libc::munlock(ptr.cast(), len) } != 0 {
+    #[cfg(test)]
+    // SAFETY: the caller guarantees the mapping remains live for this call.
+    let zeroized = unsafe { std::slice::from_raw_parts(ptr, len) }.iter().all(|byte| *byte == 0);
+    let unlocked = unsafe { libc::munlock(ptr.cast(), len) } == 0;
+    #[cfg(test)]
+    KEY_UNLOCK_OBSERVATIONS.with(|observations| {
+        observations.borrow_mut().push((zeroized, unlocked));
+    });
+    if !unlocked {
         log::error!(
             "Failed to unlock preloaded TLS private-key memory ({} bytes): {}",
             len,
             std::io::Error::last_os_error()
         );
     }
+    unlocked
 }
 
-#[cfg(not(unix))]
-fn unlock_key_material(_ptr: *const u8, _len: usize) {}
+#[cfg(all(unix, test))]
+thread_local! {
+    static KEY_UNLOCK_OBSERVATIONS: std::cell::RefCell<Vec<(bool, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(all(unix, test))]
+fn take_key_unlock_observations() -> Vec<(bool, bool)> {
+    KEY_UNLOCK_OBSERVATIONS.with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+}
 
 /// Tell the qftls owner whether process-wide locking covers future allocations.
 ///
@@ -406,6 +538,69 @@ mod tests {
             Err(ConnectionError::TlsError(message))
                 if message.contains("different certificate or private key")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn individually_locked_key_mappings_are_page_exclusive() {
+        let first = MappedKeyMaterial::new(Zeroizing::new(vec![0x31; 512]))
+            .expect("allocate first page-exclusive key mapping");
+        let second = MappedKeyMaterial::new(Zeroizing::new(vec![0x42; 512]))
+            .expect("allocate second page-exclusive key mapping");
+        // SAFETY: sysconf accepts the documented _SC_PAGESIZE selector and has
+        // no pointer arguments or retained ownership.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+
+        assert!(page_size > 0, "Unix page size must be positive");
+        let page_size = usize::try_from(page_size).expect("positive page size fits usize");
+        assert_eq!(first.ptr.addr() % page_size, 0);
+        assert_eq!(second.ptr.addr() % page_size, 0);
+        assert_ne!(first.ptr.addr(), second.ptr.addr());
+        assert!(first.as_slice().iter().all(|byte| *byte == 0x31));
+        assert!(second.as_slice().iter().all(|byte| *byte == 0x42));
+    }
+
+    #[cfg(unix)]
+    fn native_locked_identity(cert: &[u8], key: &[u8]) -> PreloadedServerIdentity {
+        let mapped = MappedKeyMaterial::new(Zeroizing::new(key.to_vec()))
+            .expect("allocate page-exclusive native key mapping");
+        assert_eq!(mapped.status(), TlsKeyLockStatus::Locked);
+        PreloadedServerIdentity {
+            cert_pem: cert.to_vec(),
+            key_pem: LockedKeyMaterial {
+                status: mapped.status(),
+                storage: KeyMaterialStorage::Mapped(mapped),
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a native Unix mlock budget and runs in dedicated CI steps"]
+    fn native_rejected_preload_values_release_only_their_own_key_mapping() {
+        let _ = take_key_unlock_observations();
+        let slot = OnceLock::new();
+        let accepted = native_locked_identity(b"accepted-cert", b"accepted-key");
+        assert!(matches!(
+            publish_preloaded_identity(&slot, accepted),
+            Ok(TlsIdentityPreloadStatus::Loaded { key_lock: TlsKeyLockStatus::Locked })
+        ));
+
+        let duplicate = native_locked_identity(b"accepted-cert", b"accepted-key");
+        assert_eq!(
+            publish_preloaded_identity(&slot, duplicate),
+            Ok(TlsIdentityPreloadStatus::AlreadyLoaded)
+        );
+        let conflict = native_locked_identity(b"conflict-cert", b"conflict-key");
+        assert!(publish_preloaded_identity(&slot, conflict).is_err());
+
+        let accepted_bytes =
+            slot.get().expect("accepted identity remains published").key_pem.as_slice();
+        assert_eq!(accepted_bytes, b"accepted-key");
+        assert_eq!(take_key_unlock_observations(), vec![(true, true), (true, true)]);
+
+        drop(slot);
+        assert_eq!(take_key_unlock_observations(), vec![(true, true)]);
     }
 
     struct ZeroizeDropProbe {
