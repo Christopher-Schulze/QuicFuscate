@@ -1581,6 +1581,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - Cargo no longer declares hardware-named features or a hardware meta-feature. `#[target_feature]` and `RUSTFLAGS`/`target-cpu` own compile-time ISA selection; qf-cpu's `FeatureDetector` owns runtime backend selection; `simd-selfcheck` remains a test-only parity feature.
 - `scripts/audits/verify-simd-feature-contract.sh` parses Cargo metadata, scans Rust for accidental hardware `cfg(feature = ...)` consumers, confirms target-feature/runtime-dispatch owners, proves `rust-tests,simd-selfcheck` and `--all-features`, and rejects every removed hardware/meta selector through fail-closed Cargo checks.
 - `.github/workflows/ci.yml`, `.github/workflows/clippy-matrix.yml`, and `scripts/tests/audits/audit-all-comprehensive.sh` execute the shared gate. No product, runtime, frontend, UI, Omega, or remote checkout behavior is changed by the feature-contract reconciliation.
+- Hosted closure at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`: Main CI run `31455010980` passes the SIMD contract and both macOS/Ubuntu self-check lanes; Clippy Matrix run `31455010971` passes the coverage contract and every declared profile. Native ISA execution remains separate target-feature/runtime evidence.
 
 ## Cargo Feature Taxonomy Wiring (2026-08-04, TODO-763)
 

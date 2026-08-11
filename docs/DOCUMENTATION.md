@@ -2168,6 +2168,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
   - Decoder policy such as Wiedemann remains an internal FEC/runtime policy concern, not a top-level product identity.
   - Hardware selection is intentionally split into three contracts: Rust `#[target_feature]`/`#[target_feature(enable = ...)]` controls compiled ISA bodies; `RUSTFLAGS` with `-C target-feature=...` or `-C target-cpu=...` controls the build target; and qf-cpu's `FeatureDetector` controls runtime dispatch. No Cargo feature enables an ISA, and the feature matrix must not be used as hardware proof.
   - `simd-selfcheck` is a test-only Cargo feature for the `rt-simd-selfcheck` target. It validates parity and telemetry on the active build; it does not claim that a particular ISA was compiled or selected.
+  - Hosted closure at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`: Main CI run `31455010980` passes the SIMD contract and macOS/Ubuntu self-check lanes; Clippy Matrix run `31455010971` passes the coverage contract and every declared feature profile. Native ISA execution remains separately owned target-feature/runtime evidence.
 
 Examples
 ```bash
