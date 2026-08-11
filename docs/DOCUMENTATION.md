@@ -2834,7 +2834,7 @@ Profile rotation allows QuicFuscate to select a different browser/OS template fo
     --tun-name <name>       TUN interface name
 ```
 
-Standalone clients receive their IPv4 address/prefix, IPv6 address/prefix, MTU, and DNS servers from the authenticated server assignment. Client-side `--tun-mtu`, `--tun-ip`, `--tun-netmask`, `--tun-ip6`, and `--tun-prefix6` are rejected instead of overriding that assignment.
+Standalone clients receive their IPv4 address/prefix, IPv6 address/prefix, MTU, and DNS servers from the authenticated server assignment. Client-side `--tun-mtu`, `--tun-ip`, `--tun-netmask`, `--tun-ip6`, and `--tun-prefix6` are rejected instead of overriding that assignment. The base native Linux TUN harness supplies only `--tun` and `--tun-name` to the client, then requires the exact server-owned and authenticated client-assigned IPv4 addresses without repairing missing runtime state through host commands.
 
 ### Standard Configuration
 

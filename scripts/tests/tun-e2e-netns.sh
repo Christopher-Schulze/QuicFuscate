@@ -386,18 +386,22 @@ wait_for_qkey "$RESTART_ADMIN_SOCKET" /tmp/ns-srv-restart.log
 # --- start client in ns-cli ---
 ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
   --qkey "$QKEY" --ca-file "$CA" --verify-peer --disable-doh \
-  --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
+  --tun --tun-name qtun0 --no-utls -v \
   "${CLIENT_CONFIG_ARGS[@]}" \
   > /tmp/ns-cli.log 2>&1 &
 CLIENT_PID=$!
 sleep 4
 
-# --- ensure TUN up + ip + route in each netns ---
-ip netns exec ns-srv ip addr add 10.0.1.1/24 dev qtun0 2>/dev/null
-ip netns exec ns-srv ip link set qtun0 up 2>/dev/null
-ip netns exec ns-cli ip addr add 10.0.1.2/24 dev qtun0 2>/dev/null
-ip netns exec ns-cli ip link set qtun0 up 2>/dev/null
+# --- require runtime-owned TUN provisioning; never repair missing assignment ---
 sleep 2
+SERVER_TUN_IPV4="$(ip netns exec ns-srv ip -o -4 addr show dev qtun0 2>/dev/null | awk '{print $4}')"
+CLIENT_TUN_IPV4="$(ip netns exec ns-cli ip -o -4 addr show dev qtun0 2>/dev/null | awk '{print $4}')"
+if [ "$SERVER_TUN_IPV4" != "10.0.1.1/24" ]; then
+  fail "server runtime did not provision exact TUN assignment: ${SERVER_TUN_IPV4:-<missing>}"
+fi
+if [ "$CLIENT_TUN_IPV4" != "10.0.1.2/24" ]; then
+  fail "authenticated server assignment did not provision exact client TUN address: ${CLIENT_TUN_IPV4:-<missing>}"
+fi
 
 echo "=== TUN ifaces ==="
 echo "srv: $(ip netns exec ns-srv ip -br addr show qtun0 2>&1)"
