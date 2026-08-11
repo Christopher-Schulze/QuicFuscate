@@ -262,6 +262,22 @@ fn tls_cover_material_is_fresh_for_each_provider_connection() {
 }
 
 #[test]
+fn tls_cover_entropy_failure_is_typed_and_fail_closed() {
+    use super::TlsCoverProvider;
+
+    let previous = crate::rng::test_force_secure_entropy_failure(true);
+    let result = TlsCoverProvider::derive_tls_cover_material("chrome", false);
+    crate::rng::test_force_secure_entropy_failure(previous);
+
+    match result {
+        Err(crate::error::ConnectionError::CryptoError(message)) => {
+            assert_eq!(message, "TLS cover entropy source unavailable");
+        }
+        other => panic!("TLS cover entropy failure did not fail closed: {other:?}"),
+    }
+}
+
+#[test]
 fn tls_cover_client_hello_is_valid_tls_record() {
     use super::{tls_cover::TlsCover, BrowserProfile, OsProfile};
     for browser in [
