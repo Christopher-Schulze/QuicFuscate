@@ -1167,6 +1167,7 @@ dependencies = [
  "qf-telemetry",
  "serde",
  "sha2",
+ "subtle",
  "zeroize",
 ]
 

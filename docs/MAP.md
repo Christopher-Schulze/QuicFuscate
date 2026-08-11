@@ -1552,7 +1552,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Implementation Reconciliation (2026-08-04, reproducible dependency resolution)
 
-- **Ownership path:** `config/tool-versions.env` owns the exact CI/release versions; `rust-toolchain.toml` pins Rust `1.97.1`. Bun, Cargo, Tauri CLI, audit, fuzz, and benchmark inputs are now reviewed against that source-owned contract. The project policy is pinned-stable-only with no declared or tested MSRV; the nightly fuzz lane and its unresolved manifest path are separate TODO-758 evidence.
+- **Ownership path:** `config/tool-versions.env` owns the exact CI/release versions; `rust-toolchain.toml` pins Rust `1.97.1`. Bun, Cargo, Tauri CLI, audit, fuzz, and benchmark inputs are now reviewed against that source-owned contract. The project policy is pinned-stable-only with no declared or tested MSRV; the nightly fuzz lane and its isolated lockfile remain separate TODO-758 evidence.
 - **Workflow path:** `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.github/workflows/clippy-matrix.yml`, and `.github/workflows/windows-omega-e2e.yml` use frozen Bun installs, locked Cargo operations, exact Rust action toolchains, and exact locked installs for release tools. The release Tauri jobs run locked metadata/check/Clippy before forwarding `--locked` to packaging.
 - **Verification path:** `scripts/audits/verify-reproducible-dependencies.sh` performs static workflow checks plus two-run Cargo and Bun resolution probes. The local gate passes with the stable Bun lock hash `10111F769AB0DF7E-c8bf34ac712c2681-9B1E6056451B6CA1-bfc42866eebd8464`.
 - **Native boundary:** The Tauri host locked check, all-target strict Clippy, and 41-test host suite pass on ARM64 macOS. Linux/Windows packaging, updater signing, hosted CI, and remote release publication remain external evidence gates; no UI or remote state was changed.
@@ -2060,6 +2060,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - `.github/workflows/ci.yml` covers pull requests and main pushes with 60/120-second target budgets; `.github/workflows/fuzz-scheduled.yml` covers the extended Sunday lane with a 1,800-second budget. Both lanes require nightly, explicitly set AddressSanitizer, call `run-ci-fuzz.sh`, and upload crash artifacts on failure.
 - The tracked seed corpus is curated to eight files per target. Generated `corpus/` and `artifacts/` directories remain ignored and are populated only in the runtime lane.
 - The crypto target distinguishes all public configuration spellings from the internal AEGIS width backends and documents the intentional fallback path. Frontend files and surfaces are outside this backend-only task.
+- Reopened lock path: `qf-crypto/Cargo.toml` direct `subtle` edge -> isolated `scripts/tests/fuzz/Cargo.lock` local-package dependency list -> Nightly `--locked` metadata -> six-target contract audit -> hosted AddressSanitizer runner. The repair adds one existing-package edge with no version churn; local metadata resolves `308/308` packages/nodes and the curated-seed dry-run retains `48/48` files. Hosted sanitizer execution is still pending.
 
 ## Strict Panic and Invariant Contract (2026-08-08, TODO-757)
 
