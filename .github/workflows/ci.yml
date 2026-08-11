@@ -39,6 +39,11 @@ jobs:
           bun run check
           bun run test:unit
 
+      - name: Bounded frontend preview lifecycle tests
+        shell: bash
+        working-directory: apps/svelte-admin
+        run: bun run test:serve:codex
+
   frontend-dependency-security:
     runs-on: ubuntu-latest
     steps:

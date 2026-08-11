@@ -15,6 +15,7 @@
     "test:e2e": "cd ../svelte-desktop && bun run test:e2e",
     "test:e2e:ui": "cd ../svelte-desktop && bun run test:e2e:ui",
     "test:e2e:debug": "cd ../svelte-desktop && bun run test:e2e:debug",
-    "serve:codex": "cd ../svelte-desktop && bun run serve:codex"
+    "serve:codex": "cd ../svelte-desktop && bun run serve:codex",
+    "test:serve:codex": "cd ../svelte-desktop && bun run test:serve:codex"
   }
 }

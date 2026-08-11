@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Description: Test suite runner: desktop unit + web-admin unit + rust integration.
+# Description: Test suite runner: desktop/web-admin checks, preview lifecycle, and Rust integration.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +37,7 @@ echo "  - Desktop Check"
 echo "  - Desktop Unit"
 echo "  - Web-Admin Check"
 echo "  - Web-Admin Unit"
+echo "  - Frontend Preview Lifecycle"
 echo "  - Rust Integration (5 targeted targets)"
 echo "==============================================================="
 echo "Output: $OUTPUT_DIR"
@@ -55,6 +56,7 @@ run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-desktop\" && bun run check"
 run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-desktop\" && bun run test:unit"
 run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-admin\" && bun run check"
 run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-admin\" && bun run test:unit"
+run bash -lc "cd \"$PROJECT_ROOT/apps/svelte-admin\" && bun run test:serve:codex"
 run_verified_rust_target \
   it-engine-control-plane \
   test_control_plane_getters_and_runtime_setters \
