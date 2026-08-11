@@ -453,6 +453,8 @@ assignment remains the sole address/configuration source. Native privileged Linu
 proof and exact external authenticated client/server evidence remain the blocked gates under
 TODO-866 and TODO-867; the local assignment and carrier implementations are complete.
 
+TODO-866 hosted closure at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`: Main CI run `31455010980`, Linux traffic job `93666880449`, opens the client TUN with authenticated assignment `10.0.1.2/24` and `fd00::2/64`, records accepted MASQUE CONNECT-UDP Flow-ID `0`, and passes bidirectional client/server tunnel traffic. Windows job `93666880422` separately executes pre-open assignment projection and disabled-assignment rejection. Unavailable macOS/Windows privileged packet lanes remain explicit platform evidence boundaries, not blockers for the authenticated Linux contract.
+
 ### Cohesive Stealth Stack (Hard to Classify)
 The stealth design is one coherent browser-like H3/MASQUE flow, not a pile of unrelated
 stealth toggles. TODO-464 through TODO-471 are complete and define the production policy.
