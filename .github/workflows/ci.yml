@@ -281,6 +281,9 @@ jobs:
       - name: Test Windows Wintun core library
         run: cargo test --locked --lib --features tun-windows,rust-tests
 
+      - name: Test Windows zero-copy memory-pool contracts
+        run: cargo test --locked --package qf-memory-pool --features rust-tests
+
       - name: Test Windows WFP cleanup ownership fault contracts
         run: >-
           cargo test --locked --lib --features tun-windows,rust-tests
