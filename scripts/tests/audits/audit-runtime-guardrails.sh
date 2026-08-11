@@ -829,7 +829,7 @@ if rg -F -- 'write_interface_platform_negative_proof()' \
     .github/workflows/ci.yml >/dev/null \
   && rg -F -- 'interface_platform_negative_proof.v1' docs/DOCUMENTATION.md docs/MAP.md \
     >/dev/null \
-  && rg -F -- 'status: BLOCKED' docs/todo/todo-848-interface-platform-negative-proof.md \
+  && rg -F -- 'status: DONE' docs/todo/done/todo-848-interface-platform-negative-proof.md \
     >/dev/null; then
   pass "Interface and platform negative-proof matrix declares local, conditional, and unavailable evidence"
   append_item "interface_platform_negative_proof_matrix" "ok" "exact local fault targets, host skips, Windows boundary statuses, evidence schema, and documentation are wired"
