@@ -1843,6 +1843,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - `transport::frames::batch_encode_frames()` retains its compatibility `Arc<MemoryPool>` parameter but no longer allocates an unused intermediate block. The optimization benchmark returns its raw block through `OptimizationManager::free_block()`.
 - Exact counter-recovery tests cover guard drop/transfer, basic and dictionary compression/decompression failures, TUN read failures, and zero-copy DATAGRAM queue lifecycle boundaries. FEC buffer ownership is closed by TODO-832; zero-copy DATAGRAM buffer ownership is closed by TODO-833.
 - Verification on the current ARM64 macOS revision: default library `2431/2431` in both debug and release profiles, focused compression `27/27`, all-target checking, strict `unsafe_rust` library/all-target Clippy, formatting, diff hygiene, and locked metadata pass. Default strict library Clippy retains four unrelated baseline diagnostics; Linux target checking is blocked by the missing `x86_64-linux-gnu-gcc`, and no Windows target is installed.
+- Hosted closure: Main CI run `31455010980`, macOS job `93666880395`, executes exact compression/decompression error returns, guard drop/transfer accounting, and TUN read-failure recycling at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`. The complete workspace matrix passes, closing the generic owner independent of the separately scoped FEC and DATAGRAM paths.
 
 ## FEC Pooled-Buffer Failure Cleanup Wiring (2026-08-06, TODO-832)
 
