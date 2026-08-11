@@ -3222,3 +3222,11 @@ The audit remains open. These reconciliations document current evidence and owne
 - GHASH parity flow: root `rust-tests` -> qf-crypto `rust-tests` -> x86 test override mutex and setter -> shared GHASH selector -> SSE or scalar backend -> telemetry and output parity. Normal product builds compile only the release environment override.
 - ChaCha20 x16 parity flow: registered x86 integration target -> `optimize::simd::crypto::chacha20_blocks_x16` -> AVX-512 runtime gate -> vector kernel or wrapping scalar fallback. `optimize::crypto` retains only its established x4 compatibility export.
 - Verification: exact workspace `tun-tests,rust-tests` all-target Clippy; Linux-x86 qf-crypto all-target Clippy; qf-crypto `140/140`; strict workspace all-feature library/binary/example Clippy; formatting and diff hygiene. Hosted Linux retains authoritative root integration-target compilation because the local cross-build lacks a Linux C sysroot.
+
+## Bounded Frontend Unit-Test Wiring (2026-08-11, TODO-753)
+
+- Developer and CI flow: `apps/svelte-{admin,desktop}/package.json` `test:unit` -> `scripts/tests/frontend/run-bounded-unit-tests.ts` -> app-local Vitest 4.1.10 -> explicit `threads` pool -> one worker with sequential file admission -> app test inventory.
+- Process ownership: Bun wrapper -> inherited stdin plus streamed stdout/stderr -> 60-second heartbeat -> validated 600-second default deadline -> `SIGKILL` and exit `124` on timeout. `QF_FRONTEND_UNIT_TIMEOUT_MS` is accepted only from 1 through 3,600,000 milliseconds.
+- Inventory ownership: an unfiltered successful process must expose a parseable Vitest summary and retain at least Web Admin 26 files/307 tests or Desktop 36 files/441 tests. Filtered diagnostic runs remain bounded but explicitly skip the full-inventory assertion.
+- Consumers: `.github/workflows/ci.yml` `frontend-checks`, `scripts/tests/suites/test-desktop-webadmin-rust-integration.sh`, and contributor commands all call the same package contract. No frontend test include or exclude path changed.
+- Verification: real timeout failure exits `124` without a residual Vitest process; post-review Web Admin passes 26/307 in 120.45 seconds; Desktop passes 36/441 in 321.29 seconds; both Svelte checks report zero errors and zero warnings.

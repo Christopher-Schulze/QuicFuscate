@@ -138,7 +138,7 @@ The Svelte 5 frontends and shared packages use Bun as package manager and runtim
 
 Quality gates (run before PRs):
 - `bun run check` - Svelte/TS type checking per app
-- `bun run test:unit` - Vitest unit tests per app (test files live under `scripts/tests/frontend/`)
+- `bun run test:unit` - the canonical single-worker Vitest gate per app. It streams live output, reports a heartbeat every 60 seconds, enforces a 600-second process deadline, and verifies the full test inventory. `QF_FRONTEND_UNIT_TIMEOUT_MS` may lower the deadline for diagnostics or raise it to at most 3,600,000 ms.
 - E2E: `bunx playwright test` via configs in `apps/svelte-admin/playwright.config.ts` and `apps/svelte-desktop/playwright.config.ts`
 
 Component conventions:
