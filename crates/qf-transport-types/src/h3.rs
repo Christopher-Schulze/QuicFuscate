@@ -111,6 +111,7 @@ pub struct Config {
     qpack_max_table_capacity: u64,
     qpack_blocked_streams: u64,
     max_field_section_size: u64,
+    webtransport_enabled: bool,
 }
 
 impl Config {
@@ -122,6 +123,7 @@ impl Config {
             // 1MiB is a common safe default for max header section size.
             // The connection owner applies the protocol safety ceiling.
             max_field_section_size: 1024 * 1024,
+            webtransport_enabled: false,
         })
     }
 
@@ -143,6 +145,12 @@ impl Config {
         self.max_field_section_size = value;
     }
 
+    /// Enable the bounded WebTransport cover profile on this H3 connection.
+    #[doc(hidden)]
+    pub fn set_webtransport_enabled(&mut self, enabled: bool) {
+        self.webtransport_enabled = enabled;
+    }
+
     /// Return the configured QPACK dynamic table capacity.
     #[inline]
     #[doc(hidden)]
@@ -162,6 +170,13 @@ impl Config {
     #[doc(hidden)]
     pub fn max_field_section_size(&self) -> u64 {
         self.max_field_section_size
+    }
+
+    /// Return whether the bounded WebTransport cover profile is enabled.
+    #[inline]
+    #[doc(hidden)]
+    pub fn webtransport_enabled(&self) -> bool {
+        self.webtransport_enabled
     }
 }
 
@@ -220,13 +235,16 @@ mod tests {
         assert_eq!(config.qpack_max_table_capacity(), 0);
         assert_eq!(config.qpack_blocked_streams(), 0);
         assert_eq!(config.max_field_section_size(), 1024 * 1024);
+        assert!(!config.webtransport_enabled());
 
         config.set_qpack_max_table_capacity(4096);
         config.set_qpack_blocked_streams(32);
         config.set_max_field_section_size(2 * 1024 * 1024);
+        config.set_webtransport_enabled(true);
         assert_eq!(config.qpack_max_table_capacity(), 4096);
         assert_eq!(config.qpack_blocked_streams(), 32);
         assert_eq!(config.max_field_section_size(), 2 * 1024 * 1024);
+        assert!(config.webtransport_enabled());
     }
 
     #[test]

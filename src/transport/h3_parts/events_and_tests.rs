@@ -181,6 +181,94 @@ mod tests {
         (client, server, recv_info, client_h3, server_h3)
     }
 
+    fn make_established_webtransport_connections() -> (
+        super::super::Connection,
+        super::super::Connection,
+        crate::transport::RecvInfo,
+        Connection,
+        Connection,
+        u64,
+    ) {
+        let mut client_config = must_succeed(Config::new());
+        client_config.set_webtransport_enabled(true);
+        let mut server_config = must_succeed(Config::new());
+        server_config.set_webtransport_enabled(true);
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
+            make_paired_h3_connections_with_configs(&client_config, &server_config);
+        assert!(client_h3.peer_supports_webtransport());
+        assert!(server_h3.peer_supports_webtransport());
+
+        let session_id = must_succeed(client_h3.open_webtransport_cover_session(
+            &mut client,
+            "cdn.example.com",
+            "/assets/wt/session",
+        ));
+        let mut packet = [0u8; 2048];
+        let mut request_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet,
+            );
+            loop {
+                match server_h3.poll(&mut server) {
+                    Ok(Some((stream_id, Event::Headers { list, .. })))
+                        if stream_id == session_id =>
+                    {
+                        assert!(list.iter().any(|header| {
+                            header.name() == b":protocol"
+                                && header.value() == b"webtransport-h3"
+                        }));
+                        request_seen = true;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("server WebTransport setup failed: {error:?}"),
+                }
+            }
+            if request_seen {
+                break;
+            }
+        }
+        assert!(request_seen, "WebTransport CONNECT request must reach the server");
+        assert!(server_h3.webtransport_session_pending(session_id));
+        must_succeed(server_h3.accept_webtransport_cover_session(&mut server, session_id));
+
+        let mut response_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet,
+            );
+            loop {
+                match client_h3.poll(&mut client) {
+                    Ok(Some((stream_id, Event::Headers { list, .. })))
+                        if stream_id == session_id =>
+                    {
+                        assert!(list.iter().any(|header| {
+                            header.name() == b":status" && header.value() == b"200"
+                        }));
+                        response_seen = true;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("client WebTransport setup failed: {error:?}"),
+                }
+            }
+            if response_seen {
+                break;
+            }
+        }
+        assert!(response_seen, "WebTransport response must reach the client");
+        assert!(client_h3.webtransport_session_established(session_id));
+        assert!(server_h3.webtransport_session_established(session_id));
+        (client, server, recv_info, client_h3, server_h3, session_id)
+    }
+
     fn current_rss_bytes() -> Option<u64> {
         #[cfg(unix)]
         {
@@ -397,17 +485,22 @@ mod tests {
     }
 
     #[test]
-    fn webtransport_cover_session_marks_cover_stream_type() {
+    fn webtransport_cover_session_requires_negotiated_peer_settings() {
         let mut conn = make_conn();
-        let mut cfg = super::Config::new().expect("cfg");
+        let mut cfg = must_succeed(super::Config::new());
         cfg.set_max_field_section_size(1024 * 1024);
-        let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+        cfg.set_webtransport_enabled(true);
+        let mut h3 = must_succeed(super::h3::Connection::with_transport(&mut conn, &cfg));
 
-        let sid = h3
-            .open_webtransport_cover_session(&mut conn, "cdn.example.com", "/assets/wt/session")
-            .expect("webtransport cover");
-        let st = h3.streams.get(&sid).expect("cover stream state");
-        assert!(matches!(st._stream_type, StreamType::WebTransportCover));
+        assert!(matches!(
+            h3.open_webtransport_cover_session(
+                &mut conn,
+                "cdn.example.com",
+                "/assets/wt/session"
+            ),
+            Err(Error::SettingsError)
+        ));
+        assert!(h3.webtransport_sessions.is_empty());
     }
 
     #[test]
@@ -1267,6 +1360,49 @@ mod tests {
     }
 
     #[test]
+    fn settings_parse_current_webtransport_draft_contract() {
+        let mut payload = Vec::new();
+        for (setting, value) in [
+            (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1),
+            (SETTINGS_H3_DATAGRAM, 1),
+            (SETTINGS_WT_ENABLED, 1),
+            (
+                SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
+                WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI,
+            ),
+            (
+                SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI,
+                WEBTRANSPORT_INITIAL_MAX_STREAMS_BIDI,
+            ),
+            (SETTINGS_WT_INITIAL_MAX_DATA, WEBTRANSPORT_INITIAL_MAX_DATA),
+        ] {
+            Connection::encode_varint(setting, &mut payload);
+            Connection::encode_varint(value, &mut payload);
+        }
+        let settings = must_succeed(Connection::parse_settings_payload(&payload));
+        assert!(settings.enable_connect_protocol);
+        assert!(settings.h3_datagram);
+        assert!(settings.webtransport_enabled);
+        assert_eq!(
+            settings.webtransport_initial_max_streams_uni,
+            WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI
+        );
+        assert_eq!(
+            settings.webtransport_initial_max_streams_bidi,
+            WEBTRANSPORT_INITIAL_MAX_STREAMS_BIDI
+        );
+        assert_eq!(settings.webtransport_initial_max_data, WEBTRANSPORT_INITIAL_MAX_DATA);
+
+        let mut invalid = Vec::new();
+        Connection::encode_varint(SETTINGS_WT_ENABLED, &mut invalid);
+        Connection::encode_varint(2, &mut invalid);
+        assert!(matches!(
+            Connection::parse_settings_payload(&invalid),
+            Err(Error::SettingsError)
+        ));
+    }
+
+    #[test]
     fn fixed_control_frame_payload_requires_exactly_one_varint() {
         assert!(matches!(
             Connection::decode_single_varint_payload(&[]),
@@ -1811,52 +1947,262 @@ mod tests {
 
     #[test]
     fn webtransport_unidirectional_payload_is_not_parsed_as_h3_frames() {
-        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
-            make_paired_h3_connections();
-        server_h3.established_webtransport_sessions.insert(0);
-        let mut payload = Vec::new();
-        Connection::encode_varint(0x54, &mut payload);
-        Connection::encode_varint(0, &mut payload);
-        payload.extend_from_slice(b"raw-webtransport");
-        client.stream_send(6, &payload, false).expect("WebTransport data stream");
-        let mut packet = [0u8; 2048];
-        assert!(pump_paired_1rtt_once(
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3, session_id) =
+            make_established_webtransport_connections();
+        let stream_id = must_succeed(client_h3.send_webtransport_unidirectional_stream(
             &mut client,
-            &mut server,
-            &recv_info,
-            &mut packet
+            session_id,
+            b"raw-webtransport",
+            true,
         ));
-        assert!(matches!(server_h3.poll(&mut server), Ok(Some((6, Event::Data)))));
+        let mut packet = [0u8; 2048];
+        let mut data_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet,
+            );
+            if matches!(
+                server_h3.poll(&mut server),
+                Ok(Some((event_stream_id, Event::Data))) if event_stream_id == stream_id
+            ) {
+                data_seen = true;
+                break;
+            }
+        }
+        assert!(data_seen, "raw WebTransport data must publish a Data event");
         let mut body = [0u8; 32];
-        let read = server_h3.recv_body(&mut server, 6, &mut body).expect("raw body");
+        let read = must_succeed(server_h3.recv_body(&mut server, stream_id, &mut body));
         assert_eq!(&body[..read], b"raw-webtransport");
-        assert_eq!(server_h3.webtransport_session_ids.get(&6), Some(&0));
+        assert_eq!(server_h3.webtransport_session_ids.get(&stream_id), Some(&session_id));
     }
 
     #[test]
     fn webtransport_payload_waits_for_its_established_session() {
-        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
-            make_paired_h3_connections();
-        let mut payload = Vec::new();
-        Connection::encode_varint(0x54, &mut payload);
-        Connection::encode_varint(0, &mut payload);
-        payload.extend_from_slice(b"buffered");
-        client.stream_send(6, &payload, false).expect("early WebTransport data");
+        let mut client_config = must_succeed(Config::new());
+        client_config.set_webtransport_enabled(true);
+        let mut server_config = must_succeed(Config::new());
+        server_config.set_webtransport_enabled(true);
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
+            make_paired_h3_connections_with_configs(&client_config, &server_config);
+        let session_id = must_succeed(client_h3.open_webtransport_cover_session(
+            &mut client,
+            "cdn.example.com",
+            "/assets/wt/session",
+        ));
         let mut packet = [0u8; 2048];
-        assert!(pump_paired_1rtt_once(
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet,
+            );
+            if matches!(
+                server_h3.poll(&mut server),
+                Ok(Some((stream_id, Event::Headers { .. }))) if stream_id == session_id
+            ) {
+                break;
+            }
+        }
+        assert!(server_h3.webtransport_session_pending(session_id));
+
+        let stream_id = client_h3.next_uni_stream_id;
+        let mut payload = Vec::new();
+        Connection::encode_varint(WEBTRANSPORT_UNI_STREAM_TYPE, &mut payload);
+        Connection::encode_varint(session_id, &mut payload);
+        payload.extend_from_slice(b"buffered");
+        must_succeed(client.stream_send(stream_id, &payload, false));
+        let _ = pump_paired_1rtt_once(
             &mut client,
             &mut server,
             &recv_info,
-            &mut packet
-        ));
+            &mut packet,
+        );
         assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
-        assert!(server_h3.pending_webtransport_streams.contains(&6));
+        assert!(server_h3.pending_webtransport_streams.contains(&stream_id));
         assert!(server_h3.pending_events.is_empty());
 
-        server_h3.established_webtransport_sessions.insert(0);
-        server_h3.publish_ready_webtransport_streams();
-        assert!(matches!(server_h3.pending_events.pop_front(), Some((6, Event::Data))));
-        assert!(!server_h3.pending_webtransport_streams.contains(&6));
+        must_succeed(server_h3.accept_webtransport_cover_session(&mut server, session_id));
+        assert!(matches!(
+            server_h3.pending_events.pop_front(),
+            Some((event_stream_id, Event::Data)) if event_stream_id == stream_id
+        ));
+        assert!(!server_h3.pending_webtransport_streams.contains(&stream_id));
+    }
+
+    #[test]
+    fn webtransport_bidirectional_streams_roundtrip_from_both_endpoints() {
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3, session_id) =
+            make_established_webtransport_connections();
+        let client_stream_id = must_succeed(client_h3.send_webtransport_bidirectional_stream(
+            &mut client,
+            session_id,
+            b"client-bidi",
+            true,
+        ));
+        let server_stream_id = must_succeed(server_h3.send_webtransport_bidirectional_stream(
+            &mut server,
+            session_id,
+            b"server-bidi",
+            true,
+        ));
+        let mut packet = [0u8; 2048];
+        let mut server_data_seen = false;
+        let mut client_data_seen = false;
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet,
+            );
+            loop {
+                match server_h3.poll(&mut server) {
+                    Ok(Some((stream_id, Event::Data))) if stream_id == client_stream_id => {
+                        server_data_seen = true;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("server bidirectional stream failed: {error:?}"),
+                }
+            }
+            loop {
+                match client_h3.poll(&mut client) {
+                    Ok(Some((stream_id, Event::Data))) if stream_id == server_stream_id => {
+                        client_data_seen = true;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("client bidirectional stream failed: {error:?}"),
+                }
+            }
+            if server_data_seen && client_data_seen {
+                break;
+            }
+        }
+        assert!(server_data_seen);
+        assert!(client_data_seen);
+
+        let mut client_body = [0u8; 16];
+        let client_body_len = must_succeed(server_h3.recv_body(
+            &mut server,
+            client_stream_id,
+            &mut client_body,
+        ));
+        assert_eq!(&client_body[..client_body_len], b"client-bidi");
+        let mut server_body = [0u8; 16];
+        let server_body_len = must_succeed(client_h3.recv_body(
+            &mut client,
+            server_stream_id,
+            &mut server_body,
+        ));
+        assert_eq!(&server_body[..server_body_len], b"server-bidi");
+    }
+
+    #[test]
+    fn webtransport_bidirectional_prefix_retains_fragment_boundaries() {
+        let (mut client, mut server, recv_info, client_h3, mut server_h3, session_id) =
+            make_established_webtransport_connections();
+        let stream_id = client_h3.next_stream_id;
+        let mut signal = Vec::new();
+        Connection::encode_varint(WEBTRANSPORT_STREAM_SIGNAL, &mut signal);
+        must_succeed(client.stream_send(stream_id, &signal, false));
+        let mut packet = [0u8; 2048];
+        let _ = pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet,
+        );
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+        assert_eq!(
+            server_h3
+                .streams
+                .get(&stream_id)
+                .map(|stream| stream.frame_buffer.as_slice()),
+            Some(signal.as_slice())
+        );
+
+        let mut remainder = Vec::new();
+        Connection::encode_varint(session_id, &mut remainder);
+        remainder.extend_from_slice(b"fragmented-bidi");
+        must_succeed(client.stream_send(stream_id, &remainder, true));
+        let _ = pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet,
+        );
+        assert!(matches!(
+            server_h3.poll(&mut server),
+            Ok(Some((event_stream_id, Event::Data))) if event_stream_id == stream_id
+        ));
+        let mut body = [0u8; 32];
+        let body_len = must_succeed(server_h3.recv_body(&mut server, stream_id, &mut body));
+        assert_eq!(&body[..body_len], b"fragmented-bidi");
+    }
+
+    #[test]
+    fn webtransport_streams_reject_unnegotiated_and_unknown_sessions() {
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let mut payload = Vec::new();
+        Connection::encode_varint(WEBTRANSPORT_STREAM_SIGNAL, &mut payload);
+        Connection::encode_varint(0, &mut payload);
+        must_succeed(client.stream_send(0, &payload, false));
+        let mut packet = [0u8; 2048];
+        let _ = pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet,
+        );
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::SettingsError)));
+
+        let mut client_config = must_succeed(Config::new());
+        client_config.set_webtransport_enabled(true);
+        let mut server_config = must_succeed(Config::new());
+        server_config.set_webtransport_enabled(true);
+        let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+            make_paired_h3_connections_with_configs(&client_config, &server_config);
+        must_succeed(client.stream_send(0, &payload, false));
+        let _ = pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet,
+        );
+        assert!(matches!(server_h3.poll(&mut server), Err(Error::IdError)));
+    }
+
+    #[test]
+    fn webtransport_stream_limits_and_duplicate_acceptance_fail_closed() {
+        let (mut client, mut server, _recv_info, mut client_h3, mut server_h3, session_id) =
+            make_established_webtransport_connections();
+        assert!(matches!(
+            server_h3.accept_webtransport_cover_session(&mut server, session_id),
+            Err(Error::FrameUnexpected)
+        ));
+        for _ in 0..WEBTRANSPORT_INITIAL_MAX_STREAMS_BIDI {
+            must_succeed(client_h3.send_webtransport_bidirectional_stream(
+                &mut client,
+                session_id,
+                &[],
+                true,
+            ));
+        }
+        assert!(matches!(
+            client_h3.send_webtransport_bidirectional_stream(
+                &mut client,
+                session_id,
+                &[],
+                true,
+            ),
+            Err(Error::ExcessiveLoad)
+        ));
     }
 
     #[test]

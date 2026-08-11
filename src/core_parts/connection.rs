@@ -948,7 +948,9 @@ impl QuicFuscateConnection {
                     loss_rate_permille,
                     intelligent_level,
                 );
-                if let Some((authority, path)) = stealth_manager.webtransport_cover_plan() {
+                if !conn.is_server()
+                    && let Some((authority, path)) = stealth_manager.webtransport_cover_plan()
+                {
                     match h3.open_webtransport_cover_session(conn, &authority, &path) {
                         Ok(sid) => {
                             debug!("WebTransport cover session opened: sid={sid}");
@@ -1059,6 +1061,46 @@ impl QuicFuscateConnection {
                 );
                 match h3.poll(&mut self.conn) {
                     Ok(Some((sid, crate::transport::h3::Event::Headers { list, .. }))) => {
+                        let webtransport_ready = if h3.webtransport_session_pending(sid)
+                            && self.conn.is_server()
+                        {
+                            match h3.accept_webtransport_cover_session(&mut self.conn, sid) {
+                                Ok(()) => true,
+                                Err(error) => {
+                                    warn!(
+                                        "WebTransport cover session acceptance failed: sid={} error={:?}",
+                                        sid, error
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            h3.webtransport_session_established(sid)
+                        };
+                        if webtransport_ready {
+                            if let Err(error) = h3.send_webtransport_unidirectional_stream(
+                                &mut self.conn,
+                                sid,
+                                b"event: ready\ndata: {}\n\n",
+                                true,
+                            ) {
+                                warn!(
+                                    "WebTransport unidirectional cover stream failed: sid={} error={:?}",
+                                    sid, error
+                                );
+                            }
+                            if let Err(error) = h3.send_webtransport_bidirectional_stream(
+                                &mut self.conn,
+                                sid,
+                                b"{\"type\":\"ping\"}",
+                                true,
+                            ) {
+                                warn!(
+                                    "WebTransport bidirectional cover stream failed: sid={} error={:?}",
+                                    sid, error
+                                );
+                            }
+                        }
                         // Detect peer-initiated MASQUE CONNECT-UDP requests (server side:
                         // the client opens the flow). Record the stream id and provision
                         // QUIC DATAGRAM queues so downlink sends work. Inlined here
@@ -2192,6 +2234,9 @@ impl QuicFuscateConnection {
                 self.stealth_manager.qpack_runtime_profile();
             h3_cfg.set_qpack_max_table_capacity(qpack_capacity);
             h3_cfg.set_qpack_blocked_streams(qpack_blocked_streams);
+            h3_cfg.set_webtransport_enabled(
+                self.stealth_manager.webtransport_cover_enabled(),
+            );
 
             let h3 = crate::transport::h3::Connection::with_transport(&mut self.conn, &h3_cfg)?;
             let mut h3 = h3;

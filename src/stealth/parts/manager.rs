@@ -1116,19 +1116,23 @@ impl StealthManager {
     /// replaces the production Core/H3/MASQUE VPN carrier and is kept out of
     /// the clean Performance/Intelligent level-0 path.
     pub(crate) fn webtransport_cover_plan(&self) -> Option<(String, String)> {
-        let active = matches!(self.config.mode, StealthMode::AntiDpi)
-            || (self.is_intelligent_runtime() && self.intelligent_runtime_level() >= 2);
-        if !active || !self.config.enable_http3_masquerading {
+        if !self.webtransport_cover_enabled() {
             return None;
         }
 
-        let authority = self
-            .domain_fronting
-            .as_ref()
-            .map(DomainFrontingManager::get_fronted_domain)
-            .unwrap_or_else(|| "cdn.cloudflare.com".to_string());
+        let authority = match self.domain_fronting.as_ref() {
+            Some(manager) => manager.get_fronted_domain(),
+            None => "cdn.cloudflare.com".to_string(),
+        };
         let base = self.config.server_push_base_path.trim_end_matches('/');
         Some((authority, format!("{base}/wt/session")))
+    }
+
+    /// Returns whether this connection persona may negotiate WebTransport cover.
+    pub(crate) fn webtransport_cover_enabled(&self) -> bool {
+        let active = matches!(self.config.mode, StealthMode::AntiDpi)
+            || (self.is_intelligent_runtime() && self.intelligent_runtime_level() >= 2);
+        active && self.config.enable_http3_masquerading
     }
 
     /// Exposes server-push cover plan for test assertions.

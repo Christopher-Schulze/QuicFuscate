@@ -35,6 +35,19 @@ const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
 const MAX_H3_SETTING_VALUE: u64 = 16 * 1024 * 1024;
 const MAX_LOCAL_QPACK_BLOCKED_STREAMS: u64 = 64;
 const MAX_STEALTH_PUSH_ID: u64 = 63;
+const SETTINGS_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
+const SETTINGS_H3_DATAGRAM: u64 = 0x33;
+const SETTINGS_WT_ENABLED: u64 = 0x2c7c_f000;
+const SETTINGS_WT_INITIAL_MAX_DATA: u64 = 0x2b61;
+const SETTINGS_WT_INITIAL_MAX_STREAMS_UNI: u64 = 0x2b64;
+const SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI: u64 = 0x2b65;
+const WEBTRANSPORT_STREAM_SIGNAL: u64 = 0x41;
+const WEBTRANSPORT_UNI_STREAM_TYPE: u64 = 0x54;
+const MAX_WEBTRANSPORT_SESSIONS: usize = 4;
+const MAX_PENDING_WEBTRANSPORT_STREAMS: usize = 16;
+const WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI: u64 = 4;
+const WEBTRANSPORT_INITIAL_MAX_STREAMS_BIDI: u64 = 4;
+const WEBTRANSPORT_INITIAL_MAX_DATA: u64 = 1024 * 1024;
 
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
@@ -59,8 +72,9 @@ pub struct Connection {
     peer_max_push_id: Option<u64>,
     local_max_push_id: Option<u64>,
     received_push_ids: HashSet<u64>,
+    peer_settings: Option<PeerSettings>,
     webtransport_session_ids: HashMap<u64, u64>,
-    established_webtransport_sessions: HashSet<u64>,
+    webtransport_sessions: HashMap<u64, WebTransportSession>,
     pending_webtransport_streams: HashSet<u64>,
     goaway_sent: bool,
     goaway_received: bool,
@@ -113,6 +127,8 @@ enum StreamType {
     QpackDecoder,
     /// A WebTransport unidirectional data stream after its session prefix.
     WebTransportData,
+    /// A peer-initiated bidirectional stream whose first varint is incomplete.
+    Bidirectional,
     Request,
     Response,
     Control,
@@ -122,9 +138,52 @@ enum StreamType {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct PeerQpackSettings {
+struct PeerSettings {
     maximum_table_capacity: u64,
     blocked_streams: u64,
+    enable_connect_protocol: bool,
+    h3_datagram: bool,
+    webtransport_enabled: bool,
+    webtransport_initial_max_data: u64,
+    webtransport_initial_max_streams_uni: u64,
+    webtransport_initial_max_streams_bidi: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebTransportSessionState {
+    Pending,
+    Established,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WebTransportStreamKind {
+    Unidirectional,
+    Bidirectional,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WebTransportSession {
+    state: WebTransportSessionState,
+    local_unidirectional_streams: u64,
+    local_bidirectional_streams: u64,
+    peer_unidirectional_streams: u64,
+    peer_bidirectional_streams: u64,
+    local_data_bytes: u64,
+    peer_data_bytes: u64,
+}
+
+impl WebTransportSession {
+    fn pending() -> Self {
+        Self {
+            state: WebTransportSessionState::Pending,
+            local_unidirectional_streams: 0,
+            local_bidirectional_streams: 0,
+            peer_unidirectional_streams: 0,
+            peer_bidirectional_streams: 0,
+            local_data_bytes: 0,
+            peer_data_bytes: 0,
+        }
+    }
 }
 
 impl Connection {
@@ -217,8 +276,9 @@ impl Connection {
             peer_max_push_id: None,
             local_max_push_id: if conn.is_server() { None } else { Some(MAX_STEALTH_PUSH_ID) },
             received_push_ids: HashSet::new(),
+            peer_settings: None,
             webtransport_session_ids: HashMap::new(),
-            established_webtransport_sessions: HashSet::new(),
+            webtransport_sessions: HashMap::new(),
             pending_webtransport_streams: HashSet::new(),
             goaway_sent: false,
             goaway_received: false,
@@ -235,6 +295,12 @@ impl Connection {
         // Try to emit the mandatory control-stream prologue immediately. A connection can be
         // constructed before peer flow-control limits are available, so a flow-control refusal
         // is deferred to the first operation that can make progress rather than failing setup.
+        if config.webtransport_enabled() {
+            conn.enable_datagrams(
+                WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI as usize,
+                WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI as usize,
+            );
+        }
         h3_conn.init_control_stream(conn)?;
         Ok(h3_conn)
     }
@@ -264,6 +330,28 @@ impl Connection {
         ] {
             Self::encode_varint(setting, &mut settings_payload);
             Self::encode_varint(value, &mut settings_payload);
+        }
+        if self.config.webtransport_enabled() {
+            if self.is_server {
+                Self::encode_varint(SETTINGS_ENABLE_CONNECT_PROTOCOL, &mut settings_payload);
+                Self::encode_varint(1, &mut settings_payload);
+            }
+            for (setting, value) in [
+                (SETTINGS_H3_DATAGRAM, 1),
+                (SETTINGS_WT_ENABLED, 1),
+                (
+                    SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
+                    WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI,
+                ),
+                (
+                    SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI,
+                    WEBTRANSPORT_INITIAL_MAX_STREAMS_BIDI,
+                ),
+                (SETTINGS_WT_INITIAL_MAX_DATA, WEBTRANSPORT_INITIAL_MAX_DATA),
+            ] {
+                Self::encode_varint(setting, &mut settings_payload);
+                Self::encode_varint(value, &mut settings_payload);
+            }
         }
 
         let mut prologue = Vec::with_capacity(settings_payload.len() + 4);
@@ -437,6 +525,134 @@ impl Connection {
         Ok(plan.commit(&mut self.encoder))
     }
 
+    fn register_webtransport_session(&mut self, session_id: u64) -> Result<(), Error> {
+        if session_id & 0x03 != 0 || self.webtransport_sessions.contains_key(&session_id) {
+            return Err(Error::IdError);
+        }
+        if self.webtransport_sessions.len() >= MAX_WEBTRANSPORT_SESSIONS {
+            return Err(Error::ExcessiveLoad);
+        }
+        self.webtransport_sessions
+            .insert(session_id, WebTransportSession::pending());
+        Ok(())
+    }
+
+    fn establish_webtransport_session(&mut self, session_id: u64) -> Result<(), Error> {
+        let session = self
+            .webtransport_sessions
+            .get_mut(&session_id)
+            .ok_or(Error::IdError)?;
+        if session.state != WebTransportSessionState::Pending {
+            return Err(Error::FrameUnexpected);
+        }
+        session.state = WebTransportSessionState::Established;
+        self.publish_ready_webtransport_streams();
+        Ok(())
+    }
+
+    fn remove_webtransport_session(&mut self, session_id: u64) {
+        self.webtransport_sessions.remove(&session_id);
+        let associated: Vec<u64> = self
+            .webtransport_session_ids
+            .iter()
+            .filter_map(|(stream_id, associated_session)| {
+                (*associated_session == session_id).then_some(*stream_id)
+            })
+            .collect();
+        for stream_id in associated {
+            self.webtransport_session_ids.remove(&stream_id);
+            self.pending_webtransport_streams.remove(&stream_id);
+            self.streams.remove(&stream_id);
+            self.finished_streams.remove(&stream_id);
+            self.pending_events.retain(|(event_stream_id, _)| *event_stream_id != stream_id);
+        }
+    }
+
+    fn webtransport_session_is_established(&self, session_id: u64) -> bool {
+        self.webtransport_sessions.get(&session_id).is_some_and(|session| {
+            session.state == WebTransportSessionState::Established
+        })
+    }
+
+    fn bind_peer_webtransport_stream(
+        &mut self,
+        stream_id: u64,
+        session_id: u64,
+        unidirectional: bool,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<(), Error> {
+        if !self.peer_supports_webtransport() {
+            return Err(Error::SettingsError);
+        }
+        if session_id & 0x03 != 0 || self.webtransport_session_ids.contains_key(&stream_id) {
+            return Err(Error::IdError);
+        }
+        let session = self.webtransport_sessions.get(&session_id).ok_or(Error::IdError)?;
+        let current_streams = if unidirectional {
+            session.peer_unidirectional_streams
+        } else {
+            session.peer_bidirectional_streams
+        };
+        let stream_limit = if unidirectional {
+            WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI
+        } else {
+            WEBTRANSPORT_INITIAL_MAX_STREAMS_BIDI
+        };
+        let next_streams = current_streams.checked_add(1).ok_or(Error::ExcessiveLoad)?;
+        if next_streams > stream_limit {
+            return Err(Error::ExcessiveLoad);
+        }
+        let data_len = u64::try_from(data.len()).map_err(|_| Error::ExcessiveLoad)?;
+        let next_data_bytes = session
+            .peer_data_bytes
+            .checked_add(data_len)
+            .ok_or(Error::ExcessiveLoad)?;
+        if next_data_bytes > WEBTRANSPORT_INITIAL_MAX_DATA {
+            return Err(Error::ExcessiveLoad);
+        }
+        let pending = session.state == WebTransportSessionState::Pending;
+        let needs_pending_slot = pending && (!data.is_empty() || fin);
+        if needs_pending_slot
+            && self.pending_webtransport_streams.len() >= MAX_PENDING_WEBTRANSPORT_STREAMS
+        {
+            return Err(Error::ExcessiveLoad);
+        }
+        let stream = self.streams.get(&stream_id).ok_or(Error::IdError)?;
+        if !stream.body_buffer.is_empty() || data.len() > MAX_BUFFERED_H3_FRAME {
+            return Err(Error::ExcessiveLoad);
+        }
+
+        let session = self
+            .webtransport_sessions
+            .get_mut(&session_id)
+            .ok_or(Error::IdError)?;
+        if unidirectional {
+            session.peer_unidirectional_streams = next_streams;
+        } else {
+            session.peer_bidirectional_streams = next_streams;
+        }
+        session.peer_data_bytes = next_data_bytes;
+        self.webtransport_session_ids.insert(stream_id, session_id);
+        let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+        stream._stream_type = StreamType::WebTransportData;
+        stream.body_buffer.extend_from_slice(data);
+        stream.fin_received = fin;
+        if pending {
+            if needs_pending_slot {
+                self.pending_webtransport_streams.insert(stream_id);
+            }
+        } else {
+            if !data.is_empty() {
+                self.pending_events.push_back((stream_id, Event::Data));
+            }
+            if fin {
+                self.pending_events.push_back((stream_id, Event::Finished));
+            }
+        }
+        Ok(())
+    }
+
     fn process_peer_stream_resets(
         &mut self,
         conn: &mut super::Connection,
@@ -452,9 +668,12 @@ impl Connection {
             self.streams.remove(&stream_id);
             self.finished_streams.remove(&stream_id);
             self.masque_flow.remove(&stream_id);
-            self.webtransport_session_ids.remove(&stream_id);
-            self.pending_webtransport_streams.remove(&stream_id);
-            self.established_webtransport_sessions.remove(&stream_id);
+            if self.webtransport_sessions.contains_key(&stream_id) {
+                self.remove_webtransport_session(stream_id);
+            } else {
+                self.webtransport_session_ids.remove(&stream_id);
+                self.pending_webtransport_streams.remove(&stream_id);
+            }
             if self.peer_request_stream_id == Some(stream_id) {
                 self.peer_request_stream_id = None;
             }
@@ -562,33 +781,40 @@ impl Connection {
                 return Err(Error::InternalError);
             }
         };
-        let stream = self.streams.entry(stream_id).or_insert_with(|| StreamState {
-            _headers: Vec::new(),
-            body_buffer: Vec::new(),
-            frame_buffer: Vec::new(),
-            _received_bytes: 0,
-            _stream_type: StreamType::Response,
-            sent_bytes: 0,
-            fin_sent: false,
-            fin_received: false,
-            masque_established: false,
-            masque_capsule_buffer: Vec::new(),
-            settings_received: false,
-            receive_message_state: ReceiveMessageState::AwaitingHeaders,
-        });
-        let webtransport_response = stream._stream_type == StreamType::WebTransportCover;
-        stream._headers = headers.to_vec();
-        stream._stream_type = if webtransport_response {
-            StreamType::WebTransportCover
-        } else {
-            StreamType::Response
+        let webtransport_response = {
+            let stream = self.streams.entry(stream_id).or_insert_with(|| StreamState {
+                _headers: Vec::new(),
+                body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
+                _received_bytes: 0,
+                _stream_type: StreamType::Response,
+                sent_bytes: 0,
+                fin_sent: false,
+                fin_received: false,
+                masque_established: false,
+                masque_capsule_buffer: Vec::new(),
+                settings_received: false,
+                receive_message_state: ReceiveMessageState::AwaitingHeaders,
+            });
+            let webtransport_response = stream._stream_type == StreamType::WebTransportCover;
+            stream._headers = headers.to_vec();
+            stream._stream_type = if webtransport_response {
+                StreamType::WebTransportCover
+            } else {
+                StreamType::Response
+            };
+            stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
+            stream.fin_sent = fin;
+            webtransport_response
         };
-        stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
-        stream.fin_sent = fin;
-        if webtransport_response
-            && Self::masque_response_status(headers).is_some_and(|status| (200..300).contains(&status))
-        {
-            self.established_webtransport_sessions.insert(stream_id);
+        if webtransport_response {
+            match Self::masque_response_status(headers) {
+                Some(status) if (200..300).contains(&status) => {
+                    self.establish_webtransport_session(stream_id)?;
+                }
+                Some(status) if status >= 200 => self.remove_webtransport_session(stream_id),
+                _ => {}
+            }
         }
         crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::optimize::telemetry::H3_HEADERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -773,9 +999,12 @@ impl Connection {
             self.streams.remove(&id);
             self.finished_streams.remove(&id);
             self.masque_flow.remove(&id);
-            self.webtransport_session_ids.remove(&id);
-            self.pending_webtransport_streams.remove(&id);
-            self.established_webtransport_sessions.remove(&id);
+            if self.webtransport_sessions.contains_key(&id) {
+                self.remove_webtransport_session(id);
+            } else {
+                self.webtransport_session_ids.remove(&id);
+                self.pending_webtransport_streams.remove(&id);
+            }
             if self.peer_request_stream_id == Some(id) {
                 self.peer_request_stream_id = None;
             }
@@ -1078,15 +1307,15 @@ impl Connection {
                 self.peer_qpack_decoder_stream_id = Some(stream_id);
                 Ok(StreamType::QpackDecoder)
             }
-            0x54 => Ok(StreamType::WebTransportData),
+            WEBTRANSPORT_UNI_STREAM_TYPE => Ok(StreamType::WebTransportData),
             _ => Ok(StreamType::UnknownUnidirectional),
         }
     }
 
-    fn parse_settings_payload(payload: &[u8]) -> Result<PeerQpackSettings, Error> {
+    fn parse_settings_payload(payload: &[u8]) -> Result<PeerSettings, Error> {
         let mut offset = 0usize;
         let mut seen = HashSet::new();
-        let mut qpack = PeerQpackSettings::default();
+        let mut settings = PeerSettings::default();
         while offset < payload.len() {
             let (setting, setting_len) = Self::decode_varint(&payload[offset..]).map_err(|error| {
                 if error == Error::BufferTooShort { Error::SettingsError } else { error }
@@ -1104,15 +1333,54 @@ impl Connection {
                 0x01 | 0x06 | 0x07 if value > MAX_H3_SETTING_VALUE => {
                     return Err(Error::ExcessiveLoad);
                 }
-                0x01 => qpack.maximum_table_capacity = value,
-                0x07 => qpack.blocked_streams = value,
+                SETTINGS_ENABLE_CONNECT_PROTOCOL | SETTINGS_H3_DATAGRAM | SETTINGS_WT_ENABLED
+                    if value > 1 =>
+                {
+                    return Err(Error::SettingsError);
+                }
+                SETTINGS_WT_INITIAL_MAX_STREAMS_UNI
+                | SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI
+                    if value > (1u64 << 60) =>
+                {
+                    return Err(Error::SettingsError);
+                }
+                0x01 => settings.maximum_table_capacity = value,
+                0x07 => settings.blocked_streams = value,
+                SETTINGS_ENABLE_CONNECT_PROTOCOL => {
+                    settings.enable_connect_protocol = value == 1;
+                }
+                SETTINGS_H3_DATAGRAM => settings.h3_datagram = value == 1,
+                SETTINGS_WT_ENABLED => settings.webtransport_enabled = value == 1,
+                SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => {
+                    settings.webtransport_initial_max_streams_uni = value;
+                }
+                SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => {
+                    settings.webtransport_initial_max_streams_bidi = value;
+                }
+                SETTINGS_WT_INITIAL_MAX_DATA => {
+                    settings.webtransport_initial_max_data = value;
+                }
                 _ => {}
             }
         }
         if offset != payload.len() {
             return Err(Error::FrameError);
         }
-        Ok(qpack)
+        Ok(settings)
+    }
+
+    fn peer_supports_webtransport(&self) -> bool {
+        if !self.config.webtransport_enabled() {
+            return false;
+        }
+        self.peer_settings.as_ref().is_some_and(|settings| {
+            settings.webtransport_enabled
+                && settings.h3_datagram
+                && (self.is_server || settings.enable_connect_protocol)
+                && settings.webtransport_initial_max_streams_uni > 0
+                && settings.webtransport_initial_max_streams_bidi > 0
+                && settings.webtransport_initial_max_data > 0
+        })
     }
 
     fn decode_single_varint_payload(payload: &[u8]) -> Result<u64, Error> {
@@ -1135,7 +1403,7 @@ impl Connection {
         if matches!(frame_type, 0x02 | 0x06 | 0x08 | 0x09) {
             return Err(Error::FrameUnexpected);
         }
-        if frame_type == 0x41 {
+        if frame_type == WEBTRANSPORT_STREAM_SIGNAL {
             return Err(Error::FrameError);
         }
 
@@ -1196,6 +1464,7 @@ impl Connection {
                 Ok(())
             }
             StreamType::Unidirectional
+            | StreamType::Bidirectional
             | StreamType::UnknownUnidirectional
             | StreamType::QpackEncoder
             | StreamType::QpackDecoder
@@ -1209,9 +1478,29 @@ impl Connection {
         data: &[u8],
         fin: bool,
     ) -> Result<(), Error> {
-        let session_ready = self.webtransport_session_ids.get(&stream_id).is_some_and(|session_id| {
-            self.established_webtransport_sessions.contains(session_id)
-        });
+        let session_id = self
+            .webtransport_session_ids
+            .get(&stream_id)
+            .copied()
+            .ok_or(Error::IdError)?;
+        let session = self.webtransport_sessions.get(&session_id).ok_or(Error::IdError)?;
+        let session_ready = session.state == WebTransportSessionState::Established;
+        let data_len = u64::try_from(data.len()).map_err(|_| Error::ExcessiveLoad)?;
+        let next_data_bytes = session
+            .peer_data_bytes
+            .checked_add(data_len)
+            .ok_or(Error::ExcessiveLoad)?;
+        if next_data_bytes > WEBTRANSPORT_INITIAL_MAX_DATA {
+            return Err(Error::ExcessiveLoad);
+        }
+        let needs_pending_slot = !session_ready
+            && (!data.is_empty() || fin)
+            && !self.pending_webtransport_streams.contains(&stream_id);
+        if needs_pending_slot
+            && self.pending_webtransport_streams.len() >= MAX_PENDING_WEBTRANSPORT_STREAMS
+        {
+            return Err(Error::ExcessiveLoad);
+        }
         if !data.is_empty() {
             let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
             let buffered_len = stream
@@ -1229,6 +1518,11 @@ impl Connection {
                 self.pending_webtransport_streams.insert(stream_id);
             }
         }
+        let session = self
+            .webtransport_sessions
+            .get_mut(&session_id)
+            .ok_or(Error::IdError)?;
+        session.peer_data_bytes = next_data_bytes;
         if fin {
             if let Some(stream) = self.streams.get_mut(&stream_id) {
                 stream.fin_received = true;
@@ -1249,7 +1543,7 @@ impl Connection {
             .copied()
             .filter(|stream_id| {
                 self.webtransport_session_ids.get(stream_id).is_some_and(|session_id| {
-                    self.established_webtransport_sessions.contains(session_id)
+                    self.webtransport_session_is_established(*session_id)
                 })
             })
             .collect();
@@ -1316,12 +1610,11 @@ impl Connection {
         // can be buffered and returned by recv_body(). Locally-opened streams are already
         // present; this fills in the gap for streams we first observe here.
         let is_unidirectional = stream_id & 0x02 != 0;
-        if existing_type.is_none() && !is_unidirectional {
+        if existing_type.is_none() {
             let expected_peer_initiator = if conn.is_server() { 0 } else { 1 };
-            if stream_id & 0x01 != expected_peer_initiator || !conn.is_server() {
+            if stream_id & 0x01 != expected_peer_initiator {
                 return Err(Error::StreamCreationError);
             }
-            self.peer_request_stream_id = Some(stream_id);
         }
         self.streams.entry(stream_id).or_insert_with(|| StreamState {
             _headers: Vec::new(),
@@ -1331,7 +1624,7 @@ impl Connection {
             _stream_type: if is_unidirectional {
                 StreamType::Unidirectional
             } else {
-                StreamType::Request
+                StreamType::Bidirectional
             },
             sent_bytes: 0,
             fin_sent: false,
@@ -1363,6 +1656,57 @@ impl Connection {
             std::mem::take(&mut stream.frame_buffer)
         };
 
+        if !is_unidirectional
+            && self
+                .streams
+                .get(&stream_id)
+                .is_some_and(|stream| stream._stream_type == StreamType::Bidirectional)
+        {
+            let (signal, signal_len) = match Self::decode_varint(&buffered) {
+                Ok(decoded) => decoded,
+                Err(Error::BufferTooShort) => {
+                    let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                    stream.frame_buffer.extend_from_slice(&buffered);
+                    if fin {
+                        return Err(Error::FrameError);
+                    }
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            if signal == WEBTRANSPORT_STREAM_SIGNAL {
+                let (session_id, session_id_len) =
+                    match Self::decode_varint(&buffered[signal_len..]) {
+                        Ok(decoded) => decoded,
+                        Err(Error::BufferTooShort) => {
+                            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                            stream.frame_buffer.extend_from_slice(&buffered);
+                            if fin {
+                                return Err(Error::FrameError);
+                            }
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error),
+                    };
+                let prefix_len = signal_len
+                    .checked_add(session_id_len)
+                    .ok_or(Error::ExcessiveLoad)?;
+                return self.bind_peer_webtransport_stream(
+                    stream_id,
+                    session_id,
+                    false,
+                    &buffered[prefix_len..],
+                    fin,
+                );
+            }
+            if !conn.is_server() {
+                return Err(Error::StreamCreationError);
+            }
+            self.peer_request_stream_id = Some(stream_id);
+            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+            stream._stream_type = StreamType::Request;
+        }
+
         if is_unidirectional
             && self
                 .streams
@@ -1383,6 +1727,7 @@ impl Connection {
             };
             let classified = self.classify_peer_unidirectional_stream(conn, stream_id, stream_type)?;
             let mut prefix_len = type_len;
+            let mut webtransport_session_id = None;
             if stream_type == 0x01 {
                 let (push_id, push_id_len) = match Self::decode_varint(&buffered[type_len..]) {
                     Ok(decoded) => decoded,
@@ -1402,7 +1747,7 @@ impl Connection {
                     return Err(Error::IdError);
                 }
                 prefix_len = prefix_len.checked_add(push_id_len).ok_or(Error::ExcessiveLoad)?;
-            } else if stream_type == 0x54 {
+            } else if stream_type == WEBTRANSPORT_UNI_STREAM_TYPE {
                 let (session_id, session_id_len) = match Self::decode_varint(&buffered[type_len..]) {
                     Ok(decoded) => decoded,
                     Err(Error::BufferTooShort) => {
@@ -1418,13 +1763,23 @@ impl Connection {
                 if session_id & 0x03 != 0 {
                     return Err(Error::IdError);
                 }
-                self.webtransport_session_ids.insert(stream_id, session_id);
+                webtransport_session_id = Some(session_id);
                 prefix_len = prefix_len.checked_add(session_id_len).ok_or(Error::ExcessiveLoad)?;
+            }
+            buffered.drain(..prefix_len);
+            if classified == StreamType::WebTransportData {
+                let session_id = webtransport_session_id.ok_or(Error::IdError)?;
+                return self.bind_peer_webtransport_stream(
+                    stream_id,
+                    session_id,
+                    true,
+                    &buffered,
+                    fin,
+                );
             }
             if let Some(stream) = self.streams.get_mut(&stream_id) {
                 stream._stream_type = classified;
             }
-            buffered.drain(..prefix_len);
             match classified {
                 StreamType::UnknownUnidirectional => {
                     if fin {
@@ -1442,9 +1797,6 @@ impl Connection {
                 StreamType::QpackDecoder => {
                     self.encoder.process_decoder_stream(&buffered)?;
                     return if fin { Err(Error::ClosedCriticalStream) } else { Ok(()) };
-                }
-                StreamType::WebTransportData => {
-                    return self.buffer_raw_stream_data(stream_id, &buffered, fin);
                 }
                 _ => {}
             }
@@ -1559,19 +1911,33 @@ impl Connection {
                         && success_response;
                     let webtransport_request = conn.is_server()
                         && current_stream_type == StreamType::Request
-                        && Self::is_webtransport_connect(&headers);
-                    let webtransport_response_accepted =
-                        current_stream_type == StreamType::WebTransportCover && success_response;
+                        && Self::is_webtransport_connect(&headers)?;
+                    let webtransport_response_status =
+                        if current_stream_type == StreamType::WebTransportCover {
+                            Self::masque_response_status(&headers)
+                        } else {
+                            None
+                        };
                     let informational_response = !conn.is_server()
                         && Self::masque_response_status(&headers)
                             .is_some_and(|status| (100..200).contains(&status));
                     if webtransport_request {
+                        if !self.peer_supports_webtransport() {
+                            return Err(Error::SettingsError);
+                        }
+                        self.register_webtransport_session(stream_id)?;
                         if let Some(stream) = self.streams.get_mut(&stream_id) {
                             stream._stream_type = StreamType::WebTransportCover;
                         }
                     }
-                    if webtransport_response_accepted {
-                        self.established_webtransport_sessions.insert(stream_id);
+                    match webtransport_response_status {
+                        Some(status) if (200..300).contains(&status) => {
+                            self.establish_webtransport_session(stream_id)?;
+                        }
+                        Some(status) if status >= 200 => {
+                            self.remove_webtransport_session(stream_id);
+                        }
+                        _ => {}
                     }
                     if let Some(stream) = self.streams.get_mut(&stream_id) {
                         stream.receive_message_state = match stream.receive_message_state {
@@ -1603,6 +1969,7 @@ impl Connection {
                         settings.maximum_table_capacity,
                         settings.blocked_streams,
                     )?;
+                    self.peer_settings = Some(settings);
                     if let Some(stream) = self.streams.get_mut(&stream_id) {
                         stream.settings_received = true;
                     }
@@ -1834,16 +2201,39 @@ impl Connection {
         })
     }
 
-    fn is_webtransport_connect(headers: &[Header]) -> bool {
-        let method_is_connect = headers.iter().any(|header| {
-            header.name().eq_ignore_ascii_case(b":method")
-                && header.value().eq_ignore_ascii_case(b"CONNECT")
-        });
-        let protocol_is_webtransport = headers.iter().any(|header| {
-            header.name().eq_ignore_ascii_case(b":protocol")
-                && header.value().eq_ignore_ascii_case(b"webtransport")
-        });
-        method_is_connect && protocol_is_webtransport
+    fn unique_header_value<'a>(
+        headers: &'a [Header],
+        name: &[u8],
+    ) -> Result<Option<&'a [u8]>, Error> {
+        let mut value = None;
+        for header in headers {
+            if header.name().eq_ignore_ascii_case(name) {
+                if value.is_some() {
+                    return Err(Error::FrameUnexpected);
+                }
+                value = Some(header.value());
+            }
+        }
+        Ok(value)
+    }
+
+    fn is_webtransport_connect(headers: &[Header]) -> Result<bool, Error> {
+        let protocol = Self::unique_header_value(headers, b":protocol")?;
+        if protocol != Some(&b"webtransport-h3"[..]) {
+            return Ok(false);
+        }
+        let method = Self::unique_header_value(headers, b":method")?;
+        let scheme = Self::unique_header_value(headers, b":scheme")?;
+        let authority = Self::unique_header_value(headers, b":authority")?;
+        let path = Self::unique_header_value(headers, b":path")?;
+        if method != Some(&b"CONNECT"[..])
+            || !scheme.is_some_and(|value| value.eq_ignore_ascii_case(b"https"))
+            || !authority.is_some_and(|value| !value.is_empty())
+            || !path.is_some_and(|value| !value.is_empty())
+        {
+            return Err(Error::FrameUnexpected);
+        }
+        Ok(true)
     }
 
     /// Open a bounded WebTransport-looking H3 cover session.
@@ -1857,19 +2247,200 @@ impl Connection {
         authority: &str,
         path: &str,
     ) -> Result<u64, Error> {
+        if self.is_server {
+            return Err(Error::StreamCreationError);
+        }
+        if !self.peer_supports_webtransport() {
+            return Err(Error::SettingsError);
+        }
+        if self.webtransport_sessions.len() >= MAX_WEBTRANSPORT_SESSIONS {
+            return Err(Error::ExcessiveLoad);
+        }
         let headers = vec![
             Header::new(b":method", b"CONNECT"),
-            Header::new(b":protocol", b"webtransport"),
+            Header::new(b":protocol", b"webtransport-h3"),
             Header::new(b":scheme", b"https"),
             Header::new(b":authority", authority.as_bytes()),
             Header::new(b":path", path.as_bytes()),
             Header::new(b"origin", format!("https://{authority}").as_bytes()),
         ];
         let sid = self.send_request(conn, &headers, false)?;
+        self.register_webtransport_session(sid)?;
         if let Some(st) = self.streams.get_mut(&sid) {
             st._stream_type = StreamType::WebTransportCover;
         }
         Ok(sid)
+    }
+
+    /// Accept one negotiated peer WebTransport cover session with a final 2xx response.
+    pub(crate) fn accept_webtransport_cover_session(
+        &mut self,
+        conn: &mut super::Connection,
+        session_id: u64,
+    ) -> Result<(), Error> {
+        if !self.is_server || !self.peer_supports_webtransport() {
+            return Err(Error::SettingsError);
+        }
+        let session = self
+            .webtransport_sessions
+            .get(&session_id)
+            .ok_or(Error::IdError)?;
+        if session.state != WebTransportSessionState::Pending
+            || !self.streams.get(&session_id).is_some_and(|stream| {
+                stream._stream_type == StreamType::WebTransportCover
+            })
+        {
+            return Err(Error::FrameUnexpected);
+        }
+        self.send_response(conn, session_id, &[Header::new(b":status", b"200")], false)
+    }
+
+    fn send_webtransport_stream(
+        &mut self,
+        conn: &mut super::Connection,
+        session_id: u64,
+        kind: WebTransportStreamKind,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<u64, Error> {
+        if !self.peer_supports_webtransport() {
+            return Err(Error::SettingsError);
+        }
+        let settings = self.peer_settings.as_ref().ok_or(Error::SettingsError)?;
+        let session = self.webtransport_sessions.get(&session_id).ok_or(Error::IdError)?;
+        if session.state != WebTransportSessionState::Established {
+            return Err(Error::FrameUnexpected);
+        }
+        let (current_streams, stream_limit) = match kind {
+            WebTransportStreamKind::Unidirectional => (
+                session.local_unidirectional_streams,
+                settings.webtransport_initial_max_streams_uni,
+            ),
+            WebTransportStreamKind::Bidirectional => (
+                session.local_bidirectional_streams,
+                settings.webtransport_initial_max_streams_bidi,
+            ),
+        };
+        let next_streams = current_streams.checked_add(1).ok_or(Error::ExcessiveLoad)?;
+        if next_streams > stream_limit {
+            return Err(Error::ExcessiveLoad);
+        }
+        let data_len = u64::try_from(data.len()).map_err(|_| Error::ExcessiveLoad)?;
+        let next_data_bytes = session
+            .local_data_bytes
+            .checked_add(data_len)
+            .ok_or(Error::ExcessiveLoad)?;
+        if data.len() > MAX_BUFFERED_H3_FRAME
+            || next_data_bytes > settings.webtransport_initial_max_data
+        {
+            return Err(Error::ExcessiveLoad);
+        }
+
+        let (stream_id, signal) = match kind {
+            WebTransportStreamKind::Unidirectional => {
+                (self.next_uni_stream_id, WEBTRANSPORT_UNI_STREAM_TYPE)
+            }
+            WebTransportStreamKind::Bidirectional => {
+                (self.next_stream_id, WEBTRANSPORT_STREAM_SIGNAL)
+            }
+        };
+        let next_stream_id = stream_id.checked_add(4).ok_or(Error::StreamCreationError)?;
+        let mut payload = Vec::with_capacity(data.len().saturating_add(16));
+        Self::encode_varint(signal, &mut payload);
+        Self::encode_varint(session_id, &mut payload);
+        payload.extend_from_slice(data);
+        let sent = conn
+            .stream_send(stream_id, &payload, fin)
+            .map_err(|_| Error::StreamCreationError)?;
+        if sent != payload.len() {
+            return Err(Error::InternalError);
+        }
+
+        match kind {
+            WebTransportStreamKind::Unidirectional => self.next_uni_stream_id = next_stream_id,
+            WebTransportStreamKind::Bidirectional => self.next_stream_id = next_stream_id,
+        }
+        let session = self
+            .webtransport_sessions
+            .get_mut(&session_id)
+            .ok_or(Error::IdError)?;
+        match kind {
+            WebTransportStreamKind::Unidirectional => {
+                session.local_unidirectional_streams = next_streams;
+            }
+            WebTransportStreamKind::Bidirectional => {
+                session.local_bidirectional_streams = next_streams;
+            }
+        }
+        session.local_data_bytes = next_data_bytes;
+        self.webtransport_session_ids.insert(stream_id, session_id);
+        self.streams.insert(
+            stream_id,
+            StreamState {
+                _headers: Vec::new(),
+                body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
+                _received_bytes: 0,
+                _stream_type: StreamType::WebTransportData,
+                sent_bytes: sent,
+                fin_sent: fin,
+                fin_received: false,
+                masque_established: false,
+                masque_capsule_buffer: Vec::new(),
+                settings_received: false,
+                receive_message_state: ReceiveMessageState::AwaitingHeaders,
+            },
+        );
+        if fin {
+            self.finished_streams.insert(stream_id);
+        }
+        Ok(stream_id)
+    }
+
+    /// Send one bounded unidirectional WebTransport cover-data stream.
+    pub(crate) fn send_webtransport_unidirectional_stream(
+        &mut self,
+        conn: &mut super::Connection,
+        session_id: u64,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<u64, Error> {
+        self.send_webtransport_stream(
+            conn,
+            session_id,
+            WebTransportStreamKind::Unidirectional,
+            data,
+            fin,
+        )
+    }
+
+    /// Send one bounded bidirectional WebTransport cover-data stream.
+    pub(crate) fn send_webtransport_bidirectional_stream(
+        &mut self,
+        conn: &mut super::Connection,
+        session_id: u64,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<u64, Error> {
+        self.send_webtransport_stream(
+            conn,
+            session_id,
+            WebTransportStreamKind::Bidirectional,
+            data,
+            fin,
+        )
+    }
+
+    /// Return whether the WebTransport CONNECT response established this session.
+    pub(crate) fn webtransport_session_established(&self, session_id: u64) -> bool {
+        self.webtransport_session_is_established(session_id)
+    }
+
+    /// Return whether a negotiated peer CONNECT is waiting for a final response.
+    pub(crate) fn webtransport_session_pending(&self, session_id: u64) -> bool {
+        self.webtransport_sessions.get(&session_id).is_some_and(|session| {
+            session.state == WebTransportSessionState::Pending
+        })
     }
 
     /// Enable MASQUE DATAGRAM for a CONNECT-UDP stream; returns Flow-ID (default 0)
