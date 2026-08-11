@@ -1973,6 +1973,7 @@ The audit remains open. These reconciliations document current evidence and owne
 - `read_block()` validates before exposing the pooled block, borrowed and owned reader loops share that invariant, and `TunPacket` no longer clamps an invalid length. `write()` and `write_packet()` validate before accepted-byte telemetry or caller success.
 - Fault-injection backends representing external-factory results cover zero and oversized reads, zero, short, and oversized writes, the client `write_packet()` path, and owned-packet oversized construction. `test-core.sh` wires exact library targets; runtime guardrail 4h is green.
 - Static format, Bash syntax, diff hygiene, and guardrail checks pass. Rust test execution is not claimed because local free space is below the 2-GiB safety boundary and both Omega checkouts are dirty or revision-mismatched. Native Linux/macOS syscall progress and raw `readv`/`writev` semantics are implemented by TODO-845 below, but privileged/native execution remains unclaimed.
+- Hosted closure: Main CI run `31455010980` executes the external-factory result, MTU-misreport, and client short-write regressions on Windows job `93666880422` and macOS job `93666880395` at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`. Both complete root suites pass, proving the platform-neutral wrapper contract without inferring native Unix syscall semantics owned by TODO-845.
 
 ## Unix TUN Syscall Boundaries (2026-08-07, TODO-845)
 
