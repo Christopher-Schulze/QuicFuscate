@@ -308,7 +308,7 @@ pub fn encode_pkt_num(pn: u64, pn_len: usize, out: &mut [u8]) -> Result<usize, C
             // order on x86_64 and avoids the previous reversed-byte shuffle.
             let pn_bytes = (pn as u32).to_be_bytes();
             let pn_vec = _mm_cvtsi32_si128(i32::from_ne_bytes(pn_bytes));
-            _mm_storeu_si32(out.as_mut_ptr() as *mut i32, pn_vec);
+            _mm_storeu_si32(out.as_mut_ptr(), pn_vec);
             return Ok(4);
         }
     }

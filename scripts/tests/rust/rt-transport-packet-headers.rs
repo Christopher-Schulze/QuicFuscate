@@ -6,6 +6,22 @@ use quicfuscate::transport::packet::{
     MAX_CID_LEN,
 };
 
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn scalar_encode_packet_number(packet_number: u64, length: usize, output: &mut [u8]) -> usize {
+    match length {
+        1 => output[0] = packet_number as u8,
+        2 => output[..2].copy_from_slice(&(packet_number as u16).to_be_bytes()),
+        3 => {
+            output[0] = (packet_number >> 16) as u8;
+            output[1] = (packet_number >> 8) as u8;
+            output[2] = packet_number as u8;
+        }
+        4 => output[..4].copy_from_slice(&(packet_number as u32).to_be_bytes()),
+        _ => panic!("test vector length must be between 1 and 4"),
+    }
+    length
+}
+
 #[test]
 fn short_header_roundtrip() {
     let hdr = Header {
