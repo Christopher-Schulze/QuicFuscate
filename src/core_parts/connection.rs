@@ -948,14 +948,14 @@ impl QuicFuscateConnection {
                     loss_rate_permille,
                     intelligent_level,
                 );
-                if !conn.is_server()
-                    && let Some((authority, path)) = stealth_manager.webtransport_cover_plan()
-                {
-                    match h3.open_webtransport_cover_session(conn, &authority, &path) {
-                        Ok(sid) => {
-                            debug!("WebTransport cover session opened: sid={sid}");
+                if !conn.is_server() {
+                    if let Some((authority, path)) = stealth_manager.webtransport_cover_plan() {
+                        match h3.open_webtransport_cover_session(conn, &authority, &path) {
+                            Ok(sid) => {
+                                debug!("WebTransport cover session opened: sid={sid}");
+                            }
+                            Err(e) => warn!("WebTransport cover session failed: {:?}", e),
                         }
-                        Err(e) => warn!("WebTransport cover session failed: {:?}", e),
                     }
                 }
                 debug!("Server Push burst emitted: {} promises", ids.len());
