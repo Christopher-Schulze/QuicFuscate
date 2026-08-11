@@ -466,8 +466,8 @@ assert_cross_tun_claim_rejected() {
     echo "cross-TUN server did not fail closed within 10 seconds" >&2
     exit 1
   fi
-  grep -q \
-    'one server firewall owner per network namespace is supported' \
+  grep -Eq \
+    'durable firewall identity belongs to TUN qtun0; refusing cross-TUN stale cleanup|durable routing state for TUN qtun0 already exists; one server firewall owner per network namespace is supported' \
     "$SECONDARY_SERVER_LOG"
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "cross-TUN rejection terminated the active firewall owner" >&2

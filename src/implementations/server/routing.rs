@@ -2211,7 +2211,7 @@ impl RoutingManager {
         )];
         if ipv6 {
             expected_filter.push(format!(
-                "-A {} -i {} -o {} -d ff00::/8 -j ACCEPT",
+                "-A {} -d ff00::/8 -i {} -o {} -j ACCEPT",
                 Self::IPTABLES_FILTER_CHAIN,
                 self.tun_name,
                 self.tun_name
@@ -2219,11 +2219,11 @@ impl RoutingManager {
         } else {
             for destination in self.ipv4_fanout_destinations() {
                 expected_filter.push(format!(
-                    "-A {} -i {} -o {} -d {} -j ACCEPT",
+                    "-A {} -d {} -i {} -o {} -j ACCEPT",
                     Self::IPTABLES_FILTER_CHAIN,
+                    destination,
                     self.tun_name,
-                    self.tun_name,
-                    destination
+                    self.tun_name
                 ));
             }
         }
