@@ -784,41 +784,61 @@ enum ClientTunPacketError {
     Fault(quicfuscate::engine::DataPlaneFault),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientTunPacketDisposition {
+    Tunnel,
+    RespondPacketTooBig { mtu: usize },
+}
+
+fn classify_client_tun_packet(
+    packet_len: usize,
+    carrier_mtu: usize,
+) -> ClientTunPacketDisposition {
+    if packet_len <= carrier_mtu {
+        ClientTunPacketDisposition::Tunnel
+    } else {
+        ClientTunPacketDisposition::RespondPacketTooBig { mtu: carrier_mtu }
+    }
+}
+
 fn send_client_tun_packet(
     conn: &mut QuicFuscateConnection,
     tun: &quicfuscate::interface::TunInterface,
     stream_id: u64,
     packet: &[u8],
-) -> Result<(), ClientTunPacketError> {
-    let tunnel_mtu = conn.effective_tunnel_mtu().min(usize::from(tun.mtu()));
-    if packet.len() <= tunnel_mtu {
-        return conn.send_tunnel_packet(stream_id, packet).map_err(|error| match error {
-            ConnectionError::DgramQueueFull => ClientTunPacketError::Backpressure,
-            error => ClientTunPacketError::Fault(
-                quicfuscate::engine::DataPlaneFault::TransportSend {
-                    component: "standalone client TUN uplink".to_string(),
+) -> Result<ClientTunPacketDisposition, ClientTunPacketError> {
+    let disposition = classify_client_tun_packet(packet.len(), conn.effective_tunnel_mtu());
+    match disposition {
+        ClientTunPacketDisposition::Tunnel => {
+            conn.send_tunnel_packet(stream_id, packet).map_err(|error| match error {
+                ConnectionError::DgramQueueFull => ClientTunPacketError::Backpressure,
+                error => ClientTunPacketError::Fault(
+                    quicfuscate::engine::DataPlaneFault::TransportSend {
+                        component: "standalone client TUN uplink".to_string(),
+                        error: error.to_string(),
+                    },
+                ),
+            })?;
+        }
+        ClientTunPacketDisposition::RespondPacketTooBig { mtu } => {
+            let response = client_packet_too_big_response(packet, mtu);
+            if response.is_empty() {
+                return Err(ClientTunPacketError::Fault(
+                    quicfuscate::engine::DataPlaneFault::TransportSend {
+                        component: "standalone client oversized TUN response".to_string(),
+                        error: ConnectionError::BufferTooShort.to_string(),
+                    },
+                ));
+            }
+            tun.write(&response).map_err(|error| {
+                ClientTunPacketError::Fault(quicfuscate::engine::DataPlaneFault::TunWrite {
+                    component: "standalone client oversized TUN response".to_string(),
                     error: error.to_string(),
-                },
-            ),
-        });
+                })
+            })?;
+        }
     }
-
-    let response = client_packet_too_big_response(packet, tunnel_mtu);
-    if response.is_empty() {
-        return Err(ClientTunPacketError::Fault(
-            quicfuscate::engine::DataPlaneFault::TransportSend {
-                component: "standalone client oversized TUN response".to_string(),
-                error: ConnectionError::BufferTooShort.to_string(),
-            },
-        ));
-    }
-    tun.write(&response).map_err(|error| {
-        ClientTunPacketError::Fault(quicfuscate::engine::DataPlaneFault::TunWrite {
-            component: "standalone client oversized TUN response".to_string(),
-            error: error.to_string(),
-        })
-    })?;
-    Ok(())
+    Ok(disposition)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1035,9 +1055,16 @@ fn drain_client_tun_uplink(
     if let Some(frame) = backlog.take() {
         let frame_len = frame.len();
         match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
-            Ok(()) => {
+            Ok(ClientTunPacketDisposition::Tunnel) => {
                 if diagnostics_enabled {
                     info!("Client Wintun backlog accepted by MASQUE uplink: bytes={frame_len}");
+                }
+            }
+            Ok(ClientTunPacketDisposition::RespondPacketTooBig { mtu }) => {
+                if diagnostics_enabled {
+                    info!(
+                        "Client Wintun backlog answered locally above tunnel carrier: bytes={frame_len} mtu={mtu}"
+                    );
                 }
             }
             Err(ClientTunPacketError::Backpressure) => {
@@ -1059,10 +1086,17 @@ fn drain_client_tun_uplink(
             Ok(frame) => {
                 let frame_len = frame.len();
                 match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
-                    Ok(()) => {
+                    Ok(ClientTunPacketDisposition::Tunnel) => {
                         if diagnostics_enabled {
                             info!(
                                 "Client Wintun packet accepted by MASQUE uplink: bytes={frame_len}"
+                            );
+                        }
+                    }
+                    Ok(ClientTunPacketDisposition::RespondPacketTooBig { mtu }) => {
+                        if diagnostics_enabled {
+                            info!(
+                                "Client Wintun packet answered locally above tunnel carrier: bytes={frame_len} mtu={mtu}"
                             );
                         }
                     }

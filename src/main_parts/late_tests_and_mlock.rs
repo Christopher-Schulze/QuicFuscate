@@ -284,6 +284,23 @@ mod runtime_reload_tests {
     }
 
     #[test]
+    fn client_uplink_uses_carrier_mtu_after_live_tun_mtu_override() {
+        let configured_tun_mtu = 1280;
+        let carrier_mtu = 1372;
+        let probe_len = 1328;
+
+        assert!(probe_len > configured_tun_mtu);
+        assert_eq!(
+            classify_client_tun_packet(probe_len, carrier_mtu),
+            ClientTunPacketDisposition::Tunnel
+        );
+        assert_eq!(
+            classify_client_tun_packet(carrier_mtu + 1, carrier_mtu),
+            ClientTunPacketDisposition::RespondPacketTooBig { mtu: carrier_mtu }
+        );
+    }
+
+    #[test]
     fn normalize_runtime_optimize_config_preserves_runtime_values() {
         let normalized = quicfuscate::implementations::server::normalize_runtime_optimize_config(
             OptimizeConfig { pool_capacity: 64, block_size: 65_536 },
