@@ -25,6 +25,7 @@ enum PushState {
 const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
 const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
+const MAX_H3_SETTING_VALUE: u64 = 16 * 1024 * 1024;
 
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
@@ -153,9 +154,13 @@ impl Connection {
     /// Creates a new HTTP/3 connection with proper initialization
     pub fn with_transport(conn: &mut super::Connection, config: &Config) -> Result<Self, Error> {
         // Validate config limits for HTTP/3 compliance and safety.
-        // max_field_section_size == 0 is invalid; excessively large values can cause memory abuse.
+        // A zero field-section limit is unusable. Every locally advertised setting is bounded
+        // before it reaches QPACK state or the wire so an unchecked public setter cannot create
+        // target-width truncation or an unbounded peer/runtime contract.
         if config.max_field_section_size() == 0
-            || config.max_field_section_size() > 16 * 1024 * 1024
+            || config.max_field_section_size() > MAX_H3_SETTING_VALUE
+            || config.qpack_max_table_capacity() > MAX_H3_SETTING_VALUE
+            || config.qpack_blocked_streams() > MAX_H3_SETTING_VALUE
         {
             return Err(Error::ExcessiveLoad);
         }
@@ -719,8 +724,9 @@ impl Connection {
                 return Err(Error::FrameError);
             }
             match setting {
-                0x01 | 0x07 if value > 16 * 1024 * 1024 => return Err(Error::ExcessiveLoad),
-                0x06 if value > 16 * 1024 * 1024 => return Err(Error::ExcessiveLoad),
+                0x01 | 0x06 | 0x07 if value > MAX_H3_SETTING_VALUE => {
+                    return Err(Error::ExcessiveLoad);
+                }
                 _ => {}
             }
         }

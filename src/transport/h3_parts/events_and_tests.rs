@@ -1330,6 +1330,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_excessive_qpack_table_capacity_rejects() {
+        let mut conn = make_conn();
+        let mut cfg = Config::new().expect("cfg");
+        cfg.set_qpack_max_table_capacity(MAX_H3_SETTING_VALUE + 1);
+        let result = super::h3::Connection::with_transport(&mut conn, &cfg);
+        assert!(
+            matches!(result, Err(Error::ExcessiveLoad)),
+            "excessive QPACK table capacity must be rejected"
+        );
+    }
+
+    #[test]
+    fn config_excessive_qpack_blocked_streams_rejects() {
+        let mut conn = make_conn();
+        let mut cfg = Config::new().expect("cfg");
+        cfg.set_qpack_blocked_streams(MAX_H3_SETTING_VALUE + 1);
+        let result = super::h3::Connection::with_transport(&mut conn, &cfg);
+        assert!(
+            matches!(result, Err(Error::ExcessiveLoad)),
+            "excessive QPACK blocked-stream count must be rejected"
+        );
+    }
+
     // ---- GOAWAY Handling -------------------------------------------------
 
     #[test]
