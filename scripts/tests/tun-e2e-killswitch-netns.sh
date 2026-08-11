@@ -19,8 +19,12 @@ HEARTBEAT_TIMEOUT_MS="${HEARTBEAT_TIMEOUT_MS:-15000}"
 TRANSITION_LIMIT_MS="$((HEARTBEAT_TIMEOUT_MS + 100))"
 LOCK_FILE="${QF_E2E_LOCK_FILE:-/tmp/quicfuscate-tun-e2e.lock}"
 SERVER_LOG="/tmp/qf-killswitch-server.log"
+SECONDARY_SERVER_LOG="/tmp/qf-killswitch-server-secondary.log"
 CLIENT_LOG="/tmp/qf-killswitch-client.log"
 CAPTURE_FILE="/tmp/qf-killswitch-underlay.pcap"
+ROUTING_STATE_PATH="/run/quicfuscate/routing/7174756e30.json"
+SECONDARY_ROUTING_STATE_PATH="/run/quicfuscate/routing/7174756e31.json"
+FIREWALL_OWNER_PATH="/run/quicfuscate/routing/firewall-owner.json"
 FIREWALL_BACKEND="${FIREWALL_BACKEND:-auto}"
 RUNTIME_PATH="${RUNTIME_PATH:-$PATH}"
 EXPECT_BACKEND_UNAVAILABLE="${EXPECT_BACKEND_UNAVAILABLE:-0}"
@@ -66,7 +70,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in flock ip nft openssl nc python3 dig ping sha256sum tcpdump; do
+for command in flock ip nft openssl nc python3 dig ping sha256sum tcpdump timeout; do
   require_command "$command"
 done
 if [ "$(id -u)" -ne 0 ]; then
@@ -117,8 +121,8 @@ assert_selection_log() {
     exit 1
   fi
   if [ "$FIREWALL_BACKEND" = "iptables" ]; then
-    grep -q \
-      "$expected_line, nftables_available=false, iptables_available=true" \
+    grep -Eq \
+      "$expected_line, nftables_available=(true|false), iptables_available=true" \
       "$log_file"
   else
     grep -q "$expected_line, nftables_available=true," "$log_file"
@@ -192,6 +196,38 @@ routing_policy_absent() {
       ! ip netns exec "$SERVER_NS" ip6tables -S QUICFUSCATE_RT >/dev/null 2>&1 &&
       ! ip netns exec "$SERVER_NS" ip6tables -t nat -S QUICFUSCATE_NAT >/dev/null 2>&1
   fi
+}
+
+routing_policy_fingerprint() {
+  local program
+  if [ "$RULE_BACKEND" = "nftables" ]; then
+    ip netns exec "$SERVER_NS" nft -s list table inet quicfuscate_rt
+  else
+    for program in iptables ip6tables; do
+      ip netns exec "$SERVER_NS" "$program" -S FORWARD
+      ip netns exec "$SERVER_NS" "$program" -S QUICFUSCATE_RT
+      ip netns exec "$SERVER_NS" "$program" -t nat -S POSTROUTING
+      ip netns exec "$SERVER_NS" "$program" -t nat -S QUICFUSCATE_NAT
+    done
+  fi | sha256sum | cut -d' ' -f1
+}
+
+assert_durable_ownership_present() {
+  if [ ! -f "$ROUTING_STATE_PATH" ] || [ ! -f "$FIREWALL_OWNER_PATH" ]; then
+    echo "server firewall ownership files are incomplete" >&2
+    exit 1
+  fi
+}
+
+assert_durable_ownership_absent() {
+  local context="$1"
+  local path
+  for path in "$ROUTING_STATE_PATH" "$SECONDARY_ROUTING_STATE_PATH" "$FIREWALL_OWNER_PATH"; do
+    if [ -e "$path" ]; then
+      echo "$context left durable firewall ownership behind: $path" >&2
+      exit 1
+    fi
+  done
 }
 
 create_runtime_config() {
@@ -401,6 +437,63 @@ start_server() {
     ip netns exec "$SERVER_NS" ip6tables \
       -t nat -C POSTROUTING -j QUICFUSCATE_NAT >/dev/null
   fi
+  assert_durable_ownership_present
+}
+
+assert_cross_tun_claim_rejected() {
+  local before after status
+  before="$(routing_policy_fingerprint)"
+  rm -f /tmp/qf-killswitch-admin-secondary.sock "$SECONDARY_SERVER_LOG"
+
+  set +e
+  timeout --signal=TERM 10s \
+    ip netns exec "$SERVER_NS" env PATH="$RUNTIME_PATH" "$BINARY" server \
+      "${RUNTIME_CONFIG_ARGS[@]}" \
+      --cert "$CERT_DIR/server.crt" --key "$CERT_DIR/server.key" \
+      --listen "$SERVER_UNDERLAY_IP:4434" \
+      --admin-socket /tmp/qf-killswitch-admin-secondary.sock \
+      --tun --tun-name qtun1 --tun-ip 10.93.0.1 \
+      --tun-netmask 255.255.255.0 --no-drop-privileges -v \
+      >"$SECONDARY_SERVER_LOG" 2>&1
+  status=$?
+  set -e
+
+  if [ "$status" -eq 0 ]; then
+    echo "cross-TUN server unexpectedly claimed the global firewall identity" >&2
+    exit 1
+  fi
+  if [ "$status" -eq 124 ]; then
+    echo "cross-TUN server did not fail closed within 10 seconds" >&2
+    exit 1
+  fi
+  grep -q \
+    'one server firewall owner per network namespace is supported' \
+    "$SECONDARY_SERVER_LOG"
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "cross-TUN rejection terminated the active firewall owner" >&2
+    exit 1
+  fi
+  if ip netns exec "$SERVER_NS" ip link show dev qtun1 >/dev/null 2>&1; then
+    echo "cross-TUN rejection left qtun1 behind" >&2
+    exit 1
+  fi
+  if [ -e /tmp/qf-killswitch-admin-secondary.sock ]; then
+    echo "cross-TUN rejection published a secondary admin socket" >&2
+    exit 1
+  fi
+  if [ -e "$SECONDARY_ROUTING_STATE_PATH" ]; then
+    echo "cross-TUN rejection published secondary durable routing state" >&2
+    exit 1
+  fi
+  assert_durable_ownership_present
+
+  after="$(routing_policy_fingerprint)"
+  if [ "$after" != "$before" ]; then
+    echo "cross-TUN rejection changed the active firewall policy: before=$before after=$after" >&2
+    exit 1
+  fi
+  assert_unrelated_firewall_unchanged
+  echo "cross-TUN claim rejected without active or unrelated firewall mutation: backend=$RULE_BACKEND fingerprint=$after"
 }
 
 fetch_qkey() {
@@ -594,6 +687,7 @@ assert_requested_backend_unavailable() {
 create_certificates
 create_runtime_config
 setup_namespaces
+assert_durable_ownership_absent "preflight"
 seed_unrelated_firewall_state
 UNRELATED_FIREWALL_FINGERPRINT="$(unrelated_firewall_fingerprint)"
 if [ "$EXPECT_BACKEND_UNAVAILABLE" = "1" ]; then
@@ -603,6 +697,7 @@ if [ "$EXPECT_BACKEND_UNAVAILABLE" = "1" ]; then
 fi
 assert_atomic_replacement_failure
 start_server
+assert_cross_tun_claim_rejected
 QKEY="$(fetch_qkey)"
 start_client "$QKEY"
 require_runtime_owned_tun_assignment "$SERVER_NS" "$SERVER_TUN_IP"
@@ -610,8 +705,11 @@ require_runtime_owned_tun_assignment "$CLIENT_NS" "$CLIENT_TUN_IP"
 assert_connected_policy
 assert_dns_and_ipv6_policy
 assert_unexpected_loss_retains_block
+assert_durable_ownership_present
 assert_stale_cleanup
 assert_clean_signal_cleanup
+assert_durable_ownership_absent "graceful cleanup after process-loss recovery"
 assert_unrelated_firewall_unchanged
 
 echo "PASS ($RULE_BACKEND): connected TUN/DNS policy, IPv6 blocking, ${TRANSITION_LIMIT_MS}ms loss bound, retained fail-closed state, stale cleanup, client/server SIGTERM cleanup, and unchanged unrelated firewall fingerprint $UNRELATED_FIREWALL_FINGERPRINT"
+echo "QF_FIREWALL_OWNERSHIP_STATUS=SUPPORTED backend=$RULE_BACKEND cross_tun_rejected=1 process_loss_recovered=1 graceful_residue=0 unrelated_preserved=1"

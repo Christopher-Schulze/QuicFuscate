@@ -574,6 +574,76 @@ jobs:
           path: |
             scripts/out/tests/linux-fastpath-gates
 
+  linux-firewall-ownership-native:
+    name: Linux firewall ownership (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [nftables, iptables]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-firewall-${{ matrix.backend }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install native firewall proof dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dnsutils \
+            iproute2 \
+            iptables \
+            iputils-ping \
+            netcat-openbsd \
+            nftables \
+            openssl \
+            tcpdump
+
+      - name: Build exact firewall proof artifact
+        run: cargo build --locked --release --bin quicfuscate
+
+      - name: Prove native firewall ownership and cleanup
+        shell: bash
+        run: |
+          set -o pipefail
+          output_dir="scripts/out/tests/firewall-ownership-${{ matrix.backend }}"
+          mkdir -p "$output_dir"
+          sudo --preserve-env=GITHUB_SHA \
+            env BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate" \
+            FIREWALL_BACKEND="${{ matrix.backend }}" \
+            PROJECT_ROOT="$GITHUB_WORKSPACE" \
+            scripts/tests/tun-e2e-killswitch-netns.sh \
+            2>&1 | tee "$output_dir/proof.log"
+          grep -Fq \
+            "QF_FIREWALL_OWNERSHIP_STATUS=SUPPORTED backend=${{ matrix.backend }}" \
+            "$output_dir/proof.log"
+
+      - name: Upload native firewall ownership evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: firewall-ownership-${{ matrix.backend }}
+          path: scripts/out/tests/firewall-ownership-${{ matrix.backend }}/
+          if-no-files-found: error
+
   linux-traffic-analysis-native:
     runs-on: ubuntu-latest
     env:
