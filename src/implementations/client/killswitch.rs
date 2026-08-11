@@ -78,6 +78,7 @@ impl VpnFirewallPolicy {
         self.server_ipv6
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     fn dns_servers(&self) -> &[IpAddr] {
         &self.dns_servers
     }

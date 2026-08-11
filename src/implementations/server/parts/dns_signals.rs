@@ -990,6 +990,7 @@ mod dns_intercept_worker_tests {
 
 enum ServerSignalEvent {
     Shutdown(&'static [u8]),
+    #[cfg(unix)]
     Reload,
 }
 

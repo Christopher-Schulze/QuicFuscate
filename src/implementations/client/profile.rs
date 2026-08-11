@@ -15,6 +15,7 @@ use crate::time_source::{ProtocolClock, WallClockError};
 use qf_engine_types as qkey;
 
 const PROFILE_ID_BYTES: usize = 16;
+#[cfg(unix)]
 const PROFILE_FILE_MODE: u32 = 0o600;
 const TEMPORARY_FILE_NAME_ATTEMPTS: usize = 8;
 

@@ -1156,6 +1156,7 @@ impl ServerRuntime {
                         ServerSignalEvent::Shutdown(reason) => {
                             self.initiate_drain(reason);
                         }
+                        #[cfg(unix)]
                         ServerSignalEvent::Reload => {
                             self.reload_standalone_runtime(runtime_config, "SIGHUP");
                             match crate::logging::reopen() {

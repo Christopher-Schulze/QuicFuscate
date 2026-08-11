@@ -156,13 +156,6 @@ pub mod firewall {
     ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
         qf_firewall::cleanup_windows_firewall_rule(name)
     }
-
-    #[cfg(target_os = "windows")]
-    pub(crate) fn cleanup_windows_nat(
-        name: &str,
-    ) -> Result<qf_firewall::CleanupOutcome, qf_firewall::CleanupError> {
-        qf_firewall::cleanup_windows_nat(name)
-    }
 }
 /// Test harness utilities for integration and property-based testing.
 pub mod harness;

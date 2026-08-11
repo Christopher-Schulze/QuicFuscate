@@ -394,14 +394,14 @@ impl RoutingManager {
         self.server_ipv6.is_some()
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     fn record_cleanup_failure(failures: &mut Vec<String>, result: Result<(), RoutingError>) {
         if let Err(error) = result {
             failures.push(error.to_string());
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     fn finish_cleanup(failures: Vec<String>) -> Result<(), RoutingError> {
         if failures.is_empty() {
             Ok(())
