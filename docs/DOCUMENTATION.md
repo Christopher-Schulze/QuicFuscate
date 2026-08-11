@@ -1758,7 +1758,7 @@ Current Rust compilation boundaries are spread across the following workflow fam
 | `windows-omega-e2e.yml` | Windows Wintun build, test compilation, and native tests | Registry/Git/`target/` directory cache; no compiler cache |
 | `release.yml` server and desktop jobs | Linux and ARM64 server builds plus macOS/Linux/Windows Tauri check, Clippy, and packaging | Registry/Git/`target/` cache for server bundles; desktop packaging has no compiler cache setup |
 
-Cache keys include one or more Cargo.lock files and, in several jobs, the runner OS. They do not constitute a single toolchain-aware sccache key or prove cross-platform hit correctness. Cargo's own fingerprints and the locked build commands remain the current correctness boundary. The repository therefore makes no current claim for compiler-cache hit rate, false-hit absence, cache failure propagation, or the historical 30% improvement claim from TODO-155. That historical claim is retired by TODO-761; the archived task body is retained and labeled historical.
+Cache keys include one or more Cargo.lock files and, in several jobs, the runner OS. They do not constitute a single toolchain-aware sccache key or prove cross-platform hit correctness. Cargo's own fingerprints and the locked build commands remain the current correctness boundary. The repository therefore makes no current claim for compiler-cache hit rate, false-hit absence, cache failure propagation, or the historical 30% improvement claim from TODO-155. TODO-761 is archived after retiring that historical claim; TODO-155 remains archived and labeled historical.
 
 ### Rust Toolchain Support Policy
 
