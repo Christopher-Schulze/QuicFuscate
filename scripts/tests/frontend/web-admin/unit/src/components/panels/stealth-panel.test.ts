@@ -49,6 +49,11 @@ describe("StealthPanel", () => {
     expect(screen.getByLabelText("Congestion control")).toBeInTheDocument();
   });
 
+  test("renders CUBIC as a canonical congestion-control selection", () => {
+    render(StealthPanel, { props: makeProps({ transportCc: "cubic" }) });
+    expect(screen.getByLabelText("Congestion control")).toHaveTextContent("CUBIC");
+  });
+
   test("renders MTU input with current value", () => {
     render(StealthPanel, { props: makeProps({ transportMtuText: "1450" }) });
     expect(screen.getByLabelText("MTU")).toBeInTheDocument();

@@ -1,3 +1,5 @@
+import { congestionControlDisplayLabel } from "@quicfuscate/ui/congestion-control";
+
 function normalize(raw: string | null | undefined): string {
   return (raw ?? "").trim().toLowerCase();
 }
@@ -23,10 +25,7 @@ export function displayFecMode(raw: string | null | undefined): string {
 export function displayCcMode(raw: string | null | undefined): string {
   const v = normalize(raw);
   if (!v || v === "server") return "BBR3";
-  if (v === "reno") return "RENO";
-  if (v === "bbr2") return "BBR2";
-  if (v === "bbr3") return "BBR3";
-  return "Custom";
+  return congestionControlDisplayLabel(v);
 }
 
 export function displayMtu(raw: string | null | undefined): string {

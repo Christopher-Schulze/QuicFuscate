@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { CONGESTION_CONTROL_OPTIONS } from "../../../../../packages/ui/congestion-control";
 import {
   normalizeTomlTextForUi,
   setSectionValue,
@@ -13,7 +14,6 @@ import {
   compactDisplayValue,
   canonicalizeConfigForCompare,
   DEFAULT_STEALTH_MANUAL,
-  CC_ALGORITHMS,
   FRONTING_SNI_ALLOWLIST,
 } from "../../../../../apps/svelte-admin/src/lib/config-helpers";
 
@@ -159,6 +159,7 @@ describe("normalizeCcSelection", () => {
   test("returns known algorithm as-is", () => {
     expect(normalizeCcSelection("bbr2")).toBe("bbr2");
     expect(normalizeCcSelection("bbr3")).toBe("bbr3");
+    expect(normalizeCcSelection("cubic")).toBe("cubic");
     expect(normalizeCcSelection("reno")).toBe("reno");
   });
 
@@ -175,15 +176,23 @@ describe("normalizeCcSelection", () => {
   });
 
   test("rejects unknown values as __custom__", () => {
-    expect(normalizeCcSelection("cubic")).toBe("__custom__");
     expect(normalizeCcSelection("bbr")).toBe("__custom__");
     expect(normalizeCcSelection("bbr2_gcongestion")).toBe("__custom__");
     expect(normalizeCcSelection("ledbat")).toBe("__custom__");
   });
 
   test("handles all known algorithms", () => {
-    for (const algo of CC_ALGORITHMS) {
-      expect(normalizeCcSelection(algo)).toBe(algo);
+    for (const option of CONGESTION_CONTROL_OPTIONS) {
+      expect(normalizeCcSelection(option.value)).toBe(option.value);
+    }
+  });
+
+  test("round-trips every canonical algorithm through the TOML helpers", () => {
+    for (const option of CONGESTION_CONTROL_OPTIONS) {
+      const config = setSectionValue("", "transport", "cc_algorithm", `"${option.value}"`);
+      const parsed = readSectionValue(config, "transport", "cc_algorithm");
+      expect(parsed).toBe(option.value);
+      expect(normalizeCcSelection(parsed)).toBe(option.value);
     }
   });
 });
@@ -320,11 +329,13 @@ describe("canonicalizeConfigForCompare", () => {
 });
 
 describe("constants", () => {
-  test("CC_ALGORITHMS contains expected values", () => {
-    expect(CC_ALGORITHMS).toContain("reno");
-    expect(CC_ALGORITHMS).toContain("bbr2");
-    expect(CC_ALGORITHMS).toContain("bbr3");
-    expect(CC_ALGORITHMS).toHaveLength(3);
+  test("congestion-control contract contains the complete backend set", () => {
+    expect(CONGESTION_CONTROL_OPTIONS.map((option) => option.value)).toEqual([
+      "reno",
+      "cubic",
+      "bbr2",
+      "bbr3",
+    ]);
   });
 
   test("FRONTING_SNI_ALLOWLIST is non-empty", () => {

@@ -697,12 +697,23 @@ suppress_icmp_unreachable = true
     }
 
     #[test]
-    fn test_cubic_transport_config_roundtrip() {
-        let mut config = EngineConfig::default();
-        config.transport.cc_algorithm = CcAlgorithm::Cubic;
-        let encoded = toml::to_string(&config).expect("serialize cubic config");
-        let decoded: EngineConfig = toml::from_str(&encoded).expect("deserialize cubic config");
-        assert_eq!(decoded.transport.cc_algorithm, CcAlgorithm::Cubic);
+    fn transport_cc_config_roundtrips_canonical_algorithms(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (name, algorithm) in [
+            ("reno", CcAlgorithm::Reno),
+            ("cubic", CcAlgorithm::Cubic),
+            ("bbr2", CcAlgorithm::Bbr2),
+            ("bbr3", CcAlgorithm::Bbr3),
+        ] {
+            let source = format!("[transport]\ncc_algorithm = \"{name}\"\n");
+            let config = EngineConfig::from_toml(&source)?;
+            assert_eq!(config.transport.cc_algorithm, algorithm);
+
+            let encoded = toml::to_string(&config)?;
+            let decoded = EngineConfig::from_toml(&encoded)?;
+            assert_eq!(decoded.transport.cc_algorithm, algorithm);
+        }
+        Ok(())
     }
 
     #[test]

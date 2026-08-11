@@ -1,4 +1,5 @@
 import type { UnixMilliseconds, UnixSeconds } from "@quicfuscate/time";
+import type { CongestionControlAlgorithm } from "@quicfuscate/ui/congestion-control";
 
 export type NavTab = "dashboard" | "configuration" | "logs" | "about";
 
@@ -61,7 +62,7 @@ export type PendingIpAction = "block" | "unblock";
 
 export type StealthPresetUi = "auto" | "performance" | "stealth" | "antidpi" | "manual" | "off";
 
-export type CcSelection = "reno" | "bbr2" | "bbr3" | "__custom__";
+export type CcSelection = CongestionControlAlgorithm | "__custom__";
 
 export interface StealthManualSettings {
   enable_domain_fronting: boolean;

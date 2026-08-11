@@ -10,7 +10,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "serve:codex": "bun run build && echo \"Build OK. For a persistent server run: bun run dev (http://localhost:4173) or bun run preview with explicit --port/--host flags.\"",
     "test": "bun run test:unit",
-    "test:unit": "bun ../../scripts/tests/frontend/run-bounded-unit-tests.ts --minimum-files=36 --minimum-tests=441",
+    "test:unit": "bun ../../scripts/tests/frontend/run-bounded-unit-tests.ts --minimum-files=36 --minimum-tests=442",
     "test:unit:watch": "vitest --config vitest.config.ts --watch",
     "test:e2e:install": "bunx playwright install chromium",
     "test:e2e:preflight": "bash ../../scripts/tests/frontend/verify-playwright-browser.sh apps/svelte-desktop",

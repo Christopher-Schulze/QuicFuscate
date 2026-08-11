@@ -48,6 +48,9 @@
       "svelte": "./Select.svelte",
       "default": "./Select.svelte"
     },
+    "./congestion-control": {
+      "default": "./congestion-control.ts"
+    },
     "./cn": {
       "default": "./cn.ts"
     },

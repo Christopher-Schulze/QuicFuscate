@@ -1,6 +1,5 @@
 import type { StealthManualSettings, StealthPresetUi, CcSelection } from "$lib/types";
-
-export const CC_ALGORITHMS = ["reno", "bbr2", "bbr3"] as const;
+import { parseCongestionControlAlgorithm } from "@quicfuscate/ui/congestion-control";
 
 export const DEFAULT_STEALTH_MANUAL: StealthManualSettings = {
   enable_domain_fronting: true,
@@ -158,7 +157,7 @@ export function parsePort(raw: string | null): number | null {
 export function normalizeCcSelection(raw: string | null): CcSelection {
   const v = (raw ?? "").trim().toLowerCase();
   if (!v) return "bbr3";
-  return (CC_ALGORITHMS as readonly string[]).includes(v) ? (v as CcSelection) : "__custom__";
+  return parseCongestionControlAlgorithm(v) ?? "__custom__";
 }
 
 export function stealthPresetFromMode(mode: string | null): StealthPresetUi {

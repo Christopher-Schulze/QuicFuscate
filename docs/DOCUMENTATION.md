@@ -4812,7 +4812,7 @@ initial_max_stream_data_bidi_local = 1000000
 ```
 
 #### Congestion Control
-Four algorithms are available: Reno (conservative AIMD), CUBIC (RFC 9438 plus RFC 9406 HyStart++), BBR2 (loss-aware model-based), and BBR3 (stealth-optimized, default). All are real implementations, selectable through the CLI and canonical runtime configuration. Protected UI selectors remain unchanged.
+Four algorithms are available: Reno (conservative AIMD), CUBIC (RFC 9438 plus RFC 9406 HyStart++), BBR2 (loss-aware model-based), and BBR3 (stealth-optimized, default). All are real implementations, selectable through the CLI, canonical runtime configuration, and the Web Admin selector.
 
 ```toml
 [transport]
@@ -4820,6 +4820,8 @@ cc_algorithm = "bbr3"   # Options: "reno", "cubic", "bbr2", "bbr3"
 ```
 
 When stealth mode is active, the StealthShaper automatically wraps paced CUBIC, BBR2, and BBR3 with bounded pacing jitter. CUBIC and BBR2 can additionally apply optional 2% dampening. Reno has no pacing and is unaffected by stealth shaping.
+
+`qf-engine-types::CcAlgorithm` owns the validated Rust/TOML values. `@quicfuscate/ui/congestion-control` mirrors the exact `reno`, `cubic`, `bbr2`, and `bbr3` frontend contract for both Svelte applications. The Web Admin parser rejects unknown values and serializes a selected CUBIC value as `cc_algorithm = "cubic"`; the Desktop policy display labels canonical CUBIC as `CUBIC` and reserves `Custom` for unknown non-empty backend values. Regression coverage proves all four canonical TOML round trips plus exact frontend option, parser, selector, and display behavior.
 
 #### CPU Affinity and Thread Count
 ```toml
@@ -7051,5 +7053,5 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - Web Admin and Desktop `bun run test:unit` use `scripts/tests/frontend/run-bounded-unit-tests.ts` as their shared process owner. The wrapper resolves each app's installed Vitest binary, preserves live stdout and stderr, emits a 60-second heartbeat, forwards interruption signals, and terminates a non-exiting run with status `124` after 600 seconds.
 - `QF_FRONTEND_UNIT_TIMEOUT_MS` provides a validated diagnostic override from 1 through 3,600,000 milliseconds. Timeout output identifies worker startup, open handles, and teardown as the bounded failure surface and prints the exact `hanging-process` reporter command for deeper inspection.
 - Both Vitest configurations select `pool: "threads"`, `maxWorkers: 1`, and `fileParallelism: false`. Worker execution therefore stays in the owned Vitest process while test-file isolation remains enabled. Per-test timeouts remain 15 seconds and the process owner covers startup and teardown paths that a test timeout cannot reach.
-- Full unfiltered runs must retain the recorded inventory floors. The post-review Web Admin gate passes 26 files and 307 tests in 120.45 seconds; the final Desktop gate passes 36 files and 441 tests in 321.29 seconds. No include or exclude rule changed. A real 1-millisecond negative run terminates with status `124` and leaves no Vitest process behind.
+- Full unfiltered runs must retain the current inventory floors of 26 files and 309 tests for Web Admin plus 36 files and 442 tests for Desktop. The TODO-753 closure baseline was 26/307 and 36/441; TODO-707 added only CUBIC contract regressions and changed no include or exclude rule. A real 1-millisecond negative run terminates with status `124` and leaves no Vitest process behind.
 - GitHub `frontend-checks` and `scripts/tests/suites/test-desktop-webadmin-rust-integration.sh` already invoke the package commands, so CI, contributor documentation, and local development share the same bounded contract.

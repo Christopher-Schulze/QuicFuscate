@@ -1,9 +1,10 @@
 <script lang="ts">
   import { Select, Switch } from "@quicfuscate/ui";
+  import { CONGESTION_CONTROL_OPTIONS, parseCongestionControlAlgorithm } from "@quicfuscate/ui/congestion-control";
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import type { StealthPresetUi, StealthManualSettings, CcSelection } from "$lib/types";
-  import { CC_ALGORITHMS, parseMtu } from "$lib/config-helpers";
+  import { parseMtu } from "$lib/config-helpers";
 
   interface Props {
     stealthPreset: StealthPresetUi;
@@ -43,12 +44,6 @@
   const FEC_OPTIONS = [
     { value: "auto", label: "Auto" },
     { value: "off", label: "Off" },
-  ];
-
-  const CC_OPTIONS = [
-    { value: "reno", label: "Reno" },
-    { value: "bbr2", label: "BBR2" },
-    { value: "bbr3", label: "BBR3" },
   ];
 
   const MANUAL_FLAGS: [keyof StealthManualSettings, string][] = [
@@ -91,11 +86,10 @@
         <div class="text-[11px] font-semibold text-black whitespace-nowrap dashboard-heading-sans">Congestion Control</div>
         <Select
           value={transportCc}
-          options={transportCc === "__custom__" ? [...CC_OPTIONS, { value: "__custom__", label: "Custom [from TOML]" }] : CC_OPTIONS}
+          options={transportCc === "__custom__" ? [...CONGESTION_CONTROL_OPTIONS, { value: "__custom__", label: "Custom [from TOML]" }] : CONGESTION_CONTROL_OPTIONS}
           onchange={(v) => {
-            if (v !== "__custom__" && (CC_ALGORITHMS as readonly string[]).includes(v)) {
-              onCcChange(v as CcSelection);
-            }
+            const selected = parseCongestionControlAlgorithm(v);
+            if (selected !== null) onCcChange(selected);
           }}
           ariaLabel="Congestion control"
         />

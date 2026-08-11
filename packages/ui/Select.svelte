@@ -10,7 +10,7 @@
 
   interface Props {
     value: string;
-    options: SelectOption[];
+    options: readonly SelectOption[];
     onchange: (value: string) => void;
     label?: string;
     ariaLabel?: string;

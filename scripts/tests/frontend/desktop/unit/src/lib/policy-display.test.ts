@@ -149,6 +149,10 @@ describe("policy-display", () => {
       expect(displayCcMode("reno")).toBe("RENO");
     });
 
+    test("returns CUBIC for 'cubic'", () => {
+      expect(displayCcMode("cubic")).toBe("CUBIC");
+    });
+
     test("returns BBR2 for 'bbr2'", () => {
       expect(displayCcMode("bbr2")).toBe("BBR2");
     });
@@ -159,12 +163,12 @@ describe("policy-display", () => {
 
     test("handles case-insensitive input", () => {
       expect(displayCcMode("RENO")).toBe("RENO");
+      expect(displayCcMode("CUBIC")).toBe("CUBIC");
       expect(displayCcMode("BBR3")).toBe("BBR3");
     });
 
     test("returns Custom for unknown values", () => {
       expect(displayCcMode("unknown")).toBe("Custom");
-      expect(displayCcMode("cubic")).toBe("Custom");
       expect(displayCcMode("bbr")).toBe("Custom");
       expect(displayCcMode("vegas")).toBe("Custom");
     });
