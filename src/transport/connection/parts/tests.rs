@@ -924,6 +924,24 @@ mod tests {
         assert!(!c.readable_stream_ids.insert(4), "readable membership must deduplicate");
         assert_eq!(c.stream_readable_next(), Some(4));
         assert!(!c.readable_stream_ids.contains(&4));
+
+        assert_eq!(c.enqueue_peer_stream_reset(8, 42), Ok(()));
+        assert_eq!(c.enqueue_peer_stream_reset(8, 99), Ok(()));
+        assert_eq!(c.stream_reset_next(), Some((8, 42)));
+        assert!(!c.reset_stream_ids.contains(&8));
+    }
+
+    #[test]
+    fn peer_stream_reset_notifications_are_bounded_before_publication() {
+        let mut c = make_conn();
+        for stream_id in 0..MAX_PENDING_STREAM_RESETS as u64 {
+            assert_eq!(c.enqueue_peer_stream_reset(stream_id, 7), Ok(()));
+        }
+        assert_eq!(
+            c.enqueue_peer_stream_reset(MAX_PENDING_STREAM_RESETS as u64, 7),
+            Err(crate::error::ConnectionError::ProtocolViolation)
+        );
+        assert!(!c.reset_stream_ids.contains(&(MAX_PENDING_STREAM_RESETS as u64)));
     }
 
     // ---- Error Handling: Transport Errors, Reset -------------------------

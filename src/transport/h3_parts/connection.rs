@@ -33,6 +33,7 @@ const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
 const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
 const MAX_H3_SETTING_VALUE: u64 = 16 * 1024 * 1024;
+const MAX_LOCAL_QPACK_BLOCKED_STREAMS: u64 = 64;
 const MAX_STEALTH_PUSH_ID: u64 = 63;
 
 /// HTTP/3 connection with enhanced stream state management
@@ -49,6 +50,8 @@ pub struct Connection {
     encoder: qpack::Encoder,
     decoder: qpack::Decoder,
     control_stream_id: Option<u64>,
+    qpack_encoder_stream_id: Option<u64>,
+    qpack_decoder_stream_id: Option<u64>,
     _peer_control_stream_id: Option<u64>,
     peer_qpack_encoder_stream_id: Option<u64>,
     peer_qpack_decoder_stream_id: Option<u64>,
@@ -118,6 +121,12 @@ enum StreamType {
     WebTransportCover,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerQpackSettings {
+    maximum_table_capacity: u64,
+    blocked_streams: u64,
+}
+
 impl Connection {
     fn build_stealth_cover_resource_plan(
         base_path: &str,
@@ -162,26 +171,12 @@ impl Connection {
         plan
     }
 
-    fn encode_headers_block(&mut self, headers: &[Header]) -> Result<Vec<u8>, Error> {
-        // QPACK header blocks can exceed 4KiB when stealth adds realistic header cover.
-        // Grow the buffer until the encoder succeeds (bounded to avoid pathological allocations).
-        let mut cap = 4096usize;
-        loop {
-            let mut buf = vec![0u8; cap];
-            match self.encoder.encode(headers, &mut buf) {
-                Ok(len) => {
-                    buf.truncate(len);
-                    return Ok(buf);
-                }
-                Err(Error::BufferTooShort) => {
-                    if cap >= 256 * 1024 {
-                        return Err(Error::BufferTooShort);
-                    }
-                    cap = (cap * 2).min(256 * 1024);
-                }
-                Err(e) => return Err(e),
-            }
-        }
+    fn prepare_headers_block(
+        &self,
+        stream_id: u64,
+        headers: &[Header],
+    ) -> Result<qpack::EncodePlan, Error> {
+        self.encoder.prepare(stream_id, headers)
     }
 
     /// Creates a new HTTP/3 connection with proper initialization
@@ -193,7 +188,7 @@ impl Connection {
         if config.max_field_section_size() == 0
             || config.max_field_section_size() > MAX_H3_SETTING_VALUE
             || config.qpack_max_table_capacity() > MAX_H3_SETTING_VALUE
-            || config.qpack_blocked_streams() > MAX_H3_SETTING_VALUE
+            || config.qpack_blocked_streams() > MAX_LOCAL_QPACK_BLOCKED_STREAMS
         {
             return Err(Error::ExcessiveLoad);
         }
@@ -207,9 +202,14 @@ impl Connection {
             streams: HashMap::new(),
             finished_streams: HashSet::new(),
             pending_events: VecDeque::new(),
-            encoder: qpack::Encoder::with_capacity(config.qpack_max_table_capacity()),
-            decoder: qpack::Decoder::with_capacity(config.qpack_max_table_capacity()),
+            encoder: qpack::Encoder::new(),
+            decoder: qpack::Decoder::with_limits(
+                config.qpack_max_table_capacity(),
+                config.qpack_blocked_streams(),
+            ),
             control_stream_id: None,
+            qpack_encoder_stream_id: None,
+            qpack_decoder_stream_id: None,
             _peer_control_stream_id: None,
             peer_qpack_encoder_stream_id: None,
             peer_qpack_decoder_stream_id: None,
@@ -312,6 +312,157 @@ impl Connection {
         Ok(())
     }
 
+    fn send_qpack_encoder_instructions(
+        &mut self,
+        conn: &mut super::Connection,
+        instructions: &[u8],
+    ) -> Result<(), Error> {
+        if instructions.is_empty() {
+            return Ok(());
+        }
+        if let Some(stream_id) = self.qpack_encoder_stream_id {
+            let sent = conn
+                .stream_send(stream_id, instructions, false)
+                .map_err(|_| Error::StreamCreationError)?;
+            if sent != instructions.len() {
+                return Err(Error::InternalError);
+            }
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
+            }
+            return Ok(());
+        }
+
+        let stream_id = self.next_uni_stream_id;
+        let next_stream_id = stream_id.checked_add(4).ok_or(Error::StreamCreationError)?;
+        let mut prologue = Vec::with_capacity(instructions.len().saturating_add(1));
+        Self::encode_varint(0x02, &mut prologue);
+        prologue.extend_from_slice(instructions);
+        let sent = conn
+            .stream_send(stream_id, &prologue, false)
+            .map_err(|_| Error::StreamCreationError)?;
+        if sent != prologue.len() {
+            return Err(Error::InternalError);
+        }
+        self.next_uni_stream_id = next_stream_id;
+        self.qpack_encoder_stream_id = Some(stream_id);
+        self.streams.insert(
+            stream_id,
+            StreamState {
+                _headers: Vec::new(),
+                body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
+                _received_bytes: 0,
+                _stream_type: StreamType::QpackEncoder,
+                sent_bytes: sent,
+                fin_sent: false,
+                fin_received: false,
+                masque_established: false,
+                masque_capsule_buffer: Vec::new(),
+                settings_received: false,
+                receive_message_state: ReceiveMessageState::AwaitingHeaders,
+            },
+        );
+        Ok(())
+    }
+
+    fn flush_qpack_decoder_instructions(
+        &mut self,
+        conn: &mut super::Connection,
+    ) -> Result<(), Error> {
+        if self.decoder.pending_decoder_instructions().is_empty() {
+            return Ok(());
+        }
+        let pending = self.decoder.pending_decoder_instructions().to_vec();
+        if let Some(stream_id) = self.qpack_decoder_stream_id {
+            let sent = match conn.stream_send(stream_id, &pending, false) {
+                Ok(sent) => sent,
+                Err(crate::error::ConnectionError::FlowControl)
+                | Err(crate::error::ConnectionError::StreamLimit) => return Ok(()),
+                Err(_) => return Err(Error::InternalError),
+            };
+            if sent != pending.len() {
+                return Err(Error::InternalError);
+            }
+            self.decoder.consume_decoder_instructions(sent);
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                stream.sent_bytes = stream.sent_bytes.saturating_add(sent);
+            }
+            return Ok(());
+        }
+
+        let stream_id = self.next_uni_stream_id;
+        let next_stream_id = stream_id.checked_add(4).ok_or(Error::StreamCreationError)?;
+        let mut prologue = Vec::with_capacity(pending.len().saturating_add(1));
+        Self::encode_varint(0x03, &mut prologue);
+        prologue.extend_from_slice(&pending);
+        let sent = match conn.stream_send(stream_id, &prologue, false) {
+            Ok(sent) => sent,
+            Err(crate::error::ConnectionError::FlowControl)
+            | Err(crate::error::ConnectionError::StreamLimit) => return Ok(()),
+            Err(_) => return Err(Error::InternalError),
+        };
+        if sent != prologue.len() {
+            return Err(Error::InternalError);
+        }
+        self.next_uni_stream_id = next_stream_id;
+        self.qpack_decoder_stream_id = Some(stream_id);
+        self.decoder.consume_decoder_instructions(pending.len());
+        self.streams.insert(
+            stream_id,
+            StreamState {
+                _headers: Vec::new(),
+                body_buffer: Vec::new(),
+                frame_buffer: Vec::new(),
+                _received_bytes: 0,
+                _stream_type: StreamType::QpackDecoder,
+                sent_bytes: sent,
+                fin_sent: false,
+                fin_received: false,
+                masque_established: false,
+                masque_capsule_buffer: Vec::new(),
+                settings_received: false,
+                receive_message_state: ReceiveMessageState::AwaitingHeaders,
+            },
+        );
+        Ok(())
+    }
+
+    fn commit_qpack_plan(
+        &mut self,
+        conn: &mut super::Connection,
+        plan: qpack::EncodePlan,
+    ) -> Result<(Vec<u8>, bool, u64), Error> {
+        self.send_qpack_encoder_instructions(conn, &plan.encoder_instructions)?;
+        Ok(plan.commit(&mut self.encoder))
+    }
+
+    fn process_peer_stream_resets(
+        &mut self,
+        conn: &mut super::Connection,
+    ) -> Result<(), Error> {
+        while let Some((stream_id, error_code)) = conn.stream_reset_next() {
+            if self._peer_control_stream_id == Some(stream_id)
+                || self.peer_qpack_encoder_stream_id == Some(stream_id)
+                || self.peer_qpack_decoder_stream_id == Some(stream_id)
+            {
+                return Err(Error::ClosedCriticalStream);
+            }
+            self.decoder.cancel_stream(stream_id)?;
+            self.streams.remove(&stream_id);
+            self.finished_streams.remove(&stream_id);
+            self.masque_flow.remove(&stream_id);
+            self.webtransport_session_ids.remove(&stream_id);
+            self.pending_webtransport_streams.remove(&stream_id);
+            self.established_webtransport_sessions.remove(&stream_id);
+            if self.peer_request_stream_id == Some(stream_id) {
+                self.peer_request_stream_id = None;
+            }
+            self.pending_events.push_back((stream_id, Event::Reset(error_code)));
+        }
+        self.flush_qpack_decoder_instructions(conn)
+    }
+
     /// Sends an HTTP/3 request with proper frame encoding
     pub fn send_request(
         &mut self,
@@ -327,15 +478,31 @@ impl Connection {
             return Err(Error::StreamCreationError);
         }
         let stream_id = self.next_stream_id;
-        self.next_stream_id += 4;
-        let encoded = self.encode_headers_block(headers)?;
+        let next_stream_id = stream_id.checked_add(4).ok_or(Error::StreamCreationError)?;
+        let plan = self.prepare_headers_block(stream_id, headers)?;
+        let (encoded, owns_section, section_stream_id) = self.commit_qpack_plan(conn, plan)?;
         let encoded_len = encoded.len();
         // Create HEADERS frame
         let mut frame = Vec::new();
         frame.push(0x01);
         Self::encode_varint(encoded_len as u64, &mut frame);
         frame.extend_from_slice(&encoded[..encoded_len]);
-        conn.stream_send(stream_id, &frame, fin).map_err(|_| Error::InternalError)?;
+        let sent = match conn.stream_send(stream_id, &frame, fin) {
+            Ok(sent) if sent == frame.len() => sent,
+            Ok(_) => {
+                if owns_section {
+                    self.encoder.rollback_latest_section(section_stream_id);
+                }
+                return Err(Error::InternalError);
+            }
+            Err(_) => {
+                if owns_section {
+                    self.encoder.rollback_latest_section(section_stream_id);
+                }
+                return Err(Error::InternalError);
+            }
+        };
+        self.next_stream_id = next_stream_id;
         // Telemetry
         crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::optimize::telemetry::H3_HEADERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -347,7 +514,7 @@ impl Connection {
                 frame_buffer: Vec::new(),
                 _received_bytes: 0,
                 _stream_type: StreamType::Request,
-                sent_bytes: frame.len(),
+                sent_bytes: sent,
                 fin_sent: fin,
                 fin_received: false,
                 masque_established: false,
@@ -374,12 +541,27 @@ impl Connection {
         if self.control_stream_id.is_none() {
             return Err(Error::StreamCreationError);
         }
-        let encoded = self.encode_headers_block(headers)?;
+        let plan = self.prepare_headers_block(stream_id, headers)?;
+        let (encoded, owns_section, section_stream_id) = self.commit_qpack_plan(conn, plan)?;
         let mut frame = Vec::with_capacity(encoded.len().saturating_add(10));
         frame.push(0x01);
         Self::encode_varint(encoded.len() as u64, &mut frame);
         frame.extend_from_slice(&encoded);
-        let sent = conn.stream_send(stream_id, &frame, fin).map_err(|_| Error::InternalError)?;
+        let sent = match conn.stream_send(stream_id, &frame, fin) {
+            Ok(sent) if sent == frame.len() => sent,
+            Ok(_) => {
+                if owns_section {
+                    self.encoder.rollback_latest_section(section_stream_id);
+                }
+                return Err(Error::InternalError);
+            }
+            Err(_) => {
+                if owns_section {
+                    self.encoder.rollback_latest_section(section_stream_id);
+                }
+                return Err(Error::InternalError);
+            }
+        };
         let stream = self.streams.entry(stream_id).or_insert_with(|| StreamState {
             _headers: Vec::new(),
             body_buffer: Vec::new(),
@@ -534,6 +716,8 @@ impl Connection {
     /// Process HTTP/3 frames and generate events
     pub fn poll(&mut self, conn: &mut super::Connection) -> Result<Option<(u64, Event)>, Error> {
         self.init_control_stream(conn)?;
+        self.process_peer_stream_resets(conn)?;
+        self.flush_qpack_decoder_instructions(conn)?;
         // Process scheduled push streams and continue sending bodies
         self.process_scheduled_push_streams(conn);
         self.process_push_data(conn);
@@ -546,6 +730,19 @@ impl Connection {
             self.stream_recv_buffer = recv_buffer;
             result?;
         }
+        loop {
+            let ready = self.decoder.take_unblocked_streams();
+            if ready.is_empty() {
+                break;
+            }
+            for stream_id in ready {
+                let mut recv_buffer = std::mem::take(&mut self.stream_recv_buffer);
+                let result = self.process_stream(conn, stream_id, &mut recv_buffer);
+                self.stream_recv_buffer = recv_buffer;
+                result?;
+            }
+        }
+        self.flush_qpack_decoder_instructions(conn)?;
         self.publish_ready_webtransport_streams();
 
         // Lightweight GC using fin_received. Completed push streams are locally
@@ -675,10 +872,17 @@ impl Connection {
         for push_id in ready_push_ids {
             let Some(snapshot) = self.push_streams.get(&push_id).cloned() else { continue };
             if snapshot.state == PushState::PendingPromise {
-                let encoded = match self.encode_headers_block(&snapshot.request_headers) {
-                    Ok(encoded) => encoded,
+                let plan = match self
+                    .prepare_headers_block(snapshot.request_stream_id, &snapshot.request_headers)
+                {
+                    Ok(plan) => plan,
                     Err(_) => continue,
                 };
+                let (encoded, owns_section, section_stream_id) =
+                    match self.commit_qpack_plan(conn, plan) {
+                        Ok(committed) => committed,
+                        Err(_) => continue,
+                    };
                 let mut payload = Vec::with_capacity(encoded.len().saturating_add(8));
                 Self::encode_varint(push_id, &mut payload);
                 payload.extend_from_slice(&encoded);
@@ -686,7 +890,13 @@ impl Connection {
                 Self::encode_varint(0x05, &mut frame);
                 Self::encode_varint(payload.len() as u64, &mut frame);
                 frame.extend_from_slice(&payload);
-                if conn.stream_send(snapshot.request_stream_id, &frame, false).is_err() {
+                if !matches!(
+                    conn.stream_send(snapshot.request_stream_id, &frame, false),
+                    Ok(sent) if sent == frame.len()
+                ) {
+                    if owns_section {
+                        self.encoder.rollback_latest_section(section_stream_id);
+                    }
                     continue;
                 }
                 if let Some(promise) = self.push_streams.get_mut(&push_id) {
@@ -698,11 +908,16 @@ impl Connection {
             if snapshot.state != PushState::Promised {
                 continue;
             }
-            let encoded = match self.encode_headers_block(&snapshot.response_headers) {
-                Ok(encoded) => encoded,
+            let stream_id = self.next_uni_stream_id;
+            let plan = match self.prepare_headers_block(stream_id, &snapshot.response_headers) {
+                Ok(plan) => plan,
                 Err(_) => continue,
             };
-            let stream_id = self.next_uni_stream_id;
+            let (encoded, owns_section, section_stream_id) =
+                match self.commit_qpack_plan(conn, plan) {
+                    Ok(committed) => committed,
+                    Err(_) => continue,
+                };
             let mut prologue = Vec::with_capacity(encoded.len().saturating_add(18));
             Self::encode_varint(0x01, &mut prologue);
             Self::encode_varint(push_id, &mut prologue);
@@ -712,7 +927,13 @@ impl Connection {
             let Some(next_stream_id) = stream_id.checked_add(4) else {
                 continue;
             };
-            if conn.stream_send(stream_id, &prologue, false).is_err() {
+            if !matches!(
+                conn.stream_send(stream_id, &prologue, false),
+                Ok(sent) if sent == prologue.len()
+            ) {
+                if owns_section {
+                    self.encoder.rollback_latest_section(section_stream_id);
+                }
                 continue;
             }
             self.next_uni_stream_id = next_stream_id;
@@ -862,9 +1083,10 @@ impl Connection {
         }
     }
 
-    fn validate_settings_payload(&self, payload: &[u8]) -> Result<(), Error> {
+    fn parse_settings_payload(payload: &[u8]) -> Result<PeerQpackSettings, Error> {
         let mut offset = 0usize;
         let mut seen = HashSet::new();
+        let mut qpack = PeerQpackSettings::default();
         while offset < payload.len() {
             let (setting, setting_len) = Self::decode_varint(&payload[offset..]).map_err(|error| {
                 if error == Error::BufferTooShort { Error::SettingsError } else { error }
@@ -882,13 +1104,15 @@ impl Connection {
                 0x01 | 0x06 | 0x07 if value > MAX_H3_SETTING_VALUE => {
                     return Err(Error::ExcessiveLoad);
                 }
+                0x01 => qpack.maximum_table_capacity = value,
+                0x07 => qpack.blocked_streams = value,
                 _ => {}
             }
         }
         if offset != payload.len() {
             return Err(Error::FrameError);
         }
-        Ok(())
+        Ok(qpack)
     }
 
     fn decode_single_varint_payload(payload: &[u8]) -> Result<u64, Error> {
@@ -1056,7 +1280,11 @@ impl Connection {
     ) -> Result<(), Error> {
         let (len, fin) =
             conn.stream_recv(stream_id, recv_buffer).map_err(|_| Error::InternalError)?;
-        if len == 0 && !fin {
+        let has_buffered_frames = self
+            .streams
+            .get(&stream_id)
+            .is_some_and(|stream| !stream.frame_buffer.is_empty());
+        if len == 0 && !fin && !has_buffered_frames {
             return Ok(());
         }
         let received = &recv_buffer[..len];
@@ -1070,7 +1298,13 @@ impl Connection {
                 }
                 return Ok(());
             }
-            Some(StreamType::QpackEncoder | StreamType::QpackDecoder) => {
+            Some(StreamType::QpackEncoder) => {
+                self.decoder.process_encoder_stream(received)?;
+                self.flush_qpack_decoder_instructions(conn)?;
+                return if fin { Err(Error::ClosedCriticalStream) } else { Ok(()) };
+            }
+            Some(StreamType::QpackDecoder) => {
+                self.encoder.process_decoder_stream(received)?;
                 return if fin { Err(Error::ClosedCriticalStream) } else { Ok(()) };
             }
             Some(StreamType::WebTransportData) => {
@@ -1200,7 +1434,13 @@ impl Connection {
                     }
                     return Ok(());
                 }
-                StreamType::QpackEncoder | StreamType::QpackDecoder => {
+                StreamType::QpackEncoder => {
+                    self.decoder.process_encoder_stream(&buffered)?;
+                    self.flush_qpack_decoder_instructions(conn)?;
+                    return if fin { Err(Error::ClosedCriticalStream) } else { Ok(()) };
+                }
+                StreamType::QpackDecoder => {
+                    self.encoder.process_decoder_stream(&buffered)?;
                     return if fin { Err(Error::ClosedCriticalStream) } else { Ok(()) };
                 }
                 StreamType::WebTransportData => {
@@ -1298,7 +1538,16 @@ impl Connection {
                     }
                 }
                 0x01 => {
-                    let headers = self.decoder.decode(frame_data)?;
+                    let headers = match self.decoder.decode(stream_id, frame_data)? {
+                        qpack::DecodeOutcome::Decoded(headers) => headers,
+                        qpack::DecodeOutcome::Blocked => {
+                            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                            stream.frame_buffer.extend_from_slice(&buffered[offset..]);
+                            self.pending_events.extend(pending_masque_events);
+                            return Ok(());
+                        }
+                    };
+                    self.flush_qpack_decoder_instructions(conn)?;
                     let current_stream_type = self
                         .streams
                         .get(&stream_id)
@@ -1349,7 +1598,11 @@ impl Connection {
                     }
                 }
                 0x04 => {
-                    self.validate_settings_payload(frame_data)?;
+                    let settings = Self::parse_settings_payload(frame_data)?;
+                    self.encoder.configure_peer(
+                        settings.maximum_table_capacity,
+                        settings.blocked_streams,
+                    )?;
                     if let Some(stream) = self.streams.get_mut(&stream_id) {
                         stream.settings_received = true;
                     }
@@ -1362,7 +1615,16 @@ impl Connection {
                     if self.local_max_push_id.is_none_or(|maximum| push_id > maximum) {
                         return Err(Error::IdError);
                     }
-                    let headers = self.decoder.decode(&frame_data[push_id_len..])?;
+                    let headers = match self.decoder.decode(stream_id, &frame_data[push_id_len..])? {
+                        qpack::DecodeOutcome::Decoded(headers) => headers,
+                        qpack::DecodeOutcome::Blocked => {
+                            let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
+                            stream.frame_buffer.extend_from_slice(&buffered[offset..]);
+                            self.pending_events.extend(pending_masque_events);
+                            return Ok(());
+                        }
+                    };
+                    self.flush_qpack_decoder_instructions(conn)?;
                     self.pending_events
                         .push_back((stream_id, Event::PushPromise { push_id, headers }));
                 }

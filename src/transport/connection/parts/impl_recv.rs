@@ -1,4 +1,20 @@
 impl Connection {
+    fn enqueue_peer_stream_reset(
+        &mut self,
+        stream_id: u64,
+        error_code: u64,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if self.reset_stream_ids.contains(&stream_id) {
+            return Ok(());
+        }
+        if self.reset_streams.len() >= MAX_PENDING_STREAM_RESETS {
+            return Err(crate::error::ConnectionError::ProtocolViolation);
+        }
+        self.reset_stream_ids.insert(stream_id);
+        self.reset_streams.push_back((stream_id, error_code));
+        Ok(())
+    }
+
     /// Validates the complete decrypted frame payload before receive-side state is mutated.
     #[inline(always)]
     fn preflight_frame_payload(
@@ -619,7 +635,8 @@ impl Connection {
                         Frame::Ping { .. } => {
                             ack_eliciting = true;
                         }
-                        Frame::ResetStream { .. } => {
+                        Frame::ResetStream { stream_id, error_code, .. } => {
+                            self.enqueue_peer_stream_reset(stream_id, error_code)?;
                             // Transport-level RST indicator
                             crate::optimize::telemetry::STEALTH_SIGNAL_RST
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

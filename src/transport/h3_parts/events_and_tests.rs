@@ -1,499 +1,3 @@
-
-/// QPACK encoder/decoder module with dynamic table support
-pub(crate) mod qpack {
-    use super::*;
-
-    #[inline]
-    pub(crate) fn huff_estimate_len(input: &[u8]) -> usize {
-        qf_simd::qpack::huff_estimate_len(input)
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn huff_encode_into(input: &[u8], output: &mut [u8]) -> usize {
-        qf_simd::qpack::huff_encode_into(input, output)
-    }
-
-    pub(crate) fn huff_decode_into(data: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-        qf_simd::qpack::huff_decode_into(data, out).map_err(|error| match error {
-            qf_simd::qpack::HuffmanError::BufferTooShort => Error::BufferTooShort,
-            qf_simd::qpack::HuffmanError::InvalidEncoding => Error::QpackDecompressionFailed,
-        })
-    }
-
-    fn huff_decode(data: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut buf = vec![0u8; huff_estimate_len(data).saturating_mul(2).max(32)];
-        match huff_decode_into(data, &mut buf) {
-            Ok(written) => {
-                buf.truncate(written);
-                Ok(buf)
-            }
-            Err(Error::BufferTooShort) => {
-                // grow to worst-case 3x and retry once
-                buf.resize(data.len().saturating_mul(3).max(64), 0);
-                let written = huff_decode_into(data, &mut buf)?;
-                buf.truncate(written);
-                Ok(buf)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Static table entries for common headers and frequent values
-    /// Note: This combines a pragmatic superset for our use-case; indices are internal.
-    const STATIC_TABLE: &[(&[u8], &[u8])] = &[
-        // Frequently used realistic pairs for stealth cover traffic
-        (b"content-type", b"text/css"),
-        (b"content-type", b"application/javascript"),
-        (b"content-type", b"application/json"),
-        (b"content-type", b"image/jpeg"),
-        (b"content-type", b"image/png"),
-        (b"cache-control", b"public, max-age=31536000"),
-        (b"accept-encoding", b"gzip, deflate, br"),
-        (b"accept", b"*/*"),
-        (b"x-cdn-cache", b"HIT"),
-        (b":authority", b""),
-        (b":path", b"/"),
-        (b":method", b"GET"),
-        (b":method", b"POST"),
-        (b":scheme", b"http"),
-        (b":scheme", b"https"),
-        (b":status", b"200"),
-        (b":status", b"204"),
-        (b":status", b"206"),
-        (b":status", b"304"),
-        (b":status", b"400"),
-        (b":status", b"404"),
-        (b":status", b"500"),
-        (b"accept-charset", b""),
-        (b"accept-encoding", b"gzip, deflate"),
-        (b"accept-language", b""),
-        (b"accept-ranges", b""),
-        (b"accept", b""),
-        (b"access-control-allow-origin", b""),
-        (b"age", b""),
-        (b"allow", b""),
-        (b"authorization", b""),
-        (b"cache-control", b""),
-        (b"content-disposition", b""),
-        (b"content-encoding", b""),
-        (b"content-language", b""),
-        (b"content-length", b""),
-        (b"content-location", b""),
-        (b"content-range", b""),
-        (b"content-type", b""),
-        (b"cookie", b""),
-        (b"date", b""),
-        (b"etag", b""),
-        (b"expect", b""),
-        (b"expires", b""),
-        (b"from", b""),
-        (b"host", b""),
-        (b"if-match", b""),
-        (b"if-modified-since", b""),
-        (b"if-none-match", b""),
-        (b"if-range", b""),
-        (b"if-unmodified-since", b""),
-        (b"last-modified", b""),
-        (b"link", b""),
-        (b"location", b""),
-        (b"max-forwards", b""),
-        (b"proxy-authenticate", b""),
-        (b"proxy-authorization", b""),
-        (b"range", b""),
-        (b"referer", b""),
-        (b"refresh", b""),
-        (b"retry-after", b""),
-        (b"server", b""),
-        (b"set-cookie", b""),
-        (b"strict-transport-security", b""),
-        (b"transfer-encoding", b""),
-        (b"user-agent", b""),
-        (b"vary", b""),
-        (b"via", b""),
-        (b"www-authenticate", b""),
-    ];
-
-    /// QPACK encoder with dynamic table
-    pub(crate) struct Encoder {
-        dynamic_table: Vec<(Vec<u8>, Vec<u8>)>,
-        dyn_index: std::collections::HashMap<u64, usize>,
-        _max_table_capacity: usize,
-        _current_capacity: usize,
-        _inserted_count: u64,
-        _evicted_count: u64,
-        index_prefer: Vec<Vec<u8>>, // header names to prefer ordering/indexing
-    }
-    impl Default for Encoder {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-    impl Encoder {
-        pub(crate) fn new() -> Self {
-            Self::with_capacity(0)
-        }
-        pub(crate) fn with_capacity(capacity: u64) -> Self {
-            let mut s = Self {
-                dynamic_table: Vec::new(),
-                dyn_index: std::collections::HashMap::new(),
-                _max_table_capacity: capacity as usize,
-                _current_capacity: 0,
-                _inserted_count: 0,
-                _evicted_count: 0,
-                index_prefer: Vec::new(),
-            };
-            // Seed dictionary with common (name,value) pairs if there is capacity
-            if capacity >= 1024 {
-                s.seed_default_dictionary();
-            }
-            s
-        }
-
-        #[inline]
-        fn hash_nv(name: &[u8], value: &[u8]) -> u64 {
-            let mut h: u64 = 1469598103934665603; // FNV-1a 64-bit offset basis
-            for b in name.iter().chain(value.iter()) {
-                h ^= *b as u64;
-                h = h.wrapping_mul(1099511628211);
-            }
-            h
-        }
-        /// Seed dynamic table with frequent pairs to reduce first-flight size.
-        fn seed_default_dictionary(&mut self) {
-            const SEEDS: &[(&[u8], &[u8])] = &[
-                (b"content-type", b"text/css"),
-                (b"content-type", b"application/javascript"),
-                (b"content-type", b"application/json"),
-                (b"content-type", b"image/jpeg"),
-                (b"content-type", b"image/png"),
-                (b"cache-control", b"public, max-age=31536000"),
-                (b"accept-encoding", b"gzip, deflate, br"),
-                (b"accept", b"*/*"),
-                (b"x-cdn-cache", b"HIT"),
-            ];
-            for &(n, v) in SEEDS {
-                let key = Self::hash_nv(n, v);
-                let idx = self.dynamic_table.len();
-                self.dynamic_table.push((n.to_vec(), v.to_vec()));
-                self.dyn_index.insert(key, idx);
-                self._inserted_count = self._inserted_count.saturating_add(1);
-            }
-        }
-        pub(super) fn set_index_policy(&mut self, prefer: &[&[u8]]) {
-            self.index_prefer = prefer.iter().map(|s| s.to_vec()).collect();
-        }
-        pub(crate) fn encode(
-            &mut self,
-            headers: &[Header],
-            out: &mut [u8],
-        ) -> Result<usize, Error> {
-            let mut written = 0;
-            if out.len() < 2 {
-                return Err(Error::BufferTooShort);
-            }
-            out[written] = self._inserted_count as u8;
-            out[written + 1] = self._inserted_count as u8;
-            written += 2;
-            // Persona policy: keep preferred headers first.
-            let mut ordered: Vec<&Header> = headers.iter().collect();
-            if !self.index_prefer.is_empty() {
-                ordered.sort_by_key(|h| {
-                    let name = h.name();
-                    self.index_prefer
-                        .iter()
-                        .position(|p| p.as_slice() == name)
-                        .unwrap_or(self.index_prefer.len())
-                });
-            }
-            for header in ordered {
-                let name = header.name();
-                let value = header.value();
-                let mut encoded = false;
-                for (i, (static_name, static_value)) in STATIC_TABLE.iter().enumerate() {
-                    if name == *static_name && value == *static_value {
-                        if written >= out.len() {
-                            return Err(Error::BufferTooShort);
-                        }
-                        out[written] = 0x80 | (i as u8);
-                        written += 1;
-                        encoded = true;
-                        break;
-                    }
-                }
-                if encoded {
-                    continue;
-                }
-                for (i, (static_name, static_value)) in STATIC_TABLE.iter().enumerate() {
-                    if name == *static_name && static_value.is_empty() {
-                        if written + 1 > out.len() {
-                            return Err(Error::BufferTooShort);
-                        }
-                        out[written] = 0x40 | (i as u8);
-                        written += 1;
-                        written += Self::encode_string(value, &mut out[written..])?;
-                        encoded = true;
-                        break;
-                    }
-                }
-                if encoded {
-                    continue;
-                }
-                // O(1) lookup in dynamic table via hash index
-                let mut idx_opt = None;
-                let key = Self::hash_nv(name, value);
-                if let Some(&idx) = self.dyn_index.get(&key) {
-                    if let Some((n, v)) = self.dynamic_table.get(idx) {
-                        if n.as_slice() == name && v.as_slice() == value {
-                            idx_opt = Some(idx);
-                        }
-                    }
-                }
-                if idx_opt.is_none() {
-                    if let Some(idx) = self
-                        .dynamic_table
-                        .iter()
-                        .position(|(n, v)| n.as_slice() == name && v.as_slice() == value)
-                    {
-                        self.dyn_index.insert(key, idx);
-                        idx_opt = Some(idx);
-                    }
-                }
-                if let Some(idx) = idx_opt {
-                    if written + 2 > out.len() {
-                        return Err(Error::BufferTooShort);
-                    }
-                    out[written] = 0xA0;
-                    written += 1;
-                    if idx < 128 {
-                        if written + 1 > out.len() {
-                            return Err(Error::BufferTooShort);
-                        }
-                        out[written] = idx as u8;
-                        written += 1;
-                    } else {
-                        if written + 2 > out.len() {
-                            return Err(Error::BufferTooShort);
-                        }
-                        out[written] = 0x80 | ((idx >> 8) as u8);
-                        out[written + 1] = (idx & 0xff) as u8;
-                        written += 2;
-                    }
-                    continue;
-                }
-                if written + 3 + name.len() + value.len() > out.len() {
-                    return Err(Error::BufferTooShort);
-                }
-                out[written] = 0x20;
-                written += 1;
-                written += Self::encode_string(name, &mut out[written..])?;
-                written += Self::encode_string(value, &mut out[written..])?;
-                if self._max_table_capacity > 0 {
-                    let idx_new = self.dynamic_table.len();
-                    self.dynamic_table.push((name.to_vec(), value.to_vec()));
-                    self.dyn_index.insert(Self::hash_nv(name, value), idx_new);
-                    self._inserted_count += 1;
-                    let capacity = (self._max_table_capacity / 64).max(16);
-                    while self.dynamic_table.len() > capacity {
-                        self.dynamic_table.remove(0);
-                        // Rebuild index lazily when needed
-                        self.dyn_index.clear();
-                        for (i, (n, v)) in self.dynamic_table.iter().enumerate() {
-                            self.dyn_index.insert(Self::hash_nv(n, v), i);
-                        }
-                        self._evicted_count += 1;
-                    }
-                }
-            }
-            Ok(written)
-        }
-        fn write_int_prefix7(
-            mut val: usize,
-            first: &mut u8,
-            tail: &mut [u8],
-        ) -> Result<usize, Error> {
-            let mut pos = 1;
-            let prefix_max = 0x7f;
-            if val < prefix_max {
-                *first |= val as u8;
-                return Ok(1);
-            }
-            *first |= prefix_max as u8;
-            val -= prefix_max;
-            while val >= 128 {
-                if pos > tail.len() {
-                    return Err(Error::BufferTooShort);
-                }
-                tail[pos - 1] = ((val as u8) & 0x7f) | 0x80;
-                pos += 1;
-                val >>= 7;
-            }
-            if pos > tail.len() {
-                return Err(Error::BufferTooShort);
-            }
-            tail[pos - 1] = val as u8;
-            Ok(pos + 1)
-        }
-
-        fn read_int_prefix7(first: u8, data: &[u8]) -> Result<(usize, usize), Error> {
-            let mut val = (first & 0x7f) as usize;
-            if val < 0x7f {
-                return Ok((val, 0));
-            }
-            let mut m = 0;
-            let mut pos = 0;
-            loop {
-                if pos >= data.len() {
-                    return Err(Error::BufferTooShort);
-                }
-                let b = data[pos];
-                pos += 1;
-                val += ((b & 0x7f) as usize) << m;
-                if b & 0x80 == 0 {
-                    break;
-                }
-                m += 7;
-                if m > 28 {
-                    return Err(Error::InternalError);
-                }
-            }
-            Ok((val, pos))
-        }
-
-        fn encode_string(s: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-            let raw_len = s.len();
-            let huff_len = huff_estimate_len(s);
-            let use_huff = huff_len < raw_len;
-            let encoded_len = if use_huff { huff_len } else { raw_len };
-            if out.is_empty() {
-                return Err(Error::BufferTooShort);
-            }
-            let mut first: u8 = 0;
-            if use_huff {
-                first |= 0x80;
-            }
-            // Compose header in a small buffer to avoid aliasing borrows
-            let mut hdr = [0u8; 10];
-            let header_len = {
-                let mut f = first;
-                let used = Self::write_int_prefix7(encoded_len, &mut f, &mut hdr[1..])?;
-                hdr[0] = f;
-                used
-            };
-            if out.len() < header_len {
-                return Err(Error::BufferTooShort);
-            }
-            out[..header_len].copy_from_slice(&hdr[..header_len]);
-            if use_huff {
-                if out.len() < header_len + encoded_len {
-                    return Err(Error::BufferTooShort);
-                }
-                // Prefer SIMD runtime-dispatched QPACK Huffman encoding
-                let used = crate::simd::qpack::encode_huff_into(
-                    s,
-                    &mut out[header_len..header_len + encoded_len],
-                );
-                Ok(header_len + used)
-            } else {
-                if out.len() < header_len + raw_len {
-                    return Err(Error::BufferTooShort);
-                }
-                out[header_len..header_len + raw_len].copy_from_slice(s);
-                Ok(header_len + raw_len)
-            }
-        }
-    }
-
-    /// QPACK decoder with dynamic table
-    pub(crate) struct Decoder {
-        dynamic_table: Vec<(Vec<u8>, Vec<u8>)>,
-        _max_table_capacity: usize,
-        _current_capacity: usize,
-        _inserted_count: u64,
-        _evicted_count: u64,
-    }
-    impl Default for Decoder {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-    impl Decoder {
-        pub(crate) fn new() -> Self {
-            Self::with_capacity(0)
-        }
-        pub(crate) fn with_capacity(capacity: u64) -> Self {
-            Self {
-                dynamic_table: Vec::new(),
-                _max_table_capacity: capacity as usize,
-                _current_capacity: 0,
-                _inserted_count: 0,
-                _evicted_count: 0,
-            }
-        }
-        pub(crate) fn decode(&mut self, data: &[u8]) -> Result<Vec<Header>, Error> {
-            if data.len() < 2 {
-                return Err(Error::BufferTooShort);
-            }
-            let mut headers = Vec::new();
-            let mut offset = 0;
-            let ric = data[0] as u64;
-            let base = data[1] as u64;
-            let _ = base;
-            self._inserted_count = self._inserted_count.max(ric);
-            offset += 2;
-            while offset < data.len() {
-                let first = data[offset];
-                offset += 1;
-                if first & 0x80 != 0 {
-                    let index = (first & 0x7f) as usize;
-                    if index < STATIC_TABLE.len() {
-                        let (name, value) = STATIC_TABLE[index];
-                        headers.push(Header::new(name, value));
-                    } else if index < STATIC_TABLE.len() + self.dynamic_table.len() {
-                        let dyn_index = index - STATIC_TABLE.len();
-                        if let Some((name, value)) = self.dynamic_table.get(dyn_index) {
-                            headers.push(Header::new(name, value));
-                        }
-                    }
-                } else if first & 0x40 != 0 {
-                    let index = (first & 0x3f) as usize;
-                    if index < STATIC_TABLE.len() {
-                        let (name, _) = STATIC_TABLE[index];
-                        let (value, consumed) = Self::decode_string(&data[offset..])?;
-                        offset += consumed;
-                        headers.push(Header::new(name, &value));
-                    }
-                } else if first & 0x20 != 0 {
-                    let (name, consumed1) = Self::decode_string(&data[offset..])?;
-                    offset += consumed1;
-                    let (value, consumed2) = Self::decode_string(&data[offset..])?;
-                    offset += consumed2;
-                    headers.push(Header::new(&name, &value));
-                }
-            }
-            Ok(headers)
-        }
-        fn decode_string(data: &[u8]) -> Result<(Vec<u8>, usize), Error> {
-            if data.is_empty() {
-                return Err(Error::BufferTooShort);
-            }
-            let first = data[0];
-            let is_huff = (first & 0x80) != 0;
-            let (len, used_tail) = Encoder::read_int_prefix7(first, &data[1..])?;
-            let off = 1 + used_tail;
-            if data.len() < off + len {
-                return Err(Error::BufferTooShort);
-            }
-            let payload = &data[off..off + len];
-            if is_huff {
-                Ok((huff_decode(payload)?, off + len))
-            } else {
-                Ok((payload.to_vec(), off + len))
-            }
-        }
-    }
-}
-
 /// Generate fake CSS content for stealth cover traffic
 fn generate_fake_css(size_bytes: usize) -> Vec<u8> {
     let base_css = b"/* Generated CSS for cover traffic */\nbody{margin:0;padding:0;font-family:Arial,sans-serif}\n.container{max-width:1200px;margin:0 auto;padding:20px}\n.header{background:#333;color:#fff;padding:10px}\n.content{padding:20px;line-height:1.6}\n.footer{background:#f4f4f4;padding:10px;text-align:center}\n";
@@ -551,6 +55,20 @@ fn generate_fake_image_data(size_bytes: usize) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::transport::PROTOCOL_VERSION;
+
+    fn must_succeed<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("operation failed: {error:?}"),
+        }
+    }
+
+    fn headers_equal(actual: &[Header], expected: &[Header]) -> bool {
+        actual.len() == expected.len()
+            && actual.iter().zip(expected).all(|(actual, expected)| {
+                actual.name() == expected.name() && actual.value() == expected.value()
+            })
+    }
 
     fn make_conn() -> super::super::Connection {
         let mut cfg = crate::transport::Config::new_with_version(PROTOCOL_VERSION).unwrap();
@@ -622,15 +140,26 @@ mod tests {
         Connection,
         Connection,
     ) {
+        let client_config = must_succeed(Config::new());
+        let server_config = must_succeed(Config::new());
+        make_paired_h3_connections_with_configs(&client_config, &server_config)
+    }
+
+    fn make_paired_h3_connections_with_configs(
+        client_config: &Config,
+        server_config: &Config,
+    ) -> (
+        super::super::Connection,
+        super::super::Connection,
+        crate::transport::RecvInfo,
+        Connection,
+        Connection,
+    ) {
         use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
         let BenchConnectionPair { mut client, mut server, recv_info } =
             bench_paired_1rtt_connections();
-        let mut client_h3 =
-            Connection::with_transport(&mut client, &Config::new().expect("client config"))
-                .expect("client h3");
-        let mut server_h3 =
-            Connection::with_transport(&mut server, &Config::new().expect("server config"))
-                .expect("server h3");
+        let mut client_h3 = must_succeed(Connection::with_transport(&mut client, client_config));
+        let mut server_h3 = must_succeed(Connection::with_transport(&mut server, server_config));
         let mut packet = [0u8; 2048];
         for _ in 0..4 {
             if !pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet) {
@@ -1229,11 +758,14 @@ mod tests {
             Header::new(b":scheme", b"https"),
             Header::new(b":path", b"/"),
         ];
-        let mut buf = vec![0u8; 4096];
-        let written = enc.encode(&headers, &mut buf).expect("encode");
-        assert!(written > 0, "encoder must produce output");
-
-        let decoded = dec.decode(&buf[..written]).expect("decode");
+        let plan = must_succeed(enc.prepare(0, &headers));
+        assert!(plan.encoder_instructions.is_empty());
+        assert_eq!(plan.field_section, [0x00, 0x00, 0xd1, 0xd7, 0xc1]);
+        let (field_section, _, _) = plan.commit(&mut enc);
+        let decoded = match must_succeed(dec.decode(0, &field_section)) {
+            qpack::DecodeOutcome::Decoded(headers) => headers,
+            qpack::DecodeOutcome::Blocked => panic!("static field section cannot block"),
+        };
         assert_eq!(decoded.len(), 3, "must decode 3 headers");
         assert_eq!(decoded[0].name(), b":method");
         assert_eq!(decoded[0].value(), b"GET");
@@ -1244,11 +776,14 @@ mod tests {
         let mut enc = qpack::Encoder::new();
         let mut dec = qpack::Decoder::new();
         let headers = vec![Header::new(b"x-custom-header", b"custom-value-123")];
-        let mut buf = vec![0u8; 4096];
-        let written = enc.encode(&headers, &mut buf).expect("encode");
-        assert!(written > 2, "literal encoding must produce more than 2 bytes");
-
-        let decoded = dec.decode(&buf[..written]).expect("decode");
+        let plan = must_succeed(enc.prepare(0, &headers));
+        assert!(plan.field_section.len() > 2);
+        assert!(plan.encoder_instructions.is_empty());
+        let (field_section, _, _) = plan.commit(&mut enc);
+        let decoded = match must_succeed(dec.decode(0, &field_section)) {
+            qpack::DecodeOutcome::Decoded(headers) => headers,
+            qpack::DecodeOutcome::Blocked => panic!("literal field section cannot block"),
+        };
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].name(), b"x-custom-header");
         assert_eq!(decoded[0].value(), b"custom-value-123");
@@ -1256,21 +791,20 @@ mod tests {
 
     #[test]
     fn qpack_encode_empty_headers_produces_minimal_output() {
-        let mut enc = qpack::Encoder::new();
+        let enc = qpack::Encoder::new();
         let headers: Vec<Header> = vec![];
-        let mut buf = vec![0u8; 4096];
-        let written = enc.encode(&headers, &mut buf).expect("encode empty");
-        // At minimum, the 2-byte prefix (RIC + base)
-        assert_eq!(written, 2, "empty headers should produce exactly 2-byte prefix");
+        let plan = must_succeed(enc.prepare(0, &headers));
+        assert_eq!(plan.field_section, [0x00, 0x00]);
+        assert!(plan.encoder_instructions.is_empty());
     }
 
     #[test]
-    fn qpack_encode_buffer_too_short_returns_error() {
-        let mut enc = qpack::Encoder::new();
-        let headers = vec![Header::new(b":method", b"GET")];
-        let mut buf = vec![0u8; 1]; // Too small
-        let result = enc.encode(&headers, &mut buf);
-        assert!(matches!(result, Err(Error::BufferTooShort)));
+    fn qpack_truncated_field_section_fails_decompression() {
+        let mut dec = qpack::Decoder::new();
+        assert!(matches!(
+            dec.decode(0, &[0x00]),
+            Err(Error::QpackDecompressionFailed)
+        ));
     }
 
     // ---- HTTP/3 Frame Parsing: HEADERS, DATA, SETTINGS -------------------
@@ -1404,7 +938,7 @@ mod tests {
     fn config_excessive_qpack_blocked_streams_rejects() {
         let mut conn = make_conn();
         let mut cfg = Config::new().expect("cfg");
-        cfg.set_qpack_blocked_streams(MAX_H3_SETTING_VALUE + 1);
+        cfg.set_qpack_blocked_streams(MAX_LOCAL_QPACK_BLOCKED_STREAMS + 1);
         let result = super::h3::Connection::with_transport(&mut conn, &cfg);
         assert!(
             matches!(result, Err(Error::ExcessiveLoad)),
@@ -1464,6 +998,8 @@ mod tests {
             Error::FrameError,
             Error::SettingsError,
             Error::QpackDecompressionFailed,
+            Error::QpackEncoderStreamError,
+            Error::QpackDecoderStreamError,
         ];
         for err in variants {
             let s = format!("{}", err);
@@ -1703,22 +1239,29 @@ mod tests {
     #[test]
     fn settings_reject_reserved_and_duplicate_identifiers() {
         let mut conn = make_conn();
-        let h3 = Connection::with_transport(&mut conn, &Config::new().unwrap()).unwrap();
+        let config = must_succeed(Config::new());
+        let _h3 = must_succeed(Connection::with_transport(&mut conn, &config));
 
         let mut reserved = Vec::new();
         Connection::encode_varint(0x02, &mut reserved);
         Connection::encode_varint(0, &mut reserved);
-        assert!(matches!(h3.validate_settings_payload(&reserved), Err(Error::SettingsError)));
+        assert!(matches!(
+            Connection::parse_settings_payload(&reserved),
+            Err(Error::SettingsError)
+        ));
 
         let mut duplicate = Vec::new();
         for value in [0, 1] {
             Connection::encode_varint(0x01, &mut duplicate);
             Connection::encode_varint(value, &mut duplicate);
         }
-        assert!(matches!(h3.validate_settings_payload(&duplicate), Err(Error::SettingsError)));
+        assert!(matches!(
+            Connection::parse_settings_payload(&duplicate),
+            Err(Error::SettingsError)
+        ));
 
         assert!(matches!(
-            h3.validate_settings_payload(&[0x01]),
+            Connection::parse_settings_payload(&[0x01]),
             Err(Error::SettingsError)
         ));
     }
@@ -1913,6 +1456,171 @@ mod tests {
             &mut packet
         ));
         assert!(matches!(server_h3.poll(&mut server), Err(Error::ClosedCriticalStream)));
+    }
+
+    #[test]
+    fn zero_capacity_static_roundtrip_creates_no_qpack_instruction_streams() {
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let headers = [
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":path", b"/"),
+        ];
+        let request_stream_id =
+            must_succeed(client_h3.send_request(&mut client, &headers, true));
+        let mut packet = [0u8; 2048];
+        let mut received_headers = None;
+
+        for _ in 0..8 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            loop {
+                match server_h3.poll(&mut server) {
+                    Ok(Some((stream_id, Event::Headers { list, .. }))) => {
+                        assert_eq!(stream_id, request_stream_id);
+                        received_headers = Some(list);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Done) => break,
+                    Err(error) => panic!("server H3 poll failed: {error:?}"),
+                }
+            }
+            if received_headers.is_some() {
+                break;
+            }
+        }
+
+        assert!(received_headers
+            .as_deref()
+            .is_some_and(|received| headers_equal(received, &headers)));
+        assert!(client_h3.qpack_encoder_stream_id.is_none());
+        assert!(client_h3.qpack_decoder_stream_id.is_none());
+        assert!(server_h3.peer_qpack_encoder_stream_id.is_none());
+        assert!(server_h3.peer_qpack_decoder_stream_id.is_none());
+    }
+
+    #[test]
+    fn paired_dynamic_roundtrip_synchronizes_and_releases_qpack_state() {
+        let mut client_config = must_succeed(Config::new());
+        client_config.set_qpack_max_table_capacity(220);
+        client_config.set_qpack_blocked_streams(1);
+        let mut server_config = must_succeed(Config::new());
+        server_config.set_qpack_max_table_capacity(220);
+        server_config.set_qpack_blocked_streams(1);
+        let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
+            make_paired_h3_connections_with_configs(&client_config, &server_config);
+        let headers = [
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":path", b"/"),
+            Header::new(b"x-qpack-roundtrip", b"synchronized"),
+        ];
+        let request_stream_id =
+            must_succeed(client_h3.send_request(&mut client, &headers, true));
+        let mut packet = [0u8; 2048];
+        let mut received_headers = None;
+
+        for _ in 0..16 {
+            let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
+            for (h3, transport, capture_headers) in [
+                (&mut server_h3, &mut server, true),
+                (&mut client_h3, &mut client, false),
+            ] {
+                loop {
+                    match h3.poll(transport) {
+                        Ok(Some((stream_id, Event::Headers { list, .. }))) if capture_headers => {
+                            assert_eq!(stream_id, request_stream_id);
+                            received_headers = Some(list);
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(Error::Done) => break,
+                        Err(error) => panic!("H3 dynamic roundtrip failed: {error:?}"),
+                    }
+                }
+            }
+            if received_headers.is_some()
+                && client_h3.encoder.known_received_count() == 1
+                && client_h3.encoder.outstanding_section_count() == 0
+            {
+                break;
+            }
+        }
+
+        assert!(received_headers
+            .as_deref()
+            .is_some_and(|received| headers_equal(received, &headers)));
+        assert_eq!(client_h3.encoder.known_received_count(), 1);
+        assert_eq!(client_h3.encoder.outstanding_section_count(), 0);
+        assert!(client_h3.qpack_encoder_stream_id.is_some());
+        assert_eq!(
+            client_h3.qpack_encoder_stream_id,
+            server_h3.peer_qpack_encoder_stream_id
+        );
+        assert!(server_h3.qpack_decoder_stream_id.is_some());
+        assert_eq!(
+            server_h3.qpack_decoder_stream_id,
+            client_h3.peer_qpack_decoder_stream_id
+        );
+    }
+
+    #[test]
+    fn paired_qpack_encoder_stream_retains_fragmented_instructions() {
+        let client_config = must_succeed(Config::new());
+        let mut server_config = must_succeed(Config::new());
+        server_config.set_qpack_max_table_capacity(64);
+        server_config.set_qpack_blocked_streams(1);
+        let (mut client, mut server, recv_info, client_h3, mut server_h3) =
+            make_paired_h3_connections_with_configs(&client_config, &server_config);
+        let encoder_stream_id = client_h3.next_uni_stream_id;
+        let fragments: &[&[u8]] = &[
+            &[0x02, 0x3f],
+            &[0x21, 0x41],
+            b"a",
+            &[0x01],
+            b"1",
+        ];
+        let mut packet = [0u8; 2048];
+
+        for fragment in fragments {
+            assert_eq!(
+                must_succeed(client.stream_send(encoder_stream_id, fragment, false)),
+                fragment.len()
+            );
+            assert!(pump_paired_1rtt_once(
+                &mut client,
+                &mut server,
+                &recv_info,
+                &mut packet
+            ));
+            assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+        }
+
+        assert_eq!(server_h3.peer_qpack_encoder_stream_id, Some(encoder_stream_id));
+        assert_eq!(server_h3.decoder.insert_count(), 1);
+        assert!(server_h3.qpack_decoder_stream_id.is_some());
+    }
+
+    #[test]
+    fn paired_qpack_capacity_violation_maps_to_encoder_stream_error() {
+        let (mut client, mut server, recv_info, client_h3, mut server_h3) =
+            make_paired_h3_connections();
+        let encoder_stream_id = client_h3.next_uni_stream_id;
+        let invalid_capacity = [0x02, 0x21];
+        assert_eq!(
+            must_succeed(client.stream_send(encoder_stream_id, &invalid_capacity, false)),
+            invalid_capacity.len()
+        );
+        let mut packet = [0u8; 2048];
+        assert!(pump_paired_1rtt_once(
+            &mut client,
+            &mut server,
+            &recv_info,
+            &mut packet
+        ));
+        assert!(matches!(
+            server_h3.poll(&mut server),
+            Err(Error::QpackEncoderStreamError)
+        ));
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub enum Error {
     FrameError,
     SettingsError,
     QpackDecompressionFailed,
+    QpackEncoderStreamError,
+    QpackDecoderStreamError,
     TransportError(TransportError),
 }
 

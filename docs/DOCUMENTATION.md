@@ -655,7 +655,7 @@ Notes:
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
 - Core H3/MASQUE is the production VPN/TUN carrier and the only active MASQUE implementation. Its H3 capsule parser buffers split DATA frames, rejects malformed/truncated FIN tails, and stages decoded events until the enclosing batch is valid.
-- HTTP/3 transport compliance: both endpoint roles emit a transactional unidirectional control-stream type plus one SETTINGS frame (`2,6,...` client IDs and `3,7,...` server IDs); local field-section, QPACK-table, and blocked-stream settings are rejected above the 16 MiB safety ceiling before QPACK construction or wire emission; peer control ownership is validated before frame dispatch; peer SETTINGS values and duplicate identifiers are bounded; and frame type/length parsing uses checked QUIC varints. Drained transport stream-queue entries are removed before later writable streams so a control prologue cannot starve a response.
+- HTTP/3 transport compliance: both endpoint roles emit a transactional unidirectional control-stream type plus one SETTINGS frame (`2,6,...` client IDs and `3,7,...` server IDs); local field-section and QPACK-table settings are capped at 16 MiB, while the allocation-owning local blocked-stream setting is capped at 64; peer control ownership is validated before frame dispatch; peer SETTINGS values and duplicate identifiers are bounded; and frame type/length parsing uses checked QUIC varints. Drained transport stream-queue entries are removed before later writable streams so a control prologue cannot starve a response.
 - TODO-879 is archived after current ancestry and source revalidation. Baseline commit `3a50234` immediately follows handoff `a96bef9` and remains in `main`; current source retains the complete control-stream, SETTINGS, fragmented unidirectional-stream, full-varint, and writable-queue contracts. Runtime guardrails pass with Critical 0 and Warnings 0, Clippy Matrix run `31501777499` is green at code-equivalent revision `a84476d`, and the original H3 `62/62` plus transport-connection `127/127` evidence remains authoritative. The archive pass does not modify protected frontend or Tauri paths.
 - TODO-691 is archived after closing the local SETTINGS validation gap in `c2b891c`. Clippy Matrix run `31503056901`, the locked workspace release build, and the complete workspace all-target `rust-tests` step in CI job `93818015386` pass; current source and regressions retain the original transactional control-stream and peer-state contracts plus bounded local QPACK values. Frontend and Tauri paths remain unchanged.
 - Per-packet MASQUE TX/downlink logs are `trace`-only in the production hot path. CONNECT-UDP lifecycle and peer-flow registration remain `info` for operator observability without packet-rate log amplification.
@@ -3847,7 +3847,7 @@ Core H3/MASQUE is the canonical VPN/TUN data-plane carrier and the only active C
 - DATAGRAM: registers Flow-ID/Context-ID; sends UDP payloads over QUIC DATAGRAM frames.
 - Capsules: encodes/decodes MASQUE capsules using varints.
   - Common types observed in telemetry: `0x00` (DATAGRAM), `0x21`, `0x22` (implementation-specific control/data hints).
-- QPACK: MASQUE headers use the local QPACK codec and preferred indexing keys are set via `set_qpack_index_policy()`. The negotiated dynamic-table capacity defaults to zero. Peer encoder/decoder instruction streams are uniquely classified and treated as critical, but RFC 9204 instruction synchronization is not yet implemented; TODO-882 owns that interoperability boundary before non-zero dynamic-table use can be claimed.
+- QPACK: `src/transport/h3_parts/qpack.rs` owns RFC 9204 field sections and instruction synchronization. The default capacity remains zero and creates no QPACK stream. After peer SETTINGS enable dynamic compression, the sender opens encoder stream type `0x02` only with its first transactional capacity/insertion batch; the receiver opens decoder stream type `0x03` only when an Insert Count Increment, Section Acknowledgement, or Stream Cancellation exists. Dynamic entries use byte capacity `name + value + 32`, monotonic absolute indices, acknowledged/reference-aware eviction, modulo Required Insert Count reconstruction, Base-relative or post-Base references, and the RFC 99-entry static table. Fragmented instruction tails are retained within negotiated bounds; blocked field sections remain on their request/push stream until the required insert count arrives; RESET_STREAM abandonment queues cancellation. Invalid field sections, encoder instructions, and decoder instructions map separately to `QpackDecompressionFailed`, `QpackEncoderStreamError`, and `QpackDecoderStreamError`.
 - Telemetry: `MASQUE_BYTES_SENT`, `MASQUE_BYTES_RECEIVED`, and capsule counters per type.
 
 Notes
@@ -3859,38 +3859,6 @@ Notes
 - Split capsule varints use the full 1/2/4/8-byte QUIC widths, including 16,384-byte payload lengths. A malformed capsule or truncated FIN suffix fails closed before staged events are exposed.
 - `src/dns/mod.rs` remains the owner of shared DoH primitives, and `src/implementations/client/dns_runtime.rs` owns the active client lifecycle; the retired `stealth/parts/doh.rs` resolver and `stealth::MasqueManager` source are preserved under `archive/stealth/` for historical inspection only. TODO-771 completed the runtime wiring.
 - If you maintain external profile dumps, `scripts/tests/utils/util-tls-export-active-profile.sh` exports them under `scripts/out/utils/.../profiles/` by default (or a caller-provided `--output-dir`) for regression tracking.
-
-#### MASQUE Roundtrip Example
-
-```rust
-use quicfuscate::transport::h3::{Header, qpack};
-
-// Minimal, reproducible header set
-let headers = vec![
-    Header::new(b":method", b"GET"),
-    Header::new(b":scheme", b"https"),
-    Header::new(b":authority", b"example.com"),
-    Header::new(b":path", b"/"),
-    Header::new(b"accept-encoding", b"gzip, deflate, br"),
-];
-
-// Encode
-let mut enc = qpack::Encoder::with_capacity(1024);
-enc.set_index_policy(&[b":method", b":scheme", b":authority", b":path", b"accept-encoding"]);
-let mut buf = vec![0u8; 1024];
-let n = enc.encode(&headers, &mut buf).expect("encode");
-let payload = &buf[..n];
-
-// Decode
-let mut dec = qpack::Decoder::with_capacity(1024);
-let decoded = dec.decode(payload).expect("decode");
-
-assert_eq!(decoded.len(), headers.len());
-for (a, b) in decoded.iter().zip(headers.iter()) {
-    assert_eq!(a.name(),  b.name());
-    assert_eq!(a.value(), b.value());
-}
-```
 
 ### HTTP/3 Masquerade Headers API (QPACK)
 
@@ -3927,14 +3895,16 @@ Cover Traffic integration:
   - Referer: depends on fronting/navigation (e.g., search portal or same-origin)
 
 #### Index Policy (Dynamic Table)
-- The QPACK encoder carries a preferred index policy (`set_index_policy`) to prioritize common names for better compression.
-- Default seeds (when capacity allows): `content-type` (CSS/JS/JSON/JPEG/PNG), `cache-control`, `accept-encoding`, `accept`, `x-cdn-cache`.
+- `Connection::set_qpack_index_policy()` preserves persona header ordering without inventing local-only table state.
+- No dynamic entry is preseeded. Every insertion is serialized on the encoder stream before its field section can reference it.
+- `authorization`, `cookie`, `set-cookie`, `proxy-authorization`, `x-qf-auth`, and `x-api-key` are emitted with the never-index bit and are never inserted.
 
 #### Encoding Behavior (internal)
-- Fully static indexed entry: `0x80 | index`
-- Static name, literal value (Huffman): `0x40 | index` followed by string (Huffman)
-- Dynamic indexed entry (name+value): `0xA0 <varint index>`
-- Literal name+value: `0x20 <name> <value>` (strings Huffman-encoded)
+- Static and dynamic indexed fields use RFC 9204 Section 4.5.2, with the static-table selector and a 6-bit prefixed index.
+- Literals with name references use Section 4.5.4; literal names use Section 4.5.6; strings select the RFC Huffman representation only when it is smaller.
+- Dynamic references below Base use relative indices; inserts created during the same field section use post-Base representations.
+- The field-section prefix carries the modulo Encoded Required Insert Count plus signed Delta Base. A decoder never advances its insert count from a header block.
+- Encoder-stream instructions are Set Capacity, Insert With Name Reference, Insert With Literal Name, and Duplicate. Decoder-stream instructions are Section Acknowledgement, Stream Cancellation, and non-zero Insert Count Increment.
 
 Illustration (simplified)
 ```text
@@ -3944,38 +3914,6 @@ Illustration (simplified)
 [:path=/p]           -> 0x40 | idx(":path") <huff("/p")>
 [accept-encoding=...]-> 0x80 | idx("accept-encoding=gzip, deflate, br")
 [user-agent=...]     -> 0x20 <huff("user-agent")> <huff(UA)>
-```
-
-#### QPACK Roundtrip Example (encode -> decode)
-
-```rust
-use quicfuscate::transport::h3::{Header, qpack};
-
-// Minimal, reproducible header set
-let headers = vec![
-    Header::new(b":method", b"GET"),
-    Header::new(b":scheme", b"https"),
-    Header::new(b":authority", b"example.com"),
-    Header::new(b":path", b"/"),
-    Header::new(b"accept-encoding", b"gzip, deflate, br"),
-];
-
-// Encode
-let mut enc = qpack::Encoder::with_capacity(1024);
-enc.set_index_policy(&[b":method", b":scheme", b":authority", b":path", b"accept-encoding"]);
-let mut buf = vec![0u8; 1024];
-let n = enc.encode(&headers, &mut buf).expect("encode");
-let payload = &buf[..n];
-
-// Decode
-let mut dec = qpack::Decoder::with_capacity(1024);
-let decoded = dec.decode(payload).expect("decode");
-
-assert_eq!(decoded.len(), headers.len());
-for (a, b) in decoded.iter().zip(headers.iter()) {
-    assert_eq!(a.name(),  b.name());
-    assert_eq!(a.value(), b.value());
-}
 ```
 
 ### Domain Fronting API

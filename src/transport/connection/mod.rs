@@ -24,6 +24,7 @@ const MAX_STREAM_ORIGINAL_TRANSMISSIONS: usize = 16 * 1024;
 const MAX_STREAM_TRANSMISSIONS: usize = 2 * MAX_STREAM_ORIGINAL_TRANSMISSIONS;
 const MAX_STREAM_LOST_PACKET_HISTORY: usize = 32;
 const MAX_PENDING_CONTROL_FRAMES: usize = 256;
+const MAX_PENDING_STREAM_RESETS: usize = 1024;
 
 include!("parts/pmtu.rs");
 include!("parts/types.rs");

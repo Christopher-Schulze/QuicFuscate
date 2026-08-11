@@ -1260,6 +1260,13 @@ impl Connection {
         Some(stream_id)
     }
 
+    /// Pops one peer RESET_STREAM notification for the application protocol owner.
+    pub fn stream_reset_next(&mut self) -> Option<(u64, u64)> {
+        let reset = self.reset_streams.pop_front()?;
+        self.reset_stream_ids.remove(&reset.0);
+        Some(reset)
+    }
+
     /// Returns the number of streams with pending writable data.
     pub fn writable_streams_count(&self) -> usize {
         self.writable_streams.len()

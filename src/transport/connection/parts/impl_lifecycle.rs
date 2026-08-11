@@ -228,6 +228,8 @@ impl Connection {
             key_phase: false,
             readable_streams: VecDeque::new(),
             readable_stream_ids: HashSet::new(),
+            reset_streams: VecDeque::new(),
+            reset_stream_ids: HashSet::new(),
             writable_streams: VecDeque::new(),
             writable_stream_ids: HashSet::new(),
             local_error: None,

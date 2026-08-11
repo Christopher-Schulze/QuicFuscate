@@ -60,6 +60,8 @@ pub struct Connection {
     key_phase: bool,
     readable_streams: VecDeque<u64>,
     readable_stream_ids: HashSet<u64>,
+    reset_streams: VecDeque<(u64, u64)>,
+    reset_stream_ids: HashSet<u64>,
     writable_streams: VecDeque<u64>,
     writable_stream_ids: HashSet<u64>,
     /// First locally decided terminal/protocol error.
