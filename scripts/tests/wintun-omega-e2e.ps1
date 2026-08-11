@@ -312,10 +312,6 @@ try {
         "--no-utls",
         "--tun",
         "--tun-name", $AdapterName,
-        "--tun-ip", $ClientTunAddress,
-        "--tun-netmask", "255.255.255.0",
-        "--tun-ip6", $ClientTunAddress6,
-        "--tun-prefix6", "64",
         "--kill-switch",
         "--heartbeat-timeout-ms", "15000",
         "-v"
