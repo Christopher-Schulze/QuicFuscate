@@ -318,6 +318,24 @@ else
     record_platform_skip "rt-transport-uring" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
 fi
 
+echo -e "\n> Testing io_uring partial-send exact-once proof..."
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    partial_send_environment="$(qf_json_environment_with_assignments \
+      "QUICFUSCATE_FASTPATH=auto")"
+    if ! run_required_uring_proof \
+      "uring-partial-send" "QF_IO_URING_PARTIAL_SEND_STATUS" "$partial_send_environment" \
+      run_bounded_cargo "$URING_PROOF_TIMEOUT_SECONDS" QUICFUSCATE_FASTPATH=auto -- \
+      test --release --features io_uring,rust-tests --test rt-transport-uring \
+      uring_sendmsg_partial_send_retry_subsets_deliver_exactly_once -- \
+      --nocapture --exact --test-threads=1; then
+        echo "[FAIL] io_uring partial-send exact-once proof did not pass" >&2
+    fi
+else
+    record_platform_skip \
+      "uring-partial-send" "host_os_not_linux" "test:rt-transport-uring" \
+      "io_uring,rust-tests"
+fi
+
 echo -e "\n> Testing io_uring zero-length receive rearm proof..."
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     rearm_environment="$(qf_json_environment_with_assignments "QUICFUSCATE_FASTPATH=auto")"
@@ -347,6 +365,25 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     fi
 else
     record_platform_skip "uring-zc" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
+fi
+
+echo -e "\n> Testing opt-in io_uring SendMsgZc partial-send exact-once proof..."
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    zc_partial_send_environment="$(qf_json_environment_with_assignments \
+      "QUICFUSCATE_FASTPATH=auto" "QUICFUSCATE_IO_URING_ZC=1")"
+    if ! run_required_uring_proof \
+      "uring-zc-partial-send" "QF_IO_URING_ZC_PARTIAL_SEND_STATUS" \
+      "$zc_partial_send_environment" \
+      run_bounded_cargo "$URING_PROOF_TIMEOUT_SECONDS" QUICFUSCATE_FASTPATH=auto QUICFUSCATE_IO_URING_ZC=1 -- \
+      test --release --features io_uring,rust-tests --test rt-transport-uring \
+      uring_sendmsg_zc_partial_send_retry_subset_delivers_exactly_once -- \
+      --nocapture --exact --test-threads=1; then
+        echo "[FAIL] opt-in io_uring SendMsgZc partial-send exact-once proof did not pass" >&2
+    fi
+else
+    record_platform_skip \
+      "uring-zc-partial-send" "host_os_not_linux" "test:rt-transport-uring" \
+      "io_uring,rust-tests"
 fi
 
 echo -e "\n> Testing Linux Kernel Hotpath Smoke..."

@@ -8,7 +8,7 @@
 compile_error!("rt-transport-uring requires Linux; use test-transport.sh for an explicit SKIP");
 
 #[cfg(target_os = "linux")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "linux")]
 use std::net::UdpSocket;
 #[cfg(target_os = "linux")]
@@ -18,10 +18,99 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use quicfuscate::optimize::uring_batch::{
-    UringBatchSender, UringBatchWorker, MAX_BATCH_PACKETS, MAX_BATCH_PAYLOAD_BYTES,
+    BatchSendDisposition, BatchSendResult, UringBatchSender, UringBatchWorker, MAX_BATCH_PACKETS,
+    MAX_BATCH_PAYLOAD_BYTES,
 };
 #[cfg(target_os = "linux")]
 use quicfuscate::telemetry::{IO_URING_ZC_NOTIFS, IO_URING_ZC_SENDS};
+
+#[cfg(target_os = "linux")]
+fn assert_partial_disposition(result: &BatchSendResult) {
+    assert_eq!(result.len(), 3, "partial-send result must cover every input");
+    assert_eq!(result.sent_count(), 2, "only the two valid slots may report sent");
+    assert_eq!(result.disposition(0), Some(BatchSendDisposition::Sent));
+    assert_eq!(result.disposition(1), Some(BatchSendDisposition::Failed));
+    assert_eq!(result.disposition(2), Some(BatchSendDisposition::Sent));
+}
+
+#[cfg(target_os = "linux")]
+fn retry_connected_slots(
+    socket: &UdpSocket,
+    payloads: &[&[u8]],
+    result: &BatchSendResult,
+) -> usize {
+    let mut fallback_sends = 0usize;
+    for (index, payload) in payloads.iter().enumerate() {
+        match result.disposition(index) {
+            Some(BatchSendDisposition::Sent) => {}
+            Some(BatchSendDisposition::Failed | BatchSendDisposition::NotSubmitted) => {
+                assert_eq!(socket.send(payload).expect("connected fallback send"), payload.len());
+                fallback_sends += 1;
+            }
+            Some(BatchSendDisposition::Quarantined) => {
+                panic!("quarantined slot {index} must never be retried")
+            }
+            None => panic!("missing disposition for connected slot {index}"),
+        }
+    }
+    fallback_sends
+}
+
+#[cfg(target_os = "linux")]
+fn retry_unconnected_slots(
+    socket: &UdpSocket,
+    destination: std::net::SocketAddr,
+    payloads: &[&[u8]],
+    result: &BatchSendResult,
+) -> usize {
+    let mut fallback_sends = 0usize;
+    for (index, payload) in payloads.iter().enumerate() {
+        match result.disposition(index) {
+            Some(BatchSendDisposition::Sent) => {}
+            Some(BatchSendDisposition::Failed | BatchSendDisposition::NotSubmitted) => {
+                assert_eq!(
+                    socket.send_to(payload, destination).expect("unconnected fallback send"),
+                    payload.len()
+                );
+                fallback_sends += 1;
+            }
+            Some(BatchSendDisposition::Quarantined) => {
+                panic!("quarantined slot {index} must never be retried")
+            }
+            None => panic!("missing disposition for unconnected slot {index}"),
+        }
+    }
+    fallback_sends
+}
+
+#[cfg(target_os = "linux")]
+fn assert_exactly_once_delivery(receiver: &UdpSocket, expected: &[&[u8]]) {
+    receiver.set_read_timeout(Some(Duration::from_secs(2))).expect("set proof timeout");
+    let expected_counts: HashMap<Vec<u8>, usize> =
+        expected.iter().map(|payload| (payload.to_vec(), 1usize)).collect();
+    assert_eq!(expected_counts.len(), expected.len(), "proof payloads must be unique");
+    let receive_capacity = expected.iter().map(|payload| payload.len()).max().unwrap_or(1).max(1);
+
+    let mut actual_counts = HashMap::new();
+    for _ in 0..expected.len() {
+        let mut buffer = vec![0u8; receive_capacity];
+        let (length, _) = receiver.recv_from(&mut buffer).expect("receive proof datagram");
+        *actual_counts.entry(buffer[..length].to_vec()).or_insert(0usize) += 1;
+    }
+    assert_eq!(actual_counts, expected_counts, "each proof datagram must arrive exactly once");
+
+    receiver.set_read_timeout(Some(Duration::from_millis(100))).expect("set duplicate timeout");
+    let mut extra = vec![0u8; receive_capacity];
+    match receiver.recv_from(&mut extra) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        Err(error) => panic!("unexpected duplicate-probe receive error: {error}"),
+        Ok((length, _)) => panic!("unexpected duplicate datagram: {:?}", &extra[..length]),
+    }
+}
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -63,6 +152,63 @@ fn uring_batch_sends_all_datagrams_on_loopback() {
     let expected: HashSet<Vec<u8>> = payloads.iter().map(|p| p.to_vec()).collect();
     let actual: HashSet<Vec<u8>> = received.into_iter().collect();
     assert_eq!(actual, expected, "received datagrams should match sent");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_sendmsg_partial_send_retry_subsets_deliver_exactly_once() {
+    let mut sender = match UringBatchSender::new_for_sendmsg_proof(8) {
+        Some(sender) => sender,
+        None => {
+            println!("QF_IO_URING_PARTIAL_SEND_STATUS=UNAVAILABLE reason=io_uring_init");
+            return;
+        }
+    };
+    assert!(!sender.zc_supported(), "standard proof must execute SendMsg");
+
+    let connected_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind connected receiver");
+    let connected_destination = connected_receiver.local_addr().expect("connected destination");
+    let connected_sender = UdpSocket::bind("127.0.0.1:0").expect("bind connected sender");
+    connected_sender.connect(connected_destination).expect("connect proof sender");
+    let connected_payloads: [&[u8]; 3] =
+        [b"sendmsg-connected-0", b"sendmsg-connected-1", b"sendmsg-connected-2"];
+    let connected_result = sender
+        .send_batch_with_injected_iovec_failures(
+            connected_sender.as_raw_fd(),
+            &connected_payloads,
+            &[1],
+        )
+        .expect("connected injected partial send");
+    assert_partial_disposition(&connected_result);
+    let connected_fallbacks =
+        retry_connected_slots(&connected_sender, &connected_payloads, &connected_result);
+    assert_eq!(connected_fallbacks, 1);
+    assert_exactly_once_delivery(&connected_receiver, &connected_payloads);
+
+    let unconnected_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind unconnected receiver");
+    let unconnected_destination =
+        unconnected_receiver.local_addr().expect("unconnected destination");
+    let unconnected_sender = UdpSocket::bind("127.0.0.1:0").expect("bind unconnected sender");
+    let unconnected_payloads: [&[u8]; 3] =
+        [b"sendmsg-unconnected-0", b"sendmsg-unconnected-1", b"sendmsg-unconnected-2"];
+    let packets: Vec<(std::net::SocketAddr, &[u8])> =
+        unconnected_payloads.iter().map(|payload| (unconnected_destination, *payload)).collect();
+    let unconnected_result = sender
+        .send_batch_to_with_injected_iovec_failures(unconnected_sender.as_raw_fd(), &packets, &[1])
+        .expect("unconnected injected partial send");
+    assert_partial_disposition(&unconnected_result);
+    let unconnected_fallbacks = retry_unconnected_slots(
+        &unconnected_sender,
+        unconnected_destination,
+        &unconnected_payloads,
+        &unconnected_result,
+    );
+    assert_eq!(unconnected_fallbacks, 1);
+    assert_exactly_once_delivery(&unconnected_receiver, &unconnected_payloads);
+
+    println!(
+        "QF_IO_URING_PARTIAL_SEND_STATUS=SUPPORTED mode=sendmsg connected_uring=2 connected_fallback=1 unconnected_uring=2 unconnected_fallback=1 duplicate_deliveries=0"
+    );
 }
 
 #[test]
@@ -337,6 +483,48 @@ fn uring_zc_opt_in_loopback_and_error_contract() {
     println!(
         "QF_IO_URING_ZC_STATUS=SUPPORTED primary_sends={primary_sends} notifications={notifications} delivered={} error_outcome={error_outcome}",
         actual.len()
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_sendmsg_zc_partial_send_retry_subset_delivers_exactly_once() {
+    let mut sender = match UringBatchSender::new(8) {
+        Some(sender) => sender,
+        None => {
+            println!("QF_IO_URING_ZC_PARTIAL_SEND_STATUS=UNAVAILABLE reason=io_uring_init");
+            return;
+        }
+    };
+    if !sender.zc_supported() {
+        println!(
+            "QF_IO_URING_ZC_PARTIAL_SEND_STATUS=UNAVAILABLE reason=sendmsg_zc_probe_or_opt_in"
+        );
+        return;
+    }
+
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind ZC partial receiver");
+    let destination = receiver.local_addr().expect("ZC partial destination");
+    let sender_socket = UdpSocket::bind("127.0.0.1:0").expect("bind ZC partial sender");
+    sender_socket.connect(destination).expect("connect ZC partial sender");
+    let payloads: Vec<Vec<u8>> = (0..3u8).map(|value| vec![value; 16 * 1024]).collect();
+    let payload_refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+    let send_counter_before = IO_URING_ZC_SENDS.get();
+    let notification_counter_before = IO_URING_ZC_NOTIFS.get();
+
+    let result = sender
+        .send_batch_with_injected_iovec_failures(sender_socket.as_raw_fd(), &payload_refs, &[1])
+        .expect("SendMsgZc injected partial send");
+    assert_partial_disposition(&result);
+    let fallback_sends = retry_connected_slots(&sender_socket, &payload_refs, &result);
+    assert_eq!(fallback_sends, 1);
+    assert_exactly_once_delivery(&receiver, &payload_refs);
+
+    let primary_sends = IO_URING_ZC_SENDS.get().saturating_sub(send_counter_before);
+    let notifications = IO_URING_ZC_NOTIFS.get().saturating_sub(notification_counter_before);
+    assert_eq!(primary_sends, 2, "only successful ZC primaries count as sends");
+    println!(
+        "QF_IO_URING_ZC_PARTIAL_SEND_STATUS=SUPPORTED mode=sendmsg_zc uring_sent=2 fallback_sent=1 delivered=3 duplicate_deliveries=0 notifications={notifications}"
     );
 }
 

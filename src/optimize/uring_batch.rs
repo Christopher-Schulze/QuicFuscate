@@ -229,6 +229,52 @@ struct SendControl<'a> {
     deadline: Instant,
 }
 
+struct IovecFailureInjection<'a> {
+    #[cfg(feature = "rust-tests")]
+    invalid_slots: Option<&'a [usize]>,
+    #[cfg(not(feature = "rust-tests"))]
+    _lifetime: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> IovecFailureInjection<'a> {
+    #[inline(always)]
+    fn none() -> Self {
+        Self {
+            #[cfg(feature = "rust-tests")]
+            invalid_slots: None,
+            #[cfg(not(feature = "rust-tests"))]
+            _lifetime: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(feature = "rust-tests")]
+    #[inline]
+    fn invalid_slots(failed_slots: &'a [usize]) -> Self {
+        Self { invalid_slots: Some(failed_slots) }
+    }
+
+    #[inline(always)]
+    fn validate(&self, input_len: usize) -> std::io::Result<()> {
+        #[cfg(feature = "rust-tests")]
+        if let Some(failed_slots) = self.invalid_slots {
+            return validate_injected_failure_slots(input_len, failed_slots);
+        }
+        #[cfg(not(feature = "rust-tests"))]
+        let _ = input_len;
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn apply(&self, msgs: &mut [libc::msghdr]) {
+        #[cfg(feature = "rust-tests")]
+        if let Some(failed_slots) = self.invalid_slots {
+            inject_invalid_iovec_slots(msgs, failed_slots);
+        }
+        #[cfg(not(feature = "rust-tests"))]
+        let _ = msgs;
+    }
+}
+
 impl UringBatchSender {
     /// Try to create a sender with the given queue depth.
     ///
@@ -242,6 +288,16 @@ impl UringBatchSender {
     /// seccomp filter, missing permissions, etc.).
     pub fn new(queue_depth: u32) -> Option<Self> {
         Self::new_inner(queue_depth, true)
+    }
+
+    /// Construct the standard `SendMsg` path even when the process opted in
+    /// to `SendMsgZc`.
+    ///
+    /// This rust-tests-only constructor makes the native partial-send proof
+    /// independent of process-global environment state.
+    #[cfg(feature = "rust-tests")]
+    pub fn new_for_sendmsg_proof(queue_depth: u32) -> Option<Self> {
+        Self::new_inner(queue_depth, false)
     }
 
     fn new_inner(queue_depth: u32, allow_zc: bool) -> Option<Self> {
@@ -424,7 +480,29 @@ impl UringBatchSender {
         fd: RawFd,
         payloads: &[&[u8]],
     ) -> Result<BatchSendResult, BatchSendError> {
-        self.send_batch_with_wait(fd, payloads, None)
+        self.send_batch_with_wait(fd, payloads, None, IovecFailureInjection::none())
+    }
+
+    /// Submit a connected-socket batch while making selected `msghdr` iovec
+    /// pointers invalid before kernel submission.
+    ///
+    /// This rust-tests-only boundary drives real Linux `SendMsg` or
+    /// `SendMsgZc` CQEs with deterministic per-slot `EFAULT` results. It is
+    /// used to prove that a later successful datagram is never retried after
+    /// an injected middle-slot failure.
+    #[cfg(feature = "rust-tests")]
+    pub fn send_batch_with_injected_iovec_failures(
+        &mut self,
+        fd: RawFd,
+        payloads: &[&[u8]],
+        failed_slots: &[usize],
+    ) -> Result<BatchSendResult, BatchSendError> {
+        self.send_batch_with_wait(
+            fd,
+            payloads,
+            None,
+            IovecFailureInjection::invalid_slots(failed_slots),
+        )
     }
 
     fn send_batch_with_wait(
@@ -432,6 +510,7 @@ impl UringBatchSender {
         fd: RawFd,
         payloads: &[&[u8]],
         control: Option<&SendControl<'_>>,
+        failure_injection: IovecFailureInjection<'_>,
     ) -> Result<BatchSendResult, BatchSendError> {
         let input_len = payloads.len();
         if let Err(error) = self.ensure_usable() {
@@ -452,6 +531,9 @@ impl UringBatchSender {
         let payload_bytes = Self::checked_payload_bytes(payloads.iter().copied())
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
         Self::validate_batch_admission(payloads.len(), payload_bytes)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        failure_injection
+            .validate(input_len)
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
 
         // Keep every kernel-visible payload alive inside the sender. This is
@@ -486,6 +568,7 @@ impl UringBatchSender {
             hdr.msg_iovlen = 1;
             self.msgs.push(hdr);
         }
+        failure_injection.apply(&mut self.msgs);
 
         let sq_cap = self.ring.params().sq_entries() as usize;
         let mut result = BatchSendResult::not_submitted(input_len);
@@ -559,7 +642,27 @@ impl UringBatchSender {
         fd: RawFd,
         packets: &[(SocketAddr, &[u8])],
     ) -> Result<BatchSendResult, BatchSendError> {
-        self.send_batch_to_with_wait(fd, packets, None)
+        self.send_batch_to_with_wait(fd, packets, None, IovecFailureInjection::none())
+    }
+
+    /// Submit an unconnected-socket batch with deterministic kernel `EFAULT`
+    /// results for selected iovec slots.
+    ///
+    /// The method exists only with `rust-tests` and exercises the same
+    /// `SendMsg` implementation as the server runtime path.
+    #[cfg(feature = "rust-tests")]
+    pub fn send_batch_to_with_injected_iovec_failures(
+        &mut self,
+        fd: RawFd,
+        packets: &[(SocketAddr, &[u8])],
+        failed_slots: &[usize],
+    ) -> Result<BatchSendResult, BatchSendError> {
+        self.send_batch_to_with_wait(
+            fd,
+            packets,
+            None,
+            IovecFailureInjection::invalid_slots(failed_slots),
+        )
     }
 
     fn send_batch_to_with_wait(
@@ -567,6 +670,7 @@ impl UringBatchSender {
         fd: RawFd,
         packets: &[(SocketAddr, &[u8])],
         control: Option<&SendControl<'_>>,
+        failure_injection: IovecFailureInjection<'_>,
     ) -> Result<BatchSendResult, BatchSendError> {
         let input_len = packets.len();
         if let Err(error) = self.ensure_usable() {
@@ -588,6 +692,9 @@ impl UringBatchSender {
             Self::checked_payload_bytes(packets.iter().map(|(_, payload)| *payload))
                 .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
         Self::validate_batch_admission(packets.len(), payload_bytes)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        failure_injection
+            .validate(input_len)
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
 
         // Copy payloads into sender-owned slots before any raw pointer is
@@ -633,6 +740,7 @@ impl UringBatchSender {
             hdr.msg_namelen = addr_len(*addr);
             self.msgs.push(hdr);
         }
+        failure_injection.apply(&mut self.msgs);
 
         let sq_cap = self.ring.params().sq_entries() as usize;
         let mut result = BatchSendResult::not_submitted(input_len);
@@ -1116,8 +1224,12 @@ impl UringBatchWorker {
                                 shutdown: &shutdown_for_worker,
                                 deadline: Instant::now() + BLOCKING_WORKER_OPERATION_TIMEOUT,
                             };
-                            let result =
-                                sender.send_batch_with_wait(fd, &payload_refs, Some(&control));
+                            let result = sender.send_batch_with_wait(
+                                fd,
+                                &payload_refs,
+                                Some(&control),
+                                IovecFailureInjection::none(),
+                            );
                             if worker_operation_failed(&result) {
                                 failed_for_worker.store(true, Ordering::Release);
                             }
@@ -1139,8 +1251,12 @@ impl UringBatchWorker {
                                 shutdown: &shutdown_for_worker,
                                 deadline: Instant::now() + BLOCKING_WORKER_OPERATION_TIMEOUT,
                             };
-                            let result =
-                                sender.send_batch_to_with_wait(fd, &packet_refs, Some(&control));
+                            let result = sender.send_batch_to_with_wait(
+                                fd,
+                                &packet_refs,
+                                Some(&control),
+                                IovecFailureInjection::none(),
+                            );
                             if worker_operation_failed(&result) {
                                 failed_for_worker.store(true, Ordering::Release);
                             }
@@ -1339,6 +1455,40 @@ fn checked_slot_index(user_data: u64, depth: usize) -> std::io::Result<usize> {
         ));
     }
     Ok(idx)
+}
+
+#[cfg(feature = "rust-tests")]
+fn validate_injected_failure_slots(
+    input_len: usize,
+    failed_slots: &[usize],
+) -> std::io::Result<()> {
+    if failed_slots.is_empty() {
+        return Ok(());
+    }
+    let mut seen = vec![false; input_len];
+    for &index in failed_slots {
+        let Some(slot_seen) = seen.get_mut(index) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("injected io_uring failure slot out of range: {index}/{input_len}"),
+            ));
+        };
+        if *slot_seen {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("duplicate injected io_uring failure slot: {index}"),
+            ));
+        }
+        *slot_seen = true;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "rust-tests")]
+fn inject_invalid_iovec_slots(msgs: &mut [libc::msghdr], failed_slots: &[usize]) {
+    for &index in failed_slots {
+        msgs[index].msg_iov = std::ptr::null_mut();
+    }
 }
 
 /// Returns the `socklen_t` for the given address family.
@@ -2047,6 +2197,23 @@ mod tests {
         assert_eq!(checked_slot_index(3, 4).expect("last slot"), 3);
         assert!(checked_slot_index(4, 4).is_err());
         assert!(checked_slot_index(u64::MAX, 4).is_err());
+    }
+
+    #[cfg(feature = "rust-tests")]
+    #[test]
+    fn injected_failure_slots_must_be_unique_and_in_range() {
+        assert!(validate_injected_failure_slots(3, &[]).is_ok());
+        assert!(validate_injected_failure_slots(3, &[1]).is_ok());
+
+        let duplicate = validate_injected_failure_slots(3, &[1, 1])
+            .expect_err("duplicate injected slot must fail");
+        assert_eq!(duplicate.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(duplicate.to_string().contains("duplicate"));
+
+        let out_of_range = validate_injected_failure_slots(3, &[3])
+            .expect_err("out-of-range injected slot must fail");
+        assert_eq!(out_of_range.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(out_of_range.to_string().contains("out of range"));
     }
 
     #[test]
