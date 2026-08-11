@@ -4014,6 +4014,7 @@ Benchmark and analysis mode truth is explicit. `bench-crypto.sh`, `bench-fec.sh`
 - **Workflow wiring:** `.github/workflows/release.yml` removes desktop `continue-on-error`, changes desktop artifact uploads to hard failure, verifies macOS/Linux signed pairs before upload, sets `QUICFUSCATE_DESKTOP_UPDATER_ACTIVE=true` for every desktop build, and runs the shared contract after artifact download and before `gh release create`.
 - **Runtime wiring:** `apps/tauri/src-tauri/src/main.rs` uses `option_env!("QUICFUSCATE_DESKTOP_UPDATER_ACTIVE")` for release builds and keeps debug activation runtime-opt-in. The manifest audit checks this build-bound marker and the updater plugin registration path.
 - **Negative proof:** `scripts/tests/fast/test-release-updater-artifact-contract.sh` proves complete manifest generation, missing Windows artifacts, empty signatures, updater-disabled native runtime, workflow hard-failure policy, and frontend-source exclusion. Local native Tauri `cargo check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` pass; the target exceeded 12 GiB during the lane and was cleaned immediately afterward.
+- **Archive status:** TODO-741 is archived after current-source and negative-fixture revalidation. Release `v0.4.4` exposes all three non-empty signed updater entries but predates implementation commit `d047747`, so it proves the published asset shape, not execution of the newer fail-closed workflow.
 
 ## Implementation Reconciliation (2026-08-08, TODO-877 benchmark cell result truth)
 
