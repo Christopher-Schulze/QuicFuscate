@@ -3002,6 +3002,50 @@ mod tests {
     // --- Config / path resolution helpers ---
 
     #[test]
+    fn runtime_config_rejects_invalid_candidates_before_replacement() {
+        static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let config_path = std::env::temp_dir().join(format!(
+            "quicfuscate-config-validation-{}-{}.toml",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let original = b"[engine]\nshutdown_timeout_ms = 175\n";
+        let mut config_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&config_path)
+            .unwrap();
+        config_file.write_all(original).unwrap();
+        drop(config_file);
+
+        let (mut handler, _) = blocked_ip_handler(None);
+        handler.config_path = Some(config_path.clone());
+
+        for (candidate, expected_error) in [
+            ("[engine", "Config parse failed"),
+            (
+                "[transport]\nmax_idle_timeout = 4611686018427387904\n",
+                "Config validation failed",
+            ),
+        ] {
+            let response = handler.handle_write_config(candidate);
+            assert!(!response.success, "invalid config must be rejected: {candidate}");
+            assert!(
+                response.message.as_deref().is_some_and(|message| message.contains(expected_error)),
+                "rejection must identify the failed validation boundary: {:?}",
+                response.message
+            );
+            assert_eq!(
+                std::fs::read(&config_path).unwrap(),
+                original,
+                "rejected config must not replace the durable target"
+            );
+        }
+
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    #[test]
     fn test_resolve_admin_auth_store_path_with_config_path() {
         let cfg = std::path::Path::new("/etc/quicfuscate/server.toml");
         let path = resolve_admin_auth_store_path(Some(cfg));
