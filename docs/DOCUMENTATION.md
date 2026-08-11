@@ -2133,7 +2133,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 - Stealth hotpaths (header/QPACK building and persona-driven shaping) prefer SIMD kernels with safe scalar fallback; mutex/atomic usage is minimized in hotpaths.
 
 #### Feature Matrix (Crypto)
-- The root manifest declares exactly 26 direct feature entries. Cargo metadata exposes 29 effective selectors because the optional dependencies `rcgen`, `time`, and `maxminddb` also remain available as implicit dependency selectors. Those three selectors are implementation dependencies, not user-facing product groups.
+- The root manifest declares exactly 26 direct feature entries. Cargo metadata exposes 29 effective selectors because the optional dependencies `rcgen`, `time`, and `maxminddb` also remain available as implicit dependency selectors. Those three selectors are implementation dependencies, not user-facing product groups. TODO-763 is archived after current-revision manifest, source-consumer, documentation, negative-selector, and hosted positive-profile revalidation.
 - Canonical feature taxonomy and consumer semantics:
 
 | Class | Feature | Dependencies | Consumer or owner semantics |

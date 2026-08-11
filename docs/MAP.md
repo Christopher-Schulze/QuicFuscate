@@ -1453,7 +1453,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - TODO-799 repaired the completeness validator's canonical tracker contract. It now accepts and validates `Active`/`ACTIVE|IN_PROGRESS`, `Blocked`/`BLOCKED`, `Queue`/`OPEN|QUEUED|AUDIT_COMPLETE`, and `Completed`/`DONE|SCRAP|COMPLETE|COMPLETED|CLOSED|AUDIT_COMPLETE`, enforces section order and presence, and derives the global status allowlist from the same contract.
 - The live validator passes: tracker `769` headings across Active `1`, Blocked `3`, Queue `190`, and Completed `575`; current details `411/411`; archived Markdown files `393` with `36` explicit exceptions; tracked paths `927`; ignored paths `37,803`; untracked paths `0`. The fixture suite covers a valid blocked/audit-status register plus malformed section, duplicate ID, missing detail, and status mismatch failures.
-- TODO-754 remains blocked. This closes the register/schema/Git-scope gate only; its separate native/runtime/external owners retain their own status. TODO-761 and TODO-762 are archived after retiring the stale sccache claim and establishing the pinned-stable-only Rust policy; TODO-763 remains a completed audit reconciliation.
+- TODO-754 remains blocked. This closes the register/schema/Git-scope gate only; its separate native/runtime/external owners retain their own status. TODO-761, TODO-762, and TODO-763 are archived after retiring the stale sccache claim, establishing the pinned-stable-only Rust policy, and revalidating the current Cargo feature taxonomy.
 
 ## Audit Infrastructure Wiring (2026-08-04, TODO-730)
 
