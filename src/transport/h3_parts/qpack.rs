@@ -1401,6 +1401,25 @@ pub(crate) mod qpack {
             bytes
         }
 
+        fn total_insert_count_increment(instructions: &[u8]) -> u64 {
+            let mut offset = 0usize;
+            let mut total = 0u64;
+            while offset < instructions.len() {
+                let (instruction, used) =
+                    must_succeed(parse_decoder_instruction(&instructions[offset..]));
+                let increment = match instruction {
+                    DecoderInstruction::InsertCountIncrement(value) => value,
+                    _ => panic!("fragmented inserts must only emit insert-count feedback"),
+                };
+                total = match total.checked_add(increment) {
+                    Some(value) => value,
+                    None => panic!("insert-count feedback overflowed"),
+                };
+                offset += used;
+            }
+            total
+        }
+
         #[test]
         fn static_table_matches_rfc_9204_appendix_a() {
             assert_eq!(STATIC_TABLE.len(), 99);
@@ -1440,7 +1459,10 @@ pub(crate) mod qpack {
                 must_succeed(decoder.process_encoder_stream(&[byte]));
             }
             assert_eq!(decoder.insert_count(), 2);
-            assert_eq!(decoder.pending_decoder_instructions(), [0x02]);
+            assert_eq!(
+                total_insert_count_increment(decoder.pending_decoder_instructions()),
+                2
+            );
         }
 
         #[test]
