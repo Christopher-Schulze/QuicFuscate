@@ -399,9 +399,12 @@ pub(crate) mod qpack {
                 let name = header.name();
                 let value = header.value();
                 let sensitive = is_sensitive(name);
-                if !sensitive && let Some(index) = static_exact_index(name, value) {
-                    encode_prefixed_integer(&mut field_lines, 0xc0, 6, index as u64)?;
-                    continue;
+                match static_exact_index(name, value) {
+                    Some(index) if !sensitive => {
+                        encode_prefixed_integer(&mut field_lines, 0xc0, 6, index as u64)?;
+                        continue;
+                    }
+                    _ => {}
                 }
 
                 let mut dynamic_index = next.table.find_exact(name, value);
