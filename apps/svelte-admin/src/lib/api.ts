@@ -1,3 +1,5 @@
+import type { RuntimeSchema } from "$lib/admin-api-contracts";
+
 export class ApiError extends Error {
   status?: number;
   constructor(message: string, status?: number) {
@@ -271,9 +273,27 @@ async function request(path: string, init: RequestInit): Promise<Response> {
   return resp;
 }
 
-export async function getJson<T>(path: string): Promise<T> {
+async function readValidatedJson<T>(
+  resp: Response,
+  path: string,
+  schema: RuntimeSchema<T>,
+): Promise<T> {
+  let raw: unknown;
+  try {
+    raw = await resp.json();
+  } catch {
+    throw new ApiError(`Invalid JSON response from ${path} [${schema.name}]`, resp.status);
+  }
+  const result = schema.validate(raw);
+  if (!result.success) {
+    throw new ApiError(`Invalid response from ${path}: ${result.issue}`, resp.status);
+  }
+  return result.value;
+}
+
+export async function getJson<T>(path: string, schema: RuntimeSchema<T>): Promise<T> {
   const resp = await request(path, { method: "GET" });
-  return (await resp.json()) as T;
+  return await readValidatedJson(resp, path, schema);
 }
 
 export async function getText(path: string): Promise<string> {
@@ -281,7 +301,7 @@ export async function getText(path: string): Promise<string> {
   return await resp.text();
 }
 
-export async function postJson<T, B>(path: string, body: B): Promise<T> {
+export async function postJson<T, B>(path: string, body: B, schema: RuntimeSchema<T>): Promise<T> {
   const resp = await request(path, { method: "POST", body: JSON.stringify(body) });
-  return (await resp.json()) as T;
+  return await readValidatedJson(resp, path, schema);
 }

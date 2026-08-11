@@ -7,6 +7,7 @@ import {
   postJson,
   sanitizeErrorMessage,
 } from "../../../../../apps/svelte-admin/src/lib/api";
+import { adminApiSchemas } from "../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 
 describe("createCsrfNonce", () => {
   afterEach(() => {
@@ -77,7 +78,7 @@ describe("createCsrfNonce", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("crypto", {});
 
-    await expect(postJson("/api/test", {})).rejects.toMatchObject({
+    await expect(postJson("/api/test", {}, adminApiSchemas.logout)).rejects.toMatchObject({
       message: "CSRF nonce unavailable",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);

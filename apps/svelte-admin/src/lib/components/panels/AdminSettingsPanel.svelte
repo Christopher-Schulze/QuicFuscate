@@ -5,9 +5,9 @@
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import { setAuthRequired, setAuthError } from "$lib/stores/app.svelte";
-  import type { AdminResponse } from "$lib/types";
 
   interface Props {
     onRefresh?: (fn: () => Promise<void>) => void;
@@ -15,7 +15,6 @@
 
   let { onRefresh }: Props = $props();
 
-  type AuthStatus = { user: string; requires_password_change: boolean };
   type AuthUpdateBody =
     | { new_username: string; current_password: string; new_password?: never }
     | { current_password: string; new_password: string; new_username?: never }
@@ -77,7 +76,7 @@
     return authRequests.request(async (token: RequestToken) => {
       loading = true;
       try {
-        const resp = await getJson<AdminResponse<AuthStatus>>("/api/admin/auth");
+        const resp = await getJson("/api/admin/auth", adminApiSchemas.adminAuthRead);
         if (!resp.success || !resp.data) throw new Error(resp.message ?? "Auth status unavailable");
         if (!authRequests.isCurrent(token)) return;
         username = resp.data.user || "admin";
@@ -140,7 +139,7 @@
     busy = true;
     try {
       const body: AuthUpdateBody = { new_username: newU, current_password: dlgCurrentPw };
-      const resp = await postJson<AdminResponse<unknown>, AuthUpdateBody>("/api/admin/auth", body);
+      const resp = await postJson("/api/admin/auth", body, adminApiSchemas.adminAuthUpdate);
       if (!resp.success) throw new Error(resp.message ?? "Username update failed");
       if (!viewActive) return;
       username = newU;
@@ -177,7 +176,7 @@
     busy = true;
     try {
       const body: AuthUpdateBody = { current_password: dlgCurrentPw, new_password: dlgNewPw };
-      const resp = await postJson<AdminResponse<unknown>, AuthUpdateBody>("/api/admin/auth", body);
+      const resp = await postJson("/api/admin/auth", body, adminApiSchemas.adminAuthUpdate);
       if (!resp.success) throw new Error(resp.message ?? "Password update failed");
       if (!viewActive) return;
       dlgCurrentPw = "";

@@ -8,6 +8,7 @@
   import AdminSettingsPanel from "$lib/components/panels/AdminSettingsPanel.svelte";
   import ReferenceGuide from "$lib/components/panels/ReferenceGuide.svelte";
   import { getJson, postJson, ApiError, isAuthError, sanitizeErrorMessage } from "$lib/api";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
   import {
     setAuthRequired,
     setAuthError,
@@ -30,7 +31,7 @@
     DEFAULT_STEALTH_MANUAL,
   } from "$lib/config-helpers";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
-  import type { AdminResponse, StatusData, StealthPresetUi, StealthManualSettings, CcSelection } from "$lib/types";
+  import type { StealthPresetUi, StealthManualSettings, CcSelection } from "$lib/types";
 
   const MAX_PERSIST_ATTEMPTS = 2;
 
@@ -89,7 +90,7 @@
     return configRequests.request(async (token: RequestToken) => {
       loading = true;
       try {
-        const resp = await getJson<AdminResponse<{ config: string }>>("/api/config");
+        const resp = await getJson("/api/config", adminApiSchemas.configRead);
         if (!resp.success || !resp.data) throw new Error(resp.message ?? "No config");
         if (!configRequests.isCurrent(token)) return;
         applyConfigToUi(resp.data.config);
@@ -106,7 +107,7 @@
     return statusRequests.request(async (token: RequestToken) => {
       setStatusLoading(true);
       try {
-        const resp = await getJson<AdminResponse<StatusData>>("/api/status");
+        const resp = await getJson("/api/status", adminApiSchemas.status);
         if (!resp.success || !resp.data) throw new Error(resp.message ?? "No status");
         if (!statusRequests.isCurrent(token)) return;
         setStatus(resp.data);
@@ -133,9 +134,9 @@
       let persistedConfigText: string | null = null;
       for (let attempt = 1; attempt <= MAX_PERSIST_ATTEMPTS; attempt++) {
         try {
-          const resp = await postJson<AdminResponse<unknown>, { config: string }>("/api/config", { config: normalized });
+          const resp = await postJson("/api/config", { config: normalized }, adminApiSchemas.configWrite);
           if (!resp.success) throw new Error(resp.message ?? "Save failed");
-          const verifyResp = await getJson<AdminResponse<{ config: string }>>("/api/config");
+          const verifyResp = await getJson("/api/config", adminApiSchemas.configRead);
           if (!verifyResp.success || !verifyResp.data) throw new Error(verifyResp.message ?? "Save verification failed");
           const savedCanonical = canonicalizeConfigForCompare(verifyResp.data.config);
           const expectedCanonical = canonicalizeConfigForCompare(normalized);

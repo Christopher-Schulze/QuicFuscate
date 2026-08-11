@@ -17,6 +17,7 @@ vi.mock("$lib/api", async () => {
 });
 
 import DashboardView from "../../../../../../../../apps/svelte-admin/src/lib/components/views/DashboardView.svelte";
+import { adminApiSchemas } from "../../../../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 import {
   setAuthRequired,
   setAuthError,
@@ -146,10 +147,10 @@ describe("DashboardView", () => {
     render(DashboardView);
     await vi.advanceTimersByTimeAsync(200);
 
-    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/clients");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/metrics/json");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/blocked");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status", adminApiSchemas.status);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/clients", adminApiSchemas.clients);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/metrics/json", adminApiSchemas.metrics);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/blocked", adminApiSchemas.blockedIps);
   });
 
   test("pauses hidden polling and refreshes all resources when visible again", async () => {
@@ -163,10 +164,10 @@ describe("DashboardView", () => {
 
     setVisibility("visible");
     await vi.advanceTimersByTimeAsync(0);
-    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/clients");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/metrics/json");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/blocked");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status", adminApiSchemas.status);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/clients", adminApiSchemas.clients);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/metrics/json", adminApiSchemas.metrics);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/blocked", adminApiSchemas.blockedIps);
   });
 
   test("renders listen value from status", async () => {
@@ -255,7 +256,7 @@ describe("DashboardView", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     await waitFor(() => {
-      expect(postJsonMock).toHaveBeenCalledWith("/api/block", { ip: "10.0.0.1" });
+      expect(postJsonMock).toHaveBeenCalledWith("/api/block", { ip: "10.0.0.1" }, adminApiSchemas.blockIp);
     });
   });
 
@@ -273,7 +274,7 @@ describe("DashboardView", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     await waitFor(() => {
-      expect(postJsonMock).toHaveBeenCalledWith("/api/unblock", { ip: "192.168.1.99" });
+      expect(postJsonMock).toHaveBeenCalledWith("/api/unblock", { ip: "192.168.1.99" }, adminApiSchemas.unblockIp);
     });
   });
 
@@ -301,7 +302,7 @@ describe("DashboardView", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(blockedCalls).toBe(2));
     await fireEvent.click(screen.getAllByRole("button", { name: "Block IP" })[0]);
-    await waitFor(() => expect(postJsonMock).toHaveBeenCalledWith("/api/block", { ip: "10.0.0.1" }));
+    await waitFor(() => expect(postJsonMock).toHaveBeenCalledWith("/api/block", { ip: "10.0.0.1" }, adminApiSchemas.blockIp));
 
     initialBlocked.resolve({ success: true, data: { ips: ["10.0.0.2"] } });
     await vi.advanceTimersByTimeAsync(0);

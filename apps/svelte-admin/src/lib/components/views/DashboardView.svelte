@@ -16,7 +16,8 @@
   import SmoothTrafficValue from "$lib/components/views/SmoothTrafficValue.svelte";
   import KpiCard from "$lib/components/views/KpiCard.svelte";
   import { getJson, getText, postJson, ApiError, isAuthError, sanitizeErrorMessage } from "$lib/api";
-  import { extractBlockedIps, mergeBlockedIps, optimisticBlock, optimisticUnblock } from "$lib/blocked-ips";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
+  import { mergeBlockedIps, optimisticBlock, optimisticUnblock } from "$lib/blocked-ips";
   import {
     setAuthRequired,
     setAuthError,
@@ -32,9 +33,7 @@
   } from "$lib/stores/app.svelte";
   import { formatBitsPerSecond, formatUptime, formatMetricCount, formatMetricValue } from "$lib/format";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
-  import type { AdminResponse, ClientInfo, MetricsMap, StatusData, PendingIpAction } from "$lib/types";
-
-  type MetricsResponse = { metrics?: MetricsMap | null };
+  import type { MetricsMap, PendingIpAction } from "$lib/types";
 
   let blockedIps = $state<string[]>([]);
   let ipActionPending = $state<Record<string, PendingIpAction | undefined>>({});
@@ -125,7 +124,7 @@
     return statusRequests.request(async (token: RequestToken) => {
       setStatusLoading(true);
       try {
-        const resp = await getJson<AdminResponse<StatusData>>("/api/status");
+        const resp = await getJson("/api/status", adminApiSchemas.status);
         if (!resp.success || !resp.data) throw new Error(resp.message ?? "No status");
         if (!statusRequests.isCurrent(token)) return;
         const data = resp.data;
@@ -170,7 +169,7 @@
     return clientsRequests.request(async (token: RequestToken) => {
       setClientsLoading(true);
       try {
-        const resp = await getJson<AdminResponse<ClientInfo[]>>("/api/clients");
+        const resp = await getJson("/api/clients", adminApiSchemas.clients);
         if (!resp.success) throw new Error(resp.message ?? "Failed to load clients");
         if (!clientsRequests.isCurrent(token)) return;
         setClients(Array.isArray(resp.data) ? resp.data : []);
@@ -191,20 +190,10 @@
     return metricsRequests.request(async (token: RequestToken) => {
       setMetricsLoading(true);
       try {
-        const resp = await getJson<AdminResponse<MetricsResponse>>("/api/metrics/json");
-        if (!resp.success) throw new Error(resp.message ?? "Failed to load metrics");
+        const resp = await getJson("/api/metrics/json", adminApiSchemas.metrics);
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "Failed to load metrics");
         if (!metricsRequests.isCurrent(token)) return;
-        const incoming = resp.data?.metrics;
-        const sanitized: MetricsMap = {};
-        if (incoming && typeof incoming === "object") {
-          for (const [key, raw] of Object.entries(incoming)) {
-            if (!key) continue;
-            const value = Number(raw);
-            if (!Number.isFinite(value)) continue;
-            sanitized[key] = value;
-          }
-        }
-        setMetrics(Object.keys(sanitized).length > 0 ? sanitized : null);
+        setMetrics(Object.keys(resp.data.metrics).length > 0 ? resp.data.metrics : null);
       } catch (e: unknown) {
         if (!metricsRequests.isCurrent(token)) return;
         if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
@@ -250,11 +239,10 @@
   function fetchBlocked(options: RequestOptions = {}): Promise<void> {
     return blockedRequests.request(async (token: RequestToken) => {
       try {
-        const resp = await getJson<AdminResponse<{ ips?: unknown; blocked?: unknown }>>("/api/blocked");
-        if (!resp.success) throw new Error(resp.message ?? "Failed to load blocked IPs");
+        const resp = await getJson("/api/blocked", adminApiSchemas.blockedIps);
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "Failed to load blocked IPs");
         if (!blockedRequests.isCurrent(token)) return;
-        const serverBlocked = extractBlockedIps(resp.data);
-        blockedIps = mergeBlockedIps(serverBlocked, ipActionPending);
+        blockedIps = mergeBlockedIps(resp.data.ips, ipActionPending);
       } catch (e: unknown) {
         if (!blockedRequests.isCurrent(token)) return;
         if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
@@ -270,7 +258,7 @@
     blockedRequests.invalidate();
     blockedIps = optimisticBlock(blockedIps, ip);
     try {
-      const resp = await postJson<AdminResponse<unknown>, { ip: string }>("/api/block", { ip });
+      const resp = await postJson("/api/block", { ip }, adminApiSchemas.blockIp);
       if (!resp.success) throw new Error(resp.message ?? "Block failed");
       addToast(`Blocked ${ip}`, "success");
     } catch (e: unknown) {
@@ -291,7 +279,7 @@
     blockedRequests.invalidate();
     blockedIps = optimisticUnblock(blockedIps, ip);
     try {
-      const resp = await postJson<AdminResponse<unknown>, { ip: string }>("/api/unblock", { ip });
+      const resp = await postJson("/api/unblock", { ip }, adminApiSchemas.unblockIp);
       if (!resp.success) throw new Error(resp.message ?? "Unblock failed");
       addToast(`Unblocked ${ip}`, "success");
     } catch (e: unknown) {

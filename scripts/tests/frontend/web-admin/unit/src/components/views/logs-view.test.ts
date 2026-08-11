@@ -17,6 +17,7 @@ vi.mock("$lib/api", async () => {
 });
 
 import LogsView from "../../../../../../../../apps/svelte-admin/src/lib/components/views/LogsView.svelte";
+import { adminApiSchemas } from "../../../../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 import {
   setAuthRequired,
   setAuthError,
@@ -181,9 +182,9 @@ describe("LogsView", () => {
     render(LogsView);
     await vi.advanceTimersByTimeAsync(200);
 
-    expect(getJsonMock).toHaveBeenCalledWith("/api/config/logging");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/logs?cursor=0");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/config/logging", adminApiSchemas.loggingRead);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status", adminApiSchemas.status);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/logs?cursor=0", adminApiSchemas.logs);
   });
 
   test("pauses hidden polling and refreshes mode, status, and logs when visible again", async () => {
@@ -197,9 +198,9 @@ describe("LogsView", () => {
 
     setVisibility("visible");
     await vi.advanceTimersByTimeAsync(0);
-    expect(getJsonMock).toHaveBeenCalledWith("/api/config/logging");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
-    expect(getJsonMock).toHaveBeenCalledWith("/api/logs?cursor=3");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/config/logging", adminApiSchemas.loggingRead);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status", adminApiSchemas.status);
+    expect(getJsonMock).toHaveBeenCalledWith("/api/logs?cursor=3", adminApiSchemas.logs);
   });
 
   test("shows waiting message when logs are empty", async () => {

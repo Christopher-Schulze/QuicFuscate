@@ -20,6 +20,7 @@ vi.mock("$lib/api", async () => {
 });
 
 import LoginModal from "../../../../../../../apps/svelte-admin/src/lib/components/LoginModal.svelte";
+import { adminApiSchemas } from "../../../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 import {
   setAuthRequired,
   setAuthError,
@@ -131,7 +132,7 @@ describe("LoginModal", () => {
       expect(postJsonMock).toHaveBeenCalledWith("/api/login", {
         username: "admin",
         password: "mypassword",
-      });
+      }, adminApiSchemas.login);
     });
   });
 

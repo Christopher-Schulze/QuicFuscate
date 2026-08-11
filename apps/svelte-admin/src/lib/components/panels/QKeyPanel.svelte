@@ -38,8 +38,8 @@
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import { Select } from "@quicfuscate/ui";
   import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
   import { formatUnixSeconds } from "$lib/format";
-  import { parseAdminQKeyCreateResponse, parseAdminQKeyEntries } from "$lib/timestamp-boundary";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import {
     setAuthRequired,
@@ -55,10 +55,8 @@
     parsePort,
     FRONTING_SNI_ALLOWLIST,
   } from "$lib/config-helpers";
-  import type { AdminQKeyTimestamp, AdminResponse, QKeyEntry } from "$lib/types";
+  import type { AdminQKeyTimestamp, QKeyEntry } from "$lib/types";
 
-  type QKeyList = { keys?: unknown };
-  type QKeyCreateResp = unknown;
   type DomainFrontingMode = "auto" | "off" | "manual";
   type IssuedQKey = {
     value: string;
@@ -160,10 +158,10 @@
     return qkeyRequests.request(async (token: RequestToken) => {
       setQkeyListLoading(true);
       try {
-        const resp = await getJson<AdminResponse<QKeyList>>("/api/qkeys");
-        if (!resp.success) throw new Error(resp.message ?? "Failed to load QKeys");
+        const resp = await getJson("/api/qkeys", adminApiSchemas.qkeyList);
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "Failed to load QKeys");
         if (!qkeyRequests.isCurrent(token)) return;
-        setQkeyList(parseAdminQKeyEntries(resp.data?.keys));
+        setQkeyList(resp.data.keys);
       } catch (e: unknown) {
         if (!qkeyRequests.isCurrent(token)) return;
         if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
@@ -220,7 +218,7 @@
     for (const id of selected) {
       if (!viewActive) return;
       try {
-        const resp = await postJson<AdminResponse<unknown>, { id: string }>("/api/qkeys/revoke", { id });
+        const resp = await postJson("/api/qkeys/revoke", { id }, adminApiSchemas.qkeyRevoke);
         if (resp.success) ok++;
         else fail++;
       } catch { fail++; }
@@ -247,9 +245,9 @@
       if (name) payload.name = name;
       if (port != null) payload.port = port;
       if (qkeyFrontingMode === "manual") payload.sni_domain = qkeyFixedDomain;
-      const resp = await postJson<AdminResponse<QKeyCreateResp>, typeof payload>("/api/qkey", payload);
-      const created = parseAdminQKeyCreateResponse(resp.data);
-      if (!resp.success || !created) throw new Error(resp.message ?? "QKey create failed");
+      const resp = await postJson("/api/qkey", payload, adminApiSchemas.qkeyCreate);
+      if (!resp.success || !resp.data) throw new Error(resp.message ?? "QKey create failed");
+      const created = resp.data;
       if (!viewActive) return;
       const normalized = normalizeQKey(created.qkey);
       issuedQKey = {
@@ -288,7 +286,7 @@
     selectedIds = next;
     if (copyFb.isKeyCopied(id)) copyFb.reset();
     try {
-      const resp = await postJson<AdminResponse<unknown>, { id: string }>("/api/qkeys/revoke", { id });
+      const resp = await postJson("/api/qkeys/revoke", { id }, adminApiSchemas.qkeyRevoke);
       if (!resp.success) throw new Error(resp.message ?? "Revoke failed");
     } catch (e: unknown) {
       if (!viewActive) return;

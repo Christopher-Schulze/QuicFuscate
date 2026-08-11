@@ -14,6 +14,7 @@ vi.mock("$lib/api", async () => {
 });
 
 import QKeyPanel from "../../../../../../../../apps/svelte-admin/src/lib/components/panels/QKeyPanel.svelte";
+import { adminApiSchemas } from "../../../../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 import {
   setAuthError,
   setAuthRequired,
@@ -107,7 +108,7 @@ describe("qkey panel", () => {
         name: "Desktop",
         port: 4433,
         sni_strategy: "auto_rotating",
-      });
+      }, adminApiSchemas.qkeyCreate);
     });
 
     const issuedDialog = await screen.findByRole("dialog", { name: "Issued QKey" });

@@ -364,6 +364,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- app.d.ts
 |   |   |   |-- app.html
 |   |   |   |-- lib
+|   |   |   |   |-- admin-api-contracts.ts
 |   |   |   |   |-- api.ts
 |   |   |   |   |-- assets
 |   |   |   |   |   |-- favicon.png
@@ -672,6 +673,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |       |   |-- overlay-notifications.pw.ts
 |   |   |       |   `-- smoke-ui.pw.ts
 |   |   |       `-- unit
+|   |   |           |-- admin-api-contracts.test.ts
 |   |   |           |-- api-error-parsing.test.ts
 |   |   |           |-- config-helpers.test.ts
 |   |   |           |-- format.test.ts
@@ -3227,7 +3229,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - Developer and CI flow: `apps/svelte-{admin,desktop}/package.json` `test:unit` -> `scripts/tests/frontend/run-bounded-unit-tests.ts` -> app-local Vitest 4.1.10 -> explicit `threads` pool -> one worker with sequential file admission -> app test inventory.
 - Process ownership: Bun wrapper -> inherited stdin plus streamed stdout/stderr -> 60-second heartbeat -> validated 600-second default deadline -> `SIGKILL` and exit `124` on timeout. `QF_FRONTEND_UNIT_TIMEOUT_MS` is accepted only from 1 through 3,600,000 milliseconds.
-- Inventory ownership: an unfiltered successful process must expose a parseable Vitest summary and retain at least Web Admin 26 files/309 tests or Desktop 36 files/442 tests. Filtered diagnostic runs remain bounded but explicitly skip the full-inventory assertion.
+- Inventory ownership: an unfiltered successful process must expose a parseable Vitest summary and retain at least Web Admin 27 files/385 tests or Desktop 36 files/442 tests. Filtered diagnostic runs remain bounded but explicitly skip the full-inventory assertion.
 - Consumers: `.github/workflows/ci.yml` `frontend-checks`, `scripts/tests/suites/test-desktop-webadmin-rust-integration.sh`, and contributor commands all call the same package contract. No frontend test include or exclude path changed.
 - Verification: real timeout failure exits `124` without a residual Vitest process; post-review Web Admin passes 26/307 in 120.45 seconds; Desktop passes 36/441 in 321.29 seconds; both Svelte checks report zero errors and zero warnings.
 
@@ -3236,3 +3238,10 @@ The audit remains open. These reconciliations document current evidence and owne
 - Canonical backend flow: `qf-engine-types::CcAlgorithm` serde -> `[transport].cc_algorithm` TOML -> engine configuration. The accepted set is exactly `reno`, `cubic`, `bbr2`, and `bbr3`; invalid strings remain parse errors.
 - Shared frontend flow: `packages/ui/congestion-control.ts` exact options/parser/labels -> Web Admin `StealthPanel.svelte` selection plus `config-helpers.ts` TOML serialization; Desktop `policy-display.ts` backend summary. Canonical CUBIC is selected and displayed as `CUBIC`; only unknown non-empty policy values display `Custom`.
 - Verification: qf-engine-types passes 58/58 tests and strict all-target Clippy; Shared UI passes 12 files/95 tests; Web Admin passes 26/309; Desktop passes 36/442; both Svelte checks report zero errors and zero warnings. No unrelated UI structure or styling changed.
+
+## Web Admin Runtime Response Contracts (2026-08-11, TODO-878)
+
+- Request boundary: `apps/svelte-admin/src/lib/api.ts` successful response -> JSON decode -> required `RuntimeSchema<T>` -> validated value or endpoint-named `ApiError`. Generic type parameters no longer assert unvalidated `resp.json()` values.
+- Schema ownership: `apps/svelte-admin/src/lib/admin-api-contracts.ts` owns 19 distinct method/endpoint contracts across login/logout, admin auth, config, status, clients, metrics, blocked IPs, logging, logs, and QKeys. Each data schema validates the exact fields consumed downstream; action schemas validate the common success/message envelope.
+- State wiring: named schemas -> layout auth probe, LoginModal, Sidebar, Dashboard, Configuration, Logs, AdminSettings, and QKey panels -> request coordinators -> stores. Invalid JSON, missing required fields, wrong field types, malformed list members, and raw QKey list credentials stop before state publication.
+- Verification: 76 table-driven boundary cases cover valid, missing-field, wrong-type, and non-JSON responses for every contract; the complete bounded Web Admin suite passes 27 files/385 tests; Svelte checking reports zero errors and zero warnings; the production static build passes. No dependency, styling, layout, Desktop, Tauri, or Rust path changed.

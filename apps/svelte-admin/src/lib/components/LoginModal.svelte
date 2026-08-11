@@ -9,7 +9,7 @@
     setActiveTab,
   } from "$lib/stores/app.svelte";
   import { ApiError, postJson, sanitizeErrorMessage } from "$lib/api";
-  import type { AdminResponse } from "$lib/types";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
 
   interface Props {
     open: boolean;
@@ -19,7 +19,6 @@
 
   let { open, error, onClearError }: Props = $props();
 
-  type LoginResponse = { user: string; requires_password_change?: boolean };
   const MAX_USERNAME_CHARS = 64;
   const MAX_PASSWORD_CHARS = 256;
   const REJECT_FEEDBACK_MS = 520;
@@ -111,9 +110,10 @@
     busy = true;
     onClearError();
     try {
-      const resp = await postJson<AdminResponse<LoginResponse>, { username: string; password: string }>(
+      const resp = await postJson(
         "/api/login",
         { username: username.trim(), password: password.slice(0, MAX_PASSWORD_CHARS) },
+        adminApiSchemas.login,
       );
       if (!viewActive) return;
       if (!resp.success) {

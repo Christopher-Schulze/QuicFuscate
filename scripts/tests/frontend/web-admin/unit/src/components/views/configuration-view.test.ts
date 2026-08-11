@@ -31,6 +31,7 @@ import {
   setStatus,
 } from "../../../../../../../../apps/svelte-admin/src/lib/stores/app.svelte";
 import { ApiError } from "../../../../../../../../apps/svelte-admin/src/lib/api";
+import { adminApiSchemas } from "../../../../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 
 const BASE_CONFIG = `
 [stealth]
@@ -85,6 +86,7 @@ function mockApis() {
     if (url === "/api/config") return Promise.resolve({ success: true, data: { config: _postedConfig } });
     if (url === "/api/status") return Promise.resolve({ success: true, data: BASE_STATUS });
     if (url === "/api/admin/auth") return Promise.resolve({ success: true, data: ADMIN_AUTH });
+    if (url === "/api/qkeys") return Promise.resolve({ success: true, data: { keys: [] } });
     return Promise.resolve({ success: true, data: {} });
   });
   postJsonMock.mockImplementation((_url: string, body: { config?: string }) => {
@@ -115,8 +117,8 @@ describe("ConfigurationView", () => {
     render(ConfigurationView);
 
     await waitFor(() => {
-      expect(getJsonMock).toHaveBeenCalledWith("/api/config");
-      expect(getJsonMock).toHaveBeenCalledWith("/api/status");
+      expect(getJsonMock).toHaveBeenCalledWith("/api/config", adminApiSchemas.configRead);
+      expect(getJsonMock).toHaveBeenCalledWith("/api/status", adminApiSchemas.status);
     });
   });
 
@@ -131,8 +133,8 @@ describe("ConfigurationView", () => {
 
     setVisibility("visible");
     await vi.advanceTimersByTimeAsync(0);
-    expect(getJsonMock).toHaveBeenCalledWith("/api/status");
-    expect(getJsonMock).not.toHaveBeenCalledWith("/api/config");
+    expect(getJsonMock).toHaveBeenCalledWith("/api/status", adminApiSchemas.status);
+    expect(getJsonMock).not.toHaveBeenCalledWith("/api/config", adminApiSchemas.configRead);
   });
 
   test("Save button is disabled initially (clean state)", async () => {
@@ -202,6 +204,7 @@ describe("ConfigurationView", () => {
     expect(postJsonMock).toHaveBeenCalledWith(
       "/api/config",
       expect.objectContaining({ config: expect.any(String) }),
+      adminApiSchemas.configWrite,
     );
   });
 
@@ -237,6 +240,7 @@ describe("ConfigurationView", () => {
       if (url === "/api/config") return Promise.reject(new ApiError("Unauthorized", 401));
       if (url === "/api/status") return Promise.resolve({ success: true, data: BASE_STATUS });
       if (url === "/api/admin/auth") return Promise.resolve({ success: true, data: ADMIN_AUTH });
+      if (url === "/api/qkeys") return Promise.resolve({ success: true, data: { keys: [] } });
       return Promise.resolve({ success: true, data: {} });
     });
 
@@ -251,7 +255,7 @@ describe("ConfigurationView", () => {
     render(ConfigurationView);
 
     await waitFor(() => {
-      expect(getJsonMock).toHaveBeenCalledWith("/api/config");
+      expect(getJsonMock).toHaveBeenCalledWith("/api/config", adminApiSchemas.configRead);
     });
 
     const callsBefore = getJsonMock.mock.calls.filter((c: unknown[]) => c[0] === "/api/config").length;
@@ -284,6 +288,7 @@ describe("ConfigurationView", () => {
       }
       if (url === "/api/status") return Promise.resolve({ success: true, data: BASE_STATUS });
       if (url === "/api/admin/auth") return Promise.resolve({ success: true, data: ADMIN_AUTH });
+      if (url === "/api/qkeys") return Promise.resolve({ success: true, data: { keys: [] } });
       return Promise.resolve({ success: true, data: {} });
     });
 

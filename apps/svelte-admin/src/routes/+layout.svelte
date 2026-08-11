@@ -27,7 +27,7 @@
     confirmDialog,
   } from "$lib/stores/app.svelte";
   import { ApiError, getJson, PASSWORD_CHANGE_EVENT } from "$lib/api";
-  import type { AdminResponse } from "$lib/types";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
 
   interface Props { children: Snippet; }
   let { children }: Props = $props();
@@ -75,7 +75,7 @@
     let cancelled = false;
     (async () => {
       try {
-        const resp = await getJson<AdminResponse<{ user: string; requires_password_change: boolean }>>("/api/admin/auth");
+        const resp = await getJson("/api/admin/auth", adminApiSchemas.adminAuthRead);
         if (cancelled) return;
         if (!resp.success || !resp.data) return;
         setAdminUser(resp.data.user || "admin");

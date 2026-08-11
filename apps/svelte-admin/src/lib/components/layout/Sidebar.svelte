@@ -19,7 +19,8 @@
     confirmDialog,
   } from "$lib/stores/app.svelte";
   import { postJson, sanitizeErrorMessage } from "$lib/api";
-  import type { NavTab, AdminResponse } from "$lib/types";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
+  import type { NavTab } from "$lib/types";
   import appLogo from "../../../../../../assets/logo/QuicFuscate_clean.png";
 
   interface Props {
@@ -81,7 +82,7 @@
   async function handleLogout() {
     if (!(await confirmUnsavedLeave())) return;
     try {
-      await postJson<AdminResponse<unknown>, Record<string, never>>("/api/logout", {});
+      await postJson("/api/logout", {}, adminApiSchemas.logout);
       setAuthRequired(true);
     } catch (e: unknown) {
       const msg = sanitizeErrorMessage(

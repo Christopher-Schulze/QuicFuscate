@@ -8,9 +8,9 @@
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import { useAnchorSync } from "$lib/use-anchor-sync";
   import { formatTimestamp, formatTimestampIso } from "$lib/format";
-  import { parseAdminLogEntries } from "$lib/timestamp-boundary";
   import { isBrowserDocumentVisible } from "@quicfuscate/time";
   import { ApiError, isAuthError, getJson, postJson, sanitizeErrorMessage } from "$lib/api";
+  import { adminApiSchemas } from "$lib/admin-api-contracts";
   import {
     setAuthRequired,
     setAuthError,
@@ -96,36 +96,18 @@
   $effect(() => { return () => setLogsDirty(false); });
   $effect(() => { bottomEl?.scrollIntoView({ behavior: "smooth" }); });
 
-  function isRecord(v: unknown): v is Record<string, unknown> {
-    return typeof v === "object" && v !== null && !Array.isArray(v);
-  }
-
-  function parseLogsResponse(resp: unknown): { lines: LogEntry[]; cursor: number } {
-    const asObj = isRecord(resp) ? resp : {};
-    if (typeof asObj.success === "boolean" && !asObj.success) {
-      throw new Error(typeof asObj.message === "string" ? asObj.message.trim() : "Failed to load logs");
-    }
-    const data = isRecord(asObj.data) ? asObj.data : (isRecord(resp) ? resp : {});
-    const lines = parseAdminLogEntries(data.lines);
-    const cur = typeof data.cursor === "number" ? data.cursor : 0;
-    return { lines, cursor: cur };
-  }
-
   function fetchMode(options: RequestOptions = {}): Promise<LogMode> {
     let nextMode = savedMode;
     const selectionVersionAtStart = modeSelectionVersion;
     return modeRequests.request(async (token: RequestToken) => {
       try {
-        const resp = await getJson<{ success: boolean; message?: string; data?: { mode?: string } }>("/api/config/logging");
-        if (!resp.success) throw new Error(resp.message ?? "Failed to load logging mode");
+        const resp = await getJson("/api/config/logging", adminApiSchemas.loggingRead);
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "Failed to load logging mode");
         if (!modeRequests.isCurrent(token)) return;
-        const VALID_LOG_MODES: readonly string[] = ["verbose", "normal", "minimal", "no-log"];
-        if (resp.data?.mode && VALID_LOG_MODES.includes(resp.data.mode)) {
-          const m: LogMode = resp.data.mode as LogMode;
-          if (selectionVersionAtStart === modeSelectionVersion) mode = m;
-          savedMode = m;
-          nextMode = m;
-        }
+        const next = resp.data.mode;
+        if (selectionVersionAtStart === modeSelectionVersion) mode = next;
+        savedMode = next;
+        nextMode = next;
       } catch (e: unknown) {
         if (!modeRequests.isCurrent(token)) return;
         if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
@@ -147,8 +129,9 @@
         return;
       }
       try {
-        const resp = await getJson<unknown>(`/api/logs?cursor=${requestCursor}`);
-        const next = parseLogsResponse(resp);
+        const resp = await getJson(`/api/logs?cursor=${requestCursor}`, adminApiSchemas.logs);
+        if (!resp.success || !resp.data) throw new Error(resp.message ?? "Failed to load logs");
+        const next = resp.data;
         if (!logsRequests.isCurrent(token)) return;
         if (next.lines.length) {
           cursor = next.cursor;
@@ -178,7 +161,7 @@
   function fetchOnlineStatus(options: RequestOptions = {}): Promise<void> {
     return statusRequests.request(async (token: RequestToken) => {
       try {
-        const resp = await getJson<{ success: boolean; data?: unknown }>("/api/status");
+        const resp = await getJson("/api/status", adminApiSchemas.status);
         if (!statusRequests.isCurrent(token)) return;
         backendOnline = Boolean(resp?.success && resp?.data);
       } catch (e: unknown) {
@@ -225,9 +208,9 @@
     try {
       for (let attempt = 1; attempt <= MAX_PERSIST_ATTEMPTS; attempt++) {
         try {
-          const resp = await postJson<{ success: boolean; message?: string }, { mode: LogMode }>("/api/config/logging", { mode: newMode });
+          const resp = await postJson("/api/config/logging", { mode: newMode }, adminApiSchemas.loggingWrite);
           if (!resp.success) throw new Error(resp.message ?? "Failed to save logging mode");
-          const verify = await getJson<{ success: boolean; data?: { mode?: string } }>("/api/config/logging");
+          const verify = await getJson("/api/config/logging", adminApiSchemas.loggingRead);
           if (verify.data?.mode !== newMode) throw new Error("Failed to verify logging mode");
           break;
         } catch (e) {
@@ -264,7 +247,7 @@
     cursor = 0;
     logs = [];
     try {
-      const resp = await postJson<{ success: boolean; message?: string }, Record<string, never>>("/api/logs/clear", {});
+      const resp = await postJson("/api/logs/clear", {}, adminApiSchemas.logsClear);
       if (!resp.success) throw new Error(resp.message ?? "Failed to clear logs");
       if (!viewActive) return;
       await fetchLogsOnce(mode, true, { invalidate: true });

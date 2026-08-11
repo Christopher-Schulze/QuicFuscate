@@ -12,6 +12,7 @@ vi.mock("$lib/api", async () => {
 });
 
 import Sidebar from "../../../../../../../../apps/svelte-admin/src/lib/components/layout/Sidebar.svelte";
+import { adminApiSchemas } from "../../../../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 import {
   setActiveTab,
   getActiveTab,
@@ -118,7 +119,7 @@ describe("Sidebar", () => {
     await fireEvent.click(screen.getByText("Logout"));
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(postJsonMock).toHaveBeenCalledWith("/api/logout", {});
+    expect(postJsonMock).toHaveBeenCalledWith("/api/logout", {}, adminApiSchemas.logout);
   });
 
   test("Logout sets authRequired to true", async () => {

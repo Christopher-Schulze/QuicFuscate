@@ -14,6 +14,7 @@ vi.mock("$lib/api", async () => {
 });
 
 import AdminSettingsPanel from "../../../../../../../../apps/svelte-admin/src/lib/components/panels/AdminSettingsPanel.svelte";
+import { adminApiSchemas } from "../../../../../../../../apps/svelte-admin/src/lib/admin-api-contracts";
 import {
   getAuthRequired,
   setAuthError,
@@ -185,7 +186,7 @@ describe("admin settings panel", () => {
       expect(postJsonMock).toHaveBeenCalledWith("/api/admin/auth", {
         current_password: "oldpassword",
         new_password: "newpassword123",
-      });
+      }, adminApiSchemas.adminAuthUpdate);
     });
 
     await waitFor(() => {
