@@ -2253,6 +2253,9 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpStream;
 
+        const TEST_OPERATION_TIMEOUT_MS: u64 = 500;
+        const SLOW_WORKER_DURATION: Duration = Duration::from_millis(2_500);
+
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind admin test listener");
         let addr = listener.local_addr().expect("admin test listener address");
         drop(listener);
@@ -2263,9 +2266,9 @@ mod tests {
                 std::env::temp_dir(),
                 None,
                 None,
-                slow_test_handler(Duration::from_millis(1_200)),
+                slow_test_handler(SLOW_WORKER_DURATION),
                 1,
-                MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS,
+                TEST_OPERATION_TIMEOUT_MS,
             )
             .expect("admin server"),
         );
@@ -2290,7 +2293,7 @@ mod tests {
             .await
             .expect("request write");
         let mut response = Vec::new();
-        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
             .await
             .expect("timed-out operation must return before connection grace expires")
             .expect("timed-out operation response must be readable");
@@ -2314,7 +2317,7 @@ mod tests {
             .await
             .expect("follow-up request write");
         let mut follow_up_response = Vec::new();
-        tokio::time::timeout(Duration::from_secs(1), follow_up.read_to_end(&mut follow_up_response))
+        tokio::time::timeout(Duration::from_secs(2), follow_up.read_to_end(&mut follow_up_response))
             .await
             .expect("follow-up response must be bounded")
             .expect("follow-up response must be readable");
@@ -2324,7 +2327,7 @@ mod tests {
         );
 
         let before_shutdown = diagnostics.snapshot();
-        assert_eq!(before_shutdown.timeout_ms, MIN_ADMIN_WEB_OPERATION_TIMEOUT_MS);
+        assert_eq!(before_shutdown.timeout_ms, TEST_OPERATION_TIMEOUT_MS);
         assert_eq!(before_shutdown.started_total, 2);
         assert_eq!(before_shutdown.timeout_total, 1);
         assert_eq!(before_shutdown.active_operations, 1);
