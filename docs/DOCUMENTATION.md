@@ -5781,6 +5781,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `test-core.sh` now fails closed when a named test body is not executed and records the Windows-only Wintun cleanup-state fixture as `SKIP` on non-Windows hosts. The negative-proof manifest therefore distinguishes executed portable contracts from target-gated and native-unavailable evidence.
 - Native privileged Linux/macOS syscall execution, Windows compilation and Win32/WFP fault injection, verified-DLL residue, and Omega proof remain external boundaries and are not inferred.
 - TODO-846 hosted completion at revision `3dd681d510778b6d72bc4bf086b37ae443f13aac`: Main CI run `31455010980`, Windows job `93666880422`, passes the complete `tun-windows,rust-tests` library (`1,601` passed) plus `2/2` privileged verified-DLL Wintun lifecycle targets. Bidirectional packet I/O, blocked-reader bounded close, repeated open/close, and zero adapter residue pass. Direct Win32 cleanup fault injection remains explicitly `UNAVAILABLE` rather than inferred.
+- TODO-848 hosted completion uses the same job's versioned `quicfuscate.interface_platform_negative_proof.v1` artifact. It records Windows x64, executed generic/Wintun/WFP deterministic boundaries, administrator/verified-DLL/BFE prerequisites, Unix `NOT_APPLICABLE`, ISA `HOST_CONDITIONAL`, and exact `UNAVAILABLE` reasons for direct Win32/BFE cleanup fault injection. No unsupported surface is represented as green.
 
 ## Optimize unsafe-boundary remediation (2026-08-07, TODO-680)
 
