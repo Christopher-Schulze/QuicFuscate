@@ -338,6 +338,17 @@ setup_netns() {
     done
 }
 
+require_runtime_owned_tun_assignment() {
+    local server_tun_ipv4 client_tun_ipv4
+    sleep 2
+    server_tun_ipv4=$(ip netns exec ns-srv ip -o -4 addr show dev qtun0 2>/dev/null | awk '{print $4}')
+    client_tun_ipv4=$(ip netns exec ns-cli ip -o -4 addr show dev qtun0 2>/dev/null | awk '{print $4}')
+    [ "$server_tun_ipv4" = "10.0.1.1/24" ] \
+        || fatal "server runtime did not provision exact TUN assignment: ${server_tun_ipv4:-<missing>}"
+    [ "$client_tun_ipv4" = "10.0.1.2/24" ] \
+        || fatal "authenticated server assignment did not provision exact client TUN address: ${client_tun_ipv4:-<missing>}"
+}
+
 apply_loss() {
     local loss_pct="$1"
     if [ "$loss_pct" = "0" ]; then
@@ -371,17 +382,11 @@ start_client() {
     local qkey="$1"
     ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
         --qkey "$qkey" --ca-file "$CA" --verify-peer --disable-doh \
-        --tun --tun-name qtun0 --tun-ip 10.0.1.2 --tun-netmask 255.255.255.0 --no-utls -v \
+        --tun --tun-name qtun0 --no-utls -v \
         > "$CLIENT_LOG" 2>&1 &
     CLIENT_PID=$!
     sleep 4
-
-    # Ensure TUN up + ip + route in each netns
-    ip netns exec ns-srv ip addr add 10.0.1.1/24 dev qtun0 2>/dev/null
-    ip netns exec ns-srv ip link set qtun0 up 2>/dev/null
-    ip netns exec ns-cli ip addr add 10.0.1.2/24 dev qtun0 2>/dev/null
-    ip netns exec ns-cli ip link set qtun0 up 2>/dev/null
-    sleep 2
+    require_runtime_owned_tun_assignment
 }
 
 get_qkey() {
