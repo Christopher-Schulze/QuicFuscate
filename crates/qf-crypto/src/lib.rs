@@ -20,6 +20,7 @@ use qf_cpu::{prefetch, PrefetchHint};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 // Internal compatibility aliases keep the moved source readable while making the crate boundary
@@ -546,11 +547,7 @@ impl Drop for AesGcm128 {
 }
 
 fn subtle_ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
-    let mut diff = 0u8;
-    for i in 0..16 {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    bool::from(a.ct_eq(b))
 }
 
 fn inc32(counter_block: &mut [u8; 16]) {

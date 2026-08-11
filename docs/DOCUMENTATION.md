@@ -4957,7 +4957,7 @@ This and every later dated audit or reconciliation section are historical eviden
 
 ### Security-Critical Findings
 
-- **Constant-time tag comparison**: `src/crypto/mod.rs::subtle_ct_eq` is not constant-time; the compiler may short-circuit on first mismatch, creating a timing oracle for all AEADs. Tracked in TODO-626.
+- **Constant-time tag comparison**: TODO-626 is closed. The canonical `qf-crypto` helper delegates fixed 16-byte tag verification to `subtle::ConstantTimeEq`, and all 13 production tag-verification call sites use that boundary. A byte-position-complete regression rejects a mismatch at every tag offset, and the runtime guardrail requires the direct dependency, primitive call, regression, and absence of the former hand-written accumulation.
 - **Key/IV length validation**: crypto constructors in `src/crypto/mod.rs`, `src/crypto/aegis.rs`, and `src/crypto/morus.rs` now reject malformed key/IV material through `KeyMaterialError`; the constructor boundary is closed by TODO-627. Header-protection sample bounds remain separately tracked in TODO-629.
 - **AEGIS unwrap panics**: the former `Mutex<Option<...>>` seal/open state and its `.unwrap()` path were removed by TODO-582; the concurrent-wrapper regression covers the mutex-free local-state design. TODO-628 is closed by that change.
 - **AEAD header-protection sample bypass**: `AesHp::apply` zero-pads short samples with `unwrap_or([0u8; 16])`. Tracked in TODO-629.

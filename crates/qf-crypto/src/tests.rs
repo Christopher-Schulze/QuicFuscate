@@ -45,6 +45,21 @@ fn chacha20poly1305_rfc8439_vector() {
 }
 
 #[test]
+fn tag_comparison_rejects_every_mismatch_position() {
+    let expected = [0xA5u8; 16];
+    assert!(super::subtle_ct_eq(&expected, &expected));
+
+    for index in 0..expected.len() {
+        let mut candidate = expected;
+        candidate[index] ^= 1;
+        assert!(
+            !super::subtle_ct_eq(&expected, &candidate),
+            "tag mismatch at byte {index} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn aead_rejects_packet_numbers_above_quic_limit() {
     let invalid_counter = super::MAX_QUIC_PACKET_NUMBER + 1;
     let key16 = [0x11u8; 16];

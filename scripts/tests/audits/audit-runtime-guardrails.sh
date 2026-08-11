@@ -875,10 +875,16 @@ else
   append_item "optimize_unsafe_contracts" "fail" "missing fail-closed input contract, parity regression, or documentation owner"
 fi
 
-# 4n) Crypto key and nonce material must have explicit local lifecycle owners;
-#     GHASH controls and the AES table fallback must state their release
-#     boundaries instead of implying constant-time or compiler-erasure proof.
-if rg -F -- 'impl Drop for Aes128Ctx' crates/qf-crypto/src/aes.rs >/dev/null \
+# 4n) Crypto tag verification, key, and nonce material must have explicit
+#     local owners. GHASH controls and the AES table fallback must state their
+#     release boundaries instead of implying compiler-erasure proof.
+if rg -n --no-messages '^subtle = ' crates/qf-crypto/Cargo.toml >/dev/null \
+  && rg -F -- 'use subtle::ConstantTimeEq;' crates/qf-crypto/src/lib.rs >/dev/null \
+  && rg -F -- 'bool::from(a.ct_eq(b))' crates/qf-crypto/src/lib.rs >/dev/null \
+  && rg -F -- 'tag_comparison_rejects_every_mismatch_position()' \
+    crates/qf-crypto/src/tests.rs >/dev/null \
+  && ! rg -F -- 'diff |= a[i] ^ b[i];' crates/qf-crypto/src/lib.rs >/dev/null \
+  && rg -F -- 'impl Drop for Aes128Ctx' crates/qf-crypto/src/aes.rs >/dev/null \
   && rg -F -- 'fn zeroize_round_keys(' crates/qf-crypto/src/aes.rs >/dev/null \
   && rg -F -- 'fn zeroize_aes128_schedule(' crates/qf-crypto/src/lib.rs >/dev/null \
   && rg -F -- 'self.nonce.zeroize();' crates/qf-crypto/src/lib.rs >/dev/null \
@@ -890,11 +896,11 @@ if rg -F -- 'impl Drop for Aes128Ctx' crates/qf-crypto/src/aes.rs >/dev/null \
   && rg -F -- 'QUICFUSCATE_GHASH_PMULL' crates/qf-crypto/src/gcm.rs >/dev/null \
   && rg -F -- 'Crypto key and nonce lifecycle' docs/DOCUMENTATION.md docs/MAP.md \
     >/dev/null; then
-  pass "Crypto schedule, nonce, GHASH-control, and AES fallback lifecycle contracts are wired"
-  append_item "crypto_lifecycle_contracts" "ok" "retained and temporary schedules, ChaCha nonce/one-time keys, GHASH controls, and AES fallback scope are explicit"
+  pass "Crypto tag, schedule, nonce, GHASH-control, and AES fallback lifecycle contracts are wired"
+  append_item "crypto_lifecycle_contracts" "ok" "constant-time tag primitive, retained and temporary schedules, ChaCha nonce/one-time keys, GHASH controls, and AES fallback scope are explicit"
 else
-  fail_critical "Crypto key/nonce lifecycle or backend boundary contract is incomplete"
-  append_item "crypto_lifecycle_contracts" "fail" "missing erasure owner, release-control test, or AES side-channel scope"
+  fail_critical "Crypto tag/key/nonce lifecycle or backend boundary contract is incomplete"
+  append_item "crypto_lifecycle_contracts" "fail" "missing constant-time tag primitive, erasure owner, release-control test, or AES side-channel scope"
 fi
 
 # 4o) Privilege identity and libc result contracts must remain opaque and
