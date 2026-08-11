@@ -5383,7 +5383,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - **Scope boundary:** The normal H3 masquerade caller path is covered. The independent cover-traffic scheduler and its direct monotonic cadence remain outside this task under TODO-677.
 - **Test isolation:** The canonical RNG failure hook is thread-local under `cfg(test)`, so forced entropy tests cannot alter parallel tests that exercise normal secure randomness.
 - **Verification status:** The focused H3 filter passes 9/9, the external persona-header target passes 13/13, and the complete stealth filter passes 268/268. Workspace all-target checking and strict library Clippy pass. The no-fail-fast workspace matrix executes every target: the library passes 2,216/2,218, with unchanged TODO-807 DNS and TODO-768 Rustls failures, and the `quicfuscate` binary passes 41/43, with the two existing TODO-800 PMTU fixture failures.
-- **Global gate boundary:** Workspace all-target strict Clippy reports only the three pre-existing client backend/DNS-runtime diagnostics. Authorized Omega/native proof remains unavailable because the local SSH client fails with `No user exists for uid 501`; the GitHub push remains unavailable because `github.com` DNS resolution fails.
+- **Hosted closure:** TODO-640 is closed. Implementation commit `557f619` is included in hosted revision `3e242d3c49aba65d3e2919370aa5021098411c94`; Clippy Matrix run `31471819294` is fully green and Main CI macOS feature-matrix job `93716959602` passes the default all-target Rust lane. Native Omega execution is not required for this platform-independent clock-injection contract.
 
 ## Implementation Reconciliation (2026-08-04, domain-fronting selection semantics)
 
