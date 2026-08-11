@@ -342,6 +342,7 @@ fn drain_pending_tun_downlinks(
     flush_tun_downlink_queue(live, &queued, out, socket, metrics)
 }
 
+#[cfg(test)]
 fn enqueue_pending_tun_downlink(
     pending: &mut PendingTunDownlinks,
     target: SocketAddr,
@@ -355,14 +356,40 @@ fn enqueue_pending_tun_downlink(
         pending,
         PendingTunDownlink { target, session_id, packet, queued_at, bandwidth_accounted: false },
         weight,
+        PendingTunDownlinkAdmission::TransportBackpressure,
         metrics,
     )
+}
+
+fn enqueue_scheduled_tun_downlink(
+    pending: &mut PendingTunDownlinks,
+    target: SocketAddr,
+    session_id: SessionId,
+    weight: u16,
+    packet: Vec<u8>,
+    queued_at: Instant,
+    metrics: &Metrics,
+) -> Result<(), PendingTunDownlinkReject> {
+    enqueue_pending_tun_downlink_with_accounting(
+        pending,
+        PendingTunDownlink { target, session_id, packet, queued_at, bandwidth_accounted: false },
+        weight,
+        PendingTunDownlinkAdmission::BandwidthScheduler,
+        metrics,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingTunDownlinkAdmission {
+    TransportBackpressure,
+    BandwidthScheduler,
 }
 
 fn enqueue_pending_tun_downlink_with_accounting(
     pending: &mut PendingTunDownlinks,
     entry: PendingTunDownlink,
     weight: u16,
+    admission_kind: PendingTunDownlinkAdmission,
     metrics: &Metrics,
 ) -> Result<(), PendingTunDownlinkReject> {
     let admission = pending.enqueue_with_accounting(
@@ -374,7 +401,14 @@ fn enqueue_pending_tun_downlink_with_accounting(
         entry.bandwidth_accounted,
     );
     match admission {
-        Ok(()) => metrics.record_tun_downlink_backpressure_enqueued(),
+        Ok(()) => match admission_kind {
+            PendingTunDownlinkAdmission::TransportBackpressure => {
+                metrics.record_tun_downlink_backpressure_enqueued();
+            }
+            PendingTunDownlinkAdmission::BandwidthScheduler => {
+                metrics.record_bandwidth_scheduler_enqueue();
+            }
+        },
         Err(reject) => metrics.record_tun_downlink_backpressure_drop(reject.into()),
     }
     metrics.set_tun_downlink_backpressure_pending(pending.len(), pending.bytes());
@@ -590,6 +624,7 @@ fn process_server_tun_packet(
                                     bandwidth_accounted: true,
                                 },
                                 weight,
+                                PendingTunDownlinkAdmission::TransportBackpressure,
                                 metrics,
                             ) {
                                 log::warn!(
@@ -623,7 +658,7 @@ fn process_server_tun_packet(
                 }
             }
         }
-        if let Err(reject) = enqueue_pending_tun_downlink(
+        let enqueue_result = enqueue_scheduled_tun_downlink(
             &mut live.live_state.pending_tun_downlinks,
             target,
             session_id,
@@ -631,7 +666,8 @@ fn process_server_tun_packet(
             packet.to_vec(),
             live.live_state.clock.now(),
             metrics,
-        ) {
+        );
+        if let Err(reject) = enqueue_result {
             log::warn!(
                 "dropping TUN downlink for {} after bounded scheduler rejection: {:?}",
                 target,
@@ -642,6 +678,35 @@ fn process_server_tun_packet(
 
     flush_tun_downlink_queue(live, &direct_send_targets, out, socket, metrics)?;
     drain_pending_tun_downlinks(live, out, socket, metrics)
+}
+
+#[cfg(test)]
+mod scheduled_tun_telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn scheduled_admission_does_not_report_transport_backpressure() {
+        let metrics = Metrics::new();
+        let mut pending = PendingTunDownlinks::with_limits(4, 64, 4);
+        let target: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+
+        enqueue_scheduled_tun_downlink(
+            &mut pending,
+            target,
+            SessionId::from_u64(1),
+            1,
+            vec![1, 2, 3],
+            Instant::now(),
+            &metrics,
+        )
+        .unwrap();
+
+        let output = metrics.export();
+        assert!(output.contains("quicfuscate_bandwidth_scheduler_enqueued_total 1"));
+        assert!(output.contains(
+            "quicfuscate_tun_downlink_backpressure_events_total{event=\"enqueued\"} 0"
+        ));
+    }
 }
 
 impl StandaloneServiceSignals {

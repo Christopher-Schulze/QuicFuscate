@@ -1566,7 +1566,7 @@ impl LiveServerState {
                 else {
                     continue;
                 };
-                if enqueue_pending_tun_downlink(
+                if enqueue_scheduled_tun_downlink(
                     &mut self.pending_tun_downlinks,
                     target,
                     session_id,

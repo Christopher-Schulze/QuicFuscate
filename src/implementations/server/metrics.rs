@@ -265,6 +265,7 @@ pub struct Metrics {
     pub bandwidth_uplink_clock_unavailable: AtomicU64,
     pub bandwidth_downlink_clock_unavailable: AtomicU64,
     pub bandwidth_scheduler_active_clients: AtomicU64,
+    pub bandwidth_scheduler_enqueued_packets: AtomicU64,
     pub bandwidth_scheduler_delivered_packets: AtomicU64,
     pub bandwidth_scheduler_delivered_bytes: AtomicU64,
 
@@ -411,6 +412,7 @@ impl Metrics {
             bandwidth_uplink_clock_unavailable: AtomicU64::new(0),
             bandwidth_downlink_clock_unavailable: AtomicU64::new(0),
             bandwidth_scheduler_active_clients: AtomicU64::new(0),
+            bandwidth_scheduler_enqueued_packets: AtomicU64::new(0),
             bandwidth_scheduler_delivered_packets: AtomicU64::new(0),
             bandwidth_scheduler_delivered_bytes: AtomicU64::new(0),
             masque_downlink_response_retried: AtomicU64::new(0),
@@ -924,6 +926,10 @@ impl Metrics {
         self.bandwidth_scheduler_active_clients.store(clients as u64, Ordering::Relaxed);
     }
 
+    pub fn record_bandwidth_scheduler_enqueue(&self) {
+        self.bandwidth_scheduler_enqueued_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_bandwidth_scheduler_delivery(&self, bytes: usize) {
         self.bandwidth_scheduler_delivered_packets.fetch_add(1, Ordering::Relaxed);
         self.bandwidth_scheduler_delivered_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
@@ -1178,6 +1184,14 @@ impl Metrics {
         write_metric!(
             "quicfuscate_bandwidth_scheduler_active_clients {}\n\n",
             self.bandwidth_scheduler_active_clients.load(Ordering::Relaxed)
+        );
+        out.push_str(
+            "# HELP quicfuscate_bandwidth_scheduler_enqueued_total Packets admitted to the bounded DRR queue\n",
+        );
+        out.push_str("# TYPE quicfuscate_bandwidth_scheduler_enqueued_total counter\n");
+        write_metric!(
+            "quicfuscate_bandwidth_scheduler_enqueued_total {}\n\n",
+            self.bandwidth_scheduler_enqueued_packets.load(Ordering::Relaxed)
         );
         out.push_str(
             "# HELP quicfuscate_bandwidth_scheduler_delivered_total DRR deliveries by unit\n",
@@ -2229,6 +2243,7 @@ mod tests {
             500,
         );
         metrics.set_bandwidth_scheduler_active_clients(3);
+        metrics.record_bandwidth_scheduler_enqueue();
         metrics.record_bandwidth_scheduler_delivery(1_200);
 
         let output = metrics.export();
@@ -2245,6 +2260,7 @@ mod tests {
             "quicfuscate_bandwidth_denials_total{direction=\"downlink\",outcome=\"monthly_quota_exceeded\"} 1"
         ));
         assert!(output.contains("quicfuscate_bandwidth_scheduler_active_clients 3"));
+        assert!(output.contains("quicfuscate_bandwidth_scheduler_enqueued_total 1"));
         assert!(
             output.contains("quicfuscate_bandwidth_scheduler_delivered_total{unit=\"packets\"} 1")
         );
