@@ -10,5 +10,6 @@ mod internal {
     pub use crate::{InterleavedDecoder, InterleavedEncoder, ModeManager};
 }
 
-include!("adaptive_controller.rs");
-include!("gf16_and_config.rs");
+mod adaptive_controller;
+
+pub use adaptive_controller::{AdaptiveFec, FecSwitchReason};

@@ -85,7 +85,7 @@ checks = [
         "let _pool = crate::optimize::global_pool();",
     ),
     (
-        Path("src/main_parts/late_tests_and_mlock.rs"),
+        Path("src/main/server.rs"),
         "apply_before_tls_identity(defer_process_memory_lock)",
         "quicfuscate::implementations::server::load_server_identity(",
     ),

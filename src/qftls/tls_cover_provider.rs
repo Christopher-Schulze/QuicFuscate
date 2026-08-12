@@ -3,6 +3,10 @@
 // Generates synthetic handshake-shaped records without establishing a real
 // TLS session or owning the protocol ClientHello.
 // Ultra-sophisticated TLS Cover Provider for maximum stealth
+use std::sync::Arc;
+
+use qf_stealth::{TlsCoverCipherPreference, TlsCoverCipherSuite};
+
 /// Manages synthetic TLS record generation for DPI evasion on a per-connection basis.
 pub(crate) struct TlsCoverProvider {
     cipher: qf_crypto::TlsCoverCipherState,
@@ -28,9 +32,7 @@ impl TlsCoverProvider {
     }
 
     fn tls_cover_profile_name(environment: &crate::env_utils::EnvSnapshot) -> String {
-        environment
-            .first(["QUICFUSCATE_TLS_COVER_PROFILE"])
-            .unwrap_or_else(|| "chrome".to_string())
+        environment.first(["QUICFUSCATE_TLS_COVER_PROFILE"]).unwrap_or_else(|| "chrome".to_string())
     }
 
     fn has_hardware_aes() -> bool {
@@ -78,10 +80,7 @@ impl TlsCoverProvider {
                 let mut aes_key = [0u8; 16];
                 aes_key.copy_from_slice(&tls_cover_key[..16]);
                 cipher.install(
-                    qf_crypto::TlsCoverKeyMaterial::Aes128Gcm {
-                        key: &aes_key,
-                        iv: &tls_cover_iv,
-                    },
+                    qf_crypto::TlsCoverKeyMaterial::Aes128Gcm { key: &aes_key, iv: &tls_cover_iv },
                     &mut write_sequence,
                     &mut read_sequence,
                 )?;

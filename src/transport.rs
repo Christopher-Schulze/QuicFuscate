@@ -6,7 +6,6 @@ pub use qf_transport_types::{
 };
 pub use qf_transport_version::{is_supported_version, PROTOCOL_VERSION, PROTOCOL_VERSION_V2};
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 
 // Explicit rust parity/test-only surface. Not part of the normal runtime API.
 /// 0-RTT anti-replay protection via strike register.

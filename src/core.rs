@@ -4,5 +4,6 @@
 //! forked QuicFuscate runtime. It orchestrates crypto, FEC, transport, and
 //! stealth ownership for the canonical connection lifecycle used by this fork.
 
-include!("core_parts/connection.rs");
-include!("core_parts/tests.rs");
+mod connection;
+
+pub use connection::*;

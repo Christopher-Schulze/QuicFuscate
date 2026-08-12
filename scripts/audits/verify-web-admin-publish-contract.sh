@@ -76,7 +76,10 @@ def main() -> int:
     )
     require(
         "build_checks_output",
-        'if [ ! -d "$SOURCE" ]' in build_web_admin and 'cp -R "$SOURCE"/. "$DEST"/' in build_web_admin,
+        'if [ ! -d "$SOURCE" ]' in build_web_admin
+        and 'cp -R "$SOURCE"/. "$STAGING"/' in build_web_admin
+        and 'mv "$STAGING" "$DEST"' in build_web_admin
+        and '[[ -f "$STAGING/$asset" ]]' in build_web_admin,
         "build-web-admin.sh does not check and publish the generated output",
     )
 
@@ -129,8 +132,8 @@ def main() -> int:
         "local server helpers can start before building the generated web-admin tree",
     )
 
-    cli = read("src/main_parts/early_tests_and_cli.rs")
-    static_server = read("src/implementations/server/admin_http_parts/server_and_auth.rs")
+    cli = read("src/main.rs")
+    static_server = read("src/implementations/server/admin_http/server/request.rs")
     require(
         "server_default_root",
         'default_value = "assets/web-admin"' in cli,

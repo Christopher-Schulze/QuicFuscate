@@ -67,7 +67,7 @@ run env QUICFUSCATE_STEALTH_PADDING=1 QUICFUSCATE_PADDING_STRATEGY=2 cargo test 
 
 # Test HTTP/3 MASQUE helpers
 echo -e "\n> Testing HTTP/3 MASQUE Helpers..."
-run_cargo test --release --lib transport::h3::tests::masque_ -- --nocapture
+run_cargo test --release --lib transport::h3::connection::tests::masque -- --nocapture
 
 # Integration fixtures (Rust tests)
 echo -e "\n> Running Stealth Integration Fixtures..."

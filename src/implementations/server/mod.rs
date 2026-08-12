@@ -22,7 +22,10 @@ pub mod admin_http;
 pub mod admin_logs;
 pub mod auth_frame;
 pub mod bandwidth;
+mod bootstrap;
+mod config;
 mod ddos;
+mod dns_signals;
 #[doc(hidden)]
 pub mod fsutil;
 mod http;
@@ -30,14 +33,22 @@ pub mod icmp;
 mod ip_pool;
 pub mod isolation;
 mod limits;
+mod live_auth;
+mod live_state;
 pub mod metrics;
+mod qkey_issue;
 pub mod qkey_registry;
 mod qkey_registry_storage;
 pub mod replay_window;
 pub mod revocation;
 mod routing;
+mod runtime_admin;
+mod runtime_impl;
 mod session;
 pub mod systemd;
+#[cfg(test)]
+mod tests_inline;
+mod tun_path;
 
 pub use accept::{
     AcceptConfig, AcceptDecision, AcceptLoop, AcceptStats, AcceptStatsSnapshot,
@@ -63,6 +74,9 @@ pub use bandwidth::{
     BandwidthDecision, BandwidthDirection, BandwidthLimiter, BandwidthPolicy, BandwidthStats,
     PerClientBandwidthManager, QuotaPeriod, QuotaTracker,
 };
+pub use bootstrap::*;
+pub use config::*;
+use dns_signals::*;
 pub use ip_pool::{IpPool, Ipv6Pool};
 pub use isolation::{
     AssignedClientIps, ClientIsolationManager, DownlinkRoute, IsolationStats, UplinkDrop,
@@ -77,11 +91,17 @@ pub use limits::{
 pub use limits::{
     BlacklistSync, GeoIpBlocker, GeoIpConfig, GeoIpError, GeoIpLookupError, GeoIpStatus,
 };
+pub use live_auth::*;
+pub use live_state::*;
 #[cfg(any(test, feature = "rust-tests"))]
 pub use metrics::GlobalMetricsServer;
 pub use metrics::{Metrics, RoutingOutcome, TunDownlinkBackpressureDrop};
+pub use qkey_issue::*;
 pub use routing::{detect_wan_interface, RoutingError, RoutingManager};
+pub use runtime_admin::*;
+pub use runtime_impl::*;
 pub use session::{Session, SessionError, SessionId, SessionManager, SessionStats};
+pub use tun_path::*;
 
 use self::admin_http::{AdminAuth, IssueQKeyRequest};
 use self::qkey_registry::{QKeyEntry, QKeyRecord, QKeyRegistry};
@@ -121,14 +141,3 @@ const MAX_PENDING_TUN_DOWNLINKS_PER_TARGET: usize = 32;
 const MAX_PENDING_TUN_DOWNLINK_AGE: Duration = Duration::from_secs(5);
 const MAX_MASQUE_DOWNLINK_RESPONSES: usize = 128;
 const MAX_MASQUE_DOWNLINK_RESPONSE_BYTES: usize = 192 * 1024;
-
-include!("parts/config.rs");
-include!("parts/bootstrap.rs");
-include!("parts/runtime_admin.rs");
-include!("parts/live_auth.rs");
-include!("parts/live_state.rs");
-include!("parts/tun_path.rs");
-include!("parts/qkey_issue.rs");
-include!("parts/dns_signals.rs");
-include!("parts/runtime_impl.rs");
-include!("parts/tests_inline.rs");

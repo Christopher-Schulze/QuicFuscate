@@ -236,6 +236,10 @@ def source_scope(path: str, line_position: int, test_ranges: list[tuple[int, int
         return "probe"
     if path == "src/harness.rs":
         return "benchmark"
+    if path.startswith("crates/") and in_ranges(line_position, test_ranges):
+        return "test"
+    if path.startswith("crates/"):
+        return "production"
     if path.startswith("src/") and in_ranges(line_position, test_ranges):
         return "test"
     if path.startswith("src/"):
@@ -276,29 +280,31 @@ def owner_for(path: str, kind: str, scope: str) -> str:
         return "TODO-825"
     if path == "src/time_source.rs":
         return "canonical-time-source"
+    if path == "crates/qf-common/src/time_source.rs":
+        return "canonical-time-source"
+    if path.startswith("crates/"):
+        return f"crate:{path.split('/', 2)[1]}"
     if path.startswith("src/pki/"):
         return "TODO-656"
     if path == "src/reality.rs":
         return "TODO-584"
-    if path == "src/stealth/parts/escalation.rs":
-        return "TODO-584"
-    if path == "src/stealth/parts/http3_masquerade.rs":
-        return "TODO-640"
-    if path == "src/stealth/parts/runtime.rs":
+    if path == "src/stealth/runtime.rs":
         return "TODO-822"
+    if path.startswith("src/stealth/"):
+        return "TODO-820"
     if path.startswith("src/engine/") or path.startswith("src/dns/"):
         return "TODO-822"
     if path.startswith("src/interface/") or path == "src/transport/xdp.rs":
         return "TODO-822"
-    if path.startswith("src/main_parts/runtime.rs"):
+    if path == "src/main.rs" or path.startswith("src/main/"):
         return "TODO-822"
     if path in {
         "src/implementations/client/mod.rs",
         "src/implementations/server/accept.rs",
-        "src/implementations/server/admin_http_parts/server_and_auth.rs",
-        "src/implementations/server/parts/dns_signals.rs",
-        "src/implementations/server/parts/runtime_admin.rs",
-        "src/implementations/server/parts/runtime_impl.rs",
+        "src/implementations/server/admin_http/server.rs",
+        "src/implementations/server/dns_signals.rs",
+        "src/implementations/server/runtime_admin.rs",
+        "src/implementations/server/runtime_impl.rs",
     }:
         return "TODO-822"
     if path == "src/implementations/server/admin.rs" and kind in {
@@ -308,10 +314,10 @@ def owner_for(path: str, kind: str, scope: str) -> str:
         return "TODO-822"
     if path.startswith("src/transport/") or path == "src/brain.rs":
         return "TODO-820"
-    if path == "src/core_parts/connection.rs" or path.startswith("src/stealth/parts/"):
-        if path == "src/stealth/parts/tls_cover_provider.rs":
-            return "qftls-stealth-jitter"
+    if path.startswith("src/core/connection"):
         return "TODO-820"
+    if path == "src/qftls/tls_cover_provider.rs":
+        return "qftls-stealth-jitter"
     if path == "src/firewall/cleanup.rs":
         return "native-cleanup-runtime"
     if path.startswith("src/implementations/client/") or path.startswith("src/implementations/server/"):
@@ -343,7 +349,10 @@ def load_rust_helpers(root: Path) -> tuple[Callable[[str], str], Callable[[str, 
 
 def tracked_paths(root: Path) -> list[Path]:
     result = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=root, capture_output=True, check=False
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root,
+        capture_output=True,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip())
@@ -352,7 +361,7 @@ def tracked_paths(root: Path) -> list[Path]:
         if not raw:
             continue
         path = Path(raw.decode("utf-8"))
-        if path.suffix in SUPPORTED_SUFFIXES:
+        if path.suffix in SUPPORTED_SUFFIXES and (root / path).is_file():
             paths.append(path)
     return sorted(paths)
 

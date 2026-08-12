@@ -169,7 +169,10 @@ pub fn global_pool_if_initialized() -> Option<Arc<MemoryPool>> {
     GLOBAL_POOL.get().cloned()
 }
 
-include!("parts/manager.rs");
+#[path = "parts/manager.rs"]
+mod manager;
+
+pub use manager::OptimizationManager;
 // ============================================================================
 // Memory Pool Implementation
 // ============================================================================
@@ -177,4 +180,9 @@ include!("parts/manager.rs");
 /// SIMD-accelerated primitives organized by domain (core, galois, crypto, pattern, neural, compress).
 pub mod simd;
 
-include!("parts/cache_and_const.rs");
+#[path = "parts/cache_and_const.rs"]
+mod cache_and_const;
+
+pub use cache_and_const::global_cache_hierarchy;
+#[cfg(any(test, feature = "rust-tests"))]
+pub use cache_and_const::{ConstBuffer, ConstPacketPool};

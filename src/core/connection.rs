@@ -1,0 +1,1907 @@
+// Portions derived from Quinn (https://github.com/quinn-rs/quinn)
+// Original code licensed under MIT/Apache-2.0
+// Modifications: Copyright (c) QuicFuscate Team, MIT License
+
+// # Core Forked Connection Runtime
+//
+// This module provides the central `QuicFuscateConnection` struct for the
+// forked QuicFuscate runtime. It orchestrates crypto, FEC, transport, and
+// stealth ownership for the canonical connection lifecycle used by this fork.
+
+mod h3_runtime;
+#[cfg(test)]
+mod tests;
+
+#[cfg(feature = "orchestrator")]
+use crate::brain::DeepIntegrationOrchestrator;
+use crate::brain::{CombinedObserver, StealthBrain};
+use crate::crypto::CryptoManager;
+use crate::fec::wire::{self, WireFecReceiver, WirePacketMeta, WireProfile};
+use crate::fec::{AdaptiveFec, FecConfig, FecPacket, FecTransportObserver};
+use crate::optimize::{AlignedBox, MemoryPool, OptimizationManager, OptimizeConfig, PooledBlock};
+use crate::stealth::{
+    IcmpUnreachablePolicy, NormalizeResult, OsFingerprintProfile, PacketNormalizer, StealthConfig,
+    StealthManager, StealthMode, StealthRuntimeOwner,
+};
+#[cfg(test)]
+use qf_cpu::transport::{self as transport_accel, CongestionSample};
+use std::sync::Arc;
+#[cfg(feature = "orchestrator")]
+use std::sync::OnceLock;
+// unused on current code path; keep import minimal
+use crate::telemetry;
+use log::{debug, info, warn};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
+
+#[cfg(feature = "orchestrator")]
+static ORCHESTRATOR: OnceLock<Arc<DeepIntegrationOrchestrator>> = OnceLock::new();
+use std::net::SocketAddr;
+
+// Type aliases to simplify handler types
+pub use qf_fec::ActiveFecPolicyChange;
+pub use qf_transport_cc::ConnectionStats;
+pub use qf_transport_types::{CapsuleHandler, DatagramHandler};
+pub use qf_transport_types::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
+
+const H3_TUNNEL_FRAME_MAGIC: &[u8; 4] = b"QFT1";
+const H3_TUNNEL_FRAME_HEADER_LEN: usize = 6;
+const MAX_INNER_IP_PACKET_LEN: usize = u16::MAX as usize;
+const MAX_H3_TUNNEL_PENDING_LEN: usize = 2 * (H3_TUNNEL_FRAME_HEADER_LEN + MAX_INNER_IP_PACKET_LEN);
+const IPV6_MINIMUM_LINK_MTU: usize = 1280;
+
+#[derive(Default)]
+struct H3TunnelFrameDecoder {
+    pending: Vec<u8>,
+}
+
+impl H3TunnelFrameDecoder {
+    fn push<F>(&mut self, data: &[u8], mut on_packet: F) -> Result<(), &'static str>
+    where
+        F: FnMut(&mut [u8]),
+    {
+        if self.pending.len().saturating_add(data.len()) > MAX_H3_TUNNEL_PENDING_LEN {
+            self.pending.clear();
+            return Err("H3 tunnel frame buffer exceeded its bounded capacity");
+        }
+        self.pending.extend_from_slice(data);
+
+        let mut consumed = 0usize;
+        while self.pending.len().saturating_sub(consumed) >= H3_TUNNEL_FRAME_HEADER_LEN {
+            let header = &self.pending[consumed..consumed + H3_TUNNEL_FRAME_HEADER_LEN];
+            if &header[..H3_TUNNEL_FRAME_MAGIC.len()] != H3_TUNNEL_FRAME_MAGIC {
+                self.pending.clear();
+                return Err("invalid H3 tunnel frame magic");
+            }
+            let packet_len = usize::from(u16::from_be_bytes([header[4], header[5]]));
+            if packet_len == 0 {
+                self.pending.clear();
+                return Err("empty H3 tunnel packet");
+            }
+            let frame_len = H3_TUNNEL_FRAME_HEADER_LEN + packet_len;
+            if self.pending.len() - consumed < frame_len {
+                break;
+            }
+            let packet_start = consumed + H3_TUNNEL_FRAME_HEADER_LEN;
+            let packet_end = consumed + frame_len;
+            let packet = &mut self.pending[packet_start..packet_end];
+            if !matches!(packet.first().map(|byte| byte >> 4), Some(4 | 6)) {
+                self.pending.clear();
+                return Err("H3 tunnel frame does not contain an IP packet");
+            }
+            on_packet(packet);
+            consumed = packet_end;
+        }
+
+        if consumed > 0 {
+            self.pending.drain(..consumed);
+        }
+        Ok(())
+    }
+}
+
+struct Http3PollBindings {
+    masque_datagram_cb: Option<DatagramHandler>,
+    masque_control_cb: Option<CapsuleHandler>,
+    masque_cb: Option<CapsuleHandler>,
+    memory_pool: Arc<crate::optimize::MemoryPool>,
+}
+
+struct OutgoingFecPacket {
+    packet: FecPacket,
+    wire_meta: Option<WirePacketMeta>,
+    send_info: crate::transport::SendInfo,
+    congestion_controlled: bool,
+}
+
+impl OutgoingFecPacket {
+    fn write_to(&self, buf: &mut [u8]) -> Result<usize, String> {
+        let Some(meta) = self.wire_meta else {
+            return self.packet.to_raw(buf);
+        };
+        let symbol = self.packet.payload_slice().ok_or_else(|| "No data available".to_string())?;
+        let payload = if meta.systematic {
+            wire::source_symbol_payload(symbol).map_err(|error| error.to_string())?
+        } else {
+            symbol
+        };
+        wire::write_packet(meta, payload, buf).map_err(|error| error.to_string())
+    }
+
+    fn telemetry_shape(&self) -> (bool, usize) {
+        match self.wire_meta {
+            None => (true, self.packet.data_len),
+            Some(meta) if meta.systematic => {
+                (true, self.packet.data_len.saturating_sub(2 * wire::SOURCE_LENGTH_LEN))
+            }
+            Some(_) => (false, 0),
+        }
+    }
+}
+
+#[derive(Default)]
+struct OutboundPacer {
+    next_release: Option<Instant>,
+    burst_bytes: usize,
+    burst_last_at: Option<Instant>,
+}
+
+impl OutboundPacer {
+    fn next_release(&self) -> Option<Instant> {
+        self.next_release
+    }
+
+    fn is_blocked(&mut self, now: Instant) -> bool {
+        let Some(release) = self.next_release else {
+            return false;
+        };
+        if now < release {
+            return true;
+        }
+        self.next_release = None;
+        false
+    }
+
+    fn record_send(
+        &mut self,
+        now: Instant,
+        bytes: usize,
+        send_quantum: usize,
+        rate_bytes_per_second: u64,
+    ) {
+        if bytes == 0 {
+            return;
+        }
+        if rate_bytes_per_second == 0 {
+            self.burst_bytes = 0;
+            self.burst_last_at = None;
+            return;
+        }
+        if let Some(last_at) = self.burst_last_at {
+            let elapsed_nanos = now.saturating_duration_since(last_at).as_nanos();
+            let decayed = (u128::from(rate_bytes_per_second).saturating_mul(elapsed_nanos)
+                / 1_000_000_000)
+                .min(usize::MAX as u128) as usize;
+            self.burst_bytes = self.burst_bytes.saturating_sub(decayed);
+        }
+        self.burst_last_at = Some(now);
+        self.burst_bytes = self.burst_bytes.saturating_add(bytes);
+        if self.burst_bytes < send_quantum.max(1) {
+            return;
+        }
+
+        let paced_bytes = std::mem::take(&mut self.burst_bytes);
+        self.burst_last_at = None;
+        let numerator = (paced_bytes as u128).saturating_mul(1_000_000_000);
+        let denominator = rate_bytes_per_second as u128;
+        let delay_nanos = numerator.div_ceil(denominator).max(1).min(u64::MAX as u128) as u64;
+        self.next_release = Some(now + Duration::from_nanos(delay_nanos));
+    }
+
+    fn reset(&mut self) {
+        self.next_release = None;
+        self.burst_bytes = 0;
+        self.burst_last_at = None;
+    }
+}
+
+/// Parameters for creating a new QuicFuscateConnection.
+pub struct ConnectionParams {
+    /// Monotonic clock shared by transport, H3, stealth, and TLS.
+    pub clock: crate::time_source::ProtocolClock,
+    /// Underlying QUIC transport connection.
+    pub conn: Box<crate::transport::Connection>,
+    /// Local socket address.
+    pub local_addr: SocketAddr,
+    /// Remote peer socket address.
+    pub peer_addr: SocketAddr,
+    /// HTTP Host header value (may differ from SNI when domain fronting).
+    pub host_header: String,
+    /// TLS SNI hostname override (None uses host_header).
+    pub sni_host: Option<String>,
+    /// QKey authentication token in hex (client mode only).
+    pub qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
+    /// Shared stealth manager for obfuscation and fingerprint control.
+    pub stealth_manager: Arc<StealthManager>,
+    /// Shared optimization manager for memory pool and CPU feature detection.
+    pub optimization_manager: Arc<OptimizationManager>,
+    /// Forward error correction configuration.
+    pub fec_config: FecConfig,
+    /// Frozen raw-IP normalizer for decoded client-to-server tunnel ingress.
+    ///
+    /// It is never applied to sealed QUIC packets or ordinary server-to-client
+    /// raw-IP downlink payloads.
+    pub tunnel_ingress_normalizer: PacketNormalizer,
+}
+
+/// Represents a single QuicFuscate connection and manages its state.
+pub struct QuicFuscateConnection {
+    /// Monotonic clock shared by every protocol-facing child owner.
+    clock: crate::time_source::ProtocolClock,
+    /// Underlying QUIC transport connection handle.
+    pub conn: Box<crate::transport::Connection>,
+    /// Current peer address (may change on migration).
+    pub peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+    host_header: String,
+    qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
+    /// Client-selected generation echoed by the server assignment capsule.
+    client_connection_generation: Option<u64>,
+
+    // Core Modules
+    fec: AdaptiveFec,
+
+    // Stealth & Optimization Modules
+    stealth_manager: Arc<StealthManager>,
+    optimization_manager: Arc<OptimizationManager>,
+    tunnel_ingress_normalizer: PacketNormalizer,
+
+    // State
+    stats: ConnectionStats,
+    packet_id_counter: u64,
+    // Each queued packet retains the wire contract selected when it was encoded.
+    // Mode transitions can occur before the queue drains, so framing cannot be
+    // derived at dequeue time.
+    outgoing_fec_packets: VecDeque<OutgoingFecPacket>,
+    // Reused FEC emission scratch to avoid allocating a Vec for every packet on the send path.
+    fec_send_scratch: Vec<FecPacket>,
+    // Reused FEC recovery scratch to avoid allocating a Vec for every packet on the receive path.
+    fec_receive_scratch: Vec<FecPacket>,
+    fec_wire_receiver: WireFecReceiver,
+    fec_tx_seed: Option<u64>,
+    fec_rx_seed: Option<u64>,
+    fec_tx_profile: Option<WireProfile>,
+    fec_tx_epoch: u32,
+    fec_tx_sequence: u64,
+    fec_tx_active: bool,
+    h3_conn: Option<crate::transport::h3::Connection>,
+    /// Reusable pooled buffer for HTTP/3 body reads. The default pool block is 64 KiB.
+    h3_body_buffer: Option<AlignedBox<[u8]>>,
+    h3_tunnel_rx: HashMap<u64, H3TunnelFrameDecoder>,
+    h3_tunnel_tx_frame: Vec<u8>,
+    h3_peer_tunnel_stream_id: Option<u64>,
+    h3_tunnel_response_started: HashSet<u64>,
+    h3_tunnel_uplink_fallback_reported: bool,
+    h3_tunnel_downlink_fallback_reported: bool,
+    last_telemetry: std::time::Instant,
+    // Observer for transport telemetry -> FEC/ACK policy coupling.
+    transport_observer: Arc<FecTransportObserver>,
+    masque_cb: Option<CapsuleHandler>,
+    masque_datagram_cb: Option<DatagramHandler>,
+    masque_downlink_queue: Option<Arc<std::sync::Mutex<MasqueDownlinkQueue>>>,
+    masque_downlink_retry: Option<Vec<u8>>,
+    masque_control_cb: Option<CapsuleHandler>,
+    /// Locally-initiated MASQUE CONNECT-UDP stream id (client side).
+    masque_stream_id: Option<u64>,
+    /// Peer-initiated MASQUE CONNECT-UDP stream id (server side: the client opened
+    /// the flow; we reuse its stream id for downlink datagram sends).
+    masque_peer_stream_id: Option<u64>,
+    /// Client generation parsed from the peer CONNECT-UDP request.
+    masque_peer_generation: Option<u64>,
+    /// One-shot guard for server control messages on the peer MASQUE flow.
+    masque_control_sent: bool,
+    #[cfg(feature = "orchestrator")]
+    runtime_cpu_percent: u32,
+    #[cfg(feature = "orchestrator")]
+    runtime_memory_pressure: u32,
+    #[cfg(feature = "orchestrator")]
+    runtime_system: sysinfo::System,
+    tls_ch_override_template: Option<String>,
+
+    // Async Stealth Scheduler State
+    next_packet_release: Option<std::time::Instant>,
+    outbound_pacer: OutboundPacer,
+}
+
+impl Drop for QuicFuscateConnection {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.h3_body_buffer.take() {
+            self.optimization_manager.free_block(buffer);
+        }
+    }
+}
+
+impl QuicFuscateConnection {
+    /// Returns the clock shared by protocol-facing connection state.
+    pub fn protocol_clock(&self) -> crate::time_source::ProtocolClock {
+        self.clock.clone()
+    }
+
+    #[cfg(test)]
+    fn env_optional_trimmed(name: &str) -> Option<String> {
+        std::env::var(name).ok().and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    }
+
+    /// Creates a new client connection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_client(
+        server_name: &str,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        config: crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
+        qkey_initial_token: Option<Vec<u8>>,
+        use_utls: bool,
+    ) -> Result<Self, String> {
+        Self::new_client_with_runtime(
+            server_name,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            qkey_auth_token_hex,
+            qkey_initial_token,
+            use_utls,
+            None,
+            None,
+        )
+    }
+
+    /// Creates a new client connection attached to a runtime-owned stealth service.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_client_with_runtime(
+        server_name: &str,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        config: crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
+        qkey_initial_token: Option<Vec<u8>>,
+        use_utls: bool,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        http_authority: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::new_client_with_runtime_and_clock(
+            server_name,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            qkey_auth_token_hex,
+            qkey_initial_token,
+            use_utls,
+            runtime_owner,
+            http_authority,
+            crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Creates a new client connection with an explicit protocol clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_client_with_runtime_and_clock(
+        server_name: &str,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        mut config: crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
+        qkey_initial_token: Option<Vec<u8>>,
+        use_utls: bool,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        http_authority: Option<&str>,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Result<Self, String> {
+        let crypto_manager = Arc::new(CryptoManager::new());
+        let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
+        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner_and_clock(
+            stealth_config,
+            optimization_manager.clone(),
+            crypto_manager.clone(),
+            runtime_owner,
+            clock.clone(),
+        ));
+
+        if use_utls {
+            stealth_manager.apply_utls_profile(&mut config);
+        }
+
+        // Each client connection should use a fresh, unpredictable SCID to avoid linkability.
+        let mut scid_bytes = [0u8; crate::transport::MAX_CONN_ID_LEN];
+        crate::transport::rand::rand_bytes(&mut scid_bytes);
+        let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
+
+        let (sni, default_host_header) = stealth_manager.get_connection_headers(server_name);
+        let host_header =
+            http_authority.map(|authority| authority.to_owned()).unwrap_or(default_host_header);
+
+        // When a QKey is provided, embed its 12-char hex ID as the QUIC Initial packet
+        // token so the server can look up the QKey record during connection acceptance.
+        if let Some(token_bytes) = qkey_initial_token {
+            config.set_initial_token(Some(token_bytes));
+        }
+
+        let conn = crate::transport::packet::connect_with_clock(
+            Some(&sni),
+            scid.as_ref(),
+            local_addr,
+            remote_addr,
+            &mut config,
+            clock.clone(),
+        )
+        .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
+
+        Ok(Self::new(ConnectionParams {
+            clock,
+            conn: Box::new(conn),
+            local_addr,
+            peer_addr: remote_addr,
+            host_header,
+            sni_host: Some(sni),
+            qkey_auth_token_hex,
+            stealth_manager,
+            optimization_manager,
+            fec_config,
+            tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
+        }))
+    }
+
+    /// Creates a new server-side connection accepted from a remote client.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_server(
+        scid: &crate::transport::ConnectionId,
+        initial_key_dcid: Option<&crate::transport::ConnectionId>,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        config: &mut crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+    ) -> Result<Self, String> {
+        Self::new_server_with_runtime(
+            scid,
+            initial_key_dcid,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            None,
+        )
+    }
+
+    /// Creates a new server-side connection attached to a runtime-owned stealth service.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_server_with_runtime(
+        scid: &crate::transport::ConnectionId,
+        initial_key_dcid: Option<&crate::transport::ConnectionId>,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        config: &mut crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    ) -> Result<Self, String> {
+        Self::new_server_with_runtime_and_clock(
+            scid,
+            initial_key_dcid,
+            local_addr,
+            remote_addr,
+            config,
+            stealth_config,
+            fec_config,
+            opt_cfg,
+            runtime_owner,
+            crate::time_source::ProtocolClock::default(),
+        )
+    }
+
+    /// Creates a new server-side connection with an explicit protocol clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_server_with_runtime_and_clock(
+        scid: &crate::transport::ConnectionId,
+        initial_key_dcid: Option<&crate::transport::ConnectionId>,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        config: &mut crate::transport::Config,
+        stealth_config: StealthConfig,
+        fec_config: FecConfig,
+        opt_cfg: OptimizeConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        clock: crate::time_source::ProtocolClock,
+    ) -> Result<Self, String> {
+        let tunnel_ingress_profile = if !stealth_config.enable_network_fingerprint_normalization
+            || matches!(stealth_config.mode, StealthMode::Off)
+        {
+            OsFingerprintProfile::Disabled
+        } else {
+            OsFingerprintProfile::from_stealth_os(stealth_config.initial_os)
+        };
+        let icmp_unreachable_policy = if stealth_config.suppress_icmp_unreachable {
+            IcmpUnreachablePolicy::SuppressNonPmtud
+        } else {
+            IcmpUnreachablePolicy::Preserve
+        };
+        let crypto_manager = Arc::new(CryptoManager::new());
+        let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
+        let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner_and_clock(
+            stealth_config,
+            optimization_manager.clone(),
+            crypto_manager.clone(),
+            runtime_owner,
+            clock.clone(),
+        ));
+
+        let conn = crate::transport::packet::accept_with_clock(
+            scid.as_ref(),
+            initial_key_dcid.as_ref().map(|id| id.as_ref()),
+            local_addr,
+            remote_addr,
+            config,
+            clock.clone(),
+        )
+        .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
+
+        Ok(Self::new(ConnectionParams {
+            clock,
+            conn: Box::new(conn),
+            local_addr,
+            peer_addr: remote_addr,
+            host_header: String::new(),
+            sni_host: None,
+            qkey_auth_token_hex: None,
+            stealth_manager,
+            optimization_manager,
+            fec_config,
+            tunnel_ingress_normalizer: PacketNormalizer::with_icmp_unreachable_policy(
+                tunnel_ingress_profile,
+                icmp_unreachable_policy,
+            ),
+        }))
+    }
+
+    fn new(params: ConnectionParams) -> Self {
+        let clock = params.clock.clone();
+        let environment = params.stealth_manager.environment_snapshot();
+        let obs = FecTransportObserver::new_with_snapshot(&environment);
+        let fec_mem_pool = params.optimization_manager.memory_pool().clone();
+        let h3_body_buffer = params.optimization_manager.alloc_block();
+        let mut s = Self {
+            clock: clock.clone(),
+            conn: params.conn,
+            peer_addr: params.peer_addr,
+            local_addr: params.local_addr,
+            host_header: params.host_header,
+            qkey_auth_token_hex: params.qkey_auth_token_hex,
+            client_connection_generation: None,
+            fec: qf_fec::AdaptiveFec::new_with_snapshot_and_pool(
+                params.fec_config,
+                &environment,
+                crate::optimize::global_pool(),
+            ),
+            stealth_manager: params.stealth_manager,
+            optimization_manager: params.optimization_manager,
+            tunnel_ingress_normalizer: params.tunnel_ingress_normalizer,
+            stats: ConnectionStats::default(),
+            packet_id_counter: 0,
+            outgoing_fec_packets: VecDeque::new(),
+            fec_send_scratch: Vec::with_capacity(1),
+            fec_receive_scratch: Vec::with_capacity(1),
+            fec_wire_receiver: WireFecReceiver::new(fec_mem_pool),
+            fec_tx_seed: None,
+            fec_rx_seed: None,
+            fec_tx_profile: None,
+            fec_tx_epoch: 0,
+            fec_tx_sequence: 0,
+            fec_tx_active: false,
+            h3_conn: None,
+            h3_body_buffer: Some(h3_body_buffer),
+            h3_tunnel_rx: HashMap::new(),
+            h3_tunnel_tx_frame: Vec::new(),
+            h3_peer_tunnel_stream_id: None,
+            h3_tunnel_response_started: HashSet::new(),
+            h3_tunnel_uplink_fallback_reported: false,
+            h3_tunnel_downlink_fallback_reported: false,
+            last_telemetry: clock.now(),
+            transport_observer: obs.clone(),
+            masque_cb: None,
+            masque_datagram_cb: None,
+            masque_downlink_queue: None,
+            masque_downlink_retry: None,
+            masque_control_cb: None,
+            masque_stream_id: None,
+            masque_peer_stream_id: None,
+            masque_peer_generation: None,
+            masque_control_sent: false,
+            #[cfg(feature = "orchestrator")]
+            runtime_cpu_percent: 0,
+            #[cfg(feature = "orchestrator")]
+            runtime_memory_pressure: 0,
+            #[cfg(feature = "orchestrator")]
+            runtime_system: sysinfo::System::new(),
+            tls_ch_override_template: environment.first(["QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE"]),
+            next_packet_release: None,
+            outbound_pacer: OutboundPacer::default(),
+        };
+        s.fec.enable_simd_acceleration();
+        s.conn.set_intelligent_stealth_runtime(s.stealth_manager.is_intelligent_runtime());
+        s.conn.set_brain_runtime_permissions(s.stealth_manager.brain_runtime_permissions());
+        // Attach observers to transport for live telemetry callbacks
+        // Combine FEC observer with StealthBrain when enabled (default on, disable via QUICFUSCATE_BRAIN=0|false)
+        let obs_dyn: Arc<dyn crate::transport::TransportObserver> = obs.clone();
+        let brain_enabled = environment.flag("QUICFUSCATE_BRAIN", true);
+        if brain_enabled {
+            let brain = StealthBrain::new_with_level_hints(
+                crate::brain::StealthBrainConfig::from_env_with_snapshot(&environment),
+                s.stealth_manager.intelligent_level_hints(),
+            );
+            obs.attach_brain_hints(brain.fec_hints());
+            let brain_dyn: Arc<dyn crate::transport::TransportObserver> = brain.clone();
+            let combined = CombinedObserver::new(vec![obs_dyn.clone(), brain_dyn]);
+            let combined_dyn: Arc<dyn crate::transport::TransportObserver> = combined.clone();
+            s.conn.set_observer(Some(combined_dyn));
+        } else {
+            s.conn.set_observer(Some(obs_dyn));
+        }
+
+        // Enable and configure RealTLS (always on, including Performance mode)
+        // Map stealth fingerprint to TLS profile and apply SNI from fronting
+        s.conn.set_environment_snapshot(environment.clone());
+        if let Err(e) = s.conn.enable_tls("unified") {
+            warn!("Failed to enable unified TLS provider: {:?}", e);
+        }
+        let tls_prof = s.stealth_manager.runtime_tls_profile(params.sni_host.as_deref());
+        let sni_str = tls_prof.sni.as_deref().unwrap_or(s.host_header.as_str());
+        if let Err(e) = s.conn.configure_tls(&tls_prof, sni_str) {
+            warn!("Failed to configure TLS profile for SNI {}: {:?}", sni_str, e);
+        }
+
+        // Initialize DeepIntegrationOrchestrator if feature enabled
+        #[cfg(feature = "orchestrator")]
+        {
+            let orchestrator_enabled = environment.flag("QUICFUSCATE_ORCHESTRATOR", true);
+            if orchestrator_enabled {
+                let orchestrator = DeepIntegrationOrchestrator::new(
+                    crate::brain::StealthBrainConfig::from_env_with_snapshot(&environment),
+                    1024,  // pool capacity
+                    65536, // block size
+                );
+                // Store globally for later use in HTTP/3 loop.
+                if ORCHESTRATOR.set(orchestrator).is_ok() {
+                    info!("DeepIntegrationOrchestrator activated for advanced coordination");
+                    // Enable Server Push coordination in Intelligent mode (brain will throttle)
+                    if s.stealth_manager.is_intelligent_runtime() {
+                        if let Some(orch) = ORCHESTRATOR.get() {
+                            orch.enable_server_push(true);
+                        }
+                    }
+                } else {
+                    debug!(
+                        "DeepIntegrationOrchestrator already initialized, reusing existing instance"
+                    );
+                }
+            }
+        }
+
+        s
+    }
+
+    fn inject_qkey_auth_header(
+        token: Option<&str>,
+        headers: &mut Vec<crate::transport::h3::Header>,
+    ) {
+        let Some(token) = token else {
+            return;
+        };
+        let token = token.trim();
+        if token.is_empty() {
+            return;
+        }
+        headers.retain(|h| h.name() != b"x-qf-auth");
+        headers.push(crate::transport::h3::Header::new(b"x-qf-auth", token.as_bytes()));
+    }
+
+    fn inject_connection_generation_header(
+        generation: Option<u64>,
+        headers: &mut Vec<crate::transport::h3::Header>,
+    ) {
+        let Some(generation) = generation.filter(|generation| *generation != 0) else {
+            return;
+        };
+        let value = generation.to_string();
+        headers.retain(|header| !header.name().eq_ignore_ascii_case(b"x-qf-generation"));
+        headers.push(crate::transport::h3::Header::new(b"x-qf-generation", value.as_bytes()));
+    }
+
+    fn build_masque_request_headers(&self) -> Vec<crate::transport::h3::Header> {
+        let mut headers = Vec::new();
+        Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut headers);
+        Self::inject_connection_generation_header(self.client_connection_generation, &mut headers);
+        headers
+    }
+
+    #[cfg(feature = "orchestrator")]
+    fn update_orchestrator_resource_signals(&mut self) {
+        use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate};
+
+        if ORCHESTRATOR.get().is_none() {
+            return;
+        }
+        let Ok(pid) = sysinfo::get_current_pid() else {
+            return;
+        };
+        self.runtime_system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory().without_tasks(),
+        );
+        self.runtime_system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        if let Some(process) = self.runtime_system.process(pid) {
+            self.runtime_cpu_percent = process.cpu_usage().round().clamp(0.0, 100.0) as u32;
+            let total = self.runtime_system.total_memory();
+            let used = process.memory();
+            self.runtime_memory_pressure = if total > 0 {
+                ((used as f64 * 100.0) / total as f64).round().clamp(0.0, 100.0) as u32
+            } else {
+                0
+            };
+        }
+    }
+
+    fn ensure_masque_tunnel(
+        &mut self,
+        host: &str,
+    ) -> Result<Option<u64>, crate::transport::h3::Error> {
+        self.ensure_masque_tunnel_with_requirement(host, false)
+    }
+
+    fn ensure_masque_tunnel_with_requirement(
+        &mut self,
+        host: &str,
+        required: bool,
+    ) -> Result<Option<u64>, crate::transport::h3::Error> {
+        // When TUN bridging is active (a MASQUE datagram sink is installed),
+        // always use MASQUE CONNECT-UDP as the tunnel transport regardless of
+        // the stealth escalation state. Without this, TUN traffic would fall
+        // back to H3 DATA frames (Option B) and the downlink MASQUE path would
+        // be inconsistent with the uplink.
+        let tun_bridging = self.masque_datagram_cb.is_some();
+        if !required && !self.stealth_manager.masque_preferred_runtime() && !tun_bridging {
+            return Ok(None);
+        }
+
+        if let Some(sid) = self.masque_stream_id {
+            return Ok(Some(sid));
+        }
+
+        // For TUN bridging, fall back to the connection's host header as the
+        // MASQUE proxy authority when the stealth manager has no explicit
+        // MASQUE proxy / fronting-domain config. The proxy authority is just
+        // the H3 :authority header - the server validates it against itself.
+        let proxy = self.stealth_manager.masque_proxy().unwrap_or_else(|| format!("{}:443", host));
+
+        let target = format!("{}:443", host);
+        let extra_headers = self.build_masque_request_headers();
+        let Some(ref mut h3) = self.h3_conn else {
+            return Ok(None);
+        };
+
+        let sid = h3.connect_udp_with_headers(&mut self.conn, &proxy, &target, &extra_headers)?;
+        info!("MASQUE CONNECT-UDP opened (proxy={}, target={}, sid={})", proxy, target, sid);
+        crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
+
+        match h3.enable_masque_datagram(&mut self.conn, sid) {
+            Ok(flow_id) => debug!("MASQUE DATAGRAM enabled (flow-id={flow_id}, ctx=0)"),
+            Err(e) => {
+                warn!("MASQUE DATAGRAM enable failed: {:?}", e);
+            }
+        }
+
+        self.masque_stream_id = Some(sid);
+        Ok(Some(sid))
+    }
+
+    fn sync_intelligent_runtime_controls(&self, intelligent_level: u32) {
+        self.stealth_manager.sync_intelligent_runtime_controls(intelligent_level);
+    }
+
+    fn sync_poll_intelligent_runtime_controls(&self, intelligent_level: u32) {
+        self.sync_intelligent_runtime_controls(intelligent_level);
+
+        if self.stealth_manager.is_intelligent_runtime() {
+            #[cfg(feature = "orchestrator")]
+            {
+                if intelligent_level >= 1 {
+                    if let Some(orchestrator) = ORCHESTRATOR.get() {
+                        let stats = self.conn.stats();
+                        let sent = stats.sent as u64;
+                        let lost = stats.lost as u64;
+                        let loss_rate_permille = lost
+                            .saturating_mul(1000)
+                            .checked_div(sent)
+                            .map_or(0, |rate| rate.min(1000))
+                            as u32;
+                        let delivery_rate_bps =
+                            self.conn.delivery_rate().max(self.stats.congestion_delivery_rate);
+                        let stealth_active = self.stealth_manager.runtime_stealth_active();
+                        orchestrator.update_runtime_signals(
+                            loss_rate_permille,
+                            self.runtime_cpu_percent,
+                            self.runtime_memory_pressure,
+                            delivery_rate_bps,
+                            stealth_active,
+                        );
+                    }
+                    if let Some(orchestrator) = ORCHESTRATOR.get() {
+                        if orchestrator.should_trigger_server_push() {
+                            let mut intensity = orchestrator.get_server_push_intensity();
+                            if intelligent_level >= 2 {
+                                intensity = intensity.max(0.9);
+                            }
+                            self.stealth_manager
+                                .sync_orchestrator_server_push_controls(true, intensity);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn ensure_masque_tunnel_for_send(
+        &mut self,
+    ) -> Result<Option<u64>, crate::transport::h3::Error> {
+        let host = self.host_header.clone();
+        match self.ensure_masque_tunnel(&host) {
+            Ok(sid) => Ok(sid),
+            Err(e) => {
+                crate::telemetry::MASQUE_ACTIVE.store(0, std::sync::atomic::Ordering::Relaxed);
+                Err(e)
+            }
+        }
+    }
+
+    /// Starts the locally initiated CONNECT-UDP flow without sending tunnel data.
+    pub fn begin_masque_tunnel(&mut self) -> Result<u64, crate::error::ConnectionError> {
+        self.ensure_http3_initialized()?;
+        self.ensure_masque_tunnel_for_send()?.ok_or_else(|| "MASQUE tunnel unavailable".into())
+    }
+
+    /// Starts the canonical MASQUE flow required for authenticated control exchange.
+    pub fn begin_masque_control_tunnel(&mut self) -> Result<u64, crate::error::ConnectionError> {
+        self.ensure_http3_initialized()?;
+        let host = self.host_header.clone();
+        self.ensure_masque_tunnel_with_requirement(&host, true)?.ok_or_else(|| {
+            crate::error::ConnectionError::Transport(
+                "MASQUE control tunnel unavailable".to_string(),
+            )
+        })
+    }
+
+    /// Returns true only after the peer acknowledged CONNECT-UDP with a 2xx response.
+    pub fn masque_tunnel_established(&self) -> bool {
+        let Some(stream_id) = self.masque_stream_id else {
+            return false;
+        };
+        self.h3_conn.as_ref().is_some_and(|h3| h3.masque_established(stream_id))
+    }
+
+    /// Accepts the recorded peer CONNECT-UDP flow after application authentication.
+    pub fn accept_peer_masque_tunnel(&mut self) -> Result<bool, crate::error::ConnectionError> {
+        let Some(stream_id) = self.masque_peer_stream_id else {
+            return Ok(false);
+        };
+        let Some(h3) = self.h3_conn.as_mut() else {
+            return Ok(false);
+        };
+        h3.accept_masque_connect(&mut self.conn, stream_id).map_err(Into::into)
+    }
+
+    fn emit_server_push_cover_burst(
+        h3: &mut crate::transport::h3::Connection,
+        conn: &mut crate::transport::Connection,
+        stealth_manager: &crate::stealth::StealthManager,
+        stats: &crate::transport::Stats,
+        intelligent_level: u32,
+    ) {
+        let Some((base_path, intensity)) = stealth_manager.server_push_cover_plan() else {
+            return;
+        };
+
+        match h3.generate_stealth_cover_burst(&base_path) {
+            Ok(ids) => {
+                let sent = stats.sent as u64;
+                let lost = stats.lost as u64;
+                let loss_rate_permille =
+                    lost.saturating_mul(1000).checked_div(sent).unwrap_or(0).min(1000) as u32;
+                stealth_manager.observe_server_push_burst(
+                    &base_path,
+                    ids.len(),
+                    intensity,
+                    loss_rate_permille,
+                    intelligent_level,
+                );
+                if !conn.is_server() {
+                    if let Some((authority, path)) = stealth_manager.webtransport_cover_plan() {
+                        match h3.open_webtransport_cover_session(conn, &authority, &path) {
+                            Ok(sid) => {
+                                debug!("WebTransport cover session opened: sid={sid}");
+                            }
+                            Err(e) => warn!("WebTransport cover session failed: {:?}", e),
+                        }
+                    }
+                }
+                debug!("Server Push burst emitted: {} promises", ids.len());
+            }
+            Err(e) => warn!("Server Push burst generation failed: {:?}", e),
+        }
+    }
+
+    fn prepare_http3_poll_iteration(&self) -> (u32, crate::transport::Stats) {
+        let intelligent_level = self.stealth_manager.intelligent_runtime_level();
+        self.sync_poll_intelligent_runtime_controls(intelligent_level);
+        let stats = self.conn.stats().clone();
+        (intelligent_level, stats)
+    }
+
+    /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.
+    /// This now avoids any serialization overhead.
+    pub fn recv(&mut self, data: &[u8]) -> Result<usize, crate::error::ConnectionError> {
+        self.recv_on_path(data, self.peer_addr, self.local_addr)
+    }
+
+    /// Processes an incoming raw datagram on its observed network path.
+    pub fn recv_on_path(
+        &mut self,
+        data: &[u8],
+        from: SocketAddr,
+        to: SocketAddr,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        let mut block = self.optimization_manager.alloc_block();
+        if data.len() > block.len() {
+            // Avoid silent truncation; return a clear error and recycle the block.
+            self.optimization_manager.free_block(block);
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+        let copy_len = data.len();
+        block[..copy_len].copy_from_slice(&data[..copy_len]);
+        self.recv_pooled_block_on_path(block, copy_len, from, to)
+    }
+
+    /// Processes an incoming packet that already resides in a pooled block.
+    pub fn recv_pooled_block(
+        &mut self,
+        block: AlignedBox<[u8]>,
+        len: usize,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        self.recv_pooled_block_on_path(block, len, self.peer_addr, self.local_addr)
+    }
+
+    /// Processes a pooled incoming datagram on its observed network path.
+    pub fn recv_pooled_block_on_path(
+        &mut self,
+        block: AlignedBox<[u8]>,
+        len: usize,
+        from: SocketAddr,
+        to: SocketAddr,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        if len > block.len() {
+            self.optimization_manager.free_block(block);
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+
+        let wire_framed = wire::is_framed(&block[..len]);
+        let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
+        let receive_report = if wire_framed {
+            if self.fec_rx_seed.is_none() {
+                if let Some(seed) = self.conn.fec_receive_fountain_seed() {
+                    self.fec_wire_receiver.set_fountain_seed(seed);
+                    self.fec_rx_seed = Some(seed);
+                }
+            }
+            let result = if self.fec.control_policy() == crate::fec::FecControlPolicy::Off {
+                self.fec_wire_receiver.receive_source_only(&block[..len], &mut recovered_packets)
+            } else {
+                self.fec_wire_receiver.receive(&block[..len], &mut recovered_packets)
+            };
+            self.optimization_manager.free_block(block);
+            match result {
+                Ok(report) => report,
+                Err(error) => {
+                    debug!("dropping malformed or unsupported FEC wire datagram: {error}");
+                    self.fec_receive_scratch = recovered_packets;
+                    return Ok(len);
+                }
+            }
+        } else {
+            let mem_pool = self.optimization_manager.memory_pool().clone();
+            let data = match PooledBlock::from_pool_block(Arc::clone(&mem_pool), block) {
+                Ok(data) => data,
+                Err(block) => {
+                    self.optimization_manager.free_block(block);
+                    return Err(crate::error::ConnectionError::BufferTooShort);
+                }
+            };
+            let packet = FecPacket::from_pooled_blocks(
+                self.packet_id_counter,
+                Some(data),
+                len,
+                true,
+                None,
+                0,
+                mem_pool,
+            )
+            .map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
+            self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+            recovered_packets.clear();
+            recovered_packets.push(packet);
+            wire::WireReceiveReport::raw_source(len)
+        };
+        if self.fec.telemetry_enabled() {
+            self.fec.observe_wire_receive(receive_report);
+        }
+
+        let mut terminal_receive_error = None;
+        for mut packet in recovered_packets.drain(..) {
+            // payload_mut_unique() returns None when the FEC decoder still
+            // holds an Arc clone of the shared buffer. In that case, copy the
+            // payload into a fresh pooled buffer so conn.recv() can mutate it
+            // (header protection removal + AEAD decryption are in-place).
+            if let Some(data) = packet.payload_mut_unique() {
+                self.stealth_manager.process_incoming_packet(data, from);
+                let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
+                if let Err(error) = self.conn.recv(data, &recv_info) {
+                    if matches!(
+                        error,
+                        crate::error::ConnectionError::TlsError(_)
+                            | crate::error::ConnectionError::TlsAlert(_)
+                            | crate::error::ConnectionError::PeerCertificateUnsupported
+                    ) {
+                        terminal_receive_error = Some(error);
+                        break;
+                    }
+                    debug!(
+                        "transport::recv failed (possible probe) len={}: {:?}",
+                        data.len(),
+                        error
+                    );
+                    self.stealth_manager.handle_fallback(data, from);
+                }
+            } else if let Some(slice) = packet.payload_slice() {
+                let mut buf = PooledBlock::new(self.optimization_manager.memory_pool());
+                let n = slice.len().min(buf.len());
+                buf[..n].copy_from_slice(&slice[..n]);
+                let data = &mut buf[..n];
+                self.stealth_manager.process_incoming_packet(data, from);
+                let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
+                if let Err(error) = self.conn.recv(data, &recv_info) {
+                    if matches!(
+                        error,
+                        crate::error::ConnectionError::TlsError(_)
+                            | crate::error::ConnectionError::TlsAlert(_)
+                            | crate::error::ConnectionError::PeerCertificateUnsupported
+                    ) {
+                        terminal_receive_error = Some(error);
+                        break;
+                    }
+                    debug!(
+                        "transport::recv failed (possible probe) len={}: {:?}",
+                        data.len(),
+                        error
+                    );
+                    self.stealth_manager.handle_fallback(data, from);
+                }
+            }
+        }
+        self.fec_receive_scratch = recovered_packets;
+
+        if let Some(error) = terminal_receive_error {
+            return Err(error);
+        }
+
+        self.conn
+            .do_tls_handshake(self.tls_ch_override_template.as_deref())
+            .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
+
+        Ok(len)
+    }
+
+    /// Shared receive-side memory pool for socket fast paths.
+    pub fn recv_memory_pool(&self) -> Arc<MemoryPool> {
+        self.optimization_manager.memory_pool().clone()
+    }
+
+    /// Earliest outgoing release imposed by the pacing or stealth scheduler.
+    pub fn next_outbound_release_deadline(&self) -> Option<Instant> {
+        [self.outbound_pacer.next_release(), self.next_packet_release].into_iter().flatten().min()
+    }
+
+    /// Earliest instant the caller should poll `send` again.
+    ///
+    /// This merges outer pacing, stealth release, QUIC recovery, and the one
+    /// transport-owned traffic-analysis deadline.
+    pub fn next_send_deadline(&self) -> Option<Instant> {
+        [
+            self.next_outbound_release_deadline(),
+            self.conn.recovery_deadline(),
+            self.conn.traffic_analysis_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Queue one ack-eliciting transport keepalive for the next send poll.
+    pub fn queue_keepalive_ping(&mut self) {
+        self.conn.queue_cover_ping();
+    }
+
+    /// Atomically change the operator-owned FEC policy for this live connection.
+    ///
+    /// The existing connection mutex serializes this command with lifecycle,
+    /// Brain feedback, loss feedback, send, and receive. Source datagrams already
+    /// owned by the output queue remain byte-identical; repair-only datagrams are
+    /// retired before the command is acknowledged. Both codec directions restart
+    /// from empty state so Auto never inherits stale Off-era or prior-Auto evidence.
+    pub fn set_fec_control_policy(
+        &mut self,
+        policy: crate::fec::FecControlPolicy,
+    ) -> ActiveFecPolicyChange {
+        let previous_policy = self.fec.control_policy();
+        if previous_policy == policy {
+            return ActiveFecPolicyChange {
+                controller: self.fec.set_control_policy(policy),
+                queued_sources_preserved: self
+                    .outgoing_fec_packets
+                    .iter()
+                    .filter(|packet| packet.wire_meta.is_none_or(|meta| meta.systematic))
+                    .count(),
+                queued_repairs_discarded: 0,
+            };
+        }
+
+        let queued_before = self.outgoing_fec_packets.len();
+        self.outgoing_fec_packets
+            .retain(|packet| packet.wire_meta.is_none_or(|meta| meta.systematic));
+        let queued_sources_preserved = self.outgoing_fec_packets.len();
+        let queued_repairs_discarded = queued_before.saturating_sub(queued_sources_preserved);
+
+        self.fec_send_scratch.clear();
+        self.fec_receive_scratch.clear();
+        let mut wire_receiver =
+            WireFecReceiver::new(self.optimization_manager.memory_pool().clone());
+        if let Some(seed) = self.fec_rx_seed {
+            wire_receiver.set_fountain_seed(seed);
+        }
+        self.fec_wire_receiver = wire_receiver;
+        self.fec_tx_profile = None;
+        self.fec_tx_sequence = 0;
+        self.fec_tx_active = false;
+
+        ActiveFecPolicyChange {
+            controller: self.fec.set_control_policy(policy),
+            queued_sources_preserved,
+            queued_repairs_discarded,
+        }
+    }
+
+    fn prepare_fec_wire_profile(
+        &mut self,
+    ) -> Result<Option<WireProfile>, crate::error::ConnectionError> {
+        if self.fec_tx_seed.is_none() {
+            if let Some(seed) = self.conn.fec_send_fountain_seed() {
+                self.fec.set_fountain_seed(seed);
+                self.fec_tx_seed = Some(seed);
+            }
+        }
+        let candidate = match self.fec.wire_profile(self.fec_tx_epoch.max(1)) {
+            Ok(profile) => profile,
+            Err(wire::WireError::ZeroModeMustRemainRaw) => {
+                self.fec_tx_active = false;
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(crate::error::ConnectionError::Transport(error.to_string()));
+            }
+        };
+        let shape_changed = self.fec_tx_profile.is_some_and(|previous| {
+            previous.codec != candidate.codec
+                || previous.source_count != candidate.source_count
+                || previous.total_count != candidate.total_count
+                || previous.interleave_depth != candidate.interleave_depth
+        });
+        let window_space_exhausted =
+            self.fec_tx_sequence / candidate.source_count as u64 > u32::MAX as u64;
+        if !self.fec_tx_active || shape_changed || window_space_exhausted {
+            self.fec_tx_epoch = self.fec_tx_epoch.wrapping_add(1).max(1);
+            self.fec_tx_sequence = 0;
+        }
+        self.fec_tx_active = true;
+        let profile = WireProfile { epoch: self.fec_tx_epoch, ..candidate };
+        self.fec_tx_profile = Some(profile);
+        Ok(Some(profile))
+    }
+
+    fn bypass_fec_for_path_control(
+        wire_profile: Option<WireProfile>,
+        send_info: &crate::transport::SendInfo,
+        send_buffer: &mut [u8],
+        write: usize,
+    ) -> Result<Option<WireProfile>, crate::error::ConnectionError> {
+        if wire_profile.is_none() || !send_info.path_control {
+            return Ok(wire_profile);
+        }
+
+        let quic_offset = 2 * wire::SOURCE_LENGTH_LEN;
+        let quic_end = quic_offset
+            .checked_add(write)
+            .filter(|end| *end <= send_buffer.len())
+            .ok_or(crate::error::ConnectionError::BufferTooShort)?;
+        send_buffer.copy_within(quic_offset..quic_end, 0);
+        Ok(None)
+    }
+
+    /// Prepares one wire datagram and discards its address metadata.
+    ///
+    /// Connected-socket callers can use this compatibility API. Multipath and
+    /// unconnected-socket runtimes must use [`Self::send_with_info`] so targeted
+    /// path-validation frames reach the address selected by the transport.
+    pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
+        self.send_with_info(buf).map(|(len, _)| len)
+    }
+
+    /// Prepares one wire datagram together with its exact transport-selected path.
+    pub fn send_with_info(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
+        let now = self.clock.now();
+
+        // --- LOSS/PTO RECOVERY TIMER ---
+        // RFC 9002 §6.1.2/§6.2.1: event loops drive the recovery timer.  When the
+        // deadline has passed, run loss detection (time-threshold or PTO probe)
+        // before the pacing/stealth scheduler so probes never wait on shaping.
+        if self.conn.recovery_deadline().is_some_and(|recovery_deadline| now >= recovery_deadline) {
+            self.conn.on_recovery_timeout(now);
+            // Recovery takes precedence over pacing/stealth release; force
+            // an immediate send attempt so PTO probes can emit.
+            if self.next_packet_release.is_some_and(|r| r > now) {
+                self.next_packet_release = None;
+            }
+        }
+
+        self.conn
+            .do_tls_handshake(self.tls_ch_override_template.as_deref())
+            .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
+        let established = self.conn.is_established();
+        if established {
+            self.conn.on_traffic_analysis_timeout(now);
+        }
+        let fec_wire_ready = self
+            .conn
+            .post_handshake_datagram_ready()
+            .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+        let path_control_pending = self.conn.has_sendable_path_control();
+
+        // --- REALITY FALLBACK RESPONSE POLLING ---
+        // Check if there are any responses from upstream to send back (bypass stealth scheduler)
+        if let Some(resp) = self.stealth_manager.poll_fallback() {
+            if buf.len() < resp.data.len() {
+                return Err(crate::error::ConnectionError::BufferTooShort);
+            }
+            buf[..resp.data.len()].copy_from_slice(&resp.data);
+            return Ok((
+                resp.data.len(),
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ));
+        }
+
+        // --- ASYNC STEALTH SCHEDULER ---
+        // If we are currently throttled by the StealthManager (Brain), yield immediately.
+        //
+        // Production invariant:
+        // Never delay Initial/Handshake flights. Delaying them can stall the connection setup and
+        // makes short-lived clients (like E2E) time out. Stealth timing only applies post-handshake.
+        if !established {
+            self.next_packet_release = None;
+            self.outbound_pacer.reset();
+        } else if !path_control_pending {
+            if let Some(release_time) = self.next_packet_release {
+                if now < release_time {
+                    log::trace!(
+                        "connection.send: next_packet_release blocks until {:?}",
+                        release_time
+                    );
+                    return Ok((
+                        0,
+                        crate::transport::SendInfo {
+                            from: self.local_addr,
+                            to: self.peer_addr,
+                            at: now,
+                            congestion_controlled: false,
+                            path_control: false,
+                        },
+                    )); // WouldBlock / Yield
+                }
+                // Timer expired, clear block and proceed
+                self.next_packet_release = None;
+            }
+        }
+        if established && !path_control_pending && self.outbound_pacer.is_blocked(now) {
+            log::trace!("connection.send: outbound_pacer blocked dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
+                self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
+            return Ok((
+                0,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ));
+        }
+
+        // If there are buffered FEC packets, send one directly. These packets
+        // were already generated in a previous send() call but could not be
+        // emitted because of pacing or stealth scheduling. Flushing them first
+        // prevents an accumulation deadlock: if has_pending_app_data stayed true
+        // (e.g. a MASQUE datagram was queued but conn.send was blocked), every
+        // new send() call would generate another FEC packet and push it onto
+        // outgoing_fec_packets without ever draining the buffer.
+        if !path_control_pending && !self.outgoing_fec_packets.is_empty() {
+            // Write from the queued item without removing it. A capacity or serialization
+            // failure must leave the packet exactly where it was, in order, for the next
+            // send; popping first silently discarded a locally queued packet that was never
+            // emitted while backpressure counters stayed at zero.
+            let (len, mut send_info, shape, congestion_controlled) = {
+                let packet = self
+                    .outgoing_fec_packets
+                    .front()
+                    .ok_or_else(|| "buffered FEC queue emptied unexpectedly".to_string())?;
+                let len = packet.write_to(buf)?;
+                (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
+            };
+            // Commit: the bytes are in the caller's buffer, so ownership transfers now.
+            // Dropping the popped packet recycles its pool block.
+            self.outgoing_fec_packets.pop_front();
+            send_info.at = now;
+            if self.fec.telemetry_enabled() {
+                let (systematic, source_payload_bytes) = shape;
+                self.fec.observe_wire_send(systematic, source_payload_bytes, len);
+            }
+            self.record_paced_packet(now, len, congestion_controlled);
+            return Ok((len, send_info));
+        }
+
+        // Cover PING: inject post-handshake keepalive if the interval has elapsed.
+        // The PING lands in pending_control and is flushed by flush_pending_control_frames()
+        // inside conn.send(), requiring no extra round-trip through this function.
+        if established && !path_control_pending && self.stealth_manager.should_send_cover_ping() {
+            self.conn.queue_cover_ping();
+        }
+
+        let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
+
+        // Otherwise, generate a new QUIC packet using a pooled buffer.
+        let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
+        let send_result = if wire_profile.is_some() {
+            if send_buffer.len() <= 2 * wire::SOURCE_LENGTH_LEN {
+                return Err(crate::error::ConnectionError::BufferTooShort);
+            }
+            self.conn.send_with_datagram_overhead(
+                &mut send_buffer[2 * wire::SOURCE_LENGTH_LEN..],
+                wire::MAX_DATAGRAM_OVERHEAD,
+            )
+        } else {
+            self.conn.send(&mut send_buffer)
+        };
+        let (write, send_info) = match send_result {
+            Ok(v) => v,
+            Err(crate::error::ConnectionError::Done) => {
+                log::trace!("connection.send: conn.send returned Done dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
+                    self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
+                // No packet currently pending is a normal state for polling loops.
+                drop(send_buffer);
+                return Ok((
+                    0,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                    },
+                ));
+            }
+            Err(crate::error::ConnectionError::BufferTooShort) => {
+                drop(send_buffer);
+                return Err(crate::error::ConnectionError::BufferTooShort);
+            }
+            Err(e) => {
+                // The PooledBlock guard recycles the buffer on this early return.
+                drop(send_buffer);
+                return Err(crate::error::ConnectionError::Transport(e.to_string()));
+            }
+        };
+
+        if write == 0 {
+            log::trace!("connection.send: conn.send returned write=0");
+            // The buffer is recycled automatically via Drop.
+            drop(send_buffer);
+            return Ok((
+                0,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ));
+        }
+
+        let bypass_fec_for_path_control = send_info.path_control;
+        let wire_profile =
+            Self::bypass_fec_for_path_control(wire_profile, &send_info, &mut send_buffer, write)?;
+
+        // The buffer may be larger than the written data; the length is tracked separately.
+        // Stealth padding may be applied by the transport configuration; do not mutate the
+        // sealed datagram here to preserve AEAD integrity and FEC compatibility.
+
+        // Obfuscate payload if enabled (includes timing/flow shaping)
+        // NON-BLOCKING: If delay needed, we schedule it and yield zero bytes.
+        let quic_range = if wire_profile.is_some() {
+            2 * wire::SOURCE_LENGTH_LEN..2 * wire::SOURCE_LENGTH_LEN + write
+        } else {
+            0..write
+        };
+        let delay_opt = if bypass_fec_for_path_control {
+            None
+        } else {
+            self.stealth_manager.process_outgoing_packet(&mut send_buffer[quic_range.clone()])
+        };
+
+        let (packet_id, fec_data_len) = if wire_profile.is_some() {
+            let quic_len =
+                u16::try_from(write).map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
+            let source_len = quic_len
+                .checked_add(wire::SOURCE_LENGTH_LEN as u16)
+                .ok_or(crate::error::ConnectionError::BufferTooShort)?;
+            send_buffer[..wire::SOURCE_LENGTH_LEN].copy_from_slice(&source_len.to_be_bytes());
+            send_buffer[wire::SOURCE_LENGTH_LEN..2 * wire::SOURCE_LENGTH_LEN]
+                .copy_from_slice(&quic_len.to_be_bytes());
+            (self.fec_tx_sequence, write + 2 * wire::SOURCE_LENGTH_LEN)
+        } else {
+            (self.packet_id_counter, write)
+        };
+
+        // Transfer the checked-out block only after every pre-FEC fallible operation has passed.
+        let send_pool = send_buffer.pool();
+
+        // Create a source (systematic) FEC packet, passing ownership of the buffer.
+        let mut fec_packet = FecPacket::from_pooled_blocks(
+            packet_id,
+            Some(send_buffer),
+            fec_data_len,
+            true,
+            None,
+            0,
+            // Use the same pool the buffer was allocated from to avoid cross-pool leaks
+            send_pool,
+        )
+        .map_err(crate::error::ConnectionError::Transport)?;
+        fec_packet.seq = packet_id;
+
+        // Initial and Handshake datagrams must remain raw because the server parses
+        // the first Initial before a Core connection exists. FEC starts only after
+        // this endpoint has entered 1-RTT. Zero mode retains raw zero-overhead output.
+        if let Some(profile) = wire_profile {
+            let source_sequence = self.fec_tx_sequence;
+            let window = (source_sequence / profile.source_count as u64) as u32;
+            self.fec.on_send_into(fec_packet, &mut self.fec_send_scratch);
+            for packet in self.fec_send_scratch.drain(..) {
+                let (sequence, repair_index, block_index) = if packet.is_systematic {
+                    (
+                        source_sequence,
+                        wire::SYSTEMATIC_REPAIR_INDEX,
+                        (source_sequence % profile.interleave_depth as u64) as u8,
+                    )
+                } else {
+                    (
+                        packet.id,
+                        u16::try_from(packet.seq >> 4).map_err(|_| {
+                            crate::error::ConnectionError::Transport(
+                                "FEC repair ordinal exceeds wire range".to_string(),
+                            )
+                        })?,
+                        (packet.seq & 0x0F) as u8,
+                    )
+                };
+                self.outgoing_fec_packets.push_back(OutgoingFecPacket {
+                    wire_meta: Some(WirePacketMeta {
+                        profile,
+                        window,
+                        sequence,
+                        repair_index,
+                        block_index,
+                        systematic: packet.is_systematic,
+                    }),
+                    packet,
+                    send_info,
+                    congestion_controlled: send_info.congestion_controlled,
+                });
+            }
+            self.fec_tx_sequence = self.fec_tx_sequence.wrapping_add(1);
+        } else {
+            self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+            let outgoing = OutgoingFecPacket {
+                packet: fec_packet,
+                wire_meta: None,
+                send_info,
+                congestion_controlled: send_info.congestion_controlled,
+            };
+            if send_info.path_control {
+                self.outgoing_fec_packets.push_front(outgoing);
+            } else {
+                self.outgoing_fec_packets.push_back(outgoing);
+            }
+        }
+
+        // Single outbound stealth timing owner: core merges StealthManager shaping delay
+        // with transport jitter (when enabled) into one release deadline. Connection::send
+        // no longer maintains a parallel next_send_at gate.
+        if established && !bypass_fec_for_path_control {
+            let transport_jitter = self.conn.transport_stealth_jitter_delay();
+            if let Some(release_at) =
+                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
+            {
+                self.next_packet_release = Some(release_at);
+                return Ok((
+                    0,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                    },
+                )); // Yield immediately, do not send the just-generated packets yet.
+            }
+        }
+
+        // Pop the first packet from the buffer to send it now.
+        if !self.outgoing_fec_packets.is_empty() {
+            // Same transactional shape as the buffered flush above: write from the front, and
+            // transfer ownership only once the bytes are committed to the caller's buffer.
+            let (len, mut send_info, shape, congestion_controlled) = {
+                let packet = self
+                    .outgoing_fec_packets
+                    .front()
+                    .ok_or_else(|| "FEC queue emptied unexpectedly".to_string())?;
+                let len = packet.write_to(buf)?;
+                (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
+            };
+            self.outgoing_fec_packets.pop_front();
+            send_info.at = now;
+            log::trace!(
+                "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
+                len,
+                self.conn.dgram_send_queue_len(),
+                self.outgoing_fec_packets.len()
+            );
+            if self.fec.telemetry_enabled() {
+                let (systematic, source_payload_bytes) = shape;
+                self.fec.observe_wire_send(systematic, source_payload_bytes, len);
+            }
+            self.record_paced_packet(now, len, congestion_controlled);
+            Ok((len, send_info))
+        } else {
+            Ok((
+                0,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                },
+            ))
+        }
+    }
+
+    fn record_paced_packet(&mut self, now: Instant, bytes: usize, congestion_controlled: bool) {
+        if !congestion_controlled {
+            return;
+        }
+        let Some(rate) = self.conn.pacing_rate() else {
+            return;
+        };
+        self.outbound_pacer.record_send(now, bytes, self.conn.send_quantum(), rate);
+    }
+
+    /// Merges StealthManager delay and transport jitter into one release instant.
+    /// When both apply, the later deadline wins (no stacked duplicate yields).
+    pub(crate) fn compute_outbound_stealth_release(
+        now: Instant,
+        stealth_manager_delay: Option<Duration>,
+        transport_jitter: Option<Duration>,
+    ) -> Option<Instant> {
+        let mut release = stealth_manager_delay.map(|delay| now + delay);
+        if let Some(jitter) = transport_jitter {
+            let candidate = now + jitter;
+            release = Some(match release {
+                Some(current) => current.max(candidate),
+                None => candidate,
+            });
+        }
+        release
+    }
+
+    /// Starts validation for connection migration to a new network path.
+    /// Triggers migration probing toward a new peer address.
+    ///
+    /// The underlying QUIC connection emits a new path candidate immediately,
+    /// sends PATH_CHALLENGE probing on that candidate path, and only switches
+    /// the active path after a matching PATH_RESPONSE validates it.
+    pub fn migrate_connection(
+        &mut self,
+        new_peer: SocketAddr,
+    ) -> Result<u64, crate::transport::Error> {
+        // Initiate path migration using the transport API. The local address remains
+        // unchanged, but a new peer address is supplied. The transport handles sending
+        // the probing packets required for validation.
+        self.conn
+            .migrate(self.local_addr, new_peer)
+            .map_err(|_| crate::transport::Error::NoViablePath)
+    }
+
+    /// Returns the Host header that should be used for HTTP requests when domain
+    /// fronting is active.
+    pub fn host_header(&self) -> &str {
+        &self.host_header
+    }
+
+    /// Returns the stealth manager for dynamic profile updates.
+    pub fn stealth_manager(&self) -> Arc<StealthManager> {
+        self.stealth_manager.clone()
+    }
+
+    /// Returns the network-stack profile frozen with this connection persona.
+    pub fn tunnel_ingress_profile(&self) -> OsFingerprintProfile {
+        self.tunnel_ingress_normalizer.profile
+    }
+
+    fn apply_fec_transport_feedback(
+        fec: &mut AdaptiveFec,
+        feedback: crate::transport::connection::FecCallbackFeedback,
+        transport_loss_rate: f32,
+        diagnostics_enabled: bool,
+    ) {
+        // A send callback only establishes that a packet entered recovery. It
+        // cannot establish loss or delivery, and replaying the congestion
+        // controller's current smoothed rate for each send turns stale loss
+        // into self-amplifying FEC pressure. ACK and loss callbacks are the
+        // only admissible controller evidence.
+        if feedback.acked_packets == 0 && feedback.lost_packets == 0 {
+            return;
+        }
+
+        let sent_packets = feedback.sent_packets.min(usize::MAX as u64) as usize;
+        let acknowledged_packets = feedback.acked_packets.min(usize::MAX as u64) as usize;
+        let lost_packets = feedback.lost_packets.min(usize::MAX as u64) as usize;
+        if diagnostics_enabled {
+            fec.report_transport_loss_with_slow_phase_diagnostics(
+                sent_packets,
+                acknowledged_packets,
+                lost_packets,
+                transport_loss_rate,
+            );
+        } else {
+            fec.report_transport_loss(
+                sent_packets,
+                acknowledged_packets,
+                lost_packets,
+                transport_loss_rate,
+            );
+        }
+    }
+
+    fn run_update_state_phase<T>(
+        clock: &crate::time_source::ProtocolClock,
+        diagnostics_enabled: bool,
+        phase: &'static str,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        if !diagnostics_enabled {
+            return operation();
+        }
+        let started = clock.now();
+        let result = operation();
+        let elapsed = clock.elapsed_since(started);
+        if elapsed >= std::time::Duration::from_millis(100) {
+            info!(
+                "Connection update_state slow phase: phase={phase} duration_ms={}",
+                elapsed.as_millis()
+            );
+        }
+        result
+    }
+
+    /// Update internal state, e.g., FEC mode based on statistics.
+    pub fn update_state(&mut self) {
+        self.update_state_inner(false);
+    }
+
+    /// Update internal state while retaining opt-in slow-subphase diagnostics.
+    pub fn update_state_with_slow_phase_diagnostics(&mut self) {
+        self.update_state_inner(true);
+    }
+
+    fn update_state_inner(&mut self, diagnostics_enabled: bool) {
+        let clock = self.clock.clone();
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "transport-stats", || {
+            let stats = self.conn.stats();
+            let rtt_seconds =
+                self.conn.path_stats().next().map(|ps| ps.rtt.as_secs_f32()).unwrap_or(0.0);
+            self.stats.update_from_transport_stats(stats, rtt_seconds);
+        });
+
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "resource-telemetry", || {
+            if clock.elapsed_since(self.last_telemetry) >= std::time::Duration::from_secs(1) {
+                telemetry!(telemetry::refresh_resource_metrics_if_due());
+                #[cfg(feature = "orchestrator")]
+                self.update_orchestrator_resource_signals();
+                self.last_telemetry = clock.now();
+            }
+        });
+
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "path-events", || {
+            while let Some(event) = self.conn.path_event_next() {
+                match event {
+                    crate::transport::PathEvent::New(local, peer) => {
+                        info!("New path detected: {local}->{peer}");
+                    }
+                    crate::transport::PathEvent::Validated(local, peer) => {
+                        info!("Path validated: {local}->{peer}");
+                        self.peer_addr = peer;
+                        self.local_addr = local;
+                        telemetry!(telemetry::PATH_MIGRATIONS.inc());
+                    }
+                    crate::transport::PathEvent::FailedValidation(local, peer) => {
+                        warn!("Path validation failed: {local}->{peer}");
+                    }
+                    crate::transport::PathEvent::Closed(local, peer) => {
+                        info!("Path closed: {local}->{peer}");
+                    }
+                    crate::transport::PathEvent::ReusedSourceConnectionId(seq, old, new) => {
+                        info!("CID {seq} reused from {old:?} to {new:?}");
+                    }
+                    crate::transport::PathEvent::PeerMigrated(old_peer, peer) => {
+                        info!("Peer migrated: {old_peer}->{peer}");
+                    }
+                }
+            }
+        });
+
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "masque-state", || {
+            if self.masque_flow_active() {
+                crate::telemetry::MASQUE_ACTIVE.store(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                crate::telemetry::MASQUE_ACTIVE.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.masque_stream_id = None;
+                self.masque_peer_stream_id = None;
+                self.masque_peer_generation = None;
+                self.masque_control_sent = false;
+            }
+        });
+
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-observer-sync", || {
+            self.transport_observer.sync_runtime_hints(&mut self.conn);
+        });
+
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-observer-interval", || {
+            let interval = self.transport_observer.compute_streaming_interval() as usize;
+            if (1..=32).contains(&interval) {
+                self.conn.set_fec_stream_every(interval);
+            }
+        });
+
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-control-delta", || {
+            let delta = self.conn.take_fec_control_delta();
+            if let Some(every) = delta.stream_every {
+                self.fec.set_stream_every(every);
+            }
+            if delta.force_streaming {
+                self.fec.force_streaming_mode();
+            }
+            if let Some(ppm) = delta.redundancy_ppm {
+                self.fec.set_redundancy_ppm(ppm);
+            }
+        });
+
+        let (feedback, transport_loss_rate) =
+            Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-feedback-read", || {
+                (self.conn.take_fec_callback_feedback(), self.conn.recovery_loss_rate())
+            });
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-feedback-apply", || {
+            Self::apply_fec_transport_feedback(
+                &mut self.fec,
+                feedback,
+                transport_loss_rate,
+                diagnostics_enabled,
+            );
+        });
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "fec-rtt-hint", || {
+            let rtt_ms = self.stats.rtt.max(0.0) as u32;
+            self.fec.set_rtt_hint(rtt_ms);
+        });
+
+        Self::run_update_state_phase(&clock, diagnostics_enabled, "stealth-intelligence", || {
+            self.stealth_manager.sync_intelligent_level();
+            let level = self.stealth_manager.intelligent_runtime_level();
+            if let Err(error) = self.conn.apply_intelligent_traffic_analysis_level(level) {
+                warn!("Intelligent traffic-analysis policy transition failed: {error}");
+            }
+        });
+    }
+
+    /// Returns the current estimated RTT in milliseconds.
+    pub fn rtt_ms(&self) -> f32 {
+        self.stats.rtt
+    }
+
+    /// Returns the current estimated packet loss rate in [0.0, 1.0].
+    pub fn loss_rate(&self) -> f32 {
+        self.stats.loss_rate
+    }
+
+    /// Return exact connection-local FEC policy, mode, and wire evidence.
+    pub fn fec_telemetry_snapshot(&self) -> crate::fec::FecTelemetrySnapshot {
+        self.fec.telemetry_snapshot()
+    }
+
+    /// Returns current stealth mode for this connection.
+    pub fn stealth_mode(&self) -> StealthMode {
+        self.stealth_manager.mode()
+    }
+
+    /// Returns the effective TLS SNI currently configured on the live transport connection.
+    pub fn server_name(&self) -> Option<String> {
+        self.conn.server_name().map(|name| name.to_string())
+    }
+}

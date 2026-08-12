@@ -86,23 +86,27 @@ pub use fingerprint::{
 // Legacy external TLS FFI removed: rustls owns the real handshake and the
 // deterministic profile catalog is retained only for compatibility/audit work.
 
-include!("parts/browser_profiles.rs");
+pub(crate) use qf_stealth::parse_fingerprint_profile_slot;
+#[cfg(test)]
+pub(crate) use qf_stealth::CdnProvider;
 #[cfg(test)]
 pub(crate) use qf_stealth::IntelligentStealthInputs;
 pub use qf_stealth::{
-    FecMode, PaddingStrategy, RotationMode, StealthConfig, StealthMode, TlsCoverCipherSuite,
+    ActiveProbeDetector, ChaffGenerator, FecMode, Http3Masquerade, PaddingStrategy,
+    ProbeResponseMode, RotationMode, StealthConfig, StealthMode, TlsClientHelloProfileCatalog,
+    TlsCoverCipherSuite, TrafficAnalysisPhase, TrafficAnalysisScheduler, CHAFF_PADDING_FRAME_BYTE,
 };
-include!("parts/http3_masquerade.rs");
-include!("parts/domain_fronting.rs");
-include!("parts/cover_traffic.rs");
-include!("parts/probe_detector.rs");
-include!("parts/flow_shaping.rs");
-include!("parts/chaff.rs");
-include!("parts/tls_client_hello.rs");
-include!("parts/escalation.rs");
-include!("parts/runtime.rs");
-include!("parts/manager.rs");
-include!("parts/stealth_coverage_tests.rs");
+pub use qf_stealth::{BrowserProfile, FingerprintProfile, OsProfile};
+pub(crate) use qf_stealth::{
+    CoverTrafficScheduler, DomainFrontingManager, EscalationState, FlowShaper, StealthPacketClass,
+};
+
+mod http3_masquerade;
+mod manager;
+mod runtime;
+
+pub use manager::StealthManager;
+pub use runtime::{StealthRuntimeOwner, StealthShutdownReport, STEALTH_RUNTIME_SHUTDOWN_TIMEOUT};
 
 #[cfg(test)]
 mod test_support;

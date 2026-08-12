@@ -1,3 +1,5 @@
+use super::*;
+
 // ========================================================================
 // 3-LEVEL CACHE HIERARCHY - Erweiterte Performance-Optimierungen
 // ========================================================================
@@ -190,9 +192,7 @@ mod mlock_tests {
 
     #[test]
     fn test_set_and_check_lock_blocks_flag() {
-        let _guard = LOCK_BLOCKS_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // Save original state
         let original = MemoryPool::lock_blocks_enabled();
         // Enable
@@ -207,9 +207,7 @@ mod mlock_tests {
 
     #[test]
     fn test_pool_alloc_with_lock_blocks_enabled() {
-        let _guard = LOCK_BLOCKS_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // Enable lock_blocks and verify pool allocation still works.
         // mlock may fail (EAGAIN) in unprivileged test environments, but
         // the allocation must succeed regardless - mlock is best-effort.
@@ -224,9 +222,7 @@ mod mlock_tests {
 
     #[test]
     fn test_pool_alloc_with_lock_blocks_disabled() {
-        let _guard = LOCK_BLOCKS_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         MemoryPool::set_lock_blocks(false);
         let pool = MemoryPool::new(4, 4096);
         let block = pool.alloc();
@@ -281,12 +277,14 @@ mod mlock_tests {
     /// serialising mutex the other pool-global tests use and always restore an empty slot.
     #[test]
     fn auto_tuner_start_is_idempotent_and_shutdown_joins_exactly_once() {
-        let _guard =
-            LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Start from a known-empty slot regardless of what other tests left behind.
         MemoryPool::shutdown_auto_tuner();
-        assert!(!MemoryPool::auto_tuner_running_for_tests(), "teardown must leave no worker behind");
+        assert!(
+            !MemoryPool::auto_tuner_running_for_tests(),
+            "teardown must leave no worker behind"
+        );
 
         // Shutdown with no worker running is a no-op, not a panic or a hang.
         MemoryPool::shutdown_auto_tuner();
@@ -300,10 +298,16 @@ mod mlock_tests {
 
         // A second start must not spawn a second worker for the same process-global slot.
         MemoryPool::start_auto_tuner(Arc::clone(&pool));
-        assert!(MemoryPool::auto_tuner_running_for_tests(), "the slot still holds exactly one worker");
+        assert!(
+            MemoryPool::auto_tuner_running_for_tests(),
+            "the slot still holds exactly one worker"
+        );
 
         MemoryPool::shutdown_auto_tuner();
-        assert!(!MemoryPool::auto_tuner_running_for_tests(), "shutdown must stop and join the worker, leaving the slot empty");
+        assert!(
+            !MemoryPool::auto_tuner_running_for_tests(),
+            "shutdown must stop and join the worker, leaving the slot empty"
+        );
 
         // The pool itself outlives its worker and stays usable for allocation.
         let block = pool.alloc();
@@ -319,8 +323,7 @@ mod mlock_tests {
     /// A pool with tuning disabled must never occupy the process-global worker slot.
     #[test]
     fn auto_tune_disabled_pool_starts_no_worker() {
-        let _guard =
-            LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = LOCK_BLOCKS_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         MemoryPool::shutdown_auto_tuner();
 
         let environment =

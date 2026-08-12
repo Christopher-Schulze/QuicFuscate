@@ -36,7 +36,9 @@ def read(relative: str) -> str:
 
 
 def tracked_source() -> list[tuple[str, str]]:
-    result = run_command("git", "ls-files", "-z", "--", "src")
+    result = run_command(
+        "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "src"
+    )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "git ls-files failed")
     files: list[tuple[str, str]] = []
@@ -44,6 +46,8 @@ def tracked_source() -> list[tuple[str, str]]:
         if not relative.endswith(".rs"):
             continue
         path = ROOT / relative
+        if not path.is_file():
+            continue
         files.append((relative, path.read_text(encoding="utf-8")))
     return files
 
@@ -64,9 +68,9 @@ def main() -> int:
         map_doc = read("docs/MAP.md")
         readme = read("README.md")
         config = read("src/transport/config.rs")
-        catalog = read("src/stealth/parts/tls_client_hello.rs")
-        manager = read("src/stealth/parts/manager.rs")
-        connection = read("src/core_parts/connection.rs")
+        catalog = read("crates/qf-stealth/src/tls_client_hello.rs")
+        manager = read("src/stealth/manager.rs")
+        connection = read("src/core/connection.rs")
         stealth_tests = read("src/stealth/tests.rs")
         qftls = read("src/qftls.rs")
     except (OSError, RuntimeError) as error:

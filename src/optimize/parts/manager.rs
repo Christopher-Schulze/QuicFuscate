@@ -1,3 +1,5 @@
+use super::*;
+
 /// Singleton manager for runtime optimizations.
 #[derive(Clone)]
 pub struct OptimizationManager {

@@ -1,3 +1,5 @@
+use super::*;
+
 // Transport integration remains a root compatibility adapter because the
 // observer implementation still updates the live Connection-owned FEC controls.
 pub(crate) struct FecTransportObserver {
@@ -63,20 +65,13 @@ impl FecDecoder8 {
     }
 
     /// Create a GF(2^8) decoder and reject dimensions outside the wire contract.
-    pub fn try_new(
-        k: usize,
-        pool: Arc<MemoryPool>,
-    ) -> Result<Self, FecDecoderConfigError> {
+    pub fn try_new(k: usize, pool: Arc<MemoryPool>) -> Result<Self, FecDecoderConfigError> {
         validate_decoder_dimensions(k, 1, wire::MAX_GF8_BLOCK_SOURCE_COUNT)?;
         Ok(Self(Decoder8::new(k, pool)))
     }
     /// Create a benchmark decoder with an explicit decoder policy snapshot.
     #[cfg(feature = "benches")]
-    pub fn new_with_decoder_policy(
-        k: usize,
-        pool: Arc<MemoryPool>,
-        decoder_policy: &str,
-    ) -> Self {
+    pub fn new_with_decoder_policy(k: usize, pool: Arc<MemoryPool>, decoder_policy: &str) -> Self {
         let mut policy = FecRuntimePolicy::detect();
         policy.decoder_policy = decoder_policy.to_string();
         Self(Decoder8::new_with_policy(k, pool, &policy))

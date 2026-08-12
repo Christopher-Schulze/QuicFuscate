@@ -63,7 +63,7 @@ echo "  Runtime Guardrails Audit"
 echo "==============================================================="
 
 # 1) Public xdp fastpath token and alias helpers must be gone.
-PUBLIC_XDP_TOKEN_REFS=$(rg -n --no-messages "QUICFUSCATE_FASTPATH=xdp|xdp.*compatibility alias|compatibility-only.*xdp|xdp.*maps to.*udp/io_uring|xdp-smoke|request_xdp_compat|enable_xdp_compat|FastpathMode::Xdp|xdp_compat_alias_log_message|normalize_request_xdp_compat" README.md docs/DOCUMENTATION.md src/interface.rs src/main.rs src/main_parts src/optimize src/implementations/client/io_driver.rs src/implementations/server || true)
+PUBLIC_XDP_TOKEN_REFS=$(rg -n --no-messages "QUICFUSCATE_FASTPATH=xdp|xdp.*compatibility alias|compatibility-only.*xdp|xdp.*maps to.*udp/io_uring|xdp-smoke|request_xdp_compat|enable_xdp_compat|FastpathMode::Xdp|xdp_compat_alias_log_message|normalize_request_xdp_compat" README.md docs/DOCUMENTATION.md src/interface.rs src/main.rs src/main src/optimize src/implementations/client/io_driver.rs src/implementations/server || true)
 if [[ -z "$PUBLIC_XDP_TOKEN_REFS" ]]; then
   pass "Public xdp fastpath token is fully removed"
   append_item "xdp_public_token_removed" "ok" "no public xdp fastpath token or alias helpers remain"
@@ -618,11 +618,11 @@ if rg -F -- 'fn bmi2_parser_is_allowed(profile: CpuProfile, features: &CpuFeatur
   && rg -F -- 'Self::profile_from_features(features_full)' \
     crates/qf-cpu/src/lib.rs >/dev/null \
   && rg -F -- 'fn x86_profile_selection_keeps_bmi2_explicit()' \
-    crates/qf-cpu/src/lib.rs >/dev/null \
+    crates/qf-cpu/src/tests.rs >/dev/null \
   && rg -F -- 'fn bmi2_dispatch_requires_profile_and_runtime_feature_intersection()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'SIMD_SKIP test=bmi2_parser_accepts_intentionally_unaligned_ipv4_slice_when_supported required=bmi2' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'run_verified_library_target "interface-unaligned-write"' \
     scripts/tests/suites/test-core.sh >/dev/null \
   && rg -F -- 'run_verified_library_target "interface-bmi2-dispatch"' \
@@ -674,13 +674,13 @@ if rg -F -- 'fn validate_tun_read_len' src/interface.rs >/dev/null \
   && rg -F -- 'let written = self.write(buf)?;' src/interface.rs >/dev/null \
   && ! rg -F -- 'len.min(block.len())' src/interface.rs >/dev/null \
   && rg -F -- 'fn external_factory_read_result_contract_rejects_zero_and_oversized_lengths()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'fn external_factory_write_result_contract_rejects_zero_short_and_oversized_results()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'fn write_packet_rejects_short_external_factory_result()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'fn owned_packet_constructor_rejects_oversized_length()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'run_verified_library_target "interface-read-result-contract"' \
     scripts/tests/suites/test-core.sh >/dev/null \
   && rg -F -- 'run_verified_library_target "interface-write-result-contract"' \
@@ -715,11 +715,11 @@ if rg -F -- 'pub(crate) fn validate_raw_read_result' src/interface.rs >/dev/null
   && rg -F -- 'fn tun_handle_close_failure_is_reported_and_terminalized()' \
     src/implementations/client/platform/traits.rs >/dev/null \
   && rg -F -- 'fn unix_raw_result_contract_rejects_zero_and_oversized_counts()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'fn unix_interface_name_parser_requires_bounded_terminated_utf8()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'fn unix_close_failure_is_reported_and_descriptor_number_is_terminalized()' \
-    src/interface.rs >/dev/null \
+    src/interface/tests.rs >/dev/null \
   && rg -F -- 'fn utun_writev_iovecs_follow_bounded_progress()' src/interface.rs >/dev/null \
   && rg -F -- 'run_verified_library_target "unix-raw-result-contract"' \
     scripts/tests/suites/test-core.sh >/dev/null \
@@ -753,12 +753,12 @@ if rg -F -- 'struct WintunCleanupState' src/interface/wintun.rs >/dev/null \
   && rg -F -- 'unsafe impl Send for WintunDevice {}' src/interface/wintun.rs >/dev/null \
   && rg -F -- 'unsafe impl Sync for WintunDevice {}' src/interface/wintun.rs >/dev/null \
   && rg -F -- 'fn wintun_cleanup_state_retains_failed_resources_for_retry()' \
-    src/interface/wintun.rs >/dev/null \
+    src/interface/wintun/tests.rs >/dev/null \
   && rg -F -- 'fn wintun_device_send_sync_contract_is_compile_checked()' \
-    src/interface/wintun.rs >/dev/null \
+    src/interface/wintun/tests.rs >/dev/null \
   && rg -F -- 'fn native_adapter_packet_io_and_bounded_close()' \
-    src/interface/wintun.rs >/dev/null \
-  && rg -F -- 'cleanup_state_for_test().is_complete()' src/interface/wintun.rs >/dev/null \
+    src/interface/wintun/tests.rs >/dev/null \
+  && rg -F -- 'cleanup_state_for_test().is_complete()' src/interface/wintun/tests.rs >/dev/null \
   && rg -F -- 'run_verified_library_target "wintun-cleanup-state"' \
     scripts/tests/suites/test-core.sh >/dev/null \
   && rg -F -- 'run_verified_library_target "wintun-send-sync-contract"' \
@@ -859,7 +859,7 @@ if rg -F -- 'fn bounded_bitmap_end(' crates/qf-cpu/src/transport.rs >/dev/null \
     src/optimize/string.rs >/dev/null \
   && rg -F -- 'fn percentile_index(' src/optimize/brain.rs >/dev/null \
   && rg -F -- 'test_compute_percentile_invalid_input_fails_closed_without_mutation()' \
-    src/optimize/brain.rs >/dev/null \
+    src/optimize/brain/tests.rs >/dev/null \
   && rg -F -- 'fn validate_rps_interface(' \
     src/optimize/udp.rs crates/qf-transport-udp/src/lib.rs >/dev/null \
   && rg -F -- 'fn rps_cpu_mask(' \
@@ -958,13 +958,13 @@ checks = [
         "embedded server memory policy is not applied before the global pool",
     ),
     (
-        Path("src/main_parts/late_tests_and_mlock.rs"),
+        Path("src/main/server.rs"),
         "apply_before_tls_identity(defer_process_memory_lock)",
         "quicfuscate::implementations::server::load_server_identity(",
         "standalone memory policy is not applied before TLS identity loading",
     ),
     (
-        Path("src/implementations/server/parts/runtime_impl.rs"),
+        Path("src/implementations/server/runtime_impl.rs"),
         "current_memory_lock_policy.reject_standalone_reload(candidate_memory_lock_policy)?;",
         "apply_runtime_config_reload_with_generation(",
         "standalone reload applies runtime changes before checking startup-owned memory policy",
@@ -994,21 +994,21 @@ if [[ -z "$MEMORY_LOCK_POLICY_ORDER_ERRORS" ]] \
   && rg -F -- 'fn standalone_reload_rejects_each_changed_startup_setting()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'fn embedded_startup_policy_applies_pool_setting_before_identity_boundary()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'fn standalone_restart_reapplies_pool_setting_instead_of_retaining_previous_value()' crates/qf-memory-lock/src/lib.rs >/dev/null \
-  && rg -F -- 'fn test_runtime_reload_rejects_startup_owned_memory_settings()' src/implementations/server/parts/tests_inline.rs >/dev/null \
+  && rg -F -- 'fn test_runtime_reload_rejects_startup_owned_memory_settings()' src/implementations/server/tests_inline.rs >/dev/null \
   && rg -F -- 'lock_memory = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
   && rg -F -- 'lock_blocks = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
   && rg -F -- 'memory_lock_failure_policy = "best-effort"' config/quicfuscate.toml >/dev/null \
   && rg -F -- 'memory_lock_failure_policy = "fail-closed"' config/server-linux.default.toml >/dev/null \
   && rg -F -- 'startup-owned' config/server-linux.default.toml >/dev/null \
-  && rg -F -- 'MemoryLockPolicy::from_security' src/main_parts/late_tests_and_mlock.rs >/dev/null \
-  && rg -F -- 'server memory-lock startup failed' src/main_parts/late_tests_and_mlock.rs src/engine/engine.rs >/dev/null \
-  && rg -F -- 'set_memory_lock_status' src/implementations/server/metrics.rs src/main_parts/late_tests_and_mlock.rs >/dev/null \
-  && rg -F -- '"memory_lock": memory_lock.health_json()' src/implementations/server/metrics.rs src/implementations/server/parts/runtime_admin.rs >/dev/null \
+  && rg -F -- 'MemoryLockPolicy::from_security' src/main/server.rs >/dev/null \
+  && rg -F -- 'server memory-lock startup failed' src/main/server.rs src/engine/engine.rs >/dev/null \
+  && rg -F -- 'set_memory_lock_status' src/implementations/server/metrics.rs src/main/server.rs >/dev/null \
+  && rg -F -- '"memory_lock": memory_lock.health_json()' src/implementations/server/metrics.rs src/implementations/server/runtime_admin.rs >/dev/null \
   && rg -F -- 'Process Memory-Lock Readiness and Failure Policy' docs/MAP.md docs/DOCUMENTATION.md >/dev/null \
   && rg -F -- 'struct ProcessMemoryLockGuard' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && ! rg -F -- 'current_memlock_limit().ok()' crates/qf-memory-lock/src/lib.rs >/dev/null \
-  && rg -F -- 'reject_standalone_reload(candidate_memory_lock_policy)?' src/implementations/server/parts/runtime_impl.rs >/dev/null \
-  && ! rg -F -- 'fn apply_process_memory_lock' src/main_parts/late_tests_and_mlock.rs >/dev/null \
+  && rg -F -- 'reject_standalone_reload(candidate_memory_lock_policy)?' src/implementations/server/runtime_impl.rs >/dev/null \
+  && ! rg -F -- 'fn apply_process_memory_lock' src/main/server.rs >/dev/null \
   && rg -F -- 'Shared server startup memory-lock policy' docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
   pass "Embedded and standalone memory-lock policy, typed failure/readiness, ordering, reload rejection, and tests are wired"
   append_item "embedded_memory_lock_policy_propagation" "ok" "shared process/pool policy, typed failure state, pre-identity ordering, deferred privilege boundary, health/readiness, reload rejection, tests, and documentation are present"
@@ -1028,7 +1028,7 @@ if rg -F -- 'pub enum MemoryLockFailureKind' crates/qf-memory-lock/src/lib.rs >/
   && rg -F -- 'impl Drop for ProcessMemoryLockGuard' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'libc::munlockall()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'memory_lock_health_exposes_degraded_and_not_ready_states' \
-    src/implementations/server/metrics.rs >/dev/null \
+    src/implementations/server/metrics/tests.rs >/dev/null \
   && rg -F -- 'MemoryLockFailurePolicy::FailClosed' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'memory_lock_failure_policy' src/engine/config.rs crates/qf-memory-lock/src/lib.rs >/dev/null; then
   pass "Process memory-lock failure causes, policy decisions, health states, and panic-safe cleanup are wired"
@@ -1042,11 +1042,11 @@ fi
 #     exported keying material must retain a zeroizing owner at every boundary.
 if rg -F -- 'pub type SensitiveKeyingMaterial = Zeroizing<Vec<u8>>;' src/qftls.rs >/dev/null \
   && rg -F -- 'Result<SensitiveKeyingMaterial, ConnectionError>' src/qftls.rs >/dev/null \
-  && rg -F -- '.with_single_cert(certs, key)' src/qftls.rs >/dev/null \
-  && rg -F -- 'Certificate/private-key correspondence validation failed' src/qftls.rs >/dev/null \
-  && rg -F -- 'preload_identity_duplicate_and_conflict_contract_is_isolated' src/qftls.rs >/dev/null \
-  && rg -F -- 'correspondence validation failed' src/qftls.rs >/dev/null \
-  && rg -F -- 'sensitive_keying_material_owner_zeroizes_before_drop' src/qftls.rs >/dev/null \
+  && rg -F -- '.with_single_cert(certs, key)' src/qftls/rustls_provider.rs >/dev/null \
+  && rg -F -- 'Certificate/private-key correspondence validation failed' src/qftls/rustls_provider.rs >/dev/null \
+  && rg -F -- 'preload_identity_duplicate_and_conflict_contract_is_isolated' src/qftls/tests.rs >/dev/null \
+  && rg -F -- 'correspondence validation failed' src/qftls/tests.rs >/dev/null \
+  && rg -F -- 'sensitive_keying_material_owner_zeroizes_before_drop' src/qftls/tests.rs >/dev/null \
   && rg -F -- 'TLS Identity Consistency and Secret Output Ownership' docs/todo/done/todo-853-tls-identity-secret-output.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
   pass "TLS certificate/key correspondence, preload lifecycle, and zeroizing exporter ownership are wired"
   append_item "tls_identity_and_secret_output" "ok" "rustls SPKI correspondence validation, isolated mismatch/duplicate/conflict preload coverage, and zeroizing key-export type/erasure test are present"
@@ -1598,9 +1598,9 @@ if rg -F -- 'for host_veth in "${HOST_VETH[@]}"; do' "$MULTI_CLIENT_DUAL_STACK_H
   && rg -F -- 'FEC_MODE="${QF_E2E_FEC_MODE:-auto}"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'QF_E2E_FEC_MODE must be auto or off' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
   && rg -F -- 'printf '"'"'\n[fec]\nmode = "%s"\n'"'"' "$FEC_MODE"' "$MULTI_CLIENT_DUAL_STACK_HARNESS" >/dev/null \
-  && rg -F -- 'CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS"' src/main.rs src/main_parts >/dev/null \
-  && rg -F -- 'Client receive diagnostics at heartbeat:' src/main.rs src/main_parts >/dev/null \
-  && rg -F -- 'last_activity_marker' src/main.rs src/main_parts src/transport/connection >/dev/null \
+  && rg -F -- 'CLIENT_RECV_DIAGNOSTICS_ENV: &str = "QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS"' src/main.rs src/main >/dev/null \
+  && rg -F -- 'Client receive diagnostics at heartbeat:' src/main.rs src/main >/dev/null \
+  && rg -F -- 'last_activity_marker' src/main.rs src/main src/transport/connection >/dev/null \
   && rg -F -- 'terminal_packet_threshold={}' src/transport/connection >/dev/null \
   && rg -F -- 'ack_delay_us={}' src/transport/connection >/dev/null \
   && rg -F -- 'ack_time_threshold_losses={}' src/transport/connection >/dev/null \
@@ -1657,8 +1657,8 @@ if rg -F -- 'UDP_PROBE="$SCRIPT_DIR/utils/udp-throughput-probe.py"' "$PER_CLIENT
   && rg -F -- 'QF_E2E_VERBOSE' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
   && rg -F -- 'runtime-log-mode.env' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
   && ! rg -F -- '-v >"$ARTIFACT_DIR/' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
-  && rg -F -- 'QUICFUSCATE_SERVER_DOWNLINK_RATE_BYTES_PER_SECOND' src/implementations/server/parts/config.rs config/server-linux.default.toml "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
-  && rg -F -- 'reserve_capacity(entry.packet.len())' src/implementations/server/parts/tun_path.rs >/dev/null \
+  && rg -F -- 'QUICFUSCATE_SERVER_DOWNLINK_RATE_BYTES_PER_SECOND' src/implementations/server/config.rs config/server-linux.default.toml "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
+  && rg -F -- 'reserve_capacity(entry.packet.len())' src/implementations/server/tun_path.rs >/dev/null \
   && rg -F -- 'daily_quota_exceeded' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
   && rg -F -- 'assert_matrix weighted-1-2-1 weighted' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
   && rg -F -- 'prove_runtime_clean' "$PER_CLIENT_BANDWIDTH_HARNESS" >/dev/null \
@@ -1740,7 +1740,7 @@ else
   append_item "batchprocessor_module_gate" "fail" "$BATCH_MODULE_DECLS"
 fi
 
-FASTPATH_RUNTIME_REFS=$(rg -n --no-messages "FastPathTransport" src | rg -v "src/transport/xdp.rs|src/main.rs src/main_parts" || true)
+FASTPATH_RUNTIME_REFS=$(rg -n --no-messages "FastPathTransport" src | rg -v "src/transport/xdp.rs|src/main.rs|src/main/" || true)
 if [[ -z "$FASTPATH_RUNTIME_REFS" ]]; then
   pass "FastPathTransport has no runtime call sites outside xdp/main and is treated as compatibility/test-only"
   append_item "fastpathtransport_runtime_reachability" "ok" "no runtime references found (compat/test-only surface)"
@@ -1821,7 +1821,7 @@ else
   append_item "optimize_zerocopy_shadow_surface" "fail" "$ZEROCOPY_SHADOW_REFS"
 fi
 
-OPTIMIZATION_MANAGER_XDP_STATE_REFS=$(rg -n --no-messages "XDP_RUNTIME_WIRING_ENABLED|is_xdp_compat_available\\(|is_xdp_compat_enabled\\(" src/optimize src/main.rs src/main_parts docs/DOCUMENTATION.md || true)
+OPTIMIZATION_MANAGER_XDP_STATE_REFS=$(rg -n --no-messages "XDP_RUNTIME_WIRING_ENABLED|is_xdp_compat_available\\(|is_xdp_compat_enabled\\(" src/optimize src/main.rs src/main docs/DOCUMENTATION.md || true)
 if [[ -z "$OPTIMIZATION_MANAGER_XDP_STATE_REFS" ]]; then
   pass "OptimizationManager does not carry dead XDP runtime state helpers"
   append_item "optimizationmanager_xdp_runtime_state" "ok" "no dead XDP runtime state helpers found"
@@ -1830,10 +1830,10 @@ else
   append_item "optimizationmanager_xdp_runtime_state" "fail" "$OPTIMIZATION_MANAGER_XDP_STATE_REFS"
 fi
 
-CORE_XDP_REFS=$(rg -n --no-messages "xdp|FastPathTransport|request_xdp_compat|QUICFUSCATE_FASTPATH" src/core.rs src/core_parts src/transport/connection || true)
+CORE_XDP_REFS=$(rg -n --no-messages "xdp|FastPathTransport|request_xdp_compat|QUICFUSCATE_FASTPATH" src/core.rs src/core src/transport/connection || true)
 if [[ -z "$CORE_XDP_REFS" ]]; then
   pass "active core transport/runtime path has no XDP compatibility branches"
-  append_item "core_xdp_runtime_reachability" "ok" "no XDP compatibility references found in src/core.rs src/core_parts or src/transport/connection"
+  append_item "core_xdp_runtime_reachability" "ok" "no XDP compatibility references found in src/core.rs src/core or src/transport/connection"
 else
   warn_guardrail "active core transport/runtime path still references XDP compatibility surface"
   append_item "core_xdp_runtime_reachability" "warn" "$CORE_XDP_REFS"
@@ -1868,10 +1868,10 @@ fi
 RNG_POLICY_FILES=(
   src/transport/pn.rs
   src/transport/recovery.rs
-  src/main.rs src/main_parts
+  src/main.rs src/main
   src/implementations/server/admin.rs
   src/implementations/server/admin_http.rs
-  src/implementations/server/admin_http_parts
+  src/implementations/server/admin_http
 )
 if rg -n --no-messages "OsRng\\.fill_bytes|getrandom::getrandom|rand::thread_rng\\(\\)\\.fill_bytes|rand::random\\(" "${RNG_POLICY_FILES[@]}" >/dev/null; then
   fail_critical "Direct RNG fill usage detected in security-sensitive modules (expected centralized rng API)"
@@ -1899,7 +1899,7 @@ fi
 if rg -F -- 'pub const DEFAULT_PER_SOURCE_RATE_LIMIT_PPS: u64 = 10_000;' \
     src/implementations/server/limits.rs >/dev/null \
   && rg -F -- 'max_pps: DEFAULT_PER_SOURCE_RATE_LIMIT_PPS' \
-    src/implementations/server/limits.rs >/dev/null \
+    src/implementations/server/limits/rate_limit.rs >/dev/null \
   && rg -F -- 'default: `10000`' docs/DOCUMENTATION.md >/dev/null; then
   pass "Per-source server rate limit preserves documented tunnel-throughput headroom"
   append_item "server_rate_limit_tunnel_headroom" "ok" "runtime, tests, docs, and native throughput gate retain the 10000 PPS default"
@@ -1961,7 +1961,7 @@ QKEY_REGISTRY_FAIL_OPEN_REFS=$(rg -n --no-messages 'writing plaintext|decryption
 if [[ -z "$QKEY_REGISTRY_FAIL_OPEN_REFS" ]] \
   && rg -F -- 'pub fn open(' src/implementations/server/qkey_registry.rs >/dev/null \
   && rg -F -- ') -> Result<Self, QKeyRegistryError>' src/implementations/server/qkey_registry.rs >/dev/null \
-  && rg -F -- 'map_err(std::io::Error::other)?' src/implementations/server/parts/runtime_impl.rs >/dev/null \
+  && rg -F -- 'map_err(std::io::Error::other)?' src/implementations/server/runtime_impl.rs >/dev/null \
   && rg -F -- 'QUICFUSCATE_QKEY_ENC_KEY_FILE' src/implementations/server/qkey_registry_storage.rs scripts/install/install-server-linux.sh docs/DOCUMENTATION.md >/dev/null \
   && rg -F -- 'QUICFUSCATE_QKEY_ENC_PREVIOUS_KEY_FILE' src/implementations/server/qkey_registry_storage.rs docs/DOCUMENTATION.md >/dev/null; then
   pass "QKey registry encryption remains versioned, key-file capable, and fail closed at startup"
@@ -1976,13 +1976,13 @@ from pathlib import Path
 
 checks = [
     (
-        Path("src/implementations/server/parts/live_state.rs"),
+        Path("src/implementations/server/live_state.rs"),
         "let admission =",
         "parse_live_server_initial_auth(",
         "QKey admission no longer precedes registry lookup",
     ),
     (
-        Path("src/main_parts/late_tests_and_mlock.rs"),
+        Path("src/main/server.rs"),
         "server_config_from_listen_addr(",
         "init_audit_log_with_options(",
         "auth configuration no longer validates before audit resource creation",
@@ -2003,9 +2003,9 @@ if [[ -z "$QKEY_AUTH_POLICY_ORDER_ERRORS" ]] \
   && rg -F -- 'pub struct AuthPolicyConfig {' src/implementations/server/limits.rs >/dev/null \
   && rg -F -- 'max_tracked_ips: 65_536' src/implementations/server/limits.rs >/dev/null \
   && rg -F -- 'max_pending_attempts_per_ip: 4' src/implementations/server/limits.rs >/dev/null \
-  && rg -F -- 'QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES' src/implementations/server/parts/config.rs config/server-linux.default.toml docs/DOCUMENTATION.md >/dev/null \
-  && rg -F -- 'AuthRateLimiter::new_with_clock(' src/implementations/server/parts/live_state.rs >/dev/null \
-  && [[ "$(rg -c --no-messages 'qkey_auth_denied' src/implementations/server/parts/live_auth.rs || true)" -ge 3 ]] \
+  && rg -F -- 'QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES' src/implementations/server/config.rs config/server-linux.default.toml docs/DOCUMENTATION.md >/dev/null \
+  && rg -F -- 'AuthRateLimiter::new_with_clock(' src/implementations/server/live_state.rs >/dev/null \
+  && [[ "$(rg -c --no-messages 'qkey_auth_denied' src/implementations/server/live_auth.rs || true)" -ge 3 ]] \
   && rg -F -- 'quicfuscate_auth_backoff_rejected_total' src/implementations/server/metrics.rs docs/DOCUMENTATION.md >/dev/null \
   && rg -F -- 'quicfuscate_auth_blocked_rejected_total' src/implementations/server/metrics.rs docs/DOCUMENTATION.md >/dev/null \
   && rg -F -- 'assert_metric_exact quicfuscate_auth_attempts_total 100' "$QKEY_AUTH_POLICY_HARNESS" >/dev/null \
@@ -2117,7 +2117,7 @@ else
   append_item "feature_claims_server_header_truth" "ok" "server module header is truth-aligned"
 fi
 
-if rg -n --no-messages "full QUIC connection lifecycle" src/core.rs src/core_parts >/dev/null; then
+if rg -n --no-messages "full QUIC connection lifecycle" src/core.rs src/core >/dev/null; then
   fail_critical "Core module header still overclaims a full QUIC lifecycle"
   append_item "feature_claims_core_header_truth" "fail" "full QUIC lifecycle wording present in core header"
 else

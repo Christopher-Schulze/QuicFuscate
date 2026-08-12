@@ -115,10 +115,20 @@ mod transition_tests;
 #[cfg(test)]
 mod adaptive_tests;
 
+#[path = "parts/codecs_and_observers.rs"]
+mod codecs_and_observers;
+#[path = "parts/decoders.rs"]
+mod decoders;
 #[cfg(test)]
 mod policy_tests;
-include!("parts/codecs_and_observers.rs");
-include!("parts/decoders.rs");
+
+#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+pub use codecs_and_observers::FecDecoder8;
+pub(crate) use codecs_and_observers::FecTransportObserver;
+#[cfg(test)]
+pub(crate) use decoders::{multiply_gf256_with_scratch, Decoder16, Decoder4, WiedemannScratch};
+#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
+pub(crate) use decoders::{validate_decoder_dimensions, Decoder8};
 mod internal;
 
 #[cfg(test)]

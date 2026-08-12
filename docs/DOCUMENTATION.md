@@ -36,7 +36,7 @@ The retained complexity in this repository is intentional and should be read thr
 
 | Layer | Purpose | Canonical examples |
 |---|---|---|
-| `canonical runtime/product path` | user-visible retained runtime behavior and stable product contract | `src/core.rs` (+ `src/core_parts/`), `src/transport/connection/`, `src/crypto/` product contract, `src/fec/` public `auto` / `off` contract |
+| `canonical runtime/product path` | user-visible retained runtime behavior and stable product contract | `src/core.rs` (+ `src/core/`), `src/transport/connection/`, `src/crypto/` product contract, `src/fec/` public `auto` / `off` contract |
 | `adaptive policy/control` | runtime policy loops that tune retained capability without changing the product contract | `src/brain.rs`, `src/stealth/`, `src/fec/` target/family auto-controller |
 | `platform acceleration` | hardware detection, SIMD dispatch, Linux fast paths, and owner-local hot-path helpers | `crates/qf-cpu/`, `crates/qf-simd/`, `crates/qf-transport-udp/src/lib.rs` + `fastpath.rs`, root compatibility projections in `src/optimize/`, `src/simd.rs`, `src/optimize/udp.rs`, `src/optimize/uring_batch.rs` |
 | `compat/test/experimental` | retained compatibility machinery, parity hooks, archived sources, and explicitly gated internal surfaces | archived legacy sources, `rust-tests`, `benches` |
@@ -107,7 +107,17 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 | Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection/` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims; public packet, CID, token, and CRYPTO ranges fail closed before mutation | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, `scripts/tests/rust/rt-transport-packet-headers.rs`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
 | Unsafe SIMD / crypto machine room | `src/crypto/`, `crates/qf-simd/`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Stealth/TLS-cover boundary | `src/stealth/`, `src/qftls.rs` | Stealth owns persona and cover policy; rustls still owns real TLS protocol semantics | `docs/todo/done/todo-81-stealth-capability-preservation-and-simplification.md`, `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md` |
-| Raw-IP fingerprint boundary | `src/stealth/fingerprint.rs`, `src/core_parts/connection.rs`, `src/implementations/server/parts/` | normalize decoded client-to-server raw-IP ingress exactly once; apply the frozen profile to server-generated control ICMP; never mutate sealed QUIC or ordinary server-to-client downlink; preserve fragments and PMTUD | fingerprint units, routing ICMP tests, `rt-core-connection-basics`, `rt-stealth-config-toml`, `fingerprint_normalizer` benchmark |
+| Raw-IP fingerprint boundary | `src/stealth/fingerprint.rs`, `src/core/connection.rs`, `src/implementations/server/` | normalize decoded client-to-server raw-IP ingress exactly once; apply the frozen profile to server-generated control ICMP; never mutate sealed QUIC or ordinary server-to-client downlink; preserve fragments and PMTUD | fingerprint units, routing ICMP tests, `rt-core-connection-basics`, `rt-stealth-config-toml`, `fingerprint_normalizer` benchmark |
+
+## Rust Module Ownership
+
+The active Rust tree uses real module boundaries exclusively. Source assembly through `include!` is forbidden, and `scripts/tests/audits/audit-rust-module-structure.sh` rejects both textual assembly and any Rust source above 2,000 physical lines.
+
+- `src/core/connection.rs` owns product connection orchestration; `h3_runtime.rs` and `tests.rs` are private responsibility modules behind the stable `crate::core` facade.
+- `src/transport/connection/` owns state, lifecycle, receive, send, API, PMTU, benchmark, and regression modules; `src/transport/h3/` owns QPACK, connection state, cover content, MASQUE/WebTransport extensions, and tests.
+- `src/implementations/server/` owns configuration, bootstrap, authentication, live state, runtime administration, runtime implementation, DNS signals, TUN routing, and tests as real sibling modules. Admin HTTP request parsing, API handlers, server lifecycle, and regressions live under `admin_http/server/`.
+- `src/main/` owns standalone runtime, client execution, server startup, and runtime reload tests. `src/stealth/` owns the root compatibility facade plus manager, runtime, and HTTP/3 masquerade adapters; TLS Cover installation lives under `src/qftls/`.
+- Large leaf crates keep their public facade in `lib.rs` and place coherent implementation or regression owners in private child modules. Public paths remain unchanged through explicit narrow re-exports.
 
 ## Transport Overlap and Divergence vs quinn-udp
 
