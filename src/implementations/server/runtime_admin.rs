@@ -228,7 +228,7 @@ pub(super) struct ServerHostResources {
 }
 
 #[cfg(target_os = "linux")]
-fn configured_routing_manager(
+pub(super) fn configured_routing_manager(
     tun_name: String,
     server_config: &ServerConfig,
 ) -> Result<RoutingManager, String> {
@@ -268,7 +268,7 @@ fn configured_routing_manager(
 }
 
 #[cfg(target_os = "linux")]
-fn cleanup_stale_routing_records(
+pub(super) fn cleanup_stale_routing_records(
     requested_tun_name: Option<&str>,
     server_config: &ServerConfig,
 ) -> Result<(), String> {

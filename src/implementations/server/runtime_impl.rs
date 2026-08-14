@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use super::runtime_admin::{cleanup_stale_routing_records, configured_routing_manager};
 use super::*;
 use crate::time_source::ProtocolClock;
 mod runtime_loop;
