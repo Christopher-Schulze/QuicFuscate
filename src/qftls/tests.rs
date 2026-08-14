@@ -269,6 +269,85 @@ fn client_hello_cipher_suites(frame: &[u8]) -> Vec<u16> {
         .collect()
 }
 
+fn client_hello_extensions(frame: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    let body_len = usize::try_from(u32::from_be_bytes([0, frame[1], frame[2], frame[3]]))
+        .expect("ClientHello body length");
+    let body = &frame[4..4 + body_len];
+    let session_id_end = 35 + usize::from(body[34]);
+    let suites_len =
+        usize::from(u16::from_be_bytes([body[session_id_end], body[session_id_end + 1]]));
+    let suites_end = session_id_end + 2 + suites_len;
+    let compression_end = suites_end + 1 + usize::from(body[suites_end]);
+    let extensions_len =
+        usize::from(u16::from_be_bytes([body[compression_end], body[compression_end + 1]]));
+    let mut offset = compression_end + 2;
+    let extensions_end = offset + extensions_len;
+    assert!(extensions_end <= body.len(), "ClientHello extensions are truncated");
+
+    let mut extensions = Vec::new();
+    while offset < extensions_end {
+        assert!(offset + 4 <= extensions_end, "ClientHello extension header is truncated");
+        let extension_type = u16::from_be_bytes([body[offset], body[offset + 1]]);
+        let extension_len = usize::from(u16::from_be_bytes([body[offset + 2], body[offset + 3]]));
+        offset += 4;
+        let extension_end = offset + extension_len;
+        assert!(extension_end <= extensions_end, "ClientHello extension body is truncated");
+        extensions.push((extension_type, body[offset..extension_end].to_vec()));
+        offset = extension_end;
+    }
+    extensions
+}
+
+fn client_hello_extension(extensions: &[(u16, Vec<u8>)], extension_type: u16) -> &[u8] {
+    extensions
+        .iter()
+        .find_map(|(kind, data)| (*kind == extension_type).then_some(data.as_slice()))
+        .expect("required ClientHello extension")
+}
+
+fn client_hello_sni(extension: &[u8]) -> String {
+    assert!(extension.len() >= 5, "SNI extension is truncated");
+    assert_eq!(extension[2], 0, "first SNI entry must be a DNS hostname");
+    let name_len = usize::from(u16::from_be_bytes([extension[3], extension[4]]));
+    String::from_utf8(extension[5..5 + name_len].to_vec()).expect("SNI hostname is UTF-8")
+}
+
+fn client_hello_alpn(extension: &[u8]) -> Vec<String> {
+    let mut offset = 2usize;
+    let mut protocols = Vec::new();
+    while offset < extension.len() {
+        let protocol_len = usize::from(extension[offset]);
+        offset += 1;
+        let protocol_end = offset + protocol_len;
+        protocols.push(
+            String::from_utf8(extension[offset..protocol_end].to_vec())
+                .expect("ALPN protocol is UTF-8"),
+        );
+        offset = protocol_end;
+    }
+    protocols
+}
+
+fn client_hello_supported_versions(extension: &[u8]) -> Vec<u16> {
+    extension[1..1 + usize::from(extension[0])]
+        .chunks_exact(2)
+        .map(|version| u16::from_be_bytes([version[0], version[1]]))
+        .collect()
+}
+
+fn client_hello_key_share_groups(extension: &[u8]) -> Vec<u16> {
+    let mut offset = 2usize;
+    let mut groups = Vec::new();
+    while offset < extension.len() {
+        let group = u16::from_be_bytes([extension[offset], extension[offset + 1]]);
+        let key_len =
+            usize::from(u16::from_be_bytes([extension[offset + 2], extension[offset + 3]]));
+        groups.push(group);
+        offset += 4 + key_len;
+    }
+    groups
+}
+
 #[test]
 fn v2_provider_carries_version_information_transport_parameter() {
     let information = VersionInformation {
@@ -283,11 +362,18 @@ fn v2_provider_carries_version_information_transport_parameter() {
 }
 
 #[test]
-fn rustls_client_hello_policy_excludes_chacha_for_chrome_and_firefox() {
+fn every_supported_persona_controls_the_real_rustls_client_hello_order() {
     let mut provider =
         RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("client provider");
 
-    for mut profile in [TlsProfile::chrome_130(), TlsProfile::firefox_133()] {
+    for mut profile in [
+        TlsProfile::chrome_130(),
+        TlsProfile::firefox_133(),
+        TlsProfile::safari_18(),
+        TlsProfile::edge_130(),
+        TlsProfile::opera_115(),
+        TlsProfile::brave_1_73(),
+    ] {
         // This test owns cipher-suite policy only. Cosmetic profile timing
         // is covered by profile_delay_tests and must not gate ClientHello
         // inspection on an immediate frame.
@@ -304,6 +390,308 @@ fn rustls_client_hello_policy_excludes_chacha_for_chrome_and_firefox() {
             profile.name,
             suites
         );
+        let expected = profile
+            .cipher_suites
+            .iter()
+            .copied()
+            .filter(|suite| matches!(*suite, 0x1301 | 0x1302))
+            .collect::<Vec<_>>();
+        assert_eq!(suites, expected, "real rustls order must follow {}", profile.name);
+
+        let extensions = client_hello_extensions(&frame);
+        let mut extension_types = extensions.iter().map(|(kind, _)| *kind).collect::<Vec<_>>();
+        let extension_count = extension_types.len();
+        extension_types.sort_unstable();
+        extension_types.dedup();
+        assert_eq!(extension_types.len(), extension_count, "duplicate real extension");
+        assert_eq!(
+            client_hello_sni(client_hello_extension(&extensions, 0x0000)),
+            DEFAULT_TLS_SNI_HOST
+        );
+        assert_eq!(
+            client_hello_alpn(client_hello_extension(&extensions, 0x0010)),
+            profile.alpn_protocols
+        );
+        assert_eq!(
+            client_hello_supported_versions(client_hello_extension(&extensions, 0x002b)),
+            vec![0x0304]
+        );
+        let key_share_groups =
+            client_hello_key_share_groups(client_hello_extension(&extensions, 0x0033));
+        assert!(!key_share_groups.is_empty(), "real ClientHello has no key share");
+        assert!(
+            key_share_groups.iter().any(|group| profile.groups.contains(group)),
+            "real ClientHello key shares do not overlap {}",
+            profile.name
+        );
+    }
+}
+
+#[test]
+fn real_provider_rejects_every_0rtt_activation_path() {
+    set_max_early_data_size(u32::MAX);
+    let mut client =
+        RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("client provider");
+    assert!(client.enable_0rtt().is_err());
+    assert!(client.get_0rtt_keys().is_none());
+
+    let mut profile = TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.enable_0rtt = true;
+    let error = client.configure(&profile).expect_err("profile 0-RTT must fail closed");
+    assert!(error.to_string().contains("0-RTT is disabled"));
+
+    let defaults = [
+        TlsProfile::chrome_130(),
+        TlsProfile::firefox_133(),
+        TlsProfile::safari_18(),
+        TlsProfile::edge_130(),
+        TlsProfile::opera_115(),
+        TlsProfile::brave_1_73(),
+    ];
+    assert!(defaults.iter().all(|profile| !profile.enable_0rtt));
+}
+
+#[test]
+fn rustls_client_hello_uses_profile_order_and_rejects_empty_overlap() {
+    let mut provider =
+        RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("client provider");
+    let mut reverse = TlsProfile::chrome_130();
+    reverse.timing_jitter = None;
+    reverse.cipher_suites = vec![0x1302, 0x1301, 0x1302, 0xc02f];
+    provider.configure(&reverse).expect("reverse suite profile");
+    let (_, frame) = provider
+        .next_crypto_frame(Level::Initial, usize::MAX)
+        .expect("next initial frame")
+        .expect("initial ClientHello");
+    assert_eq!(client_hello_cipher_suites(&frame), vec![0x1302, 0x1301]);
+
+    let mut unsupported = TlsProfile::chrome_130();
+    unsupported.cipher_suites = vec![0x1303, 0xc02f, 0xdead];
+    let error = provider.configure(&unsupported).expect_err("empty overlap must fail closed");
+    assert!(error.to_string().contains("no supported TLS 1.3 AES-GCM cipher suite"));
+}
+
+fn transfer_tls_crypto(
+    source: &mut RustlsProvider,
+    destination: &mut RustlsProvider,
+) -> Result<usize, ConnectionError> {
+    let mut transferred = 0usize;
+    for level in [Level::Initial, Level::Handshake, Level::Application] {
+        while let Some((_offset, bytes)) = source.next_crypto_frame(level, usize::MAX)? {
+            transferred = transferred.saturating_add(bytes.len());
+            destination.provide_quic_data(level, &bytes)?;
+        }
+    }
+    Ok(transferred)
+}
+
+fn assert_live_rustls_handshake(mut profile: TlsProfile, expected_suite: StandardCipherSuite) {
+    use crate::crypto::aead::{AeadOpen, AeadSeal};
+    use crate::qftls::rustls_provider::{take_standard_packet_operations, StandardPacketOperation};
+
+    let _ = take_standard_packet_operations();
+    let mut client =
+        RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("client provider");
+    let mut server =
+        RustlsProvider::new(true, false, PROTOCOL_VERSION, &[]).expect("server provider");
+    let client_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let server_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+
+    profile.timing_jitter = None;
+    profile.sni = Some("localhost".to_string());
+    profile.enable_0rtt = false;
+    profile.cipher_suites = vec![expected_suite.tls_id()];
+    client.configure(&profile).expect("configure client profile");
+
+    for _ in 0..64 {
+        client.poll_secrets_and_install(&client_keys).expect("poll client keys");
+        server.poll_secrets_and_install(&server_keys).expect("poll server keys");
+        let client_bytes = transfer_tls_crypto(&mut client, &mut server).expect("client flight");
+        let server_bytes = transfer_tls_crypto(&mut server, &mut client).expect("server flight");
+        client.poll_secrets_and_install(&client_keys).expect("install client keys");
+        server.poll_secrets_and_install(&server_keys).expect("install server keys");
+        if client.handshake_complete() && server.handshake_complete() {
+            break;
+        }
+        assert_ne!(
+            client_bytes + server_bytes,
+            0,
+            "live handshake stalled before both endpoints completed"
+        );
+    }
+
+    assert!(client.handshake_complete());
+    assert!(server.handshake_complete());
+    for snapshot in [
+        client_keys.read().packet_protection_snapshot(),
+        server_keys.read().packet_protection_snapshot(),
+    ] {
+        assert_eq!(snapshot.negotiated_tls_cipher_suite, Some(expected_suite));
+        assert_eq!(snapshot.handshake.packet_aead_owner, PacketProtectionOwner::RustlsStandard);
+        assert_eq!(
+            snapshot.handshake.header_protection_owner,
+            PacketProtectionOwner::RustlsStandard
+        );
+        assert_eq!(snapshot.one_rtt.packet_aead_owner, PacketProtectionOwner::RustlsStandard);
+        assert_eq!(snapshot.one_rtt.header_protection_owner, PacketProtectionOwner::RustlsStandard);
+        assert_eq!(snapshot.zero_rtt.packet_aead_owner, PacketProtectionOwner::Disabled);
+    }
+
+    let client_seal = client_keys.read().seal_1rtt.clone().expect("client rustls seal owner");
+    let server_open = server_keys.read().open_1rtt.clone().expect("server rustls open owner");
+    let plaintext = b"runtime-owner-proof";
+    let mut packet = vec![0u8; plaintext.len() + 16];
+    packet[..plaintext.len()].copy_from_slice(plaintext);
+    let sealed = client_seal
+        .seal_with_u64_counter(7, b"authenticated-header", &mut packet, plaintext.len(), None)
+        .expect("seal with installed rustls key");
+    assert_eq!(sealed, packet.len());
+    let opened = server_open
+        .open_with_u64_counter(7, b"authenticated-header", &mut packet)
+        .expect("open with installed rustls key");
+    assert_eq!(&packet[..opened], plaintext);
+
+    client.key_update_write(&client_keys).expect("client rustls write-key update");
+    server.key_update_read(&server_keys).expect("server rustls read-key update");
+    let client_seal = client_keys.read().seal_1rtt.clone().expect("updated client seal owner");
+    let server_open = server_keys.read().open_1rtt.clone().expect("updated server open owner");
+    packet[..plaintext.len()].copy_from_slice(plaintext);
+    client_seal
+        .seal_with_u64_counter(8, b"authenticated-header", &mut packet, plaintext.len(), None)
+        .expect("seal with updated rustls key");
+    let opened = server_open
+        .open_with_u64_counter(8, b"authenticated-header", &mut packet)
+        .expect("open with updated rustls key");
+    assert_eq!(&packet[..opened], plaintext);
+    assert_eq!(
+        client_keys.read().packet_protection_snapshot().one_rtt.packet_aead_owner,
+        PacketProtectionOwner::RustlsStandard
+    );
+    assert_eq!(
+        take_standard_packet_operations(),
+        vec![
+            StandardPacketOperation::Seal,
+            StandardPacketOperation::Open,
+            StandardPacketOperation::Seal,
+            StandardPacketOperation::Open,
+        ]
+    );
+}
+
+#[test]
+fn every_supported_persona_completes_real_standard_suite_handshakes() {
+    for profile in [
+        TlsProfile::chrome_130(),
+        TlsProfile::firefox_133(),
+        TlsProfile::safari_18(),
+        TlsProfile::edge_130(),
+        TlsProfile::opera_115(),
+        TlsProfile::brave_1_73(),
+    ] {
+        for suite in [StandardCipherSuite::Aes128GcmSha256, StandardCipherSuite::Aes256GcmSha384] {
+            assert_live_rustls_handshake(profile.clone(), suite);
+        }
+    }
+}
+
+#[test]
+fn rustls_ticket_resumption_is_reported_without_0rtt_keys() {
+    static TEST_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sni = format!(
+        "resumption-{}-{}.example",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let mut profile = TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some(sni);
+    profile.cipher_suites = vec![StandardCipherSuite::Aes128GcmSha256.tls_id()];
+    profile.enable_0rtt = false;
+
+    let mut first_client =
+        RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("first client provider");
+    let mut first_server =
+        RustlsProvider::new(true, false, PROTOCOL_VERSION, &[]).expect("first server provider");
+    let first_client_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let first_server_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    first_client.configure(&profile).expect("configure first client");
+
+    for _ in 0..64 {
+        first_client.poll_secrets_and_install(&first_client_keys).expect("poll first client keys");
+        first_server.poll_secrets_and_install(&first_server_keys).expect("poll first server keys");
+        let transferred = transfer_tls_crypto(&mut first_client, &mut first_server)
+            .expect("first client flight")
+            + transfer_tls_crypto(&mut first_server, &mut first_client)
+                .expect("first server flight");
+        first_client
+            .poll_secrets_and_install(&first_client_keys)
+            .expect("install first client keys");
+        first_server
+            .poll_secrets_and_install(&first_server_keys)
+            .expect("install first server keys");
+        if first_client.handshake_complete() && first_server.handshake_complete() {
+            break;
+        }
+        assert_ne!(transferred, 0, "first resumption baseline handshake stalled");
+    }
+    assert!(first_client.handshake_complete() && first_server.handshake_complete());
+    assert!(!first_client.handshake_resumed());
+    assert!(!first_server.handshake_resumed());
+
+    let mut resumed_client =
+        RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("resumed client provider");
+    let mut resumed_server =
+        RustlsProvider::new(true, false, PROTOCOL_VERSION, &[]).expect("resumed server provider");
+    let resumed_client_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let resumed_server_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    resumed_client.configure(&profile).expect("configure resumed client");
+
+    for _ in 0..64 {
+        resumed_client
+            .poll_secrets_and_install(&resumed_client_keys)
+            .expect("poll resumed client keys");
+        resumed_server
+            .poll_secrets_and_install(&resumed_server_keys)
+            .expect("poll resumed server keys");
+        let transferred = transfer_tls_crypto(&mut resumed_client, &mut resumed_server)
+            .expect("resumed client flight")
+            + transfer_tls_crypto(&mut resumed_server, &mut resumed_client)
+                .expect("resumed server flight");
+        resumed_client
+            .poll_secrets_and_install(&resumed_client_keys)
+            .expect("install resumed client keys");
+        resumed_server
+            .poll_secrets_and_install(&resumed_server_keys)
+            .expect("install resumed server keys");
+        if resumed_client.handshake_complete() && resumed_server.handshake_complete() {
+            break;
+        }
+        assert_ne!(transferred, 0, "TLS ticket resumption handshake stalled");
+    }
+
+    assert!(resumed_client.handshake_complete() && resumed_server.handshake_complete());
+    assert!(resumed_client.handshake_resumed(), "client must report TLS 1.3 resumption");
+    assert!(resumed_server.handshake_resumed(), "server must report TLS 1.3 resumption");
+    assert!(resumed_client.get_0rtt_keys().is_none());
+    assert!(resumed_server.get_0rtt_keys().is_none());
+    assert!(resumed_client.session_ticket().is_none());
+    assert!(resumed_server.session_ticket().is_none());
+    for snapshot in [
+        resumed_client_keys.read().packet_protection_snapshot(),
+        resumed_server_keys.read().packet_protection_snapshot(),
+    ] {
+        assert_eq!(
+            snapshot.negotiated_tls_cipher_suite,
+            Some(StandardCipherSuite::Aes128GcmSha256)
+        );
+        assert_eq!(snapshot.zero_rtt.packet_aead_owner, PacketProtectionOwner::Disabled);
+        assert_eq!(snapshot.one_rtt.packet_aead_owner, PacketProtectionOwner::RustlsStandard);
+        assert_eq!(snapshot.one_rtt.header_protection_owner, PacketProtectionOwner::RustlsStandard);
     }
 }
 

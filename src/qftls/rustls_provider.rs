@@ -1,5 +1,5 @@
 use super::*;
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 #[cfg(debug_assertions)]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 #[cfg(debug_assertions)]
@@ -9,10 +9,37 @@ use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerNam
 use rustls::DigitallySignedStruct;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls_native_certs::load_native_certs;
+use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use webpki_roots;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StandardPacketOperation {
+    Seal,
+    Open,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STANDARD_PACKET_OPERATIONS: std::cell::RefCell<Vec<StandardPacketOperation>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn observe_standard_packet_operation(operation: StandardPacketOperation) {
+    STANDARD_PACKET_OPERATIONS.with(|operations| operations.borrow_mut().push(operation));
+}
+
+#[cfg(test)]
+pub(super) fn take_standard_packet_operations() -> Vec<StandardPacketOperation> {
+    STANDARD_PACKET_OPERATIONS.with(|operations| std::mem::take(&mut *operations.borrow_mut()))
+}
 
 enum PendingKeyChange {
     Handshake(QuicTlsHandshakeKeys),
@@ -46,7 +73,8 @@ pub(super) fn validate_server_identity_pem(
         })
 }
 
-/// Full-featured rustls QUIC TLS provider with session resumption, 0-RTT, and PQ support.
+/// rustls QUIC TLS provider with standard TLS ticket resumption and packet-key installation.
+/// 0-RTT remains deliberately disabled until packet-level early-data keys exist.
 /// Build the shared rustls provider with the project's real-TLS ChaCha policy.
 ///
 /// This provider is used on both client and server connections. TLS Cover's
@@ -63,6 +91,123 @@ fn crypto_provider_without_chacha() -> rustls::crypto::CryptoProvider {
         )
     });
     provider
+}
+
+fn standard_cipher_suite(
+    suite: rustls::CipherSuite,
+) -> Result<StandardCipherSuite, ConnectionError> {
+    match suite {
+        rustls::CipherSuite::TLS13_AES_128_GCM_SHA256 => Ok(StandardCipherSuite::Aes128GcmSha256),
+        rustls::CipherSuite::TLS13_AES_256_GCM_SHA384 => Ok(StandardCipherSuite::Aes256GcmSha384),
+        unsupported => Err(ConnectionError::TlsError(format!(
+            "negotiated unsupported QUIC TLS cipher suite: {unsupported:?}"
+        ))),
+    }
+}
+
+fn crypto_provider_for_profile(
+    profile: &TlsProfile,
+) -> Result<rustls::crypto::CryptoProvider, ConnectionError> {
+    let mut provider = crypto_provider_without_chacha();
+    let available = provider.cipher_suites.clone();
+    let mut projected = Vec::with_capacity(profile.cipher_suites.len());
+
+    for requested in &profile.cipher_suites {
+        let requested = rustls::CipherSuite::from(*requested);
+        if let Some(suite) = available.iter().copied().find(|suite| {
+            suite.tls13().is_some()
+                && suite.suite() == requested
+                && standard_cipher_suite(suite.suite()).is_ok()
+        }) {
+            if !projected
+                .iter()
+                .any(|existing: &rustls::SupportedCipherSuite| existing.suite() == suite.suite())
+            {
+                projected.push(suite);
+            }
+        }
+    }
+
+    if projected.is_empty() {
+        return Err(ConnectionError::TlsError(format!(
+            "TLS profile '{}' has no supported TLS 1.3 AES-GCM cipher suite",
+            profile.name
+        )));
+    }
+    provider.cipher_suites = projected;
+    Ok(provider)
+}
+
+#[derive(Debug)]
+struct NoClientCertificate;
+
+impl rustls::client::ResolvesClientCert for NoClientCertificate {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[rustls::SignatureScheme],
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        None
+    }
+
+    fn has_certs(&self) -> bool {
+        false
+    }
+}
+
+static STANDARD_SESSION_STORE: OnceLock<Arc<rustls::client::ClientSessionMemoryCache>> =
+    OnceLock::new();
+static NO_CLIENT_CERTIFICATE: OnceLock<Arc<NoClientCertificate>> = OnceLock::new();
+static STANDARD_SERVER_TICKETER: OnceLock<
+    Result<Arc<dyn rustls::server::ProducesTickets>, String>,
+> = OnceLock::new();
+static STANDARD_VERIFIED_VERIFIERS: OnceLock<
+    Mutex<HashMap<String, Arc<rustls::client::WebPkiServerVerifier>>>,
+> = OnceLock::new();
+
+fn no_client_certificate() -> Arc<NoClientCertificate> {
+    NO_CLIENT_CERTIFICATE.get_or_init(|| Arc::new(NoClientCertificate)).clone()
+}
+
+fn standard_session_resumption() -> rustls::client::Resumption {
+    let store: Arc<dyn rustls::client::ClientSessionStore> = STANDARD_SESSION_STORE
+        .get_or_init(|| Arc::new(rustls::client::ClientSessionMemoryCache::new(256)))
+        .clone();
+    rustls::client::Resumption::store(store)
+}
+
+fn standard_server_ticketer() -> Result<Arc<dyn rustls::server::ProducesTickets>, ConnectionError> {
+    STANDARD_SERVER_TICKETER
+        .get_or_init(|| {
+            rustls::crypto::ring::Ticketer::new().map_err(|error| {
+                format!("standard TLS session-ticket key initialization failed: {error}")
+            })
+        })
+        .clone()
+        .map_err(ConnectionError::TlsError)
+}
+
+fn standard_verified_verifier(
+    roots: &RootCertStore,
+    verifier_key: &str,
+) -> Result<Arc<rustls::client::WebPkiServerVerifier>, ConnectionError> {
+    let verifiers = STANDARD_VERIFIED_VERIFIERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut verifiers = verifiers.lock();
+    if let Some(verifier) = verifiers.get(verifier_key) {
+        return Ok(verifier.clone());
+    }
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots.clone()),
+        Arc::new(crypto_provider_without_chacha()),
+    )
+    .build()
+    .map_err(|error| {
+        ConnectionError::TlsError(format!(
+            "standard TLS certificate verifier initialization failed: {error}"
+        ))
+    })?;
+    verifiers.insert(verifier_key.to_owned(), verifier.clone());
+    Ok(verifier)
 }
 
 pub struct RustlsProviderImpl {
@@ -122,9 +267,6 @@ pub struct RustlsProviderImpl {
     /// Queued CRYPTO frames awaiting transmission.
     pub frame_buffer: Vec<(Level, Vec<u8>)>,
 
-    /// TLS session cache for 0-RTT resumption.
-    pub session_cache: Option<Arc<RwLock<SessionCache>>>,
-
     /// Timestamp when the handshake started (for latency measurement).
     pub handshake_start: std::time::Instant,
     /// Total CRYPTO bytes sent.
@@ -133,257 +275,17 @@ pub struct RustlsProviderImpl {
     pub bytes_received: usize,
 }
 
-/// LRU session cache for TLS 0-RTT resumption tickets.
-pub struct SessionCache {
-    sessions: std::collections::HashMap<String, SessionData>,
-    max_size: usize,
-}
-
-struct SessionData {
-    ticket: crate::secret::SecretBytes,
-    timestamp: std::time::Instant,
-}
-
-impl SessionCache {
-    fn new(max_size: usize) -> Self {
-        Self { sessions: Default::default(), max_size }
-    }
-    fn store(&mut self, server_name: String, data: SessionData) {
-        if self.sessions.len() >= self.max_size {
-            // LRU eviction
-            if let Some(oldest) =
-                self.sessions.iter().min_by_key(|(_, v)| v.timestamp).map(|(k, _)| k.clone())
-            {
-                self.sessions.remove(&oldest);
-            }
-        }
-        self.sessions.insert(server_name, data);
-    }
-    fn get_ticket(&self, server_name: &str) -> Option<Zeroizing<Vec<u8>>> {
-        self.sessions.get(server_name).map(|data| Zeroizing::new(data.ticket.as_slice().to_vec()))
-    }
-}
-
-#[cfg(test)]
-mod session_secret_tests {
-    use super::{SessionCache, SessionData};
-    use std::sync::{Arc, Mutex};
-
-    fn session_data(fill: u8) -> SessionData {
-        SessionData {
-            ticket: crate::secret::SecretBytes::new(vec![fill; 32], "tls_session_ticket"),
-            timestamp: std::time::Instant::now(),
-        }
-    }
-
-    #[test]
-    fn session_cache_eviction_and_drop_erase_retained_secret_material() {
-        let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
-        let observed = Arc::clone(&events);
-        let _observer = crate::secret::test_observation::install(Arc::new(move |label, bytes| {
-            observed.lock().expect("erasure event lock").push((label, bytes.to_vec()));
-        }));
-
-        let mut cache = SessionCache::new(1);
-        cache.store("first.example".to_string(), session_data(0x31));
-        cache.store("second.example".to_string(), session_data(0x42));
-        drop(cache);
-
-        let events = events.lock().expect("erasure events");
-        for label in ["tls_session_ticket"] {
-            let matching =
-                events.iter().filter(|(event_label, _)| *event_label == label).collect::<Vec<_>>();
-            assert_eq!(matching.len(), 2, "evicted and retained owners must erase for {label}");
-            for (_, bytes) in matching {
-                assert_eq!(bytes.len(), 32);
-                assert!(bytes.iter().all(|byte| *byte == 0));
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod profile_delay_tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn profile_jitter_is_scheduled_without_blocking_configuration() {
-        let mut provider =
-            RustlsProviderImpl::new_with_ca(false, false, PROTOCOL_VERSION, &[], None)
-                .expect("client provider");
-        let mut profile = TlsProfile::chrome_130();
-        profile.timing_jitter = Some(Duration::from_secs(2));
-
-        provider.apply_profile_to_config(&profile).expect("profile configuration");
-
-        assert!(
-            provider.profile_ready_at.is_some_and(|ready_at| ready_at > provider.clock.now()),
-            "profile configuration must retain a future readiness deadline"
-        );
-        assert!(provider
-            .next_crypto_frame(Level::Initial, 1200)
-            .expect("profile delay probe")
-            .is_none());
-    }
-
-    #[test]
-    fn provider_owned_crypto_range_requeues_and_retires_exact_bytes() {
-        let mut provider =
-            RustlsProviderImpl::new_with_ca(false, false, PROTOCOL_VERSION, &[], None)
-                .expect("client provider");
-        let mut profile = TlsProfile::chrome_130();
-        profile.timing_jitter = Some(Duration::from_secs(2));
-        provider.apply_profile_to_config(&profile).expect("profile configuration");
-        provider.crypto_initial.send(b"client-hello-range").expect("queue CRYPTO range");
-
-        assert!(provider.has_pending_handshake_send());
-        let (offset, first) = provider
-            .next_crypto_frame(Level::Initial, usize::MAX)
-            .expect("take CRYPTO range")
-            .expect("queued CRYPTO range");
-        assert_eq!((offset, first.as_slice()), (0, b"client-hello-range".as_slice()));
-        assert!(!provider.has_pending_handshake_send());
-
-        provider
-            .requeue_crypto(Level::Initial, offset, first.len() as u64)
-            .expect("requeue lost CRYPTO range");
-        let retransmission = provider
-            .next_crypto_frame(Level::Initial, usize::MAX)
-            .expect("take retransmission")
-            .expect("queued retransmission");
-        assert_eq!(retransmission, (offset, first.clone()));
-
-        provider
-            .ack_crypto(Level::Initial, offset, first.len() as u64)
-            .expect("retire acknowledged CRYPTO range");
-        provider.requeue_all_crypto(Level::Initial);
-        assert!(provider
-            .next_crypto_frame(Level::Initial, usize::MAX)
-            .expect("probe retired range")
-            .is_none());
-    }
-}
-
-#[cfg(test)]
-mod ca_scope_tests {
-    use super::*;
-    use std::path::{Path, PathBuf};
-
-    struct CaFixture {
-        directory: PathBuf,
-        path: PathBuf,
-    }
-
-    impl CaFixture {
-        fn new(organization: &str) -> Self {
-            let directory = std::env::temp_dir().join(format!(
-                "quicfuscate-qftls-ca-{}-{}",
-                std::process::id(),
-                organization.replace(' ', "-")
-            ));
-            std::fs::create_dir_all(&directory).expect("create CA fixture directory");
-            let path = directory.join("ca.crt");
-            let hierarchy = crate::pki::generate_hierarchy("example.com", organization)
-                .expect("generate CA fixture hierarchy");
-            crate::pki::write_ca_cert_pem(&hierarchy.root_ca.cert_der, &path)
-                .expect("write CA fixture");
-            Self { directory, path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for CaFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
-        }
-    }
-
-    #[test]
-    fn client_ca_root_store_rejects_missing_and_invalid_pem() {
-        let fixture = CaFixture::new("missing-and-invalid");
-        let missing = fixture.directory.join("missing.crt");
-        let missing_path = missing.to_str().expect("UTF-8 fixture path");
-        let missing_error = RustlsProviderImpl::build_client_root_store(Some(missing_path))
-            .expect_err("missing CA file must fail closed");
-        assert!(missing_error.to_string().contains(missing_path));
-
-        let invalid = fixture.directory.join("invalid.crt");
-        std::fs::write(&invalid, b"not a certificate").expect("write invalid CA fixture");
-        let invalid_path = invalid.to_str().expect("UTF-8 fixture path");
-        let invalid_error = RustlsProviderImpl::build_client_root_store(Some(invalid_path))
-            .expect_err("invalid PEM must fail closed");
-        let invalid_message = invalid_error.to_string();
-        assert!(invalid_message.contains(invalid_path));
-        assert!(!invalid_message.contains("not a certificate"));
-    }
-
-    #[test]
-    fn client_ca_roots_are_scoped_per_provider_and_repeatable() {
-        let first = CaFixture::new("first-client");
-        let second = CaFixture::new("second-client");
-        let first_path = first.path().to_str().expect("UTF-8 fixture path");
-        let second_path = second.path().to_str().expect("UTF-8 fixture path");
-
-        let first_roots =
-            RustlsProviderImpl::build_client_root_store(Some(first_path)).expect("first CA");
-        let second_roots =
-            RustlsProviderImpl::build_client_root_store(Some(second_path)).expect("second CA");
-        let first_subject =
-            first_roots.roots.last().expect("first custom root").subject.as_ref().to_vec();
-        let second_subject =
-            second_roots.roots.last().expect("second custom root").subject.as_ref().to_vec();
-        assert_ne!(first_subject, second_subject, "different providers must not share roots");
-
-        let first_provider =
-            RustlsProviderImpl::new_with_ca(false, false, PROTOCOL_VERSION, &[], Some(first_path))
-                .expect("first client provider");
-        let second_provider =
-            RustlsProviderImpl::new_with_ca(false, false, PROTOCOL_VERSION, &[], Some(second_path))
-                .expect("second client provider");
-        let repeated_provider =
-            RustlsProviderImpl::new_with_ca(false, false, PROTOCOL_VERSION, &[], Some(first_path))
-                .expect("repeated same-path client provider");
-
-        assert_eq!(first_provider.client_ca_path.as_deref(), Some(first_path));
-        assert_eq!(second_provider.client_ca_path.as_deref(), Some(second_path));
-        assert_eq!(repeated_provider.client_ca_path.as_deref(), Some(first_path));
-    }
-}
-
-#[cfg(test)]
-mod cipher_policy_tests {
-    use super::*;
-
-    #[test]
-    fn shared_client_server_provider_excludes_chacha() {
-        let provider = crypto_provider_without_chacha();
-        assert!(provider.cipher_suites.iter().any(|suite| {
-            matches!(
-                suite.suite(),
-                rustls::CipherSuite::TLS13_AES_128_GCM_SHA256
-                    | rustls::CipherSuite::TLS13_AES_256_GCM_SHA384
-            )
-        }));
-        assert!(provider.cipher_suites.iter().all(|suite| {
-            !matches!(
-                suite.suite(),
-                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
-                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
-                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-            )
-        }));
-    }
-}
-
 /// Insecure verifier used only when explicitly requested via env.
 /// Only available in debug builds to prevent accidental production use.
 #[cfg(debug_assertions)]
 #[derive(Debug)]
 struct InsecureAcceptAllVerifier;
+
+#[cfg(debug_assertions)]
+fn insecure_verifier() -> Arc<InsecureAcceptAllVerifier> {
+    static VERIFIER: OnceLock<Arc<InsecureAcceptAllVerifier>> = OnceLock::new();
+    VERIFIER.get_or_init(|| Arc::new(InsecureAcceptAllVerifier)).clone()
+}
 
 #[cfg(debug_assertions)]
 impl ServerCertVerifier for InsecureAcceptAllVerifier {
@@ -525,7 +427,6 @@ impl RustlsProviderImpl {
             pending_remote_1rtt: VecDeque::new(),
             crypto_buffer: Vec::with_capacity(4096),
             frame_buffer: Vec::new(),
-            session_cache: Some(Arc::new(RwLock::new(SessionCache::new(100)))),
             handshake_start: clock.now(),
             bytes_sent: 0,
             bytes_received: 0,
@@ -572,17 +473,27 @@ impl RustlsProviderImpl {
     }
 
     fn queue_key_change(&mut self, kc: rustls::quic::KeyChange) -> Result<(), ConnectionError> {
+        let negotiated = self
+            .connection
+            .negotiated_cipher_suite()
+            .ok_or_else(|| {
+                ConnectionError::TlsError(
+                    "rustls emitted QUIC keys before exposing the negotiated cipher suite"
+                        .to_string(),
+                )
+            })
+            .and_then(|suite| standard_cipher_suite(suite.suite()))?;
         match kc {
             rustls::quic::KeyChange::Handshake { keys } => {
                 super::trace_key_change(self.is_server, "Handshake");
                 self.pending_key_changes
-                    .push_back(PendingKeyChange::Handshake(Self::handshake_keys(keys)));
+                    .push_back(PendingKeyChange::Handshake(Self::handshake_keys(keys, negotiated)));
                 self.write_level = super::Level::Handshake;
             }
             rustls::quic::KeyChange::OneRtt { keys, next } => {
                 super::trace_key_change(self.is_server, "OneRtt");
                 self.pending_key_changes
-                    .push_back(PendingKeyChange::OneRtt(Self::one_rtt_keys(keys)));
+                    .push_back(PendingKeyChange::OneRtt(Self::one_rtt_keys(keys, negotiated)));
                 self.next_1rtt_secrets = Some(next);
                 self.write_level = super::Level::Application;
             }
@@ -621,7 +532,10 @@ impl RustlsProviderImpl {
         Ok(())
     }
 
-    fn handshake_keys(keys: rustls::quic::Keys) -> QuicTlsHandshakeKeys {
+    fn handshake_keys(
+        keys: rustls::quic::Keys,
+        standard_cipher_suite: StandardCipherSuite,
+    ) -> QuicTlsHandshakeKeys {
         let local_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.local.packet.into();
         let remote_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.remote.packet.into();
         let local_hp: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey> =
@@ -634,10 +548,14 @@ impl RustlsProviderImpl {
             open: Box::new(RustlsPacketOpen { key: remote_pkt }),
             hp_seal: Box::new(RustlsHp { key: local_hp }),
             hp_open: Box::new(RustlsHp { key: remote_hp }),
+            standard_cipher_suite,
         }
     }
 
-    fn one_rtt_keys(keys: rustls::quic::Keys) -> QuicTlsOneRttKeys {
+    fn one_rtt_keys(
+        keys: rustls::quic::Keys,
+        standard_cipher_suite: StandardCipherSuite,
+    ) -> QuicTlsOneRttKeys {
         let local_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.local.packet.into();
         let remote_pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.remote.packet.into();
         let local_hp: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey> =
@@ -654,6 +572,7 @@ impl RustlsProviderImpl {
             }))),
             hp_seal: Arc::new(RustlsHp { key: local_hp }),
             hp_open: Arc::new(RustlsHp { key: remote_hp }),
+            standard_cipher_suite,
         }
     }
 
@@ -733,20 +652,30 @@ impl RustlsProviderImpl {
             {
                 builder
                     .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(InsecureAcceptAllVerifier))
-                    .with_no_client_auth()
+                    .with_custom_certificate_verifier(insecure_verifier())
+                    .with_client_cert_resolver(no_client_certificate())
             }
             #[cfg(not(debug_assertions))]
             {
                 unreachable!("allow_invalid is always false in release builds")
             }
+        } else if ca_path.is_none() {
+            builder
+                .with_webpki_verifier(standard_verified_verifier(&roots, "native")?)
+                .with_client_cert_resolver(no_client_certificate())
         } else {
-            builder.with_root_certificates(Arc::new(roots)).with_no_client_auth()
+            builder
+                .with_webpki_verifier(standard_verified_verifier(
+                    &roots,
+                    ca_path.unwrap_or_default(),
+                )?)
+                .with_client_cert_resolver(no_client_certificate())
         };
 
         let mut config = config;
+        config.resumption = standard_session_resumption();
         // Enable QUIC
-        config.enable_early_data = true;
+        config.enable_early_data = false;
         config.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec()];
         // Performance settings
         config.max_fragment_size = Some(16384);
@@ -803,6 +732,8 @@ impl RustlsProviderImpl {
         let mut config = config;
         config.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec()];
         config.max_early_data_size = MAX_EARLY_DATA_SIZE.load(Ordering::Relaxed);
+        config.ticketer = standard_server_ticketer()?;
+        config.send_tls13_tickets = 2;
 
         Ok(rustls::quic::Connection::Server(
             rustls::quic::ServerConnection::new(Arc::new(config), quic_version, transport_params)
@@ -958,7 +889,7 @@ impl RustlsProviderImpl {
         // after a profile or SNI rebuild.
         let roots = Self::build_client_root_store(self.client_ca_path.as_deref())?;
         let builder =
-            ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
+            ClientConfig::builder_with_provider(Arc::new(crypto_provider_for_profile(profile)?))
                 .with_protocol_versions(&[&rustls::version::TLS13])
                 .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
         #[cfg(debug_assertions)]
@@ -972,20 +903,35 @@ impl RustlsProviderImpl {
             {
                 builder
                     .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(InsecureAcceptAllVerifier))
-                    .with_no_client_auth()
+                    .with_custom_certificate_verifier(insecure_verifier())
+                    .with_client_cert_resolver(no_client_certificate())
             }
             #[cfg(not(debug_assertions))]
             {
                 unreachable!("allow_invalid is always false in release builds")
             }
+        } else if self.client_ca_path.is_none() {
+            builder
+                .with_webpki_verifier(standard_verified_verifier(&roots, "native")?)
+                .with_client_cert_resolver(no_client_certificate())
         } else {
-            builder.with_root_certificates(Arc::new(roots)).with_no_client_auth()
+            builder
+                .with_webpki_verifier(standard_verified_verifier(
+                    &roots,
+                    self.client_ca_path.as_deref().unwrap_or_default(),
+                )?)
+                .with_client_cert_resolver(no_client_certificate())
         };
         let mut cfg = cfg;
+        cfg.resumption = standard_session_resumption();
         // Apply ALPN
         cfg.alpn_protocols = profile.alpn_protocols.iter().map(|s| s.as_bytes().to_vec()).collect();
-        cfg.enable_early_data = profile.enable_0rtt;
+        if profile.enable_0rtt {
+            return Err(ConnectionError::TlsError(
+                "0-RTT is disabled until packet-level early-data keys are implemented".to_string(),
+            ));
+        }
+        cfg.enable_early_data = false;
         cfg.enable_sni = true;
         // Create client connection with SNI
         let server_name_str = profile.sni.as_deref().unwrap_or(DEFAULT_TLS_SNI_HOST);
@@ -1054,12 +1000,13 @@ impl RustlsProviderImpl {
         if self.pending_local_1rtt.is_empty() {
             self.derive_next_1rtt_pair()?;
         }
-        let Some(packet_key) = self.pending_local_1rtt.pop_front() else {
+        let Some(packet_key) = self.pending_local_1rtt.front().cloned() else {
             return Err(ConnectionError::TlsError(
                 "missing local 1-RTT key update material".to_string(),
             ));
         };
-        installer.rotate_1rtt_write_keypair(Box::new(RustlsPacketSeal { key: packet_key }));
+        installer.rotate_1rtt_write_keypair(Box::new(RustlsPacketSeal { key: packet_key }))?;
+        self.pending_local_1rtt.pop_front();
         Ok(())
     }
 
@@ -1070,12 +1017,13 @@ impl RustlsProviderImpl {
         if self.pending_remote_1rtt.is_empty() {
             self.derive_next_1rtt_pair()?;
         }
-        let Some(packet_key) = self.pending_remote_1rtt.pop_front() else {
+        let Some(packet_key) = self.pending_remote_1rtt.front().cloned() else {
             return Err(ConnectionError::TlsError(
                 "missing remote 1-RTT key update material".to_string(),
             ));
         };
-        installer.rotate_1rtt_read_keypair(Box::new(RustlsPacketOpen { key: packet_key }));
+        installer.rotate_1rtt_read_keypair(Box::new(RustlsPacketOpen { key: packet_key }))?;
+        self.pending_remote_1rtt.pop_front();
         Ok(())
     }
 }
@@ -1093,6 +1041,8 @@ impl crate::crypto::aead::AeadSeal for RustlsPacketSeal {
         len: usize,
         _extra_in: Option<&[u8]>,
     ) -> Result<usize, ConnectionError> {
+        #[cfg(test)]
+        observe_standard_packet_operation(StandardPacketOperation::Seal);
         let tag_len = self.key.tag_len();
         if buf.len() < len + tag_len {
             return Err(ConnectionError::BufferTooShort);
@@ -1117,6 +1067,8 @@ impl crate::crypto::aead::AeadOpen for RustlsPacketOpen {
         ad: &[u8],
         buf: &mut [u8],
     ) -> Result<usize, ConnectionError> {
+        #[cfg(test)]
+        observe_standard_packet_operation(StandardPacketOperation::Open);
         let pt = self
             .key
             .decrypt_in_place(counter, ad, buf)
@@ -1238,40 +1190,27 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
         if !self.handshake_complete && !self.connection.is_handshaking() && have_1rtt {
             self.handshake_complete = true;
             let duration = self.clock.elapsed_since(self.handshake_start);
+            let negotiated = self
+                .connection
+                .negotiated_cipher_suite()
+                .ok_or_else(|| {
+                    ConnectionError::TlsError(
+                        "completed rustls handshake has no negotiated cipher suite".to_string(),
+                    )
+                })
+                .and_then(|suite| standard_cipher_suite(suite.suite()))?;
             log::info!(
-                "TLS handshake complete in {:?} with QUIC {:?}",
+                "TLS handshake complete in {:?} with QUIC {:?}, suite={}, packet_owner=rustls-standard, header_owner=rustls-standard",
                 duration,
-                self.quic_version
+                self.quic_version,
+                negotiated.as_str()
             );
             if let Some(alpn) = self.connection.alpn_protocol() {
                 self.alpn = Some(String::from_utf8_lossy(alpn).to_string());
             }
             if let Some(certs) = self.connection.peer_certificates() {
                 if let Some(cert) = certs.first() {
-                    let cert_bytes = cert.to_vec();
-                    // Derive a stable session ticket hint from the peer certificate and ALPN.
-                    if let Some(ref cache) = self.session_cache {
-                        use sha2::{Digest, Sha256};
-                        let mut hasher = Sha256::new();
-                        hasher.update(&cert_bytes);
-                        if let Some(ref a) = self.alpn {
-                            hasher.update(a.as_bytes());
-                        }
-                        let digest = hasher.finalize();
-                        let ticket = crate::secret::SecretBytes::new(
-                            digest[..32].to_vec(),
-                            "tls_session_ticket",
-                        );
-                        let data = SessionData { ticket, timestamp: self.clock.now() };
-                        let key = self
-                            .profile
-                            .as_ref()
-                            .and_then(|p| p.sni.as_deref())
-                            .unwrap_or("default")
-                            .to_owned();
-                        cache.write().store(key, data);
-                    }
-                    self.peer_cert = Some(cert_bytes);
+                    self.peer_cert = Some(cert.to_vec());
                 }
             }
         }
@@ -1279,6 +1218,10 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
     }
     fn handshake_complete(&self) -> bool {
         self.handshake_complete
+    }
+    fn handshake_resumed(&self) -> bool {
+        self.handshake_complete
+            && self.connection.handshake_kind() == Some(rustls::HandshakeKind::Resumed)
     }
     fn alpn(&self) -> Option<&str> {
         self.alpn.as_deref()
@@ -1291,40 +1234,16 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
         self.profile.as_ref().and_then(|p| p.sni.as_deref())
     }
     fn session_ticket(&self) -> Option<Zeroizing<Vec<u8>>> {
-        if let Some(ref cache) = self.session_cache {
-            let key = self
-                .profile
-                .as_ref()
-                .and_then(|p| p.sni.as_deref())
-                .unwrap_or("default")
-                .to_owned();
-            if let Some(ticket) = cache.read().get_ticket(&key) {
-                if !ticket.is_empty() {
-                    return Some(ticket);
-                }
-            }
-        }
-        if let Some(cert) = self.peer_cert.as_ref() {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(b"qf-session-ticket-fallback");
-            hasher.update(cert);
-            if let Some(alpn) = self.alpn.as_ref() {
-                hasher.update(alpn.as_bytes());
-            }
-            if let Some(profile) = self.profile.as_ref() {
-                if let Some(sni) = profile.sni.as_ref() {
-                    hasher.update(sni.as_bytes());
-                }
-            }
-            let digest = hasher.finalize();
-            return Some(Zeroizing::new(digest[..32].to_vec()));
-        }
+        // Rustls keeps opaque tickets inside its ClientSessionStore and does not
+        // expose their bytes. Returning a digest here would be misleading and
+        // could be mistaken for proof of resumption. Use handshake_resumed().
         None
     }
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError> {
-        self.zero_rtt_enabled = true;
-        Ok(())
+        self.zero_rtt_enabled = false;
+        Err(ConnectionError::TlsError(
+            "0-RTT is disabled until packet-level early-data keys are implemented".to_string(),
+        ))
     }
     fn get_0rtt_keys(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         None

@@ -16,8 +16,23 @@ use qf_transport_types::QUIC_FIXED_BIT;
 use qf_transport_version::VersionInformation;
 use qf_transport_version::{PROTOCOL_VERSION, PROTOCOL_VERSION_V2};
 
+mod packet_protection;
+mod private_protocol;
 mod tls_cover_provider;
 
+pub use packet_protection::{
+    PacketProtectionLevelSnapshot, PacketProtectionOwner, PacketProtectionSnapshot,
+    StandardCipherSuite,
+};
+pub(crate) use private_protocol::PrivateEpochSchedule;
+pub use private_protocol::{
+    PrivateDirection, PrivateKeyMaterial, PrivateNegotiationKind, PrivateNegotiationMachine,
+    PrivateNegotiationMessage, PrivateNegotiationRole, PrivateNegotiationState,
+    PrivateProtocolError, MAX_PRIVATE_ALPN_LEN, MAX_PRIVATE_CONNECTION_ID_LEN,
+    MAX_PRIVATE_PACKET_PROTECTION_PAYLOAD, PRIVATE_EXPORTER_CONTEXT_DOMAIN, PRIVATE_EXPORTER_LABEL,
+    PRIVATE_HASH_LEN, PRIVATE_NONCE_LEN, PRIVATE_PACKET_PROTECTION_CAPSULE_TYPE,
+    PRIVATE_PACKET_PROTECTION_VERSION, PRIVATE_TAG_LEN,
+};
 pub(crate) use tls_cover_provider::TlsCoverProvider;
 
 /// Compatibility export for the root TLS namespace. The canonical contract lives in the
@@ -34,11 +49,8 @@ static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_SERVER_IDENTITY_OVERRIDE: OnceLock<PreloadedServerIdentity> = OnceLock::new();
 static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
-/// Configurable max early data size for server TLS config.
-/// RFC 9001 §4.6.1: QUIC requires this to be either 0 (no 0-RTT) or 0xFFFF_FFFF (0-RTT enabled).
-/// Default is u32::MAX (0-RTT offered). Set to 0 to disable 0-RTT.
-/// Set via `set_max_early_data_size()` before server connection creation.
-static MAX_EARLY_DATA_SIZE: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Server early-data advertisement remains disabled until packet-level 0-RTT is implemented.
+static MAX_EARLY_DATA_SIZE: AtomicU32 = AtomicU32::new(0);
 
 /// Reports the result of publishing a preloaded server identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,7 +312,12 @@ fn publish_preloaded_identity(
 
 /// Set the maximum early data size for new server TLS connections.
 pub fn set_max_early_data_size(size: u32) {
-    MAX_EARLY_DATA_SIZE.store(size, Ordering::Relaxed);
+    if size != 0 {
+        log::warn!(
+            "Ignoring unsupported TLS 0-RTT max_early_data_size={size}; packet keys are not wired"
+        );
+    }
+    MAX_EARLY_DATA_SIZE.store(0, Ordering::Relaxed);
 }
 const DEFAULT_TLS_SNI_HOST: &str = "cdn.cloudflare.com";
 
@@ -399,6 +416,8 @@ pub struct QuicTlsHandshakeKeys {
     pub hp_seal: Box<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
     /// Remote header-protection key.
     pub hp_open: Box<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
+    /// Negotiated standard suite that produced this key bundle.
+    pub standard_cipher_suite: StandardCipherSuite,
 }
 
 /// Directional 1-RTT packet-protection keys emitted by the TLS owner.
@@ -411,6 +430,8 @@ pub struct QuicTlsOneRttKeys {
     pub hp_seal: Arc<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
     /// Remote header-protection key.
     pub hp_open: Arc<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>,
+    /// Negotiated standard suite that produced this key bundle.
+    pub standard_cipher_suite: StandardCipherSuite,
 }
 
 /// Transport-owned packet-key installation port consumed by the TLS provider.
@@ -428,9 +449,15 @@ pub trait QuicTlsKeyInstaller: Send + Sync {
     /// Attempt a transport-secret-backed write-key update.
     fn key_update_1rtt_write(&self) -> Result<bool, ConnectionError>;
     /// Install the next rustls-provided read key.
-    fn rotate_1rtt_read_keypair(&self, open: Box<dyn qf_crypto::aead::AeadOpen + Send + Sync>);
+    fn rotate_1rtt_read_keypair(
+        &self,
+        open: Box<dyn qf_crypto::aead::AeadOpen + Send + Sync>,
+    ) -> Result<(), ConnectionError>;
     /// Install the next rustls-provided write key.
-    fn rotate_1rtt_write_keypair(&self, seal: Box<dyn qf_crypto::aead::AeadSeal + Send + Sync>);
+    fn rotate_1rtt_write_keypair(
+        &self,
+        seal: Box<dyn qf_crypto::aead::AeadSeal + Send + Sync>,
+    ) -> Result<(), ConnectionError>;
 }
 
 pub trait QuicTlsProvider: Send + Sync {
@@ -467,6 +494,10 @@ pub trait QuicTlsProvider: Send + Sync {
     ) -> Result<(), ConnectionError>;
     /// Check if handshake is complete
     fn handshake_complete(&self) -> bool;
+    /// Return whether rustls completed this connection through TLS 1.3 resumption.
+    fn handshake_resumed(&self) -> bool {
+        false
+    }
     /// Get negotiated ALPN protocol
     fn alpn(&self) -> Option<&str>;
     /// Get peer certificate (if any)
@@ -478,7 +509,9 @@ pub trait QuicTlsProvider: Send + Sync {
     }
     /// Get configured server name (SNI)
     fn server_name_get(&self) -> Option<&str>;
-    /// Get TLS session ticket for resumption (if any)
+    /// Return an opaque TLS ticket only when the provider can expose one safely.
+    /// Rustls keeps ticket bytes inside its session store, so callers must use
+    /// `handshake_resumed()` for authoritative resumption state.
     fn session_ticket(&self) -> Option<Zeroizing<Vec<u8>>>;
     /// Enable 0-RTT if supported
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError>;
@@ -826,6 +859,9 @@ impl QuicTlsProvider for CombinedProvider {
     fn handshake_complete(&self) -> bool {
         self.rustls.handshake_complete()
     }
+    fn handshake_resumed(&self) -> bool {
+        self.rustls.handshake_resumed()
+    }
     fn alpn(&self) -> Option<&str> {
         self.rustls.alpn()
     }
@@ -1016,6 +1052,9 @@ impl QuicTlsProvider for RustlsProvider {
     fn handshake_complete(&self) -> bool {
         self.0.handshake_complete()
     }
+    fn handshake_resumed(&self) -> bool {
+        self.0.handshake_resumed()
+    }
     fn alpn(&self) -> Option<&str> {
         self.0.alpn()
     }
@@ -1076,15 +1115,116 @@ impl QuicTlsProvider for RustlsProvider {
 
 impl RustlsProvider {
     pub fn apply_session_hint_to_profile(&mut self) {
-        if self.0.session_cache.is_some() {
-            if let Some(ref mut prof) = self.0.profile {
-                if !prof.alpn_protocols.is_empty() && prof.alpn_protocols[0] != "h3" {
-                    prof.alpn_protocols.retain(|p| p != "h3");
-                    prof.alpn_protocols.insert(0, "h3".into());
-                }
+        if let Some(ref mut prof) = self.0.profile {
+            if !prof.alpn_protocols.is_empty() && prof.alpn_protocols[0] != "h3" {
+                prof.alpn_protocols.retain(|p| p != "h3");
+                prof.alpn_protocols.insert(0, "h3".into());
             }
         }
     }
+}
+
+#[cfg(any(test, feature = "benches"))]
+#[allow(clippy::expect_used)]
+/// Complete one in-memory rustls QUIC handshake and return its installed 1-RTT key bundles.
+pub fn bench_standard_one_rtt_key_bundles(
+    suite: StandardCipherSuite,
+) -> (QuicTlsOneRttKeys, QuicTlsOneRttKeys) {
+    #[cfg(feature = "benches")]
+    fn benchmark_ca_path() -> &'static str {
+        static BENCHMARK_CA_PATH: OnceLock<String> = OnceLock::new();
+        BENCHMARK_CA_PATH.get_or_init(|| {
+            let directory = std::env::temp_dir()
+                .join(format!("quicfuscate-rustls-benchmark-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("benchmark TLS fixture directory");
+            let ca_path = directory.join("ca.crt");
+            let cert_path = directory.join("server.crt");
+            let key_path = directory.join("server.key");
+            let mut hierarchy = qf_pki::generate_hierarchy("localhost", "QuicFuscate Benchmark")
+                .expect("benchmark TLS hierarchy");
+            qf_pki::write_ca_cert_pem(&hierarchy.root_ca.cert_der, &ca_path)
+                .expect("benchmark root CA");
+            qf_pki::write_cert_chain_pem(
+                &hierarchy.server_leaf.cert_der,
+                &hierarchy.intermediate_ca.cert_der,
+                &cert_path,
+            )
+            .expect("benchmark server certificate");
+            qf_pki::write_key_pem(&mut hierarchy.server_leaf.key_der, &key_path)
+                .expect("benchmark server key");
+            preload_tls_server_identity(
+                cert_path.to_str().expect("benchmark certificate path"),
+                key_path.to_str().expect("benchmark key path"),
+                false,
+            )
+            .expect("benchmark preloaded server identity");
+            ca_path.to_str().expect("benchmark CA path").to_string()
+        })
+    }
+
+    fn transfer(source: &mut RustlsProvider, destination: &mut RustlsProvider) -> usize {
+        let mut transferred = 0usize;
+        for level in [Level::Initial, Level::Handshake, Level::Application] {
+            while let Some((_offset, bytes)) =
+                source.next_crypto_frame(level, usize::MAX).expect("benchmark TLS source flight")
+            {
+                transferred = transferred.saturating_add(bytes.len());
+                destination
+                    .provide_quic_data(level, &bytes)
+                    .expect("benchmark TLS destination flight");
+            }
+        }
+        transferred
+    }
+
+    fn take_one_rtt_bundle(
+        context: parking_lot::RwLock<crate::transport::packet::CryptoContext>,
+    ) -> QuicTlsOneRttKeys {
+        let mut context = context.into_inner();
+        let standard_cipher_suite = context
+            .packet_protection_snapshot()
+            .negotiated_tls_cipher_suite
+            .expect("benchmark negotiated suite");
+        QuicTlsOneRttKeys {
+            seal: context.seal_1rtt.take().expect("benchmark seal key"),
+            open: context.open_1rtt.take().expect("benchmark open key"),
+            hp_seal: context.hp_1rtt.take().expect("benchmark seal HP key"),
+            hp_open: context.hp_1rtt_open.take().expect("benchmark open HP key"),
+            standard_cipher_suite,
+        }
+    }
+
+    #[cfg(feature = "benches")]
+    let mut client =
+        RustlsProvider::new_with_ca(false, true, PROTOCOL_VERSION, &[], Some(benchmark_ca_path()))
+            .expect("benchmark client provider");
+    #[cfg(not(feature = "benches"))]
+    let mut client = RustlsProvider::new(false, false, PROTOCOL_VERSION, &[])
+        .expect("benchmark client provider");
+    let mut server =
+        RustlsProvider::new(true, false, PROTOCOL_VERSION, &[]).expect("benchmark server provider");
+    let client_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let server_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let mut profile = qf_stealth::TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some("localhost".to_string());
+    profile.enable_0rtt = false;
+    profile.cipher_suites = vec![suite.tls_id()];
+    client.configure(&profile).expect("benchmark TLS profile");
+
+    for _ in 0..64 {
+        client.poll_secrets_and_install(&client_keys).expect("benchmark client key install");
+        server.poll_secrets_and_install(&server_keys).expect("benchmark server key install");
+        let transferred = transfer(&mut client, &mut server) + transfer(&mut server, &mut client);
+        client.poll_secrets_and_install(&client_keys).expect("benchmark final client key install");
+        server.poll_secrets_and_install(&server_keys).expect("benchmark final server key install");
+        if client.handshake_complete() && server.handshake_complete() {
+            break;
+        }
+        assert_ne!(transferred, 0, "benchmark TLS handshake stalled");
+    }
+    assert!(client.handshake_complete() && server.handshake_complete());
+    (take_one_rtt_bundle(client_keys), take_one_rtt_bundle(server_keys))
 }
 
 // BoringSSL/RealTLS code was removed from src and centralized in archive/boringisland.rs.
