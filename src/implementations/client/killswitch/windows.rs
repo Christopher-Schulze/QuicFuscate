@@ -81,6 +81,7 @@ enum FilterKind {
     Endpoint = 2,
     Tunnel = 3,
     Block = 4,
+    EndpointAlternate = 9,
 }
 
 const fn filter_key_value(layer: Layer, kind: FilterKind) -> u128 {
@@ -222,9 +223,13 @@ impl WindowsKillSwitch {
         let mut engine = Engine::open()?;
         let mut transaction = Transaction::begin(&engine)?;
         for layer in Layer::ALL {
-            for kind in
-                [FilterKind::Loopback, FilterKind::Endpoint, FilterKind::Tunnel, FilterKind::Block]
-            {
+            for kind in [
+                FilterKind::Loopback,
+                FilterKind::Endpoint,
+                FilterKind::EndpointAlternate,
+                FilterKind::Tunnel,
+                FilterKind::Block,
+            ] {
                 let status =
                     unsafe { FwpmFilterDeleteByKey0(engine.handle, &filter_key(layer, kind)) };
                 if status != FWP_E_FILTER_NOT_FOUND as u32 {
@@ -462,9 +467,13 @@ fn delete_owned_objects(engine: &Engine) -> Result<(), KillSwitchError> {
     // static managed key or a key stored in a stack value that lives through
     // the synchronous call. Every returned status is checked immediately.
     for layer in Layer::ALL {
-        for kind in
-            [FilterKind::Loopback, FilterKind::Endpoint, FilterKind::Tunnel, FilterKind::Block]
-        {
+        for kind in [
+            FilterKind::Loopback,
+            FilterKind::Endpoint,
+            FilterKind::EndpointAlternate,
+            FilterKind::Tunnel,
+            FilterKind::Block,
+        ] {
             let status = unsafe { FwpmFilterDeleteByKey0(engine.handle, &filter_key(layer, kind)) };
             check_delete_status("delete WFP filter", status, FWP_E_FILTER_NOT_FOUND as u32)?;
         }
@@ -539,15 +548,25 @@ fn add_endpoint_filter(
     layer: Layer,
     policy: &VpnFirewallPolicy,
 ) -> Result<(), KillSwitchError> {
-    let endpoint = if layer.is_ipv6() {
-        policy.server_ipv6().map(|(ip, port)| (IpAddr::V6(ip), port))
+    let endpoints = if layer.is_ipv6() {
+        policy.server_ipv6().iter().map(|(ip, port)| (IpAddr::V6(*ip), *port)).collect::<Vec<_>>()
     } else {
-        policy.server_ipv4().map(|(ip, port)| (IpAddr::V4(ip), port))
+        policy.server_ipv4().iter().map(|(ip, port)| (IpAddr::V4(*ip), *port)).collect::<Vec<_>>()
     };
-    let Some((ip, port)) = endpoint else {
-        return Ok(());
-    };
+    for (index, (ip, port)) in endpoints.into_iter().enumerate() {
+        let kind = if index == 0 { FilterKind::Endpoint } else { FilterKind::EndpointAlternate };
+        add_one_endpoint_filter(engine, layer, kind, ip, port)?;
+    }
+    Ok(())
+}
 
+fn add_one_endpoint_filter(
+    engine: &Engine,
+    layer: Layer,
+    kind: FilterKind,
+    ip: IpAddr,
+    port: u16,
+) -> Result<(), KillSwitchError> {
     match ip {
         IpAddr::V4(ip) => {
             let mut conditions = [
@@ -564,7 +583,7 @@ fn add_endpoint_filter(
             add_filter(
                 engine,
                 layer,
-                FilterKind::Endpoint,
+                kind,
                 "Permit VPN endpoint",
                 FWP_ACTION_PERMIT,
                 PERMIT_WEIGHT_RANGE,
@@ -590,7 +609,7 @@ fn add_endpoint_filter(
             add_filter(
                 engine,
                 layer,
-                FilterKind::Endpoint,
+                kind,
                 "Permit VPN endpoint",
                 FWP_ACTION_PERMIT,
                 PERMIT_WEIGHT_RANGE,
@@ -767,9 +786,13 @@ mod tests {
     fn managed_filter_keys_are_unique_and_complete() {
         let mut keys = BTreeSet::new();
         for layer in Layer::ALL {
-            for kind in
-                [FilterKind::Loopback, FilterKind::Endpoint, FilterKind::Tunnel, FilterKind::Block]
-            {
+            for kind in [
+                FilterKind::Loopback,
+                FilterKind::Endpoint,
+                FilterKind::EndpointAlternate,
+                FilterKind::Tunnel,
+                FilterKind::Block,
+            ] {
                 assert!(keys.insert(filter_key_value(layer, kind)));
             }
         }

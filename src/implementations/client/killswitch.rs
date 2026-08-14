@@ -10,12 +10,15 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows::WindowsKillSwitch;
 
+#[cfg(test)]
+mod platform_tests;
+
 /// Typed firewall exceptions for one VPN connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VpnFirewallPolicy {
     tun_name: String,
-    server_ipv4: Option<(Ipv4Addr, u16)>,
-    server_ipv6: Option<(Ipv6Addr, u16)>,
+    server_ipv4: Vec<(Ipv4Addr, u16)>,
+    server_ipv6: Vec<(Ipv6Addr, u16)>,
     dns_servers: Vec<IpAddr>,
 }
 
@@ -25,6 +28,19 @@ impl VpnFirewallPolicy {
         tun_name: impl Into<String>,
         server: SocketAddr,
         alternate_server_ip: Option<IpAddr>,
+        dns_servers: impl IntoIterator<Item = IpAddr>,
+    ) -> Result<Self, KillSwitchError> {
+        let mut servers = vec![server];
+        if let Some(ip) = alternate_server_ip {
+            servers.push(SocketAddr::new(ip, server.port()));
+        }
+        Self::new_for_servers(tun_name, servers, dns_servers)
+    }
+
+    /// Build a policy for the active and prepared circuit entry endpoints.
+    pub fn new_for_servers(
+        tun_name: impl Into<String>,
+        servers: impl IntoIterator<Item = SocketAddr>,
         dns_servers: impl IntoIterator<Item = IpAddr>,
     ) -> Result<Self, KillSwitchError> {
         let tun_name = tun_name.into();
@@ -38,20 +54,21 @@ impl VpnFirewallPolicy {
             ));
         }
 
-        let mut server_ipv4 = None;
-        let mut server_ipv6 = None;
-        match server.ip() {
-            IpAddr::V4(ip) => server_ipv4 = Some((ip, server.port())),
-            IpAddr::V6(ip) => server_ipv6 = Some((ip, server.port())),
+        let mut servers = servers.into_iter().collect::<Vec<_>>();
+        servers.sort_unstable();
+        servers.dedup();
+        if servers.is_empty() || servers.len() > 2 {
+            return Err(KillSwitchError::InvalidPolicy(
+                "one or two VPN entry endpoints are required".to_string(),
+            ));
         }
-        match alternate_server_ip {
-            Some(IpAddr::V4(ip)) if server_ipv4.is_none() => {
-                server_ipv4 = Some((ip, server.port()));
+        let mut server_ipv4 = Vec::new();
+        let mut server_ipv6 = Vec::new();
+        for server in servers {
+            match server.ip() {
+                IpAddr::V4(ip) => server_ipv4.push((ip, server.port())),
+                IpAddr::V6(ip) => server_ipv6.push((ip, server.port())),
             }
-            Some(IpAddr::V6(ip)) if server_ipv6.is_none() => {
-                server_ipv6 = Some((ip, server.port()));
-            }
-            _ => {}
         }
 
         let mut dns_servers: Vec<IpAddr> = dns_servers.into_iter().collect();
@@ -70,12 +87,12 @@ impl VpnFirewallPolicy {
         &self.tun_name
     }
 
-    fn server_ipv4(&self) -> Option<(Ipv4Addr, u16)> {
-        self.server_ipv4
+    fn server_ipv4(&self) -> &[(Ipv4Addr, u16)] {
+        &self.server_ipv4
     }
 
-    fn server_ipv6(&self) -> Option<(Ipv6Addr, u16)> {
-        self.server_ipv6
+    fn server_ipv6(&self) -> &[(Ipv6Addr, u16)] {
+        &self.server_ipv6
     }
 
     #[cfg(any(test, target_os = "linux", target_os = "macos"))]
@@ -490,16 +507,20 @@ impl IptablesKillSwitch {
     ) -> String {
         let mut rules =
             format!("*filter\n:{} - [0:0]\n-A {} -o lo -j ACCEPT\n", KS_CHAIN, KS_CHAIN);
-        match (ipv6, policy.server_ipv4(), policy.server_ipv6()) {
-            (false, Some((ip, port)), _) => rules.push_str(&format!(
-                "-A {} -d {} -p udp --dport {} -j ACCEPT\n",
-                KS_CHAIN, ip, port
-            )),
-            (true, _, Some((ip, port))) => rules.push_str(&format!(
-                "-A {} -d {} -p udp --dport {} -j ACCEPT\n",
-                KS_CHAIN, ip, port
-            )),
-            _ => {}
+        if ipv6 {
+            for (ip, port) in policy.server_ipv6() {
+                rules.push_str(&format!(
+                    "-A {} -d {} -p udp --dport {} -j ACCEPT\n",
+                    KS_CHAIN, ip, port
+                ));
+            }
+        } else {
+            for (ip, port) in policy.server_ipv4() {
+                rules.push_str(&format!(
+                    "-A {} -d {} -p udp --dport {} -j ACCEPT\n",
+                    KS_CHAIN, ip, port
+                ));
+            }
         }
         if connected {
             for dns in policy.dns_servers().iter().filter(|ip| ip.is_ipv6() == ipv6) {
@@ -635,10 +656,10 @@ impl NftablesKillSwitch {
              \x20       oifname \"lo\" accept\n",
             table = KS_NFT_TABLE
         );
-        if let Some((ip, port)) = policy.server_ipv4() {
+        for (ip, port) in policy.server_ipv4() {
             rules.push_str(&format!("        ip daddr {ip} udp dport {port} accept\n"));
         }
-        if let Some((ip, port)) = policy.server_ipv6() {
+        for (ip, port) in policy.server_ipv6() {
             rules.push_str(&format!("        ip6 daddr {ip} udp dport {port} accept\n"));
         }
         if connected {
@@ -740,8 +761,9 @@ impl NftablesKillSwitch {
         // Store the parameters for potential re-application.
         *self.server_addr.lock().unwrap() = policy
             .server_ipv4()
+            .first()
             .map(|(ip, _)| ip.to_string())
-            .or_else(|| policy.server_ipv6().map(|(ip, _)| ip.to_string()));
+            .or_else(|| policy.server_ipv6().first().map(|(ip, _)| ip.to_string()));
         *self.tun_iface.lock().unwrap() = Some(policy.tun_name().to_string());
 
         let ruleset = self.policy_ruleset(policy, connected);
@@ -1000,10 +1022,10 @@ impl MacOSKillSwitch {
         connected: bool,
     ) -> Result<(), KillSwitchError> {
         let mut rules = "pass out quick on lo0\n".to_string();
-        if let Some((ip, port)) = policy.server_ipv4() {
+        for (ip, port) in policy.server_ipv4() {
             rules.push_str(&format!("pass out quick proto udp to {ip} port {port}\n"));
         }
-        if let Some((ip, port)) = policy.server_ipv6() {
+        for (ip, port) in policy.server_ipv6() {
             rules.push_str(&format!("pass out quick inet6 proto udp to {ip} port {port}\n"));
         }
         if connected {
@@ -1126,8 +1148,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy.dns_servers(), &["10.8.0.53".parse::<IpAddr>().unwrap()]);
-        assert_eq!(policy.server_ipv4(), Some(("198.51.100.1".parse().unwrap(), 4433)));
-        assert_eq!(policy.server_ipv6(), Some(("2001:db8::1".parse().unwrap(), 4433)));
+        assert_eq!(policy.server_ipv4(), &[("198.51.100.1".parse().unwrap(), 4433)]);
+        assert_eq!(policy.server_ipv6(), &[("2001:db8::1".parse().unwrap(), 4433)]);
+    }
+
+    #[test]
+    fn firewall_policy_retains_two_same_family_rotation_entries() {
+        let policy = VpnFirewallPolicy::new_for_servers(
+            "tun0",
+            ["198.51.100.1:4433".parse().unwrap(), "198.51.100.2:8443".parse().unwrap()],
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            policy.server_ipv4(),
+            &[("198.51.100.1".parse().unwrap(), 4433), ("198.51.100.2".parse().unwrap(), 8443),]
+        );
     }
 
     #[test]
@@ -1375,93 +1411,5 @@ mod tests {
         // Both must drop all other traffic.
         assert!(iptables_rules.contains("-j DROP"));
         assert!(nft_rules.contains("policy drop;"));
-    }
-
-    /// The rule file must be unpredictable, exclusively created, and never a symlink.
-    ///
-    /// The path was `/tmp/quicfuscate_killswitch_<pid>.conf` and was written with
-    /// `std::fs::write`, which follows symlinks. A local attacker who could predict the PID could
-    /// place a symlink there before this privileged process wrote it and redirect pf rule content
-    /// to another file.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn killswitch_rule_file_is_unpredictable_exclusive_and_symlink_safe() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let switch = MacOSKillSwitch::new();
-        let path = std::path::PathBuf::from(&switch.config_path);
-
-        // Unpredictable: the path must not be derived from the process id.
-        assert!(
-            !switch.config_path.contains(&std::process::id().to_string()),
-            "the rule path must not be PID-derived: {}",
-            switch.config_path
-        );
-        // Two instances must not collide.
-        let other = MacOSKillSwitch::new();
-        assert_ne!(switch.config_path, other.config_path, "instances must not share a rule path");
-
-        // A normal write produces an owner-only regular file with exactly the requested content.
-        switch.write_rules_exclusive("block out all\n").expect("first write");
-        let metadata = std::fs::metadata(&path).expect("rule file metadata");
-        assert!(metadata.is_file());
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600, "rule file must be owner-only");
-        // SAFETY: `geteuid` takes no arguments and cannot fail.
-        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
-        assert_eq!(std::fs::read_to_string(&path).expect("read rules"), "block out all\n");
-
-        // A rewrite replaces the content rather than appending, and keeps the same guarantees.
-        switch.write_rules_exclusive("pass out on lo0\n").expect("rewrite");
-        assert_eq!(std::fs::read_to_string(&path).expect("read rules"), "pass out on lo0\n");
-        assert_eq!(std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777, 0o600);
-
-        // A symlink planted at the path must not be followed: the target must stay untouched.
-        let _ = std::fs::remove_file(&path);
-        let victim =
-            std::env::temp_dir().join(format!("qf-killswitch-victim-{}", switch.config_path.len()));
-        let _ = std::fs::remove_file(&victim);
-        std::fs::write(&victim, "ORIGINAL").expect("seed victim");
-        std::os::unix::fs::symlink(&victim, &path).expect("plant symlink");
-
-        switch.write_rules_exclusive("block out all\n").expect("write over a planted symlink");
-        assert_eq!(
-            std::fs::read_to_string(&victim).expect("victim survives"),
-            "ORIGINAL",
-            "a planted symlink must not redirect privileged rule content"
-        );
-        assert!(
-            !std::fs::symlink_metadata(&path).expect("rule path").file_type().is_symlink(),
-            "the rule path must be a regular file after the write, not the planted symlink"
-        );
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&victim);
-        let _ = std::fs::remove_file(&other.config_path);
-    }
-
-    /// A pre-existing regular file at the path must be replaced, not appended to or reused.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn killswitch_replaces_a_preexisting_rule_file() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let switch = MacOSKillSwitch::new();
-        let path = std::path::PathBuf::from(&switch.config_path);
-
-        // Something world-readable left behind by an earlier run or another user.
-        std::fs::write(&path, "STALE RULES").expect("seed stale file");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
-            .expect("seed permissive mode");
-
-        switch.write_rules_exclusive("block out all\n").expect("write over stale file");
-
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "block out all\n");
-        assert_eq!(
-            std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
-            0o600,
-            "a permissive stale mode must not be inherited"
-        );
-
-        let _ = std::fs::remove_file(&path);
     }
 }

@@ -1,9 +1,10 @@
 //! Client connection wrapper for QuicFuscateConnection.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use crate::core::QuicFuscateConnection;
+use crate::implementations::client::circuit_runtime::{ClientDataPlane, HopFactory};
 use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
 use qf_engine_types::{EngineConfig, EngineError};
@@ -13,7 +14,7 @@ use qf_engine_types::{EngineConfig, EngineError};
 /// Wraps `QuicFuscateConnection` and provides a streamlined interface
 /// for the client runtime.
 pub struct ClientConnection {
-    inner: Arc<parking_lot::Mutex<QuicFuscateConnection>>,
+    inner: Arc<parking_lot::Mutex<ClientDataPlane>>,
     remote_addr: SocketAddr,
     local_addr: SocketAddr,
 }
@@ -62,12 +63,6 @@ impl ClientConnection {
         // Record connection attempt
         crate::instrumentation::global().client.connection_attempt();
 
-        // Parse addresses
-        let remote_addr: SocketAddr = config.connection.remote.parse().map_err(|e| {
-            crate::instrumentation::global().client.connection_failure();
-            EngineError::Config(format!("Invalid remote address: {}", e))
-        })?;
-
         let local_addr: SocketAddr = if config.connection.local.is_empty() {
             SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
         } else {
@@ -77,31 +72,122 @@ impl ClientConnection {
             })?
         };
 
-        // Build transport config
-        let transport_config = Self::build_transport_config(config)?;
+        let migrated_topology = legacy_circuit_config(config);
+        let topology = config.circuit.as_ref().or(migrated_topology.as_ref());
+        let (data_plane, remote_addr) = if let Some(topology) = topology {
+            topology
+                .validate(config.transport.mtu.min(config.transport.max_udp_payload))
+                .map_err(|error| EngineError::Config(error.to_string()))?;
+            let hop_count = topology.hops.len();
+            let entry_hop = topology.hops.first().ok_or_else(|| {
+                EngineError::Config("validated circuit has no entry hop".to_string())
+            })?;
+            let entry_addr = configured_hop_endpoint(entry_hop, 0)?;
+            let entry = Self::build_configured_circuit_hop(
+                config,
+                &stealth_config,
+                runtime_owner.clone(),
+                clock,
+                local_addr,
+                entry_hop,
+                0,
+                hop_count,
+            )?;
+            let pending_hops = topology
+                .hops
+                .iter()
+                .cloned()
+                .enumerate()
+                .skip(1)
+                .map(|(index, hop)| {
+                    let config = config.clone();
+                    let stealth_config = stealth_config.clone();
+                    let runtime_owner = runtime_owner.clone();
+                    let clock = clock.clone();
+                    Box::new(move || {
+                        Self::build_configured_circuit_hop(
+                            &config,
+                            &stealth_config,
+                            runtime_owner,
+                            &clock,
+                            local_addr,
+                            &hop,
+                            index,
+                            hop_count,
+                        )
+                    }) as HopFactory
+                })
+                .collect::<std::collections::VecDeque<_>>();
+            (ClientDataPlane::circuit(topology.clone(), entry, pending_hops)?, entry_addr)
+        } else {
+            let remote_addr = resolve_endpoint(&config.connection.remote)?;
+            let sni = derive_sni(&config.connection.sni, remote_addr);
+            let qkey_token =
+                config.connection.qkey_token.clone().filter(|token| !token.trim().is_empty());
+            let qkey_initial_token =
+                config.connection.qkey_id.as_ref().map(|id| id.as_bytes().to_vec()).or_else(|| {
+                    qkey_token.as_deref().map(|raw| qf_engine_types::id(raw.trim()).into_bytes())
+                });
+            let connection = Self::build_core_connection(
+                config,
+                stealth_config,
+                Self::build_fec_config(config)?,
+                runtime_owner,
+                clock,
+                local_addr,
+                remote_addr,
+                &sni,
+                config.connection.verify_peer,
+                &config.connection.ca_file,
+                config.connection.idle_timeout_ms,
+                config.transport.mtu.min(config.transport.max_udp_payload),
+                qkey_token,
+                qkey_initial_token,
+            )?;
+            (ClientDataPlane::single(connection), remote_addr)
+        };
 
-        // Build FEC config
-        let fec_config = Self::build_fec_config(config)?;
+        // Record success
+        crate::instrumentation::global().client.connection_success();
+        log::info!("QUIC connection established to {}", remote_addr);
 
-        // Build optimization config
-        let opt_config = Self::build_optimize_config(config)?;
+        Ok(Self { inner: Arc::new(parking_lot::Mutex::new(data_plane)), remote_addr, local_addr })
+    }
 
-        let sni = derive_sni(&config.connection.sni, remote_addr);
-
-        log::info!("Connecting to {} (SNI: {}) from {}", remote_addr, sni, local_addr);
-
-        // Create QUIC connection using core.rs
-        let qkey_token = config.connection.qkey_token.clone().filter(|t| !t.trim().is_empty());
-        let qkey_initial_token: Option<Vec<u8>> =
-            qkey_token.as_deref().map(|raw| qf_engine_types::id(raw.trim()).into_bytes());
-        let conn = QuicFuscateConnection::new_client_with_runtime_and_clock(
-            &sni,
+    #[allow(clippy::too_many_arguments)]
+    fn build_core_connection(
+        config: &EngineConfig,
+        stealth_config: crate::stealth::StealthConfig,
+        fec_config: crate::fec::FecConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        clock: &ProtocolClock,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        sni: &str,
+        verify_peer: bool,
+        ca_file: &str,
+        idle_timeout_ms: u64,
+        udp_payload_limit: u16,
+        qkey_token: Option<qf_engine_types::QKeyToken>,
+        qkey_initial_token: Option<Vec<u8>>,
+    ) -> Result<QuicFuscateConnection, EngineError> {
+        let mut transport_config = Self::build_transport_config(config, udp_payload_limit)?;
+        transport_config.set_max_idle_timeout(idle_timeout_ms);
+        transport_config.verify_peer(verify_peer);
+        if !ca_file.trim().is_empty() {
+            transport_config
+                .load_verify_locations_from_file(ca_file)
+                .map_err(|error| EngineError::Config(error.to_string()))?;
+        }
+        log::info!("Connecting circuit hop to {} (SNI: {}) from {}", remote_addr, sni, local_addr);
+        let mut connection = QuicFuscateConnection::new_client_with_runtime_and_clock(
+            sni,
             local_addr,
             remote_addr,
             transport_config,
             stealth_config,
             fec_config,
-            opt_config,
+            Self::build_optimize_config(config)?,
             qkey_token,
             qkey_initial_token,
             Self::should_use_utls(config),
@@ -109,16 +195,63 @@ impl ClientConnection {
             None,
             clock.clone(),
         )
-        .map_err(|e| {
-            crate::instrumentation::global().client.connection_failure();
-            EngineError::Connection(e)
-        })?;
+        .map_err(EngineError::Connection)?;
+        connection.set_private_packet_protection_policy(
+            config.crypto.packet_protection_mode,
+            config.crypto.private_family(),
+        );
+        Ok(connection)
+    }
 
-        // Record success
-        crate::instrumentation::global().client.connection_success();
-        log::info!("QUIC connection established to {}", remote_addr);
-
-        Ok(Self { inner: Arc::new(parking_lot::Mutex::new(conn)), remote_addr, local_addr })
+    #[allow(clippy::too_many_arguments)]
+    fn build_configured_circuit_hop(
+        config: &EngineConfig,
+        base_stealth_config: &crate::stealth::StealthConfig,
+        runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+        clock: &ProtocolClock,
+        physical_local_addr: SocketAddr,
+        hop: &qf_engine_types::HopConfig,
+        index: usize,
+        hop_count: usize,
+    ) -> Result<QuicFuscateConnection, EngineError> {
+        let remote_addr = configured_hop_endpoint(hop, index)?;
+        let local_addr = if index == 0 {
+            physical_local_addr
+        } else if remote_addr.is_ipv4() {
+            SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
+        } else {
+            SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+        };
+        let token = match hop.qkey_token.clone() {
+            Some(token) => Some(token),
+            None => resolve_qkey_token_reference(&hop.qkey_token_ref)?,
+        };
+        let outer_payload = config.transport.mtu.min(config.transport.max_udp_payload);
+        let encapsulation = u16::try_from(index)
+            .ok()
+            .and_then(|depth| qf_engine_types::NESTED_MASQUE_OVERHEAD.checked_mul(depth))
+            .ok_or_else(|| EngineError::Config("circuit datagram budget overflow".to_string()))?;
+        let hop_payload = outer_payload
+            .checked_sub(encapsulation)
+            .ok_or_else(|| EngineError::Config("circuit datagram budget underflow".to_string()))?;
+        let stealth_config = Self::apply_hop_stealth_policy(base_stealth_config, &hop.policy)?;
+        let fec_config = Self::build_hop_fec_config(config, &hop.policy, index, hop_count)?;
+        Self::build_core_connection(
+            config,
+            stealth_config,
+            fec_config,
+            runtime_owner,
+            clock,
+            local_addr,
+            remote_addr,
+            &hop.sni,
+            hop.verify_peer,
+            &hop.ca_file,
+            hop.idle_timeout_ms,
+            hop_payload,
+            token,
+            Some(hop.qkey_id.as_bytes().to_vec()),
+        )
     }
 
     fn resolve_stealth_config(
@@ -140,7 +273,7 @@ impl ClientConnection {
     /// Returns the number of bytes written to the buffer.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize, EngineError> {
         let mut guard = self.inner.lock();
-        guard.send(buf).map_err(|e| EngineError::Connection(format!("{:?}", e)))
+        guard.send_physical(buf)
     }
 
     /// Receive data from the QUIC connection.
@@ -148,7 +281,7 @@ impl ClientConnection {
     /// Returns the number of bytes processed.
     pub fn recv(&mut self, data: &[u8]) -> Result<usize, EngineError> {
         let mut guard = self.inner.lock();
-        guard.recv(data).map_err(|e| EngineError::Connection(format!("{:?}", e)))
+        guard.recv_physical(data)
     }
 
     /// Get the remote peer address.
@@ -164,43 +297,63 @@ impl ClientConnection {
     /// Get the stealth manager for dynamic configuration.
     pub fn stealth_manager(&self) -> Arc<crate::stealth::StealthManager> {
         let guard = self.inner.lock();
-        guard.stealth_manager()
+        guard.exit().stealth_manager()
     }
 
     /// Get the underlying connection (for advanced usage).
-    pub fn shared(&self) -> Arc<parking_lot::Mutex<QuicFuscateConnection>> {
+    pub(super) fn shared(&self) -> Arc<parking_lot::Mutex<ClientDataPlane>> {
         self.inner.clone()
+    }
+
+    /// Return the bounded circuit lifecycle without exposing credentials or endpoints.
+    pub fn circuit_lifecycle_state(&self) -> crate::implementations::client::CircuitLifecycleState {
+        self.inner.lock().lifecycle_state()
+    }
+
+    /// Return bounded per-hop health without endpoint or credential material.
+    pub fn circuit_diagnostics(&self) -> crate::implementations::client::CircuitDiagnostics {
+        self.inner.lock().diagnostics()
+    }
+
+    /// Mark the active generation as draining before its data-plane tasks stop.
+    pub fn mark_circuit_draining(&self) {
+        self.inner.lock().mark_draining();
+    }
+
+    /// Mark an authenticated VPN-contained fallback as usable but privacy-degraded.
+    pub fn mark_circuit_degraded(&self) {
+        self.inner.lock().mark_degraded();
     }
 
     /// Check if the connection is established.
     pub fn is_established(&self) -> bool {
         let guard = self.inner.lock();
-        guard.conn.is_established()
+        guard.circuit_ready()
     }
 
     /// Check if the connection is closed.
     pub fn is_closed(&self) -> bool {
         let guard = self.inner.lock();
-        guard.conn.is_closed()
+        guard.physical().conn.is_closed() || guard.exit().conn.is_closed()
     }
 
     /// Returns the duration elapsed since the last inbound packet was received.
     /// Used by the heartbeat watchdog to detect connection loss.
     pub fn last_activity_elapsed(&self) -> std::time::Duration {
         let guard = self.inner.lock();
-        guard.conn.last_activity_elapsed()
+        guard.last_activity_elapsed()
     }
 
     /// Get RTT in milliseconds.
     pub fn rtt_ms(&self) -> f32 {
         let guard = self.inner.lock();
-        guard.rtt_ms()
+        guard.exit().rtt_ms()
     }
 
     /// Get packet loss rate.
     pub fn loss_rate(&self) -> f32 {
         let guard = self.inner.lock();
-        guard.loss_rate()
+        guard.exit().loss_rate()
     }
 
     /// Apply and observe an active FEC policy change under the connection owner.
@@ -209,43 +362,43 @@ impl ClientConnection {
         policy: crate::fec::FecControlPolicy,
     ) -> crate::fec::ActiveFecPolicyChange {
         let mut guard = self.inner.lock();
-        guard.set_fec_control_policy(policy)
+        guard.exit_mut().set_fec_control_policy(policy)
     }
 
     /// Return exact active FEC policy, mode, and wire counters.
     pub fn fec_telemetry_snapshot(&self) -> crate::fec::FecTelemetrySnapshot {
         let guard = self.inner.lock();
-        guard.fec_telemetry_snapshot()
+        guard.exit().fec_telemetry_snapshot()
     }
 
     /// Get the effective stealth mode currently used by the live connection.
     pub fn stealth_mode(&self) -> crate::stealth::StealthMode {
         let guard = self.inner.lock();
-        guard.stealth_mode()
+        guard.exit().stealth_mode()
     }
 
     /// Get the effective TLS SNI currently used by the live connection.
     pub fn server_name(&self) -> Option<String> {
         let guard = self.inner.lock();
-        guard.server_name()
+        guard.exit().server_name()
     }
 
     /// Return the terminal error, preferring the first local root cause.
     pub fn error(&self) -> Option<crate::error::ConnectionError> {
         let guard = self.inner.lock();
-        guard.conn.error().cloned()
+        guard.error()
     }
 
     /// Return the first locally decided terminal or protocol error.
     pub fn local_error(&self) -> Option<crate::error::ConnectionError> {
         let guard = self.inner.lock();
-        guard.conn.local_error().cloned()
+        guard.local_error()
     }
 
     /// Return the first close reason received from the peer.
     pub fn remote_error(&self) -> Option<crate::error::ConnectionError> {
         let guard = self.inner.lock();
-        guard.conn.remote_error().cloned()
+        guard.remote_error()
     }
 
     /// Close the connection with an application error.
@@ -266,15 +419,7 @@ impl ClientConnection {
 
     fn close_with_kind(&mut self, app: bool, error_code: u64, reason: &[u8], kind: &str) {
         let mut guard = self.inner.lock();
-        if let Err(e) = guard.conn.close(app, error_code, reason) {
-            log::warn!(
-                "{} connection close returned error (error_code={}, reason={:?}): {:?}",
-                kind,
-                error_code,
-                reason,
-                e
-            );
-        }
+        guard.close_all(app, error_code, reason);
         log::info!("{} connection closed: error={}, reason={:?}", kind, error_code, reason);
     }
 
@@ -284,6 +429,7 @@ impl ClientConnection {
 
     fn build_transport_config(
         config: &EngineConfig,
+        udp_payload_limit: u16,
     ) -> Result<crate::transport::Config, EngineError> {
         let mut tc = crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
             .map_err(|e| EngineError::Config(format!("Transport config error: {:?}", e)))?;
@@ -297,8 +443,8 @@ impl ClientConnection {
             .map_err(|e| EngineError::Config(format!("QUIC version config error: {e}")))?;
 
         tc.set_max_idle_timeout(config.transport.max_idle_timeout);
-        tc.set_max_recv_udp_payload_size(config.transport.max_udp_payload as usize);
-        tc.set_max_send_udp_payload_size(config.transport.mtu as usize);
+        tc.set_max_recv_udp_payload_size(usize::from(udp_payload_limit));
+        tc.set_max_send_udp_payload_size(usize::from(udp_payload_limit));
         tc.enable_pacing(config.transport.enable_pacing);
         tc.set_initial_rtt_ms(config.transport.initial_rtt_ms);
         tc.set_initial_max_data(config.transport.initial_max_data);
@@ -313,8 +459,8 @@ impl ClientConnection {
         tc.set_initial_max_streams_uni(config.transport.initial_max_streams_uni);
 
         tc.set_pmtu_policy(crate::transport::PmtuPolicy {
-            min_mtu: usize::from(config.transport.pmtu_min_mtu),
-            max_mtu: usize::from(config.transport.pmtu_max_mtu),
+            min_mtu: usize::from(config.transport.pmtu_min_mtu.min(udp_payload_limit)),
+            max_mtu: usize::from(config.transport.pmtu_max_mtu.min(udp_payload_limit)),
             probe_interval: std::time::Duration::from_millis(
                 config.transport.pmtu_probe_interval_ms,
             ),
@@ -403,6 +549,33 @@ impl ClientConnection {
             .map_err(|error| EngineError::Config(format!("Stealth config error: {error}")))
     }
 
+    fn apply_hop_stealth_policy(
+        base: &crate::stealth::StealthConfig,
+        policy: &qf_engine_types::HopPolicyOverrides,
+    ) -> Result<crate::stealth::StealthConfig, EngineError> {
+        let mut resolved = base.clone();
+        if let Some(persona) = policy.persona {
+            resolved.initial_browser = persona.browser;
+            resolved.initial_os = persona.os;
+            resolved.enable_fingerprint_rotation = false;
+            resolved.fingerprint_rotation_profiles.clear();
+        }
+        if let Some(enabled) = policy.enable_traffic_padding {
+            resolved.enable_traffic_padding = enabled;
+        }
+        if let Some(enabled) = policy.enable_timing_obfuscation {
+            resolved.enable_timing_obfuscation = enabled;
+        }
+        if let Some(enabled) = policy.enable_cover_ping {
+            resolved.enable_cover_ping = enabled;
+        }
+        resolved.normalize_protocol_mimicry_bundle();
+        resolved.validate().map_err(|error| {
+            EngineError::Config(format!("Invalid per-hop stealth policy: {error}"))
+        })?;
+        Ok(resolved)
+    }
+
     fn should_use_utls(config: &EngineConfig) -> bool {
         config.stealth.use_utls && !matches!(config.stealth.mode, qf_engine_types::StealthMode::Off)
     }
@@ -412,6 +585,33 @@ impl ClientConnection {
             .fec
             .to_runtime_config()
             .map_err(|error| EngineError::Config(format!("FEC config error: {error}")))
+    }
+
+    fn build_hop_fec_config(
+        config: &EngineConfig,
+        policy: &qf_engine_types::HopPolicyOverrides,
+        hop_index: usize,
+        hop_count: usize,
+    ) -> Result<crate::fec::FecConfig, EngineError> {
+        let mut section = config.fec.clone();
+        let mode = policy.fec_mode.unwrap_or_else(|| {
+            if hop_index + 1 == hop_count {
+                config.fec.mode
+            } else {
+                qf_engine_types::FecMode::Off
+            }
+        });
+        if mode != section.mode {
+            section.mode = mode;
+            section.initial_mode = match mode {
+                qf_engine_types::FecMode::Off => "off",
+                qf_engine_types::FecMode::Auto => "auto",
+            }
+            .to_string();
+        }
+        section
+            .to_runtime_config()
+            .map_err(|error| EngineError::Config(format!("Per-hop FEC config error: {error}")))
     }
 
     fn build_optimize_config(
@@ -439,6 +639,136 @@ fn derive_sni(configured: &str, remote: SocketAddr) -> String {
     } else {
         configured.to_string()
     }
+}
+
+fn legacy_circuit_config(config: &EngineConfig) -> Option<qf_engine_types::CircuitConfig> {
+    let token = config.connection.qkey_token.clone()?;
+    let endpoint = config.connection.remote.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
+    let sni = if config.connection.sni.trim().is_empty() {
+        endpoint.parse::<SocketAddr>().map(|address| address.ip().to_string()).unwrap_or_else(
+            |_| {
+                endpoint
+                    .rsplit_once(':')
+                    .map_or(endpoint, |(host, _)| host)
+                    .trim_matches(['[', ']'])
+                    .to_string()
+            },
+        )
+    } else {
+        config.connection.sni.trim().to_string()
+    };
+    let qkey_id =
+        config.connection.qkey_id.clone().unwrap_or_else(|| qf_engine_types::id(token.as_ref()));
+    Some(qf_engine_types::CircuitConfig {
+        hops: vec![qf_engine_types::HopConfig {
+            label: "Legacy single hop".to_string(),
+            endpoint: endpoint.to_string(),
+            sni,
+            verify_peer: config.connection.verify_peer,
+            ca_file: config.connection.ca_file.clone(),
+            qkey_id,
+            qkey_token_ref: "runtime:legacy-connection".to_string(),
+            qkey_token: Some(token),
+            role: qf_engine_types::HopRole::Exit,
+            idle_timeout_ms: config.connection.idle_timeout_ms,
+            ..qf_engine_types::HopConfig::default()
+        }],
+        max_hops: 1,
+        ..qf_engine_types::CircuitConfig::default()
+    })
+}
+
+fn resolve_endpoint(authority: &str) -> Result<SocketAddr, EngineError> {
+    authority
+        .to_socket_addrs()
+        .map_err(|error| EngineError::Config(format!("endpoint resolution failed: {error}")))?
+        .next()
+        .ok_or_else(|| EngineError::Config(format!("endpoint resolved to no address: {authority}")))
+}
+
+fn configured_hop_endpoint(
+    hop: &qf_engine_types::HopConfig,
+    index: usize,
+) -> Result<SocketAddr, EngineError> {
+    if index == 0 {
+        return match hop.pinned_endpoint {
+            Some(endpoint) => Ok(endpoint),
+            None => resolve_endpoint(&hop.endpoint),
+        };
+    }
+    logical_inner_endpoint(hop, index)
+}
+
+fn logical_inner_endpoint(
+    hop: &qf_engine_types::HopConfig,
+    index: usize,
+) -> Result<SocketAddr, EngineError> {
+    let endpoint = hop.parsed_endpoint().map_err(|error| EngineError::Config(error.to_string()))?;
+    if let Ok(address) = hop.endpoint.parse::<SocketAddr>() {
+        return Ok(address);
+    }
+    let host = endpoint.host.parse::<std::net::IpAddr>().ok();
+    let ip = match host {
+        Some(ip) => ip,
+        None => {
+            let suffix = u8::try_from(index.saturating_add(1)).map_err(|_| {
+                EngineError::Config("circuit logical endpoint index overflow".to_string())
+            })?;
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, suffix))
+        }
+    };
+    Ok(SocketAddr::new(ip, endpoint.port))
+}
+
+fn resolve_qkey_token_reference(
+    reference: &str,
+) -> Result<Option<qf_engine_types::QKeyToken>, EngineError> {
+    let reference = reference.trim();
+    let value = if let Some(name) = reference.strip_prefix("env:") {
+        if name.is_empty() {
+            return Err(EngineError::Config("empty QKey environment reference".to_string()));
+        }
+        std::env::var(name).map_err(|_| {
+            EngineError::Config(format!("QKey environment reference is unavailable: {name}"))
+        })?
+    } else if let Some(path) = reference.strip_prefix("file:") {
+        if path.is_empty() {
+            return Err(EngineError::Config("empty QKey file reference".to_string()));
+        }
+        std::fs::read_to_string(path)
+            .map_err(|error| EngineError::Config(format!("QKey file reference failed: {error}")))?
+    } else if let Some(specifier) = reference.strip_prefix("keychain:") {
+        let (service, account) = specifier.split_once('/').ok_or_else(|| {
+            EngineError::Config(
+                "QKey keychain reference must use keychain:service/account".to_string(),
+            )
+        })?;
+        let output = std::process::Command::new("security")
+            .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+            .output()
+            .map_err(|error| {
+                EngineError::Config(format!("QKey keychain lookup failed: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(EngineError::Config("QKey keychain reference was not found".to_string()));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|_| EngineError::Config("QKey keychain value is not UTF-8".to_string()))?
+    } else {
+        return Err(EngineError::Config(
+            "QKey token reference must use env:, file:, or keychain:service/account".to_string(),
+        ));
+    };
+    let value = value.trim();
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EngineError::Config(
+            "resolved QKey token must contain exactly 64 hexadecimal characters".to_string(),
+        ));
+    }
+    Ok(Some(qf_engine_types::QKeyToken::new(value.to_ascii_lowercase())))
 }
 
 #[cfg(test)]
@@ -469,6 +799,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn authenticated_legacy_connection_projects_to_the_canonical_one_hop_circuit() {
+        let mut config = EngineConfig::default();
+        config.connection.remote = "203.0.113.10:4433".to_string();
+        config.connection.sni = "exit.example.com".to_string();
+        config.connection.qkey_token = Some(qf_engine_types::QKeyToken::new("a".repeat(64)));
+
+        let circuit = legacy_circuit_config(&config).expect("legacy circuit projection");
+
+        assert_eq!(circuit.hops.len(), 1);
+        assert_eq!(circuit.max_hops, 1);
+        assert_eq!(circuit.hops[0].role, qf_engine_types::HopRole::Exit);
+        assert_eq!(circuit.hops[0].endpoint, "203.0.113.10:4433");
+        assert_eq!(circuit.hops[0].sni, "exit.example.com");
+        assert!(circuit.hops[0].qkey_token.is_some());
+        circuit
+            .validate(config.transport.mtu.min(config.transport.max_udp_payload))
+            .expect("projected circuit validates");
+    }
+
+    #[test]
+    fn unauthenticated_legacy_connection_keeps_the_compatibility_path() {
+        assert!(legacy_circuit_config(&EngineConfig::default()).is_none());
+    }
+
     fn make_client_connection() -> ClientConnection {
         let config = EngineConfig::default();
         let local_addr = "127.0.0.1:10000".parse().unwrap();
@@ -477,7 +832,11 @@ mod tests {
             "localhost",
             local_addr,
             remote_addr,
-            ClientConnection::build_transport_config(&config).unwrap(),
+            ClientConnection::build_transport_config(
+                &config,
+                config.transport.mtu.min(config.transport.max_udp_payload),
+            )
+            .unwrap(),
             ClientConnection::build_stealth_config(&config).unwrap(),
             ClientConnection::build_fec_config(&config).unwrap(),
             ClientConnection::build_optimize_config(&config).unwrap(),
@@ -487,14 +846,21 @@ mod tests {
         )
         .unwrap();
 
-        ClientConnection { inner: Arc::new(parking_lot::Mutex::new(conn)), remote_addr, local_addr }
+        ClientConnection {
+            inner: Arc::new(parking_lot::Mutex::new(ClientDataPlane::single(conn))),
+            remote_addr,
+            local_addr,
+        }
     }
 
     #[test]
     fn test_build_configs() {
         let config = EngineConfig::default();
 
-        let tc = ClientConnection::build_transport_config(&config);
+        let tc = ClientConnection::build_transport_config(
+            &config,
+            config.transport.mtu.min(config.transport.max_udp_payload),
+        );
         assert!(tc.is_ok());
         let tc = tc.unwrap();
         assert_eq!(tc.version(), crate::transport::PROTOCOL_VERSION_V2);
@@ -569,7 +935,11 @@ mod tests {
         config.nat_traversal.ice_enabled = true;
         config.nat_traversal.stun_servers = vec!["203.0.113.10:3478".to_string()];
 
-        let tc = ClientConnection::build_transport_config(&config).unwrap();
+        let tc = ClientConnection::build_transport_config(
+            &config,
+            config.transport.mtu.min(config.transport.max_udp_payload),
+        )
+        .unwrap();
         let nat = tc.nat_traversal();
         assert!(nat.enabled);
         assert_eq!(nat.mode, crate::transport::NatTraversalMode::ConnectivityFallback);
@@ -586,7 +956,11 @@ mod tests {
         config.connection.migration_probe_target =
             crate::transport::MigrationProbeTarget::ReducedWindow;
 
-        let tc = ClientConnection::build_transport_config(&config).unwrap();
+        let tc = ClientConnection::build_transport_config(
+            &config,
+            config.transport.mtu.min(config.transport.max_udp_payload),
+        )
+        .unwrap();
         assert!(tc.disable_active_migration);
         let policy = tc.migration_policy();
         assert_eq!(policy.port_rebinding_cwnd_factor, 1.0);
@@ -625,8 +999,11 @@ mod tests {
         config.transport.qkey_traffic_analysis_ceiling = qkey_ceiling;
         config.transport.intelligent_traffic_analysis_ceiling = intelligent_ceiling;
 
-        let transport =
-            ClientConnection::build_transport_config(&config).expect("transport config");
+        let transport = ClientConnection::build_transport_config(
+            &config,
+            config.transport.mtu.min(config.transport.max_udp_payload),
+        )
+        .expect("transport config");
         assert_eq!(transport.traffic_analysis_policy(), active);
         assert_eq!(transport.qkey_traffic_analysis_ceiling(), qkey_ceiling);
         assert_eq!(transport.intelligent_traffic_analysis_ceiling(), intelligent_ceiling);
@@ -670,6 +1047,101 @@ mod tests {
     }
 
     #[test]
+    fn per_hop_policy_freezes_persona_and_overrides_segment_behaviors() {
+        let mut base = ClientConnection::build_stealth_config(&EngineConfig::default()).unwrap();
+        base.enable_fingerprint_rotation = true;
+        base.fingerprint_rotation_profiles =
+            vec![(crate::stealth::BrowserProfile::Chrome, crate::stealth::OsProfile::Windows)];
+        let policy = qf_engine_types::HopPolicyOverrides {
+            persona: Some(qf_engine_types::HopPersonaConfig {
+                browser: crate::stealth::BrowserProfile::Firefox,
+                os: crate::stealth::OsProfile::Linux,
+            }),
+            fec_mode: Some(qf_engine_types::FecMode::Off),
+            enable_traffic_padding: Some(false),
+            enable_timing_obfuscation: Some(true),
+            enable_cover_ping: Some(false),
+        };
+
+        let resolved = ClientConnection::apply_hop_stealth_policy(&base, &policy)
+            .expect("valid per-hop policy");
+        assert_eq!(resolved.initial_browser, crate::stealth::BrowserProfile::Firefox);
+        assert_eq!(resolved.initial_os, crate::stealth::OsProfile::Linux);
+        assert!(!resolved.enable_fingerprint_rotation);
+        assert!(resolved.fingerprint_rotation_profiles.is_empty());
+        assert!(!resolved.enable_traffic_padding);
+        assert!(resolved.enable_timing_obfuscation);
+        assert!(!resolved.enable_cover_ping);
+
+        let fec = ClientConnection::build_hop_fec_config(&EngineConfig::default(), &policy, 0, 1)
+            .expect("valid per-hop FEC policy");
+        assert!(matches!(fec.control_policy, crate::fec::FecControlPolicy::Off));
+    }
+
+    #[test]
+    fn circuit_fec_defaults_to_one_deepest_layer_and_allows_explicit_segment_override() {
+        let config = EngineConfig::default();
+        let inherited = qf_engine_types::HopPolicyOverrides::default();
+        let entry = ClientConnection::build_hop_fec_config(&config, &inherited, 0, 3)
+            .expect("entry FEC projection");
+        let middle = ClientConnection::build_hop_fec_config(&config, &inherited, 1, 3)
+            .expect("middle FEC projection");
+        let exit = ClientConnection::build_hop_fec_config(&config, &inherited, 2, 3)
+            .expect("exit FEC projection");
+        assert!(matches!(entry.control_policy, crate::fec::FecControlPolicy::Off));
+        assert!(matches!(middle.control_policy, crate::fec::FecControlPolicy::Off));
+        assert!(!matches!(exit.control_policy, crate::fec::FecControlPolicy::Off));
+
+        let explicit = qf_engine_types::HopPolicyOverrides {
+            fec_mode: Some(qf_engine_types::FecMode::Auto),
+            ..qf_engine_types::HopPolicyOverrides::default()
+        };
+        let entry = ClientConnection::build_hop_fec_config(&config, &explicit, 0, 3)
+            .expect("explicit segment FEC projection");
+        assert!(!matches!(entry.control_policy, crate::fec::FecControlPolicy::Off));
+    }
+
+    #[test]
+    fn inner_hop_construction_waits_for_authenticated_predecessor_link() {
+        let config = EngineConfig {
+            circuit: Some(qf_engine_types::CircuitConfig {
+                hops: vec![
+                    qf_engine_types::HopConfig {
+                        label: "Entry".to_string(),
+                        endpoint: "127.0.0.1:4433".to_string(),
+                        sni: "entry.example.com".to_string(),
+                        verify_peer: false,
+                        qkey_id: "000000000001".to_string(),
+                        qkey_token_ref: "runtime:test-entry".to_string(),
+                        qkey_token: Some(qf_engine_types::QKeyToken::new("11".repeat(32))),
+                        role: qf_engine_types::HopRole::Relay,
+                        ..qf_engine_types::HopConfig::default()
+                    },
+                    qf_engine_types::HopConfig {
+                        label: "Exit".to_string(),
+                        endpoint: "127.0.0.2:4433".to_string(),
+                        sni: "exit.example.com".to_string(),
+                        verify_peer: false,
+                        qkey_id: "000000000002".to_string(),
+                        qkey_token_ref: "unsupported:must-not-resolve-before-link-readiness"
+                            .to_string(),
+                        role: qf_engine_types::HopRole::Exit,
+                        ..qf_engine_types::HopConfig::default()
+                    },
+                ],
+                ..qf_engine_types::CircuitConfig::default()
+            }),
+            ..EngineConfig::default()
+        };
+
+        let connection = ClientConnection::connect(&config)
+            .expect("entry construction must not resolve the pending exit credential");
+        let diagnostics = connection.circuit_diagnostics();
+        assert_eq!(diagnostics.hops.len(), 2);
+        assert!(!diagnostics.hops[1].established);
+    }
+
+    #[test]
     fn public_close_reports_application_error_and_is_idempotent() {
         let mut client = make_client_connection();
 
@@ -686,6 +1158,18 @@ mod tests {
         assert_eq!(client.error(), client.local_error());
         assert!(client.remote_error().is_none());
         assert!(client.is_closed());
+    }
+
+    #[test]
+    fn degraded_fallback_state_is_persistent_and_observable() {
+        let client = make_client_connection();
+
+        client.mark_circuit_degraded();
+
+        assert_eq!(
+            client.circuit_diagnostics().lifecycle,
+            crate::implementations::client::CircuitLifecycleState::Degraded
+        );
     }
 
     #[test]

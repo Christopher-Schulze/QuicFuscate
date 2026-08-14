@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::app_config::AppConfig;
 use super::config::{EngineConfig, EngineMode};
 use crate::implementations::client::{
     ClientDnsRuntime, ClientRuntime, KillSwitch, VpnFirewallPolicy,
@@ -22,292 +21,26 @@ use crate::implementations::server::{
     metrics::Metrics, normalize_runtime_optimize_config, AdminAction, PreparedStandaloneLaunch,
     ServerRuntime,
 };
-use crate::transport::Config;
-use crate::transport::{self, CongestionControlAlgorithm};
 use qf_memory_lock::MemoryLockPolicy;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 #[cfg(test)]
 use qf_engine_types::DataPlaneFault;
 
+mod transport_config;
+use transport_config::build_runtime_transport_config;
+mod config_projection;
+use config_projection::{
+    build_server_optimize_config, build_server_runtime_profiles, configured_standby,
+    is_configured_single_hop_fallback, load_runtime_profile_values,
+    reject_started_client_config_changes, resolve_and_pin_client_entry, resolve_client_entry,
+};
+mod observability;
+
 pub use qf_engine_types::{
     DisconnectReason, EngineCallback, EngineCommand, EngineCommandResult, EngineError, EngineEvent,
     EngineState, EngineStats, FecPolicyCommandResult, FecPolicyCommandScope, StatsSnapshot,
 };
-
-fn build_server_optimize_config(
-    config: &EngineConfig,
-) -> Result<crate::optimize::OptimizeConfig, EngineError> {
-    config.optimization.to_runtime_config().map_err(|error| EngineError::Config(error.to_string()))
-}
-
-fn build_runtime_transport_config(config: &EngineConfig) -> Result<Config, EngineError> {
-    let mut transport =
-        transport::Config::new_with_version(transport::PROTOCOL_VERSION).map_err(|error| {
-            EngineError::Transport(format!("transport config init failed: {error}"))
-        })?;
-    let versions = config
-        .transport
-        .quic_versions
-        .iter()
-        .map(|version| version.wire_version())
-        .collect::<Vec<_>>();
-    transport.set_supported_versions(versions).map_err(|error| {
-        EngineError::Transport(format!("QUIC version configuration failed: {error}"))
-    })?;
-
-    transport.set_cc_algorithm(map_server_cc_algorithm(config.transport.cc_algorithm));
-
-    let protos = if config.connection.alpn.is_empty() {
-        vec![
-            b"hq-interop".to_vec(),
-            b"h3-29".to_vec(),
-            b"h3-28".to_vec(),
-            b"h3-27".to_vec(),
-            b"http/0.9".to_vec(),
-        ]
-    } else {
-        config
-            .connection
-            .alpn
-            .iter()
-            .filter_map(|value| {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.as_bytes().to_vec())
-                }
-            })
-            .collect()
-    };
-
-    let proto_refs: Vec<&[u8]> = protos.iter().map(std::vec::Vec::as_slice).collect();
-    transport.set_application_protos(&proto_refs).map_err(|error| {
-        EngineError::Transport(format!("application protocol setup failed: {error}"))
-    })?;
-
-    transport.set_max_idle_timeout(config.connection.idle_timeout_ms);
-    transport.set_max_recv_udp_payload_size(config.transport.max_udp_payload as usize);
-    transport.set_max_send_udp_payload_size(config.transport.mtu as usize);
-    transport.set_initial_max_data(config.transport.initial_max_data.max(1024));
-    transport.set_initial_max_stream_data_bidi_local(
-        config.transport.initial_max_stream_data_bidi_local,
-    );
-    transport.set_initial_max_stream_data_bidi_remote(
-        config.transport.initial_max_stream_data_bidi_remote,
-    );
-    // [connection].max_streams_bidi/uni override [transport] values when explicitly set to
-    // a different non-zero value (the two sections are historical duplicates).
-    let bidi = if config.connection.max_streams_bidi != config.transport.initial_max_streams_bidi
-        && config.connection.max_streams_bidi > 0
-    {
-        config.connection.max_streams_bidi
-    } else {
-        config.transport.initial_max_streams_bidi
-    };
-    let uni = if config.connection.max_streams_uni != config.transport.initial_max_streams_uni
-        && config.connection.max_streams_uni > 0
-    {
-        config.connection.max_streams_uni
-    } else {
-        config.transport.initial_max_streams_uni
-    };
-    transport.set_initial_max_streams_bidi(bidi);
-    transport.set_initial_max_streams_uni(uni);
-    transport.enable_pacing(config.transport.enable_pacing);
-    transport.set_initial_rtt_ms(config.transport.initial_rtt_ms);
-    transport
-        .set_pmtu_policy(crate::transport::PmtuPolicy {
-            min_mtu: usize::from(config.transport.pmtu_min_mtu),
-            max_mtu: usize::from(config.transport.pmtu_max_mtu),
-            probe_interval: std::time::Duration::from_millis(
-                config.transport.pmtu_probe_interval_ms,
-            ),
-            black_hole_timeout: std::time::Duration::from_millis(
-                config.transport.pmtu_black_hole_timeout_ms,
-            ),
-        })
-        .map_err(|error| EngineError::Config(format!("DPLPMTUD policy invalid: {error}")))?;
-
-    if config.connection.enable_0rtt {
-        transport.enable_early_data();
-    }
-    transport.set_disable_active_migration(!config.connection.enable_migration);
-    transport
-        .set_migration_policy(crate::transport::MigrationPolicy {
-            port_rebinding_cwnd_factor: config.connection.migration_cwnd_reduction_factor,
-            cooldown: Duration::from_millis(config.connection.migration_cooldown_ms),
-            probe_target: config.connection.migration_probe_target,
-        })
-        .map_err(|error| EngineError::Config(format!("migration policy invalid: {error}")))?;
-    transport.set_nat_traversal(
-        config.nat_traversal.to_transport_config().map_err(|error| {
-            EngineError::Config(format!("NAT traversal config invalid: {error}"))
-        })?,
-    );
-    if config.transport.disable_pmtud {
-        transport.discover_pmtu(false);
-    }
-
-    transport.set_traffic_analysis_policy(config.transport.traffic_analysis).map_err(|error| {
-        EngineError::Config(format!("traffic-analysis policy invalid: {error}"))
-    })?;
-    transport
-        .set_qkey_traffic_analysis_ceiling(config.transport.qkey_traffic_analysis_ceiling)
-        .map_err(|error| {
-            EngineError::Config(format!("QKey traffic-analysis ceiling invalid: {error}"))
-        })?;
-    transport
-        .set_intelligent_traffic_analysis_ceiling(
-            config.transport.intelligent_traffic_analysis_ceiling,
-        )
-        .map_err(|error| {
-            EngineError::Config(format!("Intelligent traffic-analysis ceiling invalid: {error}"))
-        })?;
-
-    if config.transport.dgram_recv_queue_len > 0 && config.transport.dgram_send_queue_len > 0 {
-        transport.enable_dgram(
-            config.transport.dgram_recv_queue_len,
-            config.transport.dgram_send_queue_len,
-        );
-    }
-
-    transport.verify_peer(config.connection.verify_peer);
-
-    transport.set_initial_max_stream_data_uni(config.transport.initial_max_stream_data_uni);
-
-    if !config.connection.ca_file.trim().is_empty() {
-        let ca_file = Path::new(&config.connection.ca_file);
-        let ca_path = ca_file.to_str().ok_or_else(|| {
-            EngineError::Config(format!(
-                "CA file path is not valid UTF-8: {}",
-                ca_file.to_string_lossy()
-            ))
-        })?;
-        transport.load_verify_locations_from_file(ca_path).map_err(|error| {
-            EngineError::Config(format!("failed to load CA file '{}': {error}", ca_path))
-        })?;
-    }
-
-    if !config.connection.cert_file.trim().is_empty()
-        || !config.connection.key_file.trim().is_empty()
-    {
-        if config.connection.cert_file.trim().is_empty()
-            || config.connection.key_file.trim().is_empty()
-        {
-            return Err(EngineError::Config(
-                "server mode requires both connection.cert_file and connection.key_file"
-                    .to_string(),
-            ));
-        }
-
-        crate::implementations::server::load_server_identity(
-            &mut transport,
-            Path::new(&config.connection.cert_file),
-            Path::new(&config.connection.key_file),
-            config.security.lock_memory,
-        )
-        .map_err(|error| {
-            EngineError::Transport(format!("server identity setup failed: {error}"))
-        })?;
-    }
-
-    Ok(transport)
-}
-
-fn map_server_cc_algorithm(cc: super::config::CcAlgorithm) -> CongestionControlAlgorithm {
-    match cc {
-        super::config::CcAlgorithm::Reno => CongestionControlAlgorithm::Reno,
-        super::config::CcAlgorithm::Cubic => CongestionControlAlgorithm::Cubic,
-        super::config::CcAlgorithm::Bbr2 => CongestionControlAlgorithm::BBR2,
-        super::config::CcAlgorithm::Bbr3 => CongestionControlAlgorithm::BBR3,
-    }
-}
-
-fn load_runtime_profile_values(
-    config: &EngineConfig,
-) -> Result<
-    (qf_stealth::BrowserProfile, qf_stealth::OsProfile, Vec<qf_stealth::FingerprintProfile>),
-    EngineError,
-> {
-    let browser =
-        config.stealth.initial_browser.parse::<qf_stealth::BrowserProfile>().map_err(|_| {
-            EngineError::Config(format!(
-                "invalid initial_browser profile: {}",
-                config.stealth.initial_browser
-            ))
-        })?;
-    let os = config.stealth.initial_os.parse::<qf_stealth::OsProfile>().map_err(|_| {
-        EngineError::Config(format!("invalid initial_os profile: {}", config.stealth.initial_os))
-    })?;
-    qf_stealth::FingerprintProfile::try_new(browser, os)
-        .map_err(|error| EngineError::Config(format!("invalid initial profile: {error}")))?;
-    let runtime =
-        config.stealth.to_runtime_config(&config.fingerprint_rotation).map_err(|error| {
-            EngineError::Config(format!("invalid stealth rotation projection: {error}"))
-        })?;
-    let profiles = runtime.rotation_profiles();
-
-    Ok((browser, os, profiles))
-}
-
-fn build_server_runtime_profiles(
-    config: &EngineConfig,
-) -> Result<(qf_fec::FecConfig, qf_stealth::StealthConfig), EngineError> {
-    let config_text = toml::to_string(config).map_err(|error| {
-        EngineError::Config(format!("failed to serialize server config: {error}"))
-    })?;
-
-    let runtime_cfg = AppConfig::from_toml(&config_text)
-        .map_err(|error| EngineError::Config(format!("failed to build runtime config: {error}")))?;
-
-    runtime_cfg.validate().map_err(|error| {
-        EngineError::Config(format!("runtime config validation failed: {error}"))
-    })?;
-
-    let (fec_cfg, stealth_cfg, _, _) =
-        crate::implementations::server::runtime_components_from_app_config(
-            runtime_cfg,
-            Some(config.fec.mode),
-        );
-
-    Ok((fec_cfg, stealth_cfg))
-}
-
-fn reject_started_client_config_changes(
-    current: &EngineConfig,
-    candidate: &EngineConfig,
-    state: EngineState,
-) -> Result<(), EngineError> {
-    let current_rotation = &current.fingerprint_rotation;
-    let candidate_rotation = &candidate.fingerprint_rotation;
-    if current_rotation.enabled != candidate_rotation.enabled
-        || current_rotation.interval_secs != candidate_rotation.interval_secs
-        || current_rotation.mode != candidate_rotation.mode
-        || current_rotation.profile_slots != candidate_rotation.profile_slots
-    {
-        return Err(EngineError::InvalidState(
-            state,
-            "configuration update (fingerprint rotation policy requires a stopped client runtime)",
-        ));
-    }
-    if current.engine != candidate.engine
-        || current.interface != candidate.interface
-        || current.telemetry != candidate.telemetry
-        || current.logging != candidate.logging
-        || current.audit != candidate.audit
-        || current.crypto != candidate.crypto
-        || current.optimization != candidate.optimization
-        || current.security != candidate.security
-    {
-        return Err(EngineError::InvalidState(
-            state,
-            "configuration update (engine startup-owned sections require a stopped client)",
-        ));
-    }
-    Ok(())
-}
 
 /// The main QuicFuscate engine providing full lifecycle control.
 ///
@@ -396,7 +129,19 @@ impl QuicFuscateEngine {
     /// A new `QuicFuscateEngine` instance or an error if validation fails.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         config.validate()?;
-        crate::crypto::install_data_aead_config(&config.crypto);
+        if super::config::requests_private_packet_protection(&config.crypto) {
+            log::warn!(
+                "private packet AEAD policy is retained for authenticated post-handshake upgrade; effective_owner=rustls-standard until the control boundary requested_preference={:?} requested_force={}",
+                config.crypto.aead_preference,
+                config.crypto.force_aead
+            );
+        }
+        if config.crypto.packet_protection_mode == qf_crypto::PacketProtectionMode::AdvancedRequired
+        {
+            return Err(EngineError::Config(
+                "advanced-required private packet protection is unavailable until TODO-883, TODO-884, and TODO-681 promotion gates are complete".to_string(),
+            ));
+        }
         let instrumentation = crate::instrumentation::global();
 
         let engine = Self {
@@ -477,6 +222,15 @@ impl QuicFuscateEngine {
             }
             EngineCommand::Reconnect => {
                 self.reconnect().map(|_| EngineCommandResult::State(self.state()))
+            }
+            EngineCommand::PrebuildAlternateCircuit(config) => {
+                self.prebuild_alternate_circuit(config).map(|_| EngineCommandResult::Ack)
+            }
+            EngineCommand::PromotePrebuiltAlternate => {
+                self.promote_prebuilt_alternate().map(|_| EngineCommandResult::Ack)
+            }
+            EngineCommand::RotateCircuit(config) => {
+                self.rotate_circuit(config).map(|_| EngineCommandResult::Ack)
             }
             EngineCommand::SetStealthMode(mode) => {
                 self.set_stealth_mode(mode).map(|_| EngineCommandResult::State(self.state()))
@@ -885,13 +639,8 @@ impl QuicFuscateEngine {
 
         let old_state = state;
 
-        // Resolve remote address for validation
-        let remote: SocketAddr = self.config.connection.remote.parse().map_err(|e| {
-            EngineError::Connection(format!(
-                "Invalid remote address {}: {}",
-                self.config.connection.remote, e
-            ))
-        })?;
+        // Resolve once and pin the exact entry shared by firewall and socket construction.
+        let remote = resolve_and_pin_client_entry(&mut self.config)?;
         let firewall_policy = VpnFirewallPolicy::new(
             if self.config.interface.tun_name.is_empty() {
                 "tun0"
@@ -923,6 +672,7 @@ impl QuicFuscateEngine {
             .client_runtime
             .as_mut()
             .ok_or_else(|| EngineError::Internal("Client runtime not initialized".to_string()))?;
+        runtime.update_next_config(&self.config)?;
 
         if runtime.is_connected()
             && (runtime.connection_loss_reason().is_some() || runtime.data_plane_fault().is_some())
@@ -1017,30 +767,13 @@ impl QuicFuscateEngine {
         self.notify_connected(remote);
 
         let kill_switch = self.kill_switch.clone();
-        let callbacks = self.callbacks.clone();
-        let event_sinks = self.event_sinks.clone();
         let on_loss = Arc::new(move |reason: DisconnectReason| {
             if let Some(ref kill_switch) = kill_switch {
                 if let Err(error) = kill_switch.on_vpn_disconnected() {
                     log::error!("Kill switch activation on connection loss failed: {}", error);
                 }
             }
-            {
-                let mut sinks = event_sinks.lock();
-                sinks.retain(|sink| {
-                    sink.send(EngineEvent::StateChanged {
-                        old: EngineState::Connected,
-                        new: EngineState::Running,
-                    })
-                    .is_ok()
-                        && sink.send(EngineEvent::Disconnected { reason: reason.clone() }).is_ok()
-                });
-            }
-            let callback_snapshot = callbacks.lock().clone();
-            for callback in callback_snapshot {
-                callback.on_state_change(EngineState::Connected, EngineState::Running);
-                callback.on_disconnected(reason.clone());
-            }
+            log::warn!("Connection loss detected by watchdog: {reason:?}");
         });
         let watchdog_result = self
             .client_runtime
@@ -1055,7 +788,193 @@ impl QuicFuscateEngine {
             return Err(error);
         }
 
+        if let Some(standby_config) = configured_standby(&self.config)? {
+            if let Err(error) = self.prebuild_alternate_circuit(standby_config) {
+                self.handle_connection_loss(DisconnectReason::Error(format!(
+                    "configured standby circuit failed readiness: {error}"
+                )));
+                return Err(error);
+            }
+        }
+
         Ok(())
+    }
+
+    fn validate_circuit_replacement_state(&self, action: &'static str) -> Result<(), EngineError> {
+        if self.config.engine.mode != EngineMode::Client {
+            return Err(EngineError::InvalidState(
+                self.state(),
+                "circuit replacement (not in client mode)",
+            ));
+        }
+        if self.state != EngineState::Connected {
+            return Err(EngineError::InvalidState(self.state, action));
+        }
+        Ok(())
+    }
+
+    /// Build and service a complete authenticated alternate while the primary remains active.
+    pub fn prebuild_alternate_circuit(
+        &mut self,
+        mut next_config: EngineConfig,
+    ) -> Result<(), EngineError> {
+        self.validate_circuit_replacement_state("prebuild alternate circuit")?;
+        next_config.validate().map_err(|error| {
+            EngineError::Config(format!("Invalid standby configuration: {error}"))
+        })?;
+        let current_entry =
+            self.client_runtime.as_ref().and_then(ClientRuntime::active_entry_addr).ok_or_else(
+                || EngineError::InvalidState(self.state(), "prebuild alternate circuit (no entry)"),
+            )?;
+        let next_entry = resolve_and_pin_client_entry(&mut next_config)?;
+        if current_entry == next_entry {
+            return Err(EngineError::Config(
+                "alternate circuit entry resolves to the active entry address".to_string(),
+            ));
+        }
+        let tun_name = if self.config.interface.tun_name.is_empty() {
+            "tun0".to_string()
+        } else {
+            self.config.interface.tun_name.clone()
+        };
+        let dns_servers = self
+            .client_runtime
+            .as_ref()
+            .and_then(ClientRuntime::assigned_dns_servers)
+            .unwrap_or_default();
+        let overlap_policy = VpnFirewallPolicy::new_for_servers(
+            &tun_name,
+            [current_entry, next_entry],
+            dns_servers.iter().copied(),
+        )
+        .map_err(|error| EngineError::Config(error.to_string()))?;
+        let current_policy =
+            VpnFirewallPolicy::new(&tun_name, current_entry, None, dns_servers.iter().copied())
+                .map_err(|error| EngineError::Config(error.to_string()))?;
+        if let Some(kill_switch) = self.kill_switch.as_ref() {
+            kill_switch
+                .on_vpn_connected(&overlap_policy)
+                .map_err(|error| EngineError::Internal(error.to_string()))?;
+        }
+
+        let prebuild = self
+            .client_runtime
+            .as_mut()
+            .ok_or_else(|| EngineError::Internal("Client runtime not initialized".to_string()))?
+            .prebuild_alternate_circuit(next_config);
+        if let Err(error) = prebuild {
+            if let Some(kill_switch) = self.kill_switch.as_ref() {
+                if let Err(restore_error) = kill_switch.on_vpn_connected(&current_policy) {
+                    return Err(EngineError::Internal(format!(
+                        "alternate prebuild failed: {error}; kill-switch rollback failed: {restore_error}"
+                    )));
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Commit the already-ready alternate and contract the kill-switch overlap allowance.
+    pub fn promote_prebuilt_alternate(&mut self) -> Result<(), EngineError> {
+        self.validate_circuit_replacement_state("promote alternate circuit")?;
+        let current_entry =
+            self.client_runtime.as_ref().and_then(ClientRuntime::active_entry_addr).ok_or_else(
+                || EngineError::InvalidState(self.state(), "promote alternate circuit (no entry)"),
+            )?;
+        let tun_name = if self.config.interface.tun_name.is_empty() {
+            "tun0".to_string()
+        } else {
+            self.config.interface.tun_name.clone()
+        };
+        let dns_servers = self
+            .client_runtime
+            .as_ref()
+            .and_then(ClientRuntime::assigned_dns_servers)
+            .unwrap_or_default();
+        let next_entry = {
+            let next_config = self
+                .client_runtime
+                .as_ref()
+                .and_then(ClientRuntime::prebuilt_alternate_config)
+                .ok_or_else(|| {
+                    EngineError::InvalidState(
+                        self.state(),
+                        "promote alternate circuit (none ready)",
+                    )
+                })?;
+            resolve_client_entry(next_config)?
+        };
+        let current_policy =
+            VpnFirewallPolicy::new(&tun_name, current_entry, None, dns_servers.iter().copied())
+                .map_err(|error| EngineError::Config(error.to_string()))?;
+
+        let promotion = self
+            .client_runtime
+            .as_mut()
+            .ok_or_else(|| EngineError::Internal("Client runtime not initialized".to_string()))?
+            .promote_prebuilt_alternate();
+        let next_config = match promotion {
+            Ok(config) => config,
+            Err(error) => {
+                if let Some(kill_switch) = self.kill_switch.as_ref() {
+                    if let Err(restore_error) = kill_switch.on_vpn_connected(&current_policy) {
+                        return Err(EngineError::Internal(format!(
+                            "alternate promotion failed: {error}; kill-switch rollback failed: {restore_error}"
+                        )));
+                    }
+                }
+                return Err(error);
+            }
+        };
+
+        self.config = next_config;
+        let committed_policy = VpnFirewallPolicy::new(&tun_name, next_entry, None, dns_servers)
+            .map_err(|error| EngineError::Config(error.to_string()))?;
+        if let Some(kill_switch) = self.kill_switch.as_ref() {
+            kill_switch.on_vpn_connected(&committed_policy).map_err(|error| {
+                EngineError::Internal(format!(
+                    "circuit rotated but old entry firewall allowance could not be removed: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Replace the active circuit only after a separately serviced generation is ready.
+    pub fn rotate_circuit(&mut self, next_config: EngineConfig) -> Result<(), EngineError> {
+        let has_standby = self.prebuilt_circuit_diagnostics().is_some();
+        if has_standby {
+            let matches = self
+                .client_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.prebuilt_alternate_matches(&next_config));
+            if !matches {
+                return Err(EngineError::Config(
+                    "requested rotation target does not match the authenticated prebuilt circuit"
+                        .to_string(),
+                ));
+            }
+        } else {
+            self.prebuild_alternate_circuit(next_config)?;
+        }
+        self.promote_prebuilt_alternate()?;
+        self.replenish_configured_alternate();
+        Ok(())
+    }
+
+    fn replenish_configured_alternate(&mut self) {
+        let (Some(primary), Some(alternate)) =
+            (self.config.circuit.clone(), self.config.alternate_circuit.clone())
+        else {
+            return;
+        };
+        let mut replenishment = self.config.clone();
+        replenishment.circuit = Some(alternate);
+        replenishment.alternate_circuit = Some(primary);
+        if let Err(error) = self.prebuild_alternate_circuit(replenishment) {
+            log::error!("Active circuit is healthy but standby replenishment failed: {error}");
+        }
     }
 
     /// Disconnect from remote server (client mode only).
@@ -1108,7 +1027,7 @@ impl QuicFuscateEngine {
     /// Activates the kill switch immediately if enabled, transitions to Running state,
     /// and emits a disconnected event with the given reason.
     pub fn handle_connection_loss(&mut self, reason: DisconnectReason) {
-        if self.state() != EngineState::Connected {
+        if self.state != EngineState::Connected {
             return;
         }
         log::warn!("Connection loss detected: {:?}, activating kill switch", reason);
@@ -1125,7 +1044,7 @@ impl QuicFuscateEngine {
             }
         }
 
-        let old_state = self.state();
+        let old_state = self.state;
         self.set_state(EngineState::Running);
         self.notify_state_change(old_state, EngineState::Running);
         self.notify_disconnected(reason);
@@ -1136,14 +1055,66 @@ impl QuicFuscateEngine {
         self.kill_switch.as_ref().map(|ks| ks.is_enabled()).unwrap_or(false)
     }
 
-    /// Compatibility probe for the runtime-owned automatic loss watchdog.
+    /// Service a watchdog loss and promote a healthy prebuilt circuit before disconnecting.
     ///
-    /// Loss detection and firewall activation are automatic. This method no
-    /// longer drives a second polling loop; it only reports whether the runtime
-    /// watchdog has already handled a loss.
+    /// Product hosts call this from their bounded engine-owner loop. The watchdog activates the
+    /// kill switch immediately; this owner-side step performs the mutation-heavy route swap that
+    /// cannot run from the borrowed connection task.
+    pub fn service_connection_health(&mut self) -> Result<bool, EngineError> {
+        let Some(reason) =
+            self.client_runtime.as_ref().and_then(ClientRuntime::connection_loss_reason).or_else(
+                || {
+                    self.client_runtime
+                        .as_ref()
+                        .and_then(ClientRuntime::data_plane_fault)
+                        .map(DisconnectReason::DataPlane)
+                },
+            )
+        else {
+            return Ok(false);
+        };
+
+        let standby_ready = self.prebuilt_circuit_diagnostics().is_some_and(|diagnostics| {
+            diagnostics.lifecycle == crate::implementations::client::CircuitLifecycleState::Ready
+        });
+        if standby_ready {
+            let fallback_promotion = self
+                .client_runtime
+                .as_ref()
+                .and_then(ClientRuntime::prebuilt_alternate_config)
+                .is_some_and(|standby| is_configured_single_hop_fallback(&self.config, standby));
+            match self.promote_prebuilt_alternate() {
+                Ok(()) => {
+                    log::warn!("Promoted prebuilt circuit after active-path loss: {reason:?}");
+                    if fallback_promotion {
+                        if let Some(connection) =
+                            self.client_runtime.as_ref().and_then(ClientRuntime::connection)
+                        {
+                            connection.mark_circuit_degraded();
+                        }
+                        log::warn!(
+                            "Circuit is operating on the explicitly configured VPN-contained single-hop fallback"
+                        );
+                    } else {
+                        self.replenish_configured_alternate();
+                    }
+                    return Ok(true);
+                }
+                Err(error) => {
+                    log::error!("Prebuilt circuit promotion failed after active loss: {error}");
+                }
+            }
+        }
+
+        self.handle_connection_loss(reason);
+        Ok(true)
+    }
+
+    /// Compatibility probe that also services any pending watchdog transition.
     pub fn check_heartbeat(&mut self) -> bool {
-        self.client_runtime.as_ref().is_some_and(|runtime| {
-            runtime.connection_loss_reason().is_some() || runtime.data_plane_fault().is_some()
+        self.service_connection_health().unwrap_or_else(|error| {
+            log::error!("Connection health service failed: {error}");
+            false
         })
     }
 
@@ -1202,6 +1173,23 @@ impl QuicFuscateEngine {
             .as_ref()
             .and_then(|runtime| runtime.connection())
             .and_then(|conn| conn.server_name())
+    }
+
+    /// Return bounded circuit health without endpoint or credential material.
+    pub fn active_circuit_diagnostics(
+        &self,
+    ) -> Option<crate::implementations::client::CircuitDiagnostics> {
+        self.client_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.connection())
+            .map(|connection| connection.circuit_diagnostics())
+    }
+
+    /// Return bounded health for the prebuilt alternate, when one is retained.
+    pub fn prebuilt_circuit_diagnostics(
+        &self,
+    ) -> Option<crate::implementations::client::CircuitDiagnostics> {
+        self.client_runtime.as_ref().and_then(ClientRuntime::prebuilt_alternate_diagnostics)
     }
 
     /// Set the FEC mode at runtime.
@@ -1425,142 +1413,6 @@ impl QuicFuscateEngine {
             self.state(),
             EngineState::Running | EngineState::Connecting | EngineState::Connected
         )
-    }
-
-    // ========================================================================
-    // Internal helpers
-    // ========================================================================
-
-    fn refresh_stats(&self) {
-        let metrics = &self.instrumentation;
-        if let Some(metrics) = self.server_metrics.as_ref() {
-            self.stats
-                .bytes_sent
-                .store(metrics.bytes_out.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats
-                .bytes_received
-                .store(metrics.bytes_in.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats
-                .packets_sent
-                .store(metrics.packets_out.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats
-                .packets_received
-                .store(metrics.packets_in.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats
-                .active_streams
-                .store(metrics.clients_active.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats.rtt_ms.store(0, Ordering::Relaxed);
-            self.stats.loss_percent.store(0, Ordering::Relaxed);
-            self.stats
-                .data_plane_ready
-                .store(metrics.tun_data_plane_ready.load(Ordering::Acquire), Ordering::Relaxed);
-            self.stats
-                .data_plane_faults
-                .store(metrics.tun_data_plane_faults.load(Ordering::Relaxed), Ordering::Relaxed);
-        } else {
-            self.stats
-                .bytes_sent
-                .store(metrics.transport.bytes_out.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats
-                .bytes_received
-                .store(metrics.transport.bytes_in.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats
-                .packets_sent
-                .store(metrics.transport.packets_out.load(Ordering::Relaxed), Ordering::Relaxed);
-            self.stats
-                .packets_received
-                .store(metrics.transport.packets_in.load(Ordering::Relaxed), Ordering::Relaxed);
-            let active_streams = self
-                .client_runtime
-                .as_ref()
-                .and_then(|runtime| runtime.connection())
-                .map(|conn| u64::from(conn.is_established()))
-                .unwrap_or(0);
-            self.stats.active_streams.store(active_streams, Ordering::Relaxed);
-            self.stats
-                .rtt_ms
-                .store(metrics.transport.avg_rtt_ms().round() as u64, Ordering::Relaxed);
-            self.stats
-                .loss_percent
-                .store(metrics.transport.loss_rate().round() as u64, Ordering::Relaxed);
-            if let Some(runtime) = self.client_runtime.as_ref() {
-                self.stats
-                    .data_plane_ready
-                    .store(u64::from(runtime.data_plane_available()), Ordering::Relaxed);
-                self.stats.data_plane_faults.store(
-                    runtime.io_driver_stats().map(|stats| stats.data_plane_faults).unwrap_or(0),
-                    Ordering::Relaxed,
-                );
-            } else {
-                self.stats.data_plane_ready.store(0, Ordering::Relaxed);
-                self.stats.data_plane_faults.store(0, Ordering::Relaxed);
-            }
-        }
-        if let Some(start) = self.start_time {
-            self.stats
-                .uptime_secs
-                .store(self.clock.elapsed_since(start).as_secs(), Ordering::Relaxed);
-        }
-        self.stats.stealth_mode.store(self.config.stealth.mode as u64, Ordering::Relaxed);
-        let effective_fec = self.active_fec_mode().unwrap_or(self.config.fec.mode);
-        self.stats.fec_mode.store(effective_fec as u64, Ordering::Relaxed);
-    }
-
-    fn set_state(&mut self, state: EngineState) {
-        self.state = state;
-    }
-
-    fn fail_start(&mut self, old_state: EngineState, error: EngineError) -> EngineError {
-        self.set_state(EngineState::Error);
-        self.notify_state_change(old_state, EngineState::Error);
-        error
-    }
-
-    fn notify_state_change(&self, old: EngineState, new: EngineState) {
-        self.emit_event(EngineEvent::StateChanged { old, new });
-        for cb in self.callbacks.lock().clone() {
-            cb.on_state_change(old, new);
-        }
-    }
-
-    fn notify_connected(&self, remote: SocketAddr) {
-        self.emit_event(EngineEvent::Connected { remote });
-        for cb in self.callbacks.lock().clone() {
-            cb.on_connected(remote);
-        }
-    }
-
-    fn notify_disconnected(&self, reason: DisconnectReason) {
-        self.emit_event(EngineEvent::Disconnected { reason: reason.clone() });
-        for cb in self.callbacks.lock().clone() {
-            cb.on_disconnected(reason.clone());
-        }
-    }
-
-    fn notify_stats_update(&self, stats: &StatsSnapshot) {
-        self.emit_event(EngineEvent::StatsUpdated { stats: stats.clone() });
-        for cb in self.callbacks.lock().clone() {
-            cb.on_stats_update(stats);
-        }
-    }
-
-    fn notify_stealth_escalation(&self, from: u8, to: u8) {
-        self.emit_event(EngineEvent::StealthEscalated { from, to });
-        for cb in self.callbacks.lock().clone() {
-            cb.on_stealth_escalation(from, to);
-        }
-    }
-
-    fn notify_error(&self, error: &EngineError) {
-        self.emit_event(EngineEvent::Error { error: error.clone() });
-        for cb in self.callbacks.lock().clone() {
-            cb.on_error(error);
-        }
-    }
-
-    fn emit_event(&self, event: EngineEvent) {
-        let mut sinks = self.event_sinks.lock();
-        sinks.retain(|tx| tx.send(event.clone()).is_ok());
     }
 }
 

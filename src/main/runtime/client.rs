@@ -1,5 +1,78 @@
 use super::*;
 
+async fn run_circuit_client(
+    config_path: &Path,
+    config: quicfuscate::engine::EngineConfig,
+) -> std::io::Result<()> {
+    use quicfuscate::engine::{EngineState, QuicFuscateEngine};
+
+    let mut engine = QuicFuscateEngine::new(config).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid circuit configuration {}: {error}", config_path.display()),
+        )
+    })?;
+    engine
+        .start()
+        .map_err(|error| std::io::Error::other(format!("circuit engine start failed: {error}")))?;
+    if let Err(error) = engine.connect() {
+        let cleanup = engine.stop().err();
+        return Err(std::io::Error::other(match cleanup {
+            Some(cleanup) => {
+                format!("circuit connection failed: {error}; cleanup failed: {cleanup}")
+            }
+            None => format!("circuit connection failed: {error}"),
+        }));
+    }
+
+    info!("Circuit client connected from canonical engine configuration {}", config_path.display());
+    let mut health_tick = interval(Duration::from_millis(250));
+    health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let shutdown_signal = wait_shutdown_signal();
+    tokio::pin!(shutdown_signal);
+
+    let runtime_error = loop {
+        tokio::select! {
+            _ = &mut shutdown_signal => break None,
+            _ = health_tick.tick() => {
+                match engine.service_connection_health() {
+                    Ok(false) => {}
+                    Ok(true) if engine.state() == EngineState::Connected => {
+                        info!("Circuit health owner promoted a ready alternate generation");
+                    }
+                    Ok(true) => {
+                        break Some(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "circuit failed without a ready alternate; traffic remains fail-closed",
+                        ));
+                    }
+                    Err(error) => {
+                        break Some(std::io::Error::other(format!(
+                            "circuit health service failed: {error}"
+                        )));
+                    }
+                }
+            }
+        }
+    };
+
+    let disconnect_error =
+        (engine.state() == EngineState::Connected).then(|| engine.disconnect().err()).flatten();
+    let stop_error = engine.stop().err();
+    let cleanup_error = disconnect_error.or(stop_error);
+    match (runtime_error, cleanup_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) => Err(error),
+        (None, Some(cleanup)) => {
+            Err(std::io::Error::other(format!("circuit cleanup failed: {cleanup}")))
+        }
+        (Some(error), Some(cleanup)) => Err(std::io::Error::new(
+            error.kind(),
+            format!("{error}; circuit cleanup failed: {cleanup}"),
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_client(
     remote_addr_str: &str,
@@ -69,6 +142,19 @@ pub(super) async fn run_client(
             info!("- {}@{}", format!("{:?}", b).to_lowercase(), format!("{:?}", o).to_lowercase());
         }
         return Ok(());
+    }
+
+    if let Some(config_path) = config_path {
+        let engine_config =
+            quicfuscate::engine::EngineConfig::from_file(config_path).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid configuration {}: {error}", config_path.display()),
+                )
+            })?;
+        if engine_config.circuit.is_some() {
+            return run_circuit_client(config_path, engine_config).await;
+        }
     }
 
     if tun_enable

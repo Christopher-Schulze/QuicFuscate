@@ -17,6 +17,35 @@ fn engine_tun_test_config() -> EngineConfig {
 }
 
 #[test]
+fn canonical_circuit_example_parses_and_validates() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/circuit-client.example.toml");
+    let config = EngineConfig::from_file(&path).expect("parse canonical circuit example");
+    config.validate().expect("validate canonical circuit example");
+    assert_eq!(config.circuit.as_ref().expect("circuit").hops.len(), 3);
+}
+
+#[test]
+fn advanced_required_private_packet_policy_fails_closed_until_promotion_gates() {
+    let mut config = EngineConfig::default();
+    config.crypto.packet_protection_mode = qf_engine_types::PacketProtectionMode::AdvancedRequired;
+    config.crypto.aead_preference = qf_engine_types::AeadPreference::Aegis128L;
+
+    let error = match QuicFuscateEngine::new(config) {
+        Ok(_) => panic!("advanced-required must not construct before promotion gates"),
+        Err(error) => error,
+    };
+    match error {
+        EngineError::Config(message) => {
+            assert!(message.contains("TODO-883"), "error must identify TODO-883: {message}");
+            assert!(message.contains("TODO-884"), "error must identify TODO-884: {message}");
+            assert!(message.contains("TODO-681"), "error must identify TODO-681: {message}");
+        }
+        other => panic!("advanced-required returned the wrong error: {other:?}"),
+    }
+}
+
+#[test]
 fn test_engine_lifecycle() {
     let _tun_guard = engine_tun_test_guard();
     if !crate::tun_available_for_engine_tests() {
@@ -166,6 +195,92 @@ fn running_generic_server_rejects_control_plane_config_mutation() {
 
     assert!(matches!(error, EngineError::InvalidState(EngineState::Running, _)));
     assert!(!engine.config().stealth.enable_traffic_padding);
+}
+
+#[test]
+fn circuit_entry_resolution_is_pinned_for_firewall_and_runtime_reuse() {
+    let mut config = EngineConfig {
+        circuit: Some(qf_engine_types::CircuitConfig {
+            hops: vec![qf_engine_types::HopConfig {
+                label: "Exit".to_string(),
+                endpoint: "127.0.0.1:4433".to_string(),
+                sni: "localhost".to_string(),
+                qkey_id: "000000000001".to_string(),
+                qkey_token_ref: "env:QKEY_EXIT".to_string(),
+                ..qf_engine_types::HopConfig::default()
+            }],
+            ..qf_engine_types::CircuitConfig::default()
+        }),
+        ..EngineConfig::default()
+    };
+    let resolved = resolve_and_pin_client_entry(&mut config).expect("pin entry");
+    assert_eq!(resolved, "127.0.0.1:4433".parse().expect("expected entry"));
+    assert_eq!(resolve_client_entry(&config).expect("reuse pin"), resolved);
+    assert_eq!(config.circuit.as_ref().expect("circuit").hops[0].pinned_endpoint, Some(resolved));
+    assert!(!toml::to_string(&config).expect("serialize config").contains("pinned_endpoint"));
+}
+
+fn fallback_test_hop(
+    endpoint: &str,
+    qkey_id: &str,
+    role: qf_engine_types::HopRole,
+) -> qf_engine_types::HopConfig {
+    qf_engine_types::HopConfig {
+        label: endpoint.to_string(),
+        endpoint: endpoint.to_string(),
+        sni: "relay.example.com".to_string(),
+        qkey_id: qkey_id.to_string(),
+        qkey_token_ref: format!("env:QKEY_{qkey_id}"),
+        role,
+        ..qf_engine_types::HopConfig::default()
+    }
+}
+
+#[test]
+fn configured_standby_prefers_an_alternate_then_derives_explicit_exit_fallback() {
+    let primary = qf_engine_types::CircuitConfig {
+        hops: vec![
+            fallback_test_hop(
+                "entry.example.com:4433",
+                "000000000001",
+                qf_engine_types::HopRole::Relay,
+            ),
+            fallback_test_hop(
+                "exit.example.com:4433",
+                "000000000002",
+                qf_engine_types::HopRole::Exit,
+            ),
+        ],
+        allow_single_hop_fallback: true,
+        ..qf_engine_types::CircuitConfig::default()
+    };
+    let mut config = EngineConfig { circuit: Some(primary), ..EngineConfig::default() };
+    let fallback = configured_standby(&config).expect("derive standby").expect("fallback standby");
+    assert!(is_configured_single_hop_fallback(&config, &fallback));
+    assert_eq!(fallback.circuit.as_ref().expect("fallback circuit").hops.len(), 1);
+    assert_eq!(
+        fallback.circuit.as_ref().expect("fallback circuit").hops[0].endpoint,
+        "exit.example.com:4433"
+    );
+
+    let alternate = qf_engine_types::CircuitConfig {
+        hops: vec![fallback_test_hop(
+            "alternate.example.com:4433",
+            "000000000003",
+            qf_engine_types::HopRole::Exit,
+        )],
+        ..qf_engine_types::CircuitConfig::default()
+    };
+    config.alternate_circuit = Some(alternate.clone());
+    let standby =
+        configured_standby(&config).expect("derive alternate").expect("alternate standby");
+    assert!(!is_configured_single_hop_fallback(&config, &standby));
+    assert!(standby
+        .circuit
+        .as_ref()
+        .expect("alternate circuit")
+        .has_same_operator_configuration(&alternate));
+    assert!(standby.alternate_circuit.is_some());
 }
 
 #[test]

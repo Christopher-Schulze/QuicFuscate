@@ -15,6 +15,7 @@
 //! ```
 
 mod backend;
+mod circuit_runtime;
 mod connection;
 mod dns_runtime;
 #[cfg(test)]
@@ -26,8 +27,11 @@ pub mod profile;
 pub mod quality;
 mod runtime;
 mod subsystems;
+#[cfg(test)]
+mod tests;
 
 pub use backend::*;
+pub use circuit_runtime::{CircuitDiagnostics, CircuitHopDiagnostics, CircuitLifecycleState};
 pub use connection::*;
 pub use dns_runtime::ClientDnsRuntime;
 pub use io_driver::*;
@@ -47,6 +51,8 @@ use crate::optimize::MemoryPool;
 use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
 use qf_engine_types::{DataPlaneFault, DisconnectReason, EngineConfig, EngineError, EngineState};
+
+const TRANSPORT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Client runtime handle for the VPN client.
 ///
@@ -93,12 +99,39 @@ pub struct ClientRuntime {
     loss_reason: Arc<parking_lot::Mutex<Option<DisconnectReason>>>,
     /// First terminal packet-data-plane fault for the active session.
     data_plane_fault: Arc<parking_lot::Mutex<Option<DataPlaneFault>>>,
+    /// Watchdog contract retained across make-before-break generations.
+    loss_watchdog: Option<LossWatchdogRegistration>,
+    /// Fully authenticated replacement kept live without TUN ownership.
+    standby_transport: Option<StandbyClientTransport>,
 }
 
 /// Client subsystem handles (initialized during start).
 pub struct ClientSubsystems {
     /// Stealth manager for obfuscation
     pub stealth: Arc<crate::stealth::StealthManager>,
+}
+
+struct PreparedClientTransport {
+    generation: u64,
+    connection: ClientConnection,
+    socket: Arc<UdpSocket>,
+    assignment: crate::control_plane::ClientAssignment,
+    tunnel_stream_id: u64,
+    ingress: ClientTunnelIngress,
+    io_driver: Arc<IoDriver>,
+}
+
+struct StandbyClientTransport {
+    config: EngineConfig,
+    prepared: PreparedClientTransport,
+    handle: JoinHandle<()>,
+    fault: Arc<parking_lot::Mutex<Option<DataPlaneFault>>>,
+}
+
+#[derive(Clone)]
+struct LossWatchdogRegistration {
+    timeout: std::time::Duration,
+    on_loss: Arc<dyn Fn(DisconnectReason) + Send + Sync>,
 }
 
 /// Internal client state.
@@ -220,6 +253,8 @@ impl ClientRuntime {
             )),
             loss_reason: Arc::new(parking_lot::Mutex::new(None)),
             data_plane_fault: Arc::new(parking_lot::Mutex::new(None)),
+            loss_watchdog: None,
+            standby_transport: None,
         })
     }
 
@@ -469,48 +504,6 @@ impl ClientRuntime {
         Ok(())
     }
 
-    fn rollback_failed_connect(&mut self) {
-        if let Some(io_driver) = &self.io_driver {
-            io_driver.shutdown();
-        }
-        let handles = std::mem::take(&mut self.io_handles);
-        for handle in &handles {
-            handle.abort();
-        }
-        if let Some(runtime) = self.runtime.as_ref() {
-            runtime.block_on(async {
-                for handle in handles {
-                    if let Err(error) = handle.await {
-                        if !error.is_cancelled() {
-                            log::warn!(
-                                "Client I/O task join failed during connect rollback: {}",
-                                error
-                            );
-                        }
-                    }
-                }
-            });
-        }
-        #[cfg(all(target_os = "linux", feature = "io_uring"))]
-        if let Some(io_driver) = self.io_driver.as_ref() {
-            if let Err(error) = io_driver.join_io_uring_worker() {
-                log::warn!("Client io_uring worker join failed during connect rollback: {error}");
-            }
-        }
-        if let Some(mut connection) = self.connection.take() {
-            connection.close(0, b"Connect setup failed");
-            log::info!("QUIC connection closed after failed connect");
-        }
-        self.socket = None;
-        self.io_driver = None;
-        self.tunnel_stream_id = None;
-        self.assignment = None;
-        if let Some(tun) = self.tun.take() {
-            log::info!("Closing TUN interface after failed connect: {}", tun.lock().name());
-        }
-        self.state = ClientState::Running;
-    }
-
     fn next_connection_generation(&mut self) -> Result<u64, EngineError> {
         let generation = self
             .connection_generation
@@ -523,6 +516,183 @@ impl ClientRuntime {
         Ok(generation)
     }
 
+    fn assignment_timeout(config: &EngineConfig) -> std::time::Duration {
+        config.circuit.as_ref().map_or(std::time::Duration::from_secs(10), |circuit| {
+            std::time::Duration::from_millis(
+                circuit
+                    .hops
+                    .iter()
+                    .map(|hop| hop.connect_timeout_ms)
+                    .fold(5_000u64, u64::saturating_add),
+            )
+        })
+    }
+
+    fn prepare_transport(
+        &self,
+        config: &EngineConfig,
+        generation: u64,
+    ) -> Result<PreparedClientTransport, EngineError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?
+            .clone();
+        let connection = ClientConnection::connect_with_runtime_and_clock(
+            config,
+            self.stealth_runtime.clone(),
+            &self.clock,
+        )?;
+        let local_addr = connection.local_addr();
+        let remote_addr = connection.peer_addr();
+        let shared_connection = connection.shared();
+        let mut connection = Some(connection);
+
+        let setup = {
+            let _runtime_guard = runtime.enter();
+            (|| -> Result<PreparedClientTransport, EngineError> {
+                let io_config = IoDriverConfig::default();
+                let std_socket = std::net::UdpSocket::bind(local_addr)
+                    .map_err(|error| EngineError::Io(format!("UDP bind failed: {error}")))?;
+                std_socket
+                    .set_nonblocking(true)
+                    .map_err(|error| EngineError::Io(format!("UDP nonblocking failed: {error}")))?;
+                let socket_ref = SockRef::from(&std_socket);
+                if let Err(error) = socket_ref.set_recv_buffer_size(io_config.socket_buffer_size) {
+                    log::debug!("UDP recv buffer size hint rejected: {error}");
+                }
+                if let Err(error) = socket_ref.set_send_buffer_size(io_config.socket_buffer_size) {
+                    log::debug!("UDP send buffer size hint rejected: {error}");
+                }
+                std_socket
+                    .connect(remote_addr)
+                    .map_err(|error| EngineError::Io(format!("UDP connect failed: {error}")))?;
+                let socket = Arc::new(
+                    UdpSocket::from_std(std_socket)
+                        .map_err(|error| EngineError::Io(format!("UDP setup failed: {error}")))?,
+                );
+                let io_driver = Arc::new(IoDriver::new_with_clock(io_config, &self.clock));
+                let deadline = self
+                    .clock
+                    .checked_deadline_after(Self::assignment_timeout(config))
+                    .ok_or_else(|| {
+                        EngineError::Connection("client assignment deadline overflow".to_string())
+                    })?;
+                let assignment = runtime.block_on(io_driver.negotiate_assignment(
+                    &shared_connection,
+                    &socket,
+                    generation,
+                    deadline,
+                ))?;
+                let ingress = ClientTunnelIngress::new();
+                let tunnel_stream_id = {
+                    let mut connection_guard = shared_connection.lock();
+                    if !connection_guard.masque_tunnel_established() {
+                        return Err(EngineError::Connection(
+                            "server assignment arrived before MASQUE readiness".to_string(),
+                        ));
+                    }
+                    let stream_id =
+                        connection_guard.open_http3_stream_post("/tun").map_err(|error| {
+                            EngineError::Connection(format!(
+                                "client /tun stream open failed: {error}"
+                            ))
+                        })?;
+                    let callback_ingress = ingress.clone();
+                    connection_guard.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(
+                        Box::new(move |payload: &[u8]| {
+                            if !callback_ingress.push(payload) {
+                                log::debug!(
+                                    "client MASQUE ingress queue rejected {} bytes",
+                                    payload.len()
+                                );
+                            }
+                        }),
+                    )));
+                    stream_id
+                };
+                Ok(PreparedClientTransport {
+                    generation,
+                    connection: connection.take().ok_or_else(|| {
+                        EngineError::Internal(
+                            "prepared client connection ownership disappeared".to_string(),
+                        )
+                    })?,
+                    socket,
+                    assignment,
+                    tunnel_stream_id,
+                    ingress,
+                    io_driver,
+                })
+            })()
+        };
+        if setup.is_err() {
+            if let Some(connection) = connection.as_mut() {
+                connection.close(0, b"Transport preparation failed");
+            }
+        }
+        setup
+    }
+
+    fn spawn_transport_tasks(
+        &self,
+        prepared: &PreparedClientTransport,
+        tun: Arc<parking_lot::Mutex<TunInterface>>,
+        runtime: &runtime::SharedRuntime,
+    ) -> Vec<JoinHandle<()>> {
+        let shared_connection = prepared.connection.shared();
+        let outbound = runtime.spawn({
+            let io_driver = prepared.io_driver.clone();
+            let tun = tun.clone();
+            let connection = shared_connection.clone();
+            let socket = prepared.socket.clone();
+            let tunnel_stream_id = prepared.tunnel_stream_id;
+            let data_plane_fault = self.data_plane_fault.clone();
+            async move {
+                if let Err(error) =
+                    io_driver.run_outbound(tun, connection, socket, tunnel_stream_id).await
+                {
+                    log::warn!("Client outbound I/O task exited with error: {error:?}");
+                    publish_data_plane_fault(&data_plane_fault, &io_driver, error);
+                }
+            }
+        });
+        let inbound = runtime.spawn({
+            let io_driver = prepared.io_driver.clone();
+            let tun = tun.clone();
+            let connection = shared_connection;
+            let socket = prepared.socket.clone();
+            let ingress = prepared.ingress.clone();
+            let handshake_event = self.handshake_event.clone();
+            let data_plane_fault = self.data_plane_fault.clone();
+            async move {
+                if let Err(error) =
+                    io_driver.run_inbound(tun, connection, socket, ingress, handshake_event).await
+                {
+                    log::warn!("Client inbound I/O task exited with error: {error:?}");
+                    publish_data_plane_fault(&data_plane_fault, &io_driver, error);
+                }
+            }
+        });
+        vec![outbound, inbound]
+    }
+
+    fn install_transport(
+        &mut self,
+        prepared: PreparedClientTransport,
+        tun: Arc<parking_lot::Mutex<TunInterface>>,
+        runtime: &runtime::SharedRuntime,
+    ) {
+        let handles = self.spawn_transport_tasks(&prepared, tun, runtime);
+        self.connection_generation = prepared.generation;
+        self.tunnel_stream_id = Some(prepared.tunnel_stream_id);
+        self.assignment = Some(prepared.assignment);
+        self.socket = Some(prepared.socket);
+        self.io_driver = Some(prepared.io_driver);
+        self.connection = Some(prepared.connection);
+        self.io_handles = handles;
+    }
+
     /// Connect to the remote server.
     pub fn connect(&mut self) -> Result<(), EngineError> {
         if self.state != ClientState::Running {
@@ -532,156 +702,34 @@ impl ClientRuntime {
         *self.loss_reason.lock() = None;
         *self.data_plane_fault.lock() = None;
         let generation = self.next_connection_generation()?;
-
-        // Create QUIC connection
-        let conn = ClientConnection::connect_with_runtime_and_clock(
-            &self.config,
-            self.stealth_runtime.clone(),
-            &self.clock,
-        )?;
-        let local_addr = conn.local_addr();
-        let remote_addr = conn.peer_addr();
-        self.connection = Some(conn);
-
-        let runtime = match self.runtime.as_ref().cloned() {
-            Some(runtime) => runtime,
-            None => {
-                self.rollback_failed_connect();
-                return Err(EngineError::Internal("Runtime not initialized".to_string()));
+        let config = self.config.clone();
+        let mut prepared = self.prepare_transport(&config, generation)?;
+        let mut tun_config = client_tun_config_from_assignment(&config, &prepared.assignment)?;
+        let effective_transport_mtu =
+            u16::try_from(prepared.connection.shared().lock().effective_tunnel_mtu())
+                .unwrap_or(u16::MAX);
+        tun_config.mtu = tun_config.mtu.min(effective_transport_mtu);
+        let tun = match TunInterface::open(tun_config, self.pool.clone()) {
+            Ok(tun) => Arc::new(parking_lot::Mutex::new(tun)),
+            Err(error) => {
+                prepared.connection.close(0, b"TUN open failed");
+                return Err(EngineError::Tun(format!(
+                    "server-assigned TUN open failed: {error:?}"
+                )));
             }
         };
-        // `tokio::net::UdpSocket::from_std` requires an active runtime context.
-        // The engine API is sync, so we must enter our runtime explicitly.
-        let setup_result = {
-            let _rt_guard = runtime.enter();
-            (|| -> Result<(), EngineError> {
-                let io_config = IoDriverConfig::default();
-                let std_socket = std::net::UdpSocket::bind(local_addr)
-                    .map_err(|e| EngineError::Io(format!("UDP bind failed: {}", e)))?;
-                std_socket
-                    .set_nonblocking(true)
-                    .map_err(|e| EngineError::Io(format!("UDP nonblocking failed: {}", e)))?;
-                let sock_ref = SockRef::from(&std_socket);
-                if let Err(e) = sock_ref.set_recv_buffer_size(io_config.socket_buffer_size) {
-                    log::debug!("UDP recv buffer size hint rejected: {}", e);
-                }
-                if let Err(e) = sock_ref.set_send_buffer_size(io_config.socket_buffer_size) {
-                    log::debug!("UDP send buffer size hint rejected: {}", e);
-                }
-                std_socket
-                    .connect(remote_addr)
-                    .map_err(|e| EngineError::Io(format!("UDP connect failed: {}", e)))?;
-                let socket = UdpSocket::from_std(std_socket)
-                    .map_err(|e| EngineError::Io(format!("UDP setup failed: {}", e)))?;
-                let socket = Arc::new(socket);
-                self.socket = Some(socket.clone());
-
-                let io_driver = Arc::new(IoDriver::new_with_clock(io_config, &self.clock));
-                self.io_driver = Some(io_driver.clone());
-                let shared_conn = self
-                    .connection
-                    .as_ref()
-                    .ok_or_else(|| {
-                        EngineError::Connection("Connection not initialized".to_string())
-                    })?
-                    .shared();
-
-                {
-                    let (lock, _) = &*self.handshake_event;
-                    *lock.lock() = false;
-                }
-                let deadline = self
-                    .clock
-                    .checked_deadline_after(std::time::Duration::from_secs(10))
-                    .ok_or_else(|| {
-                        EngineError::Connection("client assignment deadline overflow".to_string())
-                    })?;
-                let assignment = runtime.block_on(io_driver.negotiate_assignment(
-                    &shared_conn,
-                    &socket,
-                    generation,
-                    deadline,
-                ))?;
-                let mut tun_config = client_tun_config_from_assignment(&self.config, &assignment)?;
-                let effective_transport_mtu = {
-                    let conn_guard = shared_conn.lock();
-                    u16::try_from(conn_guard.effective_tunnel_mtu()).unwrap_or(u16::MAX)
-                };
-                tun_config.mtu = tun_config.mtu.min(effective_transport_mtu);
-                let tun = TunInterface::open(tun_config, self.pool.clone()).map_err(|error| {
-                    EngineError::Tun(format!("server-assigned TUN open failed: {error:?}"))
-                })?;
-                log::info!("TUN interface opened from server assignment: {}", tun.name());
-                let tun = Arc::new(parking_lot::Mutex::new(tun));
-                self.tun = Some(tun.clone());
-                self.assignment = Some(assignment);
-
-                let ingress = ClientTunnelIngress::new();
-                let tunnel_stream_id = {
-                    let mut conn_guard = shared_conn.lock();
-                    if !conn_guard.masque_tunnel_established() {
-                        return Err(EngineError::Connection(
-                            "server assignment arrived before MASQUE readiness".to_string(),
-                        ));
-                    }
-                    let stream_id = conn_guard.open_http3_stream_post("/tun").map_err(|error| {
-                        EngineError::Connection(format!("client /tun stream open failed: {error}"))
-                    })?;
-                    let ingress_for_callback = ingress.clone();
-                    conn_guard.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
-                        move |payload: &[u8]| {
-                            if !ingress_for_callback.push(payload) {
-                                log::debug!(
-                                    "client MASQUE ingress queue rejected {} bytes",
-                                    payload.len()
-                                );
-                            }
-                        },
-                    ))));
-                    stream_id
-                };
-                self.tunnel_stream_id = Some(tunnel_stream_id);
-
-                let outbound = runtime.spawn({
-                    let io_driver = io_driver.clone();
-                    let tun = tun.clone();
-                    let conn = shared_conn.clone();
-                    let socket = socket.clone();
-                    let data_plane_fault = self.data_plane_fault.clone();
-                    async move {
-                        if let Err(e) =
-                            io_driver.run_outbound(tun, conn, socket, tunnel_stream_id).await
-                        {
-                            log::warn!("Client outbound I/O task exited with error: {:?}", e);
-                            publish_data_plane_fault(&data_plane_fault, &io_driver, e);
-                        }
-                    }
-                });
-                let inbound = runtime.spawn({
-                    let io_driver = io_driver.clone();
-                    let tun = tun.clone();
-                    let conn = shared_conn.clone();
-                    let socket = socket.clone();
-                    let ingress = ingress.clone();
-                    let hs_event = self.handshake_event.clone();
-                    let data_plane_fault = self.data_plane_fault.clone();
-                    async move {
-                        if let Err(e) =
-                            io_driver.run_inbound(tun, conn, socket, ingress, hs_event).await
-                        {
-                            log::warn!("Client inbound I/O task exited with error: {:?}", e);
-                            publish_data_plane_fault(&data_plane_fault, &io_driver, e);
-                        }
-                    }
-                });
-                self.io_handles = vec![outbound, inbound];
-                Ok(())
-            })()
-        };
-        if let Err(error) = setup_result {
-            self.rollback_failed_connect();
-            return Err(error);
+        log::info!("TUN interface opened from server assignment: {}", tun.lock().name());
+        {
+            let (lock, _) = &*self.handshake_event;
+            *lock.lock() = false;
         }
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?
+            .clone();
+        self.install_transport(prepared, tun.clone(), &runtime);
+        self.tun = Some(tun);
 
         self.state = ClientState::Connected;
         log::info!("Connected to server");
@@ -699,6 +747,7 @@ impl ClientRuntime {
         timeout: std::time::Duration,
         on_loss: Arc<dyn Fn(DisconnectReason) + Send + Sync>,
     ) -> Result<(), EngineError> {
+        let registration = LossWatchdogRegistration { timeout, on_loss };
         let runtime = self
             .runtime
             .as_ref()
@@ -714,10 +763,25 @@ impl ClientRuntime {
             .as_ref()
             .ok_or_else(|| EngineError::Internal("I/O driver not initialized".to_string()))?
             .clone();
+        let watchdog = self.spawn_loss_watchdog(&registration, &runtime, connection, io_driver);
+        self.loss_watchdog = Some(registration);
+        self.io_handles.push(watchdog);
+        Ok(())
+    }
+
+    fn spawn_loss_watchdog(
+        &self,
+        registration: &LossWatchdogRegistration,
+        runtime: &runtime::SharedRuntime,
+        connection: Arc<parking_lot::Mutex<circuit_runtime::ClientDataPlane>>,
+        io_driver: Arc<IoDriver>,
+    ) -> JoinHandle<()> {
         let loss_reason = self.loss_reason.clone();
         let data_plane_fault = self.data_plane_fault.clone();
+        let timeout = registration.timeout;
+        let on_loss = registration.on_loss.clone();
 
-        let watchdog = runtime.spawn(async move {
+        runtime.spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticker.tick().await;
@@ -739,8 +803,8 @@ impl ClientRuntime {
                 let detected = {
                     let guard = connection.lock();
                     classify_connection_loss(
-                        guard.conn.is_closed(),
-                        guard.conn.last_activity_elapsed(),
+                        guard.is_closed(),
+                        guard.last_activity_elapsed(),
                         timeout,
                     )
                 };
@@ -758,9 +822,313 @@ impl ClientRuntime {
                 on_loss(reason);
                 break;
             }
-        });
-        self.io_handles.push(watchdog);
+        })
+    }
+
+    fn stop_transport_tasks(&mut self, context: &str) -> Result<(), EngineError> {
+        if let Some(io_driver) = self.io_driver.as_ref() {
+            io_driver.shutdown();
+        }
+        let handles = std::mem::take(&mut self.io_handles);
+        if let Some(runtime) = self.runtime.as_ref() {
+            runtime.block_on(async move {
+                let deadline = tokio::time::Instant::now() + TRANSPORT_DRAIN_TIMEOUT;
+                for mut handle in handles {
+                    match tokio::time::timeout_at(deadline, &mut handle).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) if error.is_cancelled() => {}
+                        Ok(Err(error)) => {
+                            log::warn!("Client I/O task join failed during {context}: {error}");
+                        }
+                        Err(_) => {
+                            handle.abort();
+                            if let Err(error) = handle.await {
+                                if !error.is_cancelled() {
+                                    log::warn!(
+                                        "Client I/O task force-stop failed during {context}: {error}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        if let Some(io_driver) = self.io_driver.as_ref() {
+            io_driver.join_io_uring_worker().map_err(|error| {
+                EngineError::Internal(format!(
+                    "Client io_uring worker join failed during {context}: {error}"
+                ))
+            })?;
+        }
         Ok(())
+    }
+
+    fn validate_replacement_transport(
+        &self,
+        prepared: &mut PreparedClientTransport,
+    ) -> Result<Arc<parking_lot::Mutex<TunInterface>>, EngineError> {
+        let current_assignment = self.assignment.as_ref().ok_or_else(|| {
+            EngineError::Connection("active circuit has no authenticated assignment".into())
+        })?;
+        if !assignments_share_tun_identity(current_assignment, &prepared.assignment) {
+            prepared.connection.close(0, b"Rotation assignment mismatch");
+            return Err(EngineError::Connection(
+                "rotation target assignment changes TUN addresses, family order, or DNS".into(),
+            ));
+        }
+        let tun = self
+            .tun
+            .as_ref()
+            .ok_or_else(|| EngineError::Tun("active circuit has no TUN owner".into()))?
+            .clone();
+        Ok(tun)
+    }
+
+    fn reconcile_replacement_tun_mtu(
+        prepared: &mut PreparedClientTransport,
+        tun: &Arc<parking_lot::Mutex<TunInterface>>,
+    ) -> Result<(), EngineError> {
+        let current_mtu = tun.lock().mtu();
+        let replacement_mtu = conservative_replacement_tun_mtu(
+            current_mtu,
+            prepared.connection.shared().lock().effective_tunnel_mtu(),
+            prepared.assignment.mtu,
+        );
+        if replacement_mtu >= current_mtu {
+            return Ok(());
+        }
+        if let Err(error) = tun.lock().set_mtu(replacement_mtu) {
+            prepared.connection.close(0, b"Rotation MTU update failed");
+            return Err(EngineError::Tun(format!(
+                "rotation target requires TUN MTU {replacement_mtu}, but the active TUN could not apply it: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Build and continuously service one bounded alternate circuit without TUN ownership.
+    pub fn prebuild_alternate_circuit(
+        &mut self,
+        next_config: EngineConfig,
+    ) -> Result<(), EngineError> {
+        if self.state != ClientState::Connected {
+            return Err(EngineError::InvalidState(
+                self.state.into(),
+                "prebuild alternate circuit (must be connected)",
+            ));
+        }
+        if self.standby_transport.is_some() {
+            return Err(EngineError::InvalidState(
+                self.state.into(),
+                "prebuild alternate circuit (standby already exists)",
+            ));
+        }
+        next_config.validate().map_err(|error| {
+            EngineError::Config(format!("Invalid standby configuration: {error}"))
+        })?;
+        for (label, circuit) in
+            [("active", self.config.circuit.as_ref()), ("standby", next_config.circuit.as_ref())]
+        {
+            let circuit = circuit.ok_or_else(|| {
+                EngineError::Config(format!(
+                    "{label} configuration requires a canonical circuit for prebuild"
+                ))
+            })?;
+            if circuit.max_parallel_circuits < 2 {
+                return Err(EngineError::Config(format!(
+                    "{label} circuit requires max_parallel_circuits = 2"
+                )));
+            }
+        }
+
+        let generation = self.next_connection_generation()?;
+        let mut prepared = self.prepare_transport(&next_config, generation)?;
+        self.validate_replacement_transport(&mut prepared)?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?;
+        let fault = Arc::new(parking_lot::Mutex::new(None));
+        let handle = runtime.spawn({
+            let io_driver = prepared.io_driver.clone();
+            let connection = prepared.connection.shared();
+            let socket = prepared.socket.clone();
+            let ingress = prepared.ingress.clone();
+            let fault = fault.clone();
+            async move {
+                if let Err(error) = io_driver.run_standby(connection, socket, ingress).await {
+                    let failure = match error {
+                        EngineError::DataPlane(failure) => failure,
+                        other => DataPlaneFault::TransportReceive {
+                            component: "client standby circuit".to_string(),
+                            error: other.to_string(),
+                        },
+                    };
+                    *fault.lock() = Some(failure);
+                    io_driver.shutdown();
+                }
+            }
+        });
+        self.standby_transport =
+            Some(StandbyClientTransport { config: next_config, prepared, handle, fault });
+        log::info!("Prebuilt alternate circuit generation {generation} is ready");
+        Ok(())
+    }
+
+    fn stop_standby_task(
+        &self,
+        standby: &mut StandbyClientTransport,
+        context: &str,
+    ) -> Result<(), EngineError> {
+        standby.prepared.io_driver.shutdown();
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?;
+        runtime.block_on(async {
+            match tokio::time::timeout(TRANSPORT_DRAIN_TIMEOUT, &mut standby.handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.is_cancelled() => {}
+                Ok(Err(error)) => {
+                    log::warn!("Standby task join failed during {context}: {error}");
+                }
+                Err(_) => {
+                    standby.handle.abort();
+                    if let Err(error) = (&mut standby.handle).await {
+                        if !error.is_cancelled() {
+                            log::warn!("Standby task force-stop failed during {context}: {error}");
+                        }
+                    }
+                }
+            }
+        });
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        standby.prepared.io_driver.join_io_uring_worker().map_err(|error| {
+            EngineError::Internal(format!(
+                "Client standby io_uring worker join failed during {context}: {error}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Atomically attach a healthy prebuilt alternate to the existing TUN.
+    pub fn promote_prebuilt_alternate(&mut self) -> Result<EngineConfig, EngineError> {
+        let mut standby = self.standby_transport.take().ok_or_else(|| {
+            EngineError::InvalidState(self.state.into(), "promote alternate (none prebuilt)")
+        })?;
+        let standby_fault = standby.fault.lock().clone();
+        if let Some(fault) = standby_fault {
+            self.stop_standby_task(&mut standby, "failed alternate promotion")?;
+            standby.prepared.connection.close(0, b"Standby circuit failed");
+            return Err(EngineError::DataPlane(fault));
+        }
+        if standby.handle.is_finished() || !standby.prepared.connection.is_established() {
+            self.stop_standby_task(&mut standby, "unavailable alternate promotion")?;
+            standby.prepared.connection.close(0, b"Standby circuit unavailable");
+            return Err(EngineError::Connection(
+                "prebuilt alternate is no longer ready".to_string(),
+            ));
+        }
+        self.stop_standby_task(&mut standby, "alternate promotion")?;
+        standby.prepared.io_driver =
+            Arc::new(IoDriver::new_with_clock(IoDriverConfig::default(), &self.clock));
+        let tun = self.validate_replacement_transport(&mut standby.prepared)?;
+        Self::reconcile_replacement_tun_mtu(&mut standby.prepared, &tun)?;
+        let generation = standby.prepared.generation;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?
+            .clone();
+        let promoted_connection = standby.prepared.connection.shared();
+        let promoted_io_driver = standby.prepared.io_driver.clone();
+
+        if let Some(connection) = self.connection.as_ref() {
+            connection.mark_circuit_draining();
+        }
+        if let Err(error) = self.stop_transport_tasks("alternate promotion") {
+            standby.prepared.connection.close(0, b"Active circuit drain failed");
+            if let Some(connection) = self.connection.as_mut() {
+                connection.close(0, b"Active circuit drain failed");
+            }
+            self.state = ClientState::Error;
+            return Err(error);
+        }
+        let mut old_connection = self.connection.take();
+        *self.loss_reason.lock() = None;
+        *self.data_plane_fault.lock() = None;
+        {
+            let (lock, _) = &*self.handshake_event;
+            *lock.lock() = false;
+        }
+        self.install_transport(standby.prepared, tun, &runtime);
+        if let Some(registration) = self.loss_watchdog.clone() {
+            let watchdog = self.spawn_loss_watchdog(
+                &registration,
+                &runtime,
+                promoted_connection,
+                promoted_io_driver,
+            );
+            self.io_handles.push(watchdog);
+        }
+        self.config = standby.config;
+        if let Some(connection) = old_connection.as_mut() {
+            connection.close(0, b"Circuit generation rotated");
+        }
+        log::info!("Prebuilt alternate promoted at generation {generation}");
+        Ok(self.config.clone())
+    }
+
+    /// Return the validated configuration retained by the live standby owner.
+    pub fn prebuilt_alternate_config(&self) -> Option<&EngineConfig> {
+        self.standby_transport.as_ref().map(|standby| &standby.config)
+    }
+
+    /// Return whether the retained standby is the same public circuit requested by the caller.
+    pub fn prebuilt_alternate_matches(&self, expected: &EngineConfig) -> bool {
+        let Some(actual) =
+            self.prebuilt_alternate_config().and_then(|config| config.circuit.as_ref())
+        else {
+            return false;
+        };
+        let Some(expected) = expected.circuit.as_ref() else {
+            return false;
+        };
+        actual.has_same_operator_configuration(expected)
+    }
+
+    /// Return bounded standby health without endpoint or credential material.
+    pub fn prebuilt_alternate_diagnostics(&self) -> Option<CircuitDiagnostics> {
+        self.standby_transport.as_ref().map(|standby| {
+            let mut diagnostics = standby.prepared.connection.circuit_diagnostics();
+            if standby.fault.lock().is_some() || standby.handle.is_finished() {
+                diagnostics.lifecycle = CircuitLifecycleState::Degraded;
+            }
+            diagnostics
+        })
+    }
+
+    fn discard_prebuilt_alternate(&mut self, context: &str) -> Result<(), EngineError> {
+        let Some(mut standby) = self.standby_transport.take() else {
+            return Ok(());
+        };
+        let stop_result = self.stop_standby_task(&mut standby, context);
+        standby.prepared.connection.close(0, b"Standby circuit discarded");
+        stop_result
+    }
+
+    /// Prepare a complete replacement circuit before switching the live TUN data plane.
+    pub fn rotate_circuit(&mut self, next_config: EngineConfig) -> Result<(), EngineError> {
+        if self.state != ClientState::Connected {
+            return Err(EngineError::InvalidState(
+                self.state.into(),
+                "rotate circuit (must be connected)",
+            ));
+        }
+        self.prebuild_alternate_circuit(next_config)?;
+        self.promote_prebuilt_alternate().map(|_| ())
     }
 
     /// Disconnect from the server.
@@ -772,38 +1140,10 @@ impl ClientRuntime {
             ));
         }
 
+        self.discard_prebuilt_alternate("disconnect")?;
         self.deactivate_dns()?;
 
-        if let Some(io) = &self.io_driver {
-            io.shutdown();
-        }
-        if let Some(rt) = self.runtime.as_ref() {
-            let handles = std::mem::take(&mut self.io_handles);
-            for handle in &handles {
-                handle.abort();
-            }
-            rt.block_on(async move {
-                for handle in handles {
-                    if let Err(e) = handle.await {
-                        if e.is_cancelled() {
-                            log::debug!("Client I/O task cancelled during disconnect");
-                        } else {
-                            log::warn!("Client I/O task join failed: {}", e);
-                        }
-                    }
-                }
-            });
-        }
-        let worker_join_error: Option<String> = {
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
-            {
-                self.io_driver.as_ref().and_then(|io_driver| io_driver.join_io_uring_worker().err())
-            }
-            #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
-            {
-                None
-            }
-        };
+        self.stop_transport_tasks("disconnect")?;
         if let Some(mut conn) = self.connection.take() {
             conn.close(0, b"Disconnect requested");
             log::info!("Disconnected from server");
@@ -812,15 +1152,13 @@ impl ClientRuntime {
         self.io_driver = None;
         self.tunnel_stream_id = None;
         self.assignment = None;
+        self.loss_watchdog = None;
         if let Some(tun) = self.tun.take() {
             log::info!("Closing TUN interface: {}", tun.lock().name());
         }
 
         self.state = ClientState::Running;
-        worker_join_error.map_or(Ok(()), |error| {
-            self.state = ClientState::Error;
-            Err(EngineError::Internal(format!("Client io_uring worker join failed: {error}")))
-        })
+        Ok(())
     }
 
     /// Check if connected.
@@ -857,6 +1195,11 @@ impl ClientRuntime {
     /// Get connection reference (if connected).
     pub fn connection(&self) -> Option<&ClientConnection> {
         self.connection.as_ref()
+    }
+
+    /// Return the physical entry address actually owned by the active UDP socket.
+    pub fn active_entry_addr(&self) -> Option<std::net::SocketAddr> {
+        self.connection.as_ref().map(ClientConnection::peer_addr)
     }
 
     /// Return a copy of the authenticated assignment for the active connection.
@@ -987,6 +1330,27 @@ fn publish_data_plane_fault(
     io_driver.shutdown();
 }
 
+fn assignments_share_tun_identity(
+    current: &crate::control_plane::ClientAssignment,
+    replacement: &crate::control_plane::ClientAssignment,
+) -> bool {
+    current.mode == replacement.mode
+        && current.family_order == replacement.family_order
+        && current.ipv4 == replacement.ipv4
+        && current.ipv6 == replacement.ipv6
+        && current.dns_servers == replacement.dns_servers
+}
+
+fn conservative_replacement_tun_mtu(
+    current_mtu: u16,
+    replacement_path_mtu: usize,
+    replacement_assignment_mtu: u16,
+) -> u16 {
+    current_mtu.min(
+        u16::try_from(replacement_path_mtu).unwrap_or(u16::MAX).min(replacement_assignment_mtu),
+    )
+}
+
 fn classify_connection_loss(
     remote_closed: bool,
     idle: std::time::Duration,
@@ -1009,201 +1373,4 @@ impl Drop for ClientRuntime {
             }
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn client_runtime_projects_dual_stack_tun_addresses() {
-        let mut config = EngineConfig::default();
-        config.interface.tun_ip = Some("10.20.30.40".parse().expect("IPv4 address"));
-        config.interface.tun_netmask = Some("255.255.255.0".parse().expect("IPv4 netmask"));
-        config.interface.tun_ip6 = Some("fd00::42".parse().expect("IPv6 address"));
-        config.interface.tun_prefix6 = Some(64);
-
-        let tun_config = client_tun_config(&config).expect("dual-stack projection");
-        assert_eq!(tun_config.ip, Some("10.20.30.40".parse().expect("IPv4 address")));
-        assert_eq!(tun_config.netmask, Some("255.255.255.0".parse().expect("IPv4 netmask")));
-        assert_eq!(tun_config.ip6, Some("fd00::42".parse().expect("IPv6 address")));
-        assert_eq!(tun_config.prefix6, Some(64));
-        assert_eq!(tun_config.mtu, 1500);
-    }
-
-    #[test]
-    fn client_runtime_projects_ipv6_only_tun_addresses() {
-        let mut config = EngineConfig::default();
-        config.interface.tun_ip6 = Some("fd00::42".parse().expect("IPv6 address"));
-        config.interface.tun_prefix6 = Some(64);
-
-        let tun_config = client_tun_config(&config).expect("IPv6-only projection");
-        assert_eq!(tun_config.ip, None);
-        assert_eq!(tun_config.netmask, None);
-        assert_eq!(tun_config.ip6, Some("fd00::42".parse().expect("IPv6 address")));
-        assert_eq!(tun_config.prefix6, Some(64));
-    }
-
-    #[test]
-    fn client_runtime_projects_server_assignment_before_tun_open() {
-        let assignment = crate::control_plane::ClientAssignment::enabled(
-            7,
-            3,
-            Some(crate::control_plane::AssignedIpv4 {
-                address: "10.8.0.2".parse().expect("IPv4 address"),
-                prefix: 24,
-            }),
-            Some(crate::control_plane::AssignedIpv6 {
-                address: "fd00::42".parse().expect("IPv6 address"),
-                prefix: 64,
-            }),
-            1400,
-            vec!["2001:4860:4860::8888".parse().expect("DNS address")],
-        )
-        .expect("assignment");
-        let tun_config = tun_config_from_assignment(&assignment, Some("qf0".to_string()), true)
-            .expect("assignment projection");
-        assert_eq!(tun_config.name.as_deref(), Some("qf0"));
-        assert_eq!(tun_config.ip, Some("10.8.0.2".parse().expect("IPv4 address")));
-        assert_eq!(tun_config.netmask, Some("255.255.255.0".parse().expect("netmask")));
-        assert_eq!(tun_config.ip6, Some("fd00::42".parse().expect("IPv6 address")));
-        assert_eq!(tun_config.prefix6, Some(64));
-        assert_eq!(tun_config.mtu, 1400);
-    }
-
-    #[test]
-    fn client_runtime_rejects_disabled_server_assignment_before_tun_open() {
-        let assignment =
-            crate::control_plane::ClientAssignment::disabled(7, 3).expect("disabled assignment");
-        let error = tun_config_from_assignment(&assignment, None, true)
-            .expect_err("disabled assignment must not open TUN");
-        assert!(matches!(error, EngineError::Tun(_)));
-    }
-
-    #[test]
-    fn test_client_runtime_new() {
-        let config = EngineConfig::default();
-        let runtime = ClientRuntime::new(config);
-        assert!(runtime.is_ok());
-    }
-
-    #[test]
-    fn test_client_runtime_rejects_invalid_engine_projection() {
-        let mut config = EngineConfig::default();
-        config.stealth.padding_strategy = "invalid".to_string();
-        let error = match ClientRuntime::new(config) {
-            Ok(_) => panic!("invalid stealth must fail closed"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, EngineError::Config(_)));
-    }
-
-    #[test]
-    fn connect_udp_bind_failure_rolls_back_connection_and_transport_state() {
-        let blocker = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .expect("bind UDP blocker");
-        let blocked_addr = blocker.local_addr().expect("read UDP blocker address");
-        let mut config = EngineConfig::default();
-        config.connection.local = blocked_addr.to_string();
-
-        let mut runtime = ClientRuntime::new(config).expect("client runtime");
-        runtime.runtime = Some(
-            runtime::create_shared_runtime(&runtime::RuntimeConfig::default())
-                .expect("client runtime executor"),
-        );
-        runtime.state = ClientState::Running;
-
-        let error = runtime.connect().expect_err("occupied UDP address must fail connect");
-        assert!(matches!(error, EngineError::Io(message) if message.contains("UDP bind failed")));
-        assert_eq!(runtime.state(), ClientState::Running);
-        assert!(runtime.connection().is_none());
-        assert!(runtime.socket.is_none());
-        assert!(runtime.io_driver.is_none());
-        assert!(runtime.io_handles.is_empty());
-
-        let second_error = runtime.connect().expect_err("second bind must remain blocked");
-        assert!(
-            matches!(second_error, EngineError::Io(message) if message.contains("UDP bind failed"))
-        );
-        assert!(runtime.connection().is_none());
-        assert!(runtime.io_handles.is_empty());
-
-        runtime.stop().expect("failed connect must remain stoppable");
-        assert_eq!(runtime.state(), ClientState::Stopped);
-    }
-
-    #[test]
-    fn updated_next_config_is_consumed_by_the_following_connect_attempt() {
-        let blocker = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .expect("bind UDP blocker");
-        let blocked_addr = blocker.local_addr().expect("read UDP blocker address");
-        let mut config = EngineConfig::default();
-        config.connection.local = blocked_addr.to_string();
-
-        let mut runtime = ClientRuntime::new(EngineConfig::default()).expect("client runtime");
-        runtime.update_next_config(&config).expect("update next connection config");
-        runtime.runtime = Some(
-            runtime::create_shared_runtime(&runtime::RuntimeConfig::default())
-                .expect("client runtime executor"),
-        );
-        runtime.state = ClientState::Running;
-
-        let error = runtime
-            .connect()
-            .expect_err("the following connect must use the updated local address");
-        assert!(matches!(error, EngineError::Io(message) if message.contains("UDP bind failed")));
-        assert_eq!(runtime.state(), ClientState::Running);
-        assert!(runtime.connection().is_none());
-    }
-
-    #[test]
-    fn connect_without_runtime_rolls_back_connection() {
-        let mut runtime = ClientRuntime::new(EngineConfig::default()).expect("client runtime");
-        runtime.state = ClientState::Running;
-
-        let error = runtime.connect().expect_err("missing runtime must fail connect");
-        assert!(
-            matches!(error, EngineError::Internal(message) if message == "Runtime not initialized")
-        );
-        assert_eq!(runtime.state(), ClientState::Running);
-        assert!(runtime.connection().is_none());
-        assert!(runtime.socket.is_none());
-        assert!(runtime.io_driver.is_none());
-        assert!(runtime.io_handles.is_empty());
-    }
-
-    #[test]
-    fn loss_detector_prioritizes_remote_close_and_honors_timeout_boundary() {
-        assert!(matches!(
-            classify_connection_loss(
-                true,
-                std::time::Duration::ZERO,
-                std::time::Duration::from_secs(30)
-            ),
-            Some(DisconnectReason::RemoteClosed)
-        ));
-        assert!(classify_connection_loss(
-            false,
-            std::time::Duration::from_millis(999),
-            std::time::Duration::from_secs(1)
-        )
-        .is_none());
-        assert!(classify_connection_loss(
-            false,
-            std::time::Duration::from_secs(86_400),
-            std::time::Duration::ZERO
-        )
-        .is_none());
-        assert!(matches!(
-            classify_connection_loss(
-                false,
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(1)
-            ),
-            Some(DisconnectReason::Timeout)
-        ));
-    }
-
-    // Note: TUN tests require root/admin privileges
-    // They are tested in integration tests
 }
