@@ -35,6 +35,20 @@ pub struct ConnectionStats {
     pub fec_activity_percent: f64,
     pub fec_recovered_packets: u64,
     pub current_sni: Option<String>,
+    pub circuit_generation: u64,
+    pub circuit_state: String,
+    pub effective_tunnel_mtu: u16,
+    pub hops: Vec<CircuitHopStats>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CircuitHopStats {
+    pub index: usize,
+    pub role: String,
+    pub established: bool,
+    pub latency_ms: f64,
+    pub datagram_budget: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +70,97 @@ pub struct PersistedTunnel {
     pub has_token: bool,
     #[serde(default)]
     pub debug_sni_override: Option<String>,
+    #[serde(default)]
+    pub circuit: Option<PersistedCircuit>,
+    #[serde(default)]
+    pub alternate_circuit: Option<PersistedCircuit>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedCircuit {
+    pub hops: Vec<PersistedCircuitHop>,
+    #[serde(default = "default_circuit_max_hops")]
+    pub max_hops: u8,
+    #[serde(default = "default_parallel_circuits")]
+    pub max_parallel_circuits: u8,
+    #[serde(default)]
+    pub allow_single_hop_fallback: bool,
+    #[serde(default)]
+    pub diversity: quicfuscate::engine::CircuitDiversityPolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedCircuitHop {
+    pub id: String,
+    pub label: String,
+    pub remote: String,
+    pub sni: String,
+    #[serde(default)]
+    pub qkey_id: String,
+    pub qkey: String,
+    pub role: quicfuscate::engine::HopRole,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub jurisdiction: Option<String>,
+    #[serde(default)]
+    pub failure_domain: Option<String>,
+    #[serde(default = "default_verify_peer")]
+    pub verify_peer: bool,
+    #[serde(default)]
+    pub ca_file: String,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+    #[serde(default)]
+    pub policy: PersistedHopPolicy,
+    #[serde(default)]
+    pub has_token: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EngineConnectRequest {
+    tunnel_id: String,
+    qkey_data: String,
+    sni_override: Option<String>,
+    circuit: Option<PersistedCircuit>,
+    alternate_circuit: Option<PersistedCircuit>,
+    settings: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct PersistedHopPolicy {
+    pub persona: Option<quicfuscate::engine::HopPersonaConfig>,
+    pub fec_mode: Option<quicfuscate::engine::FecMode>,
+    pub enable_traffic_padding: Option<bool>,
+    pub enable_timing_obfuscation: Option<bool>,
+    pub enable_cover_ping: Option<bool>,
+}
+
+fn default_circuit_max_hops() -> u8 {
+    quicfuscate::engine::DEFAULT_PRODUCT_HOPS
+}
+
+fn default_parallel_circuits() -> u8 {
+    2
+}
+
+fn default_verify_peer() -> bool {
+    true
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_idle_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -207,6 +312,96 @@ fn truncate_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
+fn sanitize_optional_label(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty() && char_count(&value) <= MAX_LOCATION_CHARS).then_some(value)
+    })
+}
+
+fn sanitize_persisted_circuit(mut circuit: PersistedCircuit) -> Option<PersistedCircuit> {
+    if circuit.hops.is_empty()
+        || circuit.hops.len() > usize::from(quicfuscate::engine::MAX_CIRCUIT_HOPS)
+    {
+        return None;
+    }
+    let last = circuit.hops.len() - 1;
+    for (index, hop) in circuit.hops.iter_mut().enumerate() {
+        hop.id = hop.id.trim().to_string();
+        hop.label = hop.label.trim().to_string();
+        hop.remote = hop.remote.trim().to_string();
+        hop.sni = hop.sni.trim().to_ascii_lowercase();
+        hop.qkey = hop.qkey.trim().to_string();
+        hop.qkey_id = hop.qkey_id.trim().to_ascii_lowercase();
+        hop.ca_file = hop.ca_file.trim().to_string();
+        if hop.qkey_id.is_empty() && qkey_is_valid_bearer(&hop.qkey) {
+            hop.qkey_id = qkey::id(&hop.qkey);
+        }
+        if hop.id.is_empty()
+            || char_count(&hop.id) > MAX_ID_CHARS
+            || hop.label.is_empty()
+            || char_count(&hop.label) > MAX_NAME_CHARS
+            || hop.remote.is_empty()
+            || char_count(&hop.remote) > MAX_REMOTE_CHARS
+            || !is_valid_sni_host(&hop.sni)
+            || char_count(&hop.sni) > MAX_SNI_CHARS
+            || hop.qkey_id.len() != 12
+            || !hop.qkey_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || char_count(&hop.qkey) > MAX_QKEY_CHARS
+            || char_count(&hop.ca_file) > MAX_REMOTE_CHARS
+            || hop.role
+                != if index == last {
+                    quicfuscate::engine::HopRole::Exit
+                } else {
+                    quicfuscate::engine::HopRole::Relay
+                }
+        {
+            return None;
+        }
+        hop.provider = sanitize_optional_label(hop.provider.take());
+        hop.region = sanitize_optional_label(hop.region.take());
+        hop.jurisdiction = sanitize_optional_label(hop.jurisdiction.take());
+        hop.failure_domain = sanitize_optional_label(hop.failure_domain.take());
+        hop.has_token = qkey_is_valid_bearer(&hop.qkey);
+    }
+    let runtime = quicfuscate::engine::CircuitConfig {
+        hops: circuit
+            .hops
+            .iter()
+            .map(|hop| quicfuscate::engine::HopConfig {
+                label: hop.label.clone(),
+                endpoint: hop.remote.clone(),
+                sni: hop.sni.clone(),
+                verify_peer: hop.verify_peer,
+                ca_file: hop.ca_file.clone(),
+                qkey_id: hop.qkey_id.clone(),
+                qkey_token_ref: format!("desktop-keychain:{}", hop.id),
+                role: hop.role,
+                provider: hop.provider.clone(),
+                region: hop.region.clone(),
+                jurisdiction: hop.jurisdiction.clone(),
+                failure_domain: hop.failure_domain.clone(),
+                connect_timeout_ms: hop.connect_timeout_ms,
+                idle_timeout_ms: hop.idle_timeout_ms,
+                policy: quicfuscate::engine::HopPolicyOverrides {
+                    persona: hop.policy.persona,
+                    fec_mode: hop.policy.fec_mode,
+                    enable_traffic_padding: hop.policy.enable_traffic_padding,
+                    enable_timing_obfuscation: hop.policy.enable_timing_obfuscation,
+                    enable_cover_ping: hop.policy.enable_cover_ping,
+                },
+                ..quicfuscate::engine::HopConfig::default()
+            })
+            .collect(),
+        max_hops: circuit.max_hops,
+        max_parallel_circuits: circuit.max_parallel_circuits,
+        allow_single_hop_fallback: circuit.allow_single_hop_fallback,
+        diversity: circuit.diversity.clone(),
+    };
+    runtime.validate(1500).ok()?;
+    Some(circuit)
+}
+
 fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState, String> {
     if state.schema_version == 0 {
         state.schema_version = 1;
@@ -274,12 +469,25 @@ fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState,
             .and_then(normalize_sni_host)
             .filter(|v| char_count(v) <= MAX_SNI_CHARS);
 
+        t.circuit = t.circuit.take().and_then(sanitize_persisted_circuit);
+        t.alternate_circuit = t.alternate_circuit.take().and_then(sanitize_persisted_circuit);
+        if t.alternate_circuit.is_some() && t.circuit.is_none() {
+            continue;
+        }
+
         // A truncated credential is not a shorter credential, it is an invalid one.
         // Dropping it here means `has_token` below reports the truth.
         let qk = t.qkey.trim().to_string();
         t.qkey = if char_count(&qk) > MAX_QKEY_CHARS { String::new() } else { qk };
 
-        t.has_token = qkey_is_valid_bearer(&t.qkey);
+        let primary_has_token = t.circuit.as_ref().map_or_else(
+            || qkey_is_valid_bearer(&t.qkey),
+            |circuit| circuit.hops.iter().all(|hop| hop.has_token),
+        );
+        t.has_token = primary_has_token
+            && t.alternate_circuit
+                .as_ref()
+                .is_none_or(|circuit| circuit.hops.iter().all(|hop| hop.has_token));
 
         if t.created_at == 0 {
             t.created_at = now.ok_or_else(|| {
@@ -326,6 +534,7 @@ fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState,
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedQKey {
+    pub qkey_id: String,
     pub remote: String,
     pub sni: String,
     pub has_token: bool,
@@ -530,6 +739,22 @@ fn secret_key_for_tunnel_id(tunnel_id: &str) -> String {
     format!("tunnel:{}", tunnel_id.trim())
 }
 
+fn secret_key_for_circuit_hop(tunnel_id: &str, hop_id: &str) -> String {
+    format!("tunnel:{}:hop:{}", tunnel_id.trim(), hop_id.trim())
+}
+
+fn secret_key_for_alternate_circuit_hop(tunnel_id: &str, hop_id: &str) -> String {
+    format!("tunnel:{}:alternate-hop:{}", tunnel_id.trim(), hop_id.trim())
+}
+
+fn circuit_hop_secret_key(tunnel_id: &str, hop_id: &str, alternate: bool) -> String {
+    if alternate {
+        secret_key_for_alternate_circuit_hop(tunnel_id, hop_id)
+    } else {
+        secret_key_for_circuit_hop(tunnel_id, hop_id)
+    }
+}
+
 fn qkey_is_valid_bearer(qkey_value: &str) -> bool {
     let qkey_value = qkey_value.trim();
     if qkey_value.is_empty() {
@@ -546,12 +771,71 @@ fn qkey_is_valid_bearer(qkey_value: &str) -> bool {
     normalize_token_hex_32(token_hex).is_ok()
 }
 
+fn redact_circuit_credentials(
+    tunnel_id: &str,
+    circuit: &mut PersistedCircuit,
+    alternate: bool,
+    store: &dyn secrets::SecretStore,
+) -> Result<bool, String> {
+    for hop in &mut circuit.hops {
+        let key = circuit_hop_secret_key(tunnel_id, &hop.id, alternate);
+        let qkey = hop.qkey.trim().to_string();
+        if qkey.is_empty() {
+            hop.has_token =
+                store.get(&key).ok().flatten().is_some_and(|secret| qkey_is_valid_bearer(&secret));
+            continue;
+        }
+        if !qkey_is_valid_bearer(&qkey) {
+            hop.qkey.clear();
+            hop.has_token = false;
+            continue;
+        }
+        hop.qkey_id = qkey::id(&qkey);
+        store.set(&key, &qkey).map_err(|error| {
+            format!(
+                "cannot persist circuit hop credential for tunnel {tunnel_id}: keychain storage is unavailable ({error}); the QKey was not written to disk"
+            )
+        })?;
+        hop.qkey.clear();
+        hop.has_token = true;
+    }
+    Ok(circuit.hops.iter().all(|hop| hop.has_token))
+}
+
+fn hydrate_circuit_credentials(
+    tunnel_id: &str,
+    circuit: &mut PersistedCircuit,
+    alternate: bool,
+    store: &dyn secrets::SecretStore,
+) -> bool {
+    for hop in &mut circuit.hops {
+        if hop.qkey.trim().is_empty() {
+            let key = circuit_hop_secret_key(tunnel_id, &hop.id, alternate);
+            if let Ok(Some(secret)) = store.get(&key) {
+                hop.qkey = secret;
+            }
+        }
+        hop.has_token = qkey_is_valid_bearer(&hop.qkey);
+    }
+    circuit.hops.iter().all(|hop| hop.has_token)
+}
+
 pub(crate) fn redact_state_for_disk(
     mut state: PersistedState,
     store: &dyn secrets::SecretStore,
 ) -> Result<PersistedState, String> {
     state = sanitize_persisted_state(state)?;
     for t in &mut state.tunnels {
+        if let Some(circuit) = t.circuit.as_mut() {
+            let primary_ready = redact_circuit_credentials(&t.id, circuit, false, store)?;
+            let alternate_ready = match t.alternate_circuit.as_mut() {
+                Some(alternate) => redact_circuit_credentials(&t.id, alternate, true, store)?,
+                None => true,
+            };
+            t.qkey.clear();
+            t.has_token = primary_ready && alternate_ready;
+            continue;
+        }
         let qk = t.qkey.trim().to_string();
         if qk.is_empty() {
             let key = secret_key_for_tunnel_id(&t.id);
@@ -612,6 +896,15 @@ pub(crate) fn hydrate_state_for_runtime(
     store: &dyn secrets::SecretStore,
 ) -> Result<PersistedState, String> {
     for t in &mut state.tunnels {
+        if let Some(circuit) = t.circuit.as_mut() {
+            let primary_ready = hydrate_circuit_credentials(&t.id, circuit, false, store);
+            let alternate_ready = match t.alternate_circuit.as_mut() {
+                Some(alternate) => hydrate_circuit_credentials(&t.id, alternate, true, store),
+                None => true,
+            };
+            t.has_token = primary_ready && alternate_ready;
+            continue;
+        }
         let existing = t.qkey.trim();
         if existing.is_empty() {
             let key = secret_key_for_tunnel_id(&t.id);
@@ -791,6 +1084,8 @@ fn connect_inner(
     tunnel_id: String,
     qkey_data: String,
     sni_override: Option<String>,
+    circuit: Option<PersistedCircuit>,
+    alternate_circuit: Option<PersistedCircuit>,
     settings: Option<serde_json::Value>,
     state: &AppState,
 ) -> Result<(), String> {
@@ -798,13 +1093,21 @@ fn connect_inner(
     let result: Result<(), String> = (|| {
         *state.last_error.lock().map_err(|e| e.to_string())? = None;
 
-        let qkey_trimmed = qkey_data.trim().to_string();
+        let qkey_trimmed = circuit
+            .as_ref()
+            .and_then(|value| value.hops.first())
+            .map_or_else(|| qkey_data.trim().to_string(), |hop| hop.qkey.trim().to_string());
         if qkey_trimmed.is_empty() {
             return Err("QKey cannot be empty".to_string());
         }
 
-        let cfg =
-            build_client_engine_config(&qkey_trimmed, sni_override.as_deref(), settings.as_ref())?;
+        let cfg = build_client_engine_config_with_circuit(
+            &qkey_trimmed,
+            sni_override.as_deref(),
+            circuit.as_ref(),
+            alternate_circuit.as_ref(),
+            settings.as_ref(),
+        )?;
 
         // Stop any currently running engine before connecting a new tunnel. A failed cleanup
         // retains the old owner and aborts replacement before a new engine can become live.
@@ -842,9 +1145,59 @@ fn connect_inner(
     result
 }
 
+fn rotate_inner(
+    tunnel_id: String,
+    qkey_data: String,
+    sni_override: Option<String>,
+    circuit: PersistedCircuit,
+    settings: Option<serde_json::Value>,
+    state: &AppState,
+) -> Result<(), String> {
+    let _operation_guard = state.operation_lock.lock().map_err(|error| error.to_string())?;
+    let result = (|| {
+        let entry_qkey = circuit
+            .hops
+            .first()
+            .map(|hop| hop.qkey.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| qkey_data.trim());
+        if entry_qkey.is_empty() {
+            return Err("QKey cannot be empty".to_string());
+        }
+        let config = build_client_engine_config_with_circuit(
+            entry_qkey,
+            sni_override.as_deref(),
+            Some(&circuit),
+            None,
+            settings.as_ref(),
+        )?;
+        let mut engine = state.engine.lock().map_err(|error| error.to_string())?;
+        let engine =
+            engine.as_mut().ok_or_else(|| "Cannot rotate without an active engine".to_string())?;
+        engine.rotate_circuit(config).map_err(|error| error.to_string())?;
+        *state.active_tunnel_id.lock().map_err(|error| error.to_string())? = Some(tunnel_id);
+        Ok(())
+    })();
+    if let Ok(mut last_error) = state.last_error.lock() {
+        *last_error = result.as_ref().err().cloned();
+    }
+    result
+}
+
+#[cfg(test)]
 fn build_client_engine_config(
     qkey_trimmed: &str,
     sni_override: Option<&str>,
+    settings: Option<&serde_json::Value>,
+) -> Result<EngineConfig, String> {
+    build_client_engine_config_with_circuit(qkey_trimmed, sni_override, None, None, settings)
+}
+
+fn build_client_engine_config_with_circuit(
+    qkey_trimmed: &str,
+    sni_override: Option<&str>,
+    circuit: Option<&PersistedCircuit>,
+    alternate_circuit: Option<&PersistedCircuit>,
     settings: Option<&serde_json::Value>,
 ) -> Result<EngineConfig, String> {
     let qk = qkey::parse(qkey_trimmed).map_err(|e| e.to_string())?;
@@ -885,6 +1238,23 @@ fn build_client_engine_config(
             "manual" => quicfuscate::engine::StealthMode::Manual,
             _ => quicfuscate::engine::StealthMode::Auto,
         };
+        if cfg.stealth.mode == quicfuscate::engine::StealthMode::Off {
+            cfg.stealth.use_utls = false;
+            cfg.stealth.enable_domain_fronting = false;
+            cfg.stealth.enable_http3_masquerading = false;
+            cfg.stealth.use_tls_cover = false;
+            cfg.stealth.use_qpack_headers = false;
+            cfg.stealth.enable_traffic_padding = false;
+            cfg.stealth.enable_timing_obfuscation = false;
+            cfg.stealth.enable_protocol_mimicry = false;
+            cfg.stealth.enable_doh = false;
+            cfg.stealth.doh_provider.clear();
+            cfg.stealth.max_padding_size = 0;
+            cfg.stealth.fronting_domains.clear();
+            cfg.stealth.enable_network_fingerprint_normalization = false;
+            cfg.stealth.normalize_target_size = 0;
+            cfg.fingerprint_rotation.enabled = false;
+        }
     }
     if let Some(ref fec) = qk.fec {
         let mode = fec.trim().to_ascii_lowercase();
@@ -917,6 +1287,84 @@ fn build_client_engine_config(
         }
     }
 
+    if let Some(circuit) = circuit {
+        let mut hops = Vec::with_capacity(circuit.hops.len());
+        for hop in &circuit.hops {
+            let raw_qkey = hop.qkey.trim();
+            let parsed = qkey::parse(raw_qkey).map_err(|error| error.to_string())?;
+            let token = parsed
+                .token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("Circuit hop '{}' QKey is missing its token", hop.label))?;
+            hops.push(quicfuscate::engine::HopConfig {
+                label: hop.label.clone(),
+                endpoint: parsed.remote,
+                sni: parsed.sni,
+                verify_peer: hop.verify_peer,
+                ca_file: hop.ca_file.clone(),
+                qkey_id: qkey::id(raw_qkey),
+                qkey_token_ref: format!("desktop-keychain:{}", hop.id),
+                qkey_token: Some(quicfuscate::engine::qkey::QKeyToken::new(
+                    normalize_token_hex_32(token)?,
+                )),
+                role: hop.role,
+                provider: hop.provider.clone(),
+                region: hop.region.clone(),
+                jurisdiction: hop.jurisdiction.clone(),
+                failure_domain: hop.failure_domain.clone(),
+                connect_timeout_ms: hop.connect_timeout_ms,
+                idle_timeout_ms: hop.idle_timeout_ms,
+                policy: quicfuscate::engine::HopPolicyOverrides {
+                    persona: hop.policy.persona,
+                    fec_mode: hop.policy.fec_mode,
+                    enable_traffic_padding: hop.policy.enable_traffic_padding,
+                    enable_timing_obfuscation: hop.policy.enable_timing_obfuscation,
+                    enable_cover_ping: hop.policy.enable_cover_ping,
+                },
+                ..quicfuscate::engine::HopConfig::default()
+            });
+        }
+        cfg.circuit = Some(quicfuscate::engine::CircuitConfig {
+            hops,
+            max_hops: circuit.max_hops,
+            max_parallel_circuits: circuit.max_parallel_circuits,
+            allow_single_hop_fallback: circuit.allow_single_hop_fallback,
+            diversity: circuit.diversity.clone(),
+        });
+        let legacy = quicfuscate::engine::ConnectionConfig::default();
+        cfg.connection.remote = legacy.remote;
+        cfg.connection.sni = legacy.sni;
+        cfg.connection.qkey_id = None;
+        cfg.connection.qkey_token = None;
+    }
+    if let Some(alternate_circuit) = alternate_circuit {
+        let entry_qkey = alternate_circuit
+            .hops
+            .first()
+            .map(|hop| hop.qkey.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Alternate circuit entry QKey cannot be empty".to_string())?;
+        let mut alternate_config = build_client_engine_config_with_circuit(
+            entry_qkey,
+            sni_override,
+            Some(alternate_circuit),
+            None,
+            settings,
+        )?;
+        if let Some(runtime_circuit) = alternate_config.circuit.as_mut() {
+            for (runtime_hop, persisted_hop) in
+                runtime_circuit.hops.iter_mut().zip(&alternate_circuit.hops)
+            {
+                runtime_hop.qkey_token_ref =
+                    format!("desktop-keychain:alternate:{}", persisted_hop.id);
+            }
+        }
+        cfg.alternate_circuit = alternate_config.circuit.take();
+    }
+    cfg.validate().map_err(|error| error.to_string())?;
+
     Ok(cfg)
 }
 
@@ -935,6 +1383,7 @@ async fn qkey_parse(qkey_data: String) -> Result<ParsedQKey, String> {
         .ok_or_else(|| "QKey missing token".to_string())?;
     let _ = normalize_token_hex_32(token_hex)?;
     Ok(ParsedQKey {
+        qkey_id: qkey::id(trimmed),
         remote: parsed.remote,
         sni: parsed.sni,
         has_token: true,
@@ -987,13 +1436,10 @@ async fn qkey_generate(
 #[tauri::command]
 async fn engine_connect(
     app: tauri::AppHandle,
-    tunnel_id: String,
-    qkey_data: String,
-    sni_override: Option<String>,
-    settings: Option<serde_json::Value>,
+    request: EngineConnectRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let tunnel_id = tunnel_id.trim().to_string();
+    let tunnel_id = request.tunnel_id.trim().to_string();
     if tunnel_id.is_empty() {
         return Err("Missing tunnel_id".to_string());
     }
@@ -1001,10 +1447,45 @@ async fn engine_connect(
     let state = state.inner().clone();
     let result = tokio::task::spawn_blocking({
         let state = state.clone();
-        move || connect_inner(tunnel_id, qkey_data, sni_override, settings, &state)
+        move || {
+            connect_inner(
+                tunnel_id,
+                request.qkey_data,
+                request.sni_override,
+                request.circuit,
+                request.alternate_circuit,
+                request.settings,
+                &state,
+            )
+        }
     })
     .await
     .map_err(|e| e.to_string())?;
+    update_tray_ui(&app, &state);
+    result
+}
+
+#[tauri::command]
+async fn engine_rotate(
+    app: tauri::AppHandle,
+    tunnel_id: String,
+    qkey_data: String,
+    sni_override: Option<String>,
+    circuit: PersistedCircuit,
+    settings: Option<serde_json::Value>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let tunnel_id = tunnel_id.trim().to_string();
+    if tunnel_id.is_empty() {
+        return Err("Missing tunnel_id".to_string());
+    }
+    let state = state.inner().clone();
+    let result = tokio::task::spawn_blocking({
+        let state = state.clone();
+        move || rotate_inner(tunnel_id, qkey_data, sni_override, circuit, settings, &state)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     update_tray_ui(&app, &state);
     result
 }
@@ -1027,6 +1508,7 @@ async fn engine_disconnect(
 
 #[tauri::command]
 async fn engine_status(state: tauri::State<'_, AppState>) -> Result<EngineStatus, String> {
+    service_engine_health(state.inner())?;
     let engine_state = {
         let guard = state.engine.lock().map_err(|e| e.to_string())?;
         guard.as_ref().map(|e| e.state())
@@ -1047,6 +1529,7 @@ async fn engine_status(state: tauri::State<'_, AppState>) -> Result<EngineStatus
 async fn engine_stats(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<ConnectionStats>, String> {
+    service_engine_health(state.inner())?;
     let guard = state.engine.lock().map_err(|e| e.to_string())?;
     let engine = match guard.as_ref() {
         Some(v) => v,
@@ -1068,6 +1551,28 @@ async fn engine_stats(
         .active_stealth_mode()
         .map(|mode| format!("{:?}", mode).to_lowercase())
         .unwrap_or_else(|| format!("{:?}", engine.stealth_mode()).to_lowercase());
+    let circuit = engine.active_circuit_diagnostics();
+    let circuit_generation = circuit.as_ref().map_or(0, |value| value.generation);
+    let circuit_state = circuit
+        .as_ref()
+        .map(|value| format!("{:?}", value.lifecycle).to_lowercase())
+        .unwrap_or_else(|| "idle".to_string());
+    let effective_tunnel_mtu = circuit.as_ref().map_or(0, |value| value.effective_tunnel_mtu);
+    let hops = circuit
+        .map(|value| {
+            value
+                .hops
+                .into_iter()
+                .map(|hop| CircuitHopStats {
+                    index: hop.index,
+                    role: format!("{:?}", hop.role).to_lowercase(),
+                    established: hop.established,
+                    latency_ms: f64::from(hop.rtt_ms),
+                    datagram_budget: hop.datagram_budget,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     Ok(Some(ConnectionStats {
         latency_ms: stats.rtt_ms as f64,
@@ -1082,7 +1587,28 @@ async fn engine_stats(
         fec_activity_percent,
         fec_recovered_packets,
         current_sni: engine.active_server_name(),
+        circuit_generation,
+        circuit_state,
+        effective_tunnel_mtu,
+        hops,
     }))
+}
+
+fn service_engine_health(state: &AppState) -> Result<(), String> {
+    let result = {
+        let mut engine = state.engine.lock().map_err(|error| error.to_string())?;
+        match engine.as_mut() {
+            Some(engine) => engine.service_connection_health().map(|_| ()),
+            None => Ok(()),
+        }
+    };
+    if let Err(error) = result {
+        let message = format!("Circuit health service failed: {error}");
+        *state.last_error.lock().map_err(|lock_error| lock_error.to_string())? =
+            Some(message.clone());
+        return Err(message);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1426,14 +1952,19 @@ fn emit_settings_changed(app: &tauri::AppHandle, settings: &serde_json::Value) {
 }
 
 fn find_selected_tunnel_for_tray(state: &PersistedState) -> Option<PersistedTunnel> {
+    let ready = |tunnel: &&PersistedTunnel| {
+        !tunnel.qkey.trim().is_empty()
+            || tunnel.circuit.as_ref().is_some_and(|circuit| {
+                !circuit.hops.is_empty()
+                    && circuit.hops.iter().all(|hop| !hop.qkey.trim().is_empty())
+            })
+    };
     if let Some(selected) = state.selected_tunnel_id.as_deref() {
-        if let Some(t) =
-            state.tunnels.iter().find(|t| t.id == selected && !t.qkey.trim().is_empty())
-        {
+        if let Some(t) = state.tunnels.iter().find(|t| t.id == selected && ready(t)) {
             return Some(t.clone());
         }
     }
-    state.tunnels.iter().find(|t| !t.qkey.trim().is_empty()).cloned()
+    state.tunnels.iter().find(ready).cloned()
 }
 
 fn update_tray_ui(app: &tauri::AppHandle, state: &AppState) {
@@ -1537,6 +2068,8 @@ fn connect_selected_tunnel_for_tray(
         tunnel.id.clone(),
         tunnel.qkey.clone(),
         tunnel.debug_sni_override.clone(),
+        tunnel.circuit.clone(),
+        tunnel.alternate_circuit.clone(),
         Some(runtime_state.settings.clone()),
         state,
     )
@@ -1655,6 +2188,7 @@ fn main() {
             qkey_parse,
             qkey_generate,
             engine_connect,
+            engine_rotate,
             engine_disconnect,
             engine_status,
             engine_stats,
@@ -1973,7 +2507,7 @@ mod tests {
     #[test]
     fn config_builder_uses_qkey_modes() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_stealth("off")
                 .with_fec("off"),
@@ -1988,7 +2522,7 @@ mod tests {
     #[test]
     fn config_builder_ignores_desktop_connection_presets_when_qkey_is_auto() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_stealth("auto")
                 .with_fec("auto"),
@@ -2003,7 +2537,7 @@ mod tests {
     #[test]
     fn config_builder_uses_qkey_auto_fec_even_if_desktop_requests_off() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_stealth("auto")
                 .with_fec("auto"),
@@ -2017,7 +2551,7 @@ mod tests {
     #[test]
     fn config_builder_defaults_unknown_qkey_fec_to_auto() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_fec("manual"),
         );
@@ -2029,7 +2563,7 @@ mod tests {
     #[test]
     fn config_builder_accepts_qkey_stealth_antidpi_alias() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_stealth("anti-dpi"),
         );
@@ -2041,7 +2575,7 @@ mod tests {
     #[test]
     fn config_builder_normalizes_qkey_mode_case_and_whitespace() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_stealth("  OFF  ")
                 .with_fec("  AUTO  "),
@@ -2055,7 +2589,7 @@ mod tests {
     #[test]
     fn config_builder_uses_qkey_forced_stealth_even_if_desktop_requests_max() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_stealth("off"),
         );
@@ -2068,7 +2602,7 @@ mod tests {
     #[test]
     fn config_builder_applies_log_level_without_connection_settings() {
         let qk = quicfuscate::engine::qkey::generate(
-            &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
+            &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
                 .with_stealth("auto")
                 .with_fec("auto"),
@@ -2263,7 +2797,8 @@ mod tests {
         let st = AppState::new();
         *st.active_tunnel_id.lock().unwrap() = Some("old".to_string());
 
-        let err = connect_inner("t1".to_string(), "   ".to_string(), None, None, &st).unwrap_err();
+        let err = connect_inner("t1".to_string(), "   ".to_string(), None, None, None, None, &st)
+            .unwrap_err();
         assert!(err.to_lowercase().contains("qkey"));
 
         // Input validation errors must not drop an existing connection.
@@ -2288,7 +2823,7 @@ mod tests {
             "1.2.3.4:4433",
             "example.com",
         ));
-        let err = connect_inner("t1".to_string(), qk, None, None, &st).unwrap_err();
+        let err = connect_inner("t1".to_string(), qk, None, None, None, None, &st).unwrap_err();
         assert!(err.to_lowercase().contains("token"));
 
         // Token validation errors must not drop an existing connection.
@@ -2314,11 +2849,11 @@ mod tests {
             &quicfuscate::engine::qkey::QKeyConfig::new("not-an-addr", "example.com")
                 .with_token(&"a".repeat(64)),
         );
-        let err = connect_inner("t1".to_string(), qk, None, None, &st).unwrap_err();
+        let err = connect_inner("t1".to_string(), qk, None, None, None, None, &st).unwrap_err();
         assert!(!err.trim().is_empty());
 
         assert!(st.engine.lock().unwrap().is_none());
-        assert!(st.active_tunnel_id.lock().unwrap().is_none());
+        assert_eq!(st.active_tunnel_id.lock().unwrap().as_deref(), Some("old"));
         assert!(st.last_error.lock().unwrap().is_some());
     }
 
@@ -2349,6 +2884,8 @@ mod tests {
                 location: None,
                 has_token: false,
                 debug_sni_override: None,
+                circuit: None,
+                alternate_circuit: None,
             }],
             selected_tunnel_id: Some("t1".to_string()),
             settings: serde_json::json!({}),
@@ -2361,6 +2898,109 @@ mod tests {
         let hydrated = hydrate_state_for_runtime(disk, &store).expect("hydrate state");
         assert_eq!(hydrated.tunnels[0].qkey, qk);
         assert!(hydrated.tunnels[0].has_token);
+    }
+
+    #[test]
+    fn circuit_slots_roundtrip_secrets_and_preserve_native_policy() {
+        let store = secrets::MemorySecretStore::new();
+        let make_circuit = |id: &str, remote: &str, sni: &str, token_byte: char| {
+            let qkey = quicfuscate::engine::qkey::generate(
+                &quicfuscate::engine::qkey::QKeyConfig::new(remote, sni)
+                    .with_token(&token_byte.to_string().repeat(64)),
+            );
+            PersistedCircuit {
+                hops: vec![PersistedCircuitHop {
+                    id: id.to_string(),
+                    label: format!("{id} exit"),
+                    remote: remote.to_string(),
+                    sni: sni.to_string(),
+                    qkey_id: qkey::id(&qkey),
+                    qkey,
+                    role: quicfuscate::engine::HopRole::Exit,
+                    provider: Some(id.to_string()),
+                    region: Some(id.to_string()),
+                    jurisdiction: Some(id.to_string()),
+                    failure_domain: Some(id.to_string()),
+                    verify_peer: false,
+                    ca_file: format!("/tmp/{id}-ca.pem"),
+                    connect_timeout_ms: 4_321,
+                    idle_timeout_ms: 12_345,
+                    policy: PersistedHopPolicy {
+                        persona: Some(quicfuscate::engine::HopPersonaConfig {
+                            browser: quicfuscate::stealth::BrowserProfile::Chrome,
+                            os: quicfuscate::stealth::OsProfile::Linux,
+                        }),
+                        fec_mode: Some(quicfuscate::engine::FecMode::Off),
+                        enable_traffic_padding: Some(false),
+                        enable_timing_obfuscation: Some(true),
+                        enable_cover_ping: Some(false),
+                    },
+                    has_token: true,
+                }],
+                max_hops: 3,
+                max_parallel_circuits: 2,
+                allow_single_hop_fallback: false,
+                diversity: quicfuscate::engine::CircuitDiversityPolicy::default(),
+            }
+        };
+        let state = PersistedState {
+            schema_version: 1,
+            tunnels: vec![PersistedTunnel {
+                id: "dual".to_string(),
+                name: "Dual circuit".to_string(),
+                remote: "192.0.2.10:4433".to_string(),
+                sni: "legacy.example.com".to_string(),
+                qkey: String::new(),
+                created_at: test_timestamp_ms(),
+                country_code: None,
+                location: None,
+                has_token: true,
+                debug_sni_override: None,
+                circuit: Some(make_circuit("primary", "203.0.113.10:4433", "p.example.com", 'a')),
+                alternate_circuit: Some(make_circuit(
+                    "alternate",
+                    "203.0.113.20:4433",
+                    "a.example.com",
+                    'b',
+                )),
+            }],
+            selected_tunnel_id: Some("dual".to_string()),
+            settings: serde_json::json!({}),
+        };
+
+        let disk = redact_state_for_disk(state, &store).expect("redact both circuit slots");
+        let primary_disk = disk.tunnels[0].circuit.as_ref().unwrap();
+        let alternate_disk = disk.tunnels[0].alternate_circuit.as_ref().unwrap();
+        assert!(primary_disk.hops[0].qkey.is_empty());
+        assert!(alternate_disk.hops[0].qkey.is_empty());
+        assert_ne!(
+            secret_key_for_circuit_hop("dual", "primary"),
+            secret_key_for_alternate_circuit_hop("dual", "alternate")
+        );
+
+        let hydrated = hydrate_state_for_runtime(disk, &store).expect("hydrate both circuit slots");
+        let tunnel = &hydrated.tunnels[0];
+        assert!(tunnel.has_token);
+        let primary = tunnel.circuit.as_ref().unwrap();
+        let alternate = tunnel.alternate_circuit.as_ref().unwrap();
+        assert!(!primary.hops[0].qkey.is_empty());
+        assert!(!alternate.hops[0].qkey.is_empty());
+
+        let config = build_client_engine_config_with_circuit(
+            &primary.hops[0].qkey,
+            None,
+            Some(primary),
+            Some(alternate),
+            None,
+        )
+        .expect("build canonical primary and standby");
+        let hop = &config.circuit.as_ref().unwrap().hops[0];
+        assert!(!hop.verify_peer);
+        assert_eq!(hop.ca_file, "/tmp/primary-ca.pem");
+        assert_eq!(hop.connect_timeout_ms, 4_321);
+        assert_eq!(hop.idle_timeout_ms, 12_345);
+        assert_eq!(hop.policy.fec_mode, Some(quicfuscate::engine::FecMode::Off));
+        assert!(config.alternate_circuit.is_some());
     }
 
     struct FailingSetStore {
@@ -2411,6 +3051,8 @@ mod tests {
                 location: None,
                 has_token: true,
                 debug_sni_override: None,
+                circuit: None,
+                alternate_circuit: None,
             }],
             selected_tunnel_id: Some("t1".to_string()),
             settings: serde_json::json!({}),
@@ -2445,6 +3087,8 @@ mod tests {
                 location: None,
                 has_token: false,
                 debug_sni_override: None,
+                circuit: None,
+                alternate_circuit: None,
             }],
             selected_tunnel_id: Some("t1".to_string()),
             settings: serde_json::json!({}),
@@ -2563,6 +3207,8 @@ mod tests {
                 location: None,
                 has_token: false,
                 debug_sni_override: None,
+                circuit: None,
+                alternate_circuit: None,
             }],
             selected_tunnel_id: Some("t1".to_string()),
             settings: serde_json::json!({}),
@@ -2672,6 +3318,8 @@ mod tests {
                 location: None,
                 has_token: false,
                 debug_sni_override: None,
+                circuit: None,
+                alternate_circuit: None,
             }],
             selected_tunnel_id: Some("t1".to_string()),
             settings: serde_json::json!({}),
@@ -2712,6 +3360,8 @@ mod tests {
                 location: Some("x".repeat(MAX_LOCATION_CHARS + 10)),
                 has_token: false,
                 debug_sni_override: None,
+                circuit: None,
+                alternate_circuit: None,
             });
         }
         let state = PersistedState {
@@ -2748,6 +3398,8 @@ mod tests {
             location: None,
             has_token: false,
             debug_sni_override: None,
+            circuit: None,
+            alternate_circuit: None,
         }
     }
 
@@ -2981,6 +3633,8 @@ mod tests {
             location: None,
             has_token: true,
             debug_sni_override: None,
+            circuit: None,
+            alternate_circuit: None,
         };
         let fallback = PersistedTunnel {
             id: "fallback".to_string(),
@@ -2993,6 +3647,8 @@ mod tests {
             location: None,
             has_token: true,
             debug_sni_override: None,
+            circuit: None,
+            alternate_circuit: None,
         };
         let state = PersistedState {
             schema_version: 1,
@@ -3017,6 +3673,8 @@ mod tests {
             location: None,
             has_token: false,
             debug_sni_override: None,
+            circuit: None,
+            alternate_circuit: None,
         };
         let valid = PersistedTunnel {
             id: "valid".to_string(),
@@ -3029,6 +3687,8 @@ mod tests {
             location: None,
             has_token: true,
             debug_sni_override: None,
+            circuit: None,
+            alternate_circuit: None,
         };
         let state = PersistedState {
             schema_version: 1,

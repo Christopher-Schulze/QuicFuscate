@@ -19,7 +19,13 @@ import {
   getActiveTunnelId,
   setPersistenceStatus,
 } from "./app.svelte";
-import type { TunnelConfig, AppSettings, GeneralSettings, HardwareSettings } from "$lib/types";
+import type {
+  TunnelConfig,
+  CircuitConfig,
+  AppSettings,
+  GeneralSettings,
+  HardwareSettings,
+} from "$lib/types";
 import { parseTauriLogLine, type RawTauriLogLine } from "$lib/timestamp-boundary";
 import {
   evaluateByteRateSample,
@@ -80,7 +86,110 @@ type PersistedTunnel = {
   id?: unknown; name?: unknown; remote?: unknown; sni?: unknown;
   qkey?: unknown; createdAt?: unknown; hasToken?: unknown;
   countryCode?: unknown; location?: unknown; debugSniOverride?: unknown;
+  circuit?: unknown; alternateCircuit?: unknown;
 };
+
+function normalizePersistedCircuit(input: unknown): CircuitConfig | null | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!isRecord(input) || !Array.isArray(input.hops) || input.hops.length < 1 || input.hops.length > 8) {
+    return null;
+  }
+  const rawHops = input.hops;
+  const hops = rawHops.map((raw, index) => {
+    if (!isRecord(raw)) return null;
+    const text = (key: string): string => typeof raw[key] === "string" ? raw[key].trim() : "";
+    const id = text("id");
+    const label = text("label");
+    const remote = text("remote");
+    const sni = text("sni");
+    const qkeyId = text("qkeyId").toLowerCase();
+    const qkey = typeof raw.qkey === "string" ? raw.qkey.trim() : "";
+    const expectedRole = index + 1 === rawHops.length ? "exit" : "relay";
+    if (!id || !label || !remote || !sni || raw.role !== expectedRole || !/^[0-9a-f]{12}$/.test(qkeyId)) {
+      return null;
+    }
+    const optional = (key: string): string | undefined => {
+      const value = text(key);
+      return value || undefined;
+    };
+    const rawPolicy = raw.policy;
+    let policy: CircuitConfig["hops"][number]["policy"];
+    if (rawPolicy !== undefined && rawPolicy !== null) {
+      if (!isRecord(rawPolicy)) return null;
+      const fecMode = rawPolicy.fecMode;
+      if (fecMode !== undefined && fecMode !== "off" && fecMode !== "auto") return null;
+      const rawPersona = rawPolicy.persona;
+      let persona: NonNullable<CircuitConfig["hops"][number]["policy"]>["persona"];
+      if (rawPersona !== undefined && rawPersona !== null) {
+        if (!isRecord(rawPersona)) return null;
+        const browsers = ["chrome", "firefox", "safari", "edge"];
+        const operatingSystems = ["windows", "macos", "linux", "ios", "android"];
+        if (!browsers.includes(String(rawPersona.browser))
+          || !operatingSystems.includes(String(rawPersona.os))) return null;
+        persona = {
+          browser: rawPersona.browser as NonNullable<typeof persona>["browser"],
+          os: rawPersona.os as NonNullable<typeof persona>["os"],
+        };
+      }
+      const optionalBoolean = (key: string): boolean | undefined => {
+        const value = rawPolicy[key];
+        return typeof value === "boolean" ? value : undefined;
+      };
+      policy = {
+        persona,
+        fecMode,
+        enableTrafficPadding: optionalBoolean("enableTrafficPadding"),
+        enableTimingObfuscation: optionalBoolean("enableTimingObfuscation"),
+        enableCoverPing: optionalBoolean("enableCoverPing"),
+      };
+    }
+    const positiveInteger = (key: string, fallback: number): number => {
+      const value = raw[key];
+      return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+        ? value : fallback;
+    };
+    return {
+      id,
+      label,
+      remote,
+      sni,
+      qkeyId,
+      qkey,
+      role: expectedRole,
+      provider: optional("provider"),
+      region: optional("region"),
+      jurisdiction: optional("jurisdiction"),
+      failureDomain: optional("failureDomain"),
+      verifyPeer: raw.verifyPeer !== false,
+      caFile: optional("caFile"),
+      connectTimeoutMs: positiveInteger("connectTimeoutMs", 10_000),
+      idleTimeoutMs: positiveInteger("idleTimeoutMs", 30_000),
+      policy,
+      hasToken: Boolean(raw.hasToken),
+    };
+  });
+  if (hops.some((hop) => hop === null)) return null;
+  const maxHops = typeof input.maxHops === "number" && Number.isInteger(input.maxHops)
+    ? input.maxHops : 3;
+  const maxParallelCircuits = typeof input.maxParallelCircuits === "number"
+    && Number.isInteger(input.maxParallelCircuits) ? input.maxParallelCircuits : 2;
+  if (maxHops < hops.length || maxHops > 8 || maxParallelCircuits < 1 || maxParallelCircuits > 2) {
+    return null;
+  }
+  const rawDiversity = isRecord(input.diversity) ? input.diversity : {};
+  return {
+    hops: hops as CircuitConfig["hops"],
+    maxHops,
+    maxParallelCircuits,
+    allowSingleHopFallback: input.allowSingleHopFallback === true,
+    diversity: {
+      provider: rawDiversity.provider === true,
+      region: rawDiversity.region === true,
+      jurisdiction: rawDiversity.jurisdiction === true,
+      failureDomain: rawDiversity.failureDomain === true,
+    },
+  };
+}
 
 export function normalizePersistedTunnels(input: unknown): {
   tunnels: TunnelConfig[];
@@ -111,7 +220,23 @@ export function normalizePersistedTunnels(input: unknown): {
     const debugSniOverride =
       typeof raw.debugSniOverride === "string" && raw.debugSniOverride.trim().length > 0
         ? raw.debugSniOverride.trim() : undefined;
-    result.push({ id, name, remote, sni, qkey, createdAt: createdAt.value, hasToken, countryCode, location, debugSniOverride });
+    const circuit = normalizePersistedCircuit(raw.circuit);
+    const alternateCircuit = normalizePersistedCircuit(raw.alternateCircuit);
+    if (circuit === null || alternateCircuit === null || (alternateCircuit && !circuit)) continue;
+    result.push({
+      id,
+      name,
+      remote,
+      sni,
+      qkey,
+      createdAt: createdAt.value,
+      hasToken,
+      countryCode,
+      location,
+      debugSniOverride,
+      circuit,
+      alternateCircuit,
+    });
   }
   return { tunnels: result, invalidTimestampCount };
 }
@@ -298,6 +423,10 @@ export function startEnginePollers(): () => void {
           fecActivityPercent: stats.fecActivityPercent,
           fecRecoveredPackets: stats.fecRecoveredPackets,
           currentSni: stats.currentSni,
+          circuitGeneration: stats.circuitGeneration,
+          circuitState: stats.circuitState,
+          effectiveTunnelMtu: stats.effectiveTunnelMtu,
+          hops: stats.hops,
         },
       }));
 
@@ -382,12 +511,40 @@ export function startEnginePollers(): () => void {
   };
 }
 
-export async function engineConnect(tunnelId: string, qkeyData: string, settings: unknown, sniOverride?: string): Promise<void> {
+export async function engineConnect(
+  tunnelId: string,
+  qkeyData: string,
+  settings: unknown,
+  sniOverride?: string,
+  circuit?: CircuitConfig,
+  alternateCircuit?: CircuitConfig,
+): Promise<void> {
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("engine_connect", {
+    request: {
+      tunnel_id: tunnelId,
+      qkey_data: qkeyData,
+      sni_override: sniOverride && sniOverride.length > 0 ? sniOverride : null,
+      circuit: circuit ?? null,
+      alternate_circuit: alternateCircuit ?? null,
+      settings,
+    },
+  });
+}
+
+export async function engineRotate(
+  tunnelId: string,
+  qkeyData: string,
+  settings: unknown,
+  circuit: CircuitConfig,
+  sniOverride?: string,
+): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("engine_rotate", {
     tunnel_id: tunnelId,
     qkey_data: qkeyData,
     sni_override: sniOverride && sniOverride.length > 0 ? sniOverride : null,
+    circuit,
     settings,
   });
 }

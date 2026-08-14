@@ -20,9 +20,12 @@ import {
   setTunnels,
 } from "../../../../../../apps/svelte-desktop/src/lib/stores/app.svelte";
 import {
+  engineConnect,
   engineLogsClear,
+  engineRotate,
   startEnginePollers,
 } from "../../../../../../apps/svelte-desktop/src/lib/stores/tauri-bridge.svelte";
+import type { CircuitConfig } from "../../../../../../apps/svelte-desktop/src/lib/types";
 import { getFrontendClockHarness } from "../../../test-clock";
 import { desktopCreatedAt } from "./timestamp-fixtures";
 
@@ -49,6 +52,33 @@ function resetStores(): void {
 
 function setVisibility(state: "hidden" | "visible"): void {
   getFrontendClockHarness().setVisibility(state);
+}
+
+function circuit(remote: string, role: "relay" | "exit" = "exit"): CircuitConfig {
+  return {
+    hops: [{
+      id: `hop-${remote}`,
+      label: "Exit",
+      remote,
+      sni: "exit.example.com",
+      qkeyId: "0123456789ab",
+      qkey: "QKey",
+      role,
+      verifyPeer: true,
+      connectTimeoutMs: 10_000,
+      idleTimeoutMs: 30_000,
+      hasToken: true,
+    }],
+    maxHops: 3,
+    maxParallelCircuits: 2,
+    allowSingleHopFallback: false,
+    diversity: {
+      provider: false,
+      region: false,
+      jurisdiction: false,
+      failureDomain: false,
+    },
+  };
 }
 
 describe("desktop engine poller ownership", () => {
@@ -87,6 +117,44 @@ describe("desktop engine poller ownership", () => {
     expect(getTunnelStats()).toEqual({});
     expect(getThroughput()).toEqual({});
     expect(getLogs()).toEqual([]);
+  });
+
+  test("binds connect and rotation arguments to the native command contracts", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const primary = circuit("203.0.113.10:4433");
+    const alternate = circuit("203.0.113.20:4433");
+    const settings = { general: { logLevel: "info" } };
+
+    await engineConnect("t1", "PrimaryQKey", settings, "front.example.com", primary, alternate);
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      1,
+      "engine_connect",
+      {
+        request: {
+          tunnel_id: "t1",
+          qkey_data: "PrimaryQKey",
+          sni_override: "front.example.com",
+          circuit: primary,
+          alternate_circuit: alternate,
+          settings,
+        },
+      },
+      undefined,
+    );
+
+    await engineRotate("t1", "AlternateQKey", settings, alternate);
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      2,
+      "engine_rotate",
+      {
+        tunnel_id: "t1",
+        qkey_data: "AlternateQKey",
+        sni_override: null,
+        circuit: alternate,
+        settings,
+      },
+      undefined,
+    );
   });
 
   test("serializes log polls and rejects cursor regressions and cleared epochs", async () => {

@@ -8,7 +8,7 @@
     getQkeyPolicies, setQkeyPolicies, getThroughput,
     updateTunnels,
   } from "$lib/stores/app.svelte";
-  import { isTauri, engineConnect, engineDisconnect, qkeyParse } from "$lib/stores/tauri-bridge.svelte";
+  import { isTauri, engineConnect, engineDisconnect, engineRotate, qkeyParse } from "$lib/stores/tauri-bridge.svelte";
   import { resolveDomainFrontingSniDisplay } from "$lib/domain-fronting-policy";
   import { fly, scale } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -57,7 +57,14 @@
   const selectedState = $derived(selectedTunnel ? (tunnelStates[selectedTunnel.id] ?? "inactive") : "inactive");
   const selectedStats = $derived(selectedTunnel ? (tunnelStats[selectedTunnel.id] ?? null) : null);
   const selectedThroughput = $derived(selectedTunnel ? (throughput[selectedTunnel.id] ?? null) : null);
-  const selectedHasQKey = $derived(Boolean(selectedTunnel?.qkey.trim()));
+  const selectedHasQKey = $derived(Boolean(selectedTunnel && (
+    selectedTunnel.circuit
+      ? selectedTunnel.circuit.hops.length > 0
+        && selectedTunnel.circuit.hops.every((hop) => hop.qkey.trim().length > 0)
+        && (!selectedTunnel.alternateCircuit
+          || selectedTunnel.alternateCircuit.hops.every((hop) => hop.qkey.trim().length > 0))
+      : selectedTunnel.qkey.trim().length > 0
+  )));
   const selectedPolicy = $derived(selectedTunnel ? (qkeyPolicies[selectedTunnel.id] ?? DEFAULT_POLICY) : DEFAULT_POLICY);
 
   const selectedSniDisplay = $derived.by(() => {
@@ -97,20 +104,27 @@
     } catch { return { mtu: "server", cc: "server", customDetails: [] }; }
   }
 
-  const qkeyFingerprint = $derived(tunnels.map((t) => `${t.id}:${t.qkey.slice(0, 16)}`).join("|"));
+  const qkeyFingerprint = $derived(tunnels.map((t) =>
+    `${t.id}:${(t.circuit?.hops.map((hop) => hop.qkey.slice(0, 16)).join(":") ?? t.qkey.slice(0, 16))}`,
+  ).join("|"));
 
   $effect(() => {
     void qkeyFingerprint;
     if (!isTauri()) { setQkeyPolicies({}); return; }
-    const parseable = tunnels.filter((t) => t.qkey.trim().length > 0);
+    const parseable = tunnels
+      .map((tunnel) => ({
+        tunnel,
+        qkey: tunnel.circuit?.hops.at(-1)?.qkey.trim() ?? tunnel.qkey.trim(),
+      }))
+      .filter(({ qkey }) => qkey.length > 0);
     if (parseable.length === 0) { setQkeyPolicies({}); return; }
     let cancelled = false;
     (async () => {
       try {
         const entries = await Promise.all(
-          parseable.map(async (tunnel) => {
+          parseable.map(async ({ tunnel, qkey }) => {
             try {
-              const parsed = await qkeyParse(tunnel.qkey);
+              const parsed = await qkeyParse(qkey);
               const stealth = normalizeMode(parsed.stealth as string | null);
               const fec = normalizeMode(parsed.fec as string | null);
               const extraPolicy = parseExtraPolicy(parsed.extra);
@@ -171,7 +185,7 @@
     pendingSwitchTargetId = null;
     const sourceId = activeTunnelId;
     if (!sourceId || sourceId === target.id) { setSelectedId(target.id); return; }
-    const qkey = target.qkey.trim();
+    const qkey = (target.circuit?.hops[0]?.qkey ?? target.qkey).trim();
     if (!qkey) {
       addToast("QKey missing on target tunnel. Set a QKey before switching.", "warning");
       dialogActionDelay.schedule(() => {
@@ -195,7 +209,14 @@
       await engineDisconnect();
       disconnected = true;
       const sniOverride = (target.debugSniOverride ?? "").trim();
-      await engineConnect(target.id, qkey, settings, sniOverride.length > 0 ? sniOverride : undefined);
+      await engineConnect(
+        target.id,
+        qkey,
+        settings,
+        sniOverride.length > 0 ? sniOverride : undefined,
+        target.circuit,
+        target.alternateCircuit,
+      );
       const allIds = Object.keys(tunnelStates);
       const next: Record<string, "inactive" | "activating" | "active" | "deactivating"> = {};
       for (const k of allIds) next[k] = "inactive";
@@ -215,7 +236,7 @@
     const state = selectedState;
     if (state === "activating" || state === "deactivating") return;
     if (state === "active") { pendingDisconnectId = selectedTunnel.id; return; }
-    const qkey = selectedTunnel.qkey.trim();
+    const qkey = (selectedTunnel.circuit?.hops[0]?.qkey ?? selectedTunnel.qkey).trim();
     if (!qkey) {
       addToast("QKey missing. Set a QKey before connecting.", "warning");
       dialogActionDelay.schedule(() => {
@@ -238,7 +259,14 @@
     }
     try {
       const sniOverride = (selectedTunnel.debugSniOverride ?? "").trim();
-      await engineConnect(selectedTunnel.id, qkey, settings, sniOverride.length > 0 ? sniOverride : undefined);
+      await engineConnect(
+        selectedTunnel.id,
+        qkey,
+        settings,
+        sniOverride.length > 0 ? sniOverride : undefined,
+        selectedTunnel.circuit,
+        selectedTunnel.alternateCircuit,
+      );
       const allIds = Object.keys(tunnelStates);
       const next: Record<string, "inactive" | "activating" | "active" | "deactivating"> = {};
       for (const k of allIds) next[k] = "inactive";
@@ -250,6 +278,51 @@
       updateTunnelStates((prev) => ({ ...prev, [selectedTunnel.id]: "inactive" }));
       setError(String(e ?? "Connect failed"));
       addToast(String(e ?? "Connect failed"), "error");
+    }
+  }
+
+  async function handleRotateCircuit() {
+    if (!selectedTunnel?.circuit || selectedState !== "active" || switchingTunnelId) return;
+    const rotationTarget = selectedTunnel.alternateCircuit;
+    if (!rotationTarget) {
+      addToast("No authenticated alternate circuit is configured.", "warning");
+      return;
+    }
+    if (selectedTunnel.circuit.maxParallelCircuits !== 2) {
+      addToast("Circuit rotation requires a parallel-circuit limit of 2.", "warning");
+      return;
+    }
+    const qkey = rotationTarget.hops[0]?.qkey.trim() ?? "";
+    if (!qkey || !rotationTarget.hops.every((hop) => hop.qkey.trim().length > 0)) {
+      addToast("Every circuit hop needs a QKey before rotation.", "warning");
+      return;
+    }
+    if (!isTauri()) {
+      addToast("Circuit rotation requires the desktop app runtime", "error");
+      return;
+    }
+    switchingTunnelId = selectedTunnel.id;
+    setError(null);
+    try {
+      const sniOverride = (selectedTunnel.debugSniOverride ?? "").trim();
+      await engineRotate(
+        selectedTunnel.id,
+        qkey,
+        settings,
+        rotationTarget,
+        sniOverride.length > 0 ? sniOverride : undefined,
+      );
+      const previousPrimary = selectedTunnel.circuit;
+      updateTunnels((current) => current.map((tunnel) => tunnel.id === selectedTunnel.id
+        ? { ...tunnel, circuit: rotationTarget, alternateCircuit: previousPrimary }
+        : tunnel));
+      addToast("Circuit rotated after readiness verification", "success");
+    } catch (error: unknown) {
+      const message = String(error ?? "Circuit rotation failed");
+      setError(message);
+      addToast(message, "error");
+    } finally {
+      switchingTunnelId = null;
     }
   }
 
@@ -410,6 +483,8 @@
       hasQKey={selectedHasQKey}
       ontoggle={handleToggleConnection}
       oneditqkey={() => { if (selectedTunnel) openEditQkeyDialog(selectedTunnel.id); }}
+      onrotate={handleRotateCircuit}
+      rotationDisabled={Boolean(switchingTunnelId)}
     />
   </div>
 </div>

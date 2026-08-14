@@ -3,7 +3,7 @@
   import { cn } from "@quicfuscate/ui";
   import { countryCodeToFlag, formatBytes, formatDuration, formatRate, normalizeMode } from "$lib/format";
   import { displayStealthMode, displayFecMode, displayCcMode, displayMtu } from "$lib/policy-display";
-  import { Zap, Clock3, ArrowDownUp } from "@lucide/svelte";
+  import { Zap, Clock3, ArrowDownUp, RefreshCw } from "@lucide/svelte";
   import ConnectButton from "$lib/components/ui/ConnectButton.svelte";
   import ThroughputChart from "$lib/components/tunnel/ThroughputChart.svelte";
   import type { TunnelConfig, TunnelState, TunnelStats as TStats, TunnelPolicyView } from "$lib/types";
@@ -19,9 +19,11 @@
     hasQKey: boolean;
     ontoggle: () => void;
     oneditqkey: () => void;
+    onrotate: () => void;
+    rotationDisabled: boolean;
   }
 
-  let { tunnel, state, stats, policy, throughput, sniDisplay, actionDisabled, hasQKey, ontoggle, oneditqkey }: Props = $props();
+  let { tunnel, state, stats, policy, throughput, sniDisplay, actionDisabled, hasQKey, ontoggle, oneditqkey, onrotate, rotationDisabled }: Props = $props();
 
   const flag = $derived(tunnel ? countryCodeToFlag(tunnel.countryCode) : "");
   const statusLabel = $derived(
@@ -151,14 +153,29 @@
           </div>
         </div>
         <!-- Bottom: Connect button flush with chart bottom -->
-        <ConnectButton
-          state={connectState}
-          onclick={ontoggle}
-          disabled={actionDisabled}
-          {hasQKey}
-          class="w-full"
-          buttonClass="w-full h-[32px]"
-        />
+        <div class="flex w-full gap-1.5">
+          <ConnectButton
+            state={connectState}
+            onclick={ontoggle}
+            disabled={actionDisabled}
+            {hasQKey}
+            class="min-w-0 flex-1"
+            buttonClass="w-full h-[32px]"
+          />
+          {#if tunnel?.circuit && state === "active"}
+            <button
+              type="button"
+              use:ripple
+              onclick={onrotate}
+              disabled={rotationDisabled || tunnel.circuit.maxParallelCircuits !== 2}
+              aria-label="Rotate circuit"
+              title="Build a fresh circuit generation, verify readiness, then switch"
+              class="action-refresh-btn inline-flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-lg border disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <RefreshCw class="h-3.5 w-3.5" strokeWidth={2.1} />
+            </button>
+          {/if}
+        </div>
       </div>
 
       <!-- Right column: chart fills all remaining width -->

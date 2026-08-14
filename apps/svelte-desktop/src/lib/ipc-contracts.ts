@@ -87,6 +87,18 @@ export interface EngineStatsContract {
   fecActivityPercent: number;
   fecRecoveredPackets: number;
   currentSni?: string;
+  circuitGeneration: number;
+  circuitState: string;
+  effectiveTunnelMtu: number;
+  hops: CircuitHopStatsContract[];
+}
+
+export interface CircuitHopStatsContract {
+  index: number;
+  role: "relay" | "exit";
+  established: boolean;
+  latencyMs: number;
+  datagramBudget: number;
 }
 
 /**
@@ -117,10 +129,13 @@ export function parseEngineStats(raw: unknown): EngineStatsContract | null {
   const uptimeSecs = numeric("uptimeSecs", counter);
   const fecActivityPercent = numeric("fecActivityPercent", percentage);
   const fecRecoveredPackets = numeric("fecRecoveredPackets", counter);
+  const circuitGeneration = numeric("circuitGeneration", counter);
+  const effectiveTunnelMtu = numeric("effectiveTunnelMtu", (v) => finiteNumber(v, 0, 65_535));
 
   const numbers = [
     latencyMs, lossPercent, rxBytes, txBytes, rxPackets,
     txPackets, uptimeSecs, fecActivityPercent, fecRecoveredPackets,
+    circuitGeneration, effectiveTunnelMtu,
   ];
   if (numbers.some((value) => value === null || value === undefined)) return null;
 
@@ -130,7 +145,33 @@ export function parseEngineStats(raw: unknown): EngineStatsContract | null {
   };
   const stealthMode = optionalMode(raw.stealthMode, "auto");
   const fecMode = optionalMode(raw.fecMode, "auto");
-  if (stealthMode === null || fecMode === null) return null;
+  const circuitState = optionalMode(raw.circuitState, "idle");
+  if (stealthMode === null || fecMode === null || circuitState === null) return null;
+
+  const rawHops = raw.hops ?? [];
+  if (!Array.isArray(rawHops) || rawHops.length > 8) return null;
+  const hops: CircuitHopStatsContract[] = [];
+  for (const [expectedIndex, rawHop] of rawHops.entries()) {
+    if (!isRecord(rawHop)) return null;
+    const index = finiteNumber(rawHop.index, 0, 7);
+    const role = oneOf(rawHop.role, ["relay", "exit"] as const);
+    const latency = finiteNumber(rawHop.latencyMs, 0, 3_600_000);
+    const budget = finiteNumber(rawHop.datagramBudget, 0, 65_535);
+    if (
+      index !== expectedIndex ||
+      role === null ||
+      typeof rawHop.established !== "boolean" ||
+      latency === null ||
+      budget === null
+    ) return null;
+    hops.push({
+      index,
+      role,
+      established: rawHop.established,
+      latencyMs: latency,
+      datagramBudget: budget,
+    });
+  }
 
   // An absent SNI is normal; a present but malformed one is not silently dropped,
   // because the displayed identity would then differ from what the engine reported.
@@ -154,6 +195,10 @@ export function parseEngineStats(raw: unknown): EngineStatsContract | null {
     fecActivityPercent: fecActivityPercent as number,
     fecRecoveredPackets: fecRecoveredPackets as number,
     currentSni,
+    circuitGeneration: circuitGeneration as number,
+    circuitState,
+    effectiveTunnelMtu: effectiveTunnelMtu as number,
+    hops,
   };
 }
 

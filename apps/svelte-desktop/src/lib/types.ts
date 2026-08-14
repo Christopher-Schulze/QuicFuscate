@@ -26,6 +26,56 @@ export interface TunnelConfig {
   hasToken: boolean;
   /** Canonical credential */
   qkey: string;
+  /** Canonical ordered circuit. Absence is the legacy one-hop shorthand. */
+  circuit?: CircuitConfig;
+  /** Distinct ready standby circuit. Absence disables make-before-break failover. */
+  alternateCircuit?: CircuitConfig;
+}
+
+export interface CircuitConfig {
+  hops: CircuitHopConfig[];
+  maxHops: number;
+  maxParallelCircuits: number;
+  allowSingleHopFallback: boolean;
+  diversity: CircuitDiversityPolicy;
+}
+
+export interface CircuitHopConfig {
+  id: string;
+  label: string;
+  remote: string;
+  sni: string;
+  qkeyId: string;
+  qkey: string;
+  role: "relay" | "exit";
+  provider?: string;
+  region?: string;
+  jurisdiction?: string;
+  failureDomain?: string;
+  verifyPeer?: boolean;
+  caFile?: string;
+  connectTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  policy?: CircuitHopPolicy;
+  hasToken: boolean;
+}
+
+export interface CircuitHopPolicy {
+  persona?: {
+    browser: "chrome" | "firefox" | "safari" | "edge";
+    os: "windows" | "macos" | "linux" | "ios" | "android";
+  };
+  fecMode?: "off" | "auto";
+  enableTrafficPadding?: boolean;
+  enableTimingObfuscation?: boolean;
+  enableCoverPing?: boolean;
+}
+
+export interface CircuitDiversityPolicy {
+  provider: boolean;
+  region: boolean;
+  jurisdiction: boolean;
+  failureDomain: boolean;
 }
 
 /** Live tunnel statistics (while active) */
@@ -42,6 +92,18 @@ export interface TunnelStats {
   fecActivityPercent: number;
   fecRecoveredPackets: number;
   currentSni?: string;
+  circuitGeneration: number;
+  circuitState: string;
+  effectiveTunnelMtu: number;
+  hops: CircuitHopStats[];
+}
+
+export interface CircuitHopStats {
+  index: number;
+  role: "relay" | "exit";
+  established: boolean;
+  latencyMs: number;
+  datagramBudget: number;
 }
 
 /** Client-level application settings */
