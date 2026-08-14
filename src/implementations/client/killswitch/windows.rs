@@ -796,7 +796,7 @@ mod tests {
                 assert!(keys.insert(filter_key_value(layer, kind)));
             }
         }
-        assert_eq!(keys.len(), 8);
+        assert_eq!(keys.len(), 10);
     }
 
     #[test]
