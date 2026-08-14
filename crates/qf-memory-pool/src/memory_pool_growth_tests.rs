@@ -7,9 +7,9 @@ use super::{
 };
 
 #[cfg(unix)]
-use super::{ZeroCopyBuffer, ZeroCopyRecvBuffer};
+use super::zero_copy_buffers::{ZeroCopyBuffer, ZeroCopyRecvBuffer};
 #[cfg(any(unix, windows))]
-use super::{ZeroCopyError, ZeroCopyTransfer};
+use super::zero_copy_buffers::{ZeroCopyError, ZeroCopyTransfer};
 
 #[cfg(any(unix, windows))]
 #[test]
@@ -37,7 +37,7 @@ fn zero_copy_transfer_classifies_zero_complete_and_partial_progress() {
 #[cfg(unix)]
 #[test]
 fn unix_zero_copy_checks_iovec_count_and_normalizes_syscall_errors() {
-    let maximum = super::unix_iovec_max();
+    let maximum = super::zero_copy_buffers::unix_iovec_max();
     let data = [0u8; 1];
     let buffers = vec![&data[..]; maximum + 1];
     assert!(matches!(ZeroCopyBuffer::new(&buffers), Err(ZeroCopyError::InvalidBufferCount { .. })));
@@ -57,11 +57,11 @@ fn unix_zero_copy_checks_iovec_count_and_normalizes_syscall_errors() {
 #[test]
 fn windows_zero_copy_checks_u32_abi_bounds() {
     assert!(matches!(
-        super::checked_windows_buffer_length(0, u32::MAX as usize + 1),
+        super::zero_copy_buffers::checked_windows_buffer_length(0, u32::MAX as usize + 1),
         Err(ZeroCopyError::BufferLengthTooLarge { .. })
     ));
     assert!(matches!(
-        super::checked_windows_buffer_count(u32::MAX as usize + 1),
+        super::zero_copy_buffers::checked_windows_buffer_count(u32::MAX as usize + 1),
         Err(ZeroCopyError::InvalidBufferCount { .. })
     ));
 }

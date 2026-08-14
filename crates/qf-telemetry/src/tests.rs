@@ -149,6 +149,42 @@ fn crypto_backend_selection_metrics_exported_in_telemetry_text() {
 }
 
 #[test]
+fn standard_quic_packet_key_install_metrics_are_typed_and_low_cardinality() {
+    let handshake_aes128_before = QUIC_HANDSHAKE_AES128_KEY_INSTALLS.get();
+    let handshake_aes256_before = QUIC_HANDSHAKE_AES256_KEY_INSTALLS.get();
+    let one_rtt_aes128_before = QUIC_ONE_RTT_AES128_KEY_INSTALLS.get();
+    let one_rtt_aes256_before = QUIC_ONE_RTT_AES256_KEY_INSTALLS.get();
+
+    QUIC_HANDSHAKE_AES128_KEY_INSTALLS.inc();
+    QUIC_HANDSHAKE_AES256_KEY_INSTALLS.inc();
+    QUIC_ONE_RTT_AES128_KEY_INSTALLS.inc();
+    QUIC_ONE_RTT_AES256_KEY_INSTALLS.inc();
+
+    let output = export_telemetry_text();
+    for (labels, value) in [
+        (
+            "level=\"handshake\",owner=\"rustls-standard\",suite=\"tls-aes-128-gcm-sha256\"",
+            handshake_aes128_before + 1,
+        ),
+        (
+            "level=\"handshake\",owner=\"rustls-standard\",suite=\"tls-aes-256-gcm-sha384\"",
+            handshake_aes256_before + 1,
+        ),
+        (
+            "level=\"one-rtt\",owner=\"rustls-standard\",suite=\"tls-aes-128-gcm-sha256\"",
+            one_rtt_aes128_before + 1,
+        ),
+        (
+            "level=\"one-rtt\",owner=\"rustls-standard\",suite=\"tls-aes-256-gcm-sha384\"",
+            one_rtt_aes256_before + 1,
+        ),
+    ] {
+        assert!(output
+            .contains(&format!("quicfuscate_quic_packet_key_installs_total{{{labels}}} {value}")));
+    }
+}
+
+#[test]
 fn test_cpu_profile_mask_arm_profiles_nonzero() {
     let arm_profiles = [
         CpuProfileId::ARM_A0,

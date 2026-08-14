@@ -1,4 +1,209 @@
-use super::*;
+#[cfg(any(unix, windows))]
+use std::io;
+#[cfg(any(unix, windows))]
+use std::net::SocketAddr;
+
+#[cfg(unix)]
+use libc::{iovec, msghdr, recvmsg, sendmsg};
+#[cfg(unix)]
+use smallvec::SmallVec;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::{
+    WSAGetLastError, WSARecv, WSARecvFrom, WSASend, WSASendTo, WSABUF,
+};
+
+/// Platform-neutral failure values for the synchronous zero-copy syscall boundary.
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+pub enum ZeroCopyError {
+    InvalidBufferCount { count: usize, max: usize },
+    BufferLengthTooLarge { index: usize, length: usize, max: usize },
+    TotalLengthOverflow,
+    InvalidTransferCount { transferred: usize, requested: usize },
+    InvalidSocketAddress,
+    InvalidSocketAddressLength { length: usize, max: usize },
+    Io(io::Error),
+}
+
+#[cfg(any(unix, windows))]
+impl std::fmt::Display for ZeroCopyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidBufferCount { count, max } => {
+                write!(formatter, "zero-copy buffer count {count} exceeds platform maximum {max}")
+            }
+            Self::BufferLengthTooLarge { index, length, max } => write!(
+                formatter,
+                "zero-copy buffer {index} length {length} exceeds platform maximum {max}"
+            ),
+            Self::TotalLengthOverflow => {
+                formatter.write_str("zero-copy buffer lengths overflow usize")
+            }
+            Self::InvalidTransferCount { transferred, requested } => write!(
+                formatter,
+                "zero-copy syscall returned {transferred} bytes for {requested} requested bytes"
+            ),
+            Self::InvalidSocketAddress => {
+                formatter.write_str("zero-copy syscall returned a non-IP socket address")
+            }
+            Self::InvalidSocketAddressLength { length, max } => {
+                write!(formatter, "socket address length {length} exceeds platform maximum {max}")
+            }
+            Self::Io(error) => write!(formatter, "zero-copy syscall failed: {error}"),
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl std::error::Error for ZeroCopyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl From<io::Error> for ZeroCopyError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl From<ZeroCopyError> for io::Error {
+    fn from(error: ZeroCopyError) -> Self {
+        match error {
+            ZeroCopyError::Io(error) => error,
+            other => {
+                let kind = match &other {
+                    ZeroCopyError::InvalidTransferCount { .. } => io::ErrorKind::InvalidData,
+                    _ => io::ErrorKind::InvalidInput,
+                };
+                io::Error::new(kind, other)
+            }
+        }
+    }
+}
+
+/// Result type for the platform-specific zero-copy boundary.
+#[cfg(any(unix, windows))]
+pub type ZeroCopyResult<T> = Result<T, ZeroCopyError>;
+
+/// Explicit byte-count result for one synchronous zero-copy operation.
+#[cfg(any(unix, windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZeroCopyTransfer {
+    transferred: usize,
+    requested: usize,
+}
+
+#[cfg(any(unix, windows))]
+impl ZeroCopyTransfer {
+    pub(crate) fn from_syscall_count(transferred: usize, requested: usize) -> ZeroCopyResult<Self> {
+        if transferred > requested {
+            return Err(ZeroCopyError::InvalidTransferCount { transferred, requested });
+        }
+        Ok(Self { transferred, requested })
+    }
+
+    pub const fn transferred(self) -> usize {
+        self.transferred
+    }
+
+    pub const fn requested(self) -> usize {
+        self.requested
+    }
+
+    pub const fn is_zero(self) -> bool {
+        self.transferred == 0
+    }
+
+    pub const fn is_complete(self) -> bool {
+        self.transferred == self.requested
+    }
+
+    pub const fn is_partial(self) -> bool {
+        self.transferred != 0 && self.transferred < self.requested
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn checked_total_buffer_length<I>(lengths: I) -> ZeroCopyResult<usize>
+where
+    I: Iterator<Item = usize>,
+{
+    let mut total = 0usize;
+    for length in lengths {
+        total = total.checked_add(length).ok_or(ZeroCopyError::TotalLengthOverflow)?;
+    }
+    Ok(total)
+}
+
+#[cfg(any(unix, windows))]
+fn checked_buffer_count(count: usize, max: usize) -> ZeroCopyResult<usize> {
+    if count > max {
+        return Err(ZeroCopyError::InvalidBufferCount { count, max });
+    }
+    Ok(count)
+}
+
+#[cfg(windows)]
+pub(crate) fn checked_windows_buffer_count(count: usize) -> ZeroCopyResult<u32> {
+    checked_buffer_count(count, u32::MAX as usize)?;
+    u32::try_from(count)
+        .map_err(|_| ZeroCopyError::InvalidBufferCount { count, max: u32::MAX as usize })
+}
+
+#[cfg(windows)]
+pub(crate) fn checked_windows_buffer_length(index: usize, length: usize) -> ZeroCopyResult<u32> {
+    if length > u32::MAX as usize {
+        return Err(ZeroCopyError::BufferLengthTooLarge { index, length, max: u32::MAX as usize });
+    }
+    u32::try_from(length).map_err(|_| ZeroCopyError::BufferLengthTooLarge {
+        index,
+        length,
+        max: u32::MAX as usize,
+    })
+}
+
+#[cfg(windows)]
+fn last_winsock_error() -> io::Error {
+    // SAFETY: WSAGetLastError has no pointer arguments and reads the calling thread's
+    // Winsock error slot immediately after the failed synchronous operation.
+    io::Error::from_raw_os_error(unsafe { WSAGetLastError() })
+}
+
+#[cfg(unix)]
+pub(crate) fn unix_iovec_max() -> usize {
+    let abi_max = i32::MAX as usize;
+    #[cfg(any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos"))]
+    {
+        // A failed sysconf query is handled fail-closed. The common Linux/macOS
+        // paths return the kernel's IOV_MAX value here.
+        let configured = unsafe { libc::sysconf(libc::_SC_IOV_MAX) };
+        if configured > 0 {
+            return (configured as usize).min(abi_max);
+        }
+    }
+    1
+}
+
+#[cfg(unix)]
+fn checked_unix_iovec_count(count: usize) -> ZeroCopyResult<usize> {
+    checked_buffer_count(count, unix_iovec_max())
+}
+
+#[cfg(unix)]
+fn normalize_unix_count(raw: isize, requested: usize) -> ZeroCopyResult<ZeroCopyTransfer> {
+    if raw < 0 {
+        return Err(ZeroCopyError::Io(io::Error::last_os_error()));
+    }
+    ZeroCopyTransfer::from_syscall_count(raw as usize, requested)
+}
 
 /// A send-only buffer for synchronous zero-copy vectored I/O.
 ///

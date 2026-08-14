@@ -609,10 +609,10 @@ pub struct Encoder16 {
 }
 
 /// Public wrapper for GF(2^8) encoder used by transport integration.
-#[cfg(any(test, feature = "rust-tests"))]
+#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
 pub struct Encoder8(Encoder<GF8>);
 
-#[cfg(any(test, feature = "rust-tests"))]
+#[cfg(any(test, feature = "rust-tests", feature = "benches"))]
 impl Encoder8 {
     /// Create a new GF(2^8) encoder with source block size `k` and total codeword size `n`.
     pub fn new(k: usize, n: usize) -> Self {
