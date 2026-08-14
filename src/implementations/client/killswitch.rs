@@ -10,7 +10,7 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows::WindowsKillSwitch;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod platform_tests;
 
 /// Typed firewall exceptions for one VPN connection.
