@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::{
-    AeadPreference, AntiReplaySection, AuditConfig, CcAlgorithm, ConfigError, ConnectionConfig,
-    CryptoConfig, EngineMode, EngineSection, FecSection, FingerprintRotationConfig,
-    InterfaceConfig, LoggingConfig, NatTraversalSection, OptimizationConfig, QKeyConfig,
-    SecurityConfig, StealthMode, TelemetryConfig, TransportConfig,
+    AeadPreference, AntiReplaySection, AuditConfig, CcAlgorithm, CircuitConfig, ConfigError,
+    ConnectionConfig, CryptoConfig, EngineMode, EngineSection, FecSection,
+    FingerprintRotationConfig, InterfaceConfig, LoggingConfig, NatTraversalSection,
+    OptimizationConfig, QKeyConfig, SecurityConfig, StealthMode, TelemetryConfig, TransportConfig,
 };
 
 /// Complete engine configuration aggregating all subsystems.
@@ -30,6 +30,10 @@ pub struct EngineConfig {
     pub engine: EngineSection,
     /// Connection parameters (remote, TLS, streams)
     pub connection: ConnectionConfig,
+    /// Canonical multi-hop client circuit. Absence preserves legacy one-hop configuration.
+    pub circuit: Option<CircuitConfig>,
+    /// Optional distinct circuit authenticated and serviced in parallel after the primary.
+    pub alternate_circuit: Option<CircuitConfig>,
     /// Transport layer settings (CC, MTU, pacing)
     pub transport: TransportConfig,
     /// Optional NAT path discovery settings (STUN/TURN/ICE).
@@ -106,6 +110,83 @@ impl EngineConfig {
         self.engine.validate().map_err(ConfigError::Validation)?;
         self.connection.validate().map_err(|error| ConfigError::Validation(error.to_string()))?;
         self.transport.validate().map_err(|error| ConfigError::Validation(error.to_string()))?;
+        if self.engine.mode == EngineMode::Server
+            && (self.circuit.is_some() || self.alternate_circuit.is_some())
+        {
+            return Err(ConfigError::Validation(
+                "circuit and alternate_circuit are client-only configuration sections".to_string(),
+            ));
+        }
+        if let Some(circuit) = self.circuit.as_ref() {
+            circuit
+                .validate(self.transport.mtu.min(self.transport.max_udp_payload))
+                .map_err(|error| ConfigError::Validation(error.to_string()))?;
+            let legacy = ConnectionConfig::default();
+            if self.connection.remote != legacy.remote
+                || self.connection.sni != legacy.sni
+                || self.connection.qkey_id.is_some()
+                || self.connection.qkey_token.is_some()
+            {
+                return Err(ConfigError::Validation(
+                    "circuit cannot be combined with legacy connection endpoint or QKey fields"
+                        .to_string(),
+                ));
+            }
+        }
+        if let Some(alternate) = self.alternate_circuit.as_ref() {
+            let primary = self.circuit.as_ref().ok_or_else(|| {
+                ConfigError::Validation(
+                    "alternate_circuit requires a canonical primary circuit".to_string(),
+                )
+            })?;
+            alternate
+                .validate(self.transport.mtu.min(self.transport.max_udp_payload))
+                .map_err(|error| ConfigError::Validation(error.to_string()))?;
+            if primary.max_parallel_circuits != 2 || alternate.max_parallel_circuits != 2 {
+                return Err(ConfigError::Validation(
+                    "primary and alternate circuits require max_parallel_circuits = 2".to_string(),
+                ));
+            }
+            let primary_endpoints = primary
+                .hops
+                .iter()
+                .map(|hop| {
+                    hop.parsed_endpoint()
+                        .map(|endpoint| (endpoint.host, endpoint.port))
+                        .map_err(|error| ConfigError::Validation(error.to_string()))
+                })
+                .collect::<Result<std::collections::HashSet<_>, _>>()?;
+            let primary_identities = primary
+                .hops
+                .iter()
+                .map(|hop| hop.qkey_id.trim().to_ascii_lowercase())
+                .collect::<std::collections::HashSet<_>>();
+            let primary_token_references = primary
+                .hops
+                .iter()
+                .map(|hop| hop.qkey_token_ref.trim())
+                .collect::<std::collections::HashSet<_>>();
+            for (index, hop) in alternate.hops.iter().enumerate() {
+                let endpoint = hop
+                    .parsed_endpoint()
+                    .map_err(|error| ConfigError::Validation(error.to_string()))?;
+                if primary_endpoints.contains(&(endpoint.host, endpoint.port)) {
+                    return Err(ConfigError::Validation(format!(
+                        "alternate_circuit.hops[{index}] reuses a primary endpoint"
+                    )));
+                }
+                if primary_identities.contains(&hop.qkey_id.trim().to_ascii_lowercase()) {
+                    return Err(ConfigError::Validation(format!(
+                        "alternate_circuit.hops[{index}] reuses a primary QKey identity"
+                    )));
+                }
+                if primary_token_references.contains(hop.qkey_token_ref.trim()) {
+                    return Err(ConfigError::Validation(format!(
+                        "alternate_circuit.hops[{index}] reuses a primary QKey token reference"
+                    )));
+                }
+            }
+        }
         self.nat_traversal
             .validate()
             .map_err(|error| ConfigError::Validation(error.to_string()))?;
@@ -454,7 +535,7 @@ mod tests {
     use super::*;
     use crate::{
         ClientTunnelIpv4, ClientTunnelIpv6, InterfaceType, LoggingMode, MemoryLockFailurePolicy,
-        QuicVersion, RotationMode,
+        PacketProtectionMode, PrivateAeadFamily, QuicVersion, RotationMode,
     };
     use std::path::PathBuf;
 
@@ -465,6 +546,7 @@ mod tests {
         assert_eq!(config.transport.quic_versions, [QuicVersion::V2, QuicVersion::V1]);
         assert_eq!(config.transport.cc_algorithm, CcAlgorithm::Bbr3);
         assert_eq!(config.crypto.aead_preference, AeadPreference::Auto);
+        assert_eq!(config.crypto.packet_protection_mode, PacketProtectionMode::Auto);
         assert!(config.stealth.enable_network_fingerprint_normalization);
         assert!(!config.stealth.suppress_icmp_unreachable);
     }
@@ -898,6 +980,26 @@ mode = "roaming"
     }
 
     #[test]
+    fn private_packet_policy_roundtrips_as_typed_config_and_validates() {
+        let config = EngineConfig::from_toml(
+            "[crypto]\npacket_protection_mode = \"advanced-required\"\naead_preference = \"aegis-128l\"\n",
+        )
+        .expect("private packet policy parses");
+        assert_eq!(config.crypto.packet_protection_mode, PacketProtectionMode::AdvancedRequired);
+        assert_eq!(config.crypto.aead_preference, AeadPreference::Aegis128L);
+        assert_eq!(
+            config.crypto.aead_preference.private_family(),
+            Some(PrivateAeadFamily::Aegis128L)
+        );
+        config.validate().expect("typed private policy is semantically valid");
+
+        let encoded = toml::to_string(&config).expect("private packet policy serializes");
+        let decoded = EngineConfig::from_toml(&encoded).expect("private packet policy roundtrips");
+        assert_eq!(decoded.crypto.packet_protection_mode, PacketProtectionMode::AdvancedRequired);
+        assert_eq!(decoded.crypto.aead_preference, AeadPreference::Aegis128L);
+    }
+
+    #[test]
     fn test_parse_minimal_toml() {
         let toml = r#"
             [engine]
@@ -910,6 +1012,87 @@ mode = "roaming"
         let config = EngineConfig::from_toml(toml).unwrap();
         assert_eq!(config.engine.mode, EngineMode::Client);
         assert_eq!(config.connection.remote, "127.0.0.1:4433");
+    }
+
+    #[test]
+    fn circuit_allows_an_explicit_local_bind_but_rejects_legacy_peer_fields() {
+        let hop = crate::HopConfig {
+            label: "Entry".to_string(),
+            endpoint: "relay.example.com:4433".to_string(),
+            sni: "relay.example.com".to_string(),
+            qkey_id: "000000000001".to_string(),
+            qkey_token_ref: "env:QUICFUSCATE_HOP_1_QKEY".to_string(),
+            ..crate::HopConfig::default()
+        };
+        let mut config = EngineConfig {
+            circuit: Some(CircuitConfig { hops: vec![hop], ..CircuitConfig::default() }),
+            ..EngineConfig::default()
+        };
+        config.connection.local = "[::]:0".to_string();
+        config.validate().expect("the physical entry still needs an operator-selected local bind");
+
+        config.connection.remote = "198.51.100.7:4433".to_string();
+        let error =
+            config.validate().expect_err("legacy peer fields make circuit ownership ambiguous");
+        assert!(error.to_string().contains("legacy connection endpoint"));
+    }
+
+    #[test]
+    fn alternate_circuit_requires_distinct_parallel_bounded_routes() {
+        let make_hop = |endpoint: &str, qkey_id: &str| crate::HopConfig {
+            label: endpoint.to_string(),
+            endpoint: endpoint.to_string(),
+            sni: "relay.example.com".to_string(),
+            qkey_id: qkey_id.to_string(),
+            qkey_token_ref: format!("env:QKEY_{qkey_id}"),
+            ..crate::HopConfig::default()
+        };
+        let primary = CircuitConfig {
+            hops: vec![make_hop("primary.example.com:4433", "000000000001")],
+            ..CircuitConfig::default()
+        };
+        let alternate = CircuitConfig {
+            hops: vec![make_hop("alternate.example.com:4433", "000000000002")],
+            ..CircuitConfig::default()
+        };
+        let mut config = EngineConfig {
+            circuit: Some(primary),
+            alternate_circuit: Some(alternate),
+            ..EngineConfig::default()
+        };
+        config.validate().expect("distinct alternate circuit");
+
+        config.alternate_circuit.as_mut().unwrap().hops[0].endpoint =
+            "PRIMARY.EXAMPLE.COM.:4433".to_string();
+        assert!(config.validate().expect_err("endpoint reuse").to_string().contains("endpoint"));
+
+        config.alternate_circuit.as_mut().unwrap().hops[0].endpoint =
+            "alternate.example.com:4433".to_string();
+        config.alternate_circuit.as_mut().unwrap().hops[0].qkey_token_ref =
+            config.circuit.as_ref().unwrap().hops[0].qkey_token_ref.clone();
+        assert!(config
+            .validate()
+            .expect_err("credential reference reuse")
+            .to_string()
+            .contains("token reference"));
+    }
+
+    #[test]
+    fn server_mode_rejects_client_circuit_sections() {
+        let hop = crate::HopConfig {
+            label: "Exit".to_string(),
+            endpoint: "exit.example.com:4433".to_string(),
+            sni: "exit.example.com".to_string(),
+            qkey_id: "000000000001".to_string(),
+            qkey_token_ref: "env:QKEY_EXIT".to_string(),
+            ..crate::HopConfig::default()
+        };
+        let mut config = EngineConfig {
+            circuit: Some(CircuitConfig { hops: vec![hop], ..CircuitConfig::default() }),
+            ..EngineConfig::default()
+        };
+        config.engine.mode = EngineMode::Server;
+        assert!(config.validate().expect_err("server circuit").to_string().contains("client-only"));
     }
 
     #[test]
@@ -975,10 +1158,30 @@ mode = "roaming"
     }
 
     #[test]
+    fn canonical_circuit_example_validates_as_the_shared_operator_schema() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/circuit-client.example.toml");
+        let config = EngineConfig::from_file(path).expect("canonical circuit example parses");
+        config.validate().expect("canonical circuit example validates");
+
+        let circuit = config.circuit.as_ref().expect("canonical circuit section");
+        assert_eq!(circuit.hops.len(), 3);
+        assert_eq!(circuit.max_hops, 3);
+        assert_eq!(circuit.max_parallel_circuits, 2);
+        assert!(!circuit.allow_single_hop_fallback);
+        assert_eq!(circuit.hops.last().map(|hop| hop.role), Some(crate::HopRole::Exit));
+        assert!(config.alternate_circuit.is_none());
+    }
+
+    #[test]
     fn strict_engine_schema_rejects_unknown_keys_in_every_section() {
         let sections = [
             "engine",
             "connection",
+            "circuit",
+            "circuit.diversity",
+            "alternate_circuit",
+            "alternate_circuit.diversity",
             "transport",
             "transport.traffic_analysis",
             "transport.qkey_traffic_analysis_ceiling",

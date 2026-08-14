@@ -2,6 +2,172 @@
 
 use super::TransportError;
 
+/// Semantic owner of one authenticated HTTP Datagram flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MasqueFlowPurpose {
+    /// Raw IPv4 or IPv6 packets for the final TUN data plane.
+    TunIp,
+    /// Opaque UDP datagrams carrying the next hop's QUIC connection.
+    NextHopUdp,
+    /// Bounded circuit control messages.
+    Control,
+}
+
+impl MasqueFlowPurpose {
+    /// Stable request-header value used inside the authenticated H3 connection.
+    pub fn as_header_value(self) -> &'static [u8] {
+        match self {
+            Self::TunIp => b"tun-ip",
+            Self::NextHopUdp => b"next-hop-udp",
+            Self::Control => b"control",
+        }
+    }
+
+    /// Parse the unique authenticated request-header value.
+    pub fn from_header_value(value: &[u8]) -> Option<Self> {
+        if value.eq_ignore_ascii_case(b"tun-ip") {
+            Some(Self::TunIp)
+        } else if value.eq_ignore_ascii_case(b"next-hop-udp") {
+            Some(Self::NextHopUdp)
+        } else if value.eq_ignore_ascii_case(b"control") {
+            Some(Self::Control)
+        } else {
+            None
+        }
+    }
+}
+
+/// Strict RFC 9298 CONNECT-UDP target authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MasqueUdpTarget {
+    host: String,
+    port: u16,
+}
+
+impl MasqueUdpTarget {
+    /// Parse `host:port` or `[ipv6]:port` without DNS resolution.
+    pub fn parse_authority(authority: &str) -> Result<Self, Error> {
+        let authority = authority.trim();
+        let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+            let close = rest.find(']').ok_or(Error::FrameUnexpected)?;
+            let host = &rest[..close];
+            let port = rest[close + 1..].strip_prefix(':').ok_or(Error::FrameUnexpected)?;
+            if host.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(Error::FrameUnexpected);
+            }
+            (host, port)
+        } else {
+            let (host, port) = authority.rsplit_once(':').ok_or(Error::FrameUnexpected)?;
+            if host.contains(':') || !valid_target_host(host) {
+                return Err(Error::FrameUnexpected);
+            }
+            (host, port)
+        };
+        let port =
+            port.parse::<u16>().ok().filter(|port| *port != 0).ok_or(Error::FrameUnexpected)?;
+        Ok(Self { host: host.to_ascii_lowercase(), port })
+    }
+
+    /// Parse the RFC 9298 URI-template path without accepting extra segments.
+    pub fn parse_connect_udp_path(path: &[u8]) -> Result<Self, Error> {
+        const PREFIX: &[u8] = b"/.well-known/masque/udp/";
+        let suffix = path.strip_prefix(PREFIX).ok_or(Error::FrameUnexpected)?;
+        let suffix = suffix.strip_suffix(b"/").ok_or(Error::FrameUnexpected)?;
+        let mut segments = suffix.split(|byte| *byte == b'/');
+        let host = decode_uri_segment(segments.next().ok_or(Error::FrameUnexpected)?)?;
+        let port = decode_uri_segment(segments.next().ok_or(Error::FrameUnexpected)?)?;
+        if segments.next().is_some() {
+            return Err(Error::FrameUnexpected);
+        }
+        let authority =
+            if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+        Self::parse_authority(&authority)
+    }
+
+    /// Encode the exact RFC 9298 URI-template path.
+    pub fn connect_udp_path(&self) -> String {
+        format!("/.well-known/masque/udp/{}/{}/", encode_uri_segment(&self.host), self.port)
+    }
+
+    /// Hostname or IP literal without IPv6 brackets.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// UDP destination port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Canonical authority, adding brackets only for IPv6.
+    pub fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+fn valid_target_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    host.trim_end_matches('.').split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+fn encode_uri_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn decode_uri_segment(value: &[u8]) -> Result<String, Error> {
+    if value.is_empty() {
+        return Err(Error::FrameUnexpected);
+    }
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] != b'%' {
+            decoded.push(value[index]);
+            index += 1;
+            continue;
+        }
+        let pair = value.get(index + 1..index + 3).ok_or(Error::FrameUnexpected)?;
+        let high = hex_nibble(pair[0]).ok_or(Error::FrameUnexpected)?;
+        let low = hex_nibble(pair[1]).ok_or(Error::FrameUnexpected)?;
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    String::from_utf8(decoded).map_err(|_| Error::FrameUnexpected)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// HTTP/3 operation and protocol errors exposed by the connection boundary.
 #[derive(Debug, Clone, PartialEq)]
 #[doc(hidden)]
@@ -226,7 +392,9 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Error, Event, Header, APPLICATION_PROTOCOL};
+    use super::{
+        Config, Error, Event, Header, MasqueFlowPurpose, MasqueUdpTarget, APPLICATION_PROTOCOL,
+    };
     use crate::TransportError;
 
     #[test]
@@ -256,6 +424,50 @@ mod tests {
         let owned = Header::from_parts(b"owned".to_vec(), b"bytes".to_vec());
         assert_eq!(owned.name(), b"owned");
         assert_eq!(owned.value(), b"bytes");
+    }
+
+    #[test]
+    fn masque_target_codec_roundtrips_hostname_ipv4_and_ipv6() {
+        for (authority, path) in [
+            ("relay.example.com:4433", "/.well-known/masque/udp/relay.example.com/4433/"),
+            ("203.0.113.4:53", "/.well-known/masque/udp/203.0.113.4/53/"),
+            ("[2001:db8::4]:4433", "/.well-known/masque/udp/2001%3Adb8%3A%3A4/4433/"),
+        ] {
+            let target = MasqueUdpTarget::parse_authority(authority).expect("target authority");
+            assert_eq!(target.connect_udp_path(), path);
+            assert_eq!(
+                MasqueUdpTarget::parse_connect_udp_path(path.as_bytes()).expect("target path"),
+                target
+            );
+            assert_eq!(target.authority(), authority.to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn masque_target_codec_rejects_ambiguous_or_malformed_input() {
+        for authority in ["", "relay.example.com", "relay.example.com:0", "2001:db8::1:4433"] {
+            assert!(MasqueUdpTarget::parse_authority(authority).is_err(), "{authority}");
+        }
+        for path in [
+            b"/.well-known/masque/udp/host/4433".as_slice(),
+            b"/.well-known/masque/udp/host/4433/extra/".as_slice(),
+            b"/.well-known/masque/udp/host/%GG/".as_slice(),
+        ] {
+            assert!(MasqueUdpTarget::parse_connect_udp_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn masque_flow_purpose_header_values_are_exact() {
+        for purpose in
+            [MasqueFlowPurpose::TunIp, MasqueFlowPurpose::NextHopUdp, MasqueFlowPurpose::Control]
+        {
+            assert_eq!(
+                MasqueFlowPurpose::from_header_value(purpose.as_header_value()),
+                Some(purpose)
+            );
+        }
+        assert_eq!(MasqueFlowPurpose::from_header_value(b"unknown"), None);
     }
 
     #[test]

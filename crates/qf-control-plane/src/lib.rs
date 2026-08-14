@@ -15,6 +15,10 @@ pub const CLIENT_ASSIGNMENT_VERSION: u8 = 1;
 pub const MAX_CLIENT_ASSIGNMENT_PAYLOAD: usize = 256;
 /// Maximum number of DNS servers carried by one assignment.
 pub const MAX_CLIENT_ASSIGNMENT_DNS_SERVERS: usize = 4;
+/// RFC 9484 ADDRESS_ASSIGN capsule type.
+pub const CONNECT_IP_ADDRESS_ASSIGN_CAPSULE_TYPE: u64 = 0x01;
+/// RFC 9484 ROUTE_ADVERTISEMENT capsule type.
+pub const CONNECT_IP_ROUTE_ADVERTISEMENT_CAPSULE_TYPE: u64 = 0x03;
 
 const FLAG_ENABLED: u8 = 0x01;
 const FLAG_IPV4: u8 = 0x02;
@@ -236,6 +240,46 @@ impl ClientAssignment {
         Ok(out)
     }
 
+    /// Encode the RFC 9484 address and full-tunnel route capsules that precede
+    /// the private operational assignment capsule.
+    pub fn encode_connect_ip_capsules(&self) -> Result<Vec<(u64, Vec<u8>)>, AssignmentError> {
+        self.validate()?;
+        if self.mode == AssignmentMode::Disabled {
+            return Ok(Vec::new());
+        }
+        let mut addresses = Vec::with_capacity(32);
+        if let Some(ipv4) = self.ipv4 {
+            encode_quic_varint(0, &mut addresses);
+            addresses.push(4);
+            addresses.extend_from_slice(&ipv4.address.octets());
+            addresses.push(32);
+        }
+        if let Some(ipv6) = self.ipv6 {
+            encode_quic_varint(0, &mut addresses);
+            addresses.push(6);
+            addresses.extend_from_slice(&ipv6.address.octets());
+            addresses.push(128);
+        }
+
+        let mut routes = Vec::with_capacity(44);
+        if self.ipv4.is_some() {
+            routes.push(4);
+            routes.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets());
+            routes.extend_from_slice(&Ipv4Addr::BROADCAST.octets());
+            routes.push(0);
+        }
+        if self.ipv6.is_some() {
+            routes.push(6);
+            routes.extend_from_slice(&Ipv6Addr::UNSPECIFIED.octets());
+            routes.extend_from_slice(&Ipv6Addr::from(u128::MAX).octets());
+            routes.push(0);
+        }
+        Ok(vec![
+            (CONNECT_IP_ADDRESS_ASSIGN_CAPSULE_TYPE, addresses),
+            (CONNECT_IP_ROUTE_ADVERTISEMENT_CAPSULE_TYPE, routes),
+        ])
+    }
+
     fn flags(&self) -> u8 {
         let mut flags = if self.mode == AssignmentMode::Enabled { FLAG_ENABLED } else { 0 };
         if self.ipv4.is_some() {
@@ -313,6 +357,18 @@ impl ClientAssignment {
             Self { session_id, generation, mode, family_order, ipv4, ipv6, dns_servers, mtu };
         assignment.validate()?;
         Ok(assignment)
+    }
+}
+
+fn encode_quic_varint(value: u64, output: &mut Vec<u8>) {
+    match value {
+        0..=63 => output.push(value as u8),
+        64..=16_383 => output.extend_from_slice(&((value as u16) | 0x4000).to_be_bytes()),
+        16_384..=1_073_741_823 => {
+            output.extend_from_slice(&((value as u32) | 0x8000_0000).to_be_bytes());
+        }
+        _ => output
+            .extend_from_slice(&(value.min((1 << 62) - 1) | 0xC000_0000_0000_0000).to_be_bytes()),
     }
 }
 
@@ -407,12 +463,36 @@ impl AssignmentReceiver {
 pub struct AssignmentReception {
     receiver: AssignmentReceiver,
     failure: Option<AssignmentError>,
+    connect_ip_addresses: Option<Vec<(IpAddr, u8)>>,
+    connect_ip_routes: Option<Vec<(IpAddr, IpAddr, u8)>>,
+    connect_ip_required: bool,
+    connect_ip_ready: bool,
 }
 
 impl AssignmentReception {
     /// Create a reception state bound to one reconnect generation.
     pub fn new(expected_generation: u64) -> Result<Self, AssignmentError> {
-        Ok(Self { receiver: AssignmentReceiver::new(expected_generation)?, failure: None })
+        Self::with_connect_ip_requirement(expected_generation, false)
+    }
+
+    /// Create reception state that withholds the private assignment until the
+    /// matching RFC 9484 address and route capsules have both arrived.
+    pub fn new_connect_ip(expected_generation: u64) -> Result<Self, AssignmentError> {
+        Self::with_connect_ip_requirement(expected_generation, true)
+    }
+
+    fn with_connect_ip_requirement(
+        expected_generation: u64,
+        connect_ip_required: bool,
+    ) -> Result<Self, AssignmentError> {
+        Ok(Self {
+            receiver: AssignmentReceiver::new(expected_generation)?,
+            failure: None,
+            connect_ip_addresses: None,
+            connect_ip_routes: None,
+            connect_ip_required,
+            connect_ip_ready: !connect_ip_required,
+        })
     }
 
     /// Feed one capsule and retain the first terminal failure.
@@ -420,19 +500,203 @@ impl AssignmentReception {
         if self.failure.is_some() {
             return;
         }
-        if let Err(error) = self.receiver.receive(capsule_type, payload) {
+        let result = match capsule_type {
+            CONNECT_IP_ADDRESS_ASSIGN_CAPSULE_TYPE => decode_connect_ip_addresses(payload)
+                .map(|addresses| self.connect_ip_addresses = Some(addresses)),
+            CONNECT_IP_ROUTE_ADVERTISEMENT_CAPSULE_TYPE => decode_connect_ip_routes(payload)
+                .map(|routes| self.connect_ip_routes = Some(routes)),
+            _ => self.receiver.receive(capsule_type, payload).map(|_| ()),
+        }
+        .and_then(|()| self.refresh_connect_ip_state());
+        if let Err(error) = result {
+            self.connect_ip_ready = false;
             self.failure = Some(error);
+        }
+    }
+
+    fn refresh_connect_ip_state(&mut self) -> Result<(), AssignmentError> {
+        if self.receiver.assignment().is_none() {
+            self.connect_ip_ready = false;
+            return Ok(());
+        }
+        match (&self.connect_ip_addresses, &self.connect_ip_routes) {
+            (None, None) => {
+                self.connect_ip_ready = !self.connect_ip_required;
+                Ok(())
+            }
+            (Some(_), Some(_)) => {
+                self.validate_connect_ip_assignment()?;
+                self.connect_ip_ready = true;
+                Ok(())
+            }
+            _ => {
+                self.connect_ip_ready = false;
+                Ok(())
+            }
         }
     }
 
     /// Return the accepted assignment, if one exists.
     pub fn assignment(&self) -> Option<&ClientAssignment> {
-        self.receiver.assignment()
+        self.connect_ip_ready.then(|| self.receiver.assignment()).flatten()
     }
 
     /// Return the first terminal reception failure, if one exists.
     pub fn failure(&self) -> Option<&AssignmentError> {
         self.failure.as_ref()
+    }
+
+    fn validate_connect_ip_assignment(&self) -> Result<(), AssignmentError> {
+        let (Some(addresses), Some(routes)) =
+            (self.connect_ip_addresses.as_ref(), self.connect_ip_routes.as_ref())
+        else {
+            return Ok(());
+        };
+        let assignment = self
+            .receiver
+            .assignment()
+            .ok_or(AssignmentError::InvalidConnectIpControl("private assignment is missing"))?;
+        let expected_address_count =
+            usize::from(assignment.ipv4.is_some()) + usize::from(assignment.ipv6.is_some());
+        if addresses.len() != expected_address_count || routes.len() != expected_address_count {
+            return Err(AssignmentError::ConnectIpAssignmentMismatch);
+        }
+        if let Some(ipv4) = assignment.ipv4 {
+            if !addresses.contains(&(IpAddr::V4(ipv4.address), 32))
+                || !routes.contains(&(
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    IpAddr::V4(Ipv4Addr::BROADCAST),
+                    0,
+                ))
+            {
+                return Err(AssignmentError::ConnectIpAssignmentMismatch);
+            }
+        }
+        if let Some(ipv6) = assignment.ipv6 {
+            if !addresses.contains(&(IpAddr::V6(ipv6.address), 128))
+                || !routes.contains(&(
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    IpAddr::V6(Ipv6Addr::from(u128::MAX)),
+                    0,
+                ))
+            {
+                return Err(AssignmentError::ConnectIpAssignmentMismatch);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn decode_connect_ip_addresses(payload: &[u8]) -> Result<Vec<(IpAddr, u8)>, AssignmentError> {
+    let mut reader = Reader::new(payload);
+    let mut addresses = Vec::new();
+    while reader.remaining() > 0 {
+        if addresses.len() >= 8 {
+            return Err(AssignmentError::InvalidConnectIpControl("too many assigned addresses"));
+        }
+        let request_id = reader.quic_varint()?;
+        if request_id != 0 {
+            return Err(AssignmentError::InvalidConnectIpControl(
+                "server address assignment request id must be zero",
+            ));
+        }
+        let address = reader.ip()?;
+        let prefix = reader.u8()?;
+        if (address.is_ipv4() && prefix > 32) || (address.is_ipv6() && prefix > 128) {
+            return Err(AssignmentError::InvalidConnectIpControl("invalid address prefix"));
+        }
+        if !ip_prefix_is_canonical(address, prefix) {
+            return Err(AssignmentError::InvalidConnectIpControl(
+                "assigned address has non-zero bits after its prefix",
+            ));
+        }
+        if addresses.contains(&(address, prefix)) {
+            return Err(AssignmentError::InvalidConnectIpControl("duplicate assigned address"));
+        }
+        addresses.push((address, prefix));
+    }
+    Ok(addresses)
+}
+
+fn decode_connect_ip_routes(payload: &[u8]) -> Result<Vec<(IpAddr, IpAddr, u8)>, AssignmentError> {
+    let mut reader = Reader::new(payload);
+    let mut routes = Vec::new();
+    while reader.remaining() > 0 {
+        if routes.len() >= 8 {
+            return Err(AssignmentError::InvalidConnectIpControl("too many advertised routes"));
+        }
+        let family = reader.u8()?;
+        let (start, end) = match family {
+            4 => (IpAddr::V4(reader.ipv4()?), IpAddr::V4(reader.ipv4()?)),
+            6 => (IpAddr::V6(reader.ipv6()?), IpAddr::V6(reader.ipv6()?)),
+            family => return Err(AssignmentError::InvalidIpFamily(family)),
+        };
+        let protocol = reader.u8()?;
+        if ip_numeric(start) > ip_numeric(end) {
+            return Err(AssignmentError::InvalidConnectIpControl("invalid or duplicate route"));
+        }
+        for (previous_start, previous_end, previous_protocol) in &routes {
+            let previous_family = ip_family_order(*previous_start);
+            let family_order = ip_family_order(start);
+            if family_order < previous_family
+                || (family_order == previous_family && protocol < *previous_protocol)
+                || (family_order == previous_family
+                    && protocol == *previous_protocol
+                    && ip_numeric(start) <= ip_numeric(*previous_end))
+            {
+                return Err(AssignmentError::InvalidConnectIpControl(
+                    "routes are not strictly ordered and disjoint",
+                ));
+            }
+            if family_order == previous_family
+                && (protocol == 0 || *previous_protocol == 0)
+                && ip_ranges_overlap(*previous_start, *previous_end, start, end)
+            {
+                return Err(AssignmentError::InvalidConnectIpControl(
+                    "all-protocol route overlaps another route",
+                ));
+            }
+        }
+        routes.push((start, end, protocol));
+    }
+    Ok(routes)
+}
+
+fn ip_prefix_is_canonical(address: IpAddr, prefix: u8) -> bool {
+    let (value, width) = match address {
+        IpAddr::V4(address) => (u128::from(u32::from(address)), 32),
+        IpAddr::V6(address) => (u128::from(address), 128),
+    };
+    let host_bits = width - u32::from(prefix);
+    match host_bits {
+        0 => true,
+        128 => value == 0,
+        _ => value & ((1u128 << host_bits) - 1) == 0,
+    }
+}
+
+fn ip_family_order(address: IpAddr) -> u8 {
+    if address.is_ipv4() {
+        4
+    } else {
+        6
+    }
+}
+
+fn ip_ranges_overlap(
+    left_start: IpAddr,
+    left_end: IpAddr,
+    right_start: IpAddr,
+    right_end: IpAddr,
+) -> bool {
+    ip_numeric(left_start) <= ip_numeric(right_end)
+        && ip_numeric(right_start) <= ip_numeric(left_end)
+}
+
+fn ip_numeric(address: IpAddr) -> u128 {
+    match address {
+        IpAddr::V4(address) => u128::from(u32::from(address)),
+        IpAddr::V6(address) => u128::from(address),
     }
 }
 
@@ -481,6 +745,10 @@ pub enum AssignmentError {
     ConflictingAssignment,
     /// An IP family discriminator is unknown.
     InvalidIpFamily(u8),
+    /// An RFC 9484 control capsule violates its bounded grammar or state contract.
+    InvalidConnectIpControl(&'static str),
+    /// RFC 9484 address/route state disagrees with the authenticated operational assignment.
+    ConnectIpAssignmentMismatch,
 }
 
 impl fmt::Display for AssignmentError {
@@ -541,6 +809,20 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn remaining(&self) -> usize {
+        self.payload.len().saturating_sub(self.offset)
+    }
+
+    fn quic_varint(&mut self) -> Result<u64, AssignmentError> {
+        let first = self.u8()?;
+        let length = 1usize << usize::from(first >> 6);
+        let mut value = u64::from(first & 0x3f);
+        for byte in self.take(length - 1)? {
+            value = (value << 8) | u64::from(*byte);
+        }
+        Ok(value)
+    }
+
     fn finish(&self) -> Result<(), AssignmentError> {
         if self.offset == self.payload.len() {
             Ok(())
@@ -564,6 +846,15 @@ mod tests {
             vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), IpAddr::V6(Ipv6Addr::LOCALHOST)],
         )
         .expect("valid dual-stack assignment")
+    }
+
+    fn encode_test_route(start: IpAddr, end: IpAddr, protocol: u8, out: &mut Vec<u8>) {
+        encode_ip(out, start);
+        match end {
+            IpAddr::V4(address) => out.extend_from_slice(&address.octets()),
+            IpAddr::V6(address) => out.extend_from_slice(&address.octets()),
+        }
+        out.push(protocol);
     }
 
     #[test]
@@ -689,6 +980,119 @@ mod tests {
         assert_eq!(receiver.receive(0x00, &[0x45, 0, 0, 20]), Ok(AssignmentReceipt::Ignored));
         assert_eq!(receiver.receive(0x30, &[0, 0]), Ok(AssignmentReceipt::Ignored));
         assert!(receiver.assignment().is_none());
+    }
+
+    #[test]
+    fn connect_ip_capsules_assign_addresses_and_advertise_full_tunnel_routes() {
+        let capsules = dual_stack().encode_connect_ip_capsules().expect("RFC 9484 capsules");
+        assert_eq!(capsules.len(), 2);
+        assert_eq!(capsules[0].0, CONNECT_IP_ADDRESS_ASSIGN_CAPSULE_TYPE);
+        assert_eq!(capsules[0].1[0], 0);
+        assert!(capsules[0].1.contains(&4));
+        assert!(capsules[0].1.contains(&6));
+        assert_eq!(capsules[1].0, CONNECT_IP_ROUTE_ADVERTISEMENT_CAPSULE_TYPE);
+        assert_eq!(capsules[1].1.first(), Some(&4));
+        assert!(capsules[1].1.contains(&6));
+        assert_eq!(
+            decode_connect_ip_addresses(&capsules[0].1),
+            Ok(vec![
+                (IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2)), 32),
+                (IpAddr::V6(Ipv6Addr::LOCALHOST), 128),
+            ])
+        );
+    }
+
+    #[test]
+    fn connect_ip_control_state_must_match_the_authenticated_assignment() {
+        let assignment = dual_stack();
+        let capsules = assignment.encode_connect_ip_capsules().expect("RFC 9484 capsules");
+        let mut reception =
+            AssignmentReception::new_connect_ip(assignment.generation).expect("reception");
+        reception.receive(CLIENT_ASSIGNMENT_CAPSULE_TYPE, &assignment.encode().expect("encode"));
+        assert!(reception.assignment().is_none());
+        reception.receive(capsules[0].0, &capsules[0].1);
+        assert!(reception.assignment().is_none());
+        reception.receive(capsules[1].0, &capsules[1].1);
+        assert!(reception.failure().is_none());
+        assert_eq!(reception.assignment(), Some(&assignment));
+
+        let mut mismatched =
+            AssignmentReception::new_connect_ip(assignment.generation).expect("reception");
+        let mut wrong_addresses = capsules[0].1.clone();
+        wrong_addresses[2] ^= 1;
+        mismatched
+            .receive(CLIENT_ASSIGNMENT_CAPSULE_TYPE, &assignment.encode().expect("assignment"));
+        mismatched.receive(CONNECT_IP_ADDRESS_ASSIGN_CAPSULE_TYPE, &wrong_addresses);
+        mismatched.receive(CONNECT_IP_ROUTE_ADVERTISEMENT_CAPSULE_TYPE, &capsules[1].1);
+        assert_eq!(mismatched.failure(), Some(&AssignmentError::ConnectIpAssignmentMismatch));
+        assert!(mismatched.assignment().is_none());
+    }
+
+    #[test]
+    fn legacy_reception_does_not_require_connect_ip_capsules() {
+        let assignment = dual_stack();
+        let mut reception = AssignmentReception::new(assignment.generation).expect("reception");
+        reception.receive(CLIENT_ASSIGNMENT_CAPSULE_TYPE, &assignment.encode().expect("encode"));
+        assert_eq!(reception.assignment(), Some(&assignment));
+    }
+
+    #[test]
+    fn connect_ip_withdrawals_are_valid_but_cannot_authorize_an_active_assignment() {
+        assert_eq!(decode_connect_ip_addresses(&[]), Ok(Vec::new()));
+        assert_eq!(decode_connect_ip_routes(&[]), Ok(Vec::new()));
+
+        let assignment = dual_stack();
+        let mut reception =
+            AssignmentReception::new_connect_ip(assignment.generation).expect("reception");
+        reception.receive(CLIENT_ASSIGNMENT_CAPSULE_TYPE, &assignment.encode().expect("encode"));
+        reception.receive(CONNECT_IP_ADDRESS_ASSIGN_CAPSULE_TYPE, &[]);
+        reception.receive(CONNECT_IP_ROUTE_ADVERTISEMENT_CAPSULE_TYPE, &[]);
+        assert_eq!(reception.failure(), Some(&AssignmentError::ConnectIpAssignmentMismatch));
+        assert!(reception.assignment().is_none());
+    }
+
+    #[test]
+    fn connect_ip_addresses_require_canonical_prefix_bits() {
+        let non_canonical = [0, 4, 10, 0, 0, 2, 24];
+        assert_eq!(
+            decode_connect_ip_addresses(&non_canonical),
+            Err(AssignmentError::InvalidConnectIpControl(
+                "assigned address has non-zero bits after its prefix"
+            ))
+        );
+        let canonical_zero_prefix = [0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            decode_connect_ip_addresses(&canonical_zero_prefix),
+            Ok(vec![(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)])
+        );
+    }
+
+    #[test]
+    fn connect_ip_routes_require_rfc_ordering_and_disjoint_ranges() {
+        let first = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0));
+        let last = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 255));
+        let mut descending_protocols = Vec::new();
+        encode_test_route(first, last, 17, &mut descending_protocols);
+        encode_test_route(first, last, 6, &mut descending_protocols);
+        assert!(decode_connect_ip_routes(&descending_protocols).is_err());
+
+        let mut overlapping_all_protocol = Vec::new();
+        encode_test_route(first, last, 0, &mut overlapping_all_protocol);
+        encode_test_route(first, last, 6, &mut overlapping_all_protocol);
+        assert_eq!(
+            decode_connect_ip_routes(&overlapping_all_protocol),
+            Err(AssignmentError::InvalidConnectIpControl(
+                "all-protocol route overlaps another route"
+            ))
+        );
+    }
+
+    #[test]
+    fn malformed_connect_ip_control_capsules_fail_closed() {
+        let assignment = dual_stack();
+        let mut reception = AssignmentReception::new(assignment.generation).expect("reception");
+        reception.receive(CONNECT_IP_ADDRESS_ASSIGN_CAPSULE_TYPE, &[0, 4, 10]);
+        assert!(matches!(reception.failure(), Some(AssignmentError::Truncated)));
     }
 
     #[test]

@@ -8,15 +8,26 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod circuit;
 mod config;
 mod qkey;
+#[cfg(test)]
+mod tests;
 
+pub use circuit::{
+    CircuitConfig, CircuitConfigError, CircuitDiversityPolicy, HopConfig, HopEndpoint,
+    HopPersonaConfig, HopPolicyOverrides, HopRole, DEFAULT_PRODUCT_HOPS, MAX_CIRCUIT_HOPS,
+    MAX_CIRCUIT_HOP_LABEL_CHARS, MIN_INNER_QUIC_DATAGRAM, NESTED_FEC_OVERHEAD,
+    NESTED_HTTP_DATAGRAM_OVERHEAD, NESTED_MASQUE_OVERHEAD, NESTED_QUIC_OVERHEAD,
+};
 pub use config::{
     EngineConfig, EngineConfigBuilder, StealthSection, MAX_NORMALIZE_TARGET_SIZE,
     MIN_NORMALIZE_TARGET_SIZE,
 };
 pub use qf_audit::AuditConfig;
-pub use qf_crypto::{CryptoConfig, DataAeadPreference as AeadPreference};
+pub use qf_crypto::{
+    CryptoConfig, DataAeadPreference as AeadPreference, PacketProtectionMode, PrivateAeadFamily,
+};
 pub use qf_firewall::FirewallConfig;
 pub use qf_logging::{LogFormat, LoggingConfig, LoggingMode};
 pub use qf_memory_lock::MemoryLockFailurePolicy;
@@ -26,7 +37,11 @@ pub use qf_transport_anti_replay::AntiReplaySection;
 pub use qf_transport_cc::cc::Algorithm as CcAlgorithm;
 pub use qf_transport_nat::NatTraversalSection;
 pub use qf_transport_version::QuicVersion;
-pub use qkey::{generate, id, parse, QKeyError, QKEY_PREFIX};
+pub use qkey::{
+    authenticated_transcript_hash_from_token_hex,
+    authenticated_transcript_hash_from_verifier_hash_hex, generate, id, parse, QKeyConfig,
+    QKeyError, QKeyToken, QKEY_PREFIX,
+};
 
 /// Failure returned while loading, parsing, or validating the aggregate engine configuration.
 ///
@@ -93,184 +108,6 @@ impl RuntimePolicyGeneration {
 impl Default for RuntimePolicyGeneration {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Zeroizing owner for an engine configuration QKey bearer token.
-#[derive(Clone)]
-pub struct QKeyToken(qf_common::secret::SecretString);
-
-impl QKeyToken {
-    /// Create a token owner from its raw string value.
-    pub fn new(value: String) -> Self {
-        Self(qf_common::secret::SecretString::new(value, "qkey_token"))
-    }
-}
-
-impl std::fmt::Debug for QKeyToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("QKeyToken([REDACTED])")
-    }
-}
-
-impl std::ops::Deref for QKeyToken {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_str()
-    }
-}
-
-impl AsRef<str> for QKeyToken {
-    fn as_ref(&self) -> &str {
-        self
-    }
-}
-
-impl From<String> for QKeyToken {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for QKeyToken {
-    fn from(value: &str) -> Self {
-        Self::new(value.to_string())
-    }
-}
-
-impl serde::Serialize for QKeyToken {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for QKeyToken {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        String::deserialize(deserializer).map(Self::new)
-    }
-}
-
-/// Compact connection parameters embedded in a QKey string.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct QKeyConfig {
-    /// Remote server address (host:port).
-    pub remote: String,
-    /// SNI hostname for TLS.
-    pub sni: String,
-    /// Stealth mode (optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stealth: Option<String>,
-    /// FEC mode (optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fec: Option<String>,
-    /// Custom parameters (optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra: Option<String>,
-    /// QKey authentication token (hex, optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<QKeyToken>,
-    /// Checksum string (`s256:<8-hex>` for newly generated keys).
-    #[serde(rename = "m")]
-    pub md5: String,
-}
-
-impl QKeyConfig {
-    /// Create a new QKey configuration.
-    pub fn new(remote: &str, sni: &str) -> Self {
-        let mut config = Self {
-            remote: remote.to_string(),
-            sni: sni.to_string(),
-            stealth: None,
-            fec: None,
-            extra: None,
-            token: None,
-            md5: String::new(),
-        };
-        config.update_checksum();
-        config
-    }
-
-    /// Set stealth mode and refresh the checksum.
-    pub fn with_stealth(mut self, mode: &str) -> Self {
-        self.stealth = Some(mode.to_string());
-        self.update_checksum();
-        self
-    }
-
-    /// Set FEC mode and refresh the checksum.
-    pub fn with_fec(mut self, mode: &str) -> Self {
-        self.fec = Some(mode.to_string());
-        self.update_checksum();
-        self
-    }
-
-    /// Set custom parameters and refresh the checksum.
-    pub fn with_extra(mut self, extra: &str) -> Self {
-        self.extra = Some(extra.to_string());
-        self.update_checksum();
-        self
-    }
-
-    /// Set a token from its raw string value and refresh the checksum.
-    pub fn with_token(mut self, token: &str) -> Self {
-        self.token = Some(QKeyToken::from(token));
-        self.update_checksum();
-        self
-    }
-
-    /// Set an already-owned token without creating another raw-secret owner.
-    pub fn with_owned_token(mut self, token: QKeyToken) -> Self {
-        self.token = Some(token);
-        self.update_checksum();
-        self
-    }
-
-    fn checksum_prefix8_hex(&self) -> String {
-        use sha2::{Digest, Sha256};
-
-        let mut hasher = Sha256::new();
-        for (index, field) in [
-            self.remote.as_str(),
-            self.sni.as_str(),
-            self.stealth.as_deref().unwrap_or(""),
-            self.fec.as_deref().unwrap_or(""),
-            self.extra.as_deref().unwrap_or(""),
-            self.token.as_deref().unwrap_or(""),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if index > 0 {
-                hasher.update(b"|");
-            }
-            hasher.update(field.as_bytes());
-        }
-        let hex = format!("{:x}", hasher.finalize());
-        hex.chars().take(8).collect()
-    }
-
-    fn is_hex8(value: &str) -> bool {
-        value.len() == 8 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
-    }
-
-    fn update_checksum(&mut self) {
-        self.md5 = format!("s256:{}", self.checksum_prefix8_hex());
-    }
-
-    /// Validate the embedded checksum.
-    pub fn validate(&self) -> bool {
-        let checksum = self.md5.trim();
-        let Some(rest) = checksum.strip_prefix("s256:") else {
-            return false;
-        };
-        Self::is_hex8(rest) && rest.eq_ignore_ascii_case(&self.checksum_prefix8_hex())
     }
 }
 
@@ -871,8 +708,10 @@ impl ConnectionConfig {
         if remote.is_empty() {
             return Err(ConnectionConfigError("remote address cannot be empty".to_string()));
         }
-        remote.parse::<SocketAddr>().map_err(|error| {
-            ConnectionConfigError(format!("connection.remote must be a socket address: {error}"))
+        circuit::parse_endpoint_authority(remote).map_err(|error| {
+            ConnectionConfigError(format!(
+                "connection.remote must be a host:port or [ipv6]:port authority: {error}"
+            ))
         })?;
         if !self.local.trim().is_empty() {
             self.local.trim().parse::<SocketAddr>().map_err(|error| {
@@ -1452,6 +1291,12 @@ pub enum EngineCommand {
     Disconnect,
     /// Disconnect and reconnect with current configuration.
     Reconnect,
+    /// Authenticate and service one bounded alternate circuit without TUN ownership.
+    PrebuildAlternateCircuit(EngineConfig),
+    /// Promote the already-ready alternate circuit.
+    PromotePrebuiltAlternate,
+    /// Build, verify, and promote a replacement circuit synchronously.
+    RotateCircuit(EngineConfig),
     /// Change the stealth mode at runtime.
     SetStealthMode(StealthMode),
     /// Change the FEC mode at runtime.
@@ -1549,272 +1394,4 @@ pub enum DisconnectReason {
     IdleTimeout,
     /// The requested packet data plane failed while the process was alive.
     DataPlane(DataPlaneFault),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lifecycle_display_is_stable() {
-        assert_eq!(EngineState::Created.to_string(), "Created");
-        assert_eq!(EngineState::Connected.to_string(), "Connected");
-        assert_eq!(EngineState::Error.to_string(), "Error");
-    }
-
-    #[test]
-    fn runtime_policy_generation_is_shared_and_saturating() {
-        let generation = RuntimePolicyGeneration::new();
-        let observer = generation.clone();
-        assert_eq!(observer.current(), 1);
-
-        let mut guard = generation.write_guard();
-        RuntimePolicyGeneration::advance(&mut guard);
-        assert_eq!(*guard, 2);
-        *guard = u64::MAX;
-        RuntimePolicyGeneration::advance(&mut guard);
-        drop(guard);
-
-        assert_eq!(observer.current(), u64::MAX);
-    }
-
-    #[test]
-    fn engine_mode_defaults_match_configuration_contract() {
-        assert_eq!(EngineMode::default(), EngineMode::Client);
-        assert_eq!(StealthMode::default(), StealthMode::Auto);
-        assert_eq!(FecMode::default(), FecMode::Auto);
-        assert!(qf_fec::EngineFecMode::adaptive_requested(FecMode::Auto));
-        assert!(!qf_fec::EngineFecMode::adaptive_requested(FecMode::Off));
-        assert_ne!(EngineMode::Client, EngineMode::Server);
-        assert_ne!(StealthMode::Off, StealthMode::AntiDpi);
-    }
-
-    #[test]
-    fn engine_section_defaults_and_validation_match_configuration_contract() {
-        let section = EngineSection::default();
-        assert_eq!(section.mode, EngineMode::Client);
-        assert_eq!(section.log_level, "info");
-        assert!(section.validate().is_ok());
-
-        let mut invalid_level = section.clone();
-        invalid_level.log_level = "verbose".to_string();
-        assert_eq!(
-            invalid_level.validate().expect_err("invalid log level must fail"),
-            "Invalid log_level: verbose. Must be one of: [\"trace\", \"debug\", \"info\", \"warn\", \"error\"]"
-        );
-
-        let mut invalid_timeout = section;
-        invalid_timeout.shutdown_timeout_ms = 0;
-        assert_eq!(
-            invalid_timeout.validate().expect_err("zero timeout must fail"),
-            "engine.shutdown_timeout_ms must be > 0"
-        );
-    }
-
-    #[test]
-    fn fec_section_defaults_and_runtime_projection_match_engine_contract() {
-        let section = FecSection::default();
-        assert_eq!(section.mode, FecMode::Auto);
-        assert_eq!(section.initial_mode, "auto");
-        assert_eq!(section.window_good, 10);
-        assert_eq!(section.window_fair, 30);
-        assert_eq!(section.window_poor, 50);
-        assert!(section.validate().is_ok());
-
-        let runtime = section.to_runtime_config().expect("default FEC section projects");
-        assert_eq!(runtime.control_policy, qf_fec::FecControlPolicy::Auto);
-        assert_eq!(runtime.initial_mode, qf_fec::FecMode::Zero);
-        assert_eq!(runtime.configured_stream_every, Some(5));
-        assert_eq!(runtime.window_sizes[&qf_fec::FecMode::Normal], 10);
-        assert_eq!(runtime.window_sizes[&qf_fec::FecMode::Medium], 30);
-        assert_eq!(runtime.window_sizes[&qf_fec::FecMode::Strong], 50);
-    }
-
-    #[test]
-    fn fec_section_off_mode_projects_a_disabled_policy() {
-        let section = FecSection { mode: FecMode::Off, ..FecSection::default() };
-        let runtime = section.to_runtime_config().expect("off FEC section projects");
-        assert_eq!(runtime.control_policy, qf_fec::FecControlPolicy::Off);
-        assert_eq!(runtime.initial_mode, qf_fec::FecMode::Zero);
-        assert!(!runtime.force_on);
-    }
-
-    #[test]
-    fn fec_section_rejects_invalid_projection_inputs() {
-        let section = FecSection { initial_mode: "streaming".to_string(), ..FecSection::default() };
-        assert_eq!(
-            section.validate().expect_err("unsupported initial mode must fail").to_string(),
-            "fec.initial_mode has unsupported value 'streaming'; use 'auto' or 'off'"
-        );
-
-        let section = FecSection { window_good: 0, ..FecSection::default() };
-        assert_eq!(
-            section.validate().expect_err("zero good window must fail").to_string(),
-            "fec.window_good, fec.window_fair, and fec.window_poor must be > 0"
-        );
-
-        let section = FecSection { enable_partial: false, ..FecSection::default() };
-        assert!(section
-            .to_runtime_config()
-            .expect_err("disabled partial recovery must fail")
-            .to_string()
-            .contains("fec.enable_partial=false"));
-    }
-
-    #[test]
-    fn security_config_defaults_preserve_engine_startup_contract() {
-        let config = SecurityConfig::default();
-        assert!(!config.kill_switch);
-        assert_eq!(config.heartbeat_timeout_ms, 30_000);
-        assert!(!config.cleanup_firewall_on_start);
-        assert_eq!(config.firewall, FirewallConfig::default());
-        assert!(config.lock_memory);
-        assert_eq!(config.memory_lock_failure_policy, MemoryLockFailurePolicy::BestEffort);
-        assert!(config.lock_blocks);
-    }
-
-    #[test]
-    fn optimization_config_projects_the_runtime_pool_contract() {
-        let config = OptimizationConfig {
-            memory_pool_size: 16 * 1024 * 1024,
-            memory_pool_alignment: 64,
-            num_worker_threads: 0,
-        };
-        let runtime = config.to_runtime_config().expect("optimization config projects");
-        assert_eq!(runtime.block_size, 65_536);
-        assert_eq!(runtime.pool_capacity, 256);
-        config.validate().expect("projected optimization config validates");
-    }
-
-    #[test]
-    fn optimization_config_preserves_scaling_and_validation_contract() {
-        assert_eq!(scaled_memory_pool_size(128 * 1024 * 1024), MIN_POOL_BYTES);
-        assert_eq!(scaled_memory_pool_size(2 * 1024 * 1024 * 1024), MAX_POOL_BYTES);
-        assert_eq!(scaled_memory_pool_size(usize::MAX), MAX_POOL_BYTES);
-
-        let invalid_alignment =
-            OptimizationConfig { memory_pool_alignment: 0, ..OptimizationConfig::default() };
-        assert_eq!(
-            invalid_alignment.validate().expect_err("zero alignment must fail").to_string(),
-            "optimization.memory_pool_alignment must be > 0"
-        );
-
-        let invalid_threads =
-            OptimizationConfig { num_worker_threads: 257, ..OptimizationConfig::default() };
-        assert_eq!(
-            invalid_threads.validate().expect_err("excessive worker count must fail").to_string(),
-            "optimization.num_worker_threads must be 0 or <= 256"
-        );
-    }
-
-    #[test]
-    fn transport_config_defaults_and_validation_match_engine_contract() {
-        let config = TransportConfig::default();
-        assert_eq!(
-            config.quic_versions,
-            [qf_transport_version::QuicVersion::V2, qf_transport_version::QuicVersion::V1]
-        );
-        assert_eq!(config.cc_algorithm, qf_transport_cc::cc::Algorithm::Bbr3);
-        assert_eq!(config.mtu, 1500);
-        assert_eq!(config.pmtu_min_mtu, 1280);
-        assert_eq!(config.pmtu_max_mtu, 1500);
-        assert!(config.validate().is_ok());
-
-        let duplicate = TransportConfig {
-            quic_versions: vec![qf_transport_version::QuicVersion::V2; 2],
-            ..config.clone()
-        };
-        assert_eq!(
-            duplicate.validate().expect_err("duplicate versions must fail").to_string(),
-            "quic_versions must not contain duplicates"
-        );
-
-        let invalid_mtu = TransportConfig { mtu: 1199, ..config };
-        assert_eq!(
-            invalid_mtu.validate().expect_err("sub-floor MTU must fail").to_string(),
-            "transport.mtu must be at least 1200, got 1199"
-        );
-    }
-
-    #[test]
-    fn connection_config_defaults_and_validation_match_engine_contract() {
-        let config = ConnectionConfig::default();
-        assert_eq!(config.remote, "0.0.0.0:4433");
-        assert_eq!(config.alpn, ["h3", "quicfuscate"]);
-        assert_eq!(config.migration_cooldown_ms, 750);
-        assert!(config.validate().is_ok());
-
-        let invalid_remote =
-            ConnectionConfig { remote: "not-an-address".to_string(), ..config.clone() };
-        assert!(invalid_remote
-            .validate()
-            .expect_err("invalid remote must fail")
-            .to_string()
-            .starts_with("connection.remote must be a socket address:"));
-
-        let invalid_qkey_id = ConnectionConfig { qkey_id: Some("abc".to_string()), ..config };
-        assert_eq!(
-            invalid_qkey_id.validate().expect_err("invalid qkey id must fail").to_string(),
-            "qkey_id must be 12 hex chars"
-        );
-    }
-
-    #[test]
-    fn qkey_token_debug_is_redacted_and_value_access_is_explicit() {
-        let token = QKeyToken::from("sensitive-token");
-        assert_eq!(token.as_ref(), "sensitive-token");
-        assert_eq!(format!("{token:?}"), "QKeyToken([REDACTED])");
-    }
-
-    #[test]
-    fn qkey_config_checksum_binds_all_serialized_fields() {
-        let config = QKeyConfig::new("192.168.1.1:4433", "example.com")
-            .with_stealth("stealth")
-            .with_fec("auto")
-            .with_extra("profile=default")
-            .with_token("sensitive-token");
-        assert!(config.validate());
-
-        let mut tampered = config.clone();
-        tampered.remote.push_str(".invalid");
-        assert!(!tampered.validate());
-    }
-
-    #[test]
-    fn stats_snapshot_projects_atomic_values() {
-        let stats = EngineStats::default();
-        stats.bytes_sent.store(11, Ordering::Relaxed);
-        stats.packets_received.store(7, Ordering::Relaxed);
-        stats.data_plane_ready.store(1, Ordering::Relaxed);
-        assert_eq!(
-            stats.snapshot(),
-            StatsSnapshot {
-                bytes_sent: 11,
-                packets_received: 7,
-                data_plane_ready: 1,
-                ..StatsSnapshot::default()
-            }
-        );
-    }
-
-    #[test]
-    fn typed_fault_and_error_display_are_stable() {
-        let fault =
-            DataPlaneFault::TunWrite { component: "tun".to_string(), error: "closed".to_string() };
-        assert_eq!(fault.to_string(), "TUN write failed (tun): closed");
-        assert_eq!(
-            EngineError::DataPlane(fault).to_string(),
-            "Data-plane error: TUN write failed (tun): closed"
-        );
-    }
-
-    #[test]
-    fn config_error_display_preserves_stable_categories() {
-        assert_eq!(ConfigError::Io("missing".to_string()).to_string(), "IO error: missing");
-        assert_eq!(ConfigError::Parse("invalid".to_string()).to_string(), "Parse error: invalid");
-        assert_eq!(
-            ConfigError::Validation("bad mtu".to_string()).to_string(),
-            "Validation error: bad mtu"
-        );
-    }
 }

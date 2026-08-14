@@ -144,14 +144,21 @@ max_early_data_size = 16384
 # ==============================================================================
 
 [crypto]
-# AEAD cipher preference
+# Packet protection policy. "auto" starts with standard protection and may attempt
+# the authenticated private 1-RTT upgrade when all local and peer gates pass.
+# "advanced-required" fails closed until the promotion gates are complete.
+# Options: "standard", "auto", "advanced-required"
+packet_protection_mode = "auto"
+# Retained private packet-AEAD policy. These values select the planner-owned family
+# for the authenticated private 1-RTT path; standard Initial, Handshake, pre-auth
+# 1-RTT, header protection, and 0-RTT ownership remain unchanged.
 # Options: "auto", "aegis-128l", "morus"
 # - auto: Select best based on CPU features (recommended)
 # - aegis-128l: Prefer AEGIS-128L when hardware AES is available
 # - morus: Prefer MORUS-1280-128
 aead_preference = "auto"
 
-# Force specific AEAD (overrides preference, useful for testing or constrained deployments)
+# Request a specific private AEAD family for the authenticated post-handshake path.
 # Options: "auto", "aegis-128l", "morus" (empty string = use preference above)
 force_aead = ""
 

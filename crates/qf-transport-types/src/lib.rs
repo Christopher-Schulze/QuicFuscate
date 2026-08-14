@@ -35,8 +35,11 @@ pub mod traffic;
 pub mod tun;
 pub use brain::StealthBrainConfig;
 pub use fastpath::FastpathMode;
+pub use h3::{MasqueFlowPurpose, MasqueUdpTarget};
 pub use handlers::{CapsuleHandler, DatagramHandler};
-pub use masque::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
+pub use masque::{
+    MasqueDownlinkQueue, MasqueDownlinkQueueReject, MasqueRelayResponse, MasqueRelayResponseQueue,
+};
 pub use observer::{TransportObserver, TransportPolicyError, TransportPolicyTarget};
 pub use path::PathEvent;
 pub use protocol::{Epoch, Header, PacketType, TransportError, QUIC_FIXED_BIT};

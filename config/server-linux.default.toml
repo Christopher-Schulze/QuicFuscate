@@ -70,8 +70,11 @@ enabled = true
 # ==============================================================================
 
 # [crypto]
+# Retained migration policy only until authenticated private negotiation exists.
+# The effective live QUIC packet owner remains rustls-standard and is reported separately.
+# packet_protection_mode = "auto" # Options: "standard", "auto", "advanced-required"
 # aead_preference = "auto"     # Options: "auto", "aegis-128l", "morus"
-# force_aead = ""              # Override AEAD selection
+# force_aead = ""              # Request future private AEAD policy
 
 # ==============================================================================
 # STEALTH

@@ -23,6 +23,58 @@ pub enum MasqueDownlinkQueueReject {
     ByteCapacity,
 }
 
+/// One opaque UDP response bound to its authenticated MASQUE flow.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MasqueRelayResponse {
+    pub flow_id: u64,
+    pub payload: Vec<u8>,
+}
+
+/// Bounded cross-task response queue for intermediate-hop UDP associations.
+#[derive(Debug)]
+pub struct MasqueRelayResponseQueue {
+    responses: VecDeque<MasqueRelayResponse>,
+    bytes: usize,
+    max_packets: usize,
+    max_bytes: usize,
+}
+
+impl MasqueRelayResponseQueue {
+    pub fn new(max_packets: usize, max_bytes: usize) -> Self {
+        Self { responses: VecDeque::new(), bytes: 0, max_packets, max_bytes }
+    }
+
+    pub fn enqueue(
+        &mut self,
+        flow_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), MasqueDownlinkQueueReject> {
+        if self.responses.len() >= self.max_packets {
+            return Err(MasqueDownlinkQueueReject::PacketCapacity);
+        }
+        if self.bytes.saturating_add(payload.len()) > self.max_bytes {
+            return Err(MasqueDownlinkQueueReject::ByteCapacity);
+        }
+        self.bytes = self.bytes.saturating_add(payload.len());
+        self.responses.push_back(MasqueRelayResponse { flow_id, payload });
+        Ok(())
+    }
+
+    pub fn pop_front(&mut self) -> Option<MasqueRelayResponse> {
+        let response = self.responses.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(response.payload.len());
+        Some(response)
+    }
+
+    pub fn discard_all(&mut self) -> (usize, usize) {
+        let packets = self.responses.len();
+        let bytes = self.bytes;
+        self.responses.clear();
+        self.bytes = 0;
+        (packets, bytes)
+    }
+}
+
 impl MasqueDownlinkQueue {
     /// Creates an empty queue with packet-count and byte-size limits.
     pub fn new(max_packets: usize, max_bytes: usize) -> Self {
@@ -76,7 +128,7 @@ impl MasqueDownlinkQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
+    use super::{MasqueDownlinkQueue, MasqueDownlinkQueueReject, MasqueRelayResponseQueue};
 
     #[test]
     fn bounded_fifo_preserves_order_and_byte_accounting() {
@@ -114,5 +166,17 @@ mod tests {
         assert!(queue.is_empty());
         assert_eq!(queue.bytes(), 0);
         assert_eq!(queue.discard_all(), (0, 0));
+    }
+
+    #[test]
+    fn relay_queue_preserves_flow_identity_and_bounds() {
+        let mut queue = MasqueRelayResponseQueue::new(2, 4);
+        queue.enqueue(7, vec![1, 2]).expect("first response");
+        queue.enqueue(9, vec![3]).expect("second response");
+        assert_eq!(queue.enqueue(11, vec![4]), Err(MasqueDownlinkQueueReject::PacketCapacity));
+        let response = queue.pop_front().expect("queued response");
+        assert_eq!(response.flow_id, 7);
+        assert_eq!(response.payload, vec![1, 2]);
+        assert_eq!(queue.discard_all(), (1, 1));
     }
 }

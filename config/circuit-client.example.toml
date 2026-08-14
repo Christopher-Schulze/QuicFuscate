@@ -1,0 +1,79 @@
+# Canonical three-hop client circuit. Copy this file to a deployment-specific,
+# access-controlled path and replace endpoint, SNI, public QKey ID, and secret
+# references with values issued by the three authenticated relays.
+
+[engine]
+mode = "client"
+
+[interface]
+type = "tun"
+tun_name = "qtun0"
+
+[security]
+kill_switch = true
+heartbeat_timeout_ms = 30000
+
+[circuit]
+max_hops = 3
+max_parallel_circuits = 2
+allow_single_hop_fallback = false
+
+[circuit.diversity]
+provider = true
+region = true
+jurisdiction = false
+failure_domain = true
+
+[[circuit.hops]]
+label = "Entry"
+endpoint = "198.51.100.10:4433"
+sni = "entry.vpn.example"
+verify_peer = true
+ca_file = ""
+qkey_id = "a1b2c3d4e5f6"
+qkey_token_ref = "env:QUICFUSCATE_ENTRY_QKEY_TOKEN"
+role = "relay"
+provider = "provider-a"
+region = "eu-west"
+failure_domain = "edge-a"
+connect_timeout_ms = 10000
+idle_timeout_ms = 30000
+
+[circuit.hops.policy]
+fec_mode = "off"
+
+[[circuit.hops]]
+label = "Relay"
+endpoint = "203.0.113.20:4433"
+sni = "relay.vpn.example"
+verify_peer = true
+ca_file = ""
+qkey_id = "b1c2d3e4f5a6"
+qkey_token_ref = "env:QUICFUSCATE_RELAY_QKEY_TOKEN"
+role = "relay"
+provider = "provider-b"
+region = "eu-central"
+failure_domain = "edge-b"
+connect_timeout_ms = 10000
+idle_timeout_ms = 30000
+
+[circuit.hops.policy]
+fec_mode = "off"
+
+[[circuit.hops]]
+label = "Exit"
+endpoint = "192.0.2.30:4433"
+sni = "exit.vpn.example"
+verify_peer = true
+ca_file = ""
+qkey_id = "c1d2e3f4a5b6"
+qkey_token_ref = "env:QUICFUSCATE_EXIT_QKEY_TOKEN"
+role = "exit"
+provider = "provider-c"
+region = "eu-north"
+failure_domain = "edge-c"
+connect_timeout_ms = 10000
+idle_timeout_ms = 30000
+
+[circuit.hops.policy]
+fec_mode = "auto"
