@@ -11,6 +11,11 @@ use tokio::sync::{mpsc, oneshot};
 const RELAY_CHANNEL_CAPACITY: usize = 512;
 const MAX_RELAY_DATAGRAM_BYTES: usize = 65_535;
 
+fn masque_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("QUICFUSCATE_MASQUE_TRACE").is_some())
+}
+
 fn audit_relay_event(
     event_type: crate::audit::AuditEventType,
     severity: crate::audit::AuditSeverity,
@@ -710,11 +715,12 @@ async fn run_relay_association(mut task: RelayAssociationTask) {
                     Err(poisoned) => poisoned.into_inner().enqueue(task.flow_id, payload),
                 };
                 match result {
-                    Ok(()) => log::debug!(
+                    Ok(()) if masque_trace_enabled() => log::info!(
                         "queued MASQUE relay response flow={} bytes={}",
                         task.flow_id,
                         payload_len
                     ),
+                    Ok(()) => {}
                     Err(error) => {
                         log::warn!(
                             "dropping MASQUE relay response after bounded egress saturation: {:?}",

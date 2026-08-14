@@ -239,9 +239,11 @@ start_server() {
   if [ "$mode" = "exit" ]; then
     args+=(--tun --tun-name qtun0 --tun-ip 10.51.0.1 --tun-netmask 255.255.255.0
       --tun-ip6 fd51::1 --tun-prefix6 64 --vpn-dns 10.51.0.1)
-    ip netns exec "$namespace" "$BINARY" "${args[@]}" > "$log" 2>&1 &
+    ip netns exec "$namespace" env QUICFUSCATE_MASQUE_TRACE=1 \
+      "$BINARY" "${args[@]}" > "$log" 2>&1 &
   else
     ip netns exec "$namespace" env \
+      QUICFUSCATE_MASQUE_TRACE=1 \
       QUICFUSCATE_MASQUE_RELAY_ENABLED=1 \
       QUICFUSCATE_MASQUE_RELAY_ALLOW_NON_GLOBAL_TARGETS=1 \
       QUICFUSCATE_MASQUE_RELAY_ALLOWED_HOSTS="$next" \
@@ -334,7 +336,8 @@ CONFIG="$WORK_DIR/client.toml"
   printf '%s\n' '[[circuit.hops]]' 'label = "Exit"' "endpoint = \"$exit_endpoint\"" 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$EXIT_ID\"" 'qkey_token_ref = "env:QF_MH_EXIT_TOKEN"' 'role = "exit"'
 } > "$CONFIG"
 
-ip netns exec qf-mh-cli env QF_MH_R1_TOKEN="${R1_TOKEN:-$EXIT_TOKEN}" QF_MH_R2_TOKEN="${R2_TOKEN:-$EXIT_TOKEN}" \
+ip netns exec qf-mh-cli env QUICFUSCATE_MASQUE_TRACE=1 \
+  QF_MH_R1_TOKEN="${R1_TOKEN:-$EXIT_TOKEN}" QF_MH_R2_TOKEN="${R2_TOKEN:-$EXIT_TOKEN}" \
   QF_MH_EXIT_TOKEN="$EXIT_TOKEN" "$BINARY" client --remote 10.41.0.1:4433 --config "$CONFIG" \
   > "$WORK_DIR/client.log" 2>&1 &
 CLIENT_PID=$!

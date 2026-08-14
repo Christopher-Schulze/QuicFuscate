@@ -10,6 +10,11 @@ const MAX_QUEUED_INNER_BYTES: usize = 384 * 1024;
 const MAX_INNER_DATAGRAMS_PER_DRIVE: usize = 64;
 const MAX_INNER_BYTES_PER_DRIVE: usize = 256 * 1024;
 
+fn masque_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("QUICFUSCATE_MASQUE_TRACE").is_some())
+}
+
 pub(super) type HopFactory = Box<dyn FnOnce() -> Result<QuicFuscateConnection, EngineError> + Send>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,11 +363,13 @@ impl ClientDataPlane {
             let ingress = self.inner_ingress[link_index].clone();
             self.hops[link_index].set_masque_relay_cb(Arc::new(std::sync::Mutex::new(Box::new(
                 move |flow_id, _target, payload| {
-                    log::debug!(
-                        "received nested QUIC datagram flow={} bytes={}",
-                        flow_id,
-                        payload.len()
-                    );
+                    if masque_trace_enabled() {
+                        log::info!(
+                            "received nested QUIC datagram flow={} bytes={}",
+                            flow_id,
+                            payload.len()
+                        );
+                    }
                     if !ingress.push(payload) {
                         log::warn!(
                             "dropping nested QUIC datagram after bounded ingress saturation"
