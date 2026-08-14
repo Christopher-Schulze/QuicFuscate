@@ -362,7 +362,7 @@ impl IoDriver {
             };
             match result {
                 Ok(()) => return Ok(()),
-                Err(crate::error::ConnectionError::DgramQueueFull) => {
+                Err(EngineError::Backpressure) => {
                     if self.shutdown.load(Ordering::Relaxed) {
                         return Ok(());
                     }

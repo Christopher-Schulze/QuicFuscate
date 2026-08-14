@@ -684,9 +684,10 @@ impl ClientDataPlane {
     }
 
     pub fn send_tunnel_packet(&mut self, stream_id: u64, packet: &[u8]) -> Result<(), EngineError> {
-        self.exit_mut()
-            .send_tunnel_packet(stream_id, packet)
-            .map_err(|error| EngineError::Connection(error.to_string()))?;
+        self.exit_mut().send_tunnel_packet(stream_id, packet).map_err(|error| match error {
+            crate::error::ConnectionError::DgramQueueFull => EngineError::Backpressure,
+            error => EngineError::Connection(error.to_string()),
+        })?;
         self.flush_inner_outbound()
     }
 

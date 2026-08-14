@@ -276,6 +276,7 @@ fn typed_fault_and_error_display_are_stable() {
         EngineError::DataPlane(fault).to_string(),
         "Data-plane error: TUN write failed (tun): closed"
     );
+    assert_eq!(EngineError::Backpressure.to_string(), "Connection backpressure");
 }
 
 #[test]

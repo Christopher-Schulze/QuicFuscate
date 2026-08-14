@@ -1162,6 +1162,8 @@ pub enum EngineError {
     Tun(String),
     /// Connection error.
     Connection(String),
+    /// A bounded connection queue is full and the caller may retry.
+    Backpressure,
     /// Transport error.
     Transport(String),
     /// Terminal TUN/QUIC data-plane error.
@@ -1183,6 +1185,7 @@ impl std::fmt::Display for EngineError {
             }
             Self::Tun(error) => write!(formatter, "TUN error: {error}"),
             Self::Connection(error) => write!(formatter, "Connection error: {error}"),
+            Self::Backpressure => formatter.write_str("Connection backpressure"),
             Self::Transport(error) => write!(formatter, "Transport error: {error}"),
             Self::DataPlane(error) => write!(formatter, "Data-plane error: {error}"),
             Self::Crypto(error) => write!(formatter, "Crypto error: {error}"),
