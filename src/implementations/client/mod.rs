@@ -470,9 +470,10 @@ impl ClientRuntime {
 
         if let Some(owner) = self.stealth_runtime.as_ref() {
             if let Some(runtime) = self.runtime.as_ref() {
-                match runtime
-                    .block_on(owner.shutdown(crate::stealth::STEALTH_RUNTIME_SHUTDOWN_TIMEOUT))
-                {
+                match runtime::block_on(
+                    runtime,
+                    owner.shutdown(crate::stealth::STEALTH_RUNTIME_SHUTDOWN_TIMEOUT),
+                ) {
                     Ok(report) => log::debug!(
                         "Client stealth runtime generation {} stopped: joined={}, force_stopped={}",
                         report.generation,
@@ -548,84 +549,78 @@ impl ClientRuntime {
         let shared_connection = connection.shared();
         let mut connection = Some(connection);
 
-        let setup = {
-            let _runtime_guard = runtime.enter();
-            (|| -> Result<PreparedClientTransport, EngineError> {
-                let io_config = IoDriverConfig::default();
-                let std_socket = std::net::UdpSocket::bind(local_addr)
-                    .map_err(|error| EngineError::Io(format!("UDP bind failed: {error}")))?;
-                std_socket
-                    .set_nonblocking(true)
-                    .map_err(|error| EngineError::Io(format!("UDP nonblocking failed: {error}")))?;
-                let socket_ref = SockRef::from(&std_socket);
-                if let Err(error) = socket_ref.set_recv_buffer_size(io_config.socket_buffer_size) {
-                    log::debug!("UDP recv buffer size hint rejected: {error}");
-                }
-                if let Err(error) = socket_ref.set_send_buffer_size(io_config.socket_buffer_size) {
-                    log::debug!("UDP send buffer size hint rejected: {error}");
-                }
-                std_socket
-                    .connect(remote_addr)
-                    .map_err(|error| EngineError::Io(format!("UDP connect failed: {error}")))?;
-                let socket = Arc::new(
+        let setup = (|| -> Result<PreparedClientTransport, EngineError> {
+            let io_config = IoDriverConfig::default();
+            let std_socket = std::net::UdpSocket::bind(local_addr)
+                .map_err(|error| EngineError::Io(format!("UDP bind failed: {error}")))?;
+            std_socket
+                .set_nonblocking(true)
+                .map_err(|error| EngineError::Io(format!("UDP nonblocking failed: {error}")))?;
+            let socket_ref = SockRef::from(&std_socket);
+            if let Err(error) = socket_ref.set_recv_buffer_size(io_config.socket_buffer_size) {
+                log::debug!("UDP recv buffer size hint rejected: {error}");
+            }
+            if let Err(error) = socket_ref.set_send_buffer_size(io_config.socket_buffer_size) {
+                log::debug!("UDP send buffer size hint rejected: {error}");
+            }
+            std_socket
+                .connect(remote_addr)
+                .map_err(|error| EngineError::Io(format!("UDP connect failed: {error}")))?;
+            let socket = {
+                let _runtime_guard = runtime.enter();
+                Arc::new(
                     UdpSocket::from_std(std_socket)
                         .map_err(|error| EngineError::Io(format!("UDP setup failed: {error}")))?,
-                );
-                let io_driver = Arc::new(IoDriver::new_with_clock(io_config, &self.clock));
-                let deadline = self
-                    .clock
-                    .checked_deadline_after(Self::assignment_timeout(config))
-                    .ok_or_else(|| {
-                        EngineError::Connection("client assignment deadline overflow".to_string())
+                )
+            };
+            let io_driver = Arc::new(IoDriver::new_with_clock(io_config, &self.clock));
+            let deadline =
+                self.clock.checked_deadline_after(Self::assignment_timeout(config)).ok_or_else(
+                    || EngineError::Connection("client assignment deadline overflow".to_string()),
+                )?;
+            let assignment = runtime::block_on(
+                &runtime,
+                io_driver.negotiate_assignment(&shared_connection, &socket, generation, deadline),
+            )?;
+            let ingress = ClientTunnelIngress::new();
+            let tunnel_stream_id = {
+                let mut connection_guard = shared_connection.lock();
+                if !connection_guard.masque_tunnel_established() {
+                    return Err(EngineError::Connection(
+                        "server assignment arrived before MASQUE readiness".to_string(),
+                    ));
+                }
+                let stream_id =
+                    connection_guard.open_http3_stream_post("/tun").map_err(|error| {
+                        EngineError::Connection(format!("client /tun stream open failed: {error}"))
                     })?;
-                let assignment = runtime.block_on(io_driver.negotiate_assignment(
-                    &shared_connection,
-                    &socket,
-                    generation,
-                    deadline,
-                ))?;
-                let ingress = ClientTunnelIngress::new();
-                let tunnel_stream_id = {
-                    let mut connection_guard = shared_connection.lock();
-                    if !connection_guard.masque_tunnel_established() {
-                        return Err(EngineError::Connection(
-                            "server assignment arrived before MASQUE readiness".to_string(),
-                        ));
-                    }
-                    let stream_id =
-                        connection_guard.open_http3_stream_post("/tun").map_err(|error| {
-                            EngineError::Connection(format!(
-                                "client /tun stream open failed: {error}"
-                            ))
-                        })?;
-                    let callback_ingress = ingress.clone();
-                    connection_guard.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(
-                        Box::new(move |payload: &[u8]| {
-                            if !callback_ingress.push(payload) {
-                                log::debug!(
-                                    "client MASQUE ingress queue rejected {} bytes",
-                                    payload.len()
-                                );
-                            }
-                        }),
-                    )));
-                    stream_id
-                };
-                Ok(PreparedClientTransport {
-                    generation,
-                    connection: connection.take().ok_or_else(|| {
-                        EngineError::Internal(
-                            "prepared client connection ownership disappeared".to_string(),
-                        )
-                    })?,
-                    socket,
-                    assignment,
-                    tunnel_stream_id,
-                    ingress,
-                    io_driver,
-                })
-            })()
-        };
+                let callback_ingress = ingress.clone();
+                connection_guard.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
+                    move |payload: &[u8]| {
+                        if !callback_ingress.push(payload) {
+                            log::debug!(
+                                "client MASQUE ingress queue rejected {} bytes",
+                                payload.len()
+                            );
+                        }
+                    },
+                ))));
+                stream_id
+            };
+            Ok(PreparedClientTransport {
+                generation,
+                connection: connection.take().ok_or_else(|| {
+                    EngineError::Internal(
+                        "prepared client connection ownership disappeared".to_string(),
+                    )
+                })?,
+                socket,
+                assignment,
+                tunnel_stream_id,
+                ingress,
+                io_driver,
+            })
+        })();
         if setup.is_err() {
             if let Some(connection) = connection.as_mut() {
                 connection.close(0, b"Transport preparation failed");
@@ -831,7 +826,7 @@ impl ClientRuntime {
         }
         let handles = std::mem::take(&mut self.io_handles);
         if let Some(runtime) = self.runtime.as_ref() {
-            runtime.block_on(async move {
+            runtime::block_on(runtime, async move {
                 let deadline = tokio::time::Instant::now() + TRANSPORT_DRAIN_TIMEOUT;
                 for mut handle in handles {
                     match tokio::time::timeout_at(deadline, &mut handle).await {
@@ -987,7 +982,7 @@ impl ClientRuntime {
             .runtime
             .as_ref()
             .ok_or_else(|| EngineError::Internal("Runtime not initialized".to_string()))?;
-        runtime.block_on(async {
+        runtime::block_on(runtime, async {
             match tokio::time::timeout(TRANSPORT_DRAIN_TIMEOUT, &mut standby.handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) if error.is_cancelled() => {}

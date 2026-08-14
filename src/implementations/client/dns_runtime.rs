@@ -190,7 +190,7 @@ impl ClientDnsRuntime {
 
     /// Restore the prior system resolver and stop the proxy tasks.
     pub fn stop(&mut self, runtime: &SharedRuntime) -> Result<(), EngineError> {
-        runtime.block_on(self.stop_async())
+        super::runtime::block_on(runtime, self.stop_async())
     }
 
     /// Restore the prior system resolver and stop the proxy tasks from async code.
