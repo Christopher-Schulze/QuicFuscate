@@ -206,9 +206,9 @@ impl ClientDataPlane {
     }
 
     fn mark_ready_hops_authenticated(&mut self) -> Result<(), EngineError> {
-        let exit_index = self.hops.len().saturating_sub(1);
+        let exit_index = self.topology_exit_index_if_active();
         for (index, hop) in self.hops.iter_mut().enumerate() {
-            if index == exit_index {
+            if exit_index == Some(index) {
                 continue;
             }
             if hop.has_local_private_packet_protection_flow()
@@ -298,9 +298,9 @@ impl ClientDataPlane {
         // before the TUN writer can receive them. Intermediate hops have no
         // application sink; their only job here is to advance relay flows and
         // deliver opaque datagrams into the next-hop ingress queues.
-        let exit_index = self.hops.len().saturating_sub(1);
+        let exit_index = self.topology_exit_index_if_active();
         for (index, hop) in self.hops.iter_mut().enumerate() {
-            if index == exit_index {
+            if exit_index == Some(index) {
                 continue;
             }
             if hop.conn.is_established() {
@@ -308,6 +308,12 @@ impl ClientDataPlane {
             }
         }
         Ok(())
+    }
+
+    fn topology_exit_index_if_active(&self) -> Option<usize> {
+        let topology = self.topology.as_ref()?;
+        let index = topology.hops.len().saturating_sub(1);
+        (index < self.hops.len()).then_some(index)
     }
 
     fn deliver_inner_ingress(&mut self) -> Result<(), EngineError> {
