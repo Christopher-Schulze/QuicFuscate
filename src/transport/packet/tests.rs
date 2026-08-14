@@ -16,6 +16,332 @@ fn packet_number_encoding_is_big_endian_for_all_lengths() {
 }
 
 #[test]
+fn private_packet_boundary_selection_is_deterministic_and_fail_closed() {
+    assert_eq!(
+        select_private_packet_protection(9, Some(10), true),
+        PrivatePacketProtectionSelection::Standard
+    );
+    assert_eq!(
+        select_private_packet_protection(10, Some(10), true),
+        PrivatePacketProtectionSelection::Advanced
+    );
+    assert_eq!(
+        select_private_packet_protection(10, Some(10), false),
+        PrivatePacketProtectionSelection::Standard
+    );
+    assert_eq!(
+        select_private_packet_protection(u64::MAX, None, true),
+        PrivatePacketProtectionSelection::Standard
+    );
+    assert_eq!(
+        select_private_packet_protection(10, Some(0), true),
+        PrivatePacketProtectionSelection::Standard
+    );
+}
+
+#[test]
+fn authenticated_private_owner_installs_exact_material_and_preserves_standard_hp() {
+    let mut crypto = CryptoContext::default();
+    let standard_secret = [0x42u8; 32];
+    crate::crypto::aead::KeyScheduleHooks::set_read_secret(
+        &mut crypto,
+        crate::crypto::aead::Level::OneRTT,
+        crate::crypto::aead::Algorithm::AES128_GCM,
+        &standard_secret,
+    )
+    .expect("standard read secret");
+    crate::crypto::aead::KeyScheduleHooks::set_write_secret(
+        &mut crypto,
+        crate::crypto::aead::Level::OneRTT,
+        crate::crypto::aead::Algorithm::AES128_GCM,
+        &standard_secret,
+    )
+    .expect("standard write secret");
+
+    crypto
+        .install_authenticated_private_1rtt(
+            qf_crypto::PrivateAeadFamily::Aegis128L,
+            &[0x11; qf_crypto::PrivateAeadFamily::KEY_LEN],
+            &[0x22; qf_crypto::PrivateAeadFamily::IV_LEN],
+            &[0x33; qf_crypto::PrivateAeadFamily::KEY_LEN],
+            &[0x44; qf_crypto::PrivateAeadFamily::IV_LEN],
+            10,
+            20,
+        )
+        .expect("authenticated private owner");
+
+    let snapshot = crypto.packet_protection_snapshot();
+    assert_eq!(
+        snapshot.one_rtt.packet_aead_owner,
+        crate::qftls::PacketProtectionOwner::PrivateAdvanced
+    );
+    assert_eq!(
+        snapshot.one_rtt.header_protection_owner,
+        crate::qftls::PacketProtectionOwner::TransportStandard
+    );
+    assert_eq!(crypto.private_write_boundary_1rtt, Some(10));
+    assert_eq!(crypto.private_read_boundary_1rtt, Some(20));
+    assert!(matches!(crypto.key_update_1rtt_write(), Err(ConnectionError::KeyUpdateError)));
+    assert!(matches!(
+        crypto.install_authenticated_private_1rtt(
+            qf_crypto::PrivateAeadFamily::Aegis128L,
+            &[0x11; qf_crypto::PrivateAeadFamily::KEY_LEN],
+            &[0x22; qf_crypto::PrivateAeadFamily::IV_LEN],
+            &[0x33; qf_crypto::PrivateAeadFamily::KEY_LEN],
+            &[0x44; qf_crypto::PrivateAeadFamily::IV_LEN],
+            11,
+            21,
+        ),
+        Err(ConnectionError::InvalidState)
+    ));
+}
+
+fn private_packet_for_test(
+    crypto: &CryptoContext,
+    packet_number: u64,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    private_packet_for_test_with_phase(crypto, packet_number, false, plaintext)
+}
+
+fn private_packet_for_test_with_phase(
+    crypto: &CryptoContext,
+    packet_number: u64,
+    key_phase: bool,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let header = Header {
+        ty: PacketType::Short,
+        version: 0,
+        dcid: Vec::new(),
+        scid: Vec::new(),
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: None,
+        versions: None,
+        key_phase,
+    };
+    let pn_len = 2usize;
+    let mut packet = vec![0u8; 96];
+    let header_len = format_header(&header, &mut packet).expect("format");
+    packet[header_len] = (packet_number >> 8) as u8;
+    packet[header_len + 1] = packet_number as u8;
+    let aad_len = header_len + pn_len;
+    packet[aad_len..aad_len + plaintext.len()].copy_from_slice(plaintext);
+    let total = aad_len + plaintext.len() + qf_crypto::PrivateAeadFamily::TAG_LEN;
+    let used = encrypt_and_protect(
+        crypto,
+        &mut packet[..total],
+        aad_len,
+        packet_number,
+        pn_len,
+        PacketType::Short,
+    )
+    .expect("private packet seal");
+    packet.truncate(used);
+    packet
+}
+
+#[test]
+fn authenticated_private_owner_selects_standard_then_private_by_packet_boundary() {
+    let mut sender = CryptoContext::default();
+    let mut receiver = CryptoContext::default();
+    let standard_secret = [0x51u8; 32];
+    for crypto in [&mut sender, &mut receiver] {
+        crate::crypto::aead::KeyScheduleHooks::set_read_secret(
+            crypto,
+            crate::crypto::aead::Level::OneRTT,
+            crate::crypto::aead::Algorithm::AES128_GCM,
+            &standard_secret,
+        )
+        .expect("standard read secret");
+        crate::crypto::aead::KeyScheduleHooks::set_write_secret(
+            crypto,
+            crate::crypto::aead::Level::OneRTT,
+            crate::crypto::aead::Algorithm::AES128_GCM,
+            &standard_secret,
+        )
+        .expect("standard write secret");
+        crypto
+            .install_authenticated_private_1rtt(
+                qf_crypto::PrivateAeadFamily::Morus1280_128,
+                &[0x61; qf_crypto::PrivateAeadFamily::KEY_LEN],
+                &[0x62; qf_crypto::PrivateAeadFamily::IV_LEN],
+                &[0x61; qf_crypto::PrivateAeadFamily::KEY_LEN],
+                &[0x62; qf_crypto::PrivateAeadFamily::IV_LEN],
+                10,
+                10,
+            )
+            .expect("private owner");
+    }
+
+    for (packet_number, plaintext) in
+        [(9u64, b"standard-owner".as_slice()), (10u64, b"private-owner".as_slice())]
+    {
+        let mut packet = private_packet_for_test(&sender, packet_number, plaintext);
+        let (_header, aad_len, plaintext_len) =
+            unprotect_and_decrypt(&receiver, &mut packet, 0, 0).expect("private packet open");
+        assert_eq!(&packet[aad_len..aad_len + plaintext_len], plaintext);
+    }
+}
+
+#[test]
+fn private_epoch_update_requires_staged_authenticated_schedule() {
+    let mut crypto = CryptoContext::default();
+    let standard_secret = [0x71u8; 32];
+    crate::crypto::aead::KeyScheduleHooks::set_read_secret(
+        &mut crypto,
+        crate::crypto::aead::Level::OneRTT,
+        crate::crypto::aead::Algorithm::AES128_GCM,
+        &standard_secret,
+    )
+    .expect("standard read secret");
+    crate::crypto::aead::KeyScheduleHooks::set_write_secret(
+        &mut crypto,
+        crate::crypto::aead::Level::OneRTT,
+        crate::crypto::aead::Algorithm::AES128_GCM,
+        &standard_secret,
+    )
+    .expect("standard write secret");
+    crypto
+        .install_authenticated_private_1rtt(
+            qf_crypto::PrivateAeadFamily::Aegis128L,
+            &[0x81; qf_crypto::PrivateAeadFamily::KEY_LEN],
+            &[0x82; qf_crypto::PrivateAeadFamily::IV_LEN],
+            &[0x83; qf_crypto::PrivateAeadFamily::KEY_LEN],
+            &[0x84; qf_crypto::PrivateAeadFamily::IV_LEN],
+            10,
+            10,
+        )
+        .expect("private owner");
+    assert_eq!(crypto.stage_private_read_update(), Err(ConnectionError::KeyUpdateError));
+}
+
+fn activated_private_machine(
+    role: crate::qftls::PrivateNegotiationRole,
+) -> crate::qftls::PrivateNegotiationMachine {
+    let mut machine = crate::qftls::PrivateNegotiationMachine::new(
+        qf_crypto::PacketProtectionMode::Auto,
+        role,
+        Some(qf_crypto::PrivateAeadFamily::Aegis128L),
+        9,
+        crate::transport::PROTOCOL_VERSION,
+        b"h3".to_vec(),
+        vec![1, 2, 3],
+        vec![4, 5, 6],
+        [0x91; crate::qftls::PRIVATE_HASH_LEN],
+        if role == crate::qftls::PrivateNegotiationRole::Client {
+            [0x11; crate::qftls::PRIVATE_NONCE_LEN]
+        } else {
+            [0x22; crate::qftls::PRIVATE_NONCE_LEN]
+        },
+    )
+    .expect("private machine");
+    machine.install_exporter_root(&[0x72; crate::qftls::PRIVATE_HASH_LEN]).expect("exporter root");
+    machine.mark_authenticated().expect("authenticated machine");
+    machine
+}
+
+#[test]
+fn private_epoch_update_roundtrips_after_authenticated_phase_transition() {
+    let mut client = activated_private_machine(crate::qftls::PrivateNegotiationRole::Client);
+    let mut server = activated_private_machine(crate::qftls::PrivateNegotiationRole::Server);
+    let proposal = client.build_proposal().expect("proposal");
+    server.receive_proposal(&proposal).expect("proposal received");
+    let selection = server.build_selection().expect("selection");
+    client.receive_selection(&selection).expect("selection received");
+    let client_confirmation = client.build_confirmation(10).expect("client boundary");
+    server.receive_confirmation(&client_confirmation).expect("client confirmation");
+    let server_confirmation = server.build_confirmation(10).expect("server boundary");
+    client.receive_confirmation(&server_confirmation).expect("server confirmation");
+    client.activate().expect("client active");
+    server.activate().expect("server active");
+
+    let standard_secret = [0x73u8; 32];
+    let mut sender = CryptoContext::default();
+    let mut receiver = CryptoContext::default();
+    for crypto in [&mut sender, &mut receiver] {
+        crate::crypto::aead::KeyScheduleHooks::set_read_secret(
+            crypto,
+            crate::crypto::aead::Level::OneRTT,
+            crate::crypto::aead::Algorithm::AES128_GCM,
+            &standard_secret,
+        )
+        .expect("standard read secret");
+        crate::crypto::aead::KeyScheduleHooks::set_write_secret(
+            crypto,
+            crate::crypto::aead::Level::OneRTT,
+            crate::crypto::aead::Algorithm::AES128_GCM,
+            &standard_secret,
+        )
+        .expect("standard write secret");
+    }
+    let client_schedule = client.epoch_schedule().expect("client schedule");
+    let server_schedule = server.epoch_schedule().expect("server schedule");
+    let client_write = client
+        .derive_material(crate::qftls::PrivateDirection::ClientToServer, 1)
+        .expect("client write material");
+    let client_read = client
+        .derive_material(crate::qftls::PrivateDirection::ServerToClient, 1)
+        .expect("client read material");
+    let server_write = server
+        .derive_material(crate::qftls::PrivateDirection::ServerToClient, 1)
+        .expect("server write material");
+    let server_read = server
+        .derive_material(crate::qftls::PrivateDirection::ClientToServer, 1)
+        .expect("server read material");
+    sender
+        .install_authenticated_private_1rtt_with_schedule(
+            qf_crypto::PrivateAeadFamily::Aegis128L,
+            client_write.key.as_slice(),
+            client_write.iv.as_slice(),
+            client_read.key.as_slice(),
+            client_read.iv.as_slice(),
+            10,
+            10,
+            Some(client_schedule),
+            Some(crate::qftls::PrivateDirection::ClientToServer),
+            Some(crate::qftls::PrivateDirection::ServerToClient),
+            false,
+        )
+        .expect("client private owner");
+    receiver
+        .install_authenticated_private_1rtt_with_schedule(
+            qf_crypto::PrivateAeadFamily::Aegis128L,
+            server_write.key.as_slice(),
+            server_write.iv.as_slice(),
+            server_read.key.as_slice(),
+            server_read.iv.as_slice(),
+            10,
+            10,
+            Some(server_schedule),
+            Some(crate::qftls::PrivateDirection::ServerToClient),
+            Some(crate::qftls::PrivateDirection::ClientToServer),
+            false,
+        )
+        .expect("server private owner");
+
+    let first = private_packet_for_test(&sender, 10, b"epoch-one");
+    let mut first_incoming = first;
+    let (_, first_aad, first_len) =
+        unprotect_and_decrypt(&receiver, &mut first_incoming, 0, 0).expect("epoch one open");
+    assert_eq!(&first_incoming[first_aad..first_aad + first_len], b"epoch-one");
+
+    assert!(sender.key_update_1rtt_write().expect("write update"));
+    receiver.stage_private_read_update().expect("stage read update");
+    assert_eq!(receiver.stage_private_read_update(), Err(ConnectionError::KeyUpdateError));
+    let second = private_packet_for_test_with_phase(&sender, 11, true, b"epoch-two");
+    let mut second_incoming = second;
+    let (second_header, second_aad, second_len) =
+        unprotect_and_decrypt(&receiver, &mut second_incoming, 0, 0).expect("epoch two open");
+    assert!(second_header.key_phase);
+    assert_eq!(&second_incoming[second_aad..second_aad + second_len], b"epoch-two");
+    assert!(receiver
+        .commit_private_read_epoch(second_header.pkt_num, second_header.key_phase)
+        .expect("commit epoch two"));
+}
+
+#[test]
 fn initial_header_token_roundtrip() {
     let header = Header {
         ty: PacketType::Initial,
@@ -632,6 +958,32 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
     use crate::qftls::{QuicTlsHandshakeKeys, QuicTlsKeyInstaller, QuicTlsOneRttKeys};
 
     let installer = parking_lot::RwLock::new(CryptoContext::default());
+    {
+        let mut crypto = installer.write();
+        crypto
+            .install_aes_gcm_initial(&[0x11; 32], &[0x12; 32], crate::transport::PROTOCOL_VERSION)
+            .expect("install Initial packet keys");
+        crypto
+            .install_hp_initial(&[0x11; 32], &[0x12; 32], crate::transport::PROTOCOL_VERSION)
+            .expect("install Initial header keys");
+        let snapshot = crypto.packet_protection_snapshot();
+        assert_eq!(
+            snapshot.initial.packet_aead_owner,
+            crate::qftls::PacketProtectionOwner::QuicInitialStandard
+        );
+        assert_eq!(
+            snapshot.initial.header_protection_owner,
+            crate::qftls::PacketProtectionOwner::QuicInitialStandard
+        );
+        assert_eq!(
+            snapshot.initial.standard_cipher_suite,
+            Some(crate::qftls::StandardCipherSuite::Aes128GcmSha256)
+        );
+        assert_eq!(
+            snapshot.zero_rtt.packet_aead_owner,
+            crate::qftls::PacketProtectionOwner::Disabled
+        );
+    }
     let previous_secret = [0x21; 32];
     {
         let mut crypto = installer.write();
@@ -649,6 +1001,15 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
             &previous_secret,
         )
         .expect("install previous write secret");
+        let snapshot = crypto.packet_protection_snapshot();
+        assert_eq!(
+            snapshot.one_rtt.packet_aead_owner,
+            crate::qftls::PacketProtectionOwner::TransportStandard
+        );
+        assert_eq!(
+            snapshot.one_rtt.header_protection_owner,
+            crate::qftls::PacketProtectionOwner::TransportStandard
+        );
         assert!(crypto.key_update_1rtt_read().expect("advance previous read generation"));
         assert_eq!(crypto.previous_read_1rtt.len(), 1);
     }
@@ -660,6 +1021,7 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
         open: Box::new(AesGcm128::from_arrays(&handshake_key, &handshake_iv)),
         hp_seal: Box::new(crate::crypto::aead::AesHp::from_key(&handshake_hp_key)),
         hp_open: Box::new(crate::crypto::aead::AesHp::from_key(&handshake_hp_key)),
+        standard_cipher_suite: crate::qftls::StandardCipherSuite::Aes128GcmSha256,
     });
 
     let one_rtt_key = [0x41; 16];
@@ -676,6 +1038,7 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
         )))),
         hp_seal: Arc::new(crate::crypto::aead::AesHp::from_key(&one_rtt_hp_key)),
         hp_open: Arc::new(crate::crypto::aead::AesHp::from_key(&one_rtt_hp_key)),
+        standard_cipher_suite: crate::qftls::StandardCipherSuite::Aes128GcmSha256,
     });
 
     {
@@ -693,6 +1056,19 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
         assert_eq!(crypto.read_generation_1rtt, 0);
         assert_eq!(crypto.write_generation_1rtt, 0);
         assert!(crypto.previous_read_1rtt.is_empty());
+        let snapshot = crypto.packet_protection_snapshot();
+        assert_eq!(
+            snapshot.handshake.packet_aead_owner,
+            crate::qftls::PacketProtectionOwner::RustlsStandard
+        );
+        assert_eq!(
+            snapshot.one_rtt.header_protection_owner,
+            crate::qftls::PacketProtectionOwner::RustlsStandard
+        );
+        assert_eq!(
+            snapshot.negotiated_tls_cipher_suite,
+            Some(crate::qftls::StandardCipherSuite::Aes128GcmSha256)
+        );
     }
     assert!(installer.has_one_rtt_keys());
 
@@ -711,6 +1087,15 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
     assert_eq!(crypto.read_generation_1rtt, 0);
     assert_eq!(crypto.write_generation_1rtt, 0);
     assert!(crypto.previous_read_1rtt.is_empty());
+    let snapshot = crypto.packet_protection_snapshot();
+    assert_eq!(
+        snapshot.handshake.packet_aead_owner,
+        crate::qftls::PacketProtectionOwner::Uninstalled
+    );
+    assert_eq!(
+        snapshot.one_rtt.header_protection_owner,
+        crate::qftls::PacketProtectionOwner::Uninstalled
+    );
 }
 
 fn header_protection_test_context() -> CryptoContext {

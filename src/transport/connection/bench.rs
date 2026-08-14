@@ -15,6 +15,26 @@ pub fn bench_paired_1rtt_connections() -> BenchConnectionPair {
 }
 
 #[cfg(any(test, feature = "benches"))]
+/// Build a matched pair using the real rustls standard 1-RTT packet and header keys.
+pub fn bench_paired_standard_1rtt_connections(
+    suite: crate::qftls::StandardCipherSuite,
+) -> BenchConnectionPair {
+    let mut pair = bench_paired_1rtt_connections();
+    let (client_keys, server_keys) = crate::qftls::bench_standard_one_rtt_key_bundles(suite);
+    crate::qftls::QuicTlsKeyInstaller::install_one_rtt_keys(
+        pair.client.crypto.as_ref(),
+        client_keys,
+    );
+    crate::qftls::QuicTlsKeyInstaller::install_one_rtt_keys(
+        pair.server.crypto.as_ref(),
+        server_keys,
+    );
+    pair.client.refresh_short_header_tag_reserve();
+    pair.server.refresh_short_header_tag_reserve();
+    pair
+}
+
+#[cfg(any(test, feature = "benches"))]
 /// Build a matched client/server pair for 1-RTT benches with stealth knobs toggled.
 #[allow(clippy::expect_used)]
 pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectionPair {

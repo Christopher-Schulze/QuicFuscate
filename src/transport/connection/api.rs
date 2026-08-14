@@ -1,5 +1,7 @@
 use super::*;
 
+mod stream_and_path;
+
 impl Connection {
     #[inline]
     fn is_terminal_control_frame(frame: &Frame<'_>) -> bool {
@@ -536,6 +538,11 @@ impl Connection {
         self.is_server
     }
 
+    /// Return the negotiated QUIC version used by this connection.
+    pub(crate) fn config_version(&self) -> u32 {
+        self.config.version()
+    }
+
     /// Returns a mutable reference to the BBR3 recovery/congestion controller.
     pub fn recovery_mut(&mut self) -> &mut recovery::Recovery {
         &mut self.recovery
@@ -558,14 +565,7 @@ impl Connection {
     /// Returns true when a session ticket is present in config or provider state.
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn is_resumed(&self) -> bool {
-        let cfg_ticket = self.config.tls_session.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
-        let provider_ticket = self
-            .tls_provider
-            .as_ref()
-            .and_then(|p| p.session_ticket())
-            .map(|t| !t.is_empty())
-            .unwrap_or(false);
-        cfg_ticket || provider_ticket
+        self.tls_provider.as_ref().is_some_and(|provider| provider.handshake_resumed())
     }
     /// Returns true while 0-RTT is allowed and handshake has not fully established.
     #[cfg(any(test, feature = "rust-tests"))]
@@ -576,6 +576,84 @@ impl Connection {
     /// Returns connection statistics
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// Return secret-free, connection-owned truth for every QUIC packet-protection level.
+    pub fn packet_protection_snapshot(&self) -> crate::qftls::PacketProtectionSnapshot {
+        self.crypto.read().packet_protection_snapshot()
+    }
+
+    /// Export the authenticated TLS keying material for a post-handshake protocol owner.
+    pub(crate) fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: &[u8],
+        length: usize,
+    ) -> Result<crate::qftls::SensitiveKeyingMaterial, crate::error::ConnectionError> {
+        if !self.tls_handshake_complete() {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        self.tls_provider
+            .as_ref()
+            .ok_or(crate::error::ConnectionError::InvalidState)?
+            .export_keying_material(label, context, length)
+    }
+
+    /// Install the packet owner derived by an already-active private negotiation machine.
+    pub(crate) fn activate_private_packet_protection(
+        &mut self,
+        machine: &crate::qftls::PrivateNegotiationMachine,
+        epoch: u32,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if !self.tls_handshake_complete()
+            || machine.state() != crate::qftls::PrivateNegotiationState::AdvancedActive
+        {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        let family =
+            machine.selected_family().ok_or(crate::error::ConnectionError::InvalidState)?;
+        let write_boundary =
+            machine.write_boundary().ok_or(crate::error::ConnectionError::InvalidState)?;
+        let read_boundary =
+            machine.peer_write_boundary().ok_or(crate::error::ConnectionError::InvalidState)?;
+        let (write_direction, read_direction) = if self.is_server {
+            (
+                crate::qftls::PrivateDirection::ServerToClient,
+                crate::qftls::PrivateDirection::ClientToServer,
+            )
+        } else {
+            (
+                crate::qftls::PrivateDirection::ClientToServer,
+                crate::qftls::PrivateDirection::ServerToClient,
+            )
+        };
+        let schedule = machine
+            .epoch_schedule()
+            .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?;
+        let write_material = machine
+            .derive_material(write_direction, epoch)
+            .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?;
+        let read_material = machine
+            .derive_material(read_direction, epoch)
+            .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?;
+        {
+            let mut crypto = self.crypto.write();
+            crypto.install_authenticated_private_1rtt_with_schedule(
+                family,
+                write_material.key.as_slice(),
+                write_material.iv.as_slice(),
+                read_material.key.as_slice(),
+                read_material.iv.as_slice(),
+                write_boundary,
+                read_boundary,
+                Some(schedule),
+                Some(write_direction),
+                Some(read_direction),
+                self.key_phase,
+            )?;
+        }
+        self.refresh_short_header_tag_reserve();
+        Ok(())
     }
 
     /// Smoothed packet-loss signal owned by the active congestion controller.
@@ -914,6 +992,60 @@ impl Connection {
         &self.scid
     }
 
+    /// Returns the original destination connection ID bound to the Initial packet space.
+    ///
+    /// The value remains stable for the connection lifetime, including after Retry. It is
+    /// exposed read-only so higher authenticated protocols can bind context without inferring
+    /// endpoint-specific CID semantics from packet headers.
+    pub fn initial_destination_id(&self) -> &ConnectionId {
+        &self.initial_dcid
+    }
+
+    /// Returns the original client-selected Destination Connection ID, independent of Retry
+    /// Initial-key derivation on the server.
+    pub fn original_destination_id(&self) -> &ConnectionId {
+        &self.original_dcid
+    }
+
+    /// Returns the current destination connection ID used for outgoing packets.
+    pub fn destination_id(&self) -> &ConnectionId {
+        &self.dcid
+    }
+
+    /// Return the local CID context only when all required transport IDs exist.
+    ///
+    /// The returned pair is (initial destination CID, current destination CID). A higher
+    /// protocol must combine it with the peer-authenticated role and source CID; this accessor
+    /// intentionally does not guess a cross-endpoint ordering.
+    pub fn private_protocol_local_connection_ids(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        if self.initial_dcid.is_empty() || self.dcid.is_empty() {
+            return None;
+        }
+        Some((self.initial_dcid.as_ref().to_vec(), self.dcid.as_ref().to_vec()))
+    }
+
+    /// Return the canonical connection-ID pair shared by both authenticated endpoints.
+    /// The first value is the client original DCID; the second is the server SCID.
+    pub(crate) fn private_protocol_canonical_connection_ids(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        let original = if self.original_dcid.is_empty() {
+            self.initial_dcid.as_ref()
+        } else {
+            self.original_dcid.as_ref()
+        };
+        let current = if self.is_server { self.scid.as_ref() } else { self.dcid.as_ref() };
+        if original.is_empty() || current.is_empty() {
+            return None;
+        }
+        Some((original.to_vec(), current.to_vec()))
+    }
+
+    /// Return the next application packet number without bypassing the QUIC overflow guard.
+    pub(crate) fn next_application_send_packet_number(
+        &self,
+    ) -> Result<u64, crate::error::ConnectionError> {
+        self.next_send_packet_number(2)
+    }
+
     /// Returns all source IDs (minimal: only current scid)
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn source_ids(&self) -> impl Iterator<Item = &ConnectionId> {
@@ -1156,262 +1288,5 @@ impl Connection {
         if let Some(scheduler) = self.traffic_analysis.as_mut() {
             scheduler.cancel();
         }
-    }
-    /// Server name (SNI) from TLS provider
-    pub fn server_name(&self) -> Option<&str> {
-        self.tls_provider.as_ref().and_then(|p| p.server_name_get())
-    }
-
-    /// Stream priority
-    /// Sets urgency and incremental scheduling hints for a stream.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn stream_priority(
-        &mut self,
-        stream_id: u64,
-        _urgency: u8,
-        _incremental: bool,
-    ) -> Result<(), crate::error::ConnectionError> {
-        let _stream = self
-            .streams
-            .get_mut(&stream_id)
-            .ok_or(crate::error::ConnectionError::InvalidStreamState(stream_id))?;
-        _stream.priority_urgency = _urgency;
-        #[cfg(any(test, feature = "rust-tests"))]
-        {
-            _stream.priority_incremental = _incremental;
-        }
-
-        if self.writable_stream_ids.contains(&stream_id) {
-            self.writable_streams.retain(|&id| id != stream_id);
-            self.insert_writable_stream_ordered(stream_id);
-        }
-        Ok(())
-    }
-
-    /// Shuts down a stream in the given direction (no-op in minimal impl).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn stream_shutdown(
-        &mut self,
-        _stream_id: u64,
-        _direction: std::net::Shutdown,
-        _err: u64,
-    ) -> Result<(), crate::error::ConnectionError> {
-        Ok(())
-    }
-
-    /// Returns the remaining send capacity for a stream (fixed 64 KB in minimal impl).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn stream_capacity(&self, _stream_id: u64) -> Result<usize, crate::error::ConnectionError> {
-        Ok(65536)
-    }
-
-    /// Returns true if the stream has buffered receive data.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn stream_readable(&self, _stream_id: u64) -> bool {
-        self.readable_stream_ids.contains(&_stream_id)
-    }
-
-    /// Returns true if the stream has queued send data.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn stream_writable(&self, _stream_id: u64, _len: usize) -> bool {
-        self.writable_stream_ids.contains(&_stream_id)
-    }
-
-    /// Returns true if the stream's send buffer is empty and FIN has been set.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn stream_finished(&self, _stream_id: u64) -> bool {
-        if let Some(s) = self.streams.get(&_stream_id) {
-            #[cfg(not(feature = "stream_ring_buffer"))]
-            {
-                s.send_fin && s.send_buf.is_empty()
-            }
-            #[cfg(feature = "stream_ring_buffer")]
-            {
-                s.send_fin && s.send_ring.is_empty()
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Iterates over stream IDs that have readable data.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn readable(&self) -> impl Iterator<Item = u64> + '_ {
-        self.readable_streams.iter().copied()
-    }
-
-    /// Iterates over stream IDs that have pending send data.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn writable(&self) -> impl Iterator<Item = u64> + '_ {
-        self.writable_streams.iter().copied()
-    }
-
-    /// Pops and returns the next stream ID that has data ready to read.
-    pub fn stream_readable_next(&mut self) -> Option<u64> {
-        let stream_id = self.readable_streams.pop_front()?;
-        self.readable_stream_ids.remove(&stream_id);
-        Some(stream_id)
-    }
-
-    /// Pops one peer RESET_STREAM notification for the application protocol owner.
-    pub fn stream_reset_next(&mut self) -> Option<(u64, u64)> {
-        let reset = self.reset_streams.pop_front()?;
-        self.reset_stream_ids.remove(&reset.0);
-        Some(reset)
-    }
-
-    /// Returns the number of streams with pending writable data.
-    pub fn writable_streams_count(&self) -> usize {
-        self.writable_streams.len()
-    }
-
-    /// Pops the next stream ID with queued send data (test helper).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn stream_writable_next(&mut self) -> Option<u64> {
-        let stream_id = self.writable_streams.pop_front()?;
-        self.writable_stream_ids.remove(&stream_id);
-        Some(stream_id)
-    }
-
-    /// Path migration
-    pub fn migrate(
-        &mut self,
-        local: SocketAddr,
-        peer: SocketAddr,
-    ) -> Result<u64, crate::error::ConnectionError> {
-        self.begin_path_validation(local, peer, PathValidationOrigin::LocalMigration, 0)
-    }
-    /// Change only the local address (migrate source path)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn migrate_source(
-        &mut self,
-        local: SocketAddr,
-    ) -> Result<u64, crate::error::ConnectionError> {
-        self.begin_path_validation(local, self.peer_addr, PathValidationOrigin::LocalMigration, 0)
-    }
-    /// Probe a path and emit path lifecycle events for observers/control-plane.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn probe_path(
-        &mut self,
-        from: SocketAddr,
-        to: SocketAddr,
-    ) -> Result<(), crate::error::ConnectionError> {
-        if from == to {
-            return Err(crate::error::ConnectionError::InvalidState);
-        }
-
-        let _ = self.begin_path_validation(from, to, PathValidationOrigin::LocalMigration, 0)?;
-        Ok(())
-    }
-
-    /// Returns per-path statistics for each validated path.
-    pub fn path_stats(&self) -> impl Iterator<Item = PathStats> {
-        std::iter::once(PathStats {
-            recv: self.stats.recv_bytes,
-            sent: self.stats.sent_bytes,
-            lost: self.stats.lost as u64,
-            rtt: self.rtt,
-            cwnd: self.cwnd,
-            delivery_rate: self.stats.delivery_rate,
-            local_addr: self.local_addr,
-            peer_addr: self.peer_addr,
-        })
-    }
-    // Pacing / Congestion / Release hooks
-    /// Returns the next pacing-based release time for outbound packets.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn get_next_release_time(&self) -> Option<Instant> {
-        if !self.config.pacing {
-            return None;
-        }
-
-        let now = self.clock.now();
-        let rate_bps = self.recovery.get_pacing_rate().or(self.config.max_pacing_rate)?;
-        if rate_bps == 0 || self.bytes_in_flight == 0 {
-            return Some(now);
-        }
-
-        let release_delay_us =
-            ((self.bytes_in_flight as u128) * 1_000_000u128 / rate_bps as u128).max(1) as u64;
-        Some(now + Duration::from_micros(release_delay_us))
-    }
-    /// Whether send pacing is enabled.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn pacing_enabled(&self) -> bool {
-        self.config.pacing
-    }
-
-    /// Sends a packet targeting a specific peer address (delegates to `send`).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn send_on_path(
-        &mut self,
-        out: &mut [u8],
-        _to: SocketAddr,
-    ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
-        self.send(out)
-    }
-
-    /// Returns the next path event, if any
-    pub fn path_event_next(&mut self) -> Option<PathEvent> {
-        self.poll_path_validation_timeout(self.clock.now());
-        if self.path_events.is_empty() {
-            None
-        } else {
-            self.path_events.pop_front()
-        }
-    }
-    /// Active SCIDs count (minimal: 1)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn active_scids(&self) -> usize {
-        1
-    }
-    /// SCIDs left to issue (minimal: 0)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn scids_left(&self) -> usize {
-        0
-    }
-    /// Retire a DCID by sequence (minimal: record in retired_scids)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn retire_dcid(&mut self, _dcid_seq: u64) -> Result<(), crate::error::ConnectionError> {
-        self.retired_scids.push_back(self.scid);
-        Ok(())
-    }
-    /// Iterate paths (minimal: return peer addr once)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn paths_iter(&self, _from: SocketAddr) -> impl Iterator<Item = SocketAddr> {
-        std::iter::once(self.peer_addr)
-    }
-    /// Send an ACK-eliciting frame hint (mark ACK needed)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn send_ack_eliciting(&mut self) -> Result<(), crate::error::ConnectionError> {
-        self.pkt_spaces[2].ack_elicited = true;
-        Ok(())
-    }
-    /// Send ACK-eliciting on a path (ignored in minimal impl)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn send_ack_eliciting_on_path(
-        &mut self,
-        _from: SocketAddr,
-    ) -> Result<(), crate::error::ConnectionError> {
-        self.send_ack_eliciting()
-    }
-    /// Retired scids count
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn retired_scids(&self) -> usize {
-        self.retired_scids.len()
-    }
-    /// Next retired scid if any
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn retired_scid_next(&mut self) -> Option<ConnectionId> {
-        if self.retired_scids.is_empty() {
-            None
-        } else {
-            self.retired_scids.pop_front()
-        }
-    }
-    /// Available dcids (minimal: 0)
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn available_dcids(&self) -> usize {
-        0
     }
 }

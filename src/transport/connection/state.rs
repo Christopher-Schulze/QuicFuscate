@@ -17,6 +17,9 @@ pub struct Connection {
     /// Server: the DCID from the accepted Initial, including the Retry SCID
     /// selected by the server when Retry occurred.
     pub(super) initial_dcid: ConnectionId,
+    /// Original client-selected Destination Connection ID retained independently from the
+    /// Initial key-derivation CID. On a server this remains the pre-Retry ODCID.
+    pub(super) original_dcid: ConnectionId,
     pub(super) is_server: bool,
     pub(super) is_established: bool,
     pub(super) is_closed: bool,

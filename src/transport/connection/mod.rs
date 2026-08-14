@@ -15,7 +15,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::crypto::aead::AeadSeal;
 use crate::optimize::{prefetch, PrefetchHint};
 
 const MAX_RX_KEY_UPDATE_ADVANCE: usize = 4;
@@ -50,7 +49,8 @@ pub use state::StreamRingBuffer;
 
 #[cfg(any(test, feature = "benches"))]
 pub use bench::{
-    bench_paired_1rtt_connections, bench_paired_1rtt_connections_stealth, BenchConnectionPair,
+    bench_paired_1rtt_connections, bench_paired_1rtt_connections_stealth,
+    bench_paired_standard_1rtt_connections, BenchConnectionPair,
 };
 #[cfg(feature = "benches")]
 pub use bench::{bench_retry_case, BenchRetryCase};

@@ -4,6 +4,13 @@ use crate::error::ConnectionError;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+mod private_selection;
+pub(crate) use private_selection::{select_private_open_for_phase, select_private_seal};
+#[cfg(test)]
+pub(crate) use private_selection::{
+    select_private_packet_protection, PrivatePacketProtectionSelection,
+};
+
 pub use qf_crypto::{TlsCoverCipherKind, TlsCoverInstallOutcome, TlsCoverKeyMaterial};
 pub use qf_transport_crypto_stream::CryptoStream;
 // no direct varint helpers used here
@@ -40,6 +47,7 @@ pub const MAX_PKT_NUM_LEN: usize = 4;
 pub const SAMPLE_LEN: usize = 16;
 const AEAD_TAG_LEN: usize = 16;
 const MAX_QUIC_VARINT: u64 = 0x3fff_ffff_ffff_ffff;
+const PRIVATE_READ_EPOCH_WINDOW: usize = 4;
 
 #[inline]
 fn checked_usize_add(left: usize, right: usize) -> Result<usize, ConnectionError> {
@@ -137,421 +145,29 @@ fn trace_open_failure(hdr: &Header, aad_len: usize, payload_len: usize) {
 // PacketType is defined once in transport.rs; re-export for local convenience.
 pub use super::PacketType;
 
-// Connection establishment functions (moved from transport.rs to externalize packet module API)
+mod headers;
+pub use headers::{encode_pkt_num, format_header, format_short_header, parse_header, Header};
+mod connection_setup;
+pub use connection_setup::{
+    accept, accept_with_clock, accept_with_clock_and_original, connect, connect_with_clock,
+};
+mod retry;
+pub use retry::{append_retry_tag, verify_retry_tag};
+mod secrets;
+pub use secrets::{derive_initial_secrets, derive_key_iv, derive_key_iv_for_version};
+mod version_negotiation;
+pub use version_negotiation::{
+    generate_version_negotiation_packet, negotiate_version, parse_version_negotiation,
+    server_version_negotiation_response,
+};
 
-/// Creates a new client-side QUIC connection with the given parameters.
-pub fn connect(
-    _sni: Option<&str>,
-    scid: &[u8],
-    local: std::net::SocketAddr,
-    peer: std::net::SocketAddr,
-    config: &mut crate::transport::Config,
-) -> Result<crate::transport::Connection, ConnectionError> {
-    connect_with_clock(
-        _sni,
-        scid,
-        local,
-        peer,
-        config,
-        crate::time_source::ProtocolClock::default(),
-    )
-}
-
-/// Creates a client connection using an explicit protocol clock owner.
-pub fn connect_with_clock(
-    _sni: Option<&str>,
-    scid: &[u8],
-    local: std::net::SocketAddr,
-    peer: std::net::SocketAddr,
-    config: &mut crate::transport::Config,
-    clock: crate::time_source::ProtocolClock,
-) -> Result<crate::transport::Connection, ConnectionError> {
-    let mut conn = crate::transport::Connection::new_with_role_and_clock(
-        scid,
-        local,
-        peer,
-        config.clone(),
-        false,
-        clock,
-    )?;
-
-    // Client selects an unpredictable initial DCID (RFC 9000). This DCID is also the ODCID
-    // used for Initial key derivation (RFC 9001).
-    let mut dcid = [0u8; crate::transport::MAX_CONN_ID_LEN];
-    crate::transport::rand::rand_bytes(&mut dcid);
-    conn.set_initial_dcid(crate::transport::ConnectionId::from_ref(&dcid));
-
-    // Attach lightweight FEC transport observer to collect ECN/ACK telemetry
-    // (policy application remains optional and external)
-    {
-        let obs_arc = std::sync::Arc::new(qf_fec::FecObserver::new());
-        let obs_trait: std::sync::Arc<dyn crate::transport::TransportObserver> = obs_arc;
-        conn.set_observer(Some(obs_trait));
-    }
-
-    config.set_application_protos(&[b"h3"])?;
-    // BBR3 with browser-specific tuning
-    let browser_profile = crate::transport::recovery::BrowserProfile::Chrome;
-    conn.recovery_mut()
-        .set_stealth_mode(false, browser_profile)
-        .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
-
-    Ok(conn)
-}
-
-/// Creates a new server-side QUIC connection accepting a client handshake.
-pub fn accept(
-    scid: &[u8],
-    initial_key_dcid: Option<&[u8]>,
-    local: std::net::SocketAddr,
-    peer: std::net::SocketAddr,
-    config: &mut crate::transport::Config,
-) -> Result<crate::transport::Connection, ConnectionError> {
-    accept_with_clock(
-        scid,
-        initial_key_dcid,
-        local,
-        peer,
-        config,
-        crate::time_source::ProtocolClock::default(),
-    )
-}
-
-/// Creates a server connection using an explicit protocol clock owner.
-pub fn accept_with_clock(
-    scid: &[u8],
-    initial_key_dcid: Option<&[u8]>,
-    local: std::net::SocketAddr,
-    peer: std::net::SocketAddr,
-    config: &mut crate::transport::Config,
-    clock: crate::time_source::ProtocolClock,
-) -> Result<crate::transport::Connection, ConnectionError> {
-    // Create connection with server role
-    // Record the Destination Connection ID from this Initial for RFC 9001
-    // key derivation. After Retry this is the server's Retry SCID, not the
-    // client's original destination connection ID.
-    let mut conn = crate::transport::Connection::new_with_role_and_clock(
-        scid,
-        local,
-        peer,
-        config.clone(),
-        true,
-        clock,
-    )?;
-    if let Some(initial_key_dcid) = initial_key_dcid {
-        conn.set_initial_dcid(crate::transport::ConnectionId::from_ref(initial_key_dcid));
-    }
-    // Attach lightweight FEC transport observer to collect ECN/ACK telemetry
-    // (policy application remains optional and external)
-    {
-        let obs_arc = std::sync::Arc::new(qf_fec::FecObserver::new());
-        let obs_trait: std::sync::Arc<dyn crate::transport::TransportObserver> = obs_arc;
-        conn.set_observer(Some(obs_trait));
-    }
-
-    config.set_application_protos(&[b"h3"])?;
-    // BBR3 with browser-specific tuning
-    let browser_profile = crate::transport::recovery::BrowserProfile::Chrome;
-    conn.recovery_mut()
-        .set_stealth_mode(false, browser_profile)
-        .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
-
-    Ok(conn)
-}
-
-/// Parsed QUIC packet header (Vec-based variant used during packet processing).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Header {
-    /// Packet type.
-    pub ty: PacketType,
-    /// QUIC version (0 for short header or Version Negotiation).
-    pub version: u32,
-    /// Destination Connection ID bytes.
-    pub dcid: Vec<u8>,
-    /// Source Connection ID bytes (empty for short headers).
-    pub scid: Vec<u8>,
-    /// Decoded packet number.
-    pub pkt_num: u64,
-    /// On-wire packet number encoding length in bytes (1-4).
-    pub pkt_num_len: usize,
-    /// Token from Initial or Retry packets.
-    pub token: Option<Vec<u8>>,
-    /// Supported versions from Version Negotiation packets.
-    pub versions: Option<Vec<u32>>,
-    /// Key phase bit for 1-RTT key rotation.
-    pub key_phase: bool,
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-use std::arch::x86_64::*;
-
-/// SIMD-optimized packet number encoding
-pub fn encode_pkt_num(pn: u64, pn_len: usize, out: &mut [u8]) -> Result<usize, ConnectionError> {
-    if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    if out.len() < pn_len {
-        return Err(ConnectionError::BufferTooShort);
-    }
-
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    unsafe {
-        // AVX2 optimized path for 4-byte packet numbers
-        if pn_len == 4
-            && crate::optimize::FeatureDetector::instance()
-                .features_full()
-                .simd_dispatch_matrix()
-                .avx2
-        {
-            // Keep the wire representation big-endian. Converting the bytes
-            // to a native integer before the unaligned store preserves their
-            // order on x86_64 and avoids the previous reversed-byte shuffle.
-            let pn_bytes = (pn as u32).to_be_bytes();
-            let pn_vec = _mm_cvtsi32_si128(i32::from_ne_bytes(pn_bytes));
-            _mm_storeu_si32(out.as_mut_ptr(), pn_vec);
-            return Ok(4);
-        }
-    }
-
-    // Fallback scalar path
-    match pn_len {
-        1 => {
-            out[0] = pn as u8;
-            Ok(1)
-        }
-        2 => {
-            let bytes = (pn as u16).to_be_bytes();
-            out[..2].copy_from_slice(&bytes);
-            Ok(2)
-        }
-        3 => {
-            out[0] = (pn >> 16) as u8;
-            out[1] = (pn >> 8) as u8;
-            out[2] = pn as u8;
-            Ok(3)
-        }
-        4 => {
-            let bytes = (pn as u32).to_be_bytes();
-            out[..4].copy_from_slice(&bytes);
-            Ok(4)
-        }
-        _ => Err(ConnectionError::InvalidPacket),
-    }
-}
-
-/// Minimal header parsing to get PN offset and header fields
-pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize), ConnectionError> {
-    use crate::transport::udpfast::{likely, unlikely};
-    if unlikely(buf.is_empty()) {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let first = buf[0];
-    if likely((first & crate::transport::packet::FORM_BIT) == 0) {
-        // Short header (most common in established connections)
-        if unlikely((first & crate::transport::packet::FIXED_BIT) == 0) {
-            return Err(ConnectionError::InvalidPacket);
-        }
-        if short_dcid_len > MAX_CID_LEN {
-            return Err(ConnectionError::InvalidPacket);
-        }
-        let pn_off = checked_usize_add(1, short_dcid_len)?;
-        if unlikely(buf.len() < pn_off) {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let dcid = buf[1..pn_off].to_vec();
-        let hdr = Header {
-            ty: PacketType::Short,
-            version: 0,
-            dcid,
-            scid: Vec::new(),
-            pkt_num: 0,
-            pkt_num_len: 0,
-            token: None,
-            versions: None,
-            key_phase: (first & crate::transport::packet::KEY_PHASE_BIT) != 0,
-        };
-        return Ok((hdr, pn_off));
-    }
-    // Long header parsing
-    if buf.len() < 7 {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let version = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
-    if version != 0 && unlikely((first & crate::transport::packet::FIXED_BIT) == 0) {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    let mut off = 5usize;
-    let dcid_len = *buf.get(off).ok_or(ConnectionError::BufferTooShort)? as usize;
-    off = checked_usize_add(off, 1)?;
-    if dcid_len > MAX_CID_LEN {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    let dcid_start = off;
-    let dcid_end = checked_buffer_end(buf.len(), dcid_start, dcid_len)?;
-    let scid_len = *buf.get(dcid_end).ok_or(ConnectionError::BufferTooShort)? as usize;
-    off = checked_usize_add(dcid_end, 1)?;
-    if scid_len > MAX_CID_LEN {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    let scid_end = checked_buffer_end(buf.len(), off, scid_len)?;
-    let dcid = buf[dcid_start..dcid_end].to_vec();
-    let scid = buf[off..scid_end].to_vec();
-    off = scid_end;
-    let ty_bits = first & crate::transport::packet::TYPE_MASK;
-    let ty = crate::transport::version::packet_type_from_long_header(version, ty_bits)?;
-    let mut token = None;
-    let mut versions = None;
-    if ty == PacketType::VersionNegotiation {
-        let remaining = buf.len().saturating_sub(off);
-        if remaining == 0 || !remaining.is_multiple_of(4) {
-            return Err(ConnectionError::InvalidPacket);
-        }
-        versions = Some(
-            buf[off..]
-                .chunks_exact(4)
-                .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-                .collect(),
-        );
-        off = buf.len();
-    } else if ty == PacketType::Initial {
-        let (tok_len, used) = crate::transport::varint::read_varint(&buf[off..])?;
-        let tok_len = usize::try_from(tok_len).map_err(|_| ConnectionError::InvalidPacket)?;
-        off = checked_usize_add(off, used)?;
-        let token_end = checked_buffer_end(buf.len(), off, tok_len)?;
-        if tok_len > 0 {
-            token = Some(buf[off..token_end].to_vec());
-        }
-        off = token_end;
-    } else if ty == PacketType::Retry {
-        let tag_start =
-            buf.len().checked_sub(AEAD_TAG_LEN).ok_or(ConnectionError::BufferTooShort)?;
-        if tag_start < off {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let tok_len = tag_start - off;
-        if tok_len > 0 {
-            token = Some(buf[off..tag_start].to_vec());
-        }
-        off = tag_start;
-    }
-    let hdr = Header {
-        ty,
-        version,
-        dcid,
-        scid,
-        pkt_num: 0,
-        pkt_num_len: 0,
-        token,
-        versions,
-        key_phase: false,
-    };
-    Ok((hdr, off))
-}
-
-/// Format a Short header directly from a DCID slice, bypassing `Header`
-/// construction. This eliminates two `Vec` allocations (`dcid.to_vec()` +
-/// `scid.to_vec()`) on the 1-RTT send hot path — `ConnectionId` is already
-/// a stack-allocated `Copy` type and `scid` is always empty for Short headers.
-#[inline]
-pub fn format_short_header(
-    dcid: &[u8],
-    key_phase: bool,
-    out: &mut [u8],
-) -> Result<usize, ConnectionError> {
-    checked_cid_wire_len(dcid.len())?;
-    let end = checked_buffer_end(out.len(), 1, dcid.len())?;
-    let mut first = crate::transport::packet::FIXED_BIT; // 0x40
-    if key_phase {
-        first |= crate::transport::packet::KEY_PHASE_BIT;
-    }
-    out[0] = first;
-    out[1..end].copy_from_slice(dcid);
-    Ok(end)
-}
-
-/// Minimal header formatting to get PN offset and header fields
-pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionError> {
-    match h.ty {
-        PacketType::Short => {
-            checked_cid_wire_len(h.dcid.len())?;
-            if !h.scid.is_empty() || h.token.is_some() || h.versions.is_some() {
-                return Err(ConnectionError::InvalidPacket);
-            }
-            let end = checked_buffer_end(out.len(), 1, h.dcid.len())?;
-            let mut first = crate::transport::packet::FIXED_BIT; // 0x40
-            if h.key_phase {
-                first |= crate::transport::packet::KEY_PHASE_BIT;
-            }
-            out[0] = first;
-            out[1..end].copy_from_slice(&h.dcid);
-            Ok(end)
-        }
-        PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT | PacketType::Retry => {
-            // Long header: [first][version:4][dcid_len:1][dcid][scid_len:1][scid]
-            let dcid_len = checked_cid_wire_len(h.dcid.len())?;
-            let scid_len = checked_cid_wire_len(h.scid.len())?;
-            let token = h.token.as_deref().unwrap_or(&[]);
-            let token_value = checked_varint_value(token.len())?;
-            let type_bits = crate::transport::version::long_header_type_bits(h.version, h.ty)?;
-            let mut required = 5usize;
-            required = checked_usize_add(required, 1)?;
-            required = checked_usize_add(required, h.dcid.len())?;
-            required = checked_usize_add(required, 1)?;
-            required = checked_usize_add(required, h.scid.len())?;
-            if h.ty == PacketType::Initial {
-                required = checked_usize_add(
-                    required,
-                    crate::transport::pn::varint::varint_len(token_value),
-                )?;
-            }
-            if h.ty == PacketType::Initial || h.ty == PacketType::Retry {
-                required = checked_usize_add(required, token.len())?;
-            } else if h.token.is_some() {
-                return Err(ConnectionError::InvalidPacket);
-            }
-            if out.len() < required {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            let mut first = FORM_BIT | FIXED_BIT; // long header with fixed bit
-            first |= type_bits;
-            out[0] = first;
-            out[1..5].copy_from_slice(&h.version.to_be_bytes());
-            let mut off = 5usize;
-            off = checked_usize_add(off, 1)?;
-            let dcid_end = checked_buffer_end(out.len(), off, h.dcid.len())?;
-            let scid_len_offset = dcid_end;
-            let scid_bytes_start = checked_usize_add(scid_len_offset, 1)?;
-            let scid_end = checked_buffer_end(out.len(), scid_bytes_start, h.scid.len())?;
-            out[5] = dcid_len;
-            out[6..dcid_end].copy_from_slice(&h.dcid);
-            out[scid_len_offset] = scid_len;
-            out[scid_bytes_start..scid_end].copy_from_slice(&h.scid);
-            off = scid_end;
-            if h.ty == PacketType::Initial {
-                let written = crate::transport::varint::write_varint(token_value, &mut out[off..])?;
-                off = checked_usize_add(off, written)?;
-                let token_end = checked_buffer_end(out.len(), off, token.len())?;
-                out[off..token_end].copy_from_slice(token);
-                off = token_end;
-            } else if h.ty == PacketType::Retry {
-                let token_end = checked_buffer_end(out.len(), off, token.len())?;
-                out[off..token_end].copy_from_slice(token);
-                off = token_end;
-            }
-            Ok(off)
-        }
-        _ => Err(ConnectionError::InvalidPacket),
-    }
-}
-
-fn unprotect_and_decrypt_with_key(
+fn unprotect_header_with_key(
     hp: &dyn HeaderProtector,
-    aead: &dyn crate::crypto::aead::AeadOpen,
     buf: &mut [u8],
     short_dcid_len: usize,
     largest_pn_hint: u64,
     pre_parsed: Option<(Header, usize)>,
-) -> Result<(Header, usize, usize), ConnectionError> {
+) -> Result<(Header, usize), ConnectionError> {
     let (mut hdr, pn_off) = match pre_parsed {
         Some(parsed) => parsed,
         None => parse_header(buf, short_dcid_len)?,
@@ -574,8 +190,7 @@ fn unprotect_and_decrypt_with_key(
     }
     hdr.pkt_num_len = pn_len;
     let aad_len = checked_usize_add(pn_off, pn_len)?;
-    let payload_len = buf.len() - aad_len;
-    if payload_len < AEAD_TAG_LEN {
+    if buf.len() - aad_len < AEAD_TAG_LEN {
         return Err(ConnectionError::BufferTooShort);
     }
     for i in 0..pn_len {
@@ -589,15 +204,28 @@ fn unprotect_and_decrypt_with_key(
     hdr.pkt_num =
         crate::optimize::transport::decode_packet_number(encoded_pn, largest_pn_hint, pn_len as u8);
 
-    let (aad_buf, payload_buf) = buf.split_at_mut(aad_len);
-    let aad = &aad_buf[..aad_len];
-    let plaintext_len = match aead.open_with_u64_counter(hdr.pkt_num, aad, payload_buf) {
-        Ok(n) => n,
-        Err(e) => {
-            trace_open_failure(&hdr, aad_len, payload_len);
-            return Err(e);
-        }
-    };
+    Ok((hdr, aad_len))
+}
+
+fn unprotect_and_decrypt_with_key(
+    hp: &dyn HeaderProtector,
+    aead: &dyn crate::crypto::aead::AeadOpen,
+    buf: &mut [u8],
+    short_dcid_len: usize,
+    largest_pn_hint: u64,
+    pre_parsed: Option<(Header, usize)>,
+) -> Result<(Header, usize, usize), ConnectionError> {
+    let (hdr, aad_len) =
+        unprotect_header_with_key(hp, buf, short_dcid_len, largest_pn_hint, pre_parsed)?;
+    let payload_len = buf.len() - aad_len;
+    let plaintext_len =
+        match decrypt_payload_plaintext_len(buf, hdr.pkt_num, hdr.pkt_num_len, aad_len, aead) {
+            Ok(n) => n,
+            Err(e) => {
+                trace_open_failure(&hdr, aad_len, payload_len);
+                return Err(e);
+            }
+        };
 
     Ok((hdr, aad_len, plaintext_len))
 }
@@ -631,14 +259,29 @@ pub(crate) fn unprotect_and_decrypt_1rtt(
     if hdr.ty != PacketType::Short {
         return Err(ConnectionError::Done);
     }
-    unprotect_and_decrypt_with_key(
+    let (hdr, aad_len) = unprotect_header_with_key(
         &*keys.hp_open,
-        &*keys.open,
         buf,
         short_dcid_len,
         largest_pn_hint,
         Some((hdr, pn_off)),
-    )
+    )?;
+    let aead = select_private_open_for_phase(
+        Some(&keys.open),
+        keys.private_open.as_ref(),
+        keys.private_next_open.as_ref(),
+        &keys.private_previous_read,
+        hdr.pkt_num,
+        keys.private_read_boundary,
+        hdr.key_phase,
+        keys.private_read_key_phase,
+        !keys.private_read_key_phase,
+        keys.private_read_start,
+        keys.private_read_update_pending,
+    )?;
+    let plaintext_len =
+        decrypt_payload_plaintext_len(buf, hdr.pkt_num, hdr.pkt_num_len, aad_len, aead)?;
+    Ok((hdr, aad_len, plaintext_len))
 }
 
 /// Like [`unprotect_and_decrypt`], but accepts an optional pre-parsed header to avoid
@@ -712,47 +355,79 @@ pub fn unprotect_and_decrypt_parsed(
             )
         }
         PacketType::Short => {
-            let mut candidates: Vec<(&dyn HeaderProtector, &dyn crate::crypto::aead::AeadOpen)> =
-                Vec::new();
             let hp_1rtt = crypto.hp_1rtt_open.as_deref().or(crypto.hp_1rtt.as_deref());
-            if let (Some(hp), Some(aead)) = (hp_1rtt, crypto.open_1rtt.as_deref()) {
-                candidates.push((hp, aead as &dyn tls_aead::AeadOpen));
-            }
-            if let Some(hp) = hp_1rtt {
-                for prev in &crypto.previous_read_1rtt {
-                    candidates.push((hp, &*prev.open as &dyn tls_aead::AeadOpen));
+            let hp = hp_1rtt.ok_or(ConnectionError::Done)?;
+            if crypto.private_open_1rtt.is_none() {
+                let mut candidates: Vec<&dyn tls_aead::AeadOpen> = Vec::new();
+                if let Some(aead) = crypto.open_1rtt.as_deref() {
+                    candidates.push(aead as &dyn tls_aead::AeadOpen);
                 }
-            }
-            if candidates.is_empty() {
-                return Err(ConnectionError::Done);
-            }
-            let original = if candidates.len() > 1 { Some(buf.to_vec()) } else { None };
-            let mut last_err = ConnectionError::CryptoError("crypto failure".into());
-            // take() moves the header to the first candidate; subsequent
-            // candidates get None and parse internally. No clone needed.
-            let mut hdr_opt = Some((hdr, pn_off));
-            for (hp, aead) in candidates.into_iter() {
-                // Restore buf from the original snapshot for candidates after
-                // the first (previous attempt's HP removal modified buf).
-                if hdr_opt.is_none() {
-                    if let Some(orig) = original.as_ref() {
-                        buf.copy_from_slice(orig);
+                for previous in &crypto.previous_read_1rtt {
+                    candidates.push(&*previous.open as &dyn tls_aead::AeadOpen);
+                }
+                if candidates.is_empty() {
+                    return Err(ConnectionError::Done);
+                }
+                let original = if candidates.len() > 1 { Some(buf.to_vec()) } else { None };
+                let mut last_error = ConnectionError::CryptoError("crypto failure".into());
+                for (index, aead) in candidates.into_iter().enumerate() {
+                    if index > 0 {
+                        if let Some(original) = original.as_ref() {
+                            buf.copy_from_slice(original);
+                        }
+                    }
+                    let pre = if index == 0 { Some((hdr.clone(), pn_off)) } else { None };
+                    match unprotect_and_decrypt_with_key(
+                        hp,
+                        aead,
+                        buf,
+                        short_dcid_len,
+                        largest_pn_hint,
+                        pre,
+                    ) {
+                        Ok(value) => return Ok(value),
+                        Err(error) => last_error = error,
                     }
                 }
-                let pre = hdr_opt.take();
-                match unprotect_and_decrypt_with_key(
-                    hp,
-                    aead,
-                    buf,
-                    short_dcid_len,
-                    largest_pn_hint,
-                    pre,
-                ) {
-                    Ok(v) => return Ok(v),
-                    Err(e) => last_err = e,
-                }
+                return Err(last_error);
             }
-            Err(last_err)
+            let (hdr, aad_len) = unprotect_header_with_key(
+                hp,
+                buf,
+                short_dcid_len,
+                largest_pn_hint,
+                Some((hdr, pn_off)),
+            )?;
+            let previous_private =
+                crypto.private_previous_read_1rtt.iter().cloned().collect::<Vec<_>>();
+            let aead = select_private_open_for_phase(
+                crypto.open_1rtt.as_ref(),
+                crypto.private_open_1rtt.as_ref(),
+                crypto.private_next_open_1rtt.as_ref(),
+                &previous_private,
+                hdr.pkt_num,
+                crypto.private_read_boundary_1rtt,
+                hdr.key_phase,
+                crypto.private_read_key_phase_1rtt,
+                !crypto.private_read_key_phase_1rtt,
+                crypto.private_read_start_1rtt,
+                crypto.private_read_update_pending_1rtt,
+            )?;
+            let payload_len = buf.len().saturating_sub(aad_len);
+            let plaintext_len = match decrypt_payload_plaintext_len(
+                buf,
+                hdr.pkt_num,
+                hdr.pkt_num_len,
+                aad_len,
+                aead,
+            ) {
+                Ok(n) => n,
+                Err(error) => {
+                    trace_open_failure(&hdr, aad_len, payload_len);
+                    return Err(error);
+                }
+            };
+            Ok((hdr, aad_len, plaintext_len))
         }
         _ => Ok((hdr, pn_off, buf.len().saturating_sub(pn_off))),
     }
@@ -836,20 +511,32 @@ pub fn encrypt_and_protect(
         return Err(ConnectionError::BufferTooShort);
     }
 
-    // Select AEAD based on packet type
-    let aead: Option<&dyn tls_aead::AeadSeal> = match pkt_type {
-        PacketType::Initial => crypto.seal_initial.as_deref().map(|a| a as &dyn tls_aead::AeadSeal),
-        PacketType::Handshake => {
-            crypto.seal_handshake.as_deref().map(|a| a as &dyn tls_aead::AeadSeal)
-        }
-        PacketType::ZeroRTT => crypto.seal_0rtt.as_ref().map(|a| a as &dyn tls_aead::AeadSeal),
-        PacketType::Short => crypto.seal_1rtt.as_deref().map(|a| a as &dyn tls_aead::AeadSeal),
+    // Select AEAD based on packet type. Short-header packets use the committed packet-number
+    // boundary, while header protection remains the standard QUIC owner.
+    let aead: &dyn tls_aead::AeadSeal = match pkt_type {
+        PacketType::Initial => match crypto.seal_initial.as_deref() {
+            Some(aead) => aead as &dyn tls_aead::AeadSeal,
+            None => return Ok(hdr_len),
+        },
+        PacketType::Handshake => match crypto.seal_handshake.as_deref() {
+            Some(aead) => aead as &dyn tls_aead::AeadSeal,
+            None => return Ok(hdr_len),
+        },
+        PacketType::ZeroRTT => match crypto.seal_0rtt.as_ref() {
+            Some(aead) => aead as &dyn tls_aead::AeadSeal,
+            None => return Ok(hdr_len),
+        },
+        PacketType::Short => match select_private_seal(
+            crypto.seal_1rtt.as_ref(),
+            crypto.private_seal_1rtt.as_ref(),
+            pn,
+            crypto.private_write_boundary_1rtt,
+        ) {
+            Ok(aead) => aead,
+            Err(ConnectionError::Done) => return Ok(hdr_len),
+            Err(error) => return Err(error),
+        },
         _ => return Ok(hdr_len),
-    };
-
-    let aead = match aead {
-        Some(a) => a,
-        None => return Ok(hdr_len), // No AEAD available yet
     };
 
     // Encode packet number length (pn_len - 1) into the low 2 bits of the first header byte.
@@ -874,6 +561,9 @@ pub fn seal_data_aead_batch(
     crypto: &CryptoContext,
     items: &mut [tls_aead::AeadSealItem<'_>],
 ) -> Result<(), ConnectionError> {
+    if crypto.private_seal_1rtt.is_some() {
+        return Err(ConnectionError::InvalidState);
+    }
     let seal =
         crypto.seal_1rtt.as_deref().or(crypto.seal_0rtt.as_ref()).ok_or_else(|| {
             ConnectionError::TlsError("missing AEAD sealer for batch seal".into())
@@ -886,279 +576,14 @@ pub fn open_data_aead_batch(
     crypto: &CryptoContext,
     items: &mut [tls_aead::AeadOpenItem<'_>],
 ) -> Result<(), ConnectionError> {
+    if crypto.private_open_1rtt.is_some() {
+        return Err(ConnectionError::InvalidState);
+    }
     let open =
         crypto.open_1rtt.as_deref().or(crypto.open_0rtt.as_ref()).ok_or_else(|| {
             ConnectionError::TlsError("missing AEAD opener for batch open".into())
         })?;
     open.open_batch(items)
-}
-
-/// Selects the server's most-preferred QUIC version that the client also supports.
-///
-/// Iterates `server_versions` in preference order and returns the first entry
-/// that also appears in `client_versions`. Returns `None` when no common
-/// version exists. In that case, the caller should emit a Version Negotiation
-/// packet via [`generate_version_negotiation_packet`].
-pub fn negotiate_version(client_versions: &[u32], server_versions: &[u32]) -> Option<u32> {
-    server_versions.iter().find(|&&sv| client_versions.contains(&sv)).copied()
-}
-
-/// Builds a Version Negotiation (VN) response packet listing `server_versions`.
-///
-/// Per RFC 9000 Section 17.2.1, the VN packet's DCID echoes the client's SCID
-/// and its SCID echoes the client's DCID; the caller is responsible for passing
-/// the already-swapped connection IDs in `dcid` / `scid`. The form bit is set,
-/// while all other first-byte bits are non-invariant. The `client_versions`
-/// argument is accepted for API symmetry but is not encoded; only the server's
-/// supported versions appear in the packet body.
-pub fn generate_version_negotiation_packet(
-    _client_versions: &[u32],
-    server_versions: &[u32],
-    dcid: &[u8],
-    scid: &[u8],
-) -> Result<Vec<u8>, ConnectionError> {
-    checked_cid_wire_len(dcid.len())?;
-    checked_cid_wire_len(scid.len())?;
-    if server_versions.is_empty() {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    let versions_len =
-        server_versions.len().checked_mul(4).ok_or(ConnectionError::InvalidPacket)?;
-    let base_len = checked_usize_add(1 + 4, 1)?;
-    let base_len = checked_usize_add(base_len, dcid.len())?;
-    let base_len = checked_usize_add(base_len, 1)?;
-    let base_len = checked_usize_add(base_len, scid.len())?;
-    let capacity = checked_usize_add(base_len, versions_len)?;
-    let mut pkt = Vec::with_capacity(capacity);
-    // Only the form bit is invariant. RFC 9000 recommends setting the fixed-bit
-    // position so VN packets resemble other QUIC packets on multiplexed ports.
-    let first = crate::transport::rand::rand_u8() | FORM_BIT | FIXED_BIT;
-    pkt.push(first);
-    // Version field is 0x00000000 for VN packets.
-    pkt.extend_from_slice(&0u32.to_be_bytes());
-    // DCID (echoes the client's SCID).
-    pkt.push(checked_cid_wire_len(dcid.len())?);
-    pkt.extend_from_slice(dcid);
-    // SCID (echoes the client's DCID).
-    pkt.push(checked_cid_wire_len(scid.len())?);
-    pkt.extend_from_slice(scid);
-    // Supported versions, big-endian.
-    for v in server_versions {
-        pkt.extend_from_slice(&v.to_be_bytes());
-    }
-    Ok(pkt)
-}
-
-/// Extracts the version list from a Version Negotiation packet.
-///
-/// Returns `Some(versions)` when `pkt` is a well-formed VN packet (form bit set,
-/// version field zero, and a whole number of 4-byte version
-/// entries). Returns `None` otherwise.
-pub fn parse_version_negotiation(pkt: &[u8]) -> Option<Vec<u32>> {
-    if pkt.is_empty() {
-        return None;
-    }
-    let first = pkt[0];
-    // Only the form bit is defined for VN; the remaining seven bits are ignored.
-    if (first & FORM_BIT) == 0 {
-        return None;
-    }
-    if pkt.len() < 5 {
-        return None;
-    }
-    let version = u32::from_be_bytes([pkt[1], pkt[2], pkt[3], pkt[4]]);
-    if version != 0 {
-        return None;
-    }
-    let mut off = 5usize;
-    // DCID length + bytes.
-    let dcid_len = usize::from(*pkt.get(off)?);
-    if dcid_len > MAX_CID_LEN {
-        return None;
-    }
-    off = off.checked_add(1)?;
-    let dcid_end = off.checked_add(dcid_len)?;
-    if dcid_end > pkt.len() {
-        return None;
-    }
-    off = dcid_end;
-    // SCID length + bytes.
-    let scid_len = usize::from(*pkt.get(off)?);
-    if scid_len > MAX_CID_LEN {
-        return None;
-    }
-    off = off.checked_add(1)?;
-    let scid_end = off.checked_add(scid_len)?;
-    if scid_end > pkt.len() {
-        return None;
-    }
-    off = scid_end;
-    // Remaining bytes must be a whole number of 4-byte version entries.
-    let remaining = pkt.len().saturating_sub(off);
-    if remaining == 0 || !remaining.is_multiple_of(4) {
-        return None;
-    }
-    Some(
-        pkt[off..]
-            .chunks_exact(4)
-            .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            .collect(),
-    )
-}
-
-/// Builds a stateless server VN response for an unsupported long-header packet.
-///
-/// The response is emitted before allocating connection state. Supported
-/// versions retain endpoint preference order; one reserved grease value is
-/// appended but is never considered selectable.
-pub fn server_version_negotiation_response(
-    packet: &[u8],
-    supported_versions: &[u32],
-) -> Result<Option<Vec<u8>>, ConnectionError> {
-    if packet.len() < crate::transport::MIN_CLIENT_INITIAL_LEN
-        || packet.first().is_none_or(|first| first & FORM_BIT == 0)
-        || packet.len() < 7
-    {
-        return Ok(None);
-    }
-    let version =
-        u32::from_be_bytes(packet[1..5].try_into().map_err(|_| ConnectionError::InvalidPacket)?);
-    if version == 0 || supported_versions.contains(&version) {
-        return Ok(None);
-    }
-
-    let mut offset = 5usize;
-    let dcid_len = usize::from(packet[offset]);
-    if dcid_len > MAX_CID_LEN {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    offset += 1;
-    let dcid_end = offset.checked_add(dcid_len).ok_or(ConnectionError::InvalidPacket)?;
-    if dcid_end >= packet.len() {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    let dcid = &packet[offset..dcid_end];
-    offset = dcid_end;
-    let scid_len = usize::from(packet[offset]);
-    if scid_len > MAX_CID_LEN {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    offset += 1;
-    let scid_end = offset.checked_add(scid_len).ok_or(ConnectionError::InvalidPacket)?;
-    if scid_end > packet.len() {
-        return Err(ConnectionError::InvalidPacket);
-    }
-    let scid = &packet[offset..scid_end];
-
-    let mut offered = supported_versions
-        .iter()
-        .copied()
-        .filter(|version| crate::transport::is_supported_version(*version))
-        .collect::<Vec<_>>();
-    if offered.is_empty() {
-        return Err(ConnectionError::InvalidState);
-    }
-    offered.push(crate::transport::version::generate_reserved_version());
-    Ok(Some(generate_version_negotiation_packet(&[], &offered, scid, dcid)?))
-}
-
-fn retry_integrity_material(
-    version: u32,
-) -> Result<(&'static [u8; 16], &'static [u8; 12]), ConnectionError> {
-    const KEY_V1: [u8; 16] = [
-        0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8,
-        0x4e,
-    ];
-    const NONCE_V1: [u8; 12] =
-        [0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb];
-    const KEY_V2: [u8; 16] = [
-        0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2, 0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc,
-        0x92,
-    ];
-    const NONCE_V2: [u8; 12] =
-        [0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99, 0x90, 0xef, 0xb0, 0x4a];
-    match version {
-        crate::transport::PROTOCOL_VERSION => Ok((&KEY_V1, &NONCE_V1)),
-        crate::transport::PROTOCOL_VERSION_V2 => Ok((&KEY_V2, &NONCE_V2)),
-        _ => Err(ConnectionError::VersionMismatch),
-    }
-}
-
-/// Appends a Retry Integrity Tag using the version-specific RFC key and nonce.
-pub fn append_retry_tag(
-    buf: &mut Vec<u8>,
-    odcid: &[u8],
-    version: u32,
-) -> Result<(), ConnectionError> {
-    checked_cid_wire_len(odcid.len())?;
-    let hdr_len = buf.len();
-    let capacity = checked_usize_add(1, odcid.len())?;
-    let capacity = checked_usize_add(capacity, hdr_len)?;
-    let mut pseudo = Vec::with_capacity(capacity);
-    pseudo.push(checked_cid_wire_len(odcid.len())?);
-    pseudo.extend_from_slice(odcid);
-    pseudo.extend_from_slice(&buf[..hdr_len]);
-    let (key, nonce) = retry_integrity_material(version)?;
-    let tag = crate::crypto::gcm::aes_gcm_tag_aad_only(key, nonce, &pseudo);
-    buf.extend_from_slice(&tag);
-    Ok(())
-}
-
-/// Verifies the Retry Integrity Tag of a received Retry packet.
-pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], version: u32) -> Result<(), ConnectionError> {
-    if packet.len() < 16 {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    checked_cid_wire_len(odcid.len())?;
-    let hdr_len = packet.len() - 16;
-    let tag_in = &packet[hdr_len..];
-    let capacity = checked_usize_add(1, odcid.len())?;
-    let capacity = checked_usize_add(capacity, hdr_len)?;
-    let mut pseudo = Vec::with_capacity(capacity);
-    pseudo.push(checked_cid_wire_len(odcid.len())?);
-    pseudo.extend_from_slice(odcid);
-    pseudo.extend_from_slice(&packet[..hdr_len]);
-    let (key, nonce) = retry_integrity_material(version)?;
-    let tag = crate::crypto::gcm::aes_gcm_tag_aad_only(key, nonce, &pseudo);
-    let mut diff = 0u8;
-    for i in 0..16 {
-        diff |= tag[i] ^ tag_in[i];
-    }
-    if diff == 0 {
-        Ok(())
-    } else {
-        Err(ConnectionError::CryptoError("crypto failure".into()))
-    }
-}
-
-/// HKDF-based key/iv derivation for AEAD from TLS secrets (RFC 9001 compliant)
-pub fn derive_key_iv(secret: &[u8]) -> Result<([u8; 32], [u8; 12]), ConnectionError> {
-    derive_key_iv_for_version(secret, crate::transport::PROTOCOL_VERSION)
-}
-
-/// Derives version-specific packet key and IV material.
-pub fn derive_key_iv_for_version(
-    secret: &[u8],
-    version: u32,
-) -> Result<([u8; 32], [u8; 12]), ConnectionError> {
-    let key_vec = crate::crypto::kdf::derive_pkt_key_for_version(secret, 32, version)?;
-    let iv_vec = crate::crypto::kdf::derive_pkt_iv_for_version(secret, 12, version)?;
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&key_vec);
-    let mut iv = [0u8; 12];
-    iv.copy_from_slice(&iv_vec);
-    Ok((key, iv))
-}
-
-/// Derive Initial secrets from destination connection ID (RFC 9001 compliant)
-pub fn derive_initial_secrets(
-    dcid: &[u8],
-    version: u32,
-) -> Result<(Vec<u8>, Vec<u8>), ConnectionError> {
-    let initial_secret = crate::crypto::kdf::derive_initial_secret(dcid, version);
-    let client_secret = crate::crypto::kdf::derive_client_initial_secret(&initial_secret)?;
-    let server_secret = crate::crypto::kdf::derive_server_initial_secret(&initial_secret)?;
-    Ok((client_secret, server_secret))
 }
 
 /// Apply header protection mask (for encryption)
@@ -1223,6 +648,17 @@ pub fn decrypt_payload(
     hdr_len: usize,
     aead: &dyn crate::crypto::aead::AeadOpen,
 ) -> Result<usize, ConnectionError> {
+    let plaintext_len = decrypt_payload_plaintext_len(buf, pn, pn_len, hdr_len, aead)?;
+    checked_usize_add(hdr_len, plaintext_len)
+}
+
+fn decrypt_payload_plaintext_len(
+    buf: &mut [u8],
+    pn: u64,
+    pn_len: usize,
+    hdr_len: usize,
+    aead: &dyn crate::crypto::aead::AeadOpen,
+) -> Result<usize, ConnectionError> {
     if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) || hdr_len < pn_len {
         return Err(ConnectionError::InvalidPacket);
     }
@@ -1239,10 +675,7 @@ pub fn decrypt_payload(
     let aad = &aad_buf[..hdr_len];
 
     // Decrypt in-place
-    let _payload_len = payload_buf.len();
-    let plaintext_len = aead.open_with_u64_counter(pn, aad, payload_buf)?;
-
-    checked_usize_add(hdr_len, plaintext_len)
+    aead.open_with_u64_counter(pn, aad, payload_buf)
 }
 
 /// Encrypt a QUIC packet payload
@@ -1281,6 +714,13 @@ struct PreviousRead1RttKey {
     open: Arc<crate::crypto::PacketAeadOpen>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PreviousPrivateReadEpoch {
+    pub(crate) open: Arc<crate::crypto::PacketAeadOpen>,
+    pub(crate) start_packet_number: u64,
+    pub(crate) key_phase: bool,
+}
+
 /// Lock-free 1-RTT crypto keys for the data-plane hot path.
 ///
 /// Stored in `ArcSwapOption<OneRttCrypto>` on `Connection`. The hot path
@@ -1295,11 +735,23 @@ pub(crate) struct OneRttCrypto {
     pub(crate) hp_seal: Arc<dyn HeaderProtector + Send + Sync>,
     /// Header protector for incoming 1-RTT packets.
     pub(crate) hp_open: Arc<dyn HeaderProtector + Send + Sync>,
+    /// Optional private payload owner selected only after the decoded PN boundary.
+    pub(crate) private_seal: Option<Arc<crate::crypto::PacketAeadSeal>>,
+    pub(crate) private_open: Option<Arc<crate::crypto::PacketAeadOpen>>,
+    pub(crate) private_next_open: Option<Arc<crate::crypto::PacketAeadOpen>>,
+    pub(crate) private_previous_read: Vec<PreviousPrivateReadEpoch>,
+    pub(crate) private_write_boundary: Option<u64>,
+    pub(crate) private_read_boundary: Option<u64>,
+    pub(crate) private_read_start: Option<u64>,
+    pub(crate) private_read_key_phase: bool,
+    pub(crate) private_read_update_pending: bool,
 }
 
 /// Per-connection cryptographic state (AEAD keys, HP keys, TLS Cover cipher, CryptoStreams).
 #[derive(Default)]
 pub struct CryptoContext {
+    /// Secret-free effective packet-protection state for diagnostics and policy truth.
+    packet_protection: crate::qftls::PacketProtectionSnapshot,
     /// AEAD open (decrypt) key for Initial packets (AES-GCM).
     pub open_initial: Option<Box<dyn crate::crypto::aead::AeadOpen + Send + Sync>>,
     /// AEAD open (decrypt) key for Handshake packets (AES-GCM).
@@ -1316,6 +768,21 @@ pub struct CryptoContext {
     pub(crate) seal_0rtt: Option<crate::crypto::PacketAeadSeal>,
     /// AEAD seal (encrypt) key for 1-RTT packets.
     pub(crate) seal_1rtt: Option<Arc<crate::crypto::PacketAeadSeal>>,
+    /// Optional negotiated private 1-RTT payload sealer. Header protection remains standard.
+    pub(crate) private_seal_1rtt: Option<Arc<crate::crypto::PacketAeadSeal>>,
+    /// Optional negotiated private 1-RTT payload opener. Header protection remains standard.
+    pub(crate) private_open_1rtt: Option<Arc<crate::crypto::PacketAeadOpen>>,
+    /// Next authenticated private read epoch, derived but not committed until a valid packet
+    /// authenticates under its new key phase.
+    pub(crate) private_next_open_1rtt: Option<Arc<crate::crypto::PacketAeadOpen>>,
+    /// Locally committed standard-to-private write boundary.
+    pub(crate) private_write_boundary_1rtt: Option<u64>,
+    /// Peer committed standard-to-private read boundary.
+    pub(crate) private_read_boundary_1rtt: Option<u64>,
+    /// Current private read epoch start packet number and key phase.
+    pub(crate) private_read_start_1rtt: Option<u64>,
+    pub(crate) private_read_key_phase_1rtt: bool,
+    pub(crate) private_read_update_pending_1rtt: bool,
     /// Header protection key for outgoing Initial packets.
     pub hp_initial: Option<Box<dyn HeaderProtector + Send + Sync>>,
     /// Header protection key for outgoing Handshake packets.
@@ -1340,9 +807,16 @@ pub struct CryptoContext {
     pub read_generation_1rtt: u64,
     /// Current 1-RTT write key generation counter.
     pub write_generation_1rtt: u64,
+    /// Connection-bound private epoch derivation schedule.
+    private_epoch_schedule: Option<crate::qftls::PrivateEpochSchedule>,
+    private_write_direction: Option<crate::qftls::PrivateDirection>,
+    private_read_direction: Option<crate::qftls::PrivateDirection>,
+    private_write_epoch: u32,
+    private_read_epoch: u32,
     /// Whether 0-RTT early data is enabled for this context.
     pub zero_rtt_enabled: bool,
     previous_read_1rtt: VecDeque<PreviousRead1RttKey>,
+    pub(crate) private_previous_read_1rtt: VecDeque<PreviousPrivateReadEpoch>,
     tls_cover_cipher: qf_crypto::TlsCoverCipherState,
     /// TLS Cover write sequence number.
     pub tls_cover_write_seq: u64,
@@ -1358,388 +832,7 @@ pub struct CryptoContext {
     pub crypto_application: CryptoStream,
 }
 
-impl CryptoContext {
-    /// Returns true while an Initial or Handshake flight still needs transmission.
-    pub fn has_pending_handshake_send(&self) -> bool {
-        self.crypto_initial.has_pending_send() || self.crypto_handshake.has_pending_send()
-    }
-
-    /// Installs 0-RTT read and write keys from the given TLS secrets.
-    pub fn install_0rtt_keys(
-        &mut self,
-        read_secret: &[u8],
-        write_secret: &[u8],
-    ) -> Result<(), ConnectionError> {
-        let (read_key, read_iv) = derive_key_iv(read_secret)?;
-        let (write_key, write_iv) = derive_key_iv(write_secret)?;
-        let write_hp = derive_hp_key(write_secret)?;
-        let read_hp = derive_hp_key(read_secret)?;
-        let (_, open) = select_packet_data_aead(&read_key, &read_iv);
-        let (seal, _) = select_packet_data_aead(&write_key, &write_iv);
-        self.zero_rtt_enabled = true;
-        self.open_0rtt = Some(open);
-        self.seal_0rtt = Some(seal);
-        self.hp_0rtt = Some(Box::new(crate::crypto::aead::AesHp::from_key(&write_hp)));
-        self.hp_0rtt_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&read_hp)));
-        Ok(())
-    }
-}
-
-impl CryptoContext {
-    /// Enables or disables 0-RTT key installation for this crypto context.
-    pub fn set_zero_rtt_enabled(&mut self, enabled: bool) {
-        self.zero_rtt_enabled = enabled;
-    }
-
-    /// Install or rotate the TLS Cover cipher without permitting counter reuse.
-    pub fn install_tls_cover_cipher(
-        &mut self,
-        material: TlsCoverKeyMaterial<'_>,
-    ) -> Result<TlsCoverInstallOutcome, ConnectionError> {
-        self.tls_cover_cipher.install(
-            material,
-            &mut self.tls_cover_write_seq,
-            &mut self.tls_cover_read_seq,
-        )
-    }
-
-    #[inline]
-    /// Returns the TLS Cover cipher algorithm in use, if configured.
-    pub fn tls_cover_cipher_kind(&self) -> Option<TlsCoverCipherKind> {
-        self.tls_cover_cipher.cipher_kind()
-    }
-
-    /// Encrypt a TLS Cover record using the configured TLS Cover cipher.
-    pub fn encrypt_tls_cover_record(
-        &mut self,
-        aad: &[u8],
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>, ConnectionError> {
-        self.tls_cover_cipher.encrypt_record(&mut self.tls_cover_write_seq, aad, plaintext)
-    }
-
-    /// Decrypt a TLS Cover record using the configured TLS Cover cipher.
-    pub fn decrypt_tls_cover_record(
-        &mut self,
-        aad: &[u8],
-        ciphertext: &mut [u8],
-    ) -> Result<usize, ConnectionError> {
-        self.tls_cover_cipher.decrypt_record(&mut self.tls_cover_read_seq, aad, ciphertext)
-    }
-
-    /// Install AES-GCM for Initial packets (compatibility path).
-    /// QUIC initial keys are direction-specific, so we accept read/write secrets separately.
-    pub fn install_aes_gcm_initial(
-        &mut self,
-        read_secret: &[u8],
-        write_secret: &[u8],
-        version: u32,
-    ) -> Result<(), ConnectionError> {
-        let rkey = crate::crypto::kdf::derive_pkt_key_for_version(read_secret, 16, version)?;
-        let wkey = crate::crypto::kdf::derive_pkt_key_for_version(write_secret, 16, version)?;
-        let riv = crate::crypto::kdf::derive_pkt_iv_for_version(read_secret, 12, version)?;
-        let wiv = crate::crypto::kdf::derive_pkt_iv_for_version(write_secret, 12, version)?;
-        let mut k16 = [0u8; 16];
-        let mut iv12 = [0u8; 12];
-        k16.copy_from_slice(&wkey);
-        iv12.copy_from_slice(&wiv);
-        self.seal_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv12)));
-        k16.copy_from_slice(&rkey);
-        iv12.copy_from_slice(&riv);
-        self.open_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv12)));
-        // HP can be installed later when header protection keys are derived
-        Ok(())
-    }
-
-    /// Install AES-GCM for Handshake packets (compatibility path)
-    pub fn install_aes_gcm_handshake(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
-        let (key, iv) = derive_key_iv(secret)?;
-        let mut k16 = [0u8; 16];
-        k16.copy_from_slice(&key[..16]);
-        let seal = AesGcm128::from_arrays(&k16, &iv);
-        let open = AesGcm128::from_arrays(&k16, &iv);
-        self.seal_handshake = Some(Box::new(seal));
-        self.open_handshake = Some(Box::new(open));
-        // HP can be installed later when header protection keys are derived
-        Ok(())
-    }
-
-    /// Install AES-based Header Protection for Initial packets.
-    /// QUIC header protection is direction-specific, so we accept read/write secrets separately.
-    pub fn install_hp_initial(
-        &mut self,
-        read_secret: &[u8],
-        write_secret: &[u8],
-        version: u32,
-    ) -> Result<(), ConnectionError> {
-        let hp_key_w = derive_hp_key_for_version(write_secret, version)?;
-        let hp_key_r = derive_hp_key_for_version(read_secret, version)?;
-        self.hp_initial = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key_w)));
-        self.hp_initial_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key_r)));
-        Ok(())
-    }
-
-    /// Install AES-based Header Protection for Handshake packets
-    pub fn install_hp_handshake(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
-        let hp_key = derive_hp_key(secret)?;
-        self.hp_handshake = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-        self.hp_handshake_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-        Ok(())
-    }
-
-    fn install_read_1rtt_secret(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
-        let (key, iv) = derive_key_iv(secret)?;
-        let (_, open) = select_packet_data_aead(&key, &iv);
-        let hp_key = derive_hp_key(secret)?;
-        self.open_1rtt = Some(Arc::new(open));
-        self.hp_1rtt_open = Some(Arc::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-        Ok(())
-    }
-
-    fn install_write_1rtt_secret(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
-        let (key, iv) = derive_key_iv(secret)?;
-        let (seal, _) = select_packet_data_aead(&key, &iv);
-        let hp_key = derive_hp_key(secret)?;
-        self.seal_1rtt = Some(Arc::new(seal));
-        self.hp_1rtt = Some(Arc::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-        Ok(())
-    }
-
-    fn push_previous_read_key(&mut self, open: Arc<crate::crypto::PacketAeadOpen>) {
-        self.previous_read_1rtt.push_back(PreviousRead1RttKey { open });
-        while self.previous_read_1rtt.len() > ONE_RTT_READ_KEY_WINDOW {
-            let _ = self.previous_read_1rtt.pop_front();
-        }
-    }
-
-    /// Rotates the 1-RTT read key, pushing the old key into the read window.
-    pub fn rotate_1rtt_read_keypair(
-        &mut self,
-        open: Box<dyn crate::crypto::aead::AeadOpen + Send + Sync>,
-    ) {
-        if let Some(prev_open) = self.open_1rtt.take() {
-            self.push_previous_read_key(prev_open);
-        }
-        self.open_1rtt = Some(Arc::new(crate::crypto::PacketAeadOpen::dynamic(open)));
-        self.read_generation_1rtt = self.read_generation_1rtt.saturating_add(1);
-        self.read_secret_1rtt = None;
-    }
-
-    /// Rotates the 1-RTT write key, replacing the current sealer.
-    pub fn rotate_1rtt_write_keypair(
-        &mut self,
-        seal: Box<dyn crate::crypto::aead::AeadSeal + Send + Sync>,
-    ) {
-        self.seal_1rtt = Some(Arc::new(crate::crypto::PacketAeadSeal::dynamic(seal)));
-        self.write_generation_1rtt = self.write_generation_1rtt.saturating_add(1);
-        self.write_secret_1rtt = None;
-    }
-
-    /// Derives the next 1-RTT read secret and rotates the opener.
-    pub fn key_update_1rtt_read(&mut self) -> Result<bool, ConnectionError> {
-        let Some(cur) = self.read_secret_1rtt.as_deref() else {
-            return Ok(false);
-        };
-        let next = crate::crypto::kdf::derive_next_secret(cur)?;
-        let (key, iv) = derive_key_iv(&next)?;
-        let (_, open) = select_packet_data_aead(&key, &iv);
-        if let Some(prev_open) = self.open_1rtt.take() {
-            self.push_previous_read_key(prev_open);
-        }
-        self.open_1rtt = Some(Arc::new(open));
-        self.read_secret_1rtt = Some(crate::secret::SecretBytes::new(next, "tls_1rtt_read_secret"));
-        self.read_generation_1rtt = self.read_generation_1rtt.saturating_add(1);
-        Ok(true)
-    }
-
-    /// Derives the next 1-RTT write secret and rotates the sealer.
-    pub fn key_update_1rtt_write(&mut self) -> Result<bool, ConnectionError> {
-        let Some(cur) = self.write_secret_1rtt.as_deref() else {
-            return Ok(false);
-        };
-        let next = crate::crypto::kdf::derive_next_secret(cur)?;
-        let (key, iv) = derive_key_iv(&next)?;
-        let (seal, _) = select_packet_data_aead(&key, &iv);
-        self.seal_1rtt = Some(Arc::new(seal));
-        self.write_secret_1rtt =
-            Some(crate::secret::SecretBytes::new(next, "tls_1rtt_write_secret"));
-        self.write_generation_1rtt = self.write_generation_1rtt.saturating_add(1);
-        Ok(true)
-    }
-
-    /// Backwards-compatible helper for call sites that still update both directions together.
-    pub fn key_update_1rtt(&mut self) -> Result<bool, ConnectionError> {
-        let write = self.key_update_1rtt_write()?;
-        let read = self.key_update_1rtt_read()?;
-        Ok(write || read)
-    }
-}
-
-impl crate::qftls::QuicTlsKeyInstaller for parking_lot::RwLock<CryptoContext> {
-    fn clear_handshake_and_one_rtt_keys(&self) {
-        let mut crypto = self.write();
-        crypto.seal_handshake = None;
-        crypto.open_handshake = None;
-        crypto.hp_handshake = None;
-        crypto.hp_handshake_open = None;
-        crypto.seal_1rtt = None;
-        crypto.open_1rtt = None;
-        crypto.hp_1rtt = None;
-        crypto.hp_1rtt_open = None;
-        crypto.read_secret_1rtt = None;
-        crypto.write_secret_1rtt = None;
-        crypto.read_generation_1rtt = 0;
-        crypto.write_generation_1rtt = 0;
-        crypto.previous_read_1rtt.clear();
-    }
-
-    fn install_handshake_keys(&self, keys: crate::qftls::QuicTlsHandshakeKeys) {
-        let mut crypto = self.write();
-        crypto.seal_handshake = Some(keys.seal);
-        crypto.open_handshake = Some(keys.open);
-        crypto.hp_handshake = Some(keys.hp_seal);
-        crypto.hp_handshake_open = Some(keys.hp_open);
-    }
-
-    fn install_one_rtt_keys(&self, keys: crate::qftls::QuicTlsOneRttKeys) {
-        let mut crypto = self.write();
-        crypto.seal_1rtt = Some(keys.seal);
-        crypto.open_1rtt = Some(keys.open);
-        crypto.hp_1rtt = Some(keys.hp_seal);
-        crypto.hp_1rtt_open = Some(keys.hp_open);
-        crypto.read_secret_1rtt = None;
-        crypto.write_secret_1rtt = None;
-        crypto.read_generation_1rtt = 0;
-        crypto.write_generation_1rtt = 0;
-        crypto.previous_read_1rtt.clear();
-    }
-
-    fn has_one_rtt_keys(&self) -> bool {
-        let crypto = self.read();
-        crypto.seal_1rtt.is_some()
-            && crypto.open_1rtt.is_some()
-            && crypto.hp_1rtt.is_some()
-            && crypto.hp_1rtt_open.is_some()
-    }
-
-    fn key_update_1rtt_read(&self) -> Result<bool, ConnectionError> {
-        self.write().key_update_1rtt_read()
-    }
-
-    fn key_update_1rtt_write(&self) -> Result<bool, ConnectionError> {
-        self.write().key_update_1rtt_write()
-    }
-
-    fn rotate_1rtt_read_keypair(&self, open: Box<dyn qf_crypto::aead::AeadOpen + Send + Sync>) {
-        self.write().rotate_1rtt_read_keypair(open);
-    }
-
-    fn rotate_1rtt_write_keypair(&self, seal: Box<dyn qf_crypto::aead::AeadSeal + Send + Sync>) {
-        self.write().rotate_1rtt_write_keypair(seal);
-    }
-}
-
-// Install AEAD/HP from TLS key schedule.
-impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
-    fn set_read_secret(
-        &mut self,
-        level: crate::crypto::aead::Level,
-        alg: crate::crypto::aead::Algorithm,
-        secret: &[u8],
-    ) -> Result<(), ConnectionError> {
-        let (key, iv) = derive_key_iv(secret)?;
-        match level {
-            crate::crypto::aead::Level::Initial => {
-                match alg {
-                    crate::crypto::aead::Algorithm::AES128_GCM => {
-                        let mut k16 = [0u8; 16];
-                        k16.copy_from_slice(&key[..16]);
-                        self.open_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
-                    }
-                }
-                let hp_key = derive_hp_key(secret)?;
-                self.hp_initial_open =
-                    Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-            }
-            crate::crypto::aead::Level::Handshake => {
-                match alg {
-                    crate::crypto::aead::Algorithm::AES128_GCM => {
-                        let mut k16 = [0u8; 16];
-                        k16.copy_from_slice(&key[..16]);
-                        self.open_handshake = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
-                    }
-                }
-                let hp_key = derive_hp_key(secret)?;
-                self.hp_handshake_open =
-                    Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-            }
-            crate::crypto::aead::Level::ZeroRTT => {
-                if self.zero_rtt_enabled {
-                    let (_, open) = select_packet_data_aead(&key, &iv);
-                    self.open_0rtt = Some(open);
-                    let hp_key = derive_hp_key(secret)?;
-                    self.hp_0rtt_open =
-                        Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-                }
-            }
-            crate::crypto::aead::Level::OneRTT => {
-                self.install_read_1rtt_secret(secret)?;
-                self.read_secret_1rtt =
-                    Some(crate::secret::SecretBytes::new(secret.to_vec(), "tls_1rtt_read_secret"));
-                self.read_generation_1rtt = 0;
-                self.previous_read_1rtt.clear();
-            }
-        }
-        Ok(())
-    }
-    fn set_write_secret(
-        &mut self,
-        level: crate::crypto::aead::Level,
-        alg: crate::crypto::aead::Algorithm,
-        secret: &[u8],
-    ) -> Result<(), ConnectionError> {
-        let (key, iv) = derive_key_iv(secret)?;
-        match level {
-            crate::crypto::aead::Level::Initial => {
-                match alg {
-                    crate::crypto::aead::Algorithm::AES128_GCM => {
-                        let mut k16 = [0u8; 16];
-                        k16.copy_from_slice(&key[..16]);
-                        self.seal_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
-                    }
-                }
-                let hp_key = derive_hp_key(secret)?;
-                self.hp_initial = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-            }
-            crate::crypto::aead::Level::Handshake => {
-                match alg {
-                    crate::crypto::aead::Algorithm::AES128_GCM => {
-                        let mut k16 = [0u8; 16];
-                        k16.copy_from_slice(&key[..16]);
-                        self.seal_handshake = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
-                    }
-                }
-                let hp_key = derive_hp_key(secret)?;
-                self.hp_handshake = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-            }
-            crate::crypto::aead::Level::ZeroRTT => {
-                if self.zero_rtt_enabled {
-                    let (seal, _) = select_packet_data_aead(&key, &iv);
-                    self.seal_0rtt = Some(seal);
-                    let hp_key = derive_hp_key(secret)?;
-                    self.hp_0rtt = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-                }
-            }
-            crate::crypto::aead::Level::OneRTT => {
-                self.install_write_1rtt_secret(secret)?;
-                self.write_secret_1rtt =
-                    Some(crate::secret::SecretBytes::new(secret.to_vec(), "tls_1rtt_write_secret"));
-                self.write_generation_1rtt = 0;
-            }
-        }
-        Ok(())
-    }
-}
+mod context;
 
 #[cfg(test)]
 mod secret_erasure_tests;

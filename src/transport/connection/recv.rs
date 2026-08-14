@@ -273,6 +273,16 @@ impl Connection {
         // receive merely because an earlier frame in the same payload was valid.
         Self::preflight_frame_payload(&buf[aad_len..end], pkt_ty)?;
 
+        if pkt_ty == PacketType::Short {
+            let committed = self
+                .crypto
+                .write()
+                .commit_private_read_epoch(hdr_native.pkt_num, hdr_native.key_phase)?;
+            if committed {
+                self.sync_1rtt();
+            }
+        }
+
         // Duplicate PN detection: if already observed, count and return after the frame contract
         // has been validated so malformed input cannot take the successful receive path.
         if hdr_native.pkt_num_len > 0 && self.pkt_spaces[space_idx].contains(hdr_native.pkt_num) {
@@ -731,6 +741,15 @@ impl Connection {
                 open,
                 hp_seal,
                 hp_open,
+                private_seal: crypto.private_seal_1rtt.clone(),
+                private_open: crypto.private_open_1rtt.clone(),
+                private_next_open: crypto.private_next_open_1rtt.clone(),
+                private_previous_read: crypto.private_previous_read_1rtt.iter().cloned().collect(),
+                private_write_boundary: crypto.private_write_boundary_1rtt,
+                private_read_boundary: crypto.private_read_boundary_1rtt,
+                private_read_start: crypto.private_read_start_1rtt,
+                private_read_key_phase: crypto.private_read_key_phase_1rtt,
+                private_read_update_pending: crypto.private_read_update_pending_1rtt,
             })));
         } else {
             self.crypto_1rtt.store(None);
@@ -1331,7 +1350,19 @@ impl Connection {
                 buf: rest,
                 plaintext_len: pt_len,
             };
-            keys.seal.seal_batch(core::slice::from_mut(&mut item))?;
+            let seal = packet::select_private_seal(
+                Some(&keys.seal),
+                keys.private_seal.as_ref(),
+                pn,
+                keys.private_write_boundary,
+            )
+            .map_err(|error| match error {
+                crate::error::ConnectionError::Done => crate::error::ConnectionError::TlsError(
+                    "missing AEAD sealer for 1-RTT short header".into(),
+                ),
+                error => error,
+            })?;
+            seal.seal_batch(core::slice::from_mut(&mut item))?;
             let sealed_len = pt_len + 16;
             off = ad_len + sealed_len;
             let sample_offset = sample_end - packet::SAMPLE_LEN;
@@ -1360,7 +1391,19 @@ impl Connection {
                 buf: rest,
                 plaintext_len: pt_len,
             };
-            packet::seal_data_aead_batch(&crypto_guard, core::slice::from_mut(&mut item))?;
+            let seal = packet::select_private_seal(
+                crypto_guard.seal_1rtt.as_ref(),
+                crypto_guard.private_seal_1rtt.as_ref(),
+                pn,
+                crypto_guard.private_write_boundary_1rtt,
+            )
+            .map_err(|error| match error {
+                crate::error::ConnectionError::Done => crate::error::ConnectionError::TlsError(
+                    "missing AEAD sealer for 1-RTT short header".into(),
+                ),
+                error => error,
+            })?;
+            seal.seal_batch(core::slice::from_mut(&mut item))?;
             pt_len + 16
         };
         let ad_len = pn_off + pn_len;
