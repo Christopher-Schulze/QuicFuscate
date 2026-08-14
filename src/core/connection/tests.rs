@@ -365,6 +365,40 @@ fn tun_ip_masque_payload_rejects_the_same_non_ip_bytes() {
 }
 
 #[test]
+fn peer_connect_ip_flow_active_ignores_relay_flows() {
+    let mut connection = test_connection();
+    connection.masque_peer_flows.insert(
+        1,
+        MasqueFlowBinding {
+            stream_id: 4,
+            target: Some(MasqueUdpTarget::parse_authority("relay.example:443").unwrap()),
+            purpose: MasqueFlowPurpose::NextHopUdp,
+            generation: Some(7),
+            circuit_id: Some([1; 16]),
+            hop_budget: Some(1),
+            accepted: true,
+            control_sent: false,
+        },
+    );
+    assert!(!connection.peer_connect_ip_flow_active());
+
+    connection.masque_peer_flows.insert(
+        2,
+        MasqueFlowBinding {
+            stream_id: 8,
+            target: None,
+            purpose: MasqueFlowPurpose::TunIp,
+            generation: Some(7),
+            circuit_id: None,
+            hop_budget: None,
+            accepted: true,
+            control_sent: false,
+        },
+    );
+    assert!(connection.peer_connect_ip_flow_active());
+}
+
+#[test]
 fn outgoing_zero_mode_packet_preserves_raw_quic_datagram() {
     let payload = [0x40, 0x11, 0x22, 0x33];
     let outgoing = OutgoingFecPacket {

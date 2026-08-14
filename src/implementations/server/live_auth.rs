@@ -1390,7 +1390,7 @@ pub(super) async fn process_live_server_client_datagram(
                 log::info!("Authenticated MASQUE data plane accepted for {}", addr);
                 true
             }
-            Ok(false) => conn.masque_flow_active(),
+            Ok(false) => conn.peer_connect_ip_flow_active(),
             Err(error) => {
                 log::warn!("MASQUE CONNECT response failed for {}: {:?}", addr, error);
                 false

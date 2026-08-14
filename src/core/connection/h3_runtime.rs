@@ -1243,6 +1243,13 @@ impl QuicFuscateConnection {
         })
     }
 
+    /// Returns whether an authenticated peer CONNECT-IP flow can carry the client assignment.
+    pub fn peer_connect_ip_flow_active(&self) -> bool {
+        self.masque_peer_flows
+            .values()
+            .any(|flow| flow.accepted && flow.purpose == MasqueFlowPurpose::TunIp)
+    }
+
     /// Send one control capsule on the accepted peer CONNECT-IP flow.
     pub fn send_peer_connect_ip_capsule(
         &mut self,
