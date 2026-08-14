@@ -58,6 +58,10 @@ cleanup() {
   done
   if [ -n "$WORK_DIR" ] && [ "$PRESERVE_ARTIFACTS" = "0" ]; then
     rm -rf "$WORK_DIR"
+  elif [ -n "$WORK_DIR" ]; then
+    # Admin Unix-domain sockets are runtime residue, not evidence; remove them
+    # so artifact upload does not choke on unsupported entry types.
+    find "$WORK_DIR" -type s -delete 2>/dev/null || true
   fi
 }
 trap cleanup EXIT

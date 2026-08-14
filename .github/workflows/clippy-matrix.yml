@@ -27,6 +27,7 @@ jobs:
         features:
           - ""
           - "rust-tests"
+          - "process-probes"
           - "unsafe_rust"
           - "unsafe_rust,rust-tests"
           - "unsafe_rust,compression_zstd_ffi"

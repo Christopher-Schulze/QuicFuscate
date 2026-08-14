@@ -206,24 +206,8 @@ impl IoDriver {
             reception.map_err(|error| EngineError::Connection(error.to_string()))?
         }));
         {
-            let callback_state = Arc::clone(&reception);
             let mut guard = conn.lock();
             guard.set_client_connection_generation(generation);
-            guard.set_masque_control_cb(Arc::new(std::sync::Mutex::new(Box::new(
-                move |capsule_type: u64, payload: &[u8]| {
-                    let mut state = callback_state.lock();
-                    state.receive(capsule_type, payload);
-                    if masque_trace_enabled() {
-                        log::info!(
-                            "received MASQUE control capsule type={} bytes={} assignment_ready={} failed={}",
-                            capsule_type,
-                            payload.len(),
-                            state.assignment().is_some(),
-                            state.failure().is_some()
-                        );
-                    }
-                },
-            ))));
         }
 
         let mut recv_buf = vec![0u8; 65_535];
@@ -258,8 +242,30 @@ impl IoDriver {
 
             let established = { conn.lock().is_established() };
             if established && !control_started {
-                let stream_id = conn
-                    .lock()
+                // The circuit is fully established only after every pending hop
+                // was activated, so `exit_mut()` now resolves to the real exit
+                // hop. Install the control capsule sink here, right before the
+                // tunnel opens: installing it earlier would bind the sink to the
+                // entry hop, whose connection never carries CONNECT-IP control
+                // capsules, and leave the later-activated exit hop without a sink.
+                let callback_state = Arc::clone(&reception);
+                let mut guard = conn.lock();
+                guard.set_masque_control_cb(Arc::new(std::sync::Mutex::new(Box::new(
+                    move |capsule_type: u64, payload: &[u8]| {
+                        let mut state = callback_state.lock();
+                        state.receive(capsule_type, payload);
+                        if masque_trace_enabled() {
+                            log::info!(
+                                "received MASQUE control capsule type={} bytes={} assignment_ready={} failed={}",
+                                capsule_type,
+                                payload.len(),
+                                state.assignment().is_some(),
+                                state.failure().is_some()
+                            );
+                        }
+                    },
+                ))));
+                let stream_id = guard
                     .begin_masque_control_tunnel()
                     .map_err(|error| EngineError::Connection(error.to_string()))?;
                 control_started = true;
