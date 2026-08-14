@@ -264,6 +264,62 @@ impl super::Morus1280State {
         plain
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[target_feature(enable = "sse2")]
+    // SAFETY: target_feature gate ensures SSE2. `block` is &mut [u8; 32] and
+    // `keystream` is &[u64; 4], so both pairs of unaligned 16-byte loads and
+    // stores stay within their 32-byte bounds. Exclusive borrowing prevents
+    // aliasing while the ciphertext is updated in place.
+    pub(super) unsafe fn xor_keystream_block_encrypt_sse(
+        block: &mut [u8; 32],
+        keystream: &[u64; 4],
+    ) -> [u64; 4] {
+        use core::arch::x86_64::*;
+
+        let mut plain = [0u64; 4];
+        let block_ptr = block.as_mut_ptr() as *mut __m128i;
+        let block_lo = _mm_loadu_si128(block_ptr);
+        let block_hi = _mm_loadu_si128(block_ptr.add(1));
+        _mm_storeu_si128(plain.as_mut_ptr() as *mut __m128i, block_lo);
+        _mm_storeu_si128(plain.as_mut_ptr().add(2) as *mut __m128i, block_hi);
+
+        let keystream_ptr = keystream.as_ptr() as *const __m128i;
+        let keystream_lo = _mm_loadu_si128(keystream_ptr);
+        let keystream_hi = _mm_loadu_si128(keystream_ptr.add(1));
+        _mm_storeu_si128(block_ptr, _mm_xor_si128(block_lo, keystream_lo));
+        _mm_storeu_si128(block_ptr.add(1), _mm_xor_si128(block_hi, keystream_hi));
+        plain
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[target_feature(enable = "sse2")]
+    // SAFETY: target_feature gate ensures SSE2. The input and keystream each
+    // provide 32 readable bytes, and all unaligned loads/stores remain inside
+    // those fixed-size arrays. The block is exclusively borrowed in place.
+    pub(super) unsafe fn xor_keystream_block_decrypt_sse(
+        block: &mut [u8; 32],
+        keystream: &[u64; 4],
+    ) -> [u64; 4] {
+        use core::arch::x86_64::*;
+
+        let mut plain = [0u64; 4];
+        let block_ptr = block.as_mut_ptr() as *mut __m128i;
+        let ciphertext_lo = _mm_loadu_si128(block_ptr);
+        let ciphertext_hi = _mm_loadu_si128(block_ptr.add(1));
+        let keystream_ptr = keystream.as_ptr() as *const __m128i;
+        let keystream_lo = _mm_loadu_si128(keystream_ptr);
+        let keystream_hi = _mm_loadu_si128(keystream_ptr.add(1));
+        let plaintext_lo = _mm_xor_si128(ciphertext_lo, keystream_lo);
+        let plaintext_hi = _mm_xor_si128(ciphertext_hi, keystream_hi);
+        _mm_storeu_si128(block_ptr, plaintext_lo);
+        _mm_storeu_si128(block_ptr.add(1), plaintext_hi);
+        _mm_storeu_si128(plain.as_mut_ptr() as *mut __m128i, plaintext_lo);
+        _mm_storeu_si128(plain.as_mut_ptr().add(2) as *mut __m128i, plaintext_hi);
+        plain
+    }
+
     #[inline(always)]
     pub(super) fn xor_keystream_partial_encrypt(
         block: &mut [u8],
