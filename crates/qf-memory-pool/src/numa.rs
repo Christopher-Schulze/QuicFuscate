@@ -129,11 +129,6 @@ mod windows {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn is_available() -> bool {
-    windows::is_available()
-}
-
-#[cfg(target_os = "windows")]
 pub(super) fn num_nodes() -> usize {
     windows::num_nodes()
 }
