@@ -200,6 +200,19 @@ fi
 EXIT_NS=qf-mh-r1
 [ "$HOPS" = "2" ] && EXIT_NS=qf-mh-r2
 [ "$HOPS" = "3" ] && EXIT_NS=qf-mh-exit
+
+configure_exit_default_route() {
+  local gateway interface
+  case "$HOPS" in
+    1) gateway=10.41.0.2; interface=mh-r1-in ;;
+    2) gateway=10.42.0.1; interface=mh-r2-in ;;
+    3) gateway=10.43.0.1; interface=mh-exit ;;
+  esac
+  ip netns exec "$EXIT_NS" ip route replace default via "$gateway" dev "$interface" \
+    || fail "could not configure the exit default route via $gateway on $interface"
+}
+
+configure_exit_default_route
 INITIAL_IPV4_FORWARDING="$(ip netns exec "$EXIT_NS" cat /proc/sys/net/ipv4/ip_forward)"
 INITIAL_IPV6_FORWARDING="$(ip netns exec "$EXIT_NS" cat /proc/sys/net/ipv6/conf/all/forwarding)"
 
