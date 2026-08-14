@@ -11,15 +11,17 @@ OUTPUT_DIR=""
 JOBS=""
 CARGO_FEATURES="rust-tests"
 REQUIRE_NATIVE_PRIVILEGE=0
+ONLY="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --jobs) JOBS="$2"; shift;;
     --features) CARGO_FEATURES="$2"; shift;;
+    --only) ONLY="$2"; shift;;
     --require-native-privilege) REQUIRE_NATIVE_PRIVILEGE=1;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1; export QUICFUSCATE_DEBUG_SCRIPTS;;
     --help|-h)
-      echo "Usage: $(basename "$0") [--output-dir DIR] [--jobs N] [--features STR] [--require-native-privilege] [--verbose]"
+      echo "Usage: $(basename "$0") [--output-dir DIR] [--jobs N] [--features STR] [--only SCOPES] [--require-native-privilege] [--verbose]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 2;;
@@ -27,15 +29,89 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+validate_scope_selection() {
+  [[ "$ONLY" == "all" ]] && return 0
+  local scope
+  local -a scopes
+  IFS=',' read -r -a scopes <<< "$ONLY"
+  [[ "${#scopes[@]}" -gt 0 ]] || {
+    echo "--only requires at least one scope" >&2
+    return 2
+  }
+  for scope in "${scopes[@]}"; do
+    case "$scope" in
+      privilege|memory-lock|qftls|integration|ordering|native-privilege) ;;
+      *)
+        echo "unknown --only scope: $scope (expected privilege,memory-lock,qftls,integration,ordering,native-privilege)" >&2
+        return 2
+        ;;
+    esac
+  done
+  if [[ ",$ONLY," == *,all,* ]]; then
+    echo "--only=all cannot be combined with another scope" >&2
+    return 2
+  fi
+}
+
+scope_selected() {
+  local scope="$1"
+  [[ "$ONLY" == "all" || ",$ONLY," == *",$scope,"* ]]
+}
+
+validate_scope_selection
+if [[ "$REQUIRE_NATIVE_PRIVILEGE" == "1" ]] && ! scope_selected native-privilege; then
+  echo "--require-native-privilege requires native-privilege in --only" >&2
+  exit 2
+fi
+
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/privilege-memory-tls-proof-${TIMESTAMP}"
 mkdir -p "$OUTPUT_DIR"
 JSON="$OUTPUT_DIR/results.json"
 json_begin "$JSON" "tests_privilege_memory_tls_proof"
 
+qf_json_append_object "$JSON" \
+  "name=selection" \
+  "status=PASS" \
+  "result=PASS" \
+  "reason=explicit_scope_selection" \
+  "selected_scopes=$ONLY" \
+  "command_status=int:0" \
+  "raw_output="
+
 HOST_OS="$(detect_os)"
 HOST_ARCH="$(detect_arch)"
 FAILURES=0
+PRIVILEGE_STATUS="SKIP"
+MEMORY_LOCK_STATUS="SKIP"
+QFTLS_STATUS="SKIP"
+INTEGRATION_STATUS="SKIP"
+ORDERING_STATUS="SKIP"
+
+scope_status_reason() {
+  case "$1" in
+    PASS) printf '%s' "selected_target_executed";;
+    FAIL) printf '%s' "selected_target_failed";;
+    SKIP) printf '%s' "not_selected_by_scope";;
+    *) printf '%s' "unknown_scope_status";;
+  esac
+}
+
+record_scope_skip() {
+  local name="$1"
+  local target="$2"
+  local feature_set="$3"
+  qf_json_append_object "$JSON" \
+    "name=$name" \
+    "status=SKIP" \
+    "result=SKIP" \
+    "reason=not_selected_by_scope" \
+    "target=$target" \
+    "feature_set=$(qf_cargo_test_feature_set "$feature_set")" \
+    "test_count=int:0" \
+    "command_status=int:0" \
+    "raw_output="
+}
 
 run_verified_target() {
   local name="$1"
@@ -72,9 +148,38 @@ run_verified_target() {
       "command_status=int:$command_status" \
       "raw_output=$output_file"
   fi
+  return "$command_status"
+}
+
+run_selected_target() {
+  local scope="$1"
+  local status_variable="$2"
+  local name="$3"
+  local target="$4"
+  local filter="$5"
+  local expected_test="$6"
+  shift 6
+
+  if ! scope_selected "$scope"; then
+    record_scope_skip "$name" "$target" "$CARGO_FEATURES"
+    printf -v "$status_variable" '%s' "SKIP"
+    return 0
+  fi
+
+  if run_verified_target "$name" "$target" "$filter" "$expected_test" "$@"; then
+    printf -v "$status_variable" '%s' "PASS"
+  else
+    printf -v "$status_variable" '%s' "FAIL"
+  fi
+  return 0
 }
 
 check_startup_order() {
+  if ! scope_selected ordering; then
+    record_scope_skip "embedded-and-standalone-ordering" "source-order-contract" "$CARGO_FEATURES"
+    ORDERING_STATUS="SKIP"
+    return 0
+  fi
   if python3 - <<'PY'
 from pathlib import Path
 
@@ -96,6 +201,7 @@ for path, first, second in checks:
         raise SystemExit(f"startup ordering failed in {path}")
 PY
   then
+    ORDERING_STATUS="PASS"
     qf_json_append_object "$JSON" \
       "name=embedded-and-standalone-ordering" \
       "status=PASS" \
@@ -106,6 +212,7 @@ PY
       "command_status=int:0" \
       "raw_output="
   else
+    ORDERING_STATUS="FAIL"
     FAILURES=$((FAILURES + 1))
     qf_json_append_object "$JSON" \
       "name=embedded-and-standalone-ordering" \
@@ -177,28 +284,32 @@ print(unique[0])
 PY
 }
 
-run_verified_target \
+run_selected_target \
+  privilege PRIVILEGE_STATUS \
   "privilege-unit-negative-contracts" \
   "lib" \
   "drop::tests" \
   "drop::tests::partial_transition_error_preserves_state_and_operation" \
   --locked --package qf-privilege --lib -- --nocapture
 
-run_verified_target \
+run_selected_target \
+  memory-lock MEMORY_LOCK_STATUS \
   "memory-lock-negative-contracts" \
   "lib" \
   "tests" \
   "tests::failure_policy_distinguishes_best_effort_from_fail_closed" \
   --locked --package qf-memory-lock --lib
 
-run_verified_target \
+run_selected_target \
+  qftls QFTLS_STATUS \
   "qftls-negative-contracts" \
   "lib" \
   "qftls::tests" \
   "qftls::tests::preload_identity_duplicate_and_conflict_contract_is_isolated" \
   --locked --lib -- --nocapture
 
-run_verified_target \
+run_selected_target \
+  integration INTEGRATION_STATUS \
   "privilege-boundary-integration" \
   "it-privilege-boundary" \
   "capability_report_is_serializable_and_readiness_is_fail_closed" \
@@ -211,7 +322,10 @@ PRIVILEGED_STATUS="UNAVAILABLE"
 PRIVILEGED_REASON="host_os_not_linux"
 PRIVILEGED_COMMAND_STATUS=0
 PRIVILEGED_LOG="$OUTPUT_DIR/privileged-native-regain-proof.log"
-if [[ "$HOST_OS" == "linux" ]]; then
+if ! scope_selected native-privilege; then
+  PRIVILEGED_STATUS="SKIP"
+  PRIVILEGED_REASON="not_selected_by_scope"
+elif [[ "$HOST_OS" == "linux" ]]; then
   if [[ "$(id -u)" == "0" ]]; then
     if qf_cargo_test_run \
       "$PRIVILEGED_LOG" "it-privilege-boundary" "$CARGO_FEATURES" \
@@ -298,16 +412,18 @@ qf_json_write_object_file "$OUTPUT_DIR/privilege-memory-tls-negative-proof.json"
   "source_revision=$(git rev-parse HEAD)" \
   "host_os=$HOST_OS" \
   "host_arch=$HOST_ARCH" \
-  "privilege_ffi_status=PASS" \
-  "privilege_ffi_reason=lookup_pointer_null_unterminated_forged_identity_and_count_contracts_executed" \
-  "post_drop_contract_status=PASS" \
-  "post_drop_contract_reason=partial_transition_filesystem_id_and_syscall_free_root_regain_contracts_executed" \
-  "memory_lock_status=PASS" \
-  "memory_lock_reason=rlimit_mlockall_policy_deferred_order_and_unwind_cleanup_contracts_executed" \
-  "tls_status=PASS" \
-  "tls_reason=mismatched_duplicate_conflict_rejected_publication_and_sensitive_output_contracts_executed" \
-  "embedded_order_status=PASS" \
-  "embedded_order_reason=source_order_contract_executed" \
+  "privilege_ffi_status=$PRIVILEGE_STATUS" \
+  "privilege_ffi_reason=$(scope_status_reason "$PRIVILEGE_STATUS")" \
+  "post_drop_contract_status=$PRIVILEGE_STATUS" \
+  "post_drop_contract_reason=$(scope_status_reason "$PRIVILEGE_STATUS")" \
+  "portable_integration_status=$INTEGRATION_STATUS" \
+  "portable_integration_reason=$(scope_status_reason "$INTEGRATION_STATUS")" \
+  "memory_lock_status=$MEMORY_LOCK_STATUS" \
+  "memory_lock_reason=$(scope_status_reason "$MEMORY_LOCK_STATUS")" \
+  "tls_status=$QFTLS_STATUS" \
+  "tls_reason=$(scope_status_reason "$QFTLS_STATUS")" \
+  "embedded_order_status=$ORDERING_STATUS" \
+  "embedded_order_reason=$(scope_status_reason "$ORDERING_STATUS")" \
   "privileged_native_status=$PRIVILEGED_STATUS" \
   "privileged_native_reason=$PRIVILEGED_REASON" \
   "windows_compile_gate_status=$WINDOWS_GATE_STATUS" \
