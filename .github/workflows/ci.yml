@@ -856,6 +856,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/scripts/out/tests"
           for hops in 1 2 3; do
             output_dir="$GITHUB_WORKSPACE/scripts/out/tests/multihop-${hops}hop-native"
             sudo --preserve-env=GITHUB_SHA \
