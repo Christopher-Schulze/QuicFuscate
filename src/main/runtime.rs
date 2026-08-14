@@ -270,6 +270,7 @@ async fn async_main(
                 shared.tun_netmask,
                 shared.tun_ip6,
                 shared.tun_prefix6,
+                &shared.vpn_dns,
                 admin_socket,
                 metrics_port,
                 admin_web,

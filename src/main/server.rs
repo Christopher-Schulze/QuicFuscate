@@ -31,6 +31,7 @@ pub(super) async fn run_server(
     tun_netmask: Option<String>,
     tun_ip6: Option<String>,
     tun_prefix6: Option<u8>,
+    vpn_dns: &[IpAddr],
     admin_socket: Option<PathBuf>,
     metrics_port: Option<u16>,
     admin_web: Option<std::net::SocketAddr>,
@@ -129,6 +130,7 @@ pub(super) async fn run_server(
         firewall_backend,
     )
     .map_err(std::io::Error::other)?;
+    apply_server_vpn_dns_override(&mut server_config, vpn_dns);
     server_config.allow_client_to_client = allow_client_to_client;
     if tun_enable {
         apply_standalone_tun_server_config(
@@ -479,5 +481,62 @@ pub(super) async fn run_server(
         (Err(runtime_error), _) => Err(runtime_error),
         (Ok(()), Err(audit_error)) => Err(audit_error),
         (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn apply_server_vpn_dns_override(
+    server_config: &mut quicfuscate::implementations::server::ServerConfig,
+    vpn_dns: &[IpAddr],
+) {
+    if vpn_dns.is_empty() {
+        return;
+    }
+
+    server_config.dns_servers.clear();
+    server_config.ipv6_dns_servers.clear();
+    for address in vpn_dns {
+        match address {
+            IpAddr::V4(address) => server_config.dns_servers.push(*address),
+            IpAddr::V6(address) => server_config.ipv6_dns_servers.push(*address),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_server_vpn_dns_override;
+    use quicfuscate::implementations::server::ServerConfig;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn server_vpn_dns_override_partitions_ipv4_and_ipv6() {
+        let mut config = ServerConfig::default();
+        let addresses = [
+            IpAddr::V4(Ipv4Addr::new(10, 51, 0, 1)),
+            IpAddr::V6(Ipv6Addr::from([0xfd, 0x51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])),
+            IpAddr::V4(Ipv4Addr::new(10, 51, 0, 2)),
+        ];
+
+        apply_server_vpn_dns_override(&mut config, &addresses);
+
+        assert_eq!(
+            config.dns_servers,
+            vec![Ipv4Addr::new(10, 51, 0, 1), Ipv4Addr::new(10, 51, 0, 2)]
+        );
+        assert_eq!(
+            config.ipv6_dns_servers,
+            vec![Ipv6Addr::from([0xfd, 0x51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])]
+        );
+    }
+
+    #[test]
+    fn empty_server_vpn_dns_override_preserves_defaults() {
+        let mut config = ServerConfig::default();
+        let defaults = config.clone();
+
+        apply_server_vpn_dns_override(&mut config, &[]);
+
+        assert_eq!(config.dns_servers, defaults.dns_servers);
+        assert_eq!(config.ipv6_dns_servers, defaults.ipv6_dns_servers);
     }
 }
