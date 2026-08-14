@@ -525,7 +525,7 @@ jobs:
             cargo test --workspace --all-targets --features rust-tests --locked
           fi
 
-  linux-fastpath-gates:
+  linux-platform-gates:
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -539,14 +539,9 @@ jobs:
         with:
           toolchain: "1.97.1"
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-fastpath-${{ hashFiles('**/Cargo.lock') }}
+          prefix-key: linux-platform
 
       - name: Prove native Linux resolver ownership
         shell: bash
@@ -598,21 +593,44 @@ jobs:
             --require-native-privilege \
             --output-dir scripts/out/tests/linux-privilege-proof
 
+      - name: Upload Linux platform artifacts
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-platform-gates
+          path: |
+            scripts/out/tests/linux-privilege-proof
+            scripts/out/tests/linux-resolver-ownership
+
+  linux-transport-suite:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: linux-transport
+
       - name: Run Linux fastpath transport suite
         shell: bash
         run: |
           bash scripts/tests/suites/test-transport.sh --output-dir scripts/out/tests/linux-fastpath-gates
 
-      - name: Upload Linux fastpath artifacts
+      - name: Upload Linux transport artifacts
         uses: actions/upload-artifact@v7
         if: always()
         with:
           name: linux-fastpath-gates
-          path: |
-            scripts/out/tests/linux-fastpath-gates
-            scripts/out/tests/linux-privilege-proof
-            scripts/out/tests/linux-resolver-ownership
-
+          path: scripts/out/tests/linux-fastpath-gates
   linux-firewall-ownership-native:
     name: Linux firewall ownership (${{ matrix.backend }})
     runs-on: ubuntu-latest
