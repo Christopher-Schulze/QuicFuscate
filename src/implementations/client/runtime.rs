@@ -2,7 +2,10 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use tokio::runtime::{Builder, Handle, Runtime};
+use std::time::Duration;
+use tokio::runtime::{Builder, Handle, Runtime, RuntimeFlavor};
+
+const CLIENT_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime configuration for the client.
 #[derive(Clone, Debug)]
@@ -76,6 +79,26 @@ where
     }
 }
 
+/// Shut down a client-owned runtime without blocking an asynchronous caller during `Drop`.
+pub(crate) fn shutdown_shared_runtime(runtime: SharedRuntime) {
+    let flavor = Handle::try_current().ok().map(|handle| handle.runtime_flavor());
+    let shutdown = || match Arc::try_unwrap(runtime) {
+        Ok(runtime) => match flavor {
+            Some(RuntimeFlavor::MultiThread) => {
+                tokio::task::block_in_place(|| {
+                    runtime.shutdown_timeout(CLIENT_RUNTIME_SHUTDOWN_TIMEOUT)
+                });
+            }
+            Some(RuntimeFlavor::CurrentThread) => runtime.shutdown_background(),
+            Some(_) => runtime.shutdown_background(),
+            None => runtime.shutdown_timeout(CLIENT_RUNTIME_SHUTDOWN_TIMEOUT),
+        },
+        Err(runtime) => drop(runtime),
+    };
+
+    shutdown();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +129,28 @@ mod tests {
 
         let value = outer_runtime.block_on(async { block_on(&client_runtime, async { 42 }) });
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn shutdown_shared_runtime_from_outer_runtime_does_not_panic() {
+        let client_runtime =
+            create_shared_runtime(&RuntimeConfig::default()).expect("client runtime");
+        let outer_runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("outer runtime");
+
+        outer_runtime.block_on(async { shutdown_shared_runtime(client_runtime) });
+    }
+
+    #[test]
+    fn shutdown_shared_runtime_from_current_thread_runtime_does_not_panic() {
+        let client_runtime =
+            create_shared_runtime(&RuntimeConfig::default()).expect("client runtime");
+        let outer_runtime =
+            Builder::new_current_thread().enable_all().build().expect("outer runtime");
+
+        outer_runtime.block_on(async { shutdown_shared_runtime(client_runtime) });
     }
 }

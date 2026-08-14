@@ -500,6 +500,10 @@ impl ClientRuntime {
             )));
         }
 
+        if let Some(runtime) = self.runtime.take() {
+            runtime::shutdown_shared_runtime(runtime);
+        }
+
         self.state = ClientState::Stopped;
         log::info!("Client runtime stopped");
         Ok(())
