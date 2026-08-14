@@ -238,7 +238,7 @@ start_server() {
     --qkey-store "$store" --no-drop-privileges -v)
   if [ "$mode" = "exit" ]; then
     args+=(--tun --tun-name qtun0 --tun-ip 10.51.0.1 --tun-netmask 255.255.255.0
-      --tun-ip6 fd51::1 --tun-prefix6 64)
+      --tun-ip6 fd51::1 --tun-prefix6 64 --vpn-dns 10.51.0.1)
     ip netns exec "$namespace" "$BINARY" "${args[@]}" > "$log" 2>&1 &
   else
     ip netns exec "$namespace" env \
