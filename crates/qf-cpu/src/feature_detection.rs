@@ -492,7 +492,7 @@ impl FeatureDetector {
     }
 
     /// Select the automatic profile from an exact feature snapshot.
-    fn profile_from_features(features: CpuFeatures) -> CpuProfile {
+    pub(crate) fn profile_from_features(features: CpuFeatures) -> CpuProfile {
         #[cfg(target_arch = "x86_64")]
         {
             let matrix = features.simd_dispatch_matrix();
