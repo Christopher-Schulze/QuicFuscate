@@ -7,24 +7,54 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
-OUTPUT_DIR=""; FAST=0; INTEGRATION=0; RUSTFLAGS_EXTRA=""
+OUTPUT_DIR=""; FAST=0; INTEGRATION=0; RUSTFLAGS_EXTRA=""; ONLY="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --rustflags) RUSTFLAGS_EXTRA="$2"; shift;;
     --fast) FAST=1;;
     --integration) INTEGRATION=1;;
+    --only) ONLY="$2"; shift;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
-    --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--rustflags STR] [--fast] [--integration]"; exit 0;;
+    --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--rustflags STR] [--fast] [--integration] [--only SCOPES]"; exit 0;;
     *) break;;
   esac; shift
 done
+
+validate_scope_selection() {
+  [[ "$ONLY" == "all" ]] && return 0
+  local scope
+  local -a scopes
+  IFS=',' read -r -a scopes <<< "$ONLY"
+  [[ "${#scopes[@]}" -gt 0 ]] || {
+    echo "--only requires at least one scope" >&2
+    return 2
+  }
+  for scope in "${scopes[@]}"; do
+    case "$scope" in
+      h3-qpack|server-push|fec|migration|zero-rtt|stealth|integration-control|integration-fec|integration-stealth|integration-loss|integration-performance|integration) ;;
+      *)
+        echo "unknown --only scope: $scope (expected h3-qpack,server-push,fec,migration,zero-rtt,stealth,integration-control,integration-fec,integration-stealth,integration-loss,integration-performance,integration)" >&2
+        return 2
+        ;;
+    esac
+  done
+}
+
+scope_selected() {
+  local scope="$1"
+  [[ "$ONLY" == "all" || ",$ONLY," == *",$scope,"* ]] && return 0
+  [[ "$scope" == integration-* && ",$ONLY," == *,integration,* ]]
+}
+
+validate_scope_selection
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
 mkdir -p "$OUTPUT_DIR"; LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"; exec > >(tee -a "$LOG_FILE") 2>&1
 [[ -n "${RUSTFLAGS_EXTRA:-}" ]] && export RUSTFLAGS="${RUSTFLAGS_EXTRA} ${RUSTFLAGS:-}"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "tests_e2e_end2end"; JSON_FIRST_RUN=1
+CASES_RUN=0
 
 echo "==============================================================="
 echo "  End-to-End (E2E) Scenario Tests"
@@ -35,6 +65,7 @@ run_case() {
   local envs="$1"; shift
   local target="$1"; shift
   local pattern="$1"; shift
+  CASES_RUN=$((CASES_RUN + 1))
   echo -e "\n> $name"
   local -a env_keys=()
   local -a env_vals=()
@@ -98,66 +129,94 @@ run_case() {
 }
 
 # Baseline HTTP/3 request with QPACK Huffman
-run_case "E2E HTTP/3 + QPACK Huffman" \
-  "QUICFUSCATE_H3_MASQUERADE=1 QUICFUSCATE_QPACK=1" \
-  "test:rt-harness-cli" \
-  "harness_qpack_encode_runs_with_small_input"
+if scope_selected h3-qpack; then
+  run_case "E2E HTTP/3 + QPACK Huffman" \
+    "QUICFUSCATE_H3_MASQUERADE=1 QUICFUSCATE_QPACK=1" \
+    "test:rt-harness-cli" \
+    "harness_qpack_encode_runs_with_small_input"
+fi
 
 # Server push pipeline end-to-end
-run_case "E2E H3 Server Push (Promise->Headers->Data->FIN)" \
-  "QUICFUSCATE_H3_MASQUERADE=1" \
-  "test:it-stealth-mode-matrix" \
-  "test_should_trigger_server_push_mode_matrix"
+if scope_selected server-push; then
+  run_case "E2E H3 Server Push (Promise->Headers->Data->FIN)" \
+    "QUICFUSCATE_H3_MASQUERADE=1" \
+    "test:it-stealth-mode-matrix" \
+    "test_should_trigger_server_push_mode_matrix"
+fi
 
 # Internal machine-room FEC streaming recovery under 6% loss
-run_case "E2E Internal FEC Streaming @6% loss" \
-  "QUICFUSCATE_FEC_INITIAL_MODE=streaming QUICFUSCATE_RS_LOSS=0.06 QUICFUSCATE_FEC_USE_ADAPTIVE=1" \
-  "lib" \
-  "test_streaming_tetrys_style_recovery_single_loss"
+if scope_selected fec; then
+  run_case "E2E Internal FEC Streaming @6% loss" \
+    "QUICFUSCATE_FEC_INITIAL_MODE=streaming QUICFUSCATE_RS_LOSS=0.06 QUICFUSCATE_FEC_USE_ADAPTIVE=1" \
+    "lib" \
+    "test_streaming_tetrys_style_recovery_single_loss"
+fi
 
 # Transport migration validation control-path
-run_case "Transport Migration Validation Control Path" \
-  "" \
-  "test:rt-transport-connection" \
-  "connection_migrate_emits_path_events_in_order"
+if scope_selected migration; then
+  run_case "Transport Migration Validation Control Path" \
+    "" \
+    "test:rt-transport-connection" \
+    "connection_migrate_emits_path_events_in_order"
+fi
 
 # Zero-RTT
-run_case "E2E 0-RTT Resume" \
-  "" \
-  "test:rt-transport-frames-roundtrip" \
-  "ack_in_zero_rtt_is_invalid"
+if scope_selected zero-rtt; then
+  run_case "E2E 0-RTT Resume" \
+    "" \
+    "test:rt-transport-frames-roundtrip" \
+    "ack_in_zero_rtt_is_invalid"
+fi
 
 # Full-stack stealth
-(( ! FAST )) && run_case "E2E Full-Stack Stealth" \
-  "QUICFUSCATE_STEALTH_MODE=anti_dpi QUICFUSCATE_BROWSER=chrome QUICFUSCATE_OS=windows QUICFUSCATE_DOH=1 QUICFUSCATE_H3_MASQUERADE=1 QUICFUSCATE_STEALTH_PADDING=1" \
-  "test:it-stealth-mode-matrix" \
-  "test_mode_feature_matrix_core_expectations"
-
-if (( INTEGRATION )); then
-  run_case "E2E Client-Server Connection" \
-    "" \
-    "test:it-engine-control-plane" \
-    "test_control_plane_start_stop_commands"
-
-  run_case "E2E FEC (Adaptive Mode)" \
-    "QUICFUSCATE_FEC_USE_ADAPTIVE=1 QUICFUSCATE_FEC_INITIAL_MODE=auto" \
-    "lib" \
-    "test_replayed_loss_trace_drives_end_to_end_adaptation"
-
-  run_case "E2E Stealth Mode" \
-    "QUICFUSCATE_STEALTH_MODE=anti_dpi QUICFUSCATE_BROWSER_PROFILE=chrome QUICFUSCATE_OS_PROFILE=windows" \
+if scope_selected stealth && { (( ! FAST )) || [[ "$ONLY" != "all" ]]; }; then
+  run_case "E2E Full-Stack Stealth" \
+    "QUICFUSCATE_STEALTH_MODE=anti_dpi QUICFUSCATE_BROWSER=chrome QUICFUSCATE_OS=windows QUICFUSCATE_DOH=1 QUICFUSCATE_H3_MASQUERADE=1 QUICFUSCATE_STEALTH_PADDING=1" \
     "test:it-stealth-mode-matrix" \
-    "test_anti_dpi_escalation_stack_is_cumulative_and_reversible"
+    "test_mode_feature_matrix_core_expectations"
+fi
 
-  run_case "E2E Packet Loss (10%)" \
-    "QUICFUSCATE_RS_LOSS=0.10" \
-    "lib" \
-    "test_long_running_mixed_loss_trace_stays_operational"
+if (( INTEGRATION )) || [[ "$ONLY" != "all" && "$ONLY" == *integration* ]]; then
+  if scope_selected integration-control; then
+    run_case "E2E Client-Server Connection" \
+      "" \
+      "test:it-engine-control-plane" \
+      "test_control_plane_start_stop_commands"
+  fi
 
-  run_case "E2E Performance Under Load" \
-    "" \
-    "lib" \
-    "test_hotpath_perf_smoke_thresholds_pass"
+  if scope_selected integration-fec; then
+    run_case "E2E FEC (Adaptive Mode)" \
+      "QUICFUSCATE_FEC_USE_ADAPTIVE=1 QUICFUSCATE_FEC_INITIAL_MODE=auto" \
+      "lib" \
+      "test_replayed_loss_trace_drives_end_to_end_adaptation"
+  fi
+
+  if scope_selected integration-stealth; then
+    run_case "E2E Stealth Mode" \
+      "QUICFUSCATE_STEALTH_MODE=anti_dpi QUICFUSCATE_BROWSER_PROFILE=chrome QUICFUSCATE_OS_PROFILE=windows" \
+      "test:it-stealth-mode-matrix" \
+      "test_anti_dpi_escalation_stack_is_cumulative_and_reversible"
+  fi
+
+  if scope_selected integration-loss; then
+    run_case "E2E Packet Loss (10%)" \
+      "QUICFUSCATE_RS_LOSS=0.10" \
+      "lib" \
+      "test_long_running_mixed_loss_trace_stays_operational"
+  fi
+
+  if scope_selected integration-performance; then
+    run_case "E2E Performance Under Load" \
+      "" \
+      "lib" \
+      "test_hotpath_perf_smoke_thresholds_pass"
+  fi
+fi
+
+if [[ "$CASES_RUN" -eq 0 ]]; then
+  echo "[FAIL] --only selection resolved to zero runnable E2E cases (FAST=$FAST, INTEGRATION=$INTEGRATION)" >&2
+  json_end "$JSON"
+  exit 1
 fi
 
 echo -e "\n[OK] E2E scenarios complete. Artifacts: $OUTPUT_DIR"
