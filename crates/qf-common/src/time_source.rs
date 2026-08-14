@@ -86,7 +86,7 @@ pub fn unix_epoch_millis(now: SystemTime) -> Result<u64, WallClockError> {
 #[cfg(any(test, feature = "rust-tests"))]
 pub mod test_support {
     use super::TimeSource;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, MutexGuard};
     use std::time::{Duration, Instant, SystemTime};
 
     pub struct ManualTimeSource {
@@ -100,21 +100,29 @@ pub mod test_support {
         }
 
         pub fn advance(&self, duration: Duration) {
-            let mut instant = self.instant.lock().expect("manual instant lock");
-            *instant = instant.checked_add(duration).expect("manual instant overflow");
-            drop(instant);
-            let mut system = self.system.lock().expect("manual system lock");
-            *system = system.checked_add(duration).expect("manual system overflow");
+            let mut instant = recover_lock(&self.instant);
+            let mut system = recover_lock(&self.system);
+            let Some(next_instant) = instant.checked_add(duration) else { return };
+            let Some(next_system) = system.checked_add(duration) else { return };
+            *instant = next_instant;
+            *system = next_system;
+        }
+    }
+
+    fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
     impl TimeSource for ManualTimeSource {
         fn now_instant(&self) -> Instant {
-            *self.instant.lock().expect("manual instant lock")
+            *recover_lock(&self.instant)
         }
 
         fn now_system(&self) -> SystemTime {
-            *self.system.lock().expect("manual system lock")
+            *recover_lock(&self.system)
         }
     }
 }

@@ -44,7 +44,7 @@ impl TlsProfile {
             ],
             alpn_protocols: vec!["h3".into(), "h2".into(), "http/1.1".into()],
             sni: None,
-            enable_0rtt: true,
+            enable_0rtt: false,
             enable_ech: true,
             grease_values: vec![0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a],
             extension_order: vec![
@@ -67,7 +67,7 @@ impl TlsProfile {
             ],
             alpn_protocols: vec!["h3".into(), "h2".into(), "http/1.1".into()],
             sni: None,
-            enable_0rtt: true,
+            enable_0rtt: false,
             enable_ech: false,
             grease_values: vec![],
             extension_order: vec![
@@ -87,7 +87,7 @@ impl TlsProfile {
             signature_algorithms: vec![0x0403, 0x0503, 0x0807, 0x0804, 0x0805, 0x0401],
             alpn_protocols: vec!["h3".into(), "h2".into()],
             sni: None,
-            enable_0rtt: true,
+            enable_0rtt: false,
             enable_ech: false,
             grease_values: vec![],
             extension_order: vec![0x0000, 0x000d, 0x0010, 0x0033, 0x002b, 0x0023, 0x002d, 0x0039],

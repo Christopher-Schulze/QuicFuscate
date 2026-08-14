@@ -19,6 +19,36 @@ pub trait UdpSender {
 /// Factory for the production UDP sender supplied by the root compatibility layer.
 pub type UdpSenderFactory = fn(bind: SocketAddr) -> std::io::Result<Box<dyn UdpSender>>;
 
+/// Secret-free packet-protection state projected by the root transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PacketProtectionReport<'a> {
+    pub initial_packet_owner: &'a str,
+    pub initial_header_owner: &'a str,
+    pub handshake_packet_owner: &'a str,
+    pub handshake_header_owner: &'a str,
+    pub zero_rtt_packet_owner: &'a str,
+    pub zero_rtt_header_owner: &'a str,
+    pub one_rtt_packet_owner: &'a str,
+    pub one_rtt_header_owner: &'a str,
+    pub negotiated_standard_suite: &'a str,
+}
+
+/// Format one live connection snapshot for developer diagnostics without secret material.
+pub fn format_packet_protection_report(report: PacketProtectionReport<'_>) -> String {
+    format!(
+        "initial_packet_owner={} initial_header_owner={} handshake_packet_owner={} handshake_header_owner={} zero_rtt_packet_owner={} zero_rtt_header_owner={} one_rtt_packet_owner={} one_rtt_header_owner={} negotiated_standard_suite={}",
+        report.initial_packet_owner,
+        report.initial_header_owner,
+        report.handshake_packet_owner,
+        report.handshake_header_owner,
+        report.zero_rtt_packet_owner,
+        report.zero_rtt_header_owner,
+        report.one_rtt_packet_owner,
+        report.one_rtt_header_owner,
+        report.negotiated_standard_suite,
+    )
+}
+
 /// Developer harness: central CLI used by scripts/ (no tests here)
 #[derive(Parser, Debug)]
 #[command(name = "harness", version, about = "QuicFuscate developer harness")]
@@ -254,4 +284,31 @@ fn bench_udp_throughput(
         secs * 1000.0,
         mib / secs
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_protection_report_is_complete_and_secret_free() {
+        let output = format_packet_protection_report(PacketProtectionReport {
+            initial_packet_owner: "quic-initial-standard",
+            initial_header_owner: "quic-initial-standard",
+            handshake_packet_owner: "rustls-standard",
+            handshake_header_owner: "rustls-standard",
+            zero_rtt_packet_owner: "disabled",
+            zero_rtt_header_owner: "disabled",
+            one_rtt_packet_owner: "rustls-standard",
+            one_rtt_header_owner: "rustls-standard",
+            negotiated_standard_suite: "tls-aes-128-gcm-sha256",
+        });
+
+        assert_eq!(
+            output,
+            "initial_packet_owner=quic-initial-standard initial_header_owner=quic-initial-standard handshake_packet_owner=rustls-standard handshake_header_owner=rustls-standard zero_rtt_packet_owner=disabled zero_rtt_header_owner=disabled one_rtt_packet_owner=rustls-standard one_rtt_header_owner=rustls-standard negotiated_standard_suite=tls-aes-128-gcm-sha256"
+        );
+        assert!(!output.contains("key="));
+        assert!(!output.contains("secret="));
+    }
 }
