@@ -40,6 +40,7 @@ EXCLUDED_COMPONENTS = {
     "target",
     "test",
     "tests",
+    "tests_inline",
 }
 SECRET_ASSIGN_RE = re.compile(
     r"[\"']?(?:password|secret|token|api[_-]?key|private[_-]?key|credential)[\"']?"

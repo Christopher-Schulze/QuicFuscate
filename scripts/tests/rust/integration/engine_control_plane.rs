@@ -96,6 +96,19 @@ fn test_control_plane_command_error_emits_event() {
 }
 
 #[test]
+fn circuit_replacement_commands_fail_closed_before_connection() {
+    for command in [
+        EngineCommand::PrebuildAlternateCircuit(EngineConfig::default()),
+        EngineCommand::PromotePrebuiltAlternate,
+        EngineCommand::RotateCircuit(EngineConfig::default()),
+    ] {
+        let mut engine = QuicFuscateEngine::new(EngineConfig::default()).unwrap();
+        assert!(engine.apply_command(command).is_err());
+        assert_eq!(engine.state(), EngineState::Created);
+    }
+}
+
+#[test]
 fn test_control_plane_start_stop_commands() {
     if !tun_available() {
         return;

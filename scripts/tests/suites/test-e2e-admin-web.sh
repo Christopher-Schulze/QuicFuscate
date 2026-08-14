@@ -408,7 +408,7 @@ SERVER_CMD+=(
 )
 
 SERVER_LOG="$OUTPUT_DIR/server.log"
-if [[ -n "${DRY_RUN:-}" ]]; then
+if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "DRY-RUN: ${SERVER_CMD[*]}"
 else
   "${SERVER_CMD[@]}" >"$SERVER_LOG" 2>&1 &

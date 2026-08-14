@@ -810,6 +810,102 @@ jobs:
           path: /tmp/quicfuscate-tun-provisioning.*
           if-no-files-found: warn
 
+  linux-multihop-native:
+    name: Linux native MASQUE circuit proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-multihop-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install native circuit proof dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            iproute2 \
+            iptables \
+            iputils-ping \
+            netcat-openbsd \
+            nftables \
+            openssl \
+            tcpdump
+
+      - name: Build exact circuit proof artifact
+        run: cargo build --locked --release --bin quicfuscate
+
+      - name: Prove native one-, two-, and three-hop circuits
+        shell: bash
+        run: |
+          set -euo pipefail
+          for hops in 1 2 3; do
+            output_dir="$GITHUB_WORKSPACE/scripts/out/tests/multihop-${hops}hop-native"
+            sudo --preserve-env=GITHUB_SHA \
+              env QF_E2E_BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate" \
+              QF_MULTIHOP_E2E_HOPS="$hops" \
+              QF_MULTIHOP_E2E_ARTIFACT_DIR="$output_dir" \
+              PROJECT_ROOT="$GITHUB_WORKSPACE" \
+              scripts/tests/tun-multihop-e2e-netns.sh
+          done
+
+      - name: Prove impaired three-hop circuit bounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="$GITHUB_WORKSPACE/scripts/out/tests/multihop-3hop-impaired-native"
+          sudo --preserve-env=GITHUB_SHA \
+            env QF_E2E_BINARY="$GITHUB_WORKSPACE/target/release/quicfuscate" \
+            QF_MULTIHOP_E2E_HOPS=3 \
+            QF_MULTIHOP_E2E_ARTIFACT_DIR="$output_dir" \
+            QF_MULTIHOP_E2E_UNDERLAY_MTU=1472 \
+            QF_MULTIHOP_E2E_NETEM_DELAY_MS=12 \
+            QF_MULTIHOP_E2E_NETEM_JITTER_MS=4 \
+            QF_MULTIHOP_E2E_NETEM_LOSS_PERCENT=1 \
+            QF_MULTIHOP_E2E_NETEM_REORDER_PERCENT=2 \
+            QF_MULTIHOP_E2E_NETEM_DUPLICATE_PERCENT=1 \
+            QF_MULTIHOP_E2E_MAX_TUNNEL_LOSS_PERCENT=10 \
+            QF_MULTIHOP_E2E_MAX_RTT_MS=500 \
+            QF_MULTIHOP_E2E_MAX_JITTER_MS=150 \
+            QF_MULTIHOP_E2E_MIN_THROUGHPUT_RATIO=0.40 \
+            QF_MULTIHOP_E2E_FAILURE_TARGET=middle \
+            PROJECT_ROOT="$GITHUB_WORKSPACE" \
+            scripts/tests/tun-multihop-e2e-netns.sh
+
+      - name: Normalize native circuit evidence ownership
+        if: always()
+        shell: bash
+        run: |
+          shopt -s nullglob
+          evidence=("$GITHUB_WORKSPACE"/scripts/out/tests/multihop-*native)
+          if ((${#evidence[@]} > 0)); then
+            sudo chown -R -- "$(id -u):$(id -g)" "${evidence[@]}"
+          fi
+
+      - name: Upload native circuit evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: multihop-native
+          path: scripts/out/tests/multihop-*native/
+          if-no-files-found: error
+
   linux-installer-native:
     runs-on: ubuntu-latest
     timeout-minutes: 90

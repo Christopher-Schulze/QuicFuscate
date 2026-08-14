@@ -338,6 +338,63 @@ fn bench_data_aead_backends(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// rustls QUIC PacketKey seal/open path
+// ---------------------------------------------------------------------------
+fn bench_rustls_standard_packet_keys(c: &mut Criterion) {
+    use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
+    use quicfuscate::qftls::{bench_standard_one_rtt_key_bundles, StandardCipherSuite};
+
+    for suite in [StandardCipherSuite::Aes128GcmSha256, StandardCipherSuite::Aes256GcmSha384] {
+        let (client, server) = bench_standard_one_rtt_key_bundles(suite);
+        for size in [64usize, 1024, 1400, 8192] {
+            let mut group = c.benchmark_group("rustls_standard_packet_key");
+            group.throughput(Throughput::Bytes(size as u64));
+            let mut counter = 1u64;
+            let mut seal_buffer = vec![0u8; size + 16];
+            group.bench_function(format!("{}_seal_{}B", suite.as_str(), size), |b| {
+                b.iter(|| {
+                    counter = counter.wrapping_add(1);
+                    seal_buffer[..size].fill(0xA5);
+                    client
+                        .seal
+                        .seal_with_u64_counter(
+                            black_box(counter),
+                            black_box(b"standard-packet-key"),
+                            black_box(&mut seal_buffer),
+                            size,
+                            None,
+                        )
+                        .expect("rustls PacketKey seal");
+                    black_box(&seal_buffer);
+                });
+            });
+
+            let mut frozen = vec![0x5Au8; size + 16];
+            client
+                .seal
+                .seal_with_u64_counter(7, b"standard-packet-key", &mut frozen, size, None)
+                .expect("rustls PacketKey fixture seal");
+            let mut open_buffer = frozen.clone();
+            group.bench_function(format!("{}_open_{}B", suite.as_str(), size), |b| {
+                b.iter(|| {
+                    open_buffer.copy_from_slice(&frozen);
+                    server
+                        .open
+                        .open_with_u64_counter(
+                            7,
+                            black_box(b"standard-packet-key"),
+                            black_box(&mut open_buffer),
+                        )
+                        .expect("rustls PacketKey open");
+                    black_box(&open_buffer);
+                });
+            });
+            group.finish();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Varint encode + decode roundtrip
 // ---------------------------------------------------------------------------
 fn bench_varint(c: &mut Criterion) {
@@ -670,6 +727,36 @@ fn bench_connection_1rtt_send_recv(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_connection_rustls_standard_1rtt(c: &mut Criterion) {
+    use quicfuscate::error::ConnectionError;
+    use quicfuscate::qftls::StandardCipherSuite;
+    use quicfuscate::transport::{bench_paired_standard_1rtt_connections, BenchConnectionPair};
+
+    let mut group = c.benchmark_group("connection_rustls_standard_1rtt");
+    for suite in [StandardCipherSuite::Aes128GcmSha256, StandardCipherSuite::Aes256GcmSha384] {
+        for payload_len in [256usize, 1024, 1400] {
+            let payload = vec![0x5Au8; payload_len];
+            group.throughput(Throughput::Bytes((payload_len * 2) as u64));
+            group.bench_function(format!("{}_{}B", suite.as_str(), payload_len), |b| {
+                b.iter_batched(
+                    || bench_paired_standard_1rtt_connections(suite),
+                    |BenchConnectionPair { mut client, mut server, recv_info }| {
+                        let mut wire = [0u8; 2048];
+                        client.stream_send(0, black_box(&payload), false).expect("stream_send");
+                        let (sent, _) = client.send(&mut wire).expect("standard 1-RTT send");
+                        match server.recv(&mut wire[..sent], &recv_info) {
+                            Ok(_) | Err(ConnectionError::Done) => {}
+                            Err(error) => panic!("standard 1-RTT receive failed: {error:?}"),
+                        }
+                    },
+                    BatchSize::PerIteration,
+                );
+            });
+        }
+    }
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // ACK sent-byte accounting under N in-flight PNs (TODO-400)
 // ---------------------------------------------------------------------------
@@ -958,6 +1045,7 @@ criterion_group!(
     bench_morus_encrypt,
     bench_morus_decrypt,
     bench_data_aead_backends,
+    bench_rustls_standard_packet_keys,
 );
 
 criterion_group!(
@@ -971,6 +1059,7 @@ criterion_group!(
     bench_transport_retry_receive,
     bench_transport_connection_id_set,
     bench_connection_1rtt_send_recv,
+    bench_connection_rustls_standard_1rtt,
     bench_ack_sent_byte_accounting,
     bench_connection_1rtt_stealth_compare,
     bench_stream_frame_encoding,

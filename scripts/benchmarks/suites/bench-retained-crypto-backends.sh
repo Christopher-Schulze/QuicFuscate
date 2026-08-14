@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# The source path is rooted through SCRIPT_DIR at runtime.
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/../../tests/lib/lib-common.sh" || { echo "ERROR: lib-common.sh not found" >&2; exit 1; }
 
 OUTPUT_DIR=""
@@ -32,7 +34,6 @@ SUMMARY_FILE="$OUTPUT_DIR/summary.txt"
 CSV_FILE="$OUTPUT_DIR/results.csv"
 RESULTS_JSON="$OUTPUT_DIR/results.json"
 json_begin "$RESULTS_JSON" "bench_retained_crypto_backends"
-JSON_FIRST_RUN=1
 FAILURES=0
 
 if (( FAST )); then
@@ -43,12 +44,14 @@ else
   ITERS=1000
 fi
 
-BACKENDS=("aegis128l" "aegis128x4" "aegis128x8" "morus")
+BACKENDS=("aegis128l" "aegis128x4" "aegis128x8" "morus1280_128")
 
-echo "suite=bench-retained-crypto-backends" > "$SUMMARY_FILE"
-echo "output_dir=$OUTPUT_DIR" >> "$SUMMARY_FILE"
-echo "iters=$ITERS" >> "$SUMMARY_FILE"
-echo "sizes=${SIZES[*]}" >> "$SUMMARY_FILE"
+{
+  echo "suite=bench-retained-crypto-backends"
+  echo "output_dir=$OUTPUT_DIR"
+  echo "iters=$ITERS"
+  echo "sizes=${SIZES[*]}"
+} > "$SUMMARY_FILE"
 
 PROFILE_OUTPUT="$OUTPUT_DIR/profile.txt"
 if qf_benchmark_run "$PROFILE_OUTPUT" run cargo run --release --features benches --quiet --example crypto_backend_bench -- profile; then

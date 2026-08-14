@@ -208,7 +208,7 @@ internal_avx10_preview = ["qf-cpu/internal_avx10_preview", "qf-crypto/internal_a
 
 # --- Test-only features ---
 rust-tests = ["qf-compress/rust-tests", "qf-cpu/rust-tests", "qf-crypto/rust-tests", "qf-dns/rust-tests", "qf-fec/rust-tests", "qf-harness/rust-tests", "qf-logging/rust-tests", "qf-memory-lock/rust-tests", "qf-memory-pool/rust-tests", "qf-metrics/rust-tests", "qf-reality/rust-tests", "qf-stealth/rust-tests", "qf-simd/rust-tests", "qf-transport-anti-replay/rust-tests", "qf-transport-batch/rust-tests", "qf-transport-cc/rust-tests", "qf-transport-nat/rust-tests", "qf-transport-pn/rust-tests", "qf-transport-path/rust-tests", "qf-transport-recovery/rust-tests", "qf-transport-version/rust-tests", "qf-transport-types/rust-tests", "qf-transport-udp/rust-tests"]
-benches = ["qf-crypto/benches", "qf-simd/benches"]
+benches = ["qf-crypto/benches", "qf-fec/benches", "qf-simd/benches"]
 masque-tests = []
 tun-tests = []
 simd-selfcheck = []

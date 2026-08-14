@@ -616,7 +616,7 @@ if rg -F -- 'fn bmi2_parser_is_allowed(profile: CpuProfile, features: &CpuFeatur
   && rg -F -- 'if bmi2_parser_is_allowed(detector.profile(), features)' \
     src/interface.rs >/dev/null \
   && rg -F -- 'Self::profile_from_features(features_full)' \
-    crates/qf-cpu/src/lib.rs >/dev/null \
+    crates/qf-cpu/src >/dev/null \
   && rg -F -- 'fn x86_profile_selection_keeps_bmi2_explicit()' \
     crates/qf-cpu/src/tests.rs >/dev/null \
   && rg -F -- 'fn bmi2_dispatch_requires_profile_and_runtime_feature_intersection()' \
@@ -704,10 +704,10 @@ if rg -F -- 'pub(crate) fn validate_raw_read_result' src/interface.rs >/dev/null
   && rg -F -- 'pub(crate) fn close_owned_fd' src/interface.rs >/dev/null \
   && rg -F -- 'validate_raw_read_result(n, buf.len(), "Linux TUN read")' src/interface.rs >/dev/null \
   && rg -F -- 'validate_raw_write_progress(n, remaining, "Linux TUN write")' src/interface.rs >/dev/null \
-  && rg -F -- 'fn writev_iovecs(' src/interface.rs >/dev/null \
+  && rg -F -- 'fn writev_iovecs(' src/interface/macos_tun.rs >/dev/null \
   && rg -F -- 'validate_raw_write_progress(n, total - written, "macOS utun writev")' \
-    src/interface.rs >/dev/null \
-  && rg -F -- 'parse_bounded_interface_name(&ifname, reported_len)' src/interface.rs >/dev/null \
+    src/interface/macos_tun.rs >/dev/null \
+  && rg -F -- 'parse_bounded_interface_name(&ifname, reported_len)' src/interface/macos_tun.rs >/dev/null \
   && rg -F -- 'fn close_fd(&mut self) -> Result<(), PlatformError>' \
     src/implementations/client/platform/traits.rs >/dev/null \
   && rg -F -- 'fn compatibility_kernel_name_contract_rejects_unterminated_identity()' \
@@ -720,7 +720,7 @@ if rg -F -- 'pub(crate) fn validate_raw_read_result' src/interface.rs >/dev/null
     src/interface/tests.rs >/dev/null \
   && rg -F -- 'fn unix_close_failure_is_reported_and_descriptor_number_is_terminalized()' \
     src/interface/tests.rs >/dev/null \
-  && rg -F -- 'fn utun_writev_iovecs_follow_bounded_progress()' src/interface.rs >/dev/null \
+  && rg -F -- 'fn utun_writev_iovecs_follow_bounded_progress()' src/interface/macos_tun.rs >/dev/null \
   && rg -F -- 'run_verified_library_target "unix-raw-result-contract"' \
     scripts/tests/suites/test-core.sh >/dev/null \
   && rg -F -- 'run_verified_library_target "unix-interface-name-contract"' \
@@ -909,9 +909,9 @@ if rg -n --no-messages '^type CurrentIds =' crates/qf-privilege/src/drop.rs >/de
   && rg -F -- 'fn validate_resolved_identity(' crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'fn checked_group_result_count(' crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'final_identity_boundary_rejects_forged_root_target' \
-    crates/qf-privilege/src/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop/tests.rs >/dev/null \
   && rg -F -- 'group_result_rejects_count_larger_than_requested_capacity' \
-    crates/qf-privilege/src/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop/tests.rs >/dev/null \
   && ! rg -n --no-messages '^\s+pub (user_selector|user_name|uid|group_selector|group_name|gid):' \
     crates/qf-privilege/src/drop.rs >/dev/null; then
   pass "Privilege identity is opaque and libc count/platform contracts are wired"
@@ -927,9 +927,9 @@ if rg -F -- 'Result<[u32; 4], DropError>' crates/qf-privilege/src/drop.rs >/dev/
   && rg -F -- 'PartialTransition' crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'verify_root_cannot_be_regained(identity' crates/qf-privilege/src/drop.rs >/dev/null \
   && rg -F -- 'linux_thread_status_requires_filesystem_uid_and_gid_fields' \
-    crates/qf-privilege/src/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop/tests.rs >/dev/null \
   && rg -F -- 'partial_transition_error_preserves_state_and_operation' \
-    crates/qf-privilege/src/drop.rs >/dev/null \
+    crates/qf-privilege/src/drop/tests.rs >/dev/null \
   && rg -F -- 'PRIVILEGE_PROBE_STATE mode={probe_mode} threads_verified=' \
     src/bin/qf-privilege-probe.rs >/dev/null \
   && rg -F -- 'PRIVILEGE_PROBE_STATE mode=standard threads_verified=' \
@@ -994,7 +994,8 @@ if [[ -z "$MEMORY_LOCK_POLICY_ORDER_ERRORS" ]] \
   && rg -F -- 'fn standalone_reload_rejects_each_changed_startup_setting()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'fn embedded_startup_policy_applies_pool_setting_before_identity_boundary()' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'fn standalone_restart_reapplies_pool_setting_instead_of_retaining_previous_value()' crates/qf-memory-lock/src/lib.rs >/dev/null \
-  && rg -F -- 'fn test_runtime_reload_rejects_startup_owned_memory_settings()' src/implementations/server/tests_inline.rs >/dev/null \
+  && rg -F -- 'fn test_runtime_reload_rejects_startup_owned_memory_settings()' \
+    src/implementations/server/tests_inline/runtime_lifecycle.rs >/dev/null \
   && rg -F -- 'lock_memory = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
   && rg -F -- 'lock_blocks = true' config/quicfuscate.toml config/server-linux.default.toml >/dev/null \
   && rg -F -- 'memory_lock_failure_policy = "best-effort"' config/quicfuscate.toml >/dev/null \
@@ -1135,7 +1136,7 @@ if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh scripts/tests/rust/integration/privilege_boundary.rs >/dev/null \
   && rg -F -- 'windows_compile_gate_status' scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
   && rg -F -- 'test-privilege-memory-tls-proof.sh' scripts/tests/utils/util-run-full-suite.sh .github/workflows/ci.yml >/dev/null \
-  && rg -F -- 'root_regain_result_contract_is_deterministic_without_syscalls' crates/qf-privilege/src/drop.rs >/dev/null \
+  && rg -F -- 'root_regain_result_contract_is_deterministic_without_syscalls' crates/qf-privilege/src/drop/tests.rs >/dev/null \
   && rg -F -- 'process_memory_lock_guard_cleans_up_during_unwind' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'deferred_process_lock_status_is_explicit_before_privilege_transition' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'Privilege, Lock, and TLS Negative-Proof Guardrails' docs/todo/done/todo-854-privilege-lock-negative-proof.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
@@ -1248,7 +1249,7 @@ FEC_RECOVERY_INTEGRITY_REGRESSIONS="$(rg -n --no-messages 'norm_base|base_id\.wr
 if [[ -n "$FEC_RECOVERY_INTEGRITY_REGRESSIONS" ]]; then
   fail_critical "FEC decoder regained ambiguous anchors, forward GF4 mapping, or unvalidated auto-Wiedemann recovery"
   append_item "fec_recovery_integrity" "fail" "$FEC_RECOVERY_INTEGRITY_REGRESSIONS"
-elif rg -n --no-messages 'valid\.then_some\(solution\)' crates/qf-fec/src/decoders.rs >/dev/null \
+elif rg -n --no-messages 'valid\.then_some\(solution\)' crates/qf-fec/src/decoders/decoder8.rs >/dev/null \
   && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_1000_packets_at_5pct_random_loss' src/fec/e2e_tests.rs >/dev/null \
   && rg -n --no-messages 'test_fec_e2e_default_interleave_recovers_four_consecutive_losses_per_sixteen' src/fec/e2e_tests.rs >/dev/null; then
   pass "FEC recovery keeps exact anchors, validated solver output, and deterministic interleaved integrity gates"
@@ -1284,7 +1285,7 @@ TLS_COVER_REINSTALL_REGRESSIONS="$(rg -n --no-messages 'TODO-269|install_tls_cov
 if [[ -n "$TLS_COVER_REINSTALL_REGRESSIONS" ]]; then
   fail_critical "TLS Cover retained an unsafe or parallel cipher reinstallation path"
   append_item "tls_cover_reinstallation_safety" "fail" "$TLS_COVER_REINSTALL_REGRESSIONS"
-elif rg -n --no-messages 'pub fn install_tls_cover_cipher\(' src/transport/packet.rs >/dev/null \
+elif rg -n --no-messages 'pub fn install_tls_cover_cipher\(' src/transport/packet/context.rs >/dev/null \
   && rg -F -- 'pub struct TlsCoverCipherState' crates/qf-crypto/src/tls_cover.rs >/dev/null \
   && rg -F -- 'retired_identities: Vec<[u8; 32]>' crates/qf-crypto/src/tls_cover.rs >/dev/null \
   && rg -n --no-messages 'checked_add\(1\).*AeadLimitReached' crates/qf-crypto/src/tls_cover.rs >/dev/null \
@@ -1337,6 +1338,110 @@ if [[ -x "$TUN_PROVISIONING_NEGATIVE_HARNESS" ]] \
 else
   fail_critical "Linux TUN provisioning negative namespace proof is missing or incomplete"
   append_item "tun_provisioning_negative_namespace_proof" "fail" "missing executable harness, required negative cases, network/runtime isolation, exact residue checks, or safe process ownership"
+fi
+
+MULTIHOP_TUN_E2E_HARNESS="scripts/tests/tun-multihop-e2e-netns.sh"
+MULTIHOP_TUN_E2E_GLOBAL_REAPERS="$(
+  rg -n --no-messages 'pkill.*quicfuscate|killall.*quicfuscate' \
+    "$MULTIHOP_TUN_E2E_HARNESS" || true
+)"
+if [[ -n "$MULTIHOP_TUN_E2E_GLOBAL_REAPERS" ]]; then
+  fail_critical "Multi-hop TUN E2E harness retained a global QuicFuscate process reaper"
+  append_item "multihop_tun_e2e_contract" "fail" "$MULTIHOP_TUN_E2E_GLOBAL_REAPERS"
+elif [[ ! -x "$MULTIHOP_TUN_E2E_HARNESS" ]] \
+  || ! rg -F -- 'QF_MULTIHOP_E2E_HOPS:-3' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- '[ "$HOPS" = "1" ] || [ "$HOPS" = "2" ] || [ "$HOPS" = "3" ]' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'OWNED_NAMESPACES=()' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'OWNED_PIDS=()' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'trap cleanup EXIT' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'refusing to remove pre-existing namespace' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'mktemp -d /tmp/quicfuscate-multihop.' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'QUICFUSCATE_MASQUE_RELAY_ALLOWED_HOSTS="$next"' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'kill_switch = true' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'allow_single_hop_fallback = false' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'adjacency capture exposed a non-adjacent endpoint' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'assert_ping_thresholds client_ipv4 "$PING"' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'assert_ping_thresholds exit_ipv4 "$EXIT_PING"' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'assert_ping_thresholds client_ipv6 "$IPV6_PING"' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'TCP echo failed' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'UDP echo failed' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'DNS datagram failed' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'QF_MULTIHOP_E2E_MIN_THROUGHPUT_RATIO:-0.70' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'python3 "$THROUGHPUT_PROBE" server' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'python3 "$THROUGHPUT_PROBE" client' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'receiver_bits_per_second' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'runtime_cpu_percent' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'runtime_rss_kib' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'performance-${HOPS}hop.json' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'QF_MULTIHOP_E2E_NETEM_REORDER_PERCENT:-0' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'QF_MULTIHOP_E2E_FAILURE_TARGET:-entry' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'kill -KILL "$FAILURE_PID"' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'client reached a non-entry relay directly after circuit failure' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'refusing to replace existing artifact path' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'TUN residue remains in $namespace after graceful shutdown' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'iptables residue remains in $namespace after graceful shutdown' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'nftables residue remains in $namespace after graceful shutdown' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'IPv4 forwarding was not restored after graceful shutdown' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null \
+  || ! rg -F -- 'IPv6 forwarding was not restored after graceful shutdown' "$MULTIHOP_TUN_E2E_HARNESS" >/dev/null; then
+  fail_critical "Multi-hop TUN E2E ownership, traffic, adjacency, or teardown contract is incomplete"
+  append_item "multihop_tun_e2e_contract" "fail" "missing executable one/two/three-hop topology, exact ownership, fail-closed routing, traffic and throughput matrix, adjacency capture, artifact ownership, or residue assertions"
+else
+  pass "Multi-hop TUN E2E harness retains one/two/three-hop traffic, bounded impairment/performance, fail-closed owner loss, adjacency, and exact cleanup proof"
+  append_item "multihop_tun_e2e_contract" "ok" "owned namespaces and PIDs, relay allowlists, kill switch, no fallback, selectable owner-loss isolation, dual-stack traffic, receiver-verified throughput, CPU/RSS/latency/jitter/loss thresholds, exclusive artifacts, adjacent-only capture, and zero runtime residue assertions are present"
+fi
+
+PRIVATE_CONTROL_BOOTSTRAP_ORDER="$({
+  python3 - <<'PY'
+from pathlib import Path
+
+def ordered(path, markers):
+    text = Path(path).read_text(encoding="utf-8")
+    positions = []
+    cursor = 0
+    for marker in markers:
+        position = text.find(marker, cursor)
+        if position < 0:
+            return False
+        positions.append(position)
+        cursor = position + len(marker)
+    return all(left < right for left, right in zip(positions, positions[1:]))
+
+checks = {
+    "server": ordered(
+        "src/implementations/server/live_auth.rs",
+        [
+            "for (stream_id, target, purpose, circuit_id, hop_budget) in conn.pending_peer_masque_flows()",
+            "conn.accept_peer_masque_flow(stream_id)",
+            "conn.private_packet_protection_control_tick()",
+        ],
+    ),
+    "client_assignment": ordered(
+        "src/implementations/client/io_driver/runtime.rs",
+        [
+            "guard.mark_qkey_authenticated_from_token();",
+            "private_packet_protection_control_tick()",
+            "guard.mark_ready();",
+        ],
+    ),
+    "client_circuit": ordered(
+        "src/implementations/client/circuit_runtime.rs",
+        [
+            "hop.mark_qkey_authenticated_from_token()",
+            "hop.private_packet_protection_control_tick()",
+        ],
+    ),
+}
+missing = [name for name, present in checks.items() if not present]
+print("ok" if not missing else "missing=" + ",".join(missing))
+PY
+})"
+if [[ "$PRIVATE_CONTROL_BOOTSTRAP_ORDER" == "ok" ]]; then
+  pass "Private packet-protection control is primed after authenticated MASQUE flow acceptance"
+  append_item "private_control_bootstrap_order" "ok" "server peer-flow acceptance and client QKey assignment/circuit authentication precede the first private control tick"
+else
+  fail_critical "Private packet-protection control bootstrap can consume the first proposal before its callback exists"
+  append_item "private_control_bootstrap_order" "fail" "$PRIVATE_CONTROL_BOOTSTRAP_ORDER"
 fi
 
 SPECIALIZED_TUN_E2E_HARNESSES=(
@@ -2000,9 +2105,9 @@ PY
 )"
 QKEY_AUTH_POLICY_HARNESS="scripts/tests/suites/test-qkey-auth-policy.sh"
 if [[ -z "$QKEY_AUTH_POLICY_ORDER_ERRORS" ]] \
-  && rg -F -- 'pub struct AuthPolicyConfig {' src/implementations/server/limits.rs >/dev/null \
-  && rg -F -- 'max_tracked_ips: 65_536' src/implementations/server/limits.rs >/dev/null \
-  && rg -F -- 'max_pending_attempts_per_ip: 4' src/implementations/server/limits.rs >/dev/null \
+  && rg -F -- 'pub struct AuthPolicyConfig {' src/implementations/server/limits/auth_policy.rs >/dev/null \
+  && rg -F -- 'max_tracked_ips: 65_536' src/implementations/server/limits/auth_policy.rs >/dev/null \
+  && rg -F -- 'max_pending_attempts_per_ip: 4' src/implementations/server/limits/auth_policy.rs >/dev/null \
   && rg -F -- 'QUICFUSCATE_AUTH_BACKOFF_AFTER_FAILURES' src/implementations/server/config.rs config/server-linux.default.toml docs/DOCUMENTATION.md >/dev/null \
   && rg -F -- 'AuthRateLimiter::new_with_clock(' src/implementations/server/live_state.rs >/dev/null \
   && [[ "$(rg -c --no-messages 'qkey_auth_denied' src/implementations/server/live_auth.rs || true)" -ge 3 ]] \
@@ -2027,14 +2132,16 @@ fi
 DEAD_ACCEL_EXPORTS=(
 )
 dead_candidates=()
-for entry in "${DEAD_ACCEL_EXPORTS[@]}"; do
-  file="${entry%%:*}"
-  symbol="${entry##*:}"
-  refs="$(rg -n --no-messages "\\b${symbol}\\b" src | rg -v "^${file}:" || true)"
-  if [[ -z "${refs}" ]]; then
-    dead_candidates+=("${symbol}")
-  fi
-done
+if (( ${#DEAD_ACCEL_EXPORTS[@]} > 0 )); then
+  for entry in "${DEAD_ACCEL_EXPORTS[@]}"; do
+    file="${entry%%:*}"
+    symbol="${entry##*:}"
+    refs="$(rg -n --no-messages "\\b${symbol}\\b" src | rg -v "^${file}:" || true)"
+    if [[ -z "${refs}" ]]; then
+      dead_candidates+=("${symbol}")
+    fi
+  done
+fi
 if [[ "${#dead_candidates[@]}" -gt 0 ]]; then
   warn_guardrail "Acceleration exports with zero runtime references detected: ${dead_candidates[*]}"
   append_item "dead_accel_exports_runtime_reachability" "warn" "zero-runtime-reference exports: ${dead_candidates[*]}"

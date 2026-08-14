@@ -91,7 +91,7 @@ FEATURE_CONTRACT: dict[str, tuple[str, tuple[str, ...]]] = {
             "qf-transport-udp/rust-tests",
         ),
     ),
-    "benches": ("test", ("qf-crypto/benches", "qf-simd/benches")),
+    "benches": ("test", ("qf-crypto/benches", "qf-fec/benches", "qf-simd/benches")),
     "masque-tests": ("test", ()),
     "tun-tests": ("test", ()),
     "simd-selfcheck": ("test", ()),

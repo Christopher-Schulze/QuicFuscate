@@ -582,7 +582,17 @@ echo "+===============================================================+"
 
 echo -e "\n> Running Clippy analysis..."
 set +e
-CLIPPY_OUTPUT=$(cargo clippy --all-targets --all-features -- -W clippy::all 2>&1)
+CLIPPY_TARGET_SCOPE=(--all-targets)
+if [[ "$(uname -s)" != "Linux" ]]; then
+    # Linux-only kernel integration targets deliberately fail closed at compile
+    # time outside Linux. Keep the portable library/bin quality gate active and
+    # classify the unavailable target lane instead of turning it into a false
+    # product failure.
+    CLIPPY_TARGET_SCOPE=(--lib --bins)
+    log_warning "Platform-only Clippy test targets unavailable on $(uname -s); checking portable lib/bin targets"
+    record_check "clippy_platform_test_targets" UNAVAILABLE "" "platform=$(uname -s);reason=linux-only-integration-targets"
+fi
+CLIPPY_OUTPUT=$(cargo clippy "${CLIPPY_TARGET_SCOPE[@]}" --all-features -- -W clippy::all 2>&1)
 CLIPPY_RC=$?
 set -e
 CLIPPY_LOG="$OUTPUT_DIR/clippy.log"

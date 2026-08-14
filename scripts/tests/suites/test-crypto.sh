@@ -27,15 +27,44 @@ mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/crypto-tests.log"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "tests_crypto_comprehensive"; JSON_FIRST_RUN=1
 
+run_qf_crypto_filter() {
+  local pattern="$1"
+  local list_output matched
+  if ! list_output="$(QF_DISABLE_COMMAND_JSON_LOG=1 run_cargo test -p qf-crypto --release --lib "$pattern" -- --list 2>&1)"; then
+    printf '%s\n' "$list_output" >&2
+    return 1
+  fi
+  matched="$(printf '%s\n' "$list_output" | awk '/: test$/{count++} END{print count+0}')"
+  if (( matched == 0 )); then
+    die "No qf-crypto tests matched filter: ${pattern}"
+  fi
+  run_cargo test -p qf-crypto --release --lib "$pattern" -- --nocapture
+}
+
+run_qf_crypto_filter_with_env() {
+  local env_assignment="$1"
+  local pattern="$2"
+  local list_output matched
+  if ! list_output="$(QF_DISABLE_COMMAND_JSON_LOG=1 run_cargo_with_env "$env_assignment" -- test -p qf-crypto --release --lib "$pattern" -- --list 2>&1)"; then
+    printf '%s\n' "$list_output" >&2
+    return 1
+  fi
+  matched="$(printf '%s\n' "$list_output" | awk '/: test$/{count++} END{print count+0}')"
+  if (( matched == 0 )); then
+    die "No qf-crypto tests matched filter with ${env_assignment}: ${pattern}"
+  fi
+  run_cargo_with_env "$env_assignment" -- test -p qf-crypto --release --lib "$pattern" -- --nocapture
+}
+
 echo "==============================================================="
 echo "  Crypto & AEAD Comprehensive Test Suite"
 echo "==============================================================="
 
 if (( FAST )); then
   echo -e "\n> Fast mode enabled (minimal crypto confidence set)"
-  run_cargo test --release --lib aegis128l -- --nocapture
-  run_cargo test --release --lib morus -- --nocapture
-  run_cargo test --release --lib aes_gcm -- --nocapture
+  run_qf_crypto_filter aegis128l
+  run_qf_crypto_filter morus
+  run_qf_crypto_filter aes_gcm
   run_cargo test --release \
     --test rt-tls-cover-cipher \
     --test rt-ghash-sse-parity \
@@ -47,31 +76,31 @@ fi
 
 # Test AEGIS-128L
 echo -e "\n> Testing AEGIS-128L..."
-run_cargo test --release --lib aegis128l -- --nocapture
+run_qf_crypto_filter aegis128l
 
 # Test MORUS-1280-128
 echo -e "\n> Testing MORUS-1280-128..."
-run_cargo test --release --lib morus -- --nocapture
+run_qf_crypto_filter morus
 
 # Test AES-GCM with hardware acceleration
 echo -e "\n> Testing AES-GCM (Hardware Accelerated)..."
-run_cargo test --release --lib aes_gcm -- --nocapture
+run_qf_crypto_filter aes_gcm
 
 # Test GHASH PMULL (ARM)
 echo -e "\n> Testing GHASH with PMULL (ARM)..."
-run env QUICFUSCATE_GHASH_PMULL=1 cargo test --release --lib ghash -- --nocapture
+run_qf_crypto_filter_with_env QUICFUSCATE_GHASH_PMULL=1 ghash
 
 # Test ChaCha20-Poly1305 fallback
 echo -e "\n> Testing ChaCha20-Poly1305..."
-run_cargo test --release --lib chacha20poly1305 -- --nocapture
+run_qf_crypto_filter chacha20poly1305
 
 # Test AES header-protection key setup (key derivation path)
 echo -e "\n> Testing AES Header-Protection Key Derivation..."
-run_cargo test --release --lib aes_hp -- --nocapture
+run_qf_crypto_filter aes_hp
 
 # Test SIMD paths (x86_64)
 echo -e "\n> Testing SIMD Paths (AVX2/SSE2)..."
-run env RUSTFLAGS="-C target-cpu=native" cargo test --release --lib simd -- --nocapture
+run_qf_crypto_filter_with_env RUSTFLAGS=-C\ target-cpu=native simd
 
 # Integration fixtures (Rust tests)
 echo -e "\n> Running Crypto Integration Fixtures..."
