@@ -704,12 +704,23 @@ async fn run_relay_association(mut task: RelayAssociationTask) {
                     break RelayExitReason::RateQuota;
                 }
                 let payload = receive_buffer[..received].to_vec();
+                let payload_len = payload.len();
                 let result = match task.responses.lock() {
                     Ok(mut queue) => queue.enqueue(task.flow_id, payload),
                     Err(poisoned) => poisoned.into_inner().enqueue(task.flow_id, payload),
                 };
-                if result.is_err() {
-                    log::warn!("dropping MASQUE relay response after bounded egress saturation");
+                match result {
+                    Ok(()) => log::debug!(
+                        "queued MASQUE relay response flow={} bytes={}",
+                        task.flow_id,
+                        payload_len
+                    ),
+                    Err(error) => {
+                        log::warn!(
+                            "dropping MASQUE relay response after bounded egress saturation: {:?}",
+                            error
+                        );
+                    }
                 }
             }
             () = &mut idle => break RelayExitReason::Idle,

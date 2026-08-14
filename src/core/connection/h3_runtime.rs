@@ -580,6 +580,11 @@ impl QuicFuscateConnection {
                 if let Some(callback) = masque_relay_cb {
                     if let Ok(mut callback) = callback.lock() {
                         if let Some(target) = binding.target.as_ref() {
+                            debug!(
+                                "dispatching MASQUE relay payload flow={} bytes={}",
+                                flow_id,
+                                payload.len()
+                            );
                             (callback)(flow_id, target, payload);
                         }
                     }
@@ -1090,15 +1095,36 @@ impl QuicFuscateConnection {
             let Some(response) = response else {
                 break;
             };
+            debug!(
+                "dequeued MASQUE relay response flow={} bytes={}",
+                response.flow_id,
+                response.payload.len()
+            );
             let Some(binding) = self.masque_peer_flows.get(&response.flow_id) else {
+                debug!(
+                    "dropping MASQUE relay response with missing flow binding flow={}",
+                    response.flow_id
+                );
                 continue;
             };
             if !binding.accepted || binding.purpose != MasqueFlowPurpose::NextHopUdp {
+                debug!(
+                    "dropping MASQUE relay response on inactive flow={} accepted={} purpose={:?}",
+                    response.flow_id, binding.accepted, binding.purpose
+                );
                 continue;
             }
             let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
             match h3.send_masque_datagram(&mut self.conn, binding.stream_id, &response.payload) {
-                Ok(()) => sent = sent.saturating_add(1),
+                Ok(()) => {
+                    sent = sent.saturating_add(1);
+                    debug!(
+                        "queued MASQUE relay response for QUIC flow={} stream={} bytes={}",
+                        response.flow_id,
+                        binding.stream_id,
+                        response.payload.len()
+                    );
+                }
                 Err(crate::transport::h3::Error::DgramQueueFull) => {
                     let enqueue = match queue.lock() {
                         Ok(mut queue) => queue.enqueue(response.flow_id, response.payload),

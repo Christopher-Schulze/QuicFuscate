@@ -357,7 +357,12 @@ impl ClientDataPlane {
             let target = topology.hops[link_index + 1].endpoint.clone();
             let ingress = self.inner_ingress[link_index].clone();
             self.hops[link_index].set_masque_relay_cb(Arc::new(std::sync::Mutex::new(Box::new(
-                move |_flow_id, _target, payload| {
+                move |flow_id, _target, payload| {
+                    log::debug!(
+                        "received nested QUIC datagram flow={} bytes={}",
+                        flow_id,
+                        payload.len()
+                    );
                     if !ingress.push(payload) {
                         log::warn!(
                             "dropping nested QUIC datagram after bounded ingress saturation"
