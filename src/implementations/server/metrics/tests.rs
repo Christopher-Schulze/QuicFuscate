@@ -1,6 +1,8 @@
 use super::*;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
 async fn metrics_server_serves_next_request_while_first_reader_is_silent() {
