@@ -278,10 +278,10 @@ test.describe("Button Semantics", () => {
 
     const serverSection = page.locator("section").filter({ has: page.getByText("Server", { exact: true }) }).first();
     await expect(serverSection).toContainText("127.0.0.1:4433");
+    await expect(page.getByText("203.0.113.42")).toBeVisible();
     await serverSection.getByRole("button", { name: "Clear" }).click();
     await expect(serverSection).not.toContainText("127.0.0.1:4433");
     await expect(serverSection).toContainText("-");
-    await expect(page.getByText("203.0.113.42")).toBeVisible();
 
     await nav.getByRole("button", { name: "Configuration" }).click();
     await expect(page.getByRole("main").getByText("Configuration", { exact: true })).toBeVisible();
@@ -307,6 +307,8 @@ test.describe("Button Semantics", () => {
 
     await nav.getByRole("button", { name: "Logs" }).click();
     await expect(page.getByRole("main").getByText("Logs", { exact: true })).toBeVisible();
+    await expect(page.getByText("client connected", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Clear" }).first()).toBeEnabled();
     const logsBase = {
       mode: count(counters, "GET /api/config/logging"),
       status: count(counters, "GET /api/status"),

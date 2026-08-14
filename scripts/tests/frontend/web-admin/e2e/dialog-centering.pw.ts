@@ -263,6 +263,8 @@ test.describe("Dialog Centering [Web-Admin]", () => {
     await stubAdminApi(page);
     await page.goto("/");
     await page.getByRole("navigation", { name: "Primary" }).getByRole("button", { name: "Logs" }).click();
+    await expect(page.getByText("admin init", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Clear" }).first()).toBeEnabled();
     await page.getByRole("button", { name: "Clear" }).first().click();
     await expect(page.getByText("Clear Live Output", { exact: true })).toBeVisible();
     await assertDialogCenteredInStage(page, testInfo, "clear-live-output");
