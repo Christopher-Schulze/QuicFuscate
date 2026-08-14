@@ -181,11 +181,13 @@ async function stubAdminApi(page: Page, opts: StubOptions = {}) {
             lines: [
               {
                 ts: ADMIN_LOG_TIMESTAMP_MS,
+                timestamp_valid: true,
                 level: "info",
                 msg: "admin init",
               },
             ],
             cursor: 1,
+            mode: "normal",
           },
         }),
       });

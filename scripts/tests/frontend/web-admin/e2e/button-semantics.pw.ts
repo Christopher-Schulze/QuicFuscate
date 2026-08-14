@@ -162,8 +162,9 @@ async function stubApi(page: Page, state: StubState, counters: Map<string, numbe
         body: JSON.stringify({
           success: true,
           data: {
-            lines: state.logs,
+            lines: state.logs.map((line) => ({ ...line, timestamp_valid: true })),
             cursor: state.logCursor,
+            mode: state.serverLogMode,
           },
         }),
       });
@@ -176,7 +177,24 @@ async function stubApi(page: Page, state: StubState, counters: Map<string, numbe
         contentType: "application/json",
         body: JSON.stringify({
           success: true,
-          data: [{ ip: "203.0.113.42" }, { ip: "198.51.100.27" }],
+          data: [
+            {
+              id: "client-203-0-113-42",
+              ip: "203.0.113.42",
+              bytes_in: 1024,
+              bytes_out: 2048,
+              connected_secs: 45,
+              stealth_mode: "manual",
+            },
+            {
+              id: "client-198-51-100-27",
+              ip: "198.51.100.27",
+              bytes_in: 512,
+              bytes_out: 768,
+              connected_secs: 30,
+              stealth_mode: "manual",
+            },
+          ],
         }),
       });
       return;
