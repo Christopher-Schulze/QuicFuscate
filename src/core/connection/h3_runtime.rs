@@ -22,6 +22,8 @@ impl QuicFuscateConnection {
             masque_datagram_cb: self.masque_datagram_cb.clone(),
             masque_control_cb: self.masque_control_cb.clone(),
             masque_cb: self.masque_cb.clone(),
+            masque_relay_cb: self.masque_relay_cb.clone(),
+            private_packet_protection_cb: self.private_packet_protection_cb.clone(),
             memory_pool: self.optimization_manager.memory_pool(),
         }
     }
@@ -47,6 +49,7 @@ impl QuicFuscateConnection {
         headers.insert(0, crate::transport::h3::Header::new(b":method", method));
         Self::inject_qkey_auth_header(self.qkey_auth_token_hex.as_deref(), &mut headers);
         Self::inject_connection_generation_header(self.client_connection_generation, &mut headers);
+        Self::inject_circuit_headers(self.circuit_id, self.circuit_hop_budget, &mut headers);
         headers
     }
 
@@ -136,16 +139,86 @@ impl QuicFuscateConnection {
                         // QUIC DATAGRAM queues so downlink sends work. Inlined here
                         // because h3 is borrowed from self.h3_conn while we also need
                         // &mut self.conn - a helper taking &mut self would conflict.
-                        if Self::is_connect_udp_request(&list)
-                            && self.masque_peer_stream_id.is_none()
-                        {
-                            self.masque_peer_stream_id = Some(sid);
-                            self.masque_peer_generation = Self::peer_generation(&list);
-                            self.masque_control_sent = false;
-                            let _ = h3.enable_masque_datagram(&mut self.conn, sid);
-                            crate::telemetry::MASQUE_ACTIVE
-                                .store(1, std::sync::atomic::Ordering::Relaxed);
-                            info!("MASQUE peer CONNECT-UDP flow recorded (stream={})", sid);
+                        if Self::is_masque_request(&list) {
+                            let request =
+                                crate::transport::h3::Connection::masque_connect_udp_request(&list)
+                                    .and_then(|request| {
+                                        if let Some((target, purpose)) = request {
+                                            return Ok(Some((Some(target), purpose)));
+                                        }
+                                        crate::transport::h3::Connection::masque_connect_ip_request(
+                                            &list,
+                                        )
+                                        .map(
+                                            |is_connect_ip| {
+                                                is_connect_ip
+                                                    .then_some((None, MasqueFlowPurpose::TunIp))
+                                            },
+                                        )
+                                    });
+                            match request {
+                                Ok(Some((target, purpose))) => {
+                                    let circuit = match Self::peer_circuit(&list) {
+                                        Ok(circuit) => circuit,
+                                        Err(error) => {
+                                            warn!(
+                                                "rejecting malformed circuit headers: stream={} error={}",
+                                                sid, error
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    if purpose == MasqueFlowPurpose::NextHopUdp && circuit.is_none()
+                                    {
+                                        warn!(
+                                            "rejecting next-hop MASQUE flow without circuit identity: stream={}",
+                                            sid
+                                        );
+                                        continue;
+                                    }
+                                    if self.masque_peer_flows.len() >= MAX_BOUND_MASQUE_FLOWS {
+                                        warn!(
+                                            "rejecting MASQUE flow beyond per-connection bound: sid={}",
+                                            sid
+                                        );
+                                        continue;
+                                    }
+                                    match h3.enable_masque_datagram(&mut self.conn, sid) {
+                                        Ok(flow_id) => {
+                                            self.masque_peer_flows.insert(
+                                                flow_id,
+                                                MasqueFlowBinding {
+                                                    stream_id: sid,
+                                                    target,
+                                                    purpose,
+                                                    generation: Self::peer_generation(&list),
+                                                    circuit_id: circuit.map(|value| value.0),
+                                                    hop_budget: circuit.map(|value| value.1),
+                                                    accepted: false,
+                                                    control_sent: false,
+                                                },
+                                            );
+                                            crate::telemetry::MASQUE_ACTIVE.store(
+                                                1,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                            info!(
+                                                "MASQUE peer flow recorded (stream={}, flow={}, purpose={:?})",
+                                                sid, flow_id, purpose
+                                            );
+                                        }
+                                        Err(error) => warn!(
+                                            "MASQUE peer flow registration failed: stream={} error={:?}",
+                                            sid, error
+                                        ),
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => warn!(
+                                    "rejecting malformed MASQUE request: stream={} error={:?}",
+                                    sid, error
+                                ),
+                            }
                         }
                         if list
                             .iter()
@@ -209,27 +282,31 @@ impl QuicFuscateConnection {
                         body_result?;
                     }
                     Ok(Some((
-                        _sid,
+                        sid,
                         crate::transport::h3::Event::MasqueCapsule { capsule_type, mut payload },
                     ))) => {
+                        let binding = self
+                            .masque_local_flows
+                            .get(&(sid / 4))
+                            .or_else(|| self.masque_peer_flows.get(&(sid / 4)));
                         Self::handle_masque_capsule_event(
                             capsule_type,
                             &mut payload,
-                            &bindings.masque_datagram_cb,
-                            &bindings.masque_control_cb,
-                            &bindings.masque_cb,
-                            &bindings.memory_pool,
-                            &self.tunnel_ingress_normalizer,
+                            sid / 4,
+                            binding,
+                            &MasqueDispatchContext {
+                                bindings: &bindings,
+                                normalizer: &self.tunnel_ingress_normalizer,
+                                local_flows: &self.masque_local_flows,
+                                peer_flows: &self.masque_peer_flows,
+                            },
                         );
                     }
                     Ok(Some((sid, crate::transport::h3::Event::Reset(err)))) => {
                         self.h3_tunnel_rx.remove(&sid);
                         self.h3_tunnel_response_started.remove(&sid);
-                        if self.masque_peer_stream_id == Some(sid) {
-                            self.masque_peer_stream_id = None;
-                            self.masque_peer_generation = None;
-                            self.masque_control_sent = false;
-                        }
+                        self.masque_peer_flows.retain(|_, flow| flow.stream_id != sid);
+                        self.masque_local_flows.retain(|_, flow| flow.stream_id != sid);
                         crate::optimize::telemetry::STEALTH_SIGNAL_RST
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if verbose_events {
@@ -249,11 +326,8 @@ impl QuicFuscateConnection {
                     Ok(Some((sid, crate::transport::h3::Event::Finished))) => {
                         self.h3_tunnel_rx.remove(&sid);
                         self.h3_tunnel_response_started.remove(&sid);
-                        if self.masque_peer_stream_id == Some(sid) {
-                            self.masque_peer_stream_id = None;
-                            self.masque_peer_generation = None;
-                            self.masque_control_sent = false;
-                        }
+                        self.masque_peer_flows.retain(|_, flow| flow.stream_id != sid);
+                        self.masque_local_flows.retain(|_, flow| flow.stream_id != sid);
                         if self.h3_peer_tunnel_stream_id == Some(sid) {
                             self.h3_peer_tunnel_stream_id = None;
                         }
@@ -274,18 +348,16 @@ impl QuicFuscateConnection {
                     Err(crate::transport::h3::Error::Done) => break,
                     Err(e) => return Err(e.into()),
                 }
-                let expected_flow_id = self
-                    .masque_stream_id
-                    .or(self.masque_peer_stream_id)
-                    .and_then(|stream_id| h3.masque_flow_id(stream_id));
                 Self::drain_masque_datagrams(
                     h3,
                     &mut self.conn,
                     &self.stealth_manager,
-                    &bindings.masque_datagram_cb,
-                    &bindings.masque_cb,
-                    &self.tunnel_ingress_normalizer,
-                    expected_flow_id,
+                    &MasqueDispatchContext {
+                        bindings: &bindings,
+                        normalizer: &self.tunnel_ingress_normalizer,
+                        local_flows: &self.masque_local_flows,
+                        peer_flows: &self.masque_peer_flows,
+                    },
                 );
             }
             // Always drain MASQUE datagrams after the H3 event loop exits.
@@ -295,18 +367,16 @@ impl QuicFuscateConnection {
             // uplink packets would be silently dropped whenever the H3 event
             // queue is empty (the common case after handshake).
             if let Some(ref mut h3) = self.h3_conn {
-                let expected_flow_id = self
-                    .masque_stream_id
-                    .or(self.masque_peer_stream_id)
-                    .and_then(|stream_id| h3.masque_flow_id(stream_id));
                 Self::drain_masque_datagrams(
                     h3,
                     &mut self.conn,
                     &self.stealth_manager,
-                    &bindings.masque_datagram_cb,
-                    &bindings.masque_cb,
-                    &self.tunnel_ingress_normalizer,
-                    expected_flow_id,
+                    &MasqueDispatchContext {
+                        bindings: &bindings,
+                        normalizer: &self.tunnel_ingress_normalizer,
+                        local_flows: &self.masque_local_flows,
+                        peer_flows: &self.masque_peer_flows,
+                    },
                 );
             }
             log::trace!(
@@ -366,6 +436,17 @@ impl QuicFuscateConnection {
         }
     }
 
+    fn dispatch_private_packet_protection_payload(
+        callback: &Option<PrivatePacketProtectionHandler>,
+        payload: &[u8],
+    ) {
+        if let Some(callback) = callback {
+            if let Ok(mut callback) = callback.lock() {
+                (callback)(payload);
+            }
+        }
+    }
+
     fn dispatch_masque_compressed_datagram(
         masque_datagram_cb: &Option<DatagramHandler>,
         masque_cb: &Option<CapsuleHandler>,
@@ -394,30 +475,40 @@ impl QuicFuscateConnection {
     fn handle_masque_capsule_event(
         capsule_type: u64,
         payload: &mut Vec<u8>,
-        masque_datagram_cb: &Option<DatagramHandler>,
-        masque_control_cb: &Option<CapsuleHandler>,
-        masque_cb: &Option<CapsuleHandler>,
-        memory_pool: &Arc<crate::optimize::MemoryPool>,
-        normalizer: &PacketNormalizer,
+        flow_id: u64,
+        binding: Option<&MasqueFlowBinding>,
+        context: &MasqueDispatchContext<'_>,
     ) {
         match capsule_type {
             0x00 => {
-                if normalizer.normalize_tunnel_ingress_vec(payload) != NormalizeResult::Dropped {
-                    Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, payload);
-                }
-            }
-            0x21 => {
-                Self::dispatch_masque_compressed_datagram(
-                    masque_datagram_cb,
-                    masque_cb,
-                    memory_pool,
+                Self::dispatch_bound_masque_payload(
+                    flow_id,
+                    binding,
                     payload,
-                    None,
-                    normalizer,
+                    &context.bindings.masque_datagram_cb,
+                    &context.bindings.masque_control_cb,
+                    &context.bindings.masque_cb,
+                    &context.bindings.masque_relay_cb,
+                    context.normalizer,
                 );
             }
+            0x21 => {
+                if binding.is_some_and(|flow| flow.purpose == MasqueFlowPurpose::TunIp) {
+                    Self::dispatch_masque_compressed_datagram(
+                        &context.bindings.masque_datagram_cb,
+                        &context.bindings.masque_cb,
+                        &context.bindings.memory_pool,
+                        payload,
+                        None,
+                        context.normalizer,
+                    );
+                }
+            }
             0x22 => {
-                if payload.len() >= 9 && payload[0] == 0x5D {
+                if binding.is_some_and(|flow| flow.purpose == MasqueFlowPurpose::TunIp)
+                    && payload.len() >= 9
+                    && payload[0] == 0x5D
+                {
                     let mut hb = [0u8; 2];
                     hb.copy_from_slice(&payload[1..3]);
                     let hash = u16::from_be_bytes(hb);
@@ -426,23 +517,76 @@ impl QuicFuscateConnection {
                     let ver = u16::from_be_bytes(vb);
                     if let Some(dict) = crate::compress::get_dict_by_id(hash, ver) {
                         Self::dispatch_masque_compressed_datagram(
-                            masque_datagram_cb,
-                            masque_cb,
-                            memory_pool,
+                            &context.bindings.masque_datagram_cb,
+                            &context.bindings.masque_cb,
+                            &context.bindings.memory_pool,
                             payload,
                             Some(&dict),
-                            normalizer,
+                            context.normalizer,
                         );
                     }
                 }
             }
             _ => {
-                Self::dispatch_masque_capsule_payload(
-                    masque_control_cb,
-                    masque_cb,
-                    capsule_type,
-                    payload,
-                );
+                if capsule_type == crate::qftls::PRIVATE_PACKET_PROTECTION_CAPSULE_TYPE
+                    && binding.is_some_and(|flow| {
+                        flow.accepted && Self::private_packet_protection_flow(flow.purpose)
+                    })
+                {
+                    Self::dispatch_private_packet_protection_payload(
+                        &context.bindings.private_packet_protection_cb,
+                        payload,
+                    );
+                } else {
+                    Self::dispatch_masque_capsule_payload(
+                        &context.bindings.masque_control_cb,
+                        &context.bindings.masque_cb,
+                        capsule_type,
+                        payload,
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn dispatch_bound_masque_payload(
+        flow_id: u64,
+        binding: Option<&MasqueFlowBinding>,
+        payload: &mut Vec<u8>,
+        masque_datagram_cb: &Option<DatagramHandler>,
+        masque_control_cb: &Option<CapsuleHandler>,
+        masque_cb: &Option<CapsuleHandler>,
+        masque_relay_cb: &Option<MasqueRelayHandler>,
+        normalizer: &PacketNormalizer,
+    ) {
+        let Some(binding) = binding else {
+            debug!("dropping MASQUE payload on unbound flow-id={flow_id}");
+            return;
+        };
+        if !binding.accepted {
+            debug!("dropping MASQUE payload on unauthenticated flow-id={flow_id}");
+            return;
+        }
+        match binding.purpose {
+            MasqueFlowPurpose::TunIp => {
+                if matches!(payload.first().map(|byte| byte >> 4), Some(4 | 6))
+                    && normalizer.normalize_tunnel_ingress_vec(payload) != NormalizeResult::Dropped
+                {
+                    Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, payload);
+                }
+            }
+            MasqueFlowPurpose::NextHopUdp => {
+                if let Some(callback) = masque_relay_cb {
+                    if let Ok(mut callback) = callback.lock() {
+                        if let Some(target) = binding.target.as_ref() {
+                            (callback)(flow_id, target, payload);
+                        }
+                    }
+                }
+            }
+            MasqueFlowPurpose::Control => {
+                Self::dispatch_masque_capsule_payload(masque_control_cb, masque_cb, 0x00, payload);
             }
         }
     }
@@ -451,39 +595,39 @@ impl QuicFuscateConnection {
         h3: &mut crate::transport::h3::Connection,
         conn: &mut crate::transport::Connection,
         stealth_manager: &StealthManager,
-        masque_datagram_cb: &Option<DatagramHandler>,
-        masque_cb: &Option<CapsuleHandler>,
-        normalizer: &PacketNormalizer,
-        expected_flow_id: Option<u64>,
+        context: &MasqueDispatchContext<'_>,
     ) {
         // Drain whenever a sink is present (TUN bridge) or the stealth runtime
         // explicitly enabled MASQUE datagrams. Without this, MASQUE-framed
         // datagrams would be left in the QUIC datagram queue and either dropped
         // or consumed as corrupted raw bytes by a bare dgram_recv loop.
-        let has_sink = masque_datagram_cb.is_some() || masque_cb.is_some();
+        let has_sink = context.bindings.masque_datagram_cb.is_some()
+            || context.bindings.masque_control_cb.is_some()
+            || context.bindings.masque_cb.is_some()
+            || context.bindings.masque_relay_cb.is_some();
         if stealth_manager.masque_datagram_enabled() || has_sink {
             while let Some((flow_id, mut payload)) = h3.try_recv_masque_datagram(conn) {
-                if expected_flow_id != Some(flow_id) {
-                    log::debug!(
-                        "dropping MASQUE datagram with unbound flow-id={} expected={:?}",
-                        flow_id,
-                        expected_flow_id
-                    );
-                    continue;
-                }
-                if normalizer.normalize_tunnel_ingress_vec(&mut payload) != NormalizeResult::Dropped
-                {
-                    Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, &payload);
-                }
+                let binding =
+                    context.local_flows.get(&flow_id).or_else(|| context.peer_flows.get(&flow_id));
+                Self::dispatch_bound_masque_payload(
+                    flow_id,
+                    binding,
+                    &mut payload,
+                    &context.bindings.masque_datagram_cb,
+                    &context.bindings.masque_control_cb,
+                    &context.bindings.masque_cb,
+                    &context.bindings.masque_relay_cb,
+                    context.normalizer,
+                );
             }
         }
     }
 
     /// Returns true if the H3 headers describe a MASQUE CONNECT-UDP request
     /// (`:method: CONNECT` + `:protocol: connect-udp`).
-    fn is_connect_udp_request(headers: &[crate::transport::h3::Header]) -> bool {
+    fn is_masque_request(headers: &[crate::transport::h3::Header]) -> bool {
         let mut method_connect = false;
-        let mut protocol_connect_udp = false;
+        let mut masque_protocol = false;
         for h in headers {
             if h.name().eq_ignore_ascii_case(b":method")
                 && h.value().eq_ignore_ascii_case(b"CONNECT")
@@ -491,12 +635,13 @@ impl QuicFuscateConnection {
                 method_connect = true;
             }
             if h.name().eq_ignore_ascii_case(b":protocol")
-                && h.value().eq_ignore_ascii_case(b"connect-udp")
+                && (h.value().eq_ignore_ascii_case(b"connect-udp")
+                    || h.value().eq_ignore_ascii_case(b"connect-ip"))
             {
-                protocol_connect_udp = true;
+                masque_protocol = true;
             }
         }
-        method_connect && protocol_connect_udp
+        method_connect && masque_protocol
     }
 
     fn peer_generation(headers: &[crate::transport::h3::Header]) -> Option<u64> {
@@ -515,6 +660,42 @@ impl QuicFuscateConnection {
             generation = Some(value);
         }
         generation
+    }
+
+    pub(super) fn peer_circuit(
+        headers: &[crate::transport::h3::Header],
+    ) -> Result<Option<([u8; 16], u8)>, &'static str> {
+        let circuit_ids = headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case(b"x-qf-circuit-id"))
+            .collect::<Vec<_>>();
+        let budgets = headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case(b"x-qf-hop-budget"))
+            .collect::<Vec<_>>();
+        if circuit_ids.is_empty() && budgets.is_empty() {
+            return Ok(None);
+        }
+        if circuit_ids.len() != 1 || budgets.len() != 1 {
+            return Err("circuit identity and hop budget must occur exactly once");
+        }
+        let raw_id = circuit_ids[0].value();
+        if raw_id.len() != 32 || !raw_id.iter().all(u8::is_ascii_hexdigit) {
+            return Err("circuit identity must contain 32 hexadecimal characters");
+        }
+        let mut circuit_id = [0u8; 16];
+        for (index, chunk) in raw_id.chunks_exact(2).enumerate() {
+            circuit_id[index] = std::str::from_utf8(chunk)
+                .ok()
+                .and_then(|value| u8::from_str_radix(value, 16).ok())
+                .ok_or("invalid circuit identity")?;
+        }
+        let hop_budget = std::str::from_utf8(budgets[0].value())
+            .ok()
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| (1..=qf_engine_types::MAX_CIRCUIT_HOPS).contains(value))
+            .ok_or("circuit hop budget is outside the implementation bound")?;
+        Ok(Some((circuit_id, hop_budget)))
     }
 }
 
@@ -686,6 +867,66 @@ impl QuicFuscateConnection {
         }
     }
 
+    /// Opens a purpose-bound CONNECT-UDP flow to the next circuit hop.
+    pub fn begin_next_hop_masque_tunnel(
+        &mut self,
+        proxy: &str,
+        target: &str,
+    ) -> Result<u64, crate::error::ConnectionError> {
+        if self.masque_local_flows.len() >= MAX_BOUND_MASQUE_FLOWS {
+            return Err(crate::error::ConnectionError::StreamLimit);
+        }
+        self.ensure_http3_initialized()?;
+        let parsed_target = MasqueUdpTarget::parse_authority(target)?;
+        let headers = self.build_masque_request_headers();
+        let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::InvalidState)?;
+        let stream_id = h3.connect_udp_for_purpose(
+            &mut self.conn,
+            proxy,
+            target,
+            MasqueFlowPurpose::NextHopUdp,
+            &headers,
+        )?;
+        let flow_id = h3.enable_masque_datagram(&mut self.conn, stream_id)?;
+        self.masque_local_flows.insert(
+            flow_id,
+            MasqueFlowBinding {
+                stream_id,
+                target: Some(parsed_target),
+                purpose: MasqueFlowPurpose::NextHopUdp,
+                generation: self.client_connection_generation,
+                circuit_id: self.circuit_id,
+                hop_budget: self.circuit_hop_budget,
+                accepted: true,
+                control_sent: false,
+            },
+        );
+        Ok(stream_id)
+    }
+
+    /// Sends one opaque inner QUIC datagram without IP normalization.
+    pub fn send_next_hop_masque_datagram(
+        &mut self,
+        stream_id: u64,
+        payload: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        let flow_id = stream_id / 4;
+        let valid = self.masque_local_flows.get(&flow_id).is_some_and(|flow| {
+            flow.stream_id == stream_id && flow.purpose == MasqueFlowPurpose::NextHopUdp
+        });
+        if !valid || payload.is_empty() || payload.len() > self.effective_masque_mtu() {
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+        let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
+        match h3.send_masque_datagram(&mut self.conn, stream_id, payload) {
+            Ok(()) => Ok(()),
+            Err(crate::transport::h3::Error::DgramQueueFull) => {
+                Err(crate::error::ConnectionError::DgramQueueFull)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Sends an ordinary raw IP packet downlink through the fastest safe peer carrier.
     ///
     /// A bare QUIC datagram fallback was intentionally removed: the client only
@@ -709,11 +950,16 @@ impl QuicFuscateConnection {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
 
+        let peer_stream_id = self
+            .masque_peer_flows
+            .values()
+            .find(|flow| flow.accepted && flow.purpose == MasqueFlowPurpose::TunIp)
+            .map(|flow| flow.stream_id);
         log::trace!("send_masque_downlink: payload len={} masque_mtu={} masque_peer_stream_id={:?} h3_conn={}",
-        payload.len(), self.effective_masque_mtu(), self.masque_peer_stream_id, self.h3_conn.is_some());
+        payload.len(), self.effective_masque_mtu(), peer_stream_id, self.h3_conn.is_some());
 
         if payload.len() <= self.effective_masque_mtu() {
-            if let Some(sid) = self.masque_peer_stream_id {
+            if let Some(sid) = peer_stream_id {
                 if let Some(ref mut h3) = self.h3_conn {
                     match h3.send_masque_datagram(&mut self.conn, sid, payload) {
                         Ok(()) => {
@@ -778,11 +1024,10 @@ impl QuicFuscateConnection {
 
     /// Maximum raw IP packet that fits the confirmed QUIC/FEC MASQUE path.
     pub fn effective_masque_mtu(&self) -> usize {
-        const QUIC_AND_MASQUE_OVERHEAD: usize = 64;
         self.conn
             .effective_path_mtu()
             .min(self.conn.max_send_udp_payload_size())
-            .saturating_sub(wire::MAX_DATAGRAM_OVERHEAD + QUIC_AND_MASQUE_OVERHEAD)
+            .saturating_sub(usize::from(qf_engine_types::NESTED_MASQUE_OVERHEAD))
     }
 
     /// Maximum inner IP packet supported by the complete tunnel carrier set.
@@ -803,14 +1048,165 @@ impl QuicFuscateConnection {
         self.masque_control_cb = Some(cb);
     }
 
+    /// Install the private packet-protection control sink without replacing assignment handling.
+    pub fn set_private_packet_protection_cb(&mut self, cb: PrivatePacketProtectionHandler) {
+        self.private_packet_protection_cb = Some(cb);
+    }
+
+    /// Return whether the private packet-protection control sink is installed.
+    pub fn has_private_packet_protection_cb(&self) -> bool {
+        self.private_packet_protection_cb.is_some()
+    }
+
+    /// Installs the authenticated opaque UDP relay sink used by intermediate hops.
+    pub fn set_masque_relay_cb(&mut self, cb: MasqueRelayHandler) {
+        self.masque_relay_cb = Some(cb);
+    }
+
+    pub fn set_masque_relay_response_queue(
+        &mut self,
+        queue: Arc<std::sync::Mutex<MasqueRelayResponseQueue>>,
+    ) {
+        self.masque_relay_response_queue = Some(queue);
+    }
+
+    pub fn masque_relay_response_queue(
+        &self,
+    ) -> Option<Arc<std::sync::Mutex<MasqueRelayResponseQueue>>> {
+        self.masque_relay_response_queue.as_ref().cloned()
+    }
+
+    /// Flushes bounded UDP relay responses back onto their exact peer flow.
+    pub fn flush_masque_relay_responses(&mut self) -> Result<usize, crate::error::ConnectionError> {
+        let Some(queue) = self.masque_relay_response_queue.as_ref().cloned() else {
+            return Ok(0);
+        };
+        let mut sent = 0usize;
+        loop {
+            let response = match queue.lock() {
+                Ok(mut queue) => queue.pop_front(),
+                Err(poisoned) => poisoned.into_inner().pop_front(),
+            };
+            let Some(response) = response else {
+                break;
+            };
+            let Some(binding) = self.masque_peer_flows.get(&response.flow_id) else {
+                continue;
+            };
+            if !binding.accepted || binding.purpose != MasqueFlowPurpose::NextHopUdp {
+                continue;
+            }
+            let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
+            match h3.send_masque_datagram(&mut self.conn, binding.stream_id, &response.payload) {
+                Ok(()) => sent = sent.saturating_add(1),
+                Err(crate::transport::h3::Error::DgramQueueFull) => {
+                    let enqueue = match queue.lock() {
+                        Ok(mut queue) => queue.enqueue(response.flow_id, response.payload),
+                        Err(poisoned) => {
+                            poisoned.into_inner().enqueue(response.flow_id, response.payload)
+                        }
+                    };
+                    if enqueue.is_err() {
+                        warn!("dropping relay response after retry queue saturation");
+                    }
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Snapshot of peer flows awaiting authentication and policy admission.
+    pub fn pending_peer_masque_flows(&self) -> Vec<PendingMasqueFlow> {
+        self.masque_peer_flows
+            .values()
+            .filter(|flow| !flow.accepted)
+            .map(|flow| {
+                (
+                    flow.stream_id,
+                    flow.target.clone(),
+                    flow.purpose,
+                    flow.circuit_id,
+                    flow.hop_budget,
+                )
+            })
+            .collect()
+    }
+
     /// Bind subsequent client H3 requests to one reconnect generation.
     pub fn set_client_connection_generation(&mut self, generation: u64) {
         self.client_connection_generation = (generation != 0).then_some(generation);
     }
 
+    /// Bind authenticated circuit identity and remaining hop budget to relay requests.
+    pub fn set_circuit_context(&mut self, circuit_id: [u8; 16], hop_budget: u8) {
+        self.circuit_id = Some(circuit_id);
+        self.circuit_hop_budget = Some(hop_budget);
+    }
+
     /// Return the generation supplied by a peer CONNECT-UDP request.
     pub fn masque_peer_generation(&self) -> Option<u64> {
-        self.masque_peer_generation
+        self.masque_peer_flows
+            .values()
+            .find(|flow| Self::private_packet_protection_flow(flow.purpose))
+            .and_then(|flow| flow.generation)
+    }
+
+    fn private_packet_protection_flow(purpose: MasqueFlowPurpose) -> bool {
+        matches!(
+            purpose,
+            MasqueFlowPurpose::TunIp | MasqueFlowPurpose::NextHopUdp | MasqueFlowPurpose::Control
+        )
+    }
+
+    /// Return whether a locally initiated authenticated MASQUE flow can carry private
+    /// packet-protection control capsules.
+    pub fn local_private_packet_protection_control_available(&self) -> bool {
+        self.masque_local_flows.values().any(|flow| {
+            flow.accepted
+                && Self::private_packet_protection_flow(flow.purpose)
+                && self.h3_conn.as_ref().is_some_and(|h3| h3.masque_established(flow.stream_id))
+        })
+    }
+
+    /// Return whether a local authenticated MASQUE flow exists, independent of whether its
+    /// response has already arrived. This lets a circuit bind the QKey transcript before the
+    /// private control runtime's first poll.
+    pub fn has_local_private_packet_protection_flow(&self) -> bool {
+        self.masque_local_flows.values().any(|flow| {
+            flow.accepted
+                && Self::private_packet_protection_flow(flow.purpose)
+                && self.h3_conn.as_ref().is_some_and(|h3| h3.masque_established(flow.stream_id))
+        })
+    }
+
+    /// Return whether an authenticated peer MASQUE flow can carry private packet-protection
+    /// control capsules.
+    pub fn peer_private_packet_protection_control_available(&self) -> bool {
+        self.masque_peer_flows
+            .values()
+            .any(|flow| flow.accepted && Self::private_packet_protection_flow(flow.purpose))
+    }
+
+    /// Accepts one authenticated peer flow after authorization and policy checks.
+    pub fn accept_peer_masque_flow(
+        &mut self,
+        stream_id: u64,
+    ) -> Result<bool, crate::error::ConnectionError> {
+        let flow_id = stream_id / 4;
+        let Some(flow) = self.masque_peer_flows.get(&flow_id) else {
+            return Ok(false);
+        };
+        if flow.stream_id != stream_id {
+            return Ok(false);
+        }
+        let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
+        h3.accept_masque_connect(&mut self.conn, stream_id)?;
+        if let Some(flow) = self.masque_peer_flows.get_mut(&flow_id) {
+            flow.accepted = true;
+        }
+        Ok(true)
     }
 
     /// Send one server control capsule on the authenticated peer MASQUE flow.
@@ -823,20 +1219,99 @@ impl QuicFuscateConnection {
         capsule_type: u64,
         payload: &[u8],
     ) -> Result<bool, crate::error::ConnectionError> {
-        if self.masque_control_sent {
+        let Some(flow_id) = self.masque_peer_flows.iter().find_map(|(flow_id, flow)| {
+            (flow.accepted && flow.purpose == MasqueFlowPurpose::TunIp).then_some(*flow_id)
+        }) else {
+            return Err(crate::error::ConnectionError::Done);
+        };
+        if self.masque_peer_flows.get(&flow_id).is_some_and(|flow| flow.control_sent) {
             return Ok(false);
         }
-        let stream_id = self.masque_peer_stream_id.ok_or(crate::error::ConnectionError::Done)?;
+        let stream_id = self.masque_peer_flows[&flow_id].stream_id;
         let capsule = crate::transport::h3::Connection::encode_capsule(capsule_type, payload);
         let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
         h3.send_capsule(&mut self.conn, stream_id, &capsule, false)?;
-        self.masque_control_sent = true;
+        if let Some(flow) = self.masque_peer_flows.get_mut(&flow_id) {
+            flow.control_sent = true;
+        }
         Ok(true)
+    }
+
+    pub fn peer_connect_ip_control_sent(&self) -> bool {
+        self.masque_peer_flows.values().any(|flow| {
+            flow.accepted && flow.purpose == MasqueFlowPurpose::TunIp && flow.control_sent
+        })
+    }
+
+    /// Send one control capsule on the accepted peer CONNECT-IP flow.
+    pub fn send_peer_connect_ip_capsule(
+        &mut self,
+        capsule_type: u64,
+        payload: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        let stream_id = self
+            .masque_peer_flows
+            .values()
+            .find(|flow| flow.accepted && flow.purpose == MasqueFlowPurpose::TunIp)
+            .map(|flow| flow.stream_id)
+            .ok_or(crate::error::ConnectionError::Done)?;
+        let capsule = crate::transport::h3::Connection::encode_capsule(capsule_type, payload);
+        let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
+        h3.send_capsule(&mut self.conn, stream_id, &capsule, false)?;
+        Ok(())
+    }
+
+    /// Send one private packet-protection control capsule on the local authenticated
+    /// CONNECT-IP flow. This path is deliberately independent from the one-shot assignment
+    /// guard and therefore supports proposal, selection, and confirmation messages.
+    pub fn send_private_packet_protection_capsule(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        let stream_id = self
+            .masque_local_flows
+            .values()
+            .find(|flow| flow.accepted && Self::private_packet_protection_flow(flow.purpose))
+            .map(|flow| flow.stream_id)
+            .ok_or(crate::error::ConnectionError::Done)?;
+        let capsule = crate::transport::h3::Connection::encode_capsule(
+            crate::qftls::PRIVATE_PACKET_PROTECTION_CAPSULE_TYPE,
+            payload,
+        );
+        let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
+        h3.send_capsule(&mut self.conn, stream_id, &capsule, false)?;
+        Ok(())
+    }
+
+    /// Send one private packet-protection control capsule on the accepted peer CONNECT-IP flow.
+    /// This is the server-side counterpart of the local-flow sender and has no assignment guard.
+    pub fn send_peer_private_packet_protection_capsule(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        let stream_id = self
+            .masque_peer_flows
+            .values()
+            .find(|flow| flow.accepted && Self::private_packet_protection_flow(flow.purpose))
+            .map(|flow| flow.stream_id)
+            .ok_or(crate::error::ConnectionError::Done)?;
+        let capsule = crate::transport::h3::Connection::encode_capsule(
+            crate::qftls::PRIVATE_PACKET_PROTECTION_CAPSULE_TYPE,
+            payload,
+        );
+        let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
+        h3.send_capsule(&mut self.conn, stream_id, &capsule, false)?;
+        Ok(())
     }
 
     /// Returns true if a MASQUE datagram sink has been installed.
     pub fn has_masque_datagram_cb(&self) -> bool {
         self.masque_datagram_cb.is_some()
+    }
+
+    /// Returns true if the authenticated opaque relay sink has been installed.
+    pub fn has_masque_relay_cb(&self) -> bool {
+        self.masque_relay_cb.is_some()
     }
 
     /// Installs a queue for raw IP packets that must be sent back to the peer
@@ -923,7 +1398,8 @@ impl QuicFuscateConnection {
                 debug!("Received {} bytes on stream {}", data.len(), sid);
                 debug!("{}", String::from_utf8_lossy(data));
             },
-        )
+        )?;
+        self.private_packet_protection_control_tick()
     }
 
     /// Polls HTTP/3 events and forwards received HEADERS/DATA frames to the provided sinks.
@@ -936,7 +1412,8 @@ impl QuicFuscateConnection {
         FH: FnMut(u64, &[crate::transport::h3::Header]),
         FB: FnMut(u64, &[u8]),
     {
-        self.poll_http3_event_loop("poll_http3_with_headers", false, on_headers, on_body)
+        self.poll_http3_event_loop("poll_http3_with_headers", false, on_headers, on_body)?;
+        self.private_packet_protection_control_tick()
     }
 
     /// Polls HTTP/3 events and forwards received DATA frames to the provided sink.

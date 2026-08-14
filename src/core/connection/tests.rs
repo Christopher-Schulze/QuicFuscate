@@ -20,6 +20,8 @@ fn test_connection() -> QuicFuscateConnection {
         optimization_manager,
         fec_config: FecConfig::default(),
         tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
+        private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
+        private_packet_protection_family: None,
     })
 }
 
@@ -91,6 +93,8 @@ fn asymmetric_stealth_server_emits_no_raw_h3_cover_stream() {
             optimization_manager,
             fec_config,
             tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
+            private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
+            private_packet_protection_family: None,
         })
     };
 
@@ -132,6 +136,39 @@ fn masque_request_headers_bind_auth_and_connection_generation() {
     assert!(headers
         .iter()
         .any(|header| { header.name() == b"x-qf-generation" && header.value() == b"47" }));
+}
+
+#[test]
+fn circuit_headers_roundtrip_a_bounded_identity_without_path_disclosure() {
+    let mut connection = test_connection();
+    let circuit_id = [0xab; 16];
+    connection.set_circuit_context(circuit_id, 3);
+
+    let headers = connection.build_masque_request_headers();
+
+    assert_eq!(QuicFuscateConnection::peer_circuit(&headers), Ok(Some((circuit_id, 3))));
+    assert_eq!(
+        headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case(b"x-qf-circuit-id"))
+            .count(),
+        1
+    );
+    assert!(!headers.iter().any(|header| {
+        header.name().eq_ignore_ascii_case(b"x-qf-circuit-path")
+            || header.name().eq_ignore_ascii_case(b"x-qf-circuit-depth")
+    }));
+}
+
+#[test]
+fn circuit_headers_reject_missing_duplicate_and_out_of_range_budgets() {
+    let id =
+        crate::transport::h3::Header::new(b"x-qf-circuit-id", b"abababababababababababababababab");
+    assert!(QuicFuscateConnection::peer_circuit(std::slice::from_ref(&id)).is_err());
+    let invalid_budget = crate::transport::h3::Header::new(b"x-qf-hop-budget", b"9");
+    assert!(QuicFuscateConnection::peer_circuit(&[id.clone(), invalid_budget]).is_err());
+    let valid_budget = crate::transport::h3::Header::new(b"x-qf-hop-budget", b"1");
+    assert!(QuicFuscateConnection::peer_circuit(&[id.clone(), id, valid_budget]).is_err());
 }
 
 #[test]
@@ -250,6 +287,81 @@ fn masque_downlink_retry_precedes_later_responses_and_shutdown_discards_all_owne
     connection.retry_masque_downlink_packet(vec![5, 6, 7]);
     assert_eq!(connection.discard_masque_downlink_packets(), (2, 5));
     assert!(connection.pop_masque_downlink_packet().is_none());
+}
+
+#[test]
+fn next_hop_masque_payload_bypasses_ip_normalization_byte_exactly() {
+    let target = MasqueUdpTarget::parse_authority("relay.example:443").expect("valid relay target");
+    let binding = MasqueFlowBinding {
+        stream_id: 4,
+        target: Some(target.clone()),
+        purpose: MasqueFlowPurpose::NextHopUdp,
+        generation: Some(7),
+        circuit_id: Some([1; 16]),
+        hop_budget: Some(1),
+        accepted: true,
+        control_sent: false,
+    };
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_clone = Arc::clone(&observed);
+    let relay: MasqueRelayHandler =
+        Arc::new(std::sync::Mutex::new(Box::new(move |flow_id, received_target, payload| {
+            observed_clone.lock().unwrap().push((
+                flow_id,
+                received_target.clone(),
+                payload.to_vec(),
+            ));
+        })));
+    let mut opaque_inner_quic = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+
+    QuicFuscateConnection::dispatch_bound_masque_payload(
+        9,
+        Some(&binding),
+        &mut opaque_inner_quic,
+        &None,
+        &None,
+        &None,
+        &Some(relay),
+        &PacketNormalizer::new(OsFingerprintProfile::Disabled),
+    );
+
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        &[(9, target, vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x01])]
+    );
+}
+
+#[test]
+fn tun_ip_masque_payload_rejects_the_same_non_ip_bytes() {
+    let binding = MasqueFlowBinding {
+        stream_id: 4,
+        target: None,
+        purpose: MasqueFlowPurpose::TunIp,
+        generation: Some(7),
+        circuit_id: None,
+        hop_budget: None,
+        accepted: true,
+        control_sent: false,
+    };
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_clone = Arc::clone(&observed);
+    let datagram: DatagramHandler = Arc::new(std::sync::Mutex::new(Box::new(move |payload| {
+        observed_clone.lock().unwrap().push(payload.to_vec());
+    })));
+    let mut non_ip = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+
+    QuicFuscateConnection::dispatch_bound_masque_payload(
+        9,
+        Some(&binding),
+        &mut non_ip,
+        &Some(datagram),
+        &None,
+        &None,
+        &None,
+        &PacketNormalizer::new(OsFingerprintProfile::Disabled),
+    );
+
+    assert!(observed.lock().unwrap().is_empty());
 }
 
 #[test]
