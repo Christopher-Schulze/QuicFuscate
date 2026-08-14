@@ -4076,7 +4076,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-fec.sh` - FEC suite (all modes + GF16/GF8/Wiedemann/Partial/Adaptive/Stress; add `--refactor` / `--refactor-only` for structural invariants; environment and Cargo arguments stay array-safe)
 - `test-fec-simulation.sh` - FEC simulation under varied loss/threads/mode matrices with per-cell command status
 - `test-fec-e2e-loss.sh` - Deterministic FEC model-loss matrix using seeded `fec_sim` runs and explicit ratio thresholds; it does not exercise real QUIC, TLS, congestion control, ACK processing, or TUN delivery. Native transport proof is owned by the `tun-e2e-fec-*` netns harnesses.
-- `test-stealth.sh` - Stealth suite (browser/OS profiles, padding, DoH, H3 masquerade, rotation)
+- `test-stealth.sh` - Stealth suite (browser/OS profiles, padding, DoH, H3 masquerade, rotation); supports granular `--only modes,qftls,padding,masque,integration` selection with explicit omitted-scope evidence
 - `test-stealth-brain.sh` - StealthBrain ACK policy optimization tests with per-cell required-command status and explicit optional probe status
 - `test-probe-detection.sh` - Active-probe validation (detector invariants, reality fallback rotation, optional stealth pressure path)
 - `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations); supports granular `--only` scope selection with explicit omitted-scope evidence
