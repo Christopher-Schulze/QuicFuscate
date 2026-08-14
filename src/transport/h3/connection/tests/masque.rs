@@ -53,6 +53,84 @@ fn connect_udp_with_headers_preserves_auth_header() {
 }
 
 #[test]
+fn connect_udp_request_parser_binds_target_and_flow_purpose() {
+    let headers = [
+        Header::new(b":method", b"CONNECT"),
+        Header::new(b":protocol", b"connect-udp"),
+        Header::new(b":scheme", b"https"),
+        Header::new(b":authority", b"entry.example.com"),
+        Header::new(b":path", b"/.well-known/masque/udp/2001%3Adb8%3A%3A7/4433/"),
+        Header::new(b"capsule-protocol", b"?1"),
+        Header::new(b"x-qf-flow-purpose", b"next-hop-udp"),
+    ];
+    let (target, purpose) = Connection::masque_connect_udp_request(&headers)
+        .expect("request syntax")
+        .expect("CONNECT-UDP request");
+    assert_eq!(target.authority(), "[2001:db8::7]:4433");
+    assert_eq!(purpose, MasqueFlowPurpose::NextHopUdp);
+}
+
+#[test]
+fn connect_udp_request_parser_rejects_duplicate_or_unknown_purpose() {
+    let base = [
+        Header::new(b":method", b"CONNECT"),
+        Header::new(b":protocol", b"connect-udp"),
+        Header::new(b":scheme", b"https"),
+        Header::new(b":authority", b"entry.example.com"),
+        Header::new(b":path", b"/.well-known/masque/udp/relay.example.com/4433/"),
+        Header::new(b"capsule-protocol", b"?1"),
+    ];
+    let mut duplicate = base.to_vec();
+    duplicate.push(Header::new(b":path", b"/.well-known/masque/udp/other.example.com/4433/"));
+    assert!(Connection::masque_connect_udp_request(&duplicate).is_err());
+
+    let mut unknown = base.to_vec();
+    unknown.push(Header::new(b"x-qf-flow-purpose", b"arbitrary-proxy"));
+    assert!(Connection::masque_connect_udp_request(&unknown).is_err());
+}
+
+#[test]
+fn connect_ip_uses_rfc9484_unrestricted_scope_and_strict_parser() {
+    let mut conn = make_conn();
+    let cfg = super::Config::new().expect("cfg");
+    let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+    let stream_id = h3
+        .connect_ip_with_headers(
+            &mut conn,
+            "exit.example.com:4433",
+            &[Header::new(b"x-qf-auth", b"token")],
+        )
+        .expect("CONNECT-IP");
+    let stream = h3.streams.get(&stream_id).expect("stream");
+    assert!(matches!(stream._stream_type, StreamType::Masque));
+    assert!(Connection::masque_connect_ip_request(&stream._headers).expect("valid request"));
+
+    let mut malformed = stream._headers.clone();
+    malformed.retain(|header| header.name() != b"capsule-protocol");
+    assert!(Connection::masque_connect_ip_request(&malformed).is_err());
+}
+
+#[test]
+fn masque_flow_ids_follow_quarter_stream_ids() {
+    let mut conn = make_conn();
+    let cfg = super::Config::new().expect("cfg");
+    let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
+    let first = h3.connect_udp(&mut conn, "proxy.test", "first.test:443").expect("first");
+    let second = h3
+        .connect_udp_for_purpose(
+            &mut conn,
+            "proxy.test",
+            "second.test:443",
+            MasqueFlowPurpose::NextHopUdp,
+            &[],
+        )
+        .expect("second");
+    assert_eq!(h3.enable_masque_datagram(&mut conn, first).expect("first flow"), first / 4);
+    assert_eq!(h3.enable_masque_datagram(&mut conn, second).expect("second flow"), second / 4);
+    assert_ne!(h3.masque_flow_id(first), h3.masque_flow_id(second));
+}
+
+#[test]
 fn masque_datagram_e2e_roundtrip() {
     // E2E Test: Create connection, establish MASQUE, send datagram, verify queue
     let mut conn = make_conn();

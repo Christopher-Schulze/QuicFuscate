@@ -276,12 +276,20 @@ impl Connection {
         target: &str,
         extra_headers: &[Header],
     ) -> Result<u64, Error> {
-        // Split target "host:port" into MASQUE path segments; fallback to old style if no ':'
-        let (host, port) = match target.rsplit_once(':') {
-            Some((h, p)) => (h, p),
-            None => (target, "443"),
-        };
-        let path = format!("/.well-known/masque/udp/{}/{}/", host, port);
+        self.connect_udp_for_purpose(conn, proxy, target, MasqueFlowPurpose::TunIp, extra_headers)
+    }
+
+    /// Establish a purpose-bound CONNECT-UDP stream from a strict target authority.
+    pub fn connect_udp_for_purpose(
+        &mut self,
+        conn: &mut super::super::super::Connection,
+        proxy: &str,
+        target: &str,
+        purpose: MasqueFlowPurpose,
+        extra_headers: &[Header],
+    ) -> Result<u64, Error> {
+        let target = MasqueUdpTarget::parse_authority(target)?;
+        let path = target.connect_udp_path();
         let mut headers = vec![
             Header::new(b":method", b"CONNECT"),
             Header::new(b":protocol", b"connect-udp"),
@@ -289,7 +297,14 @@ impl Connection {
             Header::new(b":authority", proxy.as_bytes()),
             Header::new(b":path", path.as_bytes()),
             Header::new(b"capsule-protocol", b"?1"),
+            Header::new(b"x-qf-flow-purpose", purpose.as_header_value()),
         ];
+        if extra_headers.iter().any(|header| {
+            header.name().eq_ignore_ascii_case(b"x-qf-flow-purpose")
+                || header.name().starts_with(b":")
+        }) {
+            return Err(Error::FrameUnexpected);
+        }
         headers.extend_from_slice(extra_headers);
         // Send request without FIN
         let sid = self.send_request(conn, &headers, false)?;
@@ -297,6 +312,90 @@ impl Connection {
             st._stream_type = StreamType::Masque;
         }
         Ok(sid)
+    }
+
+    /// Establish an RFC 9484 full-tunnel CONNECT-IP stream.
+    pub fn connect_ip_with_headers(
+        &mut self,
+        conn: &mut super::super::super::Connection,
+        proxy: &str,
+        extra_headers: &[Header],
+    ) -> Result<u64, Error> {
+        let mut headers = vec![
+            Header::new(b":method", b"CONNECT"),
+            Header::new(b":protocol", b"connect-ip"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b":authority", proxy.as_bytes()),
+            Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
+            Header::new(b"capsule-protocol", b"?1"),
+            Header::new(b"x-qf-flow-purpose", MasqueFlowPurpose::TunIp.as_header_value()),
+        ];
+        if proxy.is_empty()
+            || extra_headers.iter().any(|header| {
+                header.name().eq_ignore_ascii_case(b"x-qf-flow-purpose")
+                    || header.name().starts_with(b":")
+            })
+        {
+            return Err(Error::FrameUnexpected);
+        }
+        headers.extend_from_slice(extra_headers);
+        let stream_id = self.send_request(conn, &headers, false)?;
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream._stream_type = StreamType::Masque;
+        }
+        Ok(stream_id)
+    }
+
+    /// Parse one strict peer CONNECT-UDP request and its authenticated purpose.
+    pub fn masque_connect_udp_request(
+        headers: &[Header],
+    ) -> Result<Option<(MasqueUdpTarget, MasqueFlowPurpose)>, Error> {
+        let method = Self::unique_header_value(headers, b":method")?;
+        let protocol = Self::unique_header_value(headers, b":protocol")?;
+        if method != Some(&b"CONNECT"[..]) || protocol != Some(&b"connect-udp"[..]) {
+            return Ok(None);
+        }
+        let scheme = Self::unique_header_value(headers, b":scheme")?;
+        let authority = Self::unique_header_value(headers, b":authority")?;
+        let path = Self::unique_header_value(headers, b":path")?;
+        let capsules = Self::unique_header_value(headers, b"capsule-protocol")?;
+        if !scheme.is_some_and(|value| value.eq_ignore_ascii_case(b"https"))
+            || !authority.is_some_and(|value| !value.is_empty())
+            || capsules != Some(&b"?1"[..])
+        {
+            return Err(Error::FrameUnexpected);
+        }
+        let target = MasqueUdpTarget::parse_connect_udp_path(path.ok_or(Error::FrameUnexpected)?)?;
+        let purpose = match Self::unique_header_value(headers, b"x-qf-flow-purpose")? {
+            Some(value) => {
+                MasqueFlowPurpose::from_header_value(value).ok_or(Error::FrameUnexpected)?
+            }
+            None => MasqueFlowPurpose::TunIp,
+        };
+        Ok(Some((target, purpose)))
+    }
+
+    /// Validate an RFC 9484 unrestricted CONNECT-IP request.
+    pub fn masque_connect_ip_request(headers: &[Header]) -> Result<bool, Error> {
+        let method = Self::unique_header_value(headers, b":method")?;
+        let protocol = Self::unique_header_value(headers, b":protocol")?;
+        if method != Some(&b"CONNECT"[..]) || protocol != Some(&b"connect-ip"[..]) {
+            return Ok(false);
+        }
+        let scheme = Self::unique_header_value(headers, b":scheme")?;
+        let authority = Self::unique_header_value(headers, b":authority")?;
+        let path = Self::unique_header_value(headers, b":path")?;
+        let capsules = Self::unique_header_value(headers, b"capsule-protocol")?;
+        let purpose = Self::unique_header_value(headers, b"x-qf-flow-purpose")?;
+        if !scheme.is_some_and(|value| value.eq_ignore_ascii_case(b"https"))
+            || !authority.is_some_and(|value| !value.is_empty())
+            || path != Some(&b"/.well-known/masque/ip/*/*/"[..])
+            || capsules != Some(&b"?1"[..])
+            || purpose != Some(MasqueFlowPurpose::TunIp.as_header_value())
+        {
+            return Err(Error::FrameUnexpected);
+        }
+        Ok(true)
     }
 
     pub(super) fn masque_response_status(headers: &[Header]) -> Option<u16> {
@@ -550,7 +649,7 @@ impl Connection {
     ) -> Result<u64, Error> {
         // Provision QUIC DATAGRAM queues (idempotent)
         conn.enable_datagrams(256, 256);
-        let flow_id = 0u64;
+        let flow_id = stream_id / 4;
         self.masque_flow.insert(stream_id, flow_id);
         Ok(flow_id)
     }
