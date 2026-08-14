@@ -45,6 +45,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+PROCESS_PROBE_BUILD_ARGS=()
+if [[ "$CLIENT_BINARY" == "$PROJECT_ROOT/target/debug/qf-e2e-client" && ! -x "$CLIENT_BINARY" ]]; then
+  PROCESS_PROBE_BUILD_ARGS+=(--bin qf-e2e-client)
+fi
+if [[ "$POLICY_PROBE_BINARY" == "$PROJECT_ROOT/target/debug/qf-ddos-policy-probe" && ! -x "$POLICY_PROBE_BINARY" ]]; then
+  PROCESS_PROBE_BUILD_ARGS+=(--bin qf-ddos-policy-probe)
+fi
+if [[ "${#PROCESS_PROBE_BUILD_ARGS[@]}" -gt 0 ]]; then
+  echo "Building the default DDoS process probes"
+  cargo build --features process-probes "${PROCESS_PROBE_BUILD_ARGS[@]}"
+fi
+
 if [[ -z "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="$PROJECT_ROOT/scripts/out/tests/ddos-admission-$(date +%Y%m%d_%H%M%S)"
 fi

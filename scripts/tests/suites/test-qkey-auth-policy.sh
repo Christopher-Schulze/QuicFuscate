@@ -47,6 +47,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$PROBE_BINARY" == "$PROJECT_ROOT/target/debug/qf-e2e-client" && ! -x "$PROBE_BINARY" ]]; then
+  echo "Building the default QKey process probe"
+  cargo build --bin qf-e2e-client --features process-probes
+fi
+
 if [[ -z "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="$PROJECT_ROOT/scripts/out/tests/qkey-auth-policy-$(date +%Y%m%d_%H%M%S)"
 fi

@@ -1686,6 +1686,8 @@ Binary entrypoints:
 - `src/bin/qf-e2e-desktop.rs` - headless desktop-style Engine E2E probe (connect/stats/disconnect).
 - `src/bin/quicfuscate-ctl.rs` - Unix admin socket CLI (`status`, `clients`, `kick`, `block`, `reload`, `qkey`, `shutdown`).
 
+The process-real E2E and DDoS probes require the explicit `process-probes` Cargo feature. Their owning suites build that feature on demand, so ordinary focused Cargo tests do not compile unrelated probe binaries.
+
 Engine module (`src/engine/`):
 - `src/engine/mod.rs` - engine module root and public exports.
 - `src/engine/config.rs` - typed engine config schema, enums, validation, builder.
@@ -2228,6 +2230,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 | internal | `internal_wiedemann` | none | Internal FEC Wiedemann policy |
 | internal | `internal_avx10_preview` | none | Internal AVX10 preview dispatch branch |
 | test | `rust-tests` | none | Rust integration and feature-gated test targets |
+| test | `process-probes` | `client`, `server`, `rate_limiter`, `rust-tests` | Explicit process-real E2E/DDoS probe binaries; omitted from ordinary Cargo test builds |
 | test | `benches` | none | Criterion and benchmark target compilation |
 | test | `masque-tests` | none | MASQUE-specific test branches |
 | test | `tun-tests` | none | TUN example/test target contract |
