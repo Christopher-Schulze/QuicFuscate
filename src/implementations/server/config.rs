@@ -78,6 +78,8 @@ pub struct ServerConfig {
     pub downlink_scheduler_rate_bytes_per_second: u64,
     /// Shared downlink token-bucket burst. Zero disables the shaper.
     pub downlink_scheduler_burst_bytes: u64,
+    /// Explicitly allowlisted intermediate-hop CONNECT-UDP relay policy.
+    pub masque_relay: crate::implementations::server::masque_relay::MasqueRelayPolicy,
     /// Validated sustained DDoS detection and enhanced-admission policy.
     #[cfg(feature = "rate_limiter")]
     pub ddos_policy: limits::DdosPolicyConfig,
@@ -215,6 +217,8 @@ impl Default for ServerConfig {
             bandwidth_policy: BandwidthPolicy::default(),
             downlink_scheduler_rate_bytes_per_second: 0,
             downlink_scheduler_burst_bytes: 0,
+            masque_relay: crate::implementations::server::masque_relay::MasqueRelayPolicy::default(
+            ),
             #[cfg(feature = "rate_limiter")]
             ddos_policy: limits::DdosPolicyConfig::default(),
             #[cfg(feature = "rate_limiter")]
@@ -488,6 +492,7 @@ pub fn server_config_from_listen_addr(
     config.bandwidth_policy = load_bandwidth_policy_from_env()?;
     (config.downlink_scheduler_rate_bytes_per_second, config.downlink_scheduler_burst_bytes) =
         load_downlink_scheduler_from_env()?;
+    config.masque_relay = load_masque_relay_policy_from_env()?;
     #[cfg(feature = "rate_limiter")]
     {
         config.ddos_policy = load_ddos_policy_config_from_env()?;
@@ -495,6 +500,78 @@ pub fn server_config_from_listen_addr(
         config.blacklist = load_blacklist_config_from_env()?;
     }
     Ok(config)
+}
+
+fn load_masque_relay_policy_from_env(
+) -> Result<crate::implementations::server::masque_relay::MasqueRelayPolicy, String> {
+    use crate::implementations::server::masque_relay::{MasqueRelayPolicy, RelayCidr};
+
+    let mut policy = MasqueRelayPolicy {
+        enabled: env_flag_enabled("QUICFUSCATE_MASQUE_RELAY_ENABLED"),
+        allow_non_global_targets: env_flag_enabled(
+            "QUICFUSCATE_MASQUE_RELAY_ALLOW_NON_GLOBAL_TARGETS",
+        ),
+        ..MasqueRelayPolicy::default()
+    };
+    if let Some(hosts) = env_string("QUICFUSCATE_MASQUE_RELAY_ALLOWED_HOSTS") {
+        policy.allowed_hosts = hosts
+            .split(',')
+            .map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect();
+    }
+    if let Some(cidrs) = env_string("QUICFUSCATE_MASQUE_RELAY_ALLOWED_CIDRS") {
+        policy.allowed_cidrs = cidrs
+            .split(',')
+            .map(|value| RelayCidr::parse(value.trim()))
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    if let Some(ports) = env_string("QUICFUSCATE_MASQUE_RELAY_ALLOWED_PORTS") {
+        policy.allowed_ports = ports
+            .split(',')
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| format!("invalid MASQUE relay port: {value}"))
+            })
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+    }
+    policy.max_associations = usize::try_from(parse_auth_policy_env_u64(
+        "QUICFUSCATE_MASQUE_RELAY_MAX_ASSOCIATIONS",
+        policy.max_associations as u64,
+    )?)
+    .map_err(|_| "MASQUE relay association cap exceeds usize".to_string())?;
+    policy.max_associations_per_session = usize::try_from(parse_auth_policy_env_u64(
+        "QUICFUSCATE_MASQUE_RELAY_MAX_ASSOCIATIONS_PER_SESSION",
+        policy.max_associations_per_session as u64,
+    )?)
+    .map_err(|_| "MASQUE relay per-session cap exceeds usize".to_string())?;
+    policy.max_datagram_bytes = usize::try_from(parse_auth_policy_env_u64(
+        "QUICFUSCATE_MASQUE_RELAY_MAX_DATAGRAM_BYTES",
+        policy.max_datagram_bytes as u64,
+    )?)
+    .map_err(|_| "MASQUE relay datagram cap exceeds usize".to_string())?;
+    policy.max_dns_resolutions_per_minute = parse_auth_policy_env_u64(
+        "QUICFUSCATE_MASQUE_RELAY_MAX_DNS_RESOLUTIONS_PER_MINUTE",
+        policy.max_dns_resolutions_per_minute,
+    )?;
+    policy.max_packets_per_second = parse_auth_policy_env_u64(
+        "QUICFUSCATE_MASQUE_RELAY_MAX_PACKETS_PER_SECOND",
+        policy.max_packets_per_second,
+    )?;
+    policy.max_bytes_per_second = parse_auth_policy_env_u64(
+        "QUICFUSCATE_MASQUE_RELAY_MAX_BYTES_PER_SECOND",
+        policy.max_bytes_per_second,
+    )?;
+    policy.idle_timeout = Duration::from_secs(parse_auth_policy_env_u64(
+        "QUICFUSCATE_MASQUE_RELAY_IDLE_SECS",
+        policy.idle_timeout.as_secs(),
+    )?);
+    policy.validate()?;
+    Ok(policy)
 }
 
 impl ServerConfig {

@@ -233,6 +233,7 @@ fn auth_policy_rejects_before_qkey_registry_lookup() {
         auth_rate_limiter,
         retry_token_manager: None,
         clock: crate::time_source::ProtocolClock::default(),
+        crypto_config: &qf_crypto::CryptoConfig::default(),
     });
 
     assert!(result.is_none());

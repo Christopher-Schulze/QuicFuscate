@@ -26,6 +26,7 @@ mod bootstrap;
 mod config;
 mod ddos;
 mod dns_signals;
+mod errors;
 #[doc(hidden)]
 pub mod fsutil;
 mod http;
@@ -35,6 +36,7 @@ pub mod isolation;
 mod limits;
 mod live_auth;
 mod live_state;
+pub mod masque_relay;
 pub mod metrics;
 mod qkey_issue;
 pub mod qkey_registry;
@@ -77,6 +79,7 @@ pub use bandwidth::{
 pub use bootstrap::*;
 pub use config::*;
 use dns_signals::*;
+pub use errors::AcceptError;
 pub use ip_pool::{IpPool, Ipv6Pool};
 pub use isolation::{
     AssignedClientIps, ClientIsolationManager, DownlinkRoute, IsolationStats, UplinkDrop,
@@ -99,7 +102,6 @@ pub use metrics::{Metrics, RoutingOutcome, TunDownlinkBackpressureDrop};
 pub use qkey_issue::*;
 pub use routing::{detect_wan_interface, RoutingError, RoutingManager};
 pub use runtime_admin::*;
-pub use runtime_impl::*;
 pub use session::{Session, SessionError, SessionId, SessionManager, SessionStats};
 pub use tun_path::*;
 

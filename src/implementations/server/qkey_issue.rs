@@ -29,6 +29,17 @@ pub struct QKeyAuthState {
 }
 
 impl QKeyAuthState {
+    /// Return the authenticated, secret-free transcript binding for private control.
+    ///
+    /// The registry stores only the SHA-256 verifier digest. The shared engine-types helper
+    /// applies the same domain-separated transcript hash as the client token owner without
+    /// exposing either the raw QKey or the verifier bytes to callers.
+    pub fn authenticated_transcript_hash(&self) -> Option<[u8; 32]> {
+        qf_engine_types::authenticated_transcript_hash_from_verifier_hash_hex(
+            &self.expected_token_sha256,
+        )
+    }
+
     #[inline]
     pub fn begin_post_handshake_timeout(&mut self) {
         self.begin_post_handshake_timeout_at(ProtocolClock::default().now());

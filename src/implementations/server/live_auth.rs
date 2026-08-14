@@ -1,5 +1,12 @@
 use super::*;
 
+mod fanout;
+#[allow(unused_imports)]
+pub(super) use fanout::{
+    new_client_fanout_queue, ClientFanoutQueue, ClientFanoutQueueState, ClientFanoutReject,
+    MAX_CLIENT_FANOUT_DRAIN_BATCH, MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE,
+};
+
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
 pub(super) type LiveUringWorker = crate::optimize::uring_batch::UringBatchWorker;
 #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
@@ -206,6 +213,7 @@ pub fn reconcile_live_clients(
 
 pub struct LiveInitialAuthContext {
     pub initial_key_dcid: crate::transport::ConnectionId,
+    pub original_dcid: crate::transport::ConnectionId,
     pub version: u32,
     pub qkey_record: Option<QKeyRecord>,
     pub pending_qkey_auth: Option<QKeyAuthState>,
@@ -243,6 +251,7 @@ pub(crate) fn parse_live_server_initial_auth(
 
     let version = initial_hdr.version;
     let initial_key_dcid = crate::transport::ConnectionId::from_ref(&initial_hdr.dcid);
+    let mut original_dcid = initial_key_dcid;
     let mut initial_token = initial_hdr.token.take();
     if initial_token
         .as_deref()
@@ -254,6 +263,7 @@ pub(crate) fn parse_live_server_initial_auth(
         let claims = manager
             .validate(initial_token.as_deref().unwrap_or_default(), remote_ip, &initial_hdr.dcid)
             .map_err(|_| LiveInitialAuthError::InvalidCredential)?;
+        original_dcid = crate::transport::ConnectionId::from_ref(&claims.original_dcid);
         initial_token = Some(claims.credential);
     }
     let require_qkey = require_qkey_for_new_clients();
@@ -287,7 +297,13 @@ pub(crate) fn parse_live_server_initial_auth(
         qkey_record = Some(record);
     }
 
-    Ok(LiveInitialAuthContext { initial_key_dcid, version, qkey_record, pending_qkey_auth })
+    Ok(LiveInitialAuthContext {
+        initial_key_dcid,
+        original_dcid,
+        version,
+        qkey_record,
+        pending_qkey_auth,
+    })
 }
 
 pub fn apply_qkey_policy_overrides(
@@ -381,12 +397,40 @@ pub fn create_live_server_connection_with_runtime_and_clock(
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     clock: crate::time_source::ProtocolClock,
 ) -> Result<QuicFuscateConnection, String> {
+    create_live_server_connection_with_runtime_and_clock_and_original(
+        local_addr,
+        remote_addr,
+        transport_config,
+        stealth_config,
+        fec_config,
+        opt_params,
+        initial_key_dcid,
+        None,
+        runtime_owner,
+        clock,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_live_server_connection_with_runtime_and_clock_and_original(
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    transport_config: &mut crate::transport::Config,
+    stealth_config: crate::stealth::StealthConfig,
+    fec_config: crate::fec::FecConfig,
+    opt_params: crate::optimize::OptimizeConfig,
+    initial_key_dcid: &crate::transport::ConnectionId,
+    original_dcid: Option<&crate::transport::ConnectionId>,
+    runtime_owner: Option<Arc<StealthRuntimeOwner>>,
+    clock: crate::time_source::ProtocolClock,
+) -> Result<QuicFuscateConnection, String> {
     let mut scid_bytes = [0u8; crate::transport::MAX_CONN_ID_LEN];
     crate::transport::rand::rand_bytes(&mut scid_bytes);
     let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
-    QuicFuscateConnection::new_server_with_runtime_and_clock(
+    QuicFuscateConnection::new_server_with_runtime_and_clock_and_original(
         &scid,
         Some(initial_key_dcid),
+        original_dcid,
         local_addr,
         remote_addr,
         transport_config,
@@ -681,138 +725,6 @@ pub async fn flush_live_server_outgoing(
     Ok((bytes_sent, packets_sent))
 }
 
-#[derive(Debug)]
-pub(super) struct ClientFanoutPacket {
-    pub(super) source: SocketAddr,
-    pub(super) destination: IpAddr,
-    pub(super) packet: Vec<u8>,
-}
-
-const MAX_CLIENT_FANOUT_ENTRIES: usize = 256;
-const MAX_CLIENT_FANOUT_BYTES: usize = 384 * 1024;
-pub(super) const MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE: usize = 32;
-const MAX_CLIENT_FANOUT_BYTES_PER_SOURCE: usize = 64 * 1024;
-pub(super) const MAX_CLIENT_FANOUT_DRAIN_BATCH: usize = 64;
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ClientFanoutSourceUsage {
-    entries: usize,
-    bytes: usize,
-}
-
-#[derive(Debug)]
-pub(super) struct ClientFanoutQueueState {
-    packets: std::collections::VecDeque<ClientFanoutPacket>,
-    bytes: usize,
-    source_usage: std::collections::HashMap<SocketAddr, ClientFanoutSourceUsage>,
-    max_entries: usize,
-    max_bytes: usize,
-    max_source_entries: usize,
-    max_source_bytes: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ClientFanoutReject {
-    Queue,
-    Bytes,
-    PerSource,
-    PerSourceBytes,
-}
-
-impl ClientFanoutQueueState {
-    pub(super) fn new() -> Self {
-        Self::with_limits(
-            MAX_CLIENT_FANOUT_ENTRIES,
-            MAX_CLIENT_FANOUT_BYTES,
-            MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE,
-            MAX_CLIENT_FANOUT_BYTES_PER_SOURCE,
-        )
-    }
-
-    pub(super) fn with_limits(
-        max_entries: usize,
-        max_bytes: usize,
-        max_source_entries: usize,
-        max_source_bytes: usize,
-    ) -> Self {
-        Self {
-            packets: std::collections::VecDeque::new(),
-            bytes: 0,
-            source_usage: std::collections::HashMap::new(),
-            max_entries,
-            max_bytes,
-            max_source_entries,
-            max_source_bytes,
-        }
-    }
-
-    pub(super) fn enqueue(
-        &mut self,
-        source: SocketAddr,
-        destination: IpAddr,
-        packet: &[u8],
-    ) -> Result<(), ClientFanoutReject> {
-        let packet_bytes = packet.len();
-        if self.packets.len() >= self.max_entries {
-            return Err(ClientFanoutReject::Queue);
-        }
-        if packet_bytes > self.max_bytes.saturating_sub(self.bytes) {
-            return Err(ClientFanoutReject::Bytes);
-        }
-        let source_usage = self.source_usage.get(&source).copied().unwrap_or_default();
-        if source_usage.entries >= self.max_source_entries {
-            return Err(ClientFanoutReject::PerSource);
-        }
-        if packet_bytes > self.max_source_bytes.saturating_sub(source_usage.bytes) {
-            return Err(ClientFanoutReject::PerSourceBytes);
-        }
-
-        self.packets.push_back(ClientFanoutPacket { source, destination, packet: packet.to_vec() });
-        self.bytes += packet_bytes;
-        let source_usage = self.source_usage.entry(source).or_default();
-        source_usage.entries += 1;
-        source_usage.bytes += packet_bytes;
-        Ok(())
-    }
-
-    pub(super) fn pop_front(&mut self) -> Option<ClientFanoutPacket> {
-        let fanout = self.packets.pop_front()?;
-        let packet_bytes = fanout.packet.len();
-        self.bytes = self.bytes.saturating_sub(packet_bytes);
-        let remove_source = if let Some(source_usage) = self.source_usage.get_mut(&fanout.source) {
-            source_usage.entries = source_usage.entries.saturating_sub(1);
-            source_usage.bytes = source_usage.bytes.saturating_sub(packet_bytes);
-            source_usage.entries == 0
-        } else {
-            false
-        };
-        if remove_source {
-            self.source_usage.remove(&fanout.source);
-        }
-        Some(fanout)
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.packets.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.packets.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn bytes(&self) -> usize {
-        self.bytes
-    }
-}
-
-pub(super) type ClientFanoutQueue = Arc<std::sync::Mutex<ClientFanoutQueueState>>;
-
-pub(super) fn new_client_fanout_queue() -> ClientFanoutQueue {
-    Arc::new(std::sync::Mutex::new(ClientFanoutQueueState::new()))
-}
-
 pub(super) fn enqueue_client_fanout(
     queue: &ClientFanoutQueue,
     metrics: &Metrics,
@@ -1008,6 +920,9 @@ fn send_client_assignment(
     settings: &ServerAssignmentSettings,
     tun_enabled: bool,
 ) {
+    if conn.peer_connect_ip_control_sent() {
+        return;
+    }
     let Some(session_id) = session_id else {
         return;
     };
@@ -1054,6 +969,24 @@ fn send_client_assignment(
             return;
         }
     };
+    let connect_ip_capsules = match assignment.encode_connect_ip_capsules() {
+        Ok(capsules) => capsules,
+        Err(error) => {
+            log::warn!("RFC 9484 assignment for {} could not be encoded: {}", session_id, error);
+            return;
+        }
+    };
+    for (capsule_type, capsule_payload) in connect_ip_capsules {
+        if let Err(error) = conn.send_peer_connect_ip_capsule(capsule_type, &capsule_payload) {
+            log::warn!(
+                "RFC 9484 capsule send failed: session={} type={} error={:?}",
+                session_id,
+                capsule_type,
+                error
+            );
+            return;
+        }
+    }
     match conn
         .send_masque_control_once(crate::control_plane::CLIENT_ASSIGNMENT_CAPSULE_TYPE, &payload)
     {
@@ -1108,6 +1041,7 @@ pub(super) async fn process_live_server_client_datagram(
     tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     tun_notify: Arc<tokio::sync::Notify>,
     runtime_shutdown: Arc<AtomicBool>,
+    masque_relay_owner: Option<&crate::implementations::server::masque_relay::MasqueRelayOwner>,
     uring_worker: Option<&LiveUringWorker>,
 ) -> Result<LiveClientDatagramResult, DataPlaneFault> {
     use std::cell::Cell;
@@ -1156,7 +1090,25 @@ pub(super) async fn process_live_server_client_datagram(
     let auth_gate =
         Arc::new(AtomicBool::new(qkey_auth.as_ref().map(|state| state.authed).unwrap_or(true)));
     let auth_progress = Cell::new(QKeyDatagramAuthProgress::Pending);
+    let authenticated_transcript = Cell::new(false);
     let should_close: Cell<Option<&'static [u8]>> = Cell::new(None);
+
+    if let (Some(relay_owner), Some(relay_session_id)) = (masque_relay_owner, session_id) {
+        if conn.masque_relay_response_queue().is_none() {
+            let queue =
+                Arc::new(std::sync::Mutex::new(qf_transport_types::MasqueRelayResponseQueue::new(
+                    MAX_MASQUE_DOWNLINK_RESPONSES,
+                    MAX_MASQUE_DOWNLINK_RESPONSE_BYTES,
+                )));
+            conn.set_masque_relay_response_queue(Arc::clone(&queue));
+        }
+        // The owner callback carries a session lease. Install it once per
+        // connection: replacing it on every packet would drop the previous
+        // lease and enqueue session teardown while the connection is active.
+        if !conn.has_masque_relay_cb() {
+            conn.set_masque_relay_cb(relay_owner.handler(relay_session_id.as_u64()));
+        }
+    }
 
     // Install the MASQUE→TUN sink when TUN bridging is active. Decoded MASQUE
     // CONNECT-UDP datagram payloads (raw IP packets) are written to the server
@@ -1279,6 +1231,7 @@ pub(super) async fn process_live_server_client_datagram(
             QKeyHeaderAuthOutcome::Unchanged => {}
             QKeyHeaderAuthOutcome::Authenticated => {
                 auth_gate.store(true, AtomicOrdering::Relaxed);
+                authenticated_transcript.set(true);
                 auth_progress.set(QKeyDatagramAuthProgress::Authenticated);
             }
             QKeyHeaderAuthOutcome::Reject(reason) => {
@@ -1353,12 +1306,85 @@ pub(super) async fn process_live_server_client_datagram(
     ) {
         log::warn!("HTTP/3 header/body poll failed for {}: {:?}", addr, error);
     }
+    if authenticated_transcript.get() {
+        if let Some(transcript_hash) = expected_token_sha256
+            .as_deref()
+            .and_then(qf_engine_types::authenticated_transcript_hash_from_verifier_hash_hex)
+        {
+            conn.set_authenticated_qkey_transcript_hash(transcript_hash);
+        }
+    }
 
     // A successful CONNECT response is the client-visible data-plane barrier.
     // For QKey clients it is queued only after the CONNECT headers authenticated;
     // the caller commits bandwidth ownership synchronously before receiving the
     // client's next datagram.
     if should_close.get().is_none() && auth_gate.load(AtomicOrdering::Relaxed) {
+        for (stream_id, target, purpose, circuit_id, hop_budget) in conn.pending_peer_masque_flows()
+        {
+            let admitted = match purpose {
+                crate::transport::h3::MasqueFlowPurpose::TunIp => false,
+                crate::transport::h3::MasqueFlowPurpose::Control => true,
+                crate::transport::h3::MasqueFlowPurpose::NextHopUdp => {
+                    let (Some(circuit_id), Some(hop_budget)) = (circuit_id, hop_budget) else {
+                        log::warn!(
+                            "Rejecting MASQUE relay flow for {} without a valid circuit context",
+                            addr
+                        );
+                        continue;
+                    };
+                    let Some(relay_owner) = masque_relay_owner else {
+                        log::warn!(
+                            "Rejecting MASQUE relay flow for {} because relay mode is disabled",
+                            addr
+                        );
+                        continue;
+                    };
+                    let (Some(relay_session_id), Some(target), Some(responses)) =
+                        (session_id, target, conn.masque_relay_response_queue())
+                    else {
+                        log::warn!("Rejecting incomplete MASQUE relay flow for {}", addr);
+                        continue;
+                    };
+                    match relay_owner
+                        .authorize_flow(
+                            relay_session_id.as_u64(),
+                            stream_id / 4,
+                            target,
+                            circuit_id,
+                            hop_budget,
+                            responses,
+                        )
+                        .await
+                    {
+                        Ok(()) => true,
+                        Err(error) => {
+                            log::warn!(
+                                "Rejecting MASQUE relay flow for {} on stream {}: {}",
+                                addr,
+                                stream_id,
+                                error
+                            );
+                            false
+                        }
+                    }
+                }
+            };
+            if admitted {
+                match conn.accept_peer_masque_flow(stream_id) {
+                    Ok(true) => log::info!(
+                        "Authenticated MASQUE {:?} flow accepted for {} on stream {}",
+                        purpose,
+                        addr,
+                        stream_id
+                    ),
+                    Ok(false) => {}
+                    Err(error) => {
+                        log::warn!("MASQUE {:?} response failed for {}: {:?}", purpose, addr, error)
+                    }
+                }
+            }
+        }
         let masque_ready = match conn.accept_peer_masque_tunnel() {
             Ok(true) => {
                 log::info!("Authenticated MASQUE data plane accepted for {}", addr);
@@ -1370,6 +1396,17 @@ pub(super) async fn process_live_server_client_datagram(
                 false
             }
         };
+        // The first private-protection proposal can arrive on the next UDP datagram. Prime the
+        // authenticated control owner now that any peer flow, including NextHopUdp relay flows,
+        // is accepted. Otherwise the H3 dispatcher would consume that proposal before a callback
+        // exists. The call is intentionally outside the TunIp-only `masque_ready` branch.
+        if let Err(error) = conn.private_packet_protection_control_tick() {
+            log::warn!(
+                "Private packet-protection control bootstrap failed for {}: {:?}",
+                addr,
+                error
+            );
+        }
         if masque_ready {
             send_client_assignment(
                 conn,
@@ -1395,6 +1432,9 @@ pub(super) async fn process_live_server_client_datagram(
     }
 
     drain_masque_downlink_responses(conn, addr, metrics);
+    if let Err(error) = conn.flush_masque_relay_responses() {
+        log::warn!("MASQUE relay response flush failed for {}: {:?}", addr, error);
+    }
 
     flush_live_server_outgoing(
         socket,

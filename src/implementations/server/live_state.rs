@@ -1,5 +1,7 @@
 use super::*;
 
+mod domain;
+mod qkey_auth;
 #[path = "live_state/runtime_support.rs"]
 mod runtime_support;
 pub(super) use runtime_support::*;
@@ -53,6 +55,7 @@ pub(crate) struct LiveClientBuildRequest<'a> {
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
     pub retry_token_manager: Option<Arc<crate::implementations::server::ddos::RetryTokenManager>>,
     pub clock: crate::time_source::ProtocolClock,
+    pub crypto_config: &'a qf_crypto::CryptoConfig,
 }
 
 fn complete_auth_attempt(
@@ -204,6 +207,7 @@ pub(crate) fn build_live_server_client_init(
         request.fec_cfg_shared,
         request.opt_params_shared,
         request.stealth_config,
+        request.crypto_config,
     );
     let runtime_generation = runtime_policy.generation;
     if let Some(state) = initial_ctx.pending_qkey_auth.as_mut() {
@@ -232,7 +236,7 @@ pub(crate) fn build_live_server_client_init(
         );
         return None;
     }
-    match create_live_server_connection_with_runtime_and_clock(
+    match create_live_server_connection_with_runtime_and_clock_and_original(
         request.local_addr,
         request.remote_addr,
         &mut selected_transport,
@@ -240,14 +244,21 @@ pub(crate) fn build_live_server_client_init(
         conn_fec_cfg,
         opt_params,
         &initial_ctx.initial_key_dcid,
+        Some(&initial_ctx.original_dcid),
         request.stealth_runtime.clone(),
         request.clock,
     ) {
-        Ok(connection) => Some(LiveClientInit {
-            connection,
-            pending_qkey_auth: initial_ctx.pending_qkey_auth,
-            runtime_generation,
-        }),
+        Ok(mut connection) => {
+            connection.set_private_packet_protection_policy(
+                runtime_policy.crypto.packet_protection_mode,
+                runtime_policy.crypto.private_family(),
+            );
+            Some(LiveClientInit {
+                connection,
+                pending_qkey_auth: initial_ctx.pending_qkey_auth,
+                runtime_generation,
+            })
+        }
         Err(error) => {
             log::error!("failed to create server connection: {}", error);
             complete_auth_attempt(
@@ -289,195 +300,6 @@ pub(super) struct LiveServerDomain {
     pub(super) shared: SharedServerDomain,
     client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     dns_admission: Arc<crate::dns::DnsAdmission>,
-}
-
-impl LiveServerDomain {
-    #[allow(dead_code)]
-    pub(super) fn try_new(server_config: &ServerConfig) -> Result<Self, String> {
-        Self::try_new_with_clock(server_config, &crate::time_source::ProtocolClock::default())
-    }
-
-    fn try_new_with_clock(
-        server_config: &ServerConfig,
-        clock: &crate::time_source::ProtocolClock,
-    ) -> Result<Self, String> {
-        let dns_admission = Arc::new(
-            crate::dns::DnsAdmission::try_new_with_clock(server_config.dns_admission, clock)
-                .map_err(|error| format!("server DNS admission configuration: {error}"))?,
-        );
-        Ok(Self {
-            shared: SharedServerDomain::try_new_with_clock(server_config, clock)?,
-            client_snapshots: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            dns_admission,
-        })
-    }
-
-    pub(super) fn accept(
-        &self,
-        remote_addr: SocketAddr,
-    ) -> Result<(SessionId, Arc<SessionStats>, AssignedClientIps), AcceptError> {
-        let (session_id, stats, assigned_ips) = self.shared.accept(remote_addr)?;
-        let source_ip = remote_addr.ip().to_string();
-        let client_id = session_id.as_u64().to_string();
-        crate::audit::audit(
-            crate::audit::AuditEventType::ConnectionEstablished,
-            crate::audit::AuditSeverity::Info,
-            Some(&source_ip),
-            Some(&client_id),
-            "Client connection accepted",
-        );
-        Ok((session_id, stats, assigned_ips))
-    }
-
-    pub(super) fn remove_remote(&self, remote_addr: SocketAddr) {
-        let Some(session_id) = self.shared.sessions.read().session_id_by_remote_addr(remote_addr)
-        else {
-            self.dns_admission
-                .remove_identity(crate::dns::DnsAdmissionIdentity::Source(remote_addr.ip()));
-            #[cfg(feature = "rate_limiter")]
-            self.shared.remove_rate_limited_ip(remote_addr.ip());
-            self.remove_remote_snapshot(remote_addr);
-            return;
-        };
-        let source_ip = remote_addr.ip().to_string();
-        let client_id = session_id.as_u64().to_string();
-        crate::audit::audit(
-            crate::audit::AuditEventType::ConnectionClosed,
-            crate::audit::AuditSeverity::Info,
-            Some(&source_ip),
-            Some(&client_id),
-            "Client session removed",
-        );
-        self.shared.remove(session_id);
-        self.dns_admission
-            .remove_identity(crate::dns::DnsAdmissionIdentity::Session(session_id.as_u64()));
-        self.dns_admission
-            .remove_identity(crate::dns::DnsAdmissionIdentity::Source(remote_addr.ip()));
-        #[cfg(feature = "rate_limiter")]
-        self.shared.remove_rate_limited_ip(remote_addr.ip());
-        self.remove_remote_snapshot(remote_addr);
-    }
-
-    fn rebind_remote(&self, old_addr: SocketAddr, new_addr: SocketAddr) -> bool {
-        let mut sessions = self.shared.sessions.write();
-        if sessions.rebind_remote_addr(old_addr, new_addr).is_err() {
-            return false;
-        }
-        drop(sessions);
-        let mut limiter = self.shared.connection_limiter.lock();
-        limiter.remove(old_addr.ip());
-        limiter.add(new_addr.ip());
-        self.dns_admission.remove_identity(crate::dns::DnsAdmissionIdentity::Source(old_addr.ip()));
-        #[cfg(feature = "rate_limiter")]
-        self.shared.remove_rate_limited_ip(old_addr.ip());
-        if let Ok(mut guard) = self.client_snapshots.lock() {
-            if let Some(snapshot) = guard.remove(&old_addr) {
-                guard.insert(new_addr, snapshot);
-            }
-        }
-        true
-    }
-
-    fn session_stats_by_remote(&self, remote_addr: SocketAddr) -> Option<Arc<SessionStats>> {
-        self.shared.sessions.read().stats_by_remote_addr(remote_addr)
-    }
-
-    pub(super) fn session_id_by_remote(&self, remote_addr: SocketAddr) -> Option<SessionId> {
-        self.shared.sessions.read().session_id_by_remote_addr(remote_addr)
-    }
-
-    fn assigned_ips_by_remote(&self, remote_addr: SocketAddr) -> Option<AssignedClientIps> {
-        self.shared.sessions.read().get_by_remote_addr(remote_addr).map(|session| {
-            AssignedClientIps { ipv4: session.client_ip(), ipv6: session.client_ipv6() }
-        })
-    }
-
-    pub(super) fn remote_addr_for_identity(&self, identity: &ClientIdentity) -> Option<SocketAddr> {
-        match identity {
-            ClientIdentity::Remote(addr) => Some(*addr),
-            ClientIdentity::Session(session_id) => {
-                self.shared.sessions.read().remote_addr_by_session_id(*session_id)
-            }
-        }
-    }
-
-    pub(super) fn active_session_count(&self) -> usize {
-        self.shared.session_count()
-    }
-
-    fn reap_expired_remotes(&self) -> Vec<(SocketAddr, SessionId)> {
-        let expired = self.shared.reap_expired();
-        for session in &expired {
-            self.dns_admission
-                .remove_identity(crate::dns::DnsAdmissionIdentity::Session(session.id().as_u64()));
-            self.dns_admission.remove_identity(crate::dns::DnsAdmissionIdentity::Source(
-                session.remote_addr().ip(),
-            ));
-            let source_ip = session.remote_addr().ip().to_string();
-            let client_id = session.id().as_u64().to_string();
-            crate::audit::audit(
-                crate::audit::AuditEventType::ConnectionClosed,
-                crate::audit::AuditSeverity::Info,
-                Some(&source_ip),
-                Some(&client_id),
-                "Client session expired",
-            );
-        }
-        expired.into_iter().map(|session| (session.remote_addr(), session.id())).collect()
-    }
-
-    fn client_snapshots(
-        &self,
-    ) -> &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>> {
-        &self.client_snapshots
-    }
-
-    pub(super) fn dns_admission(&self) -> Arc<crate::dns::DnsAdmission> {
-        Arc::clone(&self.dns_admission)
-    }
-
-    fn remove_remote_snapshot(&self, remote_addr: SocketAddr) {
-        if let Ok(mut guard) = self.client_snapshots.lock() {
-            guard.remove(&remote_addr);
-        }
-    }
-
-    fn retain_snapshots_for_clients(
-        &self,
-        clients: &std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
-    ) {
-        if let Ok(mut guard) = self.client_snapshots.lock() {
-            guard.retain(|addr, _| clients.contains_key(addr));
-        }
-    }
-
-    #[cfg(feature = "rate_limiter")]
-    pub(super) fn admit_incoming_datagram(
-        &self,
-        from: SocketAddr,
-        packet: &[u8],
-        established: bool,
-        retry_eligible: bool,
-        metrics: &Metrics,
-    ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
-        self.shared.admit_incoming_datagram(from, packet, established, retry_eligible, metrics)
-    }
-
-    #[cfg(feature = "rate_limiter")]
-    fn geoip_status(&self) -> crate::implementations::server::limits::GeoIpStatus {
-        self.shared.geoip_status()
-    }
-
-    #[cfg(feature = "rate_limiter")]
-    fn prune_rate_limits_if_due(&self, metrics: &Metrics) {
-        self.shared.prune_rate_limits_if_due(metrics);
-    }
-
-    /// Returns a clone of the blacklist synchronizer Arc for async sync.
-    #[cfg(feature = "rate_limiter")]
-    pub(super) fn blacklist(&self) -> Arc<crate::implementations::server::limits::BlacklistSync> {
-        Arc::clone(&self.shared.blacklist)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1043,6 +865,13 @@ impl LiveServerState {
             let session_id = self.domain.session_id_by_remote(addr);
             let established_conn_id = if let Some(conn) = self.get_mut(&addr) {
                 drain_masque_downlink_responses(conn, addr, metrics);
+                if let Err(error) = conn.flush_masque_relay_responses() {
+                    log::warn!(
+                        "MASQUE relay response flush failed during housekeeping for {}: {:?}",
+                        addr,
+                        error
+                    );
+                }
                 flush_live_server_outgoing(
                     socket,
                     addr,
@@ -1451,249 +1280,6 @@ impl LiveServerState {
         }
         self.domain.retain_snapshots_for_clients(&self.clients);
         self.sync_active_metrics(metrics);
-    }
-
-    pub fn enforce_qkey_auth_timeouts(&mut self, metrics: &Metrics) {
-        let timed_out_conn_ids: Vec<Vec<u8>> = self
-            .qkey_auth
-            .iter()
-            .filter_map(|(conn_id, state)| {
-                state.is_expired_at(self.clock.now()).then_some(conn_id.clone())
-            })
-            .collect();
-        for conn_id in timed_out_conn_ids {
-            let key_id = self.qkey_auth.get(&conn_id).map(|state| state.key_id.clone());
-            let remote_addr = self.clients.iter().find_map(|(addr, conn)| {
-                (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
-            });
-            for conn in self.values_mut() {
-                if conn.conn.source_id().as_ref() == conn_id.as_slice() {
-                    metrics.record_connection_rejected();
-                    if let Err(error) = conn.conn.close(true, 0x0, b"qkey_auth_timeout") {
-                        log::warn!("Client close after QKey auth timeout failed: {:?}", error);
-                    }
-                    break;
-                }
-            }
-            let source_ip = remote_addr.map(|addr| addr.ip().to_string());
-            crate::audit::audit_typed(
-                crate::audit::AuditEventType::AuthTimeout,
-                crate::audit::AuditSeverity::Warning,
-                source_ip.as_deref(),
-                key_id.as_deref(),
-                crate::audit::AuditContext {
-                    actor: crate::audit::AuditActor::Client,
-                    target: crate::audit::AuditTarget::Client,
-                    outcome: crate::audit::AuditOutcome::TimedOut,
-                    reason: Some("qkey_authentication_timeout"),
-                },
-                "QKey authentication timed out",
-            );
-            let session_id = self.session_id_for_conn_id(&conn_id);
-            self.dissociate_qkey_for_session(session_id);
-            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
-                complete_qkey_auth_state(
-                    &self.auth_rate_limiter,
-                    metrics,
-                    &mut state,
-                    crate::implementations::server::limits::AuthTerminal::Failed,
-                );
-            }
-        }
-    }
-
-    pub fn commit_qkey_auth_result(
-        &mut self,
-        remove_auth_conn_id: Option<Vec<u8>>,
-        auth_result: Option<(Vec<u8>, bool)>,
-        accept_loop: &AcceptLoop,
-        metrics: &Metrics,
-    ) {
-        let mut handled_conn_id: Option<Vec<u8>> = None;
-        if let Some((conn_id, authed)) = auth_result {
-            handled_conn_id = Some(conn_id.clone());
-            if authed && self.qkey_auth.get(&conn_id).is_some_and(|state| state.authed) {
-                // Authentication was already committed for this connection.
-                // Replayed HTTP/3 headers must not create a second bandwidth owner.
-            } else if !authed {
-                let remote_addr = self.clients.iter().find_map(|(addr, conn)| {
-                    (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
-                });
-                if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
-                    let key_id = state.key_id.clone();
-                    complete_qkey_auth_state(
-                        &self.auth_rate_limiter,
-                        metrics,
-                        &mut state,
-                        crate::implementations::server::limits::AuthTerminal::Failed,
-                    );
-                    let source_ip = remote_addr.map(|addr| addr.ip().to_string());
-                    crate::audit::audit_typed(
-                        crate::audit::AuditEventType::AuthFailed,
-                        crate::audit::AuditSeverity::Warning,
-                        source_ip.as_deref(),
-                        Some(&key_id),
-                        crate::audit::AuditContext {
-                            actor: crate::audit::AuditActor::Client,
-                            target: crate::audit::AuditTarget::Qkey,
-                            outcome: crate::audit::AuditOutcome::Denied,
-                            reason: Some("qkey_authentication_denied"),
-                        },
-                        "QKey authentication denied",
-                    );
-                }
-            } else {
-                let policy = self.qkey_auth.get(&conn_id).map(|state| {
-                    (
-                        state.key_id.clone(),
-                        state.bandwidth_policy.clone(),
-                        state.traffic_analysis_policy,
-                    )
-                });
-                let Some((key_id, bandwidth_policy, traffic_analysis_policy)) = policy else {
-                    return;
-                };
-                if self.revocation_manager.is_revoked(&key_id) {
-                    let addr = self.clients.iter().find_map(|(addr, conn)| {
-                        (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
-                    });
-                    if let Some(addr) = addr {
-                        let session_id = self.domain.session_id_by_remote(addr);
-                        if let Some(mut conn) = self.clients.remove(&addr) {
-                            if let Err(error) = conn.conn.close(true, 0x0, b"qkey_revoked") {
-                                log::warn!(
-                                    "Client close after pending QKey revocation failed for {}: {:?}",
-                                    addr,
-                                    error
-                                );
-                            }
-                            accept_loop.record_closed(addr);
-                            metrics.record_connection_rejected();
-                        }
-                        self.dissociate_qkey_for_session(session_id);
-                        self.domain.remove_remote(addr);
-                        self.domain.retain_snapshots_for_clients(&self.clients);
-                        self.sync_active_metrics(metrics);
-                    }
-                    if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
-                        complete_qkey_auth_state(
-                            &self.auth_rate_limiter,
-                            metrics,
-                            &mut state,
-                            crate::implementations::server::limits::AuthTerminal::Failed,
-                        );
-                    }
-                    return;
-                }
-                let remote_addr = self.clients.iter().find_map(|(addr, connection)| {
-                    (connection.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
-                });
-                let session_id =
-                    remote_addr.and_then(|addr| self.domain.session_id_by_remote(addr));
-                let traffic_analysis_error = match remote_addr {
-                    Some(addr) => self
-                        .clients
-                        .get_mut(&addr)
-                        .ok_or(crate::error::ConnectionError::InvalidState)
-                        .and_then(|connection| {
-                            if let Some(policy) = traffic_analysis_policy {
-                                connection.conn.apply_traffic_analysis_policy(policy)?;
-                            }
-                            connection
-                                .conn
-                                .authorize_intelligent_traffic_analysis(traffic_analysis_policy)
-                        })
-                        .err()
-                        .map(|error| error.to_string()),
-                    None => Some("live connection not found".to_string()),
-                };
-                let bandwidth_error = if traffic_analysis_error.is_none() {
-                    match session_id {
-                        Some(session_id) => self
-                            .domain
-                            .shared
-                            .sessions
-                            .write()
-                            .activate_bandwidth(session_id, bandwidth_policy)
-                            .err()
-                            .map(|error| error.to_string()),
-                        None => Some(SessionError::NotFound.to_string()),
-                    }
-                } else {
-                    None
-                };
-                let activation_error = traffic_analysis_error.or(bandwidth_error);
-                if let Some(error) = activation_error {
-                    log::error!("Authenticated QKey policy activation failed: {}", error);
-                    metrics.record_connection_rejected();
-                    if let Some(addr) = remote_addr {
-                        if let Some(mut connection) = self.clients.remove(&addr) {
-                            if let Err(close_error) =
-                                connection.conn.close(true, 0x0, b"qkey_policy_invalid")
-                            {
-                                log::warn!(
-                                    "Client close after QKey policy activation failure failed: {:?}",
-                                    close_error
-                                );
-                            }
-                            accept_loop.record_closed(addr);
-                        }
-                        self.domain.remove_remote(addr);
-                        self.domain.retain_snapshots_for_clients(&self.clients);
-                        self.sync_active_metrics(metrics);
-                    }
-                    if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
-                        complete_qkey_auth_state(
-                            &self.auth_rate_limiter,
-                            metrics,
-                            &mut state,
-                            crate::implementations::server::limits::AuthTerminal::Failed,
-                        );
-                    }
-                    return;
-                }
-                let Some(session_id) = session_id else {
-                    return;
-                };
-                self.qkey_tracker.associate(session_id.as_u64(), &key_id);
-                let auth_rate_limiter = Arc::clone(&self.auth_rate_limiter);
-                if let Some(state) = self.qkey_auth_state_mut(&conn_id) {
-                    state.authed = true;
-                    complete_qkey_auth_state(
-                        &auth_rate_limiter,
-                        metrics,
-                        state,
-                        crate::implementations::server::limits::AuthTerminal::Succeeded,
-                    );
-                }
-                crate::audit::audit_typed(
-                    crate::audit::AuditEventType::ClientAuthenticated,
-                    crate::audit::AuditSeverity::Info,
-                    None,
-                    Some(&key_id),
-                    crate::audit::AuditContext {
-                        actor: crate::audit::AuditActor::Client,
-                        target: crate::audit::AuditTarget::Connection,
-                        outcome: crate::audit::AuditOutcome::Succeeded,
-                        reason: None,
-                    },
-                    "Client authenticated successfully",
-                );
-            }
-        }
-        if let Some(conn_id) = remove_auth_conn_id {
-            if handled_conn_id.as_deref() == Some(conn_id.as_slice()) {
-                return;
-            }
-            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
-                complete_qkey_auth_state(
-                    &self.auth_rate_limiter,
-                    metrics,
-                    &mut state,
-                    crate::implementations::server::limits::AuthTerminal::Failed,
-                );
-            }
-        }
     }
 }
 

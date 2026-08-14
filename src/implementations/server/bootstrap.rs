@@ -95,6 +95,7 @@ pub(crate) struct RuntimePolicySnapshot {
     pub(crate) fec: FecConfig,
     pub(crate) optimize: OptimizeConfig,
     pub(crate) stealth: StealthConfig,
+    pub(crate) crypto: qf_crypto::CryptoConfig,
 }
 
 impl RuntimePolicySnapshot {
@@ -104,13 +105,21 @@ impl RuntimePolicySnapshot {
         fec: &Arc<std::sync::Mutex<FecConfig>>,
         optimize: &Arc<std::sync::Mutex<OptimizeConfig>>,
         stealth: &Arc<std::sync::Mutex<StealthConfig>>,
+        crypto: &qf_crypto::CryptoConfig,
     ) -> Self {
         let generation_guard = generation.read_guard();
         let transport = transport.clone();
         let fec = fec.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let optimize = *optimize.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let stealth = stealth.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-        Self { generation: *generation_guard, transport, fec, optimize, stealth }
+        Self {
+            generation: *generation_guard,
+            transport,
+            fec,
+            optimize,
+            stealth,
+            crypto: crypto.clone(),
+        }
     }
 }
 

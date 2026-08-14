@@ -681,34 +681,6 @@ fn process_server_tun_packet(
     drain_pending_tun_downlinks(live, out, socket, metrics)
 }
 
-#[cfg(test)]
-mod scheduled_tun_telemetry_tests {
-    use super::*;
-
-    #[test]
-    fn scheduled_admission_does_not_report_transport_backpressure() {
-        let metrics = Metrics::new();
-        let mut pending = PendingTunDownlinks::with_limits(4, 64, 4);
-        let target: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-
-        enqueue_scheduled_tun_downlink(
-            &mut pending,
-            target,
-            SessionId::from_u64(1),
-            1,
-            vec![1, 2, 3],
-            Instant::now(),
-            &metrics,
-        )
-        .unwrap();
-
-        let output = metrics.export();
-        assert!(output.contains("quicfuscate_bandwidth_scheduler_enqueued_total 1"));
-        assert!(output
-            .contains("quicfuscate_tun_downlink_backpressure_events_total{event=\"enqueued\"} 0"));
-    }
-}
-
 impl StandaloneServiceSignals {
     pub(super) fn shutdown_all(&mut self) {
         if let Some(sig) = self.admin.take() {
@@ -824,3 +796,31 @@ pub(super) const BUILTIN_FRONTING_SNI_ALLOWLIST: &[&str] = &[
     "incapdns.net",
     "imperva.com",
 ];
+
+#[cfg(test)]
+mod scheduled_tun_telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn scheduled_admission_does_not_report_transport_backpressure() {
+        let metrics = Metrics::new();
+        let mut pending = PendingTunDownlinks::with_limits(4, 64, 4);
+        let target: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+
+        enqueue_scheduled_tun_downlink(
+            &mut pending,
+            target,
+            SessionId::from_u64(1),
+            1,
+            vec![1, 2, 3],
+            Instant::now(),
+            &metrics,
+        )
+        .unwrap();
+
+        let output = metrics.export();
+        assert!(output.contains("quicfuscate_bandwidth_scheduler_enqueued_total 1"));
+        assert!(output
+            .contains("quicfuscate_tun_downlink_backpressure_events_total{event=\"enqueued\"} 0"));
+    }
+}
