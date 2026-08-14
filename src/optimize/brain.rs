@@ -9,6 +9,8 @@ use std::arch::x86_64::__m256;
 mod histogram;
 
 pub use histogram::{decay_histogram, jensen_shannon_divergence};
+#[cfg(target_arch = "x86_64")]
+use histogram::{fast_exp_ps_sse, horizontal_max_ps_sse, horizontal_sum_ps, horizontal_sum_ps_sse};
 
 #[cfg(test)]
 fn scalar_jensen_shannon(bins: &[u64], total: u64, target: &[f64]) -> f64 {

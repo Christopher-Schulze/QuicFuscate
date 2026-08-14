@@ -662,7 +662,7 @@ unsafe fn vlogq_f64_neon(v: std::arch::aarch64::float64x2_t) -> std::arch::aarch
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn horizontal_sum_ps(v: __m256) -> f32 {
+pub(super) unsafe fn horizontal_sum_ps(v: __m256) -> f32 {
     use std::arch::x86_64::*;
 
     let sum_128 = _mm_add_ps(_mm256_extractf128_ps(v, 0), _mm256_extractf128_ps(v, 1));
@@ -673,7 +673,7 @@ unsafe fn horizontal_sum_ps(v: __m256) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn fast_exp_ps_sse(x: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128 {
+pub(super) unsafe fn fast_exp_ps_sse(x: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128 {
     use std::arch::x86_64::*;
 
     let one = _mm_set1_ps(1.0);
@@ -697,7 +697,7 @@ unsafe fn fast_exp_ps_sse(x: std::arch::x86_64::__m128) -> std::arch::x86_64::__
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn horizontal_sum_ps_sse(v: std::arch::x86_64::__m128) -> f32 {
+pub(super) unsafe fn horizontal_sum_ps_sse(v: std::arch::x86_64::__m128) -> f32 {
     use std::arch::x86_64::*;
 
     let mut buf = [0f32; 4];
@@ -707,7 +707,7 @@ unsafe fn horizontal_sum_ps_sse(v: std::arch::x86_64::__m128) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn horizontal_max_ps_sse(v: std::arch::x86_64::__m128) -> f32 {
+pub(super) unsafe fn horizontal_max_ps_sse(v: std::arch::x86_64::__m128) -> f32 {
     use std::arch::x86_64::*;
 
     let mut buf = [f32::NEG_INFINITY; 4];
