@@ -8,25 +8,63 @@ cd "$PROJECT_ROOT"
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
 OUTPUT_DIR=""
+ONLY="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
+    --only) ONLY="$2"; shift;;
     --jobs) JOBS="$2"; shift;;
     --features) CARGO_FEATURES="$2"; shift;;
     --rustflags) RUSTFLAGS_EXTRA="$2"; shift;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
     --help|-h)
-      echo "Usage: $(basename "$0") [options]"; echo "Core Integration Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
+      echo "Usage: $(basename "$0") [--only cli,core,interface,telemetry,reality] [options]"; echo "Core Integration Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
     *) echo "Unknown flag: $1" >&2; exit 2;;
   esac
   shift
 done
+
+validate_scope_selection() {
+  qf_validate_scope_selection "$ONLY" "cli,core,interface,telemetry,reality"
+}
+
+scope_selected() {
+  qf_scope_selected "$ONLY" "$1"
+}
+
+validate_scope_selection
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/tests-core-${TIMESTAMP}"
 mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/core-tests.log"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "tests_core_integration"; JSON_FIRST_RUN=1
+
+qf_json_append_object "$JSON" \
+  "name=selection" \
+  "status=PASS" \
+  "result=PASS" \
+  "reason=explicit_scope_selection" \
+  "selected_scopes=$ONLY" \
+  "command_status=int:0" \
+  "raw_output="
+
+record_scope_skip() {
+  local scope="$1"
+  qf_json_append_object "$JSON" \
+    "name=scope-$scope" \
+    "status=SKIP" \
+    "result=SKIP" \
+    "reason=not_selected_by_scope" \
+    "command_status=int:0" \
+    "raw_output="
+}
+
+for scope in cli core interface telemetry reality; do
+  if ! scope_selected "$scope"; then
+    record_scope_skip "$scope"
+  fi
+done
 
 if [[ -n "${RUSTFLAGS_EXTRA:-}" ]]; then
   export RUSTFLAGS="${RUSTFLAGS_EXTRA} ${RUSTFLAGS:-}"
@@ -193,75 +231,84 @@ write_interface_platform_negative_proof() {
     "raw_output=$OUTPUT_DIR/interface-platform-negative-proof.json"
 }
 
-# CLI and harness
-run_cargo test --release --test rt-cli-help -- --nocapture
-run_cargo test --release --test rt-harness-cli -- --nocapture
-
-# Core wiring and config
-run_cargo test --release --test rt-core-connection-basics -- --nocapture
-run_cargo test --release --test rt-interface -- --nocapture
-run_verified_library_target "interface-unaligned-write" \
-  "interface::tests::write_packet_accepts_intentionally_unaligned_ipv4_slice" rust-tests
-run_verified_library_target "interface-read-result-contract" \
-  "interface::tests::external_factory_read_result_contract_rejects_zero_and_oversized_lengths" rust-tests
-run_verified_library_target "interface-write-result-contract" \
-  "interface::tests::external_factory_write_result_contract_rejects_zero_short_and_oversized_results" rust-tests
-run_verified_library_target "interface-write-packet-result-contract" \
-  "interface::tests::write_packet_rejects_short_external_factory_result" rust-tests
-run_verified_library_target "unix-raw-result-contract" \
-  "interface::tests::unix_raw_result_contract_rejects_zero_and_oversized_counts" rust-tests
-run_verified_library_target "unix-interface-name-contract" \
-  "interface::tests::unix_interface_name_parser_requires_bounded_terminated_utf8" rust-tests
-run_verified_library_target "unix-close-ownership" \
-  "interface::tests::unix_close_failure_is_reported_and_descriptor_number_is_terminalized" rust-tests
-run_verified_library_target "compatibility-tun-handle-close" \
-  "implementations::client::platform::traits::tests::tun_handle_close_failure_is_reported_and_terminalized" rust-tests
-if [[ "$(detect_os)" == "windows" ]]; then
-  run_verified_library_target "wintun-cleanup-state" \
-    "interface::wintun::tests::wintun_cleanup_state_retains_failed_resources_for_retry" rust-tests
-else
-  record_platform_skip "wintun-cleanup-state" "host_os_not_windows" "lib" "rust-tests"
+if scope_selected cli; then
+  run_cargo test --release --test rt-cli-help -- --nocapture
+  run_cargo test --release --test rt-harness-cli -- --nocapture
 fi
-run_verified_library_target "wintun-send-sync-contract" \
-  "interface::wintun::tests::wintun_device_send_sync_contract_is_compile_checked" rust-tests
-case "$(detect_os)" in
-  macos)
-    run_verified_library_target "macos-utun-iovec-contract" \
-      "interface::macos_tun::tests::utun_writev_iovecs_follow_bounded_progress" rust-tests
-    record_platform_skip "linux-compatibility-kernel-name" "host_os_not_linux" "lib" "rust-tests"
-    ;;
-  linux)
-    run_verified_library_target "linux-compatibility-kernel-name" \
-      "implementations::client::platform::linux::tests::compatibility_kernel_name_contract_rejects_unterminated_identity" rust-tests
-    record_platform_skip "macos-utun-iovec-contract" "host_os_not_macos" "lib" "rust-tests"
-    ;;
-  *)
-    record_platform_skip "linux-compatibility-kernel-name" "host_os_not_linux" "lib" "rust-tests"
-    record_platform_skip "macos-utun-iovec-contract" "host_os_not_macos" "lib" "rust-tests"
-    ;;
-esac
-if [[ "$(detect_arch)" == "x86_64" ]]; then
-  run_verified_library_target "interface-bmi2-dispatch" \
-    "interface::tests::bmi2_dispatch_requires_profile_and_runtime_feature_intersection" rust-tests
-  run_verified_library_target "cpu-profile-bmi2-intersection" \
-    "optimize::tests::x86_profile_selection_keeps_bmi2_explicit" rust-tests
-else
-  record_platform_skip "interface-bmi2-dispatch" "host_arch_not_x86_64" "lib" "rust-tests"
-  record_platform_skip "cpu-profile-bmi2-intersection" "host_arch_not_x86_64" "lib" "rust-tests"
+
+if scope_selected core; then
+  run_cargo test --release --test rt-core-connection-basics -- --nocapture
 fi
-run_native_bmi2_interface_test
-run_cargo test --release --test rt-compress-preprocessor -- --nocapture
 
-# Telemetry + profiles
-run_cargo test --release --test rt-telemetry-http -- --nocapture
-run_cargo test --release --test rt-profile-aegis-selection -- --nocapture
-run_cargo test --release --test rt-qftls-profiles -- --nocapture
-run_cargo test --release --test rt-admin-http-contract -- --nocapture
+if scope_selected interface; then
+  run_cargo test --release --test rt-interface -- --nocapture
+  run_verified_library_target "interface-unaligned-write" \
+    "interface::tests::write_packet_accepts_intentionally_unaligned_ipv4_slice" rust-tests
+  run_verified_library_target "interface-read-result-contract" \
+    "interface::tests::external_factory_read_result_contract_rejects_zero_and_oversized_lengths" rust-tests
+  run_verified_library_target "interface-write-result-contract" \
+    "interface::tests::external_factory_write_result_contract_rejects_zero_short_and_oversized_results" rust-tests
+  run_verified_library_target "interface-write-packet-result-contract" \
+    "interface::tests::write_packet_rejects_short_external_factory_result" rust-tests
+  run_verified_library_target "unix-raw-result-contract" \
+    "interface::tests::unix_raw_result_contract_rejects_zero_and_oversized_counts" rust-tests
+  run_verified_library_target "unix-interface-name-contract" \
+    "interface::tests::unix_interface_name_parser_requires_bounded_terminated_utf8" rust-tests
+  run_verified_library_target "unix-close-ownership" \
+    "interface::tests::unix_close_failure_is_reported_and_descriptor_number_is_terminalized" rust-tests
+  run_verified_library_target "compatibility-tun-handle-close" \
+    "implementations::client::platform::traits::tests::tun_handle_close_failure_is_reported_and_terminalized" rust-tests
+  if [[ "$(detect_os)" == "windows" ]]; then
+    run_verified_library_target "wintun-cleanup-state" \
+      "interface::wintun::tests::wintun_cleanup_state_retains_failed_resources_for_retry" rust-tests
+  else
+    record_platform_skip "wintun-cleanup-state" "host_os_not_windows" "lib" "rust-tests"
+  fi
+  run_verified_library_target "wintun-send-sync-contract" \
+    "interface::wintun::tests::wintun_device_send_sync_contract_is_compile_checked" rust-tests
+  case "$(detect_os)" in
+    macos)
+      run_verified_library_target "macos-utun-iovec-contract" \
+        "interface::macos_tun::tests::utun_writev_iovecs_follow_bounded_progress" rust-tests
+      record_platform_skip "linux-compatibility-kernel-name" "host_os_not_linux" "lib" "rust-tests"
+      ;;
+    linux)
+      run_verified_library_target "linux-compatibility-kernel-name" \
+        "implementations::client::platform::linux::tests::compatibility_kernel_name_contract_rejects_unterminated_identity" rust-tests
+      record_platform_skip "macos-utun-iovec-contract" "host_os_not_macos" "lib" "rust-tests"
+      ;;
+    *)
+      record_platform_skip "linux-compatibility-kernel-name" "host_os_not_linux" "lib" "rust-tests"
+      record_platform_skip "macos-utun-iovec-contract" "host_os_not_macos" "lib" "rust-tests"
+      ;;
+  esac
+  if [[ "$(detect_arch)" == "x86_64" ]]; then
+    run_verified_library_target "interface-bmi2-dispatch" \
+      "interface::tests::bmi2_dispatch_requires_profile_and_runtime_feature_intersection" rust-tests
+    run_verified_library_target "cpu-profile-bmi2-intersection" \
+      "optimize::tests::x86_profile_selection_keeps_bmi2_explicit" rust-tests
+  else
+    record_platform_skip "interface-bmi2-dispatch" "host_arch_not_x86_64" "lib" "rust-tests"
+    record_platform_skip "cpu-profile-bmi2-intersection" "host_arch_not_x86_64" "lib" "rust-tests"
+  fi
+  run_native_bmi2_interface_test
+  write_interface_platform_negative_proof
+fi
 
-# Reality fallback
-run_cargo test --release --test rt-reality-targets -- --nocapture
+if scope_selected core; then
+  run_cargo test --release --test rt-compress-preprocessor -- --nocapture
+fi
 
-write_interface_platform_negative_proof
+if scope_selected telemetry; then
+  run_cargo test --release --test rt-telemetry-http -- --nocapture
+  run_cargo test --release --test rt-profile-aegis-selection -- --nocapture
+  run_cargo test --release --test rt-qftls-profiles -- --nocapture
+  run_cargo test --release --test rt-admin-http-contract -- --nocapture
+fi
+
+if scope_selected reality; then
+  run_cargo test --release --test rt-reality-targets -- --nocapture
+fi
 
 echo -e "\n[OK] Core Integration Tests Complete"
 json_end "$JSON"

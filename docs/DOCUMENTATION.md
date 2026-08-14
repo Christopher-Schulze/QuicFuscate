@@ -4067,7 +4067,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 
 #### Tests (`scripts/tests/`)
 **Suites (`scripts/tests/suites/`)**
-- `test-core.sh` - Core integration tests (CLI/telemetry/profile/qftls/reality/config)
+- `test-core.sh` - Core integration tests (CLI/telemetry/profile/qftls/reality/config); `--only cli,core,interface,telemetry,reality` runs only selected contract groups and records omitted groups as explicit `SKIP` entries, while the default remains complete.
 - `test-profile-overrides.sh` - Deterministic profile override parity tests
 - `test-profile-fuzz-parity.sh` - Fuzz-style parity tests (scalar vs SIMD) with forced profiles
 - `test-fec.sh` - FEC suite (all modes + GF16/GF8/Wiedemann/Partial/Adaptive/Stress; add `--refactor` / `--refactor-only` for structural invariants; environment and Cargo arguments stay array-safe)
