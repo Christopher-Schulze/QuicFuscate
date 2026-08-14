@@ -1,5 +1,10 @@
 use super::*;
 
+fn masque_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("QUICFUSCATE_MASQUE_TRACE").is_some())
+}
+
 impl IoDriver {
     #[inline]
     pub(super) fn normalized_batch_size(&self) -> usize {
@@ -208,6 +213,15 @@ impl IoDriver {
                 move |capsule_type: u64, payload: &[u8]| {
                     let mut state = callback_state.lock();
                     state.receive(capsule_type, payload);
+                    if masque_trace_enabled() {
+                        log::info!(
+                            "received MASQUE control capsule type={} bytes={} assignment_ready={} failed={}",
+                            capsule_type,
+                            payload.len(),
+                            state.assignment().is_some(),
+                            state.failure().is_some()
+                        );
+                    }
                 },
             ))));
         }
@@ -244,10 +258,14 @@ impl IoDriver {
 
             let established = { conn.lock().is_established() };
             if established && !control_started {
-                conn.lock()
+                let stream_id = conn
+                    .lock()
                     .begin_masque_control_tunnel()
                     .map_err(|error| EngineError::Connection(error.to_string()))?;
                 control_started = true;
+                if masque_trace_enabled() {
+                    log::info!("started MASQUE assignment control tunnel stream={stream_id}");
+                }
                 continue;
             }
 
