@@ -555,12 +555,16 @@ Wire -> Pooled Buffer
 - Never use em-dashes (-); use regular hyphens (-)
 
 ## UI Change Boundary
-- Do not modify UI surfaces, UI components, UI styles, UI assets, frontend views, desktop app UI, or web admin UI unless the user explicitly asks for that exact UI change in the current task.
-- Do only the UI work the user explicitly requested, and only that. Never broaden a request into adjacent UI cleanup, redesign, component refactors, style polish, text changes, asset changes, or frontend behavior changes.
+- Frontend implementation may change when required by an authorized functional task, but its existing visual output is frozen by default.
+- Never modify any visible UI property unless the user explicitly requests that exact visual change. This prohibition includes removing or altering an existing animation, restyling, repositioning, resizing, relabeling, replacing icons or assets, or changing visual hierarchy.
+- Preserve the established style exactly during every frontend interaction. Functional frontend work must remain visually identical outside visual changes explicitly approved by the user.
+- The currently added Rotate button is explicitly approved and must be preserved. Never remove, revert, hide, restyle, relabel, reposition, or otherwise visually alter it unless the user explicitly requests that exact change.
+- Do only the visual UI work the user explicitly requested, and only that. Never broaden a request into adjacent UI cleanup, redesign, component refactors, style polish, text changes, asset changes, or other visible behavior changes.
 - Do not change any visible element, layout, spacing, style, theme token, CSS class, animation, transition, icon, asset, copy/text, route, navigation behavior, screenshot baseline, or frontend component structure unless that exact visual/UI change is explicitly requested.
 - Do not "improve", refactor, polish, rename, migrate, normalize, deduplicate, or clean UI code proactively. Backend, Rust core, server, build, CI, docs, and non-UI tests may proceed normally when in scope.
-- If a requested backend or infrastructure task appears to require UI changes, stop and ask for explicit approval before touching any UI file.
-- Treat `apps/svelte-admin/`, `apps/svelte-desktop/`, `packages/ui/`, `packages/theme/`, `assets/web-admin/`, frontend component/style/asset/test files, Playwright visual baselines, and generated UI bundles as protected UI territory unless explicitly authorized.
+- If a requested backend or infrastructure task appears to require a visible UI change, stop and ask for explicit approval before making that visible change.
+- Treat `apps/svelte-admin/`, `apps/svelte-desktop/`, `packages/ui/`, `packages/theme/`, `assets/web-admin/`, frontend component/style/asset/test files, Playwright visual baselines, and generated UI bundles as visually protected territory. Non-visual contract, state, validation, IPC, accessibility, or test updates are allowed only when required by the authorized task and when visual identity is preserved.
+- Before finishing any task that touched frontend files, verify the affected rendered states against the pre-change baseline. Any unapproved visual delta must be treated as a regression and fixed without removing explicitly approved visual changes.
 - `apps/tauri/src-tauri/` may be edited for backend/host logic, persistence, commands, security, and build integration. Tauri window configuration, dimensions, titles, icons, menus, tray UI, visible webview behavior, CSP changes that require UI adaptation, and frontend bundle behavior are UI-facing and require explicit approval.
 - Running existing frontend install/check/build/test commands is allowed for CI/backend validation, but editing frontend source, generated UI artifacts, or UI snapshots to make a backend/CI task pass is forbidden without explicit UI approval.
 
