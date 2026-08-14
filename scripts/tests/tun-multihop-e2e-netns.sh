@@ -316,6 +316,7 @@ fi
 CONFIG="$WORK_DIR/client.toml"
 {
   printf '%s\n' '[engine]' 'mode = "client"' '[interface]' 'type = "tun"' 'tun_name = "qtun0"'
+  printf '%s\n' '[stealth]' 'enable_doh = false'
   printf '%s\n' '[security]' 'kill_switch = true' '[circuit]' "max_hops = $HOPS" 'max_parallel_circuits = 2' 'allow_single_hop_fallback = false'
   if [ "$HOPS" -ge 2 ]; then
     printf '%s\n' '[[circuit.hops]]' 'label = "Entry"' 'endpoint = "10.41.0.1:4433"' 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$R1_ID\"" 'qkey_token_ref = "env:QF_MH_R1_TOKEN"' 'role = "relay"'
