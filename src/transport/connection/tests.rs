@@ -37,6 +37,23 @@ fn make_conn() -> Connection {
     .expect("valid test connection configuration")
 }
 
+fn encode_transport_parameter(parameter_id: u64, value: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(value.len() + 16);
+    let mut scratch = [0u8; 8];
+    let id_len = qf_transport_pn::varint::write_varint(parameter_id, &mut scratch).unwrap();
+    encoded.extend_from_slice(&scratch[..id_len]);
+    let value_len = qf_transport_pn::varint::write_varint(value.len() as u64, &mut scratch).unwrap();
+    encoded.extend_from_slice(&scratch[..value_len]);
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+fn max_udp_payload_transport_parameter(value: u64) -> Vec<u8> {
+    let mut encoded_value = [0u8; 8];
+    let value_len = qf_transport_pn::varint::write_varint(value, &mut encoded_value).unwrap();
+    encode_transport_parameter(0x03, &encoded_value[..value_len])
+}
+
 fn enable_test_traffic_analysis(
     connection: &mut Connection,
     mode: crate::transport::config::TrafficAnalysisDefense,
@@ -179,6 +196,71 @@ fn valid_vn_restarts_once_with_preferred_common_version_and_fresh_cids() {
     .expect("generate VN");
     assert_eq!(client.recv(&mut second, &recv_info()), Ok(second.len()));
     assert_eq!(client.config.version(), PROTOCOL_VERSION);
+}
+
+#[test]
+fn version_negotiation_restart_restores_local_datagram_ceiling() {
+    let mut client = make_v2_client();
+    client.config.set_max_send_udp_payload_size(1500);
+    client.dgram_send_max_size = 1413;
+
+    let mut vn = packet::generate_version_negotiation_packet(
+        &[],
+        &[PROTOCOL_VERSION],
+        client.scid.as_ref(),
+        client.initial_dcid.as_ref(),
+    )
+    .expect("generate VN");
+    assert_eq!(client.recv(&mut vn, &recv_info()), Ok(vn.len()));
+    assert_eq!(client.dgram_send_max_size, 1500);
+}
+
+#[test]
+fn peer_transport_limit_clamps_datagram_packetization() {
+    let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    config.set_max_send_udp_payload_size(1500);
+    let mut connection = Connection::new_with_role(
+        b"client-scid",
+        local(),
+        peer(),
+        config,
+        false,
+    )
+    .expect("valid test connection configuration");
+
+    assert_eq!(connection.dgram_send_max_size, 1500);
+    connection
+        .apply_peer_transport_limits(&max_udp_payload_transport_parameter(1413))
+        .expect("valid peer max_udp_payload_size");
+    assert_eq!(connection.dgram_send_max_size, 1413);
+    assert_eq!(connection.dgram_send(&vec![0u8; 1413]), Ok(()));
+    assert_eq!(connection.dgram_send(&vec![0u8; 1414]), Err(ConnectionError::InvalidState));
+}
+
+#[test]
+fn peer_transport_limit_rejects_malformed_duplicate_and_out_of_range_parameters() {
+    let mut connection = make_conn();
+    let initial_max = connection.dgram_send_max_size;
+
+    assert_eq!(
+        connection.apply_peer_transport_limits(&[0x03, 0x02, 0x40]),
+        Err(ConnectionError::InvalidPacket)
+    );
+    assert_eq!(connection.dgram_send_max_size, initial_max);
+
+    let mut duplicate = max_udp_payload_transport_parameter(1413);
+    duplicate.extend(max_udp_payload_transport_parameter(1414));
+    assert_eq!(
+        connection.apply_peer_transport_limits(&duplicate),
+        Err(ConnectionError::InvalidPacket)
+    );
+    assert_eq!(connection.dgram_send_max_size, initial_max);
+
+    assert_eq!(
+        connection.apply_peer_transport_limits(&max_udp_payload_transport_parameter(1199)),
+        Err(ConnectionError::InvalidPacket)
+    );
+    assert_eq!(connection.dgram_send_max_size, initial_max);
 }
 
 #[test]

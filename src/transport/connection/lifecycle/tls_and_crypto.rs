@@ -1,5 +1,50 @@
 use super::*;
 
+const MAX_UDP_PAYLOAD_SIZE_PARAMETER_ID: u64 = 0x03;
+const MIN_QUIC_UDP_PAYLOAD_SIZE: usize = 1200;
+const MAX_QUIC_UDP_PAYLOAD_SIZE: usize = 65_527;
+
+fn peer_max_udp_payload_size(
+    parameters: &[u8],
+) -> Result<Option<usize>, crate::error::ConnectionError> {
+    let mut offset = 0usize;
+    let mut found = None;
+    while offset < parameters.len() {
+        let (parameter_id, id_len) = qf_transport_pn::varint::read_varint(&parameters[offset..])
+            .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+        offset += id_len;
+        let (value_len, length_len) = qf_transport_pn::varint::read_varint(&parameters[offset..])
+            .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+        offset += length_len;
+        let value_len = usize::try_from(value_len)
+            .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+        let end = offset
+            .checked_add(value_len)
+            .ok_or(crate::error::ConnectionError::InvalidPacket)?;
+        if end > parameters.len() {
+            return Err(crate::error::ConnectionError::InvalidPacket);
+        }
+        if parameter_id == MAX_UDP_PAYLOAD_SIZE_PARAMETER_ID {
+            if found.is_some() {
+                return Err(crate::error::ConnectionError::InvalidPacket);
+            }
+            let (value, used) = qf_transport_pn::varint::read_varint(&parameters[offset..end])
+                .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+            if used != value_len {
+                return Err(crate::error::ConnectionError::InvalidPacket);
+            }
+            let value = usize::try_from(value)
+                .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+            if !(MIN_QUIC_UDP_PAYLOAD_SIZE..=MAX_QUIC_UDP_PAYLOAD_SIZE).contains(&value) {
+                return Err(crate::error::ConnectionError::InvalidPacket);
+            }
+            found = Some(value);
+        }
+        offset = end;
+    }
+    Ok(found)
+}
+
 impl Connection {
     /// Process incoming CRYPTO frame
     pub(crate) fn process_crypto_frame(
@@ -69,8 +114,31 @@ impl Connection {
             provider.poll_secrets_and_install(&*self.crypto)?;
             provider.peer_quic_transport_params()
         };
+        if let Some(parameters) = peer_parameters.as_deref() {
+            self.apply_peer_transport_limits(parameters)?;
+        }
         self.refresh_short_header_tag_reserve();
         self.validate_peer_version_information(peer_parameters)
+    }
+
+    pub(in crate::transport::connection) fn apply_peer_transport_limits(
+        &mut self,
+        parameters: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        let peer_max = peer_max_udp_payload_size(parameters)?;
+        let local_max = self.config.max_udp_payload_size as usize;
+        let current_max = self.dgram_send_max_size.min(local_max);
+        let effective_max = peer_max.map_or(current_max, |peer_max| current_max.min(peer_max));
+        if effective_max != self.dgram_send_max_size {
+            log::debug!(
+                "applying peer max UDP payload: local={} peer={:?} effective={}",
+                local_max,
+                peer_max,
+                effective_max
+            );
+        }
+        self.dgram_send_max_size = effective_max;
+        Ok(())
     }
 
     pub(in crate::transport::connection) fn validate_peer_version_information(
@@ -331,6 +399,7 @@ impl Connection {
         self.h3 = None;
         self.pmtu_probe_pn = None;
         self.pmtu_above_floor_pns.clear();
+        self.dgram_send_max_size = self.config.max_udp_payload_size as usize;
         self.recovery = Self::configured_recovery_with_snapshot(
             &self.config,
             self.dgram_send_max_size,
