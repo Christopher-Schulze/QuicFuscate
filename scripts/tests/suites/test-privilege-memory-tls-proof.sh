@@ -189,7 +189,7 @@ run_verified_target \
   "lib" \
   "tests" \
   "tests::failure_policy_distinguishes_best_effort_from_fail_closed" \
-  --locked --package qf-memory-lock --lib -- --nocapture
+  --locked --package qf-memory-lock --lib
 
 run_verified_target \
   "qftls-negative-contracts" \
