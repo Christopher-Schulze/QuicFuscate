@@ -31,6 +31,13 @@ scope_selected() {
   qf_scope_selected "$ONLY" "$1"
 }
 
+fast_scope_selected() {
+  case "$1" in
+    aegis|morus|aes-gcm|integration) return 0;;
+    *) return 1;;
+  esac
+}
+
 validate_scope_selection
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -65,7 +72,7 @@ record_scope_skip() {
 }
 
 for scope in aegis morus aes-gcm ghash chacha aes-hp simd integration; do
-  if ! scope_selected "$scope"; then
+  if ! scope_selected "$scope" || { (( FAST )) && [[ "$ONLY" == "all" ]] && ! fast_scope_selected "$scope"; }; then
     record_scope_skip "$scope"
   fi
 done
