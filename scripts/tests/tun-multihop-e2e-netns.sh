@@ -315,7 +315,7 @@ fi
 
 CONFIG="$WORK_DIR/client.toml"
 {
-  printf '%s\n' '[engine]' 'mode = "client"' '[interface]' 'type = "tun"' 'tun_name = "qtun0"'
+  printf '%s\n' '[engine]' 'mode = "client"' '[interface]' 'type = "tun"' 'tun_name = "qtun0"' 'dns_servers = ["10.51.0.1"]'
   printf '%s\n' '[stealth]' 'enable_doh = false'
   printf '%s\n' '[security]' 'kill_switch = true' '[circuit]' "max_hops = $HOPS" 'max_parallel_circuits = 2' 'allow_single_hop_fallback = false'
   if [ "$HOPS" -ge 2 ]; then
