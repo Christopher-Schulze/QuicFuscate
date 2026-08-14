@@ -110,6 +110,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
+          components: clippy
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
