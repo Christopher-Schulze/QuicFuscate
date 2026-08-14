@@ -144,6 +144,7 @@ else:
 expected_overrides = {
     "cookie": "0.7.2",
     "esbuild": "0.28.1",
+    "nanoid": "3.3.18",
     "picomatch": "4.0.4",
     "postcss": "8.5.23",
     "undici": "7.29.0",
