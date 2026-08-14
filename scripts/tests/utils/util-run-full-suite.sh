@@ -7,23 +7,60 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
-OUTPUT_DIR=""; FAST=1
+OUTPUT_DIR=""; FAST=1; ONLY="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --fast) FAST=1;;
     --full) FAST=0;;
+    --only) ONLY="$2"; shift;;
     --verbose) export QUICFUSCATE_DEBUG_SCRIPTS=1;;
-    --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--fast] [--full]"; exit 0;;
+    --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--fast] [--full] [--only SCOPES]"; exit 0;;
     *) break;;
   esac; shift
 done
+
+validate_scope_selection() {
+  [[ "$ONLY" == "all" ]] && return 0
+  local scope
+  local -a scopes
+  IFS=',' read -r -a scopes <<< "$ONLY"
+  [[ "${#scopes[@]}" -gt 0 ]] || {
+    echo "--only requires at least one scope" >&2
+    return 2
+  }
+  for scope in "${scopes[@]}"; do
+    case "$scope" in
+      build|core|privilege|desktop|transport|fec|stealth|crypto|optimization|security|frontend|e2e|performance|audits|benchmarks|amx) ;;
+      *)
+        echo "unknown --only scope: $scope (expected build,core,privilege,desktop,transport,fec,stealth,crypto,optimization,security,frontend,e2e,performance,audits,benchmarks,amx)" >&2
+        return 2
+        ;;
+    esac
+  done
+}
+
+scope_selected() {
+  local scope="$1"
+  [[ "$ONLY" == "all" || ",$ONLY," == *",$scope,"* ]]
+}
+
+validate_scope_selection
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/full-test-${TIMESTAMP}"
 mkdir -p "$OUTPUT_DIR"
 
 log "Running full suite into $OUTPUT_DIR"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "utils_full_suite"
+
+qf_json_append_object "$JSON" \
+  "name=selection" \
+  "status=PASS" \
+  "result=PASS" \
+  "reason=explicit_scope_selection" \
+  "selected_scopes=$ONLY" \
+  "command_status=int:0" \
+  "raw_output="
 
 run_stealth_bench_preflight() {
   local log_path="$1"
@@ -82,6 +119,125 @@ if [[ "${QUICFUSCATE_BENCH_PREFLIGHT_CONTRACT_TEST:-0}" == "1" ]]; then
   fi
   json_end "$JSON"
   exit 1
+fi
+
+run_selected_scope() {
+  local scope="$1"
+  case "$scope" in
+    build)
+      if (( FAST )); then
+        run "$SCRIPT_DIR/../build/build-check.sh" --skip-clippy --output-dir "$OUTPUT_DIR/build-check"
+      else
+        run "$SCRIPT_DIR/../build/build-clippy-matrix.sh"
+        run "$SCRIPT_DIR/../build/build-check.sh" --skip-clippy --output-dir "$OUTPUT_DIR/build-check"
+      fi
+      ;;
+    core)
+      if warn_if_low_disk_for_step "${QUICFUSCATE_MIN_FULL_TEST_COMPILE_GIB:-10}" "scoped core test binary precompile" "$PROJECT_ROOT"; then
+        run_cargo test --no-run
+      fi
+      if (( FAST )); then
+        run_cargo test --lib -- --nocapture
+      else
+        run_cargo test --lib
+        run_cargo test --doc
+      fi
+      run "$SCRIPT_DIR/../suites/test-core.sh" --output-dir "$OUTPUT_DIR/tests-core"
+      ;;
+    privilege)
+      run "$SCRIPT_DIR/../suites/test-privilege-memory-tls-proof.sh" \
+        --output-dir "$OUTPUT_DIR/tests-privilege-memory-tls-proof"
+      ;;
+    desktop)
+      run "$SCRIPT_DIR/../suites/test-desktop-webadmin-rust-integration.sh" \
+        --output-dir "$OUTPUT_DIR/tests-desktop-webadmin-rust"
+      ;;
+    transport)
+      run "$SCRIPT_DIR/../suites/test-transport.sh" --output-dir "$OUTPUT_DIR/tests-transport"
+      ;;
+    fec)
+      run "$SCRIPT_DIR/../suites/test-fec.sh" --refactor --output-dir "$OUTPUT_DIR/tests-fec"
+      run "$SCRIPT_DIR/../suites/test-fec-auto-controller-scenarios.sh" \
+        --output-dir "$OUTPUT_DIR/tests-fec-auto-controller-scenarios"
+      run "$SCRIPT_DIR/../suites/test-fec-auto-controller-proof.sh" \
+        --output-dir "$OUTPUT_DIR/tests-fec-auto-controller-proof"
+      run "$SCRIPT_DIR/../suites/test-fec-simulation.sh" \
+        --output-dir "$OUTPUT_DIR/tests-fec-sim" $( ((FAST)) && echo --fast )
+      run "$SCRIPT_DIR/../suites/test-fec-e2e-loss.sh" \
+        --output-dir "$OUTPUT_DIR/tests-fec-e2e-loss" $( ((FAST)) && echo --fast )
+      ;;
+    stealth)
+      run "$SCRIPT_DIR/../suites/test-stealth.sh" --output-dir "$OUTPUT_DIR/tests-stealth" \
+        $( ((FAST)) && echo --fast )
+      run "$SCRIPT_DIR/../suites/test-stealth-brain.sh" \
+        --output-dir "$OUTPUT_DIR/tests-stealth-brain" $( ((FAST)) && echo --fast )
+      run "$SCRIPT_DIR/../suites/test-probe-detection.sh" \
+        --output-dir "$OUTPUT_DIR/tests-probe-detection" $( ((FAST)) && echo --fast )
+      ;;
+    crypto)
+      run "$SCRIPT_DIR/../suites/test-crypto.sh" --output-dir "$OUTPUT_DIR/tests-crypto" \
+        $( ((FAST)) && echo --fast )
+      if (( FAST )); then
+        run "$SCRIPT_DIR/../fast/test-fast-crypto.sh" --output-dir "$OUTPUT_DIR/fast-crypto"
+      else
+        run_cargo test --release --lib aes_gcm
+        run_cargo test --release --lib aegis128l
+      fi
+      ;;
+    optimization)
+      run "$SCRIPT_DIR/../suites/test-optimization.sh" \
+        --output-dir "$OUTPUT_DIR/tests-optimization" $( ((FAST)) && echo --fast )
+      ;;
+    security)
+      run "$SCRIPT_DIR/../suites/test-security.sh" --output-dir "$OUTPUT_DIR/tests-security"
+      run "$SCRIPT_DIR/../suites/test-security-fuzzing.sh" \
+        --output-dir "$OUTPUT_DIR/tests-security-fuzzing"
+      ;;
+    frontend)
+      run "$SCRIPT_DIR/../smoke/smoke-ui-frontends.sh" --output-dir "$OUTPUT_DIR/frontend-smoke"
+      ;;
+    e2e)
+      run "$SCRIPT_DIR/../suites/test-e2e.sh" --output-dir "$OUTPUT_DIR/e2e" \
+        $( ((FAST)) && echo --fast )
+      run "$SCRIPT_DIR/../suites/test-e2e.sh" --integration \
+        --output-dir "$OUTPUT_DIR/e2e-integration" $( ((FAST)) && echo --fast )
+      ;;
+    performance)
+      run "$SCRIPT_DIR/../suites/test-performance-regression.sh" \
+        --output-dir "$OUTPUT_DIR/tests-perf" $( ((FAST)) && echo --fast )
+      ;;
+    audits)
+      run "$SCRIPT_DIR/../audits/audit-all-comprehensive.sh" --strict --output-dir "$OUTPUT_DIR/audit"
+      run "$SCRIPT_DIR/../../utils/util-analyze-codebase.sh" > "$OUTPUT_DIR/analysis.txt"
+      ;;
+    benchmarks)
+      BENCH_STEALTH_PREFLIGHT_LOG="$OUTPUT_DIR/bench-stealth-preflight.log"
+      if run_stealth_bench_preflight "$BENCH_STEALTH_PREFLIGHT_LOG"; then
+        run "$SCRIPT_DIR/../../benchmarks/suites/bench-stealth.sh" --output-dir "$OUTPUT_DIR/bench-stealth"
+        run "$SCRIPT_DIR/../../benchmarks/suites/bench-fec-simulation.sh" --output-dir "$OUTPUT_DIR/bench-fec-sim"
+        run "$SCRIPT_DIR/../../benchmarks/suites/bench-stealth-brain.sh" --output-dir "$OUTPUT_DIR/bench-stealth-brain"
+      else
+        json_end "$JSON"
+        return 1
+      fi
+      ;;
+    amx)
+      if ! run_amx_proof_lane "$OUTPUT_DIR/tests-amx-proof"; then
+        return 1
+      fi
+      ;;
+  esac
+}
+
+if [[ "$ONLY" != "all" ]]; then
+  local_scope=""
+  IFS=',' read -r -a selected_scopes <<< "$ONLY"
+  for local_scope in "${selected_scopes[@]}"; do
+    run_selected_scope "$local_scope"
+  done
+  echo -e "\n[OK] Scoped suite complete. Scopes: $ONLY. Artifacts: $OUTPUT_DIR"
+  json_end "$JSON"
+  exit 0
 fi
 
 # 1) Build/lint checks (short by default)

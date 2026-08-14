@@ -4205,7 +4205,7 @@ Guardrail remediation playbook:
 - When a guardrail touches feature claims, update runtime truth and `docs/DOCUMENTATION.md` in the same change set.
 
 #### Utils (`scripts/tests/utils/`)
-- `util-run-full-suite.sh`
+- `util-run-full-suite.sh` - complete default run; explicit `--only build,core,privilege,desktop,transport,fec,stealth,crypto,optimization,security,frontend,e2e,performance,audits,benchmarks,amx` executes only the selected top-level scopes and records the selection, so focused verification does not pay for unrelated suites.
 - `verify-icmp-time-exceeded-pcap.py` - Dependency-free IPv4 ICMP Time Exceeded pcap verifier. Schema `quicfuscate.icmp-time-exceeded-pcap.v1` validates the request and server response endpoints, TTLs, ICMP type/code, IPv4 and ICMP checksums, and exact quoted-request bytes without replacing an existing result.
 - TLS utilities: `util-tls-generate-sha256-sidecars.sh`, `util-tls-diff-profiles.sh`, `util-tls-export-active-profile.sh`, `util-tls-list-profiles.sh`, `util-tls-profile-head.sh`, `util-tls-show-active-env.sh`
 - E2E profile utilities: `util-e2e-decode-all-profiles.sh`, `util-e2e-verify-all.sh`, `util-e2e-verify-current.sh`
