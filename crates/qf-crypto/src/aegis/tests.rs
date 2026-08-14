@@ -20,6 +20,142 @@ fn dec(ct: &[u8], ad: &[u8], tag: &[u8; 16]) -> Result<Vec<u8>, AegisError> {
     Aegis128L::new(&KEY, &NONCE).unwrap().decrypt_verified(ct, ad, tag)
 }
 
+#[test]
+fn aegis128l_matches_pinned_cfrg_vectors() {
+    // Pinned CFRG vectors from commit 8e289c40:
+    // https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-aegis-aead/8e289c40/test-vectors/aegis-128l-test-vectors.json
+    let vectors = [
+        (
+            "Test Vector 1",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "",
+            "00000000000000000000000000000000",
+            "c1c0e58bd913006feba00f4b3cc3594e",
+            "abe0ece80c24868a226a35d16bdae37a",
+        ),
+        (
+            "Test Vector 2",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "",
+            "",
+            "",
+            "c2b879a67def9d74e6c14f708bbcc9b4",
+        ),
+        (
+            "Test Vector 3",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "0001020304050607",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "79d94593d8c2119d7e8fd9b8fc77845c5c077a05b2528b6ac54b563aed8efe84",
+            "cc6f3372f6aa1bb82388d695c3962d9a",
+        ),
+        (
+            "Test Vector 4",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "0001020304050607",
+            "000102030405060708090a0b0c0d",
+            "79d94593d8c2119d7e8fd9b8fc77",
+            "5c04b3dba849b2701effbe32c7f0fab7",
+        ),
+        (
+            "Test Vector 5",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829",
+            "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637",
+            "b31052ad1cca4e291abcf2df3502e6bdb1bfd6db36798be3607b1f94d34478aa7ede7f7a990fec10",
+            "7542a745733014f9474417b337399507",
+        ),
+    ];
+
+    for (name, key_hex, nonce_hex, ad_hex, msg_hex, expected_ct_hex, expected_tag_hex) in vectors {
+        let key: [u8; 16] = hex::decode(key_hex).unwrap().try_into().unwrap();
+        let nonce: [u8; 16] = hex::decode(nonce_hex).unwrap().try_into().unwrap();
+        let ad = hex::decode(ad_hex).unwrap();
+        let msg = hex::decode(msg_hex).unwrap();
+        let expected_ct = hex::decode(expected_ct_hex).unwrap();
+        let expected_tag: [u8; 16] = hex::decode(expected_tag_hex).unwrap().try_into().unwrap();
+
+        let mut l_ciphertext = msg.clone();
+        let l_tag = Aegis128L::new(&key, &nonce).unwrap().encrypt_in_place(&mut l_ciphertext, &ad);
+        assert_eq!(l_ciphertext, expected_ct, "L ciphertext mismatch: {name}");
+        assert_eq!(l_tag, expected_tag, "L tag mismatch: {name}");
+
+        let mut x4_ciphertext = msg.clone();
+        let x4_tag =
+            Aegis128X4::new(&key, &nonce).unwrap().encrypt_in_place(&mut x4_ciphertext, &ad);
+        assert_eq!(x4_ciphertext, expected_ct, "X4 ciphertext mismatch: {name}");
+        assert_eq!(x4_tag, expected_tag, "X4 tag mismatch: {name}");
+
+        let mut x8_ciphertext = msg.clone();
+        let x8_tag =
+            Aegis128X8::new(&key, &nonce).unwrap().encrypt_in_place(&mut x8_ciphertext, &ad);
+        assert_eq!(x8_ciphertext, expected_ct, "X8 ciphertext mismatch: {name}");
+        assert_eq!(x8_tag, expected_tag, "X8 tag mismatch: {name}");
+
+        let mut verifier = Aegis128L::new(&key, &nonce).unwrap();
+        assert_eq!(verifier.decrypt_verified(&expected_ct, &ad, &expected_tag).unwrap(), msg);
+    }
+}
+
+#[test]
+fn aegis128l_rejects_pinned_cfrg_failure_vectors() {
+    // The failure cases are part of the same pinned CFRG vector file and mutate
+    // key, ciphertext, associated data, or the 128-bit tag.
+    let vectors = [
+        (
+            "key",
+            "10000200000000000000000000000000",
+            "10010000000000000000000000000000",
+            "0001020304050607",
+            "79d94593d8c2119d7e8fd9b8fc77",
+            "5c04b3dba849b2701effbe32c7f0fab7",
+        ),
+        (
+            "ciphertext",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "0001020304050607",
+            "79d94593d8c2119d7e8fd9b8fc78",
+            "5c04b3dba849b2701effbe32c7f0fab7",
+        ),
+        (
+            "associated data",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "0001020304050608",
+            "79d94593d8c2119d7e8fd9b8fc77",
+            "5c04b3dba849b2701effbe32c7f0fab7",
+        ),
+        (
+            "tag",
+            "10010000000000000000000000000000",
+            "10000200000000000000000000000000",
+            "0001020304050607",
+            "79d94593d8c2119d7e8fd9b8fc77",
+            "6c04b3dba849b2701effbe32c7f0fab8",
+        ),
+    ];
+
+    for (mutation, key_hex, nonce_hex, ad_hex, ciphertext_hex, tag_hex) in vectors {
+        let key: [u8; 16] = hex::decode(key_hex).unwrap().try_into().unwrap();
+        let nonce: [u8; 16] = hex::decode(nonce_hex).unwrap().try_into().unwrap();
+        let ad = hex::decode(ad_hex).unwrap();
+        let ciphertext = hex::decode(ciphertext_hex).unwrap();
+        let tag: [u8; 16] = hex::decode(tag_hex).unwrap().try_into().unwrap();
+        let mut verifier = Aegis128L::new(&key, &nonce).unwrap();
+        assert_eq!(
+            verifier.decrypt_verified(&ciphertext, &ad, &tag),
+            Err(AegisError::InvalidTag),
+            "CFRG failure vector unexpectedly verified: {mutation}"
+        );
+    }
+}
+
 // ---- Roundtrip ----
 
 #[test]

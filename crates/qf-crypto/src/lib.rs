@@ -1064,6 +1064,73 @@ pub fn select_packet_data_aead(key: &[u8; 32], iv: &[u8; 12]) -> (PacketAeadSeal
     build_packet_data_aead(plan, &k16, &iv12)
 }
 
+/// Product-level private packet-AEAD family exposed to the authenticated negotiation layer.
+///
+/// Internal AEGIS width variants remain planner-owned and cannot appear in this contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrivateAeadFamily {
+    /// AEGIS-128L with the exact 128-bit key profile.
+    Aegis128L,
+    /// MORUS-1280-128 with the exact 128-bit key profile.
+    #[serde(rename = "morus-1280-128")]
+    Morus1280_128,
+}
+
+impl PrivateAeadFamily {
+    /// Exact key length required by the private wire contract.
+    pub const KEY_LEN: usize = 16;
+    /// Exact packet IV length required by the private wire contract.
+    pub const IV_LEN: usize = 12;
+    /// Exact authentication tag length shared with the QUIC packet shape.
+    pub const TAG_LEN: usize = 16;
+
+    /// Stable protocol identifier. Internal SIMD widths deliberately have no identifier.
+    pub const fn protocol_id(self) -> u8 {
+        match self {
+            Self::Aegis128L => 1,
+            Self::Morus1280_128 => 2,
+        }
+    }
+
+    /// Stable low-cardinality diagnostic label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Aegis128L => "aegis-128l",
+            Self::Morus1280_128 => "morus-1280-128",
+        }
+    }
+}
+
+/// Select a private packet AEAD with exact key and IV lengths.
+///
+/// This API is intentionally separate from the retained legacy selector, whose 32-byte input
+/// represents a TLS-derived secret and historically feeds the first 16 bytes to the product
+/// backend. Private negotiation must never silently truncate material, so it accepts only the
+/// exact 128-bit family key and 96-bit packet IV.
+pub fn select_private_packet_data_aead(
+    family: PrivateAeadFamily,
+    key: &[u8],
+    iv: &[u8],
+) -> Result<(PacketAeadSeal, PacketAeadOpen), crate::error::ConnectionError> {
+    crate::crypto::aead::require_exact_key_iv(
+        family.as_str(),
+        key,
+        PrivateAeadFamily::KEY_LEN,
+        iv,
+        PrivateAeadFamily::IV_LEN,
+    )?;
+    let mut key16 = [0u8; PrivateAeadFamily::KEY_LEN];
+    key16.copy_from_slice(key);
+    let mut iv12 = [0u8; PrivateAeadFamily::IV_LEN];
+    iv12.copy_from_slice(iv);
+    let plan = match family {
+        PrivateAeadFamily::Aegis128L => CryptoAeadPlan::Aegis128L,
+        PrivateAeadFamily::Morus1280_128 => CryptoAeadPlan::Morus,
+    };
+    Ok(build_packet_data_aead(plan, &key16, &iv12))
+}
+
 fn data_aead_override_mode() -> u8 {
     DATA_AEAD_OVERRIDE_MODE.load(Ordering::Relaxed)
 }
@@ -1093,10 +1160,47 @@ pub enum DataAeadPreference {
     Morus,
 }
 
+impl DataAeadPreference {
+    /// Convert the retained operator preference to the product-level private family contract.
+    pub const fn private_family(self) -> Option<PrivateAeadFamily> {
+        match self {
+            Self::Auto => None,
+            Self::Aegis128L => Some(PrivateAeadFamily::Aegis128L),
+            Self::Morus => Some(PrivateAeadFamily::Morus1280_128),
+        }
+    }
+}
+
+/// Packet-protection policy for the authenticated private data-plane upgrade.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PacketProtectionMode {
+    /// Keep the complete connection on standards-compatible rustls QUIC keys.
+    Standard,
+    /// Use standard protection unless a future authenticated private upgrade proves safe.
+    #[default]
+    Auto,
+    /// Require a completed authenticated private upgrade and fail closed otherwise.
+    AdvancedRequired,
+}
+
+impl PacketProtectionMode {
+    /// Stable low-cardinality diagnostic label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Auto => "auto",
+            Self::AdvancedRequired => "advanced-required",
+        }
+    }
+}
+
 /// Cryptographic configuration projected from the engine boundary.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CryptoConfig {
+    /// Authenticated private packet-protection policy.
+    pub packet_protection_mode: PacketProtectionMode,
     /// AEAD cipher preference.
     pub aead_preference: DataAeadPreference,
     /// Force a supported product-family AEAD name.
@@ -1105,11 +1209,25 @@ pub struct CryptoConfig {
 
 impl Default for CryptoConfig {
     fn default() -> Self {
-        Self { aead_preference: DataAeadPreference::Auto, force_aead: String::new() }
+        Self {
+            packet_protection_mode: PacketProtectionMode::Auto,
+            aead_preference: DataAeadPreference::Auto,
+            force_aead: String::new(),
+        }
     }
 }
 
 impl CryptoConfig {
+    /// Resolve the configured product family without exposing internal backend widths.
+    pub fn private_family(&self) -> Option<PrivateAeadFamily> {
+        let force = self.force_aead.trim().to_ascii_lowercase();
+        match force.as_str() {
+            "aegis-128l" | "aegis128l" | "aegis" => Some(PrivateAeadFamily::Aegis128L),
+            "morus" | "morus-1280-128" | "morus1280-128" => Some(PrivateAeadFamily::Morus1280_128),
+            _ => self.aead_preference.private_family(),
+        }
+    }
+
     /// Validate the operator-facing product-family override.
     pub fn validate(&self) -> Result<(), String> {
         let force = self.force_aead.trim();
@@ -1128,6 +1246,23 @@ impl CryptoConfig {
             if !supported {
                 return Err(format!("crypto.force_aead has unsupported value: {force}"));
             }
+        }
+        let private_requested = self.aead_preference != DataAeadPreference::Auto
+            || !matches!(force.to_ascii_lowercase().as_str(), "" | "auto");
+        match self.packet_protection_mode {
+            PacketProtectionMode::Standard if private_requested => {
+                return Err(
+                    "crypto.packet_protection_mode=standard conflicts with a private AEAD selection"
+                        .to_string(),
+                );
+            }
+            PacketProtectionMode::AdvancedRequired if !private_requested => {
+                return Err(
+                    "crypto.packet_protection_mode=advanced-required requires an explicit private AEAD selection"
+                        .to_string(),
+                );
+            }
+            _ => {}
         }
         Ok(())
     }

@@ -314,9 +314,37 @@ unsafe fn aesenc_round_armcrypto(block: &[u8; 16], round_key: &[u8; 16]) -> [u8;
     use core::arch::aarch64::*;
     let b = vld1q_u8(block.as_ptr());
     let rk = vld1q_u8(round_key.as_ptr());
-    let e = vaeseq_u8(b, rk);
+    // AESE folds AddRoundKey before SubBytes, unlike AES-NI's AESENC. Keep
+    // the ARM instruction's key operand zero and XOR the actual key after
+    // AESMC to preserve the AESENC ordering required by AEGIS.
+    let e = vaeseq_u8(b, vdupq_n_u8(0));
     let m = vaesmcq_u8(e);
+    let out_vec = veorq_u8(m, rk);
     let mut out = [0u8; 16];
-    vst1q_u8(out.as_mut_ptr(), m);
+    vst1q_u8(out.as_mut_ptr(), out_vec);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aesenc_round_cached;
+
+    #[test]
+    fn aesenc_round_matches_cfrg_reference() {
+        let block = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let round_key = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        assert_eq!(
+            aesenc_round_cached(&block, &round_key),
+            [
+                0x63, 0x78, 0xe4, 0xda, 0xf0, 0x62, 0xfd, 0x71, 0xa5, 0x0f, 0x36, 0xff, 0xde, 0xe6,
+                0x84, 0xac,
+            ]
+        );
+    }
 }

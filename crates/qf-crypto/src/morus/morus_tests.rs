@@ -357,43 +357,95 @@ fn test_morus_in_place_roundtrip() {
 }
 
 #[test]
-fn morus_kat_vectors() {
-    let key: [u8; 16] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-        0x0f,
-    ];
-    let iv = [0u8; 12];
-    let nonce: [u8; 16] = [
-        0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
-        0x00,
-    ];
-    let ad: [u8; 16] = [
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-        0x1f,
-    ];
-    let pt: [u8; 32] = [
-        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
-        0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d,
-        0x3e, 0x3f,
-    ];
-    let expected_ct: [u8; 32] = [
-        0x0e, 0x95, 0x2d, 0x81, 0xd5, 0x90, 0xb2, 0x29, 0x16, 0xfe, 0xf3, 0x56, 0x5c, 0x8f, 0x49,
-        0xbe, 0x72, 0x9a, 0x43, 0x13, 0x64, 0x5b, 0x4f, 0x6b, 0xd6, 0xc8, 0x7c, 0x97, 0x66, 0x3c,
-        0x4f, 0xb7,
-    ];
-    let expected_tag: [u8; 16] = [
-        0xf0, 0x85, 0xa8, 0xc7, 0x48, 0x70, 0x0b, 0x94, 0x1c, 0xb9, 0xca, 0xa6, 0xcd, 0x0d, 0x74,
-        0x18,
+fn morus_official_caesar_morus1280_128_vectors() {
+    // Pinned from the final MORUS v2 reference package:
+    // https://personal.ntu.edu.sg/wuhj/research/caesar/finalist_code/morusv2_code.zip
+    // SHA-256: 1f21f972d10e9303358fa88ee46c961d501653b73ea33047ebe83d4388fa9bbf
+    let vectors = [
+        (
+            "zero-empty",
+            "00000000000000000000000000000000",
+            "00000000000000000000000000000000",
+            "",
+            "",
+            "",
+            "5bd2cba68ea7e72f6b3d0c155f39f962",
+        ),
+        (
+            "zero-one",
+            "00000000000000000000000000000000",
+            "00000000000000000000000000000000",
+            "",
+            "01",
+            "ba",
+            "ec1942a315a84695432a1255e6197878",
+        ),
+        (
+            "zero-ad",
+            "00000000000000000000000000000000",
+            "00000000000000000000000000000000",
+            "01",
+            "",
+            "",
+            "590caa148b848d7614315685377a0d42",
+        ),
+        (
+            "range-16",
+            "000102030405060708090a0b0c0d0e0f",
+            "101112131415161718191a1b1c1d1e1f",
+            "202122232425262728292a2b2c2d2e2f",
+            "303132333435363738393a3b3c3d3e3f",
+            "2adad1acf5919eb5f51b3db3a56769d4",
+            "e670904fdc83e35d2b06f163bc3c58c5",
+        ),
+        (
+            "range-33",
+            "000102030405060708090a0b0c0d0e0f",
+            "101112131415161718191a1b1c1d1e1f",
+            "202122232425262728292a2b2c2d2e2f",
+            "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f50",
+            "2adad1acf5919eb5f51b3db3a56769d4ae579f726ed07bc199024ea626f20f4a9c",
+            "53063a3be3a06f73b7414b99dbd50b4b",
+        ),
+        (
+            "reference-regression",
+            "000102030405060708090a0b0c0d0e0f",
+            "0f0e0d0c0b0a09080706050403020100",
+            "101112131415161718191a1b1c1d1e1f",
+            "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+            "6086380dd1bbf8c220b50156e97a47a2260491450e01f8e946fb1b7fc0bba8bf",
+            "32c2889e4293c6d0979078ec8cc6685d",
+        ),
     ];
 
-    let morus = MorusAead::from_arrays(&key, &iv);
-    let (ct, tag) = morus.encrypt_native(&pt, &ad, &nonce);
-    assert_eq!(ct, expected_ct);
-    assert_eq!(tag, expected_tag);
+    for (name, key_hex, nonce_hex, ad_hex, plaintext_hex, expected_ct_hex, expected_tag_hex) in
+        vectors
+    {
+        let key: [u8; 16] = hex::decode(key_hex).unwrap().try_into().unwrap();
+        let nonce: [u8; 16] = hex::decode(nonce_hex).unwrap().try_into().unwrap();
+        let ad = hex::decode(ad_hex).unwrap();
+        let plaintext = hex::decode(plaintext_hex).unwrap();
+        let expected_ct = hex::decode(expected_ct_hex).unwrap();
+        let expected_tag: [u8; 16] = hex::decode(expected_tag_hex).unwrap().try_into().unwrap();
+        let morus = MorusAead::from_arrays(&key, &[0u8; 12]);
 
-    let (ct_opt, tag_opt) = morus.encrypt_optimized(&pt, &ad, &nonce);
-    assert_eq!(ct_opt, expected_ct);
-    assert_eq!(tag_opt, expected_tag);
+        let (native_ct, native_tag) = morus.encrypt_native(&plaintext, &ad, &nonce);
+        assert_eq!(native_ct, expected_ct, "native ciphertext mismatch: {name}");
+        assert_eq!(native_tag, expected_tag, "native tag mismatch: {name}");
+        assert_eq!(morus.decrypt_native(&native_ct, &native_tag, &ad, &nonce).unwrap(), plaintext);
+
+        let (optimized_ct, optimized_tag) = morus.encrypt_optimized(&plaintext, &ad, &nonce);
+        assert_eq!(optimized_ct, expected_ct, "optimized ciphertext mismatch: {name}");
+        assert_eq!(optimized_tag, expected_tag, "optimized tag mismatch: {name}");
+        assert_eq!(
+            morus.decrypt_optimized(&optimized_ct, &optimized_tag, &ad, &nonce).unwrap(),
+            plaintext
+        );
+
+        let mut forged_tag = expected_tag;
+        forged_tag[0] ^= 1;
+        assert!(morus.decrypt_native(&expected_ct, &forged_tag, &ad, &nonce).is_err());
+    }
 }
 
 // TODO-395: regression guard — the AeadSeal/AeadOpen trait path must

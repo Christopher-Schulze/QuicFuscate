@@ -1,7 +1,7 @@
 use super::chacha20poly1305::ChaCha20Poly1305;
 use super::{DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AUTO};
 use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
-use crate::{CryptoConfig, DataAeadPreference};
+use crate::{CryptoConfig, DataAeadPreference, PacketProtectionMode, PrivateAeadFamily};
 use qf_cpu::CryptoAeadPlan;
 use std::sync::Mutex;
 
@@ -111,6 +111,7 @@ fn data_aead_config_force_internal_width_aliases_fall_back_to_auto() {
 #[test]
 fn crypto_config_preserves_wire_shape_and_force_validation() {
     let config = CryptoConfig::default();
+    assert_eq!(config.packet_protection_mode, PacketProtectionMode::Auto);
     assert_eq!(config.aead_preference, DataAeadPreference::Auto);
     assert!(config.validate().is_ok());
 
@@ -121,6 +122,44 @@ fn crypto_config_preserves_wire_shape_and_force_validation() {
     let mut invalid = config;
     invalid.force_aead = "aegis-128x4".to_string();
     assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn private_packet_selector_requires_exact_key_and_iv_material() {
+    let key = [0x11u8; PrivateAeadFamily::KEY_LEN];
+    let iv = [0x22u8; PrivateAeadFamily::IV_LEN];
+    let plaintext = b"private-roundtrip";
+    for family in [PrivateAeadFamily::Aegis128L, PrivateAeadFamily::Morus1280_128] {
+        let (seal, open) =
+            super::select_private_packet_data_aead(family, &key, &iv).expect("exact material");
+        let mut packet = vec![0u8; plaintext.len() + PrivateAeadFamily::TAG_LEN];
+        packet[..plaintext.len()].copy_from_slice(plaintext);
+        seal.seal_with_u64_counter(7, b"aad", &mut packet, plaintext.len(), None).expect("seal");
+        let length = open.open_with_u64_counter(7, b"aad", &mut packet).expect("open");
+        assert_eq!(length, plaintext.len());
+        assert_eq!(&packet[..length], plaintext);
+        assert!(super::select_private_packet_data_aead(family, &[0u8; 32], &iv).is_err());
+        assert!(super::select_private_packet_data_aead(family, &key, &[0u8; 16]).is_err());
+    }
+}
+
+#[test]
+fn packet_protection_mode_validation_is_fail_closed() {
+    let mut config = CryptoConfig {
+        packet_protection_mode: PacketProtectionMode::Standard,
+        ..CryptoConfig::default()
+    };
+    assert!(config.validate().is_ok());
+
+    config.aead_preference = DataAeadPreference::Aegis128L;
+    assert!(config.validate().is_err());
+
+    config.packet_protection_mode = PacketProtectionMode::AdvancedRequired;
+    assert!(config.validate().is_ok());
+
+    config.aead_preference = DataAeadPreference::Auto;
+    config.force_aead.clear();
+    assert!(config.validate().is_err());
 }
 
 #[test]

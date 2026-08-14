@@ -4,10 +4,9 @@
 //! Internal consolidated implementation with hardware-dispatched AES rounds.
 //! No external crate dependency.
 
-use crate::crypto::aead::{
-    require_exact_key_iv, AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem, KeyMaterialError,
-};
-use std::sync::atomic::Ordering;
+use crate::crypto::aead::{require_exact_key_iv, KeyMaterialError};
+#[cfg(test)]
+pub(crate) use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
 use zeroize::Zeroize;
 
 /// AEGIS-128L AEAD wrapper for the data-plane AEAD trait.
@@ -139,6 +138,7 @@ impl std::error::Error for AegisError {}
 // We always compile a portable software AESENC equivalent, and optionally dispatch
 // to architecture-specific AES instructions via #[target_feature] when available.
 mod aegis_aes_block;
+mod batch;
 
 use aegis_aes_block::AesBlock;
 
@@ -169,16 +169,17 @@ fn aegis128l_update(state: &mut [AesBlock; 8], d0: AesBlock, d1: AesBlock) {
     // in any order (including VAES batching).
     let old = state.clone();
 
-    // Prepare inputs/round-keys for the 8 AESENC operations.
-    // new7 = AESENC(old7, old6)
-    // new6 = AESENC(old6, old5)
-    // new5 = AESENC(old5, old4)
-    // new4 = AESENC(old4, old3)
-    // new3 = AESENC(old3, old2)
-    // new2 = AESENC(old2, old1)
-    // new1 = AESENC(old1, old0)
-    // new0 = AESENC(old0, old7)
+    // Prepare inputs/round-keys for the CFRG AEGIS-128L update:
+    // new0 = AESENC(old7, old0 XOR d0)
+    // new1 = AESENC(old0, old1)
+    // new2 = AESENC(old1, old2)
+    // new3 = AESENC(old2, old3)
+    // new4 = AESENC(old3, old4 XOR d1)
+    // new5 = AESENC(old4, old5)
+    // new6 = AESENC(old5, old6)
+    // new7 = AESENC(old6, old7)
     let in_b = [
+        old[7].to_bytes(),
         old[0].to_bytes(),
         old[1].to_bytes(),
         old[2].to_bytes(),
@@ -186,30 +187,50 @@ fn aegis128l_update(state: &mut [AesBlock; 8], d0: AesBlock, d1: AesBlock) {
         old[4].to_bytes(),
         old[5].to_bytes(),
         old[6].to_bytes(),
-        old[7].to_bytes(),
     ];
     let in_rk = [
-        old[7].to_bytes(),
-        old[0].to_bytes(),
+        old[0].xor(&d0).to_bytes(),
         old[1].to_bytes(),
         old[2].to_bytes(),
         old[3].to_bytes(),
-        old[4].to_bytes(),
+        old[4].xor(&d1).to_bytes(),
         old[5].to_bytes(),
         old[6].to_bytes(),
+        old[7].to_bytes(),
     ];
 
     // Run the 8 AESENC operations with the best available backend.
     let out = aegis_aes_block::aesenc8_update_inputs(&in_b, &in_rk);
 
-    state[0] = AesBlock::from_bytes(&out[0]).xor(&d0);
-    state[1] = AesBlock::from_bytes(&out[1]);
-    state[2] = AesBlock::from_bytes(&out[2]);
-    state[3] = AesBlock::from_bytes(&out[3]);
-    state[4] = AesBlock::from_bytes(&out[4]).xor(&d1);
-    state[5] = AesBlock::from_bytes(&out[5]);
-    state[6] = AesBlock::from_bytes(&out[6]);
-    state[7] = AesBlock::from_bytes(&out[7]);
+    for (slot, block) in state.iter_mut().zip(out.iter()) {
+        *slot = AesBlock::from_bytes(block);
+    }
+}
+
+#[inline(always)]
+fn aegis128l_finalize_tag(
+    state: &mut [AesBlock; 8],
+    associated_data_len: usize,
+    message_len: usize,
+) -> [u8; 16] {
+    // CFRG AEGIS-128L finalization: t = S2 XOR LE64(ad_bits)||LE64(msg_bits),
+    // followed by seven updates with (t, t), then S0 through S6 for a 128-bit tag.
+    let mut length_bytes = [0u8; 16];
+    length_bytes[..8].copy_from_slice(&(associated_data_len as u64).wrapping_mul(8).to_le_bytes());
+    length_bytes[8..].copy_from_slice(&(message_len as u64).wrapping_mul(8).to_le_bytes());
+    let t = state[2].xor(&AesBlock::from_bytes(&length_bytes));
+    for _ in 0..7 {
+        aegis128l_update(state, t.clone(), t.clone());
+    }
+
+    state[0]
+        .xor(&state[1])
+        .xor(&state[2])
+        .xor(&state[3])
+        .xor(&state[4])
+        .xor(&state[5])
+        .xor(&state[6])
+        .to_bytes()
 }
 
 fn aegis128l_init_state(key: &[u8], nonce: &[u8]) -> Result<[AesBlock; 8], AegisError> {
@@ -251,7 +272,7 @@ fn aegis128l_init_state(key: &[u8], nonce: &[u8]) -> Result<[AesBlock; 8], Aegis
         kxn.clone(),
         key_block.xor(&c0),
         key_block.xor(&c1),
-        kxn,
+        key_block.xor(&c0),
     ];
 
     // Initialization rounds.
@@ -408,28 +429,7 @@ impl Aegis128L {
             }
         }
 
-        // Finalization: mix lengths (bits) for AD and message, then 7 rounds
-        let ad_bits = (associated_data.len() as u64).wrapping_mul(8);
-        let msg_bits = (plaintext.len() as u64).wrapping_mul(8);
-        let mut len_block = [0u8; 16];
-        len_block[..8].copy_from_slice(&ad_bits.to_le_bytes());
-        len_block[8..16].copy_from_slice(&msg_bits.to_le_bytes());
-        let l0 = AesBlock::from_bytes(&len_block);
-        let l1 = l0.clone();
-        for _ in 0..7 {
-            Self::update(&mut self.state, l0.clone(), l1.clone());
-        }
-
-        // Generate tag: XOR all 8 state words
-        self.state[0]
-            .xor(&self.state[1])
-            .xor(&self.state[2])
-            .xor(&self.state[3])
-            .xor(&self.state[4])
-            .xor(&self.state[5])
-            .xor(&self.state[6])
-            .xor(&self.state[7])
-            .to_bytes()
+        aegis128l_finalize_tag(&mut self.state, associated_data.len(), plaintext.len())
     }
 
     /// Decrypts ciphertext in-place.
@@ -552,28 +552,8 @@ impl Aegis128L {
             }
         }
 
-        // Finalization: mix lengths (bits) for AD and message, then 7 rounds
-        let ad_bits = (associated_data.len() as u64).wrapping_mul(8);
-        let msg_bits = (ciphertext.len() as u64).wrapping_mul(8);
-        let mut len_block = [0u8; 16];
-        len_block[..8].copy_from_slice(&ad_bits.to_le_bytes());
-        len_block[8..16].copy_from_slice(&msg_bits.to_le_bytes());
-        let l0 = AesBlock::from_bytes(&len_block);
-        let l1 = l0.clone();
-        for _ in 0..7 {
-            Self::update(&mut self.state, l0.clone(), l1.clone());
-        }
-
-        // Verify tag: XOR all 8 state words
-        let computed_tag = self.state[0]
-            .xor(&self.state[1])
-            .xor(&self.state[2])
-            .xor(&self.state[3])
-            .xor(&self.state[4])
-            .xor(&self.state[5])
-            .xor(&self.state[6])
-            .xor(&self.state[7])
-            .to_bytes();
+        let computed_tag =
+            aegis128l_finalize_tag(&mut self.state, associated_data.len(), ciphertext.len());
 
         if !super::subtle_ct_eq(&computed_tag, tag) {
             return Err(AegisError::InvalidTag);
@@ -770,27 +750,7 @@ impl Aegis128X4 {
             }
         }
 
-        // Finalization: mix lengths (bits) for AD and message, then 7 rounds.
-        let ad_bits = (associated_data.len() as u64).wrapping_mul(8);
-        let msg_bits = (plaintext.len() as u64).wrapping_mul(8);
-        let mut len_block = [0u8; 16];
-        len_block[..8].copy_from_slice(&ad_bits.to_le_bytes());
-        len_block[8..16].copy_from_slice(&msg_bits.to_le_bytes());
-        let l0 = AesBlock::from_bytes(&len_block);
-        let l1 = l0.clone();
-        for _ in 0..7 {
-            Self::update(&mut self.state, l0.clone(), l1.clone());
-        }
-
-        self.state[0]
-            .xor(&self.state[1])
-            .xor(&self.state[2])
-            .xor(&self.state[3])
-            .xor(&self.state[4])
-            .xor(&self.state[5])
-            .xor(&self.state[6])
-            .xor(&self.state[7])
-            .to_bytes()
+        aegis128l_finalize_tag(&mut self.state, associated_data.len(), plaintext.len())
     }
 
     pub(crate) fn decrypt_in_place(
@@ -926,26 +886,8 @@ impl Aegis128X4 {
             }
         }
 
-        let ad_bits = (associated_data.len() as u64).wrapping_mul(8);
-        let msg_bits = (ciphertext.len() as u64).wrapping_mul(8);
-        let mut len_block = [0u8; 16];
-        len_block[..8].copy_from_slice(&ad_bits.to_le_bytes());
-        len_block[8..16].copy_from_slice(&msg_bits.to_le_bytes());
-        let l0 = AesBlock::from_bytes(&len_block);
-        let l1 = l0.clone();
-        for _ in 0..7 {
-            Self::update(&mut self.state, l0.clone(), l1.clone());
-        }
-
-        let computed_tag = self.state[0]
-            .xor(&self.state[1])
-            .xor(&self.state[2])
-            .xor(&self.state[3])
-            .xor(&self.state[4])
-            .xor(&self.state[5])
-            .xor(&self.state[6])
-            .xor(&self.state[7])
-            .to_bytes();
+        let computed_tag =
+            aegis128l_finalize_tag(&mut self.state, associated_data.len(), ciphertext.len());
 
         if !super::subtle_ct_eq(&computed_tag, tag) {
             return Err(AegisError::InvalidTag);
@@ -1137,26 +1079,7 @@ impl Aegis128X8 {
             }
         }
 
-        let ad_bits = (associated_data.len() as u64).wrapping_mul(8);
-        let msg_bits = (plaintext.len() as u64).wrapping_mul(8);
-        let mut len_block = [0u8; 16];
-        len_block[..8].copy_from_slice(&ad_bits.to_le_bytes());
-        len_block[8..16].copy_from_slice(&msg_bits.to_le_bytes());
-        let l0 = AesBlock::from_bytes(&len_block);
-        let l1 = l0.clone();
-        for _ in 0..7 {
-            Self::update(&mut self.state, l0.clone(), l1.clone());
-        }
-
-        self.state[0]
-            .xor(&self.state[1])
-            .xor(&self.state[2])
-            .xor(&self.state[3])
-            .xor(&self.state[4])
-            .xor(&self.state[5])
-            .xor(&self.state[6])
-            .xor(&self.state[7])
-            .to_bytes()
+        aegis128l_finalize_tag(&mut self.state, associated_data.len(), plaintext.len())
     }
 
     /// Decrypt ciphertext in place with associated data and verify the tag.
@@ -1308,26 +1231,8 @@ impl Aegis128X8 {
             }
         }
 
-        let ad_bits = (associated_data.len() as u64).wrapping_mul(8);
-        let msg_bits = (ciphertext.len() as u64).wrapping_mul(8);
-        let mut len_block = [0u8; 16];
-        len_block[..8].copy_from_slice(&ad_bits.to_le_bytes());
-        len_block[8..16].copy_from_slice(&msg_bits.to_le_bytes());
-        let l0 = AesBlock::from_bytes(&len_block);
-        let l1 = l0.clone();
-        for _ in 0..7 {
-            Self::update(&mut self.state, l0.clone(), l1.clone());
-        }
-
-        let computed_tag = self.state[0]
-            .xor(&self.state[1])
-            .xor(&self.state[2])
-            .xor(&self.state[3])
-            .xor(&self.state[4])
-            .xor(&self.state[5])
-            .xor(&self.state[6])
-            .xor(&self.state[7])
-            .to_bytes();
+        let computed_tag =
+            aegis128l_finalize_tag(&mut self.state, associated_data.len(), ciphertext.len());
 
         if !super::subtle_ct_eq(&computed_tag, tag) {
             return Err(AegisError::InvalidTag);
@@ -1335,420 +1240,6 @@ impl Aegis128X8 {
 
         Ok(())
     }
-}
-
-#[inline]
-fn aegis_batch_homogeneous_seal(items: &[AeadSealItem<'_>]) -> bool {
-    if items.len() <= 1 {
-        return false;
-    }
-    let first = &items[0];
-    items[1..]
-        .iter()
-        .all(|it| it.plaintext_len == first.plaintext_len && it.ad.len() == first.ad.len())
-}
-
-#[inline]
-fn aegis_batch_homogeneous_open(items: &[AeadOpenItem<'_>]) -> bool {
-    if items.len() <= 1 {
-        return false;
-    }
-    let first = &items[0];
-    items[1..].iter().all(|it| it.buf.len() == first.buf.len() && it.ad.len() == first.ad.len())
-}
-
-#[inline]
-fn record_aegis_batch_ops(count: usize, homogeneous: bool) {
-    if count > 1 && homogeneous {
-        qf_telemetry::AEGIS_BATCH_OPS.fetch_add(count as u64, Ordering::Relaxed);
-    }
-}
-
-// Implement AeadSeal and AeadOpen for Aegis128LAead
-impl AeadSeal for Aegis128LAead {
-    fn seal_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-        len: usize,
-        _extra_in: Option<&[u8]>,
-    ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        let sealed = crate::crypto::checked_seal_capacity(buf.len(), len)?;
-        let nonce16 = super::make_nonce16(&self.iv, counter)?;
-        let mut cipher = crate::crypto::Aegis128L::new(&self.key, &nonce16)
-            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        let (pt, rest) = buf.split_at_mut(len);
-        let tag = cipher.encrypt_in_place(pt, ad);
-        rest[..16].copy_from_slice(&tag);
-        Ok(sealed)
-    }
-
-    fn supports_batch_seal(&self) -> bool {
-        true
-    }
-
-    fn seal_batch(
-        &self,
-        items: &mut [AeadSealItem<'_>],
-    ) -> Result<(), crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if items.is_empty() {
-            return Ok(());
-        }
-        let homogeneous = aegis_batch_homogeneous_seal(items);
-        let first = &items[0];
-        if first.buf.len() < crate::crypto::sealed_len(first.plaintext_len)? {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let first_nonce = super::make_nonce16(&self.iv, first.counter)?;
-        let mut cipher = Aegis128L::new(&self.key, &first_nonce)
-            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        for (index, item) in items.iter_mut().enumerate() {
-            if index > 0 {
-                if item.buf.len() < crate::crypto::sealed_len(item.plaintext_len)? {
-                    return Err(ConnectionError::BufferTooShort);
-                }
-                let nonce16 = super::make_nonce16(&self.iv, item.counter)?;
-                cipher
-                    .reinit(&self.key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-            }
-            let (pt, rest) = item.buf.split_at_mut(item.plaintext_len);
-            let tag = cipher.encrypt_in_place(pt, item.ad);
-            rest[..16].copy_from_slice(&tag);
-        }
-        record_aegis_batch_ops(items.len(), homogeneous);
-        Ok(())
-    }
-}
-
-impl AeadOpen for Aegis128LAead {
-    fn open_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-    ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if buf.len() < 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let ct_len = buf.len() - 16;
-        let (ct, tag_in) = buf.split_at_mut(ct_len);
-        let mut tag = [0u8; 16];
-        tag.copy_from_slice(&tag_in[..16]);
-        let nonce16 = super::make_nonce16(&self.iv, counter)?;
-        let mut cipher = crate::crypto::Aegis128L::new(&self.key, &nonce16)
-            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        cipher
-            .decrypt_in_place(ct, ad, &tag)
-            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        Ok(ct_len)
-    }
-
-    fn supports_batch_open(&self) -> bool {
-        true
-    }
-
-    fn open_batch(
-        &self,
-        items: &mut [AeadOpenItem<'_>],
-    ) -> Result<(), crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if items.is_empty() {
-            return Ok(());
-        }
-        let homogeneous = aegis_batch_homogeneous_open(items);
-        let first = &items[0];
-        if first.buf.len() < 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let first_nonce = super::make_nonce16(&self.iv, first.counter)?;
-        let mut cipher = Aegis128L::new(&self.key, &first_nonce)
-            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        for (index, item) in items.iter_mut().enumerate() {
-            if index > 0 {
-                if item.buf.len() < 16 {
-                    return Err(ConnectionError::BufferTooShort);
-                }
-                let nonce16 = super::make_nonce16(&self.iv, item.counter)?;
-                cipher
-                    .reinit(&self.key, &nonce16)
-                    .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-            }
-            let ct_len = item.buf.len() - 16;
-            let (ct, tag_in) = item.buf.split_at_mut(ct_len);
-            let mut tag = [0u8; 16];
-            tag.copy_from_slice(&tag_in[..16]);
-            cipher
-                .decrypt_in_place(ct, item.ad, &tag)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
-        record_aegis_batch_ops(items.len(), homogeneous);
-        Ok(())
-    }
-}
-
-impl AeadSeal for Aegis128X4Aead {
-    fn seal_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-        len: usize,
-        _extra_in: Option<&[u8]>,
-    ) -> Result<usize, crate::error::ConnectionError> {
-        let sealed = crate::crypto::sealed_len(len)?;
-        let mut item = AeadSealItem { counter, ad, buf, plaintext_len: len };
-        self.seal_batch(core::slice::from_mut(&mut item))?;
-        Ok(sealed)
-    }
-
-    fn supports_batch_seal(&self) -> bool {
-        true
-    }
-
-    fn seal_batch(
-        &self,
-        items: &mut [AeadSealItem<'_>],
-    ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x4_seal_batch(&self.key, &self.iv, items)
-    }
-}
-
-impl AeadOpen for Aegis128X4Aead {
-    fn open_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-    ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if buf.len() < 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let ct_len = buf.len() - 16;
-        let mut item = AeadOpenItem { counter, ad, buf };
-        self.open_batch(core::slice::from_mut(&mut item))?;
-        Ok(ct_len)
-    }
-
-    fn supports_batch_open(&self) -> bool {
-        true
-    }
-
-    fn open_batch(
-        &self,
-        items: &mut [AeadOpenItem<'_>],
-    ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x4_open_batch(&self.key, &self.iv, items)
-    }
-}
-
-impl AeadSeal for Aegis128X8Aead {
-    fn seal_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-        len: usize,
-        _extra_in: Option<&[u8]>,
-    ) -> Result<usize, crate::error::ConnectionError> {
-        let sealed = crate::crypto::sealed_len(len)?;
-        let mut item = AeadSealItem { counter, ad, buf, plaintext_len: len };
-        self.seal_batch(core::slice::from_mut(&mut item))?;
-        Ok(sealed)
-    }
-
-    fn supports_batch_seal(&self) -> bool {
-        true
-    }
-
-    fn seal_batch(
-        &self,
-        items: &mut [AeadSealItem<'_>],
-    ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x8_seal_batch(&self.key, &self.iv, items)
-    }
-}
-
-impl AeadOpen for Aegis128X8Aead {
-    fn open_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-    ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if buf.len() < 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let ct_len = buf.len() - 16;
-        let mut item = AeadOpenItem { counter, ad, buf };
-        self.open_batch(core::slice::from_mut(&mut item))?;
-        Ok(ct_len)
-    }
-
-    fn supports_batch_open(&self) -> bool {
-        true
-    }
-
-    fn open_batch(
-        &self,
-        items: &mut [AeadOpenItem<'_>],
-    ) -> Result<(), crate::error::ConnectionError> {
-        aegis_x8_open_batch(&self.key, &self.iv, items)
-    }
-}
-
-fn aegis_x4_seal_batch(
-    key: &[u8; 16],
-    iv: &[u8; 12],
-    items: &mut [AeadSealItem<'_>],
-) -> Result<(), crate::error::ConnectionError> {
-    use crate::error::ConnectionError;
-    if items.is_empty() {
-        return Ok(());
-    }
-    let homogeneous = aegis_batch_homogeneous_seal(items);
-    let first = &items[0];
-    if first.buf.len() < crate::crypto::sealed_len(first.plaintext_len)? {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let first_nonce = super::make_nonce16(iv, first.counter)?;
-    let mut cipher = Aegis128X4::new(key, &first_nonce)
-        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-    for (index, item) in items.iter_mut().enumerate() {
-        if index > 0 {
-            if item.buf.len() < crate::crypto::sealed_len(item.plaintext_len)? {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            let nonce16 = super::make_nonce16(iv, item.counter)?;
-            cipher
-                .reinit(key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
-        let (pt, rest) = item.buf.split_at_mut(item.plaintext_len);
-        let tag = cipher.encrypt_in_place(pt, item.ad);
-        rest[..16].copy_from_slice(&tag);
-    }
-    record_aegis_batch_ops(items.len(), homogeneous);
-    Ok(())
-}
-
-fn aegis_x4_open_batch(
-    key: &[u8; 16],
-    iv: &[u8; 12],
-    items: &mut [AeadOpenItem<'_>],
-) -> Result<(), crate::error::ConnectionError> {
-    use crate::error::ConnectionError;
-    if items.is_empty() {
-        return Ok(());
-    }
-    let homogeneous = aegis_batch_homogeneous_open(items);
-    let first = &items[0];
-    if first.buf.len() < 16 {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let first_nonce = super::make_nonce16(iv, first.counter)?;
-    let mut cipher = Aegis128X4::new(key, &first_nonce)
-        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-    for (index, item) in items.iter_mut().enumerate() {
-        if index > 0 {
-            if item.buf.len() < 16 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            let nonce16 = super::make_nonce16(iv, item.counter)?;
-            cipher
-                .reinit(key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
-        let ct_len = item.buf.len() - 16;
-        let (ct, tag_in) = item.buf.split_at_mut(ct_len);
-        let mut tag = [0u8; 16];
-        tag.copy_from_slice(&tag_in[..16]);
-        cipher
-            .decrypt_in_place(ct, item.ad, &tag)
-            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-    }
-    record_aegis_batch_ops(items.len(), homogeneous);
-    Ok(())
-}
-
-fn aegis_x8_seal_batch(
-    key: &[u8; 16],
-    iv: &[u8; 12],
-    items: &mut [AeadSealItem<'_>],
-) -> Result<(), crate::error::ConnectionError> {
-    use crate::error::ConnectionError;
-    if items.is_empty() {
-        return Ok(());
-    }
-    let homogeneous = aegis_batch_homogeneous_seal(items);
-    let first = &items[0];
-    if first.buf.len() < crate::crypto::sealed_len(first.plaintext_len)? {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let first_nonce = super::make_nonce16(iv, first.counter)?;
-    let mut cipher = Aegis128X8::new(key, &first_nonce)
-        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-    for (index, item) in items.iter_mut().enumerate() {
-        if index > 0 {
-            if item.buf.len() < crate::crypto::sealed_len(item.plaintext_len)? {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            let nonce16 = super::make_nonce16(iv, item.counter)?;
-            cipher
-                .reinit(key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
-        let (pt, rest) = item.buf.split_at_mut(item.plaintext_len);
-        let tag = cipher.encrypt_in_place(pt, item.ad);
-        rest[..16].copy_from_slice(&tag);
-    }
-    record_aegis_batch_ops(items.len(), homogeneous);
-    Ok(())
-}
-
-fn aegis_x8_open_batch(
-    key: &[u8; 16],
-    iv: &[u8; 12],
-    items: &mut [AeadOpenItem<'_>],
-) -> Result<(), crate::error::ConnectionError> {
-    use crate::error::ConnectionError;
-    if items.is_empty() {
-        return Ok(());
-    }
-    let homogeneous = aegis_batch_homogeneous_open(items);
-    let first = &items[0];
-    if first.buf.len() < 16 {
-        return Err(ConnectionError::BufferTooShort);
-    }
-    let first_nonce = super::make_nonce16(iv, first.counter)?;
-    let mut cipher = Aegis128X8::new(key, &first_nonce)
-        .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-    for (index, item) in items.iter_mut().enumerate() {
-        if index > 0 {
-            if item.buf.len() < 16 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            let nonce16 = super::make_nonce16(iv, item.counter)?;
-            cipher
-                .reinit(key, &nonce16)
-                .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-        }
-        let ct_len = item.buf.len() - 16;
-        let (ct, tag_in) = item.buf.split_at_mut(ct_len);
-        let mut tag = [0u8; 16];
-        tag.copy_from_slice(&tag_in[..16]);
-        cipher
-            .decrypt_in_place(ct, item.ad, &tag)
-            .map_err(|_| ConnectionError::CryptoError("crypto failure".into()))?;
-    }
-    record_aegis_batch_ops(items.len(), homogeneous);
-    Ok(())
 }
 
 #[cfg(test)]
