@@ -141,7 +141,8 @@ main() {
   # The packaged file must be the same executable that was verified above.
   local packaged_mode
   packaged_mode="$(tar -tvzf "$tarball" \
-    | awk -v path="$(basename "$stage")/bin/quicfuscate" '$NF == path {print $1; exit}')"
+    | awk -v path="$(basename "$stage")/bin/quicfuscate" \
+      '$NF == path && mode == "" {mode = $1} END {if (mode != "") print mode}')"
   [[ -n "$packaged_mode" ]] || die "tarball does not contain bin/quicfuscate"
   [[ "$packaged_mode" == *x*x*x* ]] \
     || die "packaged binary is not executable in the tarball: mode $packaged_mode"
