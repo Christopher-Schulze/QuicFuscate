@@ -1880,7 +1880,7 @@ We do not list the crate's file structure exhaustively; instead we focus on the 
   - Tests:
     - `scripts/tests/rust/rt-baseline-oracles.rs` covers baseline vectors and oracle-style roundtrips.
     - `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, and `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs` are the primary retained proof surfaces for the custom runtime contract and backend parity.
-  - Tooling: central runner `./scripts/tests/suites/test-crypto.sh` executes qf-crypto leaf filters plus root integration fixtures, fails closed when a filter matches zero tests, and records a validated JSON artifact; Clippy remains a separate strict `-D warnings` gate.
+  - Tooling: central runner `./scripts/tests/suites/test-crypto.sh` executes qf-crypto leaf filters plus root integration fixtures, fails closed when a filter matches zero tests, and records a validated JSON artifact. `--only aegis,morus,aes-gcm,ghash,chacha,aes-hp,simd,integration` runs only selected contract groups and records omitted groups as explicit `SKIP` entries; `--fast` retains the minimal confidence profile. Clippy remains a separate strict `-D warnings` gate.
     - Manual invocation (equivalent in repo root):
       - `cargo test`
       - `cargo clippy -- -D warnings`
@@ -4079,7 +4079,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-stealth.sh` - Stealth suite (browser/OS profiles, padding, DoH, H3 masquerade, rotation)
 - `test-stealth-brain.sh` - StealthBrain ACK policy optimization tests with per-cell required-command status and explicit optional probe status
 - `test-probe-detection.sh` - Active-probe validation (detector invariants, reality fallback rotation, optional stealth pressure path)
-- `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations)
+- `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations); supports granular `--only` scope selection with explicit omitted-scope evidence
 - `test-transport.sh` - Transport suite (varint/frames/loss/BBR/0-RTT/validated migration/DATAGRAM; io_uring on Linux); `--only basic,uring,anti-replay,cc,integration` runs only the selected contract groups and records omitted groups as explicit `SKIP` entries, while the default remains complete.
 - `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`). Optional library tests use target-scoped discovery and fail closed on discovery or zero-test execution.
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest). Dynamic library-test selection uses release/`--lib` discovery with explicit feature and prerequisite status.
