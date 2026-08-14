@@ -271,8 +271,8 @@ if ! run_amx_proof_lane "$OUTPUT_DIR/tests-amx-proof"; then
 fi
 
 if (( FAST )); then
-  # Explicit fast helpers stay in sync with dedicated quick lanes.
-  run "$SCRIPT_DIR/../fast/test-fast-crypto.sh" --output-dir "$OUTPUT_DIR/fast-crypto"
+  # The crypto suite already covers TLS Cover; the FEC helper owns the
+  # Wiedemann telemetry smoke that used to be repeated by fast-crypto.
   run "$SCRIPT_DIR/../fast/test-fast-fec.sh" --output-dir "$OUTPUT_DIR/fast-fec"
 fi
 
