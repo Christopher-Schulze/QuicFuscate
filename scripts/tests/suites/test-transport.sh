@@ -8,17 +8,46 @@ cd "$PROJECT_ROOT"
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
 OUTPUT_DIR=""
+ONLY="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --jobs) JOBS="$2"; shift;;
     --features) CARGO_FEATURES="$2"; shift;;
+    --only) ONLY="$2"; shift;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
     --help|-h)
-      echo "Usage: $(basename "$0") [options]"; echo "Transport Layer Comprehensive Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
+      echo "Usage: $(basename "$0") [--only SCOPES] [options]"; echo "Transport Layer Comprehensive Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
     *) echo "Unknown flag: $1" >&2; exit 2;;
   esac; shift
 done
+
+validate_scope_selection() {
+  [[ "$ONLY" == "all" ]] && return 0
+  local scope
+  local -a scopes
+  IFS=',' read -r -a scopes <<< "$ONLY"
+  [[ "${#scopes[@]}" -gt 0 ]] || {
+    echo "--only requires at least one scope" >&2
+    return 2
+  }
+  for scope in "${scopes[@]}"; do
+    case "$scope" in
+      basic|uring|anti-replay|cc|integration) ;;
+      *)
+        echo "unknown --only scope: $scope (expected basic,uring,anti-replay,cc,integration)" >&2
+        return 2
+        ;;
+    esac
+  done
+}
+
+scope_selected() {
+  local scope="$1"
+  [[ "$ONLY" == "all" || ",$ONLY," == *",$scope,"* ]]
+}
+
+validate_scope_selection
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/tests-transport-${TIMESTAMP}"
@@ -44,6 +73,22 @@ record_platform_skip() {
     "raw_output="
   echo "[SKIP] $name: $reason"
 }
+
+record_scope_skip() {
+  local name="$1"
+  local target="${2:-not_applicable}"
+  local feature_set="${3:-rust-tests}"
+  record_platform_skip "$name" "not_selected_by_scope" "$target" "$feature_set"
+}
+
+qf_json_append_object "$JSON" \
+  "name=selection" \
+  "status=PASS" \
+  "result=PASS" \
+  "reason=explicit_scope_selection" \
+  "selected_scopes=$ONLY" \
+  "command_status=int:0" \
+  "raw_output="
 
 run_verified_target() {
   local target="$1"
@@ -306,20 +351,25 @@ echo "==============================================================="
 echo "  Transport Layer Comprehensive Test Suite (validated migration contract)"
 echo "==============================================================="
 
-echo -e "\n> Testing Basic Transport (unit tests)..."
-run_cargo test --release --lib transport:: -- --nocapture
-
-# Test io_uring fast path (Linux)
-echo -e "\n> Testing io_uring UDP Fast Path..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    QUICFUSCATE_FASTPATH=auto \
-    run_verified_target rt-transport-uring uring_batch_sender_initialises io_uring,rust-tests
+if scope_selected basic; then
+  echo -e "\n> Testing Basic Transport (unit tests)..."
+  run_cargo test --release --lib transport:: -- --nocapture
 else
-    record_platform_skip "rt-transport-uring" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
+  record_scope_skip "basic-transport" "lib" "rust-tests"
 fi
 
-echo -e "\n> Testing io_uring partial-send exact-once proof..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+if scope_selected uring; then
+  # Test io_uring fast path (Linux)
+  echo -e "\n> Testing io_uring UDP Fast Path..."
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+      QUICFUSCATE_FASTPATH=auto \
+      run_verified_target rt-transport-uring uring_batch_sender_initialises io_uring,rust-tests
+  else
+      record_platform_skip "rt-transport-uring" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
+  fi
+
+  echo -e "\n> Testing io_uring partial-send exact-once proof..."
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     partial_send_environment="$(qf_json_environment_with_assignments \
       "QUICFUSCATE_FASTPATH=auto")"
     if ! run_required_uring_proof \
@@ -330,14 +380,14 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
       --nocapture --exact --test-threads=1; then
         echo "[FAIL] io_uring partial-send exact-once proof did not pass" >&2
     fi
-else
-    record_platform_skip \
-      "uring-partial-send" "host_os_not_linux" "test:rt-transport-uring" \
-      "io_uring,rust-tests"
-fi
+  else
+      record_platform_skip \
+        "uring-partial-send" "host_os_not_linux" "test:rt-transport-uring" \
+        "io_uring,rust-tests"
+  fi
 
-echo -e "\n> Testing io_uring zero-length receive rearm proof..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  echo -e "\n> Testing io_uring zero-length receive rearm proof..."
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     rearm_environment="$(qf_json_environment_with_assignments "QUICFUSCATE_FASTPATH=auto")"
     if ! run_required_uring_proof \
       "uring-rearm" "QF_IO_URING_REARM_STATUS" "$rearm_environment" \
@@ -347,12 +397,12 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
       --nocapture --exact; then
         echo "[FAIL] io_uring zero-length receive rearm proof did not pass" >&2
     fi
-else
-    record_platform_skip "uring-rearm" "host_os_not_linux" "lib" "io_uring,rust-tests"
-fi
+  else
+      record_platform_skip "uring-rearm" "host_os_not_linux" "lib" "io_uring,rust-tests"
+  fi
 
-echo -e "\n> Testing opt-in io_uring SendMsgZc completion proof..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  echo -e "\n> Testing opt-in io_uring SendMsgZc completion proof..."
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     zc_environment="$(qf_json_environment_with_assignments \
       "QUICFUSCATE_FASTPATH=auto" "QUICFUSCATE_IO_URING_ZC=1")"
     if ! run_required_uring_proof \
@@ -363,12 +413,12 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
       --nocapture --exact --test-threads=1; then
         echo "[FAIL] opt-in io_uring SendMsgZc proof did not pass" >&2
     fi
-else
-    record_platform_skip "uring-zc" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
-fi
+  else
+      record_platform_skip "uring-zc" "host_os_not_linux" "test:rt-transport-uring" "io_uring,rust-tests"
+  fi
 
-echo -e "\n> Testing opt-in io_uring SendMsgZc partial-send exact-once proof..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  echo -e "\n> Testing opt-in io_uring SendMsgZc partial-send exact-once proof..."
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     zc_partial_send_environment="$(qf_json_environment_with_assignments \
       "QUICFUSCATE_FASTPATH=auto" "QUICFUSCATE_IO_URING_ZC=1")"
     if ! run_required_uring_proof \
@@ -380,53 +430,68 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
       --nocapture --exact --test-threads=1; then
         echo "[FAIL] opt-in io_uring SendMsgZc partial-send exact-once proof did not pass" >&2
     fi
-else
-    record_platform_skip \
-      "uring-zc-partial-send" "host_os_not_linux" "test:rt-transport-uring" \
-      "io_uring,rust-tests"
-fi
+  else
+      record_platform_skip \
+        "uring-zc-partial-send" "host_os_not_linux" "test:rt-transport-uring" \
+        "io_uring,rust-tests"
+  fi
 
-echo -e "\n> Testing Linux Kernel Hotpath Smoke..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  echo -e "\n> Testing Linux Kernel Hotpath Smoke..."
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     QUICFUSCATE_FASTPATH=auto \
     run_verified_target \
       rt-io-hotpath-kernel-integration \
       zc_batch_sendmmsg_kernel_path_sends_all_datagrams \
       io_uring,rust-tests
+  else
+      record_platform_skip \
+        "rt-io-hotpath-kernel-integration" "host_os_not_linux" \
+        "test:rt-io-hotpath-kernel-integration" "io_uring,rust-tests"
+  fi
 else
-    record_platform_skip \
-      "rt-io-hotpath-kernel-integration" "host_os_not_linux" \
-      "test:rt-io-hotpath-kernel-integration" "io_uring,rust-tests"
+  record_scope_skip "io-uring" "test:rt-transport-uring" "io_uring,rust-tests"
 fi
 
-echo -e "\n> Testing Anti-Replay Strike Register..."
-run_cargo test --features rust-tests --test rt-anti-replay -- --nocapture
-
-echo -e "\n> Testing Congestion Control Algorithms..."
-run_cargo test --features rust-tests --test rt-cc-algorithms -- --nocapture
-
-echo -e "\n> Testing Transport Integration Targets..."
-run_verified_target rt-transport-connection connection_datagram_queues_and_thresholds rust-tests
-run_verified_target rt-transport-config config_accepts_known_version rust-tests
-run_verified_target rt-transport-batch-processor batch_processor_init_acceleration_is_ok rust-tests
-run_verified_target rt-transport-frames-roundtrip roundtrip_basic_frames rust-tests
-run_arm_transport_target rt-transport-frames-roundtrip arm_stream_cursor_bounds_are_rejected rust-tests
-run_verified_target rt-transport-packet-headers short_header_roundtrip rust-tests
-run_native_avx2_target rt-transport-packet-headers native_avx2_packet_number_encoding_matches_scalar_unaligned rust-tests
-run_verified_target rt-packet-number-parity packet_number_decode_matches_scalar_reference rust-tests
-run_verified_target rt-transport-recovery recovery_counters_and_pto_progression rust-tests
-run_verified_target rt-transport-udpfast aligned_buffer_is_cacheline_aligned rust-tests
-run_verified_target rt-transport-h3 h3_send_request_returns_stream_id rust-tests
-run_verified_target rt-pnspace-ack-policy ack_elicitation_threshold_and_ranges rust-tests
-run_verified_target rt-udp-batch-send udpfast_send_batch_sends_all_packets rust-tests
-run_verified_target rt-harness-udpfast harness_udpfast_loopback_smoke rust-tests
-run_verified_package_library_target qf-transport-udp udp-syscall-metadata \
-  tests::test_udp_syscall_metadata_rejects_malformed_results rust-tests
-if [[ "$(detect_os)" == "linux" ]]; then
-  run_verified_package_library_target qf-transport-batch batch-invalid-caller-fd \
-    tests::test_linux_batch_send_rejects_invalid_caller_fd rust-tests
+if scope_selected anti-replay; then
+  echo -e "\n> Testing Anti-Replay Strike Register..."
+  run_cargo test --features rust-tests --test rt-anti-replay -- --nocapture
 else
-  record_platform_skip "batch-invalid-caller-fd" "host_os_not_linux" "lib" "rust-tests"
+  record_scope_skip "anti-replay" "test:rt-anti-replay" "rust-tests"
+fi
+
+if scope_selected cc; then
+  echo -e "\n> Testing Congestion Control Algorithms..."
+  run_cargo test --features rust-tests --test rt-cc-algorithms -- --nocapture
+else
+  record_scope_skip "congestion-control" "test:rt-cc-algorithms" "rust-tests"
+fi
+
+if scope_selected integration; then
+  echo -e "\n> Testing Transport Integration Targets..."
+  run_verified_target rt-transport-connection connection_datagram_queues_and_thresholds rust-tests
+  run_verified_target rt-transport-config config_accepts_known_version rust-tests
+  run_verified_target rt-transport-batch-processor batch_processor_init_acceleration_is_ok rust-tests
+  run_verified_target rt-transport-frames-roundtrip roundtrip_basic_frames rust-tests
+  run_arm_transport_target rt-transport-frames-roundtrip arm_stream_cursor_bounds_are_rejected rust-tests
+  run_verified_target rt-transport-packet-headers short_header_roundtrip rust-tests
+  run_native_avx2_target rt-transport-packet-headers native_avx2_packet_number_encoding_matches_scalar_unaligned rust-tests
+  run_verified_target rt-packet-number-parity packet_number_decode_matches_scalar_reference rust-tests
+  run_verified_target rt-transport-recovery recovery_counters_and_pto_progression rust-tests
+  run_verified_target rt-transport-udpfast aligned_buffer_is_cacheline_aligned rust-tests
+  run_verified_target rt-transport-h3 h3_send_request_returns_stream_id rust-tests
+  run_verified_target rt-pnspace-ack-policy ack_elicitation_threshold_and_ranges rust-tests
+  run_verified_target rt-udp-batch-send udpfast_send_batch_sends_all_packets rust-tests
+  run_verified_target rt-harness-udpfast harness_udpfast_loopback_smoke rust-tests
+  run_verified_package_library_target qf-transport-udp udp-syscall-metadata \
+    tests::test_udp_syscall_metadata_rejects_malformed_results rust-tests
+  if [[ "$(detect_os)" == "linux" ]]; then
+    run_verified_package_library_target qf-transport-batch batch-invalid-caller-fd \
+      tests::test_linux_batch_send_rejects_invalid_caller_fd rust-tests
+  else
+    record_platform_skip "batch-invalid-caller-fd" "host_os_not_linux" "lib" "rust-tests"
+  fi
+else
+  record_scope_skip "transport-integration" "integration-targets" "rust-tests"
 fi
 
 json_end "$JSON"

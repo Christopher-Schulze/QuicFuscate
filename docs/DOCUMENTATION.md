@@ -4077,7 +4077,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-stealth-brain.sh` - StealthBrain ACK policy optimization tests with per-cell required-command status and explicit optional probe status
 - `test-probe-detection.sh` - Active-probe validation (detector invariants, reality fallback rotation, optional stealth pressure path)
 - `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations)
-- `test-transport.sh` - Transport suite (varint/frames/loss/BBR/0-RTT/validated migration/DATAGRAM; io_uring on Linux)
+- `test-transport.sh` - Transport suite (varint/frames/loss/BBR/0-RTT/validated migration/DATAGRAM; io_uring on Linux); `--only basic,uring,anti-replay,cc,integration` runs only the selected contract groups and records omitted groups as explicit `SKIP` entries, while the default remains complete.
 - `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`). Optional library tests use target-scoped discovery and fail closed on discovery or zero-test execution.
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest). Dynamic library-test selection uses release/`--lib` discovery with explicit feature and prerequisite status.
 - `test-performance-regression.sh` - Performance regression with baseline comparison; optional library checks use the same release/`--lib` and feature scope for discovery and execution.
