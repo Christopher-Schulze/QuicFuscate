@@ -21,28 +21,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_scope_selection() {
-  [[ "$ONLY" == "all" ]] && return 0
-  local scope
-  local -a scopes
-  IFS=',' read -r -a scopes <<< "$ONLY"
-  [[ "${#scopes[@]}" -gt 0 ]] || {
-    echo "--only requires at least one scope" >&2
-    return 2
-  }
-  for scope in "${scopes[@]}"; do
-    case "$scope" in
-      build|core|privilege|desktop|transport|fec|stealth|crypto|optimization|security|frontend|e2e|performance|audits|benchmarks|amx) ;;
-      *)
-        echo "unknown --only scope: $scope (expected build,core,privilege,desktop,transport,fec,stealth,crypto,optimization,security,frontend,e2e,performance,audits,benchmarks,amx)" >&2
-        return 2
-        ;;
-    esac
-  done
+  qf_validate_scope_selection "$ONLY" "build,core,privilege,desktop,transport,fec,stealth,crypto,optimization,security,frontend,e2e,performance,audits,benchmarks,amx"
 }
 
 scope_selected() {
-  local scope="$1"
-  [[ "$ONLY" == "all" || ",$ONLY," == *",$scope,"* ]]
+  qf_scope_selected "$ONLY" "$1"
 }
 
 validate_scope_selection

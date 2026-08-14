@@ -30,32 +30,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_scope_selection() {
-  [[ "$ONLY" == "all" ]] && return 0
-  local scope
-  local -a scopes
-  IFS=',' read -r -a scopes <<< "$ONLY"
-  [[ "${#scopes[@]}" -gt 0 ]] || {
-    echo "--only requires at least one scope" >&2
-    return 2
-  }
-  for scope in "${scopes[@]}"; do
-    case "$scope" in
-      privilege|memory-lock|qftls|integration|ordering|native-privilege) ;;
-      *)
-        echo "unknown --only scope: $scope (expected privilege,memory-lock,qftls,integration,ordering,native-privilege)" >&2
-        return 2
-        ;;
-    esac
-  done
-  if [[ ",$ONLY," == *,all,* ]]; then
-    echo "--only=all cannot be combined with another scope" >&2
-    return 2
-  fi
+  qf_validate_scope_selection "$ONLY" "privilege,memory-lock,qftls,integration,ordering,native-privilege"
+  return $?
 }
 
 scope_selected() {
-  local scope="$1"
-  [[ "$ONLY" == "all" || ",$ONLY," == *",$scope,"* ]]
+  qf_scope_selected "$ONLY" "$1"
 }
 
 validate_scope_selection

@@ -1014,6 +1014,41 @@ usage_common_flags() {
 USAGE
 }
 
+# Validate a comma-separated scope selection against one canonical allow-list.
+# The special `all` selection is exclusive and preserves the complete default path.
+qf_validate_scope_selection() {
+  local selection="$1"
+  local allowed_scopes="$2"
+  [[ "$selection" == "all" ]] && return 0
+  [[ -n "$selection" ]] || {
+    echo "--only requires at least one scope" >&2
+    return 2
+  }
+  local scope
+  local -a scopes
+  IFS=',' read -r -a scopes <<< "$selection"
+  for scope in "${scopes[@]}"; do
+    case ",${allowed_scopes}," in
+      *,"$scope",*) ;;
+      *)
+        echo "unknown --only scope: $scope (expected $allowed_scopes)" >&2
+        return 2
+        ;;
+    esac
+  done
+  if [[ ",$selection," == *,all,* ]]; then
+    echo "--only=all cannot be combined with another scope" >&2
+    return 2
+  fi
+}
+
+# Return success when one scope is selected, including the complete default run.
+qf_scope_selected() {
+  local selection="$1"
+  local scope="$2"
+  [[ "$selection" == "all" || ",$selection," == *",$scope,"* ]]
+}
+
 # ---------------- JSON + System Meta helpers ----------------
 
 sys_os() { uname -s; }
