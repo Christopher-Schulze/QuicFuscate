@@ -1108,7 +1108,7 @@ impl Connection {
         .encode_parameter()?;
 
         // Create the TLS composition stack (rustls + optional TLS Cover).
-        let provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock(
+        let provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             self.is_server,
             self.config.verify_peer,
             self.config.version,
@@ -1116,6 +1116,7 @@ impl Connection {
             self.config.verify_locations_file.as_deref(),
             &self.environment,
             &self.clock,
+            self.config.max_udp_payload_size as usize,
         )?;
 
         // Store provider

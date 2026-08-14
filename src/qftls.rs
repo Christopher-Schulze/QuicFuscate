@@ -635,7 +635,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
     environment: &crate::env_utils::EnvSnapshot,
     clock: &crate::time_source::ProtocolClock,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
-    Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot_and_clock(
+    create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
         verify_peer,
         version,
@@ -643,6 +643,30 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
         verify_locations_file,
         environment,
         clock,
+        rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+    is_server: bool,
+    verify_peer: bool,
+    version: u32,
+    version_information_parameter: &[u8],
+    verify_locations_file: Option<&str>,
+    environment: &crate::env_utils::EnvSnapshot,
+    clock: &crate::time_source::ProtocolClock,
+    max_udp_payload_size: usize,
+) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+        is_server,
+        verify_peer,
+        version,
+        version_information_parameter,
+        verify_locations_file,
+        environment,
+        clock,
+        max_udp_payload_size,
     )?))
 }
 
@@ -723,7 +747,7 @@ impl CombinedProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
     ) -> Result<Self, ConnectionError> {
-        let rustls = RustlsProvider::new_with_ca_with_snapshot_and_clock(
+        Self::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
             verify_peer,
             version,
@@ -731,6 +755,30 @@ impl CombinedProvider {
             verify_locations_file,
             environment,
             clock,
+            rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+        is_server: bool,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        verify_locations_file: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+        max_udp_payload_size: usize,
+    ) -> Result<Self, ConnectionError> {
+        let rustls = RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+            is_server,
+            verify_peer,
+            version,
+            version_information_parameter,
+            verify_locations_file,
+            environment,
+            clock,
+            max_udp_payload_size,
         )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
@@ -992,7 +1040,7 @@ impl RustlsProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
     ) -> Result<Self, ConnectionError> {
-        Ok(Self(rustls_provider::make_with_ca_with_snapshot_and_clock(
+        Self::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
             verify_peer,
             version,
@@ -1000,6 +1048,30 @@ impl RustlsProvider {
             client_ca_path,
             environment,
             clock,
+            rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+        is_server: bool,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        client_ca_path: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+        max_udp_payload_size: usize,
+    ) -> Result<Self, ConnectionError> {
+        Ok(Self(rustls_provider::make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+            is_server,
+            verify_peer,
+            version,
+            version_information_parameter,
+            client_ca_path,
+            environment,
+            clock,
+            max_udp_payload_size,
         )?))
     }
 }

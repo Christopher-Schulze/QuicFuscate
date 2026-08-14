@@ -275,6 +275,8 @@ pub struct RustlsProviderImpl {
     pub bytes_received: usize,
 }
 
+pub(super) const DEFAULT_MAX_UDP_PAYLOAD_SIZE: usize = 1472;
+
 /// Insecure verifier used only when explicitly requested via env.
 /// Only available in debug builds to prevent accidental production use.
 #[cfg(debug_assertions)]
@@ -383,8 +385,31 @@ impl RustlsProviderImpl {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
     ) -> Result<Self, ConnectionError> {
+        Self::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+            is_server,
+            verify_peer,
+            version,
+            version_information_parameter,
+            client_ca_path,
+            environment,
+            clock,
+            DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+        is_server: bool,
+        verify_peer: bool,
+        version: u32,
+        version_information_parameter: &[u8],
+        client_ca_path: Option<&str>,
+        environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
+        max_udp_payload_size: usize,
+    ) -> Result<Self, ConnectionError> {
         let quic_version = Self::map_quic_version(version)?;
-        let mut transport_params = Self::default_transport_params();
+        let mut transport_params = Self::default_transport_params(max_udp_payload_size)?;
         transport_params.extend_from_slice(version_information_parameter);
         let client_ca_path = client_ca_path.map(str::to_owned);
         let connection = if is_server {
@@ -835,13 +860,30 @@ impl RustlsProviderImpl {
         Err(ConnectionError::TlsError("No valid private key found".into()))
     }
 
-    fn default_transport_params() -> Vec<u8> {
+    fn default_transport_params(max_udp_payload_size: usize) -> Result<Vec<u8>, ConnectionError> {
+        if !(1200..=65_527).contains(&max_udp_payload_size) {
+            return Err(ConnectionError::InvalidState);
+        }
         // QUIC transport parameters in wire format
         let mut params = Vec::new();
         // max_idle_timeout (0x01) = 30000ms
         params.extend_from_slice(&[0x01, 0x02, 0x75, 0x30]);
-        // max_udp_payload_size (0x03) = 1472
-        params.extend_from_slice(&[0x03, 0x02, 0x05, 0xc0]);
+        // max_udp_payload_size (0x03) follows the concrete transport budget of this hop.
+        let mut parameter_id = [0u8; 8];
+        let parameter_id_len = qf_transport_pn::varint::write_varint(0x03, &mut parameter_id)?;
+        let mut parameter_value = [0u8; 8];
+        let parameter_value_len = qf_transport_pn::varint::write_varint(
+            max_udp_payload_size as u64,
+            &mut parameter_value,
+        )?;
+        let mut parameter_length = [0u8; 8];
+        let parameter_length_len = qf_transport_pn::varint::write_varint(
+            parameter_value_len as u64,
+            &mut parameter_length,
+        )?;
+        params.extend_from_slice(&parameter_id[..parameter_id_len]);
+        params.extend_from_slice(&parameter_length[..parameter_length_len]);
+        params.extend_from_slice(&parameter_value[..parameter_value_len]);
         // initial_max_data (0x04) = 10MB
         params.extend_from_slice(&[0x04, 0x03, 0x98, 0x96, 0x80]);
         // initial_max_stream_data_bidi_local (0x05) = 1MB
@@ -852,7 +894,7 @@ impl RustlsProviderImpl {
         params.extend_from_slice(&[0x08, 0x01, 0x64]);
         // initial_max_streams_uni (0x09) = 100
         params.extend_from_slice(&[0x09, 0x01, 0x64]);
-        params
+        Ok(params)
     }
 
     fn apply_profile_to_config(&mut self, profile: &TlsProfile) -> Result<(), ConnectionError> {
@@ -1331,7 +1373,7 @@ pub(super) fn make_with_ca_with_snapshot(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn make_with_ca_with_snapshot_and_clock(
+pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
     is_server: bool,
     verify_peer: bool,
     version: u32,
@@ -1339,8 +1381,9 @@ pub(super) fn make_with_ca_with_snapshot_and_clock(
     client_ca_path: Option<&str>,
     environment: &crate::env_utils::EnvSnapshot,
     clock: &crate::time_source::ProtocolClock,
+    max_udp_payload_size: usize,
 ) -> Result<RustlsProviderImpl, ConnectionError> {
-    RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
+    RustlsProviderImpl::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
         verify_peer,
         version,
@@ -1348,5 +1391,6 @@ pub(super) fn make_with_ca_with_snapshot_and_clock(
         client_ca_path,
         environment,
         clock,
+        max_udp_payload_size,
     )
 }

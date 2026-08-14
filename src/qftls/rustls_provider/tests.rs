@@ -1,5 +1,34 @@
 use super::*;
 
+#[test]
+fn default_transport_params_encode_requested_udp_payload_size() {
+    let params = RustlsProviderImpl::default_transport_params(1413)
+        .expect("custom UDP payload size must produce valid transport parameters");
+    let mut offset = 0;
+    let mut max_udp_payload_size = None;
+    while offset < params.len() {
+        let (parameter_id, parameter_id_len) =
+            qf_transport_pn::varint::read_varint(&params[offset..]).expect("parameter id");
+        offset += parameter_id_len;
+        let (parameter_length, parameter_length_len) =
+            qf_transport_pn::varint::read_varint(&params[offset..]).expect("parameter length");
+        offset += parameter_length_len;
+        let parameter_length = usize::try_from(parameter_length).expect("parameter length usize");
+        let end = offset.checked_add(parameter_length).expect("parameter end");
+        assert!(end <= params.len(), "parameter must stay within the encoded buffer");
+        if parameter_id == 0x03 {
+            let (value, value_len) =
+                qf_transport_pn::varint::read_varint(&params[offset..end]).expect("payload value");
+            assert_eq!(value_len, parameter_length);
+            max_udp_payload_size = Some(value);
+        }
+        offset = end;
+    }
+
+    assert_eq!(max_udp_payload_size, Some(1413));
+    assert!(RustlsProviderImpl::default_transport_params(1199).is_err());
+}
+
 mod profile_delay_tests {
     use super::*;
     use std::time::{Duration, Instant, SystemTime};
