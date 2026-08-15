@@ -22,10 +22,10 @@ impl Connection {
             }
         }
 
-        if matches!(&frame, Frame::HandshakeDone) {
-            if queue.iter().any(|queued| matches!(queued, Frame::HandshakeDone)) {
-                return;
-            }
+        if matches!(&frame, Frame::HandshakeDone)
+            && queue.iter().any(|queued| matches!(queued, Frame::HandshakeDone))
+        {
+            return;
         }
 
         if matches!(&frame, Frame::DataBlocked { .. }) {
