@@ -36,12 +36,14 @@ R2_SERVER_PID=""
 EXIT_SERVER_PID=""
 
 fail() {
-  echo "FAIL: $*" >&2
-  for log in "${WORK_DIR:-/nonexistent}"/*.log; do
-    [ -f "$log" ] && { echo "=== $log ===" >&2; tail -80 "$log" >&2; }
-  done
-  exit 1
-}
+   echo "FAIL: $*" >&2
+   for log in "${WORK_DIR:-/nonexistent}"/*.log; do
+     [ -f "$log" ] && { echo "=== $log ===" >&2; tail -80 "$log" >&2; }
+     [ -f "$log" ] && { echo "=== $log (transport failures) ===" >&2; \
+       grep -E "possible probe|Forwarding new probe|QUIC recv failed|Failed to connect|timed out|saturation|rejected" "$log" >&2 || true; }
+   done
+   exit 1
+ }
 
 cleanup() {
   local pid namespace
@@ -321,7 +323,7 @@ fi
 
 CONFIG="$WORK_DIR/client.toml"
 {
-  printf '%s\n' '[engine]' 'mode = "client"' '[interface]' 'type = "tun"' 'tun_name = "qtun0"' 'dns_servers = ["10.51.0.1"]'
+  printf '%s\n' '[engine]' 'mode = "client"' 'log_level = "debug"' '[interface]' 'type = "tun"' 'tun_name = "qtun0"' 'dns_servers = ["10.51.0.1"]'
   printf '%s\n' '[stealth]' 'enable_doh = false'
   printf '%s\n' '[security]' 'kill_switch = true' '[circuit]' "max_hops = $HOPS" 'max_parallel_circuits = 2' 'allow_single_hop_fallback = false'
   if [ "$HOPS" -ge 2 ]; then
