@@ -329,19 +329,11 @@ impl Connection {
 
         self.received_non_vn_packet = true;
 
-        // Receiving a valid 1-RTT (Short) packet confirms the peer has the
-        // 1-RTT keys and therefore the handshake is done. Discard the
-        // Initial/Handshake packet number spaces and keys per RFC 9002 §6.2.2
-        // so unacknowledged handshake packets stop triggering PTO probes and
-        // inflating bytes_in_flight.
+        // A valid 1-RTT packet proves the peer can speak Application keys.
+        // Initial keys may be dropped immediately. Handshake keys stay on the
+        // client until a Handshake ACK confirms Finished; see on_peer_one_rtt_packet.
         if pkt_ty == PacketType::Short {
-            self.recovery.discard_space(recovery::PacketSpace::Initial);
-            self.recovery.discard_space(recovery::PacketSpace::Handshake);
-            let mut crypto = self.crypto.write();
-            crypto.seal_initial = None;
-            crypto.open_initial = None;
-            crypto.seal_handshake = None;
-            crypto.open_handshake = None;
+            self.on_peer_one_rtt_packet();
         }
 
         // Learn peer CID from the first long-header packets.

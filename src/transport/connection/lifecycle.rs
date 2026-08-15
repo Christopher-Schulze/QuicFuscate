@@ -732,6 +732,9 @@ impl Connection {
         if space == recovery::PacketSpace::Application {
             self.fec_acked_packets = self.fec_acked_packets.saturating_add(acked_packet_count);
         }
+        if space == recovery::PacketSpace::Handshake && !outcome.newly_acked.is_empty() {
+            self.confirm_client_handshake_from_ack();
+        }
         if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(
                 "persistent congestion established; cwnd={} space={:?} pmtu_effective={} largest_acked={} ack_delay_us={} largest_acked_age_known={} largest_acked_age_us={} acked_packets={} ack_lost_packets={} ack_packet_threshold_losses={} ack_time_threshold_losses={} run_start_pn={} run_min_packet_size={} run_max_packet_size={} run_control_packets={} run_stream_packets={} run_stream_fresh_packets={} run_stream_retransmission_packets={} run_datagram_packets={} terminal_lost_pn={} terminal_packet_threshold={} terminal_time_threshold={} lost_packets={} smoothed_rtt_us={} rtt_variance_us={} loss_delay_us={} period_us={} run_us={}",

@@ -853,6 +853,62 @@ fn new_connection_starts_unestablished() {
 }
 
 #[test]
+fn client_keeps_handshake_keys_after_half_rtt() {
+    let mut connection = make_conn();
+    connection
+        .crypto
+        .write()
+        .install_aes_gcm_handshake(&[0x11u8; 32])
+        .expect("install client handshake keys");
+    connection.on_peer_one_rtt_packet();
+    assert!(
+        connection.crypto.read().seal_handshake.is_some(),
+        "0.5-RTT must not drop the client's Handshake keys"
+    );
+    assert!(
+        connection.crypto.read().seal_initial.is_none(),
+        "Initial keys may be discarded once 1-RTT is in use"
+    );
+}
+
+#[test]
+fn client_discards_handshake_keys_after_handshake_ack() {
+    let mut connection = make_conn();
+    connection
+        .crypto
+        .write()
+        .install_aes_gcm_handshake(&[0x22u8; 32])
+        .expect("install client handshake keys");
+    connection.confirm_client_handshake_from_ack();
+    assert!(
+        connection.crypto.read().seal_handshake.is_none(),
+        "a Handshake ACK confirms Finished and must drop Handshake keys"
+    );
+}
+
+#[test]
+fn server_discards_handshake_keys_on_one_rtt() {
+    let mut connection = Connection::new_with_role(
+        b"test_scid_0123456789",
+        local(),
+        peer(),
+        Config::new_with_version(PROTOCOL_VERSION).unwrap(),
+        true,
+    )
+    .expect("valid test server connection");
+    connection
+        .crypto
+        .write()
+        .install_aes_gcm_handshake(&[0x33u8; 32])
+        .expect("install server handshake keys");
+    connection.on_peer_one_rtt_packet();
+    assert!(
+        connection.crypto.read().seal_handshake.is_none(),
+        "server handshake is confirmed once the client speaks 1-RTT"
+    );
+}
+
+#[test]
 fn post_handshake_envelope_waits_for_pending_handshake_flight() {
     let mut c = make_conn();
     c.is_established = true;

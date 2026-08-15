@@ -429,4 +429,40 @@ impl Connection {
         self.stats.recv_bytes = self.stats.recv_bytes.saturating_add(packet_len as u64);
         Ok(packet_len)
     }
+
+    fn discard_initial_packet_protection(&mut self) {
+        self.recovery.discard_space(recovery::PacketSpace::Initial);
+        let mut crypto = self.crypto.write();
+        crypto.seal_initial = None;
+        crypto.open_initial = None;
+    }
+
+    fn discard_handshake_packet_protection(&mut self) {
+        self.recovery.discard_space(recovery::PacketSpace::Handshake);
+        let mut crypto = self.crypto.write();
+        crypto.seal_handshake = None;
+        crypto.open_handshake = None;
+    }
+
+    /// RFC 9001 §4.9.1: Initial keys may go as soon as 1-RTT is in use.
+    /// RFC 9001 §4.1.2 / §4.9.2: only the server may treat handshake completion
+    /// as confirmation. A client that drops Handshake keys on the first 1-RTT
+    /// packet treats 0.5-RTT as confirmation, loses Handshake PTO, and cannot
+    /// retransmit a lost Finished. The server then stays in the handshake
+    /// forever while the client waits for CONNECT-UDP.
+    pub(in crate::transport::connection) fn on_peer_one_rtt_packet(&mut self) {
+        self.discard_initial_packet_protection();
+        if self.is_server {
+            self.discard_handshake_packet_protection();
+        }
+    }
+
+    /// RFC 9002 §6.2.2.1: an ACK for a Handshake packet the client sent is
+    /// enough to confirm that Finished landed and Handshake keys can go.
+    pub(in crate::transport::connection) fn confirm_client_handshake_from_ack(&mut self) {
+        if self.is_server || self.crypto.read().seal_handshake.is_none() {
+            return;
+        }
+        self.discard_handshake_packet_protection();
+    }
 }
