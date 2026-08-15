@@ -144,7 +144,7 @@ impl ClientDataPlane {
         let link_count = topology.hops.len().saturating_sub(1);
         Ok(Self {
             link_streams: vec![None; link_count],
-            inner_ingress: vec![InnerIngress::default(); link_count],
+            inner_ingress: Self::new_link_ingresses(link_count),
             pending_inner_egress: vec![None; link_count],
             hop_started_at,
             link_started_at: vec![None; link_count],
@@ -763,6 +763,15 @@ impl ClientDataPlane {
         }
         Ok(())
     }
+
+    /// Build one independent bounded ingress queue per relay link.
+    ///
+    /// Each link owns private queue state; constructing entries by cloning a
+    /// single `InnerIngress` would share its `Arc` state across every hop and
+    /// cross-deliver relay payloads into the wrong nested QUIC connection.
+    fn new_link_ingresses(link_count: usize) -> Vec<InnerIngress> {
+        (0..link_count).map(|_| InnerIngress::default()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -786,5 +795,16 @@ mod tests {
             assert!(ingress.push(&large));
         }
         assert!(!ingress.push(&large));
+    }
+
+    #[test]
+    fn link_ingresses_are_independent_across_relay_links() {
+        let ingress = ClientDataPlane::new_link_ingresses(3);
+        assert!(ingress[0].push(b"entry-carried"));
+        assert!(ingress[2].push(b"exit-carried"));
+        assert_eq!(ingress[0].pop(), Some(b"entry-carried".to_vec()));
+        assert_eq!(ingress[1].pop(), None, "link ingress queues must not share state");
+        assert_eq!(ingress[2].pop(), Some(b"exit-carried".to_vec()));
+        assert_eq!(ingress[0].pop(), None);
     }
 }
