@@ -334,6 +334,12 @@ impl ClientDataPlane {
                 delivered_datagrams = delivered_datagrams.saturating_add(1);
                 delivered_bytes = delivered_bytes.saturating_add(payload.len());
                 let hop = &mut self.hops[inner_index + 1];
+                log::debug!(
+                    "delivering inner ingress inner_index={} hop_peer={} bytes={}",
+                    inner_index,
+                    hop.peer_addr,
+                    payload.len()
+                );
                 hop.recv(&payload).map_err(|error| EngineError::Connection(error.to_string()))?;
                 if hop.conn.is_established() {
                     hop.poll_http3().map_err(|error| EngineError::Connection(error.to_string()))?;
@@ -365,7 +371,8 @@ impl ClientDataPlane {
                 move |flow_id, _target, payload| {
                     if masque_trace_enabled() {
                         log::info!(
-                            "received nested QUIC datagram flow={} bytes={}",
+                            "received nested QUIC datagram link={} flow={} bytes={}",
+                            link_index,
                             flow_id,
                             payload.len()
                         );
