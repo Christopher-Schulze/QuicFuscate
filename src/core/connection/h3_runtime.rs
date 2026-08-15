@@ -926,7 +926,13 @@ impl QuicFuscateConnection {
         let valid = self.masque_local_flows.get(&flow_id).is_some_and(|flow| {
             flow.stream_id == stream_id && flow.purpose == MasqueFlowPurpose::NextHopUdp
         });
-        if !valid || payload.is_empty() || payload.len() > self.effective_masque_mtu() {
+        if !valid
+            || payload.is_empty()
+            || payload.len()
+                > self
+                    .effective_masque_mtu()
+                    .max(crate::transport::MIN_CLIENT_INITIAL_LEN)
+        {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
         let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
