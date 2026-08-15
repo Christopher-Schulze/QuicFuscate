@@ -22,6 +22,8 @@ pub struct Connection {
     pub(super) original_dcid: ConnectionId,
     pub(super) is_server: bool,
     pub(super) is_established: bool,
+    /// Server has queued RFC 9000 HANDSHAKE_DONE for the client.
+    pub(super) handshake_done_queued: bool,
     pub(super) is_closed: bool,
     pub(super) is_draining: bool,
     pub(super) received_non_vn_packet: bool,

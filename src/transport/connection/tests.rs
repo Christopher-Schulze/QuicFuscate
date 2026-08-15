@@ -879,7 +879,7 @@ fn client_discards_handshake_keys_after_handshake_ack() {
         .write()
         .install_aes_gcm_handshake(&[0x22u8; 32])
         .expect("install client handshake keys");
-    connection.confirm_client_handshake_from_ack();
+    connection.confirm_client_handshake();
     assert!(
         connection.crypto.read().seal_handshake.is_none(),
         "a Handshake ACK confirms Finished and must drop Handshake keys"
@@ -887,7 +887,7 @@ fn client_discards_handshake_keys_after_handshake_ack() {
 }
 
 #[test]
-fn server_discards_handshake_keys_on_one_rtt() {
+fn server_keeps_handshake_keys_after_one_rtt() {
     let mut connection = Connection::new_with_role(
         b"test_scid_0123456789",
         local(),
@@ -903,8 +903,24 @@ fn server_discards_handshake_keys_on_one_rtt() {
         .expect("install server handshake keys");
     connection.on_peer_one_rtt_packet();
     assert!(
-        connection.crypto.read().seal_handshake.is_none(),
-        "server handshake is confirmed once the client speaks 1-RTT"
+        connection.crypto.read().seal_handshake.is_some(),
+        "server must keep Handshake keys so Finished can still be ACKed"
+    );
+}
+
+#[test]
+fn handshake_done_control_frames_coalesce() {
+    let mut connection = make_conn();
+    Connection::queue_control_frame(&mut connection.pending_control, Frame::HandshakeDone);
+    Connection::queue_control_frame(&mut connection.pending_control, Frame::HandshakeDone);
+    assert_eq!(
+        connection
+            .pending_control
+            .iter()
+            .filter(|frame| matches!(frame, Frame::HandshakeDone))
+            .count(),
+        1,
+        "HANDSHAKE_DONE must be queued at most once"
     );
 }
 

@@ -266,6 +266,7 @@ pub fn wire_len_with<V: VarIntCodec, A: FrameAcceleration>(
                 reason.len(),
             ])
         }
+        F::HandshakeDone => Ok(1),
         F::Datagram { data } => {
             let data_len = checked_frame_data_len(data.len())?;
             checked_len_sum(&[1, V::varint_len(data_len), data.len()])
@@ -443,6 +444,9 @@ pub fn to_bytes_with<V: VarIntCodec, A: FrameAcceleration>(
             write_varint_at::<V>(*error_code, out, &mut off)?;
             write_varint_at::<V>(checked_frame_data_len(reason.len())?, out, &mut off)?;
             write_bytes_at(reason, out, &mut off)?;
+        }
+        F::HandshakeDone => {
+            write_varint_at::<V>(0x1e, out, &mut off)?;
         }
         F::Datagram { data } => {
             write_varint_at::<V>(0x31, out, &mut off)?;
@@ -625,7 +629,7 @@ fn frame_type_allowed(ty: u64, pkt: PacketType) -> bool {
             stream_frame_type(ty)
                 || matches!(ty, 0x00 | 0x01 | 0x04 | 0x05 | 0x10..=0x17 | 0x1c | 0x1d | 0x30 | 0x31)
         }
-        PT::Short => matches!(ty, 0x00..=0x05 | 0x07..=0x1d | 0x30 | 0x31),
+        PT::Short => matches!(ty, 0x00..=0x05 | 0x07..=0x1e | 0x30 | 0x31),
         PT::Retry | PT::VersionNegotiation => false,
     }
 }
@@ -842,6 +846,7 @@ pub fn from_bytes_with<'a, V: VarIntCodec, A: FrameAcceleration>(
             let reason = Cow::Borrowed(c.get_bytes(len)?);
             F::ApplicationClose { error_code, reason }
         }
+        0x1e => F::HandshakeDone,
         0x30 | 0x31 => {
             let len = if ty == 0x30 {
                 c.remaining()
@@ -1154,8 +1159,18 @@ mod tests {
             from_bytes(&application_close, PacketType::Initial),
             Err(ConnectionError::InvalidFrame)
         ));
+        let handshake_done = [0x1E];
+        assert!(from_bytes(&handshake_done, PacketType::Short).is_ok());
         assert!(matches!(
-            from_bytes(&[0x1E], PacketType::Short),
+            from_bytes(&handshake_done, PacketType::Initial),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&handshake_done, PacketType::Handshake),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&handshake_done, PacketType::ZeroRTT),
             Err(ConnectionError::InvalidFrame)
         ));
         assert!(matches!(

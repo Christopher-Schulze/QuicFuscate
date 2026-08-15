@@ -204,6 +204,7 @@ impl Connection {
             original_dcid: ConnectionId::default(),
             is_server,
             is_established: false,
+            handshake_done_queued: false,
             is_closed: false,
             is_draining: false,
             received_non_vn_packet: false,
@@ -733,7 +734,7 @@ impl Connection {
             self.fec_acked_packets = self.fec_acked_packets.saturating_add(acked_packet_count);
         }
         if space == recovery::PacketSpace::Handshake && !outcome.newly_acked.is_empty() {
-            self.confirm_client_handshake_from_ack();
+            self.confirm_client_handshake();
         }
         if let Some(evidence) = outcome.persistent_congestion_evidence {
             log::info!(

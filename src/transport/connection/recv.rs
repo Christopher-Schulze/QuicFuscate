@@ -640,6 +640,13 @@ impl Connection {
                         Frame::Ping { .. } => {
                             ack_eliciting = true;
                         }
+                        Frame::HandshakeDone => {
+                            if self.is_server {
+                                return Err(crate::error::ConnectionError::ProtocolViolation);
+                            }
+                            self.confirm_client_handshake();
+                            ack_eliciting = true;
+                        }
                         Frame::ResetStream { stream_id, error_code, .. } => {
                             self.enqueue_peer_stream_reset(stream_id, error_code)?;
                             // Transport-level RST indicator

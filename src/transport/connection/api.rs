@@ -22,6 +22,12 @@ impl Connection {
             }
         }
 
+        if matches!(&frame, Frame::HandshakeDone) {
+            if queue.iter().any(|queued| matches!(queued, Frame::HandshakeDone)) {
+                return;
+            }
+        }
+
         if matches!(&frame, Frame::DataBlocked { .. }) {
             if let Some(existing) =
                 queue.iter_mut().find(|queued| matches!(queued, Frame::DataBlocked { .. }))

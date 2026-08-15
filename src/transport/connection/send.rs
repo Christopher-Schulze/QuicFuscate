@@ -201,9 +201,14 @@ impl Connection {
                     .pending_probe_spaces
                     .iter()
                     .position(|s| *s == recovery::PacketSpace::from_index(space_idx));
-                if crypto_frame.is_none() && probe_pos.is_none() {
+                let pending_ack = self.pkt_spaces[space_idx].has_pending_ack_at(now);
+                if crypto_frame.is_none() && probe_pos.is_none() && !pending_ack {
                     continue;
                 }
+                // Handshake/Initial ACK must go out even after CRYPTO is drained.
+                // Otherwise Finished is never acknowledged, the client keeps
+                // Handshake PTO forever, and 1-RTT throughput stalls.
+                let ack_only = crypto_frame.is_none() && probe_pos.is_none();
                 // RFC 9002 §6.2.4: a PTO probe for this space. The packet below
                 // always carries PING (ack-eliciting), plus retransmitted or
                 // fresh CRYPTO when available. Client Initial probes stay
@@ -216,6 +221,7 @@ impl Connection {
                 // Inspect without consuming. The capacity check below can reject the frame and
                 // `to_bytes` can fail; either would otherwise discard a pending ACK that no
                 // further inbound packet is guaranteed to re-trigger.
+                let mut wrote_handshake_ack = false;
                 if let Some((ack_delay, ack_ranges)) =
                     self.pkt_spaces[space_idx].peek_ack_at(self.config.ack_delay_exponent, now)
                 {
@@ -225,14 +231,20 @@ impl Connection {
                         off += frames::to_bytes(&ack, &mut out[off..])?;
                         // Committed only now that the bytes are in the packet.
                         self.pkt_spaces[space_idx].commit_ack_at(now);
+                        wrote_handshake_ack = true;
                     }
                 }
-                let ping = Frame::Ping { mtu_probe: None };
-                off += frames::to_bytes(&ping, &mut out[off..])?;
-                if let Some((crypto_off, data)) = crypto_frame {
-                    let frame = Frame::Crypto { offset: crypto_off, data: Cow::Owned(data) };
-                    let written = frames::to_bytes(&frame, &mut out[off..])?;
-                    off += written;
+                if ack_only && !wrote_handshake_ack {
+                    continue;
+                }
+                if !ack_only {
+                    let ping = Frame::Ping { mtu_probe: None };
+                    off += frames::to_bytes(&ping, &mut out[off..])?;
+                    if let Some((crypto_off, data)) = crypto_frame {
+                        let frame = Frame::Crypto { offset: crypto_off, data: Cow::Owned(data) };
+                        let written = frames::to_bytes(&frame, &mut out[off..])?;
+                        off += written;
+                    }
                 }
 
                 let pn_off = hdr_len_wo_pn;
@@ -286,15 +298,27 @@ impl Connection {
                 self.stats.sent_bytes += used as u64;
                 // RFC 9002 §4.9: handshake packets are not special - they are
                 // tracked for loss recovery exactly like 1-RTT packets.
-                self.recovery.on_packet_sent_in_space(
-                    recovery::PacketSpace::from_index(space_idx),
-                    pn,
-                    used,
-                    true,
-                    true,
-                    crypto_range,
-                    now,
-                );
+                // ACK-only Handshake/Initial packets are not ack-eliciting and
+                // must not occupy the congestion window.
+                if !ack_only {
+                    self.recovery.on_packet_sent_in_space(
+                        recovery::PacketSpace::from_index(space_idx),
+                        pn,
+                        used,
+                        true,
+                        true,
+                        crypto_range,
+                        now,
+                    );
+                }
+                if self.is_server
+                    && matches!(pkt_ty, PacketType::Handshake)
+                    && wrote_handshake_ack
+                    && self.tls_handshake_complete()
+                    && !self.pkt_spaces[space_idx].has_pending_ack_at(now)
+                {
+                    self.discard_handshake_packet_protection();
+                }
                 if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
                     self.is_established = true;
                 }
@@ -304,7 +328,7 @@ impl Connection {
                         at: now,
                         from: self.local_addr,
                         to: self.peer_addr,
-                        congestion_controlled: true,
+                        congestion_controlled: !ack_only,
                         path_control: false,
                     },
                 ));

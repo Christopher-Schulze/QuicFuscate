@@ -209,7 +209,7 @@ fn receive_frame_preflight_rejects_empty_and_malformed_suffixes() {
         Err(ConnectionError::InvalidFrame)
     ));
     assert!(matches!(
-        Connection::preflight_frame_payload(&[0x01, 0x1E], PacketType::Short),
+        Connection::preflight_frame_payload(&[0x01, 0x1F], PacketType::Short),
         Err(ConnectionError::InvalidFrame)
     ));
     assert!(matches!(

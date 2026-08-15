@@ -50,6 +50,7 @@ fn roundtrip_basic_frames() {
             Frame::ApplicationClose { error_code: 0x02, reason: Cow::Owned(b"app".to_vec()) },
             PacketType::Short,
         ),
+        (Frame::HandshakeDone, PacketType::Short),
         (Frame::Datagram { data: Cow::Owned(b"payload".to_vec()) }, PacketType::Short),
         (Frame::PathChallenge { data: [0xAB; 8] }, PacketType::Short),
         (Frame::PathResponse { data: [0xCD; 8] }, PacketType::Short),

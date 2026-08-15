@@ -260,6 +260,8 @@ pub enum Frame<'a> {
     ConnectionClose { error_code: u64, frame_type: u64, reason: Cow<'a, [u8]> },
     /// APPLICATION_CLOSE frame carrying an application-level error.
     ApplicationClose { error_code: u64, reason: Cow<'a, [u8]> },
+    /// HANDSHAKE_DONE frame confirming the handshake to the client (RFC 9000 Section 19.20).
+    HandshakeDone,
     /// DATAGRAM frame carrying unreliable application data (RFC 9221).
     Datagram { data: Cow<'a, [u8]> },
     /// Parsed datagram header only (length known, data not yet read).
