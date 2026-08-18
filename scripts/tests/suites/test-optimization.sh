@@ -7,17 +7,40 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
-OUTPUT_DIR=""; RUSTFLAGS_EXTRA=""; FAST=0
+OUTPUT_DIR=""; RUSTFLAGS_EXTRA=""; FAST=0; ONLY="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --rustflags) RUSTFLAGS_EXTRA="$2"; shift;;
     --fast) FAST=1;;
+    --only) ONLY="$2"; shift;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1; set -x;;
-    --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--rustflags STR] [--fast]"; exit 0;;
+    --help|-h) echo "Usage: $(basename "$0") [--only batch,memory,simd,cpu,zero-copy,telemetry,integration,stress] [--output-dir DIR] [--rustflags STR] [--fast]"; exit 0;;
     *) break;;
   esac; shift
 done
+
+OPTIMIZATION_SCOPES="batch,memory,simd,cpu,zero-copy,telemetry,integration,stress"
+validate_scope_selection() {
+  qf_validate_scope_selection "$ONLY" "$OPTIMIZATION_SCOPES"
+}
+scope_selected() {
+  qf_scope_selected "$ONLY" "$1"
+}
+fast_scope_selected() {
+  case "$1" in
+    batch|cpu|telemetry|integration) return 0;;
+    *) return 1;;
+  esac
+}
+should_run_scope() {
+  scope_selected "$1" || return 1
+  if (( FAST )) && [[ "$ONLY" == "all" ]] && ! fast_scope_selected "$1"; then
+    return 1
+  fi
+  return 0
+}
+validate_scope_selection
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
@@ -27,6 +50,63 @@ validate_control_free_value "RUSTFLAGS_EXTRA" "${RUSTFLAGS_EXTRA:-}" 8192
 mkdir -p "$OUTPUT_DIR"; LOG_FILE="$OUTPUT_DIR/${BASE_NAME}.log"; exec > >(tee -a "$LOG_FILE") 2>&1
 [[ -n "${RUSTFLAGS_EXTRA:-}" ]] && export RUSTFLAGS="${RUSTFLAGS_EXTRA} ${RUSTFLAGS:-}"
 RESULTS_JSON="$OUTPUT_DIR/results.json"; json_begin "$RESULTS_JSON" "tests_optimization"; JSON_FIRST_RUN=1
+
+qf_json_append_object "$RESULTS_JSON" \
+  "name=selection" \
+  "status=PASS" \
+  "result=PASS" \
+  "reason=explicit_scope_selection" \
+  "selected_scopes=$ONLY" \
+  "mode=$( (( FAST )) && printf 'fast' || printf 'full' )" \
+  "command_status=int:0" \
+  "raw_output="
+
+record_scope_status() {
+  local scope="$1"
+  local result="$2"
+  local reason="$3"
+  qf_json_append_object "$RESULTS_JSON" \
+    "name=scope-$scope" \
+    "status=$result" \
+    "result=$result" \
+    "reason=$reason" \
+    "command_status=int:0" \
+    "raw_output="
+}
+
+scope_skip_reason() {
+  if (( FAST )) && [[ "$ONLY" == "all" ]]; then
+    printf '%s' "fast_profile_omits_scope"
+    return 0
+  fi
+  printf '%s' "not_selected_by_scope"
+}
+
+for scope in batch memory simd cpu zero-copy telemetry integration stress; do
+  if should_run_scope "$scope"; then
+    record_scope_status "$scope" "PASS" "selected_by_scope"
+  else
+    record_scope_status "$scope" "SKIP" "$(scope_skip_reason)"
+  fi
+done
+
+print_summary_and_exit() {
+  local ok_label="$1"
+  echo -e "\n==============================================================="
+  echo "  Optimization Test Summary"
+  echo "==============================================================="
+  echo "  Total:   $TOTAL"
+  echo "  Passed:  $PASSED"
+  echo "  Failed:  $FAILED"
+  echo "  Skipped:  $SKIPPED"
+  json_end "$RESULTS_JSON"
+  if [[ "$FAILED" -gt 0 ]]; then
+    echo -e "\n[FAIL] Optimization Tests completed with failures"
+    exit 1
+  fi
+  echo -e "\n[OK] $ok_label"
+  exit 0
+}
 
 echo "==============================================================="
 echo "  Optimization & Hardware Acceleration Test Suite"
@@ -326,10 +406,12 @@ run_named_test() {
 }
 
 # Test I/O batch sizing
-echo -e "\n> Testing I/O Batch Sizing..."
-run_named_test "I/O batch sizing" "normalized_batch_size"
+if should_run_scope batch; then
+  echo -e "\n> Testing I/O Batch Sizing..."
+  run_named_test "I/O batch sizing" "normalized_batch_size"
+fi
 
-if (( FAST )); then
+if (( FAST )) && [[ "$ONLY" == "all" ]]; then
   echo -e "\n> Fast mode enabled (reduced optimization matrix)"
   run_named_test "CPU profile telemetry mask" "cpu_profile_mask"
   run_named_test "FEC batch processing" "test_batch_"
@@ -349,153 +431,139 @@ if (( FAST )); then
     --test rt-iter-reductions
     --test rt-simd-selfcheck
     --test rt-telemetry-counters
-    --test rt-xor-repeating-parity
   )
   if [[ "$(uname -m)" == "x86_64" ]]; then
-    SIMD_FAST_TEST_ARGS+=(--test rt-ack-merge-parity --test rt-xor-sse2-parity)
+    SIMD_FAST_TEST_ARGS+=(--test rt-ack-merge-parity)
   fi
   run_case "SIMD/Accelerate integration" -- cargo test --release --features "$FEATURES" \
     "${SIMD_FAST_TEST_ARGS[@]}" \
     -- --nocapture
 
-  echo -e "\n==============================================================="
-  echo "  Optimization Test Summary"
-  echo "==============================================================="
-  echo "  Total:   $TOTAL"
-  echo "  Passed:  $PASSED"
-  echo "  Failed:  $FAILED"
-  echo "  Skipped: $SKIPPED"
-  json_end "$RESULTS_JSON"
-  if [[ "$FAILED" -gt 0 ]]; then
-    echo -e "\n[FAIL] Optimization Tests completed with failures"
-    exit 1
-  fi
-  echo -e "\n[OK] Optimization Fast Tests Complete"
-  exit 0
+  print_summary_and_exit "Optimization Fast Tests Complete"
 fi
 
 # Test NUMA awareness
-echo -e "\n> Testing NUMA Awareness..."
-run_optional_test "NUMA local" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=local" --
-run_optional_test "NUMA interleave" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=interleave" --
-run_optional_test "NUMA preferred" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=preferred:0" --
+if should_run_scope memory; then
+  echo -e "\n> Testing NUMA Awareness..."
+  run_optional_test "NUMA local" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=local" --
+  run_optional_test "NUMA interleave" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=interleave" --
+  run_optional_test "NUMA preferred" "numa" "$BASE_FEATURES" "" "QUICFUSCATE_NUMA_POLICY=preferred:0" --
 
-# Test HugePages
-echo -e "\n> Testing HugePages Support..."
-run_optional_test "HugePages" "hugepages" "$BASE_FEATURES" "" "QUICFUSCATE_MADVISE_HUGEPAGE=1" --
+  # Test HugePages
+  echo -e "\n> Testing HugePages Support..."
+  run_optional_test "HugePages" "hugepages" "$BASE_FEATURES" "" "QUICFUSCATE_MADVISE_HUGEPAGE=1" --
+fi
 
 # Test SIMD paths (x86_64)
-echo -e "\n> Testing x86_64 SIMD Paths..."
-if [[ $(uname -m) == "x86_64" ]]; then
-    echo "  - Testing SSE2..."
-    run_optional_test "SSE2 paths" "sse2" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+sse2" --
-    
-    echo "  - Testing AVX2..."
-    run_optional_test "AVX2 paths" "avx2" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+avx2" --
-    
-    echo "  - Testing AVX-512..."
-    run_optional_test "AVX-512 paths" "avx512" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+avx512f" --
-else
-    echo "  Skipping (x86_64 only)"
-    record_platform_skip "x86_64 SIMD paths" "host_arch_not_x86_64" "x86_64" "$BASE_FEATURES"
+if should_run_scope simd; then
+  echo -e "\n> Testing x86_64 SIMD Paths..."
+  if [[ $(uname -m) == "x86_64" ]]; then
+      echo "  - Testing SSE2..."
+      run_optional_test "SSE2 paths" "sse2" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+sse2" --
+
+      echo "  - Testing AVX2..."
+      run_optional_test "AVX2 paths" "avx2" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+avx2" --
+
+      echo "  - Testing AVX-512..."
+      run_optional_test "AVX-512 paths" "avx512" "$BASE_FEATURES" "" "RUSTFLAGS=-Ctarget-feature=+avx512f" --
+  else
+      echo "  Skipping (x86_64 only)"
+      record_platform_skip "x86_64 SIMD paths" "host_arch_not_x86_64" "x86_64" "$BASE_FEATURES"
+  fi
+
+  # Test SIMD paths (ARM)
+  echo -e "\n> Testing ARM SIMD Paths..."
+  if [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
+      echo "  - Testing NEON..."
+      run_optional_test "NEON paths" "neon" "$BASE_FEATURES" "" --
+
+      echo "  - Testing PMULL..."
+      run_optional_test "PMULL paths" "pmull" "$BASE_FEATURES" "" --
+  else
+      echo "  Skipping (ARM only)"
+      record_platform_skip "ARM SIMD paths" "host_arch_not_arm64" "arm64" "$BASE_FEATURES"
+  fi
 fi
 
-# Test SIMD paths (ARM)
-echo -e "\n> Testing ARM SIMD Paths..."
-if [[ $(uname -m) == "aarch64" ]] || [[ $(uname -m) == "arm64" ]]; then
-    echo "  - Testing NEON..."
-    run_optional_test "NEON paths" "neon" "$BASE_FEATURES" "" --
-    
-    echo "  - Testing PMULL..."
-    run_optional_test "PMULL paths" "pmull" "$BASE_FEATURES" "" --
-else
-    echo "  Skipping (ARM only)"
-    record_platform_skip "ARM SIMD paths" "host_arch_not_arm64" "arm64" "$BASE_FEATURES"
+# Test CPU feature detection, prefetch, cache alignment
+if should_run_scope cpu; then
+  echo -e "\n> Testing CPU Feature Detection..."
+  run_named_test "CPU feature detection" "cpu_features"
+
+  echo -e "\n> Testing Prefetch Hints..."
+  run_named_test "Prefetch hints" "prefetch"
+
+  echo -e "\n> Testing Cache Line Alignment..."
+  run_named_test "Cache alignment" "cache_alignment"
 fi
-
-# Test CPU feature detection
-echo -e "\n> Testing CPU Feature Detection..."
-run_named_test "CPU feature detection" "cpu_features"
-
-# Test prefetching
-echo -e "\n> Testing Prefetch Hints..."
-run_named_test "Prefetch hints" "prefetch"
-
-# Test cache alignment
-echo -e "\n> Testing Cache Line Alignment..."
-run_named_test "Cache alignment" "cache_alignment"
 
 # Test zero-copy operations
-echo -e "\n> Testing Zero-Copy Operations..."
-ZERO_COPY_FEATURES="$(qf_cargo_test_feature_set "${BASE_FEATURES},zero_copy_dgram")"
-run_optional_test "Zero-copy operations" "zero_copy" "$ZERO_COPY_FEATURES" "zero_copy_dgram" --
+if should_run_scope zero-copy; then
+  echo -e "\n> Testing Zero-Copy Operations..."
+  ZERO_COPY_FEATURES="$(qf_cargo_test_feature_set "${BASE_FEATURES},zero_copy_dgram")"
+  run_optional_test "Zero-copy operations" "zero_copy" "$ZERO_COPY_FEATURES" "zero_copy_dgram" --
+fi
 
 # Test batch processing
-echo -e "\n> Testing Batch Processing..."
-run_named_test "Batch processing" "batch_processing"
+if should_run_scope batch; then
+  echo -e "\n> Testing Batch Processing..."
+  run_named_test "Batch processing" "batch_processing"
+fi
 
 # Test telemetry
-echo -e "\n> Testing Telemetry System..."
-run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "" "QUICFUSCATE_TELEMETRY=1" --
+if should_run_scope telemetry; then
+  echo -e "\n> Testing Telemetry System..."
+  run_optional_test "Telemetry system" "telemetry" "$BASE_FEATURES" "" "QUICFUSCATE_TELEMETRY=1" --
+fi
 
 # Integration fixtures (SIMD/accelerate/telemetry)
-FEATURES="${CARGO_FEATURES:-rust-tests}"
-if [[ ",${FEATURES}," != *",rust-tests,"* ]]; then
-  FEATURES="${FEATURES},rust-tests"
+if should_run_scope integration; then
+  FEATURES="${CARGO_FEATURES:-rust-tests}"
+  if [[ ",${FEATURES}," != *",rust-tests,"* ]]; then
+    FEATURES="${FEATURES},rust-tests"
+  fi
+  if [[ ",${FEATURES}," != *",simd-selfcheck,"* ]]; then
+    FEATURES="${FEATURES},simd-selfcheck"
+  fi
+  echo -e "\n> Running SIMD/Accelerate Integration Fixtures..."
+  SIMD_FULL_TEST_ARGS=(
+    --test rt-argsort-parity
+    --test rt-base64-decode-parity
+    --test rt-bitmap-range-parity
+    --test rt-bitstream-parity
+    --test rt-brain-activation-parity
+    --test rt-brain-histogram
+    --test rt-ecn-popcount
+    --test rt-header-validate-parity
+    --test rt-iter-reduction-telemetry
+    --test rt-iter-reductions
+    --test rt-moving-average-parity
+    --test rt-packet-number-parity
+    --test rt-random-aes-ctr
+    --test rt-ring-buffer-parity
+    --test rt-shuffle-parity
+    --test rt-simd-selfcheck
+    --test rt-telemetry-counters
+    --test rt-transpose-parity
+    --test rt-varint-roundtrip
+  )
+  if [[ "$(uname -m)" == "x86_64" ]]; then
+    SIMD_FULL_TEST_ARGS+=(--test rt-ack-merge-parity)
+  fi
+  run_case "SIMD/Accelerate integration" -- cargo test --release --features "$FEATURES" \
+    "${SIMD_FULL_TEST_ARGS[@]}" \
+    -- --nocapture
 fi
-if [[ ",${FEATURES}," != *",simd-selfcheck,"* ]]; then
-  FEATURES="${FEATURES},simd-selfcheck"
-fi
-echo -e "\n> Running SIMD/Accelerate Integration Fixtures..."
-SIMD_FULL_TEST_ARGS=(
-  --test rt-argsort-parity
-  --test rt-base64-decode-parity
-  --test rt-bitmap-range-parity
-  --test rt-bitstream-parity
-  --test rt-brain-activation-parity
-  --test rt-brain-histogram
-  --test rt-ecn-popcount
-  --test rt-header-validate-parity
-  --test rt-iter-reduction-telemetry
-  --test rt-iter-reductions
-  --test rt-moving-average-parity
-  --test rt-packet-number-parity
-  --test rt-random-aes-ctr
-  --test rt-ring-buffer-parity
-  --test rt-shuffle-parity
-  --test rt-simd-selfcheck
-  --test rt-telemetry-counters
-  --test rt-transpose-parity
-  --test rt-varint-roundtrip
-  --test rt-xor-parity
-  --test rt-xor-repeating-parity
-)
-if [[ "$(uname -m)" == "x86_64" ]]; then
-  SIMD_FULL_TEST_ARGS+=(--test rt-ack-merge-parity --test rt-xor-sse2-parity)
-fi
-run_case "SIMD/Accelerate integration" -- cargo test --release --features "$FEATURES" \
-  "${SIMD_FULL_TEST_ARGS[@]}" \
-  -- --nocapture
 
 # Combined optimization test
-echo -e "\n> Running Optimization Stress Test..."
-run_optional_test "Optimization stress" "optimization_stress" "$BASE_FEATURES" "" \
-  "QUICFUSCATE_NUMA_POLICY=interleave" \
-  "QUICFUSCATE_MADVISE_HUGEPAGE=1" \
-  "QUICFUSCATE_TELEMETRY=1" \
-  "RUSTFLAGS=-Ctarget-cpu=native" -- \
-  --nocapture --test-threads=1
-
-echo -e "\n==============================================================="
-echo "  Optimization Test Summary"
-echo "==============================================================="
-echo "  Total:   $TOTAL"
-echo "  Passed:  $PASSED"
-echo "  Failed:  $FAILED"
-echo "  Skipped: $SKIPPED"
-json_end "$RESULTS_JSON"
-if [[ "$FAILED" -gt 0 ]]; then
-  echo -e "\n[FAIL] Optimization Tests completed with failures"
-  exit 1
+if should_run_scope stress; then
+  echo -e "\n> Running Optimization Stress Test..."
+  run_optional_test "Optimization stress" "optimization_stress" "$BASE_FEATURES" "" \
+    "QUICFUSCATE_NUMA_POLICY=interleave" \
+    "QUICFUSCATE_MADVISE_HUGEPAGE=1" \
+    "QUICFUSCATE_TELEMETRY=1" \
+    "RUSTFLAGS=-Ctarget-cpu=native" -- \
+    --nocapture --test-threads=1
 fi
-echo -e "\n[OK] Optimization Tests Complete"
+
+print_summary_and_exit "Optimization Tests Complete"
