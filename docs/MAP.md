@@ -621,6 +621,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- test-release-updater-artifact-contract.sh
 |   |   |   |-- test-harness-argument-safety.sh
 |   |   |   |-- test-profiling-evidence-contract.sh
+|   |   |   |-- test-optimization-scope-contract.sh
 |   |   |   `-- test-shared-artifact-writer-contract.sh
 |   |   |-- frontend
 |   |   |   |-- desktop
@@ -816,10 +817,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- rt-transport-uring.rs
 |   |   |   |-- rt-transpose-parity.rs
 |   |   |   |-- rt-udp-batch-send.rs
-|   |   |   |-- rt-varint-roundtrip.rs
-|   |   |   |-- rt-xor-repeating-parity.rs
-|   |   |   |-- rt-xor-parity.rs
-|   |   |   `-- rt-xor-sse2-parity.rs
+|   |   |   `-- rt-varint-roundtrip.rs
 |   |   |-- smoke
 |   |   |   |-- smoke-avx10.sh
 |   |   |   |-- smoke-bench-example-cli.sh
@@ -985,8 +983,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |   |-- transport.rs
     |   |-- udp.rs
     |   |-- unsafe.rs
-    |   |-- uring_batch.rs
-    |   `-- x86_sse2.rs
+    |   `-- uring_batch.rs
     |-- profile.rs
     |-- qftls.rs
     |-- qftls/
@@ -1222,7 +1219,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 - **Cargo tests:** 71 integration-test targets are declared and all 71 source paths exist. The desktop/web-admin Rust validation suite now invokes five current declared targets; the archived `it-masque-runtime-integration` source is evidence only and is not part of the active Cargo target surface. TODO-774 closed the stale runner edge, while TODO-734 owns the remaining feature and non-vacuity contract.
 - **Feature propagation:** All retained declared test targets with crate-level feature cfgs now declare matching Cargo `required-features`. Orchestrator requires `rust-tests,orchestrator`; SIMD self-check requires `rust-tests,simd-selfcheck`; and Linux io_uring targets require `rust-tests,io_uring`. `run_cargo` still injects the baseline `rust-tests` feature for generic test commands, while the targeted desktop, transport, full-suite, and CI lanes now pass the complete feature set explicitly.
-- **Non-vacuity:** `qf_cargo_test_run_expect` requires a positive executed-test count plus a named `test ... ... ok` marker. The transport bundle verifies one intended test per target and records Linux-only paths as explicit `SKIP` items. The dynamic-discovery contract includes negative Cargo invocations for missing `rust-tests` and `orchestrator`, which must fail before a zero-test result can be emitted. The CI SIMD lane requires the `varint_roundtrip_and_consistency` success marker; the default feature-matrix lane enables `rust-tests`.
+- **Non-vacuity:** `qf_cargo_test_run_expect` requires a positive executed-test count plus a named `test ... ... ok` marker. The transport bundle verifies one intended test per target and records Linux-only paths as explicit `SKIP` items. The dynamic-discovery contract includes negative Cargo invocations for missing `rust-tests` and `orchestrator`, which must fail before a zero-test result can be emitted. The CI SIMD lanes (Linux and macOS) require the `varint_roundtrip_and_consistency` success marker; the default all-target `rust-tests` surface is owned by `build-test` after the 2026-08-16 cadence change moved slow lanes (installer, impaired three-hop, short fuzz) to PR/nightly/manual gating.
 - **Architecture skips:** The x86_64-only parity targets and the aarch64-only random helper target retain exact Cargo feature requirements but now provide explicit ignored `SKIP` fixtures on unsupported architectures, so direct target invocations cannot report an empty passing crate.
 - **Examples:** `examples/tun_factory_example.rs` is Cargo- and crate-gated only to `tun-tests`; its `main()` demonstrates external factory registration and no longer advertises unreachable `tun-windows`/`tun-ios` branches. The example proves factory wiring, not platform backend behavior. TODO-775 closed the target contract; the production platform owners remain TODO-443 and the related Windows/TUN tasks.
 - **Scope gate:** The current register has 703 tracker headings, 364 current detail files, and 374 archived detail files. The last recorded validator pass enumerated 902 tracked, 58,787 ignored, and 0 non-ignored untracked paths, for 59,689 accounted paths, including exactly three `historical-archive` paths. The current validator stops before those counts because it rejects the canonical `Blocked` tracker section; TODO-799 owns that schema mismatch. TODO-773 classifies tracked archive paths as `historical-archive` evidence; TODO-795 owns the Unix admin CLI response-contract gap, TODO-796 is closed for the E2E migration finalization evidence gap, TODO-797 is closed for the persisted logging-mode state gap, and TODO-798 owns the io_uring partial-send disposition gap.
@@ -1250,7 +1247,7 @@ The audit remains open. These reconciliations document current evidence and owne
 ## Implementation Reconciliation (2026-08-02, dynamic test discovery)
 
 - **Shared contract:** `scripts/tests/lib/lib-common.sh` owns target-scoped Cargo test discovery and execution classification. It preserves raw output and command status, requires a positive listed or executed test count, and emits `PASS`, `FAIL`, or `UNAVAILABLE` metadata with target, feature set, filter, and reason.
-- **Suite wiring:** `test-optimization.sh`, `test-performance-regression.sh`, and `test-security-fuzzing.sh` discover and execute the same release `--lib` test universe, including the effective `rust-tests` feature set. Optimization keeps a separate zero-copy feature scope; platform and toolchain skips retain explicit prerequisites and machine-readable reasons.
+- **Suite wiring:** `test-optimization.sh`, `test-performance-regression.sh`, and `test-security-fuzzing.sh` discover and execute the same release `--lib` test universe, including the effective `rust-tests` feature set. Optimization keeps a separate zero-copy feature scope and the explicit `--only` scopes `batch,memory,simd,cpu,zero-copy,telemetry,integration,stress`; platform and toolchain skips retain explicit prerequisites and machine-readable reasons. The Optimization selection contract is `scripts/tests/fast/test-optimization-scope-contract.sh`.
 - **Negative proof:** `scripts/tests/fast/test-dynamic-discovery-fail-closed.sh` uses real Cargo calls to prove discovery command failure, integration-to-library target mismatch, stale-pattern discovery, and zero-test execution are non-pass results. Raw outputs and exit statuses remain in the bounded result artifact.
 
 ## Implementation Reconciliation (2026-08-02, harness argument safety)

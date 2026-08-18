@@ -27,14 +27,13 @@ use zeroize::Zeroize;
 // explicit: crypto owns the machine room and consumes only common, error, CPU, and telemetry
 // contracts. No root product module is reachable from this crate.
 pub(crate) use crate as crypto;
-#[cfg(any(test, feature = "rust-tests"))]
-pub(crate) use qf_common::rng;
 pub(crate) use qf_common::{env_utils, secret};
 pub(crate) use qf_error as error;
 pub(crate) use qf_telemetry as telemetry;
 
-// Removed: rand::rngs::OsRng + RngCore. Callers now use crate::rng::fill_secure_or_abort
-// which wraps getrandom directly and avoids coupling to any rand_core version.
+// Removed: rand::rngs::OsRng + RngCore. Secure randomness comes from
+// qf-common's fill_secure_or_abort, which wraps getrandom directly and
+// avoids coupling to any rand_core version.
 
 const DATA_AEAD_OVERRIDE_AUTO: u8 = 0;
 const DATA_AEAD_OVERRIDE_AEGIS_L: u8 = 1;
@@ -274,32 +273,16 @@ pub use self::morus::*;
 /// This manager ensures that all cryptographic operations are backed by
 /// secure, session-specific materials.
 ///
-/// Actively used by `StealthManager`, `CoreConnection`, and client subsystems
-/// as a dependency-injection point for cryptographic key generation.
-/// Methods use `OsRng` for CSPRNG-backed key generation; the struct itself
-/// is zero-sized and carries no state (acts as a capability token).
+/// Retained by `StealthManager`, `CoreConnection`, and client subsystems
+/// as a dependency-injection capability token; the struct itself is
+/// zero-sized and carries no state. Key material comes from the canonical
+/// secure-randomness contracts in `qf-common`.
 pub struct CryptoManager;
 
 impl CryptoManager {
     /// Create a new zero-sized crypto capability token.
     pub fn new() -> Self {
         Self
-    }
-
-    /// Generates a cryptographically secure random key of a given length.
-    /// This is used for generating ephemeral keys for XOR obfuscation.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn get_obfuscation_key(&self, length: usize) -> Vec<u8> {
-        let mut key = vec![0; length];
-        crate::rng::fill_secure_or_abort(&mut key, "CryptoManager::get_obfuscation_key");
-        key
-    }
-
-    /// Generates a session specific key. This helper wraps [`Self::get_obfuscation_key`]
-    /// to make the intent clear when a new connection is created.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn generate_session_key(&self, length: usize) -> Vec<u8> {
-        self.get_obfuscation_key(length)
     }
 }
 

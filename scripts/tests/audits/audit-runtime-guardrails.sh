@@ -402,7 +402,6 @@ files = [
     Path("scripts/tests/rust/rt-chacha-x16-parity.rs"),
     Path("scripts/tests/rust/rt-chacha-x4-parity.rs"),
     Path("scripts/tests/rust/rt-ghash-sse-parity.rs"),
-    Path("scripts/tests/rust/rt-xor-sse2-parity.rs"),
 ]
 failures = []
 checked = 0
@@ -1094,7 +1093,7 @@ from pathlib import Path
 
 ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 match = re.search(
-    r"(?ms)^  linux-fastpath-gates:\n(?P<job>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+    r"(?ms)^  linux-platform-gates:\n(?P<job>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
     ci,
 )
 job = match.group("job") if match else ""
@@ -1125,7 +1124,7 @@ if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
   && rg -F -- 'tests::failure_policy_distinguishes_best_effort_from_fail_closed' \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
-  && rg -F -- '--locked --package qf-memory-lock --lib -- --nocapture' \
+  && rg -F -- '--locked --package qf-memory-lock --lib' \
     scripts/tests/suites/test-privilege-memory-tls-proof.sh >/dev/null \
   && rg -F -- 'rust-tests = []' crates/qf-privilege/Cargo.toml >/dev/null \
   && rg -F -- 'qftls::tests::preload_identity_duplicate_and_conflict_contract_is_isolated' \
@@ -1155,7 +1154,7 @@ from pathlib import Path
 
 ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 match = re.search(
-    r"(?ms)^  linux-fastpath-gates:\n(?P<job>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+    r"(?ms)^  linux-platform-gates:\n(?P<job>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
     ci,
 )
 job = match.group("job") if match else ""

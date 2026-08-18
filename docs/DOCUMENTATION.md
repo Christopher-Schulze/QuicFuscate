@@ -24,7 +24,7 @@ Current task status and evidence ownership are canonical only in `docs/todo.md` 
 | UDP/io_uring fast path | `active` | canonical retained fastpath |
 | Core H3/MASQUE carrier | `active` | production CONNECT-UDP/capsule carrier for authenticated TUN traffic |
 | Bounded N-hop MASQUE circuits | `experimental/internal` | complete standard-mode source path for one to three product hops and a resource-bounded generic core; local all-feature library and non-io_uring Rust test binaries pass, while privileged Linux and native cross-platform promotion evidence remains open under TODO-886 |
-| XOR obfuscation | `compat-only` | not part of canonical product path |
+| XOR obfuscation | `removed` | standalone obfuscation layer deleted (TODO-887); algorithm-internal XOR in AEAD, header protection, FEC/Galois math, and STUN/TURN stays |
 | `transport::batch` | `experimental/internal` | rust-parity/test-only transport surface |
 | `accelerate::*` parity helpers | `compat-only` | internal runtime owner plus explicit `rust-tests` parity surface |
 | `accelerate::random` helpers | `compat-only` | heuristic/perf helper surface only |
@@ -512,7 +512,7 @@ stealth toggles. TODO-464 through TODO-471 are complete and define the productio
 - HTTP/3/QPACK: ALPN, header sets, QPACK policy, and framing must align with the selected persona snapshot.
 - Core H3/MASQUE: production VPN/TUN payloads use the Core H3/MASQUE data plane. It is the sole active CONNECT-UDP/capsule carrier; the retired `stealth::MasqueManager` and stealth-local DoH resolver are preserved only under `archive/`.
 - Domain Fronting: useful only with explicit, vetted fronting configuration. Blind fronting defaults are disabled for Performance, Stealth, and clean Intelligent mode.
-- DoH: DNS resolution stays inside the tunnel path and keeps the canonical stealth runtime free of payload-side XOR obfuscation.
+- DoH: DNS resolution stays inside the tunnel path and the canonical stealth runtime carries no standalone XOR obfuscation layer.
 - Active Probe Detection + Reality Fallback: probe-like traffic is detected and, when required, relayed via `RealityProxy` to preserve realistic upstream behavior under active scanning.
 - Cover Traffic: Cover PING, H3-framed cover requests, randomized bounded Server Push cover, and escalated WebTransport cover are valid layers.
 - StealthBrain Coordination: telemetry-driven policy updates may tune ACK strategy, pacing, timing, padding, cover intensity, and FEC hints. Brain may steer actuators, but does not mutate active persona identity.
@@ -680,7 +680,6 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 | Domain Fronting | off | explicit only | on with explicit domains or built-in aggressive list | off at Level 0; explicit/escalated only |
 | HTTP/3 Masquerading | on | on | on | on |
 | QPACK Headers | on | on | on | on |
-| XOR Obfuscation | off | off | off | off (dynamic) |
 | Traffic Padding | off | Adaptive (max 86) | BrowserMimic (max 256) | off at Level 0; dynamic at Level 1-2 |
 | Timing Obfuscation | off | 750 us default | 3000 us default | off (dynamic); forced on after probe |
 | Flow Shaper and Dummy Retransmits | off | off | on | off (dynamic) |
@@ -768,9 +767,9 @@ Final stealth stack:
 
 #### Stealth Modes - Semantics
 - Off: no stealth; DoH, fronting, HTTP/3 masquerading, padding, timing, QPACK, and TLS Cover extras are all disabled.
-- Performance: uTLS/persona on; DoH on; domain fronting off; HTTP/3 masquerading on; XOR off; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
-- Stealth: uTLS/persona on; DoH on; domain fronting off unless explicit fronting domains are configured; HTTP/3 masquerading on; XOR off; QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off; server push cover light (intensity 0.25, 60 s interval).
-- Anti-DPI: uTLS/persona on; DoH on; fronting on with explicit domains or the built-in aggressive list; HTTP/3 masquerading on; XOR off; QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; server push cover enabled (intensity 0.8, 15 s interval); WebTransport cover enabled as an H3 application-cover session; real-time choke off by default.
+- Performance: uTLS/persona on; DoH on; domain fronting off; HTTP/3 masquerading on; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
+- Stealth: uTLS/persona on; DoH on; domain fronting off unless explicit fronting domains are configured; HTTP/3 masquerading on; QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off; server push cover light (intensity 0.25, 60 s interval).
+- Anti-DPI: uTLS/persona on; DoH on; fronting on with explicit domains or the built-in aggressive list; HTTP/3 masquerading on; QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; server push cover enabled (intensity 0.8, 15 s interval); WebTransport cover enabled as an H3 application-cover session; real-time choke off by default.
 - Intelligent: starts like Performance at level 0 (no padding, no cover overhead, no domain fronting); escalates dynamically to Stealth/Anti-DPI timing, padding, cover and FEC-hint behavior on probe signals or brain pressure; server-push burst interval is level-dependent (30 s at L0/L1, 15 s at L2); WebTransport cover is level-2 only.
 - Manual: all knobs as configured in TOML or env; no automatic escalation.
 
@@ -1767,7 +1766,6 @@ Optimize submodules (`src/optimize/`):
 - `src/optimize/uring_batch.rs` - io_uring batch sender and runtime-owned blocking worker (Linux-only, feature-gated).
 - `src/optimize/simd.rs` - SIMD dispatch and capability detection helpers.
 - `src/optimize/mod.rs` - module root (ConstBuffer, ConstPacketPool, SIMD dispatch entry points).
-- `src/optimize/x86_sse2.rs` - x86 SSE2-specific compatibility and helper kernels.
 
 SIMD submodules (`crates/qf-simd/src/`):
 - `crates/qf-simd/src/arm_stream.rs` - ARM stream-oriented SIMD helpers.
@@ -1827,6 +1825,10 @@ Current Rust compilation boundaries are spread across the following workflow fam
 | `release.yml` server and desktop jobs | Linux and ARM64 server builds plus macOS/Linux/Windows Tauri check, Clippy, and packaging | Registry/Git/`target/` cache for server bundles; desktop packaging has no compiler cache setup |
 
 Cache keys include one or more Cargo.lock files and, in several jobs, the runner OS. They do not constitute a single toolchain-aware sccache key or prove cross-platform hit correctness. Cargo's own fingerprints and the locked build commands remain the current correctness boundary. The repository therefore makes no current claim for compiler-cache hit rate, false-hit absence, cache failure propagation, or the historical 30% improvement claim from TODO-155. TODO-761 is archived after retiring that historical claim; TODO-155 remains archived and labeled historical.
+
+### CI Lane Cadence Contract
+
+Since 2026-08-16, main pushes run the fast critical lanes only. The nspawn installer lifecycle (`linux-installer-native`), the netem-impaired three-hop circuit step, and the short ASAN fuzz job are gated to pull requests, manual dispatch, and the nightly `CI` schedule (`17 2 * * *`); deep fuzzing additionally remains in the weekly `fuzz-scheduled.yml` workflow. Unimpaired one/two/three-hop circuit proof, native firewall, traffic-analysis, Windows, macOS build/test, and all frontend and contract lanes stay on every push. Every job carries an explicit `timeout-minutes` bound. The macOS feature matrix was deduplicated against `build-test`: the default all-target `rust-tests` surface runs once in `build-test`, while both `simd-selfcheck` lanes execute only the `rt-simd-selfcheck` target. The `[profile.dev]` switch to `debug = false` removes debuginfo from all dev/test-profile compilation locally and in CI without touching debug assertions or the release profile.
 
 ### Rust Toolchain Support Policy
 
@@ -1934,7 +1936,6 @@ let text = telemetry::export_telemetry_text();
 - `src/optimize/`
   - qf-cpu compatibility consumers of `FeatureDetector` (CPU features -> `CpuProfile`)
   - Central SIMD dispatch helpers (`SimdDispatch`), MemoryPool, telemetry
-  - ARM: `xor_repeating_key_32` provides a dedicated SVE2 kernel with key rotation; NEON serves as fallback
 - `crates/qf-simd/`
   - Architecture-specific SIMD dispatch and per-domain acceleration helpers
   - CryptoAeadPlan (LAesni/LNeon/Morus by default; wider plans exist but are not selected by default)
@@ -3119,7 +3120,7 @@ Admin HTTP contract notes:
 #### Views (4 tabs):
 - **Dashboard**: Server status (version, uptime, bytes in/out, listen address), active clients with kick/block actions, blocked IP management (block/unblock), and Prometheus-style metrics display. Auto-refreshes status/clients every 5 s and metrics/blocked IPs every 15 s.
 - **Configuration**: Composite view with embedded panels:
-  - Stealth/FEC/Transport panel: stealth preset (`Auto`, `Performance`, `Stealth`, `AntiDPI`, `Manual`, `Off`), manual stealth mode expands inline and exposes the canonical per-feature toggles (domain fronting, HTTP3 masquerading, TLS Cover extras, QPACK headers, padding, timing obfuscation, protocol mimicry, DoH). XOR remains compatibility-only and is not part of the product-facing controls. FEC preset (`Auto` or `Off`). Transport controls: congestion control algorithm and MTU validation (1200-9000). Unsaved-changes warning on page leave, explicit Save/Reset, and pacing pinned on in config writes.
+  - Stealth/FEC/Transport panel: stealth preset (`Auto`, `Performance`, `Stealth`, `AntiDPI`, `Manual`, `Off`), manual stealth mode expands inline and exposes the canonical per-feature toggles (domain fronting, HTTP3 masquerading, TLS Cover extras, QPACK headers, padding, timing obfuscation, protocol mimicry, DoH). No standalone XOR obfuscation control exists; the layer was removed (TODO-887). FEC preset (`Auto` or `Off`). Transport controls: congestion control algorithm and MTU validation (1200-9000). Unsaved-changes warning on page leave, explicit Save/Reset, and pacing pinned on in config writes.
   - QKey panel: generate server-issued QKeys with optional display name, reveal the raw credential once at issuance, copy it from that one-time dialog, then manage issued entries through a metadata-only list with single or bulk revoke. TTL is not exposed in the admin UI flow.
   - Admin settings panel: change username and password. Default credentials are detected and the UI warns until changed. The active minimum password length for updates is 6 characters.
   - Reference guide panel: configuration reference inline.
@@ -3290,7 +3291,7 @@ Server TUN mode is supported only on Linux. Standalone clients accept only `--tu
 - `pool-bench` - Memory pool micro-benchmark
   - Options: `--iterations|--packets`, `--payload`, `--pool-capacity`, `--block-size`, `--warmup`, `--json`
 - `crypto-bench` - Crypto/encode micro-benchmark
-  - Options: `--iterations`, `--payload`, `--mode {fnv1a|xor|rolling}`, `--warmup`, `--json`
+  - Options: `--iterations`, `--payload`, `--mode {fnv1a|rolling}`, `--warmup`, `--json`
 - `net-bench` - Synthetic networking micro-benchmark
   - Options: `--iterations`, `--payload`, `--warmup`, `--json`
 
@@ -3301,7 +3302,6 @@ The `crypto-bench` subcommand supports different hashing/encoding modes:
 ```rust
 pub enum CryptoMode {
     Fnv1a,   // FNV-1a hash
-    Xor,     // XOR encoding
     Rolling, // Rolling hash
 }
 ```
@@ -3311,9 +3311,6 @@ pub enum CryptoMode {
 # Benchmark FNV-1a hashing
 quicfuscate crypto-bench --mode fnv1a --iterations 1000000
 
-# Benchmark XOR encoding
-quicfuscate crypto-bench --mode xor --payload 4096
-
 # Benchmark rolling hash
 quicfuscate crypto-bench --mode rolling --warmup 1000
 ```
@@ -3322,7 +3319,7 @@ quicfuscate crypto-bench --mode rolling --warmup 1000
 - **`BrowserProfile`** - Browser fingerprint profiles (Chrome, Firefox, Safari, Edge)
 - **`OsProfile`** - Operating system profiles (Windows, macOS, Linux, iOS, Android)
 - **`FecMode`** - Internal Adaptive FEC/test modes (Zero, Light, Normal, Medium, Strong, Extreme, Ultra, Fountain, Streaming)
-- **`CryptoMode`** - Cryptographic operation modes (Fnv1a, Xor, Rolling)
+- **`CryptoMode`** - Cryptographic operation modes (Fnv1a, Rolling)
 
 ### Common Configuration Options
 Both client and server subcommands support extensive configuration:
@@ -3749,13 +3746,14 @@ Curated domain sets are defined in `CdnProvider` and `DomainFrontingManager::ult
 
 ### Performance Optimizations
 
-#### SIMD XOR Obfuscation
-- SSE2 on x86_64: 32-byte chunks
-- NEON on aarch64: 32-byte chunks
-- Fallback: Byte-wise XOR
+#### Standalone XOR Obfuscation (removed)
+- The callerless repeating-key XOR obfuscation layer was removed (TODO-887); it never
+  had a production caller and added audit surface without confidentiality or stealth value.
+- XOR remains exactly where cryptography and protocols require it: inside AEAD
+  keystream/tag composition, QUIC header protection, FEC/Galois arithmetic, and
+  STUN/TURN address attributes.
 
 #### Zero-Copy Operations
-- In-place Obfuscation/Deobfuscation
 - Pooled memory for HTTP/3 headers
 - Aligned buffers for SIMD
 
@@ -4081,7 +4079,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-probe-detection.sh` - Active-probe validation (detector invariants, reality fallback rotation, optional stealth pressure path)
 - `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations); supports granular `--only` scope selection with explicit omitted-scope evidence
 - `test-transport.sh` - Transport suite (varint/frames/loss/BBR/0-RTT/validated migration/DATAGRAM; io_uring on Linux); `--only basic,uring,anti-replay,cc,integration` runs only the selected contract groups and records omitted groups as explicit `SKIP` entries, while the default remains complete.
-- `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`). Optional library tests use target-scoped discovery and fail closed on discovery or zero-test execution.
+- `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`). `--only batch,memory,simd,cpu,zero-copy,telemetry,integration,stress` runs selected contract groups, records every canonical scope before execution, and emits `SKIP` with `reason=not_selected_by_scope` or `fast_profile_omits_scope`. Unscoped full and `--fast` keep the previous command order; `--fast --only` honors the requested scopes instead of the reduced fast omission list. Optional library tests use target-scoped discovery and fail closed on discovery or zero-test execution. `scripts/tests/fast/test-optimization-scope-contract.sh` is the JSON-inspecting help/selection/skip/failure contract.
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest). Dynamic library-test selection uses release/`--lib` discovery with explicit feature and prerequisite status.
 - `test-performance-regression.sh` - Performance regression with baseline comparison; optional library checks use the same release/`--lib` and feature scope for discovery and execution.
 - `test-e2e.sh` - End-to-end integration tests with real network scenarios; `--only h3-qpack,server-push,fec,migration,zero-rtt,stealth,integration-control,integration-fec,integration-stealth,integration-loss,integration-performance` runs only selected cases, while `--only integration` selects the five integration cases and the default remains complete
@@ -5449,7 +5447,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 - **Cargo contract:** The root package retains 71 integration-test targets and every source path exists. All retained sources with crate-level feature cfgs declare the same feature prerequisites in `Cargo.toml`; the AF_XDP target and feature were removed under TODO-838, while the orchestrator disabled branch and unsupported-host no-op tests were removed so a missing feature or platform cannot masquerade as coverage.
 - **Runner contract:** `qf_cargo_test_run_expect()` requires a positive executed-test count and a named successful test marker. `test-transport.sh` passes `rust-tests,io_uring` for Linux io_uring and kernel-hotpath targets, verifies one intended test in every retained transport integration target, and writes structured Linux-only `SKIP` records on macOS. Desktop/web-admin Rust integration invokes the orchestrator with `rust-tests,orchestrator` and verifies one real body in all five targets. The full-suite utility passes the exact Linux feature sets as well.
-- **CI contract:** The SIMD self-check lane passes `rust-tests,simd-selfcheck` and requires the `varint_roundtrip_and_consistency` success marker. The default all-target feature-matrix lane passes `rust-tests`, and non-empty matrix entries append that baseline feature.
+- **CI contract:** The SIMD self-check lanes (Linux and macOS) pass `rust-tests,simd-selfcheck` and require the `varint_roundtrip_and_consistency` success marker. The default all-target `rust-tests` surface on macOS is owned by the `build-test` job; the former duplicate empty feature-matrix lane was removed with the 2026-08-16 CI cadence change.
 - **Negative proof:** `scripts/tests/fast/test-dynamic-discovery-fail-closed.sh` now runs real Cargo invocations with one required feature removed for SIMD and Orchestrator targets. Both must exit nonzero, identify Cargo's `required-features` contract, and contain neither `running 0 tests` nor a green test-result line.
 - **Local proof:** Cargo metadata reports zero crate-feature-gated targets without matching `required-features`; `cargo check --all-targets` passes; SIMD self-check passes 14/14; Orchestrator integration passes 2/2; the dynamic-discovery negative contract passes; and the macOS transport suite passes 541/541 basic transport tests, 13/13 anti-replay and 20/20 congestion tests, all 11 target-scoped transport checks with their named markers, and explicit Linux-only `SKIP` records. The combined desktop/web-admin validation suite passes its desktop and web-admin checks with 0 errors/0 warnings, desktop unit tests 370/370, web-admin unit tests 285/285, and the five Rust targets with 5/3/2/1/7 tests. The broad workspace all-target gate reaches 2,308/2,308 library tests and 41/43 binary tests; its exit is still limited to the two unchanged runtime-reload assertions at `src/main_parts/late_tests_and_mlock.rs:566,638`.
 - **Resource boundary:** After the broad gate, the filesystem reports 11 GiB free and `target/` is 11 GiB, below the 13 GiB target ceiling used for this task.

@@ -864,8 +864,6 @@ pub static ZERO_MODE_UPGRADES: AtomicU64 = AtomicU64::new(0);
 pub static STEALTH_DOH: AtomicU64 = AtomicU64::new(0);
 /// Domain fronting operations performed.
 pub static STEALTH_FRONTING: AtomicU64 = AtomicU64::new(0);
-/// XOR obfuscation operations applied.
-pub static STEALTH_XOR: AtomicU64 = AtomicU64::new(0);
 /// Stealth padding operations via GFNI instructions.
 pub static STEALTH_PADDING_GFNI_OPS: Counter = Counter::new();
 /// HTTP/3 server push promises sent for cover traffic.

@@ -54,10 +54,6 @@ pub use qf_cpu::{
 };
 pub(crate) use qf_cpu::{prefetch, PrefetchHint};
 
-// Modular x86 SSE2 helpers (legacy acceleration)
-#[cfg(target_arch = "x86_64")]
-#[path = "x86_sse2.rs"]
-pub mod x86_sse2;
 #[cfg(any(test, feature = "rust-tests"))]
 impl<const N: usize> Default for ConstBuffer<N> {
     fn default() -> Self {

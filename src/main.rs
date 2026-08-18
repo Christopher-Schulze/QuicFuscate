@@ -575,8 +575,6 @@ fn run_fec_bench(
 enum CryptoMode {
     #[clap(name = "fnv1a")]
     Fnv1a,
-    #[clap(name = "xor")]
-    Xor,
     #[clap(name = "rolling")]
     Rolling,
 }
@@ -670,13 +668,6 @@ fn run_crypto_bench(
                 for &b in buf.iter() {
                     acc ^= b as u64;
                     acc = acc.wrapping_mul(0x100000001b3);
-                }
-            }
-            CryptoMode::Xor => {
-                let k = ((idx as u8).wrapping_mul(0x5D)) ^ 0xA5;
-                for x in buf.iter_mut() {
-                    *x ^= k;
-                    acc = acc.wrapping_add(*x as u64);
                 }
             }
             CryptoMode::Rolling => {

@@ -594,21 +594,6 @@ path = "scripts/tests/rust/rt-varint-roundtrip.rs"
 required-features = ["rust-tests"]
 
 [[test]]
-name = "rt-xor-repeating-parity"
-path = "scripts/tests/rust/rt-xor-repeating-parity.rs"
-required-features = ["rust-tests"]
-
-[[test]]
-name = "rt-xor-parity"
-path = "scripts/tests/rust/rt-xor-parity.rs"
-required-features = ["rust-tests"]
-
-[[test]]
-name = "rt-xor-sse2-parity"
-path = "scripts/tests/rust/rt-xor-sse2-parity.rs"
-required-features = ["rust-tests"]
-
-[[test]]
 name = "rt-cc-algorithms"
 path = "scripts/tests/rust/rt-cc-algorithms.rs"
 

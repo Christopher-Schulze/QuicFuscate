@@ -9,7 +9,6 @@ use crossbeam_channel::bounded;
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
 use quicfuscate::crypto::ChaCha20Poly1305;
-use quicfuscate::crypto::CryptoManager;
 use quicfuscate::crypto::{install_data_aead_config, select_data_aead, Aegis128LAead};
 use quicfuscate::engine::{AeadPreference, CryptoConfig};
 use quicfuscate::error::ConnectionError;
@@ -182,18 +181,6 @@ fn timing_attack_tag_mismatch_rejected() {
     let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let err = open.open_with_u64_counter(0, b"aad", &mut buf).expect_err("tamper must fail");
     assert!(matches!(err, ConnectionError::CryptoError(_)));
-}
-
-#[test]
-fn key_material_generated_is_nonzero() {
-    let mgr = CryptoManager::new();
-    let k1 = mgr.generate_session_key(32);
-    let k2 = mgr.generate_session_key(32);
-    assert_eq!(k1.len(), 32);
-    assert_eq!(k2.len(), 32);
-    assert!(k1.iter().any(|b| *b != 0));
-    assert!(k2.iter().any(|b| *b != 0));
-    assert_ne!(k1, k2);
 }
 
 #[test]

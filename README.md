@@ -59,7 +59,7 @@ QuicFuscate is a stealth transport and VPN runtime built on a custom QUIC-based 
 
 ## Highlights
 - Censorship-resistant runtime with browser-grade traffic observables
-  (rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, profile-coherent timing/padding; Core H3/MASQUE is the production TUN carrier and XOR remains compatibility-only)
+  (rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, profile-coherent timing/padding; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists)
 - Adaptive SIMD dispatch (AVX2/AVX-512/NEON) with runtime CPU feature detection for optimal performance paths
 - AEAD selection at runtime (`Aegis128L` family, `Morus1280_128`) with automatic CPU feature detection;
   PFS by default via ephemeral X25519 key exchange
@@ -127,8 +127,6 @@ Rule of thumb:
   - Aligns ALPN, header sets, and framing to common web patterns<br>
 - **MASQUE Tunneling**: Core HTTP/3 CONNECT-UDP/capsule carrier for authenticated TUN traffic
   - Selected by an active TUN bridge or Intelligent-mode escalation; the retired standalone manager is not part of the runtime<br>
-- **Traffic Obfuscation**: XOR-based obfuscation layer (compatibility-only, not part of the default runtime)
-  - Sealed QUIC datagrams remain unmodified to preserve AEAD/FEC integrity<br>
 - **TLS Profile Metadata**: Deterministic compatibility ClientHello metadata remains available in memory for audit and compatibility inspection; rustls owns the wire handshake<br>
 - **DNS-over-HTTPS (DoH)**: Resolves DNS via HTTPS to hide queries from on-path resolvers<br>
 - **QPACK Header Shaping**: Encodes realistic HTTP/3 headers with QPACK for indistinguishable request patterns<br>
@@ -177,7 +175,6 @@ AEGIS-128L and MORUS-1280-128 are the production AEAD ciphers; the runtime selec
   - Hot loops (FEC arithmetic, crypto glue) vectorized where safe for multi-Gbps throughput<br>
 - **Bit-Sliced GF Multiplication**: Faster FEC arithmetic via dedicated AVX2/AVX512/NEON kernels
   - Field ops implemented with bit-slicing and tableless strategies to minimize cache pressure<br>
-- **Vectorized XOR Fast Path**: 32-byte key path with runtime dispatch and safe scalar fallback for other sizes/alignments
 - **Batched Processing**: QUIC I/O and FEC arithmetic are processed in cache-hot batches to maximize throughput<br>
 - **Adaptive Compression (zstd Policy)**: Runtime compression decisions use payload size and link signals (RTT/loss/bandwidth), with optional dictionary-based paths and telemetry counters<br>
 - **Zero-Copy Architecture**: Minimizes memory allocations for maximum throughput
@@ -307,7 +304,7 @@ The transport subsystem uses `src/transport.rs` as the module root and focused s
 | Encryption          | AEGIS-128L family, MORUS-1280-128                                          |
 | Key Exchange        | X25519 (ephemeral); Perfect Forward Secrecy by default                      |
 | Error Correction    | Hybrid Adaptive FEC (RLNC + Streaming)                                     |
-| Stealth/Obfuscation | rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, adaptive padding/timing/protocol mimicry, active-probe detection + Reality fallback, server-push cover traffic; Core H3/MASQUE is the production TUN carrier and XOR is compatibility-only |
+| Stealth/Obfuscation | rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, adaptive padding/timing/protocol mimicry, active-probe detection + Reality fallback, server-push cover traffic; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists |
 | Adaptive Intelligence | StealthBrain policy engine (ACK/timing/padding/FEC coordination plus Core H3/MASQUE preference hinting) |
 | Control Plane       | Server-authoritative QKey lifecycle (issue/revoke/persist), Admin Web/API policy enforcement |
 | Compression         | Adaptive zstd policy (signal-aware compression decisions, optional dictionary path) |
