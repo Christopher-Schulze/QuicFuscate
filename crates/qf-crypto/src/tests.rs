@@ -516,6 +516,185 @@ fn crypto_constructors_reject_invalid_key_and_iv_lengths() {
     assert!(super::select_data_aead(&[0u8; 16], &[0u8; 13]).is_err());
 }
 
+/// Differential property test: AEGIS-128L and MORUS-1280-128 must satisfy the
+/// same correctness and authentication invariants over a deterministic
+/// pseudorandom input space. Each scenario picks key, IV, nonce, associated
+/// data length, and plaintext length from a splitmix64 stream and asserts
+/// both candidates share the same shape of behavior — roundtrip, ciphertext
+/// change relative to plaintext, wrong-AD rejection, tag-flip rejection, and
+/// nonce sensitivity. This is the symmetrized differential coverage for the
+/// active TODO-884 evidence program; it does not promote a winner and
+/// remains bounded to the local Rust correctness harness.
+#[test]
+fn aegis_morus_differential_invariants() {
+    use super::aegis::{Aegis128L, AegisError};
+    use super::morus::{AeadError, MorusAead};
+
+    // Splitmix64 — self-contained, deterministic, zero-dependency PRNG so
+    // the test reproduces the exact same input space across runs.
+    fn next_u64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    const SCENARIOS: usize = 64;
+
+    let mut state: u64 = 0xDEAD_BEEF_CAFE_BABEu64;
+    for scenario in 0..SCENARIOS {
+        // Key (16 bytes), IV (12 bytes), nonce (16 bytes), alt-nonce (16 bytes).
+        let key: [u8; 16] = {
+            let mut k = [0u8; 16];
+            for slot in k.chunks_exact_mut(8) {
+                slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
+            }
+            k
+        };
+        let iv: [u8; 12] = {
+            let n0 = next_u64(&mut state).to_le_bytes();
+            let n1 = next_u64(&mut state).to_le_bytes();
+            let mut v = [0u8; 12];
+            v[..8].copy_from_slice(&n0);
+            v[8..].copy_from_slice(&n1[..4]);
+            v
+        };
+        let nonce: [u8; 16] = {
+            let mut n = [0u8; 16];
+            for slot in n.chunks_exact_mut(8) {
+                slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
+            }
+            n
+        };
+        let mut alt_nonce = nonce;
+        alt_nonce[0] ^= 0xFF;
+
+        // AD length in [0, 96); plaintext length in [0, 1024).
+        let ad_len = (next_u64(&mut state) as usize) % 96;
+        let msg_len = (next_u64(&mut state) as usize) % 1024;
+        let ad: Vec<u8> =
+            (0..ad_len).map(|i| (i as u8).wrapping_mul(13).wrapping_add(0x5A)).collect();
+        let msg: Vec<u8> = (0..msg_len)
+            .map(|i| (i as u8).wrapping_mul(7).wrapping_add((scenario as u8).wrapping_mul(31)))
+            .collect();
+
+        // Wrong AD: prefer a length mutation; fall back to a sentinel byte.
+        let wrong_ad: Vec<u8> =
+            if ad.is_empty() { vec![0xFF] } else { ad[..ad.len() - 1].to_vec() };
+
+        // === AEGIS-128L ===
+        let mut aegis_buf = msg.clone();
+        let aegis_tag = Aegis128L::new(&key, &nonce)
+            .expect("AEGIS valid 16-byte key+nonce")
+            .encrypt_in_place(&mut aegis_buf, &ad);
+        let aegis_ct = aegis_buf;
+
+        // Invariant 1: roundtrip.
+        let pt = Aegis128L::new(&key, &nonce)
+            .unwrap()
+            .decrypt_verified(&aegis_ct, &ad, &aegis_tag)
+            .expect("AEGIS roundtrip must succeed");
+        assert_eq!(pt, msg, "AEGIS scenario {scenario}: roundtrip mismatch");
+
+        // Invariant 2: ciphertext differs from plaintext when non-empty.
+        if !msg.is_empty() {
+            assert_ne!(
+                aegis_ct, msg,
+                "AEGIS scenario {scenario}: ciphertext must differ from plaintext"
+            );
+        }
+
+        // Invariant 3: wrong AD fails authentication.
+        assert_eq!(
+            Aegis128L::new(&key, &nonce)
+                .unwrap()
+                .decrypt_verified(&aegis_ct, &wrong_ad, &aegis_tag),
+            Err(AegisError::InvalidTag),
+            "AEGIS scenario {scenario}: wrong AD must fail authentication"
+        );
+
+        // Invariant 4: single tag-bit flip fails authentication.
+        let mut aegis_bad_tag = aegis_tag;
+        aegis_bad_tag[0] ^= 0x01;
+        assert_eq!(
+            Aegis128L::new(&key, &nonce).unwrap().decrypt_verified(&aegis_ct, &ad, &aegis_bad_tag),
+            Err(AegisError::InvalidTag),
+            "AEGIS scenario {scenario}: tag bit flip must fail authentication"
+        );
+
+        // Invariant 5: alternate nonce must change either ciphertext or tag.
+        let mut aegis_alt_buf = msg.clone();
+        let aegis_alt_tag =
+            Aegis128L::new(&key, &alt_nonce).unwrap().encrypt_in_place(&mut aegis_alt_buf, &ad);
+        if !msg.is_empty() {
+            assert_ne!(
+                aegis_alt_buf, aegis_ct,
+                "AEGIS scenario {scenario}: alternate nonce must change ciphertext"
+            );
+        } else {
+            assert_ne!(
+                aegis_alt_tag, aegis_tag,
+                "AEGIS scenario {scenario}: alternate nonce must change tag (empty plaintext)"
+            );
+        }
+
+        // === MORUS-1280-128 ===
+        let morus = MorusAead::from_arrays(&key, &iv);
+        let mut morus_buf = msg.clone();
+        let morus_tag = morus.encrypt_in_place(&mut morus_buf, &ad, &nonce);
+        let morus_ct = morus_buf;
+
+        // Invariant 1: roundtrip.
+        let mut morus_pt = morus_ct.clone();
+        morus
+            .decrypt_in_place(&mut morus_pt, &morus_tag, &ad, &nonce)
+            .expect("MORUS roundtrip must succeed");
+        assert_eq!(morus_pt, msg, "MORUS scenario {scenario}: roundtrip mismatch");
+
+        // Invariant 2: ciphertext differs from plaintext when non-empty.
+        if !msg.is_empty() {
+            assert_ne!(
+                morus_ct, msg,
+                "MORUS scenario {scenario}: ciphertext must differ from plaintext"
+            );
+        }
+
+        // Invariant 3: wrong AD fails authentication.
+        let mut morus_bad = morus_ct.clone();
+        assert_eq!(
+            morus.decrypt_in_place(&mut morus_bad, &morus_tag, &wrong_ad, &nonce),
+            Err(AeadError::TagMismatch),
+            "MORUS scenario {scenario}: wrong AD must fail authentication"
+        );
+
+        // Invariant 4: single tag-bit flip fails authentication.
+        let mut morus_bad_tag = morus_tag;
+        morus_bad_tag[0] ^= 0x01;
+        let mut morus_bad = morus_ct.clone();
+        assert_eq!(
+            morus.decrypt_in_place(&mut morus_bad, &morus_bad_tag, &ad, &nonce),
+            Err(AeadError::TagMismatch),
+            "MORUS scenario {scenario}: tag bit flip must fail authentication"
+        );
+
+        // Invariant 5: alternate nonce must change either ciphertext or tag.
+        let mut morus_alt_buf = msg.clone();
+        let morus_alt_tag = morus.encrypt_in_place(&mut morus_alt_buf, &ad, &alt_nonce);
+        if !msg.is_empty() {
+            assert_ne!(
+                morus_alt_buf, morus_ct,
+                "MORUS scenario {scenario}: alternate nonce must change ciphertext"
+            );
+        } else {
+            assert_ne!(
+                morus_alt_tag, morus_tag,
+                "MORUS scenario {scenario}: alternate nonce must change tag (empty plaintext)"
+            );
+        }
+    }
+}
+
 /// AEAD length arithmetic must be checked before it can wrap.
 ///
 /// Every seal path computed `len + 16` directly. On a caller-supplied length near `usize::MAX`

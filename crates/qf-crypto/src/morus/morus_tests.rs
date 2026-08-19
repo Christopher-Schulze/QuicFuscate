@@ -495,3 +495,104 @@ fn morus_trait_path_matches_in_place_and_roundtrips() {
         "tampered ciphertext must fail authentication"
     );
 }
+
+// ---- Forgery matrix mirroring `aegis128l_rejects_pinned_cfrg_failure_vectors` ----
+
+// Mirror of `aegis128l_wrong_ad_fails_authentication`: the same tag bound to
+// one associated data value must not authenticate under a different AD.
+#[test]
+fn morus_wrong_ad_fails_authentication() {
+    let key = [0x6Eu8; 16];
+    let iv = [0x4Fu8; 12];
+    let nonce = [0x3Cu8; 16];
+    let ad_correct = b"correct-ad";
+    let ad_wrong = b"wrong-ad";
+    let msg: Vec<u8> = (0u8..32).collect();
+
+    let morus = MorusAead::from_arrays(&key, &iv);
+    let (ct, tag) = morus.encrypt_optimized(&msg, ad_correct, &nonce);
+
+    // Decrypt with the wrong AD must fail authentication.
+    let mut bad = ct.clone();
+    assert_eq!(
+        morus.decrypt_in_place(&mut bad, &tag, ad_wrong, &nonce),
+        Err(AeadError::TagMismatch)
+    );
+
+    // Sanity: the same tag still authenticates the correct AD.
+    let mut good = ct;
+    morus
+        .decrypt_in_place(&mut good, &tag, ad_correct, &nonce)
+        .expect("correct AD must authenticate");
+    assert_eq!(good, msg);
+}
+
+// Mirror of `aegis128l_rejects_pinned_cfrg_failure_vectors`: each of the four
+// canonical AEAD inputs (key, ciphertext, associated data, tag) must cause
+// authentication failure when independently mutated. The inputs are chosen to
+// match the AEGIS CFRG vector shape so the two harnesses stay symmetric.
+#[test]
+fn morus_failure_vectors_matrix() {
+    let key: [u8; 16] = [
+        0x10, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ];
+    let nonce: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    let iv: [u8; 12] = [0x55; 12];
+    let ad: [u8; 8] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+    let msg: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+
+    let morus = MorusAead::from_arrays(&key, &iv);
+    let (ct, tag) = morus.encrypt_optimized(&msg, &ad, &nonce);
+
+    // Sanity: the unmodified (key, iv, nonce, ad, ct, tag) tuple roundtrips.
+    let mut baseline = ct.clone();
+    morus.decrypt_in_place(&mut baseline, &tag, &ad, &nonce).expect("baseline must authenticate");
+    assert_eq!(baseline, msg.to_vec());
+
+    // 1. Mutate the key.
+    let mut bad_key = key;
+    bad_key[0] ^= 0x01;
+    let mut bad = ct.clone();
+    assert_eq!(
+        MorusAead::from_arrays(&bad_key, &iv).decrypt_in_place(&mut bad, &tag, &ad, &nonce),
+        Err(AeadError::TagMismatch),
+        "key mutation must fail authentication"
+    );
+
+    // 2. Mutate the ciphertext.
+    let mut bad_ct = ct.clone();
+    bad_ct[0] ^= 0x01;
+    let mut bad = bad_ct;
+    assert_eq!(
+        morus.decrypt_in_place(&mut bad, &tag, &ad, &nonce),
+        Err(AeadError::TagMismatch),
+        "ciphertext mutation must fail authentication"
+    );
+
+    // 3. Mutate the associated data.
+    let mut bad_ad = ad;
+    bad_ad[0] ^= 0x01;
+    let mut bad = ct.clone();
+    assert_eq!(
+        morus.decrypt_in_place(&mut bad, &tag, &bad_ad, &nonce),
+        Err(AeadError::TagMismatch),
+        "associated data mutation must fail authentication"
+    );
+
+    // 4. Mutate the tag.
+    let mut bad_tag = tag;
+    bad_tag[0] ^= 0x01;
+    let mut bad = ct;
+    assert_eq!(
+        morus.decrypt_in_place(&mut bad, &bad_tag, &ad, &nonce),
+        Err(AeadError::TagMismatch),
+        "tag mutation must fail authentication"
+    );
+}
