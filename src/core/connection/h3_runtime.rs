@@ -929,9 +929,7 @@ impl QuicFuscateConnection {
         if !valid
             || payload.is_empty()
             || payload.len()
-                > self
-                    .effective_masque_mtu()
-                    .max(crate::transport::MIN_CLIENT_INITIAL_LEN)
+                > self.effective_masque_mtu().max(crate::transport::MIN_CLIENT_INITIAL_LEN)
         {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }

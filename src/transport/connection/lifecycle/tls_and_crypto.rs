@@ -16,11 +16,10 @@ fn peer_max_udp_payload_size(
         let (value_len, length_len) = qf_transport_pn::varint::read_varint(&parameters[offset..])
             .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
         offset += length_len;
-        let value_len = usize::try_from(value_len)
-            .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
-        let end = offset
-            .checked_add(value_len)
-            .ok_or(crate::error::ConnectionError::InvalidPacket)?;
+        let value_len =
+            usize::try_from(value_len).map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+        let end =
+            offset.checked_add(value_len).ok_or(crate::error::ConnectionError::InvalidPacket)?;
         if end > parameters.len() {
             return Err(crate::error::ConnectionError::InvalidPacket);
         }
@@ -33,8 +32,8 @@ fn peer_max_udp_payload_size(
             if used != value_len {
                 return Err(crate::error::ConnectionError::InvalidPacket);
             }
-            let value = usize::try_from(value)
-                .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+            let value =
+                usize::try_from(value).map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
             if !(MIN_QUIC_UDP_PAYLOAD_SIZE..=MAX_QUIC_UDP_PAYLOAD_SIZE).contains(&value) {
                 return Err(crate::error::ConnectionError::InvalidPacket);
             }

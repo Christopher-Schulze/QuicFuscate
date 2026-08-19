@@ -220,7 +220,7 @@ experimental = ["internal_wiedemann", "internal_avx10_preview"]
 
 [profile.dev]
 opt-level = 0
-debug = true
+debug = false
 lto = false
 codegen-units = 256
 incremental = true

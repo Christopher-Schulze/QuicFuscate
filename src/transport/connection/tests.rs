@@ -42,7 +42,8 @@ fn encode_transport_parameter(parameter_id: u64, value: &[u8]) -> Vec<u8> {
     let mut scratch = [0u8; 8];
     let id_len = qf_transport_pn::varint::write_varint(parameter_id, &mut scratch).unwrap();
     encoded.extend_from_slice(&scratch[..id_len]);
-    let value_len = qf_transport_pn::varint::write_varint(value.len() as u64, &mut scratch).unwrap();
+    let value_len =
+        qf_transport_pn::varint::write_varint(value.len() as u64, &mut scratch).unwrap();
     encoded.extend_from_slice(&scratch[..value_len]);
     encoded.extend_from_slice(value);
     encoded
@@ -219,14 +220,8 @@ fn version_negotiation_restart_restores_local_datagram_ceiling() {
 fn peer_transport_limit_clamps_datagram_packetization() {
     let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
     config.set_max_send_udp_payload_size(1500);
-    let mut connection = Connection::new_with_role(
-        b"client-scid",
-        local(),
-        peer(),
-        config,
-        false,
-    )
-    .expect("valid test connection configuration");
+    let mut connection = Connection::new_with_role(b"client-scid", local(), peer(), config, false)
+        .expect("valid test connection configuration");
 
     assert_eq!(connection.dgram_send_max_size, 1500);
     connection
