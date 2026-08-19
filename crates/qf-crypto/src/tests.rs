@@ -850,6 +850,136 @@ fn aegis_morus_aead_trait_differential() {
     }
 }
 
+/// Differential property test at the QUIC packet-size boundary: both
+/// Aegis128LAead and MorusAead must satisfy the same correctness and
+/// authentication invariants at the 1200, 1400, and 1500-byte payload
+/// sizes that the QUIC transport actually uses. This complements
+/// `aegis_morus_aead_trait_differential` (which sweeps up to 256 bytes)
+/// by exercising the realistic packet-payload range and one oversized
+/// 1500-byte edge case. Neither candidate is promoted; both must satisfy
+/// the same roundtrip and forgery invariants at every payload size.
+#[test]
+fn aegis_morus_quic_payload_boundary_differential() {
+    use super::aead::{AeadOpen, AeadSeal};
+    use super::aegis::Aegis128LAead;
+    use super::morus::MorusAead;
+
+    // The QUIC-relevant payload sizes from the TODO-884 evidence program.
+    const PAYLOAD_SIZES: &[usize] = &[1200, 1400, 1500];
+
+    // A deterministic fixed key/IV/AD/counter triple so this test is
+    // reproducible across runs without depending on an RNG.
+    let key: [u8; 16] = [
+        0x5A, 0xA5, 0x3C, 0xC3, 0x69, 0x96, 0x0F, 0xF0, 0x12, 0x21, 0xAB, 0xBA, 0xCD, 0xDC, 0xEF,
+        0xFE,
+    ];
+    let iv: [u8; 12] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC];
+    let ad: [u8; 17] = *b"quic-boundary-ad!";
+    let counter: u64 = 42;
+
+    let wrong_ad: [u8; 18] = *b"wrong-boundary-ad!";
+
+    for &payload_len in PAYLOAD_SIZES {
+        // Deterministic payload: every byte is a function of its index.
+        let payload: Vec<u8> =
+            (0..payload_len).map(|i| (i as u8).wrapping_mul(23).wrapping_add(0x5C)).collect();
+
+        // === Aegis128LAead via AeadSeal/AeadOpen ===
+        let aegis = Aegis128LAead::from_arrays(&key, &iv);
+        let mut aegis_buf = vec![0u8; payload.len() + 16];
+        aegis_buf[..payload.len()].copy_from_slice(&payload);
+        let aegis_sealed_len = aegis
+            .seal_with_u64_counter(counter, &ad, &mut aegis_buf, payload.len(), None)
+            .expect("AEGIS seal at QUIC boundary must succeed");
+        assert_eq!(
+            aegis_sealed_len,
+            payload.len() + 16,
+            "AEGIS {payload_len}B: sealed length mismatch"
+        );
+
+        // Roundtrip.
+        let aegis_pt_len = aegis
+            .open_with_u64_counter(counter, &ad, &mut aegis_buf)
+            .expect("AEGIS open at QUIC boundary must succeed");
+        assert_eq!(aegis_pt_len, payload.len(), "AEGIS {payload_len}B: pt length mismatch");
+        assert_eq!(
+            &aegis_buf[..aegis_pt_len],
+            &payload[..],
+            "AEGIS {payload_len}B: roundtrip mismatch"
+        );
+
+        // Bit-flip forgery.
+        let mut aegis_forged = vec![0u8; payload.len() + 16];
+        aegis_forged[..payload.len()].copy_from_slice(&payload);
+        aegis
+            .seal_with_u64_counter(counter, &ad, &mut aegis_forged, payload.len(), None)
+            .expect("AEGIS reseal at QUIC boundary must succeed");
+        aegis_forged[0] ^= 0x01;
+        assert!(
+            aegis.open_with_u64_counter(counter, &ad, &mut aegis_forged).is_err(),
+            "AEGIS {payload_len}B: bit-flip forgery must fail"
+        );
+
+        // Wrong-AD forgery.
+        let mut aegis_wrong_ad = vec![0u8; payload.len() + 16];
+        aegis_wrong_ad[..payload.len()].copy_from_slice(&payload);
+        aegis
+            .seal_with_u64_counter(counter, &ad, &mut aegis_wrong_ad, payload.len(), None)
+            .expect("AEGIS reseal at QUIC boundary must succeed");
+        assert!(
+            aegis.open_with_u64_counter(counter, &wrong_ad, &mut aegis_wrong_ad).is_err(),
+            "AEGIS {payload_len}B: wrong-AD must fail"
+        );
+
+        // === MorusAead via AeadSeal/AeadOpen ===
+        let morus = MorusAead::from_arrays(&key, &iv);
+        let mut morus_buf = vec![0u8; payload.len() + 16];
+        morus_buf[..payload.len()].copy_from_slice(&payload);
+        let morus_sealed_len = morus
+            .seal_with_u64_counter(counter, &ad, &mut morus_buf, payload.len(), None)
+            .expect("MORUS seal at QUIC boundary must succeed");
+        assert_eq!(
+            morus_sealed_len,
+            payload.len() + 16,
+            "MORUS {payload_len}B: sealed length mismatch"
+        );
+
+        // Roundtrip.
+        let morus_pt_len = morus
+            .open_with_u64_counter(counter, &ad, &mut morus_buf)
+            .expect("MORUS open at QUIC boundary must succeed");
+        assert_eq!(morus_pt_len, payload.len(), "MORUS {payload_len}B: pt length mismatch");
+        assert_eq!(
+            &morus_buf[..morus_pt_len],
+            &payload[..],
+            "MORUS {payload_len}B: roundtrip mismatch"
+        );
+
+        // Bit-flip forgery.
+        let mut morus_forged = vec![0u8; payload.len() + 16];
+        morus_forged[..payload.len()].copy_from_slice(&payload);
+        morus
+            .seal_with_u64_counter(counter, &ad, &mut morus_forged, payload.len(), None)
+            .expect("MORUS reseal at QUIC boundary must succeed");
+        morus_forged[0] ^= 0x01;
+        assert!(
+            morus.open_with_u64_counter(counter, &ad, &mut morus_forged).is_err(),
+            "MORUS {payload_len}B: bit-flip forgery must fail"
+        );
+
+        // Wrong-AD forgery.
+        let mut morus_wrong_ad = vec![0u8; payload.len() + 16];
+        morus_wrong_ad[..payload.len()].copy_from_slice(&payload);
+        morus
+            .seal_with_u64_counter(counter, &ad, &mut morus_wrong_ad, payload.len(), None)
+            .expect("MORUS reseal at QUIC boundary must succeed");
+        assert!(
+            morus.open_with_u64_counter(counter, &wrong_ad, &mut morus_wrong_ad).is_err(),
+            "MORUS {payload_len}B: wrong-AD must fail"
+        );
+    }
+}
+
 /// AEAD length arithmetic must be checked before it can wrap.
 ///
 /// Every seal path computed `len + 16` directly. On a caller-supplied length near `usize::MAX`
