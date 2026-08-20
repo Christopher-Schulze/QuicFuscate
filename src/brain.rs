@@ -116,6 +116,12 @@ fn elapsed_since(instant: Instant) -> Duration {
 pub struct StealthBrain {
     cfg: StealthBrainConfig,
     st: RwLock<StealthBrainState>,
+    /// Environment snapshot captured once at brain construction. The Intelligent
+    /// policy derivation only reads `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1`,
+    /// which is startup configuration, not a per-tick runtime knob. Capturing the
+    /// full process environment per apply_policy tick cost millions of allocs at
+    /// high pps for zero behavioral difference (TODO-894).
+    environment: qf_common::env_utils::EnvSnapshot,
     fec_hints: Arc<BrainFecHints>,
     level_hints: Arc<IntelligentLevelHints>,
     // Lock-free buffers for observer callbacks - drained in apply_policy's single write lock.
@@ -168,6 +174,7 @@ impl StealthBrain {
         let fec_hints = Arc::new(BrainFecHints::new());
         Arc::new(Self {
             st: RwLock::new(StealthBrainState::new(&cfg)),
+            environment: qf_common::env_utils::EnvSnapshot::capture(),
             cfg,
             fec_hints,
             level_hints,
@@ -602,8 +609,6 @@ impl TransportObserver for StealthBrain {
                 st.last_masque_hint_change = now;
             }
             let prefer_masque_effective = st.last_masque_hint;
-
-            let environment = crate::env_utils::EnvSnapshot::capture();
             let mut stealth_policy = qf_stealth::derive_intelligent_runtime_policy(
                 qf_stealth::IntelligentStealthInputs {
                     level_hint: effective_level,
@@ -619,7 +624,7 @@ impl TransportObserver for StealthBrain {
                     pad_max_low: self.cfg.pad_max_low,
                     pad_max_high: self.cfg.pad_max_high,
                 },
-                &environment,
+                &self.environment,
             );
             let dither_pct = ((ts >> 7) % 21) as i64 - 10;
             stealth_policy.timing_max_jitter_us = ((stealth_policy.timing_max_jitter_us as i64)
