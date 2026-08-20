@@ -177,6 +177,9 @@
 - Detail: `docs/todo/todo-903-brain-jitter-flowshaper.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
+- Keep Initial, Handshake, unauthenticated probes, and fallback traffic standards-compatible, then negotiate the TODO-884 winner only inside the authenticated encrypted control plane. Derive independent directional keys through the existing TLS exporter, bind the selection against downgrade and cross-connection reuse, switch at deterministic packet-number boundaries, and make the winner the automatic QuicFuscate-to-QuicFuscate post-auth default while retaining explicit standard-only and advanced-required modes.
+- Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
+
 ## Completed
 
 ### TODO-893 - Modularize the Performance regression runner and artifact report path
