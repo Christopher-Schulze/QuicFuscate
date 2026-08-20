@@ -8,7 +8,7 @@
 #   - MASQUE_BYTES_RECEIVED counters increment on both ends
 #
 # Requirements: root, Linux, iproute2, procps, openssl, python3, nc (openbsd-netcat).
-# Run on the target server (e.g. broderick). Single-host loopback short-circuits
+# Run on the target server (e.g. omega). Single-host loopback short-circuits
 # TUN routing, so netns + veth is mandatory.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

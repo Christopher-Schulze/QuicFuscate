@@ -7,7 +7,7 @@
     },
     "apps/svelte-admin": {
       "name": "quicfuscate-svelte-admin",
-      "version": "0.3.0",
+      "version": "0.4.4",
       "dependencies": {
         "@lucide/svelte": "^0.577.0",
         "@quicfuscate/theme": "workspace:*",
@@ -36,7 +36,7 @@
     },
     "apps/svelte-desktop": {
       "name": "quicfuscate-svelte-desktop",
-      "version": "0.3.0",
+      "version": "0.4.4",
       "dependencies": {
         "@lucide/svelte": "^0.577.0",
         "@quicfuscate/theme": "workspace:*",
@@ -67,7 +67,7 @@
     },
     "apps/tauri": {
       "name": "quicfuscate-desktop",
-      "version": "0.3.0",
+      "version": "0.4.4",
     },
     "packages/theme": {
       "name": "@quicfuscate/theme",

@@ -7,17 +7,51 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
 [[ -f "$SCRIPT_DIR/../lib/lib-common.sh" ]] && source "$SCRIPT_DIR/../lib/lib-common.sh"
 
-OUTPUT_DIR=""; RUSTFLAGS_EXTRA=""; FAST=0
+OUTPUT_DIR=""; RUSTFLAGS_EXTRA=""; FAST=0; ONLY="all"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift;;
     --rustflags) RUSTFLAGS_EXTRA="$2"; shift;;
     --fast) FAST=1;;
+    --only)
+      ONLY="$2"
+      shift
+      ;;
+    --only=*)
+      ONLY="${1#--only=}"
+      ;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1; set -x;;
-    --help|-h) echo "Usage: $(basename "$0") [--output-dir DIR] [--rustflags STR] [--fast]"; exit 0;;
+    --help|-h)
+      echo "Usage: $(basename "$0") [--output-dir DIR] [--rustflags STR] [--fast] [--only SCOPE[,SCOPE]]"
+      echo "Performance Regression Test Suite"
+      echo "  --only SCOPE[,SCOPE]   Select scopes: throughput,latency,memory,cpu,hotpath,simd,scalability,report,all (default: all)"
+      echo "  Scopes: throughput,latency,memory,cpu,hotpath,simd,scalability,report"
+      usage_common_flags 2>/dev/null || true
+      exit 0;;
     *) break;;
   esac; shift
 done
+PERFORMANCE_SCOPES="throughput,latency,memory,cpu,hotpath,simd,scalability,report"
+if ! qf_validate_scope_selection "$ONLY" "$PERFORMANCE_SCOPES"; then
+  exit 2
+fi
+EFFECTIVE="$ONLY"
+if [[ "$ONLY" == "all" ]]; then
+  EFFECTIVE="throughput,latency,memory,cpu,hotpath,simd,scalability,report"
+fi
+should_run_scope() {
+  local scope="$1"
+  qf_scope_selected "$EFFECTIVE" "$scope"
+}
+needs_benchmark() {
+  if should_run_scope throughput || should_run_scope latency || should_run_scope hotpath; then
+    return 0
+  fi
+  if should_run_scope simd && [[ "$(uname -m)" == "x86_64" ]]; then
+    return 0
+  fi
+  return 1
+}
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_NAME="$(basename "$0" .sh)"
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$SCRIPT_DIR/../../out/tests/${BASE_NAME}-${TIMESTAMP}"
@@ -35,6 +69,49 @@ mkdir -p "$OUTPUT_DIR"
 json_begin "$SUMMARY_JSON" "performance_regression"
 JSON_FIRST_RUN=1
 FAIL=0
+# Selection record
+qf_json_append_object "$SUMMARY_JSON" \
+  "name=selection" \
+  "status=PASS" \
+  "result=PASS" \
+  "reason=explicit_scope_selection" \
+  "selected_scopes=$ONLY" \
+  "effective_scopes=$EFFECTIVE" \
+  "mode=$( (( FAST )) && printf 'fast' || printf 'full' )" \
+  "command_status=int:0" \
+  "raw_output="
+# Per-scope pre-execution records
+for scope in throughput latency memory cpu hotpath simd scalability report; do
+  # Fast profile omits memory,cpu,simd when ONLY==all
+  if [[ "$ONLY" == "all" && "$FAST" -eq 1 && ( "$scope" == "memory" || "$scope" == "cpu" || "$scope" == "simd" ) ]]; then
+    qf_json_append_object "$SUMMARY_JSON" \
+      "name=scope:$scope" \
+      "status=SKIP" \
+      "result=SKIP" \
+      "reason=fast_profile_omits_scope" \
+      "scope=$scope" \
+      "command_status=int:0" \
+      "raw_output="
+  elif should_run_scope "$scope"; then
+    qf_json_append_object "$SUMMARY_JSON" \
+      "name=scope:$scope" \
+      "status=PASS" \
+      "result=PASS" \
+      "reason=selected" \
+      "scope=$scope" \
+      "command_status=int:0" \
+      "raw_output="
+  else
+    qf_json_append_object "$SUMMARY_JSON" \
+      "name=scope:$scope" \
+      "status=SKIP" \
+      "result=SKIP" \
+      "reason=not_selected_by_scope" \
+      "scope=$scope" \
+      "command_status=int:0" \
+      "raw_output="
+  fi
+done
 BENCH_AVAILABLE=1
 TEST_LIST_FILE="$OUTPUT_DIR/testlist.txt"
 BASE_FEATURES="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
@@ -99,6 +176,39 @@ append_performance_record() {
     "raw_output=$raw_output" "duration_sec=null"
 }
 
+write_current_snapshot() {
+  mkdir -p "$(dirname "$CURRENT_FILE")"
+  if [ -f "$SUMMARY_JSON" ]; then
+    cp "$SUMMARY_JSON" "$CURRENT_FILE" 2>/dev/null || echo '{"generated":"current"}' > "$CURRENT_FILE"
+  else
+    echo '{"generated":"current"}' > "$CURRENT_FILE"
+  fi
+}
+
+run_report_scope() {
+  write_current_snapshot
+  echo -e "\n> Generating performance report..."
+  if [ -f "$BASELINE_FILE" ] && [ -f "$CURRENT_FILE" ]; then
+    echo -e "\n=== Performance Comparison Report ==="
+    echo "Baseline: $BASELINE_FILE"
+    echo "Current: $CURRENT_FILE"
+    if command -v jq >/dev/null 2>&1; then
+      if ! jq -s '.[0] * .[1]' "$BASELINE_FILE" "$CURRENT_FILE" 2>/dev/null; then
+        warn "failed to merge the benchmark comparison report"
+        FAIL=1
+        qf_json_append_object "$SUMMARY_JSON" "name=report" "status=FAIL" "result=FAIL" "reason=report_merge_failed" "command_status=int:1" "raw_output="
+        return 1
+      fi
+    else
+      warn "jq not installed; skipping JSON merge report"
+    fi
+    qf_json_append_object "$SUMMARY_JSON" "name=report" "status=PASS" "result=PASS" "reason=report_generated" "command_status=int:0" "raw_output="
+  else
+    warn "Baseline or current file missing; report limited"
+    qf_json_append_object "$SUMMARY_JSON" "name=report" "status=SKIP" "result=SKIP" "reason=missing_baseline_or_current" "command_status=int:0" "raw_output="
+  fi
+}
+
 if [[ "${QUICFUSCATE_JSON_CONTRACT_TEST:-0}" == "1" ]]; then
   COMMAND_ARGV_JSON='["json-contract-fixture"]'
   COMMAND_ENVIRONMENT_JSON='{"fixture":"non-empty"}'
@@ -109,20 +219,25 @@ if [[ "${QUICFUSCATE_JSON_CONTRACT_TEST:-0}" == "1" ]]; then
 fi
 
 BENCH_PREFLIGHT_STATUS=""
-if BENCH_PREFLIGHT_STATUS="$(qf_bench_preflight benches "$BENCH_TARGET")" && [[ "$BENCH_PREFLIGHT_STATUS" == "present" ]]; then
-  BENCH_AVAILABLE=1
-else
-  if [[ "$BENCH_PREFLIGHT_STATUS" == "absent" ]]; then
-    warn "Benchmark target $BENCH_TARGET is absent; requested cells will be recorded as SKIP"
+if needs_benchmark; then
+  if BENCH_PREFLIGHT_STATUS="$(qf_bench_preflight benches "$BENCH_TARGET")" && [[ "$BENCH_PREFLIGHT_STATUS" == "present" ]]; then
+    BENCH_AVAILABLE=1
   else
-    warn "Benchmark target $BENCH_TARGET failed to build; requested cells will be recorded as FAIL"
-    FAIL=1
+    if [[ "$BENCH_PREFLIGHT_STATUS" == "absent" ]]; then
+      warn "Benchmark target $BENCH_TARGET is absent; requested cells will be recorded as SKIP"
+    else
+      warn "Benchmark target $BENCH_TARGET failed to build; requested cells will be recorded as FAIL"
+      FAIL=1
+    fi
+    BENCH_AVAILABLE=0
   fi
+else
   BENCH_AVAILABLE=0
+  BENCH_PREFLIGHT_STATUS="skipped_not_required"
 fi
 
-# Build with optimizations (only when benches exist)
-if [[ "$BENCH_AVAILABLE" -eq 1 && "$FAST" -eq 0 ]]; then
+# Build with optimizations (only when benches exist and needed)
+if needs_benchmark && [[ "$BENCH_AVAILABLE" -eq 1 && "$FAST" -eq 0 ]]; then
   echo -e "\n> Building with native optimizations..."
   RUSTFLAGS="$BENCH_RUSTFLAGS" run_cargo build --release --features benches || FAIL=1
 fi
@@ -397,45 +512,60 @@ measure_performance() {
 }
 
 # Core performance tests
-echo -e "\n=== Throughput Tests ==="
-for test_name in "${THROUGHPUT_TESTS[@]}"; do
-  if ! measure_performance "$test_name" "thrpt" "$THROUGHPUT_THRESHOLD"; then FAIL=1; fi
-done
-
-echo -e "\n=== Latency Tests ==="
-for test_name in "${LATENCY_TESTS[@]}"; do
-  if ! measure_performance "$test_name" "time" "$LATENCY_THRESHOLD"; then FAIL=1; fi
-done
-
-if [[ "$RUN_MEM_CPU" -eq 1 ]]; then
-  echo -e "\n=== Memory Usage Tests ==="
-  echo -e "\n> Testing memory allocation patterns..."
-  run_optional_cargo_test "Memory usage" "memory_usage"
-
-  echo -e "\n> Testing memory pool efficiency..."
-  run_optional_cargo_test "Memory pool efficiency" "pool_efficiency"
-
-  echo -e "\n=== CPU Usage Tests ==="
-  echo -e "\n> Testing CPU utilization..."
-  run_optional_cargo_test "CPU usage" "cpu_usage"
-else
-  warn "FAST mode: skipping memory/CPU tests"
-  COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
-  append_performance_record "memory_cpu_tests" "test_execution" "0" "skipped" "SKIP" \
-    "fast_mode_reduced_selection" "not_applicable" "lib" "$BASE_FEATURES" null null null "SKIP" ""
+if should_run_scope throughput; then
+  echo -e "\n=== Throughput Tests ==="
+  for test_name in "${THROUGHPUT_TESTS[@]}"; do
+    if ! measure_performance "$test_name" "thrpt" "$THROUGHPUT_THRESHOLD"; then FAIL=1; fi
+  done
 fi
 
-# Hot path performance
-echo -e "\n=== Hot Path Performance ==="
-for test_name in "${HOTPATH_TESTS[@]}"; do
-  echo -e "\n> Testing ${test_name//_/ }..."
-  if ! measure_performance "$test_name" "time" "$LATENCY_THRESHOLD"; then FAIL=1; fi
-done
+if should_run_scope latency; then
+  echo -e "\n=== Latency Tests ==="
+  for test_name in "${LATENCY_TESTS[@]}"; do
+    if ! measure_performance "$test_name" "time" "$LATENCY_THRESHOLD"; then FAIL=1; fi
+  done
+fi
 
-# SIMD performance verification
-echo -e "\n=== SIMD Performance Verification ==="
+if should_run_scope memory; then
+  if [[ "$RUN_MEM_CPU" -eq 1 ]]; then
+    echo -e "\n=== Memory Usage Tests ==="
+    echo -e "\n> Testing memory allocation patterns..."
+    run_optional_cargo_test "Memory usage" "memory_usage"
 
-if [[ "$RUN_SIMD" -eq 1 && "$BENCH_AVAILABLE" -eq 1 && $(uname -m) == "x86_64" ]]; then
+    echo -e "\n> Testing memory pool efficiency..."
+    run_optional_cargo_test "Memory pool efficiency" "pool_efficiency"
+  else
+    warn "FAST mode: skipping memory tests"
+    COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
+    append_performance_record "memory_tests" "test_execution" "0" "skipped" "SKIP" \
+      "fast_mode_reduced_selection" "not_applicable" "lib" "$BASE_FEATURES" null null null "SKIP" ""
+  fi
+fi
+
+if should_run_scope cpu; then
+  if [[ "$RUN_MEM_CPU" -eq 1 ]]; then
+    echo -e "\n=== CPU Usage Tests ==="
+    echo -e "\n> Testing CPU utilization..."
+    run_optional_cargo_test "CPU usage" "cpu_usage"
+  else
+    warn "FAST mode: skipping CPU tests"
+    COMMAND_ARGV_JSON="[]"; COMMAND_ENVIRONMENT_JSON="{}"
+    append_performance_record "cpu_tests" "test_execution" "0" "skipped" "SKIP" \
+      "fast_mode_reduced_selection" "not_applicable" "lib" "$BASE_FEATURES" null null null "SKIP" ""
+  fi
+fi
+
+if should_run_scope hotpath; then
+  # Hot path performance
+  echo -e "\n=== Hot Path Performance ==="
+  for test_name in "${HOTPATH_TESTS[@]}"; do
+    echo -e "\n> Testing ${test_name//_/ }..."
+    if ! measure_performance "$test_name" "time" "$LATENCY_THRESHOLD"; then FAIL=1; fi
+  done
+fi
+if should_run_scope simd; then
+  echo -e "\n=== SIMD Performance Verification ==="
+  if [[ "$RUN_SIMD" -eq 1 && "$BENCH_AVAILABLE" -eq 1 && $(uname -m) == "x86_64" ]]; then
     echo -e "\n> Verifying AVX2 comparison on sort_simd/1024_elems..."
     for simd_mode in without_avx2 with_avx2; do
       if [[ "$simd_mode" == "without_avx2" ]]; then
@@ -480,48 +610,37 @@ if [[ "$RUN_SIMD" -eq 1 && "$BENCH_AVAILABLE" -eq 1 && $(uname -m) == "x86_64" ]
         "$(qf_json_array env "RUSTFLAGS=$simd_flags" cargo bench --bench "$BENCH_TARGET" --features benches -- sort_simd/1024_elems)" \
         "$(qf_json_environment_with_assignments "RUSTFLAGS=$simd_flags")"
     done
-elif [[ "$RUN_SIMD" -eq 0 ]]; then
+  elif [[ "$RUN_SIMD" -eq 0 ]]; then
     warn "FAST mode: skipping SIMD verification"
     qf_benchmark_record "$SUMMARY_JSON" "simd/verification" "not_measured" null "SKIP" \
       "fast_mode_reduced_selection" 0 "bench:$BENCH_TARGET" "benches" "" \
       "$(qf_json_array cargo bench --bench "$BENCH_TARGET" --features benches -- sort_simd/1024_elems)" "$(qf_json_environment)"
-else
+  else
     qf_benchmark_record "$SUMMARY_JSON" "simd/verification" "not_measured" null "SKIP" \
       "platform_requires_x86_64" 0 "bench:$BENCH_TARGET" "benches" "" \
       "$(qf_json_array cargo bench --bench "$BENCH_TARGET" --features benches -- sort_simd/1024_elems)" "$(qf_json_environment)"
+  fi
 fi
 
-# Scalability tests
-echo -e "\n=== Scalability Tests ==="
+if should_run_scope scalability; then
+  # Scalability tests
+  echo -e "\n=== Scalability Tests ==="
 
-echo -e "\n> Testing connection scalability..."
-for connections in "${SCALABILITY_CONNECTIONS[@]}"; do
-    echo "  Testing with $connections connections..."
-    run_optional_cargo_test "Scalability ${connections} connections" "scalability_${connections}"
-done
+  echo -e "\n> Testing connection scalability..."
+  for connections in "${SCALABILITY_CONNECTIONS[@]}"; do
+      echo "  Testing with $connections connections..."
+      run_optional_cargo_test "Scalability ${connections} connections" "scalability_${connections}"
+  done
 
-echo -e "\n> Testing stream scalability..."
-for streams in "${SCALABILITY_STREAMS[@]}"; do
-    echo "  Testing with $streams streams..."
-    run_optional_cargo_test "Scalability ${streams} streams" "streams_${streams}"
-done
+  echo -e "\n> Testing stream scalability..."
+  for streams in "${SCALABILITY_STREAMS[@]}"; do
+      echo "  Testing with $streams streams..."
+      run_optional_cargo_test "Scalability ${streams} streams" "streams_${streams}"
+  done
+fi
 
-# Generate comparison report
-echo -e "\n> Generating performance report..."
-if [ -f "$BASELINE_FILE" ] && [ -f "$CURRENT_FILE" ]; then
-    echo -e "\n=== Performance Comparison Report ==="
-    echo "Baseline: $BASELINE_FILE"
-    echo "Current: $CURRENT_FILE"
-    
-    # Merge and format results
-    if command -v jq >/dev/null 2>&1; then
-      if ! jq -s '.[0] * .[1]' "$BASELINE_FILE" "$CURRENT_FILE" 2>/dev/null; then
-        warn "failed to merge the benchmark comparison report"
-        FAIL=1
-      fi
-    else
-      warn "jq not installed; skipping JSON merge report"
-    fi
+if should_run_scope report; then
+  run_report_scope
 fi
 
 json_end "$SUMMARY_JSON"

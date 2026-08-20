@@ -146,7 +146,7 @@ impl CryptoPlan {
     }
 
     fn arm_for_length(_len: usize, _features: &CpuFeatures) -> CryptoAeadPlan {
-        // Broderick ARM/AArch64 Criterion evidence (TODO-500) shows MORUS
+        // Omega ARM/AArch64 Criterion evidence (TODO-500) shows MORUS
         // beats the retained AEGIS L/X4/X8 backends for 64B, 1024B, 1400B
         // and 8192B payloads across single-packet and batch8 seal/open
         // trait paths. Keep AEGIS available for explicit override and
@@ -201,7 +201,7 @@ mod crypto_plan_tests {
     }
 
     #[test]
-    fn arm_payloads_use_morus_after_broderick_backend_evidence() {
+    fn arm_payloads_use_morus_after_omega_backend_evidence() {
         let features = CpuFeatures { neon: true, aes: true, ..CpuFeatures::default() };
         assert_eq!(
             CryptoPlan::arm_for_length(CryptoPlan::AEGIS_X4_MIN_LEN - 1, &features),
