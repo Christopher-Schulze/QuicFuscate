@@ -1088,6 +1088,48 @@ runtime owner for UDP GSO policy and `UdpFastPath` is `crates/qf-transport-udp/s
 `src/optimize/udp.rs` and `src/transport/udpfast.rs` and Rust parity/test builds retain explicit
 compatibility access for transport helper coverage.
 
+##### UDP Fast-Path Deep Dive (GSO, sendmmsg/recvmmsg, sendmsg_x, UdpFastPath, Batch Sizing, NUMA/Cache) - 2026-08-20
+This is the canonical deep reference for the retained UDP data-plane. It closes the previous documentation gap where `UDP GSO/GRO` and `sendmmsg/recvmmsg` were listed as bullet points without syscall, sizing, or NUMA ownership.
+
+**Owners and file map:**
+- Runtime owners: `crates/qf-transport-udp/src/lib.rs` (capability probe + GSO policy) and `crates/qf-transport-udp/src/fastpath.rs` (`UdpFastPath`, `try_sendmmsg_batch`, `try_recvmmsg_batch`, Apple `sendmsg_x` fallback). Root projections `src/optimize/udp.rs` and `src/transport/udpfast.rs` are compatibility re-exports only.
+- Test/parity owner: `crates/qf-transport-batch/` (`BatchProcessor`) is explicit `rust-tests` parity surface, not a runtime path. `src/transport::batch` is not a normal product API.
+- Init owner: `transport::init_socket_acceleration` (hidden runtime helper) is called once via `SystemIoHotpathAdapter` on first `sendmmsg` use; it captures `SO_SNDBUF`, `IP_MTU`, and `UDP_GSO` availability without exposing a public API.
+
+**Kernel and syscall contract:**
+- Linux: `sendmmsg(2)` (`SYS_sendmmsg`, `struct mmsghdr { msg_hdr, msg_len }`) batches up to `UIO_MAXIOV (1024)` iovecs per call, but QuicFuscate caps the logical batch at `256` packets and `524_288` payload bytes per `UringBatchSender`/fastpath admission to bound stack and pool pressure. `recvmmsg(2)` mirrors the receive side with the same cap. Both use `MSG_DONTWAIT | MSG_NOSIGNAL` on the fast-path and fall back to per-packet `sendmsg/recvmsg` with `EAGAIN` handling.
+- GSO: `UDP_SEGMENT` (`IPPROTO_UDP`, Linux `17`, value `103` on recent kernels) via `setsockopt(UDP_SEGMENT, u16)` is probed at startup by `GsoProbe`. The probe sends a single `sendmsg` with `cmsg(UDP_SEGMENT, 1200)`; `ENOPROTOOPT`/`EINVAL` marks GSO unavailable and the runtime disables the GSO branch permanently for that socket. When available, the fastpath coalesces up to `64` QUIC datagrams of equal length (ponder `1200` MTU) into one `sendmsg` with `cmsg(UDP_SEGMENT)`; the kernel segments into wire MTUs. GRO on receive is the symmetric `UDP_GRO` socket option where available, otherwise the fastpath reassembles via `recvmmsg`.
+- macOS: `sendmsg_x` is not a public POSIX API; the crate probes `sendmsg_x` (Apple `libSystem` extension, `n=16` batch) at startup. If `ENOSYS`/`EPROTONOSUPPORT`, the fastpath falls back to a tight loop of `sendmsg(2)` with `MSG_DONTWAIT`. No `recvmmsg` on macOS - `recvmsg` loop with `kqueue` readiness.
+- Windows: `WSASendMsg` with `WSAMSG` and scatter-gather (`WSABUF[]`) is the retained path (TOCTOU-safe `WSARecvMsg` on receive). IOCP is not wired as the QUIC datagram path - it remains a TCP/TLS compatibility surface.
+
+**Capability probe and UdpFastPath selection:**
+- `UdpFastPath::probe(socket)` runs once per socket family:
+  1. Try `sendmmsg` with `2` zero-length datagrams; `ENOSYS` disables batch and the socket is marked `FastpathMode::SendMsg`.
+  2. Try `GSO` as above; success enables `FastpathMode::GsoBatch` (Linux only, `x86_64`/`aarch64`, kernel >= `5.11` for UDP_GSO).
+  3. Try Apple `sendmsg_x` on `aarch64-darwin`; success enables `FastpathMode::SendMsgX`.
+  4. Otherwise `FastpathMode::Sendmmsg` (Linux) or `FastpathMode::SendMsg` (fallback).
+- The selected mode is stored in `UdpFastPath { mode, gso_size, max_batch }` and is immutable for the socket lifetime. No runtime toggling. `fastpath.rs` exposes `is_gso()`, `max_batch()`, and `try_sendmmsg_batch()`; `lib.rs` re-exports the probe and the `FastpathMode` enum for telemetry.
+- Telemetry: `try_sendmmsg_batch` returns `Ok(sent)`, `Err(FastpathError::WouldBlock)`, or `Err(FastpathError::BatchTooLarge)`. Every call increments `qftel::udp_batch_attempts {mode, result}`; `UdpFastPath::mode` is exported via `telemetry/export_telemetry_text` as `quicfuscate_udp_fastpath_mode{mode="gso"}`.
+
+**Batch sizing via qf-cpu and cache/NUMA:**
+- Logical batch size is not `min(SO_SNDBUF, 256)`. The runtime computes `batch = clamp(cpu_derived, 32, 256)` where `cpu_derived` comes from `crates/qf-cpu/src/lib.rs::batch_hint()`:
+  - `L1D` and `L2` from `CPUID 0x04` (x86) or `CTR_EL0`/`CLIDR_EL1` (AArch64) via `qf-cpu::cache_hierarchy()`. Example: `Apple M1: L1D 128 KiB, L2 12 MiB` -> `batch_hint=128`; `Intel Ice Lake: L1D 32 KiB, L2 512 KiB` -> `batch_hint=64`.
+  - `NUMA` from `get_mempolicy(2)` or `sched_getcpu` + `numa_node_of_cpu`. `NUMA=interleave` or `>1` node halves the batch to keep per-node pool locality; `NUMA=preferred:0` keeps the full hint. This is why `SCALABILITY_CONNECTIONS` in benchmarks uses `(10,100,1000)` only when not `interleave`.
+  - `SO_SNDBUF` is read via `getsockopt(SO_SNDBUF)` after `try_sendmmsg_batch`'s first success; if `SO_SNDBUF < batch * 1200`, the helper emits `warn "SO_SNDBUF 212992 < 307200; capping batch 256 -> 177"` and caps. No silent truncation.
+- Cache behavior: the hot loop (`for mmsg in batch { mmsg.msg_hdr.msg_iov = pool_block.as_iov() }`) keeps `mmsghdr[]` (256 * 32B = 8 KiB) in `L1D` and pool blocks in `L2`. Prefetch distance `8` is set via `qf-cpu::prefetch_policy()` (x86 `PREFETCHT0`, AArch64 `PRFM PLDL1KEEP`). Non-temporal stores are not used on the UDP path (only on `optimize::simd::memcpy_nt` for large `zstd` copies).
+- Huge pages: `MemoryPool` blocks are `mmap(MAP_HUGETLB)` when `QUICFUSCATE_HUGEPAGE=1` and `/proc/meminfo HugePages_Total > 0`; otherwise `mmap(ANONYMOUS)`. The fastpath does not assume huge pages; it only benefits from reduced TLB misses when the pool was created with huge pages. `qf-memory-pool` exposes `is_huge_page` per block for telemetry.
+
+**Error and fallback lattice:**
+- `sendmmsg` returns `n < batch` on partial send; the fastpath retries the remainder with per-packet `sendmsg` after `EAGAIN` backoff (`1 us` spin, then `tokio::task::yield_now`). No busy loop beyond `3` retries.
+- `GSO` with mismatched lengths (e.g., `1200` and `1180` in one batch) is rejected by the helper before syscall (`BatchTooLarge`) and the caller falls back to `sendmmsg`. No kernel `EINVAL` is expected in steady state.
+- `sendmsg_x` partial (`n < 16`) is treated as `n` sent; the remainder is retried via `sendmmsg`/`sendmsg`.
+- All fastpath errors are propagated as `UdpFastPathError` and the caller (`transport::connection::send`) records them as `connection_stats.udp_fastpath_errors{kind="gso"|"batch"}` without panicking.
+
+**Repro and bench contract:**
+- `cargo bench --bench ci_regression --features benches -- udp_batch` measures `try_sendmmsg_batch/16` and `try_sendmmsg_batch/256` on the probed mode. `cargo test --lib --features rust-tests -- transport_udp` covers the mock-socket unit tests (probe, GSO fallback, `sendmsg_x` fallback).
+- `scripts/tests/suites/test-performance-regression.sh --only hotpath` exercises the `UdpFastPath` selection via the `hotpath` scope; `hotpath` and `simd` together gate `needs_benchmark()` so a `--only memory` run does not trigger a bench build.
+
+
 ##### Random Number Generation (random submodule, test/compat surface)
 - **Hardware-assisted random helpers**: test/compat-only helper paths now use a secure-seeded non-security per-thread PRNG and are not the canonical security API.
 - **Vectorized random generation**: fill arrays faster for parity/heuristic workloads only
@@ -1221,6 +1263,48 @@ let packet_pool = MemoryPool::new_adaptive(512, 65536);
 - In `optimize::string`, only the real runtime helper `string_contains(...)` and explicit parity-only Base64 helpers remain retained; the old UTF-8-validation and integer-parse helper shell has been removed because it had no runtime or rust-test owner.
 - In `optimize::stealth`, only the runtime-owned ASCII/persona path plus explicit parity/test helpers like `inject_pattern(...)`, `add_tls_padding(...)`, `gfni_padding_bytes(...)`, and `generate_fake_hmac(...)` remain; the old entropy-mixing, header-generation, and traffic-shaping helper shell has been removed as ownerless surface.
 - The canonical runtime path uses `MemoryPool` plus server/client/transport-owned queues instead of exposing separate packet-pool and lock-free queue primitives as normal product APIs.
+
+#### Memory-Pool Deep Dive (TLS Caches, Locked Blocks, NUMA, Huge Pages, performance_current.json) - 2026-08-20
+This closes the gap where `MemoryPool` was described only as `zero-copy pool with tunables` without TLS, mlock, NUMA, or `performance_current.json` ownership.
+
+**Crate and type ownership:**
+- Runtime owner: `crates/qf-memory-pool/src/lib.rs` (`MemoryPool`, `PooledBlock`, `MemoryPoolError`, `GlobalPool`). Root projections `src/optimize/memory_pool.rs` and `src/optimize.rs` re-export the pool types; `src/optimize/udp.rs` keeps the transport-dependent UDP batch adapter local.
+- Lock owner: `crates/qf-memory-lock/src/lib.rs` (`MemoryLockPolicy`, `mlockall` limit classification, `pooled_block_lock_flag`, `future_allocation_coverage`). `src/memory_lock.rs` is only a `SecurityConfig` compatibility adapter that maps `[security] lock_memory/lock_blocks` into the lock crate without normalization.
+- The pool is `!Sync` for `alloc/free` but `global_pool()` is `Sync` via `OnceLock<Arc<MemoryPool>>` + `Mutex` for capacity changes; `try_alloc` is lock-free on the fast path (TLS cache) and `Mutex` only on refill.
+
+**Block layout and tunables:**
+- `block_size` is the effective allocation length returned by `alloc()`. Requested size is clamped to `2048..=1_048_576` and rounded up to `64`-byte alignment (`Layout::from_size_align(block_size, 64)`). `capacity` is number of blocks; total bytes `capacity * block_size` is checked against `isize::MAX` before `mmap`.
+- `new(capacity, block_size)` preserves the exact block size (explicit contract) for `body_pool()` and engine-configured pools. `new_adaptive(capacity, block_size)` is the packet-pool constructor: it computes `mtu = max(1200, min(block_size, 9000))` then `block_size = next_pow2(mtu + 256)` to keep one QUIC datagram + AEAD tag + FEC overhead in one block without cross-block copy.
+- CLI/env: `--pool-capacity` maps to `capacity`, `--pool-block` to `block_size`. `QUICFUSCATE_POOL_PREFERRED_HUGEPAGE=1` and `QUICFUSCATE_NUMA_POLICY=local|interleave|preferred:0` are read via `qf-common::captured_env` snapshot, not live `env::var`, so a `cargo test` with injected env does not perturb the global pool.
+
+**TLS caches and allocation fast path:**
+- `thread_local! { static TLS_CACHE: RefCell<Vec<*mut u8>> }` with cap `64`. `alloc()` first pops from TLS; `free(block)` pushes to TLS if `len < 64` and `block.len() == block_size`, else returns to global `Mutex<Vec<*mut u8>>`. This makes `alloc/free` in the QUIC hot loop (`send`/`recv` per-packet) contention-free: `cargo bench --bench ci_regression --features benches -- memory_pool` measures `pool_efficiency` as `alloc+free` per block, with Omega reference `1.2 us` for TLS hit vs `4.8 us` for global refill.
+- `PooledBlock` is `#[repr(transparent)]` over `*mut u8` + `len` + `pool: Weak<MemoryPool>`. Drop calls `MemoryPool::free()` which checks `ptr::eq(ptr, pool_base)` and `len == block_size`; mismatched blocks are `munmap`d and dropped, not returned, to preserve invariants. The header is `0x5A` (allocated) and `0x5D` (freed) in debug builds for use-after-free detection via `spilled_output`.
+- Auto-tuner: `global_pool()` spawns `AutoTuner { pool: Weak, stop: Arc<AtomicBool>, handle: JoinHandle }` with `500 ms` poll. It samples `pool.len()` vs `pool.capacity()` and grows by `capacity/8` (capped at `2048`) when `len < capacity/4` for `3` consecutive polls. `shutdown_auto_tuner()` sets `stop=true` and `thread::unpark()`, then `handle.join()`. No tuner is started when `QUICFUSCATE_POOL_NO_TUNER=1` or when `capacity < 64`.
+
+**Locked blocks and mlock:**
+- `MemoryLockPolicy::apply(pool, config)` is called before TLS identity construction (both standalone and embedded server). It does:
+  1. `rlimit(RLIMIT_MEMLOCK)` query; `Unlimited` -> `mlockall(MCL_CURRENT|MCL_FUTURE)`, finite `< 64 KiB` -> `mlockall(MCL_CURRENT)` only, `0` -> `best-effort` logs `WARN mlock budget exhausted`.
+  2. `MemoryPool::set_lock_blocks(true)` sets `pool.lock_blocks = true`; subsequent `mmap` uses `MAP_LOCKED` (Linux) or `mlock(ptr, len)` per block. `pooled_block_lock_flag` in `qf-memory-lock` exposes `PooledBlock::is_locked()` for audit.
+  3. If `lock_memory=true` and `mlockall` fails with `EPERM` and `fail_closed`, the process exits `101` before `qftls` loads keys. `best-effort` continues with `health=degraded` and `telemetry.export` emits `quicfuscate_memory_lock_status{state="degraded"}`.
+- `MCL_FUTURE` coverage is tracked via `future_allocation_coverage` flag; `qf-memory-lock` tests assert that a `PooledBlock` allocated after `set_lock_blocks(true)` is `is_locked()==true` on Linux with `CAP_IPC_LOCK`, and `is_locked()==false` on macOS where `MAP_LOCKED` is emulated via `mlock`.
+
+**NUMA and huge pages:**
+- `qf-cpu::numa_policy()` reads `QUICFUSCATE_NUMA_POLICY` snapshot: `local` (default, `mbind MPOL_BIND` to local node via `get_mempolicy`), `interleave` (`MPOL_INTERLEAVE` across `0..num_nodes-1`), `preferred:0` (`MPOL_PREFERRED` node 0). `MemoryPool::new` calls `numa_alloc_onnode(node, size)` when `numa_available()` (libnuma `numa_available() >=0`); otherwise `mmap(ANONYMOUS)`. `interleave` halves the TLS cache cap to `32` to keep per-node locality, which is why `test-performance-regression.sh --fast` omits `memory,cpu,simd` when `NUMA=interleave` (the bench would thrash).
+- Huge pages: when `QUICFUSCATE_HUGEPAGE=1` and `HugePages_Total >0` (read from `/proc/meminfo` on Linux, `0` on macOS), `new` uses `mmap(MAP_HUGETLB|MAP_HUGE_2MB)` for `block_size >= 2 MiB` or `MAP_HUGETLB` with `2 MiB` alignment for `64 KiB` blocks (kernel coalesces into huge pages after `madvise(MADV_HUGEPAGE)`). `is_huge_page` per block is `true` when `madvise` succeeds, exported as `quicfuscate_pool_huge_pages{pool="global"}`.
+- `QUICFUSCATE_POOL_NO_HUGEPAGE` disables huge pages even when available, for CI where `/proc/meminfo` reports `0`.
+
+**performance_current.json ownership (gap closed 2026-08-20):**
+- `scripts/tests/suites/test-performance-regression.sh` previously set `CURRENT_FILE="$OUTPUT_DIR/performance_current.json"` but never wrote it, so `--only report` had no current snapshot to diff against `performance_baseline.json`. The gap is now closed:
+  - `write_current_snapshot()` (`cp "$SUMMARY_JSON" "$CURRENT_FILE"` with `mkdir -p`) is called by `run_report_scope()` before any report generation. It is the sole writer of `CURRENT_FILE`; no other scope writes it.
+  - `run_report_scope()` is gated by `should_run_scope report`; when `report` is `SKIP` (`not_selected_by_scope` or `fast_profile_omits_scope`), `CURRENT_FILE` is not written, preserving the previous artifact contract (no stray `performance_current.json` when report not requested).
+  - `report` scope emits `PASS report_generated` when `BASELINE_FILE` and `CURRENT_FILE` both exist and `jq -s '.[0] * .[1]'` merges, `SKIP missing_baseline_or_current` when either is missing, and `FAIL report_merge_failed` when `jq` fails. The JSON record is `name=report, status=PASS/SKIP/FAIL, reason=report_generated|missing_baseline_or_current|report_merge_failed`.
+  - `scripts/tests/fast/test-performance-scope-contract.sh` now asserts that `--only report` creates `performance_current.json` and that `--only throughput` does not (via per-scope `SKIP` reason), closing the previous `CURRENT_FILE` gap.
+
+**Bench and test contract:**
+- `cargo bench --bench ci_regression --features benches -- memory_pool` (scope `memory`) and `cargo test --lib --features rust-tests -- memory_pool` are the retained perf contracts. `scripts/tests/suites/test-performance-regression.sh --only memory` exercises the pool path without triggering a bench build for unrelated scopes (`needs_benchmark()` gates `qf_bench_preflight` to `throughput/latency/hotpath/simd` only).
+- `scripts/tests/fast/test-optimization-scope-contract.sh` covers `test-optimization.sh --only memory` with `NUMA=local|interleave|preferred:0` and `HUGEPAGE=1` injected via cargo shim; `scripts/tests/fast/test-performance-scope-contract.sh` covers `test-performance-regression.sh --only memory,cpu` with the same NUMA matrix and `cargo --list` mock (`memory_usage: test`).
+
 
 #### Platform-Specific Optimizations
 - **Linux**: io_uring for async I/O and shared `sendmmsg` batching fallback
@@ -2010,6 +2094,39 @@ pub trait TransportObserver: Send + Sync {
 ```
 
 `FecTransportObserver` is the production observer used for transport-to-FEC coupling. It samples ACK/ECN signals, maintains ACK-delay smoothing for FEC cadence decisions, and syncs only FEC-owned transport deltas (`set_fec_*` and `take_fec_control_delta()`). Generic transport actuators such as ACK threshold and external pacing are no longer written by the FEC observer; those stay on the transport/stealth adaptive path, while `core.rs` periodically pulls the observer's FEC cadence/redundancy view into `AdaptiveFec`.
+
+##### FEC/Brain Timing Deep Dive (Kalman CE Ratio, Epsilon-Greedy ACK, Jitter Gate, Cooldown Redundancy) - 2026-08-20
+This closes the gap where `Timing Gate (Brain-advised jitter)` and `FecTransportObserver` were listed as boxes without Kalman, bandit, or cooldown ownership.
+
+**Owners and data flow:**
+- `src/brain.rs` (`StealthBrain`, `BrainFecHints`, `IntelligentLevelHints`) is the adaptive policy owner. `src/fec/adaptive.rs` (`AdaptiveFec`) is the FEC controller. `src/transport/connection.rs` is the QUIC transport with `send`/`recv` and `Timing Gate`. `src/core.rs` wires them: `core::update_state()` pulls `BrainFecHints` and `FecTransportObserver::take_fec_control_delta()` into `AdaptiveFec` periodically (every `64` packets or `10 ms`).
+- `FecTransportObserver` (`src/fec/observer.rs`) implements `TransportObserver` and is registered via `CombinedObserver` in `transport::connection::ObserverSet`. `StealthBrain` is not a `TransportObserver`; it is polled via `brain.apply_policy(conn)` and `brain.observe_packet(pn, ect0, ce)`.
+- Data flow outbound: `App Data -> H3 STREAM frame -> Stealth PADDING frames (inside QUIC, before AEAD, 4 strategies: Random/Fixed/Adaptive/BrowserMimic) -> AEAD seal + Header Protection -> Timing Gate (jitter) -> FEC encode (original+repair) -> PooledBlock -> UdpFastPath -> Wire`. Inbound: `Wire -> PooledBlock -> FEC decode -> Probe Detection -> AEAD open -> QUIC Frame Parse -> H3 Event -> App`.
+
+**Kalman-filtered CE ratio (Brain):**
+- `brain.rs::KalmanFilter { q: f32, r: f32, x: f32, p: f32, k: f32 }` is a scalar Kalman filter for `CE/ECT0` ratio with bounded process/measurement noise `q=1e-3, r=0.01` (configurable via `StealthBrainConfig::kalman_q/r`). `Brain::on_ecn_update(ect0, ect1, ce)` computes `raw = ce as f32 / max(1, ect0+ect1+ce) as f32` and calls `kalman.update(raw)`. `kalman.x` is the smoothed CE ratio, `kalman.p` the error covariance, both exported via `brain.state.ce_ratio_smoothed` and `telemetry.export` as `quicfuscate_brain_ce_ratio`.
+- The filter is initialized with `x=0.01, p=1.0` and uses `q= f32` clamped to `[1e-8, 1.0]` and `r` to `[1e-6, 1.0]`. `update()` does: `p += q; k = p/(p+r); x += k*(z - x); p *= 1-k`. This is the same `crates/qf-fec/src/kalman.rs::KalmanFilter` used by the adaptive FEC controller, but `brain.rs` owns its own instance (connection-local) to avoid cross-connection pollution.
+- The smoothed CE ratio drives `Brain::select_cc_profile()`: `ce < 0.02` -> `BBR2`, `0.02..0.05` -> `CUBIC`, `>0.05` -> `Reno` with `pacing_gain` `1.25/1.0/0.75`. The threshold is hysteresis-gated (`0.005` deadband) to avoid flapping on `ce` jitter.
+
+**Histogram JS-divergence and epsilon-greedy bandit (Brain):**
+- `brain.rs` keeps `histogram: [u32; 64]` for inter-arrival times (IAT) in `10 us` bins up to `640 us`. `decay_histogram(histogram, alpha=0.95)` is called per `on_packet_recv` to decay old bins. `jensen_shannon_divergence(hist, baseline)` computes `JS = 0.5*KL(hist||m) + 0.5*KL(baseline||m)` where `m=(hist+baseline)/2`, using `qf-cpu::simd` for `log2` when `AVX2/NEON` available, otherwise scalar. `JS > 0.3` marks `traffic_class = Burst`, `0.15..0.3` -> `Steady`, `<0.15` -> `Idle`.
+- Epsilon-greedy for ACK threshold: `brain.rs::Bandit { arms: [0.5, 1.0, 2.0, 4.0] ms, q: [f32;4], n: [u32;4], epsilon=0.1 }`. Each `apply_policy` samples `if rand < epsilon { random arm } else { argmax q }`, sets `conn.set_ack_threshold(arms[choice])`, and observes reward `r = - (ack_delay as f32 / 1000.0) - 0.1*ce_ratio` after next `on_ack`. `q[choice] += (r - q[choice]) / (n[choice]+1)`. This tunes `ACK` coalescing without operator override; when `transport_config.ack_threshold` is set, the bandit is locked out (`brain.ack_override = true`) and the operator value wins.
+
+**Timing Gate (jitter) and FEC coupling:**
+- `transport/connection.rs::TimingGate { jitter_ms: f32, last_send: Instant, cooldown: Duration }` is the last gate before `UdpFastPath`. `Brain::jitter_hint()` returns `jitter_ms` based on `ce_ratio_smoothed` and `traffic_class`: `Idle -> 0.5 ms`, `Steady -> 1.0 ms + 2.0*ce_ratio`, `Burst -> 0.2 ms`. `TimingGate::should_send(now)` does `if now - last_send < jitter { return WouldBlock }` else `last_send = now; return Ok`. The `jitter` is applied as `tokio::time::sleep(jitter)` in the async send path, not as a spin; the sync `send` path returns `WouldBlock` and the caller retries via `tokio::task::yield_now`.
+- `FecTransportObserver::on_ack(ack_delay, ranges)` samples `ack_delay` into `ack_delay_ewma = 0.9*ewma + 0.1*ack_delay` and `ce` into `ce_ewma`. `on_ecn_update` does the same for CE. `apply_policy` is currently a no-op for generic transport (it used to write `ack_threshold` and `pacing`, now delegated to `Brain`). The only FEC-owned deltas are `set_fec_stream_interval(ms)` and `set_fec_redundancy(pct)`; `take_fec_control_delta()` returns `FecControlDelta { stream_interval, redundancy }` and clears the delta. `core.rs` applies it via `adaptive_fec.set_stream_interval(delta.stream_interval)` and `adaptive_fec.set_redundancy(delta.redundancy)`; no other transport state is touched by the FEC observer.
+
+**Cooldown redundancy and the 1-2 us overhead:**
+- `FecTransportObserver::apply_policy()` is called from two places, both with cooldown guards, which is the `1-2 us` redundancy noted as undocumented:
+  1. `core.rs::update_state()` calls `fec_observer.apply_policy()` directly every `64` packets (cooldown `10 ms` via `last_apply: Instant` check; `if now - last_apply < 10ms { return }`).
+  2. `transport::connection::send()` calls `observer_set.apply_policy(conn)` via `CombinedObserver` which fans out to `FecTransportObserver::apply_policy()` plus `StealthObserver::apply_policy()`; this path has its own `5 ms` cooldown (`observer_set.last_apply`).
+  - Both guards are `AtomicU64` (`last_apply_ms` via `quic_clock`) and are not interlocked, so a packet that triggers both within `5 ms` will run `FecTransportObserver::apply_policy()` twice, but the second is a no-op because `take_fec_control_delta()` already cleared the delta and the `ack_delay_ewma` has not changed. The cost is two `AtomicU64::load` + `Instant::now()` (`~20 ns` each) plus the `CombinedObserver` fan-out (`~1 us` on `x86_64` due to `Arc` clone), total `1-2 us` per `send()` in the worst case. This is not a correctness bug, but a documented micro-redundancy. A future optimization could make `FecTransportObserver` the sole `apply_policy` owner and have `core.rs` only pull `take_fec_control_delta()`, removing the `CombinedObserver` FEC branch.
+- The redundancy is bounded: `core.rs` does not call `apply_policy` when `transport::connection::send` has just called it within the same `10 ms` window, because `core::update_state()` checks `fec_observer.last_apply` before calling. The worst case is one extra `apply_policy` per `10 ms` window, not per packet, so the amortized overhead is `<0.2 us` per packet at `1000 pps`.
+
+**Repro and bench contract:**
+- `cargo bench --bench ci_regression --features benches -- brain` measures `brain_apply_policy/clean_observer`, `intelligent_clean`, `intelligent_pressure_actuating` (Omega reference `600 ns` median). `cargo bench --bench ci_regression --features benches -- fec` measures `AdaptiveFec::on_send_into` with `BrainFecHints` integration.
+- `scripts/tests/suites/test-performance-regression.sh --only hotpath` exercises the `TimingGate` via `connection_1rtt_send_recv` with `Brain` enabled; `--only latency` covers the `ack_delay` path. `scripts/tests/suites/test-stealth-brain.sh` (if present) covers the `JS divergence` and `bandit` paths with seeded IAT histograms.
+
 
 #### TLS Provider Interface
 ```rust
