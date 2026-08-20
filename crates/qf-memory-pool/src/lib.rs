@@ -67,9 +67,11 @@ impl MemoryPoolRuntimeConfig {
         } else {
             configured_low
         };
+        let tls_low = environment.parse_positive_usize("QUICFUSCATE_TLS_LOW").unwrap_or(24);
+        let tls_high = environment.parse_positive_usize("QUICFUSCATE_TLS_HIGH").unwrap_or(48);
         Self {
             tls_cache_limit: AtomicUsize::new(
-                environment.parse::<usize>("QUICFUSCATE_TLS_CACHE").unwrap_or(0),
+                environment.parse::<usize>("QUICFUSCATE_TLS_CACHE").unwrap_or(tls_high),
             ),
             #[cfg(debug_assertions)]
             debug_slack: environment.parse::<usize>("QUICFUSCATE_POOL_DEBUG_SLACK").unwrap_or(256),
@@ -86,8 +88,8 @@ impl MemoryPoolRuntimeConfig {
             tick_ms: environment.parse_positive_u64("QUICFUSCATE_POOL_TICK_MS").unwrap_or(1000),
             utilization_low,
             utilization_high,
-            tls_low: environment.parse_positive_usize("QUICFUSCATE_TLS_LOW").unwrap_or(24),
-            tls_high: environment.parse_positive_usize("QUICFUSCATE_TLS_HIGH").unwrap_or(48),
+            tls_low,
+            tls_high,
         }
     }
 }
@@ -694,7 +696,7 @@ impl MemoryPool {
         let mut block = unsafe { AlignedBox::<[u8]>::from_raw_parts(slice, layout) };
         // Hint huge pages on Linux if enabled
         #[cfg(target_os = "linux")]
-        if madvise_hugepage {
+        if madvise_hugepage && block_size >= 1_048_576 {
             unsafe {
                 let _ = libc::madvise(
                     block.as_mut_ptr() as *mut libc::c_void,
@@ -1118,7 +1120,7 @@ impl MemoryPool {
             // Standard Ethernet: use 4KB blocks
             4096
         } else if mtu_hint <= 9000 {
-            // Jumbo frames: use 16KB blocks
+            // Jumbo frames: use 16KB blocks (must hold 9000 + tag + FEC, 8192 would truncate)
             16384
         } else {
             // High-speed datacenter: use 64KB blocks
