@@ -385,3 +385,51 @@ fn capacity_shrink_releases_locked_queue_blocks() {
     }
     MemoryPool::set_lock_blocks(original);
 }
+
+#[test]
+fn zeroize_on_free_default_erases_block_contents() {
+    // Default (flag absent): free() must erase contents so recycled blocks
+    // never carry stale data across users (TODO-900 security barrier).
+    let pool = MemoryPool::new(4, 2_048);
+    let block = pool.alloc();
+    {
+        let mut block = block;
+        for byte in block.iter_mut() {
+            *byte = 0xA5;
+        }
+        // Explicit pool return: AlignedBox Drop alone would deallocate without
+        // re-entering the pool (fresh mmap blocks are zero-initialized).
+        pool.free(block);
+    }
+    // Re-allocate the same block from the pool and inspect it BEFORE writing.
+    let recycled = pool.alloc();
+    assert!(
+        recycled.iter().all(|&byte| byte == 0),
+        "default policy must zeroize on free; found stale 0xA5 pattern"
+    );
+}
+
+#[test]
+fn zeroize_on_free_disabled_skips_erase() {
+    // QUICFUSCATE_POOL_ZEROIZE_ON_FREE=0: free() skips the memset, so the
+    // recycled block still carries the previous pattern (bench mode).
+    let environment = qf_common::env_utils::EnvSnapshot::from_pairs([
+        ("QUICFUSCATE_POOL_ZEROIZE_ON_FREE", "0"),
+        ("QUICFUSCATE_POOL_AUTO_TUNE", "0"),
+    ]);
+    let pool = MemoryPool::new_with_snapshot(4, 2_048, &environment);
+    assert!(!pool.runtime.zeroize_on_free);
+    let block = pool.alloc();
+    {
+        let mut block = block;
+        for byte in block.iter_mut() {
+            *byte = 0xA5;
+        }
+        pool.free(block);
+    }
+    let recycled = pool.alloc();
+    assert!(
+        recycled.iter().all(|&byte| byte == 0xA5),
+        "disabled policy must skip the erase; block was unexpectedly zeroed"
+    );
+}

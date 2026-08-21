@@ -48,6 +48,12 @@ struct MemoryPoolRuntimeConfig {
     #[cfg(debug_assertions)]
     debug_grace: usize,
     madvise_hugepage: bool,
+    /// Erase block contents on free (TODO-900). Default ON: the pool is
+    /// process-global and blocks are reused across connections, so the free-
+    /// time memset is the barrier that keeps connection A plaintext out of
+    /// connection B buffers after an over-read bug. Benchmarks may disable it
+    /// via QUICFUSCATE_POOL_ZEROIZE_ON_FREE=0 to measure its cost.
+    zeroize_on_free: bool,
     auto_tune: bool,
     min_capacity: usize,
     max_capacity: usize,
@@ -73,11 +79,11 @@ impl MemoryPoolRuntimeConfig {
             tls_cache_limit: AtomicUsize::new(
                 environment.parse::<usize>("QUICFUSCATE_TLS_CACHE").unwrap_or(tls_high),
             ),
-            #[cfg(debug_assertions)]
+            madvise_hugepage: environment.flag("QUICFUSCATE_MADVISE_HUGEPAGE", true),
+            zeroize_on_free: environment.flag("QUICFUSCATE_POOL_ZEROIZE_ON_FREE", true),
             debug_slack: environment.parse::<usize>("QUICFUSCATE_POOL_DEBUG_SLACK").unwrap_or(256),
             #[cfg(debug_assertions)]
             debug_grace: environment.parse::<usize>("QUICFUSCATE_POOL_DEBUG_GRACE").unwrap_or(64),
-            madvise_hugepage: environment.flag("QUICFUSCATE_MADVISE_HUGEPAGE", true),
             auto_tune: environment.flag("QUICFUSCATE_POOL_AUTO_TUNE", true),
             min_capacity: environment
                 .parse_positive_usize("QUICFUSCATE_POOL_MIN_CAP")
@@ -1015,8 +1021,14 @@ impl MemoryPool {
             return;
         };
 
-        // Zeroize efficiently; allows vectorized memset
-        block.as_mut().fill(0);
+        // Zeroize efficiently; allows vectorized memset. Policy-driven since
+        // TODO-900: QUICFUSCATE_POOL_ZEROIZE_ON_FREE=0 skips the erase so
+        // benchmarks can measure its cost. Default stays ON - the pool is
+        // process-global and blocks are reused across connections, so this
+        // memset is the barrier against cross-connection stale-data leaks.
+        if self.runtime.zeroize_on_free {
+            block.as_mut().fill(0);
+        }
 
         if origin == PoolBlockOrigin::Ephemeral {
             self.ownership.release_block(block, &self.lock_ledger);
