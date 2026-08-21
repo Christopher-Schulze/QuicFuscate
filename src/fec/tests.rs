@@ -1366,5 +1366,60 @@ fn test_wiedemann_scalar_solver_is_concurrent_and_amx_free() {
     assert_eq!(telemetry::WIEDEMANN_AMX_SCRATCH_ALLOCS.get(), amx_scratch_before);
     assert!(telemetry::WIEDEMANN_SCALAR_OPS.get() >= scalar_before + 4);
 }
+fn lazy_test_policy() -> FecRuntimePolicy {
+    let mut policy = FecRuntimePolicy::detect();
+    policy.lazy_enabled = true;
+    policy
+}
+
+#[test]
+fn test_lazy_decoder_seen_seqs_bounded_under_permanent_loss() {
+    let pool = make_pool();
+    let policy = lazy_test_policy();
+
+    let k = 4usize;
+    let mut dec = super::internal::LazyDecoder::new_with_policy(
+        FecMode::Normal,
+        k,
+        Arc::clone(&pool),
+        &policy,
+    );
+
+    // Permanent loss at block boundary: seq 0 arrives, seq 1..k never do.
+    let mut src = mk_src_packet(0, 64, &pool);
+    src.is_systematic = true;
+    src.seq = 0;
+    dec.take_packet(src);
+
+    // Stream many later windows; each has a gap (block seq jumps by k+1),
+    // so has_gaps() stays true forever and the old clear branch was dead.
+    // Repairs arrive at a realistic cadence (FEC sends them every window);
+    // each repair flushes the buffered sources, which is what lets the
+    // safe-reset guard (buffers empty) eventually fire.
+    for window in 1..64u64 {
+        let seq = window * (k as u64 + 1);
+        let mut src = mk_src_packet(seq, 64, &pool);
+        src.is_systematic = true;
+        src.seq = seq;
+        dec.take_packet(src);
+
+        if window % 2 == 0 {
+            let mut repair = mk_src_packet(10_000 + window, 64, &pool);
+            repair.is_systematic = false;
+            repair.seq = seq;
+            dec.take_packet(repair);
+        }
+    }
+
+    // The safe-reset bound keeps at most one full window (k) of block IDs:
+    // the reset only fires when no recovery is in flight (buffers drained by
+    // the repair flushes above) and the newest block is >= 2k past the
+    // minimum, after which the set holds only the current window.
+    assert!(
+        dec.seen_seqs_len() <= k,
+        "seen_seqs must stay bounded under permanent loss (len={})",
+        dec.seen_seqs_len()
+    );
+}
 
 mod streaming_tests;

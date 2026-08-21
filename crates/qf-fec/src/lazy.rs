@@ -182,7 +182,30 @@ impl LazyDecoder {
                 return;
             }
 
+            let cur_block = self.source_block_seq(packet.seq);
             if self.has_gaps() {
+                // TODO-897: A permanent loss keeps has_gaps() true forever, so
+                // the clean-path clear below is unreachable and seen_seqs leaks
+                // (~0.5-1 MB/s at 10k pps). Reset the tracking window BEFORE the
+                // flush/push decision, while no recovery is in flight (buffers
+                // empty after the previous repair-driven flush) and the newest
+                // block is a full window past the tracked minimum. At that point
+                // every tracked block is older than any repair can still
+                // reconstruct, and the fresh window starts clean. The in-flight
+                // guard keeps the exact-delivery and no-duplication e2e
+                // contracts intact because buffered sources/repairs are never
+                // discarded.
+                if self.pending_sources.is_empty()
+                    && self.pending_repairs.is_empty()
+                    && self
+                        .seen_seq_min
+                        .is_some_and(|min| cur_block.saturating_sub(min) >= self.k as u64 * 2)
+                {
+                    self.seen_seqs.clear();
+                    self.seen_seqs.insert(cur_block);
+                    self.seen_seq_min = Some(cur_block);
+                    self.seen_seq_max = Some(cur_block);
+                }
                 if !self.pending_repairs.is_empty() && self.flush_to_decoder() {
                     self.full_recovery_pending = true;
                     self.inner.take_packet(packet);
