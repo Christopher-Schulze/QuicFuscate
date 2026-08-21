@@ -28,4 +28,4 @@ Remove `Drop` impl that does volatile 16-byte memset per `AesBlock` temporary in
 - No AEAD algorithm change, no standard-mode ring path change.
 
 ## Deviations
-None.
+- Miri coverage for the AEGIS AES path was initially platform-blocked on macOS (posix_spawn in the CPU-brand probe). **Closed on Omega Linux aarch64:** with the `cfg(miri)` scalar-AES gate (`9a11f53`) the full AEGIS suite passes under Miri - 33/33, 0 UB findings, including `aegis_wrapper_drop_erases_keys_and_ivs` and all erasure-observer tests. The bench claim "2-4x privat-mode improvement" remains analysis-derived; a Criterion before/after run on the `ci_regression` bench is still open.
