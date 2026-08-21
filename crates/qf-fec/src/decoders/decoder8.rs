@@ -404,15 +404,18 @@ impl Decoder8 {
             }
         }
 
-        // Solve per byte column using Gaussian elimination in GF(2^8)
-        let mut recon: Vec<Vec<u8>> = vec![vec![0u8; min_len]; u];
-        let mut solved_any = false;
-
-        for b in 0..min_len {
-            // Build RHS y with known contributions subtracted
-            let mut y = vec![0u8; m];
-            for (i, eq) in self.equations.iter().enumerate() {
-                let mut rhs = if b < eq.len { eq.data[b] } else { 0 };
+        // Solve ALL byte columns with ONE augmented Gaussian elimination in
+        // GF(2^8) (TODO-899). The previous loop re-ran elimination per byte
+        // column, cloning the m x u matrix each time: O(B * u^2 * m). The row
+        // operations are identical for every RHS, so batching all B columns
+        // into one augmented matrix costs O(u^2 * m + B * u * m) - the
+        // asymptotic optimum for dense elimination.
+        let mut yb: Vec<Vec<u8>> = vec![vec![0u8; min_len]; m];
+        for (i, eq) in self.equations.iter().enumerate() {
+            let eq_len = eq.len;
+            let eq_data = &eq.data;
+            for b in 0..min_len {
+                let mut rhs = if b < eq_len { eq_data[b] } else { 0 };
                 for j in 0..self.k {
                     let cj = *eq.coeffs.get(j).unwrap_or(&0);
                     if cj == 0 {
@@ -425,72 +428,78 @@ impl Decoder8 {
                         }
                     }
                 }
-                y[i] = rhs;
+                yb[i][b] = rhs;
+            }
+        }
+
+        let mut ab = a.clone();
+        let mut row = 0usize;
+        let mut piv_row_for_col = vec![usize::MAX; u];
+
+        for (col, piv_slot) in piv_row_for_col.iter_mut().enumerate().take(u) {
+            // Find pivot
+            let mut pivot_row = None;
+            for (r_idx, rref) in ab.iter().enumerate().skip(row).take(m.saturating_sub(row)) {
+                if rref[col] != 0 {
+                    pivot_row = Some(r_idx);
+                    break;
+                }
             }
 
-            // Copy A and y for elimination
-            let mut ab = a.clone();
-            let mut yb = y;
-            let mut row = 0usize;
-            let mut piv_row_for_col = vec![usize::MAX; u];
+            if let Some(pr) = pivot_row {
+                if pr != row {
+                    ab.swap(pr, row);
+                    yb.swap(pr, row);
+                }
+                *piv_slot = row;
 
-            for (col, piv_slot) in piv_row_for_col.iter_mut().enumerate().take(u) {
-                // Find pivot
-                let mut pivot_row = None;
-                for (r_idx, rref) in ab.iter().enumerate().skip(row).take(m.saturating_sub(row)) {
-                    if rref[col] != 0 {
-                        pivot_row = Some(r_idx);
-                        break;
-                    }
+                let pivot = ab[row][col];
+                let pivot_inv = gf_tables::gf_inv8(pivot);
+
+                // Scale pivot row
+                for cell in ab[row].iter_mut().take(u) {
+                    *cell = gf_tables::gf_mul_table(*cell, pivot_inv);
+                }
+                for cell in yb[row].iter_mut() {
+                    *cell = gf_tables::gf_mul_table(*cell, pivot_inv);
                 }
 
-                if let Some(pr) = pivot_row {
-                    if pr != row {
-                        ab.swap(pr, row);
-                        yb.swap(pr, row);
-                    }
-                    *piv_slot = row;
-
-                    let pivot = ab[row][col];
-                    let pivot_inv = gf_tables::gf_inv8(pivot);
-
-                    // Scale pivot row
-                    for cell in ab[row].iter_mut().take(u) {
-                        *cell = gf_tables::gf_mul_table(*cell, pivot_inv);
-                    }
-                    yb[row] = gf_tables::gf_mul_table(yb[row], pivot_inv);
-
-                    // Eliminate column in other rows (SIMD-accelerated multiply-and-XOR)
-                    let pivot_row_snapshot = ab[row].clone();
-                    for (r_idx, rrow) in ab.iter_mut().enumerate() {
-                        if r_idx != row {
-                            let factor = rrow[col];
-                            if factor != 0 {
-                                // rrow[0..u] ^= factor * pivot_row_snapshot[0..u]
-                                gf_tables::gf_mul_scalar_slice(
-                                    factor,
-                                    &pivot_row_snapshot[..u],
-                                    &mut rrow[..u],
-                                );
-                                yb[r_idx] ^= gf_tables::gf_mul_table(factor, yb[row]);
+                // Eliminate column in other rows (SIMD-accelerated multiply-and-XOR)
+                let pivot_row_snapshot = ab[row].clone();
+                for (r_idx, rrow) in ab.iter_mut().enumerate() {
+                    if r_idx != row {
+                        let factor = rrow[col];
+                        if factor != 0 {
+                            // rrow[0..u] ^= factor * pivot_row_snapshot[0..u]
+                            gf_tables::gf_mul_scalar_slice(
+                                factor,
+                                &pivot_row_snapshot[..u],
+                                &mut rrow[..u],
+                            );
+                            // Same factor applies to every RHS column.
+                            let pivot_rhs = yb[row].clone();
+                            for (cell, pv) in yb[r_idx].iter_mut().zip(pivot_rhs.iter()) {
+                                *cell ^= gf_tables::gf_mul_table(factor, *pv);
                             }
                         }
                     }
-                    row += 1;
-                    if row == m {
-                        break;
-                    }
+                }
+                row += 1;
+                if row == m {
+                    break;
                 }
             }
+        }
 
-            // Extract solutions where pivot exists
-            for (col, &r) in piv_row_for_col.iter().enumerate().take(u) {
-                if r == usize::MAX {
-                    return false;
-                }
-                recon[col][b] = yb[r];
-                solved_any = true;
+        // Extract solutions where pivot exists
+        let mut recon: Vec<Vec<u8>> = vec![vec![0u8; min_len]; u];
+        let mut solved_any = false;
+        for (col, &r) in piv_row_for_col.iter().enumerate().take(u) {
+            if r == usize::MAX {
+                return false;
             }
+            recon[col].copy_from_slice(&yb[r]);
+            solved_any = true;
         }
 
         if !solved_any {
