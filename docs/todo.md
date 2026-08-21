@@ -136,30 +136,6 @@
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
 ## Queue
-### TODO-894 - Cap EnvSnapshot per ACK in Brain send path
-- EnvSnapshot::capture() per ACK (brain.rs:606) causes millions of allocs; cache one snapshot per update_state (64 pkts/10ms).
-- Detail: `docs/todo/todo-894-brain-envsnapshot-per-ack.md`
-
-### TODO-895 - Remove AesBlock Drop from hot loop
-- AesBlock Drop volatile memset per temp (aegis_aes_block.rs:7-11) and HP schedule per packet (qf-crypto/lib.rs:242) - 2-4x privat-mode overhead.
-- Detail: `docs/todo/todo-895-aesblock-drop-hotloop.md`
-
-### TODO-896 - Graceful TUN EAGAIN handling
-- TUN WouldBlock currently treated as hard fault (live_auth.rs:1290, runtime.rs:970) - transient backpressure kills tunnel.
-- Detail: `docs/todo/todo-896-tun-eagain-graceful.md`
-
-### TODO-897 - Fix LazyDecoder seen_seqs leak and fastpath death
-- has_gaps() stays true forever after first loss (lazy.rs:136), seen_seqs never clears, ~0.5MB/s leak.
-- Detail: `docs/todo/todo-897-lazydecoder-leak.md`
-
-### TODO-898 - Fix AVX512 and SVE2 GF16 carry-less reduction
-- AVX512 single fold vs 4 (galois.rs:417) and SVE2 0x000B vs 0x100B (gf16.rs:360) - dormant landmine.
-- Detail: `docs/todo/todo-898-avx512-sve2-gf16-fix.md`
-
-### TODO-899 - Multi-RHS Gauss for FEC decode under loss
-- Per-byte clone (decoder8.rs:432) and matrix rebuild (decoder16.rs:327) - 10x speedup via incremental rank update.
-- Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
-
 ### TODO-900 - Global lazy MTU pool, no zeroize-on-free
 - Per-conn 16-64M eager pool with 64K zeroize per free (lib.rs:1019) and global mutex ledger - 99% RAM waste.
 - Detail: `docs/todo/todo-900-per-connection-pool.md`
@@ -172,15 +148,40 @@
 - Triple-copy + channel(1) + Sleep(1ms) poll (uring_batch.rs:543) - 2x throughput via zero-copy and submit_and_wait.
 - Detail: `docs/todo/todo-902-iouring-tx-triple-copy.md`
 
-### TODO-903 - Brain jitter gate and FlowShaper tuning
-- Jitter gate hits ACK-only (send.rs:206) and FlowShaper uniform 1500-3000us (manager.rs:649) - adaptive tuning.
-- Detail: `docs/todo/todo-903-brain-jitter-flowshaper.md`
-
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
 - Keep Initial, Handshake, unauthenticated probes, and fallback traffic standards-compatible, then negotiate the TODO-884 winner only inside the authenticated encrypted control plane. Derive independent directional keys through the existing TLS exporter, bind the selection against downgrade and cross-connection reuse, switch at deterministic packet-number boundaries, and make the winner the automatic QuicFuscate-to-QuicFuscate post-auth default while retaining explicit standard-only and advanced-required modes.
 - Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
 
 ## Completed
+
+### TODO-894 - Cap EnvSnapshot per ACK in Brain send path
+- DONE. `StealthBrain` captures one `EnvSnapshot` at construction and reuses it for every `apply_policy` tick via `&self.environment`; the per-tick `EnvSnapshot::capture()` (full `env::vars_os`, millions of allocs at 10k pps) is removed. Only consumer is `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (startup config), so stealth behavior is byte-identical. Root lib `1713/1713`, Clippy clean. Commits `a456308`, `8adeba3`.
+- Detail: `docs/todo/todo-894-brain-envsnapshot-per-ack.md`
+
+### TODO-895 - Remove AesBlock Drop from hot loop
+- DONE. `AesBlock` no longer implements `Drop` (every `xor`/`and`/`from_bytes` temporary previously paid a 16-byte volatile memset; 117 `from_bytes` call sites per seal/open). Key protection stays at the owner boundary: `Aegis128L/X4/X8` `Drop` still calls `zeroize_aegis_state` (erasure-observed tests green). `AesHp` caches the AES-NI round-key schedule in a `OnceLock` instead of expand+zeroize per protected packet; its `Drop` erases the schedule before the key. qf-crypto `151/151`, erasure tests green. Commit `6e98929`, `e909a03`.
+- Detail: `docs/todo/todo-895-aesblock-drop-hotloop.md`
+
+### TODO-896 - Graceful TUN EAGAIN handling
+- DONE. Server HTTP/3 + MASQUE downlink absorb `WouldBlock` with `Metrics::record_tun_write_backpressure` (new Prometheus counter `quicfuscate_tun_write_backpressure_absorbed_total`); real faults keep the hard fail-closed path. Client `drain_ingress_to_tun` is lossless: failed packet and remainder are re-queued to the ingress front in order via `ClientTunnelIngress::restore` with capacity bounds; new `IoDriverStats.tun_write_backpressure` + snapshot. Also fixed `restore_dns` no-op ordering (check captured state before resolving the network service). Root lib `1713/1713`, io_driver `15/15`. Commits `48f4881`.
+- Detail: `docs/todo/todo-896-tun-eagain-graceful.md`
+
+### TODO-897 - Fix LazyDecoder seen_seqs leak and fastpath death
+- DONE. Window-relative safe reset before the flush/push decision, guarded by (a) no recovery in flight (buffers empty after the previous repair-driven flush) and (b) newest block >= 2k past the tracked minimum. Partial `retain` evictions were proven corrupt by the e2e exact-delivery and no-duplication contracts and rejected. New regression `test_lazy_decoder_seen_seqs_bounded_under_permanent_loss` models permanent loss with realistic repair cadence, asserts `len <= k`. qf-fec `82/82`, e2e `14/14`, root `1713/1713`. Commit `9873595`.
+- Detail: `docs/todo/todo-897-lazydecoder-leak.md`
+
+### TODO-898 - Fix AVX512 and SVE2 GF16 carry-less reduction
+- DONE. AVX512 VPCLMULQDQ path now uses the same four-fold reduction as the SSE path (`GF16_PCLMUL_FOLDS`) - the single fold was the exact defect documented and fixed in SSE with a differential test. SVE2 kernel replaced the integer-product `svmul/svmulh` form (not carryless) and wrong constant `0x000B` with the Russian-peasant scheme matching the NEON kernel and the scalar field (`0x100B`, x^16 implicit). qf-simd `61/61`, qf-fec `82/82`. Commit `c51c5e3`.
+- Detail: `docs/todo/todo-898-avx512-sve2-gf16-fix.md`
+
+### TODO-899 - Multi-RHS Gauss for FEC decode under loss
+- DONE. `Decoder8` elimination is now multi-RHS: one augmented pass solves all B byte columns (previously per-byte with a full matrix clone each: `O(B*u^2*m)`); now `O(u^2*m + B*u*m)`, the dense optimum. Pivot-row RHS snapshot reused per row. qf-fec `82/82`, e2e `14/14`, root `1713/1713`, Clippy clean. Commit `5588f6d`.
+- Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
+
+### TODO-903 - Brain jitter gate and FlowShaper tuning
+- DONE (jitter half). The core timing gate now skips ACK-only packets: `SendInfo.congestion_controlled == wrote_ack_eliciting == false` means no jitter - delaying ACKs only delays the peer's loss recovery and RTT signals with zero wire-shape gain. Stealth jitter stays on every ack-eliciting (data/probe) packet. FlowShaper uniform-delay tuning remains open under TODO-903's detail file. Root `1713/1713`. Commit `282e096`.
+- Detail: `docs/todo/todo-903-brain-jitter-flowshaper.md`
+
 
 ### TODO-893 - Modularize the Performance regression runner and artifact report path
 - DONE. `test-performance-regression.sh` now validates `throughput,latency,memory,cpu,hotpath,simd,scalability,report` with `--only`, gates `qf_bench_preflight` and native build to `throughput/latency/hotpath/simd` only, splits the former combined `memory_cpu` into separate `memory` and `cpu` scopes with distinct `fast_profile_omits_scope` handling, implements `write_current_snapshot` as the sole `performance_current.json` writer and `run_report_scope` with explicit `PASS/SKIP/FAIL`, and emits one selection record plus one pre-execution record per canonical scope with `not_selected_by_scope` reasons. `scripts/tests/fast/test-performance-scope-contract.sh` covers help, unknown/empty/malformed/duplicate/conflict, default, each scope, combinations, and failure propagation; `CURRENT_FILE` gap is closed.
