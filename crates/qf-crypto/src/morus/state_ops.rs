@@ -48,7 +48,9 @@ impl super::Morus1280State {
         state
     }
 
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    // Miri cannot execute NEON intrinsics, so the SIMD path is UB there even
+    // when target_feature="neon" is compiled in. Miri takes the scalar path.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(miri)))]
     #[inline(always)]
     pub(super) fn keystream_block(&self) -> [u64; 4] {
         // SAFETY: compile-time target_feature="neon" guarantees NEON availability;
@@ -56,7 +58,7 @@ impl super::Morus1280State {
         unsafe { self.keystream_block_neon() }
     }
 
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon", not(miri))))]
     #[inline(always)]
     pub(super) fn keystream_block(&self) -> [u64; 4] {
         let s0 = self.s[0];
@@ -98,13 +100,13 @@ impl super::Morus1280State {
     pub(super) fn process_ad(&mut self, ad: &[u8]) {
         let (chunks, rem) = ad.as_chunks::<32>();
         for block in chunks {
-            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(miri)))]
             {
                 // SAFETY: compile-time neon gate; `block` is a valid &[u8;32]
                 // providing 32 readable bytes for vld1q_u64 loads.
                 unsafe { self.update(Self::load_block32_neon(block)) };
             }
-            #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+            #[cfg(not(all(target_arch = "aarch64", target_feature = "neon", not(miri))))]
             {
                 self.update(Self::load_block32(block));
             }
