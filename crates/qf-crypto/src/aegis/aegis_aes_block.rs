@@ -1,14 +1,20 @@
 use std::sync::OnceLock;
 use zeroize::Zeroize;
 
+/// One 128-bit AES state word.
+///
+/// TODO-895: This type intentionally has NO `Drop`. It is a hot-loop value type:
+/// every `xor()`/`and()` temporary, `state.clone()` snapshot, and `from_bytes`
+/// message block would trigger a 16-byte volatile memset on scope exit, which
+/// dominated the privat-mode AEGIS hot path. Key material is protected at the
+/// owner boundary instead: `Aegis128L`/`Aegis128X4`/`Aegis128X8` `Drop` impls
+/// call `zeroize_aegis_state()` explicitly (erasure-observed in tests), and the
+/// wrapper `Drop` impls erase key/IV. Message-block temporaries hold plaintext
+/// the caller already owns in place, so per-temporary erasure added cost with
+/// no security gain.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AesBlock([u8; 16]);
 
-impl Drop for AesBlock {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum AesEncBackend {

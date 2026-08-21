@@ -350,7 +350,7 @@ pub mod aead;
 // SAFETY: requires AES-NI (caller ensures). `rk` is &[__m128i; 11]; indexing 0..=10
 // stays within bounds. `block` is &mut [u8; 16]; _mm_loadu_si128 reads 16 bytes,
 // _mm_storeu_si128 writes 16 bytes back. Exclusive borrow prevents aliasing.
-unsafe fn aes128_encrypt_block_rk(rk: &[core::arch::x86_64::__m128i; 11], block: &mut [u8; 16]) {
+pub(crate) unsafe fn aes128_encrypt_block_rk(rk: &[core::arch::x86_64::__m128i; 11], block: &mut [u8; 16]) {
     use core::arch::x86_64::*;
     let mut state = _mm_loadu_si128(block.as_ptr() as *const __m128i);
     state = _mm_xor_si128(state, rk[0]);
@@ -362,7 +362,7 @@ unsafe fn aes128_encrypt_block_rk(rk: &[core::arch::x86_64::__m128i; 11], block:
 }
 
 #[cfg(target_arch = "x86_64")]
-fn zeroize_aes128_schedule(rk: &mut [core::arch::x86_64::__m128i; 11]) {
+pub(crate) fn zeroize_aes128_schedule(rk: &mut [core::arch::x86_64::__m128i; 11]) {
     for word in rk {
         // SAFETY: __m128i is an opaque 128-bit value and zero is a valid bit
         // pattern. The schedule contains no borrowed pointers.
@@ -377,7 +377,7 @@ fn zeroize_aes128_schedule(rk: &mut [core::arch::x86_64::__m128i; 11]) {
 // reads exactly 16 bytes. rk is stack-owned [__m128i; 11]; all 11 slots written
 // via aes_128_key_expansion. _mm_aeskeygenassist_si128 and _mm_slli_si128 are
 // register-to-register. rcon values are exhaustively matched (10 AES-128 rounds).
-unsafe fn expand_aes128_schedule(key: &[u8; 16]) -> [core::arch::x86_64::__m128i; 11] {
+pub(crate) unsafe fn expand_aes128_schedule(key: &[u8; 16]) -> [core::arch::x86_64::__m128i; 11] {
     use core::arch::x86_64::*;
     #[inline]
     // SAFETY: requires AES-NI (caller ensures). All operations are register-to-register

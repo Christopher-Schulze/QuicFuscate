@@ -204,8 +204,16 @@ pub trait KeyScheduleHooks {
 }
 
 /// AES-based QUIC header protection using single-block AES encryption.
+///
+/// TODO-895: The AES-NI round-key schedule is expanded ONCE at construction and
+/// cached, instead of per `new_mask` call. Every protected packet calls
+/// `new_mask`, so the previous per-call `expand_aes128_schedule` +
+/// `zeroize_aes128_schedule` pair (11 AES-NI key-schedule rounds + 11 volatile
+/// 16-byte memsets) ran per packet on the hot path.
 pub struct AesHp {
     key: [u8; 16],
+    #[cfg(target_arch = "x86_64")]
+    schedule: std::sync::OnceLock<[core::arch::x86_64::__m128i; 11]>,
 }
 
 impl AesHp {
@@ -214,16 +222,44 @@ impl AesHp {
         require_minimum_length("AES-128-HP", "secret", 16, secret.len())?;
         let mut key = [0u8; 16];
         key.copy_from_slice(&secret[..16]);
-        Ok(Self { key })
+        Ok(Self {
+            key,
+            #[cfg(target_arch = "x86_64")]
+            schedule: std::sync::OnceLock::new(),
+        })
     }
 
     pub fn from_key(key: &[u8; 16]) -> Self {
-        Self { key: *key }
+        Self {
+            key: *key,
+            #[cfg(target_arch = "x86_64")]
+            schedule: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Return the cached expanded schedule, expanding it on first use.
+    ///
+    /// SAFETY (caller contract): only called when AES-NI is detected.
+    #[cfg(target_arch = "x86_64")]
+    fn cached_schedule(
+        &self,
+    ) -> &[core::arch::x86_64::__m128i; 11] {
+        self.schedule.get_or_init(|| {
+            // SAFETY: guarded by the same AES-NI runtime check that gates the
+            // fast path in `encrypt_with_schedule`.
+            unsafe { crate::crypto::expand_aes128_schedule(&self.key) }
+        })
     }
 }
 
 impl Drop for AesHp {
     fn drop(&mut self) {
+        // Erase the cached schedule first: it contains the round keys, i.e.
+        // bijective images of the key. Then erase the key itself.
+        #[cfg(target_arch = "x86_64")]
+        if let Some(mut schedule) = self.schedule.take() {
+            crate::crypto::zeroize_aes128_schedule(&mut schedule);
+        }
         self.key.zeroize();
         crate::secret::observe_erasure("aes_hp_key", &self.key);
     }
@@ -237,9 +273,24 @@ impl AesHp {
         Ok(sample_block)
     }
 
+    fn encrypt_sample(&self, sample_block: &[u8; 16]) -> [u8; 16] {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::crypto::FeatureDetector::instance().features_full().aesni {
+                let schedule = self.cached_schedule();
+                let mut out = *sample_block;
+                // SAFETY: AES-NI detected above; schedule was expanded with the
+                // same intrinsics contract.
+                unsafe { crate::crypto::aes128_encrypt_block_rk(schedule, &mut out) };
+                return out;
+            }
+        }
+        crate::crypto::aes::aes128_encrypt_block(&self.key, sample_block)
+    }
+
     fn mask_from_sample(&self, sample: &[u8]) -> Result<[u8; 5], KeyMaterialError> {
         let sample_block = self.sample_block(sample)?;
-        let block = crate::crypto::aes128_encrypt_block_fast(&self.key, &sample_block);
+        let block = self.encrypt_sample(&sample_block);
         let mut mask = [0u8; 5];
         mask.copy_from_slice(&block[..5]);
         Ok(mask)
