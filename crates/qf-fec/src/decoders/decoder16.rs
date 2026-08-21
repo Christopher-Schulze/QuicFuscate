@@ -375,13 +375,14 @@ impl Decoder16 {
                     *cell = gf_tables::gf16_mul(*cell, inv);
                 }
                 y[row] = gf_tables::gf16_mul(y[row], inv);
-                // eliminate other rows (vectorized)
+                // eliminate other rows (vectorized). One pivot-row snapshot per
+                // column keeps src/dst disjoint for the borrow checker; the old
+                // code cloned inside the r-loop, once per eliminated row.
+                let pivot_a = a[row].clone();
                 for r in 0..m {
                     if r != row && a[r][col] != 0 {
                         let f = a[r][col];
-                        // XOR row r with f * row(row)
-                        let pivot_row = a[row].clone();
-                        gf16_mul_slice(f, &pivot_row[..u], &mut a[r][..u]);
+                        gf16_mul_slice(f, &pivot_a[..u], &mut a[r][..u]);
                         // Update RHS
                         let prody = gf_tables::gf16_mul(f, y[row]);
                         y[r] ^= prody;

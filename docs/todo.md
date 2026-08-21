@@ -175,11 +175,11 @@
 - Detail: `docs/todo/todo-898-avx512-sve2-gf16-fix.md`
 
 ### TODO-899 - Multi-RHS Gauss for FEC decode under loss
-- DONE. `Decoder8` elimination is now multi-RHS: one augmented pass solves all B byte columns (previously per-byte with a full matrix clone each: `O(B*u^2*m)`); now `O(u^2*m + B*u*m)`, the dense optimum. Pivot-row RHS snapshot reused per row. qf-fec `82/82`, e2e `14/14`, root `1713/1713`, Clippy clean. Commit `5588f6d`.
+- PARTIAL. `Decoder8` is true multi-RHS (one augmented pass for all B byte columns, `O(u^2*m + B*u*m)`); decoder16 now clones the pivot row once per column instead of once per eliminated row. Correctness fully proven: qf-fec `82/82`, e2e `14/14`, root `1717/1717`. **The 10x speedup acceptance is NOT MET and NOT MEASURABLE**: `ci_regression` has no decoder bench (`fec_matrix_mul` never enters the elimination loop), so a dedicated decode-under-loss Criterion bench must be added first. Commits `5588f6d` + decoder16 clone hoist (this commit).
 - Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
 
 ### TODO-903 - Brain jitter gate and FlowShaper tuning
-- DONE (jitter half). The core timing gate now skips ACK-only packets: `SendInfo.congestion_controlled == wrote_ack_eliciting == false` means no jitter - delaying ACKs only delays the peer's loss recovery and RTT signals with zero wire-shape gain. Stealth jitter stays on every ack-eliciting (data/probe) packet. FlowShaper uniform-delay tuning remains open under TODO-903's detail file. Root `1713/1713`. Commit `282e096`.
+- DONE. Jitter half: the core timing gate skips ACK-only packets via `SendInfo.congestion_controlled`; stealth jitter stays on every ack-eliciting packet (`282e096`). FlowShaper half: traffic-aware range from the bounded 2s history - burst >=32 records -> low half floored at min/2, idle <8 -> full spread, steady -> classic uniform; replaces the flat uniform that fingerprinted bursts as constant-ish profiles. CE-ratio deviation documented in the detail file. qf-stealth `127/127`, root flow_shaper `12/12`. Commit `65a6e7c`.
 - Detail: `docs/todo/todo-903-brain-jitter-flowshaper.md`
 
 
