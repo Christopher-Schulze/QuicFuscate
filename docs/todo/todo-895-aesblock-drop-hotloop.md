@@ -22,7 +22,7 @@ Remove `Drop` impl that does volatile 16-byte memset per `AesBlock` temporary in
 ## Acceptance
 - No `Drop` on `AesBlock` in hot loop (use `ManuallyDrop` or `Zeroize` only at key boundary, verified via `cargo clippy`).
 - HP schedule cached per connection, not per packet.
-- `cargo test --features rust-tests` crypto tests green, `cargo bench --bench ci_regression --features benches -- crypto` shows 2-4x privat-mode improvement.
+- `cargo test --features rust-tests` crypto tests green. The projected 2-4x privat-mode improvement is analysis-derived, not yet measured - a Criterion before/after run on `cargo bench --bench ci_regression --features benches -- crypto` is tracked as open in Deviations.
 
 ## Out of Scope
 - No AEAD algorithm change, no standard-mode ring path change.
