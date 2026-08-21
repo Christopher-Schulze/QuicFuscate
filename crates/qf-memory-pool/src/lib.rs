@@ -81,6 +81,7 @@ impl MemoryPoolRuntimeConfig {
             ),
             madvise_hugepage: environment.flag("QUICFUSCATE_MADVISE_HUGEPAGE", true),
             zeroize_on_free: environment.flag("QUICFUSCATE_POOL_ZEROIZE_ON_FREE", true),
+            #[cfg(debug_assertions)]
             debug_slack: environment.parse::<usize>("QUICFUSCATE_POOL_DEBUG_SLACK").unwrap_or(256),
             #[cfg(debug_assertions)]
             debug_grace: environment.parse::<usize>("QUICFUSCATE_POOL_DEBUG_GRACE").unwrap_or(64),

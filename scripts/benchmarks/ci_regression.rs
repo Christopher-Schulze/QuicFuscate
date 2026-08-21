@@ -1143,7 +1143,53 @@ fn bench_fec_decode16_elimination(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(fec_benches, bench_fec_matrix_mul, bench_fec_decode16_elimination,);
+// ---------------------------------------------------------------------------
+// Memory-pool alloc/free cycle (TODO-900)
+// ---------------------------------------------------------------------------
+// Measures the full alloc -> write -> free round trip with the free-time
+// zeroize policy ON (default) vs OFF. The delta IS the cost of the 64KiB
+// memset per free that QUICFUSCATE_POOL_ZEROIZE_ON_FREE controls.
+fn bench_memory_pool_cycle(c: &mut Criterion) {
+    use quicfuscate::optimize::MemoryPool;
+    use std::sync::Arc;
+
+    const CYCLES: usize = 512;
+
+    fn run_pool(zeroize: bool) -> u64 {
+        let environment = qf_common::env_utils::EnvSnapshot::from_pairs([
+            ("QUICFUSCATE_POOL_ZEROIZE_ON_FREE", if zeroize { "1" } else { "0" }),
+            ("QUICFUSCATE_POOL_AUTO_TUNE", "0"),
+        ]);
+        let pool = Arc::new(MemoryPool::new_with_snapshot(64, 65_536, &environment));
+        let mut checksum = 0u64;
+        for i in 0..CYCLES {
+            let mut block = pool.alloc();
+            for (index, byte) in block.iter_mut().enumerate() {
+                *byte = (i as u8).wrapping_add(index as u8);
+            }
+            checksum ^= block[0] as u64;
+            pool.free(block);
+        }
+        checksum
+    }
+
+    let mut group = c.benchmark_group("memory_pool_cycle");
+    group.throughput(Throughput::Elements(CYCLES as u64));
+    group.bench_function("zeroize_on", |bench| {
+        bench.iter(|| std::hint::black_box(run_pool(true)))
+    });
+    group.bench_function("zeroize_off", |bench| {
+        bench.iter(|| std::hint::black_box(run_pool(false)))
+    });
+    group.finish();
+}
+
+criterion_group!(
+    fec_benches,
+    bench_fec_matrix_mul,
+    bench_fec_decode16_elimination,
+    bench_memory_pool_cycle,
+);
 
 criterion_group!(stealth_benches, bench_padding_gen,);
 
