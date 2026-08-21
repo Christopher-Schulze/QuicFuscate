@@ -48,7 +48,7 @@ pub(crate) use qf_fec::{
 pub(crate) use qf_fec::{fec_simd_level_for_features, SimdLevel};
 pub use qf_fec::{ActiveFecPolicyChange, FecPolicyChange, FecTelemetrySnapshot};
 #[cfg(test)]
-pub(crate) use qf_fec::{Encoder16, Encoder4};
+pub(crate) use qf_fec::Encoder4;
 pub use qf_fec::{EngineFecMode, EngineFecSection, FecConfig};
 pub use qf_fec::{FecControlPolicy, FecMode, FecPacket};
 #[cfg(test)]
@@ -127,7 +127,7 @@ mod policy_tests;
 pub use codecs_and_observers::FecDecoder8;
 pub(crate) use codecs_and_observers::FecTransportObserver;
 #[cfg(test)]
-pub(crate) use decoders::{multiply_gf256_with_scratch, Decoder16, Decoder4, WiedemannScratch};
+pub(crate) use decoders::{multiply_gf256_with_scratch, Decoder4, WiedemannScratch};
 #[cfg(any(test, feature = "rust-tests", feature = "benches"))]
 pub(crate) use decoders::{validate_decoder_dimensions, Decoder8};
 mod internal;
