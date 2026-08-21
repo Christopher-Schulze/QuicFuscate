@@ -399,6 +399,41 @@ mod tests {
         assert!(ingress.push(&[0x45, 1]));
         assert_eq!(ingress.drain(), vec![vec![0x45, 1]]);
     }
+    #[test]
+    fn client_tunnel_ingress_restore_requeues_in_order() {
+        let ingress = ClientTunnelIngress::new();
+        for index in 0..5u8 {
+            assert!(ingress.push(&[0x45, index]));
+        }
+        let drained = ingress.drain();
+        assert_eq!(drained.len(), 5);
+
+        // Simulate a TUN WouldBlock after flushing the first two packets:
+        // packets 2..5 must return to the FRONT in their original order.
+        ingress.restore(drained[2..].to_vec());
+
+        let requeued = ingress.drain();
+        assert_eq!(requeued.len(), 3);
+        assert_eq!(requeued[0], vec![0x45, 2]);
+        assert_eq!(requeued[1], vec![0x45, 3]);
+        assert_eq!(requeued[2], vec![0x45, 4]);
+    }
+
+    #[test]
+    fn client_tunnel_ingress_restore_preserves_fifo_with_new_pushes() {
+        let ingress = ClientTunnelIngress::new();
+        assert!(ingress.push(&[0x45, 1]));
+        let drained = ingress.drain();
+        assert_eq!(drained.len(), 1);
+
+        // Restore after the queue was emptied, then push new arrivals: the
+        // restored packet must stay ahead of later pushes (FIFO contract).
+        ingress.restore(drained);
+        assert!(ingress.push(&[0x45, 2]));
+
+        let packets = ingress.drain();
+        assert_eq!(packets, vec![vec![0x45, 1], vec![0x45, 2]]);
+    }
 
     #[test]
     fn test_io_driver_stats() {
