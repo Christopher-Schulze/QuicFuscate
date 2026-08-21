@@ -208,9 +208,18 @@ impl ServerRuntime {
                         }
                     }
                 }
-                recv_res = recv_datagram_from(&socket, &mut buf) => {
-                    match recv_res {
-                        Ok((len, from)) => {
+                batch_res = recv_datagram_batch(&socket, 64) => {
+                    match batch_res {
+                        Ok(batch) => {
+                            'batch: for (datagram, from) in batch {
+                                // Copy into the reusable scratch so the unchanged
+                                // stateful body below keeps operating on `buf`.
+                                let len = datagram.len();
+                                buf[..len].copy_from_slice(&datagram);
+                                // Process each drained datagram through the same
+                                // serial stateful path as before (TODO-901 step 1:
+                                // one wakeup amortized across the burst; the
+                                // syscall layer no longer caps pps).
                             crate::telemetry!(crate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
                             metrics.record_ingress_datagram(len);
 
@@ -357,7 +366,7 @@ impl ServerRuntime {
                                 Ok(result) => result,
                                 Err(fault) => {
                                     runtime_fault = Some(fault);
-                                    break;
+                                    break 'batch;
                                 }
                             };
                             if let Some(old_addr) = migration_from {
@@ -375,6 +384,7 @@ impl ServerRuntime {
                                 &metrics,
                             );
                             runtime_parts.live_state.drain_client_fanout(&metrics);
+                            } // 'batch
                         }
                         Err(e) => {
                             log::error!("Failed to read from socket: {}", e);

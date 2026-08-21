@@ -1031,6 +1031,61 @@ pub(crate) async fn recv_datagram_from(
         .await
 }
 
+/// Drain the kernel socket buffer until `WouldBlock`, returning up to `max`
+/// datagrams per call (TODO-901 step 1: amortize one tokio wakeup across a
+/// whole burst instead of paying select! + admission per single recvmsg).
+///
+/// The first datagram waits for readability via the same `async_io` pattern as
+/// [`recv_datagram_from`]; the rest of the burst is drained with non-blocking
+/// `try_recv_from` into one reused scratch buffer until EAGAIN or capacity.
+#[cfg(unix)]
+pub(crate) async fn recv_datagram_batch(
+    socket: &tokio::net::UdpSocket,
+    max: usize,
+) -> std::io::Result<Vec<(Vec<u8>, std::net::SocketAddr)>> {
+    const DRAIN_BATCH_CAP: usize = 64;
+    let cap = max.min(DRAIN_BATCH_CAP).max(1);
+    let mut scratch = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
+    let mut batch = Vec::with_capacity(cap);
+
+    // Blocking wait for the first datagram of the burst.
+    let (len, from) = recv_datagram_from(socket, &mut scratch).await?;
+    batch.push((scratch[..len].to_vec(), from));
+
+    // Drain the rest of the burst without blocking.
+    while batch.len() < cap {
+        match socket.try_recv_from(&mut scratch) {
+            Ok((len, from)) => batch.push((scratch[..len].to_vec(), from)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(batch)
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn recv_datagram_batch(
+    socket: &tokio::net::UdpSocket,
+    max: usize,
+) -> std::io::Result<Vec<(Vec<u8>, std::net::SocketAddr)>> {
+    const DRAIN_BATCH_CAP: usize = 64;
+    let cap = max.min(DRAIN_BATCH_CAP).max(1);
+    let mut scratch = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
+    let mut batch = Vec::with_capacity(cap);
+
+    loop {
+        match socket.try_recv_from(&mut scratch) {
+            Ok((len, from)) => batch.push((scratch[..len].to_vec(), from)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error),
+        }
+        if batch.len() >= cap {
+            break;
+        }
+    }
+    Ok(batch)
+}
+
 #[cfg(not(unix))]
 pub(crate) async fn recv_datagram_from(
     socket: &tokio::net::UdpSocket,
