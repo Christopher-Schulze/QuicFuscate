@@ -517,6 +517,15 @@ fn tls_cover_ech_grease_ext_has_correct_type() {
 fn flow_shaper_jitter_stays_in_range() {
     use super::FlowShaper;
     let shaper = FlowShaper::new(1000, false);
+    // Seed the steady-state band (8..=31 packets) so apply_jitter uses the
+    // classic uniform [500, 1000] range (TODO-903 traffic-aware shaper).
+    for i in 0..16 {
+        shaper.record_and_prune(64, if i % 2 == 0 {
+            super::StealthPacketClass::Data
+        } else {
+            super::StealthPacketClass::Ack
+        });
+    }
     for _ in 0..200 {
         let d = shaper.apply_jitter();
         let us = d.as_micros() as u64;
@@ -528,7 +537,7 @@ fn flow_shaper_jitter_stays_in_range() {
 #[test]
 fn flow_shaper_jitter_min_clamped_to_one() {
     use super::FlowShaper;
-    // jitter_us = 1 -> max=1, min=max(1/2,1)=1 -> range [1,1]
+    // jitter_us = 1 -> max=1; every branch floors at 1 -> range [1,1]
     let shaper = FlowShaper::new(1, false);
     for _ in 0..50 {
         let d = shaper.apply_jitter();
@@ -540,7 +549,12 @@ fn flow_shaper_jitter_min_clamped_to_one() {
 fn flow_shaper_jitter_produces_variation() {
     use super::FlowShaper;
     let shaper = FlowShaper::new(5000, false);
-    let mut values: Vec<u64> = (0..100).map(|_| shaper.apply_jitter().as_micros() as u64).collect();
+    // Steady band: [2500, 5000].
+    for i in 0..12 {
+        shaper.record_and_prune(64, super::StealthPacketClass::Data);
+    }
+    let mut values: Vec<u64> =
+        (0..100).map(|_| shaper.apply_jitter().as_micros() as u64).collect();
     values.sort();
     values.dedup();
     // With range [2500, 5000] and 100 samples, we expect significant variation
@@ -549,6 +563,32 @@ fn flow_shaper_jitter_produces_variation() {
         "expected variation in jitter, got only {} distinct values",
         values.len()
     );
+}
+
+#[test]
+fn flow_shaper_burst_tightens_range() {
+    use super::FlowShaper;
+    // Burst band: >=32 records -> low half of the range, floored at min/2.
+    // With jitter_us=1000: burst range is [250, 500].
+    let shaper = FlowShaper::new(1000, false);
+    for i in 0..40 {
+        shaper.record_and_prune(1280, super::StealthPacketClass::Data);
+    }
+    for _ in 0..200 {
+        let us = shaper.apply_jitter().as_micros() as u64;
+        assert!((250..=500).contains(&us), "burst jitter {} us out of [250, 500]", us);
+    }
+}
+
+#[test]
+fn flow_shaper_idle_spreads_full_range() {
+    use super::FlowShaper;
+    // Idle band: <8 records -> full spread [1, max]. With jitter_us=1000.
+    let shaper = FlowShaper::new(1000, false);
+    for _ in 0..50 {
+        let us = shaper.apply_jitter().as_micros() as u64;
+        assert!((1..=1000).contains(&us), "idle jitter {} us out of [1, 1000]", us);
+    }
 }
 
 #[test]

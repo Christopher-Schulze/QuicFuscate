@@ -284,11 +284,45 @@ mod flow_shaping {
             }
         }
 
-        /// Return a random jitter delay within the configured range.
+        /// Return a traffic-aware jitter delay.
+        ///
+        /// TODO-903: The previous distribution was flat uniform over
+        /// `[max/2, max]` regardless of traffic state, which smooths bursts
+        /// into an unnatural constant-ish profile a DPI stack can fingerprint.
+        /// Real client flows alternate tight bursts and long gaps. This shaper
+        /// derives the recent send rate from the already-recorded bounded
+        /// history and shapes accordingly:
+        /// - bursty (>= 32 packets in the 2s window): sample from the LOW half
+        ///   of the range so bursts stay tight;
+        /// - idle (< 8 packets): sample from the FULL range for wide spread;
+        /// - steady: unchanged uniform over `[max/2, max]`.
         #[doc(hidden)]
         pub fn apply_jitter(&self) -> Duration {
-            let jitter_us = rand::rng().random_range(self.jitter_min_us..=self.jitter_max_us);
+            let (min_us, max_us) = self.jitter_range_for_traffic();
+            let jitter_us = rand::rng().random_range(min_us..=max_us);
             Duration::from_micros(jitter_us)
+        }
+
+        /// Resolve the effective jitter range from recent traffic intensity.
+        fn jitter_range_for_traffic(&self) -> (u64, u64) {
+            let recent = self
+                .packet_history
+                .lock()
+                .map(|history| history.len())
+                .unwrap_or(0);
+            if recent >= 32 {
+                // Burst: keep packets tight - low half of the range only,
+                // floored so the minimum stays at least a quarter of max.
+                let burst_min = (self.jitter_min_us / 2).max(1);
+                let burst_max = (self.jitter_max_us / 2).max(burst_min);
+                (burst_min, burst_max)
+            } else if recent < 8 {
+                // Idle: wide spread across the full range.
+                (1, self.jitter_max_us)
+            } else {
+                // Steady: classic uniform [max/2, max].
+                (self.jitter_min_us, self.jitter_max_us)
+            }
         }
 
         /// Return conservative handshake-flight pacing.

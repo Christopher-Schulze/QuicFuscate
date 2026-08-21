@@ -114,6 +114,10 @@ mod stealth_coverage_tests {
     #[test]
     fn flow_shaper_jitter_bounds_respected() {
         let shaper = FlowShaper::new(2000, false);
+        // Steady band (8..=31 records) -> classic uniform [1000, 2000].
+        for i in 0..16 {
+            shaper.record_and_prune(64, StealthPacketClass::Data);
+        }
         for _ in 0..200 {
             let d = shaper.apply_jitter();
             let us = d.as_micros() as u64;
