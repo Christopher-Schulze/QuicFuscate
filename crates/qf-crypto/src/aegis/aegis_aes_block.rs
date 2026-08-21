@@ -32,28 +32,38 @@ enum AesEncBackend {
 fn aes_backend() -> AesEncBackend {
     static BACKEND: OnceLock<AesEncBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            let features = qf_cpu::FeatureDetector::instance().features_full();
-            if features.aesni {
-                if features.vaes && features.avx512f && features.avx512vl {
-                    return AesEncBackend::Vaes512;
-                }
-                if features.vaes && features.avx2 {
-                    return AesEncBackend::Vaes256;
-                }
-                return AesEncBackend::Aesni;
-            }
-        }
+        // Miri cannot execute AES intrinsics (the interpreter does not provide
+        // the `aes` target feature even when runtime /proc detection reports
+        // it), so any hardware-backend call is UB under Miri. Force the scalar
+        // reference implementation there; production builds are unaffected.
+        #[cfg(miri)]
+        return AesEncBackend::Scalar;
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(not(miri))]
         {
-            if qf_cpu::FeatureDetector::instance().features_full().aes {
-                return AesEncBackend::Aese;
+            #[cfg(target_arch = "x86_64")]
+            {
+                let features = qf_cpu::FeatureDetector::instance().features_full();
+                if features.aesni {
+                    if features.vaes && features.avx512f && features.avx512vl {
+                        return AesEncBackend::Vaes512;
+                    }
+                    if features.vaes && features.avx2 {
+                        return AesEncBackend::Vaes256;
+                    }
+                    return AesEncBackend::Aesni;
+                }
             }
-        }
 
-        AesEncBackend::Scalar
+            #[cfg(target_arch = "aarch64")]
+            {
+                if qf_cpu::FeatureDetector::instance().features_full().aes {
+                    return AesEncBackend::Aese;
+                }
+            }
+
+            AesEncBackend::Scalar
+        }
     })
 }
 
