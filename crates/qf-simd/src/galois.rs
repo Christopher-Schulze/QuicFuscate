@@ -409,14 +409,20 @@ unsafe fn gf16_mul_vpclmulqdq(a: &[u16], b: u16, dst: &mut [u16]) {
         let a_lo = _mm_loadu_si128(a.as_ptr().add(i) as *const _);
         let a_32 = _mm256_cvtepu16_epi32(a_lo);
         let a_64 = _mm512_cvtepu32_epi64(a_32);
-
         // Carryless multiply: a[i] * b (produces 32-bit result in low 64 bits)
         let prod = _mm512_clmulepi64_epi128(a_64, b_vec, 0x00);
 
-        // Reduce: extract bits 16-31 and XOR with polynomial
-        let hi16 = _mm512_srli_epi64(prod, 16);
-        let reduce = _mm512_clmulepi64_epi128(hi16, poly_vec, 0x00);
-        let result_64 = _mm512_xor_si512(prod, reduce);
+        // Reduce with the same four-fold scheme the SSE path uses
+        // (GF16_PCLMUL_FOLDS): one fold leaves terms above bit 31 in place,
+        // which the SSE-path documentation and differential test prove wrong.
+        let mut folded = prod;
+        let low_mask = _mm512_set1_epi64(0xFFFF);
+        for _ in 0..GF16_PCLMUL_FOLDS {
+            let high = _mm512_srli_epi64(folded, 16);
+            let low = _mm512_and_si512(folded, low_mask);
+            folded = _mm512_xor_si512(low, _mm512_clmulepi64_epi128(high, poly_vec, 0x00));
+        }
+        let result_64 = folded;
 
         // Mask to 16 bits and pack back to u16
         let mask16 = _mm512_set1_epi64(0xFFFF);

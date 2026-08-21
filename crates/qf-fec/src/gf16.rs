@@ -345,7 +345,8 @@ unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
         }
 
         let coefficient = svdup_n_u16(coeff);
-        let polynomial = svdup_n_u16(0x000B);
+        let polynomial = svdup_n_u16(0x100B);
+        let one = svdup_n_u16(1);
         let mut offset = 0usize;
         let vector_len = svcnth() as usize;
 
@@ -355,12 +356,31 @@ unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
                 break;
             }
 
-            let source = svld1_u16(predicate, src.as_ptr().add(offset));
+            // Russian-peasant carryless multiply, matching the NEON kernel and
+            // the scalar field (0x1100B with the x^16 term implicit). The old
+            // svmul/svmulh integer-product form is not a carryless multiply and
+            // used the wrong constant 0x000B, so any SVE2 result diverged from
+            // the field.
+            let mut multiplicand = svld1_u16(predicate, src.as_ptr().add(offset));
+            let mut factor = coefficient;
+            let mut product = svdup_n_u16(0);
             let target = svld1_u16(predicate, dst.as_ptr().add(offset));
-            let low = svmul_u16_x(predicate, coefficient, source);
-            let high = svmulh_u16_x(predicate, coefficient, source);
-            let reduced = svmul_u16_x(predicate, high, polynomial);
-            let product = sveor_u16_m(predicate, low, low, reduced);
+
+            let mut round = 0;
+            while round < 16 {
+                let factor_mask = svcmpeq_u16(predicate, svand_u16_x(svptrue_b16(), factor, one), one);
+                product = sveor_u16_m(predicate, product, product, svand_u16_m(predicate, factor_mask, multiplicand, svdup_n_u16(0xFFFF)));
+                let carry_mask = svcmpeq_u16(predicate, svand_u16_x(svptrue_b16(), svshr_n_u16(multiplicand, 15), one), one);
+                multiplicand = sveor_u16_m(
+                    predicate,
+                    svlsh1_n_u16_m(predicate, svdup_n_u16(0), multiplicand, 1),
+                    svlsh1_n_u16_m(predicate, svdup_n_u16(0), multiplicand, 1),
+                    svand_u16_m(predicate, carry_mask, polynomial, svdup_n_u16(0xFFFF)),
+                );
+                factor = svshr_n_u16_x(svptrue_b16(), factor, 1);
+                round += 1;
+            }
+
             let result = sveor_u16_m(predicate, target, target, product);
 
             svst1_u16(predicate, dst.as_mut_ptr().add(offset), result);
