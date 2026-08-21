@@ -450,7 +450,18 @@ impl QuicFuscateConnection {
         // with transport jitter (when enabled) into one release deadline. Connection::send
         // no longer maintains a parallel next_send_at gate.
         if established && !bypass_fec_for_path_control {
-            let transport_jitter = self.conn.transport_stealth_jitter_delay();
+            // TODO-903: ACK-only packets are not congestion-controlled
+            // (SendInfo.congestion_controlled == false, set from
+            // wrote_ack_eliciting in the transport). Delaying them only delays
+            // the peer's loss-recovery and RTT signals - the wire shape gains
+            // nothing because the ACK cadence is already randomized by the
+            // incoming packet stream. Stealth jitter stays on every
+            // ack-eliciting (data/probe) packet.
+            let transport_jitter = if send_info.congestion_controlled {
+                self.conn.transport_stealth_jitter_delay()
+            } else {
+                None
+            };
             if let Some(release_at) =
                 Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
             {
