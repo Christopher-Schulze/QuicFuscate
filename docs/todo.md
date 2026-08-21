@@ -136,6 +136,10 @@
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
 ## Queue
+### TODO-899 - Multi-RHS Gauss for FEC decode under loss
+- PARTIAL - remaining: (a) dedicated decode-under-loss Criterion bench in `ci_regression` (seeded equations + knowns, measuring the elimination `solve`), because the existing inventory has none and the 10x acceptance is NOT MEASURABLE without it; (b) decoder16 per-word elimination loop (`decoders/decoder16.rs:325`) still re-walks all words per column - multi-RHS conversion for the word domain is open. Done so far: decoder8 true multi-RHS (`O(u^2*m + B*u*m)`), decoder16 pivot-row clone hoisted to once per column, correctness fully proven (qf-fec `82/82`, e2e `14/14`, root `1717/1717`). Commits `5588f6d`, `c7f4f11`.
+- Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
+
 ### TODO-900 - Global lazy MTU pool, no zeroize-on-free
 - Per-conn 16-64M eager pool with 64K zeroize per free (lib.rs:1019) and global mutex ledger - 99% RAM waste.
 - Detail: `docs/todo/todo-900-per-connection-pool.md`
@@ -171,12 +175,9 @@
 - Detail: `docs/todo/todo-897-lazydecoder-leak.md`
 
 ### TODO-898 - Fix AVX512 and SVE2 GF16 carry-less reduction
-- DONE. AVX512 VPCLMULQDQ path now uses the same four-fold reduction as the SSE path (`GF16_PCLMUL_FOLDS`) - the single fold was the exact defect documented and fixed in SSE with a differential test. SVE2 kernel replaced the integer-product `svmul/svmulh` form (not carryless) and wrong constant `0x000B` with the Russian-peasant scheme matching the NEON kernel and the scalar field (`0x100B`, x^16 implicit). qf-simd `61/61`, qf-fec `82/82`. Commit `c51c5e3`.
+- DONE. AVX512 VPCLMULQDQ path now uses the same four-fold reduction as the SSE path (`GF16_PCLMUL_FOLDS`) - the single fold was the exact defect documented and fixed in SSE with a differential test. SVE2 kernel replaced the integer-product `svmul/svmulh` form (not carryless) and wrong constant `0x000B` with the Russian-peasant scheme matching the NEON kernel and the scalar field (`0x100B`, x^16 implicit). Miri full coverage on omega Linux aarch64: 33/33 AEGIS+MORUS, 0 UB. qf-simd `61/61`, qf-fec `82/82`. Commit `c51c5e3`.
 - Detail: `docs/todo/todo-898-avx512-sve2-gf16-fix.md`
 
-### TODO-899 - Multi-RHS Gauss for FEC decode under loss
-- PARTIAL. `Decoder8` is true multi-RHS (one augmented pass for all B byte columns, `O(u^2*m + B*u*m)`); decoder16 now clones the pivot row once per column instead of once per eliminated row. Correctness fully proven: qf-fec `82/82`, e2e `14/14`, root `1717/1717`. **The 10x speedup acceptance is NOT MET and NOT MEASURABLE**: `ci_regression` has no decoder bench (`fec_matrix_mul` never enters the elimination loop), so a dedicated decode-under-loss Criterion bench must be added first. Commits `5588f6d` + decoder16 clone hoist (this commit).
-- Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
 
 ### TODO-903 - Brain jitter gate and FlowShaper tuning
 - DONE. Jitter half: the core timing gate skips ACK-only packets via `SendInfo.congestion_controlled`; stealth jitter stays on every ack-eliciting packet (`282e096`). FlowShaper half: traffic-aware range from the bounded 2s history - burst >=32 records -> low half floored at min/2, idle <8 -> full spread, steady -> classic uniform; replaces the flat uniform that fingerprinted bursts as constant-ish profiles. CE-ratio deviation documented in the detail file. qf-stealth `127/127`, root flow_shaper `12/12`. Commit `65a6e7c`.
