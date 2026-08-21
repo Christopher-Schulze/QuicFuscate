@@ -527,13 +527,20 @@ impl PlatformBackend for MacOSPlatform {
     }
 
     fn restore_dns(&self) -> Result<(), PlatformError> {
-        let service = self.dns_service_name()?;
-
-        // Restore original DNS servers instead of blindly resetting to DHCP
+        // Restore original DNS servers instead of blindly resetting to DHCP.
+        // The no-op check must run BEFORE resolving the network service: on hosts
+        // whose default route is a VPN interface (ipsec0/utun), service resolution
+        // fails even though there is nothing to restore, and failing here would
+        // turn a legitimate no-op into a spurious error (TODO-623 family).
         let saved = self.original_dns.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(saved) = saved else {
+            log::warn!("no captured DNS state; leaving the current configuration untouched");
+            return Ok(());
+        };
 
+        let service = self.dns_service_name()?;
         match saved {
-            Some(CapturedDns::Servers(servers)) => {
+            CapturedDns::Servers(servers) => {
                 // Restore the exact original DNS servers, in their original order.
                 let mut args = vec!["-setdnsservers", &service];
                 let server_refs: Vec<&str> = servers.iter().map(String::as_str).collect();
@@ -541,18 +548,10 @@ impl PlatformBackend for MacOSPlatform {
                 self.run_networksetup(&args)?;
                 log::info!("DNS restored to original servers: {servers:?}");
             }
-            Some(CapturedDns::Dhcp) => {
+            CapturedDns::Dhcp => {
                 // The service genuinely had no servers set, so Empty is the original state.
                 self.run_networksetup(&["-setdnsservers", &service, "Empty"])?;
                 log::info!("DNS restored to DHCP, which was the captured original state");
-            }
-            None => {
-                // Nothing was captured, so this process never took ownership of the DNS
-                // configuration. Setting Empty here would erase servers it did not set.
-                log::warn!(
-                    "no captured DNS state for service {service}; leaving the current configuration untouched"
-                );
-                return Ok(());
             }
         }
 

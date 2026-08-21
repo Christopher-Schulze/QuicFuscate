@@ -967,9 +967,18 @@ impl IoDriver {
         tun: &Arc<parking_lot::Mutex<TunInterface>>,
         ingress: &ClientTunnelIngress,
     ) -> Result<(), EngineError> {
-        for packet in ingress.drain() {
+        let drained = ingress.drain();
+        for (index, packet) in drained.iter().enumerate() {
             let mut tun_guard = tun.lock();
-            if let Err(error) = tun_guard.write_packet(&packet) {
+            if let Err(error) = tun_guard.write_packet(packet) {
+                // TODO-896: WouldBlock is transient kernel ring backpressure, not a
+                // data-plane fault. Re-queue this packet and everything after it so
+                // the next poll retries after the TUN fd becomes writable again.
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    self.stats.tun_write_backpressure.fetch_add(1, Ordering::Relaxed);
+                    ingress.restore(drained[index..].to_vec());
+                    return Ok(());
+                }
                 log::warn!("TUN write error: {:?}", error);
                 return Err(self.tun_write_error("client H3/MASQUE downlink", error));
             }

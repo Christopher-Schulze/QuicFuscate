@@ -1201,6 +1201,11 @@ pub(super) async fn process_live_server_client_datagram(
                         payload,
                     );
                     if let Err(error) = tun_sink.write(payload) {
+                        // TODO-896: WouldBlock is transient backpressure, not a fault.
+                        if error.kind() == std::io::ErrorKind::WouldBlock {
+                            masque_metrics.record_tun_write_backpressure();
+                            return;
+                        }
                         log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
                         record_live_tun_fault(
                             &tun_fault_for_masque,
@@ -1288,6 +1293,15 @@ pub(super) async fn process_live_server_client_datagram(
                             data,
                         );
                         if let Err(error) = tun.write(data) {
+                            // TODO-896: transient backpressure (EAGAIN/WouldBlock on a
+                            // non-blocking TUN fd) is NOT a data-plane fault. The packet is
+                            // already fanned out to the client socket; dropping only the TUN
+                            // copy under kernel ring pressure beats tearing down every live
+                            // tunnel. Real faults (EBADF, EINVAL, ENODEV) keep the hard path.
+                            if error.kind() == std::io::ErrorKind::WouldBlock {
+                                metrics.record_tun_write_backpressure();
+                                return;
+                            }
                             log::warn!("Server TUN write failed: {:?}", error);
                             record_live_tun_fault(
                                 &tun_fault_for_stream,

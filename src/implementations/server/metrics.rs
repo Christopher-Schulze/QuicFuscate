@@ -231,6 +231,9 @@ pub struct Metrics {
 
     // TUN/MASQUE downlink backpressure metrics
     pub tun_downlink_backpressure_enqueued: AtomicU64,
+    /// Transient TUN-write backpressure events (EAGAIN/WouldBlock) that were
+    /// absorbed without failing the data plane (TODO-896).
+    pub tun_write_backpressure_absorbed: AtomicU64,
     pub tun_downlink_backpressure_retried: AtomicU64,
     pub tun_downlink_backpressure_pending_packets: AtomicU64,
     pub tun_downlink_backpressure_pending_bytes: AtomicU64,
@@ -382,6 +385,7 @@ impl Metrics {
             routing_time_exceeded: AtomicU64::new(0),
             routing_icmpv6: AtomicU64::new(0),
             tun_downlink_backpressure_enqueued: AtomicU64::new(0),
+            tun_write_backpressure_absorbed: AtomicU64::new(0),
             tun_downlink_backpressure_retried: AtomicU64::new(0),
             tun_downlink_backpressure_pending_packets: AtomicU64::new(0),
             tun_downlink_backpressure_pending_bytes: AtomicU64::new(0),
@@ -848,6 +852,12 @@ impl Metrics {
 
     pub fn record_tun_downlink_backpressure_enqueued(&self) {
         self.tun_downlink_backpressure_enqueued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one transient TUN-write backpressure event that was absorbed
+    /// without failing the data plane (TODO-896).
+    pub fn record_tun_write_backpressure(&self) {
+        self.tun_write_backpressure_absorbed.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_tun_downlink_backpressure_retry(&self) {

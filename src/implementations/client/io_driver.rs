@@ -70,6 +70,9 @@ pub struct IoDriverStats {
     pub errors: AtomicU64,
     /// Number of terminal data-plane faults published by this driver.
     pub data_plane_faults: AtomicU64,
+    /// Transient TUN write EAGAIN events absorbed without failing the data
+    /// plane (TODO-896).
+    pub tun_write_backpressure: AtomicU64,
 }
 
 impl IoDriverStats {
@@ -81,6 +84,7 @@ impl IoDriverStats {
             udp_packets_received: self.udp_packets_received.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
             data_plane_faults: self.data_plane_faults.load(Ordering::Relaxed),
+            tun_write_backpressure: self.tun_write_backpressure.load(Ordering::Relaxed),
         }
     }
 }
@@ -93,7 +97,9 @@ pub struct IoDriverStatsSnapshot {
     pub udp_packets_received: u64,
     pub errors: u64,
     pub data_plane_faults: u64,
+    pub tun_write_backpressure: u64,
 }
+
 
 const MAX_CLIENT_INGRESS_PACKETS: usize = 256;
 const MAX_CLIENT_INGRESS_BYTES: usize = 384 * 1024;
@@ -139,6 +145,32 @@ impl ClientTunnelIngress {
         let mut state = self.state.lock();
         state.bytes = 0;
         state.packets.drain(..).collect()
+    }
+
+    /// Return un-flushed packets to the front of the queue after a partial
+    /// TUN write (WouldBlock backpressure), preserving order. Capacity limits
+    /// still apply: overflow at the tail is dropped and counted by the caller.
+    fn restore(&self, mut packets: Vec<Vec<u8>>) {
+        if packets.is_empty() {
+            return;
+        }
+        let restored_bytes: usize = packets.iter().map(Vec::len).sum();
+        let mut state = self.state.lock();
+        // Prepend in original order.
+        while let Some(packet) = packets.pop() {
+            state.packets.push_front(packet);
+        }
+        state.bytes = state.bytes.saturating_add(restored_bytes);
+        // Enforce the byte bound; drop from the tail (oldest restored first is
+        // wrong direction - newest arrivals are the tail).
+        while state.bytes > MAX_CLIENT_INGRESS_BYTES {
+            let Some(dropped) = state.packets.pop_back() else { break };
+            state.bytes = state.bytes.saturating_sub(dropped.len());
+        }
+        while state.packets.len() > MAX_CLIENT_INGRESS_PACKETS {
+            let Some(dropped) = state.packets.pop_back() else { break };
+            state.bytes = state.bytes.saturating_sub(dropped.len());
+        }
     }
 }
 

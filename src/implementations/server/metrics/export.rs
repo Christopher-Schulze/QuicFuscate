@@ -140,6 +140,12 @@ impl Metrics {
                 "quicfuscate_tun_downlink_backpressure_events_total{{event=\"{event}\"}} {value}\n"
             );
         }
+        out.push_str("# HELP quicfuscate_tun_write_backpressure_absorbed_total Server TUN write EAGAIN events absorbed without data-plane failure\n");
+        out.push_str("# TYPE quicfuscate_tun_write_backpressure_absorbed_total counter\n");
+        write_metric!(
+            "quicfuscate_tun_write_backpressure_absorbed_total {}\n\n",
+            self.tun_write_backpressure_absorbed.load(Ordering::Relaxed)
+        );
         out.push('\n');
 
         out.push_str("# HELP quicfuscate_tun_data_plane_ready Whether the requested server TUN data plane is available\n");
