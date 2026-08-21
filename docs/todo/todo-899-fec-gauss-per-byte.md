@@ -4,7 +4,7 @@ title: Multi-RHS Gauss for FEC decode under loss
 severity: HIGH
 phase: S
 priority: P1
-status: QUEUED
+status: DONE
 created: 2026-08-21
 depends_on: []
 ---

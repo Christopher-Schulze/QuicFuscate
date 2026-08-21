@@ -4,7 +4,7 @@ title: Fix LazyDecoder seen_seqs leak and fastpath death
 severity: HIGH
 phase: S
 priority: P1
-status: QUEUED
+status: DONE
 created: 2026-08-21
 depends_on: []
 ---

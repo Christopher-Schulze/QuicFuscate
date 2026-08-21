@@ -4,7 +4,7 @@ title: Remove AesBlock Drop from hot loop
 severity: HIGH
 phase: S
 priority: P0
-status: QUEUED
+status: DONE
 created: 2026-08-21
 depends_on: []
 ---
