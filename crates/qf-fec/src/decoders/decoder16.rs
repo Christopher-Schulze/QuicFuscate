@@ -319,88 +319,107 @@ impl Decoder16 {
         }
 
         let words = min_len / 2;
-        let mut solutions = vec![Vec::with_capacity(words); u];
-        let mut solved_any = false;
 
-        for w in 0..words {
-            // Build A (m x u) and y (m) for this word index
-            let mut a = vec![vec![0u16; u]; m];
-            let mut y = vec![0u16; m];
-            for (i, eq) in self.equations.iter().enumerate() {
-                let Some(byte_offset) = w.checked_mul(2) else {
-                    return false;
-                };
-                let Some(end) = byte_offset.checked_add(2) else {
-                    return false;
-                };
-                if end <= eq.len {
-                    let b0 = eq.data[byte_offset] as u16;
-                    let b1 = eq.data[byte_offset + 1] as u16;
-                    y[i] = (b0 << 8) | b1;
-                    for (col, &sid) in unknowns.iter().enumerate() {
-                        for j in 0..self.k {
-                            if self.source_id_for(eq.base_id, j) == sid {
-                                a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
-                                break;
+        // TODO-899b: multi-RHS elimination over the whole word domain.
+        // The previous loop rebuilt the m x u coefficient matrix and re-ran
+        // full Gaussian elimination for every word index w (O(words * u^2 * m)
+        // with a fresh matrix allocation each pass). The coefficient matrix is
+        // identical for every RHS, so all words ride ONE augmented matrix
+        // yb[m][words]: O(u^2*m + words*u*m), the dense optimum.
+        let mut a = vec![vec![0u16; u]; m];
+        let mut yb = vec![vec![0u16; words]; m];
+        for (i, eq) in self.equations.iter().enumerate() {
+            let eq_words = eq.len / 2;
+            let shared = words.min(eq_words);
+            for (col, &sid) in unknowns.iter().enumerate() {
+                'coeff: for j in 0..self.k {
+                    if self.source_id_for(eq.base_id, j) == sid {
+                        a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
+                        break 'coeff;
+                    }
+                }
+            }
+            for w in 0..shared {
+                let b0 = eq.data[w * 2] as u16;
+                let b1 = eq.data[w * 2 + 1] as u16;
+                yb[i][w] = (b0 << 8) | b1;
+            }
+            for j in 0..self.k {
+                let sid = self.source_id_for(eq.base_id, j);
+                if self.known.contains_key(&sid) {
+                    if let Some((kd, klen)) = self.known.get(&sid) {
+                        let kwords = klen / 2;
+                        let known_shared = shared.min(kwords);
+                        let coeff = *eq.coeffs.get(j).unwrap_or(&0);
+                        if coeff != 0 {
+                            for w in 0..known_shared {
+                                let b0 = kd[w * 2] as u16;
+                                let b1 = kd[w * 2 + 1] as u16;
+                                let word = (b0 << 8) | b1;
+                                yb[i][w] ^= gf_tables::gf16_mul(coeff, word);
                             }
                         }
                     }
                 }
             }
-            // Gaussian elimination in GF(2^16)
-            let mut row = 0usize;
-            let mut pivot_rows = vec![usize::MAX; u];
-            for col in 0..u {
-                // find pivot
-                let mut pivot = None;
-                #[allow(clippy::needless_range_loop)]
-                for r in row..m {
-                    if a[r][col] != 0 {
-                        pivot = Some(r);
-                        break;
-                    }
-                }
-                if let Some(pr) = pivot {
-                    if pr != row {
-                        a.swap(pr, row);
-                        y.swap(pr, row);
-                    }
-                } else {
-                    continue;
-                }
-                pivot_rows[col] = row;
-                let inv = gf_tables::gf16_inv(a[row][col]);
-                // scale
-                for cell in a[row].iter_mut().take(u) {
-                    *cell = gf_tables::gf16_mul(*cell, inv);
-                }
-                y[row] = gf_tables::gf16_mul(y[row], inv);
-                // eliminate other rows (vectorized). One pivot-row snapshot per
-                // column keeps src/dst disjoint for the borrow checker; the old
-                // code cloned inside the r-loop, once per eliminated row.
-                let pivot_a = a[row].clone();
-                for r in 0..m {
-                    if r != row && a[r][col] != 0 {
-                        let f = a[r][col];
-                        gf16_mul_slice(f, &pivot_a[..u], &mut a[r][..u]);
-                        // Update RHS
-                        let prody = gf_tables::gf16_mul(f, y[row]);
-                        y[r] ^= prody;
-                    }
-                }
-                row += 1;
-                if row == m {
+        }
+
+        // Single Gaussian elimination in GF(2^16) across all RHS columns.
+        let mut row = 0usize;
+        let mut pivot_rows = vec![usize::MAX; u];
+        for col in 0..u {
+            // find pivot
+            let mut pivot = None;
+            #[allow(clippy::needless_range_loop)]
+            for r in row..m {
+                if a[r][col] != 0 {
+                    pivot = Some(r);
                     break;
                 }
             }
-            if pivot_rows.contains(&usize::MAX) {
-                return false;
+            if let Some(pr) = pivot {
+                if pr != row {
+                    a.swap(pr, row);
+                    yb.swap(pr, row);
+                }
+            } else {
+                continue;
             }
-            // Reduced rows hold the solution for their corresponding pivot columns.
-            for col in 0..u {
-                solutions[col].push(y[pivot_rows[col]]);
-                solved_any = true;
+            pivot_rows[col] = row;
+            let inv = gf_tables::gf16_inv(a[row][col]);
+            // scale pivot row and its entire RHS vector
+            for cell in a[row].iter_mut().take(u) {
+                *cell = gf_tables::gf16_mul(*cell, inv);
             }
+            for cell in yb[row].iter_mut() {
+                *cell = gf_tables::gf16_mul(*cell, inv);
+            }
+            // eliminate other rows. One pivot-row snapshot per column keeps
+            // src/dst disjoint for the borrow checker; the same factor f also
+            // updates every RHS word via the vectorized slice kernel.
+            let pivot_a = a[row].clone();
+            let pivot_rhs = yb[row].clone();
+            for r in 0..m {
+                if r != row && a[r][col] != 0 {
+                    let f = a[r][col];
+                    gf16_mul_slice(f, &pivot_a[..u], &mut a[r][..u]);
+                    gf16_mul_slice(f, &pivot_rhs[..words], &mut yb[r][..words]);
+                }
+            }
+            row += 1;
+            if row == m {
+                break;
+            }
+        }
+        if pivot_rows.contains(&usize::MAX) {
+            return false;
+        }
+        // Reduced rows hold the solution vectors for their pivot columns.
+        let mut solutions = vec![Vec::with_capacity(words); u];
+        let mut solved_any = false;
+        for col in 0..u {
+            solutions[col] = core::mem::take(&mut yb[pivot_rows[col]]);
+            solved_any = true;
         }
 
         if !solved_any {
