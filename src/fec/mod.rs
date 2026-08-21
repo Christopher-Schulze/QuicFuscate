@@ -88,7 +88,8 @@ pub(crate) use qf_fec::runtime_plan::{FecAmbientInputs, FecRuntimePlan};
 pub(crate) use qf_fec::FecComputeProfile;
 use qf_transport_types::TransportObserver;
 
-pub use qf_fec::decoders::{FecDecoderConfigError, MAX_DECODER_SOURCE_COUNT};
+pub use qf_fec::decoders::{Decoder16, FecDecoderConfigError, MAX_DECODER_SOURCE_COUNT};
+pub use qf_fec::Encoder16;
 
 // ============================================================================
 // FEC implementation with accelerated kernels where available.

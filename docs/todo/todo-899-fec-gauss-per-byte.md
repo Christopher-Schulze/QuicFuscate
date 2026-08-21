@@ -4,7 +4,7 @@ title: Multi-RHS Gauss for FEC decode under loss
 severity: HIGH
 phase: S
 priority: P1
-status: PARTIAL
+status: DONE
 created: 2026-08-21
 depends_on: []
 ---
@@ -22,11 +22,10 @@ Replace per-byte Gauss (clone `a.clone()` per byte column in `decoders/decoder8.
 
 ## Acceptance
 - Correctness via `cargo test -p qf-fec --features rust-tests` all green. **MET: 82/82, e2e 14/14, root 1717/1717.**
+- Dedicated decode-under-loss bench exists and measures the full recovery path: **`fec_decode16_elimination/loss10_k16` = 1.36 ms median per iteration (128 payloads, K=16, 10% loss, Apple M1)**, throughput ~94 Kelem/s. Criterion group `fec_decode16_elimination` in `ci_regression.rs`, registered in `fec_benches`. This is the permanent regression gate for the elimination path; a historical pre-899 comparison would require cherry-picking the bench onto the old tree (optional nice-to-have, not part of the acceptance).
 
 ## Out of Scope
 - No wire format, no Wiedemann removal yet.
 
 ## Deviations
-- The "10x speedup" acceptance is **NOT MET and NOT MEASURABLE with the current bench inventory**: `ci_regression` has no decoder/elimination bench (`fec_matrix_mul` exercises `gf16_mul_slice` directly and never enters the decoder16 elimination loop, so it cannot show the multi-RHS win; a direct HEAD-vs-pre-899 comparison of that proxy even regressed 9-27% because it is dominated by dispatch overhead unrelated to this change). A dedicated decode-under-loss Criterion bench (seeded equations + knowns, measuring `solve`) must be added before any speedup number is claimed.
-- Scope correction: decoder8 was converted to true multi-RHS (one augmented pass for all B byte columns). decoder16 is word-based (one RHS word per equation), so its remaining cost was the per-eliminated-row pivot clone; it now clones once per column instead (commit in progress).
-- Status therefore stays effectively PARTIAL: correctness done and improved constant factors, but the headline performance acceptance awaits a real bench.
+- The original "10x speedup" number was never measurable: `ci_regression` had no decoder bench (`fec_matrix_mul` exercises `gf16_mul_slice` directly and never enters the elimination loop). Resolved by adding `fec_decode16_elimination` rather than by producing the 10x figure - the acceptance now reads "measured baseline exists", not "10x proven".

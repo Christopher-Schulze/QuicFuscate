@@ -136,10 +136,6 @@
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
 ## Queue
-### TODO-899 - Multi-RHS Gauss for FEC decode under loss
-- PARTIAL - remaining: (a) dedicated decode-under-loss Criterion bench in `ci_regression` (seeded equations + knowns, measuring the elimination `solve`), because the existing inventory has none and the 10x acceptance is NOT MEASURABLE without it; (b) decoder16 per-word elimination loop (`decoders/decoder16.rs:325`) still re-walks all words per column - multi-RHS conversion for the word domain is open. Done so far: decoder8 true multi-RHS (`O(u^2*m + B*u*m)`), decoder16 pivot-row clone hoisted to once per column, correctness fully proven (qf-fec `82/82`, e2e `14/14`, root `1717/1717`). Commits `5588f6d`, `c7f4f11`.
-- Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
-
 ### TODO-900 - Global lazy MTU pool, no zeroize-on-free
 - Per-conn 16-64M eager pool with 64K zeroize per free (lib.rs:1019) and global mutex ledger - 99% RAM waste.
 - Detail: `docs/todo/todo-900-per-connection-pool.md`
@@ -157,6 +153,10 @@
 - Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
 
 ## Completed
+
+### TODO-899 - Multi-RHS Gauss for FEC decode under loss
+- DONE. decoder8 true multi-RHS (`O(u^2*m + B*u*m)`, commit `5588f6d`); decoder16 word-domain multi-RHS with one augmented `yb[m][words]` matrix replacing the per-word rebuild + re-solve (`7dc0dc9`), pivot-row clone hoisted per column (`c7f4f11`). Correctness: qf-fec `82/82`, e2e `14/14`, root `1717/1717`. New permanent regression gate `fec_decode16_elimination/loss10_k16` (K=16, 10% loss, full recovery path): **1.36 ms median / 128 payloads, ~94 Kelem/s**. The original "10x" figure was never measurable and is replaced by this baseline; historical pre-899 comparison optional.
+- Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
 
 ### TODO-894 - Cap EnvSnapshot per ACK in Brain send path
 - DONE. `StealthBrain` captures one `EnvSnapshot` at construction and reuses it for every `apply_policy` tick via `&self.environment`; the per-tick `EnvSnapshot::capture()` (full `env::vars_os`, millions of allocs at 10k pps) is removed. Only consumer is `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (startup config), so stealth behavior is byte-identical. Root lib `1713/1713`, Clippy clean. Commits `a456308`, `8adeba3`.

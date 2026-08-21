@@ -1068,7 +1068,82 @@ criterion_group!(
     bench_brain_packet_observer,
 );
 
-criterion_group!(fec_benches, bench_fec_matrix_mul,);
+// ---------------------------------------------------------------------------
+// FEC decoder16 decode-under-loss elimination (TODO-899)
+// ---------------------------------------------------------------------------
+// Measures the full Decoder16 recovery path under 10% loss: sources stream in
+// with two dropped ids per window, repairs trigger the augmented multi-RHS
+// Gaussian elimination via get_result(). This is the bench the TODO-899
+// speedup acceptance must be measured against - fec_matrix_mul never enters
+// the elimination loop.
+fn bench_fec_decode16_elimination(c: &mut Criterion) {
+    use quicfuscate::fec::{Decoder16, Encoder16, FecPacket};
+    use std::sync::Arc;
+
+    const K: usize = 16;
+    const REPAIRS: usize = 4;
+    const PAYLOAD: usize = 1024;
+    const WINDOWS: u64 = 8;
+
+    fn mk_src(id: u64, pool: &Arc<quicfuscate::optimize::MemoryPool>) -> FecPacket {
+        let mut buf = pool.alloc();
+        for (i, b) in buf.iter_mut().take(PAYLOAD).enumerate() {
+            *b = (id as usize).wrapping_add(i) as u8;
+        }
+        FecPacket::try_new(id, Some(buf), PAYLOAD, true, None, 0, Arc::clone(pool))
+            .expect("source packet")
+    }
+
+    let mut group = c.benchmark_group("fec_decode16_elimination");
+    // Each iteration decodes WINDOWS windows x K packets = 128 payloads.
+    group.throughput(Throughput::Elements(WINDOWS * K as u64));
+    group.bench_function("loss10_k16", |bench| {
+        bench.iter_batched(
+            || {
+                let pool = Arc::new(quicfuscate::optimize::MemoryPool::new(256, 2048));
+                let mut encoder = Encoder16::new(K, K + REPAIRS);
+                let mut inputs: Vec<FecPacket> =
+                    Vec::with_capacity((K + REPAIRS) * WINDOWS as usize);
+                for window in 0..WINDOWS {
+                    let base = window * K as u64;
+                    // 10% loss: drop the same two source ids every window so the
+                    // decoder always runs full elimination.
+                    let missing = [base + 3, base + 11];
+                    for id in base..base + K as u64 {
+                        if !missing.contains(&id) {
+                            inputs.push(mk_src(id, &pool));
+                        }
+                        encoder.take_packet(mk_src(id, &pool));
+                    }
+                    for repair_index in 0..REPAIRS {
+                        if let Some(repair) = encoder.generate_repair_packet(repair_index, &pool)
+                        {
+                            inputs.push(repair);
+                        }
+                    }
+                    encoder.clear_window();
+                }
+                (Arc::clone(&pool), inputs)
+            },
+            |(pool, inputs)| {
+                let mut decoder = Decoder16::new(K, Arc::clone(&pool));
+                let mut recovered_windows = 0usize;
+                for packet in inputs {
+                    decoder.take_packet(packet);
+                    // get_result() drives the augmented multi-RHS elimination.
+                    if decoder.get_result().is_some() {
+                        recovered_windows += 1;
+                    }
+                }
+                std::hint::black_box(recovered_windows);
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(fec_benches, bench_fec_matrix_mul, bench_fec_decode16_elimination,);
 
 criterion_group!(stealth_benches, bench_padding_gen,);
 
