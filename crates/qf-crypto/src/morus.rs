@@ -612,7 +612,11 @@ fn morus_backend() -> MorusBackend {
 
         #[cfg(target_arch = "aarch64")]
         {
-            if qf_cpu::FeatureDetector::instance().features_full().neon {
+            // Miri cannot execute NEON intrinsics (llvm.aarch64.neon.* are
+            // unsupported operations in the interpreter), so the Neon backend
+            // is UB under Miri even on real NEON hardware. Force scalar there;
+            // production builds keep full NEON dispatch.
+            if !cfg!(miri) && qf_cpu::FeatureDetector::instance().features_full().neon {
                 MorusBackend::Neon
             } else {
                 MorusBackend::Scalar
