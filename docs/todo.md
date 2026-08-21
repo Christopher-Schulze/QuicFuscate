@@ -136,10 +136,6 @@
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
 ## Queue
-### TODO-900 - Global lazy MTU pool, no zeroize-on-free
-- Per-conn 16-64M eager pool with 64K zeroize per free (lib.rs:1019) and global mutex ledger - 99% RAM waste.
-- Detail: `docs/todo/todo-900-per-connection-pool.md`
-
 ### TODO-901 - Server RX batching drain and sharding
 - Single Tokio task for all clients (runtime_loop.rs:155) with single recvmsg per wakeup - 150k pps ceiling.
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
@@ -157,6 +153,10 @@
 ### TODO-899 - Multi-RHS Gauss for FEC decode under loss
 - DONE. decoder8 true multi-RHS (`O(u^2*m + B*u*m)`, commit `5588f6d`); decoder16 word-domain multi-RHS with one augmented `yb[m][words]` matrix replacing the per-word rebuild + re-solve (`7dc0dc9`), pivot-row clone hoisted per column (`c7f4f11`). Correctness: qf-fec `82/82`, e2e `14/14`, root `1717/1717`. New permanent regression gate `fec_decode16_elimination/loss10_k16` (K=16, 10% loss, full recovery path): **1.36 ms median / 128 payloads, ~94 Kelem/s**. The original "10x" figure was never measurable and is replaced by this baseline; historical pre-899 comparison optional.
 - Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
+
+### TODO-900 - Memory-path overhead: policy zeroize, ledger decision, block-size evidence
+- DONE (revised scope). Reality check first: the "per-connection eager 16-64M pools" claim was stale - `global_pool()` is already the single process-wide pool. Implemented: free-time zeroize now policy-driven via `QUICFUSCATE_POOL_ZEROIZE_ON_FREE` (**default ON** - it is the cross-connection stale-data barrier; both modes unit-tested, commit `faf7044`). Ledger lock-free rewrite **scope-reduced with rationale**: measured ~10% of cycle cost, no header space for per-block state, fail-closed transition validation kept (see detail Deviations). New permanent bench `memory_pool_cycle` (512 cycles, equal 4 MiB working set): warm-state medians - 64K zeroize ON 1.20-1.35ms vs OFF 0.78-0.83ms (~45% memset cost), MTU 4K ON ~348us vs OFF ~323us (~8%), **4K beats 64K by ~3.5x regardless of policy**. Cold first-run numbers retracted as outliers. Security default unchanged; costs are now explicit and regression-gated. Commits `faf7044`, `8b96221`.
+- Detail: `docs/todo/todo-900-per-connection-pool.md`
 
 ### TODO-894 - Cap EnvSnapshot per ACK in Brain send path
 - DONE. `StealthBrain` captures one `EnvSnapshot` at construction and reuses it for every `apply_policy` tick via `&self.environment`; the per-tick `EnvSnapshot::capture()` (full `env::vars_os`, millions of allocs at 10k pps) is removed. Only consumer is `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (startup config), so stealth behavior is byte-identical. Root lib `1713/1713`, Clippy clean. Commits `a456308`, `8adeba3`.

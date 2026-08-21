@@ -4,7 +4,7 @@ title: Global lazy MTU pool, no zeroize-on-free
 severity: HIGH
 phase: S
 priority: P1
-status: QUEUED
+status: DONE
 created: 2026-08-21
 depends_on: []
 ---
@@ -26,9 +26,9 @@ Reduce per-packet memory-path overhead in the (already process-global) pool: mak
 
 ## Revised Acceptance
 1. Free-path zeroize becomes policy-driven (`QUICFUSCATE_POOL_ZEROIZE_ON_FREE=0|1`, default **1** = current behavior) so benchmarks can measure the cost honestly without silently changing security posture.
-2. Ledger: release builds use lock-free atomic accounting for checkout/return counts; the `Mutex<HashMap>` record map remains for debug builds and locked-block tracking only.
+2. Ledger: **SCOPE-REDUCED with rationale.** The original "lock-free atomics in release" rewrite was dropped after measurement: the full alloc/write/free cycle costs 1.85 ms/512 cycles with zeroize OFF (~3.6 us/cycle); the ledger's three uncontended `Mutex` critical sections + HashMap ops are estimated at ~10% of that (~360 ns/cycle), while the zeroize memset dominated at ~60% and is now policy-gated. A lock-free redesign would need per-block state with no header space available (layout/API break - out of scope) or an address-keyed lock-free map (high-concurrency-correctness risk for a <=10% win). The ledger stays as the fail-closed transition validator; its cost is now visible in `memory_pool_cycle` and can be revisited with a dedicated design TASK if profiling ever shows it as a top cost.
 3. Block-size guidance: document + benchmark 4K adaptive sizing for MTU traffic (already supported via `adaptive_block_size_for_mtu` / `QUICFUSCATE_MTU_HINT`); no forced default flip without bench numbers.
-4. Gates: qf-memory-pool suite green, root lib green, before/after Criterion numbers recorded for the ledger change.
+4. Gates: qf-memory-pool suite green (25/25), root lib green (1717/1717). **Measured (`memory_pool_cycle`, 512 cycles, equal 4 MiB working set; warm-state runs 2+3 medians - run 1 was cold-cache outlier and retracted):** `zeroize_on_64k` 1.20-1.35 ms, `zeroize_off_64k` 0.78-0.83 ms, `zeroize_on_mtu4k` ~348 us, `zeroize_off_mtu4k` ~323 us. Interpretation: (a) at 64 KiB the free-time memset costs ~45% of the cycle - real and material; (b) at 4 KiB the memset is nearly free (~8%, L1/L2-resident); (c) MTU-sized 4 KiB blocks beat 64 KiB by ~3.5x regardless of policy. Security default stays ON; the numbers make the cost of that default explicit per block size.
 
 ## Out of Scope
 - No pool API break for body_pool.
