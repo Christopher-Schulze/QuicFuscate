@@ -495,14 +495,18 @@ impl Morus1280State {
                 return;
             }
         }
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        // Miri cannot execute NEON intrinsics (llvm.aarch64.neon.* are
+        // unsupported operations in the interpreter), so the SIMD path is UB
+        // under Miri even when target_feature="neon" is compiled in. The
+        // runtime morus_backend() gate alone is not enough: this compile-time
+        // branch bypasses it entirely.
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(miri)))]
         {
             // SAFETY: compile-time target_feature="neon" guarantees NEON availability;
             // `self.s` provides valid aligned storage for vld1q_u64_x2 / vst1q_u64_x2.
             unsafe { self.update_simd_neon(m) }
         }
-        // Scalar fallback (compiled on non-NEON aarch64 and other targets)
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon", not(miri))))]
         {
             let [s0_0, s0_1, s0_2, s0_3] = self.s[0];
             let [s1_0, s1_1, s1_2, s1_3] = self.s[1];
