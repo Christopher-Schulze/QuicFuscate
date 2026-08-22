@@ -135,14 +135,14 @@
 - Blocked after local implementation and commit `92a05ac`; the remaining Omega checkout attribution gate is unavailable because the local SSH client fails with `No user exists for uid 501`, and GitHub push currently fails DNS resolution.
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
+### TODO-902 - io_uring TX triple-copy and channel1 fix
+- BLOCKED on Linux environment: the io_uring path builds only behind the `io_uring` feature on Linux; this macOS arm64 host cannot compile, run, or verify any change to `uring_batch.rs`/`worker.rs`. Evidence verified real (slot copy 543-546, `channel(1)` worker.rs:41); the 2x-throughput acceptance needs a live Linux x86_64 server loop (Omega is aarch64, no live workload).
+- Detail: `docs/todo/todo-902-iouring-tx-triple-copy.md`
+
 ## Queue
 ### TODO-901 - Server RX batching drain and sharding
 - PARTIAL. Step 1 DONE (`456edf7`): `recv_datagram_batch` drains until `WouldBlock` (cap 64, one tokio wakeup per burst) and the loop iterates the batch through the unchanged stateful path - syscall-per-datagram cap removed. Remaining: full SO_REUSEPORT sharding needs live_state partitioning (client maps/admission/fanout per shard), consistent client-hash routing, TUN/admin ownership split, cross-shard shutdown; own design pass + Omega pps proof required.
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
-
-### TODO-902 - io_uring TX triple-copy and channel1 fix
-- Triple-copy + channel(1) + Sleep(1ms) poll (uring_batch.rs:543) - 2x throughput via zero-copy and submit_and_wait.
-- Detail: `docs/todo/todo-902-iouring-tx-triple-copy.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
 - Keep Initial, Handshake, unauthenticated probes, and fallback traffic standards-compatible, then negotiate the TODO-884 winner only inside the authenticated encrypted control plane. Derive independent directional keys through the existing TLS exporter, bind the selection against downgrade and cross-connection reuse, switch at deterministic packet-number boundaries, and make the winner the automatic QuicFuscate-to-QuicFuscate post-auth default while retaining explicit standard-only and advanced-required modes.
