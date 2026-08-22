@@ -6,6 +6,7 @@ import type {
   QKeyEntry,
   ConfirmDialogRequest,
 } from "$lib/types";
+import { isAuthError } from "$lib/api";
 
 // Navigation
 let _activeTab = $state<NavTab>("dashboard");
@@ -36,6 +37,20 @@ export function getAuthError(): string | null {
 }
 export function setAuthError(v: string | null): void {
   _authError = v;
+}
+
+/**
+ * Handles an authentication error by clearing the auth-error message and
+ * triggering the auth-required flow. Returns true when the error was an
+ * auth error (and was handled), false otherwise - so callers can branch:
+ *
+ *   if (!handleAuthError(e)) { showFallbackToast(); }
+ */
+export function handleAuthError(e: unknown): boolean {
+  if (!isAuthError(e)) return false;
+  _authError = null;
+  _authRequired = true;
+  return true;
 }
 
 export function setAdminUser(v: string | null): void {

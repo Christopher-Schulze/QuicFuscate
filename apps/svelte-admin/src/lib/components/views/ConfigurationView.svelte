@@ -8,11 +8,10 @@
   import AdminSettingsPanel from "$lib/components/panels/AdminSettingsPanel.svelte";
   import ServerOpsPanel from "$lib/components/panels/ServerOpsPanel.svelte";
   import ReferenceGuide from "$lib/components/panels/ReferenceGuide.svelte";
-  import { getJson, postJson, ApiError, isAuthError, sanitizeErrorMessage } from "$lib/api";
+  import { getJson, postJson, ApiError, sanitizeErrorMessage } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
   import {
-    setAuthRequired,
-    setAuthError,
+    handleAuthError,
     setConfigDirty,
     getStatus,
     setStatus,
@@ -97,7 +96,7 @@
         applyConfigToUi(resp.data.config);
       } catch (e: unknown) {
         if (!configRequests.isCurrent(token)) return;
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        handleAuthError(e);
       } finally {
         if (configRequests.isCurrent(token)) loading = false;
       }
@@ -114,7 +113,7 @@
         setStatus(resp.data);
       } catch (e: unknown) {
         if (!statusRequests.isCurrent(token)) return;
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        handleAuthError(e);
       } finally {
         if (statusRequests.isCurrent(token)) setStatusLoading(false);
       }
@@ -153,8 +152,7 @@
       addToast("Changes saved", "success");
     } catch (e: unknown) {
       if (!viewActive) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else { addToast("Failed to save configuration", "error"); }
+      if (!handleAuthError(e)) { addToast("Failed to save configuration", "error"); }
     } finally {
       if (viewActive) saving = false;
     }

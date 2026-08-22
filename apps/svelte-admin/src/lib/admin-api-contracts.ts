@@ -453,6 +453,7 @@ export const adminApiSchemas = {
   clientBandwidth: dataSchema("GET /api/clients/:id/bandwidth", parseClientBandwidth),
   setClientBandwidth: actionSchema("POST /api/clients/:id/bandwidth"),
   resetClientQuota: actionSchema("POST /api/clients/:id/quota/reset"),
+  kickClient: actionSchema("POST /api/clients/:id/kick"),
   serverReload: actionSchema("POST /api/reload"),
   serverDrain: actionSchema("POST /api/drain"),
   drainStatus: dataSchema("GET /api/drain/status", parseDrainStatus),

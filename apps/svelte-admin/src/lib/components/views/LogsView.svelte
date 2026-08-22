@@ -9,15 +9,15 @@
   import { useAnchorSync } from "$lib/use-anchor-sync";
   import { formatTimestamp, formatTimestampIso } from "$lib/format";
   import { isBrowserDocumentVisible } from "@quicfuscate/time";
-  import { ApiError, isAuthError, getJson, postJson, sanitizeErrorMessage } from "$lib/api";
+  import { ApiError, getJson, postJson } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
   import {
-    setAuthRequired,
-    setAuthError,
+    handleAuthError,
     setLogsDirty,
     confirmDialog,
   } from "$lib/stores/app.svelte";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
+  import { createErrorToastHandler } from "$lib/error-toast";
   import type { LogEntry, LogMode } from "$lib/types";
 
   const MODE_DESCRIPTIONS: Record<LogMode, { title: string; desc: string; icon: typeof Eye; color: string }> = {
@@ -65,27 +65,14 @@
   });
   const copyFb = createCopyFeedback(1100);
   let bottomEl: HTMLDivElement | undefined = $state();
-  let lastLogErrorMsg = "";
   let actionsEl: HTMLDivElement | undefined = $state();
-  const errorResetTimer = createOwnedTimeout();
+  const errorToast = createErrorToastHandler(() => viewActive);
   const dialogActionDelay = createOwnedTimeout();
 
   $effect(() => useAnchorSync(actionsEl));
 
-  function showLogErrorToast(e: unknown, fallback: string) {
-    if (!viewActive) return;
-    const msg = sanitizeErrorMessage(
-      e instanceof Error ? e.message : String(e),
-      fallback,
-    );
-    if (msg === lastLogErrorMsg) return;
-    lastLogErrorMsg = msg;
-    addToast(msg, "error");
-    errorResetTimer.schedule(() => { if (lastLogErrorMsg === msg) lastLogErrorMsg = ""; }, 10000);
-  }
-
   onDestroy(() => {
-    errorResetTimer.destroy();
+    errorToast.destroy();
     dialogActionDelay.destroy();
   });
 
@@ -110,8 +97,7 @@
         nextMode = next;
       } catch (e: unknown) {
         if (!modeRequests.isCurrent(token)) return;
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-        else showLogErrorToast(e, "Failed to load logging mode");
+        if (!handleAuthError(e)) errorToast.show(e, "Failed to load logging mode");
       }
     }, options).then(() => nextMode);
   }
@@ -147,8 +133,7 @@
         }
       } catch (e: unknown) {
         if (!logsRequests.isCurrent(token)) return;
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-        else showLogErrorToast(e, "Failed to load logs");
+        if (!handleAuthError(e)) errorToast.show(e, "Failed to load logs");
       } finally {
         if (logsRequests.isCurrent(token)) {
           loadingLogs = false;
@@ -166,8 +151,7 @@
         backendOnline = Boolean(resp?.success && resp?.data);
       } catch (e: unknown) {
         if (!statusRequests.isCurrent(token)) return;
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-        else showLogErrorToast(e, "Failed to check server status");
+        if (!handleAuthError(e)) errorToast.show(e, "Failed to check server status");
         backendOnline = false;
       }
     }, options);
@@ -225,8 +209,7 @@
       void fetchLogsOnce(newMode, true, { invalidate: true });
     } catch (e: unknown) {
       if (!viewActive) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else { addToast("Failed to save logging mode", "error"); }
+      if (!handleAuthError(e)) { addToast("Failed to save logging mode", "error"); }
     } finally {
       if (viewActive) saving = false;
     }
@@ -253,7 +236,7 @@
       await fetchLogsOnce(mode, true, { invalidate: true });
     } catch (e: unknown) {
       if (!viewActive) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); return; }
+      if (handleAuthError(e)) return;
       logs = previousLogs;
       addToast("Failed to clear logs", "error");
     }
@@ -277,8 +260,7 @@
       addToast("Log rotation triggered", "success");
     } catch (e: unknown) {
       if (!viewActive) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showLogErrorToast(e, "Log rotation failed");
+      if (!handleAuthError(e)) errorToast.show(e, "Log rotation failed");
     } finally {
       if (viewActive) busyRotate = false;
     }

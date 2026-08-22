@@ -7,7 +7,7 @@
   import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
-  import { setAuthRequired, setAuthError } from "$lib/stores/app.svelte";
+  import { handleAuthError, setAuthRequired } from "$lib/stores/app.svelte";
 
   interface Props {
     onRefresh?: (fn: () => Promise<void>) => void;
@@ -83,7 +83,7 @@
         requiresChange = Boolean(resp.data.requires_password_change);
       } catch (e: unknown) {
         if (!authRequests.isCurrent(token)) return;
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        handleAuthError(e);
       } finally {
         if (authRequests.isCurrent(token)) {
           loading = false;

@@ -6,10 +6,11 @@
   import { cn, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { addToast } from "@quicfuscate/ui";
   import { isBrowserDocumentVisible } from "@quicfuscate/time";
-  import { ApiError, isAuthError, getJson, postJson, sanitizeErrorMessage } from "$lib/api";
+  import { ApiError, getJson, postJson } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
-  import { setAuthRequired, setAuthError, confirmDialog } from "$lib/stores/app.svelte";
+  import { handleAuthError, confirmDialog } from "$lib/stores/app.svelte";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
+  import { createErrorToastHandler } from "$lib/error-toast";
   import { formatDurationMs } from "$lib/format";
   import type { DrainStatusData } from "$lib/types";
 
@@ -19,22 +20,9 @@
   let drainStatus = $state<DrainStatusData | null>(null);
   let drainStatusReady = $state(false);
   let viewActive = true;
-  let lastErrorMsg = "";
   const drainRequests = createRequestCoordinator();
-  const errorResetTimer = createOwnedTimeout();
+  const errorToast = createErrorToastHandler(() => viewActive);
   const dialogActionDelay = createOwnedTimeout();
-
-  function showErrorToast(e: unknown, fallback: string) {
-    if (!viewActive) return;
-    const msg = sanitizeErrorMessage(
-      e instanceof Error ? e.message : String(e),
-      fallback,
-    );
-    if (msg === lastErrorMsg) return;
-    lastErrorMsg = msg;
-    addToast(msg, "error");
-    errorResetTimer.schedule(() => { if (lastErrorMsg === msg) lastErrorMsg = ""; }, 10000);
-  }
 
   function fetchDrainStatus(options: RequestOptions = {}): Promise<void> {
     return drainRequests.request(async (token: RequestToken) => {
@@ -49,8 +37,7 @@
           drainStatus = null;
           return;
         }
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-        else showErrorToast(e, "Failed to load drain status");
+        if (!handleAuthError(e)) errorToast.show(e, "Failed to load drain status");
       } finally {
         if (drainRequests.isCurrent(token)) drainStatusReady = true;
       }
@@ -67,8 +54,7 @@
       addToast("Server reloaded", "success");
     } catch (e: unknown) {
       if (!viewActive) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showErrorToast(e, "Reload failed");
+      if (!handleAuthError(e)) errorToast.show(e, "Reload failed");
     } finally {
       if (viewActive) busyReload = false;
     }
@@ -96,8 +82,7 @@
         addToast("Drain is not enabled on this server", "warning");
         return;
       }
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showErrorToast(e, "Drain failed");
+      if (!handleAuthError(e)) errorToast.show(e, "Drain failed");
     } finally {
       if (viewActive) busyDrain = false;
     }
@@ -124,8 +109,7 @@
         addToast("Shutdown is not enabled on this server", "warning");
         return;
       }
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else showErrorToast(e, "Shutdown failed");
+      if (!handleAuthError(e)) errorToast.show(e, "Shutdown failed");
     } finally {
       if (viewActive) busyShutdown = false;
     }
@@ -146,7 +130,7 @@
   });
 
   onDestroy(() => {
-    errorResetTimer.destroy();
+    errorToast.destroy();
     dialogActionDelay.destroy();
   });
 </script>

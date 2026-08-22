@@ -37,13 +37,12 @@
   }
   import TextInput from "$lib/components/ui/TextInput.svelte";
   import { Select } from "@quicfuscate/ui";
-  import { ApiError, isAuthError, getJson, postJson } from "$lib/api";
+  import { ApiError, getJson, postJson } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
   import { formatUnixSeconds } from "$lib/format";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import {
-    setAuthRequired,
-    setAuthError,
+    handleAuthError,
     getQkeyList,
     setQkeyList,
     getQkeyListLoading,
@@ -172,7 +171,7 @@
         setQkeyList(resp.data.keys);
       } catch (e: unknown) {
         if (!qkeyRequests.isCurrent(token)) return;
-        if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+        handleAuthError(e);
       } finally {
         if (qkeyRequests.isCurrent(token)) {
           setQkeyListLoading(false);
@@ -291,8 +290,7 @@
       issuedQKeyDialogOpen = true;
     } catch (e: unknown) {
       if (!viewActive) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else { addToast("QKey create failed", "error"); }
+      if (!handleAuthError(e)) { addToast("QKey create failed", "error"); }
     } finally {
       if (viewActive) busyCreate = false;
     }
@@ -312,8 +310,7 @@
       if (!resp.success) throw new Error(resp.message ?? "Revoke failed");
     } catch (e: unknown) {
       if (!viewActive) return;
-      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
-      else { addToast("Revoke failed", "error"); }
+      if (!handleAuthError(e)) { addToast("Revoke failed", "error"); }
       scheduleQKeyRefresh();
     } finally {
       if (viewActive) busyRevokeId = null;
