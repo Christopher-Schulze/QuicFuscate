@@ -368,18 +368,18 @@ jobs:
       - name: Build desktop frontend for locked Tauri gate
         working-directory: apps/svelte-desktop
         run: bun run build
-      - name: Verify locked Tauri host
-        working-directory: apps/tauri/src-tauri
-        run: |
-          cargo metadata --locked --no-deps --format-version 1
-          cargo check --locked
-          cargo clippy --locked --all-targets -- -D warnings
       - name: Provision verified upstream Wintun for MSI
         shell: pwsh
         run: |
           ./scripts/utils/provision-wintun.ps1 `
             -DestinationDirectory "apps/tauri/src-tauri/resources/windows" `
             -EvidencePath "scripts/out/build/windows/wintun-provenance.json"
+      - name: Verify locked Tauri host
+        working-directory: apps/tauri/src-tauri
+        run: |
+          cargo metadata --locked --no-deps --format-version 1
+          cargo check --locked
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Build signed Tauri MSI (Windows)
         working-directory: apps/tauri/src-tauri
         run: cargo tauri build --bundles msi --ci -- --locked
