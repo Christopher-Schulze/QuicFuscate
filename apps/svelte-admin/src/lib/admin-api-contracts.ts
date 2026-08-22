@@ -6,7 +6,12 @@ import {
 } from "$lib/timestamp-boundary";
 import type {
   AdminResponse,
+  BandwidthPolicy,
+  BandwidthStats,
+  ClientBandwidthData,
   ClientInfo,
+  DrainState,
+  DrainStatusData,
   LogEntry,
   LogMode,
   MetricsMap,
@@ -343,6 +348,87 @@ function parseQKeyCreate(value: unknown): ValidationResult<ParsedQKeyCreateRespo
   return parsed === null ? invalid("could not parse QKey metadata") : valid(parsed);
 }
 
+function parseBandwidthPolicy(value: unknown): ValidationResult<BandwidthPolicy> {
+  if (!isRecord(value)) return invalid("must be an object");
+  const rate = nonNegativeInteger(value.rate_bytes_per_second, "rate_bytes_per_second");
+  if (!rate.success) return rate;
+  const burst = nonNegativeInteger(value.burst_bytes, "burst_bytes");
+  if (!burst.success) return burst;
+  const dailyQuota = nonNegativeInteger(value.daily_quota_bytes, "daily_quota_bytes");
+  if (!dailyQuota.success) return dailyQuota;
+  const monthlyQuota = nonNegativeInteger(value.monthly_quota_bytes, "monthly_quota_bytes");
+  if (!monthlyQuota.success) return monthlyQuota;
+  const weight = nonNegativeInteger(value.weight, "weight");
+  if (!weight.success) return weight;
+  return valid({
+    rate_bytes_per_second: rate.value,
+    burst_bytes: burst.value,
+    daily_quota_bytes: dailyQuota.value,
+    monthly_quota_bytes: monthlyQuota.value,
+    weight: weight.value,
+  });
+}
+
+function parseBandwidthStats(value: unknown): ValidationResult<BandwidthStats> {
+  if (!isRecord(value)) return invalid("must be an object");
+  const policy = parseBandwidthPolicy(value.policy);
+  if (!policy.success) return invalid(`policy.${policy.issue}`);
+  const upAvail = nonNegativeInteger(value.uplink_available_bytes, "uplink_available_bytes");
+  if (!upAvail.success) return upAvail;
+  const downAvail = nonNegativeInteger(value.downlink_available_bytes, "downlink_available_bytes");
+  if (!downAvail.success) return downAvail;
+  const dailyUsed = nonNegativeInteger(value.daily_used_bytes, "daily_used_bytes");
+  if (!dailyUsed.success) return dailyUsed;
+  const dailyRem = nonNegativeInteger(value.daily_remaining_bytes, "daily_remaining_bytes");
+  if (!dailyRem.success) return dailyRem;
+  const monthlyUsed = nonNegativeInteger(value.monthly_used_bytes, "monthly_used_bytes");
+  if (!monthlyUsed.success) return monthlyUsed;
+  const monthlyRem = nonNegativeInteger(value.monthly_remaining_bytes, "monthly_remaining_bytes");
+  if (!monthlyRem.success) return monthlyRem;
+  return valid({
+    policy: policy.value,
+    uplink_available_bytes: upAvail.value,
+    downlink_available_bytes: downAvail.value,
+    daily_used_bytes: dailyUsed.value,
+    daily_remaining_bytes: dailyRem.value,
+    monthly_used_bytes: monthlyUsed.value,
+    monthly_remaining_bytes: monthlyRem.value,
+  });
+}
+
+function parseClientBandwidth(value: unknown): ValidationResult<ClientBandwidthData> {
+  if (!isRecord(value)) return invalid("must be an object");
+  const clientId = requiredString(value.client_id, "client_id", MAX_IDENTIFIER_LENGTH);
+  if (!clientId.success) return clientId;
+  const bandwidth = parseBandwidthStats(value.bandwidth);
+  if (!bandwidth.success) return invalid(`bandwidth.${bandwidth.issue}`);
+  return valid({ client_id: clientId.value, bandwidth: bandwidth.value });
+}
+
+const DRAIN_STATES: readonly DrainState[] = ["stopped", "running", "draining"];
+
+function parseDrainStatus(value: unknown): ValidationResult<DrainStatusData> {
+  if (!isRecord(value)) return invalid("must be an object");
+  const stateRaw = requiredString(value.state, "state", 32);
+  if (!stateRaw.success) return stateRaw;
+  const state = DRAIN_STATES.includes(stateRaw.value as DrainState)
+    ? (stateRaw.value as DrainState)
+    : null;
+  if (!state) return invalid("state must be stopped, running, or draining");
+  const active = nonNegativeInteger(value.active_connections, "active_connections");
+  if (!active.success) return active;
+  const grace = nonNegativeInteger(value.grace_period_ms, "grace_period_ms");
+  if (!grace.success) return grace;
+  const elapsed = nonNegativeInteger(value.drain_elapsed_ms, "drain_elapsed_ms");
+  if (!elapsed.success) return elapsed;
+  return valid({
+    state,
+    active_connections: active.value,
+    grace_period_ms: grace.value,
+    drain_elapsed_ms: elapsed.value,
+  });
+}
+
 export const adminApiSchemas = {
   login: dataSchema("POST /api/login", parseAuthStatus),
   logout: actionSchema("POST /api/logout"),
@@ -360,7 +446,15 @@ export const adminApiSchemas = {
   loggingWrite: actionSchema("POST /api/config/logging"),
   logs: dataSchema("GET /api/logs", parseLogs),
   logsClear: actionSchema("POST /api/logs/clear"),
+  logsRotate: actionSchema("POST /api/logs/rotate"),
   qkeyList: dataSchema("GET /api/qkeys", parseQKeyList),
   qkeyCreate: dataSchema("POST /api/qkey", parseQKeyCreate),
   qkeyRevoke: actionSchema("POST /api/qkeys/revoke"),
+  clientBandwidth: dataSchema("GET /api/clients/:id/bandwidth", parseClientBandwidth),
+  setClientBandwidth: actionSchema("POST /api/clients/:id/bandwidth"),
+  resetClientQuota: actionSchema("POST /api/clients/:id/quota/reset"),
+  serverReload: actionSchema("POST /api/reload"),
+  serverDrain: actionSchema("POST /api/drain"),
+  drainStatus: dataSchema("GET /api/drain/status", parseDrainStatus),
+  serverShutdown: actionSchema("POST /api/shutdown"),
 };

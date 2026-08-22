@@ -6,6 +6,7 @@
   import QKeyPanel from "$lib/components/panels/QKeyPanel.svelte";
   import StealthPanel from "$lib/components/panels/StealthPanel.svelte";
   import AdminSettingsPanel from "$lib/components/panels/AdminSettingsPanel.svelte";
+  import ServerOpsPanel from "$lib/components/panels/ServerOpsPanel.svelte";
   import ReferenceGuide from "$lib/components/panels/ReferenceGuide.svelte";
   import { getJson, postJson, ApiError, isAuthError, sanitizeErrorMessage } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
@@ -301,6 +302,8 @@
     </div>
 
     <AdminSettingsPanel onRefresh={(fn) => { adminRefreshFn = fn; }} />
+
+    <ServerOpsPanel />
 
     <StealthPanel
       {stealthPreset}

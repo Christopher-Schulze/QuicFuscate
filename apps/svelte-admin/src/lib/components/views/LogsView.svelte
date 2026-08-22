@@ -3,7 +3,7 @@
   import { onDestroy, untrack } from "svelte";
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import { Shield, ShieldCheck, AlertTriangle, Eye, EyeOff, Check } from "@lucide/svelte";
+  import { Shield, ShieldCheck, AlertTriangle, Eye, EyeOff, Check, RotateCw } from "@lucide/svelte";
   import { cn, createCopyFeedback, createOwnedTimeout, ripple } from "@quicfuscate/ui";
   import { Skeleton, addToast } from "@quicfuscate/ui";
   import { useAnchorSync } from "$lib/use-anchor-sync";
@@ -265,6 +265,25 @@
     await copyFb.trigger(text);
   }
 
+  let busyRotate = $state(false);
+
+  async function handleRotateLogs() {
+    if (!viewActive || busyRotate) return;
+    busyRotate = true;
+    try {
+      const resp = await postJson("/api/logs/rotate", {}, adminApiSchemas.logsRotate);
+      if (!resp.success) throw new Error(resp.message ?? "Log rotation failed");
+      if (!viewActive) return;
+      addToast("Log rotation triggered", "success");
+    } catch (e: unknown) {
+      if (!viewActive) return;
+      if (isAuthError(e)) { setAuthError(null); setAuthRequired(true); }
+      else showLogErrorToast(e, "Log rotation failed");
+    } finally {
+      if (viewActive) busyRotate = false;
+    }
+  }
+
   $effect(() => {
     const handleVisibilityChange = (): void => {
       if (!isBrowserDocumentVisible()) {
@@ -471,6 +490,20 @@
                   </span>
                 {/key}
               </span>
+            </button>
+            <button
+              use:ripple={{ color: "dark", disabled: busyRotate }}
+              type="button"
+              onclick={() => { void handleRotateLogs(); }}
+              disabled={busyRotate}
+              title="Rotate log file"
+              class={cn(
+                "action-btn-base action-neutral-btn inline-flex items-center justify-center font-medium h-7 px-3 text-[11px] gap-1.5",
+                busyRotate ? "cursor-wait" : "cursor-pointer",
+              )}
+            >
+              {#if busyRotate}<span class="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin"></span>{:else}<RotateCw class="h-3 w-3" strokeWidth={2.5} />{/if}
+              Rotate
             </button>
             <button
               use:ripple={{ color: "dark", disabled: logs.length === 0 }}

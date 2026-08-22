@@ -58,6 +58,8 @@
   import type { AdminQKeyTimestamp, QKeyEntry } from "$lib/types";
 
   type DomainFrontingMode = "auto" | "off" | "manual";
+  type QKeyStealthMode = "auto" | "max" | "manual" | "off";
+  type QKeyFecMode = "auto" | "off";
   type IssuedQKey = {
     value: string;
     name?: string | null;
@@ -83,6 +85,9 @@
   let qkeyPortText = $state("");
   let qkeyFrontingMode = $state<DomainFrontingMode>("auto");
   let qkeyFixedDomain = $state<(typeof FRONTING_SNI_ALLOWLIST)[number]>(FRONTING_SNI_ALLOWLIST[0]);
+  let advancedOpen = $state(false);
+  let qkeyStealthMode = $state<QKeyStealthMode>("auto");
+  let qkeyFecMode = $state<QKeyFecMode>("auto");
   let issuedQKey = $state<IssuedQKey | null>(null);
   let busyCreate = $state(false);
   let busyRevokeId = $state<string | null>(null);
@@ -144,6 +149,9 @@
     if (!createDialogOpen) {
       qkeyFrontingMode = "auto";
       qkeyFixedDomain = FRONTING_SNI_ALLOWLIST[0];
+      advancedOpen = false;
+      qkeyStealthMode = "auto";
+      qkeyFecMode = "auto";
     }
   });
 
@@ -239,12 +247,23 @@
     qkeyRequests.invalidate();
     busyCreate = true;
     try {
-      const payload: { name?: string; port?: number; sni_strategy: "auto_rotating" | "fixed" | "off"; sni_domain?: string } = {
+      const payload: {
+        name?: string;
+        port?: number;
+        sni_strategy: "auto_rotating" | "fixed" | "off";
+        sni_domain?: string;
+        stealth?: string;
+        fec?: string;
+      } = {
         sni_strategy: qkeyFrontingMode === "manual" ? "fixed" : qkeyFrontingMode === "off" ? "off" : "auto_rotating",
       };
       if (name) payload.name = name;
       if (port != null) payload.port = port;
       if (qkeyFrontingMode === "manual") payload.sni_domain = qkeyFixedDomain;
+      if (advancedOpen) {
+        payload.stealth = qkeyStealthMode;
+        payload.fec = qkeyFecMode;
+      }
       const resp = await postJson("/api/qkey", payload, adminApiSchemas.qkeyCreate);
       if (!resp.success || !resp.data) throw new Error(resp.message ?? "QKey create failed");
       const created = resp.data;
@@ -264,6 +283,9 @@
       qkeyPortText = "";
       qkeyFrontingMode = "auto";
       qkeyFixedDomain = FRONTING_SNI_ALLOWLIST[0];
+      advancedOpen = false;
+      qkeyStealthMode = "auto";
+      qkeyFecMode = "auto";
       await fetchQKeyList({ invalidate: true });
       if (!viewActive) return;
       issuedQKeyDialogOpen = true;
@@ -493,6 +515,48 @@
                     maxHeight="180px"
                   />
                   <p class="text-[10px] text-black leading-relaxed">Select a fixed allowlisted SNI domain.</p>
+                </div>
+              </div>
+            {/if}
+          </div>
+          <div class="space-y-2">
+            <button
+              type="button"
+              onclick={() => { advancedOpen = !advancedOpen; }}
+              class="flex items-center justify-between w-full text-[11px] font-semibold text-black dashboard-heading-sans cursor-pointer"
+            >
+              <span>Advanced</span>
+              <span class="text-[10px] text-black/50">{advancedOpen ? "Hide" : "Show"}</span>
+            </button>
+            {#if advancedOpen}
+              <div transition:slide|local={{ duration: 280, easing: cubicOut }} class="space-y-2.5">
+                <div class="flex items-center justify-between">
+                  <div class="text-[11px] font-semibold text-black dashboard-heading-sans">Stealth</div>
+                  <Select
+                    value={qkeyStealthMode}
+                    options={[
+                      { value: "auto", label: "Auto" },
+                      { value: "max", label: "Max" },
+                      { value: "manual", label: "Manual" },
+                      { value: "off", label: "Off" },
+                    ]}
+                    onchange={(v) => { qkeyStealthMode = v as QKeyStealthMode; }}
+                    ariaLabel="Stealth mode"
+                    class="w-[120px]"
+                  />
+                </div>
+                <div class="flex items-center justify-between">
+                  <div class="text-[11px] font-semibold text-black dashboard-heading-sans">FEC</div>
+                  <Select
+                    value={qkeyFecMode}
+                    options={[
+                      { value: "auto", label: "Auto" },
+                      { value: "off", label: "Off" },
+                    ]}
+                    onchange={(v) => { qkeyFecMode = v as QKeyFecMode; }}
+                    ariaLabel="FEC mode"
+                    class="w-[120px]"
+                  />
                 </div>
               </div>
             {/if}

@@ -81,3 +81,46 @@ export interface ConfirmDialogRequest {
   confirmLabel: string;
   cancelLabel: string;
 }
+
+export interface BandwidthPolicy {
+  rate_bytes_per_second: number;
+  burst_bytes: number;
+  daily_quota_bytes: number;
+  monthly_quota_bytes: number;
+  weight: number;
+}
+
+export interface BandwidthStats {
+  policy: BandwidthPolicy;
+  uplink_available_bytes: number;
+  downlink_available_bytes: number;
+  daily_used_bytes: number;
+  daily_remaining_bytes: number;
+  monthly_used_bytes: number;
+  monthly_remaining_bytes: number;
+}
+
+export interface ClientBandwidthData {
+  client_id: string;
+  bandwidth: BandwidthStats;
+}
+
+export type DrainState = "stopped" | "running" | "draining";
+
+export interface DrainStatusData {
+  state: DrainState;
+  active_connections: number;
+  grace_period_ms: number;
+  drain_elapsed_ms: number;
+}
+
+export type TrafficAnalysisDefense = "Off" | "FullPadding" | "ConstantRate";
+
+export interface TrafficAnalysisPolicy {
+  defense: TrafficAnalysisDefense;
+  chaff_rate_pps: number;
+  chaff_size_bytes: number;
+  constant_rate_pps: number;
+  idle_timeout_ms: number;
+  ramp_down_ms: number;
+}
