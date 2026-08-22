@@ -137,7 +137,7 @@
 
 ## Queue
 ### TODO-901 - Server RX batching drain and sharding
-- Single Tokio task for all clients (runtime_loop.rs:155) with single recvmsg per wakeup - 150k pps ceiling.
+- PARTIAL. Step 1 DONE (`456edf7`): `recv_datagram_batch` drains until `WouldBlock` (cap 64, one tokio wakeup per burst) and the loop iterates the batch through the unchanged stateful path - syscall-per-datagram cap removed. Remaining: full SO_REUSEPORT sharding needs live_state partitioning (client maps/admission/fanout per shard), consistent client-hash routing, TUN/admin ownership split, cross-shard shutdown; own design pass + Omega pps proof required.
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
 ### TODO-902 - io_uring TX triple-copy and channel1 fix

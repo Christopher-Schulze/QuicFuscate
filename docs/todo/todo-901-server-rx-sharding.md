@@ -4,7 +4,7 @@ title: Server RX batching drain and sharding
 severity: HIGH
 phase: S
 priority: P1
-status: QUEUED
+status: PARTIAL
 created: 2026-08-21
 depends_on: []
 ---
@@ -28,4 +28,5 @@ Shard server data path from single Tokio task (`runtime_loop.rs:155-523` all cli
 - No QUIC migration yet.
 
 ## Deviations
-None.
+- Step 1 shipped (commit `456edf7`): `recv_datagram_batch` drains the kernel socket buffer until `WouldBlock` (cap 64) with one tokio wakeup per burst; the runtime loop iterates the batch through the unchanged serial stateful path, and a labeled `'batch` break keeps data-plane fault exit prompt. This removes the one-syscall-per-datagram cap but the processing itself stays single-tasked.
+- Remaining for full sharding: SO_REUSEPORT N worker sockets each owning a slice of `live_state` (client maps, admission, fanout, QKey registry views), client-to-shard hashing consistent across reconnects, TUN/admin/housekeeping ownership split or delegated to shard 0, and shutdown/drain coordination across shards. That is an architecture change to `live_state` invariants and needs its own design pass plus Omega-native pps proof; it does not fit a single incremental commit alongside step 1.
