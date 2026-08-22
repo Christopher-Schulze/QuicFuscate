@@ -1,8 +1,9 @@
 //! optimize::simd::core (TODO-563).
 
 use super::super::telemetry;
-use super::super::{FeatureDetector, SimdDispatch};
-
+#[cfg(target_arch = "aarch64")]
+use super::super::FeatureDetector;
+use super::super::SimdDispatch;
 /// Central XOR blocks implementation - used by FEC, Crypto, everywhere!
 #[inline(always)]
 pub fn xor_blocks(dst: &mut [u8], src: &[u8]) {

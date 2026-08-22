@@ -50,7 +50,7 @@ jobs:
         run: bun run test:serve:codex
 
   frontend-dependency-security:
-  timeout-minutes: 15
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -65,7 +65,7 @@ jobs:
         run: bash scripts/audits/verify-frontend-dependencies.sh
 
   frontend-e2e:
-  timeout-minutes: 30
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -105,7 +105,7 @@ jobs:
             apps/svelte-desktop/test-results/
 
   app-backend-checks:
-  timeout-minutes: 40
+    timeout-minutes: 40
     runs-on: macos-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -161,7 +161,7 @@ jobs:
         run: cargo test --locked
 
   build-test:
-  timeout-minutes: 60
+    timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -248,7 +248,7 @@ jobs:
             target/release/*.so
 
   windows-core-checks:
-  timeout-minutes: 90
+    timeout-minutes: 90
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -408,7 +408,7 @@ jobs:
           if-no-files-found: error
 
   simd-feature-contract:
-  timeout-minutes: 15
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: "2"
@@ -432,7 +432,7 @@ jobs:
         run: bash scripts/audits/verify-cargo-feature-taxonomy.sh
 
   amx-proof-lane:
-  timeout-minutes: 30
+    timeout-minutes: 30
     name: AMX Build and Runtime Proof Lane
     runs-on: ubuntu-latest
     env:
@@ -535,7 +535,7 @@ jobs:
           fi
 
   linux-platform-gates:
-  timeout-minutes: 40
+    timeout-minutes: 40
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -613,7 +613,7 @@ jobs:
             scripts/out/tests/linux-resolver-ownership
 
   linux-transport-suite:
-  timeout-minutes: 40
+    timeout-minutes: 40
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -731,7 +731,7 @@ jobs:
           if-no-files-found: error
 
   linux-traffic-analysis-native:
-  timeout-minutes: 45
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -1001,7 +1001,7 @@ jobs:
           if-no-files-found: error
 
   security-audit:
-  timeout-minutes: 25
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: "2"
@@ -1027,7 +1027,7 @@ jobs:
         run: bash scripts/audits/verify-tauri-dependencies.sh
 
   release-contract:
-  timeout-minutes: 20
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -1099,7 +1099,7 @@ jobs:
   # TODO-154: Performance Regression Detection (criterion + critcmp)
   # ---------------------------------------------------------------------------
   benchmarks:
-  timeout-minutes: 45
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     needs: [build-test]
     if: github.event_name == 'pull_request'

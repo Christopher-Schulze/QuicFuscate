@@ -550,7 +550,7 @@ fn flow_shaper_jitter_produces_variation() {
     use super::FlowShaper;
     let shaper = FlowShaper::new(5000, false);
     // Steady band: [2500, 5000].
-    for i in 0..12 {
+    for _ in 0..12 {
         shaper.record_and_prune(64, super::StealthPacketClass::Data);
     }
     let mut values: Vec<u64> =
@@ -571,7 +571,7 @@ fn flow_shaper_burst_tightens_range() {
     // Burst band: >=32 records -> low half of the range, floored at min/2.
     // With jitter_us=1000: burst range is [250, 500].
     let shaper = FlowShaper::new(1000, false);
-    for i in 0..40 {
+    for _ in 0..40 {
         shaper.record_and_prune(1280, super::StealthPacketClass::Data);
     }
     for _ in 0..200 {
