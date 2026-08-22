@@ -339,10 +339,10 @@ impl Decoder16 {
                     }
                 }
             }
-            for w in 0..shared {
+            for (w, slot) in yb[i].iter_mut().enumerate().take(shared) {
                 let b0 = eq.data[w * 2] as u16;
                 let b1 = eq.data[w * 2 + 1] as u16;
-                yb[i][w] = (b0 << 8) | b1;
+                *slot = (b0 << 8) | b1;
             }
             for j in 0..self.k {
                 let sid = self.source_id_for(eq.base_id, j);

@@ -1044,7 +1044,7 @@ pub(crate) async fn recv_datagram_batch(
     max: usize,
 ) -> std::io::Result<Vec<(Vec<u8>, std::net::SocketAddr)>> {
     const DRAIN_BATCH_CAP: usize = 64;
-    let cap = max.min(DRAIN_BATCH_CAP).max(1);
+    let cap = max.clamp(1, DRAIN_BATCH_CAP);
     let mut scratch = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
     let mut batch = Vec::with_capacity(cap);
 
@@ -1069,7 +1069,7 @@ pub(crate) async fn recv_datagram_batch(
     max: usize,
 ) -> std::io::Result<Vec<(Vec<u8>, std::net::SocketAddr)>> {
     const DRAIN_BATCH_CAP: usize = 64;
-    let cap = max.min(DRAIN_BATCH_CAP).max(1);
+    let cap = max.clamp(1, DRAIN_BATCH_CAP);
     let mut scratch = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
     let mut batch = Vec::with_capacity(cap);
 
