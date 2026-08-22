@@ -136,7 +136,7 @@
 
 ## Queue
 ### TODO-901 - Server RX batching drain and sharding
-- PARTIAL. Step 1 DONE (`456edf7`): `recv_datagram_batch` drains until `WouldBlock` (cap 64, one tokio wakeup per burst) and the loop iterates the batch through the unchanged stateful path - syscall-per-datagram cap removed. Remaining: full SO_REUSEPORT sharding needs live_state partitioning (client maps/admission/fanout per shard), consistent client-hash routing, TUN/admin ownership split, cross-shard shutdown; own design pass + Omega pps proof required.
+- PARTIAL. Step 1 DONE (`456edf7`): batch drain until `WouldBlock` (cap 64, one wakeup per burst). Design pass complete (`71e11c9`): SO_REUSEPORT kernel-hash affinity (no userspace dispatcher), ShardMap<N> sub-maps with per-shard admission budgets, global read-shared registries, shard-0 owns TUN/admin/housekeeping, shared fault slot + labeled drain exits. Remaining is Linux/Omega implementation + pps proof only.
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
