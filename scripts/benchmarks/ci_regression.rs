@@ -1155,12 +1155,15 @@ fn bench_memory_pool_cycle(c: &mut Criterion) {
 
     const CYCLES: usize = 512;
 
-    fn run_pool(zeroize: bool) -> u64 {
+    fn run_pool(zeroize: bool, block_size: usize) -> u64 {
         let environment = qf_common::env_utils::EnvSnapshot::from_pairs([
             ("QUICFUSCATE_POOL_ZEROIZE_ON_FREE", if zeroize { "1" } else { "0" }),
             ("QUICFUSCATE_POOL_AUTO_TUNE", "0"),
         ]);
-        let pool = Arc::new(MemoryPool::new_with_snapshot(64, 65_536, &environment));
+        // Capacity scaled so both sizes hold the same total bytes (64 x 64KiB
+        // == 1024 x 4KiB = 4MiB working set).
+        let capacity = (64 * 65_536) / block_size;
+        let pool = Arc::new(MemoryPool::new_with_snapshot(capacity, block_size, &environment));
         let mut checksum = 0u64;
         for i in 0..CYCLES {
             let mut block = pool.alloc();
@@ -1175,12 +1178,16 @@ fn bench_memory_pool_cycle(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("memory_pool_cycle");
     group.throughput(Throughput::Elements(CYCLES as u64));
-    group.bench_function("zeroize_on", |bench| {
-        bench.iter(|| std::hint::black_box(run_pool(true)))
-    });
-    group.bench_function("zeroize_off", |bench| {
-        bench.iter(|| std::hint::black_box(run_pool(false)))
-    });
+    for (label, zeroize, block_size) in [
+        ("zeroize_on_64k", true, 65_536),
+        ("zeroize_off_64k", false, 65_536),
+        ("zeroize_on_mtu4k", true, 4_096),
+        ("zeroize_off_mtu4k", false, 4_096),
+    ] {
+        group.bench_function(label, |bench| {
+            bench.iter(|| std::hint::black_box(run_pool(zeroize, block_size)))
+        });
+    }
     group.finish();
 }
 
