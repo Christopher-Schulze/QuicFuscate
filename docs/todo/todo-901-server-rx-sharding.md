@@ -27,6 +27,28 @@ Shard server data path from single Tokio task (`runtime_loop.rs:155-523` all cli
 ## Out of Scope
 - No QUIC migration yet.
 
-## Deviations
-- Step 1 shipped (commit `456edf7`): `recv_datagram_batch` drains the kernel socket buffer until `WouldBlock` (cap 64) with one tokio wakeup per burst; the runtime loop iterates the batch through the unchanged serial stateful path, and a labeled `'batch` break keeps data-plane fault exit prompt. This removes the one-syscall-per-datagram cap but the processing itself stays single-tasked.
-- Remaining for full sharding: SO_REUSEPORT N worker sockets each owning a slice of `live_state` (client maps, admission, fanout, QKey registry views), client-to-shard hashing consistent across reconnects, TUN/admin/housekeeping ownership split or delegated to shard 0, and shutdown/drain coordination across shards. That is an architecture change to `live_state` invariants and needs its own design pass plus Omega-native pps proof; it does not fit a single incremental commit alongside step 1.
+## Sharding Design Pass (2026-08-21, local - implementation requires Linux/Omega)
+
+### Shard topology
+- N worker tasks (default `N = min(available_cores, 4)`), each owning one UDP socket bound to the same port with `SO_REUSEPORT` + `SO_REUSEADDR`. The kernel hashes the 4-tuple to exactly one socket, giving consistent per-client routing without an application-level dispatcher: all datagrams of one client path (same src ip:port) always land on the same shard, which is what QUIC connection-state affinity requires. No client-hash code needed in userspace; reconnects from the same NAT mapping stay sticky.
+- Each shard owns a full `Decoder16`-style pipeline slice: its own `LiveClientAcquire` admission budget (`accept_max_clients / N`), its own view into a sharded client map, and its own batch drain loop (TODO-901 step 1 helper, cap 64).
+
+### State partitioning
+- `live_state.client_snapshots` / runtime-client map becomes `ShardMap<N>`: N independent sub-maps behind per-shard locks (no cross-shard contention). Key = existing runtime client id; shard assignment derived from the same kernel hash (observable via `SO_REUSEPORT` + `getsockname` on accept? no - instead each shard only ever sees clients the kernel routed to it, so assignment is implicit by construction).
+- QKey registry stays process-global behind the existing lock (read-mostly during data phase); revocation manager and retry-token manager likewise global read-shared.
+- TUN downlink: single TUN fd is not shardable - shard 0 owns TUN writes; other shards hand TUN-bound payloads over a bounded crossbeam-style queue to shard 0 (backpressure via `PendingTunDownlinks` pattern already present).
+- Admin actions, housekeeping tick, signal handling: shard 0 exclusively; shards 1..N run pure RX/process/TX loops with a shared shutdown barrier (`AtomicBool` + `Notify`).
+
+### Failure and lifecycle
+- A data-plane fault on any shard sets the shared fault slot and notifies all shards; every shard exits its drain loop, joins, and the runtime reports the first fault (existing `runtime_fault` contract).
+- Drain-on-shutdown: each shard finishes its current batch, drops pending RX, flushes TUN queue, then exits. No partial-window commits (QUIC loss recovery absorbs the tail).
+
+### Verification plan
+1. Local: all server tests green with `N=1` (behavior identical to today).
+2. Omega (aarch64 Linux): build with `io_uring` feature, run the multi-client netns suite with `N=1..4`; require exact-delivery/no-duplication contracts unchanged.
+3. pps scaling: `bench-linux-send-path-decision.sh` extended with a `--shards N` knob; acceptance: >= 3x aggregate pps at N=4 vs N=1 before/after comparison on identical hardware, plus flat per-shard latency distribution.
+
+### Risks
+- Kernel hash skew: uneven client distribution across shards under few-NAT-gateway test setups (mitigation: measure per-shard counts in the bench; document skew, do not add application rebalancing).
+- QUIC path migration across shards: a migrating client changes ports -> may land on a different shard. Migration handling must consult the global migration registry first (existing `reconcile_incoming_path_update`) and forward to the owning shard if found - implemented as shard-local check then global fallback lookup.
+
