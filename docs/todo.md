@@ -6,11 +6,6 @@
 - Local correctness reconciliation is active against the pinned CFRG AEGIS-128L vectors and the official CAESAR MORUS-1280-128 reference. No advanced family is promoted or enabled by this work. The standard AES-GCM baseline remains the live rollback path.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
-## Blocked
-
-### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence [!] paused for TODO-893
-- Local correctness reconciliation is active against the pinned CFRG AEGIS-128L vectors and the official CAESAR MORUS-1280-128 reference. No advanced family is promoted or enabled by this work. The standard AES-GCM baseline remains the live rollback path. Paused for TODO-893 per TASK lifecycle - exactly one Active.
-- Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
 ## Blocked
 
