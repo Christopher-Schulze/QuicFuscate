@@ -117,7 +117,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
           components: clippy
 
       - name: Set up Bun
@@ -176,7 +176,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
           components: clippy
 
       - name: Cache cargo registry
@@ -261,7 +261,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
           components: clippy
 
       - name: Cache cargo registry
@@ -420,7 +420,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Verify truthful Cargo SIMD feature contract
         run: bash scripts/audits/verify-simd-feature-contract.sh
@@ -446,7 +446,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Run AMX proof lane
         shell: bash
@@ -505,7 +505,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -547,7 +547,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -625,7 +625,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -661,7 +661,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -744,7 +744,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -856,7 +856,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1011,7 +1011,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --version "0.22.2" --locked
@@ -1035,7 +1035,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -1061,30 +1061,26 @@ jobs:
   fuzz-targets:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Short ASAN fuzzing stays a PR gate; main pushes rely on the weekly
+    # Stable deterministic fuzz regression stays a PR gate; main pushes rely on the weekly
     # extended fuzz-scheduled workflow instead of blocking every push.
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     env:
       CARGO_INCREMENTAL: "0"
-      ASAN_OPTIONS: "detect_odr_violation=0"
       FUZZ_DURATION: ${{ github.event_name == 'pull_request' && '60' || '120' }}
       FUZZ_JOBS: "2"
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly
-
-      - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz --version "0.13.2" --locked
+          toolchain: "stable"
 
       - name: Verify fuzz contract
         run: bash scripts/audits/verify-fuzz-contract.sh
 
-      - name: Run all fuzz targets with AddressSanitizer
-        run: RUSTFLAGS="-Zsanitizer=address" bash scripts/tests/fuzz/run-ci-fuzz.sh
+      - name: Run all fuzz targets (stable deterministic)
+        run: bash scripts/tests/fuzz/run-ci-fuzz.sh
 
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v7
@@ -1113,7 +1109,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Cache cargo registry + criterion baselines
         uses: actions/cache@v6

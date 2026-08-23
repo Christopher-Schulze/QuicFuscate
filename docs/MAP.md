@@ -1719,10 +1719,14 @@ The audit remains open. These reconciliations document current evidence and owne
 - Post-push seam evidence at `scripts/out/audits/workspace-seams-20260810T-stable-avx10-detection-postpush/workspace-seams.json` records published revision `1fad839e8ebe84767fbea2389eba40edf6fcf476`, 36 packages, 336 Rust files, 207,784 source lines, 106 module edges, 123 workspace dependency edges, no strongly connected components, and `protected_changes=[]`.
 - The AMX proof contract audit uses ripgrep when present and a recursive fixed-string grep fallback otherwise; both local paths produce byte-identical passing output. CI therefore has no undeclared ripgrep requirement.
 
-## Fuzz Toolchain and Sanitizer Isolation (2026-08-10, TODO-562)
+## Fuzz Lane Stable Migration (2026-08-23)
 
-- `.github/workflows/ci.yml` and `.github/workflows/fuzz-scheduled.yml` install `cargo-fuzz 0.13.2` through explicit Nightly and scope `RUSTFLAGS=-Zsanitizer=address` to the shared fuzz runner. Installation and contract verification are no longer contaminated by a job-wide unstable flag under the repository's stable toolchain pin.
-- `scripts/tests/fuzz/run-ci-fuzz.sh` and `scripts/audits/verify-fuzz-contract.sh` select Nightly explicitly for fuzz metadata and target discovery. The local contract resolves the six declared targets and all curated seeds; hosted execution remains pending and is not claimed green.
+- `.github/workflows/ci.yml` and `.github/workflows/fuzz-scheduled.yml` now run the fuzz lane on the stable Rust toolchain; no nightly toolchain, `cargo-fuzz`, or AddressSanitizer is installed or required.
+- `scripts/tests/fuzz/` is restructured from `cargo-fuzz` `[[bin]]` targets with `libfuzzer-sys` to a normal library crate with `pub fn exercise(&[u8])` entry points under `src/targets/`. The deterministic runner (`run-ci-fuzz.sh`) executes `cargo test --release` with curated seeds plus a generated-input byte stream.
+- `scripts/audits/verify-fuzz-contract.sh` enforces the stable contract: no `libfuzzer-sys` dependency, no `cargo-fuzz` metadata, no nightly toolchain references, and the six-target inventory is read from `src/targets.rs`.
+- `config/tool-versions.env` drops `RUST_NIGHTLY_TOOLCHAIN` and `CARGO_FUZZ_VERSION`; `rust-toolchain.toml` moves from `1.97.1` to floating `stable`.
+- `scripts/audits/verify-reproducible-dependencies.sh` accepts floating-stable: `dtolnay/rust-toolchain@stable` with `toolchain: "stable"` or a concrete version; rejects nightly channels including version-suffixed forms like `1.98.0-nightly`.
+- Client assignment negotiation (`negotiate_assignment`) and outbound flush (`flush_outbound`) now treat `ConnectionError::BufferTooShort` and `Done` as transient under netem impairment instead of dropping the circuit fatally.
 
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 

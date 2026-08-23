@@ -4,48 +4,11 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-[package.metadata]
-cargo-fuzz = true
-
 [dependencies]
-libfuzzer-sys = "0.4"
 quicfuscate = { path = "../../..", features = ["rust-tests"] }
 
-[[bin]]
-name = "packet_parsing"
-path = "fuzz_targets/packet_parsing.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "frame_decoding"
-path = "fuzz_targets/frame_decoding.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "crypto_operations"
-path = "fuzz_targets/crypto_operations.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fec_encoding"
-path = "fuzz_targets/fec_encoding.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "varint_parsing"
-path = "fuzz_targets/varint_parsing.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "connection_handling"
-path = "fuzz_targets/connection_handling.rs"
-test = false
-doc = false
+[lib]
+path = "src/lib.rs"
 
 [profile.release]
 debug = 1

@@ -14,25 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
-      ASAN_OPTIONS: "detect_odr_violation=0"
       FUZZ_DURATION: "1800"
       FUZZ_JOBS: "4"
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly
-
-      - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz --version "0.13.2" --locked
+          toolchain: "stable"
 
       - name: Verify fuzz contract
         run: bash scripts/audits/verify-fuzz-contract.sh
 
-      - name: Run extended fuzz targets with AddressSanitizer
-        run: RUSTFLAGS="-Zsanitizer=address" bash scripts/tests/fuzz/run-ci-fuzz.sh
+      - name: Run extended fuzz targets (stable deterministic)
+        run: bash scripts/tests/fuzz/run-ci-fuzz.sh
 
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v7

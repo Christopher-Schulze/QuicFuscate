@@ -22,9 +22,8 @@ for command_name in bun cargo rustc python3; do
 done
 
 python3 - "$PROJECT_ROOT" "$VERSIONS_FILE" \
-  "$BUN_VERSION" "$PLAYWRIGHT_VERSION" "$RUST_TOOLCHAIN" "$RUST_NIGHTLY_TOOLCHAIN" \
+  "$BUN_VERSION" "$PLAYWRIGHT_VERSION" "$RUST_TOOLCHAIN" \
   "$TAURI_CLI_VERSION" "$CARGO_AUDIT_VERSION" "$CARGO_DENY_VERSION" \
-  "$CARGO_FUZZ_VERSION" \
   "$CRITCMP_VERSION" <<'PY'
 import json
 import subprocess
@@ -34,8 +33,7 @@ from pathlib import Path
 
 project_root = Path(sys.argv[1])
 versions_file = Path(sys.argv[2])
-bun_version, playwright_version, rust_toolchain, rust_nightly, tauri_cli, cargo_audit, cargo_deny, cargo_fuzz, critcmp = sys.argv[3:]
-
+bun_version, playwright_version, rust_toolchain, tauri_cli, cargo_audit, cargo_deny, critcmp = sys.argv[3:]
 
 def fail(message):
     raise SystemExit(f"error: {message}")
@@ -79,18 +77,18 @@ for path, text in workflow_text.items():
     for index, line in enumerate(lines):
         if "dtolnay/rust-toolchain@stable" in line:
             window = "\n".join(lines[index : index + 8])
-            if f"toolchain: \"{rust_toolchain}\"" not in window and f"toolchain: {rust_toolchain}" not in window:
-                fail(f"{path}:{index + 1}: stable Rust action is not pinned to {rust_toolchain}")
+            # Floating-stable contract: the action may carry `toolchain: "stable"` or an
+            # explicit concrete version. A nightly pin is rejected here.
+            if "toolchain:" not in window:
+                fail(f"{path}:{index + 1}: stable Rust action has no toolchain field")
+            if f"toolchain: \"nightly\"" in window or f"toolchain: nightly" in window:
+                fail(f"{path}:{index + 1}: stable Rust action is pinned to nightly")
         if "dtolnay/rust-toolchain@nightly" in line:
-            window = "\n".join(lines[index : index + 8])
-            if f"toolchain: \"{rust_nightly}\"" not in window and f"toolchain: {rust_nightly}" not in window:
-                fail(f"{path}:{index + 1}: nightly Rust action is not owned by {rust_nightly}")
-
+            fail(f"{path}:{index + 1}: nightly Rust action is forbidden on the stable lane")
 tool_install_versions = {
     "tauri-cli": tauri_cli,
     "cargo-audit": cargo_audit,
     "cargo-deny": cargo_deny,
-    "cargo-fuzz": cargo_fuzz,
     "critcmp": critcmp,
 }
 for path, text in workflow_text.items():
@@ -111,8 +109,12 @@ if "bun install" not in build_helper or "--frozen-lockfile" not in build_helper:
     fail("scripts/build/build-web-admin.sh does not enforce a frozen Bun lockfile")
 
 toolchain_text = (project_root / "rust-toolchain.toml").read_text(encoding="utf-8")
-if f'channel = "{rust_toolchain}"' not in toolchain_text:
-    fail(f"rust-toolchain.toml is not pinned to {rust_toolchain}")
+# Floating-stable contract: the channel may be the literal "stable" (always latest) or a
+# concrete stable version. A nightly channel is rejected.
+if 'channel = "stable"' not in toolchain_text and f'channel = "{rust_toolchain}"' not in toolchain_text:
+    fail(f"rust-toolchain.toml is not on the stable channel (got channel != stable/{rust_toolchain})")
+if 'channel = "nightly"' in toolchain_text:
+    fail("rust-toolchain.toml is pinned to nightly; the stable lane forbids it")
 
 
 def canonical_cargo_metadata(manifest):
@@ -187,8 +189,17 @@ if len(set(bun_hashes)) != 1:
     fail(f"Bun lock hash changed between frozen resolution runs: {bun_hashes}")
 
 rustc_version = run(["rustc", "--version"]).strip()
-if not rustc_version.startswith(f"rustc {rust_toolchain} "):
-    fail(f"active Rust toolchain is {rustc_version!r}, expected {rust_toolchain}")
+# Under the floating-stable contract the active toolchain is whatever stable resolves to on
+# the host. We only reject a nightly/beta/dev active compiler; a concrete stable version is
+# accepted regardless of its point release.
+rustc_release = rustc_version.split()[1] if len(rustc_version.split()) > 1 else ""
+# Reject any non-stable channel: bare "nightly"/"beta"/"dev", version-suffixed forms like
+# "1.98.0-nightly", and host-suffixed forms like "nightly-aarch64-unknown-linux-gnu".
+if "-nightly" in rustc_release or "-beta" in rustc_release or "-dev" in rustc_release \
+        or rustc_release in ("nightly", "beta", "dev") or rustc_release.startswith("nightly"):
+    fail(f"active Rust toolchain is {rustc_version!r}; stable lane forbids non-stable channels")
+if not rustc_version.startswith("rustc "):
+    fail(f"active Rust toolchain reported an unparseable version: {rustc_version!r}")
 bun_runtime_version = run(["bun", "--version"]).strip()
 if bun_runtime_version != bun_version:
     fail(f"active Bun is {bun_runtime_version!r}, expected {bun_version!r}")

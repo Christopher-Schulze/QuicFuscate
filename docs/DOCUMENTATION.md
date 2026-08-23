@@ -107,7 +107,7 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 
 | Boundary | Canonical owner | Constraint | Strongest proof surfaces |
 |---|---|---|---|
-| Data-plane AEAD posture | `src/crypto/`, `crates/qf-simd/` | Product contract is `Aegis128L` or `Morus1280_128`; internal width variants remain backend machine room only | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs` |
+| Data-plane AEAD posture | `src/crypto/`, `crates/qf-simd/` | Product contract is `Aegis128L` or `Morus1280_128`; internal width variants remain backend machine room only | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/src/targets/crypto_operations.rs` |
 | TLS-visible handshake boundary | `src/qftls.rs` | rustls owns real TLS protocol semantics; TLS Cover is overlay/cover only | `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection/` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims; public packet, CID, token, and CRYPTO ranges fail closed before mutation | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, `scripts/tests/rust/rt-transport-packet-headers.rs`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
 | Unsafe SIMD / crypto machine room | `src/crypto/`, `crates/qf-simd/`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
@@ -175,7 +175,7 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 | Evidence class | Primary surfaces | What it supports |
 |---|---|---|
 | Targeted runtime and contract tests | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, targeted `cargo test --features rust-tests` runs | retained runtime contract, backend parity, regression resistance |
-| Fuzzing | `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs`, `scripts/tests/suites/test-security-fuzzing.sh` | malformed input handling and retained crypto/runtime stress coverage |
+| Fuzzing | `scripts/tests/fuzz/src/targets/crypto_operations.rs`, `scripts/tests/suites/test-security-fuzzing.sh` | stable deterministic corpus + generated-input regression coverage for malformed input handling and retained crypto/runtime stress |
 | Guardrail audit | `scripts/tests/audits/audit-runtime-guardrails.sh` | runtime/docs/contract drift detection |
 | Runtime soak and chaos | `scripts/tests/suites/test-runtime-soak-chaos.sh` | control-plane, integration, and runtime stability evidence |
 | DDoS admission | `scripts/tests/suites/test-ddos-admission.sh` | sustained activation/clear hysteresis, established-client bidirectional continuity, real Retry handshake, real MaxMind decisions, strict-HTTPS blacklist refresh, cache restart, failed-refresh last-known-good preservation, and bounded resource evidence |
@@ -204,7 +204,7 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 - Last fully verified release checkpoint: `bf929bfddd1ca129c21d480f2ece31fb03a37c42` (`v0.4.4` tag).
 - GitHub `CI` run `30611849921`, `Clippy Matrix` run `30611849920`, and Release Build run `30612996058` are green on `bf929bfddd1ca129c21d480f2ece31fb03a37c42`.
 - `cargo audit` clean: 0 vulnerabilities, 0 warnings (crossbeam-epoch RUSTSEC-2026-0204 patched: 0.9.18 → 0.9.20).
-- The repository owns its release and CI Rust toolchain through `rust-toolchain.toml`, pinned to `1.97.1`; nightly is used only by the explicit fuzz lane. This is a pinned stable baseline, not an MSRV promise; no older Rust compatibility is currently supported or claimed.
+- The repository owns its release and CI Rust toolchain through `rust-toolchain.toml`, set to the floating `stable` channel (always latest stable); no nightly toolchain is installed or required. The fuzz lane runs on the same stable toolchain using deterministic corpus + generated-input regression tests instead of nightly-only `cargo-fuzz` + AddressSanitizer. This is a floating-stable baseline, not an MSRV promise; no older Rust compatibility is currently supported or claimed.
 - The CI workflow now includes an `app-backend-checks` job that builds the desktop Svelte bundle for Tauri context, then runs locked metadata, check, Clippy, and test gates in `apps/tauri/src-tauri` on macOS.
 - The Linux fastpath evidence job is green in the current CI checkpoint. This proves the current non-privileged CI fastpath suite, not a replacement for a privileged production deployment soak.
 - **TODO-412 DONE**: Real-world QUIC connection over the internet verified: Mac (ARM64) → Omega (Oracle Cloud, ARM64, 92.5.226.155:4433). TLS handshake successful, RTT 0ms, Loss 0.00%, FEC NEON SIMD active, stealth uTLS+TLS Cover active. Oracle Cloud Security List is now open for UDP 4433. Server RSS 3.1 MB at idle.
@@ -1896,11 +1896,11 @@ Cache keys include one or more Cargo.lock files and, in several jobs, the runner
 
 ### CI Lane Cadence Contract
 
-Since 2026-08-16, main pushes run the fast critical lanes only. The nspawn installer lifecycle (`linux-installer-native`), the netem-impaired three-hop circuit step, and the short ASAN fuzz job are gated to pull requests, manual dispatch, and the nightly `CI` schedule (`17 2 * * *`); deep fuzzing additionally remains in the weekly `fuzz-scheduled.yml` workflow. Unimpaired one/two/three-hop circuit proof, native firewall, traffic-analysis, Windows, macOS build/test, and all frontend and contract lanes stay on every push. Every job carries an explicit `timeout-minutes` bound. The macOS feature matrix was deduplicated against `build-test`: the default all-target `rust-tests` surface runs once in `build-test`, while both `simd-selfcheck` lanes execute only the `rt-simd-selfcheck` target. The `[profile.dev]` switch to `debug = false` removes debuginfo from all dev/test-profile compilation locally and in CI without touching debug assertions or the release profile.
+Since 2026-08-16, main pushes run the fast critical lanes only. The nspawn installer lifecycle (`linux-installer-native`), the netem-impaired three-hop circuit step, and the short fuzz job are gated to pull requests, manual dispatch, and the nightly `CI` schedule (`17 2 * * *`); deep fuzzing additionally remains in the weekly `fuzz-scheduled.yml` workflow. All fuzz lanes now run on the stable toolchain using deterministic corpus + generated-input regression tests; no nightly toolchain or AddressSanitizer is required. Unimpaired one/two/three-hop circuit proof, native firewall, traffic-analysis, Windows, macOS build/test, and all frontend and contract lanes sta...
 
 ### Rust Toolchain Support Policy
 
-QuicFuscate follows a pinned-stable-only support policy. `rust-toolchain.toml` and `config/tool-versions.env` select Rust `1.97.1` for the root crate, CI, release checks, and the Tauri host. The root and Tauri manifests intentionally omit `rust-version`, and no MSRV CI lane exists; consumers must use the pinned baseline or a newer compatible stable compiler at their own risk. The fuzz manifest uses the separate nightly lane and is not MSRV evidence. The source uses modern standard-library APIs including `OnceLock`, `LazyLock`, `std::io::Error::other`, `Option::{is_some_and,is_none_or}`, and integer `is_multiple_of`, so an older compiler floor must not be inferred from the 2021 edition or dependency metadata. TODO-762 is archived after establishing this policy. TODO-758 is archived after restoring the isolated lock and hosted sanitizer gate.
+QuicFuscate follows a floating-stable-only support policy. `rust-toolchain.toml` and `config/tool-versions.env` select the `stable` channel (always latest stable) for the root crate, CI, release checks, the Tauri host, and the fuzz lane. The root and Tauri manifests intentionally omit `rust-version`, and no MSRV CI lane exists; consumers must use a current stable compiler. No nightly toolchain is installed or required by any CI lane. The source uses modern standard-library APIs including ...
 
 Build/runtime behavior for TLS fingerprint inputs is documented in the TLS boundary section; see "TLS Boundary: rustls protocol with optional cover overlay -> Fingerprint Source Model".
 
@@ -4212,17 +4212,17 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 > Note: `test-all.sh` was archived; run suites sequentially or use `util-run-full-suite.sh` which delegates to the individual suite scripts.
 > Note: Linux TUN/netns E2E scripts acquire a global `flock` guard before touching shared namespace/process/log/cert/admin-socket state. Override with `QF_E2E_LOCK_FILE` or `QF_E2E_LOCK_TIMEOUT` only when running isolated copies.
 
-**Fuzzing (cargo-fuzz, optional)**
-- Tooling: `cargo install cargo-fuzz --version "0.13.2" --locked` (requires a nightly Rust toolchain for fuzz runs).
-- Targets live under `scripts/tests/fuzz/fuzz_targets/` and are wired in `scripts/tests/fuzz/Cargo.toml`.
+**Fuzzing (stable deterministic)**
+- The fuzz lane runs on the stable Rust toolchain via `cargo test`; no nightly toolchain, `cargo-fuzz`, or AddressSanitizer is required.
+- Targets live under `scripts/tests/fuzz/src/targets/` and are wired in `scripts/tests/fuzz/Cargo.toml` as a normal library crate with `pub fn exercise(&[u8])` entry points.
 - The fuzz manifest resolves the root crate through `quicfuscate = { path = "../../..", features = ["rust-tests"] }`.
 - Each target retains eight deterministic curated seed files under `scripts/tests/fuzz/seeds/<target>/`; generated runtime corpora and crash artifacts remain ignored under `scripts/tests/fuzz/corpus/` and `scripts/tests/fuzz/artifacts/`.
-- List targets: `cd scripts/tests/fuzz && cargo fuzz list`
-- Run a target: `cd scripts/tests/fuzz && cargo fuzz run packet_parsing`
-- Reproduce the CI contract with `RUSTFLAGS="-Zsanitizer=address" FUZZ_DURATION=60 scripts/tests/fuzz/run-ci-fuzz.sh`; the runner validates nightly, metadata, the exact six-target inventory, bounded inputs, curated-seed staging, and nonzero failure propagation.
+- Run the suite: `bash scripts/tests/fuzz/run-ci-fuzz.sh` (executes `cargo test --release` with the curated seeds plus a deterministic byte generator).
+- Verify the contract: `bash scripts/audits/verify-fuzz-contract.sh` (checks stable manifest, six-target inventory, seed bounds, workflow lanes, and crypto-backend coverage).
 - Runtime corpus/crash/target outputs are centralized under `scripts/out/tests/<run>/fuzz/...` by `scripts/tests/suites/test-security-fuzzing.sh`.
-- The repository CI lane runs short PR sessions and longer main-push sessions in `.github/workflows/ci.yml`; `.github/workflows/fuzz-scheduled.yml` runs the extended Sunday lane. Both lanes set AddressSanitizer explicitly and upload crash artifacts on failure.
+- The repository CI lane runs short PR sessions in `.github/workflows/ci.yml`; `.github/workflows/fuzz-scheduled.yml` runs the extended Sunday lane. Both lanes use the stable toolchain and upload crash artifacts on failure.
 - Seed dedupe utility: `scripts/tests/utils/util-fuzz-seed-curate.sh` (per-target SHA-256 deduplication).
+- Coverage-guided libFuzzer mutation and AddressSanitizer are no longer part of the stable lane; the deterministic runner catches panics, aborts, and out-of-bounds regressions over the curated seeds and generated inputs.
 
 **Fast runs (`scripts/tests/fast/`)**
 - `test-fast-crypto.sh` - Fast crypto sanity (TLS Cover parity + Wiedemann scalar telemetry)

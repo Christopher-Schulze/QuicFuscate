@@ -1,13 +1,14 @@
-#![no_main]
+//! Drives a client QUIC connection receive with arbitrary datagram bytes.
+//!
+//! Every result is consumed defensively; a panic or a length overrun on a synthetic datagram is
+//! the only finding this target reports.
 
 use std::net::{Ipv4Addr, SocketAddr};
-
-use libfuzzer_sys::fuzz_target;
 
 use quicfuscate::transport::packet;
 use quicfuscate::transport::{Config, RecvInfo};
 
-fuzz_target!(|data: &[u8]| {
+pub fn exercise(data: &[u8]) {
     if data.is_empty() {
         return;
     }
@@ -26,4 +27,4 @@ fuzz_target!(|data: &[u8]| {
     let info = RecvInfo { from: peer, to: local, ecn: None };
     let mut buf = data.to_vec();
     let _ = conn.recv(&mut buf, &info);
-});
+}

@@ -1,6 +1,4 @@
-#![no_main]
-
-//! Fuzz the FEC input boundaries that accept caller-controlled data.
+//! Drives the FEC input boundaries that accept caller-controlled data.
 //!
 //! Proof boundary: this target drives the public GF(2^8) block path, the public wire parser, and
 //! the public matrix helper with arbitrary bytes. Every one of them must either succeed or return
@@ -9,8 +7,6 @@
 //! pool exhaustion or mode transitions, which stay with their own owners.
 
 use std::sync::Arc;
-
-use libfuzzer_sys::fuzz_target;
 
 use quicfuscate::fec::{matrix_multiply_scalar, wire, Encoder8, FecDecoder8, FecPacket};
 use quicfuscate::optimize::MemoryPool;
@@ -108,7 +104,8 @@ fn fuzz_matrix_helper(data: &[u8]) {
     let _ = matrix_multiply_scalar(&a, &b, &mut result);
 
     // Mismatched result geometry must be rejected too.
-    let mut short_result: Vec<Vec<u8>> = (0..rows.saturating_sub(1)).map(|_| vec![0u8; cols]).collect();
+    let mut short_result: Vec<Vec<u8>> =
+        (0..rows.saturating_sub(1)).map(|_| vec![0u8; cols]).collect();
     let _ = matrix_multiply_scalar(&a, &b, &mut short_result);
 
     // An empty first row is the documented `EmptyInput` boundary.
@@ -118,7 +115,7 @@ fn fuzz_matrix_helper(data: &[u8]) {
     }
 }
 
-fuzz_target!(|data: &[u8]| {
+pub fn exercise(data: &[u8]) {
     if data.is_empty() {
         return;
     }
@@ -128,4 +125,4 @@ fuzz_target!(|data: &[u8]| {
     fuzz_block_path(block_bytes, &pool);
     fuzz_wire_parser(wire_bytes);
     fuzz_matrix_helper(matrix_bytes);
-});
+}

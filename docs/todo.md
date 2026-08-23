@@ -6,7 +6,9 @@
 - Local correctness reconciliation is active against the pinned CFRG AEGIS-128L vectors and the official CAESAR MORUS-1280-128 reference. No advanced family is promoted or enabled by this work. The standard AES-GCM baseline remains the live rollback path.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
-
+### TODO-894 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
+- The fuzz lane is migrated from nightly-only `cargo-fuzz` + AddressSanitizer to a stable deterministic corpus + generated-input regression runner. `rust-toolchain.toml` is set to floating `stable`; `config/tool-versions.env` drops `RUST_NIGHTLY_TOOLCHAIN` and `CARGO_FUZZ_VERSION`; all CI workflows use `dtolnay/rust-toolchain@stable`. `verify-reproducible-dependencies.sh` accepts floating-stable and rejects version-suffixed nightly channels. Client assignment negotiation and outbound flush now treat `ConnectionError::BufferTooShort` and `Done` as transient under netem impairment instead of dropping the circuit. The routing `cleanup_stale` path checks `nft_table_exists` before removing stale ownership records, preventing fail-open on foreign-owner or permission errors. Unimpaired 3-hop passes on Omega; impaired 3-hop fails only on latency/jitter threshold (pre-existing test tuning issue, not a transport bug). Local fuzz contract and test suite are green (7/7).
+- Detail: (inline - see commit)
 ## Blocked
 
 

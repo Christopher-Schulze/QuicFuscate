@@ -530,10 +530,35 @@ impl RoutingManager {
             self.validate_persisted_ownership(&state)?;
             let owner = self.current_firewall_owner()?;
             Self::reject_active_owner(&state)?;
-            self.verify_owned_firewall_resource(&owner)?;
-            self.recover_persisted_ownership()?;
-            owned_firewall = Some(owner);
-            true
+            // If the owned firewall resource is already absent (e.g. a previous clean
+            // shutdown deleted the nft table but left the ownership record), remove the
+            // stale ownership record and continue without durable state. If the table IS
+            // present, verify it fatally - a foreign owner or permission error must not
+            // be silently swallowed as fail-open.
+            let table_absent = match owner.firewall_backend {
+                crate::firewall::FirewallBackend::Nftables => {
+                    !crate::firewall::nft_table_exists("inet", Self::NFT_RT_TABLE)
+                        .map_err(|error| RoutingError::CommandFailed(error.to_string()))?
+                }
+                crate::firewall::FirewallBackend::Iptables => {
+                    // iptables does not use a dedicated table; use the existing
+                    // fixed-resource probe to decide absence.
+                    !self.fixed_firewall_resource_present()?
+                }
+            };
+            if table_absent {
+                log::warn!(
+                    "stale firewall ownership record present but resource is absent; \
+                     removing ownership record and continuing"
+                );
+                self.remove_ownership_file()?;
+                false
+            } else {
+                self.verify_owned_firewall_resource(&owner)?;
+                self.recover_persisted_ownership()?;
+                owned_firewall = Some(owner);
+                true
+            }
         } else if let Some(owner) = self.read_firewall_ownership()? {
             if owner.tun_name != self.tun_name {
                 return Err(RoutingError::CommandFailed(format!(

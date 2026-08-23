@@ -1,12 +1,17 @@
-#![no_main]
-
-use libfuzzer_sys::fuzz_target;
+//! Drives the public AEAD seal/open path and the retained data-AEAD selector with arbitrary
+//! bytes, including every accepted `force_aead` spelling.
+//!
+//! A panic, an aborted seal/open, or a fail-open selection on a malformed planner-owned width
+//! name is a finding. No key material or handshake state crosses this boundary. The public list
+//! covers every accepted `crypto.force_aead` spelling. The internal entries intentionally
+//! exercise the runtime's fail-closed fallback for planner-owned width names; they are not valid
+//! product configuration values.
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
 use quicfuscate::crypto::{install_data_aead_config, select_data_aead, ChaCha20Poly1305};
 use quicfuscate::engine::{AeadPreference, CryptoConfig};
 
-const PUBLIC_FORCE_AEAD_VALUES: [&str; 7] = [
+pub const PUBLIC_FORCE_AEAD_VALUES: [&str; 7] = [
     "auto",
     "aegis-128l",
     "aegis128l",
@@ -16,9 +21,9 @@ const PUBLIC_FORCE_AEAD_VALUES: [&str; 7] = [
     "morus1280-128",
 ];
 
-const INTERNAL_AEGIS_BACKEND_VALUES: [&str; 2] = ["aegis-128x4", "aegis-128x8"];
+pub const INTERNAL_AEGIS_BACKEND_VALUES: [&str; 2] = ["aegis-128x4", "aegis-128x8"];
 
-fuzz_target!(|data: &[u8]| {
+pub fn exercise(data: &[u8]) {
     if data.len() < 44 {
         return;
     }
@@ -44,10 +49,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // The public list covers every accepted `crypto.force_aead` spelling. The internal entries
-    // intentionally exercise the runtime's fail-closed fallback for planner-owned width names;
-    // they are not valid product configuration values.
-    let selector = usize::from(data[0]) % (PUBLIC_FORCE_AEAD_VALUES.len() + INTERNAL_AEGIS_BACKEND_VALUES.len());
+    let selector = usize::from(data[0])
+        % (PUBLIC_FORCE_AEAD_VALUES.len() + INTERNAL_AEGIS_BACKEND_VALUES.len());
     let force = if selector < PUBLIC_FORCE_AEAD_VALUES.len() {
         PUBLIC_FORCE_AEAD_VALUES[selector]
     } else {
@@ -70,4 +73,4 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let _ = open.open_with_u64_counter(7, b"fuzz-ad", &mut data_aead_buf);
-});
+}

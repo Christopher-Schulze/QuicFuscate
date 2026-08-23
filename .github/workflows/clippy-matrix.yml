@@ -55,7 +55,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: "1.97.1"
+        toolchain: "stable"
         components: clippy
         
     - name: Cache dependencies
@@ -90,7 +90,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "stable"
 
       - name: Verify truthful Cargo SIMD feature contract
         run: bash scripts/audits/verify-simd-feature-contract.sh

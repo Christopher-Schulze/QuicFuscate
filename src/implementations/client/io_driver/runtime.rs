@@ -164,12 +164,22 @@ impl IoDriver {
         loop {
             let written = {
                 let mut conn_guard = conn.lock();
-                match conn_guard.send(&mut *out) {
+                let send_result = conn_guard.send(&mut *out);
+                match &send_result {
                     Ok(0) => break,
-                    Ok(written) => written,
+                    Ok(written) => *written,
+                    Err(EngineError::Connection(msg))
+                        if msg == "Connection done" || msg == "Buffer too short" =>
+                    {
+                        // Under netem impairment the QUIC packet builder may not have
+                        // enough congestion window or MTU budget to produce a packet in
+                        // this iteration. This is transient: break and retry on the next
+                        // loop tick rather than dropping the circuit.
+                        break;
+                    }
                     Err(e) => {
                         log::debug!("Connection send error during flush: {:?}", e);
-                        return Err(self.transport_send_error("client inbound flush", e));
+                        return Err(self.transport_send_error("client inbound flush", e.clone()));
                     }
                 }
             };
@@ -283,9 +293,28 @@ impl IoDriver {
             match tokio::time::timeout(wait, socket.recv(&mut recv_buf)).await {
                 Ok(Ok(length)) if length > 0 => {
                     let mut guard = conn.lock();
-                    guard.recv(&recv_buf[..length]).map_err(|error| {
-                        self.transport_receive_error("client assignment QUIC receive", error)
-                    })?;
+                    let recv_result = guard.recv(&recv_buf[..length]);
+                    match &recv_result {
+                        Ok(_) => {}
+                        Err(EngineError::Connection(msg))
+                            if msg == "Connection done" || msg == "Buffer too short" =>
+                        {
+                            // Under netem impairment (loss + reorder) a truncated or
+                            // coalesced packet fragment can reach the QUIC parser before
+                            // the complete datagram arrives. "Connection done" is a benign
+                            // no-progress signal. Both are transient: the connection is
+                            // still alive (the is_closed check below catches a real close)
+                            // and the next recv will carry the full packet. Treating either
+                            // as fatal drops the circuit during the assignment handshake
+                            // under impairment. Continue.
+                        }
+                        Err(_) => {
+                            return Err(self.transport_receive_error(
+                                "client assignment QUIC receive",
+                                recv_result.unwrap_err(),
+                            ))?;
+                        }
+                    }
                     if control_started {
                         guard.poll_http3().map_err(|error| {
                             self.transport_receive_error("client assignment H3 poll", error)
