@@ -21,7 +21,7 @@ jobs:
   # platform-specific behavior macOS cannot cover; frontend checks run locally
   # (`bun run check` / `test:unit`) and via the release desktop builds.
   build-test:
-    timeout-minutes: 60
+    timeout-minutes: 30
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -48,8 +48,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # Pure Cargo build/test (no vendored external QUIC stack)
-
+      # Lean push gate: strict Clippy plus the library suite and the targeted
+      # platform contracts. The full --all-targets suite and release/workspace
+      # builds run on the developer machine; tagged release builds are owned by
+      # release.yml.
       - name: Run Clippy
         shell: bash
         run: |
@@ -58,15 +60,10 @@ jobs:
           # disabled form, so a warning there could not fail this gate.
           cargo clippy --workspace --all-targets --locked --features rust-tests -- -D warnings
 
-      - name: Verify release compilation
+      - name: Run library tests
         shell: bash
         run: |
-          cargo build --workspace --release --locked
-
-      - name: Run tests
-        shell: bash
-        run: |
-          cargo test --workspace --all-targets --features rust-tests --locked
+          cargo test --workspace --lib --features rust-tests --locked
 
       - name: Test macOS Unix TUN syscall contracts
         shell: bash
@@ -97,15 +94,42 @@ jobs:
           path: scripts/out/tests/privilege-memory-tls-proof/
           if-no-files-found: error
 
-      - name: Upload artifacts
+  # Single native Linux release build shared by every privileged proof lane;
+  # replaces four per-lane release compilations.
+  linux-native-binary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "stable"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-native-binary-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build native proof binary
+        run: cargo build --locked --release --bin quicfuscate
+
+      - name: Upload native proof binary
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ runner.os }}-binaries
-          path: |
-            target/release/quicfuscate*
-            target/release/*.dll
-            target/release/*.dylib
-            target/release/*.so
+          name: linux-native-quicfuscate
+          path: target/release/quicfuscate
+          if-no-files-found: error
 
   windows-core-checks:
     timeout-minutes: 45
@@ -514,7 +538,8 @@ jobs:
   linux-firewall-ownership-native:
     name: Linux firewall ownership (${{ matrix.backend }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
+    needs: [linux-native-binary]
     strategy:
       fail-fast: false
       matrix:
@@ -527,19 +552,11 @@ jobs:
         with:
           submodules: false
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download shared native proof binary
+        uses: actions/download-artifact@v8
         with:
-          toolchain: "stable"
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-firewall-${{ matrix.backend }}-${{ hashFiles('Cargo.lock') }}
+          name: linux-native-quicfuscate
+          path: target/release
 
       - name: Install native firewall proof dependencies
         run: |
@@ -553,9 +570,6 @@ jobs:
             nftables \
             openssl \
             tcpdump
-
-      - name: Build exact firewall proof artifact
-        run: cargo build --locked --release --bin quicfuscate
 
       - name: Prove native firewall ownership and cleanup
         shell: bash
@@ -600,7 +614,8 @@ jobs:
           if-no-files-found: error
 
   linux-traffic-analysis-native:
-    timeout-minutes: 45
+    timeout-minutes: 30
+    needs: [linux-native-binary]
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -610,25 +625,14 @@ jobs:
         with:
           submodules: false
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download shared native proof binary
+        uses: actions/download-artifact@v8
         with:
-          toolchain: "stable"
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-traffic-analysis-${{ hashFiles('Cargo.lock') }}
+          name: linux-native-quicfuscate
+          path: target/release
 
       - name: Install native capture dependencies
         run: sudo apt-get update && sudo apt-get install -y iproute2 netcat-openbsd tcpdump
-
-      - name: Build exact traffic-analysis artifact
-        run: cargo build --locked --release --bin quicfuscate
 
       - name: Prove fail-closed Linux TUN provisioning and rollback
         shell: bash
@@ -714,6 +718,7 @@ jobs:
     name: Linux native MASQUE circuit proof
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: [linux-native-binary]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -722,14 +727,11 @@ jobs:
         with:
           submodules: false
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download shared native proof binary
+        uses: actions/download-artifact@v8
         with:
-          toolchain: "stable"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: linux-multihop
+          name: linux-native-quicfuscate
+          path: target/release
 
       - name: Install native circuit proof dependencies
         run: |
@@ -742,9 +744,6 @@ jobs:
             nftables \
             openssl \
             tcpdump
-
-      - name: Build exact circuit proof artifact
-        run: cargo build --locked --release --bin quicfuscate
 
       - name: Prove native one- and two-hop circuits
         shell: bash
