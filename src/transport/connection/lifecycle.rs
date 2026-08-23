@@ -60,13 +60,15 @@ impl Connection {
                 crate::transport::cc::Algorithm::Bbr3
             }
         };
-        recovery::Recovery::with_algorithm_with_snapshot_and_clock(
+        let mut recovery = recovery::Recovery::with_algorithm_with_snapshot_and_clock(
             INITIAL_WINDOW,
             max_datagram_size,
             algorithm,
             environment,
             clock,
-        )
+        );
+        recovery.set_pto_backoff_cap(config.pto_backoff_cap);
+        recovery
     }
 
     pub(super) fn rebuild_traffic_analysis_scheduler(&mut self) {

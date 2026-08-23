@@ -825,6 +825,57 @@ fn pto_backoff_reset_rules() {
 }
 
 #[test]
+fn pto_backoff_cap_bounds_deadline_growth() {
+    // A nested-tunnel recovery owner lowers the exponent ceiling; probe
+    // deadlines must stop growing once pto_count exceeds the cap instead of
+    // compounding toward the RFC-default 2^16 multiplier.
+    let mut rec = Recovery::new(120_000, 1200);
+    rec.update_rtt(Duration::from_millis(40));
+    rec.set_pto_backoff_cap(3);
+    let t0 = Instant::now();
+
+    rec.pto_count = 3;
+    let capped = rec.pto_deadline(t0).duration_since(t0);
+    rec.pto_count = 4;
+    let beyond = rec.pto_deadline(t0).duration_since(t0);
+    rec.pto_count = 16;
+    let far_beyond = rec.pto_deadline(t0).duration_since(t0);
+    assert_eq!(beyond, capped);
+    assert_eq!(far_beyond, capped);
+
+    // The timer deadline used by the loss-detection loop honors the same cap.
+    rec.on_packet_sent_in_space(PacketSpace::Application, 0, 1200, true, true, None, t0);
+    let deadline_at_cap = rec.loss_detection_timeout(true, false, true);
+    rec.pto_count = 10;
+    let deadline_far = rec.loss_detection_timeout(true, false, true);
+    assert_eq!(deadline_far, deadline_at_cap);
+}
+
+#[test]
+fn pto_backoff_cap_is_clamped_to_valid_range() {
+    let mut rec = Recovery::new(120_000, 1200);
+    rec.set_pto_backoff_cap(0);
+    assert_eq!(rec.pto_deadline_growth_cap(), 1);
+    rec.set_pto_backoff_cap(99);
+    assert_eq!(rec.pto_deadline_growth_cap(), super::K_PTO_BACKOFF_CAP_DEFAULT);
+}
+
+#[test]
+fn default_backoff_keeps_rfc_ceiling() {
+    let mut rec = Recovery::new(120_000, 1200);
+    rec.update_rtt(Duration::from_millis(40));
+    let t0 = Instant::now();
+    rec.pto_count = 15;
+    let high = rec.pto_deadline(t0).duration_since(t0);
+    rec.pto_count = 16;
+    let higher = rec.pto_deadline(t0).duration_since(t0);
+    rec.pto_count = 17;
+    let ceiling = rec.pto_deadline(t0).duration_since(t0);
+    assert_eq!(higher, high * 2);
+    assert_eq!(ceiling, higher);
+}
+
+#[test]
 fn persistent_congestion_collapses_cwnd() {
     let mut rec = Recovery::new(120_000, 1200);
     rec.update_rtt(Duration::from_millis(10)); // PC period = (10+20+25)*3 = 165 ms

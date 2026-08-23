@@ -2,6 +2,7 @@ use super::{is_supported_version, CongestionControlAlgorithm};
 use qf_stealth::OsFingerprintProfile;
 
 pub use qf_transport_nat::config::{NatDiscoveryReason, NatTraversalConfig, NatTraversalMode};
+use qf_transport_recovery as recovery;
 pub use qf_transport_recovery::{MigrationPolicy, MigrationProbeTarget, PmtuPolicy};
 pub use qf_transport_types::{TrafficAnalysisDefense, TrafficAnalysisPolicy};
 
@@ -74,6 +75,10 @@ pub struct Config {
     pub(crate) initial_congestion_window_packets: usize,
     /// Initial RTT estimate in milliseconds used before real measurements arrive (default: 100).
     pub(crate) initial_rtt_ms: u64,
+    /// Ceiling for the recovery PTO backoff exponent. The RFC-style default (16)
+    /// survives long outages cheaply; nested-tunnel callers lower it so probe
+    /// gaps stay bounded across stacked recovery owners (default: 16).
+    pub(crate) pto_backoff_cap: u32,
     // Optional: TLS/QLog compatibility knobs
     #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) qlog_config: Option<(String, String, String, u32)>,
@@ -198,6 +203,7 @@ impl Config {
             hystart: true,
             initial_congestion_window_packets: 10,
             initial_rtt_ms: 100,
+            pto_backoff_cap: recovery::K_PTO_BACKOFF_CAP_DEFAULT,
             #[cfg(any(test, feature = "rust-tests"))]
             qlog_config: None,
             #[cfg(any(test, feature = "rust-tests"))]
@@ -525,6 +531,12 @@ impl Config {
     /// real measurement arrives. Values below 1 are clamped to 1.
     pub fn set_initial_rtt_ms(&mut self, ms: u64) {
         self.initial_rtt_ms = ms.max(1);
+    }
+    /// Set the recovery PTO backoff exponent ceiling. Values are clamped to
+    /// `1..=16`; the RFC-style default stays 16. Circuit transports lower this
+    /// so nested-tunnel probe gaps remain bounded under sustained loss.
+    pub fn set_pto_backoff_cap(&mut self, cap: u32) {
+        self.pto_backoff_cap = cap.clamp(1, recovery::K_PTO_BACKOFF_CAP_DEFAULT);
     }
 
     /// Enables 0-RTT early data.

@@ -150,6 +150,10 @@ pub const K_GRANULARITY: Duration = Duration::from_millis(1);
 pub const K_MAX_ACK_DELAY: Duration = Duration::from_millis(25);
 /// Initial RTT before any sample (RFC 9002 §6.2.2, A.2: handshake PTO = 1 s).
 pub const K_INITIAL_RTT: Duration = Duration::from_millis(333);
+/// Default ceiling for the PTO backoff exponent (`2^16` multiplier, RFC 9002 A.9
+/// leaves the ceiling to implementations). Nested-tunnel transports lower it via
+/// [`Recovery::set_pto_backoff_cap`].
+pub const K_PTO_BACKOFF_CAP_DEFAULT: u32 = 16;
 /// Persistent congestion window multiplier (RFC 9002 §7.6.1).
 pub const K_PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
 
@@ -390,6 +394,11 @@ pub struct Recovery {
     first_rtt_sample: Option<Instant>,
     /// Probe Timeout counter (exponential backoff, incremented per PTO firing).
     pub pto_count: u32,
+    /// Upper bound for the PTO backoff exponent (RFC 9002 leaves the ceiling to
+    /// the implementation). Nested tunnels compound backoff across hops, so the
+    /// transport lowers this ceiling for circuit connections to keep probes
+    /// frequent enough for tunneled flows to survive sustained loss.
+    pto_backoff_cap: u32,
     /// Per-packet-number-space sent/loss state (canonical owner, RFC 9002 §4.1).
     spaces: [SpaceRecovery; 3],
     /// Persistent-congestion loss-run state retained across ACK frames.
@@ -454,6 +463,7 @@ impl Recovery {
             rtt_initialized: false,
             first_rtt_sample: None,
             pto_count: 0,
+            pto_backoff_cap: K_PTO_BACKOFF_CAP_DEFAULT,
             spaces: [SpaceRecovery::default(), SpaceRecovery::default(), SpaceRecovery::default()],
             pc_window: PersistentCongestionRun::default(),
             hystart: true,
@@ -479,6 +489,20 @@ impl Recovery {
     pub fn set_initial_rtt(&mut self, rtt: Duration) {
         self.rtt = rtt;
         self.cc.update_rtt_at(rtt, self.clock.now());
+    }
+
+    /// Lowers the PTO backoff exponent ceiling (values are clamped to
+    /// `1..=K_PTO_BACKOFF_CAP_DEFAULT`). The default keeps RFC-style backoff;
+    /// nested-tunnel transports lower it so probe gaps stay bounded under
+    /// sustained loss across multiple stacked recovery owners.
+    pub fn set_pto_backoff_cap(&mut self, cap: u32) {
+        self.pto_backoff_cap = cap.clamp(1, K_PTO_BACKOFF_CAP_DEFAULT);
+    }
+
+    /// Current PTO backoff exponent ceiling (diagnostic/test accessor).
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn pto_deadline_growth_cap(&self) -> u32 {
+        self.pto_backoff_cap
     }
 
     /// Enables or disables stealth congestion shaping with the given browser profile.
@@ -718,7 +742,7 @@ impl Recovery {
     /// With exponential backoff: PTO * 2^pto_count
     pub fn pto_deadline(&self, now: Instant) -> Instant {
         let pto = self.rtt + (self.rtt_var * 4).max(K_GRANULARITY) + K_MAX_ACK_DELAY;
-        let backoff = 1u32 << self.pto_count.min(16);
+        let backoff = 1u32 << self.pto_count.min(self.pto_backoff_cap);
         now + pto.checked_mul(backoff).unwrap_or(pto)
     }
 
@@ -1362,7 +1386,7 @@ impl Recovery {
                 _ => Duration::ZERO,
             };
             let base = self.rtt + (self.rtt_var * 4).max(K_GRANULARITY) + max_ack_delay;
-            let backoff = 1u32 << self.pto_count.min(16);
+            let backoff = 1u32 << self.pto_count.min(self.pto_backoff_cap);
             let Some(period) = base.checked_mul(backoff) else {
                 continue;
             };

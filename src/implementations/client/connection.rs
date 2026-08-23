@@ -9,6 +9,13 @@ use crate::stealth::StealthRuntimeOwner;
 use crate::time_source::ProtocolClock;
 use qf_engine_types::{EngineConfig, EngineError};
 
+/// PTO backoff exponent ceiling for nested circuit hops (`2^3` = 8x). Every
+/// stacked hop owns an independent RFC 9002 recovery instance, so an unbounded
+/// per-hop backoff compounds into multi-second underlay probe gaps under
+/// sustained loss; 8x keeps worst-case probe spacing near the hop RTT scale
+/// while still damping probe frequency during short outages.
+const NESTED_CIRCUIT_PTO_BACKOFF_CAP: u32 = 3;
+
 /// Client connection wrapper.
 ///
 /// Wraps `QuicFuscateConnection` and provides a streamlined interface
@@ -143,6 +150,7 @@ impl ClientConnection {
                 config.transport.mtu.min(config.transport.max_udp_payload),
                 qkey_token,
                 qkey_initial_token,
+                None,
             )?;
             (ClientDataPlane::single(connection), remote_addr)
         };
@@ -170,9 +178,13 @@ impl ClientConnection {
         udp_payload_limit: u16,
         qkey_token: Option<qf_engine_types::QKeyToken>,
         qkey_initial_token: Option<Vec<u8>>,
+        pto_backoff_cap: Option<u32>,
     ) -> Result<QuicFuscateConnection, EngineError> {
         let mut transport_config = Self::build_transport_config(config, udp_payload_limit)?;
         transport_config.set_max_idle_timeout(idle_timeout_ms);
+        if let Some(cap) = pto_backoff_cap {
+            transport_config.set_pto_backoff_cap(cap);
+        }
         transport_config.verify_peer(verify_peer);
         if !ca_file.trim().is_empty() {
             transport_config
@@ -251,6 +263,10 @@ impl ClientConnection {
             hop_payload,
             token,
             Some(hop.qkey_id.as_bytes().to_vec()),
+            // Nested circuits stack independent PTO owners per hop: bound the
+            // backoff so a loss burst cannot compound into multi-second probe
+            // gaps that stall tunneled flows (TODO-895 diagnosis).
+            (hop_count > 1).then_some(NESTED_CIRCUIT_PTO_BACKOFF_CAP),
         )
     }
 
