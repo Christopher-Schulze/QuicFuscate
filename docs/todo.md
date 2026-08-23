@@ -8,8 +8,10 @@
 
 ### TODO-894 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
 - The fuzz lane is migrated from nightly-only `cargo-fuzz` + AddressSanitizer to a stable deterministic corpus + generated-input regression runner. `rust-toolchain.toml` is set to floating `stable`; `config/tool-versions.env` drops `RUST_NIGHTLY_TOOLCHAIN` and `CARGO_FUZZ_VERSION`; all CI workflows use `dtolnay/rust-toolchain@stable`. `verify-reproducible-dependencies.sh` accepts floating-stable and rejects version-suffixed nightly channels. Client assignment negotiation and outbound flush now treat `ConnectionError::BufferTooShort` and `Done` as transient under netem impairment instead of dropping the circuit. The routing `cleanup_stale` path checks `nft_table_exists` before removing stale ownership records, preventing fail-open on foreign-owner or permission errors. Unimpaired 3-hop passes on Omega; impaired 3-hop fails only on latency/jitter threshold (pre-existing test tuning issue, not a transport bug). Local fuzz contract and test suite are green (7/7).
-- Detail: (inline - see commit)
-## Blocked
+
+### TODO-895 - Diagnose and fix TCP-over-QUIC-tunnel failure under netem impairment
+- The impaired 3-hop MASQUE circuit test (`scripts/tests/tun-multihop-e2e-netns.sh` with `QF_MULTIHOP_E2E_NETEM_LOSS_PERCENT=1 QF_MULTIHOP_E2E_NETEM_REORDER_PERCENT=2`) has never passed in CI. The circuit establishes and carries ICMP/DNS/relay, but TCP throughput over the nested 3-hop QUIC tunnel fails to reliably connect under 1% loss + 2% reorder + 12ms delay + 4ms jitter. This is a transport/congestion/FEC diagnosis task, not a threshold-tuning task. The `tcp-throughput-probe.py` per-connect timeout (1s) may be too short for 3-hop round-trips under impairment, but changing a shared utility to mask one failing test violates test integrity. Root cause must be identified: is it congestion-control collapse, FEC recovery failure, QUIC PMTUD, or packet reordering confusing the recovery loop?
+- Detail: (inline - see diagnosis)
 
 
 ### TODO-883 - Prove and reconcile the live standard QUIC packet-protection baseline
