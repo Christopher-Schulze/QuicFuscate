@@ -17,33 +17,134 @@ mod secrets;
 mod state_store;
 
 // ---------------------------------------------------------------------------
+// NumberU64 newtype for specta command parameters.
+//
+// Tauri IPC serializes values through serde_json, so u64 reaches JavaScript as a
+// JSON number - not a bigint. specta's default would forbid the export; this
+// wrapper projects to TypeScript `number` via specta_typescript::Number so the
+// generated bindings match the real runtime values the frontend receives.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NumberU64(pub u64);
+
+impl From<u64> for NumberU64 {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<NumberU64> for u64 {
+    fn from(value: NumberU64) -> Self {
+        value.0
+    }
+}
+
+impl specta::Type for NumberU64 {
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        specta_typescript::Number::<u64>::definition(types)
+    }
+}
+
+impl Serialize for NumberU64 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for NumberU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        u64::deserialize(deserializer).map(Self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON newtype for specta command parameters (serde_json::Value is recursive
+// and overflows the specta type graph; this wrapper projects to TypeScript
+// `unknown` and is transparent for serde).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct JsonUnknown(pub serde_json::Value);
+
+impl From<serde_json::Value> for JsonUnknown {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+
+impl From<JsonUnknown> for serde_json::Value {
+    fn from(value: JsonUnknown) -> Self {
+        value.0
+    }
+}
+
+impl specta::Type for JsonUnknown {
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        specta_typescript::Unknown::<serde_json::Value>::definition(types)
+    }
+}
+
+impl Serialize for JsonUnknown {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonUnknown {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde_json::Value::deserialize(deserializer).map(Self)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Types (mirroring frontend)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionStats {
     pub latency_ms: f64,
     pub loss_percent: f64,
+    #[specta(type = specta_typescript::Number)]
     pub bytes_in: u64,
+    #[specta(type = specta_typescript::Number)]
     pub bytes_out: u64,
+    #[specta(type = specta_typescript::Number)]
     pub packets_in: u64,
+    #[specta(type = specta_typescript::Number)]
     pub packets_out: u64,
+    #[specta(type = specta_typescript::Number)]
     pub uptime_secs: u64,
     pub fec_mode: String,
     pub stealth_mode: String,
     pub fec_activity_percent: f64,
+    #[specta(type = specta_typescript::Number)]
     pub fec_recovered_packets: u64,
     pub current_sni: Option<String>,
+    #[specta(type = specta_typescript::Number)]
     pub circuit_generation: u64,
     pub circuit_state: String,
     pub effective_tunnel_mtu: u16,
     pub hops: Vec<CircuitHopStats>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CircuitHopStats {
+    #[specta(type = specta_typescript::Number)]
     pub index: usize,
     pub role: String,
     pub established: bool,
@@ -51,7 +152,7 @@ pub struct CircuitHopStats {
     pub datagram_budget: u16,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedTunnel {
     pub id: String,
@@ -61,6 +162,7 @@ pub struct PersistedTunnel {
     pub qkey: String,
     /// Unix epoch milliseconds. Zero is a legacy disk sentinel repaired by
     /// `sanitize_persisted_state()` before this value reaches the frontend.
+    #[specta(type = specta_typescript::Number)]
     pub created_at: u64,
     #[serde(default)]
     pub country_code: Option<String>,
@@ -76,7 +178,7 @@ pub struct PersistedTunnel {
     pub alternate_circuit: Option<PersistedCircuit>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedCircuit {
     pub hops: Vec<PersistedCircuitHop>,
@@ -90,7 +192,7 @@ pub struct PersistedCircuit {
     pub diversity: quicfuscate::engine::CircuitDiversityPolicy,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedCircuitHop {
     pub id: String,
@@ -114,8 +216,10 @@ pub struct PersistedCircuitHop {
     #[serde(default)]
     pub ca_file: String,
     #[serde(default = "default_connect_timeout_ms")]
+    #[specta(type = specta_typescript::Number)]
     pub connect_timeout_ms: u64,
     #[serde(default = "default_idle_timeout_ms")]
+    #[specta(type = specta_typescript::Number)]
     pub idle_timeout_ms: u64,
     #[serde(default)]
     pub policy: PersistedHopPolicy,
@@ -123,17 +227,18 @@ pub struct PersistedCircuitHop {
     pub has_token: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct EngineConnectRequest {
     tunnel_id: String,
     qkey_data: String,
     sni_override: Option<String>,
     circuit: Option<PersistedCircuit>,
     alternate_circuit: Option<PersistedCircuit>,
+    #[specta(type = specta_typescript::Unknown)]
     settings: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct PersistedHopPolicy {
     pub persona: Option<quicfuscate::engine::HopPersonaConfig>,
@@ -163,12 +268,13 @@ fn default_idle_timeout_ms() -> u64 {
     30_000
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedState {
     pub schema_version: u32,
     pub tunnels: Vec<PersistedTunnel>,
     pub selected_tunnel_id: Option<String>,
+    #[specta(type = specta_typescript::Unknown)]
     pub settings: serde_json::Value,
 }
 
@@ -531,7 +637,7 @@ fn sanitize_persisted_state(mut state: PersistedState) -> Result<PersistedState,
     Ok(state)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedQKey {
     pub qkey_id: String,
@@ -543,7 +649,7 @@ pub struct ParsedQKey {
     pub extra: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     pub state: String,
@@ -551,12 +657,14 @@ pub struct EngineStatus {
     pub last_error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BufferedLogLine {
+    #[specta(type = specta_typescript::Number)]
     pub seq: u64,
     /// Unix epoch milliseconds. Zero is meaningful only when `timestamp_valid`
     /// is false and `timestamp_error` explains why wall-clock capture failed.
+    #[specta(type = specta_typescript::Number)]
     pub ts_ms: u64,
     /// Explicit validity metadata for the serialized `ts_ms` value.
     #[serde(default)]
@@ -570,9 +678,10 @@ pub struct BufferedLogLine {
     pub target: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LogsResponse {
+    #[specta(type = specta_typescript::Number)]
     pub cursor: u64,
     pub lines: Vec<BufferedLogLine>,
 }
@@ -1369,6 +1478,7 @@ fn build_client_engine_config_with_circuit(
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn qkey_parse(qkey_data: String) -> Result<ParsedQKey, String> {
     let trimmed = qkey_data.trim();
     if trimmed.is_empty() {
@@ -1394,6 +1504,7 @@ async fn qkey_parse(qkey_data: String) -> Result<ParsedQKey, String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn qkey_generate(
     remote: String,
     sni: String,
@@ -1434,6 +1545,7 @@ async fn qkey_generate(
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn engine_connect(
     app: tauri::AppHandle,
     request: EngineConnectRequest,
@@ -1466,13 +1578,14 @@ async fn engine_connect(
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn engine_rotate(
     app: tauri::AppHandle,
     tunnel_id: String,
     qkey_data: String,
     sni_override: Option<String>,
     circuit: PersistedCircuit,
-    settings: Option<serde_json::Value>,
+    settings: Option<JsonUnknown>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let tunnel_id = tunnel_id.trim().to_string();
@@ -1480,6 +1593,7 @@ async fn engine_rotate(
         return Err("Missing tunnel_id".to_string());
     }
     let state = state.inner().clone();
+    let settings = settings.map(JsonUnknown::into);
     let result = tokio::task::spawn_blocking({
         let state = state.clone();
         move || rotate_inner(tunnel_id, qkey_data, sni_override, circuit, settings, &state)
@@ -1491,6 +1605,7 @@ async fn engine_rotate(
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn engine_disconnect(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -1507,6 +1622,7 @@ async fn engine_disconnect(
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn engine_status(state: tauri::State<'_, AppState>) -> Result<EngineStatus, String> {
     service_engine_health(state.inner())?;
     let engine_state = {
@@ -1526,6 +1642,7 @@ async fn engine_status(state: tauri::State<'_, AppState>) -> Result<EngineStatus
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn engine_stats(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<ConnectionStats>, String> {
@@ -1612,12 +1729,14 @@ fn service_engine_health(state: &AppState) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn engine_logs_since(cursor: u64) -> Result<LogsResponse, String> {
+#[specta::specta]
+async fn engine_logs_since(cursor: NumberU64) -> Result<LogsResponse, String> {
     let buf = LOG_BUFFER.get().ok_or("Log buffer not initialized")?;
-    Ok(buf.since(cursor))
+    Ok(buf.since(cursor.0))
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn engine_logs_clear() -> Result<(), String> {
     let buf = LOG_BUFFER.get().ok_or("Log buffer not initialized")?;
     buf.clear();
@@ -1625,6 +1744,7 @@ async fn engine_logs_clear() -> Result<(), String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn save_state(
     app: tauri::AppHandle,
     data: PersistedState,
@@ -1637,6 +1757,7 @@ async fn save_state(
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn load_state(app: tauri::AppHandle) -> Result<Option<PersistedState>, String> {
     let store = secret_store();
     let path = state_store().state_path(&app)?;
@@ -1648,6 +1769,7 @@ async fn load_state(app: tauri::AppHandle) -> Result<Option<PersistedState>, Str
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn detect_cpu_features() -> Result<Vec<String>, String> {
     let mut features = Vec::new();
     #[cfg(target_arch = "x86_64")]
@@ -1700,6 +1822,7 @@ async fn detect_cpu_features() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn clipboard_read_text() -> Result<String, String> {
     tokio::task::spawn_blocking(|| {
         let mut clipboard =
@@ -1711,6 +1834,7 @@ async fn clipboard_read_text() -> Result<String, String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn updater_runtime_enabled(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     Ok(state.updater_runtime_enabled.load(Ordering::Relaxed))
 }
@@ -2171,8 +2295,40 @@ fn hide_main_window(app: &tauri::AppHandle) {
     }
 }
 
+pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new().commands(tauri_specta::collect_commands![
+        qkey_parse,
+        qkey_generate,
+        engine_connect,
+        engine_rotate,
+        engine_disconnect,
+        engine_status,
+        engine_stats,
+        engine_logs_since,
+        engine_logs_clear,
+        save_state,
+        load_state,
+        detect_cpu_features,
+        clipboard_read_text,
+        updater_runtime_enabled,
+    ])
+}
+
 fn main() {
     init_logging();
+
+    #[cfg(debug_assertions)]
+    {
+        let export_builder = make_specta_builder();
+        if let Err(error) = export_builder.export(
+            specta_typescript::Typescript::default(),
+            "../../../apps/svelte-desktop/src/lib/bindings.ts",
+        ) {
+            log::error!("Failed to export TypeScript bindings: {error}");
+        }
+    }
+
+    let specta_builder = make_specta_builder();
 
     let updater_enabled = updater_enabled_for_build();
     let mut builder = tauri::Builder::default()
@@ -2184,22 +2340,7 @@ fn main() {
 
     builder
         .manage(AppState::new())
-        .invoke_handler(tauri::generate_handler![
-            qkey_parse,
-            qkey_generate,
-            engine_connect,
-            engine_rotate,
-            engine_disconnect,
-            engine_status,
-            engine_stats,
-            engine_logs_since,
-            engine_logs_clear,
-            save_state,
-            load_state,
-            detect_cpu_features,
-            clipboard_read_text,
-            updater_runtime_enabled,
-        ])
+        .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>();
@@ -3711,5 +3852,20 @@ mod tests {
         assert!(!env_flag_true(key));
         std::env::remove_var(key);
         assert!(!env_flag_true(key));
+    }
+
+    #[test]
+    fn export_typescript_bindings() {
+        // tauri-specta's recursive type processing needs a larger-than-default stack.
+        let handle = std::thread::Builder::new()
+            .stack_size(128 * 1024 * 1024)
+            .spawn(|| {
+                let output_path = "../../../apps/svelte-desktop/src/lib/bindings.ts";
+                make_specta_builder()
+                    .export(specta_typescript::Typescript::default(), output_path)
+                    .expect("failed to export TypeScript bindings");
+            })
+            .expect("failed to spawn bindings export thread");
+        handle.join().expect("bindings export thread panicked");
     }
 }

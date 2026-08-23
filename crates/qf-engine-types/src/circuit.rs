@@ -23,6 +23,7 @@ pub const NESTED_MASQUE_OVERHEAD: u16 =
 
 /// Function assigned to one authenticated circuit hop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "kebab-case")]
 pub enum HopRole {
     /// Carries the next hop over an authenticated CONNECT-UDP association.
@@ -33,6 +34,7 @@ pub enum HopRole {
 
 /// Operator-provided route-diversity constraints.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(default, deny_unknown_fields)]
 pub struct CircuitDiversityPolicy {
     /// Require distinct provider labels for every hop.
@@ -47,6 +49,7 @@ pub struct CircuitDiversityPolicy {
 
 /// Browser and operating-system persona frozen for one hop generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct HopPersonaConfig {
     /// Browser-shaped TLS, QUIC, and HTTP/3 profile.
@@ -57,6 +60,7 @@ pub struct HopPersonaConfig {
 
 /// Optional connection-local policy changes applied only to one circuit hop.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(default, deny_unknown_fields)]
 pub struct HopPolicyOverrides {
     /// Explicit immutable browser/OS persona. Absence inherits the engine policy.

@@ -8,16 +8,19 @@ license = "MIT"
 tauri-build = { version = "2.5.5", features = [] }
 
 [dependencies]
-tauri = { version = "2.10.2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2.10.2", features = ["tray-icon", "image-png", "specta"] }
 tauri-plugin-updater = "2.10.0"
 tauri-plugin-autostart = "2.5.1"
-quicfuscate = { path = "../../../" }
+quicfuscate = { path = "../../../", features = ["specta"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
 env_logger = "0.11"
 arboard = "3.4"
+specta = { version = "=2.0.0-rc.25", features = ["derive", "serde_json"] }
+specta-typescript = { version = "0.0.12", features = ["serde"] }
+tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript", "derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.2", default-features = false, features = ["apple-native"] }

@@ -145,6 +145,7 @@ pub enum StealthMode {
 
 /// FEC mode exposed by the engine configuration contract.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum FecMode {
     /// FEC disabled entirely.

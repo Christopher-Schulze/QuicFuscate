@@ -3140,6 +3140,15 @@ cd ../tauri && bun run tauri build
 The `apps/tauri/` package is a thin command wrapper around `apps/svelte-desktop/` plus the retained `apps/tauri/src-tauri/` native host. The frontend is the SvelteKit SPA from `apps/svelte-desktop/`; no separate build pipeline is needed.
 The native desktop backend is validated by the locked `cargo check`/`cargo test` gates locally and compiled per-platform by the release desktop builds; the former `app-backend-checks` CI job was removed with the CI lane consolidation.
 
+**Type-Safe IPC Bindings (tauri-specta):**
+- All 14 Tauri commands and 12 IPC structs derive `specta::Type` and are exported to `apps/svelte-desktop/src/lib/bindings.ts` via `tauri-specta` 2.0.0-rc.25.
+- The `specta` feature is gated behind a workspace feature flag chain: root `quicfuscate/specta` -> `qf-engine-types/specta` -> `qf-stealth/specta`. The feature is disabled by default in the root crate and only activated by the Tauri host via `features = ["specta"]` in its dependency on `quicfuscate`.
+- Root-crate types (`HopRole`, `FecMode`, `CircuitDiversityPolicy`, `HopPersonaConfig`, `HopPolicyOverrides`, `BrowserProfile`, `OsProfile`) use `#[cfg_attr(feature = "specta", derive(specta::Type))]` so they compile without the feature in all non-Tauri consumers.
+- Desktop-host-local types (`ConnectionStats`, `CircuitHopStats`, `PersistedTunnel`, `PersistedCircuit`, `PersistedCircuitHop`, `PersistedHopPolicy`, `PersistedState`, `EngineConnectRequest`, `EngineStatus`, `BufferedLogLine`, `LogsResponse`, `ParsedQKey`) derive `specta::Type` unconditionally since they exist only in the Tauri binary.
+- Numeric fields (`u64`, `usize`) are annotated with `#[specta(type = specta_typescript::Number)]` to satisfy specta's precision-loss guard while matching the real runtime type: Tauri IPC serializes through `serde_json`, so `u64` reaches JavaScript as a JSON `number`, not a `bigint`. Command parameters that are `u64` use the `NumberU64` newtype wrapper for the same reason.
+- `serde_json::Value` fields use `#[specta(type = specta_typescript::Unknown)]` (on struct fields) or the `JsonUnknown` newtype (on command parameters) to project to TypeScript `unknown` and avoid the recursive type-graph stack overflow.
+- The bindings file is regenerated on every debug build via `make_specta_builder().export()` in `main()`, and a dedicated `export_typescript_bindings` test provides the canonical CI generation path.
+
 **Window Model:**
 - The production desktop window is fixed to `900 x 670` in `apps/tauri/src-tauri/tauri.conf.json` with `resizable: false`, `minWidth: 900`, `minHeight: 670`, `maxWidth: 900`, and `maxHeight: 670`.
 

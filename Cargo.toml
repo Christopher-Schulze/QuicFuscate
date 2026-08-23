@@ -214,6 +214,9 @@ masque-tests = []
 tun-tests = []
 simd-selfcheck = []
 
+# --- Desktop IPC type generation (tauri-specta) ---
+specta = ["qf-engine-types/specta", "qf-stealth/specta"]
+
 # --- Meta-features for convenience ---
 test-suite = ["rust-tests", "benches"]
 experimental = ["internal_wiedemann", "internal_avx10_preview"]

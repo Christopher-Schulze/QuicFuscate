@@ -4,6 +4,7 @@
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, clap::ValueEnum,
 )]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum BrowserProfile {
     /// Google Chrome fingerprint (Chromium-based).
@@ -38,6 +39,7 @@ impl std::str::FromStr for BrowserProfile {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, clap::ValueEnum,
 )]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum OsProfile {
     /// Microsoft Windows platform fingerprint.
