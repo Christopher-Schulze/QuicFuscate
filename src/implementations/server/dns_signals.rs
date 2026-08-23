@@ -1085,18 +1085,3 @@ pub(crate) async fn recv_datagram_batch(
     }
     Ok(batch)
 }
-
-#[cfg(not(unix))]
-pub(crate) async fn recv_datagram_from(
-    socket: &tokio::net::UdpSocket,
-    buf: &mut [u8],
-) -> std::io::Result<(usize, std::net::SocketAddr)> {
-    loop {
-        socket.ready(Interest::READABLE).await?;
-        match socket.try_recv_from(buf) {
-            Ok(result) => return Ok(result),
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e),
-        }
-    }
-}

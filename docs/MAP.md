@@ -1728,6 +1728,13 @@ The audit remains open. These reconciliations document current evidence and owne
 - `scripts/audits/verify-reproducible-dependencies.sh` accepts floating-stable: `dtolnay/rust-toolchain@stable` with `toolchain: "stable"` or a concrete version; rejects nightly channels including version-suffixed forms like `1.98.0-nightly`.
 - Client assignment negotiation (`negotiate_assignment`) and outbound flush (`flush_outbound`) now treat `ConnectionError::BufferTooShort` and `Done` as transient under netem impairment instead of dropping the circuit fatally.
 
+## Nested-Circuit PTO Backoff Bound (2026-08-23, TODO-905)
+
+- `crates/qf-transport-recovery/src/lib.rs` owns `K_PTO_BACKOFF_CAP_DEFAULT = 16` and `Recovery::set_pto_backoff_cap` (clamped `1..=16`); both PTO deadline sites honor the configured ceiling.
+- `src/transport/config.rs` carries `pto_backoff_cap` with the validated `set_pto_backoff_cap` setter; `src/transport/connection/lifecycle.rs` applies it whenever connection recovery state is (re)built.
+- `src/implementations/client/connection.rs` applies `NESTED_CIRCUIT_PTO_BACKOFF_CAP = 3` for `hop_count > 1` circuit connections; single-connection transports keep the RFC default.
+- Native bench wiring: Omega release build at `9edf00c` proves the impaired 3-hop netem profile green for the first time (retained ratio 0.4104, max RTT 377.9 ms, max jitter 82.9 ms, zero residue) with the unimpaired 3-hop proof unchanged (0.9891 retained, 0% loss).
+
 ## Implementation Reconciliation (2026-08-05, TODO-813 audit persistence bounds)
 
 - `AuditOptions::validate()` is the shared owner for queue capacity `1..=65,536`, active segment bytes `1..=128 MiB`, retained segments `1..=64`, and flush/shutdown timeout `1..=60,000 ms`. `AuditConfig::to_audit_options()` and `AuditLog::open_with_options()` use that contract before resource acquisition.
