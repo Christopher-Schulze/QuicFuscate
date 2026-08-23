@@ -531,10 +531,10 @@ impl Morus1280State {
             let r2_1_3 = (s1_3 ^ (s2_3 & r1_3_3) ^ s4_3 ^ m3).rotate_left(46);
             let r2_1 = [r2_1_0, r2_1_1, r2_1_2, r2_1_3];
 
-            let r3_2_0 = (s2_0 ^ (r1_3_0 & r2_4_0) ^ r1_0_0).rotate_left(38);
-            let r3_2_1 = (s2_1 ^ (r1_3_1 & r2_4_1) ^ r1_0_1).rotate_left(38);
-            let r3_2_2 = (s2_2 ^ (r1_3_2 & r2_4_2) ^ r1_0_2).rotate_left(38);
-            let r3_2_3 = (s2_3 ^ (r1_3_3 & r2_4_3) ^ r1_0_3).rotate_left(38);
+            let r3_2_0 = (s2_0 ^ (r1_3_0 & r2_4_0) ^ r1_0_0 ^ m0).rotate_left(38);
+            let r3_2_1 = (s2_1 ^ (r1_3_1 & r2_4_1) ^ r1_0_1 ^ m1).rotate_left(38);
+            let r3_2_2 = (s2_2 ^ (r1_3_2 & r2_4_2) ^ r1_0_2 ^ m2).rotate_left(38);
+            let r3_2_3 = (s2_3 ^ (r1_3_3 & r2_4_3) ^ r1_0_3 ^ m3).rotate_left(38);
             let r3_2 = [r3_2_0, r3_2_1, r3_2_2, r3_2_3];
             let [r3_0_0, r3_0_1, r3_0_2, r3_0_3] = Self::rotl_words_256(r1_0, 1);
 

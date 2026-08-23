@@ -58,7 +58,7 @@ pub fn decay_histogram(bins: &mut [u64], decay: f64) {
     #[cfg(target_arch = "aarch64")]
     {
         let features = detector.features_full();
-        if features.sve2 {
+        if !cfg!(miri) && features.sve2 {
             telemetry::BRAIN_HISTOGRAM_SVE2_OPS.inc();
             // SAFETY: the exact runtime SVE2 feature is proven above.
             unsafe {
@@ -67,7 +67,7 @@ pub fn decay_histogram(bins: &mut [u64], decay: f64) {
             return;
         }
 
-        if features.neon {
+        if !cfg!(miri) && features.neon {
             telemetry::BRAIN_HISTOGRAM_NEON_OPS.inc();
             // SAFETY: the exact runtime NEON feature is proven above.
             unsafe {
@@ -121,13 +121,13 @@ pub fn jensen_shannon_divergence(bins: &[u64], total: u64, target: &[f64]) -> f6
     #[cfg(target_arch = "aarch64")]
     {
         let features = detector.features_full();
-        if features.sve2 {
+        if !cfg!(miri) && features.sve2 {
             telemetry::BRAIN_HISTOGRAM_SVE2_OPS.inc();
             // SAFETY: the exact runtime SVE2 feature is proven above.
             return unsafe { jensen_shannon_sve2(bins, total, target, len) };
         }
 
-        if features.neon {
+        if !cfg!(miri) && features.neon {
             telemetry::BRAIN_HISTOGRAM_NEON_OPS.inc();
             // SAFETY: the exact runtime NEON feature is proven above.
             return unsafe { jensen_shannon_neon(bins, total, target, len) };
