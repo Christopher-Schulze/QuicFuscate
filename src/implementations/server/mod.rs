@@ -115,6 +115,7 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(unix)]
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
