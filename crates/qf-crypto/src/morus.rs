@@ -867,16 +867,15 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words =
                     unsafe { Morus1280State::xor_keystream_block_encrypt_sse(block, &ks) };
                 state.update_simd_ssse3(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_encrypt(rem, &ks);
@@ -914,16 +913,15 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words =
                     unsafe { Morus1280State::xor_keystream_block_decrypt_sse(block, &ks) };
                 state.update_simd_ssse3(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_decrypt(rem, &ks);
@@ -964,15 +962,14 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_block_encrypt_sse(block, &ks);
                 state.update_simd_sse41(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_encrypt(rem, &ks);
@@ -1010,15 +1007,14 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_block_decrypt_sse(block, &ks);
                 state.update_simd_sse41(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_decrypt(rem, &ks);
@@ -1061,15 +1057,14 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_block_encrypt_sse(block, &ks);
                 state.update_simd_sse42(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_encrypt(rem, &ks);
@@ -1109,15 +1104,14 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_block_decrypt_sse(block, &ks);
                 state.update_simd_sse42(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_decrypt(rem, &ks);
@@ -1148,15 +1142,14 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_block_encrypt_sse(block, &ks);
                 state.update_simd_sse2(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_encrypt(rem, &ks);
@@ -1183,15 +1176,14 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
-                let block: &mut [u8; 32] = chunk.try_into().unwrap();
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let block: &mut [u8; 32] = chunk;
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_block_decrypt_sse(block, &ks);
                 state.update_simd_sse2(plain_words);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_decrypt(rem, &ks);

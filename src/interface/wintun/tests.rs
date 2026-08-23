@@ -355,8 +355,9 @@ fn adapter_absent_script(name: &str) -> String {
 #[cfg(all(target_os = "windows", feature = "tun-windows"))]
 fn ipv4_checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for chunk in header.chunks_exact(2) {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    let (words, _) = header.as_chunks::<2>();
+    for word in words {
+        sum += u16::from_be_bytes(*word) as u32;
     }
     while sum > u16::MAX as u32 {
         sum = (sum & u16::MAX as u32) + (sum >> 16);
