@@ -45,8 +45,8 @@ Shard server data path from single Tokio task (`runtime_loop.rs:155-523` all cli
 
 ### Verification plan
 1. Local: all server tests green with `N=1` (behavior identical to today).
-2. Omega (aarch64 Linux): build with `io_uring` feature, run the multi-client netns suite with `N=1..4`; require exact-delivery/no-duplication contracts unchanged.
-3. pps scaling: `bench-linux-send-path-decision.sh` extended with a `--shards N` knob; acceptance: >= 3x aggregate pps at N=4 vs N=1 before/after comparison on identical hardware, plus flat per-shard latency distribution.
+2. Omega (aarch64 Linux): build with `io_uring` feature, run the multi-client netns suite with `N=1..4`; require exact-delivery/no-duplication contracts unchanged. **Omega now has sudo access (2026-08-23):** `ip netns`, `nft`, and `tcpdump` are all available for packet-capture evidence.
+3. pps scaling: `bench-linux-send-path-decision.sh` extended with a `--shards N` knob; acceptance: >= 3x aggregate pps at N=4 vs N=1 before/after comparison on identical hardware, plus flat per-shard latency distribution. **Note:** Omega's single aarch64 core is insufficient for pps-scaling claims; the 3x-pps benchmark requires an x86_64 multi-core host.
 
 ### Risks
 - Kernel hash skew: uneven client distribution across shards under few-NAT-gateway test setups (mitigation: measure per-shard counts in the bench; document skew, do not add application rebalancing).
