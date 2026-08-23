@@ -1,7 +1,7 @@
 {
   "name": "quicfuscate",
   "private": true,
-  "version": "0.4.5",
+  "version": "0.5.0",
   "workspaces": [
     "apps/*",
     "packages/*"
