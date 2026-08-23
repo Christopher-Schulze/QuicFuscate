@@ -241,9 +241,7 @@ impl AesHp {
     ///
     /// SAFETY (caller contract): only called when AES-NI is detected.
     #[cfg(target_arch = "x86_64")]
-    fn cached_schedule(
-        &self,
-    ) -> &[core::arch::x86_64::__m128i; 11] {
+    fn cached_schedule(&self) -> &[core::arch::x86_64::__m128i; 11] {
         self.schedule.get_or_init(|| {
             // SAFETY: guarded by the same AES-NI runtime check that gates the
             // fast path in `encrypt_with_schedule`.

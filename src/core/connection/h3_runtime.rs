@@ -696,7 +696,8 @@ impl QuicFuscateConnection {
             return Err("circuit identity must contain 32 hexadecimal characters");
         }
         let mut circuit_id = [0u8; 16];
-        for (index, chunk) in raw_id.chunks_exact(2).enumerate() {
+        let (id_pairs, _) = raw_id.as_chunks::<2>();
+        for (index, chunk) in id_pairs.iter().enumerate() {
             circuit_id[index] = std::str::from_utf8(chunk)
                 .ok()
                 .and_then(|value| u8::from_str_radix(value, 16).ok())

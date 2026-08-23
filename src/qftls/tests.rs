@@ -264,8 +264,10 @@ fn client_hello_cipher_suites(frame: &[u8]) -> Vec<u16> {
     assert_eq!(suites_len % 2, 0, "cipher-suite vector has an odd length");
     assert!(body.len() >= suites_start + suites_len, "cipher-suite vector is truncated");
     body[suites_start..suites_start + suites_len]
-        .chunks_exact(2)
-        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_be_bytes(*bytes))
         .collect()
 }
 
@@ -330,8 +332,10 @@ fn client_hello_alpn(extension: &[u8]) -> Vec<String> {
 
 fn client_hello_supported_versions(extension: &[u8]) -> Vec<u16> {
     extension[1..1 + usize::from(extension[0])]
-        .chunks_exact(2)
-        .map(|version| u16::from_be_bytes([version[0], version[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|version| u16::from_be_bytes(*version))
         .collect()
 }
 

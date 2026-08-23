@@ -1062,11 +1062,11 @@ fn recompute_ipv4_checksum(pkt: &mut [u8], ip_hdr_len: usize) {
 }
 
 fn add_checksum_words(mut sum: u32, data: &[u8]) -> u32 {
-    let mut chunks = data.chunks_exact(2);
-    for word in &mut chunks {
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([word[0], word[1]])));
+    let (words, remainder) = data.as_chunks::<2>();
+    for word in words {
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes(*word)));
     }
-    if let Some(byte) = chunks.remainder().first() {
+    if let Some(byte) = remainder.first() {
         sum = sum.wrapping_add(u32::from(*byte) << 8);
     }
     sum

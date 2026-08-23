@@ -28,6 +28,8 @@ pub(crate) use qf_fec::target::{low_cost_block_uses_gf4, target_rank};
 pub(crate) use qf_fec::target::{DEFAULT_FOUNTAIN_WINDOW, MAX_FOUNTAIN_WINDOW};
 pub use qf_fec::AdaptiveFec;
 pub(crate) use qf_fec::BrainFecHints;
+#[cfg(test)]
+pub(crate) use qf_fec::Encoder4;
 #[cfg(any(test, feature = "rust-tests", feature = "benches"))]
 pub use qf_fec::Encoder8;
 #[cfg(any(test, feature = "benches"))]
@@ -47,8 +49,6 @@ pub(crate) use qf_fec::{
 #[cfg(test)]
 pub(crate) use qf_fec::{fec_simd_level_for_features, SimdLevel};
 pub use qf_fec::{ActiveFecPolicyChange, FecPolicyChange, FecTelemetrySnapshot};
-#[cfg(test)]
-pub(crate) use qf_fec::Encoder4;
 pub use qf_fec::{EngineFecMode, EngineFecSection, FecConfig};
 pub use qf_fec::{FecControlPolicy, FecMode, FecPacket};
 #[cfg(test)]

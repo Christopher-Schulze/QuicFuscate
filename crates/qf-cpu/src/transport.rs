@@ -339,8 +339,8 @@ unsafe fn sum_u32_vnni(values: &[u32]) -> u64 {
     }
 
     let mut acc64 = _mm512_setzero_si512();
-    let mut chunks = values.chunks_exact(16);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = values.as_chunks::<16>();
+    for chunk in chunks {
         let ptr = chunk.as_ptr();
         let lo = _mm256_loadu_si256(ptr as *const __m256i);
         let hi = _mm256_loadu_si256(ptr.add(8) as *const __m256i);
@@ -354,7 +354,7 @@ unsafe fn sum_u32_vnni(values: &[u32]) -> u64 {
     _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, acc64);
     let mut total = lanes.iter().copied().sum::<u64>();
 
-    for &rem in chunks.remainder() {
+    for &rem in remainder {
         total += rem as u64;
     }
 
@@ -635,8 +635,7 @@ unsafe fn count_ecn_marks_popcnt(bitmap: &[u64]) -> u32 {
     let mut count = 0u32;
 
     // Process 4 words at a time for better throughput
-    let chunks = bitmap.chunks_exact(4);
-    let remainder = chunks.remainder();
+    let (chunks, remainder) = bitmap.as_chunks::<4>();
 
     for chunk in chunks {
         count += _popcnt64(chunk[0] as i64) as u32;

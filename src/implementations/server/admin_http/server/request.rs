@@ -203,6 +203,7 @@ fn file_response(path: &Path, extra_headers: &[(String, String)]) -> Response<Fu
     build_response_with_headers(200, mime, data, extra_headers)
 }
 
+#[allow(clippy::result_large_err)]
 async fn collect_http_request(
     req: Request<Incoming>,
 ) -> Result<HttpRequest, Response<Full<Bytes>>> {

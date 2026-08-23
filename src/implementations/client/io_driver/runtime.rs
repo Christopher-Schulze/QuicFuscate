@@ -309,7 +309,7 @@ impl IoDriver {
                             // under impairment. Continue.
                         }
                         Err(_) => {
-                            return Err(self.transport_receive_error(
+                            Err(self.transport_receive_error(
                                 "client assignment QUIC receive",
                                 recv_result.unwrap_err(),
                             ))?;

@@ -159,11 +159,11 @@ pub(super) fn parse_ipv6_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv6DnsQ
 
 pub(super) fn ones_complement_checksum_raw(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in &mut chunks {
-        sum = sum.wrapping_add(u16::from_be_bytes([chunk[0], chunk[1]]) as u32);
+    let (words, remainder) = data.as_chunks::<2>();
+    for word in words {
+        sum = sum.wrapping_add(u16::from_be_bytes(*word) as u32);
     }
-    if let Some(&byte) = chunks.remainder().first() {
+    if let Some(&byte) = remainder.first() {
         sum = sum.wrapping_add((byte as u32) << 8);
     }
     while (sum >> 16) != 0 {

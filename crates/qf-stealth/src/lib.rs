@@ -305,11 +305,7 @@ mod flow_shaping {
 
         /// Resolve the effective jitter range from recent traffic intensity.
         fn jitter_range_for_traffic(&self) -> (u64, u64) {
-            let recent = self
-                .packet_history
-                .lock()
-                .map(|history| history.len())
-                .unwrap_or(0);
+            let recent = self.packet_history.lock().map(|history| history.len()).unwrap_or(0);
             if recent >= 32 {
                 // Burst: keep packets tight - low half of the range only,
                 // floored so the minimum stays at least a quarter of max.

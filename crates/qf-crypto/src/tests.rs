@@ -547,7 +547,8 @@ fn aegis_morus_differential_invariants() {
         // Key (16 bytes), IV (12 bytes), nonce (16 bytes), alt-nonce (16 bytes).
         let key: [u8; 16] = {
             let mut k = [0u8; 16];
-            for slot in k.chunks_exact_mut(8) {
+            let (slots, _) = k.as_chunks_mut::<8>();
+            for slot in slots {
                 slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
             }
             k
@@ -562,7 +563,8 @@ fn aegis_morus_differential_invariants() {
         };
         let nonce: [u8; 16] = {
             let mut n = [0u8; 16];
-            for slot in n.chunks_exact_mut(8) {
+            let (slots, _) = n.as_chunks_mut::<8>();
+            for slot in slots {
                 slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
             }
             n
@@ -727,7 +729,8 @@ fn aegis_morus_aead_trait_differential() {
         // Key (16 bytes), IV (12 bytes), counter (u64, 1..=100).
         let key: [u8; 16] = {
             let mut k = [0u8; 16];
-            for slot in k.chunks_exact_mut(8) {
+            let (slots, _) = k.as_chunks_mut::<8>();
+            for slot in slots {
                 slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
             }
             k

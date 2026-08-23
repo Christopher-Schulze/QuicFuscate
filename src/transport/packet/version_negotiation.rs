@@ -105,12 +105,7 @@ pub fn parse_version_negotiation(pkt: &[u8]) -> Option<Vec<u32>> {
     if remaining == 0 || !remaining.is_multiple_of(4) {
         return None;
     }
-    Some(
-        pkt[off..]
-            .chunks_exact(4)
-            .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            .collect(),
-    )
+    Some(pkt[off..].as_chunks::<4>().0.iter().map(|bytes| u32::from_be_bytes(*bytes)).collect())
 }
 
 /// Builds a stateless server VN response for an unsupported long-header packet.

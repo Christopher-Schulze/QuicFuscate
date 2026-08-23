@@ -100,7 +100,6 @@ pub struct IoDriverStatsSnapshot {
     pub tun_write_backpressure: u64,
 }
 
-
 const MAX_CLIENT_INGRESS_PACKETS: usize = 256;
 const MAX_CLIENT_INGRESS_BYTES: usize = 384 * 1024;
 

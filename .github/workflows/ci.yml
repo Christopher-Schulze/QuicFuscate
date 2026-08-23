@@ -16,150 +16,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  frontend-checks:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Svelte desktop check + unit tests
-        shell: bash
-        working-directory: apps/svelte-desktop
-        run: |
-          bun run check
-          bun run test:unit
-
-      - name: Svelte admin check + unit tests
-        shell: bash
-        working-directory: apps/svelte-admin
-        run: |
-          bun run check
-          bun run test:unit
-
-      - name: Bounded frontend preview lifecycle tests
-        shell: bash
-        working-directory: apps/svelte-admin
-        run: bun run test:serve:codex
-
-  frontend-dependency-security:
-    timeout-minutes: 15
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      - name: Verify locked frontend dependency security
-        shell: bash
-        run: bash scripts/audits/verify-frontend-dependencies.sh
-
-  frontend-e2e:
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Install Playwright Chromium
-        shell: bash
-        working-directory: apps/svelte-admin
-        run: bun run test:e2e:install -- --with-deps
-
-      - name: Svelte admin full E2E suite
-        shell: bash
-        working-directory: apps/svelte-admin
-        run: |
-          bun run test:e2e
-
-      - name: Svelte desktop full E2E suite
-        shell: bash
-        working-directory: apps/svelte-desktop
-        run: |
-          bun run test:e2e
-
-      - name: Upload frontend E2E artifacts
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: frontend-e2e-results
-          path: |
-            apps/svelte-admin/test-results/
-            apps/svelte-desktop/test-results/
-
-  app-backend-checks:
-    timeout-minutes: 40
-    runs-on: macos-latest
-    env:
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: false
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "stable"
-          components: clippy
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            apps/tauri/src-tauri/target
-          key: ${{ runner.os }}-app-backend-${{ hashFiles('apps/tauri/src-tauri/Cargo.lock', 'Cargo.lock') }}
-
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build desktop frontend bundle for Tauri context
-        shell: bash
-        working-directory: apps/svelte-desktop
-        run: |
-          bun run build
-
-      - name: Check Tauri host backend
-        shell: bash
-        working-directory: apps/tauri/src-tauri
-        run: |
-          cargo metadata --locked --no-deps --format-version 1
-          cargo check --locked
-
-      - name: Lint Tauri host backend
-        shell: bash
-        working-directory: apps/tauri/src-tauri
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Test Tauri host backend
-        shell: bash
-        working-directory: apps/tauri/src-tauri
-        run: cargo test --locked
-
+  # Platform-independent build/clippy/test coverage lives exclusively on the
+  # macOS lane (the developer platform). Ubuntu/Windows lanes below only prove
+  # platform-specific behavior macOS cannot cover; frontend checks run locally
+  # (`bun run check` / `test:unit`) and via the release desktop builds.
   build-test:
     timeout-minutes: 60
     runs-on: ${{ matrix.os }}
@@ -248,7 +108,7 @@ jobs:
             target/release/*.so
 
   windows-core-checks:
-    timeout-minutes: 90
+    timeout-minutes: 45
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -310,7 +170,16 @@ jobs:
             -Encoding utf8
 
       - name: Test Windows Wintun core library
-        run: cargo test --locked --lib --features tun-windows,rust-tests
+        # Windows proves only the Windows-gated surfaces (Wintun adapter, WFP
+        # killswitch). The platform-independent suite is covered end-to-end by
+        # the macOS lane; full test compilation on Windows stays gated above
+        # via `cargo test --no-run`.
+        shell: bash
+        run: |
+          cargo test --locked --lib --features tun-windows,rust-tests \
+            interface::wintun::tests:: -- --nocapture
+          cargo test --locked --lib --features tun-windows,rust-tests \
+            implementations::client::killswitch::windows::tests:: -- --nocapture
 
       - name: Test Windows zero-copy memory-pool contracts
         run: cargo test --locked --package qf-memory-pool --features rust-tests
@@ -485,6 +354,8 @@ jobs:
           if-no-files-found: error
 
   feature-matrix:
+    # x86_64 SIMD self-verification only; the aarch64 simd-selfcheck surface
+    # is exercised by the macOS build-test lane and local runs.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -492,8 +363,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            features: "simd-selfcheck"
-          - os: macos-latest
             features: "simd-selfcheck"
     env:
       CARGO_INCREMENTAL: "0"

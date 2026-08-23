@@ -2,6 +2,10 @@
 
 ## Active
 
+### TODO-904 - Consolidate CI onto platform lanes and clear Clippy 1.98 stable drift
+- The floating-stable toolchain moved CI to Clippy/rustfmt 1.98.0, whose new `chunks_exact_to_as_chunks` and `manual_slice_fill` lints broke the macOS build-test and Clippy Matrix lanes: 22 sites across qf-crypto, qf-cpu, qf-engine-types, qf-stealth, qf-transport-version, and the root crate now use `as_chunks`/`as_chunks_mut` (and volatile `zeroize` for AES round-key words), plus canonical rustfmt reformat. The admin auth test helper read timeout rose from 10s to 30s so Argon2 under full-suite parallel load cannot starve the response read. CI lanes were consolidated onto the developer platform: macOS `build-test` is the single platform-independent gate; `frontend-checks`, `frontend-dependency-security`, `frontend-e2e`, `app-backend-checks`, and the macOS simd-selfcheck matrix entry were removed; `windows-core-checks` proves only Windows-gated surfaces (Wintun/WFP filters) with full test compilation still enforced via `cargo test --no-run`, which also structurally removes the 83-minute Windows suite deadlock observed in run `32614855375`. Local verification: strict rust-tests Clippy, all 22 clippy-matrix feature profiles, all-features check/clippy/lib tests (1759/1759 twice), fuzz contract plus 7/7 fuzz suite, and `cargo fmt --check` all pass.
+- Detail: `docs/todo/todo-904-ci-lane-consolidation.md`
+
 ### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
 - Local correctness reconciliation is active against the pinned CFRG AEGIS-128L vectors and the official CAESAR MORUS-1280-128 reference. No advanced family is promoted or enabled by this work. The standard AES-GCM baseline remains the live rollback path.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`

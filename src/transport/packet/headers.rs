@@ -153,10 +153,7 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
             return Err(ConnectionError::InvalidPacket);
         }
         versions = Some(
-            buf[off..]
-                .chunks_exact(4)
-                .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-                .collect(),
+            buf[off..].as_chunks::<4>().0.iter().map(|bytes| u32::from_be_bytes(*bytes)).collect(),
         );
         off = buf.len();
     } else if ty == PacketType::Initial {

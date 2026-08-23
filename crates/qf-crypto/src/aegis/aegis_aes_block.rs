@@ -15,7 +15,6 @@ use zeroize::Zeroize;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AesBlock([u8; 16]);
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum AesEncBackend {
     #[cfg(target_arch = "x86_64")]

@@ -81,8 +81,10 @@ impl VersionInformation {
         let chosen =
             u32::from_be_bytes(value[..4].try_into().map_err(|_| ConnectionError::InvalidPacket)?);
         let available = value[4..]
-            .chunks_exact(4)
-            .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_be_bytes(*bytes))
             .collect::<Vec<_>>();
         if chosen == 0 || available.contains(&0) {
             return Err(ConnectionError::InvalidPacket);

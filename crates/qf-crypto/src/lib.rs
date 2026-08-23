@@ -350,7 +350,10 @@ pub mod aead;
 // SAFETY: requires AES-NI (caller ensures). `rk` is &[__m128i; 11]; indexing 0..=10
 // stays within bounds. `block` is &mut [u8; 16]; _mm_loadu_si128 reads 16 bytes,
 // _mm_storeu_si128 writes 16 bytes back. Exclusive borrow prevents aliasing.
-pub(crate) unsafe fn aes128_encrypt_block_rk(rk: &[core::arch::x86_64::__m128i; 11], block: &mut [u8; 16]) {
+pub(crate) unsafe fn aes128_encrypt_block_rk(
+    rk: &[core::arch::x86_64::__m128i; 11],
+    block: &mut [u8; 16],
+) {
     use core::arch::x86_64::*;
     let mut state = _mm_loadu_si128(block.as_ptr() as *const __m128i);
     state = _mm_xor_si128(state, rk[0]);

@@ -149,7 +149,8 @@ fn zeroize_aegis_state(state: &mut [AesBlock; 8], label: &'static str) {
     #[cfg(test)]
     {
         let mut snapshot = [0u8; 128];
-        for (destination, block) in snapshot.chunks_exact_mut(16).zip(state.iter()) {
+        let (destinations, _) = snapshot.as_chunks_mut::<16>();
+        for (destination, block) in destinations.iter_mut().zip(state.iter()) {
             destination.copy_from_slice(&block.to_bytes());
         }
         crate::secret::observe_erasure(label, &snapshot);

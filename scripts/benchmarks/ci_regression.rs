@@ -1116,8 +1116,7 @@ fn bench_fec_decode16_elimination(c: &mut Criterion) {
                         encoder.take_packet(mk_src(id, &pool));
                     }
                     for repair_index in 0..REPAIRS {
-                        if let Some(repair) = encoder.generate_repair_packet(repair_index, &pool)
-                        {
+                        if let Some(repair) = encoder.generate_repair_packet(repair_index, &pool) {
                             inputs.push(repair);
                         }
                     }

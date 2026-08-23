@@ -120,8 +120,8 @@ impl super::Morus1280State {
     }
 
     pub(super) fn encrypt(&mut self, plaintext: &mut [u8]) {
-        let mut chunks = plaintext.chunks_exact_mut(32);
-        for chunk in &mut chunks {
+        let (chunks, rem) = plaintext.as_chunks_mut::<32>();
+        for chunk in chunks {
             let mut tmp = [0u8; 32];
             tmp.copy_from_slice(chunk);
             let block: &mut [u8; 32] = &mut tmp;
@@ -131,7 +131,6 @@ impl super::Morus1280State {
             chunk.copy_from_slice(block);
         }
 
-        let rem = chunks.into_remainder();
         if !rem.is_empty() {
             let ks = self.keystream_block();
             let plain_words = Self::xor_keystream_partial_encrypt(rem, &ks);
@@ -140,8 +139,8 @@ impl super::Morus1280State {
     }
 
     pub(super) fn decrypt(&mut self, ciphertext: &mut [u8]) {
-        let mut chunks = ciphertext.chunks_exact_mut(32);
-        for chunk in &mut chunks {
+        let (chunks, rem) = ciphertext.as_chunks_mut::<32>();
+        for chunk in chunks {
             let mut tmp = [0u8; 32];
             tmp.copy_from_slice(chunk);
             let block: &mut [u8; 32] = &mut tmp;
@@ -151,7 +150,6 @@ impl super::Morus1280State {
             chunk.copy_from_slice(block);
         }
 
-        let rem = chunks.into_remainder();
         if !rem.is_empty() {
             let ks = self.keystream_block();
             let plain_words = Self::xor_keystream_partial_decrypt(rem, &ks);

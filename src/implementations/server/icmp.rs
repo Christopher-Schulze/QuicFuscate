@@ -355,11 +355,11 @@ fn icmpv6_checksum(source: &[u8], destination: &[u8], payload: &[u8]) -> u16 {
 }
 
 fn checksum_words(mut sum: u32, bytes: &[u8]) -> u32 {
-    let mut chunks = bytes.chunks_exact(2);
-    for chunk in &mut chunks {
-        sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+    let (words, remainder) = bytes.as_chunks::<2>();
+    for word in words {
+        sum += u32::from(u16::from_be_bytes(*word));
     }
-    if let Some(byte) = chunks.remainder().first() {
+    if let Some(byte) = remainder.first() {
         sum += u32::from(*byte) << 8;
     }
     sum

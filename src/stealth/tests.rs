@@ -326,8 +326,10 @@ fn deterministic_client_hello_cipher_suites(record: &[u8]) -> Vec<u16> {
     assert_eq!(suites_len % 2, 0, "cipher-suite vector has an odd length");
     assert!(body.len() >= suites_start + suites_len, "cipher-suite vector is truncated");
     body[suites_start..suites_start + suites_len]
-        .chunks_exact(2)
-        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_be_bytes(*bytes))
         .collect()
 }
 
@@ -378,8 +380,9 @@ fn tls_cover_grease_not_in_safari() {
     let cs_len = u16::from_be_bytes([ch[cs_offset], ch[cs_offset + 1]]) as usize;
     let cipher_bytes = &ch[cs_offset + 2..cs_offset + 2 + cs_len];
     // Check no GREASE values (0x?a?a pattern) in cipher suites
-    for pair in cipher_bytes.chunks_exact(2) {
-        let val = u16::from_be_bytes([pair[0], pair[1]]);
+    let (pairs, _) = cipher_bytes.as_chunks::<2>();
+    for pair in pairs {
+        let val = u16::from_be_bytes(*pair);
         let is_grease = (val & 0x0F0F) == 0x0A0A;
         assert!(!is_grease, "Safari should not include GREASE cipher 0x{:04X}", val);
     }
@@ -520,11 +523,14 @@ fn flow_shaper_jitter_stays_in_range() {
     // Seed the steady-state band (8..=31 packets) so apply_jitter uses the
     // classic uniform [500, 1000] range (TODO-903 traffic-aware shaper).
     for i in 0..16 {
-        shaper.record_and_prune(64, if i % 2 == 0 {
-            super::StealthPacketClass::Data
-        } else {
-            super::StealthPacketClass::Ack
-        });
+        shaper.record_and_prune(
+            64,
+            if i % 2 == 0 {
+                super::StealthPacketClass::Data
+            } else {
+                super::StealthPacketClass::Ack
+            },
+        );
     }
     for _ in 0..200 {
         let d = shaper.apply_jitter();
@@ -553,8 +559,7 @@ fn flow_shaper_jitter_produces_variation() {
     for _ in 0..12 {
         shaper.record_and_prune(64, super::StealthPacketClass::Data);
     }
-    let mut values: Vec<u64> =
-        (0..100).map(|_| shaper.apply_jitter().as_micros() as u64).collect();
+    let mut values: Vec<u64> = (0..100).map(|_| shaper.apply_jitter().as_micros() as u64).collect();
     values.sort();
     values.dedup();
     // With range [2500, 5000] and 100 samples, we expect significant variation

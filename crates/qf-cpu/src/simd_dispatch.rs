@@ -156,13 +156,12 @@ impl SimdDispatch {
         {
             let features = FeatureDetector::instance().features_full();
             if features.popcnt {
-                for chunk in data.chunks_exact(8) {
-                    let mut word = [0u8; 8];
-                    word.copy_from_slice(chunk);
-                    let val = u64::from_le_bytes(word);
+                let (chunks, remainder) = data.as_chunks::<8>();
+                for chunk in chunks {
+                    let val = u64::from_le_bytes(*chunk);
                     count += val.count_ones() as usize;
                 }
-                for &byte in data.chunks_exact(8).remainder() {
+                for &byte in remainder {
                     count += byte.count_ones() as usize;
                 }
                 return count;

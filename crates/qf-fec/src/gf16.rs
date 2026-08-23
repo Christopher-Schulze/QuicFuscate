@@ -368,9 +368,19 @@ unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
 
             let mut round = 0;
             while round < 16 {
-                let factor_mask = svcmpeq_u16(predicate, svand_u16_x(svptrue_b16(), factor, one), one);
-                product = sveor_u16_m(predicate, product, product, svand_u16_m(predicate, factor_mask, multiplicand, svdup_n_u16(0xFFFF)));
-                let carry_mask = svcmpeq_u16(predicate, svand_u16_x(svptrue_b16(), svshr_n_u16(multiplicand, 15), one), one);
+                let factor_mask =
+                    svcmpeq_u16(predicate, svand_u16_x(svptrue_b16(), factor, one), one);
+                product = sveor_u16_m(
+                    predicate,
+                    product,
+                    product,
+                    svand_u16_m(predicate, factor_mask, multiplicand, svdup_n_u16(0xFFFF)),
+                );
+                let carry_mask = svcmpeq_u16(
+                    predicate,
+                    svand_u16_x(svptrue_b16(), svshr_n_u16(multiplicand, 15), one),
+                    one,
+                );
                 multiplicand = sveor_u16_m(
                     predicate,
                     svlsh1_n_u16_m(predicate, svdup_n_u16(0), multiplicand, 1),

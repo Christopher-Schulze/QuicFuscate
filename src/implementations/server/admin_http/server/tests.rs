@@ -185,8 +185,9 @@ fn cookie_header_from_set_cookie(set_cookie: &str) -> Option<String> {
 
 fn send_req(addr: std::net::SocketAddr, raw: &str) -> String {
     let mut s = StdTcpStream::connect(addr).expect("connect");
-    // 10s to accommodate Argon2 password hashing in unoptimized debug builds.
-    s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    // 30s to accommodate Argon2 password hashing in unoptimized debug builds
+    // while the full parallel suite saturates the host CPU.
+    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
     s.write_all(raw.as_bytes()).expect("write");
     read_all(s)
 }

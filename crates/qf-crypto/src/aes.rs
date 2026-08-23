@@ -51,7 +51,8 @@ pub(crate) fn key_expansion(key: &[u8; 16]) -> [u8; 176] {
 fn expand_round_keys_array(key: &[u8; 16]) -> [[u8; 16]; 11] {
     let mut expanded = key_expansion(key);
     let mut keys = [[0u8; 16]; 11];
-    for (idx, chunk) in expanded.chunks_exact(16).enumerate() {
+    let (round_chunks, _) = expanded.as_chunks::<16>();
+    for (idx, chunk) in round_chunks.iter().enumerate() {
         keys[idx].copy_from_slice(chunk);
     }
     // The flat expansion is a temporary secret schedule. Clear it before the
@@ -68,9 +69,7 @@ fn zeroize_round_keys(round_keys: &mut [[u8; 16]; 11]) {
 
 fn zeroize_round_key_words(round_keys: &mut [[u32; 4]; 11]) {
     for round_key in round_keys {
-        for word in round_key {
-            *word = 0;
-        }
+        round_key.zeroize();
     }
 }
 

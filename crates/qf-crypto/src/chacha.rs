@@ -23,9 +23,9 @@ fn initial_state(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u32; 16] {
     let constants = [0x6170_7865u32, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
     let mut state = [0u32; 16];
     state[..4].copy_from_slice(&constants);
-    for (i, chunk) in key.chunks_exact(4).enumerate() {
-        let w = [chunk[0], chunk[1], chunk[2], chunk[3]];
-        state[4 + i] = u32::from_le_bytes(w);
+    let (key_words, _) = key.as_chunks::<4>();
+    for (i, word) in key_words.iter().enumerate() {
+        state[4 + i] = u32::from_le_bytes(*word);
     }
     state[12] = counter;
     state[13] = u32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]);
@@ -57,7 +57,8 @@ pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64
         state[i] = state[i].wrapping_add(working[i]);
     }
     let mut block = [0u8; 64];
-    for (i, chunk) in block.chunks_exact_mut(4).enumerate() {
+    let (block_words, _) = block.as_chunks_mut::<4>();
+    for (i, chunk) in block_words.iter_mut().enumerate() {
         chunk.copy_from_slice(&state[i].to_le_bytes());
     }
     block

@@ -1219,8 +1219,8 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
                 let mut tmp = [0u8; 32];
                 tmp.copy_from_slice(chunk);
                 let block: &mut [u8; 32] = &mut tmp;
@@ -1231,7 +1231,6 @@ impl MorusAead {
                 chunk.copy_from_slice(block);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_encrypt(rem, &ks);
@@ -1266,8 +1265,8 @@ impl MorusAead {
         state.process_ad(ad);
 
         {
-            let mut chunks = buffer.chunks_exact_mut(32);
-            for chunk in &mut chunks {
+            let (chunks, rem) = buffer.as_chunks_mut::<32>();
+            for chunk in chunks {
                 let mut tmp = [0u8; 32];
                 tmp.copy_from_slice(chunk);
                 let block: &mut [u8; 32] = &mut tmp;
@@ -1278,7 +1277,6 @@ impl MorusAead {
                 chunk.copy_from_slice(block);
             }
 
-            let rem = chunks.into_remainder();
             if !rem.is_empty() {
                 let ks = state.keystream_block();
                 let plain_words = Morus1280State::xor_keystream_partial_decrypt(rem, &ks);
