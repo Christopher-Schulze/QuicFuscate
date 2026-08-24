@@ -461,7 +461,7 @@
 <!-- Bandwidth & Quota Dialog -->
 <Dialog.Root bind:open={bandwidthDialogOpen}>
   <Dialog.Portal to="#qf-app-stage">
-    <Dialog.Overlay class="absolute inset-0 z-50 bg-black/18 animate-in fade-in-0 duration-150" style="backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);" />
+    <Dialog.Overlay class="absolute inset-0 z-50 bg-black/18 animate-in fade-in-0 duration-150" />
     <Dialog.Content class="dialog-surface dialog-typography absolute left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 glass border border-edge shadow-xl rounded-[18px] w-[360px] animate-in fade-in-0 zoom-in-95 duration-200">
       <div class="dialog-header-pad">
         <Dialog.Title class="text-[13px] font-semibold text-black dashboard-heading-sans">Bandwidth &amp; Quota</Dialog.Title>

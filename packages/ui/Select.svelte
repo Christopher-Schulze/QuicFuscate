@@ -67,7 +67,7 @@
         "z-[9999] rounded-lg p-1",
         "animate-in fade-in-0 zoom-in-95 duration-200 dashboard-heading-sans",
       )}
-      style="width: var(--bits-select-trigger-width); background: rgba(255,255,255,0.82); backdrop-filter: blur(24px) saturate(200%); -webkit-backdrop-filter: blur(24px) saturate(200%); border: 1px solid rgba(255,255,255,0.70); box-shadow: 0 8px 24px rgba(18,26,44,0.14), 0 2px 6px rgba(0,0,0,0.06); {maxHeight ? `max-height: ${maxHeight}; overflow-y: auto;` : ''}"
+      style="width: var(--bits-select-trigger-width); background: rgba(255,255,255,0.82); border: 1px solid rgba(255,255,255,0.70); box-shadow: 0 8px 24px rgba(18,26,44,0.14), 0 2px 6px rgba(0,0,0,0.06); {maxHeight ? `max-height: ${maxHeight}; overflow-y: auto;` : ''}"
       side="bottom"
       sideOffset={4}
       avoidCollisions={true}

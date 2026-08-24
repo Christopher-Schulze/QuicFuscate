@@ -82,19 +82,22 @@
       </div>
     </div>
     <div class="flex min-w-0 flex-col gap-3">
-      <div class="grid grid-cols-[64px_156px] items-center gap-2">
+      <div class="flex w-full items-center justify-between gap-3">
         <div class="text-[11px] font-semibold text-black whitespace-nowrap dashboard-heading-sans">Congestion Control</div>
-        <Select
-          value={transportCc}
-          options={transportCc === "__custom__" ? [...CONGESTION_CONTROL_OPTIONS, { value: "__custom__", label: "Custom [from TOML]" }] : CONGESTION_CONTROL_OPTIONS}
-          onchange={(v) => {
-            const selected = parseCongestionControlAlgorithm(v);
-            if (selected !== null) onCcChange(selected);
-          }}
-          ariaLabel="Congestion control"
-        />
+        <div class="w-[156px] shrink-0">
+          <Select
+            class="w-full"
+            value={transportCc}
+            options={transportCc === "__custom__" ? [...CONGESTION_CONTROL_OPTIONS, { value: "__custom__", label: "Custom [from TOML]" }] : CONGESTION_CONTROL_OPTIONS}
+            onchange={(v) => {
+              const selected = parseCongestionControlAlgorithm(v);
+              if (selected !== null) onCcChange(selected);
+            }}
+            ariaLabel="Congestion control"
+          />
+        </div>
       </div>
-      <div class="grid grid-cols-[64px_156px] items-center gap-2">
+      <div class="flex w-full items-center justify-between gap-3">
         <div class="text-[11px] font-semibold text-black whitespace-nowrap dashboard-heading-sans">MTU</div>
         <input
           type="text"
@@ -103,7 +106,7 @@
           value={transportMtuText}
           maxlength={4}
           oninput={(e) => onMtuChange((e.target as HTMLInputElement).value.slice(0, 4))}
-          class="w-[156px] h-8 min-h-8 px-2.5 rounded-md glass-nav-pill glass-select-edge text-[11px] text-black mono border-0 outline-none shadow-none ring-0 bg-transparent"
+          class="w-[156px] shrink-0 h-8 min-h-8 px-2.5 rounded-md glass-nav-pill glass-select-edge text-[11px] text-black mono border-0 outline-none shadow-none ring-0 bg-transparent"
         />
       </div>
     </div>

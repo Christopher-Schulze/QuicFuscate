@@ -145,7 +145,6 @@
   <Dialog.Portal to="#qf-app-stage">
     <Dialog.Overlay
       class="absolute inset-0 z-50 bg-black/18 animate-in fade-in-0 duration-150"
-      style="backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);"
     />
     <Dialog.Content
       class="qf-login-dialog-shell dialog-surface absolute left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 rounded-[18px] w-[min(22.75rem,calc(100vw-2rem))] animate-in fade-in-0 zoom-in-95 duration-200"

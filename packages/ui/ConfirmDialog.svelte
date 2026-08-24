@@ -42,7 +42,6 @@
   <Dialog.Portal to={portalTarget}>
     <Dialog.Overlay
       class="{pos} inset-0 z-50 bg-black/18 animate-in fade-in-0 duration-150"
-      style="backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);"
     />
     <Dialog.Content
       class="dialog-surface dialog-typography {pos} left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 glass border border-edge shadow-xl rounded-[18px] w-[340px] animate-in fade-in-0 zoom-in-95 duration-200"

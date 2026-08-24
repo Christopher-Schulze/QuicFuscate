@@ -119,6 +119,7 @@
   </Popover.Trigger>
   <Popover.Content
     class="z-50 glass-nav-pill rounded-lg p-0 shadow-lg border border-edge animate-in fade-in-0 zoom-in-95 duration-200"
+    style="backdrop-filter: none; -webkit-backdrop-filter: none;"
     side="bottom"
     align="end"
     sideOffset={6}

@@ -261,7 +261,7 @@
 </script>
 
 <div class="app-pane-scroll flex flex-1 min-h-0 overflow-y-auto">
-  <div class="w-full px-6 py-6 space-y-5 config-black-text">
+  <div class="w-full px-6 py-6 space-y-3 config-black-text">
     <!-- Header -->
     <div class="flex items-center justify-between">
       <div class="text-[14px] font-bold text-text-primary">Configuration</div>
@@ -323,8 +323,6 @@
 
     <QKeyPanel />
 
-    <div class="mt-auto pt-4">
-      <ReferenceGuide />
-    </div>
+    <ReferenceGuide />
   </div>
 </div>
