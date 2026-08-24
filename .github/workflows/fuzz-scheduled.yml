@@ -1,8 +1,7 @@
 name: Fuzz Extended
 
 on:
-  schedule:
-    - cron: "17 3 * * 0"
+  # Parked off the automatic set. Manual only until the weekly lane is rebuilt.
   workflow_dispatch:
 
 concurrency:

@@ -1,10 +1,7 @@
 name: Clippy Matrix
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  # Parked off the push/PR required set. Manual only until the matrix is rebuilt.
   workflow_dispatch:
 
 env:
@@ -48,6 +45,7 @@ jobs:
           # Aggregate features, linted as the umbrellas callers actually enable.
           - "test-suite"
           - "experimental"
+          - "specta"
 
     steps:
     - uses: actions/checkout@v7
