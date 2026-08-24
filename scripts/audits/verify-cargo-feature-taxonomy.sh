@@ -96,6 +96,7 @@ FEATURE_CONTRACT: dict[str, tuple[str, tuple[str, ...]]] = {
     "masque-tests": ("test", ()),
     "tun-tests": ("test", ()),
     "simd-selfcheck": ("test", ()),
+    "specta": ("runtime", ("qf-engine-types/specta", "qf-stealth/specta")),
     "test-suite": ("meta", ("rust-tests", "benches")),
     "experimental": (
         "meta",

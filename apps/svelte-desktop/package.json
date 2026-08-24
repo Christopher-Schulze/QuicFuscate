@@ -34,6 +34,7 @@
     "tailwind-merge": "^3.0.1"
   },
   "devDependencies": {
+    "@types/node": "22.20.1",
     "@playwright/test": "1.58.2",
     "@axe-core/playwright": "4.11.1",
     "@testing-library/jest-dom": "^6.9.1",

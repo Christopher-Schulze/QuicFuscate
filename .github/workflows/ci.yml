@@ -1200,6 +1200,10 @@ jobs:
             target
           key: ${{ runner.os }}-tauri-host-${{ hashFiles('apps/tauri/src-tauri/Cargo.lock') }}
 
+      - name: Materialize Tauri frontendDist for compile
+        shell: bash
+        run: mkdir -p apps/svelte-desktop/build
+
       - name: Tauri host Clippy
         shell: bash
         working-directory: apps/tauri/src-tauri

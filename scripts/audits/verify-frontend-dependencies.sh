@@ -154,6 +154,7 @@ expected_workspace_versions = {
     "apps/svelte-admin/package.json": {
         "@playwright/test": playwright_version,
         "@sveltejs/kit": "^2.70.2",
+        "@types/node": "22.20.1",
         "svelte": "^5.56.8",
         "vite": "^7.3.6",
         "vitest": "^4.1.10",
@@ -161,6 +162,7 @@ expected_workspace_versions = {
     "apps/svelte-desktop/package.json": {
         "@playwright/test": playwright_version,
         "@sveltejs/kit": "^2.70.2",
+        "@types/node": "22.20.1",
         "svelte": "^5.56.8",
         "vite": "^7.3.6",
         "vitest": "^4.1.10",
