@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ripple } from "@quicfuscate/ui";
   import { getSettings, updateSettings } from "$lib/stores/app.svelte";
-  import { isTauri } from "$lib/stores/tauri-bridge.svelte";
+  import { isTauri, readUpdaterRuntimeEnabled } from "$lib/stores/tauri-bridge.svelte";
   import { Switch, Select } from "@quicfuscate/ui";
   import { cn } from "@quicfuscate/ui";
   import {
@@ -92,8 +92,7 @@
     let cancelled = false;
     (async () => {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const enabled = await invoke<boolean>("updater_runtime_enabled");
+        const enabled = await readUpdaterRuntimeEnabled();
         if (!cancelled) updaterRuntimeEnabled = Boolean(enabled);
       } catch {
         if (!cancelled) updaterRuntimeEnabled = false;

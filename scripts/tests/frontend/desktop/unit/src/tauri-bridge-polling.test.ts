@@ -131,11 +131,11 @@ describe("desktop engine poller ownership", () => {
       "engine_connect",
       {
         request: {
-          tunnel_id: "t1",
-          qkey_data: "PrimaryQKey",
-          sni_override: "front.example.com",
+          tunnelId: "t1",
+          qkeyData: "PrimaryQKey",
+          sniOverride: "front.example.com",
           circuit: primary,
-          alternate_circuit: alternate,
+          alternateCircuit: alternate,
           settings,
         },
       },
@@ -147,9 +147,9 @@ describe("desktop engine poller ownership", () => {
       2,
       "engine_rotate",
       {
-        tunnel_id: "t1",
-        qkey_data: "AlternateQKey",
-        sni_override: null,
+        tunnelId: "t1",
+        qkeyData: "AlternateQKey",
+        sniOverride: null,
         circuit: alternate,
         settings,
       },

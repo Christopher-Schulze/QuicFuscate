@@ -44,6 +44,7 @@ pub struct CircuitDiversityPolicy {
     /// Require distinct jurisdiction labels for every hop.
     pub jurisdiction: bool,
     /// Require distinct failure-domain labels for every hop.
+    #[serde(alias = "failureDomain")]
     pub failure_domain: bool,
 }
 
@@ -731,5 +732,20 @@ mod tests {
             .expect_err("mismatched pin")
             .to_string()
             .contains("address"));
+    }
+
+    #[test]
+    fn diversity_policy_accepts_camel_case_failure_domain_alias() {
+        let policy: CircuitDiversityPolicy = serde_json::from_str(
+            r#"{"provider":true,"region":false,"jurisdiction":false,"failureDomain":true}"#,
+        )
+        .expect("desktop camelCase diversity");
+        assert!(policy.provider);
+        assert!(policy.failure_domain);
+        let snake: CircuitDiversityPolicy = serde_json::from_str(
+            r#"{"provider":false,"region":false,"jurisdiction":false,"failure_domain":true}"#,
+        )
+        .expect("engine snake_case diversity");
+        assert!(snake.failure_domain);
     }
 }

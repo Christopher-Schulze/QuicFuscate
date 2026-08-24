@@ -228,6 +228,7 @@ pub struct PersistedCircuitHop {
 }
 
 #[derive(Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
 struct EngineConnectRequest {
     tunnel_id: String,
     qkey_data: String,
@@ -1477,7 +1478,7 @@ fn build_client_engine_config_with_circuit(
     Ok(cfg)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 #[specta::specta]
 async fn qkey_parse(qkey_data: String) -> Result<ParsedQKey, String> {
     let trimmed = qkey_data.trim();
@@ -1577,7 +1578,7 @@ async fn engine_connect(
     result
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 #[specta::specta]
 async fn engine_rotate(
     app: tauri::AppHandle,

@@ -93,15 +93,34 @@ export type BufferedLogLine = {
 };
 
 /**  Operator-provided route-diversity constraints. */
-export type CircuitDiversityPolicy = {
+export type CircuitDiversityPolicy = CircuitDiversityPolicy_Serialize | CircuitDiversityPolicy_Deserialize;
+
+/**  Operator-provided route-diversity constraints. */
+export type CircuitDiversityPolicy_Deserialize = {
 	/**  Require distinct provider labels for every hop. */
 	provider?: boolean,
 	/**  Require distinct region labels for every hop. */
 	region?: boolean,
 	/**  Require distinct jurisdiction labels for every hop. */
 	jurisdiction?: boolean,
+} & {
 	/**  Require distinct failure-domain labels for every hop. */
 	failure_domain?: boolean,
+} | {
+	/**  Require distinct failure-domain labels for every hop. */
+	failureDomain?: boolean,
+};
+
+/**  Operator-provided route-diversity constraints. */
+export type CircuitDiversityPolicy_Serialize = {
+	/**  Require distinct provider labels for every hop. */
+	provider: boolean,
+	/**  Require distinct region labels for every hop. */
+	region: boolean,
+	/**  Require distinct jurisdiction labels for every hop. */
+	jurisdiction: boolean,
+	/**  Require distinct failure-domain labels for every hop. */
+	failure_domain: boolean,
 };
 
 export type CircuitHopStats = {
@@ -134,20 +153,20 @@ export type ConnectionStats = {
 export type EngineConnectRequest = EngineConnectRequest_Serialize | EngineConnectRequest_Deserialize;
 
 export type EngineConnectRequest_Deserialize = {
-	tunnel_id: string,
-	qkey_data: string,
-	sni_override: string | null,
+	tunnelId: string,
+	qkeyData: string,
+	sniOverride: string | null,
 	circuit: PersistedCircuit_Deserialize | null,
-	alternate_circuit: PersistedCircuit_Deserialize | null,
+	alternateCircuit: PersistedCircuit_Deserialize | null,
 	settings: unknown,
 };
 
 export type EngineConnectRequest_Serialize = {
-	tunnel_id: string,
-	qkey_data: string,
-	sni_override: string | null,
+	tunnelId: string,
+	qkeyData: string,
+	sniOverride: string | null,
 	circuit: PersistedCircuit_Serialize | null,
-	alternate_circuit: PersistedCircuit_Serialize | null,
+	alternateCircuit: PersistedCircuit_Serialize | null,
 	settings: unknown,
 };
 
@@ -299,7 +318,7 @@ export type PersistedCircuit_Deserialize = {
 	maxHops?: number,
 	maxParallelCircuits?: number,
 	allowSingleHopFallback?: boolean,
-	diversity?: CircuitDiversityPolicy,
+	diversity?: CircuitDiversityPolicy_Deserialize,
 };
 
 export type PersistedCircuit_Serialize = {
@@ -307,7 +326,7 @@ export type PersistedCircuit_Serialize = {
 	maxHops: number,
 	maxParallelCircuits: number,
 	allowSingleHopFallback: boolean,
-	diversity: CircuitDiversityPolicy,
+	diversity: CircuitDiversityPolicy_Serialize,
 };
 
 export type PersistedHopPolicy = PersistedHopPolicy_Serialize | PersistedHopPolicy_Deserialize;

@@ -26,7 +26,7 @@ import type {
   GeneralSettings,
   HardwareSettings,
 } from "$lib/types";
-import { parseTauriLogLine, type RawTauriLogLine } from "$lib/timestamp-boundary";
+import { parseTauriLogLine } from "$lib/timestamp-boundary";
 import {
   evaluateByteRateSample,
   isBrowserDocumentVisible,
@@ -34,9 +34,11 @@ import {
   readBrowserMonotonicMilliseconds,
   type ByteCounterSample,
 } from "@quicfuscate/time";
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { commands } from "$lib/bindings";
+import type { ParsedQKey, PersistedState_Deserialize } from "$lib/bindings";
 import { parseEngineStats, parseEngineStatus } from "$lib/ipc-contracts";
 import { toErrorMessage } from "$lib/format";
+import { unwrapSpectaCommand } from "$lib/specta-result";
 
 /** Shape returned by the Tauri `load_state` command. */
 interface PersistedState {
@@ -55,7 +57,7 @@ export type PersistenceLoadResult =
 
 export const PERSISTENCE_LOAD_TIMEOUT_MILLISECONDS = 5_000;
 
-async function loadNativePersistedState(): Promise<PersistedState | null> {
+async function loadNativePersistedState(): Promise<unknown> {
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<never>((_resolve, reject) => {
     timeoutHandle = setTimeout(() => {
@@ -66,7 +68,7 @@ async function loadNativePersistedState(): Promise<PersistedState | null> {
   });
   try {
     return await Promise.race([
-      tauriInvoke<PersistedState | null>("load_state"),
+      unwrapSpectaCommand(commands.loadState()),
       timeout,
     ]);
   } finally {
@@ -243,14 +245,13 @@ export function normalizePersistedTunnels(input: unknown): {
 
 export async function persistState(): Promise<void> {
   if (!isTauri()) return;
-  await tauriInvoke("save_state", {
-    data: {
-      schemaVersion: 1,
-      tunnels: getTunnels(),
-      selectedTunnelId: getSelectedId(),
-      settings: getSettings(),
-    },
-  });
+  const data: PersistedState_Deserialize = {
+    schemaVersion: 1,
+    tunnels: getTunnels(),
+    selectedTunnelId: getSelectedId(),
+    settings: getSettings(),
+  };
+  await unwrapSpectaCommand(commands.saveState(data));
 }
 
 export async function loadPersistedState(): Promise<PersistenceLoadResult> {
@@ -262,11 +263,15 @@ export async function loadPersistedState(): Promise<PersistenceLoadResult> {
     return { status: "browser" };
   }
   try {
-    const loaded = await loadNativePersistedState();
-    if (!loaded) {
+    const loadedRaw = await loadNativePersistedState();
+    if (loadedRaw === null || loadedRaw === undefined) {
       setPersistenceStatus({ phase: "ready", dirty: false, error: null });
       return { status: "missing" };
     }
+    if (!isRecord(loadedRaw)) {
+      throw new Error("Stored desktop state was malformed.");
+    }
+    const loaded = loadedRaw;
     const loadedTunnels = normalizePersistedTunnels(loaded.tunnels);
     if (loadedTunnels.invalidTimestampCount > 0) {
       setError(
@@ -347,8 +352,9 @@ export function startEnginePollers(): () => void {
     statusInFlight = true;
     try {
       if (!isCurrent()) return;
-      // `invoke<T>` is a cast, so the shape is checked here rather than trusted.
-      const rawStatus = await tauriInvoke<unknown>("engine_status");
+      // Generated command wrappers are still an untrusted IPC boundary.
+      // `parseEngineStatus` rejects malformed native payloads instead of trusting the type.
+      const rawStatus = await unwrapSpectaCommand(commands.engineStatus());
       if (!isCurrent() || !isBrowserDocumentVisible()) return;
       const status = parseEngineStatus(rawStatus);
       if (!status) {
@@ -387,7 +393,7 @@ export function startEnginePollers(): () => void {
     const activeTunnelIdAtStart = getActiveTunnelId();
     try {
       if (!isCurrent()) return;
-      const rawStats = await tauriInvoke<unknown>("engine_stats");
+      const rawStats = await unwrapSpectaCommand(commands.engineStats());
       if (!isCurrent() || stateVersionAtStart !== statusStateVersion || activeTunnelIdAtStart !== getActiveTunnelId()) return;
       if (!isBrowserDocumentVisible()) {
         resetThroughput();
@@ -469,9 +475,7 @@ export function startEnginePollers(): () => void {
     const cursorEpochAtStart = logCursorEpoch;
     try {
       if (!isCurrent()) return;
-      const resp = await tauriInvoke<{ cursor: number; lines: RawTauriLogLine[] }>(
-        "engine_logs_since", { cursor: cursorAtStart },
-      );
+      const resp = await unwrapSpectaCommand(commands.engineLogsSince(cursorAtStart));
       if (!isCurrent() || cursorEpochAtStart !== logCursorEpoch || !isBrowserDocumentVisible()) return;
       const nextCursor = resp?.cursor ?? cursorAtStart;
       if (nextCursor < cursorAtStart || nextCursor < logCursor) return;
@@ -519,17 +523,16 @@ export async function engineConnect(
   circuit?: CircuitConfig,
   alternateCircuit?: CircuitConfig,
 ): Promise<void> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("engine_connect", {
-    request: {
-      tunnel_id: tunnelId,
-      qkey_data: qkeyData,
-      sni_override: sniOverride && sniOverride.length > 0 ? sniOverride : null,
+  await unwrapSpectaCommand(
+    commands.engineConnect({
+      tunnelId,
+      qkeyData,
+      sniOverride: sniOverride && sniOverride.length > 0 ? sniOverride : null,
       circuit: circuit ?? null,
-      alternate_circuit: alternateCircuit ?? null,
+      alternateCircuit: alternateCircuit ?? null,
       settings,
-    },
-  });
+    }),
+  );
 }
 
 export async function engineRotate(
@@ -539,32 +542,41 @@ export async function engineRotate(
   circuit: CircuitConfig,
   sniOverride?: string,
 ): Promise<void> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("engine_rotate", {
-    tunnel_id: tunnelId,
-    qkey_data: qkeyData,
-    sni_override: sniOverride && sniOverride.length > 0 ? sniOverride : null,
-    circuit,
-    settings,
-  });
+  await unwrapSpectaCommand(
+    commands.engineRotate(
+      tunnelId,
+      qkeyData,
+      sniOverride && sniOverride.length > 0 ? sniOverride : null,
+      circuit,
+      settings,
+    ),
+  );
 }
 
 export async function engineDisconnect(): Promise<void> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("engine_disconnect");
+  await unwrapSpectaCommand(commands.engineDisconnect());
 }
 
-export async function qkeyParse(qkeyData: string): Promise<Record<string, unknown>> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  return await invoke<Record<string, unknown>>("qkey_parse", { qkey_data: qkeyData });
+export async function qkeyParse(qkeyData: string): Promise<ParsedQKey> {
+  return await unwrapSpectaCommand(commands.qkeyParse(qkeyData));
 }
 
 export async function detectCpuFeatures(): Promise<string[]> {
   if (!isTauri()) return [];
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<string[]>("detect_cpu_features");
-  } catch { return []; }
+    return await unwrapSpectaCommand(commands.detectCpuFeatures());
+  } catch {
+    return [];
+  }
+}
+
+export async function readUpdaterRuntimeEnabled(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return (await unwrapSpectaCommand(commands.updaterRuntimeEnabled())) === true;
+  } catch {
+    return false;
+  }
 }
 
 export async function engineLogsClear(): Promise<void> {
@@ -572,8 +584,7 @@ export async function engineLogsClear(): Promise<void> {
   logCursor = 0;
   logCursorEpoch += 1;
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("engine_logs_clear");
+    await unwrapSpectaCommand(commands.engineLogsClear());
   } catch { /* no-op */ }
 }
 

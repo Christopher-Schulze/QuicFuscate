@@ -1,3 +1,6 @@
+import { commands } from "$lib/bindings";
+import { unwrapSpectaCommand } from "$lib/specta-result";
+
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -9,9 +12,8 @@ function isWebKitBrowser(): boolean {
 
 async function readClipboardFromTauriInvoke(): Promise<string | null> {
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const value = await invoke<string>("clipboard_read_text");
-    return typeof value === "string" ? value : null;
+    const nativeText = await unwrapSpectaCommand(commands.clipboardReadText());
+    return typeof nativeText === "string" ? nativeText : null;
   } catch { return null; }
 }
 
