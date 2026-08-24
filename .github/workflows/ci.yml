@@ -1149,8 +1149,11 @@ jobs:
       - name: Production bundles and size budget
         shell: bash
         run: |
-          bun run build --cwd apps/svelte-admin
-          bun run build --cwd apps/svelte-desktop
+          # Bun 1.4 treats `bun run build --cwd <dir>` as a root script named
+          # "build". The workspace flag must come before the script name, or
+          # the step must enter the app directory first.
+          (cd apps/svelte-admin && bun run build)
+          (cd apps/svelte-desktop && bun run build)
           bash scripts/audits/verify-frontend-bundle-budget.sh
 
   frontend-e2e:
