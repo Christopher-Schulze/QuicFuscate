@@ -220,6 +220,20 @@ export function unixMillisecondsToDate(
   return result.ok ? new Date(result.value) : null;
 }
 
+export function formatClockTime(
+  value: UnixMilliseconds | null,
+  unavailable = "Time unavailable",
+): string {
+  const date = unixMillisecondsToDate(value);
+  if (!date) return unavailable;
+  return date.toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 export function describeTimestampError(error: TimestampValidationError): string {
   switch (error) {
     case "not-a-number": return "value is not a number";

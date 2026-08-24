@@ -1,4 +1,4 @@
-import { unixMillisecondsToDate, unixSecondsToMilliseconds } from "@quicfuscate/time";
+import { formatClockTime, unixMillisecondsToDate, unixSecondsToMilliseconds } from "@quicfuscate/time";
 import type { AdminLogTimestamp, AdminQKeyTimestamp } from "$lib/types";
 
 export function formatBitsPerSecond(bitsRaw: number): string {
@@ -54,14 +54,7 @@ export function formatMetricValue(name: string, value: number): string {
 }
 
 export function formatTimestamp(ts: AdminLogTimestamp | null): string {
-  const date = unixMillisecondsToDate(ts);
-  if (!date) return "Time unavailable";
-  return date.toLocaleTimeString("en-US", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return formatClockTime(ts);
 }
 
 export function formatTimestampIso(ts: AdminLogTimestamp | null): string {

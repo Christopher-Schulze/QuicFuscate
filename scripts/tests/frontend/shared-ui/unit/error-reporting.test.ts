@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { createErrorReporter } from "../../../../../packages/error-reporting";
+import { createErrorReporter, unknownErrorMessage } from "../../../../../packages/error-reporting";
 
 describe("error reporter", () => {
   test("no-ops when no DSN is configured", () => {
@@ -9,11 +9,21 @@ describe("error reporter", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test("rejects a malformed DSN fail-closed", () => {
-    expect(() => createErrorReporter({
+  test("ignores a malformed DSN fail-closed without throwing", () => {
+    const fetchImpl = vi.fn();
+    const reporter = createErrorReporter({
       dsn: "http://example.invalid",
       environment: "test",
-    })).toThrow("Invalid Sentry DSN");
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    reporter.capture(new Error("boom"));
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("unknownErrorMessage matches the desktop error projection", () => {
+    expect(unknownErrorMessage(new Error("sealed"))).toBe("sealed");
+    expect(unknownErrorMessage("plain")).toBe("plain");
+    expect(unknownErrorMessage({ code: 7 })).toBe("{\"code\":7}");
   });
 
   test("posts a Sentry store event when a valid DSN is present", async () => {

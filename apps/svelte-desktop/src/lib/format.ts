@@ -1,4 +1,5 @@
-import { unixMillisecondsToDate } from "@quicfuscate/time";
+import { unknownErrorMessage } from "@quicfuscate/error-reporting";
+import { formatClockTime } from "@quicfuscate/time";
 import type { TauriLogTimestamp } from "$lib/types";
 
 export function countryCodeToFlag(code: string | undefined): string {
@@ -34,14 +35,7 @@ export function formatRate(bps: number): string {
 }
 
 export function formatTimestamp(ts: TauriLogTimestamp | null): string {
-  const d = unixMillisecondsToDate(ts);
-  if (!d) return "Time unavailable";
-  return d.toLocaleTimeString("en-US", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return formatClockTime(ts);
 }
 
 export function normalizeMode(raw: string | null | undefined, fallback = "auto"): string {
@@ -50,11 +44,5 @@ export function normalizeMode(raw: string | null | undefined, fallback = "auto")
 }
 
 export function toErrorMessage(value: unknown, fallback = "Unknown error"): string {
-  if (value instanceof Error) return value.message;
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return fallback;
-  }
+  return unknownErrorMessage(value, fallback);
 }

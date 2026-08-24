@@ -9,6 +9,16 @@ export interface ErrorReporter {
   capture(error: unknown, context?: Record<string, string>): void;
 }
 
+export function unknownErrorMessage(value: unknown, fallback = "Unknown error"): string {
+  if (value instanceof Error) return value.message;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message;
   if (typeof error === "string" && error.trim().length > 0) return error;
@@ -61,9 +71,6 @@ export function createErrorReporter(options: {
 }): ErrorReporter {
   const rawDsn = typeof options.dsn === "string" ? options.dsn.trim() : "";
   const storeUrl = rawDsn.length > 0 ? sentryStoreUrl(rawDsn) : null;
-  if (rawDsn.length > 0 && storeUrl == null) {
-    throw new Error("Invalid Sentry DSN");
-  }
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   return {

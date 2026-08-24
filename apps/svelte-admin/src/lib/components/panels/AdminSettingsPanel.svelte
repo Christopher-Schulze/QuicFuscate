@@ -8,6 +8,12 @@
   import { adminApiSchemas } from "$lib/admin-api-contracts";
   import { createRequestCoordinator, type RequestOptions, type RequestToken } from "$lib/request-coordinator";
   import { handleAuthError, setAuthRequired } from "$lib/stores/app.svelte";
+  import {
+    MAX_PASSWORD_CHARS,
+    MAX_USERNAME_CHARS,
+    passwordLengthError as validatePasswordLength,
+    usernameValidationError,
+  } from "$lib/admin-auth-validation";
 
   interface Props {
     onRefresh?: (fn: () => Promise<void>) => void;
@@ -19,9 +25,6 @@
     | { new_username: string; current_password: string; new_password?: never }
     | { current_password: string; new_password: string; new_username?: never }
     | { new_username: string; current_password: string; new_password: string };
-  const MIN_PASSWORD_CHARS = 6;
-  const MAX_USERNAME_CHARS = 64;
-  const MAX_PASSWORD_CHARS = 256;
   const RIPPLE_DELAY_MS = 88;
 
   let loading = $state(false);
@@ -45,21 +48,10 @@
   const authRequests = createRequestCoordinator();
   const dialogActionDelay = createOwnedTimeout();
 
-  const usernameError = $derived.by(() => {
-    const v = dlgNewUsername.trim();
-    if (!v) return null;
-    if (v.length > MAX_USERNAME_CHARS) return `Username too long [max ${MAX_USERNAME_CHARS} chars]`;
-    if ([...v].some((ch) => /[\x00-\x1F\x7F]/.test(ch))) return "Username contains invalid characters";
-    return null;
-  });
+  const usernameError = $derived.by(() => usernameValidationError(dlgNewUsername));
 
   const effectivePasswordDialogOpen = $derived(requiresChange || passwordDialogOpen);
-  const passwordLengthError = $derived.by(() => {
-    if (!dlgNewPw) return null;
-    if (dlgNewPw.length < MIN_PASSWORD_CHARS) return `New password must be at least ${MIN_PASSWORD_CHARS} characters.`;
-    if (dlgNewPw.length > MAX_PASSWORD_CHARS) return `New password too long [max ${MAX_PASSWORD_CHARS} chars].`;
-    return null;
-  });
+  const passwordLengthError = $derived.by(() => validatePasswordLength(dlgNewPw));
   const passwordConfirmError = $derived.by(() => {
     if (!dlgConfirmPw) return null;
     if (dlgNewPw !== dlgConfirmPw) return "Passwords do not match.";

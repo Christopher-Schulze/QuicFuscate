@@ -11,6 +11,7 @@
   import { ApiError, postJson, sanitizeErrorMessage } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
   import { t } from "@quicfuscate/i18n";
+  import { MAX_PASSWORD_CHARS, MAX_USERNAME_CHARS, usernameValidationError } from "$lib/admin-auth-validation";
 
   interface Props {
     open: boolean;
@@ -20,8 +21,6 @@
 
   let { open, error, onClearError }: Props = $props();
 
-  const MAX_USERNAME_CHARS = 64;
-  const MAX_PASSWORD_CHARS = 256;
   const REJECT_FEEDBACK_MS = 520;
 
   let username = $state("admin");
@@ -42,13 +41,7 @@
     return () => mq.removeEventListener("change", handler);
   });
 
-  const usernameError = $derived.by(() => {
-    const u = username.trim();
-    if (!u) return null;
-    if (u.length > MAX_USERNAME_CHARS) return `Username too long [max ${MAX_USERNAME_CHARS} chars]`;
-    if ([...u].some((ch) => /[\x00-\x1F\x7F]/.test(ch))) return "Username contains invalid characters";
-    return null;
-  });
+  const usernameError = $derived.by(() => usernameValidationError(username));
 
   const canSubmit = $derived.by(() => {
     const u = username.trim();
