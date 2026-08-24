@@ -7,6 +7,20 @@ export type SpectaCommandResult<T, E = string> =
   | { status: "ok"; data: T }
   | { status: "error"; error: E };
 
+export async function wrapSpectaInvoke<T, E>(
+  result: Promise<T>,
+): Promise<SpectaCommandResult<T, E>> {
+  try {
+    return { status: "ok", data: await result };
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    if (typeof error === "string") {
+      return { status: "error", error: error as E };
+    }
+    throw new Error("Native command failed with an untyped error");
+  }
+}
+
 export async function unwrapSpectaCommand<T>(
   result: Promise<SpectaCommandResult<T>>,
 ): Promise<T> {

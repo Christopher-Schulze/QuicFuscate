@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ripple } from "@quicfuscate/ui";
+  import { t } from "@quicfuscate/i18n";
 
   interface Props {
     error: string;
@@ -27,9 +28,9 @@
     </svg>
   </div>
   <div class="space-y-2 text-center">
-    <h2 class="text-[14px] font-semibold text-text-primary">Something went wrong</h2>
+    <h2 class="text-[14px] font-semibold text-text-primary">{t("desktop.fatal.title")}</h2>
     <p class="max-w-[320px] text-[12px] text-text-secondary">
-      An unexpected desktop UI error occurred. Retry the view or restart the app.
+      {t("desktop.fatal.body")}
     </p>
     <p class="max-w-[400px] break-words font-mono text-[11px] text-text-ghost">
       {error}

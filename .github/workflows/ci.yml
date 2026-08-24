@@ -19,7 +19,8 @@ jobs:
   # Platform-independent build/clippy/test coverage lives exclusively on the
   # macOS lane (the developer platform). Ubuntu/Windows lanes below only prove
   # platform-specific behavior macOS cannot cover; frontend checks run locally
-  # (`bun run check` / `test:unit`) and via the release desktop builds.
+  # (`bun run check` / `test:unit`) plus restored `frontend-checks`,
+  # `frontend-e2e`, `frontend-dependency-security`, and `app-backend-checks`.
   build-test:
     timeout-minutes: 30
     runs-on: ${{ matrix.os }}
@@ -1087,3 +1088,124 @@ jobs:
   # (no .chlo files on disk). The job iterated non-existent directories and tested
   # nothing while consuming CI minutes. TLS correctness is covered by
   # rt-tls-cover-cipher and stealth/tests.rs integration tests.
+
+  frontend-dependency-security:
+    timeout-minutes: 15
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Verify locked frontend dependency security
+        shell: bash
+        run: bash scripts/audits/verify-frontend-dependencies.sh
+
+  frontend-checks:
+    timeout-minutes: 30
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install frontend workspaces
+        shell: bash
+        run: bun install --frozen-lockfile --no-progress
+
+      - name: Admin typecheck and unit tests
+        shell: bash
+        working-directory: apps/svelte-admin
+        run: |
+          bun run check
+          bun run test:unit
+
+      - name: Desktop typecheck and unit tests
+        shell: bash
+        working-directory: apps/svelte-desktop
+        run: |
+          bun run check
+          bun run test:unit
+
+      - name: Shared UI unit tests
+        shell: bash
+        working-directory: packages/ui
+        run: bun run test
+
+      - name: Production bundles and size budget
+        shell: bash
+        run: |
+          bun run build --cwd apps/svelte-admin
+          bun run build --cwd apps/svelte-desktop
+          bash scripts/audits/verify-frontend-bundle-budget.sh
+
+  frontend-e2e:
+    timeout-minutes: 40
+    runs-on: macos-latest
+    needs: [frontend-checks]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install frontend workspaces
+        shell: bash
+        run: bun install --frozen-lockfile --no-progress
+
+      - name: Admin Playwright E2E
+        shell: bash
+        working-directory: apps/svelte-admin
+        run: bun run test:e2e
+
+      - name: Desktop Playwright E2E
+        shell: bash
+        working-directory: apps/svelte-desktop
+        run: bun run test:e2e
+
+  app-backend-checks:
+    timeout-minutes: 25
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "stable"
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-tauri-host-${{ hashFiles('apps/tauri/src-tauri/Cargo.lock') }}
+
+      - name: Tauri host Clippy
+        shell: bash
+        working-directory: apps/tauri/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tauri host tests
+        shell: bash
+        working-directory: apps/tauri/src-tauri
+        run: cargo test --locked

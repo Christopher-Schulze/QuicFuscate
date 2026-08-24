@@ -1,0 +1,14 @@
+{
+  "name": "@quicfuscate/types",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./desktop": "./desktop.ts",
+    "./admin": "./admin.ts"
+  },
+  "dependencies": {
+    "@quicfuscate/time": "workspace:*",
+    "@quicfuscate/ui": "workspace:*"
+  }
+}

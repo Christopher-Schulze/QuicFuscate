@@ -21,6 +21,7 @@
   import { postJson, sanitizeErrorMessage } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
   import type { NavTab } from "$lib/types";
+  import { t } from "@quicfuscate/i18n";
   import appLogo from "../../../../../../assets/logo/QuicFuscate_clean.png";
 
   interface Props {
@@ -30,10 +31,10 @@
   let { lockToConfig = false }: Props = $props();
 
   const TABS: { id: NavTab; label: string; icon: typeof LayoutDashboard }[] = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "configuration", label: "Configuration", icon: SlidersHorizontal },
-    { id: "logs", label: "Logs", icon: Terminal },
-    { id: "about", label: "About", icon: Info },
+    { id: "dashboard", label: t("admin.nav.dashboard"), icon: LayoutDashboard },
+    { id: "configuration", label: t("admin.nav.configuration"), icon: SlidersHorizontal },
+    { id: "logs", label: t("admin.nav.logs"), icon: Terminal },
+    { id: "about", label: t("admin.nav.about"), icon: Info },
   ];
 
   // Sliding pill: track Y offset per tab via bind:this on each button
@@ -108,7 +109,7 @@
 </script>
 
 <nav
-  aria-label="Primary"
+  aria-label={t("admin.nav.primary")}
   data-ripple="off"
   class="w-[152px] shrink-0 glass-sidebar px-3 py-4 flex flex-col h-full rounded-b-[16px] overflow-hidden"
 >
@@ -117,7 +118,7 @@
   <div class="px-2 pb-4 flex flex-col items-center justify-center gap-1">
     <img
       src={appLogo}
-      alt="QuicFuscate logo"
+      alt={t("admin.brand.logo")}
       class="h-[44px] w-[44px] object-contain select-none"
       draggable="false"
     />
@@ -171,7 +172,7 @@
       )}
     >
       <Power class="h-[14px] w-[14px] opacity-80" />
-      <span>Logout</span>
+      <span>{t("admin.nav.logout")}</span>
     </button>
   </div>
 </nav>

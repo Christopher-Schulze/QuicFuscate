@@ -156,6 +156,7 @@
 </script>
 
 <svelte:head>
+  <title>QuicFuscate</title>
   <link rel="icon" href={favicon} />
 </svelte:head>
 

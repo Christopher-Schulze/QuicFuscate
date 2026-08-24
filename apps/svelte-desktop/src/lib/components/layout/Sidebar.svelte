@@ -3,13 +3,14 @@
   import { cn } from "@quicfuscate/ui";
   import { getActiveTab, setActiveTab } from "$lib/stores/app.svelte";
   import type { NavTab } from "$lib/types";
+  import { t } from "@quicfuscate/i18n";
   import appLogo from "../../../../../../assets/logo/QuicFuscate_clean.png";
 
   const TABS: { id: NavTab; label: string; icon: typeof Lock }[] = [
-    { id: "tunnels", label: "Tunnels", icon: Lock },
-    { id: "settings", label: "Configuration", icon: SlidersHorizontal },
-    { id: "logs", label: "Logs", icon: Terminal },
-    { id: "about", label: "About", icon: Info },
+    { id: "tunnels", label: t("desktop.nav.tunnels"), icon: Lock },
+    { id: "settings", label: t("desktop.nav.settings"), icon: SlidersHorizontal },
+    { id: "logs", label: t("desktop.nav.logs"), icon: Terminal },
+    { id: "about", label: t("desktop.nav.about"), icon: Info },
   ];
 
   const TAB_HEIGHT = 32;
@@ -20,7 +21,7 @@
 </script>
 
 <nav
-  aria-label="Primary"
+  aria-label={t("desktop.nav.primary")}
   data-ripple="off"
   class="w-[152px] shrink-0 glass-sidebar px-3 py-4 flex flex-col h-[calc(100%-13px)] self-start rounded-b-[16px] overflow-hidden"
 >
@@ -29,7 +30,7 @@
   <div class="px-2 pb-4 flex flex-col items-center justify-center gap-1">
     <img
       src={appLogo}
-      alt="QuicFuscate logo"
+      alt={t("desktop.brand.logo")}
       class="h-[44px] w-[44px] object-contain select-none"
       draggable="false"
     />

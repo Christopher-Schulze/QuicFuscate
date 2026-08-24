@@ -189,7 +189,39 @@ pub struct PersistedCircuit {
     #[serde(default)]
     pub allow_single_hop_fallback: bool,
     #[serde(default)]
-    pub diversity: quicfuscate::engine::CircuitDiversityPolicy,
+    pub diversity: PersistedDiversityPolicy,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct PersistedDiversityPolicy {
+    pub provider: bool,
+    pub region: bool,
+    pub jurisdiction: bool,
+    #[serde(alias = "failure_domain")]
+    pub failure_domain: bool,
+}
+
+impl From<PersistedDiversityPolicy> for quicfuscate::engine::CircuitDiversityPolicy {
+    fn from(value: PersistedDiversityPolicy) -> Self {
+        Self {
+            provider: value.provider,
+            region: value.region,
+            jurisdiction: value.jurisdiction,
+            failure_domain: value.failure_domain,
+        }
+    }
+}
+
+impl From<quicfuscate::engine::CircuitDiversityPolicy> for PersistedDiversityPolicy {
+    fn from(value: quicfuscate::engine::CircuitDiversityPolicy) -> Self {
+        Self {
+            provider: value.provider,
+            region: value.region,
+            jurisdiction: value.jurisdiction,
+            failure_domain: value.failure_domain,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
@@ -503,7 +535,7 @@ fn sanitize_persisted_circuit(mut circuit: PersistedCircuit) -> Option<Persisted
         max_hops: circuit.max_hops,
         max_parallel_circuits: circuit.max_parallel_circuits,
         allow_single_hop_fallback: circuit.allow_single_hop_fallback,
-        diversity: circuit.diversity.clone(),
+        diversity: circuit.diversity.clone().into(),
     };
     runtime.validate(1500).ok()?;
     Some(circuit)
@@ -1441,7 +1473,7 @@ fn build_client_engine_config_with_circuit(
             max_hops: circuit.max_hops,
             max_parallel_circuits: circuit.max_parallel_circuits,
             allow_single_hop_fallback: circuit.allow_single_hop_fallback,
-            diversity: circuit.diversity.clone(),
+            diversity: circuit.diversity.clone().into(),
         });
         let legacy = quicfuscate::engine::ConnectionConfig::default();
         cfg.connection.remote = legacy.remote;
@@ -3082,7 +3114,7 @@ mod tests {
                 max_hops: 3,
                 max_parallel_circuits: 2,
                 allow_single_hop_fallback: false,
-                diversity: quicfuscate::engine::CircuitDiversityPolicy::default(),
+                diversity: PersistedDiversityPolicy::default(),
             }
         };
         let state = PersistedState {
@@ -3856,6 +3888,57 @@ mod tests {
     }
 
     #[test]
+    fn persisted_diversity_roundtrips_camel_case_and_snake_case_failure_domain() {
+        let policy = PersistedDiversityPolicy {
+            provider: true,
+            region: false,
+            jurisdiction: false,
+            failure_domain: true,
+        };
+        let encoded = serde_json::to_string(&policy).expect("serialize persisted diversity");
+        assert!(encoded.contains("\"failureDomain\":true"));
+        assert!(!encoded.contains("failure_domain"));
+        let from_camel: PersistedDiversityPolicy = serde_json::from_str(
+            r#"{"provider":true,"region":false,"jurisdiction":false,"failureDomain":true}"#,
+        )
+        .expect("camelCase diversity");
+        assert!(from_camel.failure_domain);
+        let from_snake: PersistedDiversityPolicy = serde_json::from_str(
+            r#"{"provider":false,"region":false,"jurisdiction":false,"failure_domain":true}"#,
+        )
+        .expect("snake_case diversity alias");
+        assert!(from_snake.failure_domain);
+        let engine = quicfuscate::engine::CircuitDiversityPolicy::from(from_camel);
+        assert!(engine.failure_domain);
+    }
+
+    fn patch_generated_typescript_bindings(path: &str) {
+        let generated = std::fs::read_to_string(path).expect("read generated bindings");
+        assert!(
+            generated.contains("error: e as any"),
+            "generated Specta helper no longer contains the untyped error cast"
+        );
+        let patched = generated
+            .replace(
+                "import { invoke as __TAURI_INVOKE } from \"@tauri-apps/api/core\";",
+                "import { invoke as __TAURI_INVOKE } from \"@tauri-apps/api/core\";\nimport { wrapSpectaInvoke } from \"./specta-result\";",
+            )
+            .replace(
+                "async function typedError<T, E>(result: Promise<T>): Promise<{ status: \"ok\"; data: T } | { status: \"error\"; error: E }> {\n    try {\n        return { status: \"ok\", data: await result };\n    } catch (e) {\n        if (e instanceof Error) throw e;\n        return { status: \"error\", error: e as any };\n    }\n}",
+                "async function typedError<T, E>(result: Promise<T>): Promise<{ status: \"ok\"; data: T } | { status: \"error\"; error: E }> {\n    return wrapSpectaInvoke<T, E>(result);\n}",
+            );
+        assert!(
+            !patched.contains("as any"),
+            "generated Specta helper still contains as any"
+        );
+        assert!(
+            patched.contains("wrapSpectaInvoke"),
+            "generated Specta helper was not rewritten onto wrapSpectaInvoke"
+        );
+        std::fs::write(path, patched).expect("write patched bindings");
+    }
+
+    #[test]
     fn export_typescript_bindings() {
         // tauri-specta's recursive type processing needs a larger-than-default stack.
         let handle = std::thread::Builder::new()
@@ -3865,6 +3948,7 @@ mod tests {
                 make_specta_builder()
                     .export(specta_typescript::Typescript::default(), output_path)
                     .expect("failed to export TypeScript bindings");
+                patch_generated_typescript_bindings(output_path);
             })
             .expect("failed to spawn bindings export thread");
         handle.join().expect("bindings export thread panicked");

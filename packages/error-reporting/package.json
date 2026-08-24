@@ -1,0 +1,9 @@
+{
+  "name": "@quicfuscate/error-reporting",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  }
+}

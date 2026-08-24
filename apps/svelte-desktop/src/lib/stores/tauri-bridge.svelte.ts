@@ -39,6 +39,7 @@ import type { ParsedQKey, PersistedState_Deserialize } from "$lib/bindings";
 import { parseEngineStats, parseEngineStatus } from "$lib/ipc-contracts";
 import { toErrorMessage } from "$lib/format";
 import { unwrapSpectaCommand } from "$lib/specta-result";
+import { normalizePersistedCircuit } from "$lib/circuit-persist";
 
 /** Shape returned by the Tauri `load_state` command. */
 interface PersistedState {
@@ -90,108 +91,6 @@ type PersistedTunnel = {
   countryCode?: unknown; location?: unknown; debugSniOverride?: unknown;
   circuit?: unknown; alternateCircuit?: unknown;
 };
-
-function normalizePersistedCircuit(input: unknown): CircuitConfig | null | undefined {
-  if (input === undefined || input === null) return undefined;
-  if (!isRecord(input) || !Array.isArray(input.hops) || input.hops.length < 1 || input.hops.length > 8) {
-    return null;
-  }
-  const rawHops = input.hops;
-  const hops = rawHops.map((raw, index) => {
-    if (!isRecord(raw)) return null;
-    const text = (key: string): string => typeof raw[key] === "string" ? raw[key].trim() : "";
-    const id = text("id");
-    const label = text("label");
-    const remote = text("remote");
-    const sni = text("sni");
-    const qkeyId = text("qkeyId").toLowerCase();
-    const qkey = typeof raw.qkey === "string" ? raw.qkey.trim() : "";
-    const expectedRole = index + 1 === rawHops.length ? "exit" : "relay";
-    if (!id || !label || !remote || !sni || raw.role !== expectedRole || !/^[0-9a-f]{12}$/.test(qkeyId)) {
-      return null;
-    }
-    const optional = (key: string): string | undefined => {
-      const value = text(key);
-      return value || undefined;
-    };
-    const rawPolicy = raw.policy;
-    let policy: CircuitConfig["hops"][number]["policy"];
-    if (rawPolicy !== undefined && rawPolicy !== null) {
-      if (!isRecord(rawPolicy)) return null;
-      const fecMode = rawPolicy.fecMode;
-      if (fecMode !== undefined && fecMode !== "off" && fecMode !== "auto") return null;
-      const rawPersona = rawPolicy.persona;
-      let persona: NonNullable<CircuitConfig["hops"][number]["policy"]>["persona"];
-      if (rawPersona !== undefined && rawPersona !== null) {
-        if (!isRecord(rawPersona)) return null;
-        const browsers = ["chrome", "firefox", "safari", "edge"];
-        const operatingSystems = ["windows", "macos", "linux", "ios", "android"];
-        if (!browsers.includes(String(rawPersona.browser))
-          || !operatingSystems.includes(String(rawPersona.os))) return null;
-        persona = {
-          browser: rawPersona.browser as NonNullable<typeof persona>["browser"],
-          os: rawPersona.os as NonNullable<typeof persona>["os"],
-        };
-      }
-      const optionalBoolean = (key: string): boolean | undefined => {
-        const value = rawPolicy[key];
-        return typeof value === "boolean" ? value : undefined;
-      };
-      policy = {
-        persona,
-        fecMode,
-        enableTrafficPadding: optionalBoolean("enableTrafficPadding"),
-        enableTimingObfuscation: optionalBoolean("enableTimingObfuscation"),
-        enableCoverPing: optionalBoolean("enableCoverPing"),
-      };
-    }
-    const positiveInteger = (key: string, fallback: number): number => {
-      const value = raw[key];
-      return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-        ? value : fallback;
-    };
-    return {
-      id,
-      label,
-      remote,
-      sni,
-      qkeyId,
-      qkey,
-      role: expectedRole,
-      provider: optional("provider"),
-      region: optional("region"),
-      jurisdiction: optional("jurisdiction"),
-      failureDomain: optional("failureDomain"),
-      verifyPeer: raw.verifyPeer !== false,
-      caFile: optional("caFile"),
-      connectTimeoutMs: positiveInteger("connectTimeoutMs", 10_000),
-      idleTimeoutMs: positiveInteger("idleTimeoutMs", 30_000),
-      policy,
-      hasToken: Boolean(raw.hasToken),
-    };
-  });
-  if (hops.some((hop) => hop === null)) return null;
-  const maxHops = typeof input.maxHops === "number" && Number.isInteger(input.maxHops)
-    ? input.maxHops : 3;
-  const maxParallelCircuits = typeof input.maxParallelCircuits === "number"
-    && Number.isInteger(input.maxParallelCircuits) ? input.maxParallelCircuits : 2;
-  if (maxHops < hops.length || maxHops > 8 || maxParallelCircuits < 1 || maxParallelCircuits > 2) {
-    return null;
-  }
-  const rawDiversity = isRecord(input.diversity) ? input.diversity : {};
-  return {
-    hops: hops as CircuitConfig["hops"],
-    maxHops,
-    maxParallelCircuits,
-    allowSingleHopFallback: input.allowSingleHopFallback === true,
-    diversity: {
-      provider: rawDiversity.provider === true,
-      region: rawDiversity.region === true,
-      jurisdiction: rawDiversity.jurisdiction === true,
-      failureDomain: rawDiversity.failureDomain === true,
-    },
-  };
-}
 
 export function normalizePersistedTunnels(input: unknown): {
   tunnels: TunnelConfig[];
@@ -588,4 +487,4 @@ export async function engineLogsClear(): Promise<void> {
   } catch { /* no-op */ }
 }
 
-export { isTauri };
+export { isTauri, normalizePersistedCircuit };

@@ -1,5 +1,6 @@
 import type { StealthManualSettings, StealthPresetUi, CcSelection } from "$lib/types";
 import { parseCongestionControlAlgorithm } from "@quicfuscate/ui/congestion-control";
+import { parse as parseTomlDocument } from "smol-toml";
 
 export const DEFAULT_STEALTH_MANUAL: StealthManualSettings = {
   enable_domain_fronting: true,
@@ -58,7 +59,53 @@ function parseKvLine(line: string): { key: string; value: string } | null {
   return { key, value };
 }
 
-export function setSectionValue(contents: string, section: string, key: string, value: string): string {
+function isTomlTable(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date);
+}
+
+function lookupTomlTable(root: Record<string, unknown>, section: string): Record<string, unknown> | null {
+  let current: unknown = root;
+  for (const part of section.split(".")) {
+    if (!isTomlTable(current) || !(part in current)) return null;
+    current = current[part];
+  }
+  return isTomlTable(current) ? current : null;
+}
+
+function formatTomlScalar(value: unknown): string | null {
+  if (typeof value === "string") return value.length > 0 ? value : null;
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "bigint") {
+    return String(value);
+  }
+  return null;
+}
+
+function parseTomlRoot(contents: string): Record<string, unknown> | null {
+  try {
+    const parsed = parseTomlDocument(normalizeTomlTextForUi(contents));
+    return isTomlTable(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function expectedWrittenScalar(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\""))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function applySurgicalSectionValue(
+  contents: string,
+  section: string,
+  key: string,
+  value: string,
+): string {
   const lines = contents.split("\n");
   let inSection = false;
   let sectionFound = false;
@@ -105,7 +152,21 @@ export function setSectionValue(contents: string, section: string, key: string, 
   return lines.join("\n");
 }
 
-export function readSectionValue(contents: string, section: string, key: string): string | null {
+export function setSectionValue(contents: string, section: string, key: string, value: string): string {
+  const next = applySurgicalSectionValue(contents, section, key, value);
+  const readBack = readSectionValue(next, section, key);
+  const expected = expectedWrittenScalar(value);
+  if ((expected.length === 0 && readBack != null) || (expected.length > 0 && readBack !== expected)) {
+    throw new Error(`TOML write did not round-trip [${section}] ${key}`);
+  }
+  const parsed = parseTomlRoot(next);
+  if (parseTomlRoot(contents) != null && parsed == null) {
+    throw new Error(`TOML write produced invalid document for [${section}] ${key}`);
+  }
+  return next;
+}
+
+function readSectionValueFromLines(contents: string, section: string, key: string): string | null {
   const lines = contents.split("\n");
   let inSection = false;
   let found: string | null = null;
@@ -125,6 +186,17 @@ export function readSectionValue(contents: string, section: string, key: string)
     found = unquoted ? unquoted : null;
   }
   return found;
+}
+
+export function readSectionValue(contents: string, section: string, key: string): string | null {
+  const normalized = normalizeTomlTextForUi(contents);
+  const fromLines = readSectionValueFromLines(normalized, section, key);
+  if (fromLines != null) return fromLines;
+  const root = parseTomlRoot(contents);
+  if (root == null) return null;
+  const table = lookupTomlTable(root, section);
+  if (table == null || !(key in table)) return null;
+  return formatTomlScalar(table[key]);
 }
 
 function parseBool(raw: string | null): boolean | null {

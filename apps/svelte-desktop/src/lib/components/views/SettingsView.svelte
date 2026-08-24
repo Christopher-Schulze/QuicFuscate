@@ -14,12 +14,11 @@
     type UpdaterHandle,
   } from "$lib/updater";
 
-  // Hard-locked until code-signing and release infrastructure is production-ready
-  const UPDATER_UI_LOCKED = true;
-
   const settings = $derived(getSettings());
   const runtimeAvailable = $derived(isTauri());
   let updaterRuntimeEnabled = $state(false);
+  // Locked until the native host reports a signed updater runtime.
+  const updaterUiLocked = $derived(!updaterRuntimeEnabled);
   let updaterState = $state<UpdateUiState>({
     status: "disabled",
     reason: "Updater is disabled by policy until signed binaries are published.",
@@ -51,7 +50,7 @@
   const updaterPolicy = $derived(
     updaterEnabledByPolicy(
       runtimeAvailable,
-      UPDATER_UI_LOCKED ? false : settings.general.updaterEnabled,
+      updaterUiLocked ? false : settings.general.updaterEnabled,
       updaterRuntimeEnabled,
     )
   );
@@ -242,25 +241,27 @@
       </section>
 
       <!-- Updates -->
-      <section class={cn(SECTION, UPDATER_UI_LOCKED ? "opacity-65" : "", "relative shrink-0")}>
+      <section class={cn(SECTION, updaterUiLocked ? "opacity-65" : "", "relative shrink-0")}>
         <div class={HEADER}>
           <span class="text-[11px] font-semibold text-black dashboard-heading-sans">Updates</span>
         </div>
+        {#if updaterUiLocked}
         <span
           aria-hidden="true"
           class="pointer-events-none absolute right-4 top-[11px] text-[11px] font-bold text-black"
         >Disabled in current source-first release</span>
+        {/if}
         <div class={ROW}>
           <div>
             <div class={LABEL}>Updater enabled</div>
             <div class={DESC}>Deferred until signed binaries and release signing are shipped.</div>
           </div>
           <Switch
-            checked={UPDATER_UI_LOCKED ? false : settings.general.updaterEnabled}
-            disabled={UPDATER_UI_LOCKED}
+            checked={updaterUiLocked ? false : settings.general.updaterEnabled}
+            disabled={updaterUiLocked}
             label="Updater enabled"
             onchange={(checked) =>
-              UPDATER_UI_LOCKED
+              updaterUiLocked
                 ? null
                 : updateSettings((prev) => ({
                     ...prev,
@@ -287,14 +288,14 @@
             <button
               type="button"
               use:ripple={{ color: "light" }}
-              disabled={UPDATER_UI_LOCKED || !updaterPolicy.enabled || updaterState.status === "checking"}
+              disabled={updaterUiLocked || !updaterPolicy.enabled || updaterState.status === "checking"}
               onclick={() => { void checkUpdates(); }}
               class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-neutral-btn h-auto min-w-0 disabled:opacity-55 disabled:cursor-not-allowed"
             >Check now</button>
             <button
               type="button"
               use:ripple={{ color: "light" }}
-              disabled={UPDATER_UI_LOCKED || !pendingUpdate || updaterState.status === "downloading" || updaterState.status === "installing"}
+              disabled={updaterUiLocked || !pendingUpdate || updaterState.status === "downloading" || updaterState.status === "installing"}
               onclick={() => { void installPendingUpdate(); }}
               class="inline-flex items-center rounded-lg px-3 py-1.5 border text-[11px] font-semibold transition-all action-neutral-btn h-auto min-w-0 disabled:opacity-55 disabled:cursor-not-allowed"
             >Install</button>

@@ -1,0 +1,9 @@
+{
+  "name": "@quicfuscate/i18n",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  }
+}

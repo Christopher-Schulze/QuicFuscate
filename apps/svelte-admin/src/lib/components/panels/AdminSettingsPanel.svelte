@@ -277,7 +277,11 @@
 <Dialog.Root open={effectivePasswordDialogOpen} onOpenChange={(open) => { if (requiresChange && !open) return; passwordDialogOpen = open; if (!open) pwError = null; }}>
   <Dialog.Portal to="#qf-app-stage">
     <Dialog.Overlay class="absolute inset-0 z-50 bg-black/18 animate-in fade-in-0 duration-150" style="backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);" />
-    <Dialog.Content class="dialog-surface dialog-typography absolute left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 glass border border-edge shadow-xl rounded-[18px] w-[340px] animate-in fade-in-0 zoom-in-95 duration-200">
+    <Dialog.Content
+      escapeKeydownBehavior={requiresChange ? "ignore" : "close"}
+      interactOutsideBehavior={requiresChange ? "ignore" : "close"}
+      class="dialog-surface dialog-typography absolute left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 glass border border-edge shadow-xl rounded-[18px] w-[340px] animate-in fade-in-0 zoom-in-95 duration-200"
+    >
       <div bind:this={pwDialogEl}>
         <div class="dialog-header-pad">
           <Dialog.Title class="text-[13px] font-semibold text-black dashboard-heading-sans">Change Password</Dialog.Title>

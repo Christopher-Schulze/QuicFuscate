@@ -10,6 +10,7 @@
   } from "$lib/stores/app.svelte";
   import { ApiError, postJson, sanitizeErrorMessage } from "$lib/api";
   import { adminApiSchemas } from "$lib/admin-api-contracts";
+  import { t } from "@quicfuscate/i18n";
 
   interface Props {
     open: boolean;
@@ -167,7 +168,7 @@
             {error ? "Login failed. Check your credentials and try again." : ""}
           </span>
           <div class="dialog-header-pad flex flex-col gap-1">
-            <div class="text-[14px] font-semibold text-text-primary dashboard-heading-sans">Admin Login</div>
+            <div class="text-[14px] font-semibold text-text-primary dashboard-heading-sans">{t("admin.login.title")}</div>
             <div class="text-[11px] text-black dashboard-heading-sans">
               Enter admin credentials to access server configuration.
             </div>

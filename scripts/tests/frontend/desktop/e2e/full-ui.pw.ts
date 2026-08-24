@@ -1,5 +1,8 @@
 import { test, expect } from "@playwright/test";
 
+/** Matches apps/tauri/src-tauri/tauri.conf.json (fixed 900x670, not resizable). */
+const DESKTOP_WINDOW = { width: 900, height: 670 } as const;
+
 test.describe("Desktop UI (Browser Mode)", () => {
   async function waitForHydration(page: any) {
     await expect(page.locator('#qf-app-stage[data-hydrated="true"]')).toBeVisible();
@@ -197,7 +200,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
     test("Create Tunnel dialog stays within viewport (small window)", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width: 900, height: 600 });
+      await page.setViewportSize(DESKTOP_WINDOW);
 
       await createButton(page).click();
       const dialog = page.getByRole("dialog").first();
@@ -220,7 +223,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
     test("Create Tunnel field labels do not overlap controls in fixed desktop viewport", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width: 900, height: 600 });
+      await page.setViewportSize(DESKTOP_WINDOW);
 
       await createButton(page).click();
       const dialog = page.getByRole("dialog").first();
@@ -248,7 +251,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
     test("Import QKey dialog stays within viewport (small window)", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width: 900, height: 600 });
+      await page.setViewportSize(DESKTOP_WINDOW);
 
       await importQkeyButton(page).click();
       const dialog = page.getByRole("dialog").first();
@@ -261,7 +264,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
     test("connect control stays stable without QKey (small window)", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width: 900, height: 600 });
+      await page.setViewportSize(DESKTOP_WINDOW);
 
       await createButton(page).click();
       const dialog = page.getByRole("dialog", { name: "Create Tunnel" });
@@ -278,7 +281,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
     test("configuration view stays stable in fixed viewport", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width: 900, height: 600 });
+      await page.setViewportSize(DESKTOP_WINDOW);
 
       const nav = page.getByRole("navigation", { name: "Primary" });
       await nav.getByRole("button", { name: "Configuration", exact: true }).click();

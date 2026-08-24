@@ -328,6 +328,39 @@ describe("canonicalizeConfigForCompare", () => {
   });
 });
 
+describe("TOML document parser", () => {
+  test("prefers the last duplicate key in a section", () => {
+    const config = `[transport]\nmtu = 1400\nmtu = 1500\n`;
+    expect(readSectionValue(config, "transport", "mtu")).toBe("1500");
+  });
+
+  test("reads last-wins and invalid scalars from escaped-newline documents", () => {
+    expect(readSectionValue("[transport]\\nmtu = 1400\\nmtu = 1500\\n", "transport", "mtu")).toBe("1500");
+    expect(readSectionValue("[transport]\\nmtu = 1400abc\\n", "transport", "mtu")).toBe("1400abc");
+  });
+
+  test("reads nested tables", () => {
+    const config = `[server.tls]\nenabled = true\n`;
+    expect(readSectionValue(config, "server.tls", "enabled")).toBe("true");
+  });
+
+  test("reads inline tables", () => {
+    const config = `cc = { algorithm = "bbr3", pacing = false }\n`;
+    expect(readSectionValue(config, "cc", "algorithm")).toBe("bbr3");
+    expect(readSectionValue(config, "cc", "pacing")).toBe("false");
+  });
+
+  test("fails closed on invalid TOML for nested parser lookup only", () => {
+    expect(readSectionValue("[[[not toml", "server.tls", "enabled")).toBeNull();
+  });
+
+  test("rejects a surgical write that would not parse", () => {
+    expect(() => setSectionValue("[server]\nport = 4433\n", "server", "bind", "not a value @")).toThrow(
+      /TOML write/,
+    );
+  });
+});
+
 describe("constants", () => {
   test("congestion-control contract contains the complete backend set", () => {
     expect(CONGESTION_CONTROL_OPTIONS.map((option) => option.value)).toEqual([
