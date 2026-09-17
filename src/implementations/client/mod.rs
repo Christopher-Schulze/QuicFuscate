@@ -570,11 +570,11 @@ impl ClientRuntime {
             std_socket
                 .connect(remote_addr)
                 .map_err(|error| EngineError::Io(format!("UDP connect failed: {error}")))?;
-            // Receive-side coalescing for server GSO bursts. Disabled when the
-            // io_uring inbound path is compiled in: its RecvMsg SQEs post no
-            // control buffer, so coalesced datagrams would lose their segment
-            // metadata (TODO-923 follow-up: arm cmsg space in UringRecvBatch).
-            #[cfg(all(target_os = "linux", not(feature = "io_uring")))]
+            // Receive-side coalescing for server GSO bursts. Safe for every
+            // inbound path: the standard loop reads via recvmsg+cmsg and the
+            // io_uring receiver arms per-slot cmsg storage for the UDP_GRO
+            // segment-size metadata (TODO-923/927).
+            #[cfg(target_os = "linux")]
             {
                 if let Err(error) = qf_transport_udp::enable_udp_gro(&std_socket) {
                     log::debug!("UDP GRO enable failed: {error}");

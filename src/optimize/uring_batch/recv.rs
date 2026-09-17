@@ -7,6 +7,20 @@ use super::*;
 const DEFAULT_RECV_DEPTH: u32 = 64;
 /// Default per-buffer size (power-of-two, > typical MTU).
 const DEFAULT_RECV_BUF_SIZE: usize = 2048;
+/// Per-buffer size that can hold a maximal `UDP_GRO` super-buffer.
+const GRO_RECV_BUF_SIZE: usize = 65_535;
+/// Per-slot ancillary storage: one `UDP_GRO` segment-size cmsg fits into
+/// `CMSG_SPACE(sizeof(u16))` <= 32 bytes on every supported kernel ABI.
+const CMSG_SLOT_BYTES: usize = 32;
+
+/// Control-message slot aligned for `libc::cmsghdr` access.
+#[repr(align(8))]
+#[derive(Clone, Copy)]
+struct CmsgSlot([u8; CMSG_SLOT_BYTES]);
+
+impl CmsgSlot {
+    const ZEROED: Self = Self([0u8; CMSG_SLOT_BYTES]);
+}
 
 /// A single completed receive from `UringRecvBatch::drain_completions`.
 pub struct RecvCompletion {
@@ -88,6 +102,10 @@ pub struct UringRecvBatch {
     iovecs: Vec<libc::iovec>,
     /// Pre-built msghdr array pointing into `iovecs` (and `addrs` when `with_addr`).
     msgs: Vec<libc::msghdr>,
+    /// Per-slot ancillary storage so a `UDP_GRO` segment-size cmsg survives the
+    /// completion. Always armed; the socket option decides whether the kernel
+    /// actually fills it.
+    cmsgs: Vec<CmsgSlot>,
     /// Source address storage per slot (only allocated when `with_addr`).
     addrs: Vec<libc::sockaddr_storage>,
     depth: u32,
@@ -243,15 +261,25 @@ impl UringRecvBatch {
             Vec::new()
         };
 
+        // Per-slot ancillary storage for the `UDP_GRO` segment-size cmsg. The
+        // storage is always armed so a socket can enable `UDP_GRO` without
+        // receiver changes; when the socket option is off the kernel simply
+        // reports `msg_controllen == 0`.
+        let mut cmsgs = vec![CmsgSlot::ZEROED; d];
+
         // Pre-build msghdrs.
         let mut msgs: Vec<libc::msghdr> = Vec::with_capacity(d);
         for i in 0..d {
             // SAFETY: msghdr is POD; an all-zero bit pattern produces valid
-            // null/zero fields (msg_name, msg_control, msg_flags).
+            // null/zero fields (msg_name, msg_flags).
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
             // SAFETY: iovecs[i] is stable (no further pushes).
             hdr.msg_iov = &iovecs[i] as *const libc::iovec as *mut libc::iovec;
             hdr.msg_iovlen = 1;
+            // SAFETY: cmsgs[i] is stable (no further pushes) and aligned for
+            // cmsghdr access via `CmsgSlot`'s 8-byte alignment.
+            hdr.msg_control = cmsgs[i].0.as_mut_ptr() as *mut libc::c_void;
+            hdr.msg_controllen = CMSG_SLOT_BYTES;
             if with_addr && !addrs.is_empty() {
                 // Will be fixed up after addrs vec is fully built (it already is).
                 hdr.msg_name = &addrs[i] as *const libc::sockaddr_storage as *mut libc::c_void;
@@ -273,6 +301,7 @@ impl UringRecvBatch {
             buf_size,
             iovecs,
             msgs,
+            cmsgs,
             addrs,
             depth,
             socket_fd,
@@ -302,6 +331,53 @@ impl UringRecvBatch {
             with_addr,
             memory_pool,
         )
+    }
+
+    /// Create a contiguous receive batch sized for `UDP_GRO` super-buffers.
+    ///
+    /// Requires the caller to have enabled `UDP_GRO` on the socket. Contiguous
+    /// mode is used on purpose: pool blocks are MTU-sized and cannot hold a
+    /// maximal 65,535-byte coalesced buffer.
+    pub fn with_defaults_gro(socket_fd: RawFd, with_addr: bool) -> Option<Self> {
+        Self::new(socket_fd, DEFAULT_RECV_DEPTH, GRO_RECV_BUF_SIZE, with_addr)
+    }
+
+    /// Extract the `UDP_GRO` segment size reported for `slot`, if any.
+    ///
+    /// Returns `Some(gso_size)` when the kernel attached a `UDP_GRO` cmsg with
+    /// a sane segment size (non-zero, not larger than the receive buffer).
+    /// Takes `msgs`/`cmsgs` directly so the drain loop can call it while
+    /// `self.ring` stays mutably borrowed. The control pointer must still
+    /// address this batch's own slot storage; anything else fails closed.
+    fn gro_segment_size(
+        msgs: &[libc::msghdr],
+        cmsgs: &[CmsgSlot],
+        slot: usize,
+        buf_size: usize,
+    ) -> Option<usize> {
+        let msg = &msgs[slot];
+        if msg.msg_control as *const u8 != cmsgs[slot].0.as_ptr() {
+            log::warn!("io_uring recv slot {slot} control pointer escaped its slot storage");
+            return None;
+        }
+        if msg.msg_controllen < std::mem::size_of::<libc::cmsghdr>()
+            || msg.msg_controllen > CMSG_SLOT_BYTES
+        {
+            return None;
+        }
+        // SAFETY: the kernel wrote a valid cmsg chain into the slot's control
+        // buffer bounded by msg_controllen; CMSG_FIRSTHDR/CMSG_NXTHDR walk it.
+        unsafe {
+            let mut cmsg = libc::CMSG_FIRSTHDR(msg);
+            while !cmsg.is_null() {
+                if (*cmsg).cmsg_level == libc::SOL_UDP && (*cmsg).cmsg_type == libc::UDP_GRO {
+                    let size = *(libc::CMSG_DATA(cmsg) as *const u16) as usize;
+                    return (size > 0 && size <= buf_size).then_some(size);
+                }
+                cmsg = libc::CMSG_NXTHDR(msg, cmsg);
+            }
+        }
+        None
     }
 
     /// Raw eventfd descriptor for Tokio `AsyncFd` registration.
@@ -407,6 +483,9 @@ impl UringRecvBatch {
                     let len = result as usize;
                     let addr = if self.with_addr { parse_sockaddr(&self.addrs[idx]) } else { None };
                     let len = len.min(self.buf_size);
+                    let gso_size =
+                        Self::gro_segment_size(&self.msgs, &self.cmsgs, idx, self.buf_size)
+                            .filter(|size| len > *size);
 
                     if let Some(pool) = self.memory_pool.as_ref() {
                         let Some(block) = self.blocks[idx].take() else {
@@ -429,17 +508,65 @@ impl UringRecvBatch {
                         self.iovecs[idx].iov_base = replacement.as_mut_ptr() as *mut libc::c_void;
                         self.iovecs[idx].iov_len = self.buf_size;
                         self.blocks[idx] = Some(replacement);
-                        completions.push(RecvCompletion {
-                            data: Vec::new(),
-                            block: Some(block),
-                            len,
-                            addr,
-                        });
+                        if let Some(gso_size) = gso_size {
+                            // Kernel-coalesced super-buffer: one completion per
+                            // original segment, each copied into its own pool
+                            // block so the downstream per-datagram contract
+                            // stays unchanged.
+                            let mut offset = 0usize;
+                            while offset < len {
+                                let seg_len = (len - offset).min(gso_size);
+                                let mut segment = pool.alloc();
+                                if segment.len() < seg_len {
+                                    pool.free(segment);
+                                    pool.free(block);
+                                    drain_error = Some(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "io_uring recv pool block smaller than GRO segment",
+                                    ));
+                                    break;
+                                }
+                                segment[..seg_len]
+                                    .copy_from_slice(&block[offset..offset + seg_len]);
+                                completions.push(RecvCompletion {
+                                    data: Vec::new(),
+                                    block: Some(segment),
+                                    len: seg_len,
+                                    addr,
+                                });
+                                offset += seg_len;
+                            }
+                        } else {
+                            completions.push(RecvCompletion {
+                                data: Vec::new(),
+                                block: Some(block),
+                                len,
+                                addr,
+                            });
+                        }
                     } else {
                         let start = idx * self.buf_size;
-                        let end = start + len;
-                        let data = self.bufs[start..end].to_vec();
-                        completions.push(RecvCompletion { data, block: None, len, addr });
+                        if let Some(gso_size) = gso_size {
+                            // One completion per original segment; the copies
+                            // restore the per-datagram contract while the
+                            // single RecvMsg already saved the syscalls.
+                            let mut offset = start;
+                            while offset < start + len {
+                                let seg_len = (start + len - offset).min(gso_size);
+                                let data = self.bufs[offset..offset + seg_len].to_vec();
+                                completions.push(RecvCompletion {
+                                    data,
+                                    block: None,
+                                    len: seg_len,
+                                    addr,
+                                });
+                                offset += seg_len;
+                            }
+                        } else {
+                            let end = start + len;
+                            let data = self.bufs[start..end].to_vec();
+                            completions.push(RecvCompletion { data, block: None, len, addr });
+                        }
                         self.iovecs[idx].iov_len = self.buf_size;
                     }
                 } else {
@@ -468,6 +595,10 @@ impl UringRecvBatch {
                     self.msgs[idx].msg_namelen =
                         std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                 }
+                // The kernel shrinks msg_controllen and may set MSG_TRUNC in
+                // msg_flags; re-arm the full cmsg slot before the repost.
+                self.msgs[idx].msg_controllen = CMSG_SLOT_BYTES;
+                self.msgs[idx].msg_flags = 0;
             }
         }
 

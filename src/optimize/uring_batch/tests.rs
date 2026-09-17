@@ -193,6 +193,62 @@ fn recv_rearms_after_zero_length_datagrams() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn recv_gro_preserves_segment_boundaries() {
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("receiver bind");
+    let receiver_addr = receiver.local_addr().expect("receiver address");
+    if qf_transport_udp::enable_udp_gro_fd(receiver.as_raw_fd()).is_err() {
+        println!("QF_IO_URING_GRO_STATUS=UNAVAILABLE reason=udp_gro_sockopt");
+        return;
+    }
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
+    if !qf_transport_udp::probe_udp_gso(sender.as_raw_fd()) {
+        println!("QF_IO_URING_GRO_STATUS=UNAVAILABLE reason=udp_gso_sockopt");
+        return;
+    }
+
+    let mut recv = match UringRecvBatch::new(receiver.as_raw_fd(), 8, 65_535, false) {
+        Some(recv) => recv,
+        None => {
+            println!("QF_IO_URING_GRO_STATUS=UNAVAILABLE reason=io_uring_init");
+            return;
+        }
+    };
+    recv.post_initial().expect("post receive slots");
+
+    // One GSO sendmsg: three full segments plus a short tail. Whether the
+    // kernel coalesces them back into one receive is timing-dependent; the
+    // assertion only requires that boundaries and payload bytes survive.
+    let payload: Vec<u8> = (0..1850u32).map(|i| (i % 251) as u8).collect();
+    qf_transport_udp::send_udp_segment(sender.as_raw_fd(), receiver_addr, &payload, 600)
+        .expect("gso sendmsg");
+
+    let mut segments: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..500 {
+        for completion in recv.drain_completions().expect("drain gro") {
+            segments.push(completion.as_slice().to_vec());
+        }
+        if segments.iter().map(Vec::len).sum::<usize>() >= payload.len() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let received: usize = segments.iter().map(Vec::len).sum();
+    assert_eq!(received, payload.len(), "segment bytes lost or duplicated");
+    let mut flat = Vec::with_capacity(received);
+    for segment in &segments {
+        assert!(segment.len() <= 600, "segment {} exceeds the GSO size", segment.len());
+        flat.extend_from_slice(segment);
+    }
+    assert_eq!(flat, payload, "segment order or payload corrupted");
+    println!("QF_IO_URING_GRO_STATUS=SUPPORTED segments={}", segments.len());
+}
+
 #[test]
 fn parse_sockaddr_ipv4_roundtrip() {
     use std::net::{Ipv4Addr, SocketAddrV4};

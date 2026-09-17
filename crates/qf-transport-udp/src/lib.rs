@@ -337,6 +337,30 @@ pub fn enable_udp_gro(sock: &UdpSocket) -> std::io::Result<bool> {
     enable_udp_gro_fd(sock.as_raw_fd())
 }
 
+/// Disable `UDP_GRO` on a socket (best-effort).
+///
+/// Needed when a receiver that understands the `UDP_GRO` control message is
+/// replaced by one with MTU-sized buffers: a coalesced super-buffer would
+/// otherwise arrive with MSG_TRUNC and lose its tail.
+#[cfg(target_os = "linux")]
+pub fn disable_udp_gro_fd(fd: RawFd) -> std::io::Result<()> {
+    let val: libc::c_int = 0;
+    // SAFETY: `val` outlives the synchronous setsockopt call.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_UDP,
+            libc::UDP_GRO,
+            &val as *const _ as *const c_void,
+            std::mem::size_of_val(&val) as socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Send one super-buffer as `UDP_SEGMENT` GSO datagrams (Linux).
 ///
 /// The kernel splits `payload` into `ceil(len / segment_size)` wire datagrams;

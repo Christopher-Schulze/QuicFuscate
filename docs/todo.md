@@ -62,7 +62,7 @@
 - Detail: `docs/todo/todo-926-recv-batch-cap-unreachable.md`
 
 ### TODO-927 - io_uring TX: triple-copy, channel(1) depth, 1ms sleep poll — x86 evidence missing
-- PARTIAL (TODO-923 batch): `WorkerRequest` submissions now carry one flat payload `Vec<u8>` + span table instead of one `Vec` per packet — the per-packet alloc+copy on submit is gone. Still open: `channel(1)` serialization, `thread::sleep(1ms)` CQE poll → eventfd/`io_uring_enter` wake, `UringRecvBatch` cmsg space for GRO (blocks client GRO under io_uring), x86_64 evidence — Omega covers aarch64 only.
+- PARTIAL (larger share done): flat payload storage end-to-end (`payload_flat`+`payload_spans`+`packet_addrs`; worker adopts the flat buffer in place — zero payload copies on the channel handoff); `submit_and_poll` spin→yield→capped-sleep backoff replaces the fixed 1 ms sleep; `channel(1)` kept deliberately as bounded backpressure (analysis documented); `UringRecvBatch` arms per-slot `UDP_GRO` cmsg storage and splits coalesced super-buffers — client GRO now works under io_uring (`with_defaults_gro`, safe `disable_udp_gro_fd` fallback). Still open: x86_64 native evidence (Omega covers aarch64 only), optional `IORING_ENTER_GETEVENTS` blocking wait.
 - Detail: `docs/todo/todo-927-io-uring-x86.md`
 
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness

@@ -44,6 +44,12 @@ impl UringBatchWorker {
     /// Start one bounded worker with a sender queue depth.
     pub fn new(queue_depth: u32) -> Option<Self> {
         let sender = UringBatchSender::new_inner(queue_depth, false)?;
+        // Depth 1 is deliberate, not a missing knob: exactly one sender owns
+        // the ring and its pointer-backed staging, so requests serialize anyway.
+        // A deeper queue would only let a waiting batch exceed the caller's
+        // response deadline (500 ms) behind a 250 ms operation — spurious
+        // quarantines for zero throughput gain. Bounded depth 1 gives natural
+        // backpressure: extra submitters take the per-packet fallback instead.
         let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
@@ -63,17 +69,14 @@ impl UringBatchWorker {
                                 )));
                                 continue;
                             }
-                            let payload_refs: Vec<&[u8]> = spans
-                                .iter()
-                                .map(|&(start, len)| &flat[start..start + len])
-                                .collect();
                             let control = SendControl {
                                 shutdown: &shutdown_for_worker,
                                 deadline: Instant::now() + BLOCKING_WORKER_OPERATION_TIMEOUT,
                             };
-                            let result = sender.send_batch_with_wait(
+                            let result = sender.send_batch_flat_with_wait(
                                 fd,
-                                &payload_refs,
+                                flat,
+                                spans,
                                 Some(&control),
                                 IovecFailureInjection::none(),
                             );
@@ -90,17 +93,14 @@ impl UringBatchWorker {
                                 )));
                                 continue;
                             }
-                            let packet_refs: Vec<(SocketAddr, &[u8])> = spans
-                                .iter()
-                                .map(|&(addr, start, len)| (addr, &flat[start..start + len]))
-                                .collect();
                             let control = SendControl {
                                 shutdown: &shutdown_for_worker,
                                 deadline: Instant::now() + BLOCKING_WORKER_OPERATION_TIMEOUT,
                             };
-                            let result = sender.send_batch_to_with_wait(
+                            let result = sender.send_batch_to_flat_with_wait(
                                 fd,
-                                &packet_refs,
+                                flat,
+                                spans,
                                 Some(&control),
                                 IovecFailureInjection::none(),
                             );

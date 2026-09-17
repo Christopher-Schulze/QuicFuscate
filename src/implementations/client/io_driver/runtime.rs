@@ -1003,12 +1003,33 @@ impl IoDriver {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
         let socket_fd = socket.as_raw_fd();
-        let memory_pool = { conn.lock().recv_memory_pool() };
-        let mut receiver = crate::optimize::uring_batch::UringRecvBatch::with_defaults_pool(
-            socket_fd,
-            false,
-            memory_pool,
-        )?;
+        // Prefer UDP_GRO when the kernel accepts it: one RecvMsg can then
+        // deliver a coalesced super-buffer whose segment boundaries are
+        // restored from the per-slot cmsg storage inside UringRecvBatch. GRO
+        // needs 64 KiB buffers, which exceed pool block size, so this variant
+        // uses contiguous buffers; the pool-backed path stays the fallback.
+        let gro_enabled = qf_transport_udp::enable_udp_gro_fd(socket_fd).is_ok();
+        let mut receiver = if gro_enabled {
+            crate::optimize::uring_batch::UringRecvBatch::with_defaults_gro(socket_fd, false)
+        } else {
+            None
+        };
+        if gro_enabled && receiver.is_none() {
+            // MTU-sized fallback slots cannot hold a super-buffer; a coalesced
+            // arrival would set MSG_TRUNC and lose its tail.
+            let _ = qf_transport_udp::disable_udp_gro_fd(socket_fd);
+        } else if gro_enabled {
+            log::debug!("io_uring client recv: UDP_GRO enabled (64 KiB slots)");
+        }
+        if receiver.is_none() {
+            let memory_pool = { conn.lock().recv_memory_pool() };
+            receiver = crate::optimize::uring_batch::UringRecvBatch::with_defaults_pool(
+                socket_fd,
+                false,
+                memory_pool,
+            );
+        }
+        let mut receiver = receiver?;
 
         if receiver.post_initial().is_err() {
             log::debug!("io_uring recv post_initial failed");

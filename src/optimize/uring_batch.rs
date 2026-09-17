@@ -60,8 +60,15 @@ const CQE_F_MORE: u32 = 1 << 1;
 /// the caller immediately releases its input batch.
 pub struct UringBatchSender {
     ring: IoUring,
-    /// Sender-owned payload storage. SQE iovecs never point into caller memory.
-    payloads: Vec<Vec<u8>>,
+    /// Sender-owned payload storage: one flat buffer plus `(start, len)`
+    /// spans per input packet. SQE iovecs never point into caller memory.
+    /// Adopted in place from the blocking worker's flat submission, so the
+    /// hot path performs at most one copy end-to-end.
+    payload_flat: Vec<u8>,
+    payload_spans: Vec<(usize, usize)>,
+    /// Destination addresses for unconnected sends (`send_batch_to` family);
+    /// empty on connected sends.
+    packet_addrs: Vec<SocketAddr>,
     /// Pre-allocated iovec scratch buffer (reused across batches).
     iovecs: Vec<libc::iovec>,
     /// Pre-allocated msghdr scratch buffer (reused across batches).
@@ -348,7 +355,9 @@ impl UringBatchSender {
         let cap = depth as usize;
         Some(Self {
             ring,
-            payloads: Vec::with_capacity(cap),
+            payload_flat: Vec::with_capacity(cap * 2048),
+            payload_spans: Vec::with_capacity(cap),
+            packet_addrs: Vec::with_capacity(cap),
             // Pre-allocate scratch buffers to queue depth so the hot path
             // never touches the allocator.
             iovecs: Vec::with_capacity(cap),
@@ -392,10 +401,37 @@ impl UringBatchSender {
         Ok(())
     }
 
+    /// Reset sender-owned payload storage for a new batch.
     fn prepare_payload_slots(&mut self, count: usize) {
         debug_assert!(count <= MAX_BATCH_PACKETS);
-        self.payloads.truncate(count);
-        self.payloads.resize_with(count, || Vec::with_capacity(2048));
+        self.payload_flat.clear();
+        self.payload_spans.clear();
+        self.packet_addrs.clear();
+    }
+
+    /// Copy one input payload set into flat storage and record its spans.
+    fn stage_payloads<'a, I>(&mut self, payloads: I)
+    where
+        I: Iterator<Item = &'a [u8]>,
+    {
+        for payload in payloads {
+            let start = self.payload_flat.len();
+            self.payload_flat.extend_from_slice(payload);
+            self.payload_spans.push((start, payload.len()));
+        }
+    }
+
+    /// Adopt the blocking worker's already-flattened submission in place —
+    /// the only payload copy in the chain happened on the caller side.
+    fn adopt_flat_payloads(
+        &mut self,
+        flat: Vec<u8>,
+        spans: Vec<(usize, usize)>,
+        addrs: Vec<SocketAddr>,
+    ) {
+        self.payload_flat = flat;
+        self.payload_spans = spans;
+        self.packet_addrs = addrs;
     }
 
     fn validate_batch_admission(count: usize, payload_bytes: usize) -> std::io::Result<()> {
@@ -540,22 +576,65 @@ impl UringBatchSender {
         // required for the submit-error quarantine and for SendMsgZc's later
         // notification CQE; caller-owned slices may be released on return.
         self.prepare_payload_slots(payloads.len());
-        for (slot, payload) in self.payloads.iter_mut().zip(payloads.iter().copied()) {
-            slot.clear();
-            slot.extend_from_slice(payload);
-        }
+        self.stage_payloads(payloads.iter().copied());
+        self.finish_connected_with_wait(fd, input_len, control, failure_injection)
+    }
 
+    /// Worker-owned connected submission: adopt the flat payload buffer in
+    /// place so the channel handoff costs zero payload copies.
+    fn send_batch_flat_with_wait(
+        &mut self,
+        fd: RawFd,
+        flat: Vec<u8>,
+        spans: Vec<(usize, usize)>,
+        control: Option<&SendControl<'_>>,
+        failure_injection: IovecFailureInjection<'_>,
+    ) -> Result<BatchSendResult, BatchSendError> {
+        let input_len = spans.len();
+        if let Err(error) = self.ensure_usable() {
+            return Err(BatchSendError::quarantined(error, input_len));
+        }
+        if input_len == 0 {
+            return Ok(BatchSendResult::not_submitted(0));
+        }
+        if control.is_some() && self.zc_supported {
+            return Err(BatchSendError::not_submitted(
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "controlled io_uring sends do not permit SendMsgZc notification ownership",
+                ),
+                input_len,
+            ));
+        }
+        Self::validate_batch_admission(input_len, flat.len())
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        failure_injection
+            .validate(input_len)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        self.adopt_flat_payloads(flat, spans, Vec::new());
+        self.finish_connected_with_wait(fd, input_len, control, failure_injection)
+    }
+
+    /// Shared tail of the connected-send paths: builds iovec/msghdr scratch
+    /// over the staged flat payload, then submits in SQ-sized chunks.
+    fn finish_connected_with_wait(
+        &mut self,
+        fd: RawFd,
+        input_len: usize,
+        control: Option<&SendControl<'_>>,
+        failure_injection: IovecFailureInjection<'_>,
+    ) -> Result<BatchSendResult, BatchSendError> {
         // Reuse pre-allocated scratch buffers after the payload ownership
         // boundary has been established.
         self.iovecs.clear();
         self.msgs.clear();
 
-        for payload in &self.payloads {
+        for &(start, len) in &self.payload_spans {
             // SAFETY: libc::iovec uses a mutable pointer for the C ABI, but
             // sendmsg/sendmsg_zc read from this region and do not write it.
             self.iovecs.push(libc::iovec {
-                iov_base: payload.as_ptr() as *mut libc::c_void,
-                iov_len: payload.len(),
+                iov_base: unsafe { self.payload_flat.as_ptr().add(start) } as *mut libc::c_void,
+                iov_len: len,
             });
         }
         for iov in &mut self.iovecs {
@@ -697,47 +776,94 @@ impl UringBatchSender {
             .validate(input_len)
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
 
-        // Copy payloads into sender-owned slots before any raw pointer is
-        // published to io_uring. The input staging vector can be dropped as
+        // Copy payloads into sender-owned flat storage before any raw pointer
+        // is published to io_uring. The input staging vector can be dropped as
         // soon as this method returns, including on a submit failure.
         self.prepare_payload_slots(packets.len());
-        for (slot, (_, payload)) in self.payloads.iter_mut().zip(packets.iter()) {
-            slot.clear();
-            slot.extend_from_slice(payload);
-        }
+        self.stage_payloads(packets.iter().map(|(_, payload)| *payload));
+        self.packet_addrs.extend(packets.iter().map(|(addr, _)| *addr));
+        self.finish_to_with_wait(fd, input_len, control, failure_injection)
+    }
 
+    /// Worker-owned unconnected submission: adopt the flat payload buffer and
+    /// per-packet destination table in place (zero payload copies).
+    fn send_batch_to_flat_with_wait(
+        &mut self,
+        fd: RawFd,
+        flat: Vec<u8>,
+        spans: Vec<(SocketAddr, usize, usize)>,
+        control: Option<&SendControl<'_>>,
+        failure_injection: IovecFailureInjection<'_>,
+    ) -> Result<BatchSendResult, BatchSendError> {
+        let input_len = spans.len();
+        if let Err(error) = self.ensure_usable() {
+            return Err(BatchSendError::quarantined(error, input_len));
+        }
+        if input_len == 0 {
+            return Ok(BatchSendResult::not_submitted(0));
+        }
+        if control.is_some() && self.zc_supported {
+            return Err(BatchSendError::not_submitted(
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "controlled io_uring sends do not permit SendMsgZc notification ownership",
+                ),
+                input_len,
+            ));
+        }
+        Self::validate_batch_admission(input_len, flat.len())
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        failure_injection
+            .validate(input_len)
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        let payload_spans: Vec<(usize, usize)> =
+            spans.iter().map(|&(_, start, len)| (start, len)).collect();
+        let addrs: Vec<SocketAddr> = spans.iter().map(|&(addr, ..)| addr).collect();
+        self.adopt_flat_payloads(flat, payload_spans, addrs);
+        self.finish_to_with_wait(fd, input_len, control, failure_injection)
+    }
+
+    /// Shared tail of the unconnected-send paths: builds iovec, sockaddr, and
+    /// msghdr scratch over the staged flat payload, then submits in chunks.
+    fn finish_to_with_wait(
+        &mut self,
+        fd: RawFd,
+        input_len: usize,
+        control: Option<&SendControl<'_>>,
+        failure_injection: IovecFailureInjection<'_>,
+    ) -> Result<BatchSendResult, BatchSendError> {
         self.iovecs.clear();
         self.msgs.clear();
         self.sockaddrs.clear();
 
         // Pass 1: build iovecs (stable base for msg_iov pointers).
-        for payload in &self.payloads {
+        for &(start, len) in &self.payload_spans {
             // SAFETY: libc::iovec uses a mutable pointer for the C ABI, but
             // sendmsg reads this owned payload and does not mutate it.
             self.iovecs.push(libc::iovec {
-                iov_base: payload.as_ptr() as *mut libc::c_void,
-                iov_len: payload.len(),
+                iov_base: unsafe { self.payload_flat.as_ptr().add(start) } as *mut libc::c_void,
+                iov_len: len,
             });
         }
 
         // Pass 2: fill sockaddr_storage per destination (stable for msg_name).
-        for (addr, _) in packets {
+        for &addr in &self.packet_addrs {
             // SAFETY: sockaddr_storage is POD; zeroed init is valid.
             let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-            fill_sockaddr(*addr, &mut storage);
+            fill_sockaddr(addr, &mut storage);
             self.sockaddrs.push(storage);
         }
 
         // Pass 3: build msghdrs with stable pointers into iovecs and sockaddrs.
         // Both vecs are fully populated above - no further pushes, so no realloc.
-        for (i, (addr, _)) in packets.iter().enumerate() {
+        for (i, &addr) in self.packet_addrs.iter().enumerate() {
             // SAFETY: iovecs[i] and sockaddrs[i] are valid for the lifetime of
             // this call and the Vecs will not reallocate after this point.
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
             hdr.msg_iov = &mut self.iovecs[i] as *mut libc::iovec;
             hdr.msg_iovlen = 1;
             hdr.msg_name = &mut self.sockaddrs[i] as *mut _ as *mut libc::c_void;
-            hdr.msg_namelen = addr_len(*addr);
+            hdr.msg_namelen = addr_len(addr);
             self.msgs.push(hdr);
         }
         failure_injection.apply(&mut self.msgs);
@@ -903,6 +1029,13 @@ impl UringBatchSender {
 
     fn submit_and_poll(&mut self, queued: usize, control: &SendControl<'_>) -> std::io::Result<()> {
         self.ring.submit().map_err(|error| self.quarantine(error))?;
+        // UDP sendmsg CQEs land in microseconds — a fixed 1 ms sleep would add
+        // up to a millisecond of dead time per batch. Spin briefly, then
+        // escalate through yields to a capped sleep so the shutdown and
+        // deadline checks stay responsive without busy-looping.
+        const SPIN_ROUNDS: u32 = 64;
+        let mut spins = 0u32;
+        let mut backoff_us = 10u64;
         loop {
             // `CompletionQueue` is an iterator: `count()` would consume and
             // acknowledge every ready CQE before the reap boundary below.
@@ -921,8 +1054,16 @@ impl UringBatchSender {
                     "io_uring batch completion deadline exceeded",
                 )));
             }
-            self.ring.submit().map_err(|error| self.quarantine(error))?;
-            std::thread::sleep(Duration::from_millis(1));
+            if spins < SPIN_ROUNDS {
+                spins += 1;
+                std::hint::spin_loop();
+            } else if backoff_us < 500 {
+                std::thread::yield_now();
+                std::thread::sleep(Duration::from_micros(backoff_us));
+                backoff_us = (backoff_us * 2).min(500);
+            } else {
+                std::thread::sleep(Duration::from_micros(500));
+            }
         }
     }
 
@@ -1155,7 +1296,9 @@ impl Drop for UringBatchSender {
         // pointer-bearing storage; this is a fail-closed safety boundary, not
         // a normal-path allocation policy. The ring is then dropped without a
         // dangling userspace pointer.
-        std::mem::forget(std::mem::take(&mut self.payloads));
+        std::mem::forget(std::mem::take(&mut self.payload_flat));
+        std::mem::forget(std::mem::take(&mut self.payload_spans));
+        std::mem::forget(std::mem::take(&mut self.packet_addrs));
         std::mem::forget(std::mem::take(&mut self.iovecs));
         std::mem::forget(std::mem::take(&mut self.msgs));
         std::mem::forget(std::mem::take(&mut self.sockaddrs));
