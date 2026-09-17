@@ -2,6 +2,66 @@
 
 ## Active
 
+### TODO-913 - Server RX: per-datagram heap alloc + double copy on every ingress packet
+- DONE. `recv_datagram_batch` now takes a caller-owned slot `pool` and `batch` out-param; each drained datagram pops a full-size slot (alloc only on cold pool) and returns it after processing. `to_vec`, per-call 64 KiB scratch, and batch Vec alloc all gone; `run_loop` reads `&datagram[..len]` directly so `buf` was deleted; `continue` → `break 'one` keeps recycling on every path.
+- Detail: `docs/todo/todo-913-server-rx-per-datagram-alloc-copy.md`
+
+### TODO-914 - blocked_ips: String alloc + string hash on every ingress datagram
+- DONE. Store is `HashSet<IpAddr>` end to end; new `admin::parse_admin_ip` returns `Option<IpAddr>` while `normalize_admin_ip` keeps the canonical-string contract for the admin wire format. `persist_blocked_ips` serializes identical JSON strings. `run_loop` now does `contains(&from.ip())` — zero alloc.
+- Detail: `docs/todo/todo-914-blocked-ips-ipaddr-set.md`
+
+### TODO-915 - Server dispatch: ~11 Arc::clone per datagram are loop-invariant
+- DONE. All eleven handles plus `runtime_parts` bind once per wakeup before the `batch.drain` loop. `self.admit_incoming_datagram` was inlined into `runtime_parts.live_state.*` (the `&mut self` borrow held across the drain forbids `self` calls) and the dead wrapper removed.
+- Detail: `docs/todo/todo-915-server-dispatch-arc-clone-storm.md`
+
+### TODO-916 - send fallback path takes crypto RwLock three times per packet
+- DONE. One `crypto.read()` guard covers the seal-1rtt check, `select_private_seal`+`seal_batch`, and the HP `new_mask`; dropped before `advance_send_packet_number` (which may take `write()`). The steady-state 1-RTT path was already lock-free via `crypto_1rtt: ArcSwapOption`.
+- Detail: `docs/todo/todo-916-crypto-rwlock-triple-read.md`
+
+### TODO-917 - stream_ring_buffer TX: two allocs + two copies per STREAM frame
+- DONE. New `stream_tx_scratch: Vec<u8>` connection field (`stream_ring_buffer`-gated) replaces the per-packet `vec![0;body_len]` staging buffer; the retained copy goes straight into `Arc::from(&scratch[..read])` — same shape as the non-ring path. One alloc + one copy per frame (the copy into the retained Arc is inherent).
+- Detail: `docs/todo/todo-917-stream-ring-tx-double-copy.md`
+
+### TODO-918 - Recovery sent-map: BTreeMap node alloc + O(log n) per tracked packet
+- `sent: BTreeMap<u64, SentPacket>` allocates a B-tree node per packet and does `O(log n)` lookup/remove. Packet numbers are monotonic per space — a sliding ring indexed by `pn - pn_base` gives O(1) + zero alloc. Must tolerate non-contiguous ACK removal and pn-space gaps.
+- Detail: `docs/todo/todo-918-recovery-sentmap-btreemap.md`
+
+### TODO-919 - Fountain codec: 3+ Vec allocs per encoded symbol
+- `generate_symbol_with_indices` → `(Vec<u8>, Vec<usize>)` + `Vec<f64>` distribution; decoder `HashMap<u64, Vec<u8>>` + `Vec<Option<Vec<u8>>>` per symbol. Add `encode_into`/`SmallVec` indices + pooled symbol slab + cached degree table.
+- Detail: `docs/todo/todo-919-fountain-alloc-storm.md`
+
+### TODO-920 - qf-stealth re-acquires thread RNG on every shaping decision
+- DONE (pragmatic). `build_request_headers` binds `rand::rng()` once per built request instead of three lookups. The "seeded RNG per worker" direction is documented as rejected: the remaining sites are `&self` methods on `Arc`-shared configs where a held RNG would need `Mutex`/`RefCell` — worse than the already-lock-free TLS `ThreadRng`.
+- Detail: `docs/todo/todo-920-stealth-rng-per-call.md`
+
+### TODO-921 - Metrics: 4+ atomic RMWs per datagram — aggregate per batch
+- DONE (ingress). `record_ingress_batch(bytes, packets)` + `qf_instrumentation::record_packets_in/out(n)` added; `run_loop` accumulates per-burst and flushes once. Egress documented as residual (no batch boundary on the send side).
+- Detail: `docs/todo/todo-921-metrics-atomic-batch.md`
+
+### TODO-922 - Client io_driver: to_vec() per ingress packet on restore queue
+- DONE. `ClientTunnelIngress` gained a capped `spare` free list: `push` reuses buffers (zero alloc warm), new `recycle` returns drained buffers; the WouldBlock path now `split_off`s the unwritten suffix instead of `to_vec`-copying it. `PooledBlock` rejected (block size configurable below the 64 KiB bound → would have needed a fallback enum).
+- Detail: `docs/todo/todo-922-client-ingress-alloc.md`
+
+### TODO-923 - Wire UDP_SEGMENT GSO/GRO into the VPN dataplane
+- `UdpGsoConfig::enable_fd` probes `UDP_SEGMENT` but the dataplane still does one syscall per packet on both TX and RX. TX: coalesce same-peer packets into one `UDP_SEGMENT` sendmsg. RX: `UDP_GRO` + `recvmmsg` + control-parse split. Largest syscall-reduction lever on Linux — Omega-verifiable.
+- Detail: `docs/todo/todo-923-udp-gso-gro-datapath.md`
+
+### TODO-924 - FEC encode path: parallelize multi-block parity with rayon
+- `qf-fec` already `rayon`s the decode side (`codecs.rs:956`, `decoder8.rs:592`) but encode is serial. Split parity accumulation by byte-range when `symbol_size` is large — same `PAR_THRESHOLD` heuristic. Byte-identical output (XOR-accumulate is order-associative).
+- Detail: `docs/todo/todo-924-fec-parallel-encode.md`
+
+### TODO-925 - run_loop holds 128 KiB of stack buffers inside the spawned future
+- DONE. `buf` deleted by TODO-913 (drain processes slots in place); `out` is now `Box::new([0u8; N])` — ~64 KiB out of the future's inline state, all call sites pass `&mut out[..]`.
+- Detail: `docs/todo/todo-925-runloop-stack-buffers.md`
+
+### TODO-926 - recv_datagram_batch drain cap unreachable when socket never blocks
+- DONE via TODO-913's restructure: `while batch.len() < cap` checks the cap before each receive and slot alloc; the batch is bounded at 64 and the drain loop returns to `select!` housekeeping each wakeup.
+- Detail: `docs/todo/todo-926-recv-batch-cap-unreachable.md`
+
+### TODO-927 - io_uring TX: triple-copy, channel(1) depth, 1ms sleep poll — x86 evidence missing
+- `uring_batch.rs` still copies payload→submission→iovec, serializes on a `channel(1)`, and drains completions via `thread::sleep(1ms)`. Fix: `channel(N)` depth, eventfd/`io_uring_enter` wake, pointer-submitted `Arc` payloads. Never exercised on real x86_64 — Omega covers aarch64 only.
+- Detail: `docs/todo/todo-927-io-uring-x86.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`

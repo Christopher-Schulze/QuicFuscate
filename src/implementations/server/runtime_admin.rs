@@ -747,7 +747,7 @@ pub(super) struct ServerAdminControlPlane {
 pub struct ServerAdminCore {
     clock: ProtocolClock,
     metrics: Arc<Metrics>,
-    blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+    blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
     client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     sessions: Arc<RwLock<SessionManager>>,
     control_plane: ServerAdminControlPlane,
@@ -761,7 +761,7 @@ impl ServerAdminCore {
     #[cfg(test)]
     pub(super) fn new(
         metrics: Arc<Metrics>,
-        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
         client_snapshots: Arc<
             std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>,
         >,
@@ -785,7 +785,7 @@ impl ServerAdminCore {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_with_clock(
         metrics: Arc<Metrics>,
-        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
         client_snapshots: Arc<
             std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>,
         >,
@@ -812,7 +812,9 @@ impl ServerAdminCore {
         &self.metrics
     }
 
-    pub fn blocked_ips(&self) -> &Arc<parking_lot::RwLock<std::collections::HashSet<String>>> {
+    pub fn blocked_ips(
+        &self,
+    ) -> &Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>> {
         &self.blocked_ips
     }
 
@@ -1089,15 +1091,15 @@ impl ServerAdminCore {
     }
 
     pub fn block_ip(&self, ip: &str) -> AdminResponse {
-        let Some(ip) = crate::implementations::server::admin::normalize_admin_ip(ip) else {
+        let Some(ip) = crate::implementations::server::admin::parse_admin_ip(ip) else {
             return AdminResponse::error("Invalid IP");
         };
-        self.blocked_ips.write().insert(ip.clone());
+        self.blocked_ips.write().insert(ip);
         AdminResponse::ok_with_message(format!("IP {} blocked", ip))
     }
 
     pub fn unblock_ip(&self, ip: &str) -> AdminResponse {
-        let Some(ip) = crate::implementations::server::admin::normalize_admin_ip(ip) else {
+        let Some(ip) = crate::implementations::server::admin::parse_admin_ip(ip) else {
             return AdminResponse::error("Invalid IP");
         };
         if self.blocked_ips.write().remove(&ip) {
@@ -1108,7 +1110,8 @@ impl ServerAdminCore {
     }
 
     pub fn list_blocked_ips(&self) -> AdminResponse {
-        let mut ips: Vec<String> = self.blocked_ips.read().iter().cloned().collect();
+        let mut ips: Vec<String> =
+            self.blocked_ips.read().iter().map(|ip| ip.to_string()).collect();
         ips.sort();
         AdminResponse::ok_with_data(serde_json::json!({ "ips": ips }))
     }

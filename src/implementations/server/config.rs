@@ -986,7 +986,7 @@ pub(crate) fn resolve_blocked_ips_store_path(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PersistedBlockedIpsState {
     Absent,
-    Valid(std::collections::HashSet<String>),
+    Valid(std::collections::HashSet<std::net::IpAddr>),
 }
 
 pub(crate) fn load_persisted_blocked_ips(
@@ -1019,8 +1019,8 @@ pub(crate) fn load_persisted_blocked_ips(
     for entry in entries {
         // An entry that admission could never match is a silently ineffective rule, so
         // it is rejected here rather than loaded and never enforced.
-        let normalized = crate::implementations::server::admin::normalize_admin_ip(&entry)
-            .ok_or_else(|| {
+        let normalized =
+            crate::implementations::server::admin::parse_admin_ip(&entry).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -1138,9 +1138,9 @@ pub(crate) fn persist_logging_mode(
 
 pub(crate) fn persist_blocked_ips(
     path: &std::path::Path,
-    ips: &std::collections::HashSet<String>,
+    ips: &std::collections::HashSet<std::net::IpAddr>,
 ) -> std::io::Result<()> {
-    let mut sorted: Vec<&String> = ips.iter().collect();
+    let mut sorted: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
     sorted.sort();
     let bytes = serde_json::to_vec_pretty(&sorted)?;
     fsutil::atomic_write_file(path, &bytes, Some(0o600), "server::persist_blocked_ips_tmp_nonce")

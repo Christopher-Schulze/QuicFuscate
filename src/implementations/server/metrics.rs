@@ -772,6 +772,19 @@ impl Metrics {
         global.transport.record_packet_in();
     }
 
+    /// Batch variant of [`Self::record_ingress_datagram`]: one atomic update
+    /// per counter for a whole drained burst instead of four RMWs per packet.
+    pub fn record_ingress_batch(&self, bytes: u64, packets: u64) {
+        if packets == 0 {
+            return;
+        }
+        self.bytes_in.fetch_add(bytes, Ordering::Relaxed);
+        self.packets_in.fetch_add(packets, Ordering::Relaxed);
+        let global = crate::instrumentation::global();
+        global.transport.record_bytes_in(bytes);
+        global.transport.record_packets_in(packets);
+    }
+
     pub fn record_egress_datagram(&self, bytes: usize) {
         self.bytes_out.fetch_add(bytes as u64, Ordering::Relaxed);
         self.packets_out.fetch_add(1, Ordering::Relaxed);

@@ -4,7 +4,7 @@ pub struct StandaloneServerBootstrapState {
     pub admin_log_buffer: Arc<self::admin_logs::AdminLogBuffer>,
     pub initial_logging_mode: String,
     pub blocked_ips_path: Option<std::path::PathBuf>,
-    pub blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+    pub blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
     pub qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
 }
 
@@ -396,7 +396,7 @@ impl Default for StandaloneAdminWebBootstrap {
 }
 
 type StandaloneRuntimeBootstrapParts = (
-    Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+    Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
     Arc<std::sync::Mutex<QKeyRegistry>>,
     StandaloneAdminWebBootstrap,
 );

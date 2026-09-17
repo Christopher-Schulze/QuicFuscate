@@ -107,7 +107,7 @@ impl ServerRuntime {
         accept_config: AcceptConfig,
         tun_config: Option<TunConfig>,
         opt_params: crate::optimize::OptimizeConfig,
-        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<IpAddr>>>,
         qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
         admin_web_bootstrap: StandaloneAdminWebBootstrap,
     ) -> std::io::Result<Self> {
@@ -131,7 +131,7 @@ impl ServerRuntime {
         accept_config: AcceptConfig,
         tun_config: Option<TunConfig>,
         opt_params: crate::optimize::OptimizeConfig,
-        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<IpAddr>>>,
         qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
         admin_web_bootstrap: StandaloneAdminWebBootstrap,
         clock: ProtocolClock,
@@ -362,7 +362,7 @@ impl ServerRuntime {
         server_config: ServerConfig,
         tun_config: Option<TunConfig>,
         opt_params: crate::optimize::OptimizeConfig,
-        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+        blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<IpAddr>>>,
         qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
         admin_web_bootstrap: StandaloneAdminWebBootstrap,
     ) -> std::io::Result<Self> {
@@ -832,7 +832,7 @@ impl ServerRuntime {
         self.live().live_state.client_snapshots()
     }
 
-    pub fn blocked_ips(&self) -> &Arc<parking_lot::RwLock<std::collections::HashSet<String>>> {
+    pub fn blocked_ips(&self) -> &Arc<parking_lot::RwLock<std::collections::HashSet<IpAddr>>> {
         &self.live().blocked_ips
     }
 
@@ -934,24 +934,6 @@ impl ServerRuntime {
         }
 
         Ok(())
-    }
-
-    #[cfg(feature = "rate_limiter")]
-    pub(crate) fn admit_incoming_datagram(
-        &self,
-        from: SocketAddr,
-        packet: &[u8],
-        retry_eligible: bool,
-        metrics: &Metrics,
-    ) -> crate::implementations::server::ddos::IncomingDatagramAdmission {
-        let established = self.live().live_state.is_established_datagram(from, packet);
-        self.live().live_state.admit_incoming_datagram(
-            from,
-            packet,
-            established,
-            retry_eligible,
-            metrics,
-        )
     }
 
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {

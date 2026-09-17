@@ -259,6 +259,8 @@ impl Connection {
             environment,
             conn_bytes_sent: 0,
             pending_control: VecDeque::new(),
+            #[cfg(feature = "stream_ring_buffer")]
+            stream_tx_scratch: Vec::new(),
             crypto: Arc::new(parking_lot::RwLock::new(packet::CryptoContext::default())),
             crypto_1rtt: arc_swap::ArcSwapOption::new(None),
             short_header_tag_reserve: 0,

@@ -337,9 +337,14 @@ fn bounded_admin_value(raw: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+/// Parse an admin IP value into the canonical `IpAddr` the runtime policy keys on.
+pub fn parse_admin_ip(raw: &str) -> Option<IpAddr> {
+    bounded_admin_value(raw)?.parse::<IpAddr>().ok()
+}
+
 /// Normalize an admin IP value using the same canonical representation as the runtime policy.
 pub fn normalize_admin_ip(raw: &str) -> Option<String> {
-    bounded_admin_value(raw)?.parse::<IpAddr>().ok().map(|ip| ip.to_string())
+    parse_admin_ip(raw).map(|ip| ip.to_string())
 }
 
 /// Normalize an admin client identity using the shared session/remote grammar.
@@ -539,7 +544,7 @@ pub trait AdminHandler: Send + Sync {
 #[cfg(any(test, feature = "rust-tests"))]
 pub struct DefaultAdminHandler {
     metrics: Arc<Metrics>,
-    blocked_ips: parking_lot::RwLock<std::collections::HashSet<String>>,
+    blocked_ips: parking_lot::RwLock<std::collections::HashSet<IpAddr>>,
 }
 
 #[cfg(any(test, feature = "rust-tests"))]
@@ -549,7 +554,7 @@ impl DefaultAdminHandler {
     }
 
     pub fn is_blocked(&self, ip: &str) -> bool {
-        self.blocked_ips.read().contains(ip)
+        ip.parse::<IpAddr>().map(|ip| self.blocked_ips.read().contains(&ip)).unwrap_or(false)
     }
 }
 
@@ -596,13 +601,15 @@ impl AdminHandler for DefaultAdminHandler {
     }
 
     fn handle_block(&self, ip: &str) -> AdminResponse {
-        self.blocked_ips.write().insert(ip.to_string());
+        if let Ok(ip) = ip.parse::<IpAddr>() {
+            self.blocked_ips.write().insert(ip);
+        }
         log::info!("Admin: Blocked IP {}", ip);
         AdminResponse::ok_with_message(format!("IP {} blocked", ip))
     }
 
     fn handle_unblock(&self, ip: &str) -> AdminResponse {
-        if self.blocked_ips.write().remove(ip) {
+        if ip.parse::<IpAddr>().map(|ip| self.blocked_ips.write().remove(&ip)).unwrap_or(false) {
             log::info!("Admin: Unblocked IP {}", ip);
             AdminResponse::ok_with_message(format!("IP {} unblocked", ip))
         } else {

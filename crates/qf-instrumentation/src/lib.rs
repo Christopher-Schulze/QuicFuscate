@@ -403,9 +403,19 @@ impl TransportMetrics {
         self.packets_in.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Add `n` received packets to the counter in one atomic update.
+    pub fn record_packets_in(&self, n: u64) {
+        self.packets_in.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Increment the sent packet counter.
     pub fn record_packet_out(&self) {
         self.packets_out.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Add `n` sent packets to the counter in one atomic update.
+    pub fn record_packets_out(&self, n: u64) {
+        self.packets_out.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Record a packet loss event.

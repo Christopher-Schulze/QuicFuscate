@@ -102,10 +102,16 @@ pub struct IoDriverStatsSnapshot {
 
 const MAX_CLIENT_INGRESS_PACKETS: usize = 256;
 const MAX_CLIENT_INGRESS_BYTES: usize = 384 * 1024;
+/// Recycled packet buffers retained for reuse; capped so a drained burst does
+/// not keep more memory alive than the queue itself may hold.
+const MAX_CLIENT_INGRESS_SPARE: usize = MAX_CLIENT_INGRESS_PACKETS;
 
 #[derive(Default)]
 struct ClientTunnelIngressState {
     packets: std::collections::VecDeque<Vec<u8>>,
+    /// Drained buffers returned by the writer for reuse (TODO-922): keeps the
+    /// hot path allocation-free once a burst has warmed the free list.
+    spare: Vec<Vec<u8>>,
     bytes: usize,
 }
 
@@ -136,7 +142,10 @@ impl ClientTunnelIngress {
             return false;
         }
         state.bytes = state.bytes.saturating_add(payload.len());
-        state.packets.push_back(payload.to_vec());
+        let mut buf = state.spare.pop().unwrap_or_default();
+        buf.clear();
+        buf.extend_from_slice(payload);
+        state.packets.push_back(buf);
         true
     }
 
@@ -144,6 +153,23 @@ impl ClientTunnelIngress {
         let mut state = self.state.lock();
         state.bytes = 0;
         state.packets.drain(..).collect()
+    }
+
+    /// Return fully consumed packet buffers to the free list. The caller hands
+    /// back drained buffers whose contents were already written to TUN; buffers
+    /// beyond `MAX_CLIENT_INGRESS_SPARE` are dropped instead.
+    fn recycle(&self, buffers: Vec<Vec<u8>>) {
+        if buffers.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock();
+        for mut buf in buffers {
+            if state.spare.len() >= MAX_CLIENT_INGRESS_SPARE {
+                break;
+            }
+            buf.clear();
+            state.spare.push(buf);
+        }
     }
 
     /// Return un-flushed packets to the front of the queue after a partial
@@ -154,6 +180,8 @@ impl ClientTunnelIngress {
             return;
         }
         let restored_bytes: usize = packets.iter().map(Vec::len).sum();
+        // Restored buffers keep their capacity but are not spare-list material:
+        // they re-enter `packets` and recycle through `drain` → `recycle`.
         let mut state = self.state.lock();
         // Prepend in original order.
         while let Some(packet) = packets.pop() {

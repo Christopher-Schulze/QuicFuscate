@@ -996,7 +996,7 @@ impl IoDriver {
         tun: &Arc<parking_lot::Mutex<TunInterface>>,
         ingress: &ClientTunnelIngress,
     ) -> Result<(), EngineError> {
-        let drained = ingress.drain();
+        let mut drained = ingress.drain();
         for (index, packet) in drained.iter().enumerate() {
             let mut tun_guard = tun.lock();
             if let Err(error) = tun_guard.write_packet(packet) {
@@ -1005,7 +1005,11 @@ impl IoDriver {
                 // the next poll retries after the TUN fd becomes writable again.
                 if error.kind() == std::io::ErrorKind::WouldBlock {
                     self.stats.tun_write_backpressure.fetch_add(1, Ordering::Relaxed);
-                    ingress.restore(drained[index..].to_vec());
+                    // `split_off` hands the unwritten suffix back without the
+                    // `to_vec` copy; the already-written head buffers recycle.
+                    let rest = drained.split_off(index);
+                    ingress.recycle(drained);
+                    ingress.restore(rest);
                     return Ok(());
                 }
                 log::warn!("TUN write error: {:?}", error);
@@ -1013,6 +1017,7 @@ impl IoDriver {
             }
             self.stats.tun_packets_written.fetch_add(1, Ordering::Relaxed);
         }
+        ingress.recycle(drained);
         Ok(())
     }
 

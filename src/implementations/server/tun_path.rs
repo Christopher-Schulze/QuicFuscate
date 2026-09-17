@@ -50,7 +50,7 @@ pub(super) struct ServerLiveRuntime {
     pub(super) tun_notify: Arc<tokio::sync::Notify>,
     /// First terminal server TUN data-plane fault for this runtime generation.
     pub(super) tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
-    pub(super) blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
+    pub(super) blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
     pub(super) qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
     pub(super) admin_web_bootstrap: StandaloneAdminWebBootstrap,
     pub(super) standalone_runtime_metadata: Option<StandaloneRuntimeMetadata>,

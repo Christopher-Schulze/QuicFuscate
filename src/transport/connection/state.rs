@@ -96,6 +96,12 @@ pub struct Connection {
     pub(super) conn_bytes_sent: u64,
     /// Control frames admitted through `queue_control_frame`; bounded and window-update coalesced.
     pub(super) pending_control: VecDeque<Frame<'static>>,
+    /// Reusable staging buffer for STREAM payload extraction from the send
+    /// ring: `StreamRingBuffer::read` needs a mutable contiguous target, so
+    /// payloads stage here before the retained `Arc` copy. Reusing it across
+    /// packets removes one allocation per sent STREAM frame (TODO-917).
+    #[cfg(feature = "stream_ring_buffer")]
+    pub(super) stream_tx_scratch: Vec<u8>,
     // Crypto context (AEAD/HP) hooks for header and payload processing
     pub(super) crypto: Arc<parking_lot::RwLock<packet::CryptoContext>>,
     /// Lock-free 1-RTT crypto keys for the data-plane hot path.

@@ -48,8 +48,14 @@ impl ServerRuntime {
             metrics.set_tun_data_plane_ready(tun_rx.is_some());
         }
         let mut runtime_fault: Option<DataPlaneFault> = None;
-        let mut buf = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
-        let mut out = [0; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
+        // Ingress datagram slots are recycled through `ingress_pool` so the
+        // receive burst costs zero heap allocations once the pool is warm
+        // (TODO-913). `batch` is reused across wakeups as well.
+        let mut ingress_pool: Vec<Vec<u8>> = Vec::new();
+        let mut batch: Vec<(Vec<u8>, usize, std::net::SocketAddr)> = Vec::new();
+        // Heap-boxed scratch: a 64 KiB array inside the async state would
+        // inflate the spawned future (TODO-925).
+        let mut out = Box::new([0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE]);
         let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
         housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -208,79 +214,14 @@ impl ServerRuntime {
                         }
                     }
                 }
-                batch_res = recv_datagram_batch(&socket, 64) => {
+                batch_res = recv_datagram_batch(&socket, 64, &mut ingress_pool, &mut batch) => {
                     match batch_res {
-                        Ok(batch) => {
-                            'batch: for (datagram, from) in batch {
-                                // Copy into the reusable scratch so the unchanged
-                                // stateful body below keeps operating on `buf`.
-                                let len = datagram.len();
-                                buf[..len].copy_from_slice(&datagram);
-                                // Process each drained datagram through the same
-                                // serial stateful path as before (TODO-901 step 1:
-                                // one wakeup amortized across the burst; the
-                                // syscall layer no longer caps pps).
-                            crate::telemetry!(crate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
-                            metrics.record_ingress_datagram(len);
-
-                            let ip_str = from.ip().to_string();
-                            if blocked_ips.read().contains(&ip_str) {
-                                metrics.record_connection_rejected();
-                                continue;
-                            }
-                            let version_negotiation = stateless_version_negotiation_response(
-                                &buf[..len],
-                                runtime_config.transport.supported_versions(),
-                            )
-                            .ok()
-                            .flatten();
-                            #[cfg(feature = "rate_limiter")]
-                            {
-                                use crate::implementations::server::ddos::IncomingDatagramAdmission;
-                                match self.admit_incoming_datagram(
-                                    from,
-                                    &buf[..len],
-                                    version_negotiation.is_none(),
-                                    &metrics,
-                                ) {
-                                    IncomingDatagramAdmission::Allow => {}
-                                    IncomingDatagramAdmission::RetryValidated => {
-                                        metrics.record_ddos_retry_validated();
-                                    }
-                                    IncomingDatagramAdmission::Drop(reason) => {
-                                        metrics.record_ddos_drop(reason);
-                                        continue;
-                                    }
-                                    IncomingDatagramAdmission::Retry(response) => {
-                                        metrics.record_ddos_retry_issued();
-                                        match socket.send_to(&response, from).await {
-                                            Ok(sent) => metrics.record_egress_datagram(sent),
-                                            Err(error) => {
-                                                log::warn!(
-                                                    "failed to send QUIC Retry to {}: {}",
-                                                    from,
-                                                    error
-                                                );
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            if let Some(response) = version_negotiation {
-                                match socket.send_to(&response, from).await {
-                                    Ok(sent) => metrics.record_egress_datagram(sent),
-                                    Err(error) => {
-                                        log::warn!(
-                                            "failed to send version negotiation to {}: {}",
-                                            from,
-                                            error
-                                        );
-                                    }
-                                }
-                                continue;
-                            }
-
+                        Ok(()) => {
+                            // Loop-invariant handles bind once per wakeup instead
+                            // of per datagram (TODO-915). `live_parts` mutably
+                            // borrows `self`, so every `self`-derived binding
+                            // must be taken first; `runtime_config` is a `&mut`
+                            // parameter and can be reborrowed freely.
                             #[cfg(feature = "rate_limiter")]
                             let retry_token_manager =
                                 self.live().live_state.retry_token_manager.clone();
@@ -288,28 +229,102 @@ impl ServerRuntime {
                             let retry_token_manager = None;
                             let runtime_clock = self.clock.clone();
                             let crypto_config = self.engine_config.crypto.clone();
-                            let runtime_parts = self.live_parts();
                             let stealth_runtime = runtime_owner.clone();
-                            let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
-                            let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
-                            let revocation_manager =
-                                Arc::clone(&runtime_parts.live_state.revocation_manager);
                             let stealth_config = runtime_config.stealth_config.clone();
                             let fec_cfg_shared = runtime_config.fec_cfg_shared.clone();
                             let opt_params_shared = runtime_config.opt_params_shared.clone();
                             let transport = &runtime_config.transport;
                             let runtime_policy_generation =
                                 runtime_config.runtime_policy_generation.clone();
-                            let runtime_client = match runtime_parts.live_state.acquire_runtime_client_with(
-                                from,
-                                &buf[..len],
-                                runtime_parts.accept_loop,
-                                runtime_parts.accept_max_clients,
-                                &metrics,
-                                || {
-                                    build_live_server_client_init(
-                                        LiveClientBuildRequest {
-                                            packet: &buf[..len],
+                            let runtime_parts = self.live_parts();
+                            let client_snapshots = runtime_parts.live_state.client_snapshots().clone();
+                            let auth_rate_limiter = runtime_parts.live_state.auth_rate_limiter.clone();
+                            let revocation_manager =
+                                Arc::clone(&runtime_parts.live_state.revocation_manager);
+                            let mut ingress_bytes = 0u64;
+                            let mut ingress_pkts = 0u64;
+                            'batch: for (datagram, len, from) in batch.drain(..) {
+                                // Process each drained datagram through the same
+                                // serial stateful path as before (TODO-901 step 1:
+                                // one wakeup amortized across the burst; the
+                                // syscall layer no longer caps pps). `break 'one`
+                                // replaces `continue` so the slot recycles into
+                                // `ingress_pool` below (TODO-913).
+                                'one: {
+                                ingress_bytes += len as u64;
+                                ingress_pkts += 1;
+
+                                if blocked_ips.read().contains(&from.ip()) {
+                                    metrics.record_connection_rejected();
+                                    break 'one;
+                                }
+                                let version_negotiation = stateless_version_negotiation_response(
+                                    &datagram[..len],
+                                    transport.supported_versions(),
+                                )
+                                .ok()
+                                .flatten();
+                                #[cfg(feature = "rate_limiter")]
+                                {
+                                    use crate::implementations::server::ddos::IncomingDatagramAdmission;
+                                    let established = runtime_parts
+                                        .live_state
+                                        .is_established_datagram(from, &datagram[..len]);
+                                    match runtime_parts.live_state.admit_incoming_datagram(
+                                        from,
+                                        &datagram[..len],
+                                        established,
+                                        version_negotiation.is_none(),
+                                        &metrics,
+                                    ) {
+                                        IncomingDatagramAdmission::Allow => {}
+                                        IncomingDatagramAdmission::RetryValidated => {
+                                            metrics.record_ddos_retry_validated();
+                                        }
+                                        IncomingDatagramAdmission::Drop(reason) => {
+                                            metrics.record_ddos_drop(reason);
+                                            break 'one;
+                                        }
+                                        IncomingDatagramAdmission::Retry(response) => {
+                                            metrics.record_ddos_retry_issued();
+                                            match socket.send_to(&response, from).await {
+                                                Ok(sent) => metrics.record_egress_datagram(sent),
+                                                Err(error) => {
+                                                    log::warn!(
+                                                        "failed to send QUIC Retry to {}: {}",
+                                                        from,
+                                                        error
+                                                    );
+                                                }
+                                            }
+                                            break 'one;
+                                        }
+                                    }
+                                }
+                                if let Some(response) = version_negotiation {
+                                    match socket.send_to(&response, from).await {
+                                        Ok(sent) => metrics.record_egress_datagram(sent),
+                                        Err(error) => {
+                                            log::warn!(
+                                                "failed to send version negotiation to {}: {}",
+                                                from,
+                                                error
+                                            );
+                                        }
+                                    }
+                                    break 'one;
+                                }
+
+                                let runtime_client = match runtime_parts.live_state.acquire_runtime_client_with(
+                                    from,
+                                    &datagram[..len],
+                                    runtime_parts.accept_loop,
+                                    runtime_parts.accept_max_clients,
+                                    &metrics,
+                                    || {
+                                        build_live_server_client_init(
+                                            LiveClientBuildRequest {
+                                                packet: &datagram[..len],
                                             local_addr,
                                             remote_addr: from,
                                             qkey_registry: qkey_registry.as_ref(),
@@ -334,10 +349,10 @@ impl ServerRuntime {
                                 },
                                 LiveClientAcquire::Backpressure => {
                                     tokio::time::sleep(runtime_parts.accept_loop.backpressure_delay()).await;
-                                    continue;
+                                    break 'one;
                                 }
                                 LiveClientAcquire::Rejected => {
-                                    continue;
+                                    break 'one;
                                 }
                             };
                             let migration_from = runtime_client.migration_from;
@@ -346,8 +361,8 @@ impl ServerRuntime {
                                 &socket,
                                 from,
                                 runtime_client,
-                                &buf[..len],
-                                &mut out,
+                                &datagram[..len],
+                                &mut out[..],
                                 &metrics,
                                 &client_snapshots,
                                 runtime_parts.server_tun,
@@ -384,7 +399,14 @@ impl ServerRuntime {
                                 &metrics,
                             );
                             runtime_parts.live_state.drain_client_fanout(&metrics);
+                                } // 'one
+                                ingress_pool.push(datagram);
                             } // 'batch
+                            // Flush the burst's ingress counters in one atomic
+                            // update per counter instead of four per packet
+                            // (TODO-921).
+                            crate::telemetry!(crate::telemetry::BYTES_RECEIVED.inc_by(ingress_bytes));
+                            metrics.record_ingress_batch(ingress_bytes, ingress_pkts);
                         }
                         Err(e) => {
                             log::error!("Failed to read from socket: {}", e);
@@ -409,7 +431,7 @@ impl ServerRuntime {
                     if let Err(fault) = runtime_parts.live_state
                         .run_housekeeping_tick(
                             &socket,
-                            &mut out,
+                            &mut out[..],
                             &metrics,
                             runtime_parts.accept_loop,
                         )
@@ -422,7 +444,7 @@ impl ServerRuntime {
                     // DATAGRAM queue was full, before reading new TUN frames.
                     if let Err(fault) = drain_pending_tun_downlinks(
                         self.live_mut(),
-                        &mut out,
+                        &mut out[..],
                         &socket,
                         &metrics,
                     ) {
@@ -438,7 +460,7 @@ impl ServerRuntime {
                     let more_tun = match drain_server_tun_packets(
                         self.live_mut(),
                         &mut tun_rx,
-                        &mut out,
+                        &mut out[..],
                         &socket,
                         &metrics,
                         fingerprint_profile,
@@ -456,7 +478,7 @@ impl ServerRuntime {
                     // TUN drain above.
                     if let Err(fault) = drain_pending_tun_downlinks(
                         self.live_mut(),
-                        &mut out,
+                        &mut out[..],
                         &socket,
                         &metrics,
                     ) {
@@ -488,7 +510,7 @@ impl ServerRuntime {
                         );
                         self.finish_drain(
                             &socket,
-                            &mut out,
+                            &mut out[..],
                             &metrics,
                             b"server_shutdown",
                         )
@@ -505,7 +527,7 @@ impl ServerRuntime {
                     let more_tun = match drain_server_tun_packets(
                         self.live_mut(),
                         &mut tun_rx,
-                        &mut out,
+                        &mut out[..],
                         &socket,
                         &metrics,
                         fingerprint_profile,
@@ -521,7 +543,7 @@ impl ServerRuntime {
                     }
                     if let Err(fault) = drain_pending_tun_downlinks(
                         self.live_mut(),
-                        &mut out,
+                        &mut out[..],
                         &socket,
                         &metrics,
                     ) {

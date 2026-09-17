@@ -78,8 +78,8 @@ fn an_absent_blocked_ip_store_is_distinct_from_an_explicitly_empty_one() {
 fn a_valid_blocked_ip_policy_round_trips_through_persistence() {
     let (config_path, store) = blocked_ips_fixture("roundtrip");
     let mut policy = std::collections::HashSet::new();
-    policy.insert("203.0.113.7".to_string());
-    policy.insert("2001:db8::1".to_string());
+    policy.insert("203.0.113.7".parse().expect("valid IPv4 literal"));
+    policy.insert("2001:db8::1".parse().expect("valid IPv6 literal"));
     persist_blocked_ips(&store, &policy).expect("persist policy");
 
     let loaded = load_persisted_blocked_ips(Some(config_path.as_path())).expect("valid policy");
@@ -133,7 +133,10 @@ fn an_unreadable_blocked_ip_policy_is_an_error_and_never_an_empty_set() {
             "an unreadable policy must say so, got {error}"
         ),
         Ok(PersistedBlockedIpsState::Valid(blocked)) => {
-            assert!(blocked.contains("203.0.113.7"), "a readable policy must load intact")
+            assert!(
+                blocked.contains(&"203.0.113.7".parse().expect("valid IPv4 literal")),
+                "a readable policy must load intact"
+            )
         }
         Ok(other) => panic!("an unreadable policy must never become {other:?}"),
     }
@@ -807,7 +810,10 @@ fn graceful_shutdown_drain_uses_live_runtime_clock() {
 
 fn blocked_ip_handler(
     blocked_ips_path: Option<std::path::PathBuf>,
-) -> (ServerAdminHttpRuntimeHandler, Arc<parking_lot::RwLock<std::collections::HashSet<String>>>) {
+) -> (
+    ServerAdminHttpRuntimeHandler,
+    Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
+) {
     let blocked_ips = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
     let (tx, _rx) = mpsc::unbounded_channel::<AdminAction>();
     let core = ServerAdminCore::new(
@@ -864,14 +870,14 @@ fn a_blocked_ip_change_that_cannot_be_persisted_is_not_reported_as_success() {
     // The live block deliberately stands. Rolling it back would readmit the address
     // the operator just denied, which is the worse of the two outcomes.
     assert!(
-        blocked_ips.read().contains("203.0.113.7"),
+        blocked_ips.read().contains(&"203.0.113.7".parse().expect("valid IPv4 literal")),
         "the requested denial must remain in force"
     );
 
     let response = handler.handle_unblock("203.0.113.7");
     assert!(!response.success, "an unpersisted unblock must not report success");
     assert!(
-        !blocked_ips.read().contains("203.0.113.7"),
+        !blocked_ips.read().contains(&"203.0.113.7".parse().expect("valid IPv4 literal")),
         "the requested release must remain in force"
     );
 
@@ -886,7 +892,9 @@ fn a_durable_blocked_ip_change_reports_success_and_survives_a_reload() {
     assert!(handler.handle_block("203.0.113.7").success);
     assert_eq!(
         load_persisted_blocked_ips(Some(config_path.as_path())).expect("policy loads"),
-        PersistedBlockedIpsState::Valid(["203.0.113.7".to_string()].into_iter().collect())
+        PersistedBlockedIpsState::Valid(
+            ["203.0.113.7".parse().expect("valid IPv4 literal")].into_iter().collect()
+        )
     );
 
     assert!(handler.handle_unblock("203.0.113.7").success);
@@ -944,11 +952,11 @@ fn test_server_admin_core_block_unblock_ip() {
 
     let resp = core.block_ip("10.0.0.1");
     assert!(resp.success);
-    assert!(blocked_ips.read().contains("10.0.0.1"));
+    assert!(blocked_ips.read().contains(&"10.0.0.1".parse().expect("valid IPv4 literal")));
 
     let resp = core.unblock_ip("10.0.0.1");
     assert!(resp.success);
-    assert!(!blocked_ips.read().contains("10.0.0.1"));
+    assert!(!blocked_ips.read().contains(&"10.0.0.1".parse().expect("valid IPv4 literal")));
 
     // Unblock non-existent IP should fail
     let resp = core.unblock_ip("10.0.0.99");

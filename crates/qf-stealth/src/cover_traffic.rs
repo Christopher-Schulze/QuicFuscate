@@ -2,7 +2,6 @@
 
 use qf_common::time_source::ProtocolClock;
 use qf_transport_types::h3::Header;
-use rand::Rng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -86,6 +85,10 @@ impl CoverTrafficScheduler {
     }
 
     fn build_request_headers(&self, req_type: &CoverRequestType) -> Vec<Header> {
+        use rand::Rng;
+        // One thread-local handle per built request — `rand::rng()` is cheap,
+        // but three separate lookups per cover request are still avoidable.
+        let mut rng = rand::rng();
         let method: &[u8] = match req_type {
             CoverRequestType::HeadResource => b"HEAD",
             _ => b"GET",
@@ -99,11 +102,11 @@ impl CoverTrafficScheduler {
             CoverRequestType::GetStyle => {
                 let styles: [&[u8]; 3] =
                     [b"/css/main.css", b"/css/style.css", b"/assets/styles.css"];
-                styles[rand::rng().random_range(0..styles.len())]
+                styles[rng.random_range(0..styles.len())]
             }
             CoverRequestType::GetScript => {
                 let scripts: [&[u8]; 3] = [b"/js/app.js", b"/js/main.js", b"/assets/bundle.js"];
-                scripts[rand::rng().random_range(0..scripts.len())]
+                scripts[rng.random_range(0..scripts.len())]
             }
             CoverRequestType::HeadResource => b"/api/health",
         };
@@ -130,7 +133,7 @@ impl CoverTrafficScheduler {
         headers.push(Header::new(b"accept-language", b"en-US,en;q=0.9"));
 
         // Add cache headers with some variation
-        if rand::rng().random_bool(0.7) {
+        if rng.random_bool(0.7) {
             headers.push(Header::new(b"cache-control", b"no-cache"));
         }
 

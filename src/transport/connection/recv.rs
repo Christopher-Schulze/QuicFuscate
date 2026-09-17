@@ -1052,12 +1052,15 @@ impl Connection {
                         };
                         #[cfg(feature = "stream_ring_buffer")]
                         let data = {
-                            let mut v = vec![0u8; body_len];
-                            let read = s.send_ring.read(&mut v[..]);
-                            if read < body_len {
-                                v.truncate(read);
+                            // Reuse the connection-level scratch: the ring's
+                            // `read` needs a mutable contiguous target, but the
+                            // retained copy goes straight into the `Arc`
+                            // allocation — no per-packet staging Vec (TODO-917).
+                            if self.stream_tx_scratch.len() < body_len {
+                                self.stream_tx_scratch.resize(body_len, 0);
                             }
-                            let data = Arc::<[u8]>::from(v);
+                            let read = s.send_ring.read(&mut self.stream_tx_scratch[..body_len]);
+                            let data = Arc::<[u8]>::from(&self.stream_tx_scratch[..read]);
                             let written = frames::write_stream_frame(
                                 s.id,
                                 stream_offset,
@@ -1374,13 +1377,16 @@ impl Connection {
             return Ok(off);
         }
 
-        // Fallback: 0-RTT or handshake - use RwLock.
-        let use_1rtt_seal = {
+        // Fallback: 0-RTT or handshake - one read guard covers the seal choice,
+        // the AEAD seal, and the header-protection mask (TODO-916). Key-update
+        // writes serialize on `write()` either way; the guard is dropped before
+        // `advance_send_packet_number`, which may take the write lock.
+        let use_1rtt_seal;
+        let sealed_len;
+        let mask;
+        {
             let crypto_guard = self.crypto.read();
-            crypto_guard.seal_1rtt.is_some()
-        };
-        let sealed_len = {
-            let crypto_guard = self.crypto.read();
+            use_1rtt_seal = crypto_guard.seal_1rtt.is_some();
             let ad_len = pn_off + pn_len;
             let (ad_slice, rest) = out.split_at_mut(ad_len);
             let pt_len = off.saturating_sub(ad_len);
@@ -1403,23 +1409,20 @@ impl Connection {
                 error => error,
             })?;
             seal.seal_batch(core::slice::from_mut(&mut item))?;
-            pt_len + 16
-        };
-        let ad_len = pn_off + pn_len;
-        off = ad_len + sealed_len;
-        let mask = {
-            let crypto_guard = self.crypto.read();
+            sealed_len = pt_len + 16;
             let hp = if use_1rtt_seal {
                 crypto_guard.hp_1rtt.as_deref()
             } else {
                 crypto_guard.hp_0rtt.as_deref().or(crypto_guard.hp_1rtt.as_deref())
             };
-            hp.map(|hp| {
-                let sample_offset = sample_end - packet::SAMPLE_LEN;
-                hp.new_mask(&out[sample_offset..sample_end])
-            })
-            .transpose()?
-        };
+            mask = hp
+                .map(|hp| {
+                    let sample_offset = sample_end - packet::SAMPLE_LEN;
+                    hp.new_mask(&out[sample_offset..sample_end])
+                })
+                .transpose()?;
+        }
+        off = pn_off + pn_len + sealed_len;
         if let Some(mask) = mask {
             out[0] ^= mask[0] & 0x1f;
             for i in 0..pn_len {

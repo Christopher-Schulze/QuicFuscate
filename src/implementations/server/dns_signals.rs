@@ -1038,50 +1038,76 @@ pub(crate) async fn recv_datagram_from(
 /// The first datagram waits for readability via the same `async_io` pattern as
 /// [`recv_datagram_from`]; the rest of the burst is drained with non-blocking
 /// `try_recv_from` into one reused scratch buffer until EAGAIN or capacity.
+/// Datagram slots are popped from `pool` and pushed back by the caller after
+/// processing, so a warm pool makes the whole burst drain allocation-free.
+/// Each batch entry owns its slot until recycled; `len` records the received
+/// datagram length since slots stay at `LIVE_UDP_DATAGRAM_BUFFER_SIZE`.
 #[cfg(unix)]
 pub(crate) async fn recv_datagram_batch(
     socket: &tokio::net::UdpSocket,
     max: usize,
-) -> std::io::Result<Vec<(Vec<u8>, std::net::SocketAddr)>> {
+    pool: &mut Vec<Vec<u8>>,
+    batch: &mut Vec<(Vec<u8>, usize, std::net::SocketAddr)>,
+) -> std::io::Result<()> {
     const DRAIN_BATCH_CAP: usize = 64;
     let cap = max.clamp(1, DRAIN_BATCH_CAP);
-    let mut scratch = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
-    let mut batch = Vec::with_capacity(cap);
+    batch.clear();
 
     // Blocking wait for the first datagram of the burst.
-    let (len, from) = recv_datagram_from(socket, &mut scratch).await?;
-    batch.push((scratch[..len].to_vec(), from));
+    let mut slot = pool.pop().unwrap_or_else(|| vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE]);
+    match recv_datagram_from(socket, &mut slot).await {
+        Ok((len, from)) => batch.push((slot, len, from)),
+        Err(error) => {
+            pool.push(slot);
+            return Err(error);
+        }
+    }
 
     // Drain the rest of the burst without blocking.
     while batch.len() < cap {
-        match socket.try_recv_from(&mut scratch) {
-            Ok((len, from)) => batch.push((scratch[..len].to_vec(), from)),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) => return Err(error),
+        let mut slot = pool.pop().unwrap_or_else(|| vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE]);
+        match socket.try_recv_from(&mut slot) {
+            Ok((len, from)) => batch.push((slot, len, from)),
+            Err(error) => {
+                pool.push(slot);
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    break;
+                }
+                return Err(error);
+            }
         }
     }
-    Ok(batch)
+    Ok(())
 }
 
 #[cfg(not(unix))]
 pub(crate) async fn recv_datagram_batch(
     socket: &tokio::net::UdpSocket,
     max: usize,
-) -> std::io::Result<Vec<(Vec<u8>, std::net::SocketAddr)>> {
+    pool: &mut Vec<Vec<u8>>,
+    batch: &mut Vec<(Vec<u8>, usize, std::net::SocketAddr)>,
+) -> std::io::Result<()> {
     const DRAIN_BATCH_CAP: usize = 64;
     let cap = max.clamp(1, DRAIN_BATCH_CAP);
-    let mut scratch = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];
-    let mut batch = Vec::with_capacity(cap);
+    batch.clear();
 
     loop {
-        match socket.try_recv_from(&mut scratch) {
-            Ok((len, from)) => batch.push((scratch[..len].to_vec(), from)),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) => return Err(error),
-        }
-        if batch.len() >= cap {
-            break;
+        let mut slot = pool.pop().unwrap_or_else(|| vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE]);
+        match socket.try_recv_from(&mut slot) {
+            Ok((len, from)) => {
+                batch.push((slot, len, from));
+                if batch.len() >= cap {
+                    break;
+                }
+            }
+            Err(error) => {
+                pool.push(slot);
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    break;
+                }
+                return Err(error);
+            }
         }
     }
-    Ok(batch)
+    Ok(())
 }
