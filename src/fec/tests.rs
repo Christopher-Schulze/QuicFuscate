@@ -1423,3 +1423,68 @@ fn test_lazy_decoder_seen_seqs_bounded_under_permanent_loss() {
 }
 
 mod streaming_tests;
+
+/// Byte-range parallel accumulation must produce byte-identical output to the
+/// serial row loop. 40 KiB payloads with 8 sources push every encoder over the
+/// `PAR_THRESHOLD * 4` gate; the reference re-accumulates serially per source.
+#[test]
+fn test_parallel_encode_matches_serial_reference() {
+    // Dedicated 64 KiB-block pool: the PAR gate needs max_len >= 32 KiB, which
+    // exceeds the global test pool's 4 KiB blocks. Non-adaptive so the MTU
+    // profile cannot shrink the block size below the payload.
+    let pool = Arc::new(crate::optimize::MemoryPool::new(64, 65536));
+    let len = 40 * 1024;
+    let k = 8usize;
+
+    // GF8
+    let mut enc8 = super::Encoder8::new(k, 12);
+    let mut sources: Vec<Vec<u8>> = Vec::new();
+    for id in 0..k as u64 {
+        let pkt = mk_src_packet(id, len, &pool);
+        sources.push(pkt.payload_slice().expect("src payload").to_vec());
+        enc8.take_packet(pkt);
+    }
+    let repair = enc8.generate_repair_packet(0, &pool).expect("gf8 repair");
+    let payload = repair.payload_slice().expect("gf8 repair payload");
+    let coeffs = repair.coefficients.as_ref().expect("gf8 repair coeffs");
+    let mut expected = vec![0u8; len];
+    for (j, src) in sources.iter().enumerate() {
+        for (i, b) in expected.iter_mut().enumerate() {
+            *b ^= gf_tables::gf_mul_table(coeffs[j], src[i]);
+        }
+    }
+    assert_eq!(payload, &expected[..], "GF8 parallel chunks must match serial accumulation");
+
+    // GF4
+    let mut enc4 = super::Encoder4::new(k, 12);
+    for (id, src) in sources.iter().enumerate() {
+        let pkt = mk_src_packet(id as u64, len, &pool);
+        enc4.take_packet(pkt);
+        let _ = src;
+    }
+    let repair4 = enc4.generate_repair_packet(0, &pool).expect("gf4 repair");
+    let payload4 = repair4.payload_slice().expect("gf4 repair payload");
+    let coeffs4 = repair4.coefficients.as_ref().expect("gf4 repair coeffs");
+    let mut expected4 = vec![0u8; len];
+    for (j, src) in sources.iter().enumerate() {
+        qf_simd::galois::gf4_mul_xor(src, coeffs4[j], &mut expected4);
+    }
+    assert_eq!(payload4, &expected4[..], "GF4 parallel chunks must match serial accumulation");
+
+    // GF16 (even-padded; expected buffer covers the padded length)
+    let mut enc16 = super::Encoder16::new(k, 12);
+    for (id, src) in sources.iter().enumerate() {
+        let pkt = mk_src_packet(id as u64, len, &pool);
+        enc16.take_packet(pkt);
+        let _ = src;
+    }
+    let repair16 = enc16.generate_repair_packet(0, &pool).expect("gf16 repair");
+    let payload16 = repair16.payload_slice().expect("gf16 repair payload");
+    let coeffs16 = repair16.coefficients.as_ref().expect("gf16 repair coeffs");
+    let mut expected16 = vec![0u8; len + (len % 2)];
+    for (j, src) in sources.iter().enumerate() {
+        let c = u16::from_be_bytes([coeffs16[2 * j], coeffs16[2 * j + 1]]);
+        qf_fec::gf16_mul_scalar_slice_padded(c, src, &mut expected16);
+    }
+    assert_eq!(payload16, &expected16[..], "GF16 parallel chunks must match serial accumulation");
+}

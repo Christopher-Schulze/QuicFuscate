@@ -50,6 +50,7 @@
 
 ### TODO-924 - FEC encode path: parallelize multi-block parity with rayon
 - `qf-fec` already `rayon`s the decode side (`codecs.rs:956`, `decoder8.rs:592`) but encode is serial. Split parity accumulation by byte-range when `symbol_size` is large — same `PAR_THRESHOLD` heuristic. Byte-identical output (XOR-accumulate is order-associative).
+- DONE. GF16's existing chunked `into_par_iter` pattern now also covers GF8 (`gf_mul_scalar_slice` per chunk) and GF4 (`gf4_mul_xor` per chunk), gated identically (`max_len >= PAR_THRESHOLD*4 && wlen >= 8`, 16 KiB chunks). New `test_parallel_encode_matches_serial_reference` proves byte-identical output vs serial references across all three fields at 40 KiB × 8 sources.
 - Detail: `docs/todo/todo-924-fec-parallel-encode.md`
 
 ### TODO-925 - run_loop holds 128 KiB of stack buffers inside the spawned future

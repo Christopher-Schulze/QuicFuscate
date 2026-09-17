@@ -668,18 +668,48 @@ impl Encoder<GF8> {
             .ok()?;
         let wlen = self.window.len().min(self.k);
 
-        // Apply coefficients to data using optimized matrix helper
-        // row is 1xK (one repair packet depends on K source packets)
-        // We can just iterate and accumulate.
-        // matrix_multiply_scalar expects matrix arguments, but here we generate one row.
-
-        // Manual row accumulation
-        for (j, pkt) in self.window.iter().enumerate().take(wlen) {
-            if let Some(data) = pkt.payload_slice() {
-                let len = data.len().min(max_len);
-                let c = coeff_box[j];
-                // Accumulate: out[i] ^= c * data[i]
-                gf_tables::gf_mul_scalar_slice(c, &data[..len], &mut out[..len]);
+        // Manual row accumulation: out[i] ^= c[j] * data[j][i]. XOR accumulation
+        // is commutative, so for large payloads the byte range is split into
+        // independent chunks accumulated in parallel — byte-identical output,
+        // same gate as the GF16 path.
+        if max_len >= (PAR_THRESHOLD * 4) && wlen >= 8 {
+            let chunk = 16384usize;
+            let parts: Vec<(usize, Vec<u8>)> = (0..max_len.div_ceil(chunk))
+                .into_par_iter()
+                .map(|ci| {
+                    let start = ci * chunk;
+                    let end = (start + chunk).min(max_len);
+                    let mut acc = vec![0u8; end - start];
+                    for (j, pkt) in self.window.iter().enumerate().take(wlen) {
+                        if let Some(data) = pkt.payload_slice() {
+                            let s_len = data.len().min(max_len);
+                            if start < s_len {
+                                let len = (s_len - start).min(acc.len());
+                                gf_tables::gf_mul_scalar_slice(
+                                    coeff_box[j],
+                                    &data[start..start + len],
+                                    &mut acc[..len],
+                                );
+                            }
+                        }
+                    }
+                    (start, acc)
+                })
+                .collect();
+            for (start, acc) in parts {
+                if !acc.is_empty() {
+                    qf_simd::core::xor_blocks(&mut out[start..start + acc.len()], &acc[..]);
+                    qf_telemetry::FEC_SIMD_ENCODE.inc();
+                }
+            }
+        } else {
+            for (j, pkt) in self.window.iter().enumerate().take(wlen) {
+                if let Some(data) = pkt.payload_slice() {
+                    let len = data.len().min(max_len);
+                    let c = coeff_box[j];
+                    // Accumulate: out[i] ^= c * data[i]
+                    gf_tables::gf_mul_scalar_slice(c, &data[..len], &mut out[..len]);
+                }
             }
         }
 
@@ -759,11 +789,45 @@ impl Encoder<GF4> {
             .ok()?;
         let wlen = self.window.len().min(self.k);
 
-        for (j, pkt) in self.window.iter().enumerate().take(wlen) {
-            if let Some(data) = pkt.payload_slice() {
-                let len = data.len().min(max_len);
-                let c = coeff_box[j];
-                qf_simd::galois::gf4_mul_xor(&data[..len], c, &mut out[..len]);
+        // Same byte-range split as GF8/GF16: parallel chunk accumulation for
+        // large payloads, byte-identical output (XOR is commutative).
+        if max_len >= (PAR_THRESHOLD * 4) && wlen >= 8 {
+            let chunk = 16384usize;
+            let parts: Vec<(usize, Vec<u8>)> = (0..max_len.div_ceil(chunk))
+                .into_par_iter()
+                .map(|ci| {
+                    let start = ci * chunk;
+                    let end = (start + chunk).min(max_len);
+                    let mut acc = vec![0u8; end - start];
+                    for (j, pkt) in self.window.iter().enumerate().take(wlen) {
+                        if let Some(data) = pkt.payload_slice() {
+                            let s_len = data.len().min(max_len);
+                            if start < s_len {
+                                let len = (s_len - start).min(acc.len());
+                                qf_simd::galois::gf4_mul_xor(
+                                    &data[start..start + len],
+                                    coeff_box[j],
+                                    &mut acc[..len],
+                                );
+                            }
+                        }
+                    }
+                    (start, acc)
+                })
+                .collect();
+            for (start, acc) in parts {
+                if !acc.is_empty() {
+                    qf_simd::core::xor_blocks(&mut out[start..start + acc.len()], &acc[..]);
+                    qf_telemetry::FEC_SIMD_ENCODE.inc();
+                }
+            }
+        } else {
+            for (j, pkt) in self.window.iter().enumerate().take(wlen) {
+                if let Some(data) = pkt.payload_slice() {
+                    let len = data.len().min(max_len);
+                    let c = coeff_box[j];
+                    qf_simd::galois::gf4_mul_xor(&data[..len], c, &mut out[..len]);
+                }
             }
         }
 
