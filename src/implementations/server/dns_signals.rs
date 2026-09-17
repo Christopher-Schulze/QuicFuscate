@@ -1111,3 +1111,67 @@ pub(crate) async fn recv_datagram_batch(
     }
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+mod recv_datagram_batch_tests {
+    use super::*;
+
+    /// Loopback UDP preserves send order for a same-socket burst.
+    #[tokio::test]
+    async fn batch_drains_burst_in_order_and_pool_recycles_slots() {
+        let rx = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind rx");
+        let tx = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind tx");
+        let rx_addr = rx.local_addr().expect("rx addr");
+        let tx_addr = tx.local_addr().expect("tx addr");
+
+        let payloads: Vec<Vec<u8>> = (0u8..8).map(|i| vec![0x45, i, i]).collect();
+        for payload in &payloads {
+            tx.send_to(payload, rx_addr).await.expect("send");
+        }
+
+        let mut pool: Vec<Vec<u8>> = Vec::new();
+        let mut batch = Vec::new();
+        recv_datagram_batch(&rx, 64, &mut pool, &mut batch).await.expect("batch");
+
+        assert_eq!(batch.len(), payloads.len());
+        for (i, (buf, len, from)) in batch.iter().enumerate() {
+            assert_eq!(&buf[..*len], &payloads[i][..], "datagram {i} payload");
+            assert_eq!(*from, tx_addr);
+            assert_eq!(buf.len(), LIVE_UDP_DATAGRAM_BUFFER_SIZE, "slot stays full-size");
+        }
+
+        // Recycle all slots, then drain a second burst: every popped slot lands
+        // in the batch or returns via WouldBlock, so the pool shrinks by exactly
+        // the batch length — proof slots are reused, not reallocated.
+        for (slot, ..) in batch.drain(..) {
+            pool.push(slot);
+        }
+        let pool_before = pool.len();
+
+        let second: Vec<Vec<u8>> = (0u8..3).map(|i| vec![0x60, i]).collect();
+        for payload in &second {
+            tx.send_to(payload, rx_addr).await.expect("send");
+        }
+        recv_datagram_batch(&rx, 64, &mut pool, &mut batch).await.expect("batch 2");
+        assert_eq!(batch.len(), second.len());
+        assert_eq!(pool.len(), pool_before - second.len(), "warm pool must supply slots");
+        for (i, (buf, len, ..)) in batch.iter().enumerate() {
+            assert_eq!(&buf[..*len], &second[i][..]);
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_cap_bounds_the_drain() {
+        let rx = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind rx");
+        let tx = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind tx");
+        let rx_addr = rx.local_addr().expect("rx addr");
+
+        for i in 0u8..10 {
+            tx.send_to(&[0x45, i], rx_addr).await.expect("send");
+        }
+        let mut pool = Vec::new();
+        let mut batch = Vec::new();
+        recv_datagram_batch(&rx, 4, &mut pool, &mut batch).await.expect("batch");
+        assert_eq!(batch.len(), 4, "cap bounds the drained burst");
+    }
+}
