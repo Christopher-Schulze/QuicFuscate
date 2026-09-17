@@ -2,7 +2,6 @@
 pub(crate) use qf_fec::decoders::{validate_decoder_dimensions, Decoder8};
 
 #[cfg(test)]
-pub(crate) use qf_fec::decoders::{multiply_gf256_with_scratch, WiedemannScratch};
+pub(crate) use qf_fec::decoders::Decoder4;
 #[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use qf_fec::decoders::{Decoder16, Decoder4};
+pub(crate) use qf_fec::decoders::{multiply_gf256_with_scratch, WiedemannScratch};

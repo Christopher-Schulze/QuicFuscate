@@ -8,7 +8,7 @@ use qf_engine_types::{EngineConfig, EngineError};
 
 use super::ClientSubsystems;
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn init_subsystems_with_runtime(
     config: &EngineConfig,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,

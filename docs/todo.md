@@ -7,7 +7,7 @@
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`
 
 ### TODO-908 - GF16 SVE2 kernel: nibble-table lookup instead of 16-round carryless loop
-- The SVE2 GF16 kernel is correct (peasant loop, verified semantics) but does not exploit `svtbl` nibble tables like NEON/AVX2 now do. Needs real SVE2 hardware to validate — no Apple/Graviton SVE2 host available here.
+- DONE (compile-verified). `gf16.rs` now carries a real SVE2 kernel: `svtbl_u8` nibble tables built from plain `[[u8; 16]; 4]` arrays (scalable vectors cannot be struct fields), predicated `svld1/svst1` loop, in-register byte swap via `svlsr`/`svlsl`+`svorr`. Verified by a standalone `rustc +nightly --edition 2024 -C target-feature=+sve2` mirror compile; native SVE2 execution stays an explicit boundary (no Graviton/Neoverse host here). Unrelated pre-existing `+sve2` breakage in `qf-cpu/src/simd_dispatch.rs` (46 errors, C-ACLE names absent from Rust stdarch) is recorded in the detail file — workspace-wide SVE2 compile is not claimable until that file is fixed.
 - Detail: `docs/todo/todo-908-gf16-sve2-nibble-tables.md`
 
 ### TODO-909 - Bound anti_replay.max_entries
@@ -15,7 +15,7 @@
 - Detail: `docs/todo/todo-909-antireplay-max-entries-bound.md`
 
 ### TODO-910 - Audit carried dead code in optimize/udp.rs and compat shims
-- `src/optimize/udp.rs` carries 8 `#[allow(dead_code)]` items; audit whether they are planned API surface or removable residue.
+- DONE. Full workspace sweep (~44 `#[allow(dead_code)]`/`unused_imports` sites): 6 dead compat shims removed from `src/optimize/udp.rs` (two live Linux batch wrappers retained), ~10 zero-caller functions deleted (orphaned factories, delegation-only `new` twins, unreachable non-x86 prefetch stub), ~20 test/bench-only constructors moved behind `#[cfg(test)]`/`cfg(any(test, feature = "benches"))` so reachability is declared instead of suppressed, and ~15 stale allows dropped where the item is actually live. `StatusData` keeps an annotated allow (serde wire contract); `qf-simd`'s `x86_extended` keeps a documented module allow (self-tested SIMD toolkit). Workspace all-targets check is now warning-free including `--features rust-tests` and `x86_64-apple-darwin` cross-checks.
 - Detail: `docs/todo/todo-910-optimize-dead-code-cluster.md`
 
 ### TODO-911 - simd_policy dispatch() comment/implementation divergence
@@ -23,7 +23,7 @@
 - Detail: `docs/todo/todo-911-simd-policy-comment-divergence.md`
 
 ### TODO-912 - Release profile: evaluate panic=abort and lto=fat
-- `panic = "abort"` is unset and `lto = "thin"` is used; decide deliberately whether catch_unwind-based isolation must be preserved or the size/speed wins of abort+fat LTO are wanted.
+- DONE (decision: keep profile unchanged). `panic = "abort"` rejected — two live `catch_unwind` isolation boundaries (`admin_http/server.rs:940` → HTTP 500, `dns_signals.rs:384` → recorded worker fault) would become daemon-aborting crashes. `lto = "fat"` rejected pending evidence — with `codegen-units = 1` the marginal gain is cross-crate inlining only; revisit if `benches/ci_regression.rs` shows a cross-crate hot-path gap. Rationale comment added to `Cargo.toml`.
 - Detail: `docs/todo/todo-912-release-profile-panic-lto.md`
 
 ### TODO-904 - Consolidate CI onto platform lanes and clear Clippy 1.98 stable drift

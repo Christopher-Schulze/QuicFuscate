@@ -44,12 +44,6 @@ impl TlsCoverProvider {
     }
 
     /// Constructs a provider for the given role, deriving cover-traffic key material.
-    #[allow(dead_code)]
-    pub(crate) fn new(is_server: bool) -> Result<Self, crate::error::ConnectionError> {
-        let environment = crate::env_utils::EnvSnapshot::capture();
-        Self::new_with_snapshot(is_server, &environment)
-    }
-
     pub(crate) fn new_with_snapshot(
         is_server: bool,
         environment: &crate::env_utils::EnvSnapshot,

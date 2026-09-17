@@ -55,15 +55,6 @@ pub(in crate::implementations::server) struct PendingTunDownlinks {
 impl PendingTunDownlinks {
     const DRR_QUANTUM_BYTES: usize = 1_200;
 
-    #[allow(dead_code)]
-    fn new(rate_bytes_per_second: u64, burst_bytes: u64) -> Self {
-        Self::new_with_clock(
-            rate_bytes_per_second,
-            burst_bytes,
-            &crate::time_source::ProtocolClock::default(),
-        )
-    }
-
     pub(super) fn new_with_clock(
         rate_bytes_per_second: u64,
         burst_bytes: u64,
@@ -88,7 +79,7 @@ impl PendingTunDownlinks {
         Self::with_limits_and_capacity(max_entries, max_bytes, max_per_target, 0, 0)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::implementations::server) fn with_limits_and_capacity(
         max_entries: usize,
         max_bytes: usize,
@@ -421,7 +412,7 @@ pub(in crate::implementations::server) enum BlacklistSyncClaim {
 
 #[cfg(feature = "rate_limiter")]
 impl BlacklistSyncOwner {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::implementations::server) fn new() -> Self {
         Self::new_with_clock(&crate::time_source::ProtocolClock::default())
     }

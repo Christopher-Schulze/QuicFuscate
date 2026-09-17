@@ -49,7 +49,7 @@ const ATTR_DATA: u16 = 0x0013;
 const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
 const ATTR_ERROR_CODE: u16 = 0x0009;
 /// SOFTWARE attribute (RFC 5389 Section 15.10). Optional; used in tests.
-#[allow(dead_code)]
+#[cfg(test)]
 const ATTR_SOFTWARE: u16 = 0x8022;
 
 /// Address family codes inside MAPPED-ADDRESS style attributes.

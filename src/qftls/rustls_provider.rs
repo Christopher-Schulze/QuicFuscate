@@ -355,7 +355,7 @@ impl RustlsProviderImpl {
         )
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new_with_ca_with_snapshot(
         is_server: bool,
         verify_peer: bool,
@@ -375,6 +375,7 @@ impl RustlsProviderImpl {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_ca_with_snapshot_and_clock(
         is_server: bool,
@@ -1350,26 +1351,6 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
     fn supports_ch_override(&self) -> bool {
         false
     }
-}
-
-#[allow(dead_code)]
-pub(super) fn make_with_ca_with_snapshot(
-    is_server: bool,
-    verify_peer: bool,
-    version: u32,
-    version_information_parameter: &[u8],
-    client_ca_path: Option<&str>,
-    environment: &crate::env_utils::EnvSnapshot,
-) -> Result<RustlsProviderImpl, ConnectionError> {
-    RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
-        is_server,
-        verify_peer,
-        version,
-        version_information_parameter,
-        client_ca_path,
-        environment,
-        &crate::time_source::ProtocolClock::default(),
-    )
 }
 
 #[allow(clippy::too_many_arguments)]

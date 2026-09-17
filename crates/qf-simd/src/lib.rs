@@ -37,7 +37,6 @@ fn quic_varint_len_prefix(value: u64) -> Option<(usize, u8)> {
 // ARM NEON-optimized varint module
 #[cfg(target_arch = "aarch64")]
 #[doc(hidden)]
-#[allow(dead_code)]
 pub mod arm_stream;
 #[cfg(target_arch = "aarch64")]
 mod arm_varint;
@@ -415,6 +414,8 @@ pub mod amx;
 // X86 EXTENDED IMPLEMENTATIONS FOR FEC AND TRANSPORT
 // ============================================================================
 
+// x86_extended is a self-contained SIMD toolkit (RS/GF256 matmul/QPACK/varint)
+// exercised by x86_extended/tests.rs; production callers are added incrementally.
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 mod x86_extended;

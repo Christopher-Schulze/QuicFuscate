@@ -84,7 +84,6 @@ pub fn checked_syscall_count(result: libc::c_int, prepared: usize) -> std::io::R
 }
 
 #[cfg(unix)]
-#[allow(dead_code)]
 #[doc(hidden)]
 pub fn checked_received_len(result: u32, capacity: usize, index: usize) -> std::io::Result<usize> {
     let length = usize::try_from(result).map_err(|_| {
@@ -188,7 +187,6 @@ pub fn sockaddr_storage_for(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
 }
 
 #[cfg(unix)]
-#[allow(dead_code)]
 #[doc(hidden)]
 pub fn socket_addr_from_storage(
     storage: &sockaddr_storage,

@@ -90,7 +90,6 @@ struct AnomalyTimingState {
 }
 
 /// EWMA-based DDoS/anomaly detector.
-#[allow(dead_code)]
 pub struct EwmaAnomalyDetector {
     ewma_pps: AtomicU64,
     current_pps: AtomicU64,
@@ -101,14 +100,15 @@ pub struct EwmaAnomalyDetector {
     timing: parking_lot::Mutex<AnomalyTimingState>,
 }
 
-#[allow(dead_code)]
 impl EwmaAnomalyDetector {
     /// Create a detector with the given smoothing and spike threshold.
+    #[cfg(test)]
     pub fn new(alpha: f64, spike_multiplier: f64) -> Self {
         Self::new_with_clock(alpha, spike_multiplier, &ProtocolClock::default())
     }
 
     /// Create a detector bound to an explicit protocol clock.
+    #[cfg(test)]
     #[allow(clippy::expect_used)]
     pub fn new_with_clock(alpha: f64, spike_multiplier: f64, clock: &ProtocolClock) -> Self {
         let config =
@@ -117,6 +117,7 @@ impl EwmaAnomalyDetector {
             .expect("legacy DDoS detector parameters must be valid")
     }
 
+    #[cfg(test)]
     pub fn with_config(config: DdosPolicyConfig) -> Result<Self, String> {
         Self::with_config_and_clock(config, &ProtocolClock::default())
     }
@@ -138,6 +139,7 @@ impl EwmaAnomalyDetector {
     }
 
     /// Create a detector with sensible defaults (α=0.1, spike=3×).
+    #[cfg(test)]
     #[allow(clippy::expect_used)]
     pub fn with_defaults() -> Self {
         Self::with_config(DdosPolicyConfig::default()).expect("default DDoS policy must be valid")
@@ -238,6 +240,7 @@ impl EwmaAnomalyDetector {
         self.anomaly_active.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn limit_multiplier(&self) -> f64 {
         if self.is_anomaly() {
             0.5
@@ -246,14 +249,7 @@ impl EwmaAnomalyDetector {
         }
     }
 
-    pub fn ewma(&self) -> f64 {
-        f64::from_bits(self.ewma_pps.load(Ordering::Relaxed))
-    }
-
-    pub fn current_pps(&self) -> u64 {
-        self.current_pps.load(Ordering::Relaxed)
-    }
-
+    #[cfg(test)]
     pub fn clear(&self) {
         self.anomaly_active.store(false, Ordering::Relaxed);
         let mut timing = self.timing.lock();

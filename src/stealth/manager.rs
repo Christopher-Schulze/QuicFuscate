@@ -1204,13 +1204,6 @@ impl StealthManager {
         }
     }
 
-    /// Escalate to Anti-DPI level features (without changing enum mode).
-    /// This is the Level 2 escalation - full padding + timing + rotation.
-    #[allow(dead_code)]
-    fn escalate_to_anti_dpi_features(&self) {
-        self.escalate_to_level(2);
-    }
-
     /// Escalate to a specific stealth level (0=Performance, 1=Stealth, 2=AntiDpi).
     /// Each level sets graduated intensity on padding/timing/rotation.
     pub(crate) fn escalate_to_level(&self, level: u8) {

@@ -194,6 +194,7 @@ struct StatusGeoIp {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+// Every field is part of the wire contract under deny_unknown_fields; not all are read.
 #[allow(dead_code)]
 struct StatusData {
     version: String,

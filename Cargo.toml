@@ -228,6 +228,14 @@ lto = false
 codegen-units = 256
 incremental = true
 
+# panic = "abort" is deliberately unset (TODO-912): production code uses
+# catch_unwind as an isolation boundary — admin HTTP operation workers convert
+# panics into HTTP 500 (src/implementations/server/admin_http/server.rs) and the
+# DNS intercept worker records a Panic metric before resume_unwind
+# (src/implementations/server/dns_signals.rs). Abort would turn a single
+# panicking request into a daemon kill. lto stays "thin": with
+# codegen-units = 1 it captures most cross-crate inlining at a fraction of
+# fat-LTO link time on this workspace size.
 [profile.release]
 opt-level = 3
 debug = false

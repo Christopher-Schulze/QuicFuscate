@@ -78,7 +78,6 @@ pub(super) struct GracefulShutdown {
 }
 
 impl GracefulShutdown {
-    #[allow(dead_code)]
     pub(super) fn new(grace_ms: u64) -> Self {
         Self {
             lifecycle: AtomicU8::new(ShutdownLifecycle::Stopped as u8),
@@ -387,7 +386,7 @@ impl ServerHostResources {
 }
 
 impl SharedServerDomain {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn try_new(server_config: &ServerConfig) -> Result<Self, String> {
         Self::try_new_with_clock(server_config, &ProtocolClock::default())
     }
@@ -759,7 +758,7 @@ pub struct ServerAdminCore {
 }
 
 impl ServerAdminCore {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn new(
         metrics: Arc<Metrics>,
         blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,

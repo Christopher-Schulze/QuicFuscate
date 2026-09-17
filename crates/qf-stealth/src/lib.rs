@@ -209,7 +209,6 @@ mod domain_fronting {
 
         /// Select a random configured domain, falling back to the Cloudflare default.
         #[inline]
-        #[allow(dead_code)]
         #[doc(hidden)]
         pub fn random_domain(&self) -> String {
             use rand::seq::IndexedRandom;
@@ -233,7 +232,6 @@ mod flow_shaping {
 
     /// Stealth packet class tracked by the flow-shaping history.
     #[derive(Clone, Copy)]
-    #[allow(dead_code)]
     #[doc(hidden)]
     pub enum StealthPacketClass {
         Data,
@@ -261,7 +259,6 @@ mod flow_shaping {
 
     impl FlowShaper {
         /// Create a shaper using the process clock.
-        #[allow(dead_code)]
         #[doc(hidden)]
         pub fn new(jitter_us: u64, enable_dummy_retransmits: bool) -> Self {
             Self::new_with_clock(jitter_us, enable_dummy_retransmits, &ProtocolClock::default())

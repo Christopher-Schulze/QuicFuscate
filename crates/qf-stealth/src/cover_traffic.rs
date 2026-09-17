@@ -33,7 +33,6 @@ enum CoverRequestType {
 
 impl CoverTrafficScheduler {
     /// Creates a scheduler that emits weighted cover requests at the given interval.
-    #[allow(dead_code)]
     pub fn new(target_domain: String, interval_ms: u64) -> Self {
         Self::new_with_clock(target_domain, interval_ms, &ProtocolClock::default())
     }

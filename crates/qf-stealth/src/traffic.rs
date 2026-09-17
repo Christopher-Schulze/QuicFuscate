@@ -20,7 +20,6 @@ pub struct RateChoker {
 
 impl RateChoker {
     /// Create a choker using the process clock.
-    #[allow(dead_code)]
     #[doc(hidden)]
     pub fn new(target_mbps: u32, burst_ms: u32) -> Option<Self> {
         Self::new_with_clock(target_mbps, burst_ms, &ProtocolClock::default())

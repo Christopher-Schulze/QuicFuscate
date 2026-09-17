@@ -158,7 +158,7 @@ impl Connection {
         self.environment = environment;
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "benches"))]
     pub(crate) fn new_with_role(
         scid: &[u8],
         local: SocketAddr,
@@ -304,7 +304,7 @@ impl Connection {
         Ok(conn)
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "benches"))]
     pub(crate) fn new_client(
         scid: &[u8],
         local: SocketAddr,
@@ -314,7 +314,7 @@ impl Connection {
         Self::new_with_role(scid, local, peer, config, false)
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "benches"))]
     pub(crate) fn new_server(
         scid: &[u8],
         local: SocketAddr,

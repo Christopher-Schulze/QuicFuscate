@@ -157,7 +157,7 @@ pub(crate) struct AuthRateLimiter {
 }
 
 impl AuthRateLimiter {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn new(config: AuthPolicyConfig) -> Self {
         Self::new_with_clock(config, &ProtocolClock::default())
     }

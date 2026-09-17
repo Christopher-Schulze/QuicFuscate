@@ -161,7 +161,6 @@ pub enum CcImpl {
     StealthBbr3(stealth_shaper::StealthShaper<bbr3::Bbr3>),
 }
 
-#[allow(dead_code)]
 #[doc(hidden)]
 pub fn create_with_snapshot(
     algo: Algorithm,

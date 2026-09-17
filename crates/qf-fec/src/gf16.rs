@@ -156,6 +156,12 @@ pub fn gf16_mul_scalar_slice_u16(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
         }
         #[cfg(target_arch = "aarch64")]
         {
+            if policy.as_any().is::<qf_cpu::Sve2>() && packet_u16_len >= GF16_SVE2_MIN_WORDS {
+                unsafe {
+                    gf16_mul_bytes_sve2(coeff, src, out_xor);
+                }
+                return true;
+            }
             if policy.as_any().is::<qf_cpu::Neon>() && packet_u16_len >= GF16_NEON_MIN_WORDS {
                 unsafe {
                     gf16_mul_bytes_neon(coeff, src, out_xor);
@@ -924,6 +930,93 @@ unsafe fn gf16_mul_bytes_neon(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
     qf_telemetry::FEC_NEON_OPS.inc();
 }
 
+/// SVE2 nibble tables kept as plain byte arrays: scalable vector types cannot
+/// be stored in structs (their size is only known at runtime), so the table
+/// registers are materialized inside `sve2_product` — inlined, the eight
+/// predicated loads and the mask dup hoist out of the vector loop. Each table
+/// is 16 bytes, which always fits one SVE vector (minimum VL is 128 bits), so
+/// `svtbl_u8` indices 0..15 are always in range. Index vectors reuse the u16
+/// nibble lanes reinterpreted as bytes — the odd bytes are 0 and select table
+/// entry 0, which is always 0 (`t_k[0] = coeff * 0`).
+#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "sve2")]
+struct Sve2Tables {
+    lo: [[u8; 16]; 4],
+    hi: [[u8; 16]; 4],
+}
+
+#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "sve2")]
+fn sve2_tables(coeff: u16) -> Sve2Tables {
+    let (lo, hi) = gf16_nibble_byte_tables(coeff);
+    Sve2Tables { lo, hi }
+}
+
+/// GF(2^16) multiply of one scalable u16 vector via `svtbl_u8`: per nibble `k`,
+/// `tbl(tk_lo, nk)` yields the lo byte and `tbl(tk_hi, nk) << 8` the hi byte.
+/// Computed unpredicated; the caller stores under its own predicate.
+#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "sve2")]
+#[inline]
+unsafe fn sve2_product(
+    t: &Sve2Tables,
+    source: std::arch::aarch64::svuint16_t,
+) -> std::arch::aarch64::svuint16_t {
+    use std::arch::aarch64::*;
+    let pt = svptrue_b16();
+    // SAFETY: svwhilelt_b8_u32(0, 16) admits exactly the first 16 bytes,
+    // matching the [u8; 16] table arrays; no out-of-bounds read.
+    let p16 = svwhilelt_b8_u32(0, 16);
+    let nibble_mask = svdup_n_u16(0x000F);
+    let t0l = svld1_u8(p16, t.lo[0].as_ptr());
+    let t1l = svld1_u8(p16, t.lo[1].as_ptr());
+    let t2l = svld1_u8(p16, t.lo[2].as_ptr());
+    let t3l = svld1_u8(p16, t.lo[3].as_ptr());
+    let t0h = svld1_u8(p16, t.hi[0].as_ptr());
+    let t1h = svld1_u8(p16, t.hi[1].as_ptr());
+    let t2h = svld1_u8(p16, t.hi[2].as_ptr());
+    let t3h = svld1_u8(p16, t.hi[3].as_ptr());
+
+    let n0 = svand_u16_x(pt, source, nibble_mask);
+    let n1 = svand_u16_x(pt, svlsr_n_u16_x(pt, source, 4), nibble_mask);
+    let n2 = svand_u16_x(pt, svlsr_n_u16_x(pt, source, 8), nibble_mask);
+    let n3 = svlsr_n_u16_x(pt, source, 12);
+
+    let c0 = svorr_u16_x(
+        pt,
+        svreinterpret_u16_u8(svtbl_u8(t0l, svreinterpret_u8_u16(n0))),
+        svlsl_n_u16_x(pt, svreinterpret_u16_u8(svtbl_u8(t0h, svreinterpret_u8_u16(n0))), 8),
+    );
+    let c1 = svorr_u16_x(
+        pt,
+        svreinterpret_u16_u8(svtbl_u8(t1l, svreinterpret_u8_u16(n1))),
+        svlsl_n_u16_x(pt, svreinterpret_u16_u8(svtbl_u8(t1h, svreinterpret_u8_u16(n1))), 8),
+    );
+    let c2 = svorr_u16_x(
+        pt,
+        svreinterpret_u16_u8(svtbl_u8(t2l, svreinterpret_u8_u16(n2))),
+        svlsl_n_u16_x(pt, svreinterpret_u16_u8(svtbl_u8(t2h, svreinterpret_u8_u16(n2))), 8),
+    );
+    let c3 = svorr_u16_x(
+        pt,
+        svreinterpret_u16_u8(svtbl_u8(t3l, svreinterpret_u8_u16(n3))),
+        svlsl_n_u16_x(pt, svreinterpret_u16_u8(svtbl_u8(t3h, svreinterpret_u8_u16(n3))), 8),
+    );
+
+    sveor_u16_x(pt, sveor_u16_x(pt, c0, c1), sveor_u16_x(pt, c2, c3))
+}
+
+/// Byteswap u16 lanes in-register: `revb` reverses the bytes inside each
+/// 16-bit element, turning big-endian payload pairs into host-order words.
+#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "sve2")]
+#[inline]
+unsafe fn sve2_swap16(w: std::arch::aarch64::svuint16_t) -> std::arch::aarch64::svuint16_t {
+    use std::arch::aarch64::*;
+    let pt = svptrue_b16();
+    svorr_u16_x(pt, svlsl_n_u16_x(pt, w, 8), svlsr_n_u16_x(pt, w, 8))
+}
+
 #[cfg(target_arch = "aarch64")]
 /// # Safety
 ///
@@ -941,54 +1034,19 @@ unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
             return;
         }
 
-        let coefficient = svdup_n_u16(coeff);
-        let polynomial = svdup_n_u16(0x100B);
-        let one = svdup_n_u16(1);
+        let tables = sve2_tables(coeff);
         let mut offset = 0usize;
         let vector_len = svcnth() as usize;
 
         while offset < len {
-            let predicate = svwhilelt_b16(offset as u64, len as u64);
+            let predicate = svwhilelt_b16_u64(offset as u64, len as u64);
             if !svptest_any(svptrue_b16(), predicate) {
                 break;
             }
 
-            // Russian-peasant carryless multiply, matching the NEON kernel and
-            // the scalar field (0x1100B with the x^16 term implicit). The old
-            // svmul/svmulh integer-product form is not a carryless multiply and
-            // used the wrong constant 0x000B, so any SVE2 result diverged from
-            // the field.
-            let mut multiplicand = svld1_u16(predicate, src.as_ptr().add(offset));
-            let mut factor = coefficient;
-            let mut product = svdup_n_u16(0);
+            let source = svld1_u16(predicate, src.as_ptr().add(offset));
             let target = svld1_u16(predicate, dst.as_ptr().add(offset));
-
-            let mut round = 0;
-            while round < 16 {
-                let factor_mask =
-                    svcmpeq_u16(predicate, svand_u16_x(svptrue_b16(), factor, one), one);
-                product = sveor_u16_m(
-                    predicate,
-                    product,
-                    product,
-                    svand_u16_m(predicate, factor_mask, multiplicand, svdup_n_u16(0xFFFF)),
-                );
-                let carry_mask = svcmpeq_u16(
-                    predicate,
-                    svand_u16_x(svptrue_b16(), svshr_n_u16(multiplicand, 15), one),
-                    one,
-                );
-                multiplicand = sveor_u16_m(
-                    predicate,
-                    svlsh1_n_u16_m(predicate, svdup_n_u16(0), multiplicand, 1),
-                    svlsh1_n_u16_m(predicate, svdup_n_u16(0), multiplicand, 1),
-                    svand_u16_m(predicate, carry_mask, polynomial, svdup_n_u16(0xFFFF)),
-                );
-                factor = svshr_n_u16_x(svptrue_b16(), factor, 1);
-                round += 1;
-            }
-
-            let result = sveor_u16_m(predicate, target, target, product);
+            let result = sveor_u16_x(predicate, target, sve2_product(&tables, source));
 
             svst1_u16(predicate, dst.as_mut_ptr().add(offset), result);
             offset += vector_len;
@@ -999,6 +1057,59 @@ unsafe fn gf16_mul_slice_sve2(coeff: u16, src: &[u16], dst: &mut [u16], len: usi
     }
 
     gf16_mul_slice_neon(coeff, src, dst, len);
+}
+
+/// Big-endian byte-payload variant of the SVE2 kernel: `sve2_swap16` swaps
+/// bytes within u16 elements in-register; predication absorbs the tail, so a
+/// trailing odd byte stays untouched.
+#[cfg(target_arch = "aarch64")]
+/// # Safety
+///
+/// On builds that include the SVE2 block, the caller must prove AArch64 SVE2
+/// support. `src` and `out_xor` must remain valid for the duration of the
+/// call; only whole u16 words inside the shared length are touched. Builds
+/// without SVE2 compile to the NEON byte kernel, which has its own contract.
+unsafe fn gf16_mul_bytes_sve2(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
+    #[cfg(target_feature = "sve2")]
+    {
+        use std::arch::aarch64::*;
+
+        let byte_len = src.len().min(out_xor.len());
+        let words = byte_len / 2;
+        if words == 0 {
+            return;
+        }
+
+        let tables = sve2_tables(coeff);
+        let mut word = 0usize;
+        let vector_words = svcnth() as usize;
+
+        while word < words {
+            let predicate = svwhilelt_b16_u64(word as u64, words as u64);
+            if !svptest_any(svptrue_b16(), predicate) {
+                break;
+            }
+            let byte_offset = word * 2;
+            // SAFETY: the predicate admits at most `words - word` u16 lanes, so
+            // the load touches only bytes < byte_len on both slices; AArch64
+            // SVE loads have no alignment requirement.
+            let raw = svld1_u16(predicate, src.as_ptr().add(byte_offset) as *const u16);
+            let product = sve2_product(&tables, sve2_swap16(raw));
+            let product_be = sve2_swap16(product);
+            let target = svld1_u16(predicate, out_xor.as_ptr().add(byte_offset) as *const u16);
+            svst1_u16(
+                predicate,
+                out_xor.as_mut_ptr().add(byte_offset) as *mut u16,
+                sveor_u16_x(predicate, target, product_be),
+            );
+            word += vector_words;
+        }
+
+        qf_telemetry::FEC_SVE2_OPS.inc();
+        return;
+    }
+
+    gf16_mul_bytes_neon(coeff, src, out_xor);
 }
 
 /// GF(2^16) multiply-accumulate over u16 slices: `dst[i] ^= coeff * src[i]`.
@@ -1210,6 +1321,25 @@ mod kernel_tests {
             });
             check_bytes_kernel("neon/bytes", |c, s, d| {
                 gf16_mul_bytes_neon(c, s, d);
+            });
+        }
+    }
+
+    /// Compiled only in +sve2 builds; executes only where the hardware
+    /// actually reports SVE2 — the parity contract travels to real SVE2 CI
+    /// hardware instead of being asserted blind here.
+    #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
+    #[test]
+    fn sve2_kernels_match_scalar_reference() {
+        if !std::arch::is_aarch64_feature_detected!("sve2") {
+            return;
+        }
+        unsafe {
+            check_u16_kernel("sve2/u16", |c, s, d, l| {
+                gf16_mul_slice_sve2(c, s, d, l);
+            });
+            check_bytes_kernel("sve2/bytes", |c, s, d| {
+                gf16_mul_bytes_sve2(c, s, d);
             });
         }
     }

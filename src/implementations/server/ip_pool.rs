@@ -133,7 +133,6 @@ impl IpPool {
 
 /// IPv6 address pool for VPN clients.
 /// Uses ULA range (fd00::/48) by default for private VPN addressing.
-#[allow(dead_code)]
 pub struct Ipv6Pool {
     start: u128,
     end: u128,
@@ -142,7 +141,6 @@ pub struct Ipv6Pool {
     free_list: VecDeque<u128>,
 }
 
-#[allow(dead_code)]
 impl Ipv6Pool {
     /// Create a new IPv6 address pool.
     pub fn new(start: Ipv6Addr, end: Ipv6Addr) -> Self {

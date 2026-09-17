@@ -37,7 +37,7 @@ pub(crate) struct Aegis128X4Aead {
 }
 
 impl Aegis128X4Aead {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, KeyMaterialError> {
         require_exact_key_iv("AEGIS-128X4", aead_key, 16, iv, 12)?;
         let mut key = [0u8; 16];
@@ -58,7 +58,7 @@ pub(crate) struct Aegis128X8Aead {
 }
 
 impl Aegis128X8Aead {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, KeyMaterialError> {
         require_exact_key_iv("AEGIS-128X8", aead_key, 16, iv, 12)?;
         let mut key = [0u8; 16];

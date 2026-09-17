@@ -221,7 +221,6 @@ impl EscalationState {
     }
 
     /// Force-set the level (used by explicit mode transitions).
-    #[allow(dead_code)]
     pub fn set_level(&self, level: u8) {
         self.current_level.store(level, Ordering::Relaxed);
         self.level_hints.set_probe_level(level);

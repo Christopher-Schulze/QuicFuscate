@@ -132,11 +132,6 @@ pub(super) struct TokenBucket {
 }
 
 impl TokenBucket {
-    #[allow(dead_code)]
-    fn new(capacity: u64, refill_rate: u64, refill_interval: Duration) -> Self {
-        Self::new_at(capacity, refill_rate, refill_interval, ProtocolClock::default().now())
-    }
-
     pub(super) fn new_at(
         capacity: u64,
         refill_rate: u64,
@@ -151,11 +146,6 @@ impl TokenBucket {
             refill_rate,
             refill_interval,
         }
-    }
-
-    #[allow(dead_code)]
-    fn consume(&mut self, amount: u64) -> bool {
-        self.consume_at(amount, ProtocolClock::default().now())
     }
 
     pub(super) fn consume_at(&mut self, amount: u64, now: Instant) -> bool {

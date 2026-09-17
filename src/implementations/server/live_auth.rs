@@ -1,10 +1,12 @@
 use super::*;
 
 mod fanout;
-#[allow(unused_imports)]
 pub(super) use fanout::{
-    new_client_fanout_queue, ClientFanoutQueue, ClientFanoutQueueState, ClientFanoutReject,
-    MAX_CLIENT_FANOUT_DRAIN_BATCH, MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE,
+    new_client_fanout_queue, ClientFanoutQueue, MAX_CLIENT_FANOUT_DRAIN_BATCH,
+};
+#[cfg(test)]
+pub(super) use fanout::{
+    ClientFanoutQueueState, ClientFanoutReject, MAX_CLIENT_FANOUT_ENTRIES_PER_SOURCE,
 };
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]

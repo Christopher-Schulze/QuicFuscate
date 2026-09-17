@@ -74,11 +74,6 @@ fn prefetch_morus_buffer(ptr: *const u8, len: usize) {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-#[allow(dead_code)]
-fn prefetch_morus_buffer(_ptr: *const u8, _len: usize) {}
-
 // aarch64 intrinsics are imported locally where used via core::arch::aarch64
 
 // ============================================================================

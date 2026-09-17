@@ -30,12 +30,10 @@ static BATCH_RECVS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(target_os = "linux", any(test, feature = "rust-tests")))]
 static PACKETS_BATCHED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(any(test, feature = "rust-tests"))]
-#[allow(dead_code)]
 const MAX_UDP_DATAGRAM_SIZE: usize = 65_536;
 
 /// Test/support batch packet processor with network acceleration helpers.
 #[cfg(any(test, feature = "rust-tests"))]
-#[allow(dead_code)]
 pub struct BatchProcessor {
     /// Preallocated buffers for zero-copy batch operations
     recv_buffers: Vec<Vec<u8>>,
@@ -53,7 +51,6 @@ pub struct BatchProcessor {
 }
 
 #[cfg(any(test, feature = "rust-tests"))]
-#[allow(dead_code)]
 impl Default for BatchProcessor {
     fn default() -> Self {
         Self::new()
@@ -61,7 +58,6 @@ impl Default for BatchProcessor {
 }
 
 #[cfg(any(test, feature = "rust-tests"))]
-#[allow(dead_code)]
 impl BatchProcessor {
     pub fn new() -> Self {
         let plans = AccelerationPlanner::global();

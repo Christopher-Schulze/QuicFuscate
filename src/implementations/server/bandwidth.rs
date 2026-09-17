@@ -284,7 +284,7 @@ impl QuotaTracker {
         Self::new_at_with_clock(quota_limit_bytes, period, clock.now_system(), clock)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn new_at(
         quota_limit_bytes: u64,
         period: QuotaPeriod,

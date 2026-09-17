@@ -1,7 +1,7 @@
 use super::*;
 
 impl LiveServerDomain {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::implementations::server) fn try_new(
         server_config: &ServerConfig,
     ) -> Result<Self, String> {

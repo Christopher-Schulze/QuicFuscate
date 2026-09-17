@@ -315,7 +315,7 @@ struct LoginRateLimiter {
 }
 
 impl LoginRateLimiter {
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn new(max_attempts: u32, lockout_secs: u64) -> Self {
         Self::new_with_clock(max_attempts, lockout_secs, &ProtocolClock::default())
     }
@@ -461,7 +461,7 @@ impl SessionRecord {
 }
 
 impl SessionStore {
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn new(ttl: Duration) -> Self {
         Self::new_with_clock(ttl, &ProtocolClock::default())
     }
@@ -470,7 +470,7 @@ impl SessionStore {
         Self::new_with_capacity_and_clock(ttl, DEFAULT_ADMIN_WEB_MAX_SESSIONS, clock)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn new_with_capacity(ttl: Duration, max_sessions: usize) -> Self {
         Self::new_with_capacity_and_clock(ttl, max_sessions, &ProtocolClock::default())
     }
@@ -1121,31 +1121,6 @@ impl AdminHttpServer {
             max_connections,
             operation_timeout,
             operation_diagnostics,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)]
-    pub(crate) fn new_with_max_connections_and_operation_timeout_and_diagnostics(
-        addr: SocketAddr,
-        web_root: PathBuf,
-        auth: Option<AdminAuth>,
-        auth_path: Option<PathBuf>,
-        handler: Arc<dyn AdminHttpHandler>,
-        max_connections: usize,
-        operation_timeout_ms: u64,
-        operation_diagnostics: Arc<AdminHttpOperationDiagnostics>,
-    ) -> std::io::Result<Self> {
-        Self::new_with_max_connections_and_operation_timeout_and_diagnostics_and_clock(
-            addr,
-            web_root,
-            auth,
-            auth_path,
-            handler,
-            max_connections,
-            operation_timeout_ms,
-            operation_diagnostics,
-            ProtocolClock::default(),
         )
     }
 
