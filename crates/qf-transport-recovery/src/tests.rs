@@ -460,7 +460,7 @@ fn sent_packet_retention_is_bounded_per_space() {
 
     // Eviction removes the oldest, so the newest packet is always still tracked.
     assert!(
-        rec.spaces[PacketSpace::Application.index()].sent.contains_key(&(overshoot - 1)),
+        rec.spaces[PacketSpace::Application.index()].sent.contains(overshoot - 1),
         "the newest packet must never be the one evicted"
     );
 
@@ -1185,4 +1185,104 @@ fn migration_clears_timers_but_keeps_sent_state() {
         t0 + Duration::from_millis(100),
     );
     assert_eq!(outcome.newly_acked.len(), 2);
+}
+
+mod sent_ring_tests {
+    use super::super::{SentPacket, SentPacketContents, SentRing, MAX_SENT_RING_SLOTS};
+    use std::time::Instant;
+
+    fn pkt(pn: u64) -> SentPacket {
+        SentPacket {
+            pn,
+            size: 1200,
+            sent_at: Instant::now(),
+            ack_eliciting: true,
+            in_flight: true,
+            crypto_range: None,
+            contents: SentPacketContents::STREAM,
+            pmtu_probe: false,
+            path_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn insert_remove_trims_the_front_over_gaps() {
+        let mut ring = SentRing::default();
+        for pn in 0..10 {
+            assert!(ring.insert(pkt(pn), |_, _| panic!("no eviction below the cap")));
+        }
+        assert_eq!(ring.len(), 10);
+
+        // Removing the oldest advances base past the removed slots.
+        for pn in 0..5 {
+            assert_eq!(ring.remove(pn).map(|p| p.pn), Some(pn));
+        }
+        assert_eq!(ring.len(), 5);
+        assert!(!ring.contains(4));
+        assert!(ring.contains(9));
+        assert_eq!(ring.iter().map(|p| p.pn).collect::<Vec<_>>(), vec![5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn drain_range_takes_only_live_slots_and_preserves_order() {
+        let mut ring = SentRing::default();
+        for pn in 0..8 {
+            ring.insert(pkt(pn), |_, _| unreachable!());
+        }
+        // Punch holes first so the drain walks sparse slots.
+        ring.remove(3);
+        ring.remove(5);
+
+        let mut drained = Vec::new();
+        ring.drain_range(2, 7, |p| drained.push(p.pn));
+        assert_eq!(drained, vec![2, 4, 6], "holes must be skipped in order");
+        assert_eq!(ring.len(), 3);
+        assert_eq!(ring.iter().map(|p| p.pn).collect::<Vec<_>>(), vec![0, 1, 7]);
+    }
+
+    #[test]
+    fn sparse_span_past_the_slot_cap_evicts_oldest() {
+        let mut ring = SentRing::default();
+        ring.insert(pkt(0), |_, _| unreachable!());
+        let far = MAX_SENT_RING_SLOTS as u64 + 10;
+        let mut evicted = Vec::new();
+        assert!(ring.insert(pkt(far), |p, _| evicted.push(p.pn)));
+        assert_eq!(evicted, vec![0], "the straggler must yield to the new window");
+        assert_eq!(ring.len(), 1);
+        assert!(!ring.contains(0));
+        assert!(ring.contains(far));
+    }
+
+    #[test]
+    fn iter_prefix_stops_at_the_bound() {
+        let mut ring = SentRing::default();
+        for pn in [10, 12, 15, 20] {
+            ring.insert(pkt(pn), |_, _| unreachable!());
+        }
+        assert_eq!(ring.iter_prefix(15).map(|p| p.pn).collect::<Vec<_>>(), vec![10, 12, 15]);
+        assert!(ring.iter_prefix(9).next().is_none(), "below base yields nothing");
+    }
+
+    #[test]
+    fn non_monotonic_pn_is_refused() {
+        let mut ring = SentRing::default();
+        ring.insert(pkt(5), |_, _| unreachable!());
+        assert!(!ring.insert(pkt(3), |_, _| unreachable!()));
+        assert_eq!(ring.len(), 1);
+        assert!(ring.contains(5));
+    }
+
+    #[test]
+    fn clear_resets_for_reuse() {
+        let mut ring = SentRing::default();
+        for pn in 100..104 {
+            ring.insert(pkt(pn), |_, _| unreachable!());
+        }
+        ring.clear();
+        assert!(ring.is_empty());
+        // After clear the next insert re-anchors the window.
+        assert!(ring.insert(pkt(5000), |_, _| unreachable!()));
+        assert!(ring.contains(5000));
+        assert_eq!(ring.len(), 1);
+    }
 }

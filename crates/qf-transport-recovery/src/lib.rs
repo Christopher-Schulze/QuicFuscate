@@ -8,7 +8,7 @@
 
 use core::cmp::min;
 use core::time::Duration;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -220,11 +220,196 @@ const MAX_RETAINED_SENT_PACKETS_PER_SPACE: usize = 16_384;
 /// Hard cap on retained unacknowledged bytes per packet-number space.
 const MAX_RETAINED_SENT_BYTES_PER_SPACE: usize = 64 * 1024 * 1024;
 
+/// Slot cap for [`SentRing`]: bounds the VecDeque span when an adversarial or
+/// heavily sparse ACK pattern leaves low-numbered stragglers while the send
+/// counter advances far ahead. Twice the retained-packet budget keeps eviction
+/// pressure on genuinely old packets instead of healthy dense windows.
+const MAX_SENT_RING_SLOTS: usize = 2 * MAX_RETAINED_SENT_PACKETS_PER_SPACE;
+
+/// Packet-number-indexed ring of unacknowledged sent packets.
+///
+/// QUIC packet numbers are monotonically increasing within a space, so the set
+/// of tracked packets always occupies a contiguous span `[base, base + len)` of
+/// the packet-number line. `slots[i]` tracks `pn = base + i`; `None` marks a
+/// packet already acked, lost, or evicted. Insert/remove are O(1) with no
+/// per-packet node allocation, and ACK/loss range scans iterate dense memory
+/// instead of B-tree nodes.
+/// Why [`SentRing::insert`] released a tracked packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RingEvict {
+    /// Front eviction under the sparse-span slot cap.
+    Span,
+    /// Same-pn replacement (requeue); not a retention eviction.
+    Replaced,
+}
+
+#[derive(Default)]
+struct SentRing {
+    slots: std::collections::VecDeque<Option<SentPacket>>,
+    /// Packet number of `slots[0]`; meaningful only while `live > 0`.
+    base: u64,
+    /// Number of `Some` slots.
+    live: usize,
+}
+
+impl SentRing {
+    fn len(&self) -> usize {
+        self.live
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.live == 0
+    }
+
+    #[cfg(any(test, feature = "rust-tests"))]
+    fn contains(&self, pn: u64) -> bool {
+        self.get(pn).is_some()
+    }
+
+    #[cfg(any(test, feature = "rust-tests"))]
+    fn get(&self, pn: u64) -> Option<&SentPacket> {
+        let idx = pn.checked_sub(self.base)? as usize;
+        self.slots.get(idx)?.as_ref()
+    }
+
+    /// Removes the packet with `pn`; returns it when present.
+    fn remove(&mut self, pn: u64) -> Option<SentPacket> {
+        if self.live == 0 {
+            return None;
+        }
+        let idx = pn.checked_sub(self.base)? as usize;
+        let packet = self.slots.get_mut(idx)?.take()?;
+        self.live -= 1;
+        self.trim_front();
+        Some(packet)
+    }
+
+    /// Inserts `pkt` (its `pn` must exceed every pn still tracked; QUIC packet
+    /// numbers are protocol-monotonic). Any packets evicted from the front to
+    /// keep the ring within [`MAX_SENT_RING_SLOTS`], or a same-`pn` packet
+    /// superseded by a requeue, are handed to `on_evict` with their cause so
+    /// byte accounting stays exact. Returns `false` when the packet was not
+    /// tracked (non-monotonic `pn` — a protocol-invariant violation).
+    fn insert(&mut self, pkt: SentPacket, mut on_evict: impl FnMut(SentPacket, RingEvict)) -> bool {
+        let pn = pkt.pn;
+        if self.live == 0 {
+            self.slots.clear();
+            self.base = pn;
+            self.slots.push_back(Some(pkt));
+            self.live = 1;
+            return true;
+        }
+        // Monotonicity is a protocol invariant; a violation would make the
+        // packet unrepresentable below `base`, so refuse to track it rather
+        // than corrupt the ring.
+        let Some(mut idx) = pn.checked_sub(self.base).map(|d| d as usize) else {
+            log::warn!("recovery.sent_ring: non-monotonic pn {pn} below base {}", self.base);
+            return false;
+        };
+        while idx >= MAX_SENT_RING_SLOTS {
+            if let Some(Some(evicted)) = self.slots.pop_front() {
+                self.live -= 1;
+                on_evict(evicted, RingEvict::Span);
+            }
+            self.base += 1;
+            idx -= 1;
+        }
+        if idx >= self.slots.len() {
+            self.slots.resize(idx + 1, None);
+        }
+        // PTO requeues can re-track an in-window packet number; mirror the old
+        // map semantics by replacing the slot and reporting the superseded
+        // packet so byte accounting stays exact.
+        if let Some(replaced) = self.slots[idx].replace(pkt) {
+            on_evict(replaced, RingEvict::Replaced);
+        } else {
+            self.live += 1;
+        }
+        true
+    }
+
+    /// Removes and returns the oldest retained packet (lowest pn), if any.
+    fn pop_oldest(&mut self) -> Option<SentPacket> {
+        while let Some(front) = self.slots.front_mut() {
+            match front.take() {
+                Some(pkt) => {
+                    self.slots.pop_front();
+                    self.base += 1;
+                    self.live -= 1;
+                    self.trim_front();
+                    return Some(pkt);
+                }
+                None => {
+                    self.slots.pop_front();
+                    self.base += 1;
+                }
+            }
+        }
+        None
+    }
+
+    /// Removes every tracked packet inside `[start, end)`, invoking `f` on each
+    /// in ascending packet-number order.
+    fn drain_range(&mut self, start: u64, end: u64, mut f: impl FnMut(SentPacket)) {
+        if self.live == 0 || start >= end {
+            return;
+        }
+        let lo = start.max(self.base).saturating_sub(self.base) as usize;
+        let hi = (end.saturating_sub(self.base) as usize).min(self.slots.len());
+        for slot in self.slots.range_mut(lo..hi) {
+            if let Some(pkt) = slot.take() {
+                self.live -= 1;
+                f(pkt);
+            }
+        }
+        self.trim_front();
+    }
+
+    /// Iterates tracked packets with `pn <= largest` in ascending pn order.
+    fn iter_prefix(&self, largest: u64) -> impl Iterator<Item = &SentPacket> {
+        let hi = largest
+            .checked_sub(self.base)
+            .map_or(0, |d| (d as usize).saturating_add(1).min(self.slots.len()));
+        self.slots.range(0..hi).filter_map(|s| s.as_ref())
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &SentPacket> {
+        self.slots.iter().filter_map(|s| s.as_ref())
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.live = 0;
+    }
+
+    /// Drops leading `None` slots so `slots[0]` is the oldest live packet again.
+    fn trim_front(&mut self) {
+        while self.live > 0 && matches!(self.slots.front(), Some(None)) {
+            self.slots.pop_front();
+            self.base += 1;
+        }
+        if self.live == 0 {
+            self.slots.clear();
+        }
+    }
+}
+
+impl std::fmt::Debug for SentRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SentRing")
+            .field("base", &self.base)
+            .field("live", &self.live)
+            .field("slots", &self.slots.len())
+            .finish()
+    }
+}
+
 /// Per-space loss detection state owned by [`Recovery`].
 #[derive(Debug, Default)]
 struct SpaceRecovery {
     /// Unacknowledged sent packets by packet number.
-    sent: BTreeMap<u64, SentPacket>,
+    sent: SentRing,
     /// Retained bytes across `sent`, maintained alongside the map so the budget check is O(1).
     retained_bytes: usize,
     /// Armed time-threshold deadline (RFC 9002 §6.1.2).
@@ -950,17 +1135,17 @@ impl Recovery {
         while sp.sent.len() >= MAX_RETAINED_SENT_PACKETS_PER_SPACE
             || sp.retained_bytes.saturating_add(size) > MAX_RETAINED_SENT_BYTES_PER_SPACE
         {
-            let Some(oldest) = sp.sent.keys().next().copied() else {
+            let Some(evicted) = sp.sent.pop_oldest() else {
                 break;
             };
-            if let Some(evicted) = sp.sent.remove(&oldest) {
-                sp.retained_bytes = sp.retained_bytes.saturating_sub(evicted.size);
-                qf_telemetry::RECOVERY_SENT_RETENTION_EVICTIONS.inc();
-            }
+            sp.retained_bytes = sp.retained_bytes.saturating_sub(evicted.size);
+            qf_telemetry::RECOVERY_SENT_RETENTION_EVICTIONS.inc();
         }
         sp.retained_bytes = sp.retained_bytes.saturating_add(size);
+        // The ring additionally evicts from the front when an extreme sparse-ACK
+        // span would push the window past MAX_SENT_RING_SLOTS.
+        let retained = &mut sp.retained_bytes;
         sp.sent.insert(
-            pn,
             SentPacket {
                 pn,
                 size,
@@ -971,6 +1156,12 @@ impl Recovery {
                 contents,
                 pmtu_probe,
                 path_epoch: self.path_epoch,
+            },
+            |evicted, cause| {
+                *retained = retained.saturating_sub(evicted.size);
+                if cause == RingEvict::Span {
+                    qf_telemetry::RECOVERY_SENT_RETENTION_EVICTIONS.inc();
+                }
             },
         );
         if in_flight {
@@ -999,16 +1190,17 @@ impl Recovery {
 
         // The loss set is a contiguous prefix of the retained packets, so the scan stops at the
         // first survivor instead of walking the whole prefix. Packet numbers ascend through the
-        // BTreeMap, so once `pn` passes the packet threshold it can never satisfy it again, and
+        // ring, so once `pn` passes the packet threshold it can never satisfy it again, and
         // send times are non-decreasing in packet number, so the time threshold cannot fire later
         // either. Materializing and sorting every retained packet number made the work and the
         // temporary allocation scale with the in-flight window rather than with the losses.
         let mut lost_pns: Vec<u64> = Vec::new();
-        for (&pn, packet) in sp.sent.range(..=largest_acked) {
-            let past_packet_threshold = threshold_pn.is_some_and(|threshold| pn <= threshold);
+        for packet in sp.sent.iter_prefix(largest_acked) {
+            let past_packet_threshold =
+                threshold_pn.is_some_and(|threshold| packet.pn <= threshold);
             let past_time_threshold = now.saturating_duration_since(packet.sent_at) >= loss_delay;
             if past_packet_threshold || past_time_threshold {
-                lost_pns.push(pn);
+                lost_pns.push(packet.pn);
                 continue;
             }
             break;
@@ -1016,7 +1208,7 @@ impl Recovery {
 
         let mut lost = Vec::with_capacity(lost_pns.len());
         for pn in &lost_pns {
-            if let Some(packet) = sp.sent.remove(pn) {
+            if let Some(packet) = sp.sent.remove(*pn) {
                 sp.retained_bytes = sp.retained_bytes.saturating_sub(packet.size);
                 lost.push(packet);
             }
@@ -1027,8 +1219,8 @@ impl Recovery {
         // are non-decreasing in packet number, so the first usable one is the minimum.
         sp.loss_time = sp
             .sent
-            .range(..=largest_acked)
-            .find_map(|(_, p)| p.sent_at.checked_add(loss_delay).filter(|d| *d > now));
+            .iter_prefix(largest_acked)
+            .find_map(|p| p.sent_at.checked_add(loss_delay).filter(|d| *d > now));
         lost
     }
 
@@ -1064,13 +1256,12 @@ impl Recovery {
                 if start >= end {
                     continue;
                 }
-                let keys: Vec<u64> = sp.sent.range(*start..*end).map(|(pn, _)| *pn).collect();
-                for pn in keys {
-                    if let Some(pkt) = sp.sent.remove(&pn) {
-                        sp.retained_bytes = sp.retained_bytes.saturating_sub(pkt.size);
-                        newly_acked.push(pkt);
-                    }
-                }
+                let retained = &mut sp.retained_bytes;
+                let acked = &mut newly_acked;
+                sp.sent.drain_range(*start, *end, |pkt| {
+                    *retained = retained.saturating_sub(pkt.size);
+                    acked.push(pkt);
+                });
             }
         }
         newly_acked.sort_by_key(|p| p.pn);
@@ -1366,7 +1557,7 @@ impl Recovery {
                 continue;
             }
             let sp = &self.spaces[space.index()];
-            let has_ack_eliciting = sp.sent.values().any(|p| p.ack_eliciting);
+            let has_ack_eliciting = sp.sent.iter().any(|p| p.ack_eliciting);
             if !has_ack_eliciting {
                 // §6.2.2.1: a server pre-address-validation MUST NOT arm the PTO
                 // without in-flight ack-eliciting data; a client pre-confirmation
@@ -1442,7 +1633,7 @@ impl Recovery {
                 continue;
             }
             let sp = &self.spaces[space.index()];
-            if sp.sent.values().any(|p| p.ack_eliciting) {
+            if sp.sent.iter().any(|p| p.ack_eliciting) {
                 outcome.probe_spaces.push(space);
             }
         }
@@ -1457,13 +1648,13 @@ impl Recovery {
     /// Test-only: remaining tracked packet numbers in a space (sorted).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn tracked_sent_pns(&self, space: PacketSpace) -> Vec<u64> {
-        self.spaces[space.index()].sent.keys().copied().collect()
+        self.spaces[space.index()].sent.iter().map(|p| p.pn).collect()
     }
 
     /// Test-only: whether a packet number is tracked in a space.
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn tracks_sent_packet(&self, space: PacketSpace, pn: u64) -> bool {
-        self.spaces[space.index()].sent.contains_key(&pn)
+        self.spaces[space.index()].sent.contains(pn)
     }
 
     /// Discards a packet number space (RFC 9002 §6.2.2 key-discard rule): the
@@ -1497,7 +1688,7 @@ impl Recovery {
     pub fn discard_space(&mut self, space: PacketSpace) {
         let discarded_in_flight: usize = {
             let sp = &mut self.spaces[space.index()];
-            let bytes = sp.sent.values().filter(|p| p.in_flight).map(|p| p.size).sum();
+            let bytes = sp.sent.iter().filter(|p| p.in_flight).map(|p| p.size).sum();
             sp.sent.clear();
             sp.retained_bytes = 0;
             sp.loss_time = None;

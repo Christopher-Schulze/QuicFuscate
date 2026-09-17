@@ -30,8 +30,34 @@ fn deterministic_source_indices(
     rng_seed: u64,
     symbol_id: u64,
 ) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut selected = HashSet::new();
+    deterministic_source_indices_into(
+        symbol_count,
+        degree_dist,
+        rng_seed,
+        symbol_id,
+        &mut indices,
+        &mut selected,
+    );
+    indices
+}
+
+/// Caller-scratch variant of [`deterministic_source_indices`]: `indices` and
+/// `selected` are cleared and refilled, so repeated symbol generation reuses
+/// both allocations instead of allocating a set and vector per symbol.
+fn deterministic_source_indices_into(
+    symbol_count: usize,
+    degree_dist: &[f64],
+    rng_seed: u64,
+    symbol_id: u64,
+    indices: &mut Vec<usize>,
+    selected: &mut HashSet<usize>,
+) {
+    indices.clear();
+    selected.clear();
     if symbol_count == 0 {
-        return Vec::new();
+        return;
     }
     let mut rng_state = rng_seed.wrapping_add(symbol_id.wrapping_mul(SPLITMIX64_GAMMA));
     let random = (splitmix64_next(&mut rng_state) as f64) / (u64::MAX as f64);
@@ -40,15 +66,14 @@ fn deterministic_source_indices(
         .enumerate()
         .find_map(|(degree, &cumulative)| (random <= cumulative).then_some(degree.max(1)))
         .unwrap_or(symbol_count);
-    let mut selected = HashSet::with_capacity(degree);
-    let mut indices = Vec::with_capacity(degree);
+    selected.reserve(degree.saturating_sub(selected.capacity()));
+    indices.reserve(degree.saturating_sub(indices.capacity()));
     for _ in 0..degree {
         let index = (splitmix64_next(&mut rng_state) % symbol_count as u64) as usize;
         if selected.insert(index) {
             indices.push(index);
         }
     }
-    indices
 }
 
 /// **LT (Luby Transform) Fountain Code** - Rateless erasure coding
@@ -58,6 +83,14 @@ pub struct LTEncoder {
     degree_dist: Vec<f64>, // Degree distribution (Robust Soliton)
     rng_seed: u64,
     symbol_size: usize,
+    /// Largest buffered source-symbol length; maintained on insert so symbol
+    /// generation does not rescan the window per repair packet.
+    max_symbol_len: usize,
+    /// Reusable index-selection scratch (see `deterministic_source_indices_into`).
+    indices_scratch: Vec<usize>,
+    selected_scratch: HashSet<usize>,
+    /// Reusable XOR accumulation buffer for generated repair symbols.
+    encoded_scratch: Vec<u8>,
 }
 
 impl LTEncoder {
@@ -71,7 +104,17 @@ impl LTEncoder {
         let k = k.clamp(1, MAX_FOUNTAIN_SOURCE_SYMBOLS);
         let symbol_size = symbol_size.clamp(1, MAX_FOUNTAIN_PAYLOAD_BYTES);
         let degree_dist = Self::robust_soliton_distribution(k);
-        Self { k, symbols: Vec::with_capacity(k), degree_dist, rng_seed, symbol_size }
+        Self {
+            k,
+            symbols: Vec::with_capacity(k),
+            degree_dist,
+            rng_seed,
+            symbol_size,
+            max_symbol_len: 0,
+            indices_scratch: Vec::new(),
+            selected_scratch: HashSet::new(),
+            encoded_scratch: Vec::with_capacity(symbol_size),
+        }
     }
 
     /// **Robust Soliton Distribution** - Optimal degree distribution for LT codes
@@ -116,31 +159,43 @@ impl LTEncoder {
         dist
     }
 
-    /// **Generate encoded symbol** and return indices for BP decoding
-    pub fn generate_symbol_with_indices(&mut self, symbol_id: u64) -> (Vec<u8>, Vec<usize>) {
+    /// **Generate encoded symbol** into reusable scratch buffers and return
+    /// slices into them. Hot path: no allocation occurs once the scratch has
+    /// grown to the working degree and symbol size.
+    pub fn generate_symbol(&mut self, symbol_id: u64) -> (&[u8], &[usize]) {
         if self.symbols.is_empty() {
-            return (vec![0; self.symbol_size], Vec::new());
+            self.indices_scratch.clear();
+            self.encoded_scratch.clear();
+            self.encoded_scratch.resize(self.symbol_size, 0);
+            return (&self.encoded_scratch, &self.indices_scratch);
         }
 
-        let used_indices = self.source_indices(symbol_id);
-        let encoded_len =
-            self.symbols.iter().map(Vec::len).max().unwrap_or(0).min(self.symbol_size);
-        let mut encoded = vec![0u8; encoded_len];
-        for &index in &used_indices {
-            let source = &self.symbols[index];
-            let len = source.len().min(encoded.len());
-            fast_xor_inplace(&source[..len], &mut encoded[..len]);
-        }
-        (encoded, used_indices)
-    }
-
-    fn source_indices(&self, symbol_id: u64) -> Vec<usize> {
-        deterministic_source_indices(
+        deterministic_source_indices_into(
             self.symbols.len(),
             &self.degree_dist,
             self.rng_seed,
             symbol_id,
-        )
+            &mut self.indices_scratch,
+            &mut self.selected_scratch,
+        );
+        let encoded_len = self.max_symbol_len.min(self.symbol_size);
+        self.encoded_scratch.clear();
+        self.encoded_scratch.resize(encoded_len, 0);
+        let Self { symbols, indices_scratch, encoded_scratch, .. } = self;
+        for &index in indices_scratch.iter() {
+            let source = &symbols[index];
+            let len = source.len().min(encoded_scratch.len());
+            fast_xor_inplace(&source[..len], &mut encoded_scratch[..len]);
+        }
+        (encoded_scratch.as_slice(), indices_scratch.as_slice())
+    }
+
+    /// Owning wrapper around [`Self::generate_symbol`] retained for tests and
+    /// callers that need detached buffers.
+    #[doc(hidden)]
+    pub fn generate_symbol_with_indices(&mut self, symbol_id: u64) -> (Vec<u8>, Vec<usize>) {
+        let (encoded, indices) = self.generate_symbol(symbol_id);
+        (encoded.to_vec(), indices.to_vec())
     }
 
     /// Add a source symbol to the encoder's symbol buffer.
@@ -153,6 +208,7 @@ impl LTEncoder {
         if symbol.len() > self.symbol_size {
             return false;
         }
+        self.max_symbol_len = self.max_symbol_len.max(symbol.len());
         self.symbols.push(symbol);
         true
     }
@@ -165,6 +221,7 @@ impl LTEncoder {
     /// Clear all buffered source symbols.
     pub fn clear_window(&mut self) {
         self.symbols.clear();
+        self.max_symbol_len = 0;
     }
     /// Return the number of source symbols currently buffered.
     pub fn packets_in_window(&self) -> usize {
@@ -187,7 +244,10 @@ pub struct LTDecoder {
     symbol_size: usize,
     received_symbols: HashMap<u64, Vec<u8>>,
     decoded_symbols: Vec<Option<Vec<u8>>>,
-    symbol_degrees: HashMap<u64, HashSet<usize>>,
+    /// Sorted, deduplicated source indices per retained encoded symbol. A Vec
+    /// replaces the former per-symbol HashSet: degrees stay small under the
+    /// robust soliton distribution, so linear membership beats table overhead.
+    symbol_degrees: HashMap<u64, Vec<usize>>,
     degree_one_queue: VecDeque<u64>,
     queued_symbol_ids: HashSet<u64>,
     symbol_order: VecDeque<u64>,
@@ -201,6 +261,13 @@ pub struct LTDecoder {
     degree_dist: Vec<f64>,
     rng_seed: u64,
     mem_pool: Arc<MemoryPool>,
+    /// Bounded freelist of symbol payload buffers recycled on eviction/peel.
+    payload_scratch: Vec<Vec<u8>>,
+    /// Reusable propagation worklist (taken out during propagation).
+    propagation_scratch: Vec<u64>,
+    /// Reusable index-selection scratch for `source_indices_vec`.
+    indices_scratch: Vec<usize>,
+    select_scratch: HashSet<usize>,
 }
 
 impl LTDecoder {
@@ -267,6 +334,10 @@ impl LTDecoder {
             degree_dist: LTEncoder::robust_soliton_distribution(k),
             rng_seed,
             mem_pool,
+            payload_scratch: Vec::new(),
+            propagation_scratch: Vec::new(),
+            indices_scratch: Vec::new(),
+            select_scratch: HashSet::new(),
         }
     }
 
@@ -282,9 +353,28 @@ impl LTDecoder {
         }
     }
 
+    /// Bound on the payload freelist: keeps warm windows fully recycled without
+    /// letting evicted capacity accumulate beyond the decode window.
+    const MAX_PAYLOAD_SCRATCH: usize = 64;
+
+    fn recycle_payload(&mut self, mut data: Vec<u8>) {
+        if self.payload_scratch.len() < Self::MAX_PAYLOAD_SCRATCH {
+            data.clear();
+            self.payload_scratch.push(data);
+        }
+    }
+
+    fn take_payload_buffer(&mut self, len: usize) -> Vec<u8> {
+        let mut buf = self.payload_scratch.pop().unwrap_or_default();
+        buf.clear();
+        buf.reserve(len.saturating_sub(buf.capacity()));
+        buf
+    }
+
     fn remove_symbol_state(&mut self, symbol_id: u64) {
         if let Some(data) = self.received_symbols.remove(&symbol_id) {
             self.retained_payload_bytes = self.retained_payload_bytes.saturating_sub(data.len());
+            self.recycle_payload(data);
         }
         self.symbol_degrees.remove(&symbol_id);
         self.symbol_order.retain(|queued_id| *queued_id != symbol_id);
@@ -321,7 +411,7 @@ impl LTDecoder {
         true
     }
 
-    fn insert_symbol(&mut self, symbol_id: u64, data: Vec<u8>) -> bool {
+    fn insert_symbol(&mut self, symbol_id: u64, data: &[u8]) -> bool {
         if self.received_symbols.contains_key(&symbol_id) {
             return self.reject_symbol("duplicate symbol id");
         }
@@ -330,7 +420,9 @@ impl LTDecoder {
         }
         self.retained_payload_bytes = self.retained_payload_bytes.saturating_add(data.len());
         self.symbol_order.push_back(symbol_id);
-        self.received_symbols.insert(symbol_id, data);
+        let mut buf = self.take_payload_buffer(data.len());
+        buf.extend_from_slice(data);
+        self.received_symbols.insert(symbol_id, buf);
         true
     }
 
@@ -355,8 +447,8 @@ impl LTDecoder {
         if self.decoded_symbols[source_index].is_some() {
             return self.reject_symbol("duplicate source index");
         }
-        self.decoded_symbols[source_index] = Some(data.clone());
-        let _ = self.propagate_decoded_symbol(source_index, &data);
+        self.decoded_symbols[source_index] = Some(data);
+        let _ = self.propagate_decoded_symbol(source_index);
         true
     }
 
@@ -364,6 +456,25 @@ impl LTDecoder {
         deterministic_source_indices(self.k, &self.degree_dist, self.rng_seed, symbol_id)
             .into_iter()
             .collect()
+    }
+
+    /// Add an encoded fountain symbol whose source indices are recomputed from
+    /// the connection-local seed — the receiver-side counterpart of encoder
+    /// symbol generation. The index scratch buffer becomes the stored degree
+    /// entry, so a warm decoder performs exactly one vector allocation per
+    /// retained symbol (the stored index list itself).
+    #[doc(hidden)]
+    pub fn add_fountain_symbol(&mut self, symbol_id: u64, data: &[u8]) -> bool {
+        let mut indices = std::mem::take(&mut self.indices_scratch);
+        deterministic_source_indices_into(
+            self.k,
+            &self.degree_dist,
+            self.rng_seed,
+            symbol_id,
+            &mut indices,
+            &mut self.select_scratch,
+        );
+        self.add_encoded_symbol_inner(symbol_id, data, indices)
     }
 
     #[doc(hidden)]
@@ -374,33 +485,51 @@ impl LTDecoder {
     /// Add received symbol for decoding (no degree info available)
     #[cfg(test)]
     pub fn add_received_symbol(&mut self, symbol_id: u64, data: Vec<u8>) {
-        let _ = self.insert_symbol(symbol_id, data);
+        let _ = self.insert_symbol(symbol_id, &data);
         // Without source index set we cannot peel immediately. We rely on
         // additional encoded symbols with indices to trigger peeling.
     }
 
     /// **Belief Propagation Decoding** - Iterative peeling decoder
+    ///
+    /// `data` is copied into a recycled decoder buffer; callers do not need to
+    /// allocate. `source_indices` accepts any iterator of source indexes —
+    /// entries are sorted and deduplicated before storage.
     pub fn add_encoded_symbol(
         &mut self,
         symbol_id: u64,
-        data: Vec<u8>,
-        source_indices: HashSet<usize>,
+        data: impl AsRef<[u8]>,
+        source_indices: impl IntoIterator<Item = usize>,
     ) -> bool {
+        let data = data.as_ref();
         if data.len() > self.symbol_size {
             return self.reject_symbol("encoded data exceeds configured symbol size");
         }
-        if source_indices.is_empty()
-            || source_indices.len() > self.k
-            || source_indices.iter().any(|&index| index >= self.k)
+        let indices: Vec<usize> = source_indices.into_iter().collect();
+        self.add_encoded_symbol_inner(symbol_id, data, indices)
+    }
+
+    fn add_encoded_symbol_inner(
+        &mut self,
+        symbol_id: u64,
+        data: &[u8],
+        mut indices: Vec<usize>,
+    ) -> bool {
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty()
+            || indices.len() > self.k
+            || indices.iter().any(|&index| index >= self.k)
         {
             return self.reject_symbol("invalid source-index set");
         }
         if !self.insert_symbol(symbol_id, data) {
             return false;
         }
-        self.symbol_degrees.insert(symbol_id, source_indices.clone());
+        let degree_one = indices.len() == 1;
+        self.symbol_degrees.insert(symbol_id, indices);
 
-        if source_indices.len() == 1 {
+        if degree_one {
             let _ = self.enqueue_degree_one(symbol_id);
         }
 
@@ -412,25 +541,28 @@ impl LTDecoder {
         let mut progressed = false;
         while let Some(symbol_id) = self.degree_one_queue.pop_back() {
             self.queued_symbol_ids.remove(&symbol_id);
-            if let Some(indices) = self.symbol_degrees.get(&symbol_id).cloned() {
-                if indices.len() == 1 {
-                    let Some(&source_idx) = indices.iter().next() else {
-                        continue;
-                    };
-                    if self.decoded_symbols[source_idx].is_none() {
-                        if let Some(encoded_data) = self.received_symbols.get(&symbol_id) {
-                            let decoded = encoded_data.clone();
-                            self.decoded_symbols[source_idx] = Some(decoded.clone());
-                            // Update all other encoded symbols
-                            let propagation_complete =
-                                self.propagate_decoded_symbol(source_idx, &decoded);
-                            progressed = true;
-                            if !propagation_complete {
-                                break;
-                            }
-                        }
-                    }
-                }
+            // Degree-1 entries name their single source index directly.
+            let source_idx = match self.symbol_degrees.get(&symbol_id) {
+                Some(indices) if indices.len() == 1 => indices[0],
+                _ => continue,
+            };
+            if self.decoded_symbols[source_idx].is_some() {
+                continue;
+            }
+            // Move the payload into decoded state: the peeled symbol's data IS
+            // the source symbol, so ownership transfers without any clone. Its
+            // degree entry still names source_idx, so propagation below removes
+            // it and cleans the symbol state.
+            let Some(encoded_data) = self.received_symbols.remove(&symbol_id) else {
+                continue;
+            };
+            self.retained_payload_bytes =
+                self.retained_payload_bytes.saturating_sub(encoded_data.len());
+            self.decoded_symbols[source_idx] = Some(encoded_data);
+            let propagation_complete = self.propagate_decoded_symbol(source_idx);
+            progressed = true;
+            if !propagation_complete {
+                break;
             }
         }
         progressed
@@ -464,12 +596,22 @@ impl LTDecoder {
 
     /// XOR a decoded symbol out of all dependent encoded symbols and enqueue new degree-1 entries.
     ///
-    /// The returned flag is false only when the per-window propagation budget was exhausted.
-    pub fn propagate_decoded_symbol(&mut self, decoded_idx: usize, decoded_data: &[u8]) -> bool {
-        if decoded_idx >= self.k || decoded_data.len() > self.symbol_size {
-            return self.reject_symbol("invalid decoded symbol index or length");
+    /// The decoded bytes are taken out of `decoded_symbols` for the duration of
+    /// the sweep, so propagation needs no clone of the symbol payload. The
+    /// returned flag is false only when the per-window propagation budget was
+    /// exhausted.
+    pub fn propagate_decoded_symbol(&mut self, decoded_idx: usize) -> bool {
+        if decoded_idx >= self.k {
+            return self.reject_symbol("invalid decoded symbol index");
         }
-        let mut to_update = Vec::new();
+        let Some(decoded_data) = self.decoded_symbols[decoded_idx].take() else {
+            return self.reject_symbol("decoded symbol index carries no data");
+        };
+        if decoded_data.len() > self.symbol_size {
+            self.decoded_symbols[decoded_idx] = Some(decoded_data);
+            return self.reject_symbol("decoded symbol exceeds configured symbol size");
+        }
+        let mut to_update = std::mem::take(&mut self.propagation_scratch);
 
         for (&symbol_id, indices) in &self.symbol_degrees {
             if self.propagation_work >= self.max_propagation_work {
@@ -483,7 +625,7 @@ impl LTDecoder {
             }
         }
 
-        for symbol_id in to_update {
+        for &symbol_id in &to_update {
             // Remove decoded symbol from this encoded symbol (SIMD-accelerated XOR)
             if let Some(encoded_data) = self.received_symbols.get_mut(&symbol_id) {
                 let sl = core::cmp::min(encoded_data.len(), decoded_data.len());
@@ -492,7 +634,9 @@ impl LTDecoder {
 
             let (became_empty, became_degree_one) =
                 if let Some(indices) = self.symbol_degrees.get_mut(&symbol_id) {
-                    indices.remove(&decoded_idx);
+                    if let Ok(pos) = indices.binary_search(&decoded_idx) {
+                        indices.remove(pos);
+                    }
                     (indices.is_empty(), indices.len() == 1)
                 } else {
                     (false, false)
@@ -504,6 +648,9 @@ impl LTDecoder {
                 let _ = self.enqueue_degree_one(symbol_id);
             }
         }
+        to_update.clear();
+        self.propagation_scratch = to_update;
+        self.decoded_symbols[decoded_idx] = Some(decoded_data);
         !self.propagation_budget_exhausted
     }
 

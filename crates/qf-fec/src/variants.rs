@@ -120,12 +120,12 @@ impl EncoderVariant {
             Self::GF4(encoder) => encoder.generate_repair_packet(index, pool),
             Self::Fountain(encoder) => {
                 let symbol_id = next_repair_id();
-                let (encoded_data, indices) = encoder.generate_symbol_with_indices(symbol_id);
+                let (encoded_data, indices) = encoder.generate_symbol(symbol_id);
                 let coefficient_len = indices.len().checked_mul(4)?;
                 if coefficient_len > pool.block_size() {
                     return None;
                 }
-                let data_block = copy_to_pooled_block(pool, &encoded_data)?;
+                let data_block = copy_to_pooled_block(pool, encoded_data)?;
                 let mut coefficient_block = PooledBlock::new(Arc::clone(pool));
                 for (offset, index) in indices.iter().enumerate() {
                     let bytes = u32::try_from(*index).ok()?.to_be_bytes();
@@ -200,7 +200,7 @@ pub enum DecoderVariant {
     /// GF(2^4) block decoder for ultra-low loss recovery.
     GF4(Decoder4),
     /// LT fountain rateless decoder for extreme loss recovery.
-    Fountain(FountainDecoder),
+    Fountain(Box<FountainDecoder>),
 }
 
 impl DecoderVariant {
@@ -221,13 +221,15 @@ impl DecoderVariant {
                 Self::GF8(Decoder8::new_with_depth(k, pool, policy, depth))
             }
             WireCodec::Gf16 => Self::GF16(Decoder16::new_with_depth(k, pool, depth)),
-            WireCodec::Fountain => Self::Fountain(FountainDecoder::new_with_repair_limit(
-                k,
-                policy.fountain_symbol_size,
-                pool,
-                seed,
-                fountain_repair_limit,
-            )),
+            WireCodec::Fountain => {
+                Self::Fountain(Box::new(FountainDecoder::new_with_repair_limit(
+                    k,
+                    policy.fountain_symbol_size,
+                    pool,
+                    seed,
+                    fountain_repair_limit,
+                )))
+            }
         }
     }
 
@@ -263,7 +265,7 @@ impl DecoderVariant {
             FecBackendFamily::Fountain => {
                 let symbol_size = policy.fountain_symbol_size;
                 telemetry::FOUNTAIN_SYMBOL_SIZE.store(symbol_size as u64, Ordering::Relaxed);
-                Self::Fountain(FountainDecoder::new(k, symbol_size, Arc::clone(&pool)))
+                Self::Fountain(Box::new(FountainDecoder::new(k, symbol_size, Arc::clone(&pool))))
             }
             FecBackendFamily::Zero => Self::Zero(ZeroDecoder::new(k, pool)),
             FecBackendFamily::LowCostBlock => {
@@ -297,12 +299,11 @@ impl DecoderVariant {
             Self::GF16(decoder) => decoder.take_packet(packet),
             Self::GF4(decoder) => decoder.take_packet(packet),
             Self::Fountain(decoder) => {
-                if let Some(data) = packet.payload_slice() {
-                    let payload = data.to_vec();
-                    if packet.is_systematic {
+                if packet.is_systematic {
+                    if let Some(data) = packet.payload_slice() {
                         match usize::try_from(packet.id) {
                             Ok(source_index) => {
-                                let _ = decoder.add_source_symbol(source_index, payload);
+                                let _ = decoder.add_source_symbol(source_index, data.to_vec());
                             }
                             Err(_) => {
                                 log::debug!(
@@ -311,10 +312,12 @@ impl DecoderVariant {
                                 );
                             }
                         }
-                    } else {
-                        let source_indices = decoder.source_indices(packet.id);
-                        let _ = decoder.add_encoded_symbol(packet.id, payload, source_indices);
                     }
+                } else {
+                    // Borrow the payload directly: the decoder recomputes the
+                    // index set from the seed and copies into recycled buffers.
+                    let payload: &[u8] = packet.payload_slice().unwrap_or(&[]);
+                    let _ = decoder.add_fountain_symbol(packet.id, payload);
                 }
             }
         }

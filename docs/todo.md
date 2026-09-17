@@ -24,10 +24,12 @@
 
 ### TODO-918 - Recovery sent-map: BTreeMap node alloc + O(log n) per tracked packet
 - `sent: BTreeMap<u64, SentPacket>` allocates a B-tree node per packet and does `O(log n)` lookup/remove. Packet numbers are monotonic per space — a sliding ring indexed by `pn - pn_base` gives O(1) + zero alloc. Must tolerate non-contiguous ACK removal and pn-space gaps.
+- DONE. `SentRing` (`VecDeque<Option<SentPacket>>` + `base`) replaces the map: O(1) insert/remove/contains, dense-slot range scans for ACK `drain_range` and `iter_prefix` loss walks, `pop_oldest`/`trim_front` for eviction. `MAX_SENT_RING_SLOTS = 2×retained` bounds sparse-ACK spans; same-pn requeues replace in place with exact byte accounting via `RingEvict`. 50/50 crate tests incl. new ring edge-case suite; 1719/1719 root lib.
 - Detail: `docs/todo/todo-918-recovery-sentmap-btreemap.md`
 
 ### TODO-919 - Fountain codec: 3+ Vec allocs per encoded symbol
 - `generate_symbol_with_indices` → `(Vec<u8>, Vec<usize>)` + `Vec<f64>` distribution; decoder `HashMap<u64, Vec<u8>>` + `Vec<Option<Vec<u8>>>` per symbol. Add `encode_into`/`SmallVec` indices + pooled symbol slab + cached degree table.
+- DONE. Encoder `generate_symbol` returns slices into reusable scratch (indices/select/encoded) + cached `max_symbol_len` — zero alloc warm path. Decoder: `symbol_degrees` Vec<usize> (sorted/deduped, binary_search removal), bounded payload freelist recycles symbol buffers, `add_fountain_symbol` computes indices into the scratch Vec that becomes the stored degree (1 alloc/retained symbol), peel transfers payload ownership (2 clones → 0), `propagate_decoded_symbol` takes-out/puts-back decoded data and reuses `propagation_scratch`. `DecoderVariant::Fountain` boxed.
 - Detail: `docs/todo/todo-919-fountain-alloc-storm.md`
 
 ### TODO-920 - qf-stealth re-acquires thread RNG on every shaping decision
