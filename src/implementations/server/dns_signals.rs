@@ -1012,7 +1012,7 @@ impl ServerSignals {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) async fn recv_datagram_from(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
@@ -1031,18 +1031,126 @@ pub(crate) async fn recv_datagram_from(
         .await
 }
 
+/// Append one received record to `batch`, splitting kernel-coalesced
+/// (`UDP_GRO`) buffers back into per-datagram entries. Segment 0 keeps the
+/// receive slot; later segments are copied into fresh pooled slots so every
+/// batch entry owns its buffer.
+#[cfg(target_os = "linux")]
+fn push_gro_record(
+    slot: Vec<u8>,
+    len: usize,
+    from: std::net::SocketAddr,
+    gso_size: u16,
+    pool: &mut Vec<Vec<u8>>,
+    batch: &mut Vec<(Vec<u8>, usize, std::net::SocketAddr)>,
+) {
+    let gso = gso_size as usize;
+    if gso == 0 || len <= gso {
+        batch.push((slot, len, from));
+        return;
+    }
+    let segments = len.div_ceil(gso);
+    let mut tails: smallvec::SmallVec<[(Vec<u8>, usize); 8]> = smallvec::SmallVec::new();
+    for seg in 1..segments {
+        let start = seg * gso;
+        let seg_len = (len - start).min(gso);
+        let mut tail = pool.pop().unwrap_or_else(|| vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE]);
+        tail[..seg_len].copy_from_slice(&slot[start..start + seg_len]);
+        tails.push((tail, seg_len));
+    }
+    batch.push((slot, gso, from));
+    for (tail, seg_len) in tails {
+        batch.push((tail, seg_len, from));
+    }
+}
+
 /// Drain the kernel socket buffer until `WouldBlock`, returning up to `max`
 /// datagrams per call (TODO-901 step 1: amortize one tokio wakeup across a
 /// whole burst instead of paying select! + admission per single recvmsg).
+/// On Linux the burst drain is a single `recvmmsg` with `UDP_GRO` ancillary
+/// parsing (TODO-923); a coalesced buffer is split back into per-datagram
+/// batch entries preserving wire order.
 ///
 /// The first datagram waits for readability via the same `async_io` pattern as
-/// [`recv_datagram_from`]; the rest of the burst is drained with non-blocking
-/// `try_recv_from` into one reused scratch buffer until EAGAIN or capacity.
-/// Datagram slots are popped from `pool` and pushed back by the caller after
-/// processing, so a warm pool makes the whole burst drain allocation-free.
-/// Each batch entry owns its slot until recycled; `len` records the received
-/// datagram length since slots stay at `LIVE_UDP_DATAGRAM_BUFFER_SIZE`.
-#[cfg(unix)]
+/// [`recv_datagram_from`]. Datagram slots are popped from `pool` and pushed
+/// back by the caller after processing, so a warm pool makes the whole burst
+/// drain allocation-free. Each batch entry owns its slot until recycled;
+/// `len` records the received datagram length since slots stay at
+/// `LIVE_UDP_DATAGRAM_BUFFER_SIZE`.
+#[cfg(target_os = "linux")]
+pub(crate) async fn recv_datagram_batch(
+    socket: &tokio::net::UdpSocket,
+    max: usize,
+    pool: &mut Vec<Vec<u8>>,
+    batch: &mut Vec<(Vec<u8>, usize, std::net::SocketAddr)>,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    const DRAIN_BATCH_CAP: usize = 64;
+    let cap = max.clamp(1, DRAIN_BATCH_CAP);
+    batch.clear();
+    let fd = socket.as_raw_fd();
+
+    // Blocking wait for the first datagram of the burst. recvmsg (not
+    // recv_from) is required once UDP_GRO is enabled: a kernel-coalesced
+    // buffer only reports its segment size through the control channel.
+    let mut slot = pool.pop().unwrap_or_else(|| vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE]);
+    let first = socket
+        .async_io(Interest::READABLE, || qf_transport_udp::recv_msg_gro(fd, &mut slot, true))
+        .await;
+    match first {
+        Ok((len, from, gso)) => push_gro_record(
+            slot,
+            len,
+            from.unwrap_or_else(|| std::net::SocketAddr::from(([0u8; 4], 0))),
+            gso,
+            pool,
+            batch,
+        ),
+        Err(error) => {
+            pool.push(slot);
+            return Err(error);
+        }
+    }
+
+    // Drain the rest of the burst with a single recvmmsg.
+    let want = cap.saturating_sub(batch.len());
+    let mut slots: smallvec::SmallVec<[Vec<u8>; DRAIN_BATCH_CAP]> = smallvec::SmallVec::new();
+    for _ in 0..want {
+        slots.push(pool.pop().unwrap_or_else(|| vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE]));
+    }
+    let records = {
+        let mut refs: smallvec::SmallVec<[&mut [u8]; DRAIN_BATCH_CAP]> =
+            slots.iter_mut().map(|s| s.as_mut_slice()).collect();
+        qf_transport_udp::recv_batch_gro(fd, &mut refs, true)
+    };
+    let records = match records {
+        Ok(records) => records,
+        Err(error) => {
+            while let Some(slot) = slots.pop() {
+                pool.push(slot);
+            }
+            return Err(error);
+        }
+    };
+
+    let mut slots_iter = slots.into_iter();
+    for record in records.iter() {
+        let slot_vec = slots_iter.next().expect("one slot per recvmmsg record");
+        let from = record.addr.unwrap_or_else(|| {
+            log::warn!("recvmmsg record missing peer address");
+            std::net::SocketAddr::from(([0u8; 4], 0))
+        });
+        push_gro_record(slot_vec, record.len, from, record.gso_size, pool, batch);
+    }
+    // Slots the kernel did not fill return to the pool.
+    for leftover in slots_iter {
+        pool.push(leftover);
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) async fn recv_datagram_batch(
     socket: &tokio::net::UdpSocket,
     max: usize,

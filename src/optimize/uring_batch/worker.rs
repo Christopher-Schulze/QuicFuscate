@@ -4,12 +4,18 @@ use std::sync::Mutex;
 enum WorkerRequest {
     Connected {
         fd: RawFd,
-        payloads: Vec<Vec<u8>>,
+        /// All payloads concatenated once; `spans` holds `(start, len)` per
+        /// input so submission crosses the channel with a single allocation
+        /// instead of one `Vec` per packet.
+        flat: Vec<u8>,
+        spans: Vec<(usize, usize)>,
         reply: tokio::sync::oneshot::Sender<Result<BatchSendResult, BatchSendError>>,
     },
     To {
         fd: RawFd,
-        packets: Vec<(SocketAddr, Vec<u8>)>,
+        flat: Vec<u8>,
+        /// `(addr, start, len)` per packet into `flat`.
+        spans: Vec<(SocketAddr, usize, usize)>,
         reply: tokio::sync::oneshot::Sender<Result<BatchSendResult, BatchSendError>>,
     },
 }
@@ -49,16 +55,18 @@ impl UringBatchWorker {
                 let mut sender = sender;
                 while let Some(request) = request_rx.blocking_recv() {
                     match request {
-                        WorkerRequest::Connected { fd, payloads, reply } => {
+                        WorkerRequest::Connected { fd, flat, spans, reply } => {
                             if shutdown_for_worker.load(Ordering::Acquire) {
                                 let _ = reply.send(Err(BatchSendError::not_submitted(
                                     worker_shutdown_error(),
-                                    payloads.len(),
+                                    spans.len(),
                                 )));
                                 continue;
                             }
-                            let payload_refs: Vec<&[u8]> =
-                                payloads.iter().map(Vec::as_slice).collect();
+                            let payload_refs: Vec<&[u8]> = spans
+                                .iter()
+                                .map(|&(start, len)| &flat[start..start + len])
+                                .collect();
                             let control = SendControl {
                                 shutdown: &shutdown_for_worker,
                                 deadline: Instant::now() + BLOCKING_WORKER_OPERATION_TIMEOUT,
@@ -74,17 +82,17 @@ impl UringBatchWorker {
                             }
                             let _ = reply.send(result);
                         }
-                        WorkerRequest::To { fd, packets, reply } => {
+                        WorkerRequest::To { fd, flat, spans, reply } => {
                             if shutdown_for_worker.load(Ordering::Acquire) {
                                 let _ = reply.send(Err(BatchSendError::not_submitted(
                                     worker_shutdown_error(),
-                                    packets.len(),
+                                    spans.len(),
                                 )));
                                 continue;
                             }
-                            let packet_refs: Vec<(SocketAddr, &[u8])> = packets
+                            let packet_refs: Vec<(SocketAddr, &[u8])> = spans
                                 .iter()
-                                .map(|(addr, payload)| (*addr, payload.as_slice()))
+                                .map(|&(addr, start, len)| (addr, &flat[start..start + len]))
                                 .collect();
                             let control = SendControl {
                                 shutdown: &shutdown_for_worker,
@@ -186,9 +194,15 @@ impl UringBatchWorker {
         UringBatchSender::validate_batch_admission(payloads.len(), payload_bytes)
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let owned_payloads = payloads.iter().map(|payload| payload.to_vec()).collect();
+        let mut flat = Vec::with_capacity(payload_bytes);
+        let mut spans = Vec::with_capacity(input_len);
+        for payload in payloads {
+            let start = flat.len();
+            flat.extend_from_slice(payload);
+            spans.push((start, payload.len()));
+        }
         self.submit_request(
-            WorkerRequest::Connected { fd, payloads: owned_payloads, reply: reply_tx },
+            WorkerRequest::Connected { fd, flat, spans, reply: reply_tx },
             reply_rx,
             input_len,
         )
@@ -216,10 +230,15 @@ impl UringBatchWorker {
         UringBatchSender::validate_batch_admission(packets.len(), payload_bytes)
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let owned_packets =
-            packets.iter().map(|(addr, payload)| (*addr, payload.to_vec())).collect();
+        let mut flat = Vec::with_capacity(payload_bytes);
+        let mut spans = Vec::with_capacity(input_len);
+        for (addr, payload) in packets {
+            let start = flat.len();
+            flat.extend_from_slice(payload);
+            spans.push((*addr, start, payload.len()));
+        }
         self.submit_request(
-            WorkerRequest::To { fd, packets: owned_packets, reply: reply_tx },
+            WorkerRequest::To { fd, flat, spans, reply: reply_tx },
             reply_rx,
             input_len,
         )

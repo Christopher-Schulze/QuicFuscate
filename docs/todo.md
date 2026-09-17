@@ -45,7 +45,7 @@
 - Detail: `docs/todo/todo-922-client-ingress-alloc.md`
 
 ### TODO-923 - Wire UDP_SEGMENT GSO/GRO into the VPN dataplane
-- `UdpGsoConfig::enable_fd` probes `UDP_SEGMENT` but the dataplane still does one syscall per packet on both TX and RX. TX: coalesce same-peer packets into one `UDP_SEGMENT` sendmsg. RX: `UDP_GRO` + `recvmmsg` + control-parse split. Largest syscall-reduction lever on Linux — Omega-verifiable.
+- DONE (Omega-verified, kernel 6.17/aarch64). Shared `qf-transport-udp` primitives (`probe_udp_gso`, `enable_udp_gro`, `send_udp_segment`, `recv_batch_gro`, `recv_msg_gro`) now back both ends: server RX drains bursts via one `recvmmsg` with `UDP_GRO` cmsg parse + `push_gro_record` split; server TX coalesces contiguous same-target uniform-length runs into one `UDP_SEGMENT` sendmsg (`plan_gso_run`, ≤64 segs); client RX switched to `recv_msg_gro` + `emit_wire_record` split (GRO gated off when `io_uring` inbound is compiled in — its RecvMsg SQEs post no cmsg space). `strace` evidence: 1 sendmsg → 4 wire datagrams; 11 datagrams via 2 recvmsg + 2 recvmmsg. `UringBatchWorker` submissions now flatten payloads into one buffer + span table.
 - Detail: `docs/todo/todo-923-udp-gso-gro-datapath.md`
 
 ### TODO-924 - FEC encode path: parallelize multi-block parity with rayon
@@ -62,7 +62,7 @@
 - Detail: `docs/todo/todo-926-recv-batch-cap-unreachable.md`
 
 ### TODO-927 - io_uring TX: triple-copy, channel(1) depth, 1ms sleep poll — x86 evidence missing
-- `uring_batch.rs` still copies payload→submission→iovec, serializes on a `channel(1)`, and drains completions via `thread::sleep(1ms)`. Fix: `channel(N)` depth, eventfd/`io_uring_enter` wake, pointer-submitted `Arc` payloads. Never exercised on real x86_64 — Omega covers aarch64 only.
+- PARTIAL (TODO-923 batch): `WorkerRequest` submissions now carry one flat payload `Vec<u8>` + span table instead of one `Vec` per packet — the per-packet alloc+copy on submit is gone. Still open: `channel(1)` serialization, `thread::sleep(1ms)` CQE poll → eventfd/`io_uring_enter` wake, `UringRecvBatch` cmsg space for GRO (blocks client GRO under io_uring), x86_64 evidence — Omega covers aarch64 only.
 - Detail: `docs/todo/todo-927-io-uring-x86.md`
 
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness

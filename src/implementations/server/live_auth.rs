@@ -614,6 +614,67 @@ pub async fn send_live_datagram_to(
     }
 }
 
+/// Detect a GSO-coalescable run in `staging` starting at `start`.
+///
+/// Returns `(end, segment_size)` when at least two contiguous, unsent packets
+/// share the same target and every interior packet is exactly `segment_size`
+/// bytes (the kernel splits the super-buffer on `segment_size` boundaries, so
+/// only the final packet may be shorter). Runs are capped at 64 segments and
+/// `max_payload` bytes. `None` when the run has fewer than two packets or GSO
+/// was already ruled out for this socket.
+#[cfg(target_os = "linux")]
+fn plan_gso_run(
+    staging: &[(SocketAddr, Vec<u8>)],
+    sent: &[bool],
+    start: usize,
+    max_payload: usize,
+) -> Option<(usize, u16)> {
+    const MAX_GSO_SEGMENTS: usize = 64;
+    let (target, first) = &staging[start];
+    let seg = first.len();
+    if seg == 0 || seg > u16::MAX as usize {
+        return None;
+    }
+    let mut end = start + 1;
+    let mut total = seg;
+    while end < staging.len()
+        && !sent[end]
+        && staging[end].0 == *target
+        && end - start < MAX_GSO_SEGMENTS
+        && total + staging[end].1.len() <= max_payload
+    {
+        let len = staging[end].1.len();
+        if len == seg {
+            total += len;
+            end += 1;
+            continue;
+        }
+        // A shorter same-target packet may only close the run.
+        if len < seg {
+            end += 1;
+        }
+        break;
+    }
+    (end - start >= 2).then_some((end, seg as u16))
+}
+
+/// Kernel-wide UDP GSO probe cached per process; `UDP_SEGMENT` support is a
+/// socket option uniform across UDP sockets on this host.
+#[cfg(target_os = "linux")]
+fn udp_gso_capable(fd: std::os::unix::io::RawFd) -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let capable = qf_transport_udp::probe_udp_gso(fd);
+            STATE.store(if capable { 1 } else { 2 }, Ordering::Relaxed);
+            capable
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn flush_live_server_outgoing(
     socket: &tokio::net::UdpSocket,
@@ -671,8 +732,10 @@ pub async fn flush_live_server_outgoing(
         // of a retried contiguous prefix.
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         let mut sent = vec![false; staging.len()];
+        // `mut` even without io_uring: the Linux GSO fallback marks slots.
         #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
-        let sent = vec![false; staging.len()];
+        #[allow(unused_mut)]
+        let mut sent = vec![false; staging.len()];
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
             use std::os::unix::io::AsRawFd;
@@ -709,17 +772,65 @@ pub async fn flush_live_server_outgoing(
             }
         }
         // io_uring unavailable or partial: finish only slots not accepted by
-        // the batch operation via individual async calls.
-        for (index, (target, packet)) in staging.iter().enumerate() {
+        // the batch operation via individual async calls. On Linux, contiguous
+        // unsent same-target runs with uniform interior length go out as one
+        // UDP_SEGMENT sendmsg (one syscall per run).
+        let mut index = 0usize;
+        #[cfg(target_os = "linux")]
+        let mut gso_ok = {
+            use std::os::unix::io::AsRawFd;
+            udp_gso_capable(socket.as_raw_fd())
+        };
+        while index < staging.len() {
             if sent[index] {
+                index += 1;
                 continue;
             }
+            #[cfg(target_os = "linux")]
+            if gso_ok {
+                if let Some((end, seg_size)) =
+                    plan_gso_run(&staging, &sent, index, out.len().min(65_535))
+                {
+                    let mut total = 0usize;
+                    for (_, packet) in &staging[index..end] {
+                        out[total..total + packet.len()].copy_from_slice(packet);
+                        total += packet.len();
+                    }
+                    let target = staging[index].0;
+                    let gso_result = {
+                        use std::os::unix::io::AsRawFd;
+                        qf_transport_udp::send_udp_segment(
+                            socket.as_raw_fd(),
+                            target,
+                            &out[..total],
+                            seg_size,
+                        )
+                    };
+                    match gso_result {
+                        Ok(_) => {
+                            for slot in sent.iter_mut().take(end).skip(index) {
+                                *slot = true;
+                            }
+                            index = end;
+                            continue;
+                        }
+                        Err(error) => {
+                            // Kernel rejected GSO (or backpressure): do not
+                            // retry GSO this flush; packets go out individually.
+                            log::debug!("UDP GSO send to {target} failed, per-packet: {error}");
+                            gso_ok = false;
+                        }
+                    }
+                }
+            }
+            let (target, packet) = &staging[index];
             send_live_datagram_to(socket, target, packet).await.map_err(|error| {
                 DataPlaneFault::TransportSend {
                     component: format!("server UDP send to {target}"),
                     error: error.to_string(),
                 }
             })?;
+            index += 1;
         }
     }
 

@@ -152,6 +152,72 @@ impl IoDriver {
         base
     }
 
+    /// Blocking receive of one wire message. On Linux this is `recvmsg` with
+    /// `UDP_GRO` ancillary parsing — required once GRO is enabled, because a
+    /// kernel-coalesced buffer reports its segment size only via the control
+    /// channel (TODO-923). Returns `(len, gso_size)`; `gso_size == 0` marks a
+    /// plain single datagram.
+    #[cfg(target_os = "linux")]
+    async fn recv_wire_datagram(
+        socket: &UdpSocket,
+        buf: &mut [u8],
+    ) -> std::io::Result<(usize, u16)> {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        socket
+            .async_io(tokio::io::Interest::READABLE, || {
+                qf_transport_udp::recv_msg_gro(fd, buf, false).map(|(len, _, gso)| (len, gso))
+            })
+            .await
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn recv_wire_datagram(
+        socket: &UdpSocket,
+        buf: &mut [u8],
+    ) -> std::io::Result<(usize, u16)> {
+        socket.recv(buf).await.map(|len| (len, 0))
+    }
+
+    /// Non-blocking receive of one wire message; same GRO contract as
+    /// [`recv_wire_datagram`].
+    #[cfg(target_os = "linux")]
+    fn try_recv_wire_datagram(socket: &UdpSocket, buf: &mut [u8]) -> std::io::Result<(usize, u16)> {
+        use std::os::unix::io::AsRawFd;
+        qf_transport_udp::recv_msg_gro(socket.as_raw_fd(), buf, false)
+            .map(|(len, _, gso)| (len, gso))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn try_recv_wire_datagram(socket: &UdpSocket, buf: &mut [u8]) -> std::io::Result<(usize, u16)> {
+        socket.try_recv(buf).map(|len| (len, 0))
+    }
+
+    /// Copy one wire message into `batch` slots, splitting a kernel-coalesced
+    /// (`gso_size > 0`) buffer into per-datagram entries in wire order. Batch
+    /// grows beyond its nominal cap rather than dropping tail segments.
+    fn emit_wire_record(data: &[u8], gso_size: u16, batch: &mut Vec<Vec<u8>>, queued: &mut usize) {
+        let gso = gso_size as usize;
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let seg_len = if gso == 0 { data.len() } else { (data.len() - offset).min(gso) };
+            if *queued >= batch.len() {
+                batch.push(Vec::with_capacity(2048));
+            }
+            let slot = &mut batch[*queued];
+            slot.clear();
+            slot.extend_from_slice(&data[offset..offset + seg_len]);
+            crate::optimize::telemetry::IO_DRIVER_COPY_OPS.fetch_add(1, Ordering::Relaxed);
+            crate::optimize::telemetry::IO_DRIVER_COPY_BYTES
+                .fetch_add(seg_len as u64, Ordering::Relaxed);
+            *queued += 1;
+            offset += seg_len;
+            if gso == 0 {
+                break;
+            }
+        }
+    }
+
     /// Flush any pending outgoing packets (ACKs, PTO probes, etc.) produced by
     /// the QUIC connection.  Used by the inbound loop so probes are not held
     /// back until the outbound TUN loop wakes.
@@ -751,7 +817,9 @@ impl IoDriver {
 
         while !self.shutdown.load(Ordering::Relaxed) {
             let timeout = self.recv_timeout(&conn);
-            let recv = tokio::time::timeout(timeout, socket.recv(&mut recv_buf)).await;
+            let recv =
+                tokio::time::timeout(timeout, Self::recv_wire_datagram(&socket, &mut recv_buf))
+                    .await;
             match recv {
                 Err(_) => {}
                 Ok(Err(e)) => {
@@ -760,25 +828,19 @@ impl IoDriver {
                         return Err(self.transport_receive_error("client UDP receive", e));
                     }
                 }
-                Ok(Ok(len)) if len > 0 => {
+                Ok(Ok((len, gso))) if len > 0 => {
                     let mut queued = 0usize;
-                    inbound_batch[queued].clear();
-                    inbound_batch[queued].extend_from_slice(&recv_buf[..len]);
-                    crate::optimize::telemetry::IO_DRIVER_COPY_OPS.fetch_add(1, Ordering::Relaxed);
-                    crate::optimize::telemetry::IO_DRIVER_COPY_BYTES
-                        .fetch_add(len as u64, Ordering::Relaxed);
-                    queued += 1;
+                    Self::emit_wire_record(&recv_buf[..len], gso, &mut inbound_batch, &mut queued);
 
                     while queued < batch_cap {
-                        match socket.try_recv(&mut recv_buf) {
-                            Ok(more) if more > 0 => {
-                                inbound_batch[queued].clear();
-                                inbound_batch[queued].extend_from_slice(&recv_buf[..more]);
-                                crate::optimize::telemetry::IO_DRIVER_COPY_OPS
-                                    .fetch_add(1, Ordering::Relaxed);
-                                crate::optimize::telemetry::IO_DRIVER_COPY_BYTES
-                                    .fetch_add(more as u64, Ordering::Relaxed);
-                                queued += 1;
+                        match Self::try_recv_wire_datagram(&socket, &mut recv_buf) {
+                            Ok((more, more_gso)) if more > 0 => {
+                                Self::emit_wire_record(
+                                    &recv_buf[..more],
+                                    more_gso,
+                                    &mut inbound_batch,
+                                    &mut queued,
+                                );
                             }
                             Ok(_) => break,
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,

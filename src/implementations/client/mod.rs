@@ -570,6 +570,16 @@ impl ClientRuntime {
             std_socket
                 .connect(remote_addr)
                 .map_err(|error| EngineError::Io(format!("UDP connect failed: {error}")))?;
+            // Receive-side coalescing for server GSO bursts. Disabled when the
+            // io_uring inbound path is compiled in: its RecvMsg SQEs post no
+            // control buffer, so coalesced datagrams would lose their segment
+            // metadata (TODO-923 follow-up: arm cmsg space in UringRecvBatch).
+            #[cfg(all(target_os = "linux", not(feature = "io_uring")))]
+            {
+                if let Err(error) = qf_transport_udp::enable_udp_gro(&std_socket) {
+                    log::debug!("UDP GRO enable failed: {error}");
+                }
+            }
             let socket = {
                 let _runtime_guard = runtime.enter();
                 Arc::new(

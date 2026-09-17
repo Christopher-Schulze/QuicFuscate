@@ -296,6 +296,332 @@ impl UdpGsoConfig {
     }
 }
 
+/// Kernel-level UDP GSO capability probe for an existing descriptor.
+///
+/// `UDP_SEGMENT` is a per-message segment-size knob, so support is probed via
+/// `getsockopt`; send paths still attach the actual segment size as ancillary
+/// data on every send.
+#[cfg(target_os = "linux")]
+pub fn probe_udp_gso(fd: RawFd) -> bool {
+    UdpGsoConfig::enable_fd(fd).map(|config| config.enabled).unwrap_or(false)
+}
+
+/// Enable receive-side UDP coalescing (`UDP_GRO`) on a socket.
+///
+/// Returns `false` when the kernel rejects the option; callers must keep the
+/// per-datagram receive path in that case. When enabled, `recvmmsg` messages
+/// may carry a `UDP_GRO` control message with the original segment size and a
+/// payload containing several back-to-back datagrams.
+#[cfg(target_os = "linux")]
+pub fn enable_udp_gro_fd(fd: RawFd) -> std::io::Result<bool> {
+    let val: libc::c_int = 1;
+    // SAFETY: `val` outlives the synchronous setsockopt call.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_UDP,
+            libc::UDP_GRO,
+            &val as *const _ as *const c_void,
+            std::mem::size_of_val(&val) as socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(true)
+}
+
+/// Enable receive-side UDP coalescing (`UDP_GRO`) on a socket.
+#[cfg(target_os = "linux")]
+pub fn enable_udp_gro(sock: &UdpSocket) -> std::io::Result<bool> {
+    enable_udp_gro_fd(sock.as_raw_fd())
+}
+
+/// Send one super-buffer as `UDP_SEGMENT` GSO datagrams (Linux).
+///
+/// The kernel splits `payload` into `ceil(len / segment_size)` wire datagrams;
+/// every interior segment is exactly `segment_size` bytes and the final one
+/// may be shorter. Returns the number of payload bytes accepted, which is
+/// always `payload.len()` on success.
+#[cfg(target_os = "linux")]
+pub fn send_udp_segment(
+    fd: RawFd,
+    addr: SocketAddr,
+    payload: &[u8],
+    segment_size: u16,
+) -> std::io::Result<usize> {
+    validate_datagram_len(payload.len())?;
+    if segment_size == 0 || payload.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "UDP GSO requires a non-empty payload and a non-zero segment size",
+        ));
+    }
+
+    let (storage, storage_len) = sockaddr_storage_for(addr);
+    let iov = iovec { iov_base: payload.as_ptr() as *mut c_void, iov_len: payload.len() };
+
+    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) } as usize;
+    #[repr(align(8))]
+    struct CmsgStorage([u8; 64]);
+    let mut cmsg_buf = CmsgStorage([0u8; 64]);
+    if cmsg_space > cmsg_buf.0.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "UDP GSO control message exceeds stack buffer",
+        ));
+    }
+
+    // SAFETY: `storage`, `iov`, and `cmsg_buf` stay alive and immovable for the
+    // duration of the synchronous sendmsg call.
+    unsafe {
+        let mut msg: msghdr = std::mem::zeroed();
+        msg.msg_name = &storage as *const _ as *mut c_void;
+        msg.msg_namelen = storage_len;
+        msg.msg_iov = &iov as *const _ as *mut iovec;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsg_buf.0.as_mut_ptr() as *mut c_void;
+        msg.msg_controllen = cmsg_space;
+
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "UDP GSO control header unavailable",
+            ));
+        }
+        (*cmsg).cmsg_level = libc::SOL_UDP;
+        (*cmsg).cmsg_type = libc::UDP_SEGMENT;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as usize;
+        *(libc::CMSG_DATA(cmsg) as *mut u16) = segment_size;
+
+        let sent = libc::sendmsg(fd, &msg, libc::MSG_DONTWAIT);
+        if sent < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let sent_bytes = usize::try_from(sent).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "UDP GSO returned an unrepresentable byte count",
+            )
+        })?;
+        if sent_bytes != payload.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                format!(
+                    "UDP GSO datagram completed with {sent_bytes} bytes; expected {}",
+                    payload.len()
+                ),
+            ));
+        }
+        Ok(sent_bytes)
+    }
+}
+
+/// One datagram slot completed by [`recv_batch_gro`].
+///
+/// `gso_size > 0` marks a kernel-coalesced buffer: the slot holds
+/// `ceil(len / gso_size)` original datagrams stored back-to-back, with the
+/// final segment possibly shorter than `gso_size`. `addr` is `Some` when the
+/// caller requested peer capture (unconnected sockets).
+#[cfg(target_os = "linux")]
+pub struct RecvSlot {
+    pub len: usize,
+    pub addr: Option<SocketAddr>,
+    pub gso_size: u16,
+}
+
+/// `recvmmsg` into caller-provided buffers with `UDP_GRO` ancillary parsing.
+///
+/// Fills up to `bufs.len()` messages in one syscall and returns one
+/// [`RecvSlot`] per completed message. Set `capture_addr` for unconnected
+/// sockets to receive the peer address per message. A `WouldBlock` result
+/// yields zero records, not an error. The stack-backed `SmallVec` keeps the
+/// drain allocation-free.
+#[cfg(target_os = "linux")]
+pub fn recv_batch_gro(
+    fd: RawFd,
+    bufs: &mut [&mut [u8]],
+    capture_addr: bool,
+) -> std::io::Result<SmallVec<[RecvSlot; UDP_BATCH_STACK]>> {
+    let mut out: SmallVec<[RecvSlot; UDP_BATCH_STACK]> = SmallVec::new();
+    if bufs.is_empty() {
+        return Ok(out);
+    }
+    validate_batch_len(bufs.len())?;
+
+    #[repr(align(8))]
+    struct CmsgRx([u8; 32]);
+
+    let mut msgs: SmallVec<[libc::mmsghdr; UDP_BATCH_STACK]> = SmallVec::with_capacity(bufs.len());
+    let mut iovecs: SmallVec<[iovec; UDP_BATCH_STACK]> = SmallVec::with_capacity(bufs.len());
+    let mut addrs: SmallVec<[sockaddr_storage; UDP_BATCH_STACK]> =
+        SmallVec::with_capacity(if capture_addr { bufs.len() } else { 0 });
+    let mut cmsgs: SmallVec<[CmsgRx; UDP_BATCH_STACK]> = SmallVec::with_capacity(bufs.len());
+
+    for buf in bufs.iter_mut() {
+        iovecs.push(iovec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: buf.len() });
+        cmsgs.push(CmsgRx([0u8; 32]));
+        if capture_addr {
+            // SAFETY: sockaddr_storage is plain C storage; zeroing defines
+            // every padding byte.
+            addrs.push(unsafe { std::mem::zeroed() });
+        }
+    }
+
+    for i in 0..bufs.len() {
+        // SAFETY: each msghdr points at storage held alive in the SmallVecs
+        // above for the duration of the synchronous syscall.
+        let mut msg: msghdr = unsafe { std::mem::zeroed() };
+        if capture_addr {
+            msg.msg_name = &mut addrs[i] as *mut _ as *mut c_void;
+            msg.msg_namelen = std::mem::size_of::<sockaddr_storage>() as u32;
+        }
+        msg.msg_iov = &mut iovecs[i];
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsgs[i].0.as_mut_ptr() as *mut c_void;
+        msg.msg_controllen = cmsgs[i].0.len();
+        msgs.push(libc::mmsghdr { msg_hdr: msg, msg_len: 0 });
+    }
+
+    // SAFETY: `msgs`, `iovecs`, `addrs`, and `cmsgs` remain alive and immovable
+    // for the duration of the synchronous recvmmsg call.
+    let rc = unsafe {
+        libc::recvmmsg(
+            fd,
+            msgs.as_mut_ptr(),
+            msgs.len() as u32,
+            libc::MSG_DONTWAIT,
+            std::ptr::null_mut(),
+        )
+    };
+    if rc < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            return Ok(out);
+        }
+        return Err(error);
+    }
+    let completed = checked_syscall_count(rc, msgs.len())?;
+
+    for i in 0..completed {
+        if msgs[i].msg_hdr.msg_flags & libc::MSG_TRUNC != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("UDP datagram at index {i} exceeded the receive buffer (MSG_TRUNC)"),
+            ));
+        }
+        let len = checked_received_len(msgs[i].msg_len, bufs[i].len(), i)?;
+
+        let mut gso_size = 0u16;
+        // SAFETY: the kernel wrote a valid cmsg chain into `cmsgs[i]` up to
+        // `msg_controllen`; CMSG_NXTHDR walks it within bounds.
+        unsafe {
+            let mut cmsg = libc::CMSG_FIRSTHDR(&msgs[i].msg_hdr);
+            while !cmsg.is_null() {
+                if (*cmsg).cmsg_level == libc::SOL_UDP && (*cmsg).cmsg_type == libc::UDP_GRO {
+                    gso_size = *(libc::CMSG_DATA(cmsg) as *const u16);
+                    break;
+                }
+                cmsg = libc::CMSG_NXTHDR(&msgs[i].msg_hdr, cmsg);
+            }
+        }
+
+        let addr = if capture_addr {
+            let addr_len = usize::try_from(msgs[i].msg_hdr.msg_namelen).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("peer address length at index {i} is not representable"),
+                )
+            })?;
+            Some(socket_addr_from_storage(&addrs[i], addr_len)?)
+        } else {
+            None
+        };
+        out.push(RecvSlot { len, addr, gso_size });
+    }
+    Ok(out)
+}
+
+/// Single `recvmsg` with `UDP_GRO` ancillary parsing (Linux).
+///
+/// Returns `(len, peer, gso_size)`; `peer` is `Some` when `capture_addr` is
+/// set (unconnected sockets). `gso_size > 0` means `buf[..len]` holds a
+/// kernel-coalesced sequence of `gso_size`-aligned datagrams.
+#[cfg(target_os = "linux")]
+pub fn recv_msg_gro(
+    fd: RawFd,
+    buf: &mut [u8],
+    capture_addr: bool,
+) -> std::io::Result<(usize, Option<SocketAddr>, u16)> {
+    #[repr(align(8))]
+    struct CmsgRx([u8; 32]);
+
+    let mut iov = iovec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: buf.len() };
+    // SAFETY: sockaddr_storage is plain C storage; zeroing defines padding.
+    let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut cmsg_buf = CmsgRx([0u8; 32]);
+
+    // SAFETY: `storage`, `iov`, and `cmsg_buf` stay alive and immovable for the
+    // duration of the synchronous recvmsg call; `msg` then keeps the
+    // kernel-written msg_controllen/msg_flags/msg_namelen for the walk below.
+    let mut msg: msghdr = unsafe { std::mem::zeroed() };
+    if capture_addr {
+        msg.msg_name = &mut storage as *mut _ as *mut c_void;
+        msg.msg_namelen = std::mem::size_of::<sockaddr_storage>() as u32;
+    }
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.0.as_mut_ptr() as *mut c_void;
+    msg.msg_controllen = cmsg_buf.0.len();
+
+    let rc = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if msg.msg_flags & libc::MSG_TRUNC != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "UDP datagram exceeded the receive buffer (MSG_TRUNC)",
+        ));
+    }
+
+    let mut gso_size = 0u16;
+    // SAFETY: `msg` points at `cmsg_buf`, which holds the cmsg chain the
+    // kernel wrote up to `msg_controllen`.
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+        while !cmsg.is_null() {
+            if (*cmsg).cmsg_level == libc::SOL_UDP && (*cmsg).cmsg_type == libc::UDP_GRO {
+                gso_size = *(libc::CMSG_DATA(cmsg) as *const u16);
+                break;
+            }
+            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+        }
+    }
+
+    let len = usize::try_from(rc).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "recvmsg returned an unrepresentable byte count",
+        )
+    })?;
+    let len = checked_received_len(len as u32, buf.len(), 0)?;
+
+    let addr = if capture_addr {
+        let addr_len = usize::try_from(msg.msg_namelen).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "peer address length is not representable",
+            )
+        })?;
+        Some(socket_addr_from_storage(&storage, addr_len)?)
+    } else {
+        None
+    };
+    Ok((len, addr, gso_size))
+}
+
 // =========================================================================
 // sendmmsg/recvmmsg - Batched syscalls for reduced overhead
 // =========================================================================
@@ -862,5 +1188,86 @@ mod tests {
         let mut buf = [0u8; 64];
         let (n, _) = recv_sock.recv_from(&mut buf).expect("recv ipv6");
         assert_eq!(&buf[..n], payload);
+    }
+
+    /// UDP_SEGMENT sendmsg must emit exactly the segment boundaries the peer
+    /// sees: one syscall produces N MTU-sized datagrams on the wire.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gso_segment_send_splits_on_wire() {
+        use std::os::unix::io::AsRawFd;
+        let recv_sock = UdpSocket::bind("127.0.0.1:0").expect("bind recv");
+        recv_sock.set_read_timeout(Some(std::time::Duration::from_secs(2))).expect("timeout");
+        let dest = recv_sock.local_addr().expect("local_addr");
+        let send_sock = UdpSocket::bind("127.0.0.1:0").expect("bind send");
+
+        if !probe_udp_gso(send_sock.as_raw_fd()) {
+            return; // kernel lacks UDP_SEGMENT
+        }
+
+        // Three 600-byte segments + 250-byte tail.
+        let mut payload = vec![0u8; 600 * 3 + 250];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (i / 600).min(3) as u8;
+        }
+        let sent = send_udp_segment(send_sock.as_raw_fd(), dest, &payload, 600).expect("gso send");
+        assert_eq!(sent, payload.len());
+
+        // Wire check: receiver sees 600/600/600/250 datagrams in order.
+        let expected = [600usize, 600, 600, 250];
+        let mut buf = vec![0u8; 2048];
+        for (seg_idx, &want) in expected.iter().enumerate() {
+            let (n, from) = recv_sock.recv_from(&mut buf).expect("recv segment");
+            assert_eq!(n, want, "segment {seg_idx} size");
+            assert_eq!(from, send_sock.local_addr().expect("send addr"));
+            assert!(buf[..n].iter().all(|&b| b == seg_idx.min(3) as u8));
+        }
+    }
+
+    /// GRO-enabled receiver must report segment size via cmsg so coalesced
+    /// buffers split back into original datagram boundaries.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gro_recv_batch_reports_segments() {
+        use std::os::unix::io::AsRawFd;
+        let recv_sock = UdpSocket::bind("127.0.0.1:0").expect("bind recv");
+        recv_sock.set_nonblocking(true).expect("nonblocking");
+        let dest = recv_sock.local_addr().expect("local_addr");
+
+        if !enable_udp_gro(&recv_sock).unwrap_or(false) {
+            return; // kernel lacks UDP_GRO
+        }
+        let send_sock = UdpSocket::bind("127.0.0.1:0").expect("bind send");
+        if !probe_udp_gso(send_sock.as_raw_fd()) {
+            return;
+        }
+
+        let seg = 500usize;
+        let mut payload = vec![0u8; seg * 2];
+        payload[..seg].fill(0xAA);
+        payload[seg..].fill(0xBB);
+        send_udp_segment(send_sock.as_raw_fd(), dest, &payload, seg as u16).expect("gso send");
+
+        // Give the kernel a moment to coalesce, then drain via recvmmsg.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut b1 = vec![0u8; 65535];
+        let mut b2 = vec![0u8; 65535];
+        let mut bufs: [&mut [u8]; 2] = [&mut b1, &mut b2];
+        let records = recv_batch_gro(recv_sock.as_raw_fd(), &mut bufs, true).expect("recv gro");
+
+        assert!(!records.is_empty());
+        let first = &records[0];
+        if first.gso_size as usize == seg && first.len == payload.len() {
+            // Coalesced path: one record, two segments.
+            assert_eq!(first.addr, Some(send_sock.local_addr().expect("send addr")));
+            let data = &bufs[0][..first.len];
+            assert!(data[..seg].iter().all(|&b| b == 0xAA));
+            assert!(data[seg..].iter().all(|&b| b == 0xBB));
+        } else {
+            // Kernel delivered uncoalesced: two records, one segment each.
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].len, seg);
+            assert_eq!(records[1].len, seg);
+        }
     }
 }

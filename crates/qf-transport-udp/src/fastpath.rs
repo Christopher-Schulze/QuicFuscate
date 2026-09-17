@@ -19,10 +19,7 @@ use smallvec::SmallVec;
 
 // Linux-specific imports
 #[cfg(target_os = "linux")]
-use libc::{
-    c_void, iovec, mmsghdr, msghdr, recvmmsg, sockaddr_storage, timespec, CMSG_DATA, CMSG_FIRSTHDR,
-    CMSG_LEN, CMSG_SPACE, MSG_DONTWAIT, SOL_UDP, UDP_GRO, UDP_SEGMENT,
-};
+use libc::{c_void, iovec, mmsghdr, recvmmsg, sockaddr_storage, timespec, MSG_DONTWAIT};
 
 // Telemetry
 
@@ -162,40 +159,19 @@ impl UdpFastPath {
 
     #[cfg(target_os = "linux")]
     fn enable_gso(&mut self) {
-        unsafe {
-            // UDP_SEGMENT is a segment-size knob, not a boolean. Probe support only;
-            // send_gso() supplies the actual per-message segment size.
-            let mut val: i32 = 0;
-            let mut len = mem::size_of::<i32>() as libc::socklen_t;
-            let ret = libc::getsockopt(
-                self.fd,
-                SOL_UDP,
-                UDP_SEGMENT,
-                &mut val as *mut _ as *mut c_void,
-                &mut len,
-            );
-            self.gso_enabled = ret == 0;
-            if self.gso_enabled {
-                log::info!("UDP GSO enabled");
-            }
+        // UDP_SEGMENT is a segment-size knob, not a boolean. Probe support only;
+        // send_gso() supplies the actual per-message segment size.
+        self.gso_enabled = crate::probe_udp_gso(self.fd);
+        if self.gso_enabled {
+            log::info!("UDP GSO enabled");
         }
     }
 
     #[cfg(target_os = "linux")]
     fn enable_gro(&mut self) {
-        unsafe {
-            let val: i32 = 1;
-            let ret = libc::setsockopt(
-                self.fd,
-                SOL_UDP,
-                UDP_GRO,
-                &val as *const _ as *const c_void,
-                mem::size_of_val(&val) as libc::socklen_t,
-            );
-            self.gro_enabled = ret == 0;
-            if self.gro_enabled {
-                log::info!("UDP GRO enabled");
-            }
+        self.gro_enabled = crate::enable_udp_gro_fd(self.fd).unwrap_or(false);
+        if self.gro_enabled {
+            log::info!("UDP GRO enabled");
         }
     }
 
@@ -321,7 +297,6 @@ impl UdpFastPath {
         addr: SocketAddr,
         segment_size: usize,
     ) -> io::Result<usize> {
-        crate::validate_datagram_len(data.len())?;
         if segment_size == 0 || segment_size > u16::MAX as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -332,64 +307,10 @@ impl UdpFastPath {
             data.len().checked_add(segment_size - 1).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "UDP GSO size overflow")
             })? / segment_size;
-
-        unsafe {
-            let sock_addr = socket2::SockAddr::from(addr);
-
-            let iov = iovec { iov_base: data.as_ptr() as *mut c_void, iov_len: data.len() };
-
-            // Setup control message for GSO
-            let cmsg_buf_len = CMSG_SPACE(mem::size_of::<u16>() as u32) as usize;
-            let mut cmsg_buf = [0u8; 64];
-            if cmsg_buf_len > cmsg_buf.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "UDP GSO control message exceeds stack buffer",
-                ));
-            }
-
-            let mut msg: msghdr = mem::zeroed();
-            msg.msg_name = sock_addr.as_ptr() as *mut c_void;
-            msg.msg_namelen = sock_addr.len();
-            msg.msg_iov = &iov as *const _ as *mut iovec;
-            msg.msg_iovlen = 1;
-            msg.msg_control = cmsg_buf.as_mut_ptr() as *mut c_void;
-            msg.msg_controllen = cmsg_buf_len;
-
-            let cmsg = CMSG_FIRSTHDR(&msg);
-            if !cmsg.is_null() {
-                (*cmsg).cmsg_level = SOL_UDP;
-                (*cmsg).cmsg_type = UDP_SEGMENT;
-                (*cmsg).cmsg_len = CMSG_LEN(mem::size_of::<u16>() as u32) as usize;
-
-                let segment_size_ptr = CMSG_DATA(cmsg) as *mut u16;
-                *segment_size_ptr = segment_size as u16;
-            }
-
-            let base_flags = MSG_DONTWAIT;
-            let sent = libc::sendmsg(self.fd, &msg, base_flags);
-
-            if sent < 0 {
-                return Err(io::Error::last_os_error());
-            }
-
-            let sent_bytes = usize::try_from(sent).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "UDP GSO returned an invalid byte count")
-            })?;
-            if sent_bytes != data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    format!(
-                        "UDP GSO datagram completed with {sent_bytes} bytes; expected {}",
-                        data.len()
-                    ),
-                ));
-            }
-            self.packets_sent.fetch_add(segments as u64, Ordering::Relaxed);
-            self.bytes_sent.fetch_add(data.len() as u64, Ordering::Relaxed);
-
-            Ok(sent_bytes)
-        }
+        let sent_bytes = crate::send_udp_segment(self.fd, addr, data, segment_size as u16)?;
+        self.packets_sent.fetch_add(segments as u64, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(data.len() as u64, Ordering::Relaxed);
+        Ok(sent_bytes)
     }
 
     // Sophisticated batched receive with recvmmsg on Linux

@@ -160,6 +160,15 @@ impl ServerRuntime {
             log::debug!("UDP send buffer hint rejected: {}", error);
         }
         std_socket.set_nonblocking(true)?;
+        #[cfg(target_os = "linux")]
+        {
+            // Receive-side coalescing; peers without GSO are unaffected.
+            match qf_transport_udp::enable_udp_gro(&std_socket) {
+                Ok(true) => log::info!("UDP GRO enabled on server socket"),
+                Ok(false) => log::debug!("UDP GRO unavailable on server socket"),
+                Err(error) => log::debug!("UDP GRO enable failed: {error}"),
+            }
+        }
         let socket = Arc::new(UdpSocket::from_std(std_socket)?);
         let local_addr = socket.local_addr()?;
         let (admin_actions_tx, admin_actions_rx) = mpsc::unbounded_channel::<AdminAction>();

@@ -110,7 +110,7 @@ use self::qkey_registry::{QKeyEntry, QKeyRecord, QKeyRegistry};
 use parking_lot::{Mutex, RwLock};
 use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -127,7 +127,7 @@ use crate::optimize::MemoryPool;
 use crate::optimize::OptimizeConfig;
 #[cfg(unix)]
 use crate::optimize::ZeroCopyBuffer;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 use crate::optimize::ZeroCopyRecvBuffer;
 use crate::stealth::{
     BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, StealthConfig,
