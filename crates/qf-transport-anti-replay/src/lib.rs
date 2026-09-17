@@ -13,6 +13,15 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+/// Upper bound for `AntiReplayConfig::max_entries` (16 Mi entries).
+///
+/// Beyond this the Bloom bitset sizing (`capacity * 16` bits, rounded up to a
+/// power of two) could wrap and produce a zero-length table with an unmasked
+/// index — an out-of-bounds panic on the first packet. 16 Mi fingerprints is
+/// already far beyond any plausible 0-RTT ticket volume inside the maximum
+/// ticket age.
+pub const MAX_STRIKE_ENTRIES: usize = 1 << 24;
+
 /// Anti-replay configuration for 0-RTT early data.
 #[derive(Clone, Debug)]
 pub struct AntiReplayConfig {
@@ -162,7 +171,7 @@ impl StrikeRegister {
 }
 
 fn effective_capacity(configured: usize) -> usize {
-    configured.max(1)
+    configured.clamp(1, MAX_STRIKE_ENTRIES)
 }
 
 #[derive(Clone, Debug)]
@@ -290,6 +299,22 @@ mod tests {
         // Evicted entry (i=0) should be insertable again
         let fp_evicted = StrikeRegister::compute_fingerprint(&[0], &[0], &[0]);
         assert!(reg.check_and_insert(&fp_evicted, now + Duration::from_millis(11)));
+    }
+
+    #[test]
+    fn oversized_capacity_is_clamped_and_stays_functional() {
+        // Programmatic AntiReplayConfig construction bypasses section
+        // validation; the internal bound must still keep the Bloom sizing
+        // arithmetic from wrapping (usize::MAX used to produce a zero-length
+        // bit table with mask u64::MAX -> out-of-bounds panic on insert).
+        let mut cfg = test_config();
+        cfg.max_entries = usize::MAX;
+        let reg = StrikeRegister::new(cfg);
+
+        let fp = StrikeRegister::compute_fingerprint(b"huge", b"huge", b"huge");
+        assert!(reg.check_and_insert(&fp, Instant::now()));
+        assert!(!reg.check_and_insert(&fp, Instant::now()));
+        assert_eq!(reg.len(), 1);
     }
 
     #[test]

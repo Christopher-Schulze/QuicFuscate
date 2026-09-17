@@ -556,7 +556,7 @@ protection for early data is never installed. Enabling the keys would therefore 
 accept early data while leaving a deployment believing it had 0-RTT and that its replay posture
 mattered. The settings fail closed rather than being silently ignored. The anti-replay strike
 register described below stays in place for the point where the wiring lands.
-  - Anti-replay: 0-RTT data is protected by a SHA-256 strike register (`src/transport/anti_replay.rs`) per RFC 8446 Section 8 and RFC 9001 Section 9.2. The register uses a Bloom fast-negative in front of the full-fingerprint index and a FIFO ring for O(1) capacity eviction. Replayed 0-RTT packets are silently discarded; clients fall back to 1-RTT automatically. Configurable via `[anti_replay]` TOML section.
+  - Anti-replay: 0-RTT data is protected by a SHA-256 strike register (`src/transport/anti_replay.rs`) per RFC 8446 Section 8 and RFC 9001 Section 9.2. The register uses a Bloom fast-negative in front of the full-fingerprint index and a FIFO ring for O(1) capacity eviction. `max_entries` is bounded by `MAX_STRIKE_ENTRIES` (2^24): section validation rejects larger values at startup and the internal capacity clamp keeps the Bloom bitset sizing arithmetic from wrapping for programmatic configurations. Replayed 0-RTT packets are silently discarded; clients fall back to 1-RTT automatically. Configurable via `[anti_replay]` TOML section.
 
 #### Fingerprint Source Model
 - Primary runtime path: `TlsProfile` selection and rustls `ClientConfig` construction from the active `BrowserProfile` and `OsProfile` persona.
@@ -1572,14 +1572,14 @@ TODO-681 records that `QUICFUSCATE_GHASH` on x86 and `QUICFUSCATE_GHASH_PMULL` o
 - Block repairs use deterministic Cauchy coefficient rows whenever the block fits the GF(256) symbol space, giving the Normal interleaved path an MDS repair matrix instead of rank-deficient arithmetic rows.
 - Lookup tables for small operations
 - SSSE3 and AVX2 nibble-LUT slice multiplication preserve the codec's canonical GF(256)/0x11D field and record `FEC_SSSE3_OPS` / `FEC_AVX2_GF_OPS`. Intel GFNI's byte multiply is fixed to the AES 0x11B field, so it is never used for this FEC wire contract.
-- VBMI2 nibble gather kernel (`gf16_mul_slice_vbmi2`) drives `FEC_GF16_VBMI2_OPS`; processes 32xu16 per iteration via `_mm512_permutex2var_epi16` tables. Runtime dispatch selects it only when the shared AVX-512F + AVX-512BW + AVX-512VBMI2 intersection is present; AVX-512 VBMI, AVX2, SSE2, SVE2, NEON, and scalar levels remain distinct in the FEC owner and threshold map. Lengths are bounded both at the safe caller and inside private helpers. Native throughput and complete per-backend differential proof remain TODO-859/TODO-715 boundaries.
+- VBMI2 nibble gather kernel (`gf16_mul_slice_vbmi2`) drives `FEC_GF16_VBMI2_OPS`; processes 32xu16 per iteration via `_mm512_permutex2var_epi16` tables. Runtime dispatch selects it only when the shared AVX-512F + AVX-512BW + AVX-512VBMI2 intersection is present; AVX-512 VBMI, AVX2, SSE2, SVE2, NEON, and scalar levels remain distinct in the FEC owner and threshold map. Since TODO-907 every tier is a genuine vector kernel — AVX-512 VBMI uses `_mm512_permutexvar_epi8` over a combined 64-byte lo/hi table (gated F+BW+VBMI at the call site because the shared matrix omits BW), AVX2 uses `vpshufb` nibble tables, NEON uses `vqtbl1q_u8`, and SSE2 uses a vectorized 16-round carryless multiply — so `FEC_AVX512_OPS`/`FEC_AVX2_OPS`/`FEC_NEON_OPS` only count real vector work. Lengths are bounded both at the safe caller and inside private helpers. Native throughput and complete per-backend differential proof remain TODO-859/TODO-715 boundaries.
 - Matrix multiplication delegates coefficient application to the same canonical 0x11D slice kernel; raw AVX-512 GFNI multiplication is excluded because its 0x11B polynomial is wire-incompatible.
 - NEON and SVE2 slice kernels share nibble tables with adaptive prefetch; `FEC_NEON_OPS` and `FEC_SVE2_OPS` counters expose runtime usage.
 - GF(2^8) lookup tables are initialized once through a synchronized `Once`/`OnceLock` boundary during FEC startup and never re-enter initialization from `gf_mul_table` or `gf_inv8`.
 
 **GF(2^16) - 16-bit Galois Field:**
-- AVX2-optimized nibble paths (x86_64)
-- NEON-optimized paths (ARM)
+- Nibble-LUT slice multiplication on every vector tier: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`), AVX2 (`vpshufb`), NEON (`vqtbl1q_u8`), plus a vectorized carryless SSE2 kernel; SVE2 and scalar remain the peasant-loop fallbacks (SVE2 table kernel: TODO-908).
+- The big-endian payload path (`gf16_mul_scalar_slice_u16`, `gf16_mul_scalar_slice_padded`) resolves the dispatch policy once per call and byteswaps inside the kernel registers (`vpshufb`/`vrev16q_u8`) instead of round-tripping 64-word stack buffers; a trailing odd byte stays untouched.
 - High-throughput MatMul operations
 - Consistent byte-width policy
 

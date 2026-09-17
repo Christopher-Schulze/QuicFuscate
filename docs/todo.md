@@ -2,6 +2,30 @@
 
 ## Active
 
+### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
+- DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
+- Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`
+
+### TODO-908 - GF16 SVE2 kernel: nibble-table lookup instead of 16-round carryless loop
+- The SVE2 GF16 kernel is correct (peasant loop, verified semantics) but does not exploit `svtbl` nibble tables like NEON/AVX2 now do. Needs real SVE2 hardware to validate — no Apple/Graviton SVE2 host available here.
+- Detail: `docs/todo/todo-908-gf16-sve2-nibble-tables.md`
+
+### TODO-909 - Bound anti_replay.max_entries
+- DONE. `max_entries` had no upper bound: `usize::MAX` wrapped the Bloom sizing (`capacity*16` then `next_power_of_two`) to a zero-length bit table with `mask = u64::MAX` — an out-of-bounds panic on the first packet. `MAX_STRIKE_ENTRIES = 1 << 24` is now enforced in `AntiReplaySection::validate` (readable startup error) and clamped in `effective_capacity` so programmatic `AntiReplayConfig` construction is equally safe. qf-transport-anti-replay 16/16 incl. boundary and `usize::MAX` regression tests.
+- Detail: `docs/todo/todo-909-antireplay-max-entries-bound.md`
+
+### TODO-910 - Audit carried dead code in optimize/udp.rs and compat shims
+- `src/optimize/udp.rs` carries 8 `#[allow(dead_code)]` items; audit whether they are planned API surface or removable residue.
+- Detail: `docs/todo/todo-910-optimize-dead-code-cluster.md`
+
+### TODO-911 - simd_policy dispatch() comment/implementation divergence
+- DONE. The generic `dispatch()` priority comment claimed an SSE2 tier and omitted PCLMULQDQ; it now documents the real order and that SSE2 exists only as a `dispatch_bitslice` policy. Also recorded: `simd_dispatch_matrix().avx512_vbmi` deliberately excludes `avx512bw`, which is why the GF16 VBMI kernel gates BW itself.
+- Detail: `docs/todo/todo-911-simd-policy-comment-divergence.md`
+
+### TODO-912 - Release profile: evaluate panic=abort and lto=fat
+- `panic = "abort"` is unset and `lto = "thin"` is used; decide deliberately whether catch_unwind-based isolation must be preserved or the size/speed wins of abort+fat LTO are wanted.
+- Detail: `docs/todo/todo-912-release-profile-panic-lto.md`
+
 ### TODO-904 - Consolidate CI onto platform lanes and clear Clippy 1.98 stable drift
 - The floating-stable toolchain moved CI to Clippy/rustfmt 1.98.0, whose new `chunks_exact_to_as_chunks` and `manual_slice_fill` lints broke the macOS build-test and Clippy Matrix lanes: 22 sites across qf-crypto, qf-cpu, qf-engine-types, qf-stealth, qf-transport-version, and the root crate now use `as_chunks`/`as_chunks_mut` (and volatile `zeroize` for AES round-key words), plus canonical rustfmt reformat. The admin auth test helper read timeout rose from 10s to 30s so Argon2 under full-suite parallel load cannot starve the response read. CI lanes were consolidated onto the developer platform: macOS `build-test` remains the lean Rust push gate; the macOS simd-selfcheck matrix entry stays removed; `windows-core-checks` proves only Windows-gated surfaces (Wintun/WFP filters) with full test compilation still enforced via `cargo test --no-run`, which also structurally removes the 83-minute Windows suite deadlock observed in run `32614855375`. Frontend/Tauri host jobs were restored after that consolidation so Admin/Desktop check+unit, Shared UI unit, bundle budget, Playwright (including visual/axe), dependency security, and Tauri host tests run on push. Hosted run `32740406262` then exposed four stale contracts: `smol-toml` 1.6.0 advisory (now 1.6.1), Admin `svelte-check` missing `node:fs`/`node:url` types (now `@types/node` 22.20.1), Cargo feature taxonomy missing the live `specta` feature, and Tauri `generate_context!` requiring `apps/svelte-desktop/build` before Clippy. The required GitHub set is now only macOS `build-test`, frontend security/check/e2e, and Tauri host. Parked lanes were removed from the push workflow so skipped jobs cannot pad the check rollup. Hosted `frontend-e2e` installs Playwright Chromium and ignores visual screenshot specs until baselines exist. Local verification: strict rust-tests Clippy, all 22 clippy-matrix feature profiles, all-features check/clippy/lib tests (1759/1759 twice), fuzz contract plus 7/7 fuzz suite, and `cargo fmt --check` all pass.
 - Detail: `docs/todo/todo-904-ci-lane-consolidation.md`

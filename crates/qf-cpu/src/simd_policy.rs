@@ -113,7 +113,9 @@ where
     let has_avx10_512 = detector.features.contains(&CpuFeature::AVX10_1_512);
     let has_avx10_256 = detector.features.contains(&CpuFeature::AVX10_1_256);
 
-    // Priority order: GFNI > VBMI2 > VBMI > AVX2 > SSE2 > SVE2 > SVE > NEON
+    // Priority order: GFNI > VBMI2 > VBMI > AVX2 > PCLMULQDQ > SVE2 > SVE >
+    // NeonCrypto > NEON > Scalar. SSE2 is not dispatched here; it only exists
+    // as a bitslice policy in dispatch_bitslice below.
     if features.avx512f && features.gfni {
         telemetry::SIMD_USAGE_AVX512.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if has_avx10_512 {
@@ -140,7 +142,8 @@ where
             telemetry::SIMD_USAGE_AVX10_256.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         f(&Avx2)
-    // SSE2 removed - fallback directly to scalar
+    // No SSE2 tier in generic dispatch: SSE2-only machines continue on the
+    // PCLMULQDQ policy, which falls back to scalar work in each callee.
     } else if features.pclmulqdq {
         f(&Pclmulqdq)
     } else if matrix.sve2 {

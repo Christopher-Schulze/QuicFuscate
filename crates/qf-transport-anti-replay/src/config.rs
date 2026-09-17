@@ -11,7 +11,8 @@ pub struct AntiReplaySection {
     pub enabled: bool,
     /// Maximum ticket age in seconds before 0-RTT is rejected (default: 10).
     pub max_ticket_age_secs: u64,
-    /// Maximum entries in the strike register (default: 100000).
+    /// Maximum entries in the strike register (default: 100000,
+    /// hard bound: [`crate::MAX_STRIKE_ENTRIES`]).
     pub max_entries: usize,
     /// Maximum early data size in bytes per connection (default: 16384).
     pub max_early_data_size: u32,
@@ -42,6 +43,12 @@ impl AntiReplaySection {
             return Err(
                 "anti_replay.max_entries must be > 0 when anti-replay is enabled".to_string()
             );
+        }
+        if self.max_entries > crate::MAX_STRIKE_ENTRIES {
+            return Err(format!(
+                "anti_replay.max_entries must be <= {} when anti-replay is enabled",
+                crate::MAX_STRIKE_ENTRIES
+            ));
         }
         if self.max_early_data_size == 0 {
             return Err("anti_replay.max_early_data_size must be > 0 when anti-replay is enabled"
@@ -89,5 +96,20 @@ mod tests {
         for section in cases {
             assert!(section.validate().is_err());
         }
+    }
+
+    #[test]
+    fn enabled_section_rejects_oversized_max_entries() {
+        for oversized in [crate::MAX_STRIKE_ENTRIES + 1, usize::MAX] {
+            let section =
+                AntiReplaySection { max_entries: oversized, ..AntiReplaySection::default() };
+            assert!(section.validate().is_err(), "max_entries={oversized} must be rejected");
+        }
+
+        let at_bound = AntiReplaySection {
+            max_entries: crate::MAX_STRIKE_ENTRIES,
+            ..AntiReplaySection::default()
+        };
+        assert!(at_bound.validate().is_ok());
     }
 }
