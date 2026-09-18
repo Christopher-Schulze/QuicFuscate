@@ -157,7 +157,9 @@ pub(super) fn parse_ipv6_udp_dns_query(pkt: &[u8]) -> Option<InterceptedIpv6DnsQ
     Some(InterceptedIpv6DnsQuery { src_ip, dst_ip, src_port, dst_port, hop_limit: pkt[7], payload })
 }
 
-pub(super) fn ones_complement_checksum_raw(data: &[u8]) -> u16 {
+/// Unfolded one's-complement sum over big-endian 16-bit words; an odd tail
+/// byte counts as the high byte of the final word.
+fn ones_complement_sum(data: &[u8]) -> u32 {
     let mut sum = 0u32;
     let (words, remainder) = data.as_chunks::<2>();
     for word in words {
@@ -166,68 +168,78 @@ pub(super) fn ones_complement_checksum_raw(data: &[u8]) -> u16 {
     if let Some(&byte) = remainder.first() {
         sum = sum.wrapping_add((byte as u32) << 8);
     }
+    sum
+}
+
+fn fold_ones_complement_sum(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    !(sum as u16)
+    sum as u16
+}
+
+pub(super) fn ones_complement_checksum_raw(data: &[u8]) -> u16 {
+    !fold_ones_complement_sum(ones_complement_sum(data))
 }
 
 pub(super) fn ones_complement_checksum(data: &[u8]) -> u16 {
     ones_complement_checksum_raw(data)
 }
 
-pub(super) fn ipv4_udp_checksum(src: Ipv4Addr, dst: Ipv4Addr, udp_packet: &[u8]) -> u16 {
-    let mut pseudo = Vec::with_capacity(12 + udp_packet.len());
-    pseudo.extend_from_slice(&src.octets());
-    pseudo.extend_from_slice(&dst.octets());
-    pseudo.push(0);
-    pseudo.push(17);
-    pseudo.extend_from_slice(&(udp_packet.len() as u16).to_be_bytes());
-    pseudo.extend_from_slice(udp_packet);
-    let checksum = ones_complement_checksum(&pseudo);
+fn ipv4_udp_pseudo_header(src: Ipv4Addr, dst: Ipv4Addr, udp_len: usize) -> [u8; 12] {
+    let mut pseudo = [0u8; 12];
+    pseudo[..4].copy_from_slice(&src.octets());
+    pseudo[4..8].copy_from_slice(&dst.octets());
+    pseudo[9] = 17;
+    pseudo[10..12].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    pseudo
+}
+
+fn ipv6_udp_pseudo_header(src: Ipv6Addr, dst: Ipv6Addr, udp_len: usize) -> [u8; 40] {
+    let mut pseudo = [0u8; 40];
+    pseudo[..16].copy_from_slice(&src.octets());
+    pseudo[16..32].copy_from_slice(&dst.octets());
+    pseudo[32..36].copy_from_slice(&(udp_len as u32).to_be_bytes());
+    pseudo[39] = 17;
+    pseudo
+}
+
+/// Combined sum of a pseudo-header and its payload. Both headers are
+/// even-length (12/40 bytes), so the payload begins on a 16-bit word
+/// boundary and the concatenated checksum equals the sum of the parts —
+/// no scratch allocation per packet.
+fn pseudo_and_payload_sum(pseudo: &[u8], udp_packet: &[u8]) -> u32 {
+    debug_assert!(pseudo.len().is_multiple_of(2));
+    ones_complement_sum(pseudo).wrapping_add(ones_complement_sum(udp_packet))
+}
+
+fn udp_checksum_from_sum(sum: u32) -> u16 {
+    let checksum = !fold_ones_complement_sum(sum);
     if checksum == 0 {
         0xffff
     } else {
         checksum
     }
+}
+
+pub(super) fn ipv4_udp_checksum(src: Ipv4Addr, dst: Ipv4Addr, udp_packet: &[u8]) -> u16 {
+    let pseudo = ipv4_udp_pseudo_header(src, dst, udp_packet.len());
+    udp_checksum_from_sum(pseudo_and_payload_sum(&pseudo, udp_packet))
 }
 
 pub(super) fn ipv4_udp_checksum_is_valid(src: Ipv4Addr, dst: Ipv4Addr, udp_packet: &[u8]) -> bool {
-    let mut pseudo = Vec::with_capacity(12 + udp_packet.len());
-    pseudo.extend_from_slice(&src.octets());
-    pseudo.extend_from_slice(&dst.octets());
-    pseudo.push(0);
-    pseudo.push(17);
-    pseudo.extend_from_slice(&(udp_packet.len() as u16).to_be_bytes());
-    pseudo.extend_from_slice(udp_packet);
-    ones_complement_checksum_raw(&pseudo) == 0
+    let pseudo = ipv4_udp_pseudo_header(src, dst, udp_packet.len());
+    fold_ones_complement_sum(pseudo_and_payload_sum(&pseudo, udp_packet)) == 0xffff
 }
 
 pub(super) fn ipv6_udp_checksum(src: Ipv6Addr, dst: Ipv6Addr, udp_packet: &[u8]) -> u16 {
-    let mut pseudo = Vec::with_capacity(40 + udp_packet.len());
-    pseudo.extend_from_slice(&src.octets());
-    pseudo.extend_from_slice(&dst.octets());
-    pseudo.extend_from_slice(&(udp_packet.len() as u32).to_be_bytes());
-    pseudo.extend_from_slice(&[0, 0, 0]);
-    pseudo.push(17);
-    pseudo.extend_from_slice(udp_packet);
-    let checksum = ones_complement_checksum(&pseudo);
-    if checksum == 0 {
-        0xffff
-    } else {
-        checksum
-    }
+    let pseudo = ipv6_udp_pseudo_header(src, dst, udp_packet.len());
+    udp_checksum_from_sum(pseudo_and_payload_sum(&pseudo, udp_packet))
 }
 
 pub(super) fn ipv6_udp_checksum_is_valid(src: Ipv6Addr, dst: Ipv6Addr, udp_packet: &[u8]) -> bool {
-    let mut pseudo = Vec::with_capacity(40 + udp_packet.len());
-    pseudo.extend_from_slice(&src.octets());
-    pseudo.extend_from_slice(&dst.octets());
-    pseudo.extend_from_slice(&(udp_packet.len() as u32).to_be_bytes());
-    pseudo.extend_from_slice(&[0, 0, 0]);
-    pseudo.push(17);
-    pseudo.extend_from_slice(udp_packet);
-    ones_complement_checksum_raw(&pseudo) == 0
+    let pseudo = ipv6_udp_pseudo_header(src, dst, udp_packet.len());
+    fold_ones_complement_sum(pseudo_and_payload_sum(&pseudo, udp_packet)) == 0xffff
 }
 
 pub(super) fn build_ipv4_udp_dns_response_packet(
@@ -586,34 +598,65 @@ pub(super) fn spawn_dns_intercept(
     session_id: Option<SessionId>,
     fingerprint_profile: OsFingerprintProfile,
 ) -> bool {
+    // One parse owns the query data: fields, payload, and source IP are
+    // extracted once instead of re-validating the checksum per consumer. The
+    // payload lives in an `Arc<[u8]>` so the worker and the response builder
+    // share it by refcount instead of a second copy.
+    enum ParsedIntercept {
+        V4 { src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16, ttl: u8 },
+        V6 { src_ip: Ipv6Addr, dst_ip: Ipv6Addr, src_port: u16, dst_port: u16, hop_limit: u8 },
+    }
     let parsed = parse_ipv4_udp_dns_query(pkt)
         .map(|query| {
-            let src_ip = query.src_ip;
-            let dst_ip = query.dst_ip;
-            let src_port = query.src_port;
-            let dst_port = query.dst_port;
-            let ttl = query.ttl;
-            let payload = query.payload.to_vec();
-            Box::new(move |response: &[u8]| {
-                let query = InterceptedIpv4DnsQuery {
-                    src_ip,
-                    dst_ip,
-                    src_port,
-                    dst_port,
-                    ttl,
-                    payload: &payload,
-                };
-                build_ipv4_udp_dns_response_packet(&query, response, fingerprint_profile)
-            }) as Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>> + Send>
+            (
+                ParsedIntercept::V4 {
+                    src_ip: query.src_ip,
+                    dst_ip: query.dst_ip,
+                    src_port: query.src_port,
+                    dst_port: query.dst_port,
+                    ttl: query.ttl,
+                },
+                Arc::<[u8]>::from(query.payload),
+            )
         })
         .or_else(|| {
             parse_ipv6_udp_dns_query(pkt).map(|query| {
-                let src_ip = query.src_ip;
-                let dst_ip = query.dst_ip;
-                let src_port = query.src_port;
-                let dst_port = query.dst_port;
-                let hop_limit = query.hop_limit;
-                let payload = query.payload.to_vec();
+                (
+                    ParsedIntercept::V6 {
+                        src_ip: query.src_ip,
+                        dst_ip: query.dst_ip,
+                        src_port: query.src_port,
+                        dst_port: query.dst_port,
+                        hop_limit: query.hop_limit,
+                    },
+                    Arc::<[u8]>::from(query.payload),
+                )
+            })
+        });
+    let Some((parsed, payload)) = parsed else {
+        return false;
+    };
+    let (build_response_packet, source_ip) = match parsed {
+        ParsedIntercept::V4 { src_ip, dst_ip, src_port, dst_port, ttl } => {
+            let builder_payload = Arc::clone(&payload);
+            (
+                Box::new(move |response: &[u8]| {
+                    let query = InterceptedIpv4DnsQuery {
+                        src_ip,
+                        dst_ip,
+                        src_port,
+                        dst_port,
+                        ttl,
+                        payload: &builder_payload,
+                    };
+                    build_ipv4_udp_dns_response_packet(&query, response, fingerprint_profile)
+                }) as Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>> + Send>,
+                IpAddr::V4(src_ip),
+            )
+        }
+        ParsedIntercept::V6 { src_ip, dst_ip, src_port, dst_port, hop_limit } => {
+            let builder_payload = Arc::clone(&payload);
+            (
                 Box::new(move |response: &[u8]| {
                     let query = InterceptedIpv6DnsQuery {
                         src_ip,
@@ -621,27 +664,13 @@ pub(super) fn spawn_dns_intercept(
                         src_port,
                         dst_port,
                         hop_limit,
-                        payload: &payload,
+                        payload: &builder_payload,
                     };
                     build_ipv6_udp_dns_response_packet(&query, response, fingerprint_profile)
-                }) as Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>> + Send>
-            })
-        });
-    let Some(build_response_packet) = parsed else {
-        return false;
-    };
-    let payload = if let Some(query) = parse_ipv4_udp_dns_query(pkt) {
-        query.payload.to_vec()
-    } else if let Some(query) = parse_ipv6_udp_dns_query(pkt) {
-        query.payload.to_vec()
-    } else {
-        return false;
-    };
-    let Some(source_ip) = parse_ipv4_udp_dns_query(pkt)
-        .map(|query| IpAddr::V4(query.src_ip))
-        .or_else(|| parse_ipv6_udp_dns_query(pkt).map(|query| IpAddr::V6(query.src_ip)))
-    else {
-        return false;
+                }) as Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>> + Send>,
+                IpAddr::V6(src_ip),
+            )
+        }
     };
     let identity = session_id
         .map(|id| crate::dns::DnsAdmissionIdentity::Session(id.as_u64()))

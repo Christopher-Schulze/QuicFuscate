@@ -65,6 +65,22 @@
 - PARTIAL (larger share done): flat payload storage end-to-end (`payload_flat`+`payload_spans`+`packet_addrs`; worker adopts the flat buffer in place — zero payload copies on the channel handoff); `submit_and_poll` spin→yield→capped-sleep backoff replaces the fixed 1 ms sleep; `channel(1)` kept deliberately as bounded backpressure (analysis documented); `UringRecvBatch` arms per-slot `UDP_GRO` cmsg storage and splits coalesced super-buffers — client GRO now works under io_uring (`with_defaults_gro`, safe `disable_udp_gro_fd` fallback). Still open: x86_64 native evidence (Omega covers aarch64 only), optional `IORING_ENTER_GETEVENTS` blocking wait.
 - Detail: `docs/todo/todo-927-io-uring-x86.md`
 
+### TODO-928 - Server TX staging: N Vec allocs per flush → flat buffer + spans
+- DONE. `flush_live_server_outgoing` staged every packet into a fresh `to_vec()` (one alloc + copy per datagram) and GSO runs concatenated again. Staging is now one flat `Vec<u8>` + span table: N allocs → 1, the borrowed worker API flattens once on its side, and a contiguous GSO run is submitted straight from the flat buffer (concat removed). `plan_gso_run` operates on spans; new unit test covers boundary grouping.
+- Detail: `docs/todo/todo-928-server-tx-flat-staging.md`
+
+### TODO-929 - UDP pseudo-header checksums: heap Vec per packet → two-part sum
+- DONE. `udp_checksum_v4`/`udp_checksum_v6` allocated a `12+len`/`40+len` heap Vec per call just to concatenate pseudo-header and packet. Ones-complement summation is associative and pseudo-headers are an even length, so the sum now runs over a stack pseudo-header plus the packet — zero allocation. Validation, folding, and fix-up helpers unchanged; dns_signals 18/18.
+- Detail: `docs/todo/todo-929-udp-checksum-alloc.md`
+
+### TODO-930 - Bandwidth manager: String alloc per packet check → u64 keys
+- DONE. `PerClientBandwidthManager` keyed clients by `String` — every `check_bandwidth` call on the TUN downlink path allocated `session_id.as_u64().to_string()`. Keys and method signatures are `u64` now; the rare audit path formats the numeric id only when it must log. SessionStore wrappers pass `as_u64()` through; bandwidth/session tests migrated (36/36 + 112/112 green).
+- Detail: `docs/todo/todo-930-bandwidth-string-key.md`
+
+### TODO-931 - DNS intercept: 3 parses + 2 payload copies per query → 1 parse + Arc share
+- DONE. The DNS intercept hot path parsed the same packet three times (builder closure, payload extraction, source-IP lookup) and cloned the payload twice. It now parses once into an enum, moves the payload into `Arc<[u8]>`, and the response-builder closure clones only the `Arc` — one parse, one alloc, zero payload copies.
+- Detail: `docs/todo/todo-931-dns-intercept-triple-parse.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`

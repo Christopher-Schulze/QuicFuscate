@@ -463,7 +463,7 @@ pub struct BandwidthStats {
 /// Missing sessions fail closed. Live policy updates replace both directional
 /// buckets while preserving already-accounted quota usage.
 pub struct PerClientBandwidthManager {
-    clients: HashMap<String, ClientBandwidthEntry>,
+    clients: HashMap<u64, ClientBandwidthEntry>,
     default_policy: BandwidthPolicy,
     /// Clock shared by all per-client rate, quota, and audit state.
     clock: ProtocolClock,
@@ -524,27 +524,27 @@ impl PerClientBandwidthManager {
 
     pub fn add_client(
         &mut self,
-        client_id: &str,
+        client_id: u64,
         policy_override: Option<BandwidthPolicy>,
     ) -> Result<(), String> {
         let policy = policy_override.unwrap_or_else(|| self.default_policy.clone());
         policy.validate()?;
-        if self.clients.contains_key(client_id) {
+        if self.clients.contains_key(&client_id) {
             return Err("bandwidth client already registered".to_string());
         }
         let entry = Self::entry_from_policy(policy, &self.clock)
             .map_err(|error| format!("bandwidth wall-clock error: {error}"))?;
-        self.clients.insert(client_id.to_string(), entry);
+        self.clients.insert(client_id, entry);
         Ok(())
     }
 
     pub fn update_client_policy(
         &mut self,
-        client_id: &str,
+        client_id: u64,
         policy: BandwidthPolicy,
     ) -> Result<(), String> {
         policy.validate()?;
-        let Some(entry) = self.clients.get_mut(client_id) else {
+        let Some(entry) = self.clients.get_mut(&client_id) else {
             return Err("bandwidth client not found".to_string());
         };
         entry.uplink_limiter = BandwidthLimiter::new_with_clock(
@@ -565,11 +565,11 @@ impl PerClientBandwidthManager {
 
     pub fn check(
         &mut self,
-        client_id: &str,
+        client_id: u64,
         direction: BandwidthDirection,
         bytes: usize,
     ) -> BandwidthDecision {
-        let Some(entry) = self.clients.get_mut(client_id) else {
+        let Some(entry) = self.clients.get_mut(&client_id) else {
             return BandwidthDecision::RateLimited;
         };
         let clock_available = entry.daily_quota.check_and_reset().is_ok()
@@ -609,7 +609,7 @@ impl PerClientBandwidthManager {
                 crate::audit::AuditEventType::AdminAction,
                 crate::audit::AuditSeverity::Warning,
                 None,
-                Some(client_id),
+                Some(&client_id.to_string()),
                 crate::audit::AuditContext {
                     actor: crate::audit::AuditActor::System,
                     target: crate::audit::AuditTarget::Client,
@@ -626,8 +626,8 @@ impl PerClientBandwidthManager {
     ///
     /// Returns `None` if the client has no entry (never seen and no overrides
     /// applied).
-    pub fn stats(&self, client_id: &str) -> Option<BandwidthStats> {
-        let entry = self.clients.get(client_id)?;
+    pub fn stats(&self, client_id: u64) -> Option<BandwidthStats> {
+        let entry = self.clients.get(&client_id)?;
         Some(BandwidthStats {
             policy: entry.policy.clone(),
             uplink_available_bytes: entry.uplink_limiter.available_tokens(),
@@ -641,9 +641,9 @@ impl PerClientBandwidthManager {
 
     pub fn reset_client_quota(
         &mut self,
-        client_id: &str,
+        client_id: u64,
     ) -> Result<bool, crate::time_source::WallClockError> {
-        let Some(entry) = self.clients.get_mut(client_id) else {
+        let Some(entry) = self.clients.get_mut(&client_id) else {
             return Ok(false);
         };
         let now = self.clock.now_system();
@@ -653,8 +653,8 @@ impl PerClientBandwidthManager {
     }
 
     /// Remove a client's bandwidth/quota state (e.g. on session teardown).
-    pub fn remove_client(&mut self, client_id: &str) {
-        self.clients.remove(client_id);
+    pub fn remove_client(&mut self, client_id: u64) {
+        self.clients.remove(&client_id);
     }
 
     /// Number of clients currently tracked.
@@ -857,7 +857,7 @@ mod tests {
         let mut manager =
             PerClientBandwidthManager::new_with_clock(policy(1_000, 1_000, 10, 10), &clock)
                 .expect("policy is valid before client admission");
-        assert!(manager.add_client("pre-epoch", None).is_err());
+        assert!(manager.add_client(5, None).is_err());
     }
 
     // --- PerClientBandwidthManager ----------------------------------------
@@ -877,32 +877,23 @@ mod tests {
         let mut manager = PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000))
             .expect("valid policy");
         assert_eq!(
-            manager.check("missing", BandwidthDirection::Uplink, 1),
+            manager.check(99, BandwidthDirection::Uplink, 1),
             BandwidthDecision::RateLimited
         );
-        manager.add_client("alice", None).expect("add session");
-        assert_eq!(
-            manager.check("alice", BandwidthDirection::Uplink, 1_000),
-            BandwidthDecision::Allowed
-        );
-        assert_eq!(
-            manager.check("alice", BandwidthDirection::Uplink, 1),
-            BandwidthDecision::RateLimited
-        );
+        manager.add_client(7, None).expect("add session");
+        assert_eq!(manager.check(7, BandwidthDirection::Uplink, 1_000), BandwidthDecision::Allowed);
+        assert_eq!(manager.check(7, BandwidthDirection::Uplink, 1), BandwidthDecision::RateLimited);
     }
 
     #[test]
     fn duplicate_session_registration_is_rejected_without_replacing_state() {
         let mut manager =
             PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000)).unwrap();
-        manager.add_client("alice", None).unwrap();
-        assert_eq!(
-            manager.check("alice", BandwidthDirection::Uplink, 500),
-            BandwidthDecision::Allowed
-        );
+        manager.add_client(7, None).unwrap();
+        assert_eq!(manager.check(7, BandwidthDirection::Uplink, 500), BandwidthDecision::Allowed);
 
-        assert!(manager.add_client("alice", Some(policy(2_000, 2_000, 30_000, 40_000))).is_err());
-        let stats = manager.stats("alice").unwrap();
+        assert!(manager.add_client(7, Some(policy(2_000, 2_000, 30_000, 40_000))).is_err());
+        let stats = manager.stats(7).unwrap();
         assert_eq!(stats.policy, policy(1_000, 1_000, 10_000, 20_000));
         assert_eq!(stats.daily_used_bytes, 500);
     }
@@ -911,16 +902,13 @@ mod tests {
     fn manager_keeps_uplink_and_downlink_rate_buckets_independent() {
         let mut manager =
             PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000)).unwrap();
-        manager.add_client("alice", None).unwrap();
+        manager.add_client(7, None).unwrap();
+        assert_eq!(manager.check(7, BandwidthDirection::Uplink, 1_000), BandwidthDecision::Allowed);
         assert_eq!(
-            manager.check("alice", BandwidthDirection::Uplink, 1_000),
+            manager.check(7, BandwidthDirection::Downlink, 1_000),
             BandwidthDecision::Allowed
         );
-        assert_eq!(
-            manager.check("alice", BandwidthDirection::Downlink, 1_000),
-            BandwidthDecision::Allowed
-        );
-        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 2_000);
+        assert_eq!(manager.stats(7).unwrap().daily_used_bytes, 2_000);
     }
 
     #[test]
@@ -933,21 +921,14 @@ mod tests {
             0,
         ))
         .unwrap();
-        manager.add_client("client", None).unwrap();
+        manager.add_client(3, None).unwrap();
         assert_eq!(
-            manager.check(
-                "client",
-                BandwidthDirection::Uplink,
-                TEN_MEGABIT_BYTES_PER_SECOND as usize,
-            ),
+            manager.check(3, BandwidthDirection::Uplink, TEN_MEGABIT_BYTES_PER_SECOND as usize,),
             BandwidthDecision::Allowed
         );
         assert_eq!(
-            manager.check(
-                "client",
-                BandwidthDirection::Uplink,
-                TEN_MEGABIT_BYTES_PER_SECOND as usize + 1,
-            ),
+            manager
+                .check(3, BandwidthDirection::Uplink, TEN_MEGABIT_BYTES_PER_SECOND as usize + 1,),
             BandwidthDecision::RateLimited
         );
     }
@@ -956,14 +937,14 @@ mod tests {
     fn three_clients_have_no_rate_or_quota_coupling() {
         let mut manager =
             PerClientBandwidthManager::new(policy(1_000, 1_000, 1_000, 2_000)).unwrap();
-        for client in ["one", "two", "three"] {
+        for client in [1u64, 2u64, 3u64] {
             manager.add_client(client, None).unwrap();
             assert_eq!(
                 manager.check(client, BandwidthDirection::Uplink, 1_000),
                 BandwidthDecision::Allowed
             );
         }
-        for client in ["one", "two", "three"] {
+        for client in [1u64, 2u64, 3u64] {
             assert_eq!(manager.stats(client).unwrap().daily_used_bytes, 1_000);
         }
     }
@@ -971,24 +952,18 @@ mod tests {
     #[test]
     fn daily_and_monthly_quota_outcomes_are_distinct() {
         let mut daily = PerClientBandwidthManager::new(policy(10_000, 10_000, 500, 5_000)).unwrap();
-        daily.add_client("alice", None).unwrap();
+        daily.add_client(7, None).unwrap();
+        assert_eq!(daily.check(7, BandwidthDirection::Uplink, 500), BandwidthDecision::Allowed);
         assert_eq!(
-            daily.check("alice", BandwidthDirection::Uplink, 500),
-            BandwidthDecision::Allowed
-        );
-        assert_eq!(
-            daily.check("alice", BandwidthDirection::Downlink, 1),
+            daily.check(7, BandwidthDirection::Downlink, 1),
             BandwidthDecision::DailyQuotaExceeded
         );
 
         let mut monthly = PerClientBandwidthManager::new(policy(10_000, 10_000, 0, 500)).unwrap();
-        monthly.add_client("alice", None).unwrap();
+        monthly.add_client(7, None).unwrap();
+        assert_eq!(monthly.check(7, BandwidthDirection::Uplink, 500), BandwidthDecision::Allowed);
         assert_eq!(
-            monthly.check("alice", BandwidthDirection::Uplink, 500),
-            BandwidthDecision::Allowed
-        );
-        assert_eq!(
-            monthly.check("alice", BandwidthDirection::Downlink, 1),
+            monthly.check(7, BandwidthDirection::Downlink, 1),
             BandwidthDecision::MonthlyQuotaExceeded
         );
     }
@@ -997,31 +972,22 @@ mod tests {
     fn rejected_rate_does_not_consume_shared_quota() {
         let mut manager =
             PerClientBandwidthManager::new(policy(1_000, 1_000, 10_000, 20_000)).unwrap();
-        manager.add_client("alice", None).unwrap();
-        assert_eq!(
-            manager.check("alice", BandwidthDirection::Uplink, 1_000),
-            BandwidthDecision::Allowed
-        );
-        assert_eq!(
-            manager.check("alice", BandwidthDirection::Uplink, 1),
-            BandwidthDecision::RateLimited
-        );
-        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 1_000);
+        manager.add_client(7, None).unwrap();
+        assert_eq!(manager.check(7, BandwidthDirection::Uplink, 1_000), BandwidthDecision::Allowed);
+        assert_eq!(manager.check(7, BandwidthDirection::Uplink, 1), BandwidthDecision::RateLimited);
+        assert_eq!(manager.stats(7).unwrap().daily_used_bytes, 1_000);
     }
 
     #[test]
     fn live_policy_update_preserves_usage_until_explicit_reset() {
         let mut manager =
             PerClientBandwidthManager::new(policy(10_000, 10_000, 10_000, 20_000)).unwrap();
-        manager.add_client("alice", None).unwrap();
-        assert_eq!(
-            manager.check("alice", BandwidthDirection::Uplink, 1_000),
-            BandwidthDecision::Allowed
-        );
-        manager.update_client_policy("alice", policy(20_000, 20_000, 2_000, 3_000)).unwrap();
-        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 1_000);
-        assert!(manager.reset_client_quota("alice").expect("reset quota"));
-        assert_eq!(manager.stats("alice").unwrap().daily_used_bytes, 0);
+        manager.add_client(7, None).unwrap();
+        assert_eq!(manager.check(7, BandwidthDirection::Uplink, 1_000), BandwidthDecision::Allowed);
+        manager.update_client_policy(7, policy(20_000, 20_000, 2_000, 3_000)).unwrap();
+        assert_eq!(manager.stats(7).unwrap().daily_used_bytes, 1_000);
+        assert!(manager.reset_client_quota(7).expect("reset quota"));
+        assert_eq!(manager.stats(7).unwrap().daily_used_bytes, 0);
     }
 
     #[test]
@@ -1043,10 +1009,10 @@ mod tests {
     #[test]
     fn remove_client_erases_the_only_session_entry() {
         let mut manager = PerClientBandwidthManager::new(BandwidthPolicy::default()).unwrap();
-        manager.add_client("alice", None).unwrap();
+        manager.add_client(7, None).unwrap();
         assert_eq!(manager.len(), 1);
-        manager.remove_client("alice");
+        manager.remove_client(7);
         assert!(manager.is_empty());
-        assert!(manager.stats("alice").is_none());
+        assert!(manager.stats(7).is_none());
     }
 }

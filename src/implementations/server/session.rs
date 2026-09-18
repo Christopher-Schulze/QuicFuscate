@@ -233,7 +233,7 @@ impl SessionManager {
         direction: BandwidthDirection,
         bytes: usize,
     ) -> BandwidthDecision {
-        self.bandwidth_manager.check(&session_id.as_u64().to_string(), direction, bytes)
+        self.bandwidth_manager.check(session_id.as_u64(), direction, bytes)
     }
 
     pub fn activate_bandwidth(
@@ -248,12 +248,12 @@ impl SessionManager {
             return Err(SessionError::AlreadyExists);
         }
         self.bandwidth_manager
-            .add_client(&session_id.as_u64().to_string(), policy_override)
+            .add_client(session_id.as_u64(), policy_override)
             .map_err(SessionError::BandwidthPolicy)
     }
 
     pub fn bandwidth_stats(&self, session_id: SessionId) -> Option<BandwidthStats> {
-        self.bandwidth_manager.stats(&session_id.as_u64().to_string())
+        self.bandwidth_manager.stats(session_id.as_u64())
     }
 
     pub fn update_bandwidth_policy(
@@ -261,14 +261,14 @@ impl SessionManager {
         session_id: SessionId,
         policy: BandwidthPolicy,
     ) -> Result<(), String> {
-        self.bandwidth_manager.update_client_policy(&session_id.as_u64().to_string(), policy)
+        self.bandwidth_manager.update_client_policy(session_id.as_u64(), policy)
     }
 
     pub fn reset_bandwidth_quota(
         &mut self,
         session_id: SessionId,
     ) -> Result<bool, crate::time_source::WallClockError> {
-        self.bandwidth_manager.reset_client_quota(&session_id.as_u64().to_string())
+        self.bandwidth_manager.reset_client_quota(session_id.as_u64())
     }
 
     /// Add a session.
@@ -314,7 +314,7 @@ impl SessionManager {
     /// Remove a session.
     pub fn remove(&mut self, id: SessionId) -> Option<Session> {
         if let Some(session) = self.sessions.remove(&id) {
-            self.bandwidth_manager.remove_client(&id.as_u64().to_string());
+            self.bandwidth_manager.remove_client(id.as_u64());
             if self.by_client_ip.get(&session.client_ip) == Some(&id) {
                 self.by_client_ip.remove(&session.client_ip);
             }

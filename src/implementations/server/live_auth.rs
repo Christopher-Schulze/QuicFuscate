@@ -624,14 +624,14 @@ pub async fn send_live_datagram_to(
 /// was already ruled out for this socket.
 #[cfg(target_os = "linux")]
 fn plan_gso_run(
-    staging: &[(SocketAddr, Vec<u8>)],
+    staging: &[(SocketAddr, usize, usize)],
     sent: &[bool],
     start: usize,
     max_payload: usize,
 ) -> Option<(usize, u16)> {
     const MAX_GSO_SEGMENTS: usize = 64;
-    let (target, first) = &staging[start];
-    let seg = first.len();
+    let (target, _, first_len) = staging[start];
+    let seg = first_len;
     if seg == 0 || seg > u16::MAX as usize {
         return None;
     }
@@ -639,11 +639,11 @@ fn plan_gso_run(
     let mut total = seg;
     while end < staging.len()
         && !sent[end]
-        && staging[end].0 == *target
+        && staging[end].0 == target
         && end - start < MAX_GSO_SEGMENTS
-        && total + staging[end].1.len() <= max_payload
+        && total + staging[end].2 <= max_payload
     {
-        let len = staging[end].1.len();
+        let len = staging[end].2;
         if len == seg {
             total += len;
             end += 1;
@@ -692,9 +692,12 @@ pub async fn flush_live_server_outgoing(
 
     // Collect all outgoing packets from this connection before sending.
     // This lets us submit them as a single io_uring batch (one io_uring_enter
-    // syscall instead of one sendmsg per packet).
-    let mut staging: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
-    while staging.len() < crate::transport::UDP_DATAGRAM_BURST_LIMIT {
+    // syscall instead of one sendmsg per packet). Payloads stage into one
+    // flat buffer plus a span table — one allocation per flush instead of one
+    // `Vec` per datagram, and a GSO run is already contiguous in `flat`.
+    let mut staging_flat: Vec<u8> = Vec::new();
+    let mut staging_spans: Vec<(SocketAddr, usize, usize)> = Vec::new();
+    while staging_spans.len() < crate::transport::UDP_DATAGRAM_BURST_LIMIT {
         match conn.send_with_info(out) {
             Ok((len, send_info)) if len > 0 => {
                 crate::telemetry::BYTES_SENT.inc_by(len as u64);
@@ -704,7 +707,9 @@ pub async fn flush_live_server_outgoing(
                 }
                 bytes_sent = bytes_sent.saturating_add(len as u64);
                 packets_sent = packets_sent.saturating_add(1);
-                staging.push((send_info.to, out[..len].to_vec()));
+                let start = staging_flat.len();
+                staging_flat.extend_from_slice(&out[..len]);
+                staging_spans.push((send_info.to, start, len));
             }
             Ok(_) => break,
             Err(crate::error::ConnectionError::Done) => break,
@@ -717,7 +722,7 @@ pub async fn flush_live_server_outgoing(
             }
         }
     }
-    if staging.len() == crate::transport::UDP_DATAGRAM_BURST_LIMIT {
+    if staging_spans.len() == crate::transport::UDP_DATAGRAM_BURST_LIMIT {
         log::debug!(
             "Outgoing flush for {} reached the {} datagram burst limit",
             addr,
@@ -725,23 +730,25 @@ pub async fn flush_live_server_outgoing(
         );
     }
 
-    if !staging.is_empty() {
+    if !staging_spans.is_empty() {
         // Try io_uring batch on Linux when the feature is compiled in.
         // Every fallback candidate is selected from the exact per-slot result;
         // an out-of-order CQE can never make a later successful datagram part
         // of a retried contiguous prefix.
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
-        let mut sent = vec![false; staging.len()];
+        let mut sent = vec![false; staging_spans.len()];
         // `mut` even without io_uring: the Linux GSO fallback marks slots.
         #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
         #[allow(unused_mut)]
-        let mut sent = vec![false; staging.len()];
+        let mut sent = vec![false; staging_spans.len()];
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
             use std::os::unix::io::AsRawFd;
             let fd = socket.as_raw_fd();
-            let packets: Vec<(SocketAddr, &[u8])> =
-                staging.iter().map(|(target, packet)| (*target, packet.as_slice())).collect();
+            let packets: Vec<(SocketAddr, &[u8])> = staging_spans
+                .iter()
+                .map(|&(target, start, len)| (target, &staging_flat[start..start + len]))
+                .collect();
             if let Some(worker) = uring_worker {
                 match worker.send_batch_to_with_disposition(fd, &packets).await {
                     Ok(result) => {
@@ -774,35 +781,31 @@ pub async fn flush_live_server_outgoing(
         // io_uring unavailable or partial: finish only slots not accepted by
         // the batch operation via individual async calls. On Linux, contiguous
         // unsent same-target runs with uniform interior length go out as one
-        // UDP_SEGMENT sendmsg (one syscall per run).
+        // UDP_SEGMENT sendmsg (one syscall per run) — the flat staging already
+        // holds the run back-to-back, so no second concatenation is needed.
         let mut index = 0usize;
         #[cfg(target_os = "linux")]
         let mut gso_ok = {
             use std::os::unix::io::AsRawFd;
             udp_gso_capable(socket.as_raw_fd())
         };
-        while index < staging.len() {
+        while index < staging_spans.len() {
             if sent[index] {
                 index += 1;
                 continue;
             }
             #[cfg(target_os = "linux")]
             if gso_ok {
-                if let Some((end, seg_size)) =
-                    plan_gso_run(&staging, &sent, index, out.len().min(65_535))
-                {
-                    let mut total = 0usize;
-                    for (_, packet) in &staging[index..end] {
-                        out[total..total + packet.len()].copy_from_slice(packet);
-                        total += packet.len();
-                    }
-                    let target = staging[index].0;
+                if let Some((end, seg_size)) = plan_gso_run(&staging_spans, &sent, index, 65_535) {
+                    let run_start = staging_spans[index].1;
+                    let run_end = staging_spans[end - 1].1 + staging_spans[end - 1].2;
+                    let target = staging_spans[index].0;
                     let gso_result = {
                         use std::os::unix::io::AsRawFd;
                         qf_transport_udp::send_udp_segment(
                             socket.as_raw_fd(),
                             target,
-                            &out[..total],
+                            &staging_flat[run_start..run_end],
                             seg_size,
                         )
                     };
@@ -823,13 +826,13 @@ pub async fn flush_live_server_outgoing(
                     }
                 }
             }
-            let (target, packet) = &staging[index];
-            send_live_datagram_to(socket, target, packet).await.map_err(|error| {
-                DataPlaneFault::TransportSend {
+            let &(target, start, len) = &staging_spans[index];
+            send_live_datagram_to(socket, &target, &staging_flat[start..start + len])
+                .await
+                .map_err(|error| DataPlaneFault::TransportSend {
                     component: format!("server UDP send to {target}"),
                     error: error.to_string(),
-                }
-            })?;
+                })?;
             index += 1;
         }
     }
@@ -1577,4 +1580,68 @@ pub(super) async fn process_live_server_client_datagram(
     .await?;
 
     Ok(LiveClientDatagramResult { auth_result, remove_auth_conn_id })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod gso_plan_tests {
+    use super::*;
+
+    fn span(addr: SocketAddr, start: usize, len: usize) -> (SocketAddr, usize, usize) {
+        (addr, start, len)
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([10, 0, 0, 1], port))
+    }
+
+    #[test]
+    fn uniform_same_target_run_coalesces() {
+        let a = addr(1000);
+        let staging = vec![span(a, 0, 600), span(a, 600, 600), span(a, 1200, 250)];
+        let sent = vec![false; 3];
+        let (end, seg) = plan_gso_run(&staging, &sent, 0, 65_535).expect("run");
+        assert_eq!((end, seg), (3, 600), "short tail must close the run");
+    }
+
+    #[test]
+    fn mixed_targets_and_sent_slots_break_runs() {
+        let a = addr(1000);
+        let b = addr(2000);
+        // Different target ends the run before b.
+        let staging = vec![span(a, 0, 600), span(b, 600, 600), span(a, 1200, 600)];
+        let sent = vec![false; 3];
+        assert!(plan_gso_run(&staging, &sent, 0, 65_535).is_none());
+
+        // An already-sent middle slot splits the run; index 1 is the start.
+        let staging = vec![span(a, 0, 600), span(a, 600, 600), span(a, 1200, 600)];
+        let sent = vec![false, true, false];
+        let (end, seg) = plan_gso_run(&staging, &sent, 2, 65_535).unwrap_or((0, 0));
+        assert_eq!((end, seg), (0, 0), "single packet is not a run");
+    }
+
+    #[test]
+    fn run_caps_at_segment_count_and_payload_limit() {
+        let a = addr(1000);
+        let staging: Vec<_> = (0..80).map(|i| span(a, i * 600, 600)).collect();
+        let sent = vec![false; staging.len()];
+        let (end, seg) = plan_gso_run(&staging, &sent, 0, 65_535).expect("run");
+        assert_eq!(seg, 600);
+        assert!(end <= 64, "run must respect the 64-segment cap");
+        // 65535/600 = 109 segments fit by bytes; the 64-segment cap binds.
+        assert_eq!(end, 64);
+
+        // Tight payload cap cuts the run earlier.
+        let (end, _) = plan_gso_run(&staging, &sent, 0, 1_800).expect("run");
+        assert_eq!(end, 3, "1800-byte cap admits exactly three 600-byte segments");
+    }
+
+    #[test]
+    fn interior_longer_packet_rejects_run() {
+        let a = addr(1000);
+        // A same-target packet LONGER than the first segment cannot join the
+        // run (it is not a valid tail either) — run collapses to a singleton.
+        let staging = vec![span(a, 0, 600), span(a, 600, 900), span(a, 1500, 600)];
+        let sent = vec![false; 3];
+        assert!(plan_gso_run(&staging, &sent, 0, 65_535).is_none());
+    }
 }
