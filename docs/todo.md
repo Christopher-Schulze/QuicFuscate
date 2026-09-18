@@ -3800,3 +3800,9 @@
 - `free()` ran `begin_free` + `return_accounted` as two separate global-mutex acquisitions on the ownership HashMap per returned block; fused into `begin_return` (probe TLS room first, transition CheckedOut->Tls/Queue in one lock). One global mutex per free instead of two; `begin_free`/`return_accounted`/`try_cache_block` are now test-only.
 - Local proof: `cargo test -p qf-memory-pool` (25/25), `cargo test -p qf-fec` (85/85), clippy/fmt clean.
 - Omega proof: qf-memory-pool + qf-fec native green on aarch64 Linux.
+
+### TODO-974 - Vectored `stream_send_parts` for H3 DATA frames
+- Detail: `docs/todo/todo-974-stream-send-parts.md`
+- `send_body` built `Vec::new()` + full-body `extend_from_slice` per call just to prepend a <=9-byte DATA frame header, then `stream_send` copied it again into `send_buf`. New `stream_send_parts` appends `&[&[u8]]` parts under one flow-control decision (both buffer variants); `send_body` now sends a stack header + borrowed body - the per-body Vec alloc and intermediate copy are gone.
+- Local proof: `transport::connection` 142/142 default + 143/143 `stream_ring_buffer`, `transport::h3` 102/102, clippy/fmt clean.
+- Omega proof: native green on aarch64 Linux.
