@@ -281,6 +281,16 @@ impl QuicFuscateConnection {
 
         let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
 
+        // Raw (non-FEC) emit: conn.send writes straight into the caller's
+        // buffer — no pool checkout, no queue round-trip, no copy — unless a
+        // stealth/jitter deferral actually fires and the bytes must be
+        // materialized into a pooled block for the outgoing queue. Only legal
+        // when the queue is empty: path_control_pending skips the flush above,
+        // so a non-empty queue must keep the ordered push/pop emission.
+        if wire_profile.is_none() && self.outgoing_fec_packets.is_empty() {
+            return self.send_with_info_raw(buf, now, established);
+        }
+
         // Otherwise, generate a new QUIC packet using a pooled buffer.
         let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
         let send_result = if wire_profile.is_some() {
@@ -517,6 +527,100 @@ impl QuicFuscateConnection {
                 },
             ))
         }
+    }
+
+    /// Raw wire emit for connections without a FEC wire profile: the transport
+    /// writes the datagram straight into the caller's buffer. A stealth or jitter
+    /// deferral is the only case that pays a copy — the bytes are materialized
+    /// into a pooled block and queued exactly like the pooled path would.
+    /// Callers must guarantee `outgoing_fec_packets` is empty so direct
+    /// emission cannot reorder ahead of already queued datagrams.
+    fn send_with_info_raw(
+        &mut self,
+        buf: &mut [u8],
+        now: Instant,
+        established: bool,
+    ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
+        let zero_send_info = |at: Instant| crate::transport::SendInfo {
+            from: self.local_addr,
+            to: self.peer_addr,
+            at,
+            congestion_controlled: false,
+            path_control: false,
+        };
+        let (write, mut send_info) = match self.conn.send(buf) {
+            Ok(v) => v,
+            Err(crate::error::ConnectionError::Done) => {
+                return Ok((0, zero_send_info(now)));
+            }
+            Err(crate::error::ConnectionError::BufferTooShort) => {
+                return Err(crate::error::ConnectionError::BufferTooShort);
+            }
+            Err(e) => return Err(crate::error::ConnectionError::Transport(e.to_string())),
+        };
+        if write == 0 {
+            return Ok((0, zero_send_info(now)));
+        }
+
+        let delay_opt = if send_info.path_control {
+            None
+        } else {
+            self.stealth_manager.process_outgoing_packet(&mut buf[..write])
+        };
+
+        let packet_id = self.packet_id_counter;
+        self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+
+        if established && !send_info.path_control {
+            let transport_jitter = if send_info.congestion_controlled {
+                self.conn.transport_stealth_jitter_delay()
+            } else {
+                None
+            };
+            if let Some(release_at) =
+                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
+            {
+                // Deferred emission retains the datagram in the outgoing queue.
+                let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
+                if send_buffer.len() < write {
+                    return Err(crate::error::ConnectionError::BufferTooShort);
+                }
+                send_buffer[..write].copy_from_slice(&buf[..write]);
+                let send_pool = send_buffer.pool();
+                let mut fec_packet = FecPacket::from_pooled_blocks(
+                    packet_id,
+                    Some(send_buffer),
+                    write,
+                    true,
+                    None,
+                    0,
+                    send_pool,
+                )
+                .map_err(crate::error::ConnectionError::Transport)?;
+                fec_packet.seq = packet_id;
+                self.outgoing_fec_packets.push_back(OutgoingFecPacket {
+                    packet: fec_packet,
+                    wire_meta: None,
+                    send_info,
+                    congestion_controlled: send_info.congestion_controlled,
+                });
+                self.next_packet_release = Some(release_at);
+                return Ok((0, zero_send_info(now)));
+            }
+        }
+
+        send_info.at = now;
+        log::trace!(
+            "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
+            write,
+            self.conn.dgram_send_queue_len(),
+            self.outgoing_fec_packets.len()
+        );
+        if self.fec.telemetry_enabled() {
+            self.fec.observe_wire_send(true, write, write);
+        }
+        self.record_paced_packet(now, write, send_info.congestion_controlled);
+        Ok((write, send_info))
     }
 
     fn record_paced_packet(&mut self, now: Instant, bytes: usize, congestion_controlled: bool) {
