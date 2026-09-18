@@ -687,6 +687,13 @@ pub static FEC_POLICY_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
 pub static FEC_OBSERVED_PACKETS: Counter = Counter::new();
 /// Lost packets included in process-wide FEC loss observations.
 pub static FEC_OBSERVED_LOST_PACKETS: Counter = Counter::new();
+/// Controller-side smoothed loss estimate in parts-per-million of the last
+/// transport feedback report.
+pub static FEC_ESTIMATED_LOSS_PPM: AtomicU64 = AtomicU64::new(0);
+/// Clean-link ACK streak of the loss estimator at the last feedback report.
+pub static FEC_CLEAN_STREAK: AtomicU64 = AtomicU64::new(0);
+/// Whether a FEC mode transition is queued awaiting an encoder-window boundary.
+pub static FEC_PENDING_TRANSITION: AtomicU64 = AtomicU64::new(0);
 /// Source datagrams serialized into the network-facing output buffer.
 pub static FEC_SOURCE_PACKETS_SENT: Counter = Counter::new();
 /// Repair datagrams serialized into the network-facing output buffer.
@@ -801,6 +808,19 @@ pub fn fec_observe_loss(lost_packets: u64, observed_packets: u64) {
 pub fn fec_observe_transport_loss(lost_packets: u64, sent_packets: u64) {
     FEC_OBSERVED_LOST_PACKETS.inc_by(lost_packets);
     FEC_OBSERVED_PACKETS.inc_by(sent_packets);
+}
+
+/// Publish the controller's adaptation internals so operators can distinguish
+/// "no feedback", "estimator still elevated", and "transition awaiting a block
+/// boundary" without attaching a debugger.
+pub fn fec_observe_adaptation_state(
+    estimated_loss_ppm: u64,
+    clean_streak: u64,
+    pending_transition: bool,
+) {
+    FEC_ESTIMATED_LOSS_PPM.store(estimated_loss_ppm.min(1_000_000), Ordering::Relaxed);
+    FEC_CLEAN_STREAK.store(clean_streak, Ordering::Relaxed);
+    FEC_PENDING_TRANSITION.store(pending_transition as u64, Ordering::Relaxed);
 }
 
 /// Record one datagram only after the network-facing serializer accepts it.

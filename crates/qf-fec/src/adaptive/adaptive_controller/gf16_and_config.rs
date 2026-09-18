@@ -200,6 +200,13 @@ impl AdaptiveFec {
         Self::run_feedback_phase(diagnostics_enabled, "stream-interval-update", || {
             self.update_stream_interval(self.policy_loss_estimate(estimated_loss));
         });
+        if self.telemetry.enabled {
+            qf_telemetry::fec_observe_adaptation_state(
+                (estimated_loss.clamp(0.0, 1.0) * 1_000_000.0) as u64,
+                self.loss_estimator.clean_streak() as u64,
+                self.pending_transition.is_some(),
+            );
+        }
         if let Some(started) = feedback_started {
             let elapsed = started.elapsed();
             if elapsed >= std::time::Duration::from_millis(100) {

@@ -212,6 +212,11 @@ pub fn export_telemetry_text() -> String {
         let _ =
             writeln!(out, "quicfuscate_fec_observed_lost_packets_total {observed_lost_packets}");
         let _ = writeln!(out, "quicfuscate_fec_observed_loss_ppm {observed_loss_ppm}");
+        let _ =
+            writeln!(out, "quicfuscate_fec_estimated_loss_ppm {}", get(&FEC_ESTIMATED_LOSS_PPM));
+        let _ = writeln!(out, "quicfuscate_fec_clean_ack_streak {}", get(&FEC_CLEAN_STREAK));
+        let _ =
+            writeln!(out, "quicfuscate_fec_pending_transition {}", get(&FEC_PENDING_TRANSITION));
         let _ = writeln!(out, "quicfuscate_fec_mode_switches_total {}", get(&FEC_MODE_SWITCHES));
         let _ = writeln!(
             out,

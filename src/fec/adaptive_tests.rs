@@ -236,3 +236,75 @@ fn test_hysteresis_prevents_flapping() {
         mode_changes
     );
 }
+
+// ---------------------------------------------------------------------------
+// 7. A pending transition must commit within one block boundary
+// ---------------------------------------------------------------------------
+//
+// Encoder windows drain only at block completion (clear_window after repairs).
+// A non-clean transition queued mid-block may hold until that boundary — but
+// must commit once it passes, within bounded additional sends.
+
+#[test]
+fn test_pending_transition_commits_at_block_boundary() {
+    let _lock = acquire_env_lock();
+    let _g = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
+
+    let pool = make_pool();
+    let config = FecConfig { initial_mode: FecMode::Medium, ..FecConfig::default() };
+    let mut fec = AdaptiveFec::new(config);
+
+    for id in 0..100u64 {
+        let pkt = super::test_support::mk_src_packet(id, 1400, &pool);
+        let _ = fec.on_send(pkt);
+    }
+
+    fec.transition_to_mode(FecMode::Normal);
+    let mut committed = !fec.is_transitioning();
+    for id in 100..1000u64 {
+        if committed {
+            break;
+        }
+        let pkt = super::test_support::mk_src_packet(id, 1400, &pool);
+        let _ = fec.on_send(pkt);
+        committed = !fec.is_transitioning();
+    }
+    assert!(committed, "pending transition must commit at a block boundary");
+}
+
+// ---------------------------------------------------------------------------
+// 8. A single lossy batch must not escalate to the fountain rescue tier
+// ---------------------------------------------------------------------------
+//
+// In-flight packets declared lost after a settle gap produce one large lossy
+// report. The fountain tier requires sustained evidence across consecutive
+// reports; a single batch may escalate to mid-tier modes but never Fountain.
+
+#[test]
+fn test_single_lossy_batch_never_reaches_fountain() {
+    let _lock = acquire_env_lock();
+    let _g = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
+
+    let pool = make_pool();
+    let config = FecConfig { initial_mode: FecMode::Zero, ..FecConfig::default() };
+    let mut fec = AdaptiveFec::new(config);
+
+    for id in 0..64u64 {
+        let pkt = super::test_support::mk_src_packet(id, 1400, &pool);
+        let _ = fec.on_send(pkt);
+        fec.report_loss(0, 4);
+    }
+
+    // One large all-lost batch, then clean flow.
+    fec.report_loss(48, 48);
+    for i in 0..32u64 {
+        let pkt = super::test_support::mk_src_packet(1000 + i, 1400, &pool);
+        let _ = fec.on_send(pkt);
+        fec.report_loss(0, 4);
+        assert_ne!(
+            fec.current_mode(),
+            FecMode::Fountain,
+            "single lossy batch escalated to Fountain"
+        );
+    }
+}

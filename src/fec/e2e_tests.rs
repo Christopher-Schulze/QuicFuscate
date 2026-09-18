@@ -789,3 +789,85 @@ fn test_fec_e2e_heavy_loss_50pct_still_operational() {
     );
     assert!(sim.verify_no_duplicates(), "no duplicate packets even at 50% loss");
 }
+
+/// End-to-end trajectory regression: adaptive mode under the real transport
+/// feedback path (report_transport_loss), including a settle gap whose
+/// late-declared losses must not re-escalate the link to the fountain tier.
+#[test]
+fn test_transport_feedback_mode_trajectory_recovers() {
+    use qf_common::time_source::test_support::ManualTimeSource;
+    use std::time::{Duration, Instant, SystemTime};
+
+    let clock = ManualTimeSource::new(Instant::now(), SystemTime::now());
+    let _guard = crate::time_source::install_for_test(clock.clone());
+    let mut fec = AdaptiveFec::new(FecConfig::product_default());
+
+    // Realistic standalone-client cadence: ~1 source packet per 100ms (10pps
+    // ping), feedback only when acked/lost > 0. Sources flow through on_send so
+    // the encoder window dynamics match production.
+    let step = Duration::from_millis(100);
+    let mut next_id = 0u64;
+    let mut out = Vec::new();
+    let pool = crate::optimize::global_pool();
+    let send_source = |fec: &mut AdaptiveFec, out: &mut Vec<FecPacket>, next_id: &mut u64| {
+        *next_id += 1;
+        fec.on_send_into(mk_src_packet(*next_id, 200, &pool), out);
+    };
+
+    // Phase 1: clean warmup 5s
+    for _ in 0..50u32 {
+        clock.advance(step);
+        send_source(&mut fec, &mut out, &mut next_id);
+        fec.report_transport_loss(1, 1, 0, 0.0);
+    }
+
+    // Phase 2: 20% loss, 15s — moderate loss may escalate to mid-tier modes
+    // but must not reach the fountain rescue tier.
+    for i in 0..150u32 {
+        clock.advance(step);
+        send_source(&mut fec, &mut out, &mut next_id);
+        let lost = usize::from(i % 5 == 4);
+        fec.report_transport_loss(1, 1 - lost, lost, 0.22);
+        assert_ne!(
+            fec.current_mode(),
+            FecMode::Fountain,
+            "20% moderate loss escalated to Fountain at t={}ms",
+            (i + 1) * 100
+        );
+    }
+
+    // Settle gap: 10s idle — no sends, no feedback (estimator frozen)
+    clock.advance(Duration::from_secs(10));
+    // Late-declared losses land in the first ticks after traffic resumes: this
+    // burst must not escalate to the fountain rescue tier.
+    for _ in 0..3u32 {
+        clock.advance(step);
+        fec.report_transport_loss(2, 0, 2, 0.35);
+        assert_ne!(
+            fec.current_mode(),
+            FecMode::Fountain,
+            "settle-gap loss batch escalated to Fountain"
+        );
+    }
+
+    // Phase 3: clean, 40s budget — must de-escalate back to Zero and never
+    // reach Fountain from the late-loss burst.
+    let mut zero_at = None;
+    for i in 0..400u32 {
+        clock.advance(step);
+        send_source(&mut fec, &mut out, &mut next_id);
+        fec.report_transport_loss(1, 1, 0, 0.0);
+        let m = fec.current_mode();
+        assert_ne!(
+            m,
+            FecMode::Fountain,
+            "recovery phase escalated to Fountain at t={}ms",
+            (i + 1) * 100
+        );
+        if m == FecMode::Zero {
+            zero_at = Some(i);
+            break;
+        }
+    }
+    assert!(zero_at.is_some(), "FEC did not return to Zero within 40s of clean link");
+}

@@ -1,6 +1,11 @@
 //! Scalar Kalman smoothing used by the adaptive FEC estimator.
 
 /// One-dimensional Kalman filter with bounded process and measurement noise.
+///
+/// The caller decays `q` toward its floor while measurements agree with the
+/// state. Once `q` is starved the gain collapses and `x` would otherwise stay
+/// pinned to a stale level indefinitely. A sustained innovation (`|z - x|`)
+/// therefore restores process noise so the filter can track a real level shift.
 #[derive(Debug)]
 #[doc(hidden)]
 pub struct KalmanFilter {
@@ -8,7 +13,14 @@ pub struct KalmanFilter {
     r: f32,
     x: f32,
     p: f32,
+    innovation_ema: f32,
 }
+
+/// Innovation magnitude that marks the estimate as diverged from the
+/// measurement stream: the filter must become responsive again.
+const INNOVATION_RECOVERY_THRESHOLD: f32 = 0.05;
+/// Process-noise multiplier applied per update while the innovation stays high.
+const INNOVATION_Q_BOOST: f32 = 1.5;
 
 impl KalmanFilter {
     /// Create a filter with finite, positive noise parameters.
@@ -16,7 +28,7 @@ impl KalmanFilter {
     pub fn new(q: f32, r: f32) -> Self {
         let q = if q.is_finite() && q > 0.0 { q.clamp(1e-8, 1.0) } else { 0.001 };
         let r = if r.is_finite() && r > 0.0 { r.clamp(1e-8, 1.0) } else { 0.01 };
-        Self { q, r, x: 0.0, p: 1.0 }
+        Self { q, r, x: 0.0, p: 1.0, innovation_ema: 0.0 }
     }
 
     /// Apply one measurement and return the smoothed estimate.
@@ -24,6 +36,11 @@ impl KalmanFilter {
     pub fn update(&mut self, z: f32) -> f32 {
         if !z.is_finite() {
             return self.x;
+        }
+        let innovation = (z - self.x).abs();
+        self.innovation_ema = 0.85 * self.innovation_ema + 0.15 * innovation;
+        if self.innovation_ema > INNOVATION_RECOVERY_THRESHOLD && self.q < 0.25 {
+            self.q = (self.q * INNOVATION_Q_BOOST).clamp(1e-8, 0.25);
         }
         self.p += self.q;
         let k = self.p / (self.p + self.r);
