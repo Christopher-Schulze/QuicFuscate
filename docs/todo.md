@@ -3838,3 +3838,10 @@
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.
 - `qf_fec::interleaved` (0,0)-shape warn removed (sentinel normalization is expected for disabled FEC).
+
+### WAN forwarding + NAT verified end-to-end on Omega (aarch64 Linux, nftables backend)
+- Topology: ns-cli --veth--> ns-srv --veth--> ns-wan (fake WAN 192.168.100.0/24; ns-srv default route via veth-wan).
+- `configured_routing_manager` auto-detection correctly picked `veth-wan` (default-route dev) over `veth-srv` (QUIC underlay) when configured `eth0` was absent - no flag needed for standard deployments.
+- Client 10.0.1.2 -> WAN host 192.168.100.2 through tunnel: 4/4, ~0.56ms RTT.
+- WAN-side wire shows src `192.168.100.1` (masqueraded), client TUN wire shows `10.0.1.2` - SNAT + conntrack return path both verified.
+- Residual enhancement (low): `wan_interface` has no CLI/config knob; deployments with non-default-route WAN (policy routing, multi-WAN, wg0 uplink) cannot pin it. Consider `--wan-interface` or `[server] wan_interface`.
