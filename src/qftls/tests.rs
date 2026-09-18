@@ -767,6 +767,32 @@ fn tls_cover_support_matches_provider_name() {
 }
 
 #[test]
+fn tls_cover_jitter_defers_frame_and_surfaces_deadline() {
+    let source = crate::time_source::test_support::ManualTimeSource::new(
+        std::time::Instant::now(),
+        std::time::SystemTime::UNIX_EPOCH,
+    );
+    let clock = crate::time_source::ProtocolClock::from_source(source.clone());
+    let environment =
+        crate::env_utils::EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_JITTER_US", "500")]);
+    let mut cover =
+        TlsCoverProvider::new_with_snapshot(false, &environment, &clock).expect("cover provider");
+
+    // A jittered cover frame must never block conn.send(): it is held and a
+    // readiness deadline is surfaced so the runtime retries exactly on time.
+    assert!(cover.next_crypto_frame(Level::Initial, 1200).expect("deferred frame poll").is_none());
+    let ready_at = cover
+        .handshake_send_ready_at()
+        .expect("armed cover jitter must surface a readiness deadline");
+    assert!(ready_at > clock.now());
+
+    source.advance(std::time::Duration::from_millis(1));
+    let frame = cover.next_crypto_frame(Level::Initial, 1200).expect("post-deadline frame poll");
+    assert!(frame.is_some_and(|(_, bytes)| !bytes.is_empty()));
+    assert!(cover.handshake_send_ready_at().is_none());
+}
+
+#[test]
 fn test_profile_chrome_has_h3_alpn() {
     let p = TlsProfile::chrome_130();
     assert!(p.alpn_protocols.iter().any(|a| a == "h3"), "Chrome profile must include h3 in ALPN");

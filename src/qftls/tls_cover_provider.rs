@@ -4,6 +4,7 @@
 // TLS session or owning the protocol ClientHello.
 // Ultra-sophisticated TLS Cover Provider for maximum stealth
 use std::sync::Arc;
+use std::time::Instant;
 
 use qf_stealth::{TlsCoverCipherPreference, TlsCoverCipherSuite};
 
@@ -16,6 +17,12 @@ pub(crate) struct TlsCoverProvider {
     handshake_complete: bool,
     performance_mode: bool, // When true, disable padding/jitter/timing features
     fingerprint_profile: String,
+    /// Monotonic clock shared with the owning QUIC connection.
+    clock: crate::time_source::ProtocolClock,
+    /// Jitter window end for a deferred cover frame (`None` = emit immediately).
+    cover_ready_at: Option<Instant>,
+    /// Fully encrypted cover frame held back until `cover_ready_at` elapses.
+    pending_cover_frame: Option<Vec<u8>>,
 }
 
 impl TlsCoverProvider {
@@ -47,6 +54,7 @@ impl TlsCoverProvider {
     pub(crate) fn new_with_snapshot(
         is_server: bool,
         environment: &crate::env_utils::EnvSnapshot,
+        clock: &crate::time_source::ProtocolClock,
     ) -> Result<Self, crate::error::ConnectionError> {
         // Load profile from ENV
         let profile = Self::tls_cover_profile_name(environment);
@@ -104,6 +112,9 @@ impl TlsCoverProvider {
             handshake_complete: false,
             performance_mode: false,
             fingerprint_profile: profile,
+            clock: clock.clone(),
+            cover_ready_at: None,
+            pending_cover_frame: None,
         })
     }
 
@@ -159,13 +170,36 @@ impl TlsCoverProvider {
         max_len: usize,
     ) -> Result<Option<(u64, Vec<u8>)>, crate::error::ConnectionError> {
         // Generate sophisticated TLS Cover frames for cover traffic
-        if !self.handshake_complete {
-            let frame = self.generate_fake_crypto_frame(max_len)?;
-            if !frame.is_empty() {
+        if self.handshake_complete {
+            // Cover frames only exist pre-handshake; drop any jitter-held frame
+            // and disarm its deadline so the surfaced readiness goes quiet.
+            self.pending_cover_frame = None;
+            self.cover_ready_at = None;
+            return Ok(None);
+        }
+        if let Some(ready_at) = self.cover_ready_at {
+            if self.clock.now() < ready_at {
+                return Ok(None);
+            }
+            self.cover_ready_at = None;
+            if let Some(frame) = self.pending_cover_frame.take() {
                 return Ok(Some((0, frame)));
             }
         }
+        let frame = self.generate_fake_crypto_frame(max_len)?;
+        if !frame.is_empty() {
+            return Ok(Some((0, frame)));
+        }
         Ok(None)
+    }
+
+    /// Deadline at which a deferred cover frame becomes emittable.
+    ///
+    /// Elapsed windows report `None` (the gate is open); a pending frame that
+    /// somehow outlived its deadline is surfaced on the next `next_crypto_frame`
+    /// call instead of being held forever.
+    pub(crate) fn handshake_send_ready_at(&self) -> Option<Instant> {
+        self.cover_ready_at.filter(|ready_at| *ready_at > self.clock.now())
     }
 
     /// Generate sophisticated fake crypto frame based on stealth mode
@@ -195,9 +229,21 @@ impl TlsCoverProvider {
         frame_out.extend_from_slice(&ciphertext);
 
         if let Some(jitter) = plan.jitter {
-            // Intentional sync sleep for timing-channel mitigation in stealth mode.
-            // This runs on a dedicated sync path, NOT inside an async task.
-            std::thread::sleep(jitter);
+            // Timing-channel mitigation must not sleep: this path runs inside
+            // conn.send() on async select loops, where a blocking sleep stalls
+            // the whole runtime worker. Hold the encrypted frame and release it
+            // once the jitter window elapses; the readiness deadline is surfaced
+            // via handshake_send_ready_at so the caller retries exactly on time.
+            match self.clock.checked_deadline_after(jitter) {
+                Some(ready_at) => {
+                    self.pending_cover_frame = Some(frame_out);
+                    self.cover_ready_at = Some(ready_at);
+                    return Ok(Vec::new());
+                }
+                None => {
+                    // Clock overflow: skip the deferral rather than dropping the frame.
+                }
+            }
         }
 
         Ok(frame_out)

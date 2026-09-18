@@ -796,7 +796,7 @@ impl CombinedProvider {
             // Check stealth mode to determine TLS Cover behavior
             let stealth_mode = Self::env_string(environment, "QUICFUSCATE_STEALTH_MODE", "stealth");
 
-            let mut tls_cover = TlsCoverProvider::new_with_snapshot(is_server, environment)?;
+            let mut tls_cover = TlsCoverProvider::new_with_snapshot(is_server, environment, clock)?;
 
             // In base/performance mode, TLS Cover still runs but without artificial delays
             if stealth_mode == "base" || stealth_mode == "performance" || stealth_mode == "off" {
@@ -901,7 +901,15 @@ impl QuicTlsProvider for CombinedProvider {
     }
 
     fn handshake_send_ready_at(&self) -> Option<std::time::Instant> {
-        self.rustls.handshake_send_ready_at()
+        // Earliest unblock across providers: a deferred rustls flight and a
+        // deferred cover frame both gate output, so the retry deadline is the
+        // earlier of the two. A provider reporting `None` is not gated.
+        let rustls_ready = self.rustls.handshake_send_ready_at();
+        let cover_ready = self.cover.as_ref().and_then(|cover| cover.handshake_send_ready_at());
+        match (rustls_ready, cover_ready) {
+            (Some(rustls_at), Some(cover_at)) => Some(rustls_at.min(cover_at)),
+            (rustls_ready, cover_ready) => rustls_ready.or(cover_ready),
+        }
     }
 
     fn poll_secrets_and_install(

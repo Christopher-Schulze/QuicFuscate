@@ -3827,3 +3827,9 @@
 - Detail: `docs/todo/todo-978-standalone-client-downlink-tick.md`
 - `conn.recv()` only queues decoded H3/MASQUE events; the standalone client's `poll_http3*` dispatch ran exclusively on the housekeeping branch, so every downlink payload waited up to `CLIENT_HOUSEKEEPING_IDLE` (250ms) before reaching the TUN - measured +251.5ms between UDP arrival and qtun0 write on Omega. The UDP-receive branch now drains H3/MASQUE (and plain `poll_http3` for non-TUN) immediately after `conn.recv`, sharing a new `client_h3_downlink_body_cb` helper with the housekeeping fallback.
 - Local proof: `cargo check --bin quicfuscate` clean, bin tests 50/50, clippy/fmt clean.
+
+### TODO-979 - TLS cover jitter: deferred emission instead of thread::sleep
+- Detail: `docs/todo/todo-979-cover-jitter-no-sleep.md`
+- `TlsCoverProvider` ran `std::thread::sleep(jitter)` inside `next_crypto_frame`, which executes inside `conn.send()` on the async select loops - every jittered cover frame stalled the whole runtime worker. The encrypted frame is now held behind a `cover_ready_at` deadline surfaced through `handshake_send_ready_at` -> `next_send_deadline()`; the runtime wakes exactly on time and emits it without any blocking.
+- Bonus in the same pass: `qf_fec::interleaved` no longer warns once per connection for the (0,0) disabled-FEC sentinel shape.
+- Local proof: qftls 35/35 (new deferral regression), qf-fec 85/85, clippy/fmt clean.

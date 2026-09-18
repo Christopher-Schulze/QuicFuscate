@@ -51,7 +51,10 @@ impl InterleavedEncoder {
         let represented_k = block_k.saturating_mul(actual_depth);
         let represented_n = block_n.saturating_mul(actual_depth).max(represented_k);
 
-        if (represented_k, represented_n) != (k, n) {
+        // (0,0) is the disabled-FEC sentinel (`FecBackendFamily::Zero` yields
+        // k=0,n=0): normalizing it to a single (1,1) lane is expected, not a
+        // shape mismatch worth warning about once per connection.
+        if k > 0 && (represented_k, represented_n) != (k, n) {
             log::warn!(
                 "interleave depth {actual_depth} does not divide the requested FEC shape \
                  (k={k}, n={n}); representing (k={represented_k}, n={represented_n})"
