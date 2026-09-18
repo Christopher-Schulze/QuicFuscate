@@ -3811,3 +3811,14 @@
 - Detail: `docs/todo/todo-975-masque-zero-copy-dispatch.md`
 - `send_masque_udp_payload` cloned `host_header` (String) per uplink call just to escape a borrow conflict; `ensure_masque_tunnel{,_with_requirement}` now read `self.host_header` internally, removing the clone at all three call sites. On the downlink, `try_recv_masque_datagram` copied every datagram payload out of the shared recv scratch into a drain Vec; it now returns `(flow_id, offset, len)` indices and `dispatch_bound_masque_payload` normalizes in place over `masque_recv_region` (buffer carries `MASQUE_RECV_HEADROOM` = 40B spare, the on-wire TCP option-space bound). Capsule-carried DATAGRAM payloads keep identical semantics via a one-time +40B tail extension.
 - Local proof: masque tests 47/47, h3 connection tests 93/93, `cargo check --features rust-tests` clean, clippy/fmt clean.
+
+### TODO-976 - Bandwidth admission: per-client mutex sharding
+- Detail: `docs/todo/todo-976-bandwidth-sharding.md`
+- `sessions.write().check_bandwidth()` took the SessionManager write lock once per forwarded packet because `check` needed `&mut self`; it only mutates the target client's entry. `PerClientBandwidthManager.clients` entries now carry their own `Mutex`, `check()`/`check_bandwidth()` are `&self`, and every callsite (live_auth datagram cb, tun_path batch + fast paths) runs under a shared read guard - different sessions no longer serialize on admission. Denial audit emission moved after the entry lock is released.
+- Local proof: bandwidth 36/36, implementations::server 549/549, clippy/fmt clean.
+- Omega proof: bandwidth 36/36 native aarch64 Linux.
+
+### TODO-977 - Peer MASQUE flow accept dedupe
+- `accept_peer_masque_flow` returned `Ok(true)` for already-accepted flows, so the server emitted the accept `info!` line and re-entered `h3.accept_masque_connect` + assignment evaluation once per inbound datagram (visible as per-ping-interval log spam in the Omega E2E run). `flow.accepted` now short-circuits to `Ok(false)`; callers fall back to `peer_connect_ip_flow_active()` as before.
+- Local proof: masque 47/47, implementations::server 549/549.
+- Commit: 8e89f19
