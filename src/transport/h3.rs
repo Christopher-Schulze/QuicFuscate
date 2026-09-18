@@ -9,3 +9,4 @@ mod cover_content;
 mod qpack;
 
 pub use connection::Connection;
+pub(crate) use connection::MASQUE_RECV_HEADROOM;

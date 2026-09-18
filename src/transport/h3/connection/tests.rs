@@ -374,7 +374,8 @@ fn h3_receive_buffers_follow_transport_payload_limits() {
     let h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
 
     assert_eq!(conn.max_recv_udp_payload_size(), MAX_PAYLOAD);
-    assert_eq!(h3.masque_recv_buffer.len(), MAX_PAYLOAD);
+    assert_eq!(h3.masque_recv_capacity, MAX_PAYLOAD);
+    assert_eq!(h3.masque_recv_buffer.len(), MAX_PAYLOAD + MASQUE_RECV_HEADROOM);
     assert_eq!(h3.stream_recv_buffer.len(), 64 * 1024);
 }
 

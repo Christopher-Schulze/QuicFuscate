@@ -42,6 +42,10 @@ enum PushState {
 
 const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
+/// Spare bytes appended to `masque_recv_buffer` so tunnel-ingress
+/// normalization can expand TCP option space in place. Bounded by the
+/// on-wire TCP data-offset limit (60 - 20 = 40 bytes of options).
+pub(crate) const MASQUE_RECV_HEADROOM: usize = 40;
 const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
 const MAX_H3_SETTING_VALUE: u64 = 16 * 1024 * 1024;
 const MAX_LOCAL_QPACK_BLOCKED_STREAMS: u64 = 64;
@@ -98,8 +102,12 @@ pub struct Connection {
     next_push_id: u64,
     /// Reused caller-owned buffer for one transport STREAM receive operation.
     stream_recv_buffer: Vec<u8>,
-    /// Receive buffer sized to the transport's configured UDP payload ceiling.
+    /// Receive buffer sized to the transport's configured UDP payload ceiling
+    /// plus `MASQUE_RECV_HEADROOM` spare bytes for in-place normalization.
     masque_recv_buffer: Vec<u8>,
+    /// Byte limit passed to `dgram_recv`; the tail beyond this bound is
+    /// reserved for tunnel-ingress normalization growth.
+    masque_recv_capacity: usize,
     /// Reused scratch for flow-id varint + payload framing so
     /// `send_masque_datagram` does not allocate per datagram.
     masque_send_scratch: Vec<u8>,
@@ -292,7 +300,8 @@ impl Connection {
             // transport IDs use the server-initiated class (3, 7, 11, ...).
             next_push_id: 0,
             stream_recv_buffer: vec![0u8; STREAM_RECV_BUFFER_SIZE],
-            masque_recv_buffer: vec![0u8; masque_buffer_len],
+            masque_recv_buffer: vec![0u8; masque_buffer_len + MASQUE_RECV_HEADROOM],
+            masque_recv_capacity: masque_buffer_len,
             masque_send_scratch: Vec::new(),
         };
 

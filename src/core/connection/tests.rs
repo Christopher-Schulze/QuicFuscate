@@ -313,11 +313,13 @@ fn next_hop_masque_payload_bypasses_ip_normalization_byte_exactly() {
             ));
         })));
     let mut opaque_inner_quic = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+    let payload_len = opaque_inner_quic.len();
 
     QuicFuscateConnection::dispatch_bound_masque_payload(
         9,
         Some(&binding),
         &mut opaque_inner_quic,
+        payload_len,
         &None,
         &None,
         &None,
@@ -349,11 +351,13 @@ fn tun_ip_masque_payload_rejects_the_same_non_ip_bytes() {
         observed_clone.lock().unwrap().push(payload.to_vec());
     })));
     let mut non_ip = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+    let payload_len = non_ip.len();
 
     QuicFuscateConnection::dispatch_bound_masque_payload(
         9,
         Some(&binding),
         &mut non_ip,
+        payload_len,
         &Some(datagram),
         &None,
         &None,

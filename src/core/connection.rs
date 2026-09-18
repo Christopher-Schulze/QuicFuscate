@@ -666,16 +666,12 @@ impl QuicFuscateConnection {
         }
     }
 
-    fn ensure_masque_tunnel(
-        &mut self,
-        host: &str,
-    ) -> Result<Option<u64>, crate::transport::h3::Error> {
-        self.ensure_masque_tunnel_with_requirement(host, false)
+    fn ensure_masque_tunnel(&mut self) -> Result<Option<u64>, crate::transport::h3::Error> {
+        self.ensure_masque_tunnel_with_requirement(false)
     }
 
     fn ensure_masque_tunnel_with_requirement(
         &mut self,
-        host: &str,
         required: bool,
     ) -> Result<Option<u64>, crate::transport::h3::Error> {
         // When TUN bridging is active (a MASQUE datagram sink is installed),
@@ -696,7 +692,10 @@ impl QuicFuscateConnection {
         // MASQUE proxy authority when the stealth manager has no explicit
         // MASQUE proxy / fronting-domain config. The proxy authority is just
         // the H3 :authority header - the server validates it against itself.
-        let proxy = self.stealth_manager.masque_proxy().unwrap_or_else(|| format!("{}:443", host));
+        let proxy = self
+            .stealth_manager
+            .masque_proxy()
+            .unwrap_or_else(|| format!("{}:443", self.host_header));
 
         let extra_headers = self.build_masque_request_headers();
         let Some(ref mut h3) = self.h3_conn else {
@@ -782,8 +781,7 @@ impl QuicFuscateConnection {
     fn ensure_masque_tunnel_for_send(
         &mut self,
     ) -> Result<Option<u64>, crate::transport::h3::Error> {
-        let host = self.host_header.clone();
-        match self.ensure_masque_tunnel(&host) {
+        match self.ensure_masque_tunnel() {
             Ok(sid) => Ok(sid),
             Err(e) => {
                 crate::telemetry::MASQUE_ACTIVE.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -801,8 +799,7 @@ impl QuicFuscateConnection {
     /// Starts the canonical MASQUE flow required for authenticated control exchange.
     pub fn begin_masque_control_tunnel(&mut self) -> Result<u64, crate::error::ConnectionError> {
         self.ensure_http3_initialized()?;
-        let host = self.host_header.clone();
-        self.ensure_masque_tunnel_with_requirement(&host, true)?.ok_or_else(|| {
+        self.ensure_masque_tunnel_with_requirement(true)?.ok_or_else(|| {
             crate::error::ConnectionError::Transport(
                 "MASQUE control tunnel unavailable".to_string(),
             )

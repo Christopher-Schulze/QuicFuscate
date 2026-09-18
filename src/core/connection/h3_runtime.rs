@@ -484,10 +484,16 @@ impl QuicFuscateConnection {
     ) {
         match capsule_type {
             0x00 => {
+                // Capsule-carried DATAGRAM payloads share the TunIp ingress
+                // path with QUIC datagrams; extend the tail once so in-place
+                // normalization never reallocates.
+                let payload_len = payload.len();
+                payload.resize(payload_len + crate::transport::h3::MASQUE_RECV_HEADROOM, 0);
                 Self::dispatch_bound_masque_payload(
                     flow_id,
                     binding,
                     payload,
+                    payload_len,
                     context.bindings.masque_datagram_cb,
                     context.bindings.masque_control_cb,
                     context.bindings.masque_cb,
@@ -556,13 +562,15 @@ impl QuicFuscateConnection {
     pub(super) fn dispatch_bound_masque_payload(
         flow_id: u64,
         binding: Option<&MasqueFlowBinding>,
-        payload: &mut Vec<u8>,
+        payload: &mut [u8],
+        payload_len: usize,
         masque_datagram_cb: &Option<DatagramHandler>,
         masque_control_cb: &Option<CapsuleHandler>,
         masque_cb: &Option<CapsuleHandler>,
         masque_relay_cb: &Option<MasqueRelayHandler>,
         normalizer: &PacketNormalizer,
     ) {
+        debug_assert!(payload_len <= payload.len());
         let Some(binding) = binding else {
             debug!("dropping MASQUE payload on unbound flow-id={flow_id}");
             return;
@@ -573,10 +581,18 @@ impl QuicFuscateConnection {
         }
         match binding.purpose {
             MasqueFlowPurpose::TunIp => {
-                if matches!(payload.first().map(|byte| byte >> 4), Some(4 | 6))
-                    && normalizer.normalize_tunnel_ingress_vec(payload) != NormalizeResult::Dropped
-                {
-                    Self::dispatch_masque_datagram_payload(masque_datagram_cb, masque_cb, payload);
+                if matches!(payload[..payload_len].first().map(|byte| byte >> 4), Some(4 | 6)) {
+                    // The region behind the payload carries normalization
+                    // headroom, so TCP option expansion stays in place.
+                    let outcome =
+                        normalizer.normalize_tunnel_ingress_with_capacity(payload, payload_len);
+                    if outcome.result != NormalizeResult::Dropped {
+                        Self::dispatch_masque_datagram_payload(
+                            masque_datagram_cb,
+                            masque_cb,
+                            &payload[..outcome.packet_len],
+                        );
+                    }
                 }
             }
             MasqueFlowPurpose::NextHopUdp => {
@@ -586,17 +602,21 @@ impl QuicFuscateConnection {
                             if masque_trace_enabled() {
                                 info!(
                                     "dispatching MASQUE relay payload flow={} bytes={}",
-                                    flow_id,
-                                    payload.len()
+                                    flow_id, payload_len
                                 );
                             }
-                            (callback)(flow_id, target, payload);
+                            (callback)(flow_id, target, &payload[..payload_len]);
                         }
                     }
                 }
             }
             MasqueFlowPurpose::Control => {
-                Self::dispatch_masque_capsule_payload(masque_control_cb, masque_cb, 0x00, payload);
+                Self::dispatch_masque_capsule_payload(
+                    masque_control_cb,
+                    masque_cb,
+                    0x00,
+                    &payload[..payload_len],
+                );
             }
         }
     }
@@ -616,14 +636,14 @@ impl QuicFuscateConnection {
             || context.bindings.masque_cb.is_some()
             || context.bindings.masque_relay_cb.is_some();
         if stealth_manager.masque_datagram_enabled() || has_sink {
-            let mut payload = Vec::new();
-            while let Some(flow_id) = h3.try_recv_masque_datagram(conn, &mut payload) {
+            while let Some((flow_id, offset, payload_len)) = h3.try_recv_masque_datagram(conn) {
                 let binding =
                     context.local_flows.get(&flow_id).or_else(|| context.peer_flows.get(&flow_id));
                 Self::dispatch_bound_masque_payload(
                     flow_id,
                     binding,
-                    &mut payload,
+                    h3.masque_recv_region(offset),
+                    payload_len,
                     context.bindings.masque_datagram_cb,
                     context.bindings.masque_control_cb,
                     context.bindings.masque_cb,
@@ -867,8 +887,7 @@ impl QuicFuscateConnection {
         payload: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
         self.ensure_http3_initialized()?;
-        let host = self.host_header.clone();
-        let Some(sid) = self.ensure_masque_tunnel(&host)? else {
+        let Some(sid) = self.ensure_masque_tunnel()? else {
             return Err("masque tunnel unavailable".into());
         };
         if let Some(ref mut h3) = self.h3_conn {

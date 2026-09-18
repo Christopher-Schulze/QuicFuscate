@@ -698,26 +698,32 @@ impl Connection {
         })
     }
 
-    /// Try to receive one MASQUE datagram into `out`; returns the Flow-ID.
-    ///
-    /// `out` is cleared and extended with the payload - callers reuse one
-    /// buffer across the drain loop instead of allocating per datagram.
+    /// Receives one MASQUE DATAGRAM into the shared receive scratch and
+    /// returns `(flow_id, payload_offset, payload_len)` indexing into the
+    /// region exposed by [`Self::masque_recv_region`]. The payload stays in
+    /// place so callers can normalize and dispatch it without a copy; the
+    /// trailing `MASQUE_RECV_HEADROOM` bytes remain available for in-place
+    /// TCP option expansion.
     pub fn try_recv_masque_datagram(
         &mut self,
         conn: &mut super::super::super::Connection,
-        out: &mut Vec<u8>,
-    ) -> Option<u64> {
-        match conn.dgram_recv(&mut self.masque_recv_buffer[..]) {
+    ) -> Option<(u64, usize, usize)> {
+        match conn.dgram_recv(&mut self.masque_recv_buffer[..self.masque_recv_capacity]) {
             Ok(len) if len > 0 => {
                 if let Ok((flow_id, used)) = Self::decode_varint(&self.masque_recv_buffer[..len]) {
-                    out.clear();
-                    out.extend_from_slice(&self.masque_recv_buffer[used..len]);
-                    return Some(flow_id);
+                    return Some((flow_id, used, len - used));
                 }
                 None
             }
             _ => None,
         }
+    }
+
+    /// Returns the receive-scratch region starting at `offset`, spanning the
+    /// payload plus the normalization headroom reported by the last
+    /// [`Self::try_recv_masque_datagram`] call.
+    pub(crate) fn masque_recv_region(&mut self, offset: usize) -> &mut [u8] {
+        &mut self.masque_recv_buffer[offset..]
     }
 
     /// Return the Flow-ID bound to one active CONNECT-UDP stream.
