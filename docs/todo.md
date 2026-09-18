@@ -124,6 +124,10 @@
 ### TODO-942 - TUN downlink backpressure: `packet.to_vec()` per queued packet → retain pooled TunPacket
 - OPEN. `PendingTunDownlink.packet: Vec<u8>` copies the payload when a downlink is queued under backpressure (tun_path.rs ~800/843). Since uplink now carries pooled `TunPacket`s (TODO-940), the pending queue could retain the block instead of copying — type change ripples through `PendingTunDownlinks`, `drain_pending_tun_downlinks` and the flush path. Backpressure-only path, not the hot path.
 
+### TODO-943 - H3 poll loop: 6 Arc clones per poll → borrowed bindings view
+- DONE. `http3_poll_bindings()` cloned five callback `Option<Arc>`s + the `memory_pool` Arc per `poll_http3_event_loop` invocation (once per datagram on both server ingress and client `poll_http3_to_ingress`). `Http3PollBindings<'a>` is now a borrowed view of the connection fields; `OptimizationManager::memory_pool_ref()` added. The view is built inline in the poll loop — a `&self` helper would borrow all of `self` and clash with the `&mut self.conn`/`self.h3_conn` uses inside the loop; field-level borrows are disjoint and allowed.
+- Detail: `docs/todo/todo-943-h3-poll-bindings-borrow.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`

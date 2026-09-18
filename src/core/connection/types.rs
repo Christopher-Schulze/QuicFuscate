@@ -59,17 +59,19 @@ impl H3TunnelFrameDecoder {
     }
 }
 
-pub(crate) struct Http3PollBindings {
-    pub(crate) masque_datagram_cb: Option<DatagramHandler>,
-    pub(crate) masque_control_cb: Option<CapsuleHandler>,
-    pub(crate) masque_cb: Option<CapsuleHandler>,
-    pub(crate) masque_relay_cb: Option<MasqueRelayHandler>,
-    pub(crate) private_packet_protection_cb: Option<PrivatePacketProtectionHandler>,
-    pub(crate) memory_pool: Arc<crate::optimize::MemoryPool>,
+/// Borrowed view of the per-connection poll bindings — the callback Arcs stay
+/// owned by the connection; building the view is pointer copies, no refcounts.
+pub(crate) struct Http3PollBindings<'a> {
+    pub(crate) masque_datagram_cb: &'a Option<DatagramHandler>,
+    pub(crate) masque_control_cb: &'a Option<CapsuleHandler>,
+    pub(crate) masque_cb: &'a Option<CapsuleHandler>,
+    pub(crate) masque_relay_cb: &'a Option<MasqueRelayHandler>,
+    pub(crate) private_packet_protection_cb: &'a Option<PrivatePacketProtectionHandler>,
+    pub(crate) memory_pool: &'a Arc<crate::optimize::MemoryPool>,
 }
 
 pub(crate) struct MasqueDispatchContext<'a> {
-    pub(crate) bindings: &'a Http3PollBindings,
+    pub(crate) bindings: &'a Http3PollBindings<'a>,
     pub(crate) normalizer: &'a PacketNormalizer,
     pub(crate) local_flows: &'a HashMap<u64, MasqueFlowBinding>,
     pub(crate) peer_flows: &'a HashMap<u64, MasqueFlowBinding>,

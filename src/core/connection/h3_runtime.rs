@@ -22,17 +22,6 @@ impl QuicFuscateConnection {
         Ok(())
     }
 
-    fn http3_poll_bindings(&self) -> Http3PollBindings {
-        Http3PollBindings {
-            masque_datagram_cb: self.masque_datagram_cb.clone(),
-            masque_control_cb: self.masque_control_cb.clone(),
-            masque_cb: self.masque_cb.clone(),
-            masque_relay_cb: self.masque_relay_cb.clone(),
-            private_packet_protection_cb: self.private_packet_protection_cb.clone(),
-            memory_pool: self.optimization_manager.memory_pool(),
-        }
-    }
-
     fn build_http3_request_headers(
         &self,
         method: &'static [u8],
@@ -83,7 +72,17 @@ impl QuicFuscateConnection {
     {
         if self.ensure_http3_ready_for_poll(context) {
             let start = self.clock.now();
-            let bindings = self.http3_poll_bindings();
+            // Field-level borrows only — a `&self` helper would borrow all of
+            // `self` and conflict with the `&mut self.conn`/`self.h3_conn`
+            // uses inside the poll loop.
+            let bindings = Http3PollBindings {
+                masque_datagram_cb: &self.masque_datagram_cb,
+                masque_control_cb: &self.masque_control_cb,
+                masque_cb: &self.masque_cb,
+                masque_relay_cb: &self.masque_relay_cb,
+                private_packet_protection_cb: &self.private_packet_protection_cb,
+                memory_pool: self.optimization_manager.memory_pool_ref(),
+            };
             loop {
                 let (intelligent_level, stats) = self.prepare_http3_poll_iteration();
                 let Some(ref mut h3) = self.h3_conn else {
@@ -490,19 +489,19 @@ impl QuicFuscateConnection {
                     flow_id,
                     binding,
                     payload,
-                    &context.bindings.masque_datagram_cb,
-                    &context.bindings.masque_control_cb,
-                    &context.bindings.masque_cb,
-                    &context.bindings.masque_relay_cb,
+                    context.bindings.masque_datagram_cb,
+                    context.bindings.masque_control_cb,
+                    context.bindings.masque_cb,
+                    context.bindings.masque_relay_cb,
                     context.normalizer,
                 );
             }
             0x21 => {
                 if binding.is_some_and(|flow| flow.purpose == MasqueFlowPurpose::TunIp) {
                     Self::dispatch_masque_compressed_datagram(
-                        &context.bindings.masque_datagram_cb,
-                        &context.bindings.masque_cb,
-                        &context.bindings.memory_pool,
+                        context.bindings.masque_datagram_cb,
+                        context.bindings.masque_cb,
+                        context.bindings.memory_pool,
                         payload,
                         None,
                         context.normalizer,
@@ -522,9 +521,9 @@ impl QuicFuscateConnection {
                     let ver = u16::from_be_bytes(vb);
                     if let Some(dict) = crate::compress::get_dict_by_id(hash, ver) {
                         Self::dispatch_masque_compressed_datagram(
-                            &context.bindings.masque_datagram_cb,
-                            &context.bindings.masque_cb,
-                            &context.bindings.memory_pool,
+                            context.bindings.masque_datagram_cb,
+                            context.bindings.masque_cb,
+                            context.bindings.memory_pool,
                             payload,
                             Some(&dict),
                             context.normalizer,
@@ -539,13 +538,13 @@ impl QuicFuscateConnection {
                     })
                 {
                     Self::dispatch_private_packet_protection_payload(
-                        &context.bindings.private_packet_protection_cb,
+                        context.bindings.private_packet_protection_cb,
                         payload,
                     );
                 } else {
                     Self::dispatch_masque_capsule_payload(
-                        &context.bindings.masque_control_cb,
-                        &context.bindings.masque_cb,
+                        context.bindings.masque_control_cb,
+                        context.bindings.masque_cb,
                         capsule_type,
                         payload,
                     );
@@ -625,10 +624,10 @@ impl QuicFuscateConnection {
                     flow_id,
                     binding,
                     &mut payload,
-                    &context.bindings.masque_datagram_cb,
-                    &context.bindings.masque_control_cb,
-                    &context.bindings.masque_cb,
-                    &context.bindings.masque_relay_cb,
+                    context.bindings.masque_datagram_cb,
+                    context.bindings.masque_control_cb,
+                    context.bindings.masque_cb,
+                    context.bindings.masque_relay_cb,
                     context.normalizer,
                 );
             }
