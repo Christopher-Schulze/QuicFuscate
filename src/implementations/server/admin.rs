@@ -479,20 +479,20 @@ pub struct ClientSnapshot {
     connected_at: Instant,
     bytes_in: u64,
     bytes_out: u64,
-    stealth_mode: String,
+    stealth_mode: &'static str,
     session_id: Option<super::session::SessionId>,
 }
 
 impl ClientSnapshot {
-    pub fn new(stealth_mode: String) -> Self {
+    pub fn new(stealth_mode: &'static str) -> Self {
         Self::new_at(stealth_mode, Instant::now())
     }
 
-    pub fn new_at(stealth_mode: String, connected_at: Instant) -> Self {
+    pub fn new_at(stealth_mode: &'static str, connected_at: Instant) -> Self {
         Self { connected_at, bytes_in: 0, bytes_out: 0, stealth_mode, session_id: None }
     }
 
-    pub fn record_bytes_in(&mut self, bytes: u64, stealth_mode: String) {
+    pub fn record_bytes_in(&mut self, bytes: u64, stealth_mode: &'static str) {
         self.bytes_in = self.bytes_in.saturating_add(bytes);
         self.stealth_mode = stealth_mode;
     }
@@ -513,7 +513,7 @@ impl ClientSnapshot {
             connected_secs: now.saturating_duration_since(self.connected_at).as_secs(),
             bytes_in: self.bytes_in,
             bytes_out: self.bytes_out,
-            stealth_mode: self.stealth_mode.clone(),
+            stealth_mode: self.stealth_mode.to_string(),
         }
     }
 }
@@ -924,13 +924,13 @@ mod tests {
     fn test_snapshot_projection_is_sorted_and_preserves_counters() {
         let mut snapshots = HashMap::new();
 
-        let mut later_addr_snapshot = ClientSnapshot::new("mode-b".to_string());
-        later_addr_snapshot.record_bytes_in(9, "mode-b".to_string());
+        let mut later_addr_snapshot = ClientSnapshot::new("mode-b");
+        later_addr_snapshot.record_bytes_in(9, "mode-b");
         later_addr_snapshot.record_bytes_out(4);
         snapshots.insert("127.0.0.1:9001".parse::<SocketAddr>().unwrap(), later_addr_snapshot);
 
-        let mut earlier_addr_snapshot = ClientSnapshot::new("mode-a".to_string());
-        earlier_addr_snapshot.record_bytes_in(3, "mode-a-updated".to_string());
+        let mut earlier_addr_snapshot = ClientSnapshot::new("mode-a");
+        earlier_addr_snapshot.record_bytes_in(3, "mode-a-updated");
         earlier_addr_snapshot.record_bytes_out(7);
         snapshots.insert("127.0.0.1:9000".parse::<SocketAddr>().unwrap(), earlier_addr_snapshot);
 
@@ -951,9 +951,9 @@ mod tests {
     #[test]
     fn test_snapshot_projection_prefers_session_identity_when_available() {
         let mut snapshots = HashMap::new();
-        let mut snapshot = ClientSnapshot::new("mode-a".to_string());
+        let mut snapshot = ClientSnapshot::new("mode-a");
         snapshot.set_session_id(super::super::session::SessionId::from_u64(42));
-        snapshot.record_bytes_in(3, "mode-a".to_string());
+        snapshot.record_bytes_in(3, "mode-a");
         snapshots.insert("127.0.0.1:9000".parse::<SocketAddr>().unwrap(), snapshot);
 
         let clients = snapshots_to_client_info(&snapshots, Instant::now());

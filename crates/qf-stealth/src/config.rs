@@ -54,6 +54,21 @@ pub enum StealthMode {
     Intelligent,
 }
 
+impl StealthMode {
+    /// Static variant name identical to the `Debug` representation — lets hot
+    /// paths record the mode without a `format!("{:?}")` allocation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Performance => "Performance",
+            Self::Stealth => "Stealth",
+            Self::AntiDpi => "AntiDpi",
+            Self::Manual => "Manual",
+            Self::Intelligent => "Intelligent",
+        }
+    }
+}
+
 /// Controls how fingerprint profiles are cycled during rotation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]

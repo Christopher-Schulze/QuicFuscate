@@ -524,7 +524,7 @@ fn record_live_snapshot_bytes_in(
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     addr: SocketAddr,
     bytes_in: u64,
-    stealth_mode: String,
+    stealth_mode: &'static str,
     session_id: Option<SessionId>,
     connected_at: std::time::Instant,
 ) {
@@ -537,7 +537,7 @@ fn record_live_snapshot_bytes_in(
     };
     let snap = snapshots_guard
         .entry(addr)
-        .or_insert_with(|| ClientSnapshot::new_at(stealth_mode.clone(), connected_at));
+        .or_insert_with(|| ClientSnapshot::new_at(stealth_mode, connected_at));
     if let Some(session_id) = session_id {
         snap.set_session_id(session_id);
     }
@@ -1183,7 +1183,7 @@ pub(super) async fn process_live_server_client_datagram(
         client_snapshots,
         logical_addr,
         packet.len() as u64,
-        format!("{:?}", conn.stealth_mode()),
+        conn.stealth_mode().as_str(),
         session_id,
         conn.protocol_clock().now(),
     );

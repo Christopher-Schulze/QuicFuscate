@@ -12,7 +12,7 @@ rust-tests = ["qf-common/rust-tests", "qf-compress/rust-tests", "qf-crypto/rust-
 specta = ["dep:specta"]
 
 [dependencies]
-qf-common = { path = "../qf-common" }
+qf-common = { path = "../qf-common", features = ["rust-tests"] }
 qf-compress = { path = "../qf-compress" }
 qf-cpu = { path = "../qf-cpu" }
 qf-crypto = { path = "../qf-crypto" }
