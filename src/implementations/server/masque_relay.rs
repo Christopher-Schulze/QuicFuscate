@@ -708,11 +708,14 @@ async fn run_relay_association(mut task: RelayAssociationTask) {
                     log::warn!("closing MASQUE relay association after response rate quota breach");
                     break RelayExitReason::RateQuota;
                 }
-                let payload = receive_buffer[..received].to_vec();
-                let payload_len = payload.len();
+                let payload_len = received;
                 let result = match task.responses.lock() {
-                    Ok(mut queue) => queue.enqueue(task.flow_id, payload),
-                    Err(poisoned) => poisoned.into_inner().enqueue(task.flow_id, payload),
+                    Ok(mut queue) => {
+                        queue.enqueue_slice(task.flow_id, &receive_buffer[..received])
+                    }
+                    Err(poisoned) => poisoned
+                        .into_inner()
+                        .enqueue_slice(task.flow_id, &receive_buffer[..received]),
                 };
                 match result {
                     Ok(()) if masque_trace_enabled() => log::info!(

@@ -1103,53 +1103,58 @@ impl QuicFuscateConnection {
                 Ok(mut queue) => queue.pop_front(),
                 Err(poisoned) => poisoned.into_inner().pop_front(),
             };
-            let Some(response) = response else {
+            let Some(MasqueRelayResponse { flow_id, payload }) = response else {
                 break;
+            };
+            let recycle = |buf: Vec<u8>| match queue.lock() {
+                Ok(mut queue) => queue.recycle(buf),
+                Err(poisoned) => poisoned.into_inner().recycle(buf),
             };
             if masque_trace_enabled() {
                 info!(
                     "dequeued MASQUE relay response flow={} bytes={}",
-                    response.flow_id,
-                    response.payload.len()
+                    flow_id,
+                    payload.len()
                 );
             }
-            let Some(binding) = self.masque_peer_flows.get(&response.flow_id) else {
+            let Some(binding) = self.masque_peer_flows.get(&flow_id) else {
                 if masque_trace_enabled() {
                     info!(
                         "dropping MASQUE relay response with missing flow binding flow={}",
-                        response.flow_id
+                        flow_id
                     );
                 }
+                recycle(payload);
                 continue;
             };
             if !binding.accepted || binding.purpose != MasqueFlowPurpose::NextHopUdp {
                 if masque_trace_enabled() {
                     info!(
                         "dropping MASQUE relay response on inactive flow={} accepted={} purpose={:?}",
-                        response.flow_id, binding.accepted, binding.purpose
+                        flow_id, binding.accepted, binding.purpose
                     );
                 }
+                recycle(payload);
                 continue;
             }
             let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
-            match h3.send_masque_datagram(&mut self.conn, binding.stream_id, &response.payload) {
+            match h3.send_masque_datagram(&mut self.conn, binding.stream_id, &payload) {
                 Ok(()) => {
                     sent = sent.saturating_add(1);
                     if masque_trace_enabled() {
                         info!(
                             "queued MASQUE relay response for QUIC flow={} stream={} bytes={}",
-                            response.flow_id,
+                            flow_id,
                             binding.stream_id,
-                            response.payload.len()
+                            payload.len()
                         );
                     }
+                    recycle(payload);
                 }
                 Err(crate::transport::h3::Error::DgramQueueFull) => {
                     let enqueue = match queue.lock() {
-                        Ok(mut queue) => queue.enqueue(response.flow_id, response.payload),
-                        Err(poisoned) => {
-                            poisoned.into_inner().enqueue(response.flow_id, response.payload)
-                        }
+                        Ok(mut queue) => queue.enqueue(flow_id, payload),
+                        Err(poisoned) => poisoned.into_inner().enqueue(flow_id, payload),
                     };
                     if enqueue.is_err() {
                         warn!("dropping relay response after retry queue saturation");

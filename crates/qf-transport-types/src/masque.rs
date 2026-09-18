@@ -34,14 +34,20 @@ pub struct MasqueRelayResponse {
 #[derive(Debug)]
 pub struct MasqueRelayResponseQueue {
     responses: VecDeque<MasqueRelayResponse>,
+    /// Drained payload buffers retained for reuse — keeps steady-state relay
+    /// traffic allocation-free once a burst has warmed the list.
+    spare: Vec<Vec<u8>>,
     bytes: usize,
     max_packets: usize,
     max_bytes: usize,
 }
 
+/// Maximum recycled payload buffers held by a relay response queue.
+const MAX_RELAY_SPARE_BUFS: usize = 64;
+
 impl MasqueRelayResponseQueue {
     pub fn new(max_packets: usize, max_bytes: usize) -> Self {
-        Self { responses: VecDeque::new(), bytes: 0, max_packets, max_bytes }
+        Self { responses: VecDeque::new(), spare: Vec::new(), bytes: 0, max_packets, max_bytes }
     }
 
     pub fn enqueue(
@@ -60,6 +66,37 @@ impl MasqueRelayResponseQueue {
         Ok(())
     }
 
+    /// Enqueue from a borrowed payload without a fresh heap allocation —
+    /// drained response buffers are reused when available.
+    pub fn enqueue_slice(
+        &mut self,
+        flow_id: u64,
+        payload: &[u8],
+    ) -> Result<(), MasqueDownlinkQueueReject> {
+        if self.responses.len() >= self.max_packets {
+            return Err(MasqueDownlinkQueueReject::PacketCapacity);
+        }
+        if self.bytes.saturating_add(payload.len()) > self.max_bytes {
+            return Err(MasqueDownlinkQueueReject::ByteCapacity);
+        }
+        self.bytes = self.bytes.saturating_add(payload.len());
+        let mut buf = self.spare.pop().unwrap_or_default();
+        buf.clear();
+        buf.extend_from_slice(payload);
+        self.responses.push_back(MasqueRelayResponse { flow_id, payload: buf });
+        Ok(())
+    }
+
+    /// Return a consumed response buffer to the spare pool. Buffers beyond the
+    /// cap are dropped instead of hoarding a burst's worth of memory.
+    pub fn recycle(&mut self, mut buf: Vec<u8>) {
+        if self.spare.len() >= MAX_RELAY_SPARE_BUFS {
+            return;
+        }
+        buf.clear();
+        self.spare.push(buf);
+    }
+
     pub fn pop_front(&mut self) -> Option<MasqueRelayResponse> {
         let response = self.responses.pop_front()?;
         self.bytes = self.bytes.saturating_sub(response.payload.len());
@@ -69,7 +106,12 @@ impl MasqueRelayResponseQueue {
     pub fn discard_all(&mut self) -> (usize, usize) {
         let packets = self.responses.len();
         let bytes = self.bytes;
-        self.responses.clear();
+        let spare = &mut self.spare;
+        self.responses.drain(..).for_each(|response| {
+            if spare.len() < MAX_RELAY_SPARE_BUFS {
+                spare.push(response.payload);
+            }
+        });
         self.bytes = 0;
         (packets, bytes)
     }

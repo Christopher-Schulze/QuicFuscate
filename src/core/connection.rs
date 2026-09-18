@@ -53,7 +53,7 @@ use types::{
 // Type aliases to simplify handler types
 pub use qf_fec::ActiveFecPolicyChange;
 pub use qf_transport_cc::ConnectionStats;
-pub use qf_transport_types::MasqueRelayResponseQueue;
+pub use qf_transport_types::{MasqueRelayResponse, MasqueRelayResponseQueue};
 pub use qf_transport_types::{CapsuleHandler, DatagramHandler};
 pub use qf_transport_types::{MasqueDownlinkQueue, MasqueDownlinkQueueReject};
 pub use qf_transport_types::{MasqueFlowPurpose, MasqueUdpTarget};
