@@ -3753,3 +3753,9 @@
 - `vec![...]` Ack-range literals in feature-gated `rust-tests` targets broke after the SmallVec switch; fixed and verified the full feature matrix locally and on Omega.
 - Local proof: `cargo check --all-targets` for throughput / stream_ring_buffer / zero_copy_dgram / rust-tests and pairs, `cargo test --features rust-tests` (8/8 roundtrip, 26/26 security).
 - Omega proof: `cargo check --all-targets` for io_uring / rust-tests / io_uring+rust-tests on aarch64 Linux.
+
+### TODO-966 - QPACK Huffman encode through SIMD dispatch
+- Detail: `docs/todo/todo-966-qpack-huffman-simd.md`
+- `huff_encode_into` bypassed the existing AVX2/NEON dispatcher; rewired to `encode_huff_into`. Decode stays scalar because the SIMD decode API cannot surface `InvalidEncoding`.
+- Local proof: `cargo test -p qf-simd` (61/61), `cargo test -p quicfuscate h3/qpack` (137) on aarch64 NEON.
+- Omega proof: qf-simd 61/61, qpack 22/22 on aarch64 Linux.
