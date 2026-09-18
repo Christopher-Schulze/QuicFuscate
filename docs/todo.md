@@ -3759,3 +3759,9 @@
 - `huff_encode_into` bypassed the existing AVX2/NEON dispatcher; rewired to `encode_huff_into`. Decode stays scalar because the SIMD decode API cannot surface `InvalidEncoding`.
 - Local proof: `cargo test -p qf-simd` (61/61), `cargo test -p quicfuscate h3/qpack` (137) on aarch64 NEON.
 - Omega proof: qf-simd 61/61, qpack 22/22 on aarch64 Linux.
+
+### TODO-967 - Fountain decoder stale-tolerant queues
+- Detail: `docs/todo/todo-967-fountain-stale-queues.md`
+- `remove_symbol_state`/`remove_queued_symbol` ran `VecDeque::retain` (O(window)) per eviction and per degree-1→0 propagation; replaced with stale-parked entries + bounded compaction.
+- Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
+- Omega proof: qf-fec 85/85 on aarch64 Linux.
