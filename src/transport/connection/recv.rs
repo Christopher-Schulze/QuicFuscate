@@ -889,8 +889,12 @@ impl Connection {
                 let ack_delay_us = ack_delay << exp;
                 crate::telemetry::ACK_DELAY_LAST_US
                     .store(ack_delay_us, std::sync::atomic::Ordering::Relaxed);
-                if let Some(obs) = self.observer.as_ref().cloned() {
+                // Move the observer Arc out instead of cloning it: apply_policy
+                // needs &mut self, and the policy target can never emit observer
+                // events, so the slot can stay empty for the call's duration.
+                if let Some(obs) = self.observer.take() {
                     obs.apply_policy(self);
+                    self.observer = Some(obs);
                 }
             }
         }
