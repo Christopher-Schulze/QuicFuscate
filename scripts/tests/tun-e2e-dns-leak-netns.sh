@@ -68,7 +68,7 @@ namespace_exists() {
 
 stop_owned_process() {
   local pid="$1"
-  [ -n "$pid" ] || return
+  [ -n "$pid" ] || return 0
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     for _ in {1..50}; do
