@@ -887,6 +887,26 @@ impl QuicFuscateConnection {
         from: SocketAddr,
         to: SocketAddr,
     ) -> Result<usize, crate::error::ConnectionError> {
+        // Framed wire datagrams only need a slice read — skip the pool block
+        // checkout + copy + free round-trip entirely for the common FEC path.
+        if wire::is_framed(data) {
+            let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
+            let receive_report = match self.framed_wire_report(data, &mut recovered_packets) {
+                Ok(report) => report,
+                Err(()) => {
+                    self.fec_receive_scratch = recovered_packets;
+                    return Ok(data.len());
+                }
+            };
+            return self.finish_wire_receive(
+                receive_report,
+                recovered_packets,
+                data.len(),
+                from,
+                to,
+            );
+        }
+
         let mut block = self.optimization_manager.alloc_block();
         if data.len() > block.len() {
             // Avoid silent truncation; return a clear error and recycle the block.
@@ -896,6 +916,33 @@ impl QuicFuscateConnection {
         let copy_len = data.len();
         block[..copy_len].copy_from_slice(&data[..copy_len]);
         self.recv_pooled_block_on_path(block, copy_len, from, to)
+    }
+
+    /// Parse a framed wire datagram through the FEC receiver. Returns `Err(())`
+    /// for malformed/unsupported datagrams (caller treats them as consumed).
+    fn framed_wire_report(
+        &mut self,
+        data: &[u8],
+        recovered_packets: &mut Vec<FecPacket>,
+    ) -> Result<wire::WireReceiveReport, ()> {
+        if self.fec_rx_seed.is_none() {
+            if let Some(seed) = self.conn.fec_receive_fountain_seed() {
+                self.fec_wire_receiver.set_fountain_seed(seed);
+                self.fec_rx_seed = Some(seed);
+            }
+        }
+        let result = if self.fec.control_policy() == crate::fec::FecControlPolicy::Off {
+            self.fec_wire_receiver.receive_source_only(data, recovered_packets)
+        } else {
+            self.fec_wire_receiver.receive(data, recovered_packets)
+        };
+        match result {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                debug!("dropping malformed or unsupported FEC wire datagram: {error}");
+                Err(())
+            }
+        }
     }
 
     /// Processes an incoming packet that already resides in a pooled block.
@@ -923,22 +970,11 @@ impl QuicFuscateConnection {
         let wire_framed = wire::is_framed(&block[..len]);
         let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
         let receive_report = if wire_framed {
-            if self.fec_rx_seed.is_none() {
-                if let Some(seed) = self.conn.fec_receive_fountain_seed() {
-                    self.fec_wire_receiver.set_fountain_seed(seed);
-                    self.fec_rx_seed = Some(seed);
-                }
-            }
-            let result = if self.fec.control_policy() == crate::fec::FecControlPolicy::Off {
-                self.fec_wire_receiver.receive_source_only(&block[..len], &mut recovered_packets)
-            } else {
-                self.fec_wire_receiver.receive(&block[..len], &mut recovered_packets)
-            };
+            let result = self.framed_wire_report(&block[..len], &mut recovered_packets);
             self.optimization_manager.free_block(block);
             match result {
                 Ok(report) => report,
-                Err(error) => {
-                    debug!("dropping malformed or unsupported FEC wire datagram: {error}");
+                Err(()) => {
                     self.fec_receive_scratch = recovered_packets;
                     return Ok(len);
                 }
@@ -967,6 +1003,19 @@ impl QuicFuscateConnection {
             recovered_packets.push(packet);
             wire::WireReceiveReport::raw_source(len)
         };
+        self.finish_wire_receive(receive_report, recovered_packets, len, from, to)
+    }
+
+    /// Shared receive tail: telemetry observe, dispatch of recovered/source
+    /// packets through stealth processing + `conn.recv`, then TLS handshake.
+    fn finish_wire_receive(
+        &mut self,
+        receive_report: wire::WireReceiveReport,
+        mut recovered_packets: Vec<FecPacket>,
+        len: usize,
+        from: SocketAddr,
+        to: SocketAddr,
+    ) -> Result<usize, crate::error::ConnectionError> {
         if self.fec.telemetry_enabled() {
             self.fec.observe_wire_receive(receive_report);
         }

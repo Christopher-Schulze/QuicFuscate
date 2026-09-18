@@ -132,6 +132,10 @@
 - DONE. `prepare_http3_poll_iteration` cloned the ~200-byte `Stats` struct every poll iteration although only `emit_server_push_cover_burst` read it — and that early-returns unless a cover burst is actually due (low-rate stealth path). The stats fetch now happens inside the burst function after the early-return; `prepare_http3_poll_iteration` returns just `intelligent_level`.
 - Detail: `docs/todo/todo-944-poll-stats-lazy.md`
 
+### TODO-945 - `recv_on_path`: pool checkout + copy + free per framed datagram → slice path
+- DONE. The slice-based receive entry copied every datagram into a pooled block although the framed (FEC-wire) branch only ever read `&block[..len]` and freed it. Framed datagrams now run on the input slice directly; `framed_wire_report` (seed lazy-init + source-only/full receive dispatch) and `finish_wire_receive` (telemetry + recovered-packet drain + TLS handshake) are shared with the pooled-block entry used by io_uring/GRO. Malformed datagrams keep the consumed-semantics (`Ok(len)`).
+- Detail: `docs/todo/todo-945-recv-framed-slice-path.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`
