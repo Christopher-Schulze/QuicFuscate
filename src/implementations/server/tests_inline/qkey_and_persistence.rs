@@ -131,11 +131,11 @@ fn qkey_datagram_auth_result_preserves_pending_state() {
     assert_eq!(qkey_datagram_auth_result(conn_id, QKeyDatagramAuthProgress::Pending), None);
     assert_eq!(
         qkey_datagram_auth_result(conn_id, QKeyDatagramAuthProgress::Authenticated),
-        Some((conn_id.to_vec(), true))
+        Some((crate::transport::ConnectionId::from_ref(conn_id), true))
     );
     assert_eq!(
         qkey_datagram_auth_result(conn_id, QKeyDatagramAuthProgress::Rejected),
-        Some((conn_id.to_vec(), false))
+        Some((crate::transport::ConnectionId::from_ref(conn_id), false))
     );
 }
 

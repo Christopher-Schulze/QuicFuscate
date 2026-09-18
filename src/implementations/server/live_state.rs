@@ -13,7 +13,7 @@ pub struct LiveServerState {
     /// QUIC DATAGRAM queue was full. Retried before new TUN packets are read.
     pub(super) pending_tun_downlinks: PendingTunDownlinks,
     pub(super) fanout_queue: ClientFanoutQueue,
-    pub(super) qkey_auth: std::collections::HashMap<Vec<u8>, QKeyAuthState>,
+    pub(super) qkey_auth: std::collections::HashMap<crate::transport::ConnectionId, QKeyAuthState>,
     pub(super) domain: LiveServerDomain,
     pub(super) auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
@@ -284,7 +284,7 @@ pub struct LiveClientRuntime<'a> {
     pub connection: &'a mut QuicFuscateConnection,
     pub client_count: usize,
     pub migration_from: Option<SocketAddr>,
-    pub conn_id: Vec<u8>,
+    pub conn_id: crate::transport::ConnectionId,
     pub qkey_auth: Option<QKeyAuthState>,
     pub session_id: Option<SessionId>,
     pub session_stats: Option<Arc<SessionStats>>,
@@ -632,7 +632,7 @@ impl LiveServerState {
         match self.clients.entry(addr) {
             Entry::Occupied(entry) => {
                 let connection = entry.into_mut();
-                let conn_id = connection.conn.source_id().as_ref().to_vec();
+                let conn_id = *connection.conn.source_id();
                 let qkey_auth = self.qkey_auth.get(&conn_id).cloned();
                 let session_id = self.domain.session_id_by_remote(addr);
                 let session_stats = self.domain.session_stats_by_remote(addr);
@@ -701,11 +701,11 @@ impl LiveServerState {
                     }
                 }
                 if let Some(state) = init.pending_qkey_auth.take() {
-                    let conn_id = init.connection.conn.source_id().as_ref().to_vec();
+                    let conn_id = *init.connection.conn.source_id();
                     self.qkey_auth.insert(conn_id, state);
                 }
                 let connection = entry.insert(init.connection);
-                let conn_id = connection.conn.source_id().as_ref().to_vec();
+                let conn_id = *connection.conn.source_id();
                 let qkey_auth = self.qkey_auth.get(&conn_id).cloned();
                 metrics.record_connection_accepted();
                 accept_loop.record_accepted(addr);
@@ -910,7 +910,7 @@ impl LiveServerState {
                 if conn.conn.idle_timeout_elapsed() {
                     conn.conn.on_timeout();
                 }
-                conn.conn.is_established().then(|| conn.conn.source_id().as_ref().to_vec())
+                conn.conn.is_established().then(|| *conn.conn.source_id())
             } else {
                 None
             };
@@ -975,7 +975,7 @@ impl LiveServerState {
             // flush sends its queued CONNECTION_CLOSE frame. Removing it here
             // would drop that frame and leave the peer unaware of revocation.
             if let Some(conn) = self.clients.get_mut(&addr) {
-                let conn_id = conn.conn.source_id().as_ref().to_vec();
+                let conn_id = *conn.conn.source_id();
                 if let Err(error) = conn.conn.close(true, 0x0, b"qkey_revoked") {
                     log::warn!(
                         "Client close after QKey revocation failed for {}: {:?}",
@@ -1087,7 +1087,7 @@ impl LiveServerState {
         };
         let session_id = self.domain.session_id_by_remote(addr);
         if let Some(mut conn) = self.clients.remove(&addr) {
-            let conn_id = conn.conn.source_id().as_ref().to_vec();
+            let conn_id = *conn.conn.source_id();
             if let Err(e) = conn.conn.close(true, 0x0, b"admin_kick") {
                 log::warn!("Client close on admin kick failed for {}: {:?}", addr, e);
             }
@@ -1214,12 +1214,12 @@ impl LiveServerState {
                 })
             })
         });
-        let closed_pending: Vec<(Vec<u8>, IpAddr, String)> = self
+        let closed_pending: Vec<(crate::transport::ConnectionId, IpAddr, String)> = self
             .clients
             .iter()
             .filter(|(_, connection)| connection.conn.is_closed())
             .filter_map(|(addr, connection)| {
-                let conn_id = connection.conn.source_id().as_ref().to_vec();
+                let conn_id = *connection.conn.source_id();
                 self.qkey_auth
                     .get(&conn_id)
                     .filter(|state| !state.authed)
@@ -1227,7 +1227,7 @@ impl LiveServerState {
             })
             .collect();
         for (conn_id, ip, key_id) in closed_pending {
-            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+            if let Some(mut state) = self.remove_qkey_auth(conn_id.as_ref()) {
                 complete_qkey_auth_state(
                     &self.auth_rate_limiter,
                     metrics,
@@ -1268,7 +1268,7 @@ impl LiveServerState {
         }
         for (addr, session_id) in expired_remotes {
             if let Some(mut conn) = self.clients.remove(&addr) {
-                let conn_id = conn.conn.source_id().as_ref().to_vec();
+                let conn_id = *conn.conn.source_id();
                 if let Err(error) = conn.conn.close(true, 0x0, b"session_timeout") {
                     log::warn!(
                         "Client close after session timeout failed for {}: {:?}",
@@ -1324,16 +1324,19 @@ mod migration_commit_tests {
         connection.conn.migrate(local_addr, new_addr).expect("migration candidate");
         let (_, _, _, challenge) =
             connection.conn.pending_path_validation_for_test().expect("pending validation");
-        let source_id = connection.conn.source_id().as_ref().to_vec();
+        let source_id = *connection.conn.source_id();
         live_state.clients.insert(old_addr, connection);
         live_state
             .pending_tun_downlinks
             .enqueue(old_addr, session_id, 1, vec![1], Instant::now())
             .expect("pending downlink");
         let mut routed_packet = [0u8; 64];
-        let header_len =
-            crate::transport::packet::format_short_header(&source_id, false, &mut routed_packet)
-                .expect("short header");
+        let header_len = crate::transport::packet::format_short_header(
+            source_id.as_ref(),
+            false,
+            &mut routed_packet,
+        )
+        .expect("short header");
         routed_packet[header_len] = 0;
 
         assert_eq!(

@@ -196,7 +196,7 @@ pub fn find_live_client_by_dcid(
 
 pub fn reconcile_live_clients(
     clients: &mut std::collections::HashMap<SocketAddr, QuicFuscateConnection>,
-    qkey_auth: &mut std::collections::HashMap<Vec<u8>, QKeyAuthState>,
+    qkey_auth: &mut std::collections::HashMap<crate::transport::ConnectionId, QKeyAuthState>,
     accept_loop: &AcceptLoop,
     metrics: &Metrics,
 ) -> Vec<SocketAddr> {
@@ -209,7 +209,7 @@ pub fn reconcile_live_clients(
     // One O(clients) set build instead of O(qkey × clients) rescan per entry.
     let active_conn_ids: std::collections::HashSet<&[u8]> =
         clients.values().map(|conn| conn.conn.source_id().as_ref()).collect();
-    qkey_auth.retain(|conn_id, _| active_conn_ids.contains(conn_id.as_slice()));
+    qkey_auth.retain(|conn_id, _| active_conn_ids.contains(conn_id.as_ref()));
     metrics.clients_active.store(clients.len() as u64, Ordering::Relaxed);
     closed_addrs
 }
@@ -545,8 +545,8 @@ fn record_live_snapshot_bytes_in(
 }
 
 pub struct LiveClientDatagramResult {
-    pub auth_result: Option<(Vec<u8>, bool)>,
-    pub remove_auth_conn_id: Option<Vec<u8>>,
+    pub auth_result: Option<(crate::transport::ConnectionId, bool)>,
+    pub remove_auth_conn_id: Option<crate::transport::ConnectionId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -559,11 +559,15 @@ pub(super) enum QKeyDatagramAuthProgress {
 pub(super) fn qkey_datagram_auth_result(
     conn_id: &[u8],
     progress: QKeyDatagramAuthProgress,
-) -> Option<(Vec<u8>, bool)> {
+) -> Option<(crate::transport::ConnectionId, bool)> {
     match progress {
         QKeyDatagramAuthProgress::Pending => None,
-        QKeyDatagramAuthProgress::Authenticated => Some((conn_id.to_vec(), true)),
-        QKeyDatagramAuthProgress::Rejected => Some((conn_id.to_vec(), false)),
+        QKeyDatagramAuthProgress::Authenticated => {
+            Some((crate::transport::ConnectionId::from_ref(conn_id), true))
+        }
+        QKeyDatagramAuthProgress::Rejected => {
+            Some((crate::transport::ConnectionId::from_ref(conn_id), false))
+        }
     }
 }
 
@@ -1552,11 +1556,11 @@ pub(super) async fn process_live_server_client_datagram(
     // loop was either redundant (datagrams already drained) or wrote corrupted
     // bytes (MASQUE flow-id varint prefix not stripped) and has been removed.
 
-    let auth_result = qkey_datagram_auth_result(&conn_id, auth_progress.get());
+    let auth_result = qkey_datagram_auth_result(conn_id.as_ref(), auth_progress.get());
     let mut remove_auth_conn_id = None;
     if let Some(reason) = should_close.get() {
         close_live_client_for_qkey_auth_failure(conn, addr, reason);
-        remove_auth_conn_id = Some(conn_id.clone());
+        remove_auth_conn_id = Some(conn_id);
     }
 
     drain_masque_downlink_responses(conn, addr, metrics);

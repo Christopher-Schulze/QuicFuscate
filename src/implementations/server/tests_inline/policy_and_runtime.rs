@@ -268,14 +268,14 @@ fn test_enforce_qkey_auth_timeouts_updates_exported_auth_failed_metrics() {
         &crate::transport::ConnectionId::from_ref(b"auth-metric-timeout"),
     )
     .expect("live server connection must be creatable");
-    let conn_id = connection.conn.source_id().as_ref().to_vec();
+    let conn_id = *connection.conn.source_id();
     let rejected_before = metrics.connections_rejected.load(Ordering::Relaxed);
     let auth_failed_before = metrics.auth_failed.load(Ordering::Relaxed);
 
     live_state.clients.insert(remote_addr, connection);
     let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
     live_state.qkey_auth.insert(
-        conn_id.clone(),
+        conn_id,
         QKeyAuthState {
             key_id: "test-key".to_string(),
             expected_token_sha256: "deadbeef".to_string(),
@@ -317,7 +317,7 @@ fn test_qkey_auth_success_associates_session_and_revocation_closes_client() {
         &crate::transport::ConnectionId::from_ref(b"auth-revoke-close"),
     )
     .expect("live server connection must be creatable");
-    let conn_id = connection.conn.source_id().as_ref().to_vec();
+    let conn_id = *connection.conn.source_id();
     let qkey_policy = BandwidthPolicy {
         rate_bytes_per_second: 1_250_000,
         burst_bytes: 1_250_000,
@@ -342,7 +342,7 @@ fn test_qkey_auth_success_associates_session_and_revocation_closes_client() {
     live_state.clients.insert(remote_addr, connection);
     let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
     live_state.qkey_auth.insert(
-        conn_id.clone(),
+        conn_id,
         QKeyAuthState {
             key_id: "test-key".to_string(),
             expected_token_sha256: "deadbeef".to_string(),
@@ -354,7 +354,7 @@ fn test_qkey_auth_success_associates_session_and_revocation_closes_client() {
         },
     );
 
-    live_state.commit_qkey_auth_result(None, Some((conn_id.clone(), true)), &accept_loop, &metrics);
+    live_state.commit_qkey_auth_result(None, Some((conn_id, true)), &accept_loop, &metrics);
 
     let bandwidth_stats =
         live_state.domain.shared.sessions.read().bandwidth_stats(session_id).unwrap();
@@ -373,7 +373,7 @@ fn test_qkey_auth_success_associates_session_and_revocation_closes_client() {
         Some("test-key")
     );
 
-    live_state.commit_qkey_auth_result(None, Some((conn_id.clone(), true)), &accept_loop, &metrics);
+    live_state.commit_qkey_auth_result(None, Some((conn_id, true)), &accept_loop, &metrics);
 
     assert!(live_state.clients.contains_key(&remote_addr));
     assert_eq!(
@@ -417,7 +417,7 @@ fn failed_qkey_auth_never_activates_pending_traffic_analysis_policy() {
         &crate::transport::ConnectionId::from_ref(b"failed-policy-auth"),
     )
     .expect("live server connection");
-    let conn_id = connection.conn.source_id().as_ref().to_vec();
+    let conn_id = *connection.conn.source_id();
     let pending_policy = crate::transport::config::TrafficAnalysisPolicy {
         defense: crate::transport::config::TrafficAnalysisDefense::ConstantRate,
         chaff_rate_pps: 0,
@@ -430,7 +430,7 @@ fn failed_qkey_auth_never_activates_pending_traffic_analysis_policy() {
     live_state.clients.insert(remote_addr, connection);
     let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
     live_state.qkey_auth.insert(
-        conn_id.clone(),
+        conn_id,
         QKeyAuthState {
             key_id: "failed-policy-key".to_string(),
             expected_token_sha256: "deadbeef".to_string(),
@@ -442,12 +442,7 @@ fn failed_qkey_auth_never_activates_pending_traffic_analysis_policy() {
         },
     );
 
-    live_state.commit_qkey_auth_result(
-        None,
-        Some((conn_id.clone(), false)),
-        &accept_loop,
-        &metrics,
-    );
+    live_state.commit_qkey_auth_result(None, Some((conn_id, false)), &accept_loop, &metrics);
 
     assert!(!live_state.qkey_auth.contains_key(&conn_id));
     assert_eq!(
@@ -483,14 +478,14 @@ fn test_pending_qkey_auth_cannot_complete_after_revocation() {
         &crate::transport::ConnectionId::from_ref(b"pending-revoked"),
     )
     .expect("live server connection must be creatable");
-    let conn_id = connection.conn.source_id().as_ref().to_vec();
+    let conn_id = *connection.conn.source_id();
     let rejected_before = metrics.connections_rejected.load(Ordering::Relaxed);
     let auth_failed_before = metrics.auth_failed.load(Ordering::Relaxed);
 
     live_state.clients.insert(remote_addr, connection);
     let auth_attempt = begin_test_auth_attempt(&live_state, remote_addr.ip());
     live_state.qkey_auth.insert(
-        conn_id.clone(),
+        conn_id,
         QKeyAuthState {
             key_id: "pending-key".to_string(),
             expected_token_sha256: "deadbeef".to_string(),
@@ -503,7 +498,7 @@ fn test_pending_qkey_auth_cannot_complete_after_revocation() {
     );
     live_state.revocation_manager.revoke("pending-key", "test").expect("revoke pending key");
 
-    live_state.commit_qkey_auth_result(None, Some((conn_id.clone(), true)), &accept_loop, &metrics);
+    live_state.commit_qkey_auth_result(None, Some((conn_id, true)), &accept_loop, &metrics);
 
     assert!(!live_state.clients.contains_key(&remote_addr));
     assert!(live_state.domain.session_id_by_remote(remote_addr).is_none());

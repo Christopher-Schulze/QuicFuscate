@@ -2,20 +2,20 @@ use super::*;
 
 impl LiveServerState {
     pub fn enforce_qkey_auth_timeouts(&mut self, metrics: &Metrics) {
-        let timed_out_conn_ids: Vec<Vec<u8>> = self
+        let timed_out_conn_ids: Vec<crate::transport::ConnectionId> = self
             .qkey_auth
             .iter()
             .filter_map(|(conn_id, state)| {
-                state.is_expired_at(self.clock.now()).then_some(conn_id.clone())
+                state.is_expired_at(self.clock.now()).then_some(*conn_id)
             })
             .collect();
         for conn_id in timed_out_conn_ids {
             let key_id = self.qkey_auth.get(&conn_id).map(|state| state.key_id.clone());
             let remote_addr = self.clients.iter().find_map(|(addr, conn)| {
-                (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+                (conn.conn.source_id().as_ref() == conn_id.as_ref()).then_some(*addr)
             });
             for conn in self.values_mut() {
-                if conn.conn.source_id().as_ref() == conn_id.as_slice() {
+                if conn.conn.source_id().as_ref() == conn_id.as_ref() {
                     metrics.record_connection_rejected();
                     if let Err(error) = conn.conn.close(true, 0x0, b"qkey_auth_timeout") {
                         log::warn!("Client close after QKey auth timeout failed: {:?}", error);
@@ -37,9 +37,9 @@ impl LiveServerState {
                 },
                 "QKey authentication timed out",
             );
-            let session_id = self.session_id_for_conn_id(&conn_id);
+            let session_id = self.session_id_for_conn_id(conn_id.as_ref());
             self.dissociate_qkey_for_session(session_id);
-            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+            if let Some(mut state) = self.remove_qkey_auth(conn_id.as_ref()) {
                 complete_qkey_auth_state(
                     &self.auth_rate_limiter,
                     metrics,
@@ -52,22 +52,22 @@ impl LiveServerState {
 
     pub fn commit_qkey_auth_result(
         &mut self,
-        remove_auth_conn_id: Option<Vec<u8>>,
-        auth_result: Option<(Vec<u8>, bool)>,
+        remove_auth_conn_id: Option<crate::transport::ConnectionId>,
+        auth_result: Option<(crate::transport::ConnectionId, bool)>,
         accept_loop: &AcceptLoop,
         metrics: &Metrics,
     ) {
-        let mut handled_conn_id: Option<Vec<u8>> = None;
+        let mut handled_conn_id: Option<crate::transport::ConnectionId> = None;
         if let Some((conn_id, authed)) = auth_result {
-            handled_conn_id = Some(conn_id.clone());
+            handled_conn_id = Some(conn_id);
             if authed && self.qkey_auth.get(&conn_id).is_some_and(|state| state.authed) {
                 // Authentication was already committed for this connection.
                 // Replayed HTTP/3 headers must not create a second bandwidth owner.
             } else if !authed {
                 let remote_addr = self.clients.iter().find_map(|(addr, conn)| {
-                    (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+                    (conn.conn.source_id().as_ref() == conn_id.as_ref()).then_some(*addr)
                 });
-                if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                if let Some(mut state) = self.remove_qkey_auth(conn_id.as_ref()) {
                     let key_id = state.key_id.clone();
                     complete_qkey_auth_state(
                         &self.auth_rate_limiter,
@@ -103,7 +103,7 @@ impl LiveServerState {
                 };
                 if self.revocation_manager.is_revoked(&key_id) {
                     let addr = self.clients.iter().find_map(|(addr, conn)| {
-                        (conn.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+                        (conn.conn.source_id().as_ref() == conn_id.as_ref()).then_some(*addr)
                     });
                     if let Some(addr) = addr {
                         let session_id = self.domain.session_id_by_remote(addr);
@@ -123,7 +123,7 @@ impl LiveServerState {
                         self.domain.retain_snapshots_for_clients(&self.clients);
                         self.sync_active_metrics(metrics);
                     }
-                    if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                    if let Some(mut state) = self.remove_qkey_auth(conn_id.as_ref()) {
                         complete_qkey_auth_state(
                             &self.auth_rate_limiter,
                             metrics,
@@ -134,7 +134,7 @@ impl LiveServerState {
                     return;
                 }
                 let remote_addr = self.clients.iter().find_map(|(addr, connection)| {
-                    (connection.conn.source_id().as_ref() == conn_id.as_slice()).then_some(*addr)
+                    (connection.conn.source_id().as_ref() == conn_id.as_ref()).then_some(*addr)
                 });
                 let session_id =
                     remote_addr.and_then(|addr| self.domain.session_id_by_remote(addr));
@@ -190,7 +190,7 @@ impl LiveServerState {
                         self.domain.retain_snapshots_for_clients(&self.clients);
                         self.sync_active_metrics(metrics);
                     }
-                    if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+                    if let Some(mut state) = self.remove_qkey_auth(conn_id.as_ref()) {
                         complete_qkey_auth_state(
                             &self.auth_rate_limiter,
                             metrics,
@@ -205,7 +205,7 @@ impl LiveServerState {
                 };
                 self.qkey_tracker.associate(session_id.as_u64(), &key_id);
                 let auth_rate_limiter = Arc::clone(&self.auth_rate_limiter);
-                if let Some(state) = self.qkey_auth_state_mut(&conn_id) {
+                if let Some(state) = self.qkey_auth_state_mut(conn_id.as_ref()) {
                     state.authed = true;
                     complete_qkey_auth_state(
                         &auth_rate_limiter,
@@ -230,10 +230,10 @@ impl LiveServerState {
             }
         }
         if let Some(conn_id) = remove_auth_conn_id {
-            if handled_conn_id.as_deref() == Some(conn_id.as_slice()) {
+            if handled_conn_id == Some(conn_id) {
                 return;
             }
-            if let Some(mut state) = self.remove_qkey_auth(&conn_id) {
+            if let Some(mut state) = self.remove_qkey_auth(conn_id.as_ref()) {
                 complete_qkey_auth_state(
                     &self.auth_rate_limiter,
                     metrics,

@@ -128,6 +128,13 @@ impl AsRef<[u8]> for ConnectionId {
     }
 }
 
+impl std::borrow::Borrow<[u8]> for ConnectionId {
+    #[inline]
+    fn borrow(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
 impl ConnectionId {
     /// Creates a connection ID from a borrowed slice.
     ///
