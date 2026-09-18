@@ -1295,10 +1295,7 @@ pub(super) async fn process_live_server_client_datagram(
                         ) {
                             return;
                         }
-                        let logical_addr = match masque_logical_addr.lock() {
-                            Ok(slot) => *slot,
-                            Err(poisoned) => *poisoned.into_inner(),
-                        };
+                        let logical_addr = **masque_logical_addr.load();
                         let (session_id, assigned_ips) = {
                             let sessions = masque_sessions.read();
                             match sessions.get_by_remote_addr(logical_addr) {

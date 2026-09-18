@@ -1393,18 +1393,15 @@ impl QuicFuscateConnection {
         self.masque_datagram_auth_gate.store(authed, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Returns the shared cell holding the client's current logical remote
+    /// Returns the lock-free cell holding the client's current logical remote
     /// address (updated on migration commits).
-    pub fn masque_logical_addr(&self) -> Arc<std::sync::Mutex<SocketAddr>> {
+    pub fn masque_logical_addr(&self) -> Arc<arc_swap::ArcSwap<SocketAddr>> {
         Arc::clone(&self.masque_logical_addr)
     }
 
     /// Stores the client's current logical remote address.
     pub fn set_masque_logical_addr(&self, addr: SocketAddr) {
-        match self.masque_logical_addr.lock() {
-            Ok(mut slot) => *slot = addr,
-            Err(poisoned) => *poisoned.into_inner() = addr,
-        }
+        self.masque_logical_addr.store(Arc::new(addr));
     }
 
     /// Returns true if the authenticated opaque relay sink has been installed.

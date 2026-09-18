@@ -3806,3 +3806,8 @@
 - `send_body` built `Vec::new()` + full-body `extend_from_slice` per call just to prepend a <=9-byte DATA frame header, then `stream_send` copied it again into `send_buf`. New `stream_send_parts` appends `&[&[u8]]` parts under one flow-control decision (both buffer variants); `send_body` now sends a stack header + borrowed body - the per-body Vec alloc and intermediate copy are gone.
 - Local proof: `transport::connection` 142/142 default + 143/143 `stream_ring_buffer`, `transport::h3` 102/102, clippy/fmt clean.
 - Omega proof: native green on aarch64 Linux.
+
+### TODO-975 - MASQUE per-packet alloc + copy on uplink/downlink
+- Detail: `docs/todo/todo-975-masque-zero-copy-dispatch.md`
+- `send_masque_udp_payload` cloned `host_header` (String) per uplink call just to escape a borrow conflict; `ensure_masque_tunnel{,_with_requirement}` now read `self.host_header` internally, removing the clone at all three call sites. On the downlink, `try_recv_masque_datagram` copied every datagram payload out of the shared recv scratch into a drain Vec; it now returns `(flow_id, offset, len)` indices and `dispatch_bound_masque_payload` normalizes in place over `masque_recv_region` (buffer carries `MASQUE_RECV_HEADROOM` = 40B spare, the on-wire TCP option-space bound). Capsule-carried DATAGRAM payloads keep identical semantics via a one-time +40B tail extension.
+- Local proof: masque tests 47/47, h3 connection tests 93/93, `cargo check --features rust-tests` clean, clippy/fmt clean.

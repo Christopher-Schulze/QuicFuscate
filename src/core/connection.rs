@@ -123,7 +123,7 @@ pub struct QuicFuscateConnection {
     // Persistent MASQUE uplink state shared with the 'static datagram sink so
     // the callback can be installed once instead of rebound per datagram.
     masque_datagram_auth_gate: Arc<std::sync::atomic::AtomicBool>,
-    masque_logical_addr: Arc<std::sync::Mutex<SocketAddr>>,
+    masque_logical_addr: Arc<arc_swap::ArcSwap<SocketAddr>>,
     masque_downlink_queue: Option<Arc<std::sync::Mutex<MasqueDownlinkQueue>>>,
     masque_downlink_retry: Option<Vec<u8>>,
     masque_control_cb: Option<CapsuleHandler>,
@@ -549,7 +549,7 @@ impl QuicFuscateConnection {
             masque_cb: None,
             masque_datagram_cb: None,
             masque_datagram_auth_gate: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            masque_logical_addr: Arc::new(std::sync::Mutex::new(SocketAddr::new(
+            masque_logical_addr: Arc::new(arc_swap::ArcSwap::from_pointee(SocketAddr::new(
                 std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                 0,
             ))),
