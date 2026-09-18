@@ -3848,6 +3848,11 @@
 - Local proof: qf-fec 89/89, fec 217/217, workspace 1728/1728, clippy/fmt clean.
 - Omega proof on `4433a48`: transition E2E **PASS** — 0%/2%/0% tunnel loss across clean/lossy/recovered, `streaming -> zero` committed mid-recovery, no fountain, no latch.
 
+### TODO-982 - systemd-resolved DNS leak: tunnel link DNS lacked the `~.` routing domain
+- Detail: `docs/todo/todo-982-systemd-resolved-dns-leak.md`
+- Linux `set_dns` ran `resolvectl dns <tun> <servers>` but never set a routing domain, so systemd-resolved kept the physical link's DHCP DNS eligible for unmatched names — queries leaked to the LAN/ISP resolver while the tunnel was up, and the client DoH proxy never saw them. `set_dns` now always emits `resolvectl domain <tun> <search...> "~."` (catch-all route-only domain); `revert` on restore covers it. Legacy resolv.conf, macOS, and Windows paths were never affected.
+- Regression: `systemd_domain_args_always_route_all_lookups_through_the_tunnel` (Linux-only, runs on Omega/CI).
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.

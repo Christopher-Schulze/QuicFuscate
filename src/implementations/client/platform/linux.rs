@@ -95,6 +95,24 @@ impl LinuxResolverPaths {
     }
 }
 
+/// Catch-all routing domain that makes a systemd-resolved link answer every
+/// lookup, regardless of other links' search domains or default-route flags.
+const SYSTEMD_DNS_CATCH_ALL: &str = "~.";
+
+/// Build `resolvectl domain <tun> <search...> ~.` arguments.
+///
+/// The catch-all is unconditional: assigning DNS servers to the tunnel link
+/// without it leaves the physical link's resolver eligible for unmatched
+/// names, which is the classic systemd-resolved DNS leak under a VPN.
+fn systemd_domain_args(tun_name: &str, search_domains: &[String]) -> Vec<String> {
+    let mut args = Vec::with_capacity(3 + search_domains.len());
+    args.push("domain".to_string());
+    args.push(tun_name.to_string());
+    args.extend(search_domains.iter().cloned());
+    args.push(SYSTEMD_DNS_CATCH_ALL.to_string());
+    args
+}
+
 /// Linux platform backend.
 pub struct LinuxPlatform {
     tun_name: Mutex<Option<String>>,
@@ -739,14 +757,15 @@ impl PlatformBackend for LinuxPlatform {
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             self.run_command("resolvectl", &arg_refs)?;
 
-            if !config.search_domains.is_empty() {
-                let mut dargs = Vec::with_capacity(2 + config.search_domains.len());
-                dargs.push("domain".to_string());
-                dargs.push(tun_name.clone());
-                dargs.extend(config.search_domains.iter().cloned());
-                let darg_refs: Vec<&str> = dargs.iter().map(String::as_str).collect();
-                self.run_command("resolvectl", &darg_refs)?;
-            }
+            // Route every lookup through the tunnel link's DNS. Without the
+            // "~." catch-all routing domain, systemd-resolved keeps the
+            // physical link's DHCP-provided DNS as a candidate for names that
+            // match no routing domain, leaking queries to the LAN/ISP resolver
+            // while the tunnel is up. `resolvectl revert` on restore removes
+            // the domain together with the link's DNS servers.
+            let dargs = systemd_domain_args(&tun_name, &config.search_domains);
+            let darg_refs: Vec<&str> = dargs.iter().map(String::as_str).collect();
+            self.run_command("resolvectl", &darg_refs)?;
         } else {
             let owner_marker = self.prepare_legacy_resolver_state()?;
             let source = self.resolver_paths.source();
@@ -882,6 +901,18 @@ mod tests {
         let platform = LinuxPlatform::new();
         // This will return true if running as root, false otherwise
         let _ = platform.is_elevated();
+    }
+
+    #[test]
+    fn systemd_domain_args_always_route_all_lookups_through_the_tunnel() {
+        // Without "~." systemd-resolved keeps the physical link's DNS eligible
+        // for unmatched names: a DNS leak while the tunnel is connected.
+        let args = systemd_domain_args("qtun0", &[]);
+        assert_eq!(args, vec!["domain", "qtun0", "~."]);
+
+        let args =
+            systemd_domain_args("qtun0", &["corp.example".to_string(), "internal".to_string()]);
+        assert_eq!(args, vec!["domain", "qtun0", "corp.example", "internal", "~."]);
     }
 
     #[test]
