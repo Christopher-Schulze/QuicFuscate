@@ -227,8 +227,11 @@ impl SessionManager {
         }
     }
 
+    /// Per-packet bandwidth admission. Takes `&self` so callers only need a
+    /// shared read lock on the session registry; the manager serializes
+    /// internally per client entry.
     pub fn check_bandwidth(
-        &mut self,
+        &self,
         session_id: SessionId,
         direction: BandwidthDirection,
         bytes: usize,
@@ -622,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_session_manager_bandwidth_check() {
-        let mut mgr = SessionManager::new(100);
+        let mgr = SessionManager::new(100);
         let missing = SessionId::from_u64(1);
         assert_eq!(
             mgr.check_bandwidth(missing, BandwidthDirection::Uplink, 10_000),

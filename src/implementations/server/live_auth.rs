@@ -988,7 +988,7 @@ fn admit_session_bandwidth(
         metrics.record_bandwidth_decision(direction, BandwidthDecision::RateLimited, bytes);
         return BandwidthDecision::RateLimited;
     };
-    let decision = sessions.write().check_bandwidth(session_id, direction, bytes);
+    let decision = sessions.read().check_bandwidth(session_id, direction, bytes);
     metrics.record_bandwidth_decision(direction, decision, bytes);
     decision
 }

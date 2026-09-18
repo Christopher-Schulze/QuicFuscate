@@ -461,9 +461,11 @@ pub struct BandwidthStats {
 /// Per-client bandwidth limiter and quota tracker.
 ///
 /// Missing sessions fail closed. Live policy updates replace both directional
-/// buckets while preserving already-accounted quota usage.
+/// buckets while preserving already-accounted quota usage. Each entry carries
+/// its own mutex so `check` only serializes traffic of the same session;
+/// lookups go through the map under a shared read lock.
 pub struct PerClientBandwidthManager {
-    clients: HashMap<u64, ClientBandwidthEntry>,
+    clients: HashMap<u64, std::sync::Mutex<ClientBandwidthEntry>>,
     default_policy: BandwidthPolicy,
     /// Clock shared by all per-client rate, quota, and audit state.
     clock: ProtocolClock,
@@ -534,7 +536,7 @@ impl PerClientBandwidthManager {
         }
         let entry = Self::entry_from_policy(policy, &self.clock)
             .map_err(|error| format!("bandwidth wall-clock error: {error}"))?;
-        self.clients.insert(client_id, entry);
+        self.clients.insert(client_id, std::sync::Mutex::new(entry));
         Ok(())
     }
 
@@ -544,8 +546,12 @@ impl PerClientBandwidthManager {
         policy: BandwidthPolicy,
     ) -> Result<(), String> {
         policy.validate()?;
-        let Some(entry) = self.clients.get_mut(&client_id) else {
+        let Some(entry) = self.clients.get(&client_id) else {
             return Err("bandwidth client not found".to_string());
+        };
+        let mut entry = match entry.lock() {
+            Ok(entry) => entry,
+            Err(poisoned) => poisoned.into_inner(),
         };
         entry.uplink_limiter = BandwidthLimiter::new_with_clock(
             policy.rate_bytes_per_second,
@@ -564,46 +570,53 @@ impl PerClientBandwidthManager {
     }
 
     pub fn check(
-        &mut self,
+        &self,
         client_id: u64,
         direction: BandwidthDirection,
         bytes: usize,
     ) -> BandwidthDecision {
-        let Some(entry) = self.clients.get_mut(&client_id) else {
+        let Some(entry) = self.clients.get(&client_id) else {
             return BandwidthDecision::RateLimited;
         };
-        let clock_available = entry.daily_quota.check_and_reset().is_ok()
-            && entry.monthly_quota.check_and_reset().is_ok();
-        let accounted_bytes = bytes as u64;
-        let decision = if !clock_available {
-            BandwidthDecision::ClockUnavailable
-        } else if !entry.daily_quota.can_record(accounted_bytes) {
-            BandwidthDecision::DailyQuotaExceeded
-        } else if !entry.monthly_quota.can_record(accounted_bytes) {
-            BandwidthDecision::MonthlyQuotaExceeded
-        } else {
-            let limiter = match direction {
-                BandwidthDirection::Uplink => &mut entry.uplink_limiter,
-                BandwidthDirection::Downlink => &mut entry.downlink_limiter,
+        let (decision, should_audit) = {
+            let mut entry = match entry.lock() {
+                Ok(entry) => entry,
+                Err(poisoned) => poisoned.into_inner(),
             };
-            if limiter.check(bytes) {
-                let daily_recorded = entry.daily_quota.record(accounted_bytes);
-                let monthly_recorded = entry.monthly_quota.record(accounted_bytes);
-                debug_assert!(daily_recorded && monthly_recorded);
-                BandwidthDecision::Allowed
+            let clock_available = entry.daily_quota.check_and_reset().is_ok()
+                && entry.monthly_quota.check_and_reset().is_ok();
+            let accounted_bytes = bytes as u64;
+            let decision = if !clock_available {
+                BandwidthDecision::ClockUnavailable
+            } else if !entry.daily_quota.can_record(accounted_bytes) {
+                BandwidthDecision::DailyQuotaExceeded
+            } else if !entry.monthly_quota.can_record(accounted_bytes) {
+                BandwidthDecision::MonthlyQuotaExceeded
             } else {
-                BandwidthDecision::RateLimited
+                let limiter = match direction {
+                    BandwidthDirection::Uplink => &mut entry.uplink_limiter,
+                    BandwidthDirection::Downlink => &mut entry.downlink_limiter,
+                };
+                if limiter.check(bytes) {
+                    let daily_recorded = entry.daily_quota.record(accounted_bytes);
+                    let monthly_recorded = entry.monthly_quota.record(accounted_bytes);
+                    debug_assert!(daily_recorded && monthly_recorded);
+                    BandwidthDecision::Allowed
+                } else {
+                    BandwidthDecision::RateLimited
+                }
+            };
+            let now = self.clock.now();
+            let audit_slot = &mut entry.last_audited_denial[direction.index()];
+            let should_audit = decision != BandwidthDecision::Allowed
+                && audit_slot.is_none_or(|(previous, last)| {
+                    previous != decision || self.clock.elapsed_since(last) >= DENIAL_AUDIT_INTERVAL
+                });
+            if should_audit {
+                *audit_slot = Some((decision, now));
             }
+            (decision, should_audit)
         };
-        let now = self.clock.now();
-        let audit_slot = &mut entry.last_audited_denial[direction.index()];
-        let should_audit = decision != BandwidthDecision::Allowed
-            && audit_slot.is_none_or(|(previous, last)| {
-                previous != decision || self.clock.elapsed_since(last) >= DENIAL_AUDIT_INTERVAL
-            });
-        if should_audit {
-            *audit_slot = Some((decision, now));
-        }
         if should_audit {
             crate::audit::audit_typed(
                 crate::audit::AuditEventType::AdminAction,
@@ -628,6 +641,10 @@ impl PerClientBandwidthManager {
     /// applied).
     pub fn stats(&self, client_id: u64) -> Option<BandwidthStats> {
         let entry = self.clients.get(&client_id)?;
+        let entry = match entry.lock() {
+            Ok(entry) => entry,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         Some(BandwidthStats {
             policy: entry.policy.clone(),
             uplink_available_bytes: entry.uplink_limiter.available_tokens(),
@@ -643,8 +660,12 @@ impl PerClientBandwidthManager {
         &mut self,
         client_id: u64,
     ) -> Result<bool, crate::time_source::WallClockError> {
-        let Some(entry) = self.clients.get_mut(&client_id) else {
+        let Some(entry) = self.clients.get(&client_id) else {
             return Ok(false);
+        };
+        let mut entry = match entry.lock() {
+            Ok(entry) => entry,
+            Err(poisoned) => poisoned.into_inner(),
         };
         let now = self.clock.now_system();
         entry.daily_quota.reset_at(now)?;

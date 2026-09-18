@@ -240,11 +240,11 @@ pub(super) fn drain_pending_tun_downlinks(
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
     let mut deferred_sessions = std::collections::HashSet::new();
     let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
-    // One write guard covers stats lookups and token-bucket checks for every
-    // drained entry - previously each entry took read+write acquisitions.
+    // One read guard covers stats lookups and token-bucket checks for every
+    // drained entry; the bandwidth manager serializes per client internally.
     // `sessions` is an independent Arc here, so the guard conflicts with
     // nothing else in `live`.
-    let mut sessions = sessions.write();
+    let sessions = sessions.read();
     let now = live.live_state.clock.now();
     while let Some(mut entry) = live.live_state.pending_tun_downlinks.pop_next(&deferred_sessions) {
         if entry.is_expired(now) {
@@ -710,11 +710,11 @@ fn process_server_tun_packet(
         )?;
         return Ok(());
     }
-    // One write guard covers route-to-target resolution AND the per-target
-    // bandwidth checks below - previously this took read+write acquisitions per
-    // packet. Disjoint field borrows (`clients`, `pending_tun_downlinks`) stay
-    // usable while the guard is held.
-    let mut sessions = live.live_state.domain.shared.sessions.write();
+    // One read guard covers route-to-target resolution AND the per-target
+    // bandwidth checks below; the bandwidth manager serializes per client
+    // internally. Disjoint field borrows (`clients`, `pending_tun_downlinks`)
+    // stay usable while the guard is held.
+    let sessions = live.live_state.domain.shared.sessions.read();
     let mut targets = smallvec::SmallVec::<[(SocketAddr, SessionId); 4]>::new();
     match route {
         DownlinkRoute::Unicast { destination, .. } => {
