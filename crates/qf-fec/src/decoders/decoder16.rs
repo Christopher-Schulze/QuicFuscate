@@ -328,34 +328,29 @@ impl Decoder16 {
         for (i, eq) in self.equations.iter().enumerate() {
             let eq_words = eq.len / 2;
             let shared = words.min(eq_words);
-            for (col, &sid) in unknowns.iter().enumerate() {
-                'coeff: for j in 0..self.k {
-                    if self.source_id_for(eq.base_id, j) == sid {
-                        a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
-                        break 'coeff;
-                    }
-                }
-            }
             for (w, slot) in yb[i].iter_mut().enumerate().take(shared) {
                 let b0 = eq.data[w * 2] as u16;
                 let b1 = eq.data[w * 2 + 1] as u16;
                 *slot = (b0 << 8) | b1;
             }
-            for j in 0..self.k {
+            // Walk the coefficient row once: non-zero entries land in the
+            // matrix via binary search into the sorted unknown list, or
+            // contribute their known source to the RHS — O(k + nnz*words)
+            // instead of O(u*k) for the matrix plus O(k*words) for the RHS.
+            for (j, &coeff) in eq.coeffs.iter().enumerate().take(self.k) {
+                if coeff == 0 {
+                    continue;
+                }
                 let sid = self.source_id_for(eq.base_id, j);
-                if self.known.contains_key(&sid) {
-                    if let Some((kd, klen)) = self.known.get(&sid) {
-                        let kwords = klen / 2;
-                        let known_shared = shared.min(kwords);
-                        let coeff = *eq.coeffs.get(j).unwrap_or(&0);
-                        if coeff != 0 {
-                            for w in 0..known_shared {
-                                let b0 = kd[w * 2] as u16;
-                                let b1 = kd[w * 2 + 1] as u16;
-                                let word = (b0 << 8) | b1;
-                                yb[i][w] ^= gf_tables::gf16_mul(coeff, word);
-                            }
-                        }
+                if let Ok(col) = unknowns.binary_search(&sid) {
+                    a[i][col] = coeff;
+                } else if let Some((kd, klen)) = self.known.get(&sid) {
+                    let known_shared = shared.min(klen / 2);
+                    for w in 0..known_shared {
+                        let b0 = kd[w * 2] as u16;
+                        let b1 = kd[w * 2 + 1] as u16;
+                        let word = (b0 << 8) | b1;
+                        yb[i][w] ^= gf_tables::gf16_mul(coeff, word);
                     }
                 }
             }
@@ -391,16 +386,23 @@ impl Decoder16 {
             for cell in yb[row].iter_mut() {
                 *cell = gf_tables::gf16_mul(*cell, inv);
             }
-            // eliminate other rows. One pivot-row snapshot per column keeps
-            // src/dst disjoint for the borrow checker; the same factor f also
-            // updates every RHS word via the vectorized slice kernel.
-            let pivot_a = a[row].clone();
-            let pivot_rhs = yb[row].clone();
+            // eliminate other rows. Split both blocks once so the pivot
+            // rows can be read while other rows mutate — replaces an
+            // a-row plus a words-row clone per pivot.
+            let (a_lo, a_hi) = a.split_at_mut(row);
+            let (a_pivot, a_hi) = a_hi.split_at_mut(1);
+            let (yb_lo, yb_hi) = yb.split_at_mut(row);
+            let (yb_pivot, yb_hi) = yb_hi.split_at_mut(1);
             for r in 0..m {
-                if r != row && a[r][col] != 0 {
-                    let f = a[r][col];
-                    gf16_mul_slice(f, &pivot_a[..u], &mut a[r][..u]);
-                    gf16_mul_slice(f, &pivot_rhs[..words], &mut yb[r][..words]);
+                if r == row {
+                    continue;
+                }
+                let a_row = if r < row { &mut a_lo[r] } else { &mut a_hi[r - row - 1] };
+                let f = a_row[col];
+                if f != 0 {
+                    gf16_mul_slice(f, &a_pivot[0][..u], &mut a_row[..u]);
+                    let target = if r < row { &mut yb_lo[r] } else { &mut yb_hi[r - row - 1] };
+                    gf16_mul_slice(f, &yb_pivot[0][..words], &mut target[..words]);
                 }
             }
             row += 1;
