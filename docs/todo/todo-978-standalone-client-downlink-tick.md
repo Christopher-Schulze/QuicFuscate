@@ -52,6 +52,10 @@ standalone runtime had the gap.
 
 - `cargo check --bin quicfuscate` clean, clippy clean, fmt clean.
 - `cargo test --bin quicfuscate`: 50/50.
-- Omega manual netns run with three-hop captures: pending re-measurement
-  after deploy (expected: qtun0-cli reply latency drops from ~251ms to
-  sub-ms/millisecond scale).
+- Omega manual netns run, three-hop captures, default config (BBR3 +
+  pacing on): cli->srv 0.540/0.564/0.598ms, srv->cli 0.414/0.573/0.654ms
+  (was ~252ms both directions before the fix).
+- Omega `scripts/tests/tun-e2e-netns.sh` PASS on 0ca37d9: handshake both
+  sides, 0% loss, cli->srv rtt 0.368/0.439/0.585ms, srv->cli
+  0.325/0.429/0.480ms, forwarding restored, no TUN/firewall residue.
+- Commit: 0ca37d9.
