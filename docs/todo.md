@@ -3794,3 +3794,9 @@
 - Detail: `docs/todo/todo-972-path-scheduler-allocs.md`
 - `select_path` built `validated_path_ids()` (Vec alloc) plus a second `Vec<(PathId, u64)>` in the weighted branch per call; rewritten to iterate `paths()` directly with zero allocations. The scheduler is currently dormant (no production caller), so this removes the per-packet alloc pattern before multipath is wired.
 - Local proof: `cargo test -p qf-transport-path` (27/27), clippy clean, fmt clean.
+
+### TODO-973 - MemoryPool ownership ledger: fused free-path transition
+- Detail: `docs/todo/todo-973-pool-ownership-fused-return.md`
+- `free()` ran `begin_free` + `return_accounted` as two separate global-mutex acquisitions on the ownership HashMap per returned block; fused into `begin_return` (probe TLS room first, transition CheckedOut->Tls/Queue in one lock). One global mutex per free instead of two; `begin_free`/`return_accounted`/`try_cache_block` are now test-only.
+- Local proof: `cargo test -p qf-memory-pool` (25/25), `cargo test -p qf-fec` (85/85), clippy/fmt clean.
+- Omega proof: qf-memory-pool + qf-fec native green on aarch64 Linux.
