@@ -1,4 +1,4 @@
-# TODO-975 - MASQUE per-packet alloc + copy elimination (uplink + downlink)
+# TODO-975 - MASQUE per-packet alloc/copy/lock elimination (uplink + downlink)
 
 Status: DONE (local; Omega verification pending)
 
@@ -23,6 +23,11 @@ let Some(sid) = self.ensure_masque_tunnel(&host)? else { ... };
    `dispatch_bound_masque_payload` needed `&mut Vec<u8>` for ingress
    normalization (Darwin/MacOS persona can expand TCP option space by up
    to 24 bytes; wire bound is 40).
+
+3. Downlink lock: `masque_logical_addr` was an
+   `Arc<Mutex<SocketAddr>>` locked once per inbound MASQUE datagram in
+   the TUN sink callback, although it only changes on migration
+   commits.
 
 ## Fix
 
@@ -60,10 +65,19 @@ Per inbound MASQUE datagram the payload memcpy is gone; the packet is
 normalized in place inside the receive scratch and dispatched as a
 slice into the TUN callback.
 
+### Downlink lock
+
+`masque_logical_addr` became `Arc<arc_swap::ArcSwap<SocketAddr>>` - the
+same lock-free pattern already used for `crypto_1rtt` and the isolation
+IP sets. The TUN sink callback now does one atomic `load()` instead of
+mutex lock/unlock per datagram; `set_masque_logical_addr` stores a new
+pointee on migration commits.
+
 ## Files
 
-- `src/core/connection.rs` - ensure_masque_tunnel* signature + internal host read
-- `src/core/connection/h3_runtime.rs` - dispatch signature, drain loop, capsule caller, send_masque_udp_payload
+- `src/core/connection.rs` - ensure_masque_tunnel* signature + internal host read, ArcSwap field
+- `src/core/connection/h3_runtime.rs` - dispatch signature, drain loop, capsule caller, send_masque_udp_payload, lock-free addr accessors
+- `src/implementations/server/live_auth.rs` - TUN sink callback atomic load
 - `src/transport/h3/connection.rs` - MASQUE_RECV_HEADROOM const, masque_recv_capacity field, buffer sizing
 - `src/transport/h3/connection/masque_and_webtransport.rs` - index-returning try_recv + region accessor
 - `src/transport/h3.rs` - pub(crate) re-export of the headroom const
@@ -76,4 +90,4 @@ slice into the TUN callback.
 - `cargo test --lib masque` - 47/47
 - `cargo test --lib -- transport::h3::connection::tests` - 93/93
 - clippy clean, fmt clean
-- Commit: e3666a0
+- Commits: e3666a0 (alloc+copy), 2cece98 (ArcSwap lock removal)
