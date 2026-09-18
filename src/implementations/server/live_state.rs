@@ -289,9 +289,9 @@ pub struct LiveClientRuntime<'a> {
     pub session_id: Option<SessionId>,
     pub session_stats: Option<Arc<SessionStats>>,
     pub assigned_ips: Option<AssignedClientIps>,
-    pub forwarding_policy: Arc<ClientIsolationManager>,
-    pub sessions: Arc<RwLock<SessionManager>>,
-    pub(super) fanout_queue: ClientFanoutQueue,
+    pub forwarding_policy: &'a Arc<ClientIsolationManager>,
+    pub sessions: &'a Arc<RwLock<SessionManager>>,
+    pub(super) fanout_queue: &'a ClientFanoutQueue,
 }
 
 #[allow(
@@ -625,9 +625,9 @@ impl LiveServerState {
         use std::collections::hash_map::Entry;
 
         let count_before = self.clients.len();
-        let forwarding_policy = Arc::clone(&self.domain.shared.forwarding_policy);
-        let sessions = Arc::clone(&self.domain.shared.sessions);
-        let fanout_queue = Arc::clone(&self.fanout_queue);
+        let forwarding_policy = &self.domain.shared.forwarding_policy;
+        let sessions = &self.domain.shared.sessions;
+        let fanout_queue = &self.fanout_queue;
         match self.clients.entry(addr) {
             Entry::Occupied(entry) => {
                 let connection = entry.into_mut();
@@ -646,7 +646,7 @@ impl LiveServerState {
                     assigned_ips,
                     forwarding_policy,
                     sessions,
-                    fanout_queue: Arc::clone(&fanout_queue),
+                    fanout_queue,
                 })
             }
             Entry::Vacant(entry) => {

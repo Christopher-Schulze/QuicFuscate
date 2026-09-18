@@ -1262,9 +1262,9 @@ pub(super) async fn process_live_server_client_datagram(
             let tun_fault_for_masque = Arc::clone(tun_fault);
             let tun_notify_for_masque = Arc::clone(tun_notify);
             let shutdown_for_masque = Arc::clone(runtime_shutdown);
-            let masque_forwarding_policy = Arc::clone(&forwarding_policy);
-            let masque_sessions = Arc::clone(&sessions);
-            let masque_fanout_queue = Arc::clone(&fanout_queue);
+            let masque_forwarding_policy = Arc::clone(forwarding_policy);
+            let masque_sessions = Arc::clone(sessions);
+            let masque_fanout_queue = Arc::clone(fanout_queue);
             let masque_metrics = Arc::clone(metrics);
             let dns_resolvers = Arc::clone(dns_upstream_resolvers);
             let dns_admission = Arc::clone(dns_intercept_admission);
@@ -1385,7 +1385,7 @@ pub(super) async fn process_live_server_client_datagram(
                     // EINVAL on TUN write.
                     if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
                         let bandwidth_decision = admit_session_bandwidth(
-                            &sessions,
+                            sessions,
                             metrics,
                             session_id,
                             BandwidthDirection::Uplink,
@@ -1402,7 +1402,7 @@ pub(super) async fn process_live_server_client_datagram(
                             return;
                         };
                         let Some(route) = allow_client_uplink(
-                            &forwarding_policy,
+                            forwarding_policy,
                             metrics,
                             assigned_ips,
                             data,
@@ -1414,7 +1414,7 @@ pub(super) async fn process_live_server_client_datagram(
                             return;
                         };
                         enqueue_client_fanout(
-                            &fanout_queue,
+                            fanout_queue,
                             metrics.as_ref(),
                             logical_addr,
                             route,
