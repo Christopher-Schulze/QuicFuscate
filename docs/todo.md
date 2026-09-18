@@ -3778,7 +3778,7 @@
 - Local proof: `cargo test -p qf-fec` (85/85); `fec_peeling` bench neutral (p=0.47) at degree-2, halves scan work at higher degrees.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
 
-### TODO-970 - Gaussian elimination hot path acceleration
+### TODO-970 - Gaussian elimination hot path acceleration (decoder8/16)
 - Detail: `docs/todo/todo-970-gaussian-hot-path.md`
 - Matrix build O(m*u*k) -> O(m*k) via sorted-unknowns binary search; RHS build O(min_len*k) scalar -> O(min_len*nnz) SIMD; per-row `yb[row]` clones replaced by `split_at_mut`; RHS row updates switched to `gf_mul_scalar_slice`.
 - Local proof: `cargo test -p qf-fec` (85/85), clippy clean.

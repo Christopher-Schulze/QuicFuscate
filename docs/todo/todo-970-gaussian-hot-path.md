@@ -1,11 +1,13 @@
-# TODO-970 — Gaussian elimination hot path acceleration (Decoder8)
+# TODO-970 — Gaussian elimination hot path acceleration (Decoder8/16)
 
 ## Status
 DONE
 
 ## Problem
 `Decoder8::try_eliminate_unmeasured` (Gaussian fallback, reached per
-repair packet when peeling stalls) had three nested-scan hotspots:
+repair packet when peeling stalls) had three nested-scan hotspots.
+`Decoder16`'s Gaussian elimination had the same patterns and received
+the same fixes in commit `73ed3c8`.
 
 1. **Matrix build O(m × u × k)**: for every (row, unknown-column) cell it
    linearly scanned all `k` coefficient indices to find the `j` mapping to
@@ -45,6 +47,7 @@ repair packet when peeling stalls) had three nested-scan hotspots:
   correctness (in-place pivot mutation vs. read of the original row).
 
 ## Verification
-- `cargo test -p qf-fec` — 85/85 (local + Omega aarch64 Linux)
+- `cargo test -p qf-fec` — 85/85 (local + Omega aarch64 Linux; decoder16
+  changes verified in `73ed3c8` with 85/85 on both)
 - `cargo clippy -p qf-fec --all-targets` — clean
 - `cargo fmt --check` — clean
