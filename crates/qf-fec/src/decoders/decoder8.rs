@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 struct Equation8 {
     base_id: u64,
+    /// Coefficient row, length k. Stays a heap Vec: equations rotate through
+    /// `VecDeque` every peeling pass, so inline storage would turn each
+    /// rotation into a ~280-byte memmove — measured slower than the alloc.
     coeffs: Vec<u8>,
     data: PooledBlock,
     len: usize,
@@ -254,7 +257,10 @@ impl Decoder8 {
     }
 
     fn try_solve_equation(&mut self, eq: &mut Equation8) -> bool {
-        // Subtract known sources from equation data; zero-out corresponding coeffs
+        // Subtract known sources and count remaining unknowns in one pass:
+        // a coefficient that survives subtraction is exactly an unknown.
+        let mut last_idx: Option<(usize, u64, u8)> = None;
+        let mut multiple_unknowns = false;
         for (j, coeff) in eq.coeffs.iter_mut().enumerate().take(self.k) {
             if *coeff == 0 {
                 continue;
@@ -264,21 +270,16 @@ impl Decoder8 {
                 let sl = ::core::cmp::min(eq.len, *klen);
                 gf_tables::gf_mul_scalar_slice(*coeff, &kdata[..sl], &mut eq.data[..sl]);
                 *coeff = 0;
+            } else if last_idx.is_some() {
+                // More than one unknown remains — keep subtracting the rest,
+                // the partially reduced equation is retained for later passes.
+                multiple_unknowns = true;
+            } else {
+                last_idx = Some((j, sid, *coeff));
             }
         }
-        // Count unknowns
-        let mut last_idx: Option<(usize, u64, u8)> = None;
-        for (j, &c) in eq.coeffs.iter().enumerate().take(self.k) {
-            if c != 0 {
-                let sid = self.source_id_for(eq.base_id, j);
-                if !self.known.contains_key(&sid) {
-                    if last_idx.is_some() {
-                        // More than one unknown remains
-                        return false;
-                    }
-                    last_idx = Some((j, sid, c));
-                }
-            }
+        if multiple_unknowns {
+            return false;
         }
         if let Some((_j, sid, cj)) = last_idx {
             // Solve for single unknown sid: x = cj^{-1} * eq.data
