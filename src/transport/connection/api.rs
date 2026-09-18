@@ -185,11 +185,62 @@ impl Connection {
         buf: &[u8],
         fin: bool,
     ) -> Result<usize, crate::error::ConnectionError> {
+        self.stream_send_impl(stream_id, buf.len(), fin, |stream| {
+            #[cfg(not(feature = "stream_ring_buffer"))]
+            {
+                stream.send_buf.extend_from_slice(buf);
+                buf.len()
+            }
+            #[cfg(feature = "stream_ring_buffer")]
+            {
+                stream.send_ring.write(buf)
+            }
+        })
+    }
+
+    /// Vectored variant of `stream_send`: appends `parts` concatenated under a
+    /// single flow-control decision, so a small frame header plus a borrowed
+    /// body never needs a contiguous intermediate buffer.
+    pub fn stream_send_parts(
+        &mut self,
+        stream_id: u64,
+        parts: &[&[u8]],
+        fin: bool,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        let payload_len: usize = parts.iter().map(|part| part.len()).sum();
+        self.stream_send_impl(stream_id, payload_len, fin, |stream| {
+            let mut written = 0usize;
+            for part in parts {
+                #[cfg(not(feature = "stream_ring_buffer"))]
+                {
+                    stream.send_buf.extend_from_slice(part);
+                    written += part.len();
+                }
+                #[cfg(feature = "stream_ring_buffer")]
+                {
+                    let n = stream.send_ring.write(part);
+                    written += n;
+                    if n < part.len() {
+                        break;
+                    }
+                }
+            }
+            written
+        })
+    }
+
+    fn stream_send_impl(
+        &mut self,
+        stream_id: u64,
+        payload_len: usize,
+        fin: bool,
+        append: impl FnOnce(&mut Stream) -> usize,
+    ) -> Result<usize, crate::error::ConnectionError> {
         // Send stream data
         // Compute connection-level pending bytes before borrowing a specific stream mutably
         let pending_conn_after = (self.conn_bytes_sent)
             .saturating_add(self.total_send_buffered_bytes() as u64)
-            .saturating_add(buf.len() as u64);
+            .saturating_add(payload_len as u64);
         if pending_conn_after > self.peer_max_data {
             // Inform peer we are blocked by connection window
             Self::queue_control_frame(
@@ -230,14 +281,14 @@ impl Connection {
                 stream
                     .send_off
                     .saturating_add(stream.send_buf.len() as u64)
-                    .saturating_add(buf.len() as u64)
+                    .saturating_add(payload_len as u64)
             }
             #[cfg(feature = "stream_ring_buffer")]
             {
                 stream
                     .send_off
                     .saturating_add(stream.send_ring.len() as u64)
-                    .saturating_add(buf.len() as u64)
+                    .saturating_add(payload_len as u64)
             }
         };
         if pending_stream_after > stream.max_stream_data_tx {
@@ -252,23 +303,15 @@ impl Connection {
             return Err(crate::error::ConnectionError::FinalSize);
         }
         // Append payload and mark FIN if requested
-        #[cfg(not(feature = "stream_ring_buffer"))]
-        {
-            stream.send_buf.extend_from_slice(buf);
-            self.send_buffered_bytes = self.send_buffered_bytes.saturating_add(buf.len());
-        }
-        #[cfg(feature = "stream_ring_buffer")]
-        {
-            let written = stream.send_ring.write(buf);
-            self.send_buffered_bytes = self.send_buffered_bytes.saturating_add(written);
-            if written < buf.len() {
-                return Err(crate::error::ConnectionError::InvalidState);
-            }
+        let written = append(stream);
+        self.send_buffered_bytes = self.send_buffered_bytes.saturating_add(written);
+        if written < payload_len {
+            return Err(crate::error::ConnectionError::InvalidState);
         }
         stream.send_fin = fin;
         self.enqueue_writable_stream(stream_id);
 
-        Ok(buf.len())
+        Ok(payload_len)
     }
 
     /// Enqueues an inbound DATAGRAM only when the queue and zero-copy block contract permit it.

@@ -741,11 +741,16 @@ impl Connection {
             to_send = &blk[..*used];
             // The RAII owner remains live until the transport has consumed the frame bytes.
         }
-        let mut frame = Vec::new();
-        frame.push(0x00);
-        Self::encode_varint(to_send.len() as u64, &mut frame);
-        frame.extend_from_slice(to_send);
-        let sent = conn.stream_send(stream_id, &frame, fin).map_err(|_| Error::InternalError)?;
+        // DATA frame = type byte 0x00 + varint payload length, sent vectored so
+        // the body never gets copied into a contiguous frame buffer.
+        let mut frame_hdr = [0u8; 9];
+        frame_hdr[0] = 0x00;
+        let hdr_len =
+            1 + qf_transport_pn::varint::write_varint(to_send.len() as u64, &mut frame_hdr[1..])
+                .map_err(|_| Error::InternalError)?;
+        let parts: [&[u8]; 2] = [&frame_hdr[..hdr_len], to_send];
+        let sent =
+            conn.stream_send_parts(stream_id, &parts, fin).map_err(|_| Error::InternalError)?;
         // Telemetry
         crate::optimize::telemetry::H3_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::optimize::telemetry::H3_DATA_BYTES
