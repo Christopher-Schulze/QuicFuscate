@@ -45,6 +45,8 @@ impl IoDriver {
             uring_worker: uring_sender,
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             uring_available,
+            #[cfg(target_os = "linux")]
+            flush_scratch: tokio::sync::Mutex::new(FlushScratch::default()),
             wide_batch_cpu,
         }
     }
@@ -227,6 +229,119 @@ impl IoDriver {
         socket: &Arc<UdpSocket>,
         out: &mut [u8],
     ) -> Result<(), EngineError> {
+        // Linux: drain into the flat scratch and emit each burst with one
+        // sendmmsg (falling back to sequential sends). ACK/PTO bursts no
+        // longer cost one syscall per datagram.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            const FLUSH_BATCH_PACKETS: usize = 16;
+            const FLUSH_BATCH_BYTES: usize = 256 * 1024;
+
+            let mut scratch = self.flush_scratch.lock().await;
+            loop {
+                scratch.flat.clear();
+                scratch.spans.clear();
+                let mut drained = false;
+                while scratch.spans.len() < FLUSH_BATCH_PACKETS
+                    && (scratch.flat.is_empty()
+                        || scratch.flat.len() + out.len() <= FLUSH_BATCH_BYTES)
+                {
+                    let written = {
+                        let mut conn_guard = conn.lock();
+                        let send_result = conn_guard.send(&mut *out);
+                        match &send_result {
+                            Ok(0) => {
+                                drained = true;
+                                break;
+                            }
+                            Ok(written) => *written,
+                            Err(EngineError::Connection(msg))
+                                if msg == "Connection done" || msg == "Buffer too short" =>
+                            {
+                                // Transient under netem impairment — see the
+                                // portable arm below.
+                                drained = true;
+                                break;
+                            }
+                            Err(e) => {
+                                log::debug!("Connection send error during flush: {:?}", e);
+                                return Err(
+                                    self.transport_send_error("client inbound flush", e.clone())
+                                );
+                            }
+                        }
+                    };
+                    let start = scratch.flat.len();
+                    scratch.flat.extend_from_slice(&out[..written]);
+                    scratch.spans.push((start, written));
+                }
+                if scratch.spans.is_empty() {
+                    return Ok(());
+                }
+
+                // sendmmsg emits a contiguous prefix; the tail falls back to
+                // sequential sends with identical error semantics.
+                let mut sent_prefix = 0usize;
+                if scratch.spans.len() > 1 {
+                    let refs: smallvec::SmallVec<[&[u8]; 16]> = scratch
+                        .spans
+                        .iter()
+                        .map(|&(start, len)| &scratch.flat[start..start + len])
+                        .collect();
+                    match try_sendmmsg_batch(
+                        self.hotpath_adapter.as_ref(),
+                        socket.as_raw_fd(),
+                        OutboundDispatch::SendmmsgBatch,
+                        &refs,
+                    ) {
+                        Ok(n) => {
+                            sent_prefix = n.min(refs.len());
+                            crate::optimize::telemetry::IO_DRIVER_SENDMMSG_CALLS
+                                .fetch_add(1, Ordering::Relaxed);
+                            crate::optimize::telemetry::IO_DRIVER_SENDMMSG_PACKETS
+                                .fetch_add(sent_prefix as u64, Ordering::Relaxed);
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::InvalidData | std::io::ErrorKind::WriteZero
+                            ) =>
+                        {
+                            return Err(self
+                                .transport_send_error("client flush UDP sendmmsg result", error));
+                        }
+                        Err(error) => {
+                            log::debug!("flush sendmmsg fallback: {}", error);
+                        }
+                    }
+                }
+
+                for &(_, len) in &scratch.spans[..sent_prefix] {
+                    self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
+                    let global = crate::instrumentation::global();
+                    global.transport.record_bytes_out(len as u64);
+                    global.transport.record_packet_out();
+                }
+                for &(start, len) in &scratch.spans[sent_prefix..] {
+                    let payload = &scratch.flat[start..start + len];
+                    if let Err(e) = socket.send(payload).await {
+                        log::warn!("UDP send error during outbound flush: {}", e);
+                        return Err(self.transport_send_error("client inbound UDP flush", e));
+                    }
+                    self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
+                    let global = crate::instrumentation::global();
+                    global.transport.record_bytes_out(len as u64);
+                    global.transport.record_packet_out();
+                }
+
+                if drained {
+                    return Ok(());
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
         loop {
             let written = {
                 let mut conn_guard = conn.lock();
@@ -260,6 +375,7 @@ impl IoDriver {
             global.transport.record_bytes_out(written as u64);
             global.transport.record_packet_out();
         }
+        #[cfg(not(target_os = "linux"))]
         Ok(())
     }
 

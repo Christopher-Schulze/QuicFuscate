@@ -363,7 +363,23 @@ pub struct IoDriver {
     /// Avoids a Mutex lock just to check availability on every hot-path iteration.
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
     uring_available: bool,
+    /// Reusable staging for the batched `flush_outbound` path: produced
+    /// datagrams accumulate into `flat` (spans record boundaries) so a burst
+    /// goes out in one `sendmmsg` instead of one syscall per packet.
+    /// Separate from the `run_outbound` staging — flush is called while the
+    /// outbound task may hold its own buffers, so a shared scratch could
+    /// self-deadlock.
+    #[cfg(target_os = "linux")]
+    flush_scratch: tokio::sync::Mutex<FlushScratch>,
     wide_batch_cpu: bool,
+}
+
+/// Flat staging buffer + packet span table for `IoDriver::flush_outbound`.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct FlushScratch {
+    flat: Vec<u8>,
+    spans: Vec<(usize, usize)>,
 }
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
