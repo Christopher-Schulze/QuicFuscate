@@ -787,6 +787,25 @@ pub(super) async fn run_client(
                                         conn.conn.last_activity_marker() != before,
                                     );
                                 }
+                                // conn.recv() only queues decoded H3/MASQUE
+                                // events internally. Drain them now so the
+                                // downlink payload reaches the TUN at wire
+                                // speed instead of waiting for the next
+                                // housekeeping tick (CLIENT_HOUSEKEEPING_IDLE).
+                                if tun_enable {
+                                    if let Err(e) =
+                                        conn.poll_http3_with(client_h3_downlink_body_cb(
+                                            &tun_writer,
+                                            &tun_reader_fault,
+                                            &tun_notify,
+                                            &tun_reader_shutdown,
+                                        ))
+                                    {
+                                        warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
+                                    }
+                                } else if let Err(e) = conn.poll_http3() {
+                                    warn!("HTTP/3 error: {:?}", e);
+                                }
                                 if let Err(error) =
                                     flush_connected_outgoing(
                                         &socket,
@@ -960,33 +979,12 @@ pub(super) async fn run_client(
                         }
                     }
                     // Downlink: H3 stream data from server -> TUN interface
-                    let tun_writer_ref = tun_writer.clone();
-                    let tun_fault_for_h3 = tun_reader_fault.clone();
-                    let tun_notify_for_h3 = Arc::clone(&tun_notify);
-                    let shutdown_for_h3 = tun_reader_shutdown.clone();
-                    if let Err(e) = conn.poll_http3_with(move |data| {
-                        if let Some(ref tw) = tun_writer_ref {
-                            // Only write to TUN if the data looks like a valid IP packet.
-                            if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
-                                if let Err(e) = tw.write(data) {
-                                    warn!("Client TUN write (H3 downlink) failed: {:?}", e);
-                                    if let (Some(fault_slot), Some(shutdown)) =
-                                        (tun_fault_for_h3.as_ref(), shutdown_for_h3.as_ref())
-                                    {
-                                        record_standalone_client_tun_fault(
-                                            fault_slot,
-                                            &tun_notify_for_h3,
-                                            shutdown,
-                                            quicfuscate::engine::DataPlaneFault::TunWrite {
-                                                component: "standalone client HTTP/3 downlink".to_string(),
-                                                error: e.to_string(),
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }) {
+                    if let Err(e) = conn.poll_http3_with(client_h3_downlink_body_cb(
+                        &tun_writer,
+                        &tun_reader_fault,
+                        &tun_notify,
+                        &tun_reader_shutdown,
+                    )) {
                         warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
                     }
                     // MASQUE CONNECT-UDP downlink datagrams are drained and written
@@ -1317,5 +1315,47 @@ pub(super) async fn run_client(
             format!("{primary}; client cleanup failed: {cleanup_error}"),
         )),
         None => Err(std::io::Error::other(cleanup_error)),
+    }
+}
+
+/// H3 body sink that writes downlink tunnel payloads to the client TUN.
+///
+/// `conn.recv()` only queues decoded H3/MASQUE events internally; a
+/// `poll_http3*` call is what dispatches them. This sink is shared by the
+/// UDP-receive branch (immediate drain keeps downlink latency at wire speed)
+/// and the housekeeping branch (bounded fallback for events that surface
+/// without a socket datagram).
+fn client_h3_downlink_body_cb(
+    tun_writer: &Option<Arc<quicfuscate::interface::TunInterface>>,
+    tun_reader_fault: &Option<Arc<parking_lot::Mutex<Option<quicfuscate::engine::DataPlaneFault>>>>,
+    tun_notify: &Arc<tokio::sync::Notify>,
+    tun_reader_shutdown: &Option<Arc<AtomicBool>>,
+) -> impl FnMut(&[u8]) {
+    let tun_writer_ref = tun_writer.clone();
+    let tun_fault_for_h3 = tun_reader_fault.clone();
+    let tun_notify_for_h3 = Arc::clone(tun_notify);
+    let shutdown_for_h3 = tun_reader_shutdown.clone();
+    move |data| {
+        if let Some(ref tw) = tun_writer_ref {
+            // Only write to TUN if the data looks like a valid IP packet.
+            if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
+                if let Err(e) = tw.write(data) {
+                    warn!("Client TUN write (H3 downlink) failed: {:?}", e);
+                    if let (Some(fault_slot), Some(shutdown)) =
+                        (tun_fault_for_h3.as_ref(), shutdown_for_h3.as_ref())
+                    {
+                        record_standalone_client_tun_fault(
+                            fault_slot,
+                            &tun_notify_for_h3,
+                            shutdown,
+                            quicfuscate::engine::DataPlaneFault::TunWrite {
+                                component: "standalone client HTTP/3 downlink".to_string(),
+                                error: e.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
     }
 }

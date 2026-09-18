@@ -3822,3 +3822,8 @@
 - `accept_peer_masque_flow` returned `Ok(true)` for already-accepted flows, so the server emitted the accept `info!` line and re-entered `h3.accept_masque_connect` + assignment evaluation once per inbound datagram (visible as per-ping-interval log spam in the Omega E2E run). `flow.accepted` now short-circuits to `Ok(false)`; callers fall back to `peer_connect_ip_flow_active()` as before.
 - Local proof: masque 47/47, implementations::server 549/549.
 - Commit: 8e89f19
+
+### TODO-978 - Standalone client downlink drained only on 250ms housekeeping tick
+- Detail: `docs/todo/todo-978-standalone-client-downlink-tick.md`
+- `conn.recv()` only queues decoded H3/MASQUE events; the standalone client's `poll_http3*` dispatch ran exclusively on the housekeeping branch, so every downlink payload waited up to `CLIENT_HOUSEKEEPING_IDLE` (250ms) before reaching the TUN - measured +251.5ms between UDP arrival and qtun0 write on Omega. The UDP-receive branch now drains H3/MASQUE (and plain `poll_http3` for non-TUN) immediately after `conn.recv`, sharing a new `client_h3_downlink_body_cb` helper with the housekeeping fallback.
+- Local proof: `cargo check --bin quicfuscate` clean, bin tests 50/50, clippy/fmt clean.
