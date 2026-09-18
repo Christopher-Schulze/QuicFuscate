@@ -1251,7 +1251,7 @@ pub(crate) fn huff_estimate_len(input: &[u8]) -> usize {
 
 #[inline]
 pub(crate) fn huff_encode_into(input: &[u8], output: &mut [u8]) -> usize {
-    qf_simd::qpack::huff_encode_into(input, output)
+    qf_simd::qpack::encode_huff_into(input, output)
 }
 
 pub(crate) fn huff_decode_into(data: &[u8], out: &mut [u8]) -> Result<usize, Error> {
