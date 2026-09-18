@@ -22,4 +22,5 @@ qf-error = { path = "../qf-error" }
 qf-memory-pool = { path = "../qf-memory-pool" }
 qf-telemetry = { path = "../qf-telemetry" }
 qf-transport-cc = { path = "../qf-transport-cc" }
+smallvec = "1.13"
 serde = { version = "1", features = ["derive"] }

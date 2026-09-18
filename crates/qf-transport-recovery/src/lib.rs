@@ -8,6 +8,7 @@
 
 use core::cmp::min;
 use core::time::Duration;
+use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -471,9 +472,11 @@ impl PersistentCongestionRun {
 #[derive(Debug, Default)]
 pub struct AckOutcome {
     /// Newly acknowledged `(pn, size)` pairs (in-flight accounting already applied).
-    pub newly_acked: Vec<(u64, usize)>,
+    /// Inline for up to eight entries so steady-state ACK processing does not
+    /// allocate; larger acknowledgments spill to the heap transparently.
+    pub newly_acked: SmallVec<[(u64, usize); 8]>,
     /// Newly declared-lost `(pn, size)` pairs.
-    pub lost: Vec<(u64, usize)>,
+    pub lost: SmallVec<[(u64, usize); 8]>,
     /// CRYPTO ranges `(offset, len)` acknowledged via their carrier packets.
     pub crypto_acked: Vec<(u64, u64)>,
     /// CRYPTO ranges `(offset, len)` to requeue for retransmission.

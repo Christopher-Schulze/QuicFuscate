@@ -316,8 +316,8 @@ fn old_path_loss_releases_flight_without_reducing_new_path_cc() {
         false,
         start + Duration::from_millis(100),
     );
-    assert_eq!(outcome.newly_acked, vec![(4, 1200)]);
-    assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200), (2, 1200), (3, 1200)]);
+    assert_eq!(outcome.newly_acked.as_slice(), vec![(4, 1200)]);
+    assert_eq!(outcome.lost.as_slice(), vec![(0, 1200), (1, 1200), (2, 1200), (3, 1200)]);
     assert_eq!(outcome.rtt_sample, None);
     assert_eq!(recovery.rtt, Duration::from_millis(40));
     assert_eq!(recovery.cwnd, 12_000);
@@ -553,9 +553,9 @@ fn packet_threshold_declares_loss() {
         false,
         t0 + Duration::from_millis(50),
     );
-    assert_eq!(outcome.newly_acked, vec![(4, 1200)]);
+    assert_eq!(outcome.newly_acked.as_slice(), vec![(4, 1200)]);
     // pn <= largest(4) - kPacketThreshold(3) = 1 -> packets 0 and 1 lost.
-    assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]);
+    assert_eq!(outcome.lost.as_slice(), vec![(0, 1200), (1, 1200)]);
     assert_eq!(outcome.rtt_sample, Some(Duration::from_millis(10)));
     // Packets 2 and 3 remain tracked and in flight.
     assert_eq!(rec.bytes_in_flight, 2400);
@@ -613,7 +613,7 @@ fn pmtu_probe_loss_does_not_feed_congestion_control() {
         now + Duration::from_millis(50),
     );
 
-    assert_eq!(with_probe_outcome.lost, vec![(0, 1400), (1, 1400)]);
+    assert_eq!(with_probe_outcome.lost.as_slice(), vec![(0, 1400), (1, 1400)]);
     assert!(with_probe_outcome.persistent_congestion_evidence.is_none());
     assert!(control_outcome.lost.is_empty());
     assert_eq!(with_probes.cwnd, control.cwnd);
@@ -640,7 +640,7 @@ fn time_threshold_declares_loss_and_arms_timer() {
     // sample before loss detection), so loss_delay = 9/8*22.5 = 25.3125 ms.
     // loss_time armed for pn 2: sent at t0+20 ms -> deadline t0+45.3125 ms.
     // The armed loss timer takes precedence over any PTO (RFC 9002 §6.2.1).
-    assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]);
+    assert_eq!(outcome.lost.as_slice(), vec![(0, 1200), (1, 1200)]);
     let deadline = rec.loss_detection_timeout(true, false, true);
     assert_eq!(deadline, Some(t0 + Duration::from_nanos(45_312_500)));
 }
@@ -1153,7 +1153,7 @@ fn crypto_ranges_tracked_through_ack_and_loss() {
     assert!(outcome.crypto_acked.is_empty());
     // pn 0 and 1 lost via packet threshold: both crypto ranges requeued.
     assert_eq!(outcome.crypto_lost, vec![(0, 300), (300, 200)]);
-    assert_eq!(outcome.lost, vec![(0, 1200), (1, 1200)]);
+    assert_eq!(outcome.lost.as_slice(), vec![(0, 1200), (1, 1200)]);
 }
 
 #[test]
