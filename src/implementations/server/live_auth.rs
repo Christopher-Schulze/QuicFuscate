@@ -1150,14 +1150,14 @@ pub(super) async fn process_live_server_client_datagram(
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
     server_tun: Option<&Arc<TunInterface>>,
     server_ips: ServerTunIps,
-    assignment_settings: ServerAssignmentSettings,
+    assignment_settings: &ServerAssignmentSettings,
     tun_enable: bool,
-    dns_upstream_resolvers: Arc<Vec<Ipv4Addr>>,
-    dns_intercept_admission: Arc<crate::dns::DnsAdmission>,
-    dns_intercept_workers: Arc<DnsInterceptWorkerOwner>,
-    tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
-    tun_notify: Arc<tokio::sync::Notify>,
-    runtime_shutdown: Arc<AtomicBool>,
+    dns_upstream_resolvers: &Arc<Vec<Ipv4Addr>>,
+    dns_intercept_admission: &Arc<crate::dns::DnsAdmission>,
+    dns_intercept_workers: &Arc<DnsInterceptWorkerOwner>,
+    tun_fault: &Arc<Mutex<Option<DataPlaneFault>>>,
+    tun_notify: &Arc<tokio::sync::Notify>,
+    runtime_shutdown: &Arc<AtomicBool>,
     masque_relay_owner: Option<&crate::implementations::server::masque_relay::MasqueRelayOwner>,
     uring_worker: Option<&LiveUringWorker>,
 ) -> Result<LiveClientDatagramResult, DataPlaneFault> {
@@ -1245,16 +1245,16 @@ pub(super) async fn process_live_server_client_datagram(
                 )));
             }
             let tun_sink = Arc::clone(tun);
-            let tun_fault_for_masque = Arc::clone(&tun_fault);
-            let tun_notify_for_masque = Arc::clone(&tun_notify);
-            let shutdown_for_masque = Arc::clone(&runtime_shutdown);
+            let tun_fault_for_masque = Arc::clone(tun_fault);
+            let tun_notify_for_masque = Arc::clone(tun_notify);
+            let shutdown_for_masque = Arc::clone(runtime_shutdown);
             let masque_forwarding_policy = Arc::clone(&forwarding_policy);
             let masque_sessions = Arc::clone(&sessions);
             let masque_fanout_queue = Arc::clone(&fanout_queue);
             let masque_metrics = Arc::clone(metrics);
-            let dns_resolvers = Arc::clone(&dns_upstream_resolvers);
-            let dns_admission = Arc::clone(&dns_intercept_admission);
-            let dns_workers = Arc::clone(&dns_intercept_workers);
+            let dns_resolvers = Arc::clone(dns_upstream_resolvers);
+            let dns_admission = Arc::clone(dns_intercept_admission);
+            let dns_workers = Arc::clone(dns_intercept_workers);
             let Some(dns_downlink_queue) = conn.masque_downlink_queue() else {
                 return Err(DataPlaneFault::TransportReceive {
                     component: "MASQUE downlink queue installation".to_string(),
@@ -1341,9 +1341,9 @@ pub(super) async fn process_live_server_client_datagram(
 
     let stream_response_queue = conn.masque_downlink_queue();
 
-    let tun_fault_for_stream = Arc::clone(&tun_fault);
-    let tun_notify_for_stream = Arc::clone(&tun_notify);
-    let shutdown_for_stream = Arc::clone(&runtime_shutdown);
+    let tun_fault_for_stream = Arc::clone(tun_fault);
+    let tun_notify_for_stream = Arc::clone(tun_notify);
+    let shutdown_for_stream = Arc::clone(runtime_shutdown);
     if let Err(error) = conn.poll_http3_with_headers(
         |_sid, headers| match evaluate_qkey_http3_headers(
             headers,
@@ -1543,7 +1543,7 @@ pub(super) async fn process_live_server_client_datagram(
                 conn,
                 session_id,
                 assigned_ips,
-                &assignment_settings,
+                assignment_settings,
                 tun_enable && server_tun.is_some(),
             );
         }
