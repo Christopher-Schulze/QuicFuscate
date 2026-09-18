@@ -3834,6 +3834,12 @@
 - Bonus in the same pass: `qf_fec::interleaved` no longer warns once per connection for the (0,0) disabled-FEC sentinel shape.
 - Local proof: qftls 35/35 (new deferral regression), qf-fec 85/85, clippy/fmt clean.
 
+### TODO-980 - FEC transport feedback dead in production: callbacks lost on recovery rebuild
+- Detail: `docs/todo/todo-980-fec-callbacks-lost-on-env-snapshot.md`
+- `QuicFuscateConnection::new` calls `conn.set_environment_snapshot`, which rebuilt `self.recovery` with a fresh congestion controller and silently dropped the FEC send/loss callbacks installed at construction. `fec_cb_sent/lost` stayed 0 forever, so `observed`/`lost`/`repairs`/`switches` were all zero and FEC never left `mode=zero` even under 20% netem loss (~40% tunnel loss, Omega-verified). The VN-restart path already reinstalled them; `set_environment_snapshot` now does too.
+- Regression: `fec_callbacks_survive_environment_snapshot_replacement` fails without the fix, passes with it.
+- Local proof: lib 1725/1725, clippy/fmt clean.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.

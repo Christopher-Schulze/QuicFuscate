@@ -155,6 +155,11 @@ impl Connection {
             recovery.set_initial_rtt(Duration::from_millis(self.config.initial_rtt_ms));
         }
         self.recovery = recovery;
+        // The replacement recovery carries a fresh congestion controller without
+        // the FEC send/loss callbacks installed at construction; without this
+        // reinstall the feedback counters stay zero forever and adaptive FEC
+        // never observes transport evidence.
+        self.install_recovery_fec_callbacks();
         self.environment = environment;
     }
 

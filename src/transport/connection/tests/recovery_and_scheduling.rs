@@ -82,6 +82,33 @@ fn fec_feedback_counts_only_transport_classified_acknowledgements_as_clean() {
 }
 
 #[test]
+fn fec_callbacks_survive_environment_snapshot_replacement() {
+    // `set_environment_snapshot` rebuilds the recovery owner (fresh congestion
+    // controller). The FEC send/loss callbacks installed at construction must
+    // be reinstalled on the replacement, otherwise production connections —
+    // which all pass through this path — never emit transport feedback and
+    // adaptive FEC stays inert.
+    let mut c = make_conn();
+    let environment = Arc::new(crate::env_utils::EnvSnapshot::capture());
+    c.set_environment_snapshot(environment);
+
+    c.recovery.on_packet_sent_in_space(
+        recovery::PacketSpace::Application,
+        0,
+        1200,
+        true,
+        true,
+        None,
+        Instant::now(),
+    );
+
+    let feedback = c.take_fec_callback_feedback();
+    assert_eq!(feedback.sent_packets, 1);
+    assert_eq!(feedback.acked_packets, 0);
+    assert_eq!(feedback.lost_packets, 0);
+}
+
+#[test]
 fn ack_with_delay_subtracts_ack_delay() {
     // RTT sample should subtract the peer's ack_delay (RFC 9000 sec. 19.3).
     let mut c = make_conn();
