@@ -40,6 +40,7 @@ ADMIN_SOCKET=""
 SERVER_PID=""
 CLIENT_PID=""
 TCPDUMP_PID=""
+STUB_PID=""
 SERVER_NAMESPACE_CREATED=0
 CLIENT_NAMESPACE_CREATED=0
 VETH_CREATED=0
@@ -88,6 +89,8 @@ cleanup_owned_resources() {
   TCPDUMP_PID=""
   stop_owned_process "$CLIENT_PID" || cleanup_failed=1
   CLIENT_PID=""
+  stop_owned_process "$STUB_PID" || cleanup_failed=1
+  STUB_PID=""
   stop_owned_process "$SERVER_PID" || cleanup_failed=1
   SERVER_PID=""
   if [ "$CLIENT_NAMESPACE_CREATED" = "1" ]; then
@@ -229,6 +232,28 @@ chmod 600 "$KEY"
 
 printf 'nameserver 127.0.0.1\n' > "$PRIVATE_RESOLV_CONF"
 
+# Deterministic in-namespace DNS upstream. The server's forwarding deadline is
+# 5s - identical to dig's +time=5 - so an unreachable upstream (the default
+# 1.1.1.1/8.8.8.8 in an isolated namespace) races the dig timeout and produces
+# no response at all. A loopback stub answers in milliseconds and keeps
+# upstream traffic off the watched underlay interface.
+cat > "$RUNTIME_DIR/dns_stub.py" <<'EOF'
+import socket
+import struct
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 53))
+while True:
+    query, peer = sock.recvfrom(4096)
+    if len(query) < 12:
+        continue
+    txid, _flags, qd, _an, _ns, _ar = struct.unpack(">6H", query[:12])
+    question = query[12:]
+    header = struct.pack(">6H", txid, 0x8180, qd, 1, 0, 0)
+    answer = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + socket.inet_aton("93.184.216.34")
+    sock.sendto(header + question + answer, peer)
+EOF
+
 ip netns add "$SERVER_NS"
 SERVER_NAMESPACE_CREATED=1
 ip netns add "$CLIENT_NS"
@@ -244,6 +269,8 @@ ip netns exec "$SERVER_NS" ip link set lo up
 # absent inside the namespace, so the default route gives auto-detection its
 # target (same pattern as tun-e2e-netns.sh).
 ip netns exec "$SERVER_NS" ip route add default dev veth-srv
+ip netns exec "$SERVER_NS" python3 "$RUNTIME_DIR/dns_stub.py" &
+STUB_PID=$!
 ip netns exec "$CLIENT_NS" ip addr add "$CLIENT_UNDERLAY_IP/24" dev veth-cli
 ip netns exec "$CLIENT_NS" ip link set veth-cli up
 ip netns exec "$CLIENT_NS" ip link set lo up
@@ -258,6 +285,7 @@ ip netns exec "$CLIENT_NS" ping -c1 -W2 "$SERVER_UNDERLAY_IP" 2>&1 | grep -E "by
 ip netns exec "$SERVER_NS" "$B" server --cert "$CERT" --key "$KEY" \
   --listen "$SERVER_UNDERLAY_IP:$LISTEN_PORT" --admin-socket "$ADMIN_SOCKET" \
   --tun --tun-name qtun0 --tun-ip "$SERVER_TUN_IP" --tun-netmask 255.255.255.0 \
+  --vpn-dns 127.0.0.1 \
   --no-drop-privileges -v \
   > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
