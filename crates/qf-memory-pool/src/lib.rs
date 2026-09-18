@@ -1321,6 +1321,13 @@ impl PooledBlock {
         Arc::clone(&self.pool)
     }
 
+    /// Borrow the originating pool handle — e.g. for `Arc::ptr_eq` identity
+    /// checks — without paying an atomic refcount increment.
+    #[doc(hidden)]
+    pub fn pool_ref(&self) -> &Arc<MemoryPool> {
+        &self.pool
+    }
+
     /// Take the raw block for an ownership transfer inside the crate.
     ///
     /// Once taken, this guard remains a harmless pool keep-alive and no longer returns a block on

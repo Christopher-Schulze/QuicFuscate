@@ -40,6 +40,12 @@ pub struct Connection {
     pub(super) stats: Stats,
     pub(super) dgram_recv_queue: DatagramQueue,
     pub(super) dgram_send_queue: DatagramQueue,
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    /// Bounded free-list of drained queue buffers; enqueue reuses them instead
+    /// of a fresh `Vec` allocation per DATAGRAM.
+    pub(super) dgram_recv_freelist: Vec<Vec<u8>>,
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    pub(super) dgram_send_freelist: Vec<Vec<u8>>,
     #[cfg(feature = "zero_copy_dgram")]
     /// Pool whose fixed block-size contract bounds every zero-copy datagram payload.
     pub(super) dgram_pool: Arc<crate::optimize::MemoryPool>,

@@ -274,7 +274,9 @@ impl Connection {
         }
         #[cfg(not(feature = "zero_copy_dgram"))]
         {
-            self.dgram_recv_queue.push_back(data.into_owned());
+            let mut entry = Self::take_dgram_freelist(&mut self.dgram_recv_freelist);
+            entry.extend_from_slice(data.as_ref());
+            self.dgram_recv_queue.push_back(entry);
         }
         #[cfg(feature = "zero_copy_dgram")]
         {
@@ -300,6 +302,7 @@ impl Connection {
                 self.dgram_recv_queue.pop_front().ok_or(crate::error::ConnectionError::Done)?;
             let len = std::cmp::min(buf.len(), dgram.len());
             buf[..len].copy_from_slice(&dgram[..len]);
+            Self::return_dgram_freelist(&mut self.dgram_recv_freelist, dgram);
             Ok(len)
         }
         #[cfg(feature = "zero_copy_dgram")]
@@ -323,7 +326,9 @@ impl Connection {
         }
         #[cfg(not(feature = "zero_copy_dgram"))]
         {
-            self.dgram_send_queue.push_back(buf.to_vec());
+            let mut entry = Self::take_dgram_freelist(&mut self.dgram_send_freelist);
+            entry.extend_from_slice(buf);
+            self.dgram_send_queue.push_back(entry);
         }
         #[cfg(feature = "zero_copy_dgram")]
         {
@@ -425,6 +430,24 @@ impl Connection {
     fn is_dgram_send_queue_full(&self) -> bool {
         let lim = self.config.dgram_send_max_queue_len;
         lim > 0 && self.dgram_send_queue.len() >= lim
+    }
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    /// Bounded spare-buffer list size per direction; larger backlogs drain
+    /// through the queue itself, extra buffers are dropped.
+    const DGRAM_FREELIST_MAX: usize = 64;
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    /// Reuse a drained queue buffer (capacity retained) instead of allocating.
+    pub(super) fn take_dgram_freelist(freelist: &mut Vec<Vec<u8>>) -> Vec<u8> {
+        freelist.pop().unwrap_or_default()
+    }
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    /// Return a drained queue buffer for reuse; cleared so the next enqueue
+    /// can extend it directly.
+    pub(super) fn return_dgram_freelist(freelist: &mut Vec<Vec<u8>>, mut buf: Vec<u8>) {
+        if freelist.len() < Self::DGRAM_FREELIST_MAX {
+            buf.clear();
+            freelist.push(buf);
+        }
     }
     fn is_dgram_recv_queue_full(&self) -> bool {
         let lim = self.config.dgram_recv_max_queue_len;

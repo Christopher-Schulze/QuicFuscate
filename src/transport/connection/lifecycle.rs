@@ -218,6 +218,10 @@ impl Connection {
             stats: Stats::default(),
             dgram_recv_queue: VecDeque::new(),
             dgram_send_queue: VecDeque::new(),
+            #[cfg(not(feature = "zero_copy_dgram"))]
+            dgram_recv_freelist: Vec::new(),
+            #[cfg(not(feature = "zero_copy_dgram"))]
+            dgram_send_freelist: Vec::new(),
             #[cfg(feature = "zero_copy_dgram")]
             dgram_pool: crate::optimize::global_pool(),
             dgram_send_max_size,

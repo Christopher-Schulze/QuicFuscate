@@ -230,7 +230,7 @@ impl FecPacket {
         mem_pool: Arc<MemoryPool>,
     ) -> Result<Self, String> {
         if let Some(block) = data.as_ref() {
-            if !Arc::ptr_eq(&block.pool(), &mem_pool) {
+            if !Arc::ptr_eq(block.pool_ref(), &mem_pool) {
                 return Err("FEC data block belongs to a different memory pool".into());
             }
             if !block.is_live() || data_len > block.len() {
@@ -240,7 +240,7 @@ impl FecPacket {
             return Err("FEC data length is nonzero without a data block".into());
         }
         if let Some(block) = coefficients.as_ref() {
-            if !Arc::ptr_eq(&block.pool(), &mem_pool) {
+            if !Arc::ptr_eq(block.pool_ref(), &mem_pool) {
                 return Err("FEC coefficient block belongs to a different memory pool".into());
             }
             if !block.is_live() || coeff_len > block.len() {

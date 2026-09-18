@@ -1207,8 +1207,18 @@ impl Connection {
     pub(super) fn commit_staged_datagram_frame(
         &mut self,
     ) -> Result<(), crate::error::ConnectionError> {
-        if self.dgram_send_queue.pop_front().is_none() {
-            return Err(crate::error::ConnectionError::InvalidState);
+        #[cfg(not(feature = "zero_copy_dgram"))]
+        {
+            let Some(dgram) = self.dgram_send_queue.pop_front() else {
+                return Err(crate::error::ConnectionError::InvalidState);
+            };
+            Self::return_dgram_freelist(&mut self.dgram_send_freelist, dgram);
+        }
+        #[cfg(feature = "zero_copy_dgram")]
+        {
+            if self.dgram_send_queue.pop_front().is_none() {
+                return Err(crate::error::ConnectionError::InvalidState);
+            }
         }
         self.stats.dgram_sent = self.stats.dgram_sent.saturating_add(1);
         Ok(())
