@@ -574,22 +574,24 @@ impl Decoder8 {
         }
 
         // Precompute coefficient index for each (eq_idx, unknown_sid) pair
-        // so the Rayon closure doesn't need &self.
+        // so the Rayon closure doesn't need &self. Walk each coefficient
+        // row once and place entries via binary search into the sorted
+        // unknown list — O(m * k) instead of O(m * n * k).
         let eq_coeff_lookup: Vec<Vec<Option<u8>>> = self
             .equations
             .iter()
             .map(|eq| {
-                unknowns
-                    .iter()
-                    .map(|&sid| {
-                        for j in 0..self.k {
-                            if self.source_id_for(eq.base_id, j) == sid {
-                                return eq.coeffs.get(j).copied();
-                            }
-                        }
-                        None
-                    })
-                    .collect()
+                let mut row = vec![None; n];
+                for (j, &cj) in eq.coeffs.iter().enumerate().take(self.k) {
+                    if cj == 0 {
+                        continue;
+                    }
+                    let sid = self.source_id_for(eq.base_id, j);
+                    if let Ok(col) = unknowns.binary_search(&sid) {
+                        row[col] = Some(cj);
+                    }
+                }
+                row
             })
             .collect();
 
@@ -606,32 +608,39 @@ impl Decoder8 {
             .into_par_iter()
             .chunks(byte_chunk_len)
             .map_init(
-                || WiedemannScratch::from_lookup(&eq_coeff_lookup, n),
-                |scratch, byte_indices| {
+                || {
+                    (
+                        WiedemannScratch::from_lookup(&eq_coeff_lookup, n),
+                        vec![vec![0u8; n]; equation_count],
+                        vec![0u8; equation_count],
+                    )
+                },
+                |(scratch, matrix, rhs), byte_indices| {
                     byte_indices
                         .into_iter()
                         .map(|byte_idx| {
-                            // Build matrix for this byte
-                            let mut matrix = vec![vec![0u8; n]; equation_count];
-                            let mut rhs = vec![0u8; equation_count];
-                            qf_telemetry::WIEDEMANN_MATRIX_RHS_ALLOCS
-                                .inc_by((equation_count + 1) as u64);
-
+                            // Rebuild the matrix view for this byte in the
+                            // persistent scratch buffers — rows for equations
+                            // shorter than byte_idx stay zeroed. The solver
+                            // only reads dimensions plus the validation below,
+                            // so per-byte state is just these fills.
+                            rhs.fill(0);
                             for (i, eq) in self.equations.iter().enumerate() {
                                 if byte_idx < eq.len {
                                     rhs[i] = eq.data[byte_idx];
-                                    for (j, _uid) in unknowns.iter().enumerate() {
-                                        if let Some(coeff) = eq_coeff_lookup[i][j] {
-                                            matrix[i][j] = coeff;
-                                        }
+                                    for (cell, entry) in
+                                        matrix[i].iter_mut().zip(eq_coeff_lookup[i].iter())
+                                    {
+                                        *cell = entry.unwrap_or(0);
                                     }
+                                } else {
+                                    matrix[i].fill(0);
                                 }
                             }
 
                             // Wiedemann solver with Berlekamp-Massey
-                            let solution =
-                                self.solve_wiedemann_system(&matrix, &rhs, n, scratch)?;
-                            let valid = matrix.iter().zip(&rhs).all(|(row, expected)| {
+                            let solution = self.solve_wiedemann_system(matrix, rhs, n, scratch)?;
+                            let valid = matrix.iter().zip(rhs.iter()).all(|(row, expected)| {
                                 row.iter().zip(&solution).fold(
                                     0u8,
                                     |acc, (&coefficient, &value)| {
