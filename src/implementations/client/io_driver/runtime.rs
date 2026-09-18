@@ -195,24 +195,15 @@ impl IoDriver {
         socket.try_recv(buf).map(|len| (len, 0))
     }
 
-    /// Copy one wire message into `batch` slots, splitting a kernel-coalesced
-    /// (`gso_size > 0`) buffer into per-datagram entries in wire order. Batch
-    /// grows beyond its nominal cap rather than dropping tail segments.
-    fn emit_wire_record(data: &[u8], gso_size: u16, batch: &mut Vec<Vec<u8>>, queued: &mut usize) {
+    /// Record one wire message as `(offset, len)` spans into the flat recv
+    /// buffer, splitting a kernel-coalesced (`gso_size > 0`) buffer into
+    /// per-datagram spans in wire order. Zero-copy: no payload bytes move.
+    fn emit_wire_spans(base: usize, len: usize, gso_size: u16, spans: &mut Vec<(usize, usize)>) {
         let gso = gso_size as usize;
         let mut offset = 0usize;
-        while offset < data.len() {
-            let seg_len = if gso == 0 { data.len() } else { (data.len() - offset).min(gso) };
-            if *queued >= batch.len() {
-                batch.push(Vec::with_capacity(2048));
-            }
-            let slot = &mut batch[*queued];
-            slot.clear();
-            slot.extend_from_slice(&data[offset..offset + seg_len]);
-            crate::optimize::telemetry::IO_DRIVER_COPY_OPS.fetch_add(1, Ordering::Relaxed);
-            crate::optimize::telemetry::IO_DRIVER_COPY_BYTES
-                .fetch_add(seg_len as u64, Ordering::Relaxed);
-            *queued += 1;
+        while offset < len {
+            let seg_len = if gso == 0 { len } else { (len - offset).min(gso) };
+            spans.push((base + offset, seg_len));
             offset += seg_len;
             if gso == 0 {
                 break;
@@ -931,18 +922,23 @@ impl IoDriver {
         ingress: ClientTunnelIngress,
         handshake_event: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
     ) -> Result<(), EngineError> {
-        let mut recv_buf = vec![0u8; 65535];
-        let mut send_buf = vec![0u8; 65535];
+        // One fixed-stride 64 KiB slot per recv, plus a span table recording
+        // the per-datagram `(offset, len)` segments (GRO splits emit several
+        // spans per slot). Payloads stay in place — no per-datagram copy.
+        const RECV_SLOT: usize = 65535;
         let batch_cap = self.normalized_batch_size();
-        let mut inbound_batch: Vec<Vec<u8>> =
-            (0..batch_cap).map(|_| Vec::with_capacity(2048)).collect();
+        let mut recv_flat = vec![0u8; batch_cap * RECV_SLOT];
+        let mut send_buf = vec![0u8; 65535];
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(batch_cap * 4);
         let mut handshake_signaled = false;
 
         while !self.shutdown.load(Ordering::Relaxed) {
             let timeout = self.recv_timeout(&conn);
-            let recv =
-                tokio::time::timeout(timeout, Self::recv_wire_datagram(&socket, &mut recv_buf))
-                    .await;
+            let recv = tokio::time::timeout(
+                timeout,
+                Self::recv_wire_datagram(&socket, &mut recv_flat[..RECV_SLOT]),
+            )
+            .await;
             match recv {
                 Err(_) => {}
                 Ok(Err(e)) => {
@@ -952,18 +948,20 @@ impl IoDriver {
                     }
                 }
                 Ok(Ok((len, gso))) if len > 0 => {
-                    let mut queued = 0usize;
-                    Self::emit_wire_record(&recv_buf[..len], gso, &mut inbound_batch, &mut queued);
+                    spans.clear();
+                    let mut slots_used = 0usize;
+                    Self::emit_wire_spans(0, len, gso, &mut spans);
+                    slots_used += 1;
 
-                    while queued < batch_cap {
-                        match Self::try_recv_wire_datagram(&socket, &mut recv_buf) {
+                    while spans.len() < batch_cap && slots_used < batch_cap {
+                        let base = slots_used * RECV_SLOT;
+                        match Self::try_recv_wire_datagram(
+                            &socket,
+                            &mut recv_flat[base..base + RECV_SLOT],
+                        ) {
                             Ok((more, more_gso)) if more > 0 => {
-                                Self::emit_wire_record(
-                                    &recv_buf[..more],
-                                    more_gso,
-                                    &mut inbound_batch,
-                                    &mut queued,
-                                );
+                                Self::emit_wire_spans(base, more, more_gso, &mut spans);
+                                slots_used += 1;
                             }
                             Ok(_) => break,
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -975,12 +973,12 @@ impl IoDriver {
                             }
                         }
                     }
-                    if queued > 1 {
+                    if spans.len() > 1 {
                         crate::optimize::telemetry::IO_DRIVER_BATCH_DRAIN_PACKETS
-                            .fetch_add((queued - 1) as u64, Ordering::Relaxed);
+                            .fetch_add((spans.len() - 1) as u64, Ordering::Relaxed);
                     }
 
-                    self.process_inbound_batch(&conn, &tun, &ingress, &inbound_batch, queued)?;
+                    self.process_inbound_batch(&conn, &tun, &ingress, &recv_flat, &spans)?;
                 }
                 Ok(Ok(_)) => {}
             }
@@ -1233,10 +1231,11 @@ impl IoDriver {
         conn: &Arc<parking_lot::Mutex<ClientDataPlane>>,
         tun: &Arc<parking_lot::Mutex<TunInterface>>,
         ingress: &ClientTunnelIngress,
-        batch: &[Vec<u8>],
-        count: usize,
+        recv_flat: &[u8],
+        spans: &[(usize, usize)],
     ) -> Result<(), EngineError> {
-        for payload in batch.iter().take(count) {
+        for &(offset, len) in spans {
+            let payload = &recv_flat[offset..offset + len];
             self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
             let global = crate::instrumentation::global();
             global.transport.record_bytes_in(payload.len() as u64);
