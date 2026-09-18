@@ -202,7 +202,7 @@
 - Detail: `docs/todo/todo-961-observer-apply-policy-take.md`
 
 ### TODO-962 - `benches/ack_pipeline.rs`: criterion evidence for the alloc-free ACK path
-- DONE. New criterion suite measuring the paths made allocation-free in TODO-956..961: `recovery_ack_steady` (send+ack cycle, ~80 ns flat across 8/64/256-packet windows — proves O(1) scratch reuse), `recovery_ack_loss_64` (63-packet loss detection, ~1.5 µs cold), `pnspace_ack_emit` (24 ns inline ≤8 blocks vs 330 ns spilled 64), `frame_ack_parse` (42 ns/1 block → 1.07 µs/64), `frame_ack_emit` (91 ns → 1.82 µs). Wired as `[[bench]] ack_pipeline` behind the `benches` feature; run via `cargo bench --features benches --bench ack_pipeline`. Local M-series arm64 numbers; Omega re-run pending.
+- DONE. New criterion suite measuring the paths made allocation-free in TODO-956..961: `recovery_ack_steady` (send+ack cycle, ~80 ns flat across 8/64/256-packet windows — proves O(1) scratch reuse), `recovery_ack_loss_64` (63-packet loss detection, ~1.5 µs cold), `pnspace_ack_emit` (24 ns inline ≤8 blocks vs 330 ns spilled 64), `frame_ack_parse` (42 ns/1 block → 1.07 µs/64), `frame_ack_emit` (91 ns → 1.82 µs). Wired as `[[bench]] ack_pipeline` behind the `benches` feature; run via `cargo bench --features benches --bench ack_pipeline`. Local macOS arm64 and Omega aarch64 Linux numbers recorded.
 - Detail: `docs/todo/todo-962-ack-pipeline-bench.md`
 
 ### TODO-963 - Multi-hop inner ingress: buffer reuse instead of alloc+drop per datagram
