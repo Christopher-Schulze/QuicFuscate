@@ -3783,3 +3783,9 @@
 - Matrix build O(m*u*k) -> O(m*k) via sorted-unknowns binary search; RHS build O(min_len*k) scalar -> O(min_len*nnz) SIMD; per-row `yb[row]` clones replaced by `split_at_mut`; RHS row updates switched to `gf_mul_scalar_slice`.
 - Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
+
+### TODO-971 - Wiedemann per-worker matrix/rhs scratch + lookup build
+- Detail: `docs/todo/todo-971-wiedemann-scratch.md`
+- Per-byte `vec![vec![0;n];m]` matrix and rhs allocs moved into `map_init` worker scratch (min_len ~1200 allocs -> ~worker count); `eq_coeff_lookup` built O(m*k) via sorted-unknowns binary search instead of O(m*n*k).
+- Local proof: `cargo test -p qf-fec` (85/85), `fec_wiedemann_allocations` bench baseline.
+- Omega proof: qf-fec 85/85 on aarch64 Linux.
