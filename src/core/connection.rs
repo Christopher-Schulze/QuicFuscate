@@ -829,17 +829,20 @@ impl QuicFuscateConnection {
         h3: &mut crate::transport::h3::Connection,
         conn: &mut crate::transport::Connection,
         stealth_manager: &crate::stealth::StealthManager,
-        stats: &crate::transport::Stats,
         intelligent_level: u32,
     ) {
         let Some((base_path, intensity)) = stealth_manager.server_push_cover_plan() else {
             return;
         };
 
+        // Stats are fetched only on the rare cover-burst path — cloning the
+        // ~200-byte struct every poll iteration was unconditional waste.
+        let (sent, lost) = {
+            let stats = conn.stats();
+            (stats.sent as u64, stats.lost as u64)
+        };
         match h3.generate_stealth_cover_burst(&base_path) {
             Ok(ids) => {
-                let sent = stats.sent as u64;
-                let lost = stats.lost as u64;
                 let loss_rate_permille =
                     lost.saturating_mul(1000).checked_div(sent).unwrap_or(0).min(1000) as u32;
                 stealth_manager.observe_server_push_burst(
@@ -865,11 +868,10 @@ impl QuicFuscateConnection {
         }
     }
 
-    fn prepare_http3_poll_iteration(&self) -> (u32, crate::transport::Stats) {
+    fn prepare_http3_poll_iteration(&self) -> u32 {
         let intelligent_level = self.stealth_manager.intelligent_runtime_level();
         self.sync_poll_intelligent_runtime_controls(intelligent_level);
-        let stats = self.conn.stats().clone();
-        (intelligent_level, stats)
+        intelligent_level
     }
 
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.

@@ -84,7 +84,7 @@ impl QuicFuscateConnection {
                 memory_pool: self.optimization_manager.memory_pool_ref(),
             };
             loop {
-                let (intelligent_level, stats) = self.prepare_http3_poll_iteration();
+                let intelligent_level = self.prepare_http3_poll_iteration();
                 let Some(ref mut h3) = self.h3_conn else {
                     break;
                 };
@@ -93,7 +93,6 @@ impl QuicFuscateConnection {
                     h3,
                     &mut self.conn,
                     &self.stealth_manager,
-                    &stats,
                     intelligent_level,
                 );
                 match h3.poll(&mut self.conn) {
