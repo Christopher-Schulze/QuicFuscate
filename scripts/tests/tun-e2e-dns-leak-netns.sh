@@ -236,6 +236,10 @@ ip link set veth-cli netns "$CLIENT_NS"
 ip netns exec "$SERVER_NS" ip addr add "$SERVER_UNDERLAY_IP/24" dev veth-srv
 ip netns exec "$SERVER_NS" ip link set veth-srv up
 ip netns exec "$SERVER_NS" ip link set lo up
+# The TUN server requires a detectable WAN interface: the configured name is
+# absent inside the namespace, so the default route gives auto-detection its
+# target (same pattern as tun-e2e-netns.sh).
+ip netns exec "$SERVER_NS" ip route add default dev veth-srv
 ip netns exec "$CLIENT_NS" ip addr add "$CLIENT_UNDERLAY_IP/24" dev veth-cli
 ip netns exec "$CLIENT_NS" ip link set veth-cli up
 ip netns exec "$CLIENT_NS" ip link set lo up
