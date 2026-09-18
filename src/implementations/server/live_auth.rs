@@ -624,7 +624,7 @@ pub async fn send_live_datagram_to(
 /// `max_payload` bytes. `None` when the run has fewer than two packets or GSO
 /// was already ruled out for this socket.
 #[cfg(target_os = "linux")]
-fn plan_gso_run(
+pub(in crate::implementations::server) fn plan_gso_run(
     staging: &[(SocketAddr, usize, usize)],
     sent: &[bool],
     start: usize,

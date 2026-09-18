@@ -428,6 +428,171 @@ fn flush_tun_downlink_queue(
     socket: &UdpSocket,
     _metrics: &Metrics,
 ) -> Result<(), DataPlaneFault> {
+    // Linux: drain all targets into the persistent flat staging, then emit the
+    // burst through sendmmsg with per-packet addresses — GSO runs coalesce
+    // contiguous same-target uniform segments into one sendmsg first. A burst
+    // no longer costs one sendto syscall per produced packet.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = out;
+        use std::os::fd::AsRawFd;
+        const TX_STAGED_MAX: usize = 256;
+        const TX_FLAT_BYTES: usize = 4 * 1024 * 1024;
+        const SEND_WINDOW: usize = 65_535;
+        const GSO_MAX_PAYLOAD: usize = 65_535;
+
+        let fd = socket.as_raw_fd();
+        let flat = &mut live.live_state.downlink_tx_flat;
+        let staging = &mut live.live_state.downlink_tx_staging;
+        if flat.len() < TX_FLAT_BYTES {
+            flat.resize(TX_FLAT_BYTES, 0);
+        }
+
+        let mut ti = 0usize;
+        while ti < queued.len() {
+            // Phase 1: drain connections into flat staging until drained or full.
+            staging.clear();
+            let mut watermark = 0usize;
+            while ti < queued.len()
+                && staging.len() < TX_STAGED_MAX
+                && flat.len() - watermark >= SEND_WINDOW
+            {
+                let target = queued[ti];
+                let Some(connection) = live.live_state.clients.get_mut(&target) else {
+                    ti += 1;
+                    continue;
+                };
+                match connection.send(&mut flat[watermark..]) {
+                    Ok(0) => {
+                        log::debug!("TUN to socket send to {}: connection.send returned 0", target);
+                        ti += 1;
+                    }
+                    Ok(written) => {
+                        staging.push((target, watermark, written));
+                        watermark += written;
+                    }
+                    Err(crate::error::ConnectionError::Done) => {
+                        log::debug!(
+                            "TUN to socket send to {}: connection.send returned Done",
+                            target
+                        );
+                        ti += 1;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "TUN to socket send to {}: connection.send failed: {:?}",
+                            target,
+                            error
+                        );
+                        return Err(DataPlaneFault::TransportSend {
+                            component: format!("server TUN downlink connection to {target}"),
+                            error: error.to_string(),
+                        });
+                    }
+                }
+            }
+            if staging.is_empty() {
+                break;
+            }
+
+            // Phase 2: dispatch staged packets in order. GSO runs first — the
+            // run's spans are contiguous in `flat` by construction. Everything
+            // else accumulates into sendmmsg groups flushed before each GSO
+            // segment so per-target ordering is preserved.
+            let mut sent = [false; TX_STAGED_MAX];
+            let n_staged = staging.len();
+            let mut pending: smallvec::SmallVec<[usize; 64]> = smallvec::SmallVec::new();
+            let mut i = 0usize;
+            while i < n_staged {
+                if sent[i] {
+                    i += 1;
+                    continue;
+                }
+                if let Some((end, seg)) =
+                    super::live_auth::plan_gso_run(staging, &sent[..n_staged], i, GSO_MAX_PAYLOAD)
+                {
+                    if !pending.is_empty() {
+                        let refs: smallvec::SmallVec<[(&[u8], SocketAddr); 64]> = pending
+                            .iter()
+                            .map(|&idx| {
+                                let (t, off, len) = staging[idx];
+                                (&flat[off..off + len], t)
+                            })
+                            .collect();
+                        match qf_transport_udp::send_batch_fd(fd, &refs) {
+                            Ok(n) => {
+                                for &idx in pending.iter().take(n.min(pending.len())) {
+                                    sent[idx] = true;
+                                }
+                            }
+                            Err(error) => {
+                                log::debug!("TUN downlink sendmmsg fallback: {}", error);
+                            }
+                        }
+                        pending.clear();
+                    }
+                    let (target, start_off, _) = staging[i];
+                    let end_off = staging[end - 1].1 + staging[end - 1].2;
+                    match qf_transport_udp::send_udp_segment(
+                        fd,
+                        target,
+                        &flat[start_off..end_off],
+                        seg,
+                    ) {
+                        Ok(_) => {
+                            for flag in &mut sent[i..end] {
+                                *flag = true;
+                            }
+                        }
+                        Err(error) => {
+                            log::debug!("TUN downlink GSO fallback: {}", error);
+                        }
+                    }
+                    i = end;
+                } else {
+                    pending.push(i);
+                    i += 1;
+                }
+            }
+            if !pending.is_empty() {
+                let refs: smallvec::SmallVec<[(&[u8], SocketAddr); 64]> = pending
+                    .iter()
+                    .map(|&idx| {
+                        let (t, off, len) = staging[idx];
+                        (&flat[off..off + len], t)
+                    })
+                    .collect();
+                match qf_transport_udp::send_batch_fd(fd, &refs) {
+                    Ok(n) => {
+                        for &idx in pending.iter().take(n.min(pending.len())) {
+                            sent[idx] = true;
+                        }
+                    }
+                    Err(error) => {
+                        log::debug!("TUN downlink sendmmsg fallback: {}", error);
+                    }
+                }
+            }
+
+            // Sequential tail: whatever sendmmsg/GSO left unsent goes out with
+            // the original per-packet semantics and error propagation.
+            for (idx, &(target, off, len)) in staging.iter().enumerate() {
+                if sent[idx] {
+                    continue;
+                }
+                if let Err(error) = socket.try_send_to(&flat[off..off + len], target) {
+                    log::warn!("TUN to socket send to {} failed: {:?}", target, error);
+                    return Err(DataPlaneFault::TransportSend {
+                        component: format!("server UDP downlink to {target}"),
+                        error: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
     for target in queued {
         let Some(connection) = live.live_state.clients.get_mut(target) else {
             continue;
@@ -465,6 +630,7 @@ fn flush_tun_downlink_queue(
             log::debug!("TUN to socket send to {}: sent {}B", target, written);
         }
     }
+    #[cfg(not(target_os = "linux"))]
     Ok(())
 }
 
