@@ -3833,3 +3833,8 @@
 - `TlsCoverProvider` ran `std::thread::sleep(jitter)` inside `next_crypto_frame`, which executes inside `conn.send()` on the async select loops - every jittered cover frame stalled the whole runtime worker. The encrypted frame is now held behind a `cover_ready_at` deadline surfaced through `handshake_send_ready_at` -> `next_send_deadline()`; the runtime wakes exactly on time and emits it without any blocking.
 - Bonus in the same pass: `qf_fec::interleaved` no longer warns once per connection for the (0,0) disabled-FEC sentinel shape.
 - Local proof: qftls 35/35 (new deferral regression), qf-fec 85/85, clippy/fmt clean.
+
+### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
+- io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
+- `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.
+- `qf_fec::interleaved` (0,0)-shape warn removed (sentinel normalization is expected for disabled FEC).
