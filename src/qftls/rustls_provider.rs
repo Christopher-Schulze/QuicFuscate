@@ -1206,6 +1206,11 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
     fn has_pending_handshake_send(&self) -> bool {
         self.crypto_initial.has_pending_send() || self.crypto_handshake.has_pending_send()
     }
+    fn handshake_send_ready_at(&self) -> Option<Instant> {
+        // An elapsed deadline no longer gates anything: the next flush emits
+        // the held flight immediately, so callers must not wait on it.
+        self.profile_ready_at.filter(|ready_at| *ready_at > self.clock.now())
+    }
     fn poll_secrets_and_install(
         &mut self,
         installer: &dyn QuicTlsKeyInstaller,

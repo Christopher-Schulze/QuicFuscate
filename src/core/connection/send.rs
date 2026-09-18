@@ -10,13 +10,15 @@ impl QuicFuscateConnection {
 
     /// Earliest instant the caller should poll `send` again.
     ///
-    /// This merges outer pacing, stealth release, QUIC recovery, and the one
-    /// transport-owned traffic-analysis deadline.
+    /// This merges outer pacing, stealth release, QUIC recovery, the TLS
+    /// profile handshake-readiness deadline, and the one transport-owned
+    /// traffic-analysis deadline.
     pub fn next_send_deadline(&self) -> Option<Instant> {
         [
             self.next_outbound_release_deadline(),
             self.conn.recovery_deadline(),
             self.conn.traffic_analysis_deadline(),
+            self.conn.handshake_send_ready_at(),
         ]
         .into_iter()
         .flatten()

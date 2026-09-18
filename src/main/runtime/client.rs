@@ -406,7 +406,31 @@ pub(super) async fn run_client(
     // Construct and send the first wire datagram before any later request or TUN
     // readiness can be published. A live runtime without this packet is not a
     // valid client startup.
-    let constructed_bytes = match initial_client_packet_constructed(conn.send(&mut out)) {
+    //
+    // `Ok(0)` is the transport's deferred-send contract: cosmetic TLS profile
+    // timing or pacing schedules the first flight for a later instant. Poll
+    // again at the surfaced send deadline until the datagram materializes or
+    // the startup window closes.
+    let initial_send_deadline = Instant::now() + Duration::from_secs(10);
+    let constructed_bytes = loop {
+        match conn.send(&mut out) {
+            Ok(0) => {
+                let now = Instant::now();
+                if now >= initial_send_deadline {
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "initial client packet construction timed out awaiting \
+                         handshake readiness",
+                    ));
+                }
+                let wait =
+                    initial_send_retry_wait(conn.next_send_deadline(), now, initial_send_deadline);
+                tokio::time::sleep(wait).await;
+            }
+            result => break initial_client_packet_constructed(result),
+        }
+    };
+    let constructed_bytes = match constructed_bytes {
         Ok(bytes) => {
             info!("Constructed initial client packet of size {}", bytes);
             bytes

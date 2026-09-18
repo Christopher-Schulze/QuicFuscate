@@ -487,6 +487,14 @@ pub trait QuicTlsProvider: Send + Sync {
     fn requeue_all_crypto(&mut self, level: Level);
     /// Return whether an Initial or Handshake flight still has unsent bytes.
     fn has_pending_handshake_send(&self) -> bool;
+    /// Earliest instant at which deferred handshake output becomes available.
+    ///
+    /// Providers may hold the first handshake flight for cosmetic profile
+    /// timing; `next_crypto_frame` yields `None` until this deadline passes.
+    /// `None` means handshake output is governed by transport scheduling only.
+    fn handshake_send_ready_at(&self) -> Option<std::time::Instant> {
+        None
+    }
     /// Poll for new secrets and install them
     fn poll_secrets_and_install(
         &mut self,
@@ -892,6 +900,10 @@ impl QuicTlsProvider for CombinedProvider {
         self.rustls.has_pending_handshake_send()
     }
 
+    fn handshake_send_ready_at(&self) -> Option<std::time::Instant> {
+        self.rustls.handshake_send_ready_at()
+    }
+
     fn poll_secrets_and_install(
         &mut self,
         installer: &dyn QuicTlsKeyInstaller,
@@ -1114,6 +1126,9 @@ impl QuicTlsProvider for RustlsProvider {
     }
     fn has_pending_handshake_send(&self) -> bool {
         self.0.has_pending_handshake_send()
+    }
+    fn handshake_send_ready_at(&self) -> Option<std::time::Instant> {
+        self.0.handshake_send_ready_at()
     }
     fn poll_secrets_and_install(
         &mut self,

@@ -845,6 +845,22 @@ pub(super) struct InitialClientPacketEvidence {
     pub(super) sent_bytes: usize,
 }
 
+/// Delay before the next startup send poll after a deferred (`Ok(0)`)
+/// construction result. The transport's own send deadline wins when one is
+/// armed; otherwise a short poll bounds the wait. The result never exceeds
+/// the remaining startup window and never busy-spins.
+pub(super) fn initial_send_retry_wait(
+    next_send_deadline: Option<Instant>,
+    now: Instant,
+    startup_deadline: Instant,
+) -> Duration {
+    next_send_deadline
+        .map(|deadline| deadline.saturating_duration_since(now))
+        .unwrap_or(Duration::from_millis(5))
+        .min(startup_deadline.saturating_duration_since(now))
+        .max(Duration::from_millis(1))
+}
+
 pub(super) fn initial_client_packet_constructed(
     result: Result<usize, ConnectionError>,
 ) -> std::io::Result<usize> {

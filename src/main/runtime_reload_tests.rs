@@ -2,10 +2,10 @@ use super::runtime::{
     apply_standalone_tun_server_config, classify_client_tun_packet, client_packet_too_big_response,
     client_startup_error_with_cleanup, client_tun_activation_ready, derive_client_pool_for_tun,
     heartbeat_probe_interval, initial_client_packet_constructed, initial_client_packet_sent,
-    load_client_ca_file, load_runtime_profiles, new_runtime_transport_config,
-    record_standalone_client_tun_fault, resolve_client_target, runtime_optimize_config,
-    spawn_client_tun_reader, ClientTargetSource, ClientTunPacketDisposition,
-    InitialClientPacketEvidence,
+    initial_send_retry_wait, load_client_ca_file, load_runtime_profiles,
+    new_runtime_transport_config, record_standalone_client_tun_fault, resolve_client_target,
+    runtime_optimize_config, spawn_client_tun_reader, ClientTargetSource,
+    ClientTunPacketDisposition, InitialClientPacketEvidence,
 };
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,6 +59,37 @@ fn initial_client_packet_without_datagram_is_rejected() {
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("produced no datagram"));
+}
+
+#[test]
+fn initial_send_retry_wait_tracks_deadline_and_bounds_window() {
+    let now = Instant::now();
+    let startup_deadline = now + Duration::from_secs(10);
+
+    // An armed transport deadline drives the next poll exactly.
+    let send_deadline = now + Duration::from_millis(37);
+    assert_eq!(
+        initial_send_retry_wait(Some(send_deadline), now, startup_deadline),
+        Duration::from_millis(37)
+    );
+
+    // Without a surfaced deadline the fallback poll bounds the wait.
+    assert_eq!(initial_send_retry_wait(None, now, startup_deadline), Duration::from_millis(5));
+
+    // The wait never overshoots the remaining startup window.
+    let near_end = startup_deadline - Duration::from_millis(2);
+    let past_window = near_end + Duration::from_millis(50);
+    assert_eq!(
+        initial_send_retry_wait(Some(past_window), near_end, startup_deadline),
+        Duration::from_millis(2)
+    );
+
+    // Expired or zero-length windows still yield a floor, never a busy spin.
+    assert_eq!(initial_send_retry_wait(Some(now), now, startup_deadline), Duration::from_millis(1));
+    assert_eq!(
+        initial_send_retry_wait(None, startup_deadline, startup_deadline),
+        Duration::from_millis(1)
+    );
 }
 
 #[test]

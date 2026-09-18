@@ -906,6 +906,23 @@ fn next_send_deadline_includes_full_padding_cadence() {
 }
 
 #[test]
+fn next_send_deadline_includes_tls_handshake_readiness() {
+    let mut connection = test_connection();
+    connection.conn.enable_tls("unified").expect("unified TLS provider");
+    let mut profile = qf_stealth::TlsProfile::chrome_130();
+    profile.timing_jitter = Some(Duration::from_millis(250));
+    connection.conn.configure_tls(&profile, "example.com").expect("TLS profile");
+
+    let ready_at = connection
+        .conn
+        .handshake_send_ready_at()
+        .expect("profile jitter must arm a handshake readiness deadline");
+
+    assert!(ready_at > Instant::now());
+    assert_eq!(connection.next_send_deadline(), Some(ready_at));
+}
+
+#[test]
 fn outbound_pacer_reset_removes_release_and_partial_burst() {
     let now = Instant::now();
     let mut pacer = OutboundPacer::default();

@@ -608,6 +608,14 @@ impl Connection {
         )
     }
 
+    /// Earliest instant at which the TLS provider releases deferred handshake
+    /// output (cosmetic profile timing). `None` when no provider gate is armed.
+    /// Callers must keep polling `send` at this deadline: the first flight is
+    /// intentionally held and never dropped.
+    pub fn handshake_send_ready_at(&self) -> Option<Instant> {
+        self.tls_provider.as_ref().and_then(|provider| provider.handshake_send_ready_at())
+    }
+
     /// Runs the recovery loss-detection timer: declares time-threshold losses
     /// or queues PTO probes (RFC 9002 A.8). Event loops call this when
     /// [`recovery_deadline`](Self::recovery_deadline) expires.

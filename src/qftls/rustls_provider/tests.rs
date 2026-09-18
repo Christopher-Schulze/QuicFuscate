@@ -71,6 +71,48 @@ mod profile_delay_tests {
     }
 
     #[test]
+    fn handshake_readiness_deadline_surfaces_and_clears_profile_jitter() {
+        let source = crate::time_source::test_support::ManualTimeSource::new(
+            Instant::now(),
+            SystemTime::UNIX_EPOCH,
+        );
+        let clock = crate::time_source::ProtocolClock::from_source(source.clone());
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        let mut provider = RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
+            false,
+            false,
+            PROTOCOL_VERSION,
+            &[],
+            None,
+            &environment,
+            &clock,
+        )
+        .expect("client provider");
+        let mut profile = TlsProfile::chrome_130();
+        profile.timing_jitter = Some(Duration::from_secs(2));
+        provider.apply_profile_to_config(&profile).expect("profile configuration");
+
+        let ready_at = provider
+            .handshake_send_ready_at()
+            .expect("armed profile jitter must surface a readiness deadline");
+        assert!(ready_at > clock.now());
+        assert!(provider
+            .next_crypto_frame(Level::Initial, usize::MAX)
+            .expect("deferred frame poll")
+            .is_none());
+
+        // Once the readiness deadline passes, the deferred ClientHello is
+        // emitted and the gate clears - a zero-byte send poll is a retry
+        // signal, never a dead end.
+        source.advance(Duration::from_secs(3));
+        assert!(provider
+            .next_crypto_frame(Level::Initial, usize::MAX)
+            .expect("post-deadline frame poll")
+            .is_some());
+        assert_eq!(provider.handshake_send_ready_at(), None);
+    }
+
+    #[test]
     fn provider_owned_crypto_range_requeues_and_retires_exact_bytes() {
         let mut provider = provider_with_manual_clock();
         let mut profile = TlsProfile::chrome_130();
