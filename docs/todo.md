@@ -3765,3 +3765,9 @@
 - `remove_symbol_state`/`remove_queued_symbol` ran `VecDeque::retain` (O(window)) per eviction and per degree-1→0 propagation; replaced with stale-parked entries + bounded compaction.
 - Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
+
+### TODO-968 - Fountain propagation reverse index
+- Detail: `docs/todo/todo-968-fountain-reverse-index.md`
+- `propagate_decoded_symbol` scanned every retained degree list per decode (O(window × degree)); replaced with an `adjacency[source_idx]` reverse index maintained at insert/remove.
+- Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
+- Omega proof: qf-fec 85/85 on aarch64 Linux.
