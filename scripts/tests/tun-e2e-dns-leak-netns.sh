@@ -203,6 +203,10 @@ PRIVATE_RESOLVE_DIR="$RUNTIME_DIR/systemd-resolve"
 SERVER_LOG="$ARTIFACT_DIR/server.log"
 CLIENT_LOG="$ARTIFACT_DIR/client.log"
 mkdir "$PRIVATE_RESOLVE_DIR"
+# Once the empty dir is bound over /run/systemd/resolve, the /etc/resolv.conf
+# symlink targets stub-resolv.conf inside it; the stub must exist or the
+# following file bind mounts onto a dangling symlink.
+touch "$PRIVATE_RESOLVE_DIR/stub-resolv.conf"
 sha256sum "$B" >"$ARTIFACT_DIR/binary.sha256"
 
 CERT_EXT="$RUNTIME_DIR/leaf-ext.cnf"
