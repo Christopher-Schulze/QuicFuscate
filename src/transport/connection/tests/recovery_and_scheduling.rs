@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn ack_updates_rtt_from_send_time() {
-    // RFC 9000 §5.1: RTT sample = now - send_time - ack_delay.
+    // RFC 9000 sec. 5.1: RTT sample = now - send_time - ack_delay.
     // This test verifies that ACK processing generates a valid RTT sample
     // from the largest acknowledged PN's send time.
     let mut c = make_conn();
@@ -83,7 +83,7 @@ fn fec_feedback_counts_only_transport_classified_acknowledgements_as_clean() {
 
 #[test]
 fn ack_with_delay_subtracts_ack_delay() {
-    // RTT sample should subtract the peer's ack_delay (RFC 9000 §19.3).
+    // RTT sample should subtract the peer's ack_delay (RFC 9000 sec. 19.3).
     let mut c = make_conn();
     let send_time = Instant::now() - Duration::from_millis(100);
     c.recovery.on_packet_sent_in_space(
@@ -109,7 +109,7 @@ fn ack_with_delay_subtracts_ack_delay() {
     );
     c.apply_ack_outcome(recovery::PacketSpace::Application, outcome, now);
 
-    // RFC 9002 §5.2/§5.3: the first sample sets min_rtt = latest_rtt, so the
+    // RFC 9002 sec. 5.2/sec. 5.3: the first sample sets min_rtt = latest_rtt, so the
     // adjustment guard (latest >= min_rtt + delay) can never fire for it -
     // the first sample is NOT ack-delay adjusted (RTT ~= 100 ms, not 70 ms).
     assert!(
@@ -612,7 +612,7 @@ fn pto_probe_then_time_threshold_requeues_tail_packet() {
     );
 
     // 1. Recovery timeout fires the PTO: an Application probe is queued,
-    //    nothing is declared lost (RFC 9002 §6.2.4).
+    //    nothing is declared lost (RFC 9002 sec. 6.2.4).
     pair.client.on_recovery_timeout(Instant::now());
     assert!(pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application));
     assert!(pair
@@ -653,7 +653,7 @@ fn pto_probe_then_time_threshold_requeues_tail_packet() {
 
 #[test]
 fn aged_datagram_survives_pto_without_being_declared_lost() {
-    // RFC 9002 §6.2.4: a PTO firing sends probes - it never declares loss.
+    // RFC 9002 sec. 6.2.4: a PTO firing sends probes - it never declares loss.
     let mut pair = bench_paired_1rtt_connections();
     pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
     pair.client.enable_datagrams(16, 16);
@@ -662,7 +662,7 @@ fn aged_datagram_survives_pto_without_being_declared_lost() {
     let packet_number = pair.client.next_send_pn_by_space[2];
     let (packet_size, _) = pair.client.send(&mut packet).unwrap();
     // Age the recorded packet so a time-threshold timer would be expired,
-    // then verify the PTO path still does not declare loss (RFC 9002 §6.2.4).
+    // then verify the PTO path still does not declare loss (RFC 9002 sec. 6.2.4).
     pair.client.recovery.on_packet_sent_in_space(
         recovery::PacketSpace::Application,
         packet_number,
@@ -773,7 +773,7 @@ fn datagrams_remain_queued_when_short_header_seal_fails() {
 
 #[test]
 fn pto_probe_bypasses_congestion_gate_and_emits_ack_eliciting_packet() {
-    // RFC 9002 §7.5/§6.2.4: a PTO probe bypasses the congestion gate but
+    // RFC 9002 sec. 7.5/sec. 6.2.4: a PTO probe bypasses the congestion gate but
     // still counts as in flight (tracked ack-eliciting packet).
     let mut pair = bench_paired_1rtt_connections();
     pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
@@ -794,7 +794,7 @@ fn pto_probe_bypasses_congestion_gate_and_emits_ack_eliciting_packet() {
         pair.client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).len();
     let (probe_len, probe_info) = pair.client.send(&mut packet).expect("probe must emit");
     assert!(probe_len > 0);
-    assert!(probe_info.congestion_controlled); // probes count as in flight (§7.5)
+    assert!(probe_info.congestion_controlled); // probes count as in flight (sec. 7.5)
     assert!(!pair.client.pending_probe_spaces.contains(&recovery::PacketSpace::Application));
     let tracked_after =
         pair.client.recovery.tracked_sent_pns(recovery::PacketSpace::Application).len();
@@ -991,7 +991,7 @@ fn large_loss_prefix_uses_split_drain_and_preserves_unlost_tail() {
 #[test]
 fn timeout_does_not_inflate_rtt_repeatedly() {
     // Verify that repeated timeouts do NOT cause monotonic RTT inflation.
-    // This is the regression test for the 0→385ms loopback RTT bug.
+    // This is the regression test for the 0->385ms loopback RTT bug.
     let mut c = make_conn();
     let rtt_before = c.rtt;
     for _ in 0..10 {

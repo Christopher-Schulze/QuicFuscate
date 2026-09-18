@@ -335,7 +335,7 @@ impl Decoder16 {
             }
             // Walk the coefficient row once: non-zero entries land in the
             // matrix via binary search into the sorted unknown list, or
-            // contribute their known source to the RHS — O(k + nnz*words)
+            // contribute their known source to the RHS - O(k + nnz*words)
             // instead of O(u*k) for the matrix plus O(k*words) for the RHS.
             for (j, &coeff) in eq.coeffs.iter().enumerate().take(self.k) {
                 if coeff == 0 {
@@ -387,7 +387,7 @@ impl Decoder16 {
                 *cell = gf_tables::gf16_mul(*cell, inv);
             }
             // eliminate other rows. Split both blocks once so the pivot
-            // rows can be read while other rows mutate — replaces an
+            // rows can be read while other rows mutate - replaces an
             // a-row plus a words-row clone per pivot.
             let (a_lo, a_hi) = a.split_at_mut(row);
             let (a_pivot, a_hi) = a_hi.split_at_mut(1);

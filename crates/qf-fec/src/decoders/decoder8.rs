@@ -13,7 +13,7 @@ struct Equation8 {
     base_id: u64,
     /// Coefficient row, length k. Stays a heap Vec: equations rotate through
     /// `VecDeque` every peeling pass, so inline storage would turn each
-    /// rotation into a ~280-byte memmove — measured slower than the alloc.
+    /// rotation into a ~280-byte memmove - measured slower than the alloc.
     coeffs: Vec<u8>,
     data: PooledBlock,
     len: usize,
@@ -271,7 +271,7 @@ impl Decoder8 {
                 gf_tables::gf_mul_scalar_slice(*coeff, &kdata[..sl], &mut eq.data[..sl]);
                 *coeff = 0;
             } else if last_idx.is_some() {
-                // More than one unknown remains — keep subtracting the rest,
+                // More than one unknown remains - keep subtracting the rest,
                 // the partially reduced equation is retained for later passes.
                 multiple_unknowns = true;
             } else {
@@ -393,7 +393,7 @@ impl Decoder8 {
 
         // Build coefficient matrix A (m x u): walk each equation's
         // coefficient row once and place non-zero entries via binary search
-        // into the sorted unknown list — O(m * k) instead of O(m * u * k).
+        // into the sorted unknown list - O(m * k) instead of O(m * u * k).
         let mut a = vec![vec![0u8; u]; m];
         for (i, eq) in self.equations.iter().enumerate() {
             for (j, &cj) in eq.coeffs.iter().enumerate().take(self.k) {
@@ -418,7 +418,7 @@ impl Decoder8 {
             let eq_len = eq.len;
             let eq_data = &eq.data;
             // rhs = eq_data, then XOR-accumulate every known coefficient's
-            // contribution in one SIMD pass per non-zero coefficient —
+            // contribution in one SIMD pass per non-zero coefficient -
             // O(min_len * nnz) instead of O(min_len * k) scalar lookups.
             let head = min_len.min(eq_len);
             yb[i][..head].copy_from_slice(&eq_data[..head]);
@@ -469,7 +469,7 @@ impl Decoder8 {
                 // Eliminate column in other rows (SIMD-accelerated multiply-and-XOR)
                 let pivot_row_snapshot = ab[row].clone();
                 // Split the RHS block once so the pivot row can be read while
-                // other rows are mutated — replaces a min_len-byte clone per
+                // other rows are mutated - replaces a min_len-byte clone per
                 // eliminated row.
                 let (yb_lo, yb_hi) = yb.split_at_mut(row);
                 let (yb_pivot, yb_hi) = yb_hi.split_at_mut(1);
@@ -483,7 +483,7 @@ impl Decoder8 {
                                 &pivot_row_snapshot[..u],
                                 &mut rrow[..u],
                             );
-                            // Same factor applies to every RHS column —
+                            // Same factor applies to every RHS column -
                             // XOR-accumulate the pivot RHS row in one pass.
                             let target = if r_idx < row {
                                 &mut yb_lo[r_idx]
@@ -576,7 +576,7 @@ impl Decoder8 {
         // Precompute coefficient index for each (eq_idx, unknown_sid) pair
         // so the Rayon closure doesn't need &self. Walk each coefficient
         // row once and place entries via binary search into the sorted
-        // unknown list — O(m * k) instead of O(m * n * k).
+        // unknown list - O(m * k) instead of O(m * n * k).
         let eq_coeff_lookup: Vec<Vec<Option<u8>>> = self
             .equations
             .iter()
@@ -620,7 +620,7 @@ impl Decoder8 {
                         .into_iter()
                         .map(|byte_idx| {
                             // Rebuild the matrix view for this byte in the
-                            // persistent scratch buffers — rows for equations
+                            // persistent scratch buffers - rows for equations
                             // shorter than byte_idx stay zeroed. The solver
                             // only reads dimensions plus the validation below,
                             // so per-byte state is just these fills.

@@ -170,7 +170,7 @@ impl IoDriver {
     }
 
     /// Blocking receive of one wire message. On Linux this is `recvmsg` with
-    /// `UDP_GRO` ancillary parsing — required once GRO is enabled, because a
+    /// `UDP_GRO` ancillary parsing - required once GRO is enabled, because a
     /// kernel-coalesced buffer reports its segment size only via the control
     /// channel (TODO-923). Returns `(len, gso_size)`; `gso_size == 0` marks a
     /// plain single datagram.
@@ -265,7 +265,7 @@ impl IoDriver {
                             Err(EngineError::Connection(msg))
                                 if msg == "Connection done" || msg == "Buffer too short" =>
                             {
-                                // Transient under netem impairment — see the
+                                // Transient under netem impairment - see the
                                 // portable arm below.
                                 drained = true;
                                 break;
@@ -622,7 +622,7 @@ impl IoDriver {
     }
 
     /// Idle wait that wakes as soon as the TUN device is readable or the
-    /// connection wants to emit (pacing/stealth/recovery deadline) — replaces
+    /// connection wants to emit (pacing/stealth/recovery deadline) - replaces
     /// fixed-interval polling so the outbound loop does not burn CPU while
     /// idle. A bounded cap keeps the shutdown flag responsive. Falls back to a
     /// plain sleep when the backend exposes no file descriptor.
@@ -684,8 +684,8 @@ impl IoDriver {
         #[cfg(target_os = "linux")]
         let batch_cap = self.normalized_batch_size();
         // Flat staging: conn.send writes each datagram straight into the
-        // remaining window — no per-packet Vec, no staging copy. Sized to
-        // cover a full MTU batch (≥1 MiB bounds pathological 64 KiB packets).
+        // remaining window - no per-packet Vec, no staging copy. Sized to
+        // cover a full MTU batch (>=1 MiB bounds pathological 64 KiB packets).
         #[cfg(target_os = "linux")]
         let mut batch_flat: Vec<u8> = vec![0u8; (batch_cap * 2048).max(1 << 20)];
         #[cfg(target_os = "linux")]
@@ -984,7 +984,7 @@ impl IoDriver {
     ) -> Result<(), EngineError> {
         // One fixed-stride 64 KiB slot per recv, plus a span table recording
         // the per-datagram `(offset, len)` segments (GRO splits emit several
-        // spans per slot). Payloads stay in place — no per-datagram copy.
+        // spans per slot). Payloads stay in place - no per-datagram copy.
         const RECV_SLOT: usize = 65535;
         let batch_cap = self.normalized_batch_size();
         let mut recv_flat = vec![0u8; batch_cap * RECV_SLOT];

@@ -468,7 +468,7 @@ impl LTDecoder {
     fn evict_oldest_symbol(&mut self) -> bool {
         while let Some(symbol_id) = self.symbol_order.pop_front() {
             if !self.received_symbols.contains_key(&symbol_id) {
-                // Parked stale entry — discard for free.
+                // Parked stale entry - discard for free.
                 self.symbol_order_stale = self.symbol_order_stale.saturating_sub(1);
                 continue;
             }
@@ -567,7 +567,7 @@ impl LTDecoder {
     }
 
     /// Add an encoded fountain symbol whose source indices are recomputed from
-    /// the connection-local seed — the receiver-side counterpart of encoder
+    /// the connection-local seed - the receiver-side counterpart of encoder
     /// symbol generation. The index scratch buffer becomes the stored degree
     /// entry, so a warm decoder performs exactly one vector allocation per
     /// retained symbol (the stored index list itself).
@@ -601,7 +601,7 @@ impl LTDecoder {
     /// **Belief Propagation Decoding** - Iterative peeling decoder
     ///
     /// `data` is copied into a recycled decoder buffer; callers do not need to
-    /// allocate. `source_indices` accepts any iterator of source indexes —
+    /// allocate. `source_indices` accepts any iterator of source indexes -
     /// entries are sorted and deduplicated before storage.
     pub fn add_encoded_symbol(
         &mut self,
@@ -652,7 +652,7 @@ impl LTDecoder {
         let mut progressed = false;
         while let Some(symbol_id) = self.degree_one_queue.pop_back() {
             if !self.queued_symbol_ids.remove(&symbol_id) {
-                // Parked stale entry — membership was already removed.
+                // Parked stale entry - membership was already removed.
                 self.degree_one_stale = self.degree_one_stale.saturating_sub(1);
                 continue;
             }
@@ -734,7 +734,7 @@ impl LTDecoder {
         let mut to_update = std::mem::take(&mut self.propagation_scratch);
 
         // The reverse index names exactly the encoded symbols referencing
-        // `decoded_idx` — no scan over every retained degree list.
+        // `decoded_idx` - no scan over every retained degree list.
         for &symbol_id in &self.adjacency[decoded_idx] {
             if self.propagation_work >= self.max_propagation_work {
                 self.propagation_budget_exhausted = true;

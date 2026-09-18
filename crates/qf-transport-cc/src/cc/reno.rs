@@ -141,7 +141,7 @@ impl CongestionController for Reno {
     }
 
     fn pacing_rate(&self) -> Option<u64> {
-        // Bounded delivery-rate pacing (RFC 9002 §7.7 recommends pacing to
+        // Bounded delivery-rate pacing (RFC 9002 sec. 7.7 recommends pacing to
         // avoid burst losses): 1.25*cwnd/SRTT, clamped to [1 MSS/RTT, 2*cwnd/RTT].
         let rtt = self.rtt.max(Duration::from_millis(1));
         let rtt_secs = rtt.as_secs_f64();
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn pacing_rate_is_bounded_delivery_rate() {
-        // RFC 9002 §7.7 recommends pacing; Reno paces at 1.25*cwnd/SRTT,
+        // RFC 9002 sec. 7.7 recommends pacing; Reno paces at 1.25*cwnd/SRTT,
         // clamped to [1 MSS/RTT, 2*cwnd/RTT].
         let mss = 1200;
         let mut reno = Reno::new(mss * 10, mss);

@@ -47,7 +47,7 @@ impl UringBatchWorker {
         // Depth 1 is deliberate, not a missing knob: exactly one sender owns
         // the ring and its pointer-backed staging, so requests serialize anyway.
         // A deeper queue would only let a waiting batch exceed the caller's
-        // response deadline (500 ms) behind a 250 ms operation — spurious
+        // response deadline (500 ms) behind a 250 ms operation - spurious
         // quarantines for zero throughput gain. Bounded depth 1 gives natural
         // backpressure: extra submitters take the per-packet fallback instead.
         let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(1);

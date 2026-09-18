@@ -298,7 +298,7 @@ pub fn unprotect_and_decrypt_parsed(
         Some(parsed) => parsed,
         None => parse_header(buf, short_dcid_len)?,
     };
-    // Move hdr into the match arms — only one arm executes, so no clone needed
+    // Move hdr into the match arms - only one arm executes, so no clone needed
     // for Initial/Handshake/ZeroRTT. For Short, use take() to pass the header
     // to the first candidate only (subsequent candidates get None and re-parse
     // internally), eliminating the pre-clone that was here previously.

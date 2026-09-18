@@ -112,7 +112,7 @@ impl PmtuPolicy {
     }
 }
 
-/// RFC 9002 packet number space (§4.1, A.2).
+/// RFC 9002 packet number space (sec. 4.1, A.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PacketSpace {
     /// Initial packets (space index 0).
@@ -143,19 +143,19 @@ impl PacketSpace {
     }
 }
 
-/// Maximum reordering in packets before packet-threshold loss (RFC 9002 §6.1.1).
+/// Maximum reordering in packets before packet-threshold loss (RFC 9002 sec. 6.1.1).
 pub const K_PACKET_THRESHOLD: u64 = 3;
-/// Timer granularity floor for loss/PTO computations (RFC 9002 §6.1.2, A.2).
+/// Timer granularity floor for loss/PTO computations (RFC 9002 sec. 6.1.2, A.2).
 pub const K_GRANULARITY: Duration = Duration::from_millis(1);
-/// Default max_ack_delay when the peer does not advertise one (RFC 9000 §18.2).
+/// Default max_ack_delay when the peer does not advertise one (RFC 9000 sec. 18.2).
 pub const K_MAX_ACK_DELAY: Duration = Duration::from_millis(25);
-/// Initial RTT before any sample (RFC 9002 §6.2.2, A.2: handshake PTO = 1 s).
+/// Initial RTT before any sample (RFC 9002 sec. 6.2.2, A.2: handshake PTO = 1 s).
 pub const K_INITIAL_RTT: Duration = Duration::from_millis(333);
 /// Default ceiling for the PTO backoff exponent (`2^16` multiplier, RFC 9002 A.9
 /// leaves the ceiling to implementations). Nested-tunnel transports lower it via
 /// [`Recovery::set_pto_backoff_cap`].
 pub const K_PTO_BACKOFF_CAP_DEFAULT: u32 = 16;
-/// Persistent congestion window multiplier (RFC 9002 §7.6.1).
+/// Persistent congestion window multiplier (RFC 9002 sec. 7.6.1).
 pub const K_PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
 
 /// Ack-eliciting content carried by a tracked QUIC packet.
@@ -196,7 +196,7 @@ pub struct SentPacket {
     pub size: usize,
     /// Send timestamp.
     pub sent_at: Instant,
-    /// Whether the packet is ack-eliciting (RFC 9000 §19).
+    /// Whether the packet is ack-eliciting (RFC 9000 sec. 19).
     pub ack_eliciting: bool,
     /// Whether the packet counts toward bytes in flight.
     pub in_flight: bool,
@@ -291,7 +291,7 @@ impl SentRing {
     /// keep the ring within [`MAX_SENT_RING_SLOTS`], or a same-`pn` packet
     /// superseded by a requeue, are handed to `on_evict` with their cause so
     /// byte accounting stays exact. Returns `false` when the packet was not
-    /// tracked (non-monotonic `pn` — a protocol-invariant violation).
+    /// tracked (non-monotonic `pn` - a protocol-invariant violation).
     fn insert(&mut self, pkt: SentPacket, mut on_evict: impl FnMut(SentPacket, RingEvict)) -> bool {
         let pn = pkt.pn;
         if self.live == 0 {
@@ -413,11 +413,11 @@ struct SpaceRecovery {
     sent: SentRing,
     /// Retained bytes across `sent`, maintained alongside the map so the budget check is O(1).
     retained_bytes: usize,
-    /// Armed time-threshold deadline (RFC 9002 §6.1.2).
+    /// Armed time-threshold deadline (RFC 9002 sec. 6.1.2).
     loss_time: Option<Instant>,
-    /// Send time of the most recent ack-eliciting packet (PTO base, §6.2.1).
+    /// Send time of the most recent ack-eliciting packet (PTO base, sec. 6.2.1).
     time_of_last_ack_eliciting: Option<Instant>,
-    /// Largest packet number ever acknowledged in this space (§5.1).
+    /// Largest packet number ever acknowledged in this space (sec. 5.1).
     largest_acked: Option<u64>,
 }
 
@@ -481,9 +481,9 @@ pub struct AckOutcome {
     pub crypto_acked: Vec<(u64, u64)>,
     /// CRYPTO ranges `(offset, len)` to requeue for retransmission.
     pub crypto_lost: Vec<(u64, u64)>,
-    /// Raw RTT sample when one was generated per RFC 9002 §5.1.
+    /// Raw RTT sample when one was generated per RFC 9002 sec. 5.1.
     pub rtt_sample: Option<Duration>,
-    /// True when persistent congestion was established (RFC 9002 §7.6).
+    /// True when persistent congestion was established (RFC 9002 sec. 7.6).
     pub persistent_congestion: bool,
     /// Provenance for a persistent-congestion decision.
     pub persistent_congestion_evidence: Option<PersistentCongestionEvidence>,
@@ -551,7 +551,7 @@ pub struct TimeoutOutcome {
     pub lost: Vec<(PacketSpace, u64, usize)>,
     /// CRYPTO ranges `(offset, len)` to requeue (space implied by `lost` carriers).
     pub crypto_lost: Vec<(PacketSpace, u64, u64)>,
-    /// Spaces that must emit an ack-eliciting probe (RFC 9002 §6.2.4).
+    /// Spaces that must emit an ack-eliciting probe (RFC 9002 sec. 6.2.4).
     pub probe_spaces: Vec<PacketSpace>,
 }
 
@@ -572,13 +572,13 @@ pub struct Recovery {
     pub rtt: Duration,
     /// RTT variation (EWMA per RFC 6298).
     rtt_var: Duration,
-    /// Minimum RTT observed (RFC 9002 §5.2; also feeds BBR).
+    /// Minimum RTT observed (RFC 9002 sec. 5.2; also feeds BBR).
     min_rtt: Duration,
-    /// Most recent raw RTT sample (RFC 9002 §5.1 `latest_rtt`).
+    /// Most recent raw RTT sample (RFC 9002 sec. 5.1 `latest_rtt`).
     latest_rtt: Option<Duration>,
     /// Whether we have a valid RTT sample yet.
     rtt_initialized: bool,
-    /// Time at which the first RTT sample was obtained (RFC 9002 §7.6.2).
+    /// Time at which the first RTT sample was obtained (RFC 9002 sec. 7.6.2).
     first_rtt_sample: Option<Instant>,
     /// Probe Timeout counter (exponential backoff, incremented per PTO firing).
     pub pto_count: u32,
@@ -587,7 +587,7 @@ pub struct Recovery {
     /// transport lowers this ceiling for circuit connections to keep probes
     /// frequent enough for tunneled flows to survive sustained loss.
     pto_backoff_cap: u32,
-    /// Per-packet-number-space sent/loss state (canonical owner, RFC 9002 §4.1).
+    /// Per-packet-number-space sent/loss state (canonical owner, RFC 9002 sec. 4.1).
     spaces: [SpaceRecovery; 3],
     /// Persistent-congestion loss-run state retained across ACK frames.
     pc_window: PersistentCongestionRun,
@@ -882,7 +882,7 @@ impl Recovery {
     /// Compat wrapper for externally detected losses: feeds the congestion
     /// controller only. PTO state is owned by the canonical space-aware path
     /// (`on_loss_detection_timeout`); loss events must never bump `pto_count`
-    /// (RFC 9002 §6.2.1: backoff grows on PTO firings, not on losses).
+    /// (RFC 9002 sec. 6.2.1: backoff grows on PTO firings, not on losses).
     pub fn on_loss_packet(&mut self, packet_num: u64, lost_bytes: usize, now: Instant) {
         self.cc.on_loss_packet(packet_num, lost_bytes, now);
         self.sync_from_cc();
@@ -1037,13 +1037,13 @@ impl Recovery {
 
 /// Canonical RFC 9002 sent-packet and loss-detection-timer owner.
 impl Recovery {
-    /// RFC 9002 §6.1.2 time threshold: `max(9/8 * max(SRTT, latest_rtt), kGranularity)`.
+    /// RFC 9002 sec. 6.1.2 time threshold: `max(9/8 * max(SRTT, latest_rtt), kGranularity)`.
     fn loss_delay(&self) -> Duration {
         let base = self.rtt.max(self.latest_rtt.unwrap_or(Duration::ZERO));
         ((base * 9) / 8).max(K_GRANULARITY)
     }
 
-    /// RFC 9002 §7.6.1 persistent congestion duration.
+    /// RFC 9002 sec. 7.6.1 persistent congestion duration.
     fn persistent_congestion_period(&self) -> Duration {
         let base = self.rtt + (self.rtt_var * 4).max(K_GRANULARITY) + K_MAX_ACK_DELAY;
         base.checked_mul(K_PERSISTENT_CONGESTION_THRESHOLD).unwrap_or(base)
@@ -1052,7 +1052,7 @@ impl Recovery {
     /// Records a sent packet in the canonical per-space owner.
     ///
     /// Feeds the congestion controller only when `in_flight` is set; the
-    /// ACK-only bypass (RFC 9002 §7.2) stays out of all accounting.
+    /// ACK-only bypass (RFC 9002 sec. 7.2) stays out of all accounting.
     #[allow(clippy::too_many_arguments)]
     pub fn on_packet_sent_in_space(
         &mut self,
@@ -1185,7 +1185,7 @@ impl Recovery {
         }
     }
 
-    /// RFC 9002 §6.1 `DetectLostPackets` for one space. Removes and returns the
+    /// RFC 9002 sec. 6.1 `DetectLostPackets` for one space. Removes and returns the
     /// declared-lost packets in send order and (re)arms `loss_time`.
     ///
     /// Bounded in the loss set, not in the retained window: the scan stops at the first survivor
@@ -1233,7 +1233,7 @@ impl Recovery {
             }
             // Ascending packet numbers already yield ascending send times, so no sort is needed.
 
-            // Re-arm the time-threshold timer for the earliest remaining candidate (§6.1.2). Deadlines
+            // Re-arm the time-threshold timer for the earliest remaining candidate (sec. 6.1.2). Deadlines
             // are non-decreasing in packet number, so the first usable one is the minimum.
             sp.loss_time = sp
                 .sent
@@ -1243,7 +1243,7 @@ impl Recovery {
         self.lost_pn_scratch = lost_pns;
     }
 
-    /// Processes an ACK frame for one packet number space (RFC 9002 §5, §6.1).
+    /// Processes an ACK frame for one packet number space (RFC 9002 sec. 5, sec. 6.1).
     ///
     /// `ranges` are half-open `[start, end)` packet-number ranges; `ack_delay`
     /// is the peer-reported ACK delay already decoded with the ack-delay
@@ -1297,8 +1297,8 @@ impl Recovery {
             self.spaces[space.index()].largest_acked = Some(largest_in_frame);
         }
 
-        // 2. RTT sample (RFC 9002 §5.1: largest newly acknowledged plus at
-        //    least one newly acked ack-eliciting packet; §5.3 adjustment).
+        // 2. RTT sample (RFC 9002 sec. 5.1: largest newly acknowledged plus at
+        //    least one newly acked ack-eliciting packet; sec. 5.3 adjustment).
         if largest_advanced && any_current_ack_eliciting {
             if let Some(largest_pkt) = newly_acked
                 .iter()
@@ -1323,7 +1323,7 @@ impl Recovery {
             }
         }
 
-        // 3. PTO backoff reset (RFC 9002 §6.2.1; a client keeps its backoff on
+        // 3. PTO backoff reset (RFC 9002 sec. 6.2.1; a client keeps its backoff on
         //    Initial ACKs until the server has validated its address).
         if any_current_ack_eliciting && !(space == PacketSpace::Initial && !is_server) {
             self.pto_count = 0;
@@ -1373,7 +1373,7 @@ impl Recovery {
         now: Instant,
         mut outcome: AckOutcome,
     ) -> AckOutcome {
-        // 5. Loss detection (RFC 9002 §6.1 packet + time threshold).
+        // 5. Loss detection (RFC 9002 sec. 6.1 packet + time threshold).
         let loss_delay = self.loss_delay();
         let packet_threshold = largest_in_frame.checked_sub(K_PACKET_THRESHOLD);
         let mut lost = std::mem::take(&mut self.lost_scratch);
@@ -1387,11 +1387,11 @@ impl Recovery {
             .filter(|packet| now.saturating_duration_since(packet.sent_at) >= loss_delay)
             .count();
 
-        // 6. Persistent congestion (RFC 9002 §7.6): chain the loss run across
+        // 6. Persistent congestion (RFC 9002 sec. 7.6): chain the loss run across
         //    frames; an acknowledged packet inside the run (including a
         //    reordered ACK for a packet already declared lost) or a gap longer
         //    than the congestion period breaks it. Candidates begin only after
-        //    a real RTT sample, as required by §7.6.2.
+        //    a real RTT sample, as required by sec. 7.6.2.
         if !lost.is_empty() {
             if let Some(first_rtt_sample) = self.first_rtt_sample {
                 let period = self.persistent_congestion_period();
@@ -1562,10 +1562,10 @@ impl Recovery {
         outcome
     }
 
-    /// Earliest loss/PTO deadline across all spaces (RFC 9002 §6.1.2, §6.2.1).
+    /// Earliest loss/PTO deadline across all spaces (RFC 9002 sec. 6.1.2, sec. 6.2.1).
     ///
     /// The time-threshold timer takes precedence: while any `loss_time` is
-    /// armed, the PTO timer MUST NOT be armed (§6.2.1).
+    /// armed, the PTO timer MUST NOT be armed (sec. 6.2.1).
     pub fn loss_detection_timeout(
         &self,
         handshake_confirmed: bool,
@@ -1578,14 +1578,14 @@ impl Recovery {
         }
         let mut earliest: Option<Instant> = None;
         for space in [PacketSpace::Initial, PacketSpace::Handshake, PacketSpace::Application] {
-            // §6.2.1: no Application-space PTO before the handshake is confirmed.
+            // sec. 6.2.1: no Application-space PTO before the handshake is confirmed.
             if space == PacketSpace::Application && !handshake_confirmed {
                 continue;
             }
             let sp = &self.spaces[space.index()];
             let has_ack_eliciting = sp.sent.iter().any(|p| p.ack_eliciting);
             if !has_ack_eliciting {
-                // §6.2.2.1: a server pre-address-validation MUST NOT arm the PTO
+                // sec. 6.2.2.1: a server pre-address-validation MUST NOT arm the PTO
                 // without in-flight ack-eliciting data; a client pre-confirmation
                 // still arms Initial/Handshake so it can unblock the server.
                 if is_server && !client_address_validated {
@@ -1618,7 +1618,7 @@ impl Recovery {
     /// Runs the loss detection timer (RFC 9002 A.8 `OnLossDetectionTimeout`).
     ///
     /// An expired time-threshold timer declares losses only; an expired PTO
-    /// increments `pto_count` and requests ack-eliciting probes (§6.2.4).
+    /// increments `pto_count` and requests ack-eliciting probes (sec. 6.2.4).
     pub fn on_loss_detection_timeout(
         &mut self,
         handshake_confirmed: bool,
@@ -1654,7 +1654,7 @@ impl Recovery {
             self.lost_scratch = lost;
             return outcome;
         }
-        // PTO firing: increment backoff and request probes (RFC 9002 §6.2.4).
+        // PTO firing: increment backoff and request probes (RFC 9002 sec. 6.2.4).
         self.pto_count = self.pto_count.saturating_add(1);
         for space in [PacketSpace::Initial, PacketSpace::Handshake, PacketSpace::Application] {
             if space == PacketSpace::Application && !handshake_confirmed {
@@ -1666,7 +1666,7 @@ impl Recovery {
             }
         }
         if outcome.probe_spaces.is_empty() && !is_server && !handshake_confirmed {
-            // §6.2.2.1: client must probe to unblock the server pre-confirmation.
+            // sec. 6.2.2.1: client must probe to unblock the server pre-confirmation.
             outcome.probe_spaces.push(PacketSpace::Handshake);
             outcome.probe_spaces.push(PacketSpace::Initial);
         }
@@ -1685,7 +1685,7 @@ impl Recovery {
         self.spaces[space.index()].sent.contains(pn)
     }
 
-    /// Discards a packet number space (RFC 9002 §6.2.2 key-discard rule): the
+    /// Discards a packet number space (RFC 9002 sec. 6.2.2 key-discard rule): the
     /// space's packets leave bytes-in-flight without a loss response, and all
     /// loss/PTO timers for the space are reset.
     /// Terminal discard of every packet-number space.

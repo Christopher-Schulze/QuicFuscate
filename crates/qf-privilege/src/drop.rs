@@ -483,7 +483,7 @@ pub fn validate_startup_capabilities(
 /// The order is critical: `setgid` **must** be called before `setuid` to
 /// prevent regaining group privileges after dropping UID (POSIX requirement).
 ///
-/// After the call, file descriptors (socket, TUN fd) remain valid — they
+/// After the call, file descriptors (socket, TUN fd) remain valid - they
 /// were opened during the privileged phase and survive the UID/GID change.
 pub fn drop_privileges_resolved(
     identity: &ResolvedIdentity,

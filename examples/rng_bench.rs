@@ -44,7 +44,7 @@ fn main() {
         .unwrap_or_else(|| fail("the requested workload overflows the measured byte count"));
 
     println!(
-        "# RNG benchmark\n# total ≈ {} MB ({} bytes), block {} bytes, iterations {}",
+        "# RNG benchmark\n# total ~ {} MB ({} bytes), block {} bytes, iterations {}",
         effective_bytes as f64 / (1024.0 * 1024.0),
         effective_bytes,
         block_size,

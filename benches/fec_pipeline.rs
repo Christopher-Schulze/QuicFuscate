@@ -3,7 +3,7 @@
 // Unlike bench_fec_matrix_mul (which measures only GF(256) matrix multiply),
 // these benchmarks measure the real AdaptiveFec hot paths:
 //   - on_send()/on_send_into() pipeline (ingest -> window fill -> repair generation -> output)
-//   - on_receive() pipeline (ingest → decoder → recovery → output)
+//   - on_receive() pipeline (ingest -> decoder -> recovery -> output)
 //   - Block-boundary mode transition overhead
 //   - Streaming repair emission
 //   - Lazy decoder fast path (zero-loss skip)
@@ -58,7 +58,7 @@ fn should_drop_decode_source(id: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 1. FEC encode pipeline: on_send() per mode × packet size
+// 1. FEC encode pipeline: on_send() per mode x packet size
 // ---------------------------------------------------------------------------
 
 fn bench_fec_encode_pipeline(c: &mut Criterion) {
@@ -536,7 +536,7 @@ fn bench_fec_mode_transition(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(1));
 
-    // Measure on_send during a transition from Zero → Normal
+    // Measure on_send during a transition from Zero -> Normal
     group.bench_function("zero_to_normal", |b| {
         let pool = global_pool();
         let config = config_with_mode(FecMode::Zero);
@@ -561,7 +561,7 @@ fn bench_fec_mode_transition(c: &mut Criterion) {
         });
     });
 
-    // Measure on_send during transition from Normal → Zero (de-escalation)
+    // Measure on_send during transition from Normal -> Zero (de-escalation)
     group.bench_function("normal_to_zero", |b| {
         let pool = global_pool();
         let config = config_with_mode(FecMode::Normal);

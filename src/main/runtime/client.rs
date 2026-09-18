@@ -603,7 +603,7 @@ pub(super) async fn run_client(
                     },
                 ) {
                     Ok(reader_handle) => {
-                        // Install the MASQUE→TUN sink so downlink CONNECT-UDP
+                        // Install the MASQUE->TUN sink so downlink CONNECT-UDP
                         // datagrams are written to the client TUN by the H3 poll.
                         let tun_for_cb = tun.clone();
                         let fault_for_masque = Arc::clone(&reader_fault);
@@ -935,7 +935,7 @@ pub(super) async fn run_client(
                             Err(e) => { warn!("open_http3_stream_post failed: {:?}", e); }
                         }
                     }
-                    // Downlink: H3 stream data from server → TUN interface
+                    // Downlink: H3 stream data from server -> TUN interface
                     let tun_writer_ref = tun_writer.clone();
                     let tun_fault_for_h3 = tun_reader_fault.clone();
                     let tun_notify_for_h3 = Arc::clone(&tun_notify);

@@ -16,7 +16,7 @@
 //! # nftables transactions
 //!
 //! [`NftablesBackend`] feeds complete rulesets to `nft -f -` on stdin. This gives
-//! atomic, all-or-nothing application of a ruleset batch — the kernel either
+//! atomic, all-or-nothing application of a ruleset batch - the kernel either
 //! commits every statement or rejects the whole transaction, so a half-applied
 //! ruleset can never leak traffic.
 

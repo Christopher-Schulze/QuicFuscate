@@ -1,4 +1,4 @@
-# TODO-967 — Fountain decoder: stale-tolerant symbol queues
+# TODO-967 - Fountain decoder: stale-tolerant symbol queues
 
 ## Status
 DONE
@@ -6,12 +6,12 @@ DONE
 ## Problem
 `LTDecoder` kept two FIFO queues whose membership truth lives elsewhere:
 
-- `symbol_order` — eviction FIFO; `received_symbols` is the truth.
-- `degree_one_queue` — peel worklist; `queued_symbol_ids` is the truth.
+- `symbol_order` - eviction FIFO; `received_symbols` is the truth.
+- `degree_one_queue` - peel worklist; `queued_symbol_ids` is the truth.
 
-Every `remove_symbol_state` (eviction *and* every degree-1→0 propagation
+Every `remove_symbol_state` (eviction *and* every degree-1->0 propagation
 completion) ran `symbol_order.retain(...)`, and every
-`remove_queued_symbol` ran `degree_one_queue.retain(...)` — O(queue) scans
+`remove_queued_symbol` ran `degree_one_queue.retain(...)` - O(queue) scans
 per removal. With the admission limit `max_symbols` up to
 `MAX_FOUNTAIN_SOURCE_SYMBOLS` (12 288) a full decode window could spend
 milliseconds per burst on queue compaction alone.
@@ -30,8 +30,8 @@ Stale-parked entries + two stale counters + bounded compaction:
   (`evict_oldest_symbol` on `!contains_key`, `belief_propagation_step`
   on `!queued_symbol_ids.remove`).
 - `compact_*` rebuilds a queue via `retain` only when stale entries
-  dominate (`stale * 2 >= len && len >= 64`) — amortized O(1) removal,
-  queue size bounded to ≤ 2× live entries.
+  dominate (`stale * 2 >= len && len >= 64`) - amortized O(1) removal,
+  queue size bounded to <= 2x live entries.
 - `enqueue_degree_one` compacts before its `max_queue_len` check so the
   length heuristic isn't inflated by parked entries.
 
@@ -40,7 +40,7 @@ Semantics unchanged: membership decisions still go through
 became lazy.
 
 ## Verification
-- `cargo test -p qf-fec` — 85/85 local (aarch64 macOS)
-- `cargo clippy -p qf-fec --all-targets` — clean
-- `cargo fmt --check` — clean
-- Omega (aarch64 Linux): `cargo test -p qf-fec` — 85/85
+- `cargo test -p qf-fec` - 85/85 local (aarch64 macOS)
+- `cargo clippy -p qf-fec --all-targets` - clean
+- `cargo fmt --check` - clean
+- Omega (aarch64 Linux): `cargo test -p qf-fec` - 85/85

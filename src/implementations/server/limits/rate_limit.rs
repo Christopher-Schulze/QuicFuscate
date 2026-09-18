@@ -14,7 +14,7 @@ pub struct RateLimitConfig {
     pub max_bps: u64,
     /// Bucket refill interval.
     pub refill_interval: Duration,
-    /// Burst capacity (max tokens the bucket can hold). 0 = use 2× `max_pps`.
+    /// Burst capacity (max tokens the bucket can hold). 0 = use 2x `max_pps`.
     ///
     /// This decouples the initial burst from the steady-state refill rate so a
     /// newly-seen IP cannot dump an entire second of quota instantaneously.
@@ -27,14 +27,14 @@ impl Default for RateLimitConfig {
             max_pps: DEFAULT_PER_SOURCE_RATE_LIMIT_PPS,
             max_bps: 0, // Unlimited
             refill_interval: Duration::from_secs(1),
-            burst_size: 0, // 0 => resolve to 2× max_pps (see `effective_burst`)
+            burst_size: 0, // 0 => resolve to 2x max_pps (see `effective_burst`)
         }
     }
 }
 
 impl RateLimitConfig {
     /// Resolve the effective burst capacity. A `burst_size` of 0 means "use the
-    /// default 2× sustained rate", which keeps the config backward-compatible
+    /// default 2x sustained rate", which keeps the config backward-compatible
     /// while still separating burst from steady-state.
     #[inline]
     pub fn effective_burst(&self) -> u64 {

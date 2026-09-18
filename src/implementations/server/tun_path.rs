@@ -41,7 +41,7 @@ pub(super) struct ServerLiveRuntime {
     pub(super) server_tun_ipv6: Option<Ipv6Addr>,
     /// Channel receiving packets read from the server TUN interface (spawned reader thread).
     /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
-    /// Carries pooled [`crate::interface::TunPacket`]s — no per-packet alloc/copy.
+    /// Carries pooled [`crate::interface::TunPacket`]s - no per-packet alloc/copy.
     pub(super) tun_rx: Option<std::sync::mpsc::Receiver<crate::interface::TunPacket>>,
     /// Cooperative cancellation for the standalone TUN reader.
     pub(super) tun_reader_shutdown: Option<Arc<AtomicBool>>,
@@ -241,7 +241,7 @@ pub(super) fn drain_pending_tun_downlinks(
     let mut deferred_sessions = std::collections::HashSet::new();
     let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
     // One write guard covers stats lookups and token-bucket checks for every
-    // drained entry — previously each entry took read+write acquisitions.
+    // drained entry - previously each entry took read+write acquisitions.
     // `sessions` is an independent Arc here, so the guard conflicts with
     // nothing else in `live`.
     let mut sessions = sessions.write();
@@ -440,7 +440,7 @@ fn flush_tun_downlink_queue(
     _metrics: &Metrics,
 ) -> Result<(), DataPlaneFault> {
     // Linux: drain all targets into the persistent flat staging, then emit the
-    // burst through sendmmsg with per-packet addresses — GSO runs coalesce
+    // burst through sendmmsg with per-packet addresses - GSO runs coalesce
     // contiguous same-target uniform segments into one sendmsg first. A burst
     // no longer costs one sendto syscall per produced packet.
     #[cfg(target_os = "linux")]
@@ -506,7 +506,7 @@ fn flush_tun_downlink_queue(
                 break;
             }
 
-            // Phase 2: dispatch staged packets in order. GSO runs first — the
+            // Phase 2: dispatch staged packets in order. GSO runs first - the
             // run's spans are contiguous in `flat` by construction. Everything
             // else accumulates into sendmmsg groups flushed before each GSO
             // segment so per-target ordering is preserved.
@@ -711,7 +711,7 @@ fn process_server_tun_packet(
         return Ok(());
     }
     // One write guard covers route-to-target resolution AND the per-target
-    // bandwidth checks below — previously this took read+write acquisitions per
+    // bandwidth checks below - previously this took read+write acquisitions per
     // packet. Disjoint field borrows (`clients`, `pending_tun_downlinks`) stay
     // usable while the guard is held.
     let mut sessions = live.live_state.domain.shared.sessions.write();

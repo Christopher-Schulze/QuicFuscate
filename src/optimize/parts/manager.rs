@@ -70,7 +70,7 @@ impl OptimizationManager {
         Arc::clone(&self.memory_pool)
     }
 
-    /// Borrow the pool handle without a refcount bump — for hot paths that only
+    /// Borrow the pool handle without a refcount bump - for hot paths that only
     /// need it for the duration of a call.
     #[inline]
     pub fn memory_pool_ref(&self) -> &Arc<MemoryPool> {

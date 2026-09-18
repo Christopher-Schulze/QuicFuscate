@@ -255,7 +255,7 @@ mod flow_shaping {
         jitter_max_us: u64,
         packet_history: Arc<Mutex<VecDeque<PacketInfo>>>,
         /// Mirror of `packet_history.len()` so the read-only jitter path does
-        /// not contend on the history mutex — `record_and_prune` keeps it in
+        /// not contend on the history mutex - `record_and_prune` keeps it in
         /// sync while it already holds the lock.
         history_count: AtomicUsize,
         _enabled: AtomicBool,

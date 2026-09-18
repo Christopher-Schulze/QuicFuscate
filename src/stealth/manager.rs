@@ -761,8 +761,8 @@ impl StealthManager {
     /// Instead of immediately escalating to Level 2 on a single probe (the old
     /// binary behavior), this records the probe in `EscalationState` and only
     /// escalates if the configurable thresholds are met:
-    /// - Level 0 → 1: ≥3 probes within 60 seconds.
-    /// - Level 1 → 2: ≥8 probes within 120 seconds.
+    /// - Level 0 -> 1: >=3 probes within 60 seconds.
+    /// - Level 1 -> 2: >=8 probes within 120 seconds.
     ///
     /// A single probe is logged but does NOT trigger escalation.
     fn on_probe_detected(&self, source: std::net::SocketAddr) {

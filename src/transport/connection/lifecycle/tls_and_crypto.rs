@@ -454,7 +454,7 @@ impl Connection {
         self.handshake_done_queued = true;
     }
 
-    /// RFC 9001 §4.9.1: Initial keys may go as soon as 1-RTT is in use.
+    /// RFC 9001 sec. 4.9.1: Initial keys may go as soon as 1-RTT is in use.
     /// Handshake keys stay until the handshake is confirmed. A 1-RTT packet is
     /// not confirmation: 0.5-RTT can arrive before Finished, and dropping
     /// Handshake keys then kills Handshake PTO and Handshake ACKs.
@@ -462,7 +462,7 @@ impl Connection {
         self.discard_initial_packet_protection();
     }
 
-    /// RFC 9001 §4.1.2 / RFC 9002 §6.2.2.1: the client confirms the handshake
+    /// RFC 9001 sec. 4.1.2 / RFC 9002 sec. 6.2.2.1: the client confirms the handshake
     /// when Finished is ACKed or HANDSHAKE_DONE arrives.
     pub(in crate::transport::connection) fn confirm_client_handshake(&mut self) {
         if self.is_server || self.crypto.read().seal_handshake.is_none() {

@@ -605,7 +605,7 @@ impl Connection {
                         }
                         Frame::Ack { ranges, ack_delay, .. } => {
                             // Decode ack_delay using the configured ack_delay_exponent
-                            // (RFC 9000 §19.3: ack_delay is in microseconds = value << exponent)
+                            // (RFC 9000 sec. 19.3: ack_delay is in microseconds = value << exponent)
                             let exp = self.config.ack_delay_exponent.min(20);
                             let ack_delay_us = ack_delay << exp;
                             let ack_delay = Duration::from_micros(ack_delay_us);
@@ -760,7 +760,7 @@ impl Connection {
         self.short_header_tag_reserve as usize
     }
 
-    /// Returns true if `frame` is ack-eliciting per RFC 9000 §19 / RFC 9002 §7.2.
+    /// Returns true if `frame` is ack-eliciting per RFC 9000 sec. 19 / RFC 9002 sec. 7.2.
     /// Ack-eliciting frames require the peer to send an ACK and are congestion-
     /// controlled. Non-ack-eliciting frames: PADDING, ACK, CONNECTION_CLOSE,
     /// APPLICATION_CLOSE. All other frame types are ack-eliciting.
@@ -781,10 +781,10 @@ impl Connection {
     /// caller to decide whether the packet is congestion-controlled.
     ///
     /// When `congestion_bypass` is true, the caller is emitting an ACK-only
-    /// packet to bypass the congestion gate (RFC 9002 §7.2). In that mode only
+    /// packet to bypass the congestion gate (RFC 9002 sec. 7.2). In that mode only
     /// non-ack-eliciting control frames (CONNECTION_CLOSE / APPLICATION_CLOSE)
     /// may be emitted - emitting ack-eliciting frames would inflate
-    /// bytes_in_flight beyond cwnd, violating RFC 9002 §7.2 ("A sender MUST
+    /// bytes_in_flight beyond cwnd, violating RFC 9002 sec. 7.2 ("A sender MUST
     /// NOT send a packet if it would cause bytes_in_flight to exceed the
     /// congestion window"). Ack-eliciting control frames are left in the queue
     /// and flushed on a later non-bypassed send.
@@ -827,7 +827,7 @@ impl Connection {
             // When bypassing the congestion gate, skip ack-eliciting control
             // frames (PING, MAX_DATA, NEW_CONNECTION_ID, HANDSHAKE_DONE,
             // RESET_STREAM, STOP_SENDING, PATH_CHALLENGE, PATH_RESPONSE,
-            // DATA_BLOCKED, STREAM_DATA_BLOCKED, …). They are left in the
+            // DATA_BLOCKED, STREAM_DATA_BLOCKED, ...). They are left in the
             // queue and emitted on a later send that respects the cwnd.
             if congestion_bypass && Self::frame_is_ack_eliciting(ctrl) {
                 break;
@@ -903,7 +903,7 @@ impl Connection {
 
     /// Flushes one retransmitted or new STREAM range. Returns `(new_off,
     /// wrote_ack_eliciting, transmission emission)` - STREAM frames are always
-    /// ack-eliciting when emitted (RFC 9000 §19.8).
+    /// ack-eliciting when emitted (RFC 9000 sec. 19.8).
     fn maximum_stream_payload(
         packet_len: usize,
         packet_offset: usize,
@@ -1059,7 +1059,7 @@ impl Connection {
                             // Reuse the connection-level scratch: the ring's
                             // `read` needs a mutable contiguous target, but the
                             // retained copy goes straight into the `Arc`
-                            // allocation — no per-packet staging Vec (TODO-917).
+                            // allocation - no per-packet staging Vec (TODO-917).
                             if self.stream_tx_scratch.len() < body_len {
                                 self.stream_tx_scratch.resize(body_len, 0);
                             }
@@ -1169,7 +1169,7 @@ impl Connection {
     ///
     /// The caller must commit the front item only after the complete packet has
     /// passed padding, header protection, and AEAD sealing. DATAGRAM frames are
-    /// ack-eliciting per RFC 9221 §2.
+    /// ack-eliciting per RFC 9221 sec. 2.
     #[inline(always)]
     pub(super) fn maybe_stage_one_datagram_frame(
         &mut self,

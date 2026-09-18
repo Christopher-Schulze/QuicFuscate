@@ -115,7 +115,7 @@ impl BandwidthDecision {
 }
 
 // ---------------------------------------------------------------------------
-// BandwidthLimiter — per-client token bucket for bytes/sec.
+// BandwidthLimiter - per-client token bucket for bytes/sec.
 //
 // Mirrors the `TokenBucket` in `limits.rs` but is byte-oriented and exposes a
 // public API. The bucket starts full at `capacity_bytes`, allowing an initial
@@ -200,7 +200,7 @@ impl BandwidthLimiter {
 
     /// Add tokens based on elapsed time, capped at capacity.
     ///
-    /// Computes the refill as `refill_rate_bps × elapsed_seconds` using u128
+    /// Computes the refill as `refill_rate_bps x elapsed_seconds` using u128
     /// arithmetic to avoid overflow for large idle gaps, then saturates at
     /// `capacity_bytes`.
     pub fn refill(&mut self) {
@@ -211,7 +211,7 @@ impl BandwidthLimiter {
             return;
         }
 
-        // refill = rate_bps × elapsed_ns / 1e9, computed in u128 to avoid overflow.
+        // refill = rate_bps x elapsed_ns / 1e9, computed in u128 to avoid overflow.
         let refill =
             (self.refill_rate_bps as u128).saturating_mul(elapsed.as_nanos()) / 1_000_000_000;
 
@@ -238,7 +238,7 @@ impl BandwidthLimiter {
 }
 
 // ---------------------------------------------------------------------------
-// QuotaTracker — cumulative byte budget per billing period.
+// QuotaTracker - cumulative byte budget per billing period.
 //
 // Tracks total bytes transferred against a `quota_limit_bytes` budget for one
 // deterministic UTC calendar period. `record` rejects without accounting when
@@ -431,7 +431,7 @@ fn utc_year_month_from_epoch_days(epoch_days: i64) -> (i64, u32) {
 }
 
 // ---------------------------------------------------------------------------
-// PerClientBandwidthManager — client ID → limiter + quota.
+// PerClientBandwidthManager - client ID -> limiter + quota.
 //
 // Holds one validated default policy and explicitly registered session state.
 // ---------------------------------------------------------------------------
@@ -715,7 +715,7 @@ mod tests {
         let mut limiter = BandwidthLimiter::new(1_000, 1_000);
         // Drain the bucket.
         assert!(limiter.check(1_000));
-        // No tokens left and no time has elapsed → rejected.
+        // No tokens left and no time has elapsed -> rejected.
         assert!(!limiter.check(1));
     }
 
@@ -742,7 +742,7 @@ mod tests {
         assert!(limiter.check(500));
         assert_eq!(limiter.available_tokens(), 0);
 
-        // Simulate a very long idle period — refill must saturate at capacity.
+        // Simulate a very long idle period - refill must saturate at capacity.
         limiter.last_refill = Instant::now() - Duration::from_secs(60);
         limiter.refill();
         assert_eq!(limiter.available_tokens(), 500);
@@ -754,7 +754,7 @@ mod tests {
         // Drain.
         assert!(limiter.check(1_000));
 
-        // 500ms of refill → 500 tokens.
+        // 500ms of refill -> 500 tokens.
         limiter.last_refill = Instant::now() - Duration::from_millis(500);
         limiter.refill();
         assert_eq!(limiter.available_tokens(), 500);
@@ -799,7 +799,7 @@ mod tests {
     fn test_quota_exceeded_rejected() {
         let mut quota = QuotaTracker::new(10_000, QuotaPeriod::Daily).expect("valid epoch clock");
         assert!(quota.record(9_000));
-        // 2000 more would exceed 10_000 → rejected, and not recorded.
+        // 2000 more would exceed 10_000 -> rejected, and not recorded.
         assert!(!quota.record(2_000));
         assert_eq!(quota.used_bytes(), 9_000);
         assert_eq!(quota.remaining(), 1_000);

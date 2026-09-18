@@ -270,7 +270,7 @@ fn test_audit_log_resume_chain() {
     log.log(AuditEventType::ServerStarted, AuditSeverity::Info, None, None, "Started").unwrap();
     drop(log);
 
-    // Second session — should resume from last hash.
+    // Second session - should resume from last hash.
     let log = AuditLog::open(tmp.clone()).unwrap();
     log.log(AuditEventType::ConfigReloaded, AuditSeverity::Info, None, None, "Reloaded").unwrap();
     drop(log);
@@ -1214,14 +1214,14 @@ fn test_secure_audit_file_sets_owner_only_permissions() {
     // secure_audit_file must restrict the audit log file to mode 0o600
     // (owner read/write only) regardless of the previous mode. The
     // chown branch only runs as root and is not exercised here, but the
-    // permission hardening — the part that protects the file on disk —
+    // permission hardening - the part that protects the file on disk -
     // is verified directly.
     //
     // We create the file with an explicitly permissive mode (0o644) via
     // OpenOptions::mode() on the *create* path, then verify secure_audit_file
     // tightens it to exactly 0o600. The previous version of this test used
     // std::fs::write() first, which created the file with umask-default
-    // mode, then re-opened with OpenOptions::mode(0o644) — but mode() only
+    // mode, then re-opened with OpenOptions::mode(0o644) - but mode() only
     // applies at file creation time, so the second open was a no-op and
     // the test was not actually proving mode tightening from 0o644.
     use std::os::unix::fs::OpenOptionsExt;
@@ -1244,7 +1244,7 @@ fn test_secure_audit_file_sets_owner_only_permissions() {
     }
     // Verify the file was actually created with mode 0o644 (modulo umask).
     // If umask already stripped it below 0o644, the tightening test still
-    // holds — we just need to confirm secure_audit_file sets exactly 0o600.
+    // holds - we just need to confirm secure_audit_file sets exactly 0o600.
     let mode_before = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
     // After the call the mode must be exactly 0o600 regardless of the
     // mode in effect when the file was created. Hardening is fail-closed, so the result

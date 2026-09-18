@@ -29,7 +29,7 @@ fn recovery_counters_and_pto_progression() {
 
     rec.on_loss(100, now + Duration::from_millis(20));
     assert_eq!(rec.bytes_in_flight, 200);
-    // RFC 9002 §6.2.1: pto_count grows on PTO firings, not on loss events.
+    // RFC 9002 sec. 6.2.1: pto_count grows on PTO firings, not on loss events.
     assert_eq!(rec.pto_count, 0);
     let timeout_outcome =
         rec.on_loss_detection_timeout(true, false, now + Duration::from_millis(30));

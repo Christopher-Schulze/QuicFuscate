@@ -622,7 +622,7 @@ impl CongestionController for Bbr2 {
     }
 
     fn on_persistent_congestion(&mut self, min_cwnd: usize) {
-        // Restart the bandwidth model (RFC 9002 §7.6 allows a full reset).
+        // Restart the bandwidth model (RFC 9002 sec. 7.6 allows a full reset).
         self.state = State::Startup;
         self.max_bw = 0;
         self.cwnd = min_cwnd.max(self.mss * 2);

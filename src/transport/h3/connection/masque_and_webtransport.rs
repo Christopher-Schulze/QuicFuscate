@@ -700,7 +700,7 @@ impl Connection {
 
     /// Try to receive one MASQUE datagram into `out`; returns the Flow-ID.
     ///
-    /// `out` is cleared and extended with the payload — callers reuse one
+    /// `out` is cleared and extended with the payload - callers reuse one
     /// buffer across the drain loop instead of allocating per datagram.
     pub fn try_recv_masque_datagram(
         &mut self,

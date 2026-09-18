@@ -1,22 +1,22 @@
-# TODO-946 — `send_with_info`: raw datagrams emit directly from the caller buffer
+# TODO-946 - `send_with_info`: raw datagrams emit directly from the caller buffer
 
 ## Status
 DONE
 
 ## Problem
-`send_with_info` sent **every** wire datagram through the pooled-block →
-`FecPacket` → `outgoing_fec_packets` queue → `write_to(buf)` pipeline:
+`send_with_info` sent **every** wire datagram through the pooled-block ->
+`FecPacket` -> `outgoing_fec_packets` queue -> `write_to(buf)` pipeline:
 
 1. `PooledBlock::new(pool)` checkout per generated packet.
 2. `conn.send` writes the datagram into the block.
 3. `FecPacket::from_pooled_blocks` wraps the block (ownership + `pool()` Arc
    clone for the return path).
-4. `push_back` then immediately `front().write_to(buf)` + `pop_front` — one
+4. `push_back` then immediately `front().write_to(buf)` + `pop_front` - one
    copy of the whole datagram out of the block into the caller buffer.
 5. Block returns to the pool on drop.
 
 Per emitted raw datagram that is: 1 pool checkout + 1 whole-packet copy +
-1 block free + VecDeque push/front/pop — all pure overhead when the packet is
+1 block free + VecDeque push/front/pop - all pure overhead when the packet is
 emitted immediately, which is the common case (no stealth deferral, no FEC
 burst retention).
 
@@ -25,24 +25,24 @@ burst retention).
 outgoing queue is empty:
 
 - `conn.send(buf)` writes the wire datagram **straight into the caller's
-  buffer** — zero copies, zero pool traffic, zero queue ops.
+  buffer** - zero copies, zero pool traffic, zero queue ops.
 - `process_outgoing_packet` runs on `buf[..write]` (it only reads the length;
   the payload is never mutated).
 - Only when `compute_outbound_stealth_release` actually defers emission does
   the path pay the same cost as before: the bytes are materialized into a
-  `PooledBlock`, wrapped in an `FecPacket`, and queued — identical structure
+  `PooledBlock`, wrapped in an `FecPacket`, and queued - identical structure
   to the old code, so deferred ordering and `next_packet_release` semantics
   are unchanged.
 
 ## Correctness invariants preserved
 - **Ordering**: the direct path is gated on
   `outgoing_fec_packets.is_empty()`. When `path_control_pending` skips the
-  early queue flush, queued packets may remain — those keep the ordered
+  early queue flush, queued packets may remain - those keep the ordered
   push/pop emission through the pooled path (a direct emit could otherwise
   reorder ahead of retained datagrams).
 - **Buffer contract**: `conn.send` caps output at the caller buffer length the
   same way it did at the pool-block length; datagram size is bounded by the
-  transport MTU well below both. Callers pass ≥64 KiB buffers or flat-staging
+  transport MTU well below both. Callers pass >=64 KiB buffers or flat-staging
   windows; a sub-MTU buffer fails `BufferTooShort` either way.
 - **Deferral**: `established && !send_info.path_control` gates jitter +
   release exactly as the pooled path; a deferred packet lands in the same
@@ -59,7 +59,7 @@ outgoing queue is empty:
   shaper, escalation flag, transport jitter) can't be exhaustively
   pre-queried cheaply, and a wrong prediction loses a sealed datagram.
 - Skipping the `FecPacket` wrap but keeping the queue: saves deque ops only;
-  the dominant cost (block → buf copy) stays.
+  the dominant cost (block -> buf copy) stays.
 
 ## Verification
 - `cargo check --lib` clean; `cargo clippy --lib` clean; `cargo fmt` applied.

@@ -5,7 +5,7 @@
 // rapid condition changes.
 //
 // Tests:
-//   1. Full N×N transition matrix (9×9 = 81 pairs)
+//   1. Full NxN transition matrix (9x9 = 81 pairs)
 //   2. Bidirectional transition (simultaneous send+receive transition)
 //   3. Transition under burst traffic
 //   4. Transition under idle-then-burst
@@ -74,7 +74,7 @@ fn run_transition_test(from_mode: FecMode, to_mode: FecMode) {
             if p.is_systematic {
                 assert!(
                     !sent_ids.contains(&p.id),
-                    "duplicate systematic packet {} during {:?}→{:?} transition",
+                    "duplicate systematic packet {} during {:?}->{:?} transition",
                     p.id,
                     from_mode,
                     to_mode
@@ -92,7 +92,7 @@ fn run_transition_test(from_mode: FecMode, to_mode: FecMode) {
             if p.is_systematic {
                 assert!(
                     !sent_ids.contains(&p.id),
-                    "duplicate systematic packet {} after {:?}→{:?} transition",
+                    "duplicate systematic packet {} after {:?}->{:?} transition",
                     p.id,
                     from_mode,
                     to_mode
@@ -107,7 +107,7 @@ fn run_transition_test(from_mode: FecMode, to_mode: FecMode) {
     assert_eq!(
         sent_ids.len(),
         expected as usize,
-        "packet loss during {:?}→{:?} transition: sent={}, expected={}",
+        "packet loss during {:?}->{:?} transition: sent={}, expected={}",
         from_mode,
         to_mode,
         sent_ids.len(),
@@ -116,7 +116,7 @@ fn run_transition_test(from_mode: FecMode, to_mode: FecMode) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Full N×N transition matrix (reduced to key transitions for speed)
+// 1. Full NxN transition matrix (reduced to key transitions for speed)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -124,7 +124,7 @@ fn test_fec_key_mode_transitions_correct() {
     let _lock = acquire_env_lock();
     let _g = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
 
-    // Test key transitions (not all 81 pairs — too slow for CI)
+    // Test key transitions (not all 81 pairs - too slow for CI)
     let transitions = [
         (FecMode::Zero, FecMode::Light),
         (FecMode::Zero, FecMode::Normal),
@@ -261,9 +261,9 @@ fn test_fec_transition_idle_then_burst() {
     // Trigger transition
     fec.report_loss(25, 100);
 
-    // Idle — no packets sent. Transition completes during idle.
+    // Idle - no packets sent. Transition completes during idle.
     // (In real code, transition_left decrements on each on_send call,
-    // so idle means transition stays pending. That's OK — the next
+    // so idle means transition stays pending. That's OK - the next
     // burst will complete the transition.)
 
     // Send burst of 100 packets
@@ -296,7 +296,7 @@ fn test_fec_rapid_transitions_no_flapping() {
     let config = FecConfig { initial_mode: FecMode::Zero, ..FecConfig::default() };
     let mut fec = AdaptiveFec::new(config);
 
-    // Alternate loss signal: 0% → 50% → 0% → 50% every 10 packets
+    // Alternate loss signal: 0% -> 50% -> 0% -> 50% every 10 packets
     let mut mode_changes = 0;
     let mut prev_mode = fec.current_mode();
 
@@ -315,7 +315,7 @@ fn test_fec_rapid_transitions_no_flapping() {
         }
     }
 
-    // Hysteresis should prevent flapping — mode changes should be < 10
+    // Hysteresis should prevent flapping - mode changes should be < 10
     // (not 100, which would indicate flapping on every signal)
     assert!(
         mode_changes < 10,

@@ -98,8 +98,8 @@ impl ProbeHistory {
 ///
 /// Tracks probe detection timestamps in a sliding window and escalates/de-escalates
 /// the stealth level based on configurable thresholds:
-/// - Level 0 → 1: requires ≥ `threshold_l1` probes within 60 seconds.
-/// - Level 1 → 2: requires ≥ `threshold_l2` probes within 120 seconds.
+/// - Level 0 -> 1: requires >= `threshold_l1` probes within 60 seconds.
+/// - Level 1 -> 2: requires >= `threshold_l2` probes within 120 seconds.
 /// - De-escalation: after `quiet_period_secs` with zero probe detections.
 ///
 /// This complements the brain's pressure-based hysteresis by providing
@@ -115,9 +115,9 @@ pub struct EscalationState {
     last_level_change_time: AtomicU64,
     /// Connection-local level state shared with the Brain.
     level_hints: Arc<IntelligentLevelHints>,
-    /// Threshold for L0→L1 escalation (default: 3 probes in 60s).
+    /// Threshold for L0->L1 escalation (default: 3 probes in 60s).
     threshold_l1: u32,
-    /// Threshold for L1→L2 escalation (default: 8 probes in 120s).
+    /// Threshold for L1->L2 escalation (default: 8 probes in 120s).
     threshold_l2: u32,
     /// Quiet period before de-escalation (default: 300 seconds).
     quiet_period_secs: u64,

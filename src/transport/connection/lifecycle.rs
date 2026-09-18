@@ -592,14 +592,14 @@ impl Connection {
     }
 
     /// Whether the peer's address counts as validated for recovery purposes
-    /// (RFC 9002 §6.2.2.1). Clients are never amplification-limited; for a
+    /// (RFC 9002 sec. 6.2.2.1). Clients are never amplification-limited; for a
     /// server, handshake completion implies validation happened by then.
     fn client_address_validated(&self) -> bool {
         !self.is_server || self.tls_handshake_complete()
     }
 
     /// Earliest loss/PTO deadline across all packet number spaces
-    /// (RFC 9002 §6.1.2/§6.2.1). `None` disarms the recovery timer.
+    /// (RFC 9002 sec. 6.1.2/sec. 6.2.1). `None` disarms the recovery timer.
     pub fn recovery_deadline(&self) -> Option<Instant> {
         self.recovery.loss_detection_timeout(
             self.tls_handshake_complete(),

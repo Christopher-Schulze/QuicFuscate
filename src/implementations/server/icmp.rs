@@ -99,8 +99,8 @@ pub fn build_echo_reply_with_ttl(original_pkt: &[u8], ttl: u8) -> Vec<u8> {
     reply[ihl + 3] = (checksum & 0xFF) as u8;
 
     // Set a fresh TTL for the echo reply (this is a new packet originated
-    // by the server, not a forwarded packet — TTL should not be decremented
-    // from the original request). RFC 1812 §5.3.1: TTL for locally-generated
+    // by the server, not a forwarded packet - TTL should not be decremented
+    // from the original request). RFC 1812 sec. 5.3.1: TTL for locally-generated
     // packets should be a configured default. The value is now parameterized
     // via `ttl` to match the target OS fingerprint profile (TODO-462).
     reply[8] = ttl;
@@ -119,7 +119,7 @@ pub fn build_echo_reply_with_ttl(original_pkt: &[u8], ttl: u8) -> Vec<u8> {
 /// Swaps src/dst IP, sets ICMP type to 0, recomputes checksums, sets fresh TTL=64.
 ///
 /// This is the backward-compatible wrapper that uses the default TTL of 64
-/// (RFC 1812 §5.3.1). For OS fingerprint obfuscation, use
+/// (RFC 1812 sec. 5.3.1). For OS fingerprint obfuscation, use
 /// [`build_echo_reply_with_ttl`] with the target profile's TTL.
 pub fn build_echo_reply(original_pkt: &[u8]) -> Vec<u8> {
     build_echo_reply_with_ttl(original_pkt, 64)

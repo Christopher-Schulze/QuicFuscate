@@ -1,8 +1,8 @@
 // --- 9b. Chaff (Dummy Packet) Generator (TODO-455) ---
 
-/// QUIC PING frame type byte (RFC 9000 §19.2). A single varint 0x01 with no payload.
+/// QUIC PING frame type byte (RFC 9000 sec. 19.2). A single varint 0x01 with no payload.
 const CHAFF_PING_FRAME_BYTE: u8 = 0x01;
-/// QUIC PADDING frame byte (RFC 9000 §19.1). Each zero byte in the plaintext is a
+/// QUIC PADDING frame byte (RFC 9000 sec. 19.1). Each zero byte in the plaintext is a
 /// distinct PADDING frame, so a run of N zero bytes encodes N PADDING frames.
 #[doc(hidden)]
 pub const CHAFF_PADDING_FRAME_BYTE: u8 = 0x00;
@@ -28,7 +28,7 @@ pub enum TrafficAnalysisPhase {
 /// reach the target size. To an outside observer it is indistinguishable from a
 /// real data packet of the same size.
 ///
-/// Idle chaff uses independent ±10% interval jitter. Constant-rate defense uses an
+/// Idle chaff uses independent +/-10% interval jitter. Constant-rate defense uses an
 /// exact interval so its idle wire cadence is deterministic and capture-verifiable.
 /// Missed deadlines never create catch-up bursts: at most one pending slot exists.
 pub struct TrafficAnalysisScheduler {
@@ -144,7 +144,7 @@ impl TrafficAnalysisScheduler {
         std::time::Duration::from_nanos(1_000_000_000 / rate_pps as u64)
     }
 
-    /// Applies a ±10% uniform jitter to `base`, returning the jittered interval.
+    /// Applies a +/-10% uniform jitter to `base`, returning the jittered interval.
     /// A fresh jitter is drawn per interval so the emission pattern is not
     /// mechanically periodic.
     fn jitter_interval(base: std::time::Duration) -> std::time::Duration {

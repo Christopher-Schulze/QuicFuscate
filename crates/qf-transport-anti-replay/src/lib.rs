@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 ///
 /// Beyond this the Bloom bitset sizing (`capacity * 16` bits, rounded up to a
 /// power of two) could wrap and produce a zero-length table with an unmasked
-/// index — an out-of-bounds panic on the first packet. 16 Mi fingerprints is
+/// index - an out-of-bounds panic on the first packet. 16 Mi fingerprints is
 /// already far beyond any plausible 0-RTT ticket volume inside the maximum
 /// ticket age.
 pub const MAX_STRIKE_ENTRIES: usize = 1 << 24;
@@ -52,7 +52,7 @@ impl Default for AntiReplayConfig {
 /// first-seen timestamps. A 0-RTT packet whose fingerprint is already
 /// present is a replay and must be silently discarded.
 /// Entries, FIFO order, and Bloom filter are always mutated together inside
-/// `check_and_insert` — one lock instead of three separate RwLocks (4
+/// `check_and_insert` - one lock instead of three separate RwLocks (4
 /// acquisitions per packet previously).
 struct StrikeInner {
     entries: HashMap<[u8; 32], Instant>,

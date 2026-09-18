@@ -410,7 +410,7 @@ fn aegis128x8_roundtrip_and_matches_base() {
     assert_eq!(pt, msg);
 }
 
-// TODO-393: differential test — the AEAD wrapper reuses cipher state via
+// TODO-393: differential test - the AEAD wrapper reuses cipher state via
 // `reinit` after the first packet. Output must be byte-identical to a fresh
 // `Aegis128L::new` per packet (the pre-optimization baseline).
 #[test]

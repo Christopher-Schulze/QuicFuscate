@@ -194,7 +194,7 @@ mod tests {
         // the legacy Off path).
         let conn = make_conn_with_defense(config::TrafficAnalysisDefense::FullPadding);
         for _ in 0..32 {
-            // Various payload sizes — every call must return the full budget.
+            // Various payload sizes - every call must return the full budget.
             let v = conn.compute_stealth_padding(1, 1000);
             assert_eq!(v, 1000, "FullPadding must pad to full budget");
             let v = conn.compute_stealth_padding(500, 800);

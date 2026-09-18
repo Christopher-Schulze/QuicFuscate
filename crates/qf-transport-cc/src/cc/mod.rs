@@ -102,11 +102,11 @@ pub trait CongestionController: Send {
     fn update_rtt_var(&mut self, _rtt_var: Duration) {}
 
     /// Remove bytes from in-flight accounting without a loss response
-    /// (RFC 9002 §6.2.2 key-discard rule: discarded spaces are neither
+    /// (RFC 9002 sec. 6.2.2 key-discard rule: discarded spaces are neither
     /// lost nor acknowledged).
     fn discard_in_flight(&mut self, bytes: usize);
 
-    /// Persistent congestion response (RFC 9002 §7.6): collapse to the minimum
+    /// Persistent congestion response (RFC 9002 sec. 7.6): collapse to the minimum
     /// window; controllers MAY reset model state. Default: window clamp only.
     fn on_persistent_congestion(&mut self, min_cwnd: usize) {
         self.set_cwnd(min_cwnd);

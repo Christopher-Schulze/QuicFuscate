@@ -96,7 +96,7 @@ pub mod pnspace {
         /// Returns true if an ACK frame is pending emission (without consuming it).
         /// Used to bypass the congestion gate for ACK-only packets, which are
         /// critical for protocol liveness and must not be blocked by congestion
-        /// control (RFC 9002 §7.2: ACK-only packets are not congestion-controlled).
+        /// control (RFC 9002 sec. 7.2: ACK-only packets are not congestion-controlled).
         #[inline(always)]
         pub fn has_pending_ack(&self) -> bool {
             self.has_pending_ack_at(self.clock.now())

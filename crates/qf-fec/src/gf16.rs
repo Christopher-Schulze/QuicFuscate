@@ -72,7 +72,7 @@ fn gf16_vector_threshold_words() -> usize {
 /// 4-bit nibble value `n` to `coeff * (n << 4k)`, byte-split into lo/hi halves
 /// so each table fits one 16-byte shuffle lane. `t_k[0] == 0` for all `k`, so
 /// the zeroed odd bytes of a u16-lane index vector select element 0 and stay
-/// harmless — no index masking needed.
+/// harmless - no index masking needed.
 #[inline]
 fn gf16_nibble_byte_tables(coeff: u16) -> ([[u8; 16]; 4], [[u8; 16]; 4]) {
     let mut lo = [[0u8; 16]; 4];
@@ -385,7 +385,7 @@ pub unsafe fn gf16_mul_slice_vbmi2(coeff: u16, src: &[u16], dst: &mut [u16], len
 
 /// Big-endian byte-payload variant: swaps each 64-byte block into native u16
 /// lanes in-register, multiplies, and XORs the swapped product bytes into the
-/// destination — no stack conversion buffers.
+/// destination - no stack conversion buffers.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vbmi2")]
 /// # Safety
@@ -695,7 +695,7 @@ unsafe fn gf16_mul_bytes_avx2(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
 }
 
 /// Vectorized carryless multiply for SSE2 (no byte shuffle exists before
-/// SSSE3): 8 u16 lanes processed by a 16-round shift/mask/reduce loop —
+/// SSSE3): 8 u16 lanes processed by a 16-round shift/mask/reduce loop -
 /// honest SIMD where the only alternative is the scalar loop.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
@@ -932,11 +932,11 @@ unsafe fn gf16_mul_bytes_neon(coeff: u16, src: &[u8], out_xor: &mut [u8]) {
 
 /// SVE2 nibble tables kept as plain byte arrays: scalable vector types cannot
 /// be stored in structs (their size is only known at runtime), so the table
-/// registers are materialized inside `sve2_product` — inlined, the eight
+/// registers are materialized inside `sve2_product` - inlined, the eight
 /// predicated loads and the mask dup hoist out of the vector loop. Each table
 /// is 16 bytes, which always fits one SVE vector (minimum VL is 128 bits), so
 /// `svtbl_u8` indices 0..15 are always in range. Index vectors reuse the u16
-/// nibble lanes reinterpreted as bytes — the odd bytes are 0 and select table
+/// nibble lanes reinterpreted as bytes - the odd bytes are 0 and select table
 /// entry 0, which is always 0 (`t_k[0] = coeff * 0`).
 #[cfg(target_arch = "aarch64")]
 #[cfg(target_feature = "sve2")]
@@ -1184,7 +1184,7 @@ mod kernel_tests {
     use super::*;
 
     /// Independent Russian-peasant GF(2^16) reference (poly 0x1100B, x^16
-    /// implicit) — deliberately not `gf_tables::gf16_mul` so a broken table
+    /// implicit) - deliberately not `gf_tables::gf16_mul` so a broken table
     /// cannot mask a broken kernel.
     fn mul_ref(coeff: u16, word: u16) -> u16 {
         let mut a = word;
@@ -1326,7 +1326,7 @@ mod kernel_tests {
     }
 
     /// Compiled only in +sve2 builds; executes only where the hardware
-    /// actually reports SVE2 — the parity contract travels to real SVE2 CI
+    /// actually reports SVE2 - the parity contract travels to real SVE2 CI
     /// hardware instead of being asserted blind here.
     #[cfg(all(target_arch = "aarch64", target_feature = "sve2"))]
     #[test]

@@ -55,7 +55,7 @@ pub enum StealthMode {
 }
 
 impl StealthMode {
-    /// Static variant name identical to the `Debug` representation — lets hot
+    /// Static variant name identical to the `Debug` representation - lets hot
     /// paths record the mode without a `format!("{:?}")` allocation.
     pub fn as_str(&self) -> &'static str {
         match self {

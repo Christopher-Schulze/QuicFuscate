@@ -31,7 +31,7 @@ pub struct LiveServerState {
     pub(super) uring_worker: Option<Arc<LiveUringWorker>>,
     /// Reusable flat staging for `flush_tun_downlink_queue`: `connection.send`
     /// writes datagrams straight into `downlink_tx_flat` and `downlink_tx_staging`
-    /// records `(target, offset, len)` per packet — the burst then goes out via
+    /// records `(target, offset, len)` per packet - the burst then goes out via
     /// sendmmsg/GSO instead of one sendto per packet.
     #[cfg(target_os = "linux")]
     pub(super) downlink_tx_flat: Vec<u8>,

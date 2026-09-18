@@ -184,7 +184,7 @@ pub fn find_live_client_by_dcid(
     packet: &[u8],
 ) -> Option<SocketAddr> {
     // Server-issued SCIDs are always MAX_CONN_ID_LEN bytes, so the wire DCID
-    // can be sliced out directly — no per-client header parse (which also
+    // can be sliced out directly - no per-client header parse (which also
     // allocates two Vecs) is needed.
     let first = *packet.first()?;
     let dcid: &[u8] = if first & crate::transport::packet::FORM_BIT == 0 {
@@ -216,7 +216,7 @@ pub fn reconcile_live_clients(
         accept_loop.record_closed(*addr);
     }
     clients.retain(|_, conn| !conn.conn.is_closed());
-    // One O(clients) set build instead of O(qkey × clients) rescan per entry.
+    // One O(clients) set build instead of O(qkey x clients) rescan per entry.
     let active_conn_ids: std::collections::HashSet<&[u8]> =
         clients.values().map(|conn| conn.conn.source_id().as_ref()).collect();
     qkey_auth.retain(|conn_id, _| active_conn_ids.contains(conn_id.as_ref()));
@@ -708,7 +708,7 @@ pub async fn flush_live_server_outgoing(
     // Collect all outgoing packets from this connection before sending.
     // This lets us submit them as a single io_uring batch (one io_uring_enter
     // syscall instead of one sendmsg per packet). Payloads stage into one
-    // flat buffer plus a span table — one allocation per flush instead of one
+    // flat buffer plus a span table - one allocation per flush instead of one
     // `Vec` per datagram, and a GSO run is already contiguous in `flat`.
     let mut staging_flat: Vec<u8> = Vec::new();
     let mut staging_spans: Vec<(SocketAddr, usize, usize)> = Vec::new();
@@ -796,7 +796,7 @@ pub async fn flush_live_server_outgoing(
         // io_uring unavailable or partial: finish only slots not accepted by
         // the batch operation via individual async calls. On Linux, contiguous
         // unsent same-target runs with uniform interior length go out as one
-        // UDP_SEGMENT sendmsg (one syscall per run) — the flat staging already
+        // UDP_SEGMENT sendmsg (one syscall per run) - the flat staging already
         // holds the run back-to-back, so no second concatenation is needed.
         let mut index = 0usize;
         #[cfg(target_os = "linux")]
@@ -1244,7 +1244,7 @@ pub(super) async fn process_live_server_client_datagram(
         }
     }
 
-    // Install the MASQUE→TUN sink when TUN bridging is active. Decoded MASQUE
+    // Install the MASQUE->TUN sink when TUN bridging is active. Decoded MASQUE
     // CONNECT-UDP datagram payloads (raw IP packets) are written to the server
     // TUN interface by this callback, invoked from drain_masque_datagrams
     // inside poll_http3_event_loop. The callback is rebound on each packet
@@ -1677,7 +1677,7 @@ mod gso_plan_tests {
     fn interior_longer_packet_rejects_run() {
         let a = addr(1000);
         // A same-target packet LONGER than the first segment cannot join the
-        // run (it is not a valid tail either) — run collapses to a singleton.
+        // run (it is not a valid tail either) - run collapses to a singleton.
         let staging = vec![span(a, 0, 600), span(a, 600, 900), span(a, 1500, 600)];
         let sent = vec![false; 3];
         assert!(plan_gso_run(&staging, &sent, 0, 65_535).is_none());

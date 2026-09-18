@@ -520,7 +520,7 @@ fn crypto_constructors_reject_invalid_key_and_iv_lengths() {
 /// same correctness and authentication invariants over a deterministic
 /// pseudorandom input space. Each scenario picks key, IV, nonce, associated
 /// data length, and plaintext length from a splitmix64 stream and asserts
-/// both candidates share the same shape of behavior — roundtrip, ciphertext
+/// both candidates share the same shape of behavior - roundtrip, ciphertext
 /// change relative to plaintext, wrong-AD rejection, tag-flip rejection, and
 /// nonce sensitivity. This is the symmetrized differential coverage for the
 /// active TODO-884 evidence program; it does not promote a winner and
@@ -530,7 +530,7 @@ fn aegis_morus_differential_invariants() {
     use super::aegis::{Aegis128L, AegisError};
     use super::morus::{AeadError, MorusAead};
 
-    // Splitmix64 — self-contained, deterministic, zero-dependency PRNG so
+    // Splitmix64 - self-contained, deterministic, zero-dependency PRNG so
     // the test reproduces the exact same input space across runs.
     fn next_u64(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -712,7 +712,7 @@ fn aegis_morus_aead_trait_differential() {
     use super::aegis::Aegis128LAead;
     use super::morus::MorusAead;
 
-    // Splitmix64 — self-contained, deterministic, zero-dependency PRNG so
+    // Splitmix64 - self-contained, deterministic, zero-dependency PRNG so
     // the test reproduces the exact same input space across runs.
     fn next_u64(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);

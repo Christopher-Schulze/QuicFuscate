@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 
 use crate::time_source::ProtocolClock;
 
-/// Default EWMA smoothing factor (α). Higher α reacts faster to changes.
+/// Default EWMA smoothing factor (alpha). Higher alpha reacts faster to changes.
 pub const DEFAULT_EWMA_ALPHA: f64 = 0.1;
-/// Default spike multiplier: current rate must exceed 3× the EWMA.
+/// Default spike multiplier: current rate must exceed 3x the EWMA.
 pub const DEFAULT_SPIKE_MULTIPLIER: f64 = 3.0;
 
 /// Validated sustained-anomaly and enhanced-admission policy.
@@ -138,7 +138,7 @@ impl EwmaAnomalyDetector {
         })
     }
 
-    /// Create a detector with sensible defaults (α=0.1, spike=3×).
+    /// Create a detector with sensible defaults (alpha=0.1, spike=3x).
     #[cfg(test)]
     #[allow(clippy::expect_used)]
     pub fn with_defaults() -> Self {

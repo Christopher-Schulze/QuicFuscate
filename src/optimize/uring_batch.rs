@@ -421,7 +421,7 @@ impl UringBatchSender {
         }
     }
 
-    /// Adopt the blocking worker's already-flattened submission in place —
+    /// Adopt the blocking worker's already-flattened submission in place -
     /// the only payload copy in the chain happened on the caller side.
     fn adopt_flat_payloads(
         &mut self,
@@ -1029,7 +1029,7 @@ impl UringBatchSender {
 
     fn submit_and_poll(&mut self, queued: usize, control: &SendControl<'_>) -> std::io::Result<()> {
         self.ring.submit().map_err(|error| self.quarantine(error))?;
-        // UDP sendmsg CQEs land in microseconds — a fixed 1 ms sleep would add
+        // UDP sendmsg CQEs land in microseconds - a fixed 1 ms sleep would add
         // up to a millisecond of dead time per batch. Spin briefly, then
         // escalate through yields to a capped sleep so the shutdown and
         // deadline checks stay responsive without busy-looping.

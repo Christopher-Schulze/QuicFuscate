@@ -150,7 +150,7 @@ impl QuicFuscateConnection {
         let now = self.clock.now();
 
         // --- LOSS/PTO RECOVERY TIMER ---
-        // RFC 9002 §6.1.2/§6.2.1: event loops drive the recovery timer.  When the
+        // RFC 9002 sec. 6.1.2/sec. 6.2.1: event loops drive the recovery timer.  When the
         // deadline has passed, run loss detection (time-threshold or PTO probe)
         // before the pacing/stealth scheduler so probes never wait on shaping.
         if self.conn.recovery_deadline().is_some_and(|recovery_deadline| now >= recovery_deadline) {
@@ -282,7 +282,7 @@ impl QuicFuscateConnection {
         let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
 
         // Raw (non-FEC) emit: conn.send writes straight into the caller's
-        // buffer — no pool checkout, no queue round-trip, no copy — unless a
+        // buffer - no pool checkout, no queue round-trip, no copy - unless a
         // stealth/jitter deferral actually fires and the bytes must be
         // materialized into a pooled block for the outgoing queue. Only legal
         // when the queue is empty: path_control_pending skips the flush above,
@@ -531,7 +531,7 @@ impl QuicFuscateConnection {
 
     /// Raw wire emit for connections without a FEC wire profile: the transport
     /// writes the datagram straight into the caller's buffer. A stealth or jitter
-    /// deferral is the only case that pays a copy — the bytes are materialized
+    /// deferral is the only case that pays a copy - the bytes are materialized
     /// into a pooled block and queued exactly like the pooled path would.
     /// Callers must guarantee `outgoing_fec_packets` is empty so direct
     /// emission cannot reorder ahead of already queued datagrams.

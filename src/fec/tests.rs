@@ -345,7 +345,7 @@ fn test_target_rank_monotonic_from_clean_to_extreme() {
 
 #[test]
 fn test_streaming_adaptive_selected_for_burst_loss_5_to_15_percent() {
-    // 10% loss with high burst variance → StreamingAdaptive (Streaming family)
+    // 10% loss with high burst variance -> StreamingAdaptive (Streaming family)
     let target = continuous_fec_target(0.10, true, false, 2048, 1024, 0, 0.5);
     assert_eq!(target.family, FecBackendFamily::Streaming);
     assert!(target.stream_every.is_some());
@@ -353,23 +353,23 @@ fn test_streaming_adaptive_selected_for_burst_loss_5_to_15_percent() {
 
 #[test]
 fn test_streaming_adaptive_falls_back_to_lowcost_for_uniform_loss() {
-    // 8% loss with low burst variance (uniform) → LowCostBlock, not Streaming
+    // 8% loss with low burst variance (uniform) -> LowCostBlock, not Streaming
     let target = continuous_fec_target(0.08, true, false, 2048, 1024, 0, 0.1);
     assert_eq!(target.family, FecBackendFamily::LowCostBlock);
 }
 
 #[test]
 fn test_streaming_adaptive_escalates_to_heavyblock_above_15_percent() {
-    // 18% loss → HeavyBlock (not Streaming, even with high burst variance)
+    // 18% loss -> HeavyBlock (not Streaming, even with high burst variance)
     let target = continuous_fec_target(0.18, true, false, 2048, 1024, 0, 0.5);
     assert_eq!(target.family, FecBackendFamily::HeavyBlock);
 }
 
 #[test]
 fn test_stream_every_scales_with_rtt() {
-    // Low RTT (20ms) → smaller stream_every (faster recovery)
+    // Low RTT (20ms) -> smaller stream_every (faster recovery)
     let low_rtt = continuous_fec_target(0.16, true, true, 2048, 1024, 20, 0.0);
-    // High RTT (300ms) → larger stream_every (less overhead)
+    // High RTT (300ms) -> larger stream_every (less overhead)
     let high_rtt = continuous_fec_target(0.16, true, true, 2048, 1024, 300, 0.0);
     let low_interval = low_rtt.stream_every.unwrap();
     let high_interval = high_rtt.stream_every.unwrap();
@@ -383,7 +383,7 @@ fn test_stream_every_scales_with_rtt() {
 
 #[test]
 fn test_stream_every_clamped_to_bounds() {
-    // Very high RTT → stream_every should be clamped to max 18
+    // Very high RTT -> stream_every should be clamped to max 18
     let target = continuous_fec_target(0.16, true, true, 2048, 1024, 10000, 0.0);
     let interval = target.stream_every.unwrap();
     assert!(interval <= 18, "stream_every should be clamped to max 18, got {}", interval);

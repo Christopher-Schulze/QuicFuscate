@@ -79,7 +79,7 @@ fn test_bandwidth_aware_never_below_minimum() {
     let config = FecConfig { initial_mode: FecMode::Normal, ..FecConfig::default() };
     let mut fec = AdaptiveFec::new(config);
 
-    // Report 25% loss → minimum overhead = 300,000 ppm
+    // Report 25% loss -> minimum overhead = 300,000 ppm
     fec.report_loss(25, 100);
 
     // Set high redundancy
@@ -211,7 +211,7 @@ fn test_hysteresis_prevents_flapping() {
         let _ = fec.on_send(pkt);
     }
 
-    // Oscillate loss: 5% → 6% → 5% → 6% (small oscillation)
+    // Oscillate loss: 5% -> 6% -> 5% -> 6% (small oscillation)
     let mut mode_changes = 0;
     let mut prev_mode = fec.current_mode();
 
@@ -229,10 +229,10 @@ fn test_hysteresis_prevents_flapping() {
         }
     }
 
-    // Small oscillation (5%↔6%) should not cause flapping
+    // Small oscillation (5%<->6%) should not cause flapping
     assert!(
         mode_changes <= 2,
-        "hysteresis failed: {} mode changes for 5%↔6% oscillation",
+        "hysteresis failed: {} mode changes for 5%<->6% oscillation",
         mode_changes
     );
 }

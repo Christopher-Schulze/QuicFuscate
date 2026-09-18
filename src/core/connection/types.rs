@@ -59,7 +59,7 @@ impl H3TunnelFrameDecoder {
     }
 }
 
-/// Borrowed view of the per-connection poll bindings — the callback Arcs stay
+/// Borrowed view of the per-connection poll bindings - the callback Arcs stay
 /// owned by the connection; building the view is pointer copies, no refcounts.
 pub(crate) struct Http3PollBindings<'a> {
     pub(crate) masque_datagram_cb: &'a Option<DatagramHandler>,

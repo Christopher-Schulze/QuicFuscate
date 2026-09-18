@@ -206,7 +206,7 @@ fn ipv6_udp_pseudo_header(src: Ipv6Addr, dst: Ipv6Addr, udp_len: usize) -> [u8; 
 
 /// Combined sum of a pseudo-header and its payload. Both headers are
 /// even-length (12/40 bytes), so the payload begins on a 16-bit word
-/// boundary and the concatenated checksum equals the sum of the parts —
+/// boundary and the concatenated checksum equals the sum of the parts -
 /// no scratch allocation per packet.
 fn pseudo_and_payload_sum(pseudo: &[u8], udp_packet: &[u8]) -> u32 {
     debug_assert!(pseudo.len().is_multiple_of(2));
@@ -1279,7 +1279,7 @@ mod recv_datagram_batch_tests {
 
         // Recycle all slots, then drain a second burst: every popped slot lands
         // in the batch or returns via WouldBlock, so the pool shrinks by exactly
-        // the batch length — proof slots are reused, not reallocated.
+        // the batch length - proof slots are reused, not reallocated.
         for (slot, ..) in batch.drain(..) {
             pool.push(slot);
         }

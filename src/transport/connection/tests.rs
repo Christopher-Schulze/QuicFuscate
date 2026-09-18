@@ -1,5 +1,5 @@
 // ============================================================================
-// Inline unit tests – no real network or TLS required.
+// Inline unit tests - no real network or TLS required.
 //
 // All tests construct a Connection via new_with_role() and exercise internal
 // state directly. Private fields are accessible from this child module.
@@ -402,7 +402,7 @@ fn v1_fallback_accepts_legacy_server_without_version_information() {
 #[test]
 fn flow_control_send_blocked_by_peer_max_data() {
     let mut c = make_conn();
-    // Force connection window to 10 bytes – smaller than the send payload.
+    // Force connection window to 10 bytes - smaller than the send payload.
     c.peer_max_data = 10;
     let result = c.stream_send(0, &[0u8; 100], false);
     assert!(result.is_err(), "stream_send must fail when payload exceeds peer_max_data");
@@ -724,7 +724,7 @@ fn on_timeout_clears_bytes_in_flight() {
 #[test]
 fn key_phase_starts_false() {
     let c = make_conn();
-    assert!(!c.key_phase, "initial key_phase must be false (RFC 9001 §5.4)");
+    assert!(!c.key_phase, "initial key_phase must be false (RFC 9001 sec. 5.4)");
 }
 
 #[test]
@@ -742,7 +742,7 @@ fn key_update_twice_restores_phase() {
     install_write_secret(&mut c);
     c.key_update().expect("first transport-owned key update");
     assert!(c.key_phase, "after first update: key_phase = true");
-    // The second update derives from the rotated secret – re-install a known secret
+    // The second update derives from the rotated secret - re-install a known secret
     // so the derivation chain can continue without panicking.
     install_write_secret(&mut c);
     c.key_update().expect("second transport-owned key update");
@@ -1194,16 +1194,16 @@ fn zero_max_idle_timeout_disables_idle_expiry() {
 
 #[test]
 fn on_timeout_does_not_inflate_rtt() {
-    // RFC 9000 §5.1: RTT estimate is only updated from ACK samples,
+    // RFC 9000 sec. 5.1: RTT estimate is only updated from ACK samples,
     // not from timeout events. The previous code added 100ms on every
-    // timeout, causing monotonic RTT inflation (0→385ms on loopback).
+    // timeout, causing monotonic RTT inflation (0->385ms on loopback).
     // This test verifies the fix: on_timeout must NOT change self.rtt.
     let mut c = make_conn();
     let rtt_before = c.rtt;
     c.on_timeout();
     assert_eq!(
         c.rtt, rtt_before,
-        "on_timeout must NOT inflate RTT - only ACK samples update RTT (RFC 9000 §5.1)"
+        "on_timeout must NOT inflate RTT - only ACK samples update RTT (RFC 9000 sec. 5.1)"
     );
 }
 

@@ -34,7 +34,7 @@ pub struct MasqueRelayResponse {
 #[derive(Debug)]
 pub struct MasqueRelayResponseQueue {
     responses: VecDeque<MasqueRelayResponse>,
-    /// Drained payload buffers retained for reuse — keeps steady-state relay
+    /// Drained payload buffers retained for reuse - keeps steady-state relay
     /// traffic allocation-free once a burst has warmed the list.
     spare: Vec<Vec<u8>>,
     bytes: usize,
@@ -66,7 +66,7 @@ impl MasqueRelayResponseQueue {
         Ok(())
     }
 
-    /// Enqueue from a borrowed payload without a fresh heap allocation —
+    /// Enqueue from a borrowed payload without a fresh heap allocation -
     /// drained response buffers are reused when available.
     pub fn enqueue_slice(
         &mut self,

@@ -510,7 +510,7 @@ impl DnsAdmission {
     }
 }
 
-/// DNS query types (RFC 1035 §3.2.2).
+/// DNS query types (RFC 1035 sec. 3.2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum DnsQType {
@@ -676,7 +676,7 @@ fn parse_dns_name(pkt: &[u8], start: usize) -> Option<ParsedDnsName> {
     }
 }
 
-/// Parse a DNS name (RFC 1035 §3.1, label encoding).
+/// Parse a DNS name (RFC 1035 sec. 3.1, label encoding).
 #[cfg(test)]
 fn parse_name(pkt: &[u8], pos: &mut usize) -> Option<String> {
     let parsed = parse_dns_name(pkt, *pos)?;
@@ -718,7 +718,7 @@ fn build_dns_error(query: &DnsQuery, rcode: u8) -> Vec<u8> {
     pkt
 }
 
-/// Encode a DNS name into wire format (RFC 1035 §3.1).
+/// Encode a DNS name into wire format (RFC 1035 sec. 3.1).
 fn encode_name(name: &str, out: &mut Vec<u8>) {
     for label in name.split('.') {
         if label.is_empty() {
@@ -873,7 +873,7 @@ impl DnsProxyConfig {
 
     /// Returns a shared `reqwest::Client` for DoH resolution, building it
     /// on first call and reusing it on subsequent calls. Cloning the
-    /// config (or the returned client) is cheap — both are Arc bumps that
+    /// config (or the returned client) is cheap - both are Arc bumps that
     /// share the same connection pool.
     ///
     /// Returns an error only if the initial client build fails (e.g.

@@ -622,7 +622,7 @@ fn test_ddos_policy_validation_and_disable_semantics() {
 #[test]
 fn test_ewma_gradual_increase_no_false_positive() {
     let det = EwmaAnomalyDetector::new(0.1, 3.0);
-    // Gradual ramp from 100 → 500 over many samples.
+    // Gradual ramp from 100 -> 500 over many samples.
     let mut pps = 100u64;
     for _ in 0..200 {
         det.record_pps(pps);

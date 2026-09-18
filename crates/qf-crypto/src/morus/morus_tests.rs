@@ -448,7 +448,7 @@ fn morus_official_caesar_morus1280_128_vectors() {
     }
 }
 
-// TODO-395: regression guard — the AeadSeal/AeadOpen trait path must
+// TODO-395: regression guard - the AeadSeal/AeadOpen trait path must
 // operate in-place on the caller buffer (no intermediate Vec) and produce
 // output identical to the native in-place encrypt/decrypt path.
 #[test]

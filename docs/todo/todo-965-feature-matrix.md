@@ -1,4 +1,4 @@
-# TODO-965 — Feature-matrix verification and `rust-tests` repair
+# TODO-965 - Feature-matrix verification and `rust-tests` repair
 
 ## Status
 DONE
@@ -8,7 +8,7 @@ The `AckRanges` SmallVec switch (TODO-957) changed `Frame::Ack.ranges` from
 `Vec<(u64, u64)>` to `SmallVec<[(u64, u64); 8]>`. All default-feature check and
 test runs passed, but the `scripts/tests/rust/*` integration targets are
 gated behind the `rust-tests` feature and were never compiled during that
-work — they kept `vec![...]` literals and `assert_eq!(ranges, vec![...])`
+work - they kept `vec![...]` literals and `assert_eq!(ranges, vec![...])`
 comparisons and failed with `E0308 mismatched types` under
 `--features rust-tests` / `throughput,rust-tests`.
 
@@ -19,11 +19,11 @@ all default targets can still break gated ones.
 
 ## Solution
 - `scripts/tests/rust/rt-transport-frames-roundtrip.rs`: four `vec![...]`
-  Ack-range literals → `smallvec::smallvec![...]`; the canonicalization
-  assertion → `ranges.as_slice()`; the malformed-ranges table converted to
+  Ack-range literals -> `smallvec::smallvec![...]`; the canonicalization
+  assertion -> `ranges.as_slice()`; the malformed-ranges table converted to
   `smallvec!` entries.
-- `scripts/tests/rust/rt-security-suite.rs`: two `vec![...]` literals →
-  `smallvec::smallvec![...]`; the replay-collapse assertion →
+- `scripts/tests/rust/rt-security-suite.rs`: two `vec![...]` literals ->
+  `smallvec::smallvec![...]`; the replay-collapse assertion ->
   `ranges.as_slice()`.
 - `benches/ack_pipeline.rs`: `cargo fmt` normalization only.
 - `smallvec` is already a dependency of the `quicfuscate` crate, so the
@@ -47,15 +47,15 @@ all default targets can still break gated ones.
 aarch64/Linux check now passes as part of this matrix.
 
 ## Verification
-- `cargo check -p quicfuscate --all-targets --features rust-tests` — clean
-- `cargo check -p quicfuscate --all-targets --features throughput,rust-tests` — clean
-- `cargo check -p quicfuscate --all-targets --features zero_copy_dgram,rust-tests` — clean
-- `cargo test -p quicfuscate --features rust-tests --test rt-transport-frames-roundtrip` — 8/8
-- `cargo test -p quicfuscate --features rust-tests --test rt-security-suite` — 26/26
-- `cargo clippy -p quicfuscate --all-targets --features rust-tests` — clean
-- `cargo fmt --check` — clean
+- `cargo check -p quicfuscate --all-targets --features rust-tests` - clean
+- `cargo check -p quicfuscate --all-targets --features throughput,rust-tests` - clean
+- `cargo check -p quicfuscate --all-targets --features zero_copy_dgram,rust-tests` - clean
+- `cargo test -p quicfuscate --features rust-tests --test rt-transport-frames-roundtrip` - 8/8
+- `cargo test -p quicfuscate --features rust-tests --test rt-security-suite` - 26/26
+- `cargo clippy -p quicfuscate --all-targets --features rust-tests` - clean
+- `cargo fmt --check` - clean
 - Omega: `cargo check --all-targets` for `io_uring`, `rust-tests`,
-  `io_uring,rust-tests` — all clean on aarch64 Linux
+  `io_uring,rust-tests` - all clean on aarch64 Linux
 
 ## Lesson / gate note
 Any type change to public frame/transport types must include at least one

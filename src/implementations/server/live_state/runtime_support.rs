@@ -4,7 +4,7 @@ use super::*;
 ///
 /// `Owned` covers sources that already hold heap bytes (client fan-out,
 /// tests). `Shared` retains the TUN reader's pool block behind an
-/// `Arc` — enqueuing the same frame for additional DRR targets is an Arc
+/// `Arc` - enqueuing the same frame for additional DRR targets is an Arc
 /// bump instead of a `to_vec` copy, and the block returns to its memory
 /// pool when the last queued clone drops.
 pub(in crate::implementations::server) enum PendingTunPacket {

@@ -10,9 +10,9 @@
 //! breaks the chain and is detectable by [`AuditLog::verify_chain`].
 //!
 //! Output formats:
-//! - JSON Lines (NDJSON) — one event per line, suitable for SIEM ingestion
+//! - JSON Lines (NDJSON) - one event per line, suitable for SIEM ingestion
 //!   (Splunk, Elastic, Loki, Wazuh).
-//! - Syslog RFC 5424 — for direct forwarding to a SIEM via syslog relay.
+//! - Syslog RFC 5424 - for direct forwarding to a SIEM via syslog relay.
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 use serde::{Deserialize, Serialize};
@@ -589,7 +589,7 @@ fn compute_entry_hash(entry: &AuditEntry) -> String {
 //
 // The audit log is a cross-cutting concern. Rather than threading
 // `Option<Arc<AuditLog>>` through dozens of function signatures, we
-// use a `OnceLock` global — the same pattern used by
+// use a `OnceLock` global - the same pattern used by
 // `ADMIN_LOG_BUFFER` in `src/main.rs`. The log is initialized once
 // during server startup (when `--audit-log <path>` is provided) and
 // remains valid for the process lifetime.
@@ -603,7 +603,7 @@ static AUDIT_LOG: std::sync::OnceLock<Arc<AuditLog>> = std::sync::OnceLock::new(
 /// only). When the process is running as root, the file is chowned to the
 /// `quicfuscate` user/group so that audit logging continues to work after
 /// privilege dropping. The parent directory is chowned **only** if this
-/// function created it — a pre-existing system directory (e.g. `/var/log`)
+/// function created it - a pre-existing system directory (e.g. `/var/log`)
 /// is never re-owned, which would be a privilege-escalation vector.
 /// This must be called **before** `drop_privileges`.
 pub fn init_audit_log(path: Option<PathBuf>, owner: Option<(u32, u32)>) -> Result<(), AuditError> {
@@ -626,7 +626,7 @@ pub fn init_audit_log_with_options(
     let _ = owner;
     if let Some(p) = path {
         // Track whether *we* created the parent dir so we only chown
-        // directories we own — never pre-existing system dirs like /var/log.
+        // directories we own - never pre-existing system dirs like /var/log.
         #[cfg(unix)]
         let parent_newly_created = p.parent().map(|parent| !parent.exists()).unwrap_or(false);
         if let Some(parent) = p.parent() {
@@ -650,7 +650,7 @@ pub fn init_audit_log_with_options(
 /// Restrict permissions on the audit log file to owner-only (0o600) and,
 /// when running as root, chown the file (and a newly-created parent dir)
 /// to the `quicfuscate` user/group so audit logging survives the
-/// root→unprivileged privilege drop.
+/// root->unprivileged privilege drop.
 ///
 /// `parent_newly_created` must be true only when the caller created the
 /// parent directory itself. Chowning a pre-existing system directory would
@@ -678,7 +678,7 @@ fn secure_audit_file(
         .map_err(AuditError::IoError)?;
 
     // Only chown the parent dir if we just created it. Never reown a
-    // pre-existing directory (e.g. /var/log) — that would break other
+    // pre-existing directory (e.g. /var/log) - that would break other
     // services and open a privilege-escalation path.
     //
     // SAFETY: `geteuid` takes no arguments, dereferences no pointers, and cannot fail. It reads

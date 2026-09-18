@@ -229,7 +229,7 @@ impl ServerRuntime {
                         // Spawn a blocking reader thread that forwards TUN frames into a channel.
                         // These packets are forwarded to the client via QUIC datagrams in the run_loop.
                         // Pooled `TunPacket`s cross the channel directly: zero
-                        // alloc, zero copy — the block returns to the TUN pool
+                        // alloc, zero copy - the block returns to the TUN pool
                         // when the consumer drops it.
                         let (tx, rx) = std::sync::mpsc::sync_channel::<crate::interface::TunPacket>(
                             crate::interface::TUN_PACKET_QUEUE_CAPACITY,

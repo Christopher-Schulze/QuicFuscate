@@ -66,7 +66,7 @@ pub struct ClientIsolationManager {
     /// Set of all assigned client VPN IPs.
     assigned_ips: ArcSwap<HashSet<IpAddr>>,
     assigned_ips_write: Mutex<()>,
-    /// Maps client VPN IP → client ID (for audit logging).
+    /// Maps client VPN IP -> client ID (for audit logging).
     ip_to_client: RwLock<HashMap<IpAddr, String>>,
     /// Explicit opt-in for direct client-to-client unicast.
     client_to_client_enabled: AtomicBool,

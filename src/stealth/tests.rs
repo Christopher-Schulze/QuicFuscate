@@ -982,7 +982,7 @@ fn test_gradual_escalation_ladder() {
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
-    // Level 0 → Level 1 → Level 2: each step increases overhead
+    // Level 0 -> Level 1 -> Level 2: each step increases overhead
     mgr.escalate_to_level(0);
     let l0_padding = mgr.runtime_padding_rate();
     mgr.escalate_to_level(1);
@@ -1002,7 +1002,7 @@ fn test_single_probe_no_escalation() {
         Arc::new(CryptoManager::new()),
     );
     mgr.reset_escalation_state();
-    // Record a single probe — should not escalate.
+    // Record a single probe - should not escalate.
     let result = mgr.record_probe_for_test();
     assert!(result.is_none(), "single probe must not trigger escalation");
     assert_eq!(mgr.escalation_level(), 0, "level should remain 0 after 1 probe");
@@ -1043,13 +1043,13 @@ fn test_eight_probes_in_120s_escalate_to_level_2() {
     );
     mgr.reset_escalation_state();
 
-    // First 3 probes → level 1
+    // First 3 probes -> level 1
     for _ in 0..3 {
         mgr.record_probe_for_test();
     }
     assert_eq!(mgr.escalation_level(), 1, "should be at level 1 after 3 probes");
 
-    // 5 more probes (total 8) → level 2
+    // 5 more probes (total 8) -> level 2
     let mut last_result = None;
     for _ in 3..8 {
         last_result = mgr.record_probe_for_test();
@@ -1082,7 +1082,7 @@ fn test_de_escalation_after_quiet_period() {
     // Wait for quiet period to elapse (1 second + small buffer)
     std::thread::sleep(std::time::Duration::from_millis(1200));
 
-    // Check de-escalation — should drop from 2 to 1
+    // Check de-escalation - should drop from 2 to 1
     let result = mgr.check_de_escalation_for_test();
     assert_eq!(result, Some(1), "should de-escalate from 2 to 1 after quiet period");
     assert_eq!(mgr.escalation_level(), 1, "level should be 1 after de-escalation");
@@ -1188,7 +1188,7 @@ fn test_chaff_generator_disabled_rate_zero() {
 
 #[test]
 fn test_chaff_generator_produces_packets_at_correct_rate() {
-    // 10 pps => base interval 100ms. With ±10% jitter the interval is in
+    // 10 pps => base interval 100ms. With +/-10% jitter the interval is in
     // [90ms, 110ms]. Over 1 second we expect ~10 emissions.
     let mut gen = ChaffGenerator::new(10, 1280, true);
     let start = Instant::now();
@@ -1214,9 +1214,9 @@ fn test_chaff_generator_timing_boundaries() {
     // it should fire.
     let mut gen = ChaffGenerator::new(10, 1280, true);
     let t0 = Instant::now();
-    // 50ms in — should not fire (interval is >= 90ms with jitter).
+    // 50ms in - should not fire (interval is >= 90ms with jitter).
     assert!(!gen.should_chaff(t0 + Duration::from_millis(50), false));
-    // 120ms in — should fire (interval is <= 110ms with jitter).
+    // 120ms in - should fire (interval is <= 110ms with jitter).
     assert!(
         gen.should_chaff(t0 + Duration::from_millis(120), false),
         "chaff should fire after one interval"
@@ -1229,10 +1229,10 @@ fn test_chaff_generator_real_traffic_suppresses_chaff() {
     let t0 = Instant::now();
     // Real traffic at t0+50ms resets the clock.
     assert!(!gen.should_chaff(t0 + Duration::from_millis(50), true));
-    // 80ms after the real packet (t0+130ms) — within the minimum jittered
+    // 80ms after the real packet (t0+130ms) - within the minimum jittered
     // interval (90ms at 10pps with -10% jitter), no chaff.
     assert!(!gen.should_chaff(t0 + Duration::from_millis(130), false));
-    // 130ms after the real packet (t0+180ms) — should fire (beyond max
+    // 130ms after the real packet (t0+180ms) - should fire (beyond max
     // jittered interval of 110ms).
     assert!(
         gen.should_chaff(t0 + Duration::from_millis(180), false),
@@ -1245,9 +1245,9 @@ fn test_chaff_generator_record_real_traffic_resets_clock() {
     let mut gen = ChaffGenerator::new(10, 1280, true);
     let t0 = Instant::now();
     gen.record_real_traffic(t0 + Duration::from_millis(50));
-    // 80ms after recorded real traffic — within minimum jittered interval, no chaff.
+    // 80ms after recorded real traffic - within minimum jittered interval, no chaff.
     assert!(!gen.should_chaff(t0 + Duration::from_millis(130), false));
-    // 130ms after recorded real traffic — should fire (beyond max jittered interval).
+    // 130ms after recorded real traffic - should fire (beyond max jittered interval).
     assert!(
         gen.should_chaff(t0 + Duration::from_millis(180), false),
         "chaff should fire one interval after recorded real traffic"

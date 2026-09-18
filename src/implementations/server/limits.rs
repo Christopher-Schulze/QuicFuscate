@@ -55,7 +55,7 @@ use rate_limit::TokenBucket;
 pub use rate_limit::{ConnectionLimiter, RateLimitConfig, RateLimiter};
 
 // ---------------------------------------------------------------------------
-// Global rate limiter — server-wide PPS cap across ALL IPs.
+// Global rate limiter - server-wide PPS cap across ALL IPs.
 //
 // Prevents total server overload when many IPs each stay under the per-IP
 // limit but their aggregate traffic saturates the host. Implemented with
@@ -98,7 +98,7 @@ impl GlobalRateLimiter {
     /// Create a new global rate limiter.
     ///
     /// `refill_per_sec` is the sustained server-wide PPS cap; `capacity` is the
-    /// burst size (defaults to `2 × refill_per_sec` when 0).
+    /// burst size (defaults to `2 x refill_per_sec` when 0).
     pub fn new(refill_per_sec: u64, capacity: u64) -> Self {
         Self::new_with_clock(refill_per_sec, capacity, &ProtocolClock::default())
     }

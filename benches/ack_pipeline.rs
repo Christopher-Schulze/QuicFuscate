@@ -32,7 +32,7 @@ fn ack_frame(blocks: u64) -> Frame<'static> {
     Frame::Ack { ack_delay: 100, ranges, ecn_counts: None }
 }
 
-/// Steady state: send one new packet, ACK the oldest — constant window,
+/// Steady state: send one new packet, ACK the oldest - constant window,
 /// exercises the scratch-reuse path that must not allocate.
 fn bench_recovery_ack_steady(c: &mut Criterion) {
     let mut g = c.benchmark_group("recovery_ack_steady");
@@ -70,7 +70,7 @@ fn bench_recovery_ack_steady(c: &mut Criterion) {
     g.finish();
 }
 
-/// Loss-heavy ACK: 64 packets in flight, only the highest acknowledged —
+/// Loss-heavy ACK: 64 packets in flight, only the highest acknowledged -
 /// loss detection marks the remainder on a cold Recovery each iteration.
 fn bench_recovery_ack_loss(c: &mut Criterion) {
     c.bench_function("recovery_ack_loss_64", |b| {
@@ -117,7 +117,7 @@ fn bench_pnspace_ack_emit(c: &mut Criterion) {
     g.finish();
 }
 
-/// Wire parse: one ACK frame per iteration — inline vs spilled AckRanges.
+/// Wire parse: one ACK frame per iteration - inline vs spilled AckRanges.
 fn bench_frame_ack_parse(c: &mut Criterion) {
     let mut g = c.benchmark_group("frame_ack_parse");
     for blocks in [1u64, 8, 64] {
@@ -135,7 +135,7 @@ fn bench_frame_ack_parse(c: &mut Criterion) {
     g.finish();
 }
 
-/// Wire emit: serialize an ACK frame — inline vs spilled AckRanges.
+/// Wire emit: serialize an ACK frame - inline vs spilled AckRanges.
 fn bench_frame_ack_emit(c: &mut Criterion) {
     let mut g = c.benchmark_group("frame_ack_emit");
     for blocks in [1u64, 8, 64] {

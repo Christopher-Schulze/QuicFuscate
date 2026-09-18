@@ -40,7 +40,7 @@ impl ServerRuntime {
             }
             return Err(std::io::Error::other("server admin action receiver unavailable"));
         };
-        // Take the TUN reader channel (if any) for forwarding TUN→client datagrams.
+        // Take the TUN reader channel (if any) for forwarding TUN->client datagrams.
         let mut tun_rx = self.live_mut().tun_rx.take();
         let tun_notify = self.live().tun_notify.clone();
         let tun_fault = self.live().tun_fault.clone();
@@ -452,7 +452,7 @@ impl ServerRuntime {
                         break;
                     }
 
-                    // Forward TUN→client: drain any packets from the TUN reader thread
+                    // Forward TUN->client: drain any packets from the TUN reader thread
                     // and route them to the correct client based on the destination IP
                     // in the IP packet header. Each client has a unique TUN IP from the
                     // server's IP pool, and we look up the session by client_ip to find

@@ -3,11 +3,11 @@
 //! [`PathScheduler`] decides which path the connection should send on for each
 //! outgoing packet. Three strategies are supported:
 //!
-//! - [`ScheduleStrategy::RoundRobin`] — cycle through validated paths in
+//! - [`ScheduleStrategy::RoundRobin`] - cycle through validated paths in
 //!   insertion order. Simple, fair, and avoids head-of-line bias.
-//! - [`ScheduleStrategy::LowestLatency`] — always pick the validated path with
+//! - [`ScheduleStrategy::LowestLatency`] - always pick the validated path with
 //!   the lowest smoothed RTT. Minimizes per-packet latency.
-//! - [`ScheduleStrategy::WeightedProportional`] — distribute sends across
+//! - [`ScheduleStrategy::WeightedProportional`] - distribute sends across
 //!   paths in proportion to their congestion window, so higher-capacity paths
 //!   (e.g. WiFi) carry more traffic than lower-capacity ones (e.g. LTE).
 //!
@@ -304,7 +304,7 @@ mod tests {
         let primary =
             make_path(PRIMARY_PATH_ID, addr(4433), Duration::from_millis(50), 12_000, 0, true);
         let mut mgr = PathManager::new(primary, 4);
-        // Only an unvalidated secondary — sole validated path is primary.
+        // Only an unvalidated secondary - sole validated path is primary.
         mgr.add_path(make_path(1, addr(4434), Duration::from_millis(5), 8_000, 0, false)).unwrap();
         let sched = PathScheduler::new(ScheduleStrategy::RoundRobin);
         for _ in 0..5 {

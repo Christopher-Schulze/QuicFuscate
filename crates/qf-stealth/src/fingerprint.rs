@@ -605,12 +605,12 @@ impl PacketNormalizer {
 ///
 /// Implements RFC 1624 Equation 3: `HC' = ~(~HC + ~old + new)`.
 ///
-/// - `pkt` - the full packet (IP header checksum is at bytes 10–11).
+/// - `pkt` - the full packet (IP header checksum is at bytes 10-11).
 /// - `old_byte` - the original value at `offset` before the change.
 /// - `new_byte` - the replacement value.
 /// - `offset` - the byte offset within `pkt` of the changed byte.
 ///
-/// The checksum field at bytes 10–11 is updated in place. The changed byte
+/// The checksum field at bytes 10-11 is updated in place. The changed byte
 /// itself must be written by the caller **after** calling this function
 /// (the function reads the neighbor byte to construct the 16-bit word).
 pub fn update_ip_checksum_incremental(pkt: &mut [u8], old_byte: u8, new_byte: u8, offset: usize) {
@@ -1034,7 +1034,7 @@ fn recompute_tcp_checksum(pkt: &mut [u8], ip_hdr_len: usize) {
     if pkt.len() < tcp + 20 {
         return;
     }
-    // Total length from IP header (bytes 2–3).
+    // Total length from IP header (bytes 2-3).
     let total_len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
     if total_len < ip_hdr_len + 20 || total_len > pkt.len() {
         return;

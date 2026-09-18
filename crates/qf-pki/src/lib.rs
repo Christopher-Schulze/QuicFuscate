@@ -1,4 +1,4 @@
-//! Production PKI — CA hierarchy, certificate generation, and chain validation (TODO-434).
+//! Production PKI - CA hierarchy, certificate generation, and chain validation (TODO-434).
 //!
 //! Replaces the ephemeral self-signed certificate fallback with a proper
 //! CA hierarchy: a root CA (long-lived, offline) signs an intermediate CA
@@ -7,8 +7,8 @@
 //!
 //! Hierarchy:
 //!   Root CA (self-signed, 10y expiry)
-//!     └── Intermediate CA (signed by Root, 5y expiry)
-//!           └── Server leaf (signed by Intermediate, 1y expiry, SAN = server hostname/IP)
+//!     +-- Intermediate CA (signed by Root, 5y expiry)
+//!           +-- Server leaf (signed by Intermediate, 1y expiry, SAN = server hostname/IP)
 //!
 //! All certificates use ECDSA P-256 (prime256v1) for modern compatibility.
 
@@ -432,8 +432,8 @@ const PKI_TEMP_NAME_ATTEMPTS: u32 = 16;
 
 /// Write a private key to disk in PEM format with restrictive permissions
 /// (0600 on Unix). The intermediate PEM string copy is wrapped in
-/// `Zeroizing<String>` so it is scrubbed on every exit path — including
-/// early returns from `?` operators — without relying on the caller to
+/// `Zeroizing<String>` so it is scrubbed on every exit path - including
+/// early returns from `?` operators - without relying on the caller to
 /// remember an explicit zeroize call. The caller's `key_der` slice is
 /// also zeroized in place on the success path (and is additionally
 /// protected by `GeneratedCert::drop` if the caller owns one). The

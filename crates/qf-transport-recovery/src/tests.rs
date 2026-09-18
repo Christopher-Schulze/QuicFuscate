@@ -639,7 +639,7 @@ fn time_threshold_declares_loss_and_arms_timer() {
     // The ACK's own 5 ms sample updates SRTT to 22.5 ms first (RFC order:
     // sample before loss detection), so loss_delay = 9/8*22.5 = 25.3125 ms.
     // loss_time armed for pn 2: sent at t0+20 ms -> deadline t0+45.3125 ms.
-    // The armed loss timer takes precedence over any PTO (RFC 9002 §6.2.1).
+    // The armed loss timer takes precedence over any PTO (RFC 9002 sec. 6.2.1).
     assert_eq!(outcome.lost.as_slice(), vec![(0, 1200), (1, 1200)]);
     let deadline = rec.loss_detection_timeout(true, false, true);
     assert_eq!(deadline, Some(t0 + Duration::from_nanos(45_312_500)));
@@ -671,7 +671,7 @@ fn time_threshold_fires_on_timeout() {
 fn rtt_sample_requires_ack_eliciting_and_new_largest() {
     let mut rec = Recovery::new(120_000, 1200);
     let t0 = Instant::now();
-    // Non-ack-eliciting packet: ACK must not generate a sample (RFC 9002 §5.1).
+    // Non-ack-eliciting packet: ACK must not generate a sample (RFC 9002 sec. 5.1).
     rec.on_packet_sent_in_space(PacketSpace::Application, 0, 1200, false, true, None, t0);
     let out = rec.on_ack_received(
         PacketSpace::Application,
@@ -786,7 +786,7 @@ fn application_pto_requires_handshake_confirmation() {
     let mut rec = Recovery::new(120_000, 1200);
     let t0 = Instant::now();
     seed_space(&mut rec, PacketSpace::Application, 1, t0);
-    // Pre-confirmation: Application space must not arm a PTO (RFC 9002 §6.2.1).
+    // Pre-confirmation: Application space must not arm a PTO (RFC 9002 sec. 6.2.1).
     assert_eq!(rec.loss_detection_timeout(false, false, true), None);
     // Initial space arms without max_ack_delay: 333 + 666 = 999 ms.
     rec.on_packet_sent_in_space(PacketSpace::Initial, 0, 1200, true, true, Some((0, 300)), t0);
@@ -798,7 +798,7 @@ fn application_pto_requires_handshake_confirmation() {
 fn pto_backoff_reset_rules() {
     let mut rec = Recovery::new(120_000, 1200);
     let t0 = Instant::now();
-    // Client, Initial space: backoff is NOT reset by Initial ACKs (§6.2.1).
+    // Client, Initial space: backoff is NOT reset by Initial ACKs (sec. 6.2.1).
     rec.on_packet_sent_in_space(PacketSpace::Initial, 0, 1200, true, true, None, t0);
     let _ = rec.on_loss_detection_timeout(false, false, t0 + Duration::from_millis(999));
     assert_eq!(rec.pto_count, 1);

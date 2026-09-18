@@ -72,7 +72,7 @@ impl QuicFuscateConnection {
     {
         if self.ensure_http3_ready_for_poll(context) {
             let start = self.clock.now();
-            // Field-level borrows only — a `&self` helper would borrow all of
+            // Field-level borrows only - a `&self` helper would borrow all of
             // `self` and conflict with the `&mut self.conn`/`self.h3_conn`
             // uses inside the poll loop.
             let bindings = Http3PollBindings {
@@ -1054,7 +1054,7 @@ impl QuicFuscateConnection {
     }
 
     /// Installs a sink for decoded MASQUE datagram payloads (raw IP packets).
-    /// Used by both server (uplink: MASQUE → TUN) and client (downlink: MASQUE → TUN).
+    /// Used by both server (uplink: MASQUE -> TUN) and client (downlink: MASQUE -> TUN).
     pub fn set_masque_datagram_cb(&mut self, cb: DatagramHandler) {
         self.masque_datagram_cb = Some(cb);
     }

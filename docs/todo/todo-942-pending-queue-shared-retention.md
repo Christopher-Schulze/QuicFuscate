@@ -1,4 +1,4 @@
-# TODO-942 — Pending TUN downlink queue: retain the pooled `TunPacket` block
+# TODO-942 - Pending TUN downlink queue: retain the pooled `TunPacket` block
 
 ## Status
 DONE
@@ -7,17 +7,17 @@ DONE
 `PendingTunDownlink.packet` was a `Vec<u8>`. When a server TUN downlink could
 not be delivered immediately (transport `DgramQueueFull`, bandwidth
 scheduler, shared-capacity deferral), the enqueue path copied the frame out
-of the `TunPacket`'s pooled block via `packet.to_vec()` — one heap allocation
+of the `TunPacket`'s pooled block via `packet.to_vec()` - one heap allocation
 + copy + eventual free per queued frame, per target. Fan-out routes multiply
 that by target count.
 
 ## Solution
-`PendingTunPacket` — a two-variant payload owner in
+`PendingTunPacket` - a two-variant payload owner in
 `live_state/runtime_support.rs`:
 
-- `Owned(Vec<u8>)` — sources that already hold heap bytes (client fan-out,
+- `Owned(Vec<u8>)` - sources that already hold heap bytes (client fan-out,
   tests). No cost change.
-- `Shared(SharedFecBuffer, usize)` — the TUN reader's pool block moved behind
+- `Shared(SharedFecBuffer, usize)` - the TUN reader's pool block moved behind
   an `Arc`. `clone()` is an Arc bump, so enqueueing the same frame for
   additional DRR targets shares the block; it returns to its memory pool
   when the last queued clone drops.
@@ -25,7 +25,7 @@ that by target count.
 Supporting pieces:
 
 - `SharedFecBuffer::from_pooled_block` (qf-fec) adopts a `PooledBlock`'s
-  checked-out `AlignedBox` + pool handle — the same ownership transfer the
+  checked-out `AlignedBox` + pool handle - the same ownership transfer the
   FEC send path already performs.
 - `TunPacket::into_block()` yields the owned `PooledBlock`
   (`TunPacket::for_test` added for the new coverage).
@@ -42,8 +42,8 @@ Supporting pieces:
 
 ## Correctness notes
 - Queue accounting (`entries`, `bytes`, DRR deficit, per-target cap) is
-  driven by `packet.len()` — identical values for both variants.
-- A `Shared` block held in the queue stays checked out until dropped —
+  driven by `packet.len()` - identical values for both variants.
+- A `Shared` block held in the queue stays checked out until dropped -
   bounded by `MAX_PENDING_TUN_DOWNLINKS`/`_BYTES`; the pool allocates cold
   blocks on demand, so no exhaustion deadlock (same reasoning as TODO-940).
 - `bandwidth_accounted`, `queued_at` expiry, `requeue_front`, `rebind_target`,

@@ -4,7 +4,7 @@
 //! connection, enabling bandwidth aggregation and seamless handover. Each
 //! path carries its own congestion controller, RTT estimate, and congestion
 //! window so that loss or congestion on one path does not penalize the
-//! others — the core property that makes path bonding worthwhile.
+//! others - the core property that makes path bonding worthwhile.
 //!
 //! The primary path (`id = 0`) is always present and is the fallback when no
 //! secondary path is validated or all of them are congested. Secondary paths
@@ -258,7 +258,7 @@ impl PathManager {
     /// Selects the best path for the next send.
     ///
     /// Picks the validated path with the lowest
-    /// `rtt * (1 + bytes_in_flight / cwnd)` score — i.e. lowest latency and
+    /// `rtt * (1 + bytes_in_flight / cwnd)` score - i.e. lowest latency and
     /// least congestion. Unvalidated paths are skipped because QUIC forbids
     /// sending non-probe traffic on them. If no path is usable, the primary
     /// path is returned as the safe fallback.

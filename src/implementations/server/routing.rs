@@ -1320,7 +1320,7 @@ impl RoutingManager {
     /// Creates a single `inet` table with two chains:
     /// - `postrouting`: NAT masquerade for VPN subnet traffic leaving the WAN
     ///   interface (covers both IPv4 and, when dual-stack, IPv6).
-    /// - `forward`: allows TUN→WAN forwarding and established WAN→TUN return
+    /// - `forward`: allows TUN->WAN forwarding and established WAN->TUN return
     ///   traffic.
     ///
     /// The entire table is applied atomically via `nft -f -` (stdin batch).

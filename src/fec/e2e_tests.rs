@@ -1,7 +1,7 @@
 //! E2E FEC integration tests through a simulated transport with real packet drop.
 //!
-//! These tests exercise the full FEC pipeline (`on_send` → serialize → drop channel
-//! → deserialize → `on_receive`) with deterministic loss injection at the transport
+//! These tests exercise the full FEC pipeline (`on_send` -> serialize -> drop channel
+//! -> deserialize -> `on_receive`) with deterministic loss injection at the transport
 //! layer, not at the FEC module level. This verifies:
 //!
 //! - FEC repair packets traverse the wire correctly (stream_raw roundtrip).
@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, MutexGuard};
 
 // ---------------------------------------------------------------------------
-// Deterministic drop channel — simulates tc-netem loss at the transport layer.
+// Deterministic drop channel - simulates tc-netem loss at the transport layer.
 // Uses a simple LCG so results are reproducible across runs.
 // ---------------------------------------------------------------------------
 
@@ -53,7 +53,7 @@ impl DropChannel {
 }
 
 // ---------------------------------------------------------------------------
-// Simulated transport: serialize → drop → deserialize → deliver
+// Simulated transport: serialize -> drop -> deserialize -> deliver
 // ---------------------------------------------------------------------------
 
 /// Serialize a FecPacket to wire format, simulating the transport layer.
@@ -71,7 +71,7 @@ fn from_wire(wire: &[u8], pool: &Arc<MemoryPool>) -> FecPacket {
 }
 
 // ---------------------------------------------------------------------------
-// Test harness: sender FEC → drop channel → receiver FEC
+// Test harness: sender FEC -> drop channel -> receiver FEC
 // ---------------------------------------------------------------------------
 
 struct TransportSim {
@@ -157,7 +157,7 @@ impl TransportSim {
             }
         }
 
-        // Transport: serialize → drop → deserialize → on_receive
+        // Transport: serialize -> drop -> deserialize -> on_receive
         for pkt in output {
             let wire = to_wire(&pkt);
             if self.channel.should_drop(&pkt) {
@@ -631,13 +631,13 @@ fn test_fec_e2e_repair_packets_generated() {
 fn test_fec_e2e_mode_escalation_under_sustained_loss() {
     let mut sim = TransportSim::new(0.0, 600);
 
-    // Phase 1: No loss — mode should stay at Normal or escalate to higher
+    // Phase 1: No loss - mode should stay at Normal or escalate to higher
     for id in 0..64u64 {
         sim.send_source(id, 1400);
     }
     let mode_before = sim.sender_mode();
 
-    // Phase 2: Sustained high loss — report loss to trigger escalation
+    // Phase 2: Sustained high loss - report loss to trigger escalation
     // We need to report enough loss samples to overcome hysteresis
     for _ in 0..100 {
         sim.report_loss_sender(25, 100); // 25% loss
@@ -666,7 +666,7 @@ fn test_fec_e2e_mode_deescalation_when_loss_stops() {
         "FEC should have escalated away from Zero under 50% loss"
     );
 
-    // Phase 2: Report zero loss for a sustained period — mode should de-escalate
+    // Phase 2: Report zero loss for a sustained period - mode should de-escalate
     for _ in 0..200 {
         sim.report_loss_sender(0, 100); // 0% loss
     }
@@ -736,7 +736,7 @@ fn test_fec_e2e_zero_mode_passthrough_no_repairs() {
         _env_lock: _guard,
     };
 
-    // Send 100 packets in Zero mode — no repairs should be generated
+    // Send 100 packets in Zero mode - no repairs should be generated
     for id in 0..100u64 {
         sim.send_source(id, 1400);
     }
@@ -756,7 +756,7 @@ fn test_fec_e2e_wire_format_roundtrip_preserves_payload() {
     let src = mk_src_packet(42, 256, &pool);
     let original_payload = src.payload_slice().unwrap().to_vec();
 
-    // Serialize → deserialize
+    // Serialize -> deserialize
     let wire = to_wire(&src);
     let pool2 = crate::optimize::global_pool();
     let recovered = from_wire(&wire, &pool2);
@@ -774,7 +774,7 @@ fn test_fec_e2e_wire_format_roundtrip_preserves_payload() {
 fn test_fec_e2e_heavy_loss_50pct_still_operational() {
     let mut sim = TransportSim::new(0.50, 1100);
 
-    // Send 200 packets at 50% loss — FEC should keep the link operational
+    // Send 200 packets at 50% loss - FEC should keep the link operational
     for id in 0..200u64 {
         sim.send_source(id, 1400);
     }

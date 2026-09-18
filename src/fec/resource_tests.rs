@@ -217,9 +217,9 @@ fn test_fec_mode_transition_no_memory_leak() {
     for i in 0..100u64 {
         // Alternate between high loss (escalate) and zero loss (de-escalate)
         if i % 2 == 0 {
-            fec.report_loss(50, 100); // 50% loss → escalate
+            fec.report_loss(50, 100); // 50% loss -> escalate
         } else {
-            fec.report_loss(0, 100); // 0% loss → de-escalate
+            fec.report_loss(0, 100); // 0% loss -> de-escalate
         }
         // Feed some packets during transition
         for id in 0..5u64 {

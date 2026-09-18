@@ -844,7 +844,7 @@ impl QuicFuscateConnection {
             return;
         };
 
-        // Stats are fetched only on the rare cover-burst path — cloning the
+        // Stats are fetched only on the rare cover-burst path - cloning the
         // ~200-byte struct every poll iteration was unconditional waste.
         let (sent, lost) = {
             let stats = conn.stats();
@@ -896,7 +896,7 @@ impl QuicFuscateConnection {
         from: SocketAddr,
         to: SocketAddr,
     ) -> Result<usize, crate::error::ConnectionError> {
-        // Framed wire datagrams only need a slice read — skip the pool block
+        // Framed wire datagrams only need a slice read - skip the pool block
         // checkout + copy + free round-trip entirely for the common FEC path.
         if wire::is_framed(data) {
             let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);

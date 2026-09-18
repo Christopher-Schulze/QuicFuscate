@@ -249,7 +249,7 @@ pub async fn resolve_via_doh_with_client(
         return Err(DnsProxyError::DohError("DoH response too short for DNS packet".into()));
     }
 
-    // RFC 8484 §4.2.1 says the ID "SHOULD be set to 0" in DoH, but
+    // RFC 8484 sec. 4.2.1 says the ID "SHOULD be set to 0" in DoH, but
     // configured providers echo the query ID. Keep that correlation check
     // and bind it to the complete bounded question tuple; otherwise a
     // same-ID response for another query could cross this boundary.

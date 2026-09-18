@@ -135,9 +135,9 @@ pub struct Connection {
     pub(super) fec_cb_lost_bytes: Arc<std::sync::atomic::AtomicU64>,
     // ACK classification is owned by this connection, so no callback/atomic is needed.
     pub(super) fec_acked_packets: u64,
-    // Packet spaces pending an RFC 9002 §6.2.4 PTO probe. Filled by
+    // Packet spaces pending an RFC 9002 sec. 6.2.4 PTO probe. Filled by
     // `on_recovery_timeout`, consumed by the handshake flight loop and the
-    // 1-RTT assembly. Probes bypass the congestion gate (§7.5) but count in flight.
+    // 1-RTT assembly. Probes bypass the congestion gate (sec. 7.5) but count in flight.
     pub(super) pending_probe_spaces: VecDeque<recovery::PacketSpace>,
     // Reliable STREAM ownership. Packet maps hold compact transmission IDs while
     // payload bytes remain owned exactly once until any packet copy is ACKed.

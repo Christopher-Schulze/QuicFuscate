@@ -1321,8 +1321,8 @@ impl PooledBlock {
         Arc::clone(&self.pool)
     }
 
-    /// Borrow the originating pool handle — e.g. for `Arc::ptr_eq` identity
-    /// checks — without paying an atomic refcount increment.
+    /// Borrow the originating pool handle - e.g. for `Arc::ptr_eq` identity
+    /// checks - without paying an atomic refcount increment.
     #[doc(hidden)]
     pub fn pool_ref(&self) -> &Arc<MemoryPool> {
         &self.pool

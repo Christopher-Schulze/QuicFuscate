@@ -181,7 +181,7 @@ impl ClientTunnelIngress {
         }
         let restored_bytes: usize = packets.iter().map(Vec::len).sum();
         // Restored buffers keep their capacity but are not spare-list material:
-        // they re-enter `packets` and recycle through `drain` → `recycle`.
+        // they re-enter `packets` and recycle through `drain` -> `recycle`.
         let mut state = self.state.lock();
         // Prepend in original order.
         while let Some(packet) = packets.pop() {
@@ -366,7 +366,7 @@ pub struct IoDriver {
     /// Reusable staging for the batched `flush_outbound` path: produced
     /// datagrams accumulate into `flat` (spans record boundaries) so a burst
     /// goes out in one `sendmmsg` instead of one syscall per packet.
-    /// Separate from the `run_outbound` staging — flush is called while the
+    /// Separate from the `run_outbound` staging - flush is called while the
     /// outbound task may hold its own buffers, so a shared scratch could
     /// self-deadlock.
     #[cfg(target_os = "linux")]

@@ -383,7 +383,7 @@ struct IptablesKillSwitch {
 
 /// Dedicated iptables chain name for QuicFuscate kill switch rules.
 /// Using a separate chain avoids touching the user's OUTPUT chain rules
-/// during cleanup_stale() — we only flush our own chain and remove our
+/// during cleanup_stale() - we only flush our own chain and remove our
 /// jump rule, leaving all other firewall configuration intact.
 #[cfg(target_os = "linux")]
 const KS_CHAIN: &str = "QUICFUSCATE_KS";
@@ -1169,7 +1169,7 @@ mod tests {
     #[test]
     fn test_kill_switch_enable_disable_cycle() {
         // This test verifies the enable/disable state transitions.
-        // On platforms without root, enable() will fail — that's expected.
+        // On platforms without root, enable() will fail - that's expected.
         let ks = KillSwitch::new_with_backend(crate::firewall::FirewallBackend::Iptables);
         // Just verify the state machine works without panicking
         assert!(!ks.is_enabled());

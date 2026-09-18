@@ -1181,7 +1181,7 @@ impl Connection {
 
     /// Returns true if there are pending ACK frames in the application (1-RTT)
     /// packet space that need to be sent. Used to bypass the congestion gate
-    /// for ACK-only packets (RFC 9002 §7.2).
+    /// for ACK-only packets (RFC 9002 sec. 7.2).
     #[inline(always)]
     pub fn has_pending_application_ack(&self) -> bool {
         self.pkt_spaces[2].has_pending_ack_at(self.clock.now())
@@ -1287,10 +1287,10 @@ impl Connection {
             }
         }
 
-        // RTT estimate is NOT inflated on timeout. Per RFC 9000 §5.1, the RTT
+        // RTT estimate is NOT inflated on timeout. Per RFC 9000 sec. 5.1, the RTT
         // estimate is only updated from ACK samples (see account_sent_bytes_for_ack_ranges_with_delay).
         // The previous code added 100ms on every timeout, causing monotonic RTT inflation
-        // (0→385ms observed on loopback). The PTO backoff is handled by the loss detection
+        // (0->385ms observed on loopback). The PTO backoff is handled by the loss detection
         // timer, not by inflating self.rtt.
         // Terminal timeout retires recovery through its own owner. Previously this path called
         // the aggregate loss hook and zeroed the connection's `bytes_in_flight` while the three

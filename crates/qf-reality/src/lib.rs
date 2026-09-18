@@ -97,7 +97,7 @@ impl RealityProxy {
     ///
     /// Synchronous: uses `try_send` to avoid spawning a tokio task per probe.
     /// The channel has capacity 64; if full (backpressure), the response is
-    /// dropped with a debug log — preferable to blocking the recv hot path.
+    /// dropped with a debug log - preferable to blocking the recv hot path.
     pub fn send_cached_response(&self, target: SocketAddr, data: Vec<u8>) {
         if self.closed.load(Ordering::Acquire) {
             return;
@@ -338,7 +338,7 @@ use std::sync::Arc;
 /// the real cover site at the TLS layer.
 #[derive(Debug, Clone)]
 pub struct RealityConfig {
-    /// Master switch — when false, reality capture is disabled entirely.
+    /// Master switch - when false, reality capture is disabled entirely.
     pub enabled: bool,
     /// Cover site hostname (e.g. "www.cloudflare.com").
     pub cover_host: String,
@@ -437,9 +437,9 @@ pub struct CoverMaterial {
     /// byte-identical cover-site response to active probes.
     pub raw_flight: Vec<u8>,
     /// Raw ClientHello bytes that the client sent to the cover site during
-    /// capture. Used by Phase 2 (ClientHello-Mirror) — the QuicFuscate client
-    /// sends a byte-identical ClientHello to the server, making client→server
-    /// traffic indistinguishable from client→cover-site traffic.
+    /// capture. Used by Phase 2 (ClientHello-Mirror) - the QuicFuscate client
+    /// sends a byte-identical ClientHello to the server, making client->server
+    /// traffic indistinguishable from client->cover-site traffic.
     pub client_hello: Vec<u8>,
     /// Server certificate chain (DER-encoded, as received from cover site).
     pub certificate_chain: Vec<Vec<u8>>,
@@ -533,7 +533,7 @@ impl CoverHandshakeCache {
         log::info!("Reality: capturing cover handshake from {}", addr);
 
         // Build a rustls client config with system roots + webpki fallback.
-        // We accept the cover site's real certificate — we only need the raw
+        // We accept the cover site's real certificate - we only need the raw
         // handshake bytes for replay, not the private key.
         let mut roots = rustls::RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
@@ -571,7 +571,7 @@ impl CoverHandshakeCache {
         //
         // CRITICAL: we must drop `tls` BEFORE calling `capture_rx.collect()`.
         // `collect()` awaits a oneshot receiver that is only fulfilled when
-        // `CapturingStream::drop` runs — and `CapturingStream` is owned by
+        // `CapturingStream::drop` runs - and `CapturingStream` is owned by
         // `tls`. Without the explicit drop, `collect()` would deadlock.
         drop(tls);
         let captured = tokio::time::timeout(CAPTURE_COLLECT_TIMEOUT, capture_rx.collect())
@@ -610,7 +610,7 @@ impl CoverHandshakeCache {
         })
     }
 
-    /// Background refresh task — captures cover material periodically.
+    /// Background refresh task - captures cover material periodically.
     /// Should be spawned as a tokio task. On failure, logs warning and
     /// retries after TTL/2 seconds.
     pub async fn refresh_loop(self: Arc<Self>, mut cancel: tokio::sync::watch::Receiver<bool>) {
@@ -669,7 +669,7 @@ async fn wait_for_refresh_delay(
 }
 
 // =============================================================================
-// CapturingStream — wraps a TcpStream and records raw inbound AND outbound bytes
+// CapturingStream - wraps a TcpStream and records raw inbound AND outbound bytes
 // =============================================================================
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -683,9 +683,9 @@ pub struct RawCaptureHandle {
 /// Raw bytes captured from both directions of a `CapturingStream`.
 #[derive(Debug, Default)]
 pub struct CapturedBytes {
-    /// Bytes read from the inner stream (inbound — server flight).
+    /// Bytes read from the inner stream (inbound - server flight).
     pub inbound: Vec<u8>,
-    /// Bytes written to the inner stream (outbound — client flight, e.g. ClientHello).
+    /// Bytes written to the inner stream (outbound - client flight, e.g. ClientHello).
     pub outbound: Vec<u8>,
 }
 
@@ -705,9 +705,9 @@ impl RawCaptureHandle {
 /// (inbound) and the ClientHello bytes the client sends (outbound).
 struct CapturingStream<S> {
     inner: S,
-    /// Inbound bytes (server→client).
+    /// Inbound bytes (server->client).
     read_buf: Vec<u8>,
-    /// Outbound bytes (client→server, e.g. ClientHello).
+    /// Outbound bytes (client->server, e.g. ClientHello).
     write_buf: Vec<u8>,
     tx: Option<oneshot::Sender<CapturedBytes>>,
 }
@@ -815,7 +815,7 @@ fn parse_raw_tls_flight(raw: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>, u16)> {
         let record_body = &raw[offset + 5..record_end];
 
         if record_type == 0x16 {
-            // Handshake record — parse handshake messages within.
+            // Handshake record - parse handshake messages within.
             let mut hs_off = 0usize;
             while hs_off + 4 <= record_body.len() {
                 let hs_type = record_body[hs_off];
@@ -1129,9 +1129,9 @@ mod tests {
             captured_at: 1000,
             tls_version: 0x0303,
         };
-        // TTL=100, now=1050 → not stale
+        // TTL=100, now=1050 -> not stale
         assert!(!material.is_stale(100, 1050));
-        // TTL=100, now=1101 → stale
+        // TTL=100, now=1101 -> stale
         assert!(material.is_stale(100, 1101));
     }
 

@@ -191,7 +191,7 @@ fn load_blacklist_ca_bundle(
 
 /// External blacklist synchronizer with TTL-based expiry.
 ///
-/// Tracks blocked IPs in a `HashMap<IpAddr, Instant>` (IP → expiry). Entries
+/// Tracks blocked IPs in a `HashMap<IpAddr, Instant>` (IP -> expiry). Entries
 /// auto-expire past their TTL; `prune_expired` reclaims memory. The `sync`
 /// method fetches a plain-text IP list (one IP per line, lines starting with
 /// `#` are comments) from the configured URL and replaces the blocked set.

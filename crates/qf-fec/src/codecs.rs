@@ -683,11 +683,11 @@ impl Encoder<GF8> {
 
         // Manual row accumulation: out[i] ^= c[j] * data[j][i]. XOR accumulation
         // is commutative, so for large payloads the byte range is split into
-        // independent chunks accumulated in parallel — byte-identical output,
+        // independent chunks accumulated in parallel - byte-identical output,
         // same gate as the GF16 path.
         if max_len >= (PAR_THRESHOLD * 4) && wlen >= 8 {
             let chunk = 16384usize;
-            // Accumulate directly into the zeroed `out` in parallel — XOR is
+            // Accumulate directly into the zeroed `out` in parallel - XOR is
             // commutative and the chunks are disjoint, so no scratch vecs or
             // merge pass are needed.
             out[..max_len].par_chunks_mut(chunk).enumerate().for_each(|(ci, acc)| {
@@ -1009,7 +1009,7 @@ impl Encoder16 {
         // Accumulate
         let wlen = self.inner.window.len().min(self.inner.k);
         if max_len_even >= (PAR_THRESHOLD * 4) && wlen >= 8 {
-            let chunk = 16384usize; // multiple of 2 — chunk bounds stay u16-aligned
+            let chunk = 16384usize; // multiple of 2 - chunk bounds stay u16-aligned
             out[..max_len_even].par_chunks_mut(chunk).enumerate().for_each(|(ci, acc)| {
                 let start = ci * chunk;
                 for (j, pkt) in self.inner.window.iter().enumerate().take(wlen) {
@@ -1065,7 +1065,7 @@ mod par_path_tests {
     /// The rayon accumulation path must produce byte-identical output to the
     /// scalar XOR-of-products reference. Above `PAR_THRESHOLD * 4` the GF8
     /// encoder splits the payload into disjoint `par_chunks_mut` segments and
-    /// accumulates in place — XOR commutativity makes that order-free.
+    /// accumulates in place - XOR commutativity makes that order-free.
     #[test]
     fn gf8_parallel_repair_matches_scalar_reference() {
         let payload_len = PAR_THRESHOLD * 4 + 4096; // >32 KiB triggers rayon

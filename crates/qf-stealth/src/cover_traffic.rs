@@ -86,7 +86,7 @@ impl CoverTrafficScheduler {
 
     fn build_request_headers(&self, req_type: &CoverRequestType) -> Vec<Header> {
         use rand::Rng;
-        // One thread-local handle per built request — `rand::rng()` is cheap,
+        // One thread-local handle per built request - `rand::rng()` is cheap,
         // but three separate lookups per cover request are still avoidable.
         let mut rng = rand::rng();
         let method: &[u8] = match req_type {

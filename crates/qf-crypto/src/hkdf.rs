@@ -43,7 +43,7 @@ pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; 32] {
 /// Panics if `out_len` exceeds the RFC 5869 limit of 255 * HashLen = 8160 bytes for SHA-256.
 #[allow(clippy::expect_used)]
 pub fn hkdf_expand(prk: &[u8; 32], info: &[u8], out_len: usize) -> Vec<u8> {
-    // RFC 5869 §2.3: L must be <= 255*HashLen. For SHA-256 that is 255*32 = 8160 bytes.
+    // RFC 5869 sec. 2.3: L must be <= 255*HashLen. For SHA-256 that is 255*32 = 8160 bytes.
     assert!(
         out_len <= 255 * 32,
         "HKDF-Expand: out_len {} exceeds RFC 5869 limit of 8160 bytes",

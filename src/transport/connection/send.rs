@@ -69,7 +69,7 @@ impl Connection {
         }
         let out = &mut out[..mtu_cap];
         // Congestion gate: only send if within cwnd budget.
-        // ACK-only packets bypass the gate (RFC 9002 §7.2) to prevent
+        // ACK-only packets bypass the gate (RFC 9002 sec. 7.2) to prevent
         // congestion-control deadlocks where both sides exhaust their windows
         // and neither can send ACKs to release budget.
         let congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
@@ -78,7 +78,7 @@ impl Connection {
         let mut congestion_bypass = congestion_blocked && self.has_pending_application_ack();
         let mut pmtu_probe_bypassed_congestion = false;
         if congestion_blocked && !congestion_bypass {
-            // RFC 9002 §7.5/§6.2.4: PTO probes MUST NOT be blocked by the
+            // RFC 9002 sec. 7.5/sec. 6.2.4: PTO probes MUST NOT be blocked by the
             // congestion controller (they still count as in flight). The probe
             // PING is written below in the assembly; stream/datagram payloads
             // stay gated.
@@ -175,7 +175,7 @@ impl Connection {
 
                 // The CRYPTO data budget must reserve room for everything written into
                 // the same packet *after* the data: the AEAD tag (16), the CRYPTO frame
-                // header (type 1 + offset varint ≤8 + length varint ≤8), and the ACK/PING
+                // header (type 1 + offset varint <=8 + length varint <=8), and the ACK/PING
                 // frames added below. Without this reserve, next_crypto_frame() returns up
                 // to `out.len() - off - 16` bytes, the framed packet overflows the buffer
                 // and the seal fails with BufferTooShort. (Since the CRYPTO retention
@@ -209,10 +209,10 @@ impl Connection {
                 // Otherwise Finished is never acknowledged, the client keeps
                 // Handshake PTO forever, and 1-RTT throughput stalls.
                 let ack_only = crypto_frame.is_none() && probe_pos.is_none();
-                // RFC 9002 §6.2.4: a PTO probe for this space. The packet below
+                // RFC 9002 sec. 6.2.4: a PTO probe for this space. The packet below
                 // always carries PING (ack-eliciting), plus retransmitted or
                 // fresh CRYPTO when available. Client Initial probes stay
-                // padded to >= 1200 bytes (§6.2.2.1) via target_total below.
+                // padded to >= 1200 bytes (sec. 6.2.2.1) via target_total below.
                 if let Some(pos) = probe_pos {
                     self.pending_probe_spaces.remove(pos);
                 }
@@ -296,7 +296,7 @@ impl Connection {
                 self.advance_send_packet_number(space_idx)?;
                 self.stats.sent += 1;
                 self.stats.sent_bytes += used as u64;
-                // RFC 9002 §4.9: handshake packets are not special - they are
+                // RFC 9002 sec. 4.9: handshake packets are not special - they are
                 // tracked for loss recovery exactly like 1-RTT packets.
                 // ACK-only Handshake/Initial packets are not ack-eliciting and
                 // must not occupy the congestion window.
@@ -401,7 +401,7 @@ impl Connection {
         let mut off = pn_off + pn_len;
 
         // Track whether any ack-eliciting frame was written in this packet.
-        // Per RFC 9002 §7.2, only packets containing ack-eliciting frames are
+        // Per RFC 9002 sec. 7.2, only packets containing ack-eliciting frames are
         // congestion-controlled. Non-ack-eliciting frames: PADDING, ACK,
         // CONNECTION_CLOSE, APPLICATION_CLOSE. All others (STREAM, DATAGRAM,
         // CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, etc.) are ack-eliciting.
@@ -424,7 +424,7 @@ impl Connection {
             wrote_ack_eliciting |= ctrl_ack_eliciting;
             packet_contents.control |= ctrl_ack_eliciting;
             off = self.maybe_emit_application_ack_frame(out, off)?;
-            // RFC 9002 §6.2.4: emit one ack-eliciting PING per pending
+            // RFC 9002 sec. 6.2.4: emit one ack-eliciting PING per pending
             // Application-space PTO probe. Written directly (not via
             // pending_control) so it also fires when the congestion gate was
             // bypassed for the probe; stream/datagram payloads stay gated.
@@ -475,7 +475,7 @@ impl Connection {
         // the real data already serves as a probe), inject a PING frame and pad
         // the packet up to the probe target size. The probe is ack-eliciting so
         // the peer's ACK confirms the larger MTU. We only probe when the buffer
-        // can hold the probe size (the caller's buffer is typically ≥ PMTU_MAX).
+        // can hold the probe size (the caller's buffer is typically >= PMTU_MAX).
         let mut _pmtu_probe_sent = false;
         if dedicated_pmtu_probe
             && !wrote_ack_eliciting
@@ -570,7 +570,7 @@ impl Connection {
         };
         self.stats.sent += 1;
         self.stats.sent_bytes += total as u64;
-        // Per RFC 9002 §7.2, only packets containing ack-eliciting frames are
+        // Per RFC 9002 sec. 7.2, only packets containing ack-eliciting frames are
         // congestion-controlled. Packets carrying only ACK/PADDING/CONNECTION_CLOSE
         // are not congestion-controlled and must not inflate bytes_in_flight.
         // They are also not tracked in sent_packets_by_pn because the peer will
@@ -579,7 +579,7 @@ impl Connection {
         // `wrote_ack_eliciting` is set whenever any ack-eliciting frame (STREAM,
         // DATAGRAM, CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, RESET_STREAM,
         // STOP_SENDING, PATH_CHALLENGE, PATH_RESPONSE, HANDSHAKE_DONE, etc.) was
-        // emitted. This is the correct RFC 9002 §7.2 condition - the previous
+        // emitted. This is the correct RFC 9002 sec. 7.2 condition - the previous
         // heuristic ("no stream/dgram payload") misclassified PING-only keepalive
         // probes and flow-control updates as non-congestion-controlled, breaking
         // PTO-based loss detection for those packets.

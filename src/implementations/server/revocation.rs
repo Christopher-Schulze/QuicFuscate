@@ -142,15 +142,15 @@ impl Default for RevocationManager {
 }
 
 /// Tracks which connections are using which QKey. O(1) lookup in both
-/// directions: QKey→connections and connection→QKey.
+/// directions: QKey->connections and connection->QKey.
 pub struct QKeyConnectionTracker {
     state: RwLock<QKeyConnectionTrackerState>,
 }
 
 struct QKeyConnectionTrackerState {
-    /// QKey ID → set of connection IDs.
+    /// QKey ID -> set of connection IDs.
     by_key: HashMap<String, HashSet<u64>>,
-    /// Connection ID → QKey ID.
+    /// Connection ID -> QKey ID.
     by_conn: HashMap<u64, String>,
 }
 
