@@ -285,7 +285,7 @@ pub struct LiveClientRuntime<'a> {
     pub client_count: usize,
     pub migration_from: Option<SocketAddr>,
     pub conn_id: crate::transport::ConnectionId,
-    pub qkey_auth: Option<QKeyAuthState>,
+    pub qkey_auth: Option<&'a QKeyAuthState>,
     pub session_id: Option<SessionId>,
     pub session_stats: Option<Arc<SessionStats>>,
     pub assigned_ips: Option<AssignedClientIps>,
@@ -632,7 +632,7 @@ impl LiveServerState {
             Entry::Occupied(entry) => {
                 let connection = entry.into_mut();
                 let conn_id = *connection.conn.source_id();
-                let qkey_auth = self.qkey_auth.get(&conn_id).cloned();
+                let qkey_auth = self.qkey_auth.get(&conn_id);
                 let (session_id, session_stats, assigned_ips) =
                     self.domain.session_view_by_remote(addr);
                 LiveClientAcquire::Ready(LiveClientRuntime {
@@ -705,7 +705,7 @@ impl LiveServerState {
                 }
                 let connection = entry.insert(init.connection);
                 let conn_id = *connection.conn.source_id();
-                let qkey_auth = self.qkey_auth.get(&conn_id).cloned();
+                let qkey_auth = self.qkey_auth.get(&conn_id);
                 metrics.record_connection_accepted();
                 accept_loop.record_accepted(addr);
                 LiveClientAcquire::Ready(LiveClientRuntime {

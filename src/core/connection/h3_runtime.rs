@@ -1362,6 +1362,32 @@ impl QuicFuscateConnection {
         self.masque_datagram_cb.is_some()
     }
 
+    /// Returns the persistent auth gate shared with the MASQUE datagram sink.
+    /// The sink is installed once; callers refresh the gate per pass instead of
+    /// rebinding the whole callback to pick up auth-state changes.
+    pub fn masque_datagram_auth_gate(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.masque_datagram_auth_gate)
+    }
+
+    /// Stores the current QKey auth decision into the persistent gate.
+    pub fn set_masque_datagram_auth(&self, authed: bool) {
+        self.masque_datagram_auth_gate.store(authed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the shared cell holding the client's current logical remote
+    /// address (updated on migration commits).
+    pub fn masque_logical_addr(&self) -> Arc<std::sync::Mutex<SocketAddr>> {
+        Arc::clone(&self.masque_logical_addr)
+    }
+
+    /// Stores the client's current logical remote address.
+    pub fn set_masque_logical_addr(&self, addr: SocketAddr) {
+        match self.masque_logical_addr.lock() {
+            Ok(mut slot) => *slot = addr,
+            Err(poisoned) => *poisoned.into_inner() = addr,
+        }
+    }
+
     /// Returns true if the authenticated opaque relay sink has been installed.
     pub fn has_masque_relay_cb(&self) -> bool {
         self.masque_relay_cb.is_some()

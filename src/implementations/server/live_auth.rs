@@ -1176,7 +1176,7 @@ pub(super) async fn process_live_server_client_datagram(
     uring_worker: Option<&LiveUringWorker>,
 ) -> Result<LiveClientDatagramResult, DataPlaneFault> {
     use std::cell::Cell;
-    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::atomic::Ordering as AtomicOrdering;
 
     let LiveClientRuntime {
         connection: conn,
@@ -1193,6 +1193,7 @@ pub(super) async fn process_live_server_client_datagram(
     } = runtime_client;
     let fingerprint_profile = conn.tunnel_ingress_profile();
     let logical_addr = migration_from.unwrap_or(addr);
+    conn.set_masque_logical_addr(logical_addr);
     record_live_snapshot_bytes_in(
         client_snapshots,
         logical_addr,
@@ -1217,9 +1218,11 @@ pub(super) async fn process_live_server_client_datagram(
     }
 
     let require_auth = qkey_auth.is_some();
-    let expected_token_sha256 = qkey_auth.as_ref().map(|state| state.expected_token_sha256.clone());
-    let auth_gate =
-        Arc::new(AtomicBool::new(qkey_auth.as_ref().map(|state| state.authed).unwrap_or(true)));
+    let expected_token_sha256 = qkey_auth.map(|state| state.expected_token_sha256.as_str());
+    // The datagram sink is installed once and reads this persistent gate;
+    // refreshing the flag per pass replaces the old per-packet rebind.
+    conn.set_masque_datagram_auth(qkey_auth.map(|state| state.authed).unwrap_or(true));
+    let auth_gate = conn.masque_datagram_auth_gate();
     let auth_progress = Cell::new(QKeyDatagramAuthProgress::Pending);
     let authenticated_transcript = Cell::new(false);
     let should_close: Cell<Option<&'static [u8]>> = Cell::new(None);
@@ -1258,98 +1261,122 @@ pub(super) async fn process_live_server_client_datagram(
                     ),
                 )));
             }
-            let tun_sink = Arc::clone(tun);
-            let tun_fault_for_masque = Arc::clone(tun_fault);
-            let tun_notify_for_masque = Arc::clone(tun_notify);
-            let shutdown_for_masque = Arc::clone(runtime_shutdown);
-            let masque_forwarding_policy = Arc::clone(forwarding_policy);
-            let masque_sessions = Arc::clone(sessions);
-            let masque_fanout_queue = Arc::clone(fanout_queue);
-            let masque_metrics = Arc::clone(metrics);
-            let dns_resolvers = Arc::clone(dns_upstream_resolvers);
-            let dns_admission = Arc::clone(dns_intercept_admission);
-            let dns_workers = Arc::clone(dns_intercept_workers);
-            let Some(dns_downlink_queue) = conn.masque_downlink_queue() else {
-                return Err(DataPlaneFault::TransportReceive {
-                    component: "MASQUE downlink queue installation".to_string(),
-                    error: "queue was absent after installation".to_string(),
-                });
-            };
-            let masque_response_queue = Arc::clone(&dns_downlink_queue);
-            let tun_mtu = tun.mtu();
-            let datagram_auth_gate = Arc::clone(&auth_gate);
-            conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
-                move |payload: &[u8]| {
-                    if !qkey_payload_allowed(
-                        require_auth,
-                        datagram_auth_gate.load(AtomicOrdering::Relaxed),
-                    ) {
-                        return;
-                    }
-                    let bandwidth_decision = admit_session_bandwidth(
-                        &masque_sessions,
-                        &masque_metrics,
-                        session_id,
-                        BandwidthDirection::Uplink,
-                        payload.len(),
-                    );
-                    if bandwidth_decision != BandwidthDecision::Allowed {
-                        log::debug!(
-                            "Client uplink denied by bandwidth policy: {:?}",
-                            bandwidth_decision
-                        );
-                        return;
-                    }
-                    let Some(route) = allow_client_uplink(
-                        &masque_forwarding_policy,
-                        &masque_metrics,
-                        assigned_ips,
-                        payload,
-                        fingerprint_profile,
-                        server_ips,
-                        tun_mtu,
-                        &masque_response_queue,
-                    ) else {
-                        return;
-                    };
-                    if spawn_dns_intercept(
-                        payload,
-                        Arc::clone(&dns_resolvers),
-                        Arc::clone(&dns_downlink_queue),
-                        Arc::clone(&masque_metrics),
-                        Arc::clone(&dns_admission),
-                        Arc::clone(&dns_workers),
-                        session_id,
-                        fingerprint_profile,
-                    ) {
-                        return;
-                    }
-                    enqueue_client_fanout(
-                        &masque_fanout_queue,
-                        masque_metrics.as_ref(),
-                        logical_addr,
-                        route,
-                        payload,
-                    );
-                    if let Err(error) = tun_sink.write(payload) {
-                        // TODO-896: WouldBlock is transient backpressure, not a fault.
-                        if error.kind() == std::io::ErrorKind::WouldBlock {
-                            masque_metrics.record_tun_write_backpressure();
+            // The sink is installed once per connection. Values that used to
+            // be refreshed by the per-packet rebind now live in persistent
+            // connection state (auth gate, logical addr) or are resolved fresh
+            // inside the callback (session, assigned IPs).
+            if !conn.has_masque_datagram_cb() {
+                let tun_sink = Arc::clone(tun);
+                let tun_fault_for_masque = Arc::clone(tun_fault);
+                let tun_notify_for_masque = Arc::clone(tun_notify);
+                let shutdown_for_masque = Arc::clone(runtime_shutdown);
+                let masque_forwarding_policy = Arc::clone(forwarding_policy);
+                let masque_sessions = Arc::clone(sessions);
+                let masque_fanout_queue = Arc::clone(fanout_queue);
+                let masque_metrics = Arc::clone(metrics);
+                let dns_resolvers = Arc::clone(dns_upstream_resolvers);
+                let dns_admission = Arc::clone(dns_intercept_admission);
+                let dns_workers = Arc::clone(dns_intercept_workers);
+                let Some(dns_downlink_queue) = conn.masque_downlink_queue() else {
+                    return Err(DataPlaneFault::TransportReceive {
+                        component: "MASQUE downlink queue installation".to_string(),
+                        error: "queue was absent after installation".to_string(),
+                    });
+                };
+                let masque_response_queue = Arc::clone(&dns_downlink_queue);
+                let masque_logical_addr = conn.masque_logical_addr();
+                let tun_mtu = tun.mtu();
+                let datagram_auth_gate = Arc::clone(&auth_gate);
+                conn.set_masque_datagram_cb(Arc::new(std::sync::Mutex::new(Box::new(
+                    move |payload: &[u8]| {
+                        if !qkey_payload_allowed(
+                            require_auth,
+                            datagram_auth_gate.load(AtomicOrdering::Relaxed),
+                        ) {
                             return;
                         }
-                        log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
-                        record_live_tun_fault(
-                            &tun_fault_for_masque,
-                            &tun_notify_for_masque,
-                            &shutdown_for_masque,
-                            DataPlaneFault::TunWrite {
-                                component: "server MASQUE downlink".to_string(),
-                                error: error.to_string(),
-                            },
+                        let logical_addr = match masque_logical_addr.lock() {
+                            Ok(slot) => *slot,
+                            Err(poisoned) => *poisoned.into_inner(),
+                        };
+                        let (session_id, assigned_ips) = {
+                            let sessions = masque_sessions.read();
+                            match sessions.get_by_remote_addr(logical_addr) {
+                                Some(session) => (
+                                    Some(session.id()),
+                                    Some(AssignedClientIps {
+                                        ipv4: session.client_ip(),
+                                        ipv6: session.client_ipv6(),
+                                    }),
+                                ),
+                                None => (None, None),
+                            }
+                        };
+                        let bandwidth_decision = admit_session_bandwidth(
+                            &masque_sessions,
+                            &masque_metrics,
+                            session_id,
+                            BandwidthDirection::Uplink,
+                            payload.len(),
                         );
-                    }
-                },
-            ))));
+                        if bandwidth_decision != BandwidthDecision::Allowed {
+                            log::debug!(
+                                "Client uplink denied by bandwidth policy: {:?}",
+                                bandwidth_decision
+                            );
+                            return;
+                        }
+                        let Some(route) = allow_client_uplink(
+                            &masque_forwarding_policy,
+                            &masque_metrics,
+                            assigned_ips,
+                            payload,
+                            fingerprint_profile,
+                            server_ips,
+                            tun_mtu,
+                            &masque_response_queue,
+                        ) else {
+                            return;
+                        };
+                        if spawn_dns_intercept(
+                            payload,
+                            Arc::clone(&dns_resolvers),
+                            Arc::clone(&dns_downlink_queue),
+                            Arc::clone(&masque_metrics),
+                            Arc::clone(&dns_admission),
+                            Arc::clone(&dns_workers),
+                            session_id,
+                            fingerprint_profile,
+                        ) {
+                            return;
+                        }
+                        enqueue_client_fanout(
+                            &masque_fanout_queue,
+                            masque_metrics.as_ref(),
+                            logical_addr,
+                            route,
+                            payload,
+                        );
+                        if let Err(error) = tun_sink.write(payload) {
+                            // TODO-896: WouldBlock is transient backpressure, not a fault.
+                            if error.kind() == std::io::ErrorKind::WouldBlock {
+                                masque_metrics.record_tun_write_backpressure();
+                                return;
+                            }
+                            log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                            record_live_tun_fault(
+                                &tun_fault_for_masque,
+                                &tun_notify_for_masque,
+                                &shutdown_for_masque,
+                                DataPlaneFault::TunWrite {
+                                    component: "server MASQUE downlink".to_string(),
+                                    error: error.to_string(),
+                                },
+                            );
+                        }
+                    },
+                ))));
+            }
         }
     }
 
@@ -1358,7 +1385,7 @@ pub(super) async fn process_live_server_client_datagram(
     if let Err(error) = conn.poll_http3_with_headers(
         |_sid, headers| match evaluate_qkey_http3_headers(
             headers,
-            expected_token_sha256.as_deref(),
+            expected_token_sha256,
             auth_gate.load(AtomicOrdering::Relaxed),
         ) {
             QKeyHeaderAuthOutcome::Unchanged => {}
@@ -1450,7 +1477,6 @@ pub(super) async fn process_live_server_client_datagram(
     }
     if authenticated_transcript.get() {
         if let Some(transcript_hash) = expected_token_sha256
-            .as_deref()
             .and_then(qf_engine_types::authenticated_transcript_hash_from_verifier_hash_hex)
         {
             conn.set_authenticated_qkey_transcript_hash(transcript_hash);
