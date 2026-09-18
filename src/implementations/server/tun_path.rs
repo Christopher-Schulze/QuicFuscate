@@ -643,7 +643,7 @@ fn process_server_tun_packet(
     metrics: &Metrics,
     fingerprint_profile: OsFingerprintProfile,
 ) -> Result<(), DataPlaneFault> {
-    let Some(tun) = live.server_tun.clone() else {
+    let Some(tun) = live.server_tun.as_ref() else {
         return Ok(());
     };
     let server_ips = ServerTunIps {
@@ -652,11 +652,11 @@ fn process_server_tun_packet(
     };
     let source_profile =
         source_fingerprint_profile(&live.live_state, packet).unwrap_or(fingerprint_profile);
-    if handle_local_tun_packet(packet, &tun, server_ips, source_profile, metrics)? {
+    if handle_local_tun_packet(packet, tun, server_ips, source_profile, metrics)? {
         return Ok(());
     }
 
-    let policy = Arc::clone(&live.live_state.domain.shared.forwarding_policy);
+    let policy = &live.live_state.domain.shared.forwarding_policy;
     let route = policy.classify_downlink(packet, server_ips.ipv4, server_ips.ipv6);
     log::debug!(
         "process_server_tun_packet: {}B route={:?} assigned_count={}",
@@ -673,7 +673,7 @@ fn process_server_tun_packet(
     if expired {
         write_downlink_error(
             packet,
-            &tun,
+            tun,
             server_ips,
             source_profile,
             RoutingOutcome::TimeExceeded,
@@ -682,52 +682,54 @@ fn process_server_tun_packet(
         )?;
         return Ok(());
     }
+    // One write guard covers route-to-target resolution AND the per-target
+    // bandwidth checks below — previously this took read+write acquisitions per
+    // packet. Disjoint field borrows (`clients`, `pending_tun_downlinks`) stay
+    // usable while the guard is held.
+    let mut sessions = live.live_state.domain.shared.sessions.write();
     let mut targets = smallvec::SmallVec::<[(SocketAddr, SessionId); 4]>::new();
-    {
-        let sessions = live.live_state.domain.shared.sessions.read();
-        match route {
-            DownlinkRoute::Unicast { destination, .. } => {
-                let target = match destination {
-                    std::net::IpAddr::V4(ipv4) => sessions.get_by_client_ip(ipv4),
-                    std::net::IpAddr::V6(ipv6) => sessions.get_by_client_ipv6(ipv6),
+    match route {
+        DownlinkRoute::Unicast { destination, .. } => {
+            let target = match destination {
+                std::net::IpAddr::V4(ipv4) => sessions.get_by_client_ip(ipv4),
+                std::net::IpAddr::V6(ipv6) => sessions.get_by_client_ipv6(ipv6),
+            };
+            if let Some(session) = target {
+                targets.push((session.remote_addr(), session.id()));
+            }
+            metrics.record_routing_outcome(RoutingOutcome::Unicast);
+        }
+        DownlinkRoute::Fanout { source, destination } => {
+            for (_, session) in sessions.iter() {
+                let owns_source = match source {
+                    std::net::IpAddr::V4(ipv4) => session.client_ip() == ipv4,
+                    std::net::IpAddr::V6(ipv6) => session.client_ipv6() == Some(ipv6),
                 };
-                if let Some(session) = target {
+                let supports_family = destination.is_ipv4() || session.client_ipv6().is_some();
+                if !owns_source && supports_family {
                     targets.push((session.remote_addr(), session.id()));
                 }
-                metrics.record_routing_outcome(RoutingOutcome::Unicast);
             }
-            DownlinkRoute::Fanout { source, destination } => {
-                for (_, session) in sessions.iter() {
-                    let owns_source = match source {
-                        std::net::IpAddr::V4(ipv4) => session.client_ip() == ipv4,
-                        std::net::IpAddr::V6(ipv6) => session.client_ipv6() == Some(ipv6),
-                    };
-                    let supports_family = destination.is_ipv4() || session.client_ipv6().is_some();
-                    if !owns_source && supports_family {
-                        targets.push((session.remote_addr(), session.id()));
-                    }
-                }
-                metrics.record_routing_outcome(RoutingOutcome::Fanout);
-            }
-            DownlinkRoute::Unknown { .. } => {
-                drop(sessions);
-                write_downlink_error(
-                    packet,
-                    &tun,
-                    server_ips,
-                    source_profile,
-                    RoutingOutcome::Unknown,
-                    None,
-                    metrics,
-                )?;
-                return Ok(());
-            }
-            DownlinkRoute::Malformed => {
-                metrics.routing_drop_malformed.fetch_add(1, Ordering::Relaxed);
-                return Ok(());
-            }
-            DownlinkRoute::Local { .. } => return Ok(()),
+            metrics.record_routing_outcome(RoutingOutcome::Fanout);
         }
+        DownlinkRoute::Unknown { .. } => {
+            drop(sessions);
+            write_downlink_error(
+                packet,
+                tun,
+                server_ips,
+                source_profile,
+                RoutingOutcome::Unknown,
+                None,
+                metrics,
+            )?;
+            return Ok(());
+        }
+        DownlinkRoute::Malformed => {
+            metrics.routing_drop_malformed.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        DownlinkRoute::Local { .. } => return Ok(()),
     }
 
     log::debug!(
@@ -746,7 +748,7 @@ fn process_server_tun_packet(
             if matches!(route, DownlinkRoute::Unicast { .. }) {
                 write_downlink_error(
                     packet,
-                    &tun,
+                    tun,
                     server_ips,
                     source_profile,
                     RoutingOutcome::PacketTooBig,
@@ -758,24 +760,16 @@ fn process_server_tun_packet(
         }
         let requires_scheduler = live.live_state.pending_tun_downlinks.uses_shared_capacity()
             || live.live_state.pending_tun_downlinks.contains_session(session_id);
-        // One write acquisition covers the stats lookup and (when the fast path
-        // applies) the token-bucket check — previously this took read+write.
-        let (weight, decision) = {
-            let mut sessions = live.live_state.domain.shared.sessions.write();
-            let Some(stats) = sessions.bandwidth_stats(session_id) else {
-                continue;
-            };
-            let weight = stats.policy.weight;
-            let decision = if requires_scheduler {
-                None
-            } else {
-                Some(sessions.check_bandwidth(
-                    session_id,
-                    BandwidthDirection::Downlink,
-                    packet.len(),
-                ))
-            };
-            (weight, decision)
+        // The guard held since route resolution covers the stats lookup and
+        // (when the fast path applies) the token-bucket check.
+        let Some(stats) = sessions.bandwidth_stats(session_id) else {
+            continue;
+        };
+        let weight = stats.policy.weight;
+        let decision = if requires_scheduler {
+            None
+        } else {
+            Some(sessions.check_bandwidth(session_id, BandwidthDirection::Downlink, packet.len()))
         };
         if let Some(decision) = decision {
             metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, packet.len());
@@ -853,6 +847,7 @@ fn process_server_tun_packet(
         }
     }
 
+    drop(sessions);
     flush_tun_downlink_queue(live, &direct_send_targets, out, socket, metrics)?;
     drain_pending_tun_downlinks(live, out, socket, metrics)
 }
