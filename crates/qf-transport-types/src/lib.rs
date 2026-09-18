@@ -5,6 +5,7 @@
 //! without importing the monolithic root crate; the Brain configuration uses only the shared
 //! environment snapshot contract, and the MASQUE queue is a bounded ownership contract.
 
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -215,6 +216,13 @@ pub struct SendInfo {
     pub path_control: bool,
 }
 
+/// ACK block list carried inside [`Frame::Ack`].
+///
+/// Inline capacity covers eight blocks so typical single-block
+/// acknowledgments never touch the heap on either the parse or the emit
+/// path; loss-heavy acknowledgments spill to the heap transparently.
+pub type AckRanges = SmallVec<[(u64, u64); 8]>;
+
 /// QUIC frame types.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame<'a> {
@@ -223,7 +231,11 @@ pub enum Frame<'a> {
     /// PING frame, optionally used as an MTU probe (RFC 9000 Section 19.2).
     Ping { mtu_probe: Option<usize> },
     /// ACK frame acknowledging received packets (RFC 9000 Section 19.3).
-    Ack { ack_delay: u64, ranges: Vec<(u64, u64)>, ecn_counts: Option<EcnCounts> },
+    ///
+    /// Ranges inline up to eight ACK blocks so typical single-block
+    /// acknowledgments never touch the heap on either the parse or the emit
+    /// path.
+    Ack { ack_delay: u64, ranges: AckRanges, ecn_counts: Option<EcnCounts> },
     /// RESET_STREAM frame abruptly terminating send-side of a stream.
     ResetStream { stream_id: u64, error_code: u64, final_size: u64 },
     /// STOP_SENDING frame requesting the peer stop sending on a stream.
@@ -445,14 +457,14 @@ mod tests {
     fn frame_contract_retains_borrowed_payload_and_ecn_counts() {
         let frame = Frame::Ack {
             ack_delay: 7,
-            ranges: vec![(10, 12)],
+            ranges: smallvec::smallvec![(10, 12)],
             ecn_counts: Some(EcnCounts { ect0: 1, ect1: 2, ce: 3 }),
         };
         assert_eq!(
             frame,
             Frame::Ack {
                 ack_delay: 7,
-                ranges: vec![(10, 12)],
+                ranges: smallvec::smallvec![(10, 12)],
                 ecn_counts: Some(EcnCounts { ect0: 1, ect1: 2, ce: 3 }),
             }
         );

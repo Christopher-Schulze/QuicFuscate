@@ -1792,6 +1792,7 @@ dependencies = [
  "qf-error",
  "qf-transport-pn",
  "qf-transport-types",
+ "smallvec",
 ]
 
 [[package]]
@@ -1847,6 +1848,7 @@ dependencies = [
  "qf-error",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]

@@ -10,3 +10,4 @@ publish = false
 qf-error = { path = "../qf-error" }
 qf-transport-pn = { path = "../qf-transport-pn" }
 qf-transport-types = { path = "../qf-transport-types" }
+smallvec = "1.13"

@@ -7,6 +7,7 @@ pub mod varint;
 pub mod pnspace {
     use super::ranges::RangeSet;
     use qf_common::time_source::ProtocolClock;
+    use qf_transport_types::AckRanges;
     use std::time::{Duration, Instant};
 
     /// Per-epoch packet number space tracking ACK state and receive history.
@@ -109,7 +110,7 @@ pub mod pnspace {
 
         /// Takes an ACK decision and returns (ack_delay, ranges)
         #[inline(always)]
-        pub fn take_ack(&mut self, ack_delay_exponent: u64) -> Option<(u64, Vec<(u64, u64)>)> {
+        pub fn take_ack(&mut self, ack_delay_exponent: u64) -> Option<(u64, AckRanges)> {
             self.take_ack_at(ack_delay_exponent, self.clock.now())
         }
 
@@ -125,7 +126,7 @@ pub mod pnspace {
             &self,
             ack_delay_exponent: u64,
             now: Instant,
-        ) -> Option<(u64, Vec<(u64, u64)>)> {
+        ) -> Option<(u64, AckRanges)> {
             if !self.has_pending_ack_at(now) {
                 return None;
             }
@@ -164,7 +165,7 @@ pub mod pnspace {
             &mut self,
             ack_delay_exponent: u64,
             now: Instant,
-        ) -> Option<(u64, Vec<(u64, u64)>)> {
+        ) -> Option<(u64, AckRanges)> {
             let taken = self.peek_ack_at(ack_delay_exponent, now)?;
             self.commit_ack_at(now);
             Some(taken)

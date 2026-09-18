@@ -1,5 +1,5 @@
 use qf_error::ConnectionError;
-use qf_transport_types::{EcnCounts, Frame, PacketType, MAX_CONN_ID_LEN};
+use qf_transport_types::{AckRanges, EcnCounts, Frame, PacketType, MAX_CONN_ID_LEN};
 use std::borrow::Cow;
 
 const MAX_FRAME_DATA_LEN: usize = 64 * 1024;
@@ -682,7 +682,7 @@ pub fn from_bytes_with<'a, V: VarIntCodec, A: FrameAcceleration>(
             let first_block = c.get_varint::<V>()?;
             let range_capacity =
                 num_blocks_usize.checked_add(1).ok_or(ConnectionError::InvalidFrame)?;
-            let mut ranges = Vec::with_capacity(range_capacity);
+            let mut ranges = AckRanges::with_capacity(range_capacity);
             let mut smallest_ack =
                 largest_ack.checked_sub(first_block).ok_or(ConnectionError::InvalidFrame)?;
             let mut largest = largest_ack;
@@ -932,7 +932,8 @@ mod tests {
     #[test]
     fn test_roundtrip_ack_simple() {
         // Single range: packets 10..15 (exclusive end = 15)
-        let frame = Frame::Ack { ack_delay: 100, ranges: vec![(10, 15)], ecn_counts: None };
+        let frame =
+            Frame::Ack { ack_delay: 100, ranges: smallvec::smallvec![(10, 15)], ecn_counts: None };
         let wlen = wire_len(&frame).expect("valid ACK length");
         assert!(wlen > 0);
 
@@ -1056,7 +1057,12 @@ mod tests {
 
     #[test]
     fn malformed_ack_ranges_fail_before_serialization() {
-        for ranges in [vec![], vec![(5, 5)], vec![(8, 3)], vec![(1, 2), (7, 7)]] {
+        for ranges in [
+            smallvec::smallvec![],
+            smallvec::smallvec![(5, 5)],
+            smallvec::smallvec![(8, 3)],
+            smallvec::smallvec![(1, 2), (7, 7)],
+        ] {
             let frame = Frame::Ack { ack_delay: 0, ranges, ecn_counts: None };
             let mut out = [0xA5u8; 64];
 
