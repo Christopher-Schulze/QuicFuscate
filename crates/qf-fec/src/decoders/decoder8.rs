@@ -417,21 +417,20 @@ impl Decoder8 {
         for (i, eq) in self.equations.iter().enumerate() {
             let eq_len = eq.len;
             let eq_data = &eq.data;
-            for b in 0..min_len {
-                let mut rhs = if b < eq_len { eq_data[b] } else { 0 };
-                for j in 0..self.k {
-                    let cj = *eq.coeffs.get(j).unwrap_or(&0);
-                    if cj == 0 {
-                        continue;
-                    }
-                    let sid = self.source_id_for(eq.base_id, j);
-                    if let Some((ref kd, klen)) = self.known.get(&sid) {
-                        if b < *klen {
-                            rhs ^= gf_tables::gf_mul_table(cj, kd[b]);
-                        }
-                    }
+            // rhs = eq_data, then XOR-accumulate every known coefficient's
+            // contribution in one SIMD pass per non-zero coefficient —
+            // O(min_len * nnz) instead of O(min_len * k) scalar lookups.
+            let head = min_len.min(eq_len);
+            yb[i][..head].copy_from_slice(&eq_data[..head]);
+            for (j, &cj) in eq.coeffs.iter().enumerate().take(self.k) {
+                if cj == 0 {
+                    continue;
                 }
-                yb[i][b] = rhs;
+                let sid = self.source_id_for(eq.base_id, j);
+                if let Some((ref kd, klen)) = self.known.get(&sid) {
+                    let sl = min_len.min(*klen);
+                    gf_tables::gf_mul_scalar_slice(cj, &kd[..sl], &mut yb[i][..sl]);
+                }
             }
         }
 
@@ -469,6 +468,11 @@ impl Decoder8 {
 
                 // Eliminate column in other rows (SIMD-accelerated multiply-and-XOR)
                 let pivot_row_snapshot = ab[row].clone();
+                // Split the RHS block once so the pivot row can be read while
+                // other rows are mutated — replaces a min_len-byte clone per
+                // eliminated row.
+                let (yb_lo, yb_hi) = yb.split_at_mut(row);
+                let (yb_pivot, yb_hi) = yb_hi.split_at_mut(1);
                 for (r_idx, rrow) in ab.iter_mut().enumerate() {
                     if r_idx != row {
                         let factor = rrow[col];
@@ -479,11 +483,18 @@ impl Decoder8 {
                                 &pivot_row_snapshot[..u],
                                 &mut rrow[..u],
                             );
-                            // Same factor applies to every RHS column.
-                            let pivot_rhs = yb[row].clone();
-                            for (cell, pv) in yb[r_idx].iter_mut().zip(pivot_rhs.iter()) {
-                                *cell ^= gf_tables::gf_mul_table(factor, *pv);
-                            }
+                            // Same factor applies to every RHS column —
+                            // XOR-accumulate the pivot RHS row in one pass.
+                            let target = if r_idx < row {
+                                &mut yb_lo[r_idx]
+                            } else {
+                                &mut yb_hi[r_idx - row - 1]
+                            };
+                            gf_tables::gf_mul_scalar_slice(
+                                factor,
+                                &yb_pivot[0][..],
+                                &mut target[..],
+                            );
                         }
                     }
                 }
