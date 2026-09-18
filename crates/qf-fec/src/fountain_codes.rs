@@ -286,6 +286,12 @@ pub struct LTDecoder {
     degree_one_queue: VecDeque<u64>,
     queued_symbol_ids: HashSet<u64>,
     symbol_order: VecDeque<u64>,
+    /// Entries removed from `received_symbols`/`queued_symbol_ids` whose ids
+    /// are still parked in the order/degree queues. Consumers discard stale
+    /// ids on pop; a bounded compaction pass rebuilds the queue once stale
+    /// entries dominate so removal stays amortized O(1).
+    symbol_order_stale: usize,
+    degree_one_stale: usize,
     max_symbols: usize,
     max_payload_bytes: usize,
     max_queue_len: usize,
@@ -359,6 +365,8 @@ impl LTDecoder {
             degree_one_queue: VecDeque::new(),
             queued_symbol_ids: HashSet::new(),
             symbol_order: VecDeque::new(),
+            symbol_order_stale: 0,
+            degree_one_stale: 0,
             max_symbols,
             max_payload_bytes,
             max_queue_len: max_symbols,
@@ -382,9 +390,32 @@ impl LTDecoder {
         false
     }
 
+    /// Compact a queue once stale parked entries dominate it: rebuilds the
+    /// queue against the membership map and resets the stale counter. Keeps
+    /// per-removal cost amortized O(1) instead of O(queue).
+    fn compact_symbol_order(&mut self) {
+        if self.symbol_order_stale * 2 >= self.symbol_order.len() && self.symbol_order.len() >= 64 {
+            self.symbol_order.retain(|id| self.received_symbols.contains_key(id));
+            self.symbol_order_stale = 0;
+        }
+    }
+
+    fn compact_degree_one_queue(&mut self) {
+        if self.degree_one_stale * 2 >= self.degree_one_queue.len()
+            && self.degree_one_queue.len() >= 64
+        {
+            self.degree_one_queue.retain(|id| self.queued_symbol_ids.contains(id));
+            self.degree_one_stale = 0;
+        }
+    }
+
     fn remove_queued_symbol(&mut self, symbol_id: u64) {
         if self.queued_symbol_ids.remove(&symbol_id) {
-            self.degree_one_queue.retain(|queued_id| *queued_id != symbol_id);
+            // The parked queue entry turns stale; `belief_propagation_step`
+            // discards it on pop (membership check fails) so no O(queue)
+            // retain is needed per removal.
+            self.degree_one_stale = self.degree_one_stale.saturating_add(1);
+            self.compact_degree_one_queue();
         }
     }
 
@@ -412,22 +443,28 @@ impl LTDecoder {
             self.recycle_payload(data);
         }
         self.symbol_degrees.remove(&symbol_id);
-        self.symbol_order.retain(|queued_id| *queued_id != symbol_id);
+        // The parked order entry turns stale; `evict_oldest_symbol` discards
+        // it on pop (`contains_key` fails) so no O(queue) retain is needed.
+        self.symbol_order_stale = self.symbol_order_stale.saturating_add(1);
+        self.compact_symbol_order();
         self.remove_queued_symbol(symbol_id);
     }
 
     fn evict_oldest_symbol(&mut self) -> bool {
         while let Some(symbol_id) = self.symbol_order.pop_front() {
-            if self.received_symbols.contains_key(&symbol_id) {
-                self.remove_symbol_state(symbol_id);
-                telemetry::FEC_FOUNTAIN_DECODER_EVICTIONS.inc();
-                log::debug!(
-                    "Fountain decoder evicted symbol id={symbol_id} retained_symbols={} retained_payload_bytes={}",
-                    self.received_symbols.len(),
-                    self.retained_payload_bytes
-                );
-                return true;
+            if !self.received_symbols.contains_key(&symbol_id) {
+                // Parked stale entry — discard for free.
+                self.symbol_order_stale = self.symbol_order_stale.saturating_sub(1);
+                continue;
             }
+            self.remove_symbol_state(symbol_id);
+            telemetry::FEC_FOUNTAIN_DECODER_EVICTIONS.inc();
+            log::debug!(
+                "Fountain decoder evicted symbol id={symbol_id} retained_symbols={} retained_payload_bytes={}",
+                self.received_symbols.len(),
+                self.retained_payload_bytes
+            );
+            return true;
         }
         false
     }
@@ -465,6 +502,7 @@ impl LTDecoder {
         if !self.queued_symbol_ids.insert(symbol_id) {
             return true;
         }
+        self.compact_degree_one_queue();
         if self.degree_one_queue.len() >= self.max_queue_len {
             self.queued_symbol_ids.remove(&symbol_id);
             telemetry::FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS.inc();
@@ -595,7 +633,11 @@ impl LTDecoder {
     pub fn belief_propagation_step(&mut self) -> bool {
         let mut progressed = false;
         while let Some(symbol_id) = self.degree_one_queue.pop_back() {
-            self.queued_symbol_ids.remove(&symbol_id);
+            if !self.queued_symbol_ids.remove(&symbol_id) {
+                // Parked stale entry — membership was already removed.
+                self.degree_one_stale = self.degree_one_stale.saturating_sub(1);
+                continue;
+            }
             // Degree-1 entries name their single source index directly.
             let source_idx = match self.symbol_degrees.get(&symbol_id) {
                 Some(indices) if indices.len() == 1 => indices[0],
