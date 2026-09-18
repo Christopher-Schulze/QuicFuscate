@@ -100,8 +100,9 @@ impl EncoderVariant {
             Self::GF16(encoder) => encoder.take_packet(packet),
             Self::GF4(encoder) => encoder.take_packet(packet),
             Self::Fountain(encoder) => {
-                if let Some(data) = packet.payload_slice() {
-                    let _ = encoder.add_source_symbol(data.to_vec());
+                // Zero-copy: retain the pooled payload by reference.
+                if let Some(buf) = packet.data.clone() {
+                    let _ = encoder.add_source_symbol_shared(buf, packet.data_len);
                 }
             }
         }
@@ -300,10 +301,15 @@ impl DecoderVariant {
             Self::GF4(decoder) => decoder.take_packet(packet),
             Self::Fountain(decoder) => {
                 if packet.is_systematic {
-                    if let Some(data) = packet.payload_slice() {
+                    // Zero-copy: retain the pooled payload by reference.
+                    if let Some(buf) = packet.data.clone() {
                         match usize::try_from(packet.id) {
                             Ok(source_index) => {
-                                let _ = decoder.add_source_symbol(source_index, data.to_vec());
+                                let _ = decoder.add_source_symbol_shared(
+                                    source_index,
+                                    buf,
+                                    packet.data_len,
+                                );
                             }
                             Err(_) => {
                                 log::debug!(

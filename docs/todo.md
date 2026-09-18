@@ -97,6 +97,10 @@
 - DONE. `flush_outbound` emitted one `socket.send` per produced datagram on the inbound/standby/negotiate paths. On Linux it now drains into a dedicated `flush_scratch` (`tokio::sync::Mutex` — its guard stays `Send` across socket awaits; separate from `run_outbound` staging to avoid self-deadlock), accumulates ≤16 spans / ≤256 KiB per burst, and dispatches via `try_sendmmsg_batch` with sequential-send fallback and identical error semantics. Non-Linux keeps the per-packet loop.
 - Detail: `docs/todo/todo-935-flush-outbound-batch.md`
 
+### TODO-936 - Fountain codec: payload clone per source symbol → SharedFecBuffer passthrough
+- DONE. `EncoderVariant::take_packet` and the decoder systematic path each did `payload_slice().to_vec()` — one heap copy per source packet. Symbols are now `SymbolBuf::{Owned, Shared}`: `add_source_symbol_shared` retains the packet's pool-backed `SharedFecBuffer` (Arc bump, zero copy). Decoder `decoded_symbols` carries the same enum — peeled symbols stay owned, received source symbols stay shared; `propagate_decoded_symbol`/`get_*` read via `as_slice()`. qf-fec 84/84 local + Omega.
+- Detail: `docs/todo/todo-936-fountain-zerocopy-symbols.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`

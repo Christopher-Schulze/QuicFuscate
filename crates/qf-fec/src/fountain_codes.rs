@@ -1,4 +1,5 @@
 use super::{DEFAULT_FOUNTAIN_SEED, MAX_FOUNTAIN_SOURCE_SYMBOLS};
+use crate::SharedFecBuffer;
 use qf_cpu::SimdDispatch;
 use qf_memory_pool::MemoryPool;
 use qf_telemetry as telemetry;
@@ -7,6 +8,25 @@ use std::sync::Arc;
 
 const SPLITMIX64_GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 const MAX_FOUNTAIN_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Storage for a fountain symbol. `Shared` carries a pool-backed packet
+/// buffer by reference (zero copy); `Owned` is used for computed/decoded
+/// payloads that have no pool buffer behind them.
+#[derive(Clone)]
+enum SymbolBuf {
+    Owned(Vec<u8>),
+    Shared(SharedFecBuffer, usize),
+}
+
+impl SymbolBuf {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(buf) => buf.as_slice(),
+            Self::Shared(buf, len) => buf.bytes(*len),
+        }
+    }
+}
 
 #[inline(always)]
 fn fast_xor_inplace(src: &[u8], dst: &mut [u8]) {
@@ -78,9 +98,9 @@ fn deterministic_source_indices_into(
 
 /// **LT (Luby Transform) Fountain Code** - Rateless erasure coding
 pub struct LTEncoder {
-    k: usize,              // Number of source symbols
-    symbols: Vec<Vec<u8>>, // Source symbols
-    degree_dist: Vec<f64>, // Degree distribution (Robust Soliton)
+    k: usize,                // Number of source symbols
+    symbols: Vec<SymbolBuf>, // Source symbols
+    degree_dist: Vec<f64>,   // Degree distribution (Robust Soliton)
     rng_seed: u64,
     symbol_size: usize,
     /// Largest buffered source-symbol length; maintained on insert so symbol
@@ -183,7 +203,7 @@ impl LTEncoder {
         self.encoded_scratch.resize(encoded_len, 0);
         let Self { symbols, indices_scratch, encoded_scratch, .. } = self;
         for &index in indices_scratch.iter() {
-            let source = &symbols[index];
+            let source = symbols[index].as_slice();
             let len = source.len().min(encoded_scratch.len());
             fast_xor_inplace(&source[..len], &mut encoded_scratch[..len]);
         }
@@ -209,7 +229,22 @@ impl LTEncoder {
             return false;
         }
         self.max_symbol_len = self.max_symbol_len.max(symbol.len());
-        self.symbols.push(symbol);
+        self.symbols.push(SymbolBuf::Owned(symbol));
+        true
+    }
+
+    /// Zero-copy variant of [`Self::add_source_symbol`]: the packet's pooled
+    /// buffer is retained by reference instead of cloning its bytes.
+    pub fn add_source_symbol_shared(&mut self, buf: SharedFecBuffer, len: usize) -> bool {
+        if self.symbols.len() >= self.k() {
+            return false;
+        }
+        let len = len.min(buf.bytes(len).len());
+        if len > self.symbol_size {
+            return false;
+        }
+        self.max_symbol_len = self.max_symbol_len.max(len);
+        self.symbols.push(SymbolBuf::Shared(buf, len));
         true
     }
 
@@ -243,7 +278,7 @@ pub struct LTDecoder {
     k: usize,
     symbol_size: usize,
     received_symbols: HashMap<u64, Vec<u8>>,
-    decoded_symbols: Vec<Option<Vec<u8>>>,
+    decoded_symbols: Vec<Option<SymbolBuf>>,
     /// Sorted, deduplicated source indices per retained encoded symbol. A Vec
     /// replaces the former per-symbol HashSet: degrees stay small under the
     /// robust soliton distribution, so linear membership beats table overhead.
@@ -447,7 +482,27 @@ impl LTDecoder {
         if self.decoded_symbols[source_index].is_some() {
             return self.reject_symbol("duplicate source index");
         }
-        self.decoded_symbols[source_index] = Some(data);
+        self.decoded_symbols[source_index] = Some(SymbolBuf::Owned(data));
+        let _ = self.propagate_decoded_symbol(source_index);
+        true
+    }
+
+    /// Zero-copy variant of [`Self::add_source_symbol`]: retains the packet's
+    /// pooled buffer by reference instead of copying the payload.
+    pub fn add_source_symbol_shared(
+        &mut self,
+        source_index: usize,
+        buf: SharedFecBuffer,
+        len: usize,
+    ) -> bool {
+        let len = len.min(buf.bytes(len).len());
+        if source_index >= self.k || len > self.symbol_size {
+            return self.reject_symbol("invalid source index or oversized source data");
+        }
+        if self.decoded_symbols[source_index].is_some() {
+            return self.reject_symbol("duplicate source index");
+        }
+        self.decoded_symbols[source_index] = Some(SymbolBuf::Shared(buf, len));
         let _ = self.propagate_decoded_symbol(source_index);
         true
     }
@@ -558,7 +613,7 @@ impl LTDecoder {
             };
             self.retained_payload_bytes =
                 self.retained_payload_bytes.saturating_sub(encoded_data.len());
-            self.decoded_symbols[source_idx] = Some(encoded_data);
+            self.decoded_symbols[source_idx] = Some(SymbolBuf::Owned(encoded_data));
             let propagation_complete = self.propagate_decoded_symbol(source_idx);
             progressed = true;
             if !propagation_complete {
@@ -581,14 +636,19 @@ impl LTDecoder {
     pub fn get_partial(&mut self) -> Vec<Vec<u8>> {
         // Touch symbol_size to ensure compiler understands it is used
         let _sz = self.symbol_size();
-        self.decoded_symbols.iter().filter_map(|s| s.clone()).collect()
+        self.decoded_symbols
+            .iter()
+            .filter_map(|s| s.as_ref().map(|buf| buf.as_slice().to_vec()))
+            .collect()
     }
 
     pub fn get_partial_indexed(&self) -> Vec<(usize, Vec<u8>)> {
         self.decoded_symbols
             .iter()
             .enumerate()
-            .filter_map(|(index, symbol)| symbol.clone().map(|data| (index, data)))
+            .filter_map(|(index, symbol)| {
+                symbol.as_ref().map(|buf| (index, buf.as_slice().to_vec()))
+            })
             .collect()
     }
 
@@ -607,7 +667,7 @@ impl LTDecoder {
         let Some(decoded_data) = self.decoded_symbols[decoded_idx].take() else {
             return self.reject_symbol("decoded symbol index carries no data");
         };
-        if decoded_data.len() > self.symbol_size {
+        if decoded_data.as_slice().len() > self.symbol_size {
             self.decoded_symbols[decoded_idx] = Some(decoded_data);
             return self.reject_symbol("decoded symbol exceeds configured symbol size");
         }
@@ -628,8 +688,9 @@ impl LTDecoder {
         for &symbol_id in &to_update {
             // Remove decoded symbol from this encoded symbol (SIMD-accelerated XOR)
             if let Some(encoded_data) = self.received_symbols.get_mut(&symbol_id) {
-                let sl = core::cmp::min(encoded_data.len(), decoded_data.len());
-                fast_xor_inplace(&decoded_data[..sl], &mut encoded_data[..sl]);
+                let decoded = decoded_data.as_slice();
+                let sl = core::cmp::min(encoded_data.len(), decoded.len());
+                fast_xor_inplace(&decoded[..sl], &mut encoded_data[..sl]);
             }
 
             let (became_empty, became_degree_one) =
@@ -659,7 +720,7 @@ impl LTDecoder {
         let mut out = Vec::with_capacity(self.decoded_symbols.len());
         for symbol in &self.decoded_symbols {
             let data = symbol.as_ref()?;
-            out.push(data.clone());
+            out.push(data.as_slice().to_vec());
         }
         Some(out)
     }
@@ -1096,7 +1157,7 @@ mod tests {
         let mut dec = LTDecoder::new(2, 4, pool);
         assert!(dec.add_source_symbol(0, vec![0x11; 4]));
         assert!(!dec.add_source_symbol(0, vec![0x22; 4]));
-        assert_eq!(dec.decoded_symbols[0].as_ref().unwrap(), &vec![0x11; 4]);
+        assert_eq!(dec.decoded_symbols[0].as_ref().unwrap().as_slice(), &[0x11; 4]);
     }
 
     #[test]
