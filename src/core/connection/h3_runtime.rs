@@ -1263,7 +1263,7 @@ impl QuicFuscateConnection {
         let Some(flow) = self.masque_peer_flows.get(&flow_id) else {
             return Ok(false);
         };
-        if flow.stream_id != stream_id {
+        if flow.stream_id != stream_id || flow.accepted {
             return Ok(false);
         }
         let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
