@@ -149,6 +149,10 @@
 - DONE. `send_masque_datagram` allocated `Vec::with_capacity(9+len)` per datagram for the Flow-ID prefix; `try_recv_masque_datagram` returned `payload.to_vec()` per received datagram. Send now frames into `masque_send_scratch`; recv takes a caller-owned `out` buffer reused across the poll drain. Allocations eliminated, framing copy kept (queue needs contiguous bytes). 47/47 masque + 115/115 h3 tests, Omega native check clean.
 - Detail: `docs/todo/todo-948-masque-datagram-scratch.md`
 
+### TODO-949 - TUN outbound loop: event-driven idle wait instead of 100us polling
+- DONE. `run_outbound` polled the nonblocking TUN fd every `poll_interval_us=100` when idle — ~1,000 lock+send-attempt+syscall wakeups/s for zero traffic. The fd is now registered once with the tokio reactor (`AsyncFd` on a borrowed `TunFdRef`); idle arms wait via `select!` on `readable()` vs the connection's `next_send_deadline()` (pacing/stealth/PTO timing preserved), capped at 250ms for shutdown responsiveness. No-fd backends keep the fixed-sleep fallback. Omega native check+clippy clean, io_driver 20/20.
+- Detail: `docs/todo/todo-949-tun-outbound-event-driven-idle.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`

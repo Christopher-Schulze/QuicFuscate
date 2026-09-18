@@ -645,6 +645,12 @@ impl TunInterface {
         self.dev.request_read_shutdown()
     }
 
+    /// Raw TUN descriptor for readiness registration (unix backends only).
+    #[cfg(unix)]
+    pub fn tun_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.dev.raw_fd()
+    }
+
     /// Waits until the device is readable or shutdown is requested.
     #[cfg(unix)]
     fn wait_for_readable(&self, shutdown: &AtomicBool) -> io::Result<bool> {

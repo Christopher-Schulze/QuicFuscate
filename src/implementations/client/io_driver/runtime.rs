@@ -1,5 +1,20 @@
 use super::*;
 
+/// Borrowed view of the TUN descriptor so `AsyncFd` can register it for
+/// readiness without taking ownership of the device.
+#[cfg(target_os = "linux")]
+struct TunFdRef(std::os::fd::RawFd);
+
+#[cfg(target_os = "linux")]
+impl std::os::fd::AsRawFd for TunFdRef {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.0
+    }
+}
+
+#[cfg(target_os = "linux")]
+type TunReadable = tokio::io::unix::AsyncFd<TunFdRef>;
+
 fn masque_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("QUICFUSCATE_MASQUE_TRACE").is_some())
@@ -606,6 +621,41 @@ impl IoDriver {
         }
     }
 
+    /// Idle wait that wakes as soon as the TUN device is readable or the
+    /// connection wants to emit (pacing/stealth/recovery deadline) — replaces
+    /// fixed-interval polling so the outbound loop does not burn CPU while
+    /// idle. A bounded cap keeps the shutdown flag responsive. Falls back to a
+    /// plain sleep when the backend exposes no file descriptor.
+    #[cfg(target_os = "linux")]
+    async fn wait_tun_idle(
+        &self,
+        conn: &Arc<parking_lot::Mutex<ClientDataPlane>>,
+        fallback: Duration,
+        tun_readable: &Option<TunReadable>,
+    ) {
+        if let Some(async_fd) = tun_readable.as_ref() {
+            const MAX_IDLE_WAIT: Duration = Duration::from_millis(250);
+            let remaining = {
+                conn.lock()
+                    .next_send_deadline()
+                    .map(|deadline| deadline.saturating_duration_since(self.clock.now()))
+            }
+            .unwrap_or(MAX_IDLE_WAIT)
+            .min(MAX_IDLE_WAIT);
+            tokio::select! {
+                biased;
+                ready = async_fd.readable() => {
+                    if let Ok(mut guard) = ready {
+                        guard.clear_ready();
+                    }
+                }
+                _ = tokio::time::sleep(remaining) => {}
+            }
+            return;
+        }
+        tokio::time::sleep(fallback).await;
+    }
+
     /// Run the outbound loop (TUN -> QUIC).
     ///
     /// Reads packets from TUN, processes through Stealth/FEC, sends via UDP.
@@ -642,6 +692,14 @@ impl IoDriver {
         let mut batch_spans: Vec<(usize, usize)> = Vec::with_capacity(batch_cap);
         #[cfg(target_os = "linux")]
         let mut batch_sent: Vec<bool> = Vec::with_capacity(batch_cap);
+        // Event-driven idle wait: register the TUN descriptor with the runtime
+        // reactor once so the loop below sleeps until the device is readable
+        // instead of polling it on a fixed interval.
+        #[cfg(target_os = "linux")]
+        let tun_readable: Option<TunReadable> = {
+            let fd = { tun.lock().tun_raw_fd() };
+            fd.and_then(|fd| tokio::io::unix::AsyncFd::new(TunFdRef(fd)).ok())
+        };
         #[cfg(target_os = "linux")]
         while !self.shutdown.load(Ordering::Relaxed) {
             // Read from the validated nonblocking TUN backend - returns (block, len).
@@ -838,9 +896,11 @@ impl IoDriver {
                             continue;
                         }
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_micros(
-                        self.config.poll_interval_us,
-                    ))
+                    self.wait_tun_idle(
+                        &conn,
+                        Duration::from_micros(self.config.poll_interval_us),
+                        &tun_readable,
+                    )
                     .await;
                 }
                 Err(error)
@@ -866,7 +926,7 @@ impl IoDriver {
                             }
                         }
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                    self.wait_tun_idle(&conn, Duration::from_millis(1), &tun_readable).await;
                 }
                 Err(error) => {
                     return Err(self.reader_stopped_error("client outbound TUN reader", error));
