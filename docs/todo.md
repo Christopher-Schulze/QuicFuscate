@@ -3747,3 +3747,9 @@
 ### TODO-544 - RFC loss detection and network proof
 - Detail: `docs/todo/todo-544-rfc-loss-detection-proof.md`
 - Historical closure recorded the RFC 9002 recovery owner, per-space state, deadline wiring, CC propagation, TUN-ping correction, and named CI/Omega gates. Current follow-up gaps are explicitly owned by TODO-695 (bounded recovery scans/storage) and TODO-696 (terminal timeout cleanup); current artifact-status reconciliation belongs to TODO-561.
+
+### TODO-965 - Feature-matrix verification and rust-tests repair
+- Detail: `docs/todo/todo-965-feature-matrix.md`
+- `vec![...]` Ack-range literals in feature-gated `rust-tests` targets broke after the SmallVec switch; fixed and verified the full feature matrix locally and on Omega.
+- Local proof: `cargo check --all-targets` for throughput / stream_ring_buffer / zero_copy_dgram / rust-tests and pairs, `cargo test --features rust-tests` (8/8 roundtrip, 26/26 security).
+- Omega proof: `cargo check --all-targets` for io_uring / rust-tests / io_uring+rust-tests on aarch64 Linux.
