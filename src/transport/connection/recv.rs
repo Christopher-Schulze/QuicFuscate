@@ -1073,6 +1073,8 @@ impl Connection {
                         };
                         let data_len = data.len();
                         s.send_off += data_len as u64;
+                        self.send_buffered_bytes =
+                            self.send_buffered_bytes.saturating_sub(data_len);
                         #[cfg(not(feature = "stream_ring_buffer"))]
                         {
                             if data_len == s.send_buf.len() {

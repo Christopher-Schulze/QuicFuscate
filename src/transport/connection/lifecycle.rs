@@ -229,6 +229,7 @@ impl Connection {
             rtt: Duration::from_millis(0),
             cwnd: INITIAL_WINDOW,
             bytes_in_flight: 0,
+            send_buffered_bytes: 0,
             path_id: 0,
             path_events: VecDeque::new(),
             validated_paths: HashSet::from([(local, peer)]),
@@ -345,10 +346,7 @@ impl Connection {
         }
     }
     pub(super) fn total_send_buffered_bytes(&self) -> usize {
-        #[cfg(not(feature = "stream_ring_buffer"))]
-        return self.streams.values().map(|s| s.send_buf.len()).sum();
-        #[cfg(feature = "stream_ring_buffer")]
-        return self.streams.values().map(|s| s.send_ring.len()).sum();
+        self.send_buffered_bytes
     }
 
     #[inline]

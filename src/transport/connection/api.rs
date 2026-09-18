@@ -253,10 +253,14 @@ impl Connection {
         }
         // Append payload and mark FIN if requested
         #[cfg(not(feature = "stream_ring_buffer"))]
-        stream.send_buf.extend_from_slice(buf);
+        {
+            stream.send_buf.extend_from_slice(buf);
+            self.send_buffered_bytes = self.send_buffered_bytes.saturating_add(buf.len());
+        }
         #[cfg(feature = "stream_ring_buffer")]
         {
             let written = stream.send_ring.write(buf);
+            self.send_buffered_bytes = self.send_buffered_bytes.saturating_add(written);
             if written < buf.len() {
                 return Err(crate::error::ConnectionError::InvalidState);
             }

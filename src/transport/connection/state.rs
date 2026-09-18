@@ -93,6 +93,10 @@ pub struct Connection {
     pub(super) conn_bytes_recvd: u64,
     // Send-side connection window (what peer allows us to send)
     pub(super) peer_max_data: u64,
+    /// Running total of bytes buffered across all stream send buffers.
+    /// Maintained at the push/drain sites so `total_send_buffered_bytes` is
+    /// O(1) instead of scanning `self.streams` on every `stream_send`.
+    pub(super) send_buffered_bytes: usize,
 
     // Unified TLS provider (rustls + optional TLS Cover)
     pub(super) tls_provider: Option<Box<dyn crate::qftls::QuicTlsProvider>>,
