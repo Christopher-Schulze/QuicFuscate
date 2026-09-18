@@ -183,14 +183,24 @@ pub fn find_live_client_by_dcid(
     from: SocketAddr,
     packet: &[u8],
 ) -> Option<SocketAddr> {
+    // Server-issued SCIDs are always MAX_CONN_ID_LEN bytes, so the wire DCID
+    // can be sliced out directly — no per-client header parse (which also
+    // allocates two Vecs) is needed.
+    let first = *packet.first()?;
+    let dcid: &[u8] = if first & crate::transport::packet::FORM_BIT == 0 {
+        packet.get(1..1 + crate::transport::MAX_CONN_ID_LEN)?
+    } else {
+        let dlen = *packet.get(5)? as usize;
+        if dlen > crate::transport::MAX_CONN_ID_LEN {
+            return None;
+        }
+        packet.get(6..6 + dlen)?
+    };
     clients.iter().find_map(|(addr, conn)| {
         if *addr == from {
             return None;
         }
-        let source_id = conn.conn.source_id();
-        let (header, _) =
-            crate::transport::packet::parse_header(packet, source_id.as_ref().len()).ok()?;
-        (source_id.as_ref() == header.dcid.as_slice()).then_some(*addr)
+        (conn.conn.source_id().as_ref() == dcid).then_some(*addr)
     })
 }
 

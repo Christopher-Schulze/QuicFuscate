@@ -96,20 +96,27 @@ impl LiveServerDomain {
         self.shared.sessions.read().stats_by_remote_addr(remote_addr)
     }
 
+    /// Single read-guard fetch of the per-datagram session triple. Calling the
+    /// three individual accessors costs three `sessions.read()` acquisitions
+    /// and five map lookups per inbound datagram; this costs one and three.
+    pub(super) fn session_view_by_remote(
+        &self,
+        remote_addr: SocketAddr,
+    ) -> (Option<SessionId>, Option<Arc<SessionStats>>, Option<AssignedClientIps>) {
+        let sessions = self.shared.sessions.read();
+        let session = sessions.get_by_remote_addr(remote_addr);
+        (
+            sessions.session_id_by_remote_addr(remote_addr),
+            session.map(|s| Arc::clone(s.stats())),
+            session.map(|s| AssignedClientIps { ipv4: s.client_ip(), ipv6: s.client_ipv6() }),
+        )
+    }
+
     pub(in crate::implementations::server) fn session_id_by_remote(
         &self,
         remote_addr: SocketAddr,
     ) -> Option<SessionId> {
         self.shared.sessions.read().session_id_by_remote_addr(remote_addr)
-    }
-
-    pub(super) fn assigned_ips_by_remote(
-        &self,
-        remote_addr: SocketAddr,
-    ) -> Option<AssignedClientIps> {
-        self.shared.sessions.read().get_by_remote_addr(remote_addr).map(|session| {
-            AssignedClientIps { ipv4: session.client_ip(), ipv6: session.client_ipv6() }
-        })
     }
 
     pub(in crate::implementations::server) fn remote_addr_for_identity(

@@ -625,7 +625,6 @@ impl LiveServerState {
         use std::collections::hash_map::Entry;
 
         let count_before = self.clients.len();
-        let existing_assigned_ips = self.domain.assigned_ips_by_remote(addr);
         let forwarding_policy = Arc::clone(&self.domain.shared.forwarding_policy);
         let sessions = Arc::clone(&self.domain.shared.sessions);
         let fanout_queue = Arc::clone(&self.fanout_queue);
@@ -634,8 +633,8 @@ impl LiveServerState {
                 let connection = entry.into_mut();
                 let conn_id = *connection.conn.source_id();
                 let qkey_auth = self.qkey_auth.get(&conn_id).cloned();
-                let session_id = self.domain.session_id_by_remote(addr);
-                let session_stats = self.domain.session_stats_by_remote(addr);
+                let (session_id, session_stats, assigned_ips) =
+                    self.domain.session_view_by_remote(addr);
                 LiveClientAcquire::Ready(LiveClientRuntime {
                     connection,
                     client_count: count_before,
@@ -644,7 +643,7 @@ impl LiveServerState {
                     qkey_auth,
                     session_id,
                     session_stats,
-                    assigned_ips: existing_assigned_ips,
+                    assigned_ips,
                     forwarding_policy,
                     sessions,
                     fanout_queue: Arc::clone(&fanout_queue),

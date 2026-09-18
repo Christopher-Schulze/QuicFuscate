@@ -1111,11 +1111,7 @@ impl QuicFuscateConnection {
                 Err(poisoned) => poisoned.into_inner().recycle(buf),
             };
             if masque_trace_enabled() {
-                info!(
-                    "dequeued MASQUE relay response flow={} bytes={}",
-                    flow_id,
-                    payload.len()
-                );
+                info!("dequeued MASQUE relay response flow={} bytes={}", flow_id, payload.len());
             }
             let Some(binding) = self.masque_peer_flows.get(&flow_id) else {
                 if masque_trace_enabled() {
