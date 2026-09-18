@@ -189,6 +189,10 @@
 - DONE. The outcome returned per inbound ACK still allocated: `newly_acked` on every acknowledging ACK, `lost` under any loss burst (`crypto_*` stays `Vec` — handshake spaces only, `Vec::new()` never allocates until first push). Both hot fields are now `SmallVec<[(u64,usize); 8]>` — typical ACK counts stay inline, bulk acks spill, and every consumer iterates through `Deref<Target=[T]>` unchanged. `AckOutcome` grows ~256B — cheaper than an alloc/free cycle. recovery 50/50, connection 139/139, Omega native clean.
 - Detail: `docs/todo/todo-958-ack-outcome-inline-vecs.md`
 
+### TODO-959 - FlowShaper: lock-free history length on the jitter path
+- DONE. Anti-DPI connections took the `packet_history` mutex twice per outbound packet — `jitter_range_for_traffic` locked it just to read `len()` before `record_and_prune` locked it again. An `AtomicUsize` mirror kept exact by `record_and_prune` (sole mutator, stores `len()` while holding the lock) now feeds the jitter read side: one acquisition per packet instead of two, and the read can never stall behind the writer. Same count, same thresholds. qf-stealth 127/127, Omega native clean.
+- Detail: `docs/todo/todo-959-flowshaper-lockfree-len.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`

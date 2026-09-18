@@ -226,7 +226,7 @@ mod flow_shaping {
     use qf_common::time_source::ProtocolClock;
     use rand::Rng;
     use std::collections::VecDeque;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -254,6 +254,10 @@ mod flow_shaping {
         jitter_min_us: u64,
         jitter_max_us: u64,
         packet_history: Arc<Mutex<VecDeque<PacketInfo>>>,
+        /// Mirror of `packet_history.len()` so the read-only jitter path does
+        /// not contend on the history mutex — `record_and_prune` keeps it in
+        /// sync while it already holds the lock.
+        history_count: AtomicUsize,
         _enabled: AtomicBool,
     }
 
@@ -277,6 +281,7 @@ mod flow_shaping {
                 jitter_min_us: (jitter_max_us / 2).max(1),
                 jitter_max_us,
                 packet_history: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
+                history_count: AtomicUsize::new(0),
                 _enabled: AtomicBool::new(true),
             }
         }
@@ -302,7 +307,7 @@ mod flow_shaping {
 
         /// Resolve the effective jitter range from recent traffic intensity.
         fn jitter_range_for_traffic(&self) -> (u64, u64) {
-            let recent = self.packet_history.lock().map(|history| history.len()).unwrap_or(0);
+            let recent = self.history_count.load(Ordering::Relaxed);
             if recent >= 32 {
                 // Burst: keep packets tight - low half of the range only,
                 // floored so the minimum stays at least a quarter of max.
@@ -349,12 +354,15 @@ mod flow_shaping {
                     break;
                 }
             }
+            // Keep the mirror exact so the lock-free jitter path sees the same
+            // count the deque holds after push + prune.
+            self.history_count.store(history.len(), Ordering::Relaxed);
         }
 
         /// Return the current bounded history length for diagnostics and tests.
         #[doc(hidden)]
         pub fn history_len(&self) -> usize {
-            self.packet_history.lock().map(|history| history.len()).unwrap_or(0)
+            self.history_count.load(Ordering::Relaxed)
         }
     }
 }
