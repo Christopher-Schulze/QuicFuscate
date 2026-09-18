@@ -131,6 +131,7 @@ impl PoolOwnershipLedger {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn begin_free(&self, ptr: *const u8) -> Option<PoolBlockOrigin> {
         if self.closed.load(Ordering::Acquire) {
             return None;
@@ -148,6 +149,36 @@ impl PoolOwnershipLedger {
         Some(record.origin)
     }
 
+    /// Fused `begin_free` + `return_accounted`: validates the CheckedOut
+    /// record and moves it to `to` in a single lock acquisition. For
+    /// Ephemeral blocks the record is removed and the origin returned so the
+    /// caller runs the physical release path (identical to `begin_free`).
+    pub(super) fn begin_return(
+        &self,
+        ptr: *const u8,
+        to: PoolBlockLocation,
+    ) -> Option<PoolBlockOrigin> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let mut state = self.lock_state();
+        let address = ptr as usize;
+        let record = state.records.get_mut(&address)?;
+        if record.location != PoolBlockLocation::CheckedOut {
+            return None;
+        }
+        if record.origin == PoolBlockOrigin::Ephemeral {
+            state.records.remove(&address);
+            return Some(PoolBlockOrigin::Ephemeral);
+        }
+        record.location = to;
+        Self::decrement(&self.in_use);
+        self.available.fetch_add(1, Ordering::AcqRel);
+        Some(PoolBlockOrigin::Accounted)
+    }
+
+    #[cfg(test)]
     pub(super) fn return_accounted(&self, ptr: *const u8, location: PoolBlockLocation) -> bool {
         let mut state = self.lock_state();
         let Some(record) = state.records.get_mut(&(ptr as usize)) else {

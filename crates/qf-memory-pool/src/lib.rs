@@ -370,6 +370,7 @@ impl MemoryPool {
         })
     }
 
+    #[cfg(test)]
     #[inline]
     fn try_cache_block(
         &self,
@@ -1015,7 +1016,14 @@ impl MemoryPool {
             return;
         }
 
-        let Some(origin) = self.ownership.begin_free(ptr) else {
+        // Probe TLS room before the ownership transition so the ledger can
+        // fuse begin_free + return_accounted into a single lock acquisition
+        // (one global mutex per free instead of two).
+        let want_tls = self.with_tls_cache(|cache| cache.len() < self.tls_limit());
+        let Some(origin) = self.ownership.begin_return(
+            ptr,
+            if want_tls { PoolBlockLocation::Tls } else { PoolBlockLocation::Queue },
+        ) else {
             log::debug!(target: "memory_pool", "rejecting foreign or non-checked-out block {:p}", ptr);
             self.ownership.discard_released(ptr);
             release_locked_block(block, &self.lock_ledger);
@@ -1037,22 +1045,18 @@ impl MemoryPool {
             return;
         }
 
-        // Try to place into TLS cache
-        let limit = self.tls_limit();
-        let block = match self.try_cache_block(block, limit) {
-            Ok(()) => return,
-            Err(block) => block,
-        };
+        if want_tls {
+            self.with_tls_cache(|cache| cache.push(block));
+            return;
+        }
 
         // Fallback: return to global pool queue
         let node = numa::current_node() % self.num_nodes;
         if let Some(queue) = self.pools.get(node) {
-            if self.ownership.return_accounted(block.as_ptr(), PoolBlockLocation::Queue) {
-                queue.push(block);
-                self.update_metrics();
-                self.check_invariants();
-                return;
-            }
+            queue.push(block);
+            self.update_metrics();
+            self.check_invariants();
+            return;
         }
 
         log::error!(target: "memory_pool", "checked-out block lost its ownership record");
