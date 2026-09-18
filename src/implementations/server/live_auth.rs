@@ -978,7 +978,7 @@ pub(super) fn allow_client_uplink(
 }
 
 fn admit_session_bandwidth(
-    sessions: &Arc<RwLock<SessionManager>>,
+    sessions: &SessionManager,
     metrics: &Metrics,
     session_id: Option<SessionId>,
     direction: BandwidthDirection,
@@ -988,7 +988,7 @@ fn admit_session_bandwidth(
         metrics.record_bandwidth_decision(direction, BandwidthDecision::RateLimited, bytes);
         return BandwidthDecision::RateLimited;
     };
-    let decision = sessions.read().check_bandwidth(session_id, direction, bytes);
+    let decision = sessions.check_bandwidth(session_id, direction, bytes);
     metrics.record_bandwidth_decision(direction, decision, bytes);
     decision
 }
@@ -1296,8 +1296,10 @@ pub(super) async fn process_live_server_client_datagram(
                             return;
                         }
                         let logical_addr = **masque_logical_addr.load();
-                        let (session_id, assigned_ips) = {
-                            let sessions = masque_sessions.read();
+                        // One read guard covers both the session lookup and
+                        // the bandwidth admission below.
+                        let sessions = masque_sessions.read();
+                        let (session_id, assigned_ips) =
                             match sessions.get_by_remote_addr(logical_addr) {
                                 Some(session) => (
                                     Some(session.id()),
@@ -1307,10 +1309,9 @@ pub(super) async fn process_live_server_client_datagram(
                                     }),
                                 ),
                                 None => (None, None),
-                            }
-                        };
+                            };
                         let bandwidth_decision = admit_session_bandwidth(
-                            &masque_sessions,
+                            &sessions,
                             &masque_metrics,
                             session_id,
                             BandwidthDirection::Uplink,
@@ -1409,7 +1410,7 @@ pub(super) async fn process_live_server_client_datagram(
                     // EINVAL on TUN write.
                     if !data.is_empty() && (data[0] >> 4 == 4 || data[0] >> 4 == 6) {
                         let bandwidth_decision = admit_session_bandwidth(
-                            sessions,
+                            &sessions.read(),
                             metrics,
                             session_id,
                             BandwidthDirection::Uplink,
