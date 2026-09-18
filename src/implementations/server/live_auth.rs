@@ -1341,9 +1341,6 @@ pub(super) async fn process_live_server_client_datagram(
 
     let stream_response_queue = conn.masque_downlink_queue();
 
-    let tun_fault_for_stream = Arc::clone(tun_fault);
-    let tun_notify_for_stream = Arc::clone(tun_notify);
-    let shutdown_for_stream = Arc::clone(runtime_shutdown);
     if let Err(error) = conn.poll_http3_with_headers(
         |_sid, headers| match evaluate_qkey_http3_headers(
             headers,
@@ -1421,9 +1418,9 @@ pub(super) async fn process_live_server_client_datagram(
                             }
                             log::warn!("Server TUN write failed: {:?}", error);
                             record_live_tun_fault(
-                                &tun_fault_for_stream,
-                                &tun_notify_for_stream,
-                                &shutdown_for_stream,
+                                tun_fault,
+                                tun_notify,
+                                runtime_shutdown,
                                 DataPlaneFault::TunWrite {
                                     component: "server HTTP/3 downlink".to_string(),
                                     error: error.to_string(),

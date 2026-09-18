@@ -20,10 +20,19 @@ Element-Copy) — obwohl alle Werte über den Paket-Call hinaus unverändert leb
   klonen.
 
 ## Effekt
-- 6× `Arc::clone` (je 2 atomare Ops) pro Datagramm eliminiert.
+- 6× `Arc::clone` (je 2 atomare Ops) pro Datagramm am Callsite eliminiert.
 - 1× `Vec<IpAddr>`-Heap-Clone pro Datagramm eliminiert.
+- 3× `Arc::clone` pro Datagramm im `poll_http3_with_headers`-Setup eliminiert:
+  `tun_fault_for_stream`/`tun_notify_for_stream`/`shutdown_for_stream` wurden
+  unbedingt pro Datagramm geklont, obwohl die `FnMut`-Callbacks nur für die
+  Dauer des Calls leben (`h3_runtime.rs:1459`, keine `'static`-Bound) — die
+  Closures capturen jetzt die `&Arc`-Parameter direkt.
 - Zero-Cost auf dem Hot-Path; Semantik identisch (Lebensdauer durch Caller
   garantiert).
+- Auditiert, belassen: `conn.masque_downlink_queue()` und
+  `flush_masque_relay_responses` klonen `Option<Arc>` — `None` ist frei für
+  Non-MASQUE-Clients, und der Borrow muss über den `&mut conn`-Call stabil
+  sein.
 
 ## Verifikation
 - Lokal: `cargo check -p quicfuscate` sauber.
