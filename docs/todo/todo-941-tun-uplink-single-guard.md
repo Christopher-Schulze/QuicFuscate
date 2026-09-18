@@ -24,6 +24,10 @@ DONE (lokal + Omega/aarch64 verifiziert)
 - Auditiert: `send_masque_downlink` berührt nur conn-internen State
   (`masque_peer_flows`, Dgram-Queue) — keine `sessions`-Re-Acquisition, kein
   Deadlock-Risiko durch den längeren Guard.
+- `drain_pending_tun_downlinks` hält jetzt ebenfalls einen `sessions.write()`-
+  Guard über die komplette Drain-Schleife (vorher `read()` + `write()` pro
+  Queue-Eintrag). `sessions` ist dort ein geklonter Arc — der Guard kollidiert
+  mit keinem `live`-Borrow.
 
 ## Effekt
 - 2× `Arc::clone` (4 atomare Ops) pro Uplink-Paket eliminiert.

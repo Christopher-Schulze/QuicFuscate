@@ -240,6 +240,11 @@ pub(super) fn drain_pending_tun_downlinks(
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
     let mut deferred_sessions = std::collections::HashSet::new();
     let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
+    // One write guard covers stats lookups and token-bucket checks for every
+    // drained entry — previously each entry took read+write acquisitions.
+    // `sessions` is an independent Arc here, so the guard conflicts with
+    // nothing else in `live`.
+    let mut sessions = sessions.write();
     let now = live.live_state.clock.now();
     while let Some(mut entry) = live.live_state.pending_tun_downlinks.pop_next(&deferred_sessions) {
         if entry.is_expired(now) {
@@ -251,7 +256,7 @@ pub(super) fn drain_pending_tun_downlinks(
             );
             continue;
         }
-        let Some(stats) = sessions.read().bandwidth_stats(entry.session_id) else {
+        let Some(stats) = sessions.bandwidth_stats(entry.session_id) else {
             metrics.record_tun_downlink_backpressure_drop(
                 TunDownlinkBackpressureDrop::TerminalTransportError,
             );
@@ -264,7 +269,6 @@ pub(super) fn drain_pending_tun_downlinks(
             break;
         }
         {
-            let mut sessions = sessions.write();
             if !entry.bandwidth_accounted {
                 let decision = sessions.check_bandwidth(
                     entry.session_id,
