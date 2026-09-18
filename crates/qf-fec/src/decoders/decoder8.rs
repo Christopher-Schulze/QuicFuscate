@@ -391,16 +391,18 @@ impl Decoder8 {
             return false;
         }
 
-        // Build coefficient matrix A (m x u)
+        // Build coefficient matrix A (m x u): walk each equation's
+        // coefficient row once and place non-zero entries via binary search
+        // into the sorted unknown list — O(m * k) instead of O(m * u * k).
         let mut a = vec![vec![0u8; u]; m];
         for (i, eq) in self.equations.iter().enumerate() {
-            for (col, sid) in unknowns.iter().enumerate() {
-                // Find which coefficient index j maps to this sid
-                for j in 0..self.k {
-                    if self.source_id_for(eq.base_id, j) == *sid {
-                        a[i][col] = *eq.coeffs.get(j).unwrap_or(&0);
-                        break;
-                    }
+            for (j, &cj) in eq.coeffs.iter().enumerate().take(self.k) {
+                if cj == 0 {
+                    continue;
+                }
+                let sid = self.source_id_for(eq.base_id, j);
+                if let Ok(col) = unknowns.binary_search(&sid) {
+                    a[i][col] = cj;
                 }
             }
         }
