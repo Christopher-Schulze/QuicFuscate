@@ -51,6 +51,8 @@ pub struct CircuitDiagnostics {
 #[derive(Default)]
 struct InnerIngressState {
     datagrams: VecDeque<Vec<u8>>,
+    /// Retired datagram buffers retained for reuse by the next `push`.
+    spare: Vec<Vec<u8>>,
     bytes: usize,
 }
 
@@ -71,10 +73,30 @@ impl InnerIngress {
             return false;
         }
         state.bytes = state.bytes.saturating_add(payload.len());
-        state.datagrams.push_back(payload.to_vec());
+        let mut buf = state.spare.pop().unwrap_or_default();
+        buf.clear();
+        buf.extend_from_slice(payload);
+        state.datagrams.push_back(buf);
         true
     }
 
+    /// Drains the oldest datagram into `scratch` without allocating: the
+    /// front buffer moves into `scratch`, and `scratch`'s previous allocation
+    /// is parked in the spare list for the next `push`.
+    fn pop_into(&self, scratch: &mut Vec<u8>) -> bool {
+        let mut state = self.state.lock();
+        let Some(mut front) = state.datagrams.pop_front() else {
+            return false;
+        };
+        state.bytes = state.bytes.saturating_sub(front.len());
+        std::mem::swap(scratch, &mut front);
+        if state.spare.len() < MAX_QUEUED_INNER_DATAGRAMS {
+            state.spare.push(front);
+        }
+        true
+    }
+
+    #[cfg(test)]
     fn pop(&self) -> Option<Vec<u8>> {
         let mut state = self.state.lock();
         let payload = state.datagrams.pop_front()?;
@@ -96,6 +118,9 @@ pub struct ClientDataPlane {
     hop_started_at: Vec<Option<std::time::Instant>>,
     link_started_at: Vec<Option<std::time::Instant>>,
     packet_scratch: Vec<u8>,
+    /// Persistent drain buffer for `InnerIngress::pop_into`; retains its
+    /// allocation across deliveries so inner-hop payloads never allocate.
+    inner_ingress_scratch: Vec<u8>,
     state: CircuitLifecycleState,
     generation: u64,
     circuit_id: Option<[u8; 16]>,
@@ -114,6 +139,7 @@ impl ClientDataPlane {
             hop_started_at: vec![Some(started_at)],
             link_started_at: Vec::new(),
             packet_scratch: vec![0; 65_535],
+            inner_ingress_scratch: Vec::new(),
             state: CircuitLifecycleState::EstablishingHop(0),
             generation: 0,
             circuit_id: None,
@@ -152,6 +178,7 @@ impl ClientDataPlane {
             hops: vec![entry],
             pending_hops,
             packet_scratch: vec![0; 65_535],
+            inner_ingress_scratch: Vec::new(),
             state: CircuitLifecycleState::EstablishingHop(0),
             generation: 0,
             circuit_id: Some(circuit_id),
@@ -328,19 +355,21 @@ impl ClientDataPlane {
             while delivered_datagrams < MAX_INNER_DATAGRAMS_PER_DRIVE
                 && delivered_bytes < MAX_INNER_BYTES_PER_DRIVE
             {
-                let Some(payload) = self.inner_ingress[inner_index].pop() else {
+                if !self.inner_ingress[inner_index].pop_into(&mut self.inner_ingress_scratch) {
                     break;
-                };
+                }
                 delivered_datagrams = delivered_datagrams.saturating_add(1);
-                delivered_bytes = delivered_bytes.saturating_add(payload.len());
+                delivered_bytes = delivered_bytes.saturating_add(self.inner_ingress_scratch.len());
+                let payload_len = self.inner_ingress_scratch.len();
                 let hop = &mut self.hops[inner_index + 1];
                 log::debug!(
                     "delivering inner ingress inner_index={} hop_peer={} bytes={}",
                     inner_index,
                     hop.peer_addr,
-                    payload.len()
+                    payload_len
                 );
-                hop.recv(&payload).map_err(|error| EngineError::Connection(error.to_string()))?;
+                hop.recv(&self.inner_ingress_scratch)
+                    .map_err(|error| EngineError::Connection(error.to_string()))?;
                 if hop.conn.is_established() {
                     hop.poll_http3().map_err(|error| EngineError::Connection(error.to_string()))?;
                 }
