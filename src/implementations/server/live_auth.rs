@@ -206,9 +206,10 @@ pub fn reconcile_live_clients(
         accept_loop.record_closed(*addr);
     }
     clients.retain(|_, conn| !conn.conn.is_closed());
-    qkey_auth.retain(|conn_id, _| {
-        clients.values().any(|conn| conn.conn.source_id().as_ref() == conn_id.as_slice())
-    });
+    // One O(clients) set build instead of O(qkey × clients) rescan per entry.
+    let active_conn_ids: std::collections::HashSet<&[u8]> =
+        clients.values().map(|conn| conn.conn.source_id().as_ref()).collect();
+    qkey_auth.retain(|conn_id, _| active_conn_ids.contains(conn_id.as_slice()));
     metrics.clients_active.store(clients.len() as u64, Ordering::Relaxed);
     closed_addrs
 }

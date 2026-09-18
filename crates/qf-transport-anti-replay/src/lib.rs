@@ -51,10 +51,17 @@ impl Default for AntiReplayConfig {
 /// Stores SHA-256(DCID || SCID || decrypted_payload) fingerprints with
 /// first-seen timestamps. A 0-RTT packet whose fingerprint is already
 /// present is a replay and must be silently discarded.
+/// Entries, FIFO order, and Bloom filter are always mutated together inside
+/// `check_and_insert` — one lock instead of three separate RwLocks (4
+/// acquisitions per packet previously).
+struct StrikeInner {
+    entries: HashMap<[u8; 32], Instant>,
+    order: VecDeque<[u8; 32]>,
+    bloom: BloomFilter,
+}
+
 pub struct StrikeRegister {
-    entries: RwLock<HashMap<[u8; 32], Instant>>,
-    order: RwLock<VecDeque<[u8; 32]>>,
-    bloom: RwLock<BloomFilter>,
+    inner: RwLock<StrikeInner>,
     config: AntiReplayConfig,
     last_cleanup: RwLock<Instant>,
 }
@@ -71,11 +78,11 @@ impl StrikeRegister {
         clock: qf_common::time_source::ProtocolClock,
     ) -> Self {
         Self {
-            entries: RwLock::new(HashMap::new()),
-            order: RwLock::new(VecDeque::with_capacity(
-                effective_capacity(config.max_entries).min(4096),
-            )),
-            bloom: RwLock::new(BloomFilter::for_capacity(config.max_entries)),
+            inner: RwLock::new(StrikeInner {
+                entries: HashMap::new(),
+                order: VecDeque::with_capacity(effective_capacity(config.max_entries).min(4096)),
+                bloom: BloomFilter::for_capacity(config.max_entries),
+            }),
             last_cleanup: RwLock::new(clock.now()),
             config,
         }
@@ -105,31 +112,26 @@ impl StrikeRegister {
     /// A Bloom filter provides fast-negative checks before the full HashMap lookup,
     /// and a FIFO ring makes capacity eviction O(1).
     pub fn check_and_insert(&self, fingerprint: &[u8; 32], now: Instant) -> bool {
-        let mut entries = self.entries.write();
-        let bloom_maybe = self.bloom.read().might_contain(fingerprint);
+        let mut inner = self.inner.write();
 
         // Reject if already seen (replay)
-        if bloom_maybe && entries.contains_key(fingerprint) {
+        if inner.bloom.might_contain(fingerprint) && inner.entries.contains_key(fingerprint) {
             return false;
         }
 
         // Capacity eviction: remove oldest if at limit
         let capacity = effective_capacity(self.config.max_entries);
-        {
-            let mut order = self.order.write();
-            while entries.len() >= capacity {
-                if let Some(oldest_key) = order.pop_front() {
-                    entries.remove(&oldest_key);
-                } else {
-                    entries.clear();
-                    break;
-                }
+        while inner.entries.len() >= capacity {
+            if let Some(oldest_key) = inner.order.pop_front() {
+                inner.entries.remove(&oldest_key);
+            } else {
+                inner.entries.clear();
+                break;
             }
-            order.push_back(*fingerprint);
         }
-
-        entries.insert(*fingerprint, now);
-        self.bloom.write().insert(fingerprint);
+        inner.order.push_back(*fingerprint);
+        inner.entries.insert(*fingerprint, now);
+        inner.bloom.insert(fingerprint);
         true
     }
 
@@ -148,25 +150,25 @@ impl StrikeRegister {
             *last = now;
         }
         let max_age = self.config.max_ticket_age;
-        let mut entries = self.entries.write();
+        let mut guard = self.inner.write();
+        let StrikeInner { entries, order, bloom } = &mut *guard;
         entries.retain(|_, first_seen| now.saturating_duration_since(*first_seen) < max_age);
-        let mut order = self.order.write();
         order.retain(|fingerprint| entries.contains_key(fingerprint));
-        let mut bloom = BloomFilter::for_capacity(self.config.max_entries);
+        let mut rebuilt = BloomFilter::for_capacity(self.config.max_entries);
         for fingerprint in entries.keys() {
-            bloom.insert(fingerprint);
+            rebuilt.insert(fingerprint);
         }
-        *self.bloom.write() = bloom;
+        *bloom = rebuilt;
     }
 
     /// Current number of tracked entries.
     pub fn len(&self) -> usize {
-        self.entries.read().len()
+        self.inner.read().entries.len()
     }
 
     /// Returns true if the register is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.read().is_empty()
+        self.inner.read().entries.is_empty()
     }
 }
 

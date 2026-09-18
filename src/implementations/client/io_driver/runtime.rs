@@ -526,9 +526,15 @@ impl IoDriver {
         let mut send_buf = vec![0u8; 65535];
         #[cfg(target_os = "linux")]
         let batch_cap = self.normalized_batch_size();
+        // Flat staging: conn.send writes each datagram straight into the
+        // remaining window — no per-packet Vec, no staging copy. Sized to
+        // cover a full MTU batch (≥1 MiB bounds pathological 64 KiB packets).
         #[cfg(target_os = "linux")]
-        let mut batch_payloads: Vec<Vec<u8>> =
-            (0..batch_cap).map(|_| Vec::with_capacity(2048)).collect();
+        let mut batch_flat: Vec<u8> = vec![0u8; (batch_cap * 2048).max(1 << 20)];
+        #[cfg(target_os = "linux")]
+        let mut batch_spans: Vec<(usize, usize)> = Vec::with_capacity(batch_cap);
+        #[cfg(target_os = "linux")]
+        let mut batch_sent: Vec<bool> = Vec::with_capacity(batch_cap);
         #[cfg(target_os = "linux")]
         while !self.shutdown.load(Ordering::Relaxed) {
             // Read from the validated nonblocking TUN backend - returns (block, len).
@@ -550,10 +556,12 @@ impl IoDriver {
                     .await?;
 
                     let mut queued = 0usize;
-                    while queued < batch_cap {
+                    let mut watermark = 0usize;
+                    batch_spans.clear();
+                    while queued < batch_cap && watermark < batch_flat.len() {
                         let written = {
                             let mut conn_guard = conn.lock();
-                            match conn_guard.send(&mut send_buf) {
+                            match conn_guard.send(&mut batch_flat[watermark..]) {
                                 Ok(0) => break,
                                 Ok(written) => written,
                                 Err(e) => {
@@ -564,13 +572,8 @@ impl IoDriver {
                                 }
                             }
                         };
-                        let slot = &mut batch_payloads[queued];
-                        slot.clear();
-                        slot.extend_from_slice(&send_buf[..written]);
-                        crate::optimize::telemetry::IO_DRIVER_COPY_OPS
-                            .fetch_add(1, Ordering::Relaxed);
-                        crate::optimize::telemetry::IO_DRIVER_COPY_BYTES
-                            .fetch_add(written as u64, Ordering::Relaxed);
+                        batch_spans.push((watermark, written));
+                        watermark += written;
                         queued += 1;
                     }
 
@@ -581,20 +584,22 @@ impl IoDriver {
                     #[cfg(all(target_os = "linux", feature = "io_uring"))]
                     let dispatch = { resolve_outbound_dispatch(queued, self.has_uring()) };
                     #[cfg(target_os = "linux")]
-                    let mut sent = vec![false; queued];
+                    {
+                        batch_sent.clear();
+                        batch_sent.resize(queued, false);
+                    }
                     #[cfg(target_os = "linux")]
                     {
                         use std::os::fd::AsRawFd;
                         let socket_fd = socket.as_raw_fd();
                         // The reference vector is scoped to the synchronous
                         // dispatch phase. It cannot keep borrowing
-                        // `batch_payloads` into the next loop iteration, and
+                        // `batch_flat` into the next loop iteration, and
                         // SmallVec keeps the configured maximum batch inline.
                         #[cfg(feature = "io_uring")]
-                        let batch_refs: smallvec::SmallVec<[&[u8]; 256]> = batch_payloads
+                        let batch_refs: smallvec::SmallVec<[&[u8]; 256]> = batch_spans
                             .iter()
-                            .take(queued)
-                            .map(|payload| payload.as_slice())
+                            .map(|&(start, len)| &batch_flat[start..start + len])
                             .collect();
 
                         // io_uring batch path (preferred when available).
@@ -606,7 +611,8 @@ impl IoDriver {
                                     .await
                                 {
                                     Ok(result) => {
-                                        for (index, sent_slot) in sent.iter_mut().enumerate() {
+                                        for (index, sent_slot) in batch_sent.iter_mut().enumerate()
+                                        {
                                             *sent_slot = result.is_sent(index);
                                         }
                                         crate::telemetry::IO_URING_SUBMIT_PACKETS
@@ -638,10 +644,10 @@ impl IoDriver {
                             smallvec::SmallVec::new();
                         let mut fallback_refs: smallvec::SmallVec<[&[u8]; 256]> =
                             smallvec::SmallVec::new();
-                        for (index, payload) in batch_payloads.iter().take(queued).enumerate() {
-                            if !sent[index] {
+                        for (index, &(start, len)) in batch_spans.iter().enumerate() {
+                            if !batch_sent[index] {
                                 fallback_indices.push(index);
-                                fallback_refs.push(payload.as_slice());
+                                fallback_refs.push(&batch_flat[start..start + len]);
                             }
                         }
 
@@ -656,7 +662,7 @@ impl IoDriver {
                                 Ok(n) => {
                                     let sent_by_batch = n.min(fallback_indices.len());
                                     for index in fallback_indices.iter().take(sent_by_batch) {
-                                        sent[*index] = true;
+                                        batch_sent[*index] = true;
                                     }
                                     crate::optimize::telemetry::IO_DRIVER_SENDMMSG_CALLS
                                         .fetch_add(1, Ordering::Relaxed);
@@ -682,10 +688,11 @@ impl IoDriver {
                         }
                     }
 
-                    for (index, payload) in batch_payloads.iter().take(queued).enumerate() {
-                        if sent[index] {
+                    for (index, &(start, len)) in batch_spans.iter().enumerate() {
+                        if batch_sent[index] {
                             continue;
                         }
+                        let payload = &batch_flat[start..start + len];
                         if let Err(e) = socket.send(payload).await {
                             log::warn!("UDP send error: {}", e);
                             return Err(self.transport_send_error("client TUN UDP send", e));
@@ -698,13 +705,13 @@ impl IoDriver {
                             global.transport.record_packet_out();
                         }
                     }
-                    for (index, payload) in batch_payloads.iter().take(queued).enumerate() {
-                        if !sent[index] {
+                    for (index, &(_, len)) in batch_spans.iter().enumerate() {
+                        if !batch_sent[index] {
                             continue;
                         }
                         self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
                         let global = crate::instrumentation::global();
-                        global.transport.record_bytes_out(payload.len() as u64);
+                        global.transport.record_bytes_out(len as u64);
                         global.transport.record_packet_out();
                     }
                 }

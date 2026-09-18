@@ -81,6 +81,18 @@
 - DONE. The DNS intercept hot path parsed the same packet three times (builder closure, payload extraction, source-IP lookup) and cloned the payload twice. It now parses once into an enum, moves the payload into `Arc<[u8]>`, and the response-builder closure clones only the `Arc` — one parse, one alloc, zero payload copies.
 - Detail: `docs/todo/todo-931-dns-intercept-triple-parse.md`
 
+### TODO-932 - Client run_outbound: Vec<Vec<u8>> staging + copy per packet → flat buffer
+- DONE. The TUN→QUIC drain copied every produced datagram into a per-packet `Vec` (`extend_from_slice`, N allocs + N copies per burst). Staging is now one flat `Vec<u8>` + span table: `conn.send` writes each datagram directly into the remaining window (zero staging copies), `batch_sent` is a persistent reused `Vec<bool>`, and io_uring/sendmmsg/single-send dispatch consume span slices. `batch_flat` sized `max(batch_cap·2048, 1 MiB)` — partial flush on exhaustion is correct because dispatch honors `queued`. `IO_DRIVER_COPY_OPS/BYTES` still owned by the GSO-split helper.
+- Detail: `docs/todo/todo-932-client-tx-flat-staging.md`
+
+### TODO-933 - StrikeRegister: 4 lock acquisitions on 3 RwLocks per packet → one lock
+- DONE. `check_and_insert` acquired `entries.write()` + `bloom.read()` + `order.write()` + `bloom.write()` on every 0-RTT datagram — three RwLocks that are always mutated together. Consolidated into `RwLock<StrikeInner>` (entries/order/bloom in one guard): one acquisition per packet, `cleanup` rebuilt via a destructured `&mut StrikeInner`. qf-transport-anti-replay 16/16.
+- Detail: `docs/todo/todo-933-antireplay-single-lock.md`
+
+### TODO-934 - TUN downlink lock merge + quadratic reconcile sweep
+- DONE. The per-packet downlink path took `sessions.read()` for `bandwidth_stats` and `sessions.write()` for `check_bandwidth` — now one write guard returns weight+decision (the guard is dropped before the transport send). `reconcile_live_clients` rebuilt `qkey_auth` with an O(qkey×clients) `values().any()` scan inside `retain` — now builds a `HashSet<&[u8]>` of active conn ids once.
+- Detail: `docs/todo/todo-934-tun-downlink-lock-merge.md`
+
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply — the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
 - Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`

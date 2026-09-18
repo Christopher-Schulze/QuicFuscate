@@ -589,19 +589,28 @@ fn process_server_tun_packet(
             }
             continue;
         }
-        let Some(stats) = live.live_state.domain.shared.sessions.read().bandwidth_stats(session_id)
-        else {
-            continue;
-        };
-        let weight = stats.policy.weight;
         let requires_scheduler = live.live_state.pending_tun_downlinks.uses_shared_capacity()
             || live.live_state.pending_tun_downlinks.contains_session(session_id);
-        if !requires_scheduler {
-            let decision = live.live_state.domain.shared.sessions.write().check_bandwidth(
-                session_id,
-                BandwidthDirection::Downlink,
-                packet.len(),
-            );
+        // One write acquisition covers the stats lookup and (when the fast path
+        // applies) the token-bucket check — previously this took read+write.
+        let (weight, decision) = {
+            let mut sessions = live.live_state.domain.shared.sessions.write();
+            let Some(stats) = sessions.bandwidth_stats(session_id) else {
+                continue;
+            };
+            let weight = stats.policy.weight;
+            let decision = if requires_scheduler {
+                None
+            } else {
+                Some(sessions.check_bandwidth(
+                    session_id,
+                    BandwidthDirection::Downlink,
+                    packet.len(),
+                ))
+            };
+            (weight, decision)
+        };
+        if let Some(decision) = decision {
             metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, packet.len());
             match decision {
                 BandwidthDecision::Allowed => {
