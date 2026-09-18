@@ -41,7 +41,8 @@ pub(super) struct ServerLiveRuntime {
     pub(super) server_tun_ipv6: Option<Ipv6Addr>,
     /// Channel receiving packets read from the server TUN interface (spawned reader thread).
     /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
-    pub(super) tun_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    /// Carries pooled [`crate::interface::TunPacket`]s — no per-packet alloc/copy.
+    pub(super) tun_rx: Option<std::sync::mpsc::Receiver<crate::interface::TunPacket>>,
     /// Cooperative cancellation for the standalone TUN reader.
     pub(super) tun_reader_shutdown: Option<Arc<AtomicBool>>,
     /// Owned reader handle. `stop()` joins it before releasing the TUN device.
@@ -874,7 +875,7 @@ impl StandaloneServiceSignals {
 /// follow-up wake-up is required for more queued packets.
 pub(super) fn drain_server_tun_packets(
     live: &mut ServerLiveRuntime,
-    tun_rx: &mut Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    tun_rx: &mut Option<std::sync::mpsc::Receiver<crate::interface::TunPacket>>,
     out: &mut [u8],
     socket: &UdpSocket,
     metrics: &Metrics,
@@ -883,9 +884,14 @@ pub(super) fn drain_server_tun_packets(
     for _ in 0..32 {
         let result = tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv);
         match result {
-            Some(Ok(packet)) => {
-                process_server_tun_packet(live, &packet, out, socket, metrics, fingerprint_profile)?
-            }
+            Some(Ok(packet)) => process_server_tun_packet(
+                live,
+                packet.as_slice(),
+                out,
+                socket,
+                metrics,
+                fingerprint_profile,
+            )?,
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Ok(false),
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
                 *tun_rx = None;
@@ -908,7 +914,14 @@ pub(super) fn drain_server_tun_packets(
 
     match tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv) {
         Some(Ok(packet)) => {
-            process_server_tun_packet(live, &packet, out, socket, metrics, fingerprint_profile)?;
+            process_server_tun_packet(
+                live,
+                packet.as_slice(),
+                out,
+                socket,
+                metrics,
+                fingerprint_profile,
+            )?;
             Ok(true)
         }
         Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {

@@ -228,7 +228,10 @@ impl ServerRuntime {
                         let tun_arc = Arc::new(tun);
                         // Spawn a blocking reader thread that forwards TUN frames into a channel.
                         // These packets are forwarded to the client via QUIC datagrams in the run_loop.
-                        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+                        // Pooled `TunPacket`s cross the channel directly: zero
+                        // alloc, zero copy — the block returns to the TUN pool
+                        // when the consumer drops it.
+                        let (tx, rx) = std::sync::mpsc::sync_channel::<crate::interface::TunPacket>(
                             crate::interface::TUN_PACKET_QUEUE_CAPACITY,
                         );
                         let tun_for_reader = tun_arc.clone();
@@ -243,10 +246,10 @@ impl ServerRuntime {
                         let reader_spawn = std::thread::Builder::new()
                             .name("tun-reader".to_string())
                             .spawn(move || {
-                                let read_result = tun_for_reader.reader_loop_with_shutdown(
+                                let read_result = tun_for_reader.reader_loop_with_shutdown_owned(
                                     &shutdown_for_loop,
                                     move |packet| {
-                                        let v = packet.to_vec();
+                                        let v = packet.as_slice();
                                         log::debug!(
                                             "TUN reader: read {}B proto={:#x} dst={}",
                                             v.len(),
@@ -257,7 +260,7 @@ impl ServerRuntime {
                                                 String::from("?")
                                             }
                                         );
-                                        if tx.send(v).is_err() {
+                                        if tx.send(packet).is_err() {
                                             if !shutdown_for_callback.load(Ordering::Acquire) {
                                                 let mut fault = fault_for_callback.lock();
                                                 if fault.is_none() {
