@@ -103,10 +103,15 @@ loss, 150 lossy pings, 10s settle, 250 recovery pings):
 ## Verification
 
 - `cargo test -p qf-fec`: 89/89 green.
-- `cargo test --lib fec::`: 216/216 green.
+- `cargo test --lib fec::`: 217/217 green.
 - Workspace lib suite: 1728/1728 green; fmt/clippy clean.
-- Omega re-run of `tun-e2e-fec-transition-netns.sh` pending on the rebuilt
-  release binary.
+- Omega `tun-e2e-fec-transition-netns.sh` (moderate profile) on `4433a48`:
+  **PASS**. Phase 1: 0% tunnel loss (mode zero, no overhead). Phase 2: 2%
+  tunnel loss under 20% injection (streaming active, protection effective).
+  Phase 3: 0% tunnel loss, `streaming -> zero` committed mid-phase
+  (live telemetry: `clean_ack_streak=95`, `estimated_loss_ppm=0`,
+  `pending_transition=0`, `mode_switches_total=3`). No fountain at any point;
+  the recovered snapshot shows `mode="zero"` inside the bounded window.
 
 ## Notes
 
