@@ -597,6 +597,13 @@ pub struct Recovery {
     cc: CcImpl,
     initial_cwnd: usize,
     path_epoch: u64,
+    /// Scratch reused across ACK frames so per-ACK bookkeeping does not
+    /// allocate a fresh vector for every acknowledgment.
+    acked_scratch: Vec<SentPacket>,
+    /// Scratch for the loss set produced by `detect_lost_packets`.
+    lost_scratch: Vec<SentPacket>,
+    /// Scratch for the lost packet-number prefix inside `detect_lost_packets`.
+    lost_pn_scratch: Vec<u64>,
 }
 
 impl Recovery {
@@ -658,6 +665,9 @@ impl Recovery {
             cc: cc::create_with_snapshot_and_clock(algo, initial_cwnd, mss, environment, clock),
             initial_cwnd,
             path_epoch: 0,
+            acked_scratch: Vec::new(),
+            lost_scratch: Vec::new(),
+            lost_pn_scratch: Vec::new(),
         }
     }
 
@@ -1183,45 +1193,51 @@ impl Recovery {
         space: PacketSpace,
         largest_acked: u64,
         now: Instant,
-    ) -> Vec<SentPacket> {
+        lost: &mut Vec<SentPacket>,
+    ) {
         let loss_delay = self.loss_delay();
         let threshold_pn = largest_acked.checked_sub(K_PACKET_THRESHOLD);
-        let sp = &mut self.spaces[space.index()];
+        let mut lost_pns = std::mem::take(&mut self.lost_pn_scratch);
+        lost_pns.clear();
+        {
+            let sp = &mut self.spaces[space.index()];
 
-        // The loss set is a contiguous prefix of the retained packets, so the scan stops at the
-        // first survivor instead of walking the whole prefix. Packet numbers ascend through the
-        // ring, so once `pn` passes the packet threshold it can never satisfy it again, and
-        // send times are non-decreasing in packet number, so the time threshold cannot fire later
-        // either. Materializing and sorting every retained packet number made the work and the
-        // temporary allocation scale with the in-flight window rather than with the losses.
-        let mut lost_pns: Vec<u64> = Vec::new();
-        for packet in sp.sent.iter_prefix(largest_acked) {
-            let past_packet_threshold =
-                threshold_pn.is_some_and(|threshold| packet.pn <= threshold);
-            let past_time_threshold = now.saturating_duration_since(packet.sent_at) >= loss_delay;
-            if past_packet_threshold || past_time_threshold {
-                lost_pns.push(packet.pn);
-                continue;
+            // The loss set is a contiguous prefix of the retained packets, so the scan stops at the
+            // first survivor instead of walking the whole prefix. Packet numbers ascend through the
+            // ring, so once `pn` passes the packet threshold it can never satisfy it again, and
+            // send times are non-decreasing in packet number, so the time threshold cannot fire later
+            // either. Materializing and sorting every retained packet number made the work and the
+            // temporary allocation scale with the in-flight window rather than with the losses.
+            for packet in sp.sent.iter_prefix(largest_acked) {
+                let past_packet_threshold =
+                    threshold_pn.is_some_and(|threshold| packet.pn <= threshold);
+                let past_time_threshold =
+                    now.saturating_duration_since(packet.sent_at) >= loss_delay;
+                if past_packet_threshold || past_time_threshold {
+                    lost_pns.push(packet.pn);
+                    continue;
+                }
+                break;
             }
-            break;
-        }
 
-        let mut lost = Vec::with_capacity(lost_pns.len());
-        for pn in &lost_pns {
-            if let Some(packet) = sp.sent.remove(*pn) {
-                sp.retained_bytes = sp.retained_bytes.saturating_sub(packet.size);
-                lost.push(packet);
+            lost.clear();
+            lost.reserve(lost_pns.len());
+            for pn in &lost_pns {
+                if let Some(packet) = sp.sent.remove(*pn) {
+                    sp.retained_bytes = sp.retained_bytes.saturating_sub(packet.size);
+                    lost.push(packet);
+                }
             }
-        }
-        // Ascending packet numbers already yield ascending send times, so no sort is needed.
+            // Ascending packet numbers already yield ascending send times, so no sort is needed.
 
-        // Re-arm the time-threshold timer for the earliest remaining candidate (§6.1.2). Deadlines
-        // are non-decreasing in packet number, so the first usable one is the minimum.
-        sp.loss_time = sp
-            .sent
-            .iter_prefix(largest_acked)
-            .find_map(|p| p.sent_at.checked_add(loss_delay).filter(|d| *d > now));
-        lost
+            // Re-arm the time-threshold timer for the earliest remaining candidate (§6.1.2). Deadlines
+            // are non-decreasing in packet number, so the first usable one is the minimum.
+            sp.loss_time = sp
+                .sent
+                .iter_prefix(largest_acked)
+                .find_map(|p| p.sent_at.checked_add(loss_delay).filter(|d| *d > now));
+        }
+        self.lost_pn_scratch = lost_pns;
     }
 
     /// Processes an ACK frame for one packet number space (RFC 9002 §5, §6.1).
@@ -1248,8 +1264,11 @@ impl Recovery {
         let largest_in_frame =
             ranges.iter().filter_map(|(_, end)| end.checked_sub(1)).max().unwrap_or(0);
 
-        // 1. Newly acknowledged packets (bounded range walks).
-        let mut newly_acked: Vec<SentPacket> = Vec::new();
+        // 1. Newly acknowledged packets (bounded range walks). The scratch
+        //    vector is reused across ACK frames so steady-state processing
+        //    does not allocate.
+        let mut newly_acked = std::mem::take(&mut self.acked_scratch);
+        newly_acked.clear();
         {
             let sp = &mut self.spaces[space.index()];
             for (start, end) in ranges {
@@ -1325,15 +1344,17 @@ impl Recovery {
             .iter()
             .find(|packet| packet.pn == largest_in_frame)
             .map(|packet| now.saturating_duration_since(packet.sent_at));
-        self.finish_ack_loss_accounting(
+        let outcome = self.finish_ack_loss_accounting(
             space,
             largest_in_frame,
             ack_delay,
             largest_acked_packet_age,
-            newly_acked,
+            &newly_acked,
             now,
             outcome,
-        )
+        );
+        self.acked_scratch = newly_acked;
+        outcome
     }
 
     /// Steps 5-7 of ACK processing: loss detection, persistent congestion, and
@@ -1345,14 +1366,15 @@ impl Recovery {
         largest_in_frame: u64,
         ack_delay: Duration,
         largest_acked_packet_age: Option<Duration>,
-        newly_acked: Vec<SentPacket>,
+        newly_acked: &[SentPacket],
         now: Instant,
         mut outcome: AckOutcome,
     ) -> AckOutcome {
         // 5. Loss detection (RFC 9002 §6.1 packet + time threshold).
         let loss_delay = self.loss_delay();
         let packet_threshold = largest_in_frame.checked_sub(K_PACKET_THRESHOLD);
-        let lost = self.detect_lost_packets(space, largest_in_frame, now);
+        let mut lost = std::mem::take(&mut self.lost_scratch);
+        self.detect_lost_packets(space, largest_in_frame, now, &mut lost);
         let triggering_ack_packet_threshold_losses = lost
             .iter()
             .filter(|packet| packet_threshold.is_some_and(|threshold| packet.pn <= threshold))
@@ -1497,7 +1519,7 @@ impl Recovery {
         //    precede the ACK feed, preserving the previous ordering.
         let mut acked_bytes = 0usize;
         let mut cc_accounting_changed = false;
-        for pkt in &newly_acked {
+        for pkt in newly_acked {
             if pkt.in_flight {
                 if pkt.path_epoch == self.path_epoch {
                     acked_bytes = acked_bytes.saturating_add(pkt.size);
@@ -1533,6 +1555,7 @@ impl Recovery {
         }
         log::trace!("recovery.finish_ack_loss_accounting: space={:?} largest={} newly_acked={} lost={} bytes_in_flight_after={} cwnd={}",
             space, largest_in_frame, outcome.newly_acked.len(), outcome.lost.len(), self.bytes_in_flight, self.cwnd);
+        self.lost_scratch = lost;
         outcome
     }
 
@@ -1607,7 +1630,8 @@ impl Recovery {
             .min_by_key(|s| self.spaces[s.index()].loss_time);
         if let Some(space) = due_space {
             let largest_acked = self.spaces[space.index()].largest_acked.unwrap_or(0);
-            let lost = self.detect_lost_packets(space, largest_acked, now);
+            let mut lost = std::mem::take(&mut self.lost_scratch);
+            self.detect_lost_packets(space, largest_acked, now, &mut lost);
             for pkt in &lost {
                 if pkt.in_flight {
                     if pkt.path_epoch == self.path_epoch {
@@ -1624,6 +1648,7 @@ impl Recovery {
             if !lost.is_empty() {
                 self.sync_from_cc();
             }
+            self.lost_scratch = lost;
             return outcome;
         }
         // PTO firing: increment backoff and request probes (RFC 9002 §6.2.4).
