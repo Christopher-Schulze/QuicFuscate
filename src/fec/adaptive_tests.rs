@@ -280,6 +280,60 @@ fn test_pending_transition_commits_at_block_boundary() {
 // report. The fountain tier requires sustained evidence across consecutive
 // reports; a single batch may escalate to mid-tier modes but never Fountain.
 
+// ---------------------------------------------------------------------------
+// 9. Clean-link proof must de-escalate to Zero without draining sample windows
+// ---------------------------------------------------------------------------
+//
+// On datagram-dominated links, transport feedback arrives sparsely (~1 report
+// per burst of reliable packets). The mode manager's last-10 average and
+// last-4 stable-sample gate would otherwise hold a protective mode for tens
+// of seconds after the path is provably clean. Once 32+ consecutive ACKs have
+// passed without loss, the Zero downshift must follow within a few reports.
+
+#[test]
+fn test_clean_proof_deescalates_on_sparse_feedback() {
+    use qf_common::time_source::test_support::ManualTimeSource;
+    use std::time::{Duration, Instant, SystemTime};
+
+    let _lock = acquire_env_lock();
+    let _g = EnvGuard::set("QUICFUSCATE_FEC_INTERLEAVE", "0");
+    let clock = ManualTimeSource::new(Instant::now(), SystemTime::now());
+    let _time_guard = crate::time_source::install_for_test(clock.clone());
+
+    let pool = make_pool();
+    // Production config: Kalman smoothing enabled. Once the filter's process
+    // noise has decayed on a stable link, the estimate cannot drain on its own
+    // — the clean-link proof must carry the de-escalation.
+    let config = FecConfig { initial_mode: FecMode::Zero, ..FecConfig::product_default() };
+    let mut fec = AdaptiveFec::new(config);
+
+    // Escalate under sustained moderate loss (below the fountain threshold).
+    for _ in 0..80 {
+        clock.advance(Duration::from_millis(50));
+        fec.report_transport_loss(5, 4, 1, 0.20);
+    }
+    assert_ne!(fec.current_mode(), FecMode::Zero, "sustained 20% loss must leave Zero mode");
+
+    // Batched clean feedback: each report acknowledges 40 packets. The first
+    // report alone proves the link clean (streak 40 >= 32), so the mode
+    // manager must reach Zero within a couple of reports — the last-10 sample
+    // average and 4-sample stability gate would otherwise hold the protective
+    // mode for ~14 reports regardless of how quickly ACKs prove the path.
+    let mut deescalated_at = None;
+    for i in 0..8 {
+        clock.advance(Duration::from_millis(100));
+        fec.report_transport_loss(40, 40, 0, 0.0);
+        if fec.current_mode() == FecMode::Zero {
+            deescalated_at = Some(i + 1);
+            break;
+        }
+    }
+    assert!(
+        deescalated_at.is_some(),
+        "clean-link proof must de-escalate to Zero within 8 batched reports"
+    );
+}
+
 #[test]
 fn test_single_lossy_batch_never_reaches_fountain() {
     let _lock = acquire_env_lock();

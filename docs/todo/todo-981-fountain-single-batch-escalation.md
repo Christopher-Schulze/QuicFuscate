@@ -14,7 +14,7 @@ loss, 150 lossy pings, 10s settle, 250 recovery pings):
 - The transition test failed: `Auto policy did not return to Zero within the
   bounded recovery phase` (recovery ~36s).
 
-## Root cause (two defects in the estimator)
+## Root cause (three defects)
 
 1. **Fountain rescue tier armed by a single lossy batch.**
    `LossEstimator::fountain_ready` required `total_seen >= 32` — a cumulative
@@ -38,6 +38,16 @@ loss, 150 lossy pings, 10s settle, 250 recovery pings):
    the stale ~0.3-0.4 estimate, feeding fresh escalations long after the link
    recovered.
 
+3. **Zero downshift gated by sample counts on sparse feedback.**
+   `ModeManager::update` requires the last-10 average plus four consecutive
+   samples mapping to the target rank before any downshift. On
+   datagram-dominated links (MASQUE DATAGRAMs are not ACK-tracked), feedback
+   reports arrive at roughly 0.3-1/s, so draining those sample windows took
+   longer than the test's bounded recovery (~36s) even though the transport
+   had already proven the link clean (clean_ack_streak=193, estimate=0 at the
+   snapshot). The commit layer already encoded the "clean proof -> Zero now"
+   principle via `clean_zero_transition`; the decision layer did not.
+
 ## Fix
 
 `crates/qf-fec/src/loss.rs`:
@@ -58,6 +68,16 @@ loss, 150 lossy pings, 10s settle, 250 recovery pings):
   at 0.25), so a real level shift restores responsiveness instead of staying
   frozen at the `q` floor.
 
+`crates/qf-fec/src/manager.rs` + `adaptive_controller/gf16_and_config.rs`:
+
+- `ModeManager::update_with_clean_proof(loss_rate, clean_proof)` feeds the
+  estimator's `clean_link_confirmed` signal into the mode decision. While the
+  proof holds (32+ consecutive ACKs, zero loss), the Zero target is selected
+  immediately and the downshift stability gate is satisfied by the proof
+  itself — stronger evidence than 4 smoothed samples. Hysteresis for every
+  non-Zero target and every escalation path is unchanged; `update()` keeps
+  the old behaviour for non-transport callers.
+
 ## Tests
 
 - `loss::tests::single_loss_batch_does_not_arm_fountain` — clean-confirmed
@@ -76,6 +96,9 @@ loss, 150 lossy pings, 10s settle, 250 recovery pings):
 - `fec::e2e_tests::test_transport_feedback_mode_trajectory_recovers` — the real
   `report_transport_loss` path at production cadence with the 10s settle gap:
   never reaches Fountain, returns to Zero within the 40s budget.
+- `fec::adaptive_tests::test_clean_proof_deescalates_on_sparse_feedback` —
+  batched clean ACKs (40/report) de-escalate to Zero within 8 reports; fails
+  without the clean-proof bypass (sample-window gates need ~14+ reports).
 
 ## Verification
 

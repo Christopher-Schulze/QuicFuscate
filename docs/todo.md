@@ -3843,8 +3843,9 @@
 ### TODO-981 - Adaptive FEC: single lossy batch escalates to Fountain; Kalman freeze pins stale estimate
 - Detail: `docs/todo/todo-981-fountain-single-batch-escalation.md`
 - On Omega the transition test ended `mode=fountain` on a recovered link (0% loss, clean_streak=231, estimate=0): a single lossy batch latched `fountain_ready` via cumulative `total_seen` and flooded the recent window in one report; a starved Kalman `q` floor kept the stale estimate ready to re-emerge. `fountain_ready` now needs 3 consecutive qualifying reports plus a saturated recent window; per-report injection is capped at `burst_capacity/8` slots with an unbiased fractional carry; Kalman `q` recovers via a sustained-innovation boost.
-- Regressions: 4 estimator tests + 2 controller tests + the real-path trajectory test (`test_transport_feedback_mode_trajectory_recovers`, incl. settle-gap burst).
-- Local proof: qf-fec 89/89, fec 216/216, workspace 1728/1728, clippy/fmt clean. Omega transition re-run pending on rebuilt binary.
+- Second defect layer: the Zero downshift was gated by last-10-average + 4-sample stability while datagram-dominated links emit feedback at ~0.3-1/s, so de-escalation outlived the bounded recovery (~36s). `ModeManager::update_with_clean_proof` now lets the transport's clean-link proof (32+ consecutive ACKs) select Zero immediately; all non-Zero hysteresis is unchanged.
+- Regressions: 4 estimator tests + 3 controller tests (incl. `test_clean_proof_deescalates_on_sparse_feedback`, fails without the bypass) + the real-path trajectory test (`test_transport_feedback_mode_trajectory_recovers`, incl. settle-gap burst).
+- Local proof: qf-fec 89/89, fec 217/217, workspace 1728/1728, clippy/fmt clean. Omega transition re-run pending on rebuilt binary.
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.

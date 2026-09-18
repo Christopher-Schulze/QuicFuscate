@@ -126,6 +126,25 @@ impl ModeManager {
 
     /// Feed a new loss observation and return the previous (mode, window) if a switch occurred.
     pub fn update(&mut self, loss_rate: f32) -> Option<(FecMode, usize)> {
+        self.update_with_clean_proof(loss_rate, false)
+    }
+
+    /// Feed a loss observation with transport-level clean-link proof status.
+    ///
+    /// `clean_proof` is the estimator's `clean_link_confirmed` signal: 32+
+    /// consecutively acknowledged packets with zero loss in between. That is
+    /// strictly stronger evidence than the estimator's own sample window — on
+    /// datagram-dominated links feedback reports arrive sparsely, so waiting for
+    /// the last-10 average and the last-4 stable-sample gate can delay the
+    /// return to Zero by tens of seconds after the path is provably clean. When
+    /// the proof holds, the Zero target is selected immediately and the
+    /// downshift stability gate is satisfied by the proof itself. Hysteresis for
+    /// every non-Zero target and every escalation is unchanged.
+    pub fn update_with_clean_proof(
+        &mut self,
+        loss_rate: f32,
+        clean_proof: bool,
+    ) -> Option<(FecMode, usize)> {
         let loss_rate = if loss_rate.is_finite() { loss_rate.clamp(0.0, 1.0) } else { 0.0 };
         self.loss_history.push_back(loss_rate);
         if self.loss_history.len() > 100 {
@@ -140,7 +159,11 @@ impl ModeManager {
 
         let auto_gf4 = self.auto_gf4_enabled;
         let current_target = target_from_mode(self.current_mode, self.window_size);
-        let target = Self::target_for_loss(avg_loss, auto_gf4);
+        let target = if clean_proof {
+            target_from_mode(FecMode::Zero, self.window_size)
+        } else {
+            Self::target_for_loss(avg_loss, auto_gf4)
+        };
         let target_mode = mode_for_target(target, auto_gf4);
 
         let now = now_instant();
@@ -186,8 +209,11 @@ impl ModeManager {
             .count();
         let stable_ok = stable_hits >= stable_needed;
         let (_, target_window, _) = Self::params_for_target(target, self.window_size, auto_gf4);
-        let switch_ok =
-            if target_rank_value < current_rank { stable_ok } else { diff_ok || stable_ok };
+        let switch_ok = if target_rank_value < current_rank {
+            stable_ok || (clean_proof && target.family == FecBackendFamily::Zero)
+        } else {
+            diff_ok || stable_ok
+        };
         let state_changes = self.current_mode != target_mode || self.window_size != target_window;
         if state_changes && time_ok && switch_ok {
             let old_mode = self.current_mode;

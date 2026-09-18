@@ -441,10 +441,11 @@ impl AdaptiveFec {
 
     fn update_mode(&mut self, estimated_loss: f32, diagnostics_enabled: bool) {
         let estimated_loss = self.policy_loss_estimate(estimated_loss);
+        let clean_proof = self.loss_estimator.clean_link_confirmed();
         let (prev, current_mode, current_window) =
             Self::run_feedback_phase(diagnostics_enabled, "mode-manager-update", || {
                 let mut mode_mgr = self.mode_manager.lock();
-                let prev = mode_mgr.update(estimated_loss);
+                let prev = mode_mgr.update_with_clean_proof(estimated_loss, clean_proof);
                 let cur_mode = mode_mgr.current_mode();
                 let cur_window = mode_mgr.current_window();
                 (prev, cur_mode, cur_window)
