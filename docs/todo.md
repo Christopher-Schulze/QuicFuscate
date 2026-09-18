@@ -3789,3 +3789,8 @@
 - Per-byte `vec![vec![0;n];m]` matrix and rhs allocs moved into `map_init` worker scratch (min_len ~1200 allocs -> ~worker count); `eq_coeff_lookup` built O(m*k) via sorted-unknowns binary search instead of O(m*n*k).
 - Local proof: `cargo test -p qf-fec` (85/85), `fec_wiedemann_allocations` bench baseline.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
+
+### TODO-972 - PathScheduler per-packet Vec allocs (latent multipath flaw)
+- Detail: `docs/todo/todo-972-path-scheduler-allocs.md`
+- `select_path` built `validated_path_ids()` (Vec alloc) plus a second `Vec<(PathId, u64)>` in the weighted branch per call; rewritten to iterate `paths()` directly with zero allocations. The scheduler is currently dormant (no production caller), so this removes the per-packet alloc pattern before multipath is wired.
+- Local proof: `cargo test -p qf-transport-path` (27/27), clippy clean, fmt clean.

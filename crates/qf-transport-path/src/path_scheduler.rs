@@ -61,80 +61,69 @@ impl PathScheduler {
     /// accumulator so that, over many calls, traffic is distributed in
     /// proportion to each path's congestion window.
     pub fn select_path(&self, path_manager: &PathManager, packet_size: usize) -> PathId {
-        let validated: Vec<PathId> = path_manager.validated_path_ids();
-        if validated.is_empty() {
+        // Iterate `paths()` directly - building `validated_path_ids()` here
+        // would allocate a Vec per call on the per-packet send path.
+        let paths = path_manager.paths();
+        let mut validated_count = 0usize;
+        let mut first_validated = PRIMARY_PATH_ID;
+        for p in paths {
+            if p.validated {
+                if validated_count == 0 {
+                    first_validated = p.id;
+                }
+                validated_count += 1;
+            }
+        }
+        if validated_count == 0 {
             return PRIMARY_PATH_ID;
         }
-        if validated.len() == 1 {
-            return validated[0];
+        if validated_count == 1 {
+            return first_validated;
         }
 
         match self.strategy {
-            ScheduleStrategy::RoundRobin => self.select_round_robin(&validated),
-            ScheduleStrategy::LowestLatency => self.select_lowest_latency(path_manager, &validated),
-            ScheduleStrategy::WeightedProportional => {
-                self.select_weighted_proportional(path_manager, &validated, packet_size)
+            ScheduleStrategy::RoundRobin => {
+                let idx = self.rr_cursor.get() % validated_count;
+                self.rr_cursor.set(self.rr_cursor.get().wrapping_add(1));
+                paths
+                    .iter()
+                    .filter(|p| p.validated)
+                    .nth(idx)
+                    .map(|p| p.id)
+                    .unwrap_or(first_validated)
             }
-        }
-    }
-
-    #[inline]
-    fn select_round_robin(&self, validated: &[PathId]) -> PathId {
-        let idx = self.rr_cursor.get() % validated.len();
-        self.rr_cursor.set(self.rr_cursor.get().wrapping_add(1));
-        validated[idx]
-    }
-
-    #[inline]
-    fn select_lowest_latency(&self, path_manager: &PathManager, validated: &[PathId]) -> PathId {
-        let mut best_id = validated[0];
-        let mut best_rtt =
-            path_manager.path(best_id).map(|p| p.rtt).unwrap_or(std::time::Duration::MAX);
-        for &id in &validated[1..] {
-            if let Some(p) = path_manager.path(id) {
-                if p.rtt < best_rtt {
-                    best_rtt = p.rtt;
-                    best_id = id;
+            ScheduleStrategy::LowestLatency => {
+                let mut best_id = first_validated;
+                let mut best_rtt = std::time::Duration::MAX;
+                for p in paths.iter().filter(|p| p.validated) {
+                    if p.rtt < best_rtt {
+                        best_rtt = p.rtt;
+                        best_id = p.id;
+                    }
                 }
+                best_id
+            }
+            ScheduleStrategy::WeightedProportional => {
+                // Treat zero-cwnd paths as weight 1 so they are never starved.
+                let total: u64 =
+                    paths.iter().filter(|p| p.validated).map(|p| (p.cwnd as u64).max(1)).sum();
+
+                // Advance the accumulator by the packet size, modulo total.
+                let step = packet_size.max(1) as u64;
+                let acc = (self.weighted_cursor.get() + step) % total.max(1);
+                self.weighted_cursor.set(acc);
+
+                let mut remaining = acc;
+                for p in paths.iter().filter(|p| p.validated) {
+                    let w = (p.cwnd as u64).max(1);
+                    if remaining < w {
+                        return p.id;
+                    }
+                    remaining -= w;
+                }
+                first_validated
             }
         }
-        best_id
-    }
-
-    #[inline]
-    fn select_weighted_proportional(
-        &self,
-        path_manager: &PathManager,
-        validated: &[PathId],
-        packet_size: usize,
-    ) -> PathId {
-        // Build (id, cwnd) pairs for validated paths; treat zero-cwnd paths as
-        // weight 1 so they are never starved entirely.
-        let weights: Vec<(PathId, u64)> = validated
-            .iter()
-            .map(|&id| {
-                let w = path_manager.path(id).map(|p| p.cwnd as u64).unwrap_or(0).max(1);
-                (id, w)
-            })
-            .collect();
-        let total: u64 = weights.iter().map(|(_, w)| w).sum();
-
-        // Advance the accumulator by the packet size, modulo total weight.
-        let step = packet_size.max(1) as u64;
-        let acc = (self.weighted_cursor.get() + step) % total.max(1);
-        self.weighted_cursor.set(acc);
-
-        // Walk the weighted buckets; the path whose bucket contains the
-        // accumulator is selected.
-        let mut remaining = acc;
-        for &(id, w) in &weights {
-            if remaining < w {
-                return id;
-            }
-            remaining -= w;
-        }
-        // Fallback (should be unreachable due to modulo above).
-        validated[0]
     }
 }
 
