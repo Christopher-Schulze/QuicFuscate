@@ -52,4 +52,10 @@ so reinstalling is safe and mirrors the VN-restart contract.
   the fix (`sent_packets` stays 0 after `set_environment_snapshot`) and passes
   with it.
 - Full lib suite green.
-- Omega re-verification of the netem adversity harness pending after deploy.
+- Omega re-verified on the release binary: `tun-e2e-fec-netem-adversity.sh`
+  25/25 PASS with live feedback — e.g. `recovery-lossy: observed=126 lost=10
+  switches=1` (14% tunnel loss under 20% injection while the controller was
+  still ramping) and `recovery-recovered: observed=126 lost=12 repairs=17
+  switches=2`, tunnel loss back to 0%. Direct 20% netem probe: server reached
+  `mode=extreme` (27.9% observed loss), client `mode=strong` (29.7%), both via
+  `switch_reason=adaptive`.
