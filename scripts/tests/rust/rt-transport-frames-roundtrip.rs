@@ -74,8 +74,11 @@ fn datagram_header_requires_payload() {
 
 #[test]
 fn ack_roundtrip_canonicalizes_ranges() {
-    let frame =
-        Frame::Ack { ack_delay: 5, ranges: vec![(10, 12), (1, 2), (12, 13)], ecn_counts: None };
+    let frame = Frame::Ack {
+        ack_delay: 5,
+        ranges: smallvec::smallvec![(10, 12), (1, 2), (12, 13)],
+        ecn_counts: None,
+    };
 
     let len = wire_len(&frame).expect("valid ACK wire length");
     let mut buf = vec![0u8; len];
@@ -86,7 +89,7 @@ fn ack_roundtrip_canonicalizes_ranges() {
     match parsed {
         Frame::Ack { ranges, ecn_counts, .. } => {
             assert!(ecn_counts.is_none());
-            assert_eq!(ranges, vec![(1, 2), (10, 13)]);
+            assert_eq!(ranges.as_slice(), vec![(1, 2), (10, 13)]);
         }
         _ => panic!("expected ACK frame"),
     }
@@ -94,7 +97,7 @@ fn ack_roundtrip_canonicalizes_ranges() {
 
 #[test]
 fn ack_in_zero_rtt_is_invalid() {
-    let frame = Frame::Ack { ack_delay: 1, ranges: vec![(1, 2)], ecn_counts: None };
+    let frame = Frame::Ack { ack_delay: 1, ranges: smallvec::smallvec![(1, 2)], ecn_counts: None };
     let len = wire_len(&frame).expect("valid ACK wire length");
     let mut buf = vec![0u8; len];
     let used = to_bytes(&frame, &mut buf).expect("to_bytes");
@@ -106,7 +109,12 @@ fn ack_in_zero_rtt_is_invalid() {
 
 #[test]
 fn malformed_ack_ranges_are_rejected_before_serialization() {
-    for ranges in [vec![], vec![(5, 5)], vec![(8, 3)], vec![(1, 2), (7, 7)]] {
+    for ranges in [
+        smallvec::smallvec![],
+        smallvec::smallvec![(5, 5)],
+        smallvec::smallvec![(8, 3)],
+        smallvec::smallvec![(1, 2), (7, 7)],
+    ] {
         let frame = Frame::Ack { ack_delay: 0, ranges, ecn_counts: None };
         let mut out = [0xA5u8; 64];
 

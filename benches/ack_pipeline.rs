@@ -22,15 +22,7 @@ const CWND: usize = 4 * 1024 * 1024;
 fn seeded_recovery(in_flight: u64, now: Instant) -> Recovery {
     let mut rec = Recovery::new(CWND, MSS);
     for pn in 0..in_flight {
-        rec.on_packet_sent_in_space(
-            PacketSpace::Application,
-            pn,
-            MSS,
-            true,
-            true,
-            None,
-            now,
-        );
+        rec.on_packet_sent_in_space(PacketSpace::Application, pn, MSS, true, true, None, now);
     }
     rec
 }
@@ -134,9 +126,8 @@ fn bench_frame_ack_parse(c: &mut Criterion) {
         let len = frames::to_bytes(&frame, &mut wire).expect("ack encode");
         g.bench_with_input(BenchmarkId::from_parameter(blocks), &len, |b, &len| {
             b.iter(|| {
-                let (parsed, used) =
-                    frames::from_bytes(black_box(&wire[..len]), PacketType::Short)
-                        .expect("ack decode");
+                let (parsed, used) = frames::from_bytes(black_box(&wire[..len]), PacketType::Short)
+                    .expect("ack decode");
                 black_box((&parsed, used));
             });
         });

@@ -283,8 +283,11 @@ fn data_aead_force_morus_roundtrip() {
 
 #[test]
 fn replay_attack_duplicate_ack_ranges_collapsed() {
-    let frame =
-        Frame::Ack { ack_delay: 2, ranges: vec![(10, 12), (1, 2), (12, 13)], ecn_counts: None };
+    let frame = Frame::Ack {
+        ack_delay: 2,
+        ranges: smallvec::smallvec![(10, 12), (1, 2), (12, 13)],
+        ecn_counts: None,
+    };
     let len = wire_len(&frame).expect("valid ACK wire length");
     let mut buf = vec![0u8; len];
     let used = to_bytes(&frame, &mut buf).expect("to_bytes");
@@ -292,7 +295,7 @@ fn replay_attack_duplicate_ack_ranges_collapsed() {
     let (decoded, _) = from_bytes(&buf, PacketType::Short).expect("from_bytes");
     match decoded {
         Frame::Ack { ranges, .. } => {
-            assert_eq!(ranges, vec![(1, 2), (10, 13)]);
+            assert_eq!(ranges.as_slice(), vec![(1, 2), (10, 13)]);
         }
         _ => panic!("unexpected frame"),
     }
