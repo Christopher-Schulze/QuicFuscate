@@ -283,6 +283,11 @@ pub struct LTDecoder {
     /// replaces the former per-symbol HashSet: degrees stay small under the
     /// robust soliton distribution, so linear membership beats table overhead.
     symbol_degrees: HashMap<u64, Vec<usize>>,
+    /// Reverse index: `adjacency[source_idx]` lists the retained encoded
+    /// symbols whose degree set contains `source_idx`. Mirrors
+    /// `symbol_degrees` so propagation touches only affected symbols
+    /// instead of scanning every retained degree list.
+    adjacency: Vec<Vec<u64>>,
     degree_one_queue: VecDeque<u64>,
     queued_symbol_ids: HashSet<u64>,
     symbol_order: VecDeque<u64>,
@@ -362,6 +367,7 @@ impl LTDecoder {
             received_symbols: HashMap::new(),
             decoded_symbols: vec![None; k],
             symbol_degrees: HashMap::new(),
+            adjacency: vec![Vec::new(); k],
             degree_one_queue: VecDeque::new(),
             queued_symbol_ids: HashSet::new(),
             symbol_order: VecDeque::new(),
@@ -442,7 +448,16 @@ impl LTDecoder {
             self.retained_payload_bytes = self.retained_payload_bytes.saturating_sub(data.len());
             self.recycle_payload(data);
         }
-        self.symbol_degrees.remove(&symbol_id);
+        if let Some(indices) = self.symbol_degrees.remove(&symbol_id) {
+            for &idx in &indices {
+                if idx < self.k {
+                    let list = &mut self.adjacency[idx];
+                    if let Some(pos) = list.iter().position(|&id| id == symbol_id) {
+                        list.swap_remove(pos);
+                    }
+                }
+            }
+        }
         // The parked order entry turns stale; `evict_oldest_symbol` discards
         // it on pop (`contains_key` fails) so no O(queue) retain is needed.
         self.symbol_order_stale = self.symbol_order_stale.saturating_add(1);
@@ -620,6 +635,9 @@ impl LTDecoder {
             return false;
         }
         let degree_one = indices.len() == 1;
+        for &index in &indices {
+            self.adjacency[index].push(symbol_id);
+        }
         self.symbol_degrees.insert(symbol_id, indices);
 
         if degree_one {
@@ -715,16 +733,16 @@ impl LTDecoder {
         }
         let mut to_update = std::mem::take(&mut self.propagation_scratch);
 
-        for (&symbol_id, indices) in &self.symbol_degrees {
+        // The reverse index names exactly the encoded symbols referencing
+        // `decoded_idx` — no scan over every retained degree list.
+        for &symbol_id in &self.adjacency[decoded_idx] {
             if self.propagation_work >= self.max_propagation_work {
                 self.propagation_budget_exhausted = true;
                 break;
             }
             self.propagation_work = self.propagation_work.saturating_add(1);
             telemetry::FEC_FOUNTAIN_DECODER_PROPAGATION_WORK.inc();
-            if indices.contains(&decoded_idx) {
-                to_update.push(symbol_id);
-            }
+            to_update.push(symbol_id);
         }
 
         for &symbol_id in &to_update {
@@ -753,6 +771,9 @@ impl LTDecoder {
         }
         to_update.clear();
         self.propagation_scratch = to_update;
+        // Every referencing symbol dropped `decoded_idx` from its degree set
+        // above, so the reverse-index bucket is spent.
+        self.adjacency[decoded_idx].clear();
         self.decoded_symbols[decoded_idx] = Some(decoded_data);
         !self.propagation_budget_exhausted
     }
