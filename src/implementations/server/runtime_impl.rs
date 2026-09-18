@@ -23,6 +23,21 @@ fn standalone_housekeeping_delay(live: &ServerLiveRuntime) -> Duration {
         {
             return SERVER_HOUSEKEEPING_ACTIVE;
         }
+        // MASQUE downlink/relay queues are drained by housekeeping and by
+        // inbound datagram processing only. A reply queued right after the
+        // last drain would otherwise wait a full idle interval, adding up to
+        // SERVER_HOUSEKEEPING_IDLE to every tunneled round trip.
+        if connection
+            .masque_downlink_queue()
+            .map(|queue| queue.lock().map(|q| !q.is_empty()).unwrap_or(true))
+            .unwrap_or(false)
+            || connection
+                .masque_relay_response_queue()
+                .map(|queue| queue.lock().map(|q| !q.is_empty()).unwrap_or(true))
+                .unwrap_or(false)
+        {
+            return SERVER_HOUSEKEEPING_ACTIVE;
+        }
         if let Some(deadline) = connection.next_send_deadline() {
             delay = delay.min(deadline.saturating_duration_since(now));
         }

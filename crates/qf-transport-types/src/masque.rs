@@ -103,6 +103,11 @@ impl MasqueRelayResponseQueue {
         Some(response)
     }
 
+    /// Returns true when no response is queued.
+    pub fn is_empty(&self) -> bool {
+        self.responses.is_empty()
+    }
+
     pub fn discard_all(&mut self) -> (usize, usize) {
         let packets = self.responses.len();
         let bytes = self.bytes;
