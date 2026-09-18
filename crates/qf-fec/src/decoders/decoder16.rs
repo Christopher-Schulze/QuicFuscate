@@ -199,7 +199,10 @@ impl Decoder16 {
     }
 
     fn try_solve_equation(&mut self, eq: &mut Equation16) -> bool {
-        // Subtract known sources from equation data using GF(2^16) operations
+        // Subtract known sources and count remaining unknowns in one pass:
+        // a coefficient that survives subtraction is exactly an unknown.
+        let mut last: Option<(usize, u64, u16)> = None;
+        let mut multiple_unknowns = false;
         for (j, coeff) in eq.coeffs.iter_mut().enumerate().take(self.k) {
             if *coeff == 0 {
                 continue;
@@ -215,20 +218,14 @@ impl Decoder16 {
                     );
                 }
                 *coeff = 0;
+            } else if last.is_some() {
+                multiple_unknowns = true;
+            } else {
+                last = Some((j, sid, *coeff));
             }
         }
-        // Identify single unknown
-        let mut last: Option<(usize, u64, u16)> = None;
-        for (j, &c) in eq.coeffs.iter().enumerate().take(self.k) {
-            if c != 0 {
-                let sid = self.source_id_for(eq.base_id, j);
-                if !self.known.contains_key(&sid) {
-                    if last.is_some() {
-                        return false;
-                    }
-                    last = Some((j, sid, c));
-                }
-            }
+        if multiple_unknowns {
+            return false;
         }
         if let Some((_j, sid, cj)) = last {
             if self.known.contains_key(&sid) {
