@@ -1291,7 +1291,9 @@ impl Connection {
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn masque_try_recv_datagram(&mut self) -> Option<(u64, Vec<u8>)> {
         if let Some(mut h3c) = self.h3.take() {
-            let out = h3c.try_recv_masque_datagram(self);
+            let mut payload = Vec::new();
+            let out =
+                h3c.try_recv_masque_datagram(self, &mut payload).map(|flow_id| (flow_id, payload));
             self.h3 = Some(h3c);
             out
         } else {

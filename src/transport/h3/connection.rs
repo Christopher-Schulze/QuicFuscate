@@ -100,6 +100,9 @@ pub struct Connection {
     stream_recv_buffer: Vec<u8>,
     /// Receive buffer sized to the transport's configured UDP payload ceiling.
     masque_recv_buffer: Vec<u8>,
+    /// Reused scratch for flow-id varint + payload framing so
+    /// `send_masque_datagram` does not allocate per datagram.
+    masque_send_scratch: Vec<u8>,
 }
 
 /// Stream state tracking
@@ -290,6 +293,7 @@ impl Connection {
             next_push_id: 0,
             stream_recv_buffer: vec![0u8; STREAM_RECV_BUFFER_SIZE],
             masque_recv_buffer: vec![0u8; masque_buffer_len],
+            masque_send_scratch: Vec::new(),
         };
 
         // Try to emit the mandatory control-stream prologue immediately. A connection can be

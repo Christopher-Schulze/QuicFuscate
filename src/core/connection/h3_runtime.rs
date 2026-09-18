@@ -616,7 +616,8 @@ impl QuicFuscateConnection {
             || context.bindings.masque_cb.is_some()
             || context.bindings.masque_relay_cb.is_some();
         if stealth_manager.masque_datagram_enabled() || has_sink {
-            while let Some((flow_id, mut payload)) = h3.try_recv_masque_datagram(conn) {
+            let mut payload = Vec::new();
+            while let Some(flow_id) = h3.try_recv_masque_datagram(conn, &mut payload) {
                 let binding =
                     context.local_flows.get(&flow_id).or_else(|| context.peer_flows.get(&flow_id));
                 Self::dispatch_bound_masque_payload(

@@ -688,24 +688,31 @@ impl Connection {
         udp_payload: &[u8],
     ) -> Result<(), Error> {
         let flow_id = *self.masque_flow.get(&stream_id).unwrap_or(&0);
-        let mut buf = Vec::with_capacity(9 + udp_payload.len());
-        Self::encode_varint(flow_id, &mut buf);
+        let buf = &mut self.masque_send_scratch;
+        buf.clear();
+        Self::encode_varint(flow_id, buf);
         buf.extend_from_slice(udp_payload);
-        conn.dgram_send(&buf).map_err(|e| match e {
+        conn.dgram_send(buf).map_err(|e| match e {
             crate::error::ConnectionError::DgramQueueFull => Error::DgramQueueFull,
             _ => Error::InternalError,
         })
     }
 
-    /// Try to receive one MASQUE datagram; returns (flow_id, payload)
+    /// Try to receive one MASQUE datagram into `out`; returns the Flow-ID.
+    ///
+    /// `out` is cleared and extended with the payload — callers reuse one
+    /// buffer across the drain loop instead of allocating per datagram.
     pub fn try_recv_masque_datagram(
         &mut self,
         conn: &mut super::super::super::Connection,
-    ) -> Option<(u64, Vec<u8>)> {
+        out: &mut Vec<u8>,
+    ) -> Option<u64> {
         match conn.dgram_recv(&mut self.masque_recv_buffer[..]) {
             Ok(len) if len > 0 => {
                 if let Ok((flow_id, used)) = Self::decode_varint(&self.masque_recv_buffer[..len]) {
-                    return Some((flow_id, self.masque_recv_buffer[used..len].to_vec()));
+                    out.clear();
+                    out.extend_from_slice(&self.masque_recv_buffer[used..len]);
+                    return Some(flow_id);
                 }
                 None
             }
