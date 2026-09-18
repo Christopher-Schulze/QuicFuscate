@@ -3777,3 +3777,9 @@
 - `try_solve_equation` in decoder8 and decoder16 merged subtract and unknown-count passes into one O(k) scan. `SmallVec` coeff rows were tested and reverted: rotating ~280B structs through the equation queue measured worse than the heap alloc.
 - Local proof: `cargo test -p qf-fec` (85/85); `fec_peeling` bench neutral (p=0.47) at degree-2, halves scan work at higher degrees.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
+
+### TODO-970 - Gaussian elimination hot path acceleration
+- Detail: `docs/todo/todo-970-gaussian-hot-path.md`
+- Matrix build O(m*u*k) -> O(m*k) via sorted-unknowns binary search; RHS build O(min_len*k) scalar -> O(min_len*nnz) SIMD; per-row `yb[row]` clones replaced by `split_at_mut`; RHS row updates switched to `gf_mul_scalar_slice`.
+- Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
+- Omega proof: qf-fec 85/85 on aarch64 Linux.
