@@ -311,7 +311,7 @@ pub(super) fn drain_pending_tun_downlinks(
                 );
                 continue;
             };
-            connection.send_masque_downlink(&entry.packet)
+            connection.send_masque_downlink(entry.packet.as_slice())
         };
         match send_result {
             Ok(()) => {
@@ -362,7 +362,13 @@ pub(super) fn enqueue_pending_tun_downlink(
 ) -> Result<(), PendingTunDownlinkReject> {
     enqueue_pending_tun_downlink_with_accounting(
         pending,
-        PendingTunDownlink { target, session_id, packet, queued_at, bandwidth_accounted: false },
+        PendingTunDownlink {
+            target,
+            session_id,
+            packet: PendingTunPacket::from_vec(packet),
+            queued_at,
+            bandwidth_accounted: false,
+        },
         weight,
         PendingTunDownlinkAdmission::TransportBackpressure,
         metrics,
@@ -374,7 +380,7 @@ pub(super) fn enqueue_scheduled_tun_downlink(
     target: SocketAddr,
     session_id: SessionId,
     weight: u16,
-    packet: Vec<u8>,
+    packet: PendingTunPacket,
     queued_at: Instant,
     metrics: &Metrics,
 ) -> Result<(), PendingTunDownlinkReject> {
@@ -639,9 +645,26 @@ fn flush_tun_downlink_queue(
     Ok(())
 }
 
+/// Retain the frame's pool block for a pending-queue entry. The first enqueue
+/// converts the `TunPacket` into a `PendingTunPacket::Shared`; subsequent
+/// targets get an Arc clone of the same block instead of another copy.
+fn retain_tun_frame(
+    packet: &mut Option<crate::interface::TunPacket>,
+    shared_frame: &mut Option<PendingTunPacket>,
+) -> PendingTunPacket {
+    if let Some(shared) = shared_frame.as_ref() {
+        return shared.clone();
+    }
+    let pending = PendingTunPacket::from_tun_packet(
+        packet.take().expect("TUN frame owned until first enqueue"),
+    );
+    *shared_frame = Some(pending.clone());
+    pending
+}
+
 fn process_server_tun_packet(
     live: &mut ServerLiveRuntime,
-    packet: &[u8],
+    packet: crate::interface::TunPacket,
     out: &mut [u8],
     socket: &UdpSocket,
     metrics: &Metrics,
@@ -654,29 +677,30 @@ fn process_server_tun_packet(
         ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
         ipv6: live.server_tun_ipv6,
     };
+    let packet_slice: &[u8] = packet.as_slice();
     let source_profile =
-        source_fingerprint_profile(&live.live_state, packet).unwrap_or(fingerprint_profile);
-    if handle_local_tun_packet(packet, tun, server_ips, source_profile, metrics)? {
+        source_fingerprint_profile(&live.live_state, packet_slice).unwrap_or(fingerprint_profile);
+    if handle_local_tun_packet(packet_slice, tun, server_ips, source_profile, metrics)? {
         return Ok(());
     }
 
     let policy = &live.live_state.domain.shared.forwarding_policy;
-    let route = policy.classify_downlink(packet, server_ips.ipv4, server_ips.ipv6);
+    let route = policy.classify_downlink(packet_slice, server_ips.ipv4, server_ips.ipv6);
     log::debug!(
         "process_server_tun_packet: {}B route={:?} assigned_count={}",
-        packet.len(),
+        packet_slice.len(),
         route,
         policy.assigned_address_count()
     );
     let expired = matches!(route, DownlinkRoute::Unicast { .. })
-        && match packet.first().map(|byte| byte >> 4) {
-            Some(4) => packet.get(8).is_some_and(|ttl| *ttl == 0),
-            Some(6) => packet.get(7).is_some_and(|hop_limit| *hop_limit == 0),
+        && match packet_slice.first().map(|byte| byte >> 4) {
+            Some(4) => packet_slice.get(8).is_some_and(|ttl| *ttl == 0),
+            Some(6) => packet_slice.get(7).is_some_and(|hop_limit| *hop_limit == 0),
             _ => false,
         };
     if expired {
         write_downlink_error(
-            packet,
+            packet_slice,
             tun,
             server_ips,
             source_profile,
@@ -719,7 +743,7 @@ fn process_server_tun_packet(
         DownlinkRoute::Unknown { .. } => {
             drop(sessions);
             write_downlink_error(
-                packet,
+                packet_slice,
                 tun,
                 server_ips,
                 source_profile,
@@ -742,16 +766,25 @@ fn process_server_tun_packet(
         live.live_state.clients.len()
     );
     let mut direct_send_targets = smallvec::SmallVec::<[SocketAddr; 4]>::new();
+    // The frame stays owned until the first enqueue retains it; direct sends
+    // never pay for retention and additional queued targets share the block
+    // via an Arc bump instead of copying the frame again.
+    let mut packet = Some(packet);
+    let mut shared_frame: Option<PendingTunPacket> = None;
     for (target, session_id) in targets {
         let Some(connection) = live.live_state.clients.get(&target) else {
             log::debug!("process_server_tun_packet: no connection for target {}", target);
             continue;
         };
+        let frame: &[u8] = match &shared_frame {
+            Some(shared) => shared.as_slice(),
+            None => packet.as_ref().expect("TUN frame owned until first enqueue").as_slice(),
+        };
         let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
-        if packet.len() > effective_mtu {
+        if frame.len() > effective_mtu {
             if matches!(route, DownlinkRoute::Unicast { .. }) {
                 write_downlink_error(
-                    packet,
+                    frame,
                     tun,
                     server_ips,
                     source_profile,
@@ -773,30 +806,31 @@ fn process_server_tun_packet(
         let decision = if requires_scheduler {
             None
         } else {
-            Some(sessions.check_bandwidth(session_id, BandwidthDirection::Downlink, packet.len()))
+            Some(sessions.check_bandwidth(session_id, BandwidthDirection::Downlink, frame.len()))
         };
         if let Some(decision) = decision {
-            metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, packet.len());
+            metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, frame.len());
             match decision {
                 BandwidthDecision::Allowed => {
                     let send_result = live
                         .live_state
                         .clients
                         .get_mut(&target)
-                        .map(|connection| connection.send_masque_downlink(packet));
+                        .map(|connection| connection.send_masque_downlink(frame));
                     match send_result {
                         Some(Ok(())) => {
-                            metrics.record_bandwidth_scheduler_delivery(packet.len());
+                            metrics.record_bandwidth_scheduler_delivery(frame.len());
                             direct_send_targets.push(target);
                             continue;
                         }
                         Some(Err(crate::error::ConnectionError::DgramQueueFull)) => {
+                            let pending_packet = retain_tun_frame(&mut packet, &mut shared_frame);
                             if let Err(reject) = enqueue_pending_tun_downlink_with_accounting(
                                 &mut live.live_state.pending_tun_downlinks,
                                 PendingTunDownlink {
                                     target,
                                     session_id,
-                                    packet: packet.to_vec(),
+                                    packet: pending_packet,
                                     queued_at: live.live_state.clock.now(),
                                     bandwidth_accounted: true,
                                 },
@@ -838,7 +872,7 @@ fn process_server_tun_packet(
             target,
             session_id,
             weight,
-            packet.to_vec(),
+            retain_tun_frame(&mut packet, &mut shared_frame),
             live.live_state.clock.now(),
             metrics,
         );
@@ -883,14 +917,9 @@ pub(super) fn drain_server_tun_packets(
     for _ in 0..32 {
         let result = tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv);
         match result {
-            Some(Ok(packet)) => process_server_tun_packet(
-                live,
-                packet.as_slice(),
-                out,
-                socket,
-                metrics,
-                fingerprint_profile,
-            )?,
+            Some(Ok(packet)) => {
+                process_server_tun_packet(live, packet, out, socket, metrics, fingerprint_profile)?
+            }
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Ok(false),
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
                 *tun_rx = None;
@@ -913,14 +942,7 @@ pub(super) fn drain_server_tun_packets(
 
     match tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv) {
         Some(Ok(packet)) => {
-            process_server_tun_packet(
-                live,
-                packet.as_slice(),
-                out,
-                socket,
-                metrics,
-                fingerprint_profile,
-            )?;
+            process_server_tun_packet(live, packet, out, socket, metrics, fingerprint_profile)?;
             Ok(true)
         }
         Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
@@ -999,7 +1021,7 @@ mod scheduled_tun_telemetry_tests {
             target,
             SessionId::from_u64(1),
             1,
-            vec![1, 2, 3],
+            PendingTunPacket::from_vec(vec![1, 2, 3]),
             Instant::now(),
             &metrics,
         )

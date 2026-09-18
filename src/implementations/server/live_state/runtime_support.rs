@@ -1,10 +1,67 @@
 use super::*;
 
+/// Payload retained by a pending TUN downlink entry.
+///
+/// `Owned` covers sources that already hold heap bytes (client fan-out,
+/// tests). `Shared` retains the TUN reader's pool block behind an
+/// `Arc` — enqueuing the same frame for additional DRR targets is an Arc
+/// bump instead of a `to_vec` copy, and the block returns to its memory
+/// pool when the last queued clone drops.
+pub(in crate::implementations::server) enum PendingTunPacket {
+    Owned(Vec<u8>),
+    Shared(qf_fec::SharedFecBuffer, usize),
+}
+
+impl std::fmt::Debug for PendingTunPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(buf) => f.debug_tuple("Owned").field(&buf.len()).finish(),
+            Self::Shared(_, len) => f.debug_tuple("Shared").field(len).finish(),
+        }
+    }
+}
+
+impl PendingTunPacket {
+    pub(in crate::implementations::server) fn from_vec(packet: Vec<u8>) -> Self {
+        Self::Owned(packet)
+    }
+
+    pub(in crate::implementations::server) fn from_tun_packet(
+        packet: crate::interface::TunPacket,
+    ) -> Self {
+        let len = packet.len();
+        Self::Shared(qf_fec::SharedFecBuffer::from_pooled_block(packet.into_block()), len)
+    }
+
+    pub(in crate::implementations::server) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(buf) => buf.as_slice(),
+            Self::Shared(buf, len) => buf.bytes(*len),
+        }
+    }
+
+    pub(in crate::implementations::server) fn len(&self) -> usize {
+        match self {
+            Self::Owned(buf) => buf.len(),
+            Self::Shared(_, len) => *len,
+        }
+    }
+}
+
+impl Clone for PendingTunPacket {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Owned(buf) => Self::Owned(buf.clone()),
+            Self::Shared(buf, len) => Self::Shared(buf.clone(), *len),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(in crate::implementations::server) struct PendingTunDownlink {
     pub(in crate::implementations::server) target: SocketAddr,
     pub(in crate::implementations::server) session_id: SessionId,
-    pub(in crate::implementations::server) packet: Vec<u8>,
+    pub(in crate::implementations::server) packet: PendingTunPacket,
     pub(in crate::implementations::server) queued_at: Instant,
     pub(in crate::implementations::server) bandwidth_accounted: bool,
 }
@@ -149,7 +206,14 @@ impl PendingTunDownlinks {
         packet: Vec<u8>,
         queued_at: Instant,
     ) -> Result<(), PendingTunDownlinkReject> {
-        self.enqueue_with_accounting(target, session_id, weight, packet, queued_at, false)
+        self.enqueue_with_accounting(
+            target,
+            session_id,
+            weight,
+            PendingTunPacket::from_vec(packet),
+            queued_at,
+            false,
+        )
     }
 
     pub(in crate::implementations::server) fn enqueue_with_accounting(
@@ -157,7 +221,7 @@ impl PendingTunDownlinks {
         target: SocketAddr,
         session_id: SessionId,
         weight: u16,
-        packet: Vec<u8>,
+        packet: PendingTunPacket,
         queued_at: Instant,
         bandwidth_accounted: bool,
     ) -> Result<(), PendingTunDownlinkReject> {

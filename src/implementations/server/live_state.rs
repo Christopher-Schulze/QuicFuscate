@@ -816,7 +816,7 @@ impl LiveServerState {
                     target,
                     session_id,
                     weight,
-                    fanout.packet.clone(),
+                    PendingTunPacket::from_vec(fanout.packet.clone()),
                     self.clock.now(),
                     metrics,
                 )

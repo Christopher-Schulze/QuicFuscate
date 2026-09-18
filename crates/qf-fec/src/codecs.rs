@@ -34,6 +34,19 @@ impl SharedFecBuffer {
         Self { inner: Arc::new(SharedFecBufferInner { buf: Some(buf), pool }) }
     }
 
+    /// Adopt the checked-out block of a `PooledBlock` as shared storage.
+    ///
+    /// Lets non-FEC owners (e.g. queued TUN downlink frames) retain the pool
+    /// block behind an `Arc` instead of copying it out. The guard's pool handle
+    /// is cloned once; the block is returned to that pool when the last
+    /// `SharedFecBuffer` clone drops. A guard whose block was already taken
+    /// yields an empty buffer (unreachable for blocks that were never taken).
+    #[doc(hidden)]
+    pub fn from_pooled_block(mut block: PooledBlock) -> Self {
+        let buf = block.take_block();
+        Self { inner: Arc::new(SharedFecBufferInner { buf, pool: block.pool() }) }
+    }
+
     #[doc(hidden)]
     pub fn bytes(&self, len: usize) -> &[u8] {
         self.inner.buf.as_deref().map_or(&[], |buf| &buf[..len.min(buf.len())])

@@ -295,6 +295,17 @@ impl TunPacket {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Consume the packet and return the owning pool block so a downstream
+    /// owner (e.g. the pending TUN downlink queue) can retain it without a copy.
+    pub fn into_block(self) -> PooledBlock {
+        self.block
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(block: PooledBlock, len: usize) -> io::Result<Self> {
+        Self::new(block, len)
+    }
 }
 
 /// Application configuration module

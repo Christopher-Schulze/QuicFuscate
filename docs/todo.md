@@ -122,7 +122,8 @@
 - Detail: `docs/todo/todo-941-tun-uplink-single-guard.md`
 
 ### TODO-942 - TUN downlink backpressure: `packet.to_vec()` per queued packet → retain pooled TunPacket
-- OPEN. `PendingTunDownlink.packet: Vec<u8>` copies the payload when a downlink is queued under backpressure (tun_path.rs ~800/843). Since uplink now carries pooled `TunPacket`s (TODO-940), the pending queue could retain the block instead of copying — type change ripples through `PendingTunDownlinks`, `drain_pending_tun_downlinks` and the flush path. Backpressure-only path, not the hot path.
+- DONE. `PendingTunDownlink.packet` is now `PendingTunPacket` (`Owned(Vec)` / `Shared(SharedFecBuffer, len)`). `process_server_tun_packet` takes the `TunPacket` by value; `retain_tun_frame` converts it lazily on the first enqueue — direct sends never pay for retention, and extra queued targets share the block via Arc bump instead of another `to_vec`. `SharedFecBuffer::from_pooled_block` + `TunPacket::into_block` added; byte accounting, DRR, expiry and requeue semantics unchanged (bounded retention, pool grows on demand — no exhaustion deadlock). New shared-block test asserts `strong_count == 2` on both popped entries. Omega native: 5/5 pending + 59/59 tun tests.
+- Detail: `docs/todo/todo-942-pending-queue-shared-retention.md`
 
 ### TODO-943 - H3 poll loop: 6 Arc clones per poll → borrowed bindings view
 - DONE. `http3_poll_bindings()` cloned five callback `Option<Arc>`s + the `memory_pool` Arc per `poll_http3_event_loop` invocation (once per datagram on both server ingress and client `poll_http3_to_ingress`). `Http3PollBindings<'a>` is now a borrowed view of the connection fields; `OptimizationManager::memory_pool_ref()` added. The view is built inline in the poll loop — a `&self` helper would borrow all of `self` and clash with the `&mut self.conn`/`self.h3_conn` uses inside the loop; field-level borrows are disjoint and allowed.

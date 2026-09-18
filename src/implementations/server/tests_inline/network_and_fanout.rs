@@ -78,7 +78,7 @@ fn pending_tun_downlinks_bound_admission_and_preserve_ownership() {
 
     let first = queue.pop_next(&std::collections::HashSet::new()).unwrap();
     assert_eq!(first.target, migrated_target);
-    assert_eq!(first.packet, vec![10]);
+    assert_eq!(first.packet.as_slice(), &[10]);
     assert!(!first.is_expired(now));
     queue.requeue_front(first, 1);
 
@@ -90,7 +90,7 @@ fn pending_tun_downlinks_bound_admission_and_preserve_ownership() {
     let expired = PendingTunDownlink {
         target: migrated_target,
         session_id: first_session,
-        packet: vec![30],
+        packet: PendingTunPacket::from_vec(vec![30]),
         queued_at: now - MAX_PENDING_TUN_DOWNLINK_AGE,
         bandwidth_accounted: false,
     };
@@ -98,7 +98,16 @@ fn pending_tun_downlinks_bound_admission_and_preserve_ownership() {
 
     let mut shaped = PendingTunDownlinks::with_limits_and_capacity(4, 64, 4, 1_000, 1_000);
     assert!(shaped.uses_shared_capacity());
-    shaped.enqueue_with_accounting(first_target, first_session, 1, vec![40], now, true).unwrap();
+    shaped
+        .enqueue_with_accounting(
+            first_target,
+            first_session,
+            1,
+            PendingTunPacket::from_vec(vec![40]),
+            now,
+            true,
+        )
+        .unwrap();
     assert!(shaped.pop_next(&std::collections::HashSet::new()).unwrap().bandwidth_accounted);
 }
 
@@ -132,6 +141,52 @@ fn live_tun_fault_recording_is_first_wins_and_shutdown_safe() {
         },
     );
     assert_eq!(fault_slot.lock().as_ref(), Some(&first));
+}
+
+#[test]
+fn pending_tun_downlinks_share_retained_pool_block() {
+    let mut pending = PendingTunDownlinks::with_limits(8, 65_536, 8);
+    let now = Instant::now();
+    let first_target: SocketAddr = "10.20.0.1:4433".parse().unwrap();
+    let second_target: SocketAddr = "10.20.0.2:4433".parse().unwrap();
+
+    let pool = std::sync::Arc::new(crate::optimize::MemoryPool::new(4, 65_536));
+    let mut block = crate::optimize::PooledBlock::new(std::sync::Arc::clone(&pool));
+    block[..4].copy_from_slice(&[9, 8, 7, 6]);
+    let frame = crate::interface::TunPacket::for_test(block, 4).unwrap();
+    let shared = PendingTunPacket::from_tun_packet(frame);
+    let PendingTunPacket::Shared(..) = &shared else {
+        panic!("TUN frame must retain its pool block as a shared buffer");
+    };
+
+    // Two sessions queue the same frame: the block is shared, not copied.
+    pending
+        .enqueue_with_accounting(
+            first_target,
+            SessionId::from_u64(1),
+            1,
+            shared.clone(),
+            now,
+            false,
+        )
+        .unwrap();
+    pending
+        .enqueue_with_accounting(second_target, SessionId::from_u64(2), 1, shared, now, false)
+        .unwrap();
+    assert_eq!((pending.len(), pending.bytes()), (2, 8));
+
+    let first = pending.pop_next(&std::collections::HashSet::new()).unwrap();
+    let second = pending.pop_next(&std::collections::HashSet::new()).unwrap();
+    assert_eq!(first.packet.as_slice(), &[9, 8, 7, 6]);
+    assert_eq!(second.packet.as_slice(), &[9, 8, 7, 6]);
+    if let (PendingTunPacket::Shared(a, _), PendingTunPacket::Shared(b, _)) =
+        (&first.packet, &second.packet)
+    {
+        assert_eq!(a.strong_count(), 2);
+        assert_eq!(b.strong_count(), 2);
+    } else {
+        panic!("both queued entries must share the pool block");
+    }
 }
 
 #[test]
