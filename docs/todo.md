@@ -3772,8 +3772,8 @@
 - Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
 
-### TODO-969 - Decoder8 single-pass solve + SmallVec rejection evidence
+### TODO-969 - Decoder8/16 single-pass solve + SmallVec rejection evidence
 - Detail: `docs/todo/todo-969-decoder8-single-pass.md`
-- `try_solve_equation` merged its subtract and unknown-count passes into one O(k) scan. `SmallVec` coeff rows were tested and reverted: rotating ~280B structs through the equation queue measured worse than the heap alloc.
+- `try_solve_equation` in decoder8 and decoder16 merged subtract and unknown-count passes into one O(k) scan. `SmallVec` coeff rows were tested and reverted: rotating ~280B structs through the equation queue measured worse than the heap alloc.
 - Local proof: `cargo test -p qf-fec` (85/85); `fec_peeling` bench neutral (p=0.47) at degree-2, halves scan work at higher degrees.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.

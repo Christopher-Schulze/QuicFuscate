@@ -1,21 +1,24 @@
-# TODO-969 — Decoder8 single-pass solve + SmallVec rejection evidence
+# TODO-969 — Decoder8/16 single-pass solve + SmallVec rejection evidence
 
 ## Status
 DONE
 
 ## Problem
-`Decoder8::try_solve_equation` ran two full O(k) scans per attempt: one to
-subtract known sources and zero their coefficients, then a second to count
-remaining unknowns (with a redundant `known.contains_key` recheck per
-surviving coefficient — a coefficient that survives subtraction is unknown
-by construction). Attempts run once per queued equation per peeling pass.
+`Decoder8::try_solve_equation` and `Decoder16::try_solve_equation` ran two
+full O(k) scans per attempt: one to subtract known sources and zero their
+coefficients, then a second to count remaining unknowns (with a redundant
+`known.contains_key` recheck per surviving coefficient — a coefficient
+that survives subtraction is unknown by construction). Attempts run once
+per queued equation per peeling pass. `Decoder4` already used the merged
+single-pass form.
 
 ## Solution
-Merged both passes: while subtracting, a non-zero coefficient that is not
-in `known` is counted directly as an unknown. Multiple unknowns set a flag
-and keep subtracting (the partially reduced equation is retained for later
-passes — identical semantics to the old early-return, which also returned
-after the subtract pass had already run to completion).
+Merged both passes in decoder8 and decoder16: while subtracting, a
+non-zero coefficient that is not in `known` is counted directly as an
+unknown. Multiple unknowns set a flag and keep subtracting (the partially
+reduced equation is retained for later passes — identical semantics to the
+old early-return, which also returned after the subtract pass had already
+run to completion).
 
 Effect: one O(k) pass instead of two. On degree-2 workloads the gain is
 marginal (the old count pass early-exited after ~2 hits); on denser
