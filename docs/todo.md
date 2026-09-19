@@ -3959,6 +3959,11 @@
 - DONE. The Fountain arm of `generate_repair_packet` encoded into encoder scratch then copied into the `PooledBlock` (one `max_symbol_len` memcpy per repair). New `LTEncoder::generate_symbol_into` writes the XOR accumulation directly into the pooled wire block, matching the GF8/GF16 convention. Equivalence tests prove byte-identical payload + indices vs `generate_symbol`; 96/96 qf-fec tests green.
 - Detail: docs/todo/todo-1000-fountain-into-block.md
 
+### TODO-1001 - Decide fate of benchmark-only SIMD sort/shuffle surface
+
+- OPEN. `qf_cpu::sort::{argsort, sort_f32, sort_u32}` and `optimize::random::shuffle` have zero non-test, non-bench callers workspace-wide, yet `sort_simd`/`shuffle_simd` run in every `ci_regression` pass and the sort kernels carry SIMD/unsafe weight that TODO-681's audit budget must justify. Recommendation: delete or pin as intentional public API.
+- Detail: docs/todo/todo-1001-orphan-simd-sort-shuffle.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.
