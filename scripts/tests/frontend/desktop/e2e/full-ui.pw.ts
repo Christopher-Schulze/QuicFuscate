@@ -28,6 +28,22 @@ test.describe("Desktop UI (Browser Mode)", () => {
     expect(m.shellScrollWidth).toBeLessThanOrEqual(m.shellClientWidth + 1);
   }
 
+  // Waits until the dialog is visible AND every animation in its subtree has
+  // finished. Enter animations (zoom-in-95) move the submit button's bounding
+  // box; on contended CI runners Playwright's stability check otherwise races
+  // the animation and reports "element is not stable" for the full timeout.
+  // A dialog whose animations never settle fails here with a clear signal.
+  async function expectSettledDialog(dialog: any) {
+    await expect(dialog).toBeVisible();
+    await dialog.evaluate((el: HTMLElement) =>
+      Promise.all(
+        el
+          .getAnimations({ subtree: true })
+          .map((animation) => animation.finished.catch(() => undefined)),
+      ),
+    );
+  }
+
   async function expectLocatorInViewport(page: any, locator: any, marginPx = 8) {
     const r = await locator.evaluate((el: any) => {
       const b = el.getBoundingClientRect();
@@ -72,12 +88,12 @@ test.describe("Desktop UI (Browser Mode)", () => {
   test("create tunnel validates remote and creates a tunnel shell", async ({ page }) => {
     await createButton(page).click();
     const dialog = page.getByRole("dialog", { name: "Create Tunnel" });
-    await expect(dialog).toBeVisible();
+    await expectSettledDialog(dialog);
 
     await dialog.getByLabel("Name of the Connection", { exact: true }).fill("Frankfurt DE");
     await dialog.getByLabel("Remote [IP-Address:Port]", { exact: true }).fill("not a remote");
     await dialog.getByRole("button", { name: "Create Tunnel", exact: true }).click();
-    await expect(dialog).toBeVisible();
+    await expectSettledDialog(dialog);
     await expect(page.locator("main").getByText("Frankfurt DE", { exact: true })).toHaveCount(0);
 
     // Valid IPv6 (defaults port to 4433 if missing)
@@ -97,7 +113,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
   test("country code renders flag and can delete tunnels", async ({ page }) => {
     await createButton(page).click();
     const dialog = page.getByRole("dialog", { name: "Create Tunnel" });
-    await expect(dialog).toBeVisible();
+    await expectSettledDialog(dialog);
     await dialog.getByLabel("Name of the Connection", { exact: true }).fill("Berlin");
     await dialog.getByRole("button", { name: "-", exact: true }).click();
     const germanyOption = page.locator('[role="listbox"]').locator('[data-option]').filter({ hasText: "Germany" }).first();
@@ -121,10 +137,10 @@ test.describe("Desktop UI (Browser Mode)", () => {
     await expect(configBtn).toBeVisible();
     await configBtn.click();
     const configDialog = page.getByRole("dialog", { name: "Tunnel Configuration" });
-    await expect(configDialog).toBeVisible();
+    await expectSettledDialog(configDialog);
     await configDialog.getByRole("button", { name: "Delete", exact: true }).click();
     const deleteDialog = page.getByRole("dialog", { name: "Delete Tunnel" });
-    await expect(deleteDialog).toBeVisible();
+    await expectSettledDialog(deleteDialog);
     await deleteDialog.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(deleteDialog).toBeHidden();
     await expect(page.locator("main").getByText("Berlin", { exact: true })).toHaveCount(0);
@@ -133,7 +149,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
   test("without QKey the connect control stays disabled and import flow is available", async ({ page }) => {
     await createButton(page).click();
     const dialog = page.getByRole("dialog", { name: "Create Tunnel" });
-    await expect(dialog).toBeVisible();
+    await expectSettledDialog(dialog);
     await dialog.getByLabel("Name of the Connection", { exact: true }).fill("Test");
     await dialog.getByLabel("Remote [IP-Address:Port]", { exact: true }).fill("vpn.example.com:4433");
     await dialog.getByRole("button", { name: "Create Tunnel", exact: true }).click();
@@ -143,7 +159,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
     await expect(connectWithoutQKey).toBeDisabled();
 
     await importQkeyButton(page).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
+    await expectSettledDialog(page.getByRole("dialog"));
     await expect(page.getByLabel("QKey String", { exact: true })).toBeVisible();
   });
 
@@ -204,7 +220,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
       await createButton(page).click();
       const dialog = page.getByRole("dialog").first();
-      await expect(dialog).toBeVisible();
+      await expectSettledDialog(dialog);
 
       await expectLocatorInViewport(page, dialog, 8);
 
@@ -227,7 +243,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
       await createButton(page).click();
       const dialog = page.getByRole("dialog").first();
-      await expect(dialog).toBeVisible();
+      await expectSettledDialog(dialog);
 
       const nameInput = dialog.getByLabel("Name of the Connection", { exact: true });
       const remoteLabel = dialog.locator("label").filter({ hasText: "Remote [IP-Address:Port]" }).first();
@@ -255,7 +271,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
       await importQkeyButton(page).click();
       const dialog = page.getByRole("dialog").first();
-      await expect(dialog).toBeVisible();
+      await expectSettledDialog(dialog);
 
       await expectLocatorInViewport(page, dialog, 8);
 
@@ -268,7 +284,7 @@ test.describe("Desktop UI (Browser Mode)", () => {
 
       await createButton(page).click();
       const dialog = page.getByRole("dialog", { name: "Create Tunnel" });
-      await expect(dialog).toBeVisible();
+      await expectSettledDialog(dialog);
       await dialog.getByLabel("Name of the Connection", { exact: true }).fill("Viewport");
       await dialog.getByLabel("Remote [IP-Address:Port]", { exact: true }).fill("vpn.example.com:4433");
       await dialog.getByRole("button", { name: "Create Tunnel", exact: true }).click();

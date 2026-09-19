@@ -184,6 +184,15 @@ jobs:
         working-directory: apps/svelte-desktop
         run: bun run test:e2e
 
+      - name: Upload desktop e2e failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-e2e-test-results
+          path: apps/svelte-desktop/test-results
+          if-no-files-found: ignore
+          retention-days: 14
+
   app-backend-checks:
     timeout-minutes: 25
     runs-on: macos-latest

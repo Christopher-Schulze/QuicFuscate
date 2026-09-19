@@ -3966,7 +3966,7 @@
 
 ### TODO-1002 - Dedupe engine-poller store writes (render churn + e2e stability)
 
-- DONE. `pollStatus`/`pollStats` rebuilt `tunnelStates`, per-tunnel stats, and throughput objects every 500/900 ms and wrote them unconditionally; object writes always notify Svelte subscribers, so the render tree churned ~3x/sec while idle and bits-ui portal content remounted mid-click - the recurring `full-ui.pw.ts` "create tunnel" e2e flake. Write-site dedupe (`flatRecordEqual`/`tunnelStatsEqual`/`throughputRecordEqual`) skips identical-payload writes; 454/454 unit tests green, `svelte-check` clean.
+- DONE. `pollStatus`/`pollStats` rebuilt `tunnelStates`, per-tunnel stats, and throughput objects every 500/900 ms and wrote them unconditionally; object writes always notify Svelte subscribers, so the Tauri-mode render tree churned ~3x/sec while idle. Write-site dedupe (`flatRecordEqual`/`tunnelStatsEqual`/`throughputRecordEqual`) skips identical-payload writes; 454/454 unit tests green, `svelte-check` clean. Correction: the `full-ui.pw.ts` e2e flake was NOT this churn - browser-mode pollers never start (`!isTauri()` gate) and the flake recurred post-merge; the hardened `expectSettledDialog` animation-wait plus CI `test-results` artifact upload address it instead.
 - Detail: docs/todo/todo-1002-poller-store-write-dedupe.md
 
 ### TODO-1003 - Batch per-packet telemetry atomics in burst loops
