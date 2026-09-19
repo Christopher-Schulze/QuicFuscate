@@ -732,7 +732,9 @@ pub(super) async fn run_client(
     // Enable kernel-side receive coalescing only now: the handshake and
     // assignment paths above read via plain `recvmsg` without cmsg parsing and
     // must keep single-datagram semantics. From here on the recv branch uses
-    // `recv_connected_segments`, which splits GRO super-buffers correctly.
+    // `recv_connected_burst`, which fills the persistent slots below in one
+    // `recvmmsg` on Linux (each slot possibly a GRO super-buffer) and falls
+    // back to a single-datagram `recv_connected_segments` elsewhere.
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
@@ -740,6 +742,9 @@ pub(super) async fn run_client(
             log::debug!("UDP GRO unavailable on client socket: {error}");
         }
     }
+    let rx_slot_count = if cfg!(target_os = "linux") { RX_BURST_SLOTS } else { 1 };
+    let mut rx_bufs: Vec<Vec<u8>> =
+        (0..rx_slot_count).map(|_| vec![0u8; RX_BURST_SLOT_CAP]).collect();
 
     let exit_reason = 'runtime: loop {
         tokio::select! {
@@ -759,7 +764,7 @@ pub(super) async fn run_client(
                 }
                 break ExitReason::CleanShutdown;
             }
-            recv_res = recv_connected_segments(&socket, &mut buf) => {
+            recv_res = recv_connected_burst(&socket, &mut rx_bufs) => {
                 if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
                     break ExitReason::DataPlane(fault);
                 }
@@ -775,48 +780,52 @@ pub(super) async fn run_client(
                 }
                 last_runtime_progress = branch_started;
                 match recv_res {
-                    Ok((len, gso_size)) => {
-                        telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
-                        if let Some(diagnostics) = io_diagnostics.as_mut() {
-                            diagnostics.record_socket_datagram(len);
-                        }
-                        // A UDP_GRO super-buffer holds `gso_size`-aligned
-                        // datagrams; `conn.recv` still consumes one wire
-                        // datagram at a time, so split before feeding. A
-                        // `gso_size` of 0 means no cmsg arrived: the buffer is
-                        // one plain datagram, not len 1-byte slices.
-                        let seg = if gso_size > 0 { usize::from(gso_size) } else { len };
-                        let mut seg_off = 0usize;
-                        while seg_off < len {
-                            let seg_end = (seg_off + seg).min(len);
-                            let activity_before = io_diagnostics
-                                .as_ref()
-                                .map(|_| conn.conn.last_activity_marker());
-                            let seg_result = conn.recv_mut(&mut buf[seg_off..seg_end]);
-                            seg_off = seg_end;
-                            match seg_result {
-                                Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
-                                    | quicfuscate::error::ConnectionError::TlsAlert(_)
-                                    | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
-                                    if let Some(diagnostics) = io_diagnostics.as_mut() {
-                                        diagnostics.record_core_recv_error();
+                    Ok(slots) => {
+                        for slot in &slots {
+                            let len = slot.len;
+                            let buf = &mut rx_bufs[slot.buf_index];
+                            telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
+                            if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                diagnostics.record_socket_datagram(len);
+                            }
+                            // A UDP_GRO super-buffer holds `gso_size`-aligned
+                            // datagrams; `conn.recv` still consumes one wire
+                            // datagram at a time, so split before feeding. A
+                            // `gso_size` of 0 means no cmsg arrived: the buffer is
+                            // one plain datagram, not len 1-byte slices.
+                            let seg = if slot.gso_size > 0 { usize::from(slot.gso_size) } else { len };
+                            let mut seg_off = 0usize;
+                            while seg_off < len {
+                                let seg_end = (seg_off + seg).min(len);
+                                let activity_before = io_diagnostics
+                                    .as_ref()
+                                    .map(|_| conn.conn.last_activity_marker());
+                                let seg_result = conn.recv_mut(&mut buf[seg_off..seg_end]);
+                                seg_off = seg_end;
+                                match seg_result {
+                                    Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
+                                        | quicfuscate::error::ConnectionError::TlsAlert(_)
+                                        | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
+                                        if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                            diagnostics.record_core_recv_error();
+                                        }
+                                        error!("TLS handshake failed: {}", error);
+                                        break 'runtime ExitReason::SocketError(error.to_string());
                                     }
-                                    error!("TLS handshake failed: {}", error);
-                                    break 'runtime ExitReason::SocketError(error.to_string());
-                                }
-                                Err(error) => {
-                                    if let Some(diagnostics) = io_diagnostics.as_mut() {
-                                        diagnostics.record_core_recv_error();
+                                    Err(error) => {
+                                        if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                            diagnostics.record_core_recv_error();
+                                        }
+                                        error!("QUIC recv failed: {:?}", error);
                                     }
-                                    error!("QUIC recv failed: {:?}", error);
-                                }
-                                Ok(_) => {
-                                    if let (Some(diagnostics), Some(before)) =
-                                        (io_diagnostics.as_mut(), activity_before)
-                                    {
-                                        diagnostics.record_core_recv_success(
-                                            conn.conn.last_activity_marker() != before,
-                                        );
+                                    Ok(_) => {
+                                        if let (Some(diagnostics), Some(before)) =
+                                            (io_diagnostics.as_mut(), activity_before)
+                                        {
+                                            diagnostics.record_core_recv_success(
+                                                conn.conn.last_activity_marker() != before,
+                                            );
+                                        }
                                     }
                                 }
                             }

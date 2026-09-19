@@ -20,6 +20,7 @@ use quicfuscate::stealth::StealthRuntimeOwner;
 use quicfuscate::stealth::TlsClientHelloProfileCatalog;
 use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 use quicfuscate::telemetry;
+use smallvec::SmallVec;
 #[cfg(feature = "benches")]
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
@@ -240,30 +241,78 @@ async fn recv_connected_datagram(
         .await
 }
 
-/// Linux RX path: one `recvmsg` with `UDP_GRO` ancillary parsing. Returns the
-/// coalesced length plus the kernel segment size (`0`/`1` means a single
-/// datagram). The caller splits `buf[..len]` into `gso_size`-aligned
-/// datagrams before handing them to `conn.recv`.
-#[cfg(target_os = "linux")]
-async fn recv_connected_segments(
-    socket: &tokio::net::UdpSocket,
-    buf: &mut [u8],
-) -> std::io::Result<(usize, u16)> {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = socket.as_raw_fd();
-    socket
-        .async_io(Interest::READABLE, || qf_transport_udp::recv_msg_gro(fd, buf, false))
-        .await
-        .map(|(len, _peer, gso_size)| (len, gso_size))
-}
-
+/// Non-Linux RX path: one datagram per call. Returns the datagram length plus
+/// a pseudo segment size of `1` so callers can share the GRO-split logic
+/// (segment = whole buffer). Linux uses `recv_connected_burst` with
+/// `recv_batch_gro` directly.
 #[cfg(not(target_os = "linux"))]
 async fn recv_connected_segments(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
 ) -> std::io::Result<(usize, u16)> {
     recv_connected_datagram(socket, buf).await.map(|len| (len, 1))
+}
+
+/// Persistent RX slot count for the connected-socket burst receive path. On
+/// Linux every slot must hold a full `UDP_GRO` super-buffer (64 KiB); other
+/// platforms use a single slot via the `recv_connected_segments` fallback.
+const RX_BURST_SLOTS: usize = 8;
+const RX_BURST_SLOT_CAP: usize = 1 << 16;
+
+/// One entry of a [`recv_connected_burst`] result: `buf_index` selects the
+/// persistent burst buffer holding `len` wire bytes, `gso_size` is the kernel
+/// segment size for `UDP_GRO` super-buffers (`0` = single datagram).
+struct ConnectedRxSlot {
+    buf_index: usize,
+    len: usize,
+    gso_size: u16,
+}
+
+/// Linux RX burst: one `recvmmsg` fills up to `bufs.len()` slots in a single
+/// syscall; each slot may itself be a `UDP_GRO` super-buffer. `bufs` persists
+/// across calls, so the wake→drain cycle performs no per-packet allocation.
+#[cfg(target_os = "linux")]
+async fn recv_connected_burst(
+    socket: &tokio::net::UdpSocket,
+    bufs: &mut [Vec<u8>],
+) -> std::io::Result<SmallVec<[ConnectedRxSlot; RX_BURST_SLOTS]>> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::io::AsRawFd;
+
+    let fd = socket.as_raw_fd();
+    socket
+        .async_io(Interest::READABLE, || {
+            let mut slices: SmallVec<[&mut [u8]; RX_BURST_SLOTS]> =
+                bufs.iter_mut().map(|b| b.as_mut_slice()).collect();
+            let slots = qf_transport_udp::recv_batch_gro(fd, &mut slices, false)?;
+            if slots.is_empty() {
+                // recv_batch_gro maps WouldBlock to an empty result; async_io
+                // must see WouldBlock to keep waiting for real readiness.
+                return Err(Error::from(ErrorKind::WouldBlock));
+            }
+            Ok(slots
+                .into_iter()
+                .enumerate()
+                .map(|(buf_index, slot)| ConnectedRxSlot {
+                    buf_index,
+                    len: slot.len,
+                    gso_size: slot.gso_size,
+                })
+                .collect())
+        })
+        .await
+}
+
+/// Non-Linux fallback: one datagram per wake via `recv_connected_segments`.
+#[cfg(not(target_os = "linux"))]
+async fn recv_connected_burst(
+    socket: &tokio::net::UdpSocket,
+    bufs: &mut [Vec<u8>],
+) -> std::io::Result<SmallVec<[ConnectedRxSlot; RX_BURST_SLOTS]>> {
+    let (len, gso_size) = recv_connected_segments(socket, &mut bufs[0]).await?;
+    let mut slots = SmallVec::new();
+    slots.push(ConnectedRxSlot { buf_index: 0, len, gso_size });
+    Ok(slots)
 }
 
 #[cfg(not(unix))]

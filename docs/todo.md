@@ -4006,13 +4006,18 @@
 
 ### TODO-1010 - Next-generation stealth shaping research track
 
-- OPEN (standing). Five literature candidates to evaluate against FlowShaper/StealthBrain/TLS-Cover: ChameleonFlow-style padding-free burst-structure disruption (96.3->35.8% WF accuracy at 8.7% BW), Adaptive-Tamaraw per-cluster shaping parameters (~99pp overhead cut), WF-A2D position-aware perturbation (<2% BW, ~97% defense), QUICstep/CoMPS migration-based path splitting, UPGen per-deployment wire-image diversity. Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
+- PARTIAL (standing). Implemented: WF-A2D position-aware perturbation in FlowShaper (burst edges after >=100ms idle gaps sample the full jitter range; interior packets stay tight; ProtocolClock-injected, ManualTimeSource-tested) and the ChameleonFlow density principle in intelligent_policy (padding rate halves when real ACK-clocked traffic is dense, `ack_us < 3000` — shaping what is there instead of buying chaff). Still open: Adaptive-Tamaraw per-cluster parameters, QUICstep/CoMPS migration-as-censorship-primitive (design study), UPGen deployment-seeded wire-image diversity. Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
 - Detail: docs/todo/todo-1010-stealth-shaping-research-track.md
 
 ### TODO-1011 - FEC standards alignment and maximal-effectiveness audit
 
-- OPEN (standing). Evaluate: QUIRL application-tailored activation (FEC only where latency demands), NWCRG sliding-window RLC alignment (TinyMT32 coefficients, transport-param negotiation), Repair-ACK feedback (suppress retransmission + count loss for CC, pairs with TODO-1006), convolutional overlapping generations vs our interleaved/streaming-burst, unequal protection by traffic class.
+- PARTIAL (standing). NWCRG/TinyMT32 wire-seed alignment rejected-by-design: `seed.rs` already derives the fountain seed via HKDF from the QUIC 1-RTT secret (nothing on the wire) and `fountain_codes.rs` expands it with splitmix64 - strictly stronger than the draft's wire-carried seed. Still open: QUIRL application-tailored activation (needs a traffic-class concept the FEC path lacks), Repair-ACK wire format (paired with TODO-1006), convolutional vs interleaved gap analysis, unequal protection by traffic class.
 - Detail: docs/todo/todo-1011-fec-standards-alignment.md
+
+### TODO-1012 - Standalone client RX: recvmmsg burst + persistent GRO slots
+
+- DONE (2026-09-19). `recv_connected_burst` fills 8 persistent 64 KiB slots in one `recvmmsg` per readiness wake on Linux (each slot possibly a UDP_GRO super-buffer, split in place); non-Linux keeps single-datagram semantics. The standalone client was the last per-wake single-syscall RX path. Verified by `tun-e2e-netns.sh` on Omega (5/5 echo, 0% loss, clean teardown).
+- Detail: docs/todo/todo-1012-standalone-client-rx-burst.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
