@@ -822,7 +822,7 @@ pub async fn flush_live_server_outgoing(
                 continue;
             }
             #[cfg(target_os = "linux")]
-            if gso_ok {
+            if gso_ok && !conn.udp_gso_path_blocked {
                 if let Some((end, seg_size)) = plan_gso_run(
                     &staging_spans,
                     &sent,
@@ -855,6 +855,12 @@ pub async fn flush_live_server_outgoing(
                             // retry GSO this flush; packets go out individually.
                             log::debug!("UDP GSO send to {target} failed, per-packet: {error}");
                             gso_ok = false;
+                            // EMSGSIZE means the segment outlives the route's
+                            // payload ceiling — a stable path property, so stop
+                            // probing GSO to this peer for the connection's life.
+                            if error.raw_os_error() == Some(libc::EMSGSIZE) {
+                                conn.udp_gso_path_blocked = true;
+                            }
                         }
                     }
                 }

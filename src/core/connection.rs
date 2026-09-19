@@ -152,6 +152,11 @@ pub struct QuicFuscateConnection {
     // Async Stealth Scheduler State
     next_packet_release: Option<std::time::Instant>,
     outbound_pacer: OutboundPacer,
+    /// Linux UDP_GSO emission was rejected by this peer's route (EMSGSIZE);
+    /// further sends to it skip run planning and go out per-packet. Path MTU
+    /// is a property of the route, so the block lasts for the connection.
+    #[cfg(target_os = "linux")]
+    pub(crate) udp_gso_path_blocked: bool,
 }
 
 impl Drop for QuicFuscateConnection {
@@ -577,6 +582,8 @@ impl QuicFuscateConnection {
             tls_ch_override_template: environment.first(["QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE"]),
             next_packet_release: None,
             outbound_pacer: OutboundPacer::default(),
+            #[cfg(target_os = "linux")]
+            udp_gso_path_blocked: false,
         };
         s.fec.enable_simd_acceleration();
         s.conn.set_intelligent_stealth_runtime(s.stealth_manager.is_intelligent_runtime());

@@ -3923,6 +3923,12 @@
 - DONE. `ProductionLogger::log` allocated 3 `String`s per enabled record (target, message, file). `OwnedRecord` now uses `Cow<'static, str>` fed by `record.module_path_static()`/`file_static()` — standard `log!` sites borrow, only the formatted message still allocates. 3 allocs → 1 per record; custom `target:` strings keep exact semantics via the owned fallback.
 - Verified: qf-logging 22/22 tests, clippy/fmt clean.
 
+### TODO-994 - GSO EMSGSIZE marks the peer path permanently
+
+- Detail: `docs/todo/todo-994-gso-emsgsize-path-block.md`
+- DONE. Server GSO emission had no memory across flushes — on a route with a payload ceiling below the segment cap (IPv6 MTU 1280 vs 1472 fallback), every flush paid a doomed `sendmsg`+EMSGSIZE for the connection's life. New `udp_gso_path_blocked` flag on `QuicFuscateConnection` (path MTU is a stable route property) gates `plan_gso_run` per peer in both `live_auth` and TUN fanout; set on EMSGSIZE only, transient errors unaffected. Failed runs still fall through to per-packet tail — no drops.
+- Verified: `cargo check` macOS + Omega Linux release check clean.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

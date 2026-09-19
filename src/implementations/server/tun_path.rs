@@ -523,13 +523,23 @@ fn flush_tun_downlink_queue(
                     i += 1;
                     continue;
                 }
-                if let Some((end, seg)) = super::live_auth::plan_gso_run(
-                    staging,
-                    &sent[..n_staged],
-                    i,
-                    qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
-                    gso_seg_cap,
-                ) {
+                let gso_blocked = live
+                    .live_state
+                    .clients
+                    .get(&staging[i].0)
+                    .map(|c| c.udp_gso_path_blocked)
+                    .unwrap_or(false);
+                if let Some((end, seg)) = if gso_blocked {
+                    None
+                } else {
+                    super::live_auth::plan_gso_run(
+                        staging,
+                        &sent[..n_staged],
+                        i,
+                        qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
+                        gso_seg_cap,
+                    )
+                } {
                     if !pending.is_empty() {
                         let refs: smallvec::SmallVec<[(&[u8], SocketAddr); 64]> = pending
                             .iter()
@@ -565,6 +575,13 @@ fn flush_tun_downlink_queue(
                         }
                         Err(error) => {
                             log::debug!("TUN downlink GSO fallback: {}", error);
+                            // EMSGSIZE is a stable route property — stop
+                            // probing GSO to this peer for the connection.
+                            if error.raw_os_error() == Some(libc::EMSGSIZE) {
+                                if let Some(client) = live.live_state.clients.get_mut(&target) {
+                                    client.udp_gso_path_blocked = true;
+                                }
+                            }
                         }
                     }
                     i = end;
