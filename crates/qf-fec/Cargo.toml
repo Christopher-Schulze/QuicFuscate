@@ -17,7 +17,7 @@ rust-tests = [
 ]
 
 [dependencies]
-aligned_box = "0.2"
+aligned_box = "0.3"
 clap = { version = "4.5", features = ["derive"] }
 log = "0.4"
 parking_lot = "0.12"

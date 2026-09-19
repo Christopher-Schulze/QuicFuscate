@@ -12,7 +12,7 @@ rust-tests = ["qf-common/rust-tests", "qf-cpu/rust-tests"]
 prefetch = ["qf-cpu/prefetch"]
 
 [dependencies]
-aligned_box = "0.2"
+aligned_box = "0.3"
 crossbeam-queue = "0.3"
 libc = "0.2"
 log = "0.4"

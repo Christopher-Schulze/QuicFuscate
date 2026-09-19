@@ -38,6 +38,12 @@ highlight = "all"
 skip = [
   # Root protocol and Tauri dependency graphs intentionally retain these
   # cross-version requirements; TODO-755 owns their review.
+  # darling 0.21.3 (serde_with_macros <- tauri-utils) vs 0.23.0
+  # (tauri-specta-macros): proc-macro internals on disjoint major lines; no
+  # compatible unification exists without bumping tauri-utils/specta.
+  { crate = "darling" },
+  { crate = "darling_core" },
+  { crate = "darling_macro" },
   { crate = "rand_core" },
   { crate = "base64" },
   { crate = "core-foundation" },

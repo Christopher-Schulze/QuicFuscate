@@ -92,7 +92,7 @@ qf-transport-recovery = { path = "crates/qf-transport-recovery" }
 qf-transport-version = { path = "crates/qf-transport-version" }
 qf-transport-types = { path = "crates/qf-transport-types" }
 qf-transport-udp = { path = "crates/qf-transport-udp" }
-aligned_box = "0.2"
+aligned_box = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-native-certs = "0.8"
 rcgen = { version = "0.13", optional = true }

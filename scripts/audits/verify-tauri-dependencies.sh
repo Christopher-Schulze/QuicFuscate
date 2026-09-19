@@ -102,17 +102,10 @@ if vulnerability_count != 0:
     fail(f"Tauri lockfile still contains {vulnerability_count} vulnerabilities: {', '.join(ids)}")
 
 expected = {
-    ("unmaintained", "RUSTSEC-2024-0413", "atk", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0416", "atk-sys", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
+    # RUSTSEC-2024-0411..0420 (GTK3 bindings family) were withdrawn from the
+    # advisory database on 2026-08-14; cargo-audit no longer reports them.
     ("unmaintained", "RUSTSEC-2025-0057", "fxhash", "0.2.1"): "Tauri URL selector parser chain; transitive and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0412", "gdk", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0418", "gdk-sys", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0411", "gdkwayland-sys", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0417", "gdkx11", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0414", "gdkx11-sys", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0415", "gtk", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0420", "gtk-sys", "0.18.2"): "Tauri GTK3/WebKit carrier; archived GTK3 bindings remain transitive on Linux and no patched release is listed.",
-    ("unmaintained", "RUSTSEC-2024-0419", "gtk3-macros", "0.18.2"): "GTK3 macro build chain; transitive and no patched release is listed.",
+    ("unmaintained", "RUSTSEC-2024-0436", "paste", "1.0.15"): "specta proc-macro chain (Tauri-Specta bindings); transitive and no patched release is listed.",
     ("unmaintained", "RUSTSEC-2024-0370", "proc-macro-error", "1.0.4"): "GTK3 macro build chain; transitive and no patched release is listed.",
     ("unmaintained", "RUSTSEC-2025-0081", "unic-char-property", "0.9.0"): "Tauri URLPattern parser chain; transitive and no patched release is listed.",
     ("unmaintained", "RUSTSEC-2025-0075", "unic-char-range", "0.9.0"): "Tauri URLPattern parser chain; transitive and no patched release is listed.",
