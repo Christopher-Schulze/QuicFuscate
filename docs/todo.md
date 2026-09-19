@@ -380,7 +380,7 @@
 
 ## Queue
 ### TODO-901 - Server RX batching drain and sharding
-- PARTIAL. Step 1 DONE (`456edf7`): batch drain until `WouldBlock` (cap 64, one wakeup per burst). Design pass complete (`71e11c9`): SO_REUSEPORT kernel-hash affinity (no userspace dispatcher), ShardMap<N> sub-maps with per-shard admission budgets, global read-shared registries, shard-0 owns TUN/admin/housekeeping, shared fault slot + labeled drain exits. Remaining is Linux/Omega implementation + pps proof only.
+- PARTIAL. Step 1 DONE (`456edf7`): batch drain until `WouldBlock` (cap 64, one wakeup per burst). Design pass complete (`71e11c9`). **Sharding fully implemented (2026-08-26):** dedicated coordinator + N `SO_REUSEPORT` dataplane shards, `ShardRouter` ownership (addr/SCID/profile), bounded per-shard channels, routed TUN downlink/fanout/admin/expiry/shutdown, `rx_shards` config (`0`=auto `min(cores,4)`, `1`=legacy identical path, `N>1`=Linux shards, sibling-bind-failure → graceful single-socket fallback), `QUICFUSCATE_RX_SHARDS` env, `shard_forward_dropped` metric, transport-reload propagation via `ReloadTransport`. Local: clippy/fmt clean, 557/557 server tests green incl. router unit tests. Remaining: Omega N=1..4 correctness validation; the >=3x pps criterion stays open pending multicore x86_64 hardware (Omega is single-core).
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default

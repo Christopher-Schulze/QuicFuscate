@@ -44,6 +44,19 @@ impl ServerRuntime {
         let mut tun_rx = self.live_mut().tun_rx.take();
         let tun_notify = self.live().tun_notify.clone();
         let tun_fault = self.live().tun_fault.clone();
+        let tun_ctx = {
+            let live = self.live();
+            ServerTunContext {
+                server_tun: live.server_tun.clone(),
+                server_ips: ServerTunIps {
+                    ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                    ipv6: live.server_tun_ipv6,
+                },
+                tun_reader_shutdown: live.tun_reader_shutdown.clone(),
+                tun_fault: Arc::clone(&tun_fault),
+                fingerprint_profile,
+            }
+        };
         if tun_enable {
             metrics.set_tun_data_plane_ready(tun_rx.is_some());
         }
@@ -141,7 +154,25 @@ impl ServerRuntime {
                 )
             })
             .transpose()
-            .map_err(std::io::Error::other)?;
+            .map_err(std::io::Error::other)?
+            .map(Arc::new);
+
+        // Sharded dataplane (TODO-901): workers own socket RX/TX per
+        // SO_REUSEPORT sibling; this loop keeps admin, signals, housekeeping
+        // and TUN reads. `sharded` gates the local RX select arm.
+        let sharded = self.live().shard_router.is_some();
+        let shard_fault = self.live().shard_fault.clone();
+        let shard_router = self.live().shard_router.clone();
+        let mut shard_workers = self.spawn_shard_workers(
+            runtime_config,
+            &metrics,
+            &dns_intercept_workers,
+            &dns_upstream_resolvers,
+            &dns_intercept_admission,
+            &tun_ctx,
+            tun_enable,
+            masque_relay_owner.clone(),
+        );
 
         #[cfg(unix)]
         {
@@ -214,7 +245,7 @@ impl ServerRuntime {
                         }
                     }
                 }
-                batch_res = recv_datagram_batch(&socket, 64, &mut ingress_pool, &mut batch) => {
+                batch_res = recv_datagram_batch(&socket, 64, &mut ingress_pool, &mut batch), if !sharded => {
                     match batch_res {
                         Ok(()) => {
                             // Loop-invariant handles bind once per wakeup instead
@@ -375,7 +406,7 @@ impl ServerRuntime {
                                 &runtime_parts.tun_fault,
                                 &runtime_parts.tun_notify,
                                 &runtime_parts.shutdown,
-                                masque_relay_owner.as_ref(),
+                                masque_relay_owner.as_deref(),
                                 runtime_parts.uring_worker.as_deref(),
                             ).await {
                                 Ok(result) => result,
@@ -415,7 +446,11 @@ impl ServerRuntime {
                 }
                 _ = housekeeping.tick() => {
                     dns_intercept_workers.observe_finished().await;
-                    if let Some(fault) = tun_fault.lock().clone() {
+                    if let Some(fault) = tun_fault
+                        .lock()
+                        .clone()
+                        .or_else(|| shard_fault.lock().clone())
+                    {
                         runtime_fault = Some(fault);
                         break;
                     }
@@ -443,7 +478,7 @@ impl ServerRuntime {
                     // Retry any downlinks that were deferred because a client's QUIC
                     // DATAGRAM queue was full, before reading new TUN frames.
                     if let Err(fault) = drain_pending_tun_downlinks(
-                        self.live_mut(),
+                        &mut self.live_mut().live_state,
                         &mut out[..],
                         &socket,
                         &metrics,
@@ -458,12 +493,13 @@ impl ServerRuntime {
                     // server's IP pool, and we look up the session by client_ip to find
                     // the corresponding SocketAddr.
                     let more_tun = match drain_server_tun_packets(
-                        self.live_mut(),
+                        &mut self.live_mut().live_state,
+                        &tun_ctx,
+                        shard_router.as_deref(),
                         &mut tun_rx,
                         &mut out[..],
                         &socket,
                         &metrics,
-                        fingerprint_profile,
                     ) {
                         Ok(more_tun) => more_tun,
                         Err(fault) => {
@@ -477,7 +513,7 @@ impl ServerRuntime {
                     // Retry/final-flush any downlinks that were deferred during the
                     // TUN drain above.
                     if let Err(fault) = drain_pending_tun_downlinks(
-                        self.live_mut(),
+                        &mut self.live_mut().live_state,
                         &mut out[..],
                         &socket,
                         &metrics,
@@ -505,7 +541,7 @@ impl ServerRuntime {
                     if self.drain_complete() {
                         log::info!(
                             "Server drain complete (active_clients={}, elapsed_ms={})",
-                            self.live().live_state.client_count(),
+                            self.active_client_count(),
                             self.graceful_shutdown.elapsed().as_millis()
                         );
                         self.finish_drain(
@@ -520,17 +556,22 @@ impl ServerRuntime {
                     housekeeping.reset_after(standalone_housekeeping_delay(self.live()));
                 }
                 _ = tun_notify.notified(), if tun_enable && tun_rx.is_some() => {
-                    if let Some(fault) = tun_fault.lock().clone() {
+                    if let Some(fault) = tun_fault
+                        .lock()
+                        .clone()
+                        .or_else(|| shard_fault.lock().clone())
+                    {
                         runtime_fault = Some(fault);
                         break;
                     }
                     let more_tun = match drain_server_tun_packets(
-                        self.live_mut(),
+                        &mut self.live_mut().live_state,
+                        &tun_ctx,
+                        shard_router.as_deref(),
                         &mut tun_rx,
                         &mut out[..],
                         &socket,
                         &metrics,
-                        fingerprint_profile,
                     ) {
                         Ok(more_tun) => more_tun,
                         Err(fault) => {
@@ -542,7 +583,7 @@ impl ServerRuntime {
                         tun_notify.notify_one();
                     }
                     if let Err(fault) = drain_pending_tun_downlinks(
-                        self.live_mut(),
+                        &mut self.live_mut().live_state,
                         &mut out[..],
                         &socket,
                         &metrics,
@@ -556,10 +597,24 @@ impl ServerRuntime {
 
         drop(tun_rx);
         self.live_mut().admin_actions_rx = Some(admin_actions_rx);
+        // Hard-close dataplane shards before domain teardown: their clients
+        // reference shared sessions, so CLOSE frames must flush first.
+        if !shard_workers.is_empty() {
+            self.shutdown_shard_workers(std::mem::take(&mut shard_workers), b"server_shutdown")
+                .await;
+        }
         let stealth_error = self.shutdown_stealth_runtime().await.err();
         let stop_error = self.stop().err();
         let relay_error = match masque_relay_owner {
-            Some(owner) => owner.shutdown().await.err(),
+            Some(owner) => match Arc::try_unwrap(owner) {
+                Ok(owner) => owner.shutdown().await.err(),
+                Err(_) => {
+                    log::warn!(
+                        "MASQUE relay owner still shared at teardown;                          dropping without manager join"
+                    );
+                    None
+                }
+            },
             None => None,
         };
         let mut cleanup_errors = Vec::new();

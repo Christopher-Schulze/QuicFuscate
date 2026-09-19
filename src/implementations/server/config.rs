@@ -80,6 +80,11 @@ pub struct ServerConfig {
     pub downlink_scheduler_burst_bytes: u64,
     /// Explicitly allowlisted intermediate-hop CONNECT-UDP relay policy.
     pub masque_relay: crate::implementations::server::masque_relay::MasqueRelayPolicy,
+    /// Dataplane RX shard count under `SO_REUSEPORT` (Linux only).
+    /// `0` = auto (`min(available_parallelism, 4)`), `1` = legacy
+    /// single-task loop, `N>1` = N shard sockets plus a dedicated
+    /// coordinator task for TUN/admin/housekeeping.
+    pub rx_shards: usize,
     /// Validated sustained DDoS detection and enhanced-admission policy.
     #[cfg(feature = "rate_limiter")]
     pub ddos_policy: limits::DdosPolicyConfig,
@@ -219,6 +224,7 @@ impl Default for ServerConfig {
             downlink_scheduler_burst_bytes: 0,
             masque_relay: crate::implementations::server::masque_relay::MasqueRelayPolicy::default(
             ),
+            rx_shards: 0,
             #[cfg(feature = "rate_limiter")]
             ddos_policy: limits::DdosPolicyConfig::default(),
             #[cfg(feature = "rate_limiter")]
@@ -493,6 +499,11 @@ pub fn server_config_from_listen_addr(
     (config.downlink_scheduler_rate_bytes_per_second, config.downlink_scheduler_burst_bytes) =
         load_downlink_scheduler_from_env()?;
     config.masque_relay = load_masque_relay_policy_from_env()?;
+    config.rx_shards = usize::try_from(parse_auth_policy_env_u64(
+        "QUICFUSCATE_RX_SHARDS",
+        config.rx_shards as u64,
+    )?)
+    .map_err(|_| "QUICFUSCATE_RX_SHARDS exceeds usize".to_string())?;
     #[cfg(feature = "rate_limiter")]
     {
         config.ddos_policy = load_ddos_policy_config_from_env()?;

@@ -84,6 +84,15 @@ This section is the fast path for skeptical review. It is not a marketing summar
   This removes the io_uring-to-FEC memcpy on the Linux client fast path. Fallback to Tokio
   `recv()` + `try_recv()` when io_uring is unavailable.
 - MSG_ZEROCOPY is not part of the final runtime story.
+- Server RX can be sharded across multiple UDP sockets on the same port via Linux
+  `SO_REUSEPORT` (TODO-901): `server.rx_shards` (`QUICFUSCATE_RX_SHARDS`), `0` =
+  auto `min(available_parallelism, 4)` (default), `1` = legacy single-task
+  dataplane, `N>1` = coordinator task + N uniform shard workers owning per-addr
+  and per-SCID connection affinity via a shared `ShardRouter`. Non-Linux clamps
+  to 1; a failed sibling bind falls back to one plain socket. Sharding is a
+  startup-time topology; runtime reload propagates transport changes to workers
+  but does not reshard. Routing saturation drops are counted by the
+  `shard_forward_dropped` metric.
 - Packet-number and packet-boundary ownership is centralized in `src/transport/packet.rs` and its
   physical child modules: `headers.rs` owns the checked header model and packet-number encoding,
   `connection_setup.rs` owns connect/accept construction, `version_negotiation.rs` owns version

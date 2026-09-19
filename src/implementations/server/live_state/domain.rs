@@ -181,6 +181,15 @@ impl LiveServerDomain {
         }
     }
 
+    /// Retain variant for sharded runtimes: snapshots must survive while any
+    /// shard still owns the addr, so the caller supplies the router's global
+    /// keyset instead of one shard's local `clients` map.
+    pub(super) fn retain_snapshots_for_addrs(&self, addrs: &std::collections::HashSet<SocketAddr>) {
+        if let Ok(mut guard) = self.client_snapshots.lock() {
+            guard.retain(|addr, _| addrs.contains(addr));
+        }
+    }
+
     #[cfg(feature = "rate_limiter")]
     pub(in crate::implementations::server) fn admit_incoming_datagram(
         &self,

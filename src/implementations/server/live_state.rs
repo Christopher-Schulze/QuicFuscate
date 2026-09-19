@@ -1,3 +1,4 @@
+use super::sharding::{DownlinkKind, ShardMessage, ShardRouter, COORDINATOR_SHARD_ID};
 use super::*;
 
 mod domain;
@@ -14,7 +15,7 @@ pub struct LiveServerState {
     pub(super) pending_tun_downlinks: PendingTunDownlinks,
     pub(super) fanout_queue: ClientFanoutQueue,
     pub(super) qkey_auth: std::collections::HashMap<crate::transport::ConnectionId, QKeyAuthState>,
-    pub(super) domain: LiveServerDomain,
+    pub(super) domain: Arc<LiveServerDomain>,
     pub(super) auth_rate_limiter:
         Arc<std::sync::Mutex<crate::implementations::server::limits::AuthRateLimiter>>,
     #[cfg(feature = "rate_limiter")]
@@ -23,6 +24,15 @@ pub struct LiveServerState {
     pub(super) revocation_manager:
         Arc<crate::implementations::server::revocation::RevocationManager>,
     pub(super) qkey_tracker: Arc<crate::implementations::server::revocation::QKeyConnectionTracker>,
+    /// Downlink scheduler config retained so `shard_clone` can fork an
+    /// identically-shaped `PendingTunDownlinks` per dataplane shard.
+    downlink_scheduler_rate_bytes_per_second: u64,
+    downlink_scheduler_burst_bytes: u64,
+    /// Dataplane shard index; `0` is the coordinator/legacy single-loop
+    /// identity, `1..=N` are worker shards under `SO_REUSEPORT` fanout.
+    pub(super) shard_id: usize,
+    /// Present only when the runtime fans RX across N>1 shards.
+    pub(super) shard_router: Option<Arc<ShardRouter>>,
     next_stats_log: Instant,
     /// Owned external blacklist synchronizer task and atomic due/in-flight claim.
     #[cfg(feature = "rate_limiter")]
@@ -304,6 +314,20 @@ pub enum LiveClientAcquire<'a> {
     Rejected,
 }
 
+/// Probe one bounded io_uring outbound worker; `None` when unavailable,
+/// disabled via env, or built without the Linux feature.
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+fn new_live_uring_worker() -> Option<Arc<LiveUringWorker>> {
+    if crate::optimize::uring_batch::env_disabled() {
+        return None;
+    }
+    let worker = LiveUringWorker::with_defaults().map(Arc::new);
+    if worker.is_some() {
+        log::info!("server io_uring batch worker initialised");
+    }
+    worker
+}
+
 pub(super) struct LiveServerDomain {
     pub(super) shared: SharedServerDomain,
     client_snapshots: Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
@@ -468,7 +492,12 @@ impl LiveServerState {
             ),
             fanout_queue: new_client_fanout_queue(),
             qkey_auth: std::collections::HashMap::new(),
-            domain,
+            domain: Arc::new(domain),
+            downlink_scheduler_rate_bytes_per_second: server_config
+                .downlink_scheduler_rate_bytes_per_second,
+            downlink_scheduler_burst_bytes: server_config.downlink_scheduler_burst_bytes,
+            shard_id: 0,
+            shard_router: None,
             auth_rate_limiter: Arc::new(std::sync::Mutex::new(
                 crate::implementations::server::limits::AuthRateLimiter::new_with_clock(
                     server_config.auth_policy.clone(),
@@ -498,12 +527,53 @@ impl LiveServerState {
     pub(crate) fn enable_uring_worker(&mut self) {
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            if !crate::optimize::uring_batch::env_disabled() {
-                self.uring_worker = LiveUringWorker::with_defaults().map(Arc::new);
-                if self.uring_worker.is_some() {
-                    log::info!("server io_uring batch worker initialised");
-                }
-            }
+            self.uring_worker = new_live_uring_worker();
+        }
+    }
+
+    /// Fork a dataplane-local view for one SO_REUSEPORT shard.
+    ///
+    /// Mutable connection state (`clients`, `path_candidates`, `qkey_auth`,
+    /// `pending_tun_downlinks`, TX staging) starts empty and stays
+    /// shard-private. Shared registries (`domain`, fanout queue, auth/
+    /// revocation/QKey trackers, blacklist owner) are Arc'd so every shard
+    /// observes one global truth.
+    pub(super) fn shard_clone(&self, shard_id: usize, router: Arc<ShardRouter>) -> Self {
+        Self {
+            clock: self.clock.clone(),
+            clients: std::collections::HashMap::new(),
+            path_candidates: std::collections::HashMap::new(),
+            pending_tun_downlinks: PendingTunDownlinks::new_with_clock(
+                self.downlink_scheduler_rate_bytes_per_second,
+                self.downlink_scheduler_burst_bytes,
+                &self.clock,
+            ),
+            fanout_queue: self.fanout_queue.clone(),
+            qkey_auth: std::collections::HashMap::new(),
+            domain: Arc::clone(&self.domain),
+            auth_rate_limiter: Arc::clone(&self.auth_rate_limiter),
+            #[cfg(feature = "rate_limiter")]
+            retry_token_manager: self.retry_token_manager.clone(),
+            revocation_manager: Arc::clone(&self.revocation_manager),
+            qkey_tracker: Arc::clone(&self.qkey_tracker),
+            downlink_scheduler_rate_bytes_per_second: self.downlink_scheduler_rate_bytes_per_second,
+            downlink_scheduler_burst_bytes: self.downlink_scheduler_burst_bytes,
+            shard_id,
+            shard_router: Some(router),
+            next_stats_log: self.clock.now(),
+            #[cfg(feature = "rate_limiter")]
+            blacklist_sync: BlacklistSyncOwner {
+                state: Arc::clone(&self.blacklist_sync.state),
+                clock: self.clock.clone(),
+            },
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            uring_worker: new_live_uring_worker(),
+            #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+            uring_worker: None,
+            #[cfg(target_os = "linux")]
+            downlink_tx_flat: Vec::new(),
+            #[cfg(target_os = "linux")]
+            downlink_tx_staging: Vec::new(),
         }
     }
 
@@ -707,6 +777,14 @@ impl LiveServerState {
                 }
                 let connection = entry.insert(init.connection);
                 let conn_id = *connection.conn.source_id();
+                if let Some(router) = &self.shard_router {
+                    router.register(
+                        addr,
+                        conn_id,
+                        self.shard_id,
+                        connection.tunnel_ingress_profile(),
+                    );
+                }
                 let qkey_auth = self.qkey_auth.get(&conn_id);
                 metrics.record_connection_accepted();
                 accept_loop.record_accepted(addr);
@@ -745,6 +823,8 @@ impl LiveServerState {
             log::debug!("Client path candidate observed: {} -> {}", old_addr, addr);
         }
 
+        // Read the global count before `acquired` borrows `self` mutably.
+        let sharded_active = self.shard_router.as_ref().map(|router| router.len());
         let mut acquired = self.accept_or_get_client_with(
             lookup_addr,
             accept_loop,
@@ -754,13 +834,58 @@ impl LiveServerState {
         );
         if let LiveClientAcquire::Ready(client) = &mut acquired {
             client.migration_from = migration_from;
-            metrics.clients_active.store(client.client_count as u64, Ordering::Relaxed);
+            metrics
+                .clients_active
+                .store(sharded_active.unwrap_or(client.client_count) as u64, Ordering::Relaxed);
         }
         acquired
     }
 
     fn get_mut(&mut self, addr: &SocketAddr) -> Option<&mut QuicFuscateConnection> {
         self.clients.get_mut(addr)
+    }
+
+    /// Local half of one fanout target: qkey-auth gate, MTU check, weight
+    /// resolution and scheduled enqueue. Shared by the unsharded drain and
+    /// the `ShardMessage::Downlink{Fanout}` handler on the owning shard.
+    pub(super) fn deliver_fanout_target(
+        &mut self,
+        target: SocketAddr,
+        session_id: SessionId,
+        packet: PendingTunPacket,
+        metrics: &Metrics,
+    ) -> bool {
+        let Some(connection) = self.clients.get_mut(&target) else {
+            return false;
+        };
+        let conn_id = connection.conn.source_id().as_ref();
+        if self.qkey_auth.get(conn_id).is_some_and(|state| !state.authed) {
+            return false;
+        }
+        if packet.len() > connection.effective_tunnel_mtu() {
+            log::debug!("Client fan-out packet exceeds tunnel MTU for {}", target);
+            return false;
+        }
+        let Some(weight) = self
+            .domain
+            .shared
+            .sessions
+            .read()
+            .bandwidth_stats(session_id)
+            .map(|stats| stats.policy.weight)
+        else {
+            return false;
+        };
+        enqueue_scheduled_tun_downlink(
+            &mut self.pending_tun_downlinks,
+            target,
+            session_id,
+            weight,
+            packet,
+            self.clock.now(),
+            metrics,
+        )
+        .is_ok()
     }
 
     pub(super) fn drain_client_fanout(&mut self, metrics: &Metrics) {
@@ -772,16 +897,18 @@ impl LiveServerState {
             let Some(fanout) = fanout else {
                 break;
             };
+            // Candidate addrs come from the router's global keyset when
+            // sharded (ownership check below), else this state's own map.
+            let candidates: Vec<SocketAddr> = match &self.shard_router {
+                Some(router) => router.addr_keyset().into_iter().collect(),
+                None => self.clients.keys().copied().collect(),
+            };
             let targets = {
                 let sessions = self.domain.shared.sessions.read();
-                self.clients
+                candidates
                     .iter()
-                    .filter_map(|(address, connection)| {
+                    .filter_map(|address| {
                         if *address == fanout.source {
-                            return None;
-                        }
-                        let conn_id = connection.conn.source_id().as_ref();
-                        if self.qkey_auth.get(conn_id).is_some_and(|state| !state.authed) {
                             return None;
                         }
                         let session = sessions.get_by_remote_addr(*address)?;
@@ -795,36 +922,32 @@ impl LiveServerState {
 
             let mut queued = false;
             for (target, session_id) in targets {
-                let Some(connection) = self.clients.get_mut(&target) else {
-                    continue;
-                };
-                if fanout.packet.len() > connection.effective_tunnel_mtu() {
-                    log::debug!("Client fan-out packet exceeds tunnel MTU for {}", target);
-                    continue;
+                let owner = self.shard_router.as_ref().and_then(|router| router.owner_of(&target));
+                if let Some(owner) = owner {
+                    if owner != self.shard_id {
+                        let sent = self.shard_router.as_ref().is_some_and(|router| {
+                            router
+                                .send(
+                                    owner,
+                                    ShardMessage::Downlink {
+                                        target,
+                                        session_id,
+                                        packet: PendingTunPacket::from_vec(fanout.packet.clone()),
+                                        kind: DownlinkKind::Fanout,
+                                    },
+                                )
+                                .is_ok()
+                        });
+                        queued |= sent;
+                        continue;
+                    }
                 }
-                let Some(weight) = self
-                    .domain
-                    .shared
-                    .sessions
-                    .read()
-                    .bandwidth_stats(session_id)
-                    .map(|stats| stats.policy.weight)
-                else {
-                    continue;
-                };
-                if enqueue_scheduled_tun_downlink(
-                    &mut self.pending_tun_downlinks,
+                queued |= self.deliver_fanout_target(
                     target,
                     session_id,
-                    weight,
                     PendingTunPacket::from_vec(fanout.packet.clone()),
-                    self.clock.now(),
                     metrics,
-                )
-                .is_ok()
-                {
-                    queued = true;
-                }
+                );
             }
             if queued {
                 metrics.record_routing_outcome(RoutingOutcome::Fanout);
@@ -848,26 +971,36 @@ impl LiveServerState {
         if log_client_stats {
             self.next_stats_log = now.checked_add(SERVER_STATS_LOG_INTERVAL).unwrap_or(now);
         }
-        {
-            let mut limiter =
-                self.auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
-            let pruned = limiter.prune_if_due();
-            metrics.set_auth_state_tracked_ips(limiter.tracked_ips());
+        // Global registries are pruned exactly once: by the coordinator
+        // (COORDINATOR_SHARD_ID) or the legacy unsharded loop. Worker
+        // shards skip; their local client loop below still runs.
+        let global_housekeeping =
+            self.shard_id == COORDINATOR_SHARD_ID || self.shard_router.is_none();
+        if global_housekeeping {
+            // Scoped so the std MutexGuard is provably dead before the
+            // blacklist `await` below (the worker future must stay `Send`).
+            let pruned = {
+                let mut limiter =
+                    self.auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
+                let pruned = limiter.prune_if_due();
+                metrics.set_auth_state_tracked_ips(limiter.tracked_ips());
+                pruned
+            };
             metrics.record_auth_state_pruned(pruned);
-        }
-        let pruned_revocations = match self.revocation_manager.prune_expired_if_due() {
-            Ok(pruned) => pruned,
-            Err(error) => {
-                log::error!("QKey revocation pruning skipped: {error}");
-                0
+            let pruned_revocations = match self.revocation_manager.prune_expired_if_due() {
+                Ok(pruned) => pruned,
+                Err(error) => {
+                    log::error!("QKey revocation pruning skipped: {error}");
+                    0
+                }
+            };
+            metrics.record_revocation_pruned(pruned_revocations);
+            #[cfg(feature = "rate_limiter")]
+            {
+                self.prune_rate_limits_if_due(metrics);
+                // Periodically dispatch and observe the owned blacklist worker.
+                self.maybe_sync_blacklist(metrics).await;
             }
-        };
-        metrics.record_revocation_pruned(pruned_revocations);
-        #[cfg(feature = "rate_limiter")]
-        {
-            self.prune_rate_limits_if_due(metrics);
-            // Periodically dispatch and observe the owned blacklist worker.
-            self.maybe_sync_blacklist(metrics).await;
         }
         self.drain_client_fanout(metrics);
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
@@ -953,6 +1086,19 @@ impl LiveServerState {
         }
     }
 
+    /// Close one local connection whose session was revoked. The closed
+    /// connection stays in `clients` until the next runtime flush emits its
+    /// queued CONNECTION_CLOSE frame.
+    pub(super) fn close_revoked_remote(&mut self, addr: SocketAddr) {
+        if let Some(conn) = self.clients.get_mut(&addr) {
+            let conn_id = *conn.conn.source_id();
+            if let Err(error) = conn.conn.close(true, 0x0, b"qkey_revoked") {
+                log::warn!("Client close after QKey revocation failed for {}: {:?}", addr, error);
+            }
+            self.qkey_auth.remove(&conn_id);
+        }
+    }
+
     fn close_sessions_for_revoked_qkey(&mut self, key_id: &str) {
         let revoked_session_ids = self.qkey_tracker.drain_connections_for_key(key_id);
         if revoked_session_ids.is_empty() {
@@ -960,10 +1106,12 @@ impl LiveServerState {
         }
         let revoked_session_ids: std::collections::HashSet<u64> =
             revoked_session_ids.into_iter().collect();
-        let addrs: Vec<SocketAddr> = self
-            .clients
-            .keys()
-            .copied()
+        let candidates: Vec<SocketAddr> = match &self.shard_router {
+            Some(router) => router.addr_keyset().into_iter().collect(),
+            None => self.clients.keys().copied().collect(),
+        };
+        let addrs: Vec<SocketAddr> = candidates
+            .into_iter()
             .filter(|addr| {
                 self.domain
                     .session_id_by_remote(*addr)
@@ -971,20 +1119,26 @@ impl LiveServerState {
                     .unwrap_or(false)
             })
             .collect();
+        let mut routed: std::collections::HashMap<usize, Vec<SocketAddr>> =
+            std::collections::HashMap::new();
         for addr in addrs {
-            // Keep the closed connection in `clients` until the next runtime
-            // flush sends its queued CONNECTION_CLOSE frame. Removing it here
-            // would drop that frame and leave the peer unaware of revocation.
-            if let Some(conn) = self.clients.get_mut(&addr) {
-                let conn_id = *conn.conn.source_id();
-                if let Err(error) = conn.conn.close(true, 0x0, b"qkey_revoked") {
+            let owner = self.shard_router.as_ref().and_then(|router| router.owner_of(&addr));
+            if let Some(owner) = owner {
+                if owner != self.shard_id {
+                    routed.entry(owner).or_default().push(addr);
+                    continue;
+                }
+            }
+            self.close_revoked_remote(addr);
+        }
+        if let Some(router) = &self.shard_router {
+            for (shard, addrs) in routed {
+                if router.send(shard, ShardMessage::CloseSessions { addrs }).is_err() {
                     log::warn!(
-                        "Client close after QKey revocation failed for {}: {:?}",
-                        addr,
-                        error
+                        "dropping CloseSessions for closed shard {} during QKey revocation",
+                        shard
                     );
                 }
-                self.qkey_auth.remove(&conn_id);
             }
         }
     }
@@ -1052,6 +1206,9 @@ impl LiveServerState {
         self.clients.insert(new_addr, connection);
         self.path_candidates.remove(&new_addr);
         self.pending_tun_downlinks.rebind_target(old_addr, new_addr);
+        if let Some(router) = &self.shard_router {
+            router.rebind(old_addr, new_addr, self.shard_id);
+        }
         accept_loop.record_migration(old_addr, new_addr);
         crate::telemetry::QKEY_PATH_REBIND_TOTAL.inc();
         log::info!("Client path validated and committed: {} -> {}", old_addr, new_addr);
@@ -1086,6 +1243,27 @@ impl LiveServerState {
         let Some(addr) = self.domain.remote_addr_for_identity(identity) else {
             return false;
         };
+        if let Some(router) = &self.shard_router {
+            match router.owner_of(&addr) {
+                Some(owner) if owner != self.shard_id => {
+                    return router.send(owner, ShardMessage::Kick { addr }).is_ok();
+                }
+                _ => {}
+            }
+        }
+        self.kick_remote(addr, accept_loop, metrics);
+        true
+    }
+
+    /// Local half of an admin kick: drops the connection, drains its queues,
+    /// removes domain/session state. Invoked directly when unsharded or via
+    /// `ShardMessage::Kick` on the owning shard.
+    pub(super) fn kick_remote(
+        &mut self,
+        addr: SocketAddr,
+        accept_loop: &AcceptLoop,
+        metrics: &Metrics,
+    ) {
         let session_id = self.domain.session_id_by_remote(addr);
         if let Some(mut conn) = self.clients.remove(&addr) {
             let conn_id = *conn.conn.source_id();
@@ -1128,8 +1306,10 @@ impl LiveServerState {
         }
         self.dissociate_qkey_for_session(session_id);
         self.domain.remove_remote(addr);
+        if let Some(router) = &self.shard_router {
+            router.unregister(addr, self.shard_id);
+        }
         self.sync_active_metrics(metrics);
-        true
     }
 
     pub fn shutdown_all(&mut self, reason: &'static [u8], metrics: Option<&Metrics>) {
@@ -1257,41 +1437,92 @@ impl LiveServerState {
             let session_id = self.domain.session_id_by_remote(addr);
             self.dissociate_qkey_for_session(session_id);
             self.domain.remove_remote(addr);
+            if let Some(router) = &self.shard_router {
+                router.unregister(addr, self.shard_id);
+            }
         }
-        self.domain.retain_snapshots_for_clients(&self.clients);
+        if let Some(router) = self.shard_router.clone() {
+            let active_ids: std::collections::HashSet<crate::transport::ConnectionId> =
+                self.clients.values().map(|conn| *conn.conn.source_id()).collect();
+            router.sync_conn_ids(self.shard_id, &active_ids);
+            self.domain.retain_snapshots_for_addrs(&router.addr_keyset());
+        } else {
+            self.domain.retain_snapshots_for_clients(&self.clients);
+        }
         self.sync_active_metrics(metrics);
     }
 
+    /// Per-remote teardown shared by session reaping and the sharded
+    /// `ExpireRemotes` command: closes and drops the local connection,
+    /// completes pending QKey auth, dissociates tracker state and updates
+    /// accept bookkeeping. Domain session removal happens on the
+    /// coordinator before this runs.
+    pub(super) fn expire_remote(
+        &mut self,
+        addr: SocketAddr,
+        session_id: SessionId,
+        accept_loop: &AcceptLoop,
+        metrics: &Metrics,
+    ) {
+        if let Some(mut conn) = self.clients.remove(&addr) {
+            let conn_id = *conn.conn.source_id();
+            if let Err(error) = conn.conn.close(true, 0x0, b"session_timeout") {
+                log::warn!("Client close after session timeout failed for {}: {:?}", addr, error);
+            }
+            if let Some(mut state) = self.qkey_auth.remove(&conn_id) {
+                if !state.authed {
+                    complete_qkey_auth_state(
+                        &self.auth_rate_limiter,
+                        metrics,
+                        &mut state,
+                        crate::implementations::server::limits::AuthTerminal::Failed,
+                    );
+                }
+            }
+        }
+        self.dissociate_qkey_for_session(Some(session_id));
+        accept_loop.record_closed(addr);
+        if let Some(router) = &self.shard_router {
+            router.unregister(addr, self.shard_id);
+        }
+    }
+
     pub fn reap_expired_sessions(&mut self, accept_loop: &AcceptLoop, metrics: &Metrics) {
+        // Worker shards never reap the shared session registry: the
+        // coordinator drains it once and ships `ExpireRemotes` to owners.
+        if self.shard_router.is_some() && self.shard_id != COORDINATOR_SHARD_ID {
+            return;
+        }
         let expired_remotes = self.domain.reap_expired_remotes();
         if expired_remotes.is_empty() {
             return;
         }
+        let mut routed: std::collections::HashMap<usize, Vec<(SocketAddr, SessionId)>> =
+            std::collections::HashMap::new();
         for (addr, session_id) in expired_remotes {
-            if let Some(mut conn) = self.clients.remove(&addr) {
-                let conn_id = *conn.conn.source_id();
-                if let Err(error) = conn.conn.close(true, 0x0, b"session_timeout") {
-                    log::warn!(
-                        "Client close after session timeout failed for {}: {:?}",
-                        addr,
-                        error
-                    );
-                }
-                if let Some(mut state) = self.qkey_auth.remove(&conn_id) {
-                    if !state.authed {
-                        complete_qkey_auth_state(
-                            &self.auth_rate_limiter,
-                            metrics,
-                            &mut state,
-                            crate::implementations::server::limits::AuthTerminal::Failed,
-                        );
-                    }
+            let owner = self.shard_router.as_ref().and_then(|router| router.owner_of(&addr));
+            if let Some(owner) = owner {
+                if owner != self.shard_id {
+                    // The owner's `expire_remote` performs accept bookkeeping.
+                    routed.entry(owner).or_default().push((addr, session_id));
+                    continue;
                 }
             }
-            self.dissociate_qkey_for_session(Some(session_id));
-            accept_loop.record_closed(addr);
+            self.expire_remote(addr, session_id, accept_loop, metrics);
         }
-        self.domain.retain_snapshots_for_clients(&self.clients);
+        if let Some(router) = &self.shard_router {
+            for (shard, remotes) in routed {
+                if router.send(shard, ShardMessage::ExpireRemotes { remotes }).is_err() {
+                    log::warn!(
+                        "dropping ExpireRemotes for closed shard {} during session reap",
+                        shard
+                    );
+                }
+            }
+            self.domain.retain_snapshots_for_addrs(&router.addr_keyset());
+        } else {
+            self.domain.retain_snapshots_for_clients(&self.clients);
+        }
         self.sync_active_metrics(metrics);
     }
 }

@@ -1,11 +1,18 @@
+use super::masque_relay::MasqueRelayOwner;
 #[cfg(target_os = "linux")]
 use super::runtime_admin::{cleanup_stale_routing_records, configured_routing_manager};
+use super::sharding::{
+    shard_channels, ShardMessage, ShardRouter, COORDINATOR_SHARD_ID, SHARD_MESSAGE_CAPACITY,
+};
 use super::*;
 use crate::time_source::ProtocolClock;
 mod runtime_loop;
 
 const SERVER_HOUSEKEEPING_ACTIVE: Duration = Duration::from_millis(5);
 const SERVER_HOUSEKEEPING_IDLE: Duration = Duration::from_millis(250);
+/// Bounded join window for dataplane shards during runtime teardown; the
+/// final CONNECTION_CLOSE flush on each shard shares the same bound.
+const SHARD_WORKER_JOIN_TIMEOUT: Duration = FINAL_CLOSE_FLUSH_TIMEOUT;
 
 fn standalone_housekeeping_delay(live: &ServerLiveRuntime) -> Duration {
     let fanout_pending =
@@ -43,6 +50,100 @@ fn standalone_housekeeping_delay(live: &ServerLiveRuntime) -> Duration {
         }
     }
     delay.max(SERVER_HOUSEKEEPING_ACTIVE)
+}
+
+/// Resolve `ServerConfig::rx_shards` into the effective dataplane shard
+/// count. `0` selects `min(available_parallelism, 4)`; the result is clamped
+/// to `1` off Linux where `SO_REUSEPORT` sharding is unavailable.
+fn resolve_rx_shards(configured: usize) -> usize {
+    let resolved = match configured {
+        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4),
+        n => n,
+    };
+    #[cfg(target_os = "linux")]
+    {
+        resolved.max(1)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if resolved > 1 {
+            log::warn!(
+                "rx_shards={resolved} requested but RX sharding requires Linux \
+                 SO_REUSEPORT; running the single-dataplane loop"
+            );
+        }
+        1
+    }
+}
+
+/// Apply the socket options every server dataplane socket shares: buffer
+/// hints, nonblocking mode, and receive-side coalescing on Linux.
+fn tune_server_udp_socket(std_socket: &std::net::UdpSocket) -> std::io::Result<()> {
+    let socket_ref = socket2::SockRef::from(std_socket);
+    if let Err(error) = socket_ref.set_recv_buffer_size(crate::transport::UDP_SOCKET_BUFFER_BYTES) {
+        log::debug!("UDP receive buffer hint rejected: {}", error);
+    }
+    if let Err(error) = socket_ref.set_send_buffer_size(crate::transport::UDP_SOCKET_BUFFER_BYTES) {
+        log::debug!("UDP send buffer hint rejected: {}", error);
+    }
+    std_socket.set_nonblocking(true)?;
+    #[cfg(target_os = "linux")]
+    {
+        // Receive-side coalescing; peers without GSO are unaffected.
+        match qf_transport_udp::enable_udp_gro(std_socket) {
+            Ok(true) => log::info!("UDP GRO enabled on server socket"),
+            Ok(false) => log::debug!("UDP GRO unavailable on server socket"),
+            Err(error) => log::debug!("UDP GRO enable failed: {error}"),
+        }
+    }
+    Ok(())
+}
+
+/// Bind one dataplane socket; with `reuseport` the bind carries
+/// `SO_REUSEADDR` + `SO_REUSEPORT` so sibling sockets share the port.
+fn create_udp_socket(listen: SocketAddr, reuseport: bool) -> std::io::Result<std::net::UdpSocket> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = reuseport;
+    #[cfg(target_os = "linux")]
+    if reuseport {
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(listen),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        socket.set_reuse_address(true)?;
+        socket.set_reuse_port(true)?;
+        socket.bind(&socket2::SockAddr::from(listen))?;
+        let std_socket: std::net::UdpSocket = socket.into();
+        tune_server_udp_socket(&std_socket)?;
+        return Ok(std_socket);
+    }
+    let std_socket = std::net::UdpSocket::bind(listen)?;
+    tune_server_udp_socket(&std_socket)?;
+    Ok(std_socket)
+}
+
+/// Bind `count` dataplane sockets on `listen`. On Linux each carries
+/// `SO_REUSEPORT`; if any sibling bind fails the whole set is dropped and a
+/// single plain socket is bound instead (graceful N→1 fallback).
+fn create_shard_sockets(listen: SocketAddr, count: usize) -> std::io::Result<Vec<Arc<UdpSocket>>> {
+    let mut sockets = Vec::with_capacity(count);
+    for shard in 0..count.max(1) {
+        match create_udp_socket(listen, count > 1) {
+            Ok(std_socket) => sockets.push(Arc::new(UdpSocket::from_std(std_socket)?)),
+            Err(error) if count > 1 => {
+                log::warn!(
+                    "SO_REUSEPORT shard socket {shard}/{count} failed ({error}); \
+                     falling back to a single dataplane socket"
+                );
+                drop(sockets);
+                let std_socket = create_udp_socket(listen, false)?;
+                return Ok(vec![Arc::new(UdpSocket::from_std(std_socket)?)]);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(sockets)
 }
 
 impl ServerRuntime {
@@ -160,32 +261,33 @@ impl ServerRuntime {
         let mut live_state =
             LiveServerState::try_new_with_clock(server_config.clone(), clock.clone())
                 .map_err(std::io::Error::other)?;
-        live_state.enable_uring_worker();
 
-        let std_socket = std::net::UdpSocket::bind(server_config.listen)?;
-        let socket_ref = socket2::SockRef::from(&std_socket);
-        if let Err(error) =
-            socket_ref.set_recv_buffer_size(crate::transport::UDP_SOCKET_BUFFER_BYTES)
-        {
-            log::debug!("UDP receive buffer hint rejected: {}", error);
-        }
-        if let Err(error) =
-            socket_ref.set_send_buffer_size(crate::transport::UDP_SOCKET_BUFFER_BYTES)
-        {
-            log::debug!("UDP send buffer hint rejected: {}", error);
-        }
-        std_socket.set_nonblocking(true)?;
-        #[cfg(target_os = "linux")]
-        {
-            // Receive-side coalescing; peers without GSO are unaffected.
-            match qf_transport_udp::enable_udp_gro(&std_socket) {
-                Ok(true) => log::info!("UDP GRO enabled on server socket"),
-                Ok(false) => log::debug!("UDP GRO unavailable on server socket"),
-                Err(error) => log::debug!("UDP GRO enable failed: {error}"),
-            }
-        }
-        let socket = Arc::new(UdpSocket::from_std(std_socket)?);
+        let shard_count = resolve_rx_shards(server_config.rx_shards);
+        let shard_sockets = create_shard_sockets(server_config.listen, shard_count)
+            .map_err(std::io::Error::other)?;
+        let socket = Arc::clone(&shard_sockets[0]);
         let local_addr = socket.local_addr()?;
+        // Sharded dataplane: per-shard channels + the global router are built
+        // once here; worker forks are spawned when the run loop starts. The
+        // coordinator fork never accepts clients, so its own shard id is the
+        // sentinel and its uring worker stays disabled.
+        let (shard_router, shard_receivers) = if shard_sockets.len() > 1 {
+            let (senders, receivers) = shard_channels(shard_sockets.len(), SHARD_MESSAGE_CAPACITY);
+            (Some(ShardRouter::new(senders)), Some(receivers))
+        } else {
+            (None, None)
+        };
+        if let Some(router) = &shard_router {
+            live_state = live_state.shard_clone(COORDINATOR_SHARD_ID, Arc::clone(router));
+            live_state.uring_worker = None;
+            log::info!(
+                "server RX sharding active: {} dataplane shards on {}",
+                shard_sockets.len(),
+                local_addr
+            );
+        } else {
+            live_state.enable_uring_worker();
+        }
         let (admin_actions_tx, admin_actions_rx) = mpsc::unbounded_channel::<AdminAction>();
         let accept_max_clients = server_config.max_clients;
         let server_tun_ip = Some(server_config.server_ip);
@@ -358,7 +460,7 @@ impl ServerRuntime {
         }
         runtime.live = Some(ServerLiveRuntime {
             live_state,
-            accept_loop: AcceptLoop::new(accept_config),
+            accept_loop: Arc::new(AcceptLoop::new(accept_config)),
             accept_max_clients,
             admin_actions_tx,
             admin_actions_rx: Some(admin_actions_rx),
@@ -374,6 +476,10 @@ impl ServerRuntime {
             tun_reader_handle,
             tun_notify,
             tun_fault,
+            shard_sockets,
+            shard_receivers,
+            shard_router,
+            shard_fault: Arc::new(Mutex::new(None)),
             blocked_ips,
             qkey_registry,
             admin_web_bootstrap,
@@ -977,6 +1083,109 @@ impl ServerRuntime {
         Ok(())
     }
 
+    /// Fork `LiveServerState` per shard and spawn one dataplane worker task
+    /// per `SO_REUSEPORT` socket. Empty when sharding is inactive (N=1 path).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_shard_workers(
+        &mut self,
+        runtime_config: &PreparedStandaloneRuntimeConfig,
+        metrics: &Arc<Metrics>,
+        dns_intercept_workers: &Arc<DnsInterceptWorkerOwner>,
+        dns_upstream_resolvers: &Arc<Vec<Ipv4Addr>>,
+        dns_intercept_admission: &Arc<crate::dns::DnsAdmission>,
+        tun_ctx: &ServerTunContext,
+        tun_enable: bool,
+        masque_relay_owner: Option<Arc<MasqueRelayOwner>>,
+    ) -> Vec<tokio::task::JoinHandle<Result<(), DataPlaneFault>>> {
+        let Some(router) = self.live().shard_router.clone() else {
+            return Vec::new();
+        };
+        let Some(receivers) = self.live_mut().shard_receivers.take() else {
+            return Vec::new();
+        };
+        let shard_count = self.live().shard_sockets.len();
+        // Per-shard admission budget: the global cap stays enforced through
+        // the shared `AcceptLoop`; the per-shard slice only bounds local map
+        // growth so no single shard hoards the whole budget.
+        let accept_budget = (self.live().accept_max_clients / shard_count).max(1);
+        let mut assignment_settings = self.assignment_settings.clone();
+        if let Some(tun) = self.live().server_tun.as_ref() {
+            assignment_settings.mtu = tun.mtu();
+        }
+        // Clone `self`-derived handles before `live_mut` mutably borrows.
+        let shutdown = Arc::clone(&self.shutdown);
+        let stealth_runtime = self.stealth_runtime.clone();
+        let crypto_config = self.engine_config.crypto.clone();
+        let clock = self.clock.clone();
+        let live = self.live_mut();
+        let mut handles = Vec::with_capacity(shard_count);
+        for (shard_id, shard_rx) in receivers.into_iter().enumerate() {
+            let state = live.live_state.shard_clone(shard_id, Arc::clone(&router));
+            let ctx = super::sharding::ShardWorkerCtx {
+                shard_id,
+                router: Arc::clone(&router),
+                socket: Arc::clone(&live.shard_sockets[shard_id]),
+                local_addr: live.local_addr,
+                accept_loop: Arc::clone(&live.accept_loop),
+                accept_max_clients: accept_budget,
+                metrics: Arc::clone(metrics),
+                blocked_ips: Arc::clone(&live.blocked_ips),
+                qkey_registry: Arc::clone(&live.qkey_registry),
+                dns_intercept_admission: Arc::clone(dns_intercept_admission),
+                dns_intercept_workers: Arc::clone(dns_intercept_workers),
+                dns_upstream_resolvers: Arc::clone(dns_upstream_resolvers),
+                tun_ctx: tun_ctx.clone(),
+                tun_enable,
+                assignment_settings: assignment_settings.clone(),
+                tun_notify: Arc::clone(&live.tun_notify),
+                shutdown: Arc::clone(&shutdown),
+                stealth_runtime: Some(stealth_runtime.clone()),
+                stealth_config: runtime_config.stealth_config.clone(),
+                fec_cfg_shared: runtime_config.fec_cfg_shared.clone(),
+                opt_params_shared: runtime_config.opt_params_shared.clone(),
+                transport: runtime_config.transport.clone(),
+                runtime_policy_generation: runtime_config.runtime_policy_generation.clone(),
+                crypto_config: crypto_config.clone(),
+                #[cfg(feature = "rate_limiter")]
+                retry_token_manager: live.live_state.retry_token_manager.clone(),
+                clock: clock.clone(),
+                masque_relay_owner: masque_relay_owner.clone(),
+                shard_fault: Arc::clone(&live.shard_fault),
+            };
+            handles.push(tokio::spawn(super::sharding::run_shard_worker(state, ctx, shard_rx)));
+        }
+        log::info!("spawned {} dataplane shard workers", handles.len());
+        handles
+    }
+
+    /// Broadcast `Shutdown` to every shard and join their tasks with a bound.
+    /// Runs before `stop()` so worker-held client state closes while the
+    /// shared domain is still intact.
+    async fn shutdown_shard_workers(
+        &self,
+        workers: Vec<tokio::task::JoinHandle<Result<(), DataPlaneFault>>>,
+        reason: &'static [u8],
+    ) {
+        if let Some(router) = self.live().shard_router.clone() {
+            for shard in 0..router.shard_count() {
+                let _ = router.send(shard, ShardMessage::Shutdown { reason });
+            }
+        }
+        let join = async move {
+            for handle in workers {
+                if let Err(error) = handle.await {
+                    log::warn!("shard worker task join failed: {error}");
+                }
+            }
+        };
+        if tokio::time::timeout(SHARD_WORKER_JOIN_TIMEOUT, join).await.is_err() {
+            log::warn!(
+                "shard worker join exceeded {} ms; continuing teardown",
+                SHARD_WORKER_JOIN_TIMEOUT.as_millis()
+            );
+        }
+    }
+
     fn live_parts(&mut self) -> ServerRuntimeLiveParts<'_> {
         let shutdown = Arc::clone(&self.shutdown);
         let mut assignment_settings = self.assignment_settings.clone();
@@ -987,7 +1196,7 @@ impl ServerRuntime {
         }
         ServerRuntimeLiveParts {
             live_state: &mut live.live_state,
-            accept_loop: &live.accept_loop,
+            accept_loop: live.accept_loop.as_ref(),
             accept_max_clients: live.accept_max_clients,
             server_tun: live.server_tun.as_ref(),
             server_ips: ServerTunIps {
@@ -1055,7 +1264,7 @@ impl ServerRuntime {
             AdminAction::Kick(id) => {
                 let kicked = if let Some(identity) = ClientIdentity::parse(&id) {
                     let live = self.live_mut();
-                    live.live_state.kick_client(&identity, &live.accept_loop, metrics)
+                    live.live_state.kick_client(&identity, live.accept_loop.as_ref(), metrics)
                 } else {
                     false
                 };
@@ -1089,7 +1298,7 @@ impl ServerRuntime {
                     live.live_state.revoke_qkey_now(
                         &id,
                         "admin_revoked",
-                        &live.accept_loop,
+                        live.accept_loop.as_ref(),
                         metrics,
                     )
                 };
@@ -1272,7 +1481,26 @@ impl ServerRuntime {
 
         match result {
             Ok(()) => {
-                let active_sessions = self.live().live_state.clients.len();
+                // Propagate the reloaded construction transport to every
+                // dataplane shard; they build new clients from their own copy.
+                if let Some(router) = self.live().shard_router.clone() {
+                    let transport = Box::new(runtime_config.transport.clone());
+                    for shard in 0..router.shard_count() {
+                        if router
+                            .send(
+                                shard,
+                                ShardMessage::ReloadTransport { transport: transport.clone() },
+                            )
+                            .is_err()
+                        {
+                            log::warn!(
+                                "transport reload propagation to shard {} dropped (queue full)",
+                                shard
+                            );
+                        }
+                    }
+                }
+                let active_sessions = self.active_client_count();
                 let outcome = StandaloneReloadOutcome {
                     scope: StandaloneReloadScope::NextConnectionOnly,
                     active_sessions_unchanged: active_sessions,
@@ -1362,8 +1590,16 @@ impl ServerRuntime {
 
     fn drain_complete(&self) -> bool {
         self.graceful_shutdown.lifecycle() == ShutdownLifecycle::Draining
-            && (self.live().live_state.client_count() == 0
-                || self.graceful_shutdown.deadline_reached())
+            && (self.active_client_count() == 0 || self.graceful_shutdown.deadline_reached())
+    }
+
+    /// Global client count: the router's owner keyset under sharding, else
+    /// the coordinator's local map.
+    fn active_client_count(&self) -> usize {
+        let live = self.live();
+        live.shard_router
+            .as_ref()
+            .map_or_else(|| live.live_state.client_count(), |router| router.len())
     }
 
     pub(super) async fn finish_drain(
@@ -1377,7 +1613,13 @@ impl ServerRuntime {
         let live = self.live_mut();
         if tokio::time::timeout(
             FINAL_CLOSE_FLUSH_TIMEOUT,
-            live.live_state.force_close_and_flush(socket, out, metrics, &live.accept_loop, reason),
+            live.live_state.force_close_and_flush(
+                socket,
+                out,
+                metrics,
+                live.accept_loop.as_ref(),
+                reason,
+            ),
         )
         .await
         .is_err()

@@ -47,6 +47,7 @@ mod routing;
 mod runtime_admin;
 mod runtime_impl;
 mod session;
+mod sharding;
 pub mod systemd;
 #[cfg(test)]
 mod tests_inline;

@@ -1,3 +1,4 @@
+use super::sharding::{DownlinkKind, ShardMessage, ShardRouter};
 use super::*;
 
 impl Default for LiveServerState {
@@ -27,7 +28,7 @@ pub(super) struct ServerRuntimeLiveParts<'a> {
 
 pub(super) struct ServerLiveRuntime {
     pub(super) live_state: LiveServerState,
-    pub(super) accept_loop: AcceptLoop,
+    pub(super) accept_loop: Arc<AcceptLoop>,
     pub(super) accept_max_clients: usize,
     pub(super) admin_actions_tx: mpsc::UnboundedSender<AdminAction>,
     pub(super) admin_actions_rx: Option<mpsc::UnboundedReceiver<AdminAction>>,
@@ -51,6 +52,17 @@ pub(super) struct ServerLiveRuntime {
     pub(super) tun_notify: Arc<tokio::sync::Notify>,
     /// First terminal server TUN data-plane fault for this runtime generation.
     pub(super) tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
+    /// All dataplane sockets (`len > 1` => SO_REUSEPORT sharding active).
+    /// `socket` stays `shard_sockets[0]` for legacy consumers.
+    pub(super) shard_sockets: Vec<Arc<UdpSocket>>,
+    /// Worker-side message receivers, taken by the run loop when spawning
+    /// shard tasks. `Some` iff sharding is active.
+    pub(super) shard_receivers:
+        Option<Vec<tokio::sync::mpsc::Receiver<super::sharding::ShardMessage>>>,
+    /// Global address/conn-id -> shard-owner routing table.
+    pub(super) shard_router: Option<Arc<super::sharding::ShardRouter>>,
+    /// First dataplane fault reported by any shard worker.
+    pub(super) shard_fault: Arc<Mutex<Option<DataPlaneFault>>>,
     pub(super) blocked_ips: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::IpAddr>>>,
     pub(super) qkey_registry: Arc<std::sync::Mutex<QKeyRegistry>>,
     pub(super) admin_web_bootstrap: StandaloneAdminWebBootstrap,
@@ -109,24 +121,6 @@ fn write_tun_control_packet(
         });
     }
     Ok(())
-}
-
-fn source_fingerprint_profile(
-    state: &LiveServerState,
-    packet: &[u8],
-) -> Option<OsFingerprintProfile> {
-    let remote_addr = match packet.first().map(|byte| byte >> 4) {
-        Some(4) if packet.len() >= 20 => {
-            let source = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-            state.domain.shared.sessions.read().get_by_client_ip(source).map(Session::remote_addr)
-        }
-        Some(6) if packet.len() >= 40 => {
-            let source = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?);
-            state.domain.shared.sessions.read().get_by_client_ipv6(source).map(Session::remote_addr)
-        }
-        _ => None,
-    }?;
-    state.clients.get(&remote_addr).map(QuicFuscateConnection::tunnel_ingress_profile)
 }
 
 fn handle_local_tun_packet(
@@ -232,21 +226,21 @@ fn write_downlink_error(
 /// queue was full. Successfully enqueued packets are flushed to the socket;
 /// entries that are still backpressured remain in the pending queue.
 pub(super) fn drain_pending_tun_downlinks(
-    live: &mut ServerLiveRuntime,
+    live_state: &mut LiveServerState,
     out: &mut [u8],
     socket: &UdpSocket,
     metrics: &Metrics,
 ) -> Result<(), DataPlaneFault> {
     let mut queued = smallvec::SmallVec::<[SocketAddr; 4]>::new();
     let mut deferred_sessions = std::collections::HashSet::new();
-    let sessions = Arc::clone(&live.live_state.domain.shared.sessions);
+    let sessions = Arc::clone(&live_state.domain.shared.sessions);
     // One read guard covers stats lookups and token-bucket checks for every
     // drained entry; the bandwidth manager serializes per client internally.
     // `sessions` is an independent Arc here, so the guard conflicts with
     // nothing else in `live`.
     let sessions = sessions.read();
-    let now = live.live_state.clock.now();
-    while let Some(mut entry) = live.live_state.pending_tun_downlinks.pop_next(&deferred_sessions) {
+    let now = live_state.clock.now();
+    while let Some(mut entry) = live_state.pending_tun_downlinks.pop_next(&deferred_sessions) {
         if entry.is_expired(now) {
             metrics.record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::Expired);
             log::warn!(
@@ -263,9 +257,9 @@ pub(super) fn drain_pending_tun_downlinks(
             continue;
         };
         let weight = stats.policy.weight;
-        if !live.live_state.pending_tun_downlinks.reserve_capacity(entry.packet.len()) {
+        if !live_state.pending_tun_downlinks.reserve_capacity(entry.packet.len()) {
             metrics.record_tun_downlink_backpressure_retry();
-            live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
+            live_state.pending_tun_downlinks.requeue_front(entry, weight);
             break;
         }
         {
@@ -283,16 +277,16 @@ pub(super) fn drain_pending_tun_downlinks(
                 match decision {
                     BandwidthDecision::Allowed => entry.bandwidth_accounted = true,
                     BandwidthDecision::RateLimited => {
-                        live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
+                        live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                         metrics.record_tun_downlink_backpressure_retry();
                         deferred_sessions.insert(entry.session_id);
-                        live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
+                        live_state.pending_tun_downlinks.requeue_front(entry, weight);
                         continue;
                     }
                     BandwidthDecision::DailyQuotaExceeded
                     | BandwidthDecision::MonthlyQuotaExceeded
                     | BandwidthDecision::ClockUnavailable => {
-                        live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
+                        live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                         continue;
                     }
                 }
@@ -300,8 +294,8 @@ pub(super) fn drain_pending_tun_downlinks(
         }
         let target = entry.target;
         let send_result = {
-            let Some(connection) = live.live_state.clients.get_mut(&target) else {
-                live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
+            let Some(connection) = live_state.clients.get_mut(&target) else {
+                live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                 metrics.record_tun_downlink_backpressure_drop(
                     TunDownlinkBackpressureDrop::TerminalTransportError,
                 );
@@ -319,14 +313,14 @@ pub(super) fn drain_pending_tun_downlinks(
                 queued.push(target);
             }
             Err(crate::error::ConnectionError::DgramQueueFull) => {
-                live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
+                live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                 log::debug!("pending TUN downlink for {} still backpressured", target);
                 metrics.record_tun_downlink_backpressure_retry();
                 deferred_sessions.insert(entry.session_id);
-                live.live_state.pending_tun_downlinks.requeue_front(entry, weight);
+                live_state.pending_tun_downlinks.requeue_front(entry, weight);
             }
             Err(error) => {
-                live.live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
+                live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                 metrics.record_tun_downlink_backpressure_drop(
                     TunDownlinkBackpressureDrop::TerminalTransportError,
                 );
@@ -340,14 +334,13 @@ pub(super) fn drain_pending_tun_downlinks(
     }
 
     metrics.set_tun_downlink_backpressure_pending(
-        live.live_state.pending_tun_downlinks.len(),
-        live.live_state.pending_tun_downlinks.bytes(),
+        live_state.pending_tun_downlinks.len(),
+        live_state.pending_tun_downlinks.bytes(),
     );
-    metrics.set_bandwidth_scheduler_active_clients(
-        live.live_state.pending_tun_downlinks.active_clients(),
-    );
+    metrics
+        .set_bandwidth_scheduler_active_clients(live_state.pending_tun_downlinks.active_clients());
 
-    flush_tun_downlink_queue(live, &queued, out, socket, metrics)
+    flush_tun_downlink_queue(live_state, &queued, out, socket, metrics)
 }
 
 #[cfg(test)]
@@ -432,8 +425,8 @@ fn enqueue_pending_tun_downlink_with_accounting(
 
 /// Flush a list of client connections whose downlink datagrams have been
 /// enqueued. Callers are responsible for collecting `queued` addresses.
-fn flush_tun_downlink_queue(
-    live: &mut ServerLiveRuntime,
+pub(super) fn flush_tun_downlink_queue(
+    live_state: &mut LiveServerState,
     queued: &[SocketAddr],
     out: &mut [u8],
     socket: &UdpSocket,
@@ -457,8 +450,8 @@ fn flush_tun_downlink_queue(
         // server socket rarely reports a route MTU, so the conservative
         // Ethernet payload ceiling stands in when probing fails.
         let gso_seg_cap = qf_transport_udp::udp_gso_segment_mtu(fd).unwrap_or(1472);
-        let flat = &mut live.live_state.downlink_tx_flat;
-        let staging = &mut live.live_state.downlink_tx_staging;
+        let flat = &mut live_state.downlink_tx_flat;
+        let staging = &mut live_state.downlink_tx_staging;
         if flat.len() < TX_FLAT_BYTES {
             flat.resize(TX_FLAT_BYTES, 0);
         }
@@ -473,7 +466,7 @@ fn flush_tun_downlink_queue(
                 && flat.len() - watermark >= SEND_WINDOW
             {
                 let target = queued[ti];
-                let Some(connection) = live.live_state.clients.get_mut(&target) else {
+                let Some(connection) = live_state.clients.get_mut(&target) else {
                     ti += 1;
                     continue;
                 };
@@ -578,7 +571,7 @@ fn flush_tun_downlink_queue(
                             // EMSGSIZE is a stable route property — stop
                             // probing GSO to this peer for the connection.
                             if error.raw_os_error() == Some(libc::EMSGSIZE) {
-                                if let Some(client) = live.live_state.clients.get_mut(&target) {
+                                if let Some(client) = live_state.clients.get_mut(&target) {
                                     client.udp_gso_path_blocked = true;
                                 }
                             }
@@ -630,7 +623,7 @@ fn flush_tun_downlink_queue(
 
     #[cfg(not(target_os = "linux"))]
     for target in queued {
-        let Some(connection) = live.live_state.clients.get_mut(target) else {
+        let Some(connection) = live_state.clients.get_mut(target) else {
             continue;
         };
         loop {
@@ -687,32 +680,237 @@ fn retain_tun_frame(
     pending
 }
 
-fn process_server_tun_packet(
-    live: &mut ServerLiveRuntime,
-    packet: crate::interface::TunPacket,
-    out: &mut [u8],
-    socket: &UdpSocket,
+/// TUN-side handles and identity shared by the unsharded packet path and
+/// the sharded coordinator/worker split. Owned `Arc`s keep the context
+/// independent of `ServerLiveRuntime` borrows; everything is `&self`-safe:
+/// TUN writes are atomic per frame, ICMP composition is pure.
+#[derive(Clone)]
+pub(super) struct ServerTunContext {
+    pub(super) server_tun: Option<Arc<TunInterface>>,
+    pub(super) server_ips: ServerTunIps,
+    pub(super) tun_reader_shutdown: Option<Arc<AtomicBool>>,
+    pub(super) tun_fault: Arc<Mutex<Option<DataPlaneFault>>>,
+    pub(super) fingerprint_profile: OsFingerprintProfile,
+}
+
+/// One downlink target processed on the shard that owns the connection:
+/// MTU gate (+ PacketTooBig ICMP for unicast), bandwidth decision, then
+/// direct send or bounded scheduled enqueue. Returns `true` when the packet
+/// was queued into the connection and the caller should flush it.
+#[allow(clippy::too_many_arguments)]
+fn deliver_tun_downlink_target(
+    live_state: &mut LiveServerState,
+    tun: Option<&Arc<TunInterface>>,
+    server_ips: ServerTunIps,
+    target: SocketAddr,
+    session_id: SessionId,
+    packet: &mut Option<crate::interface::TunPacket>,
+    shared_frame: &mut Option<PendingTunPacket>,
+    unicast: bool,
+    source_profile: OsFingerprintProfile,
+    sessions: &SessionManager,
     metrics: &Metrics,
+) -> Result<bool, DataPlaneFault> {
+    let Some(connection) = live_state.clients.get(&target) else {
+        log::debug!("downlink target {} has no local connection", target);
+        return Ok(false);
+    };
+    let frame_len = match shared_frame.as_ref() {
+        Some(shared) => shared.len(),
+        None => packet.as_ref().expect("TUN frame owned until first enqueue").len(),
+    };
+    let effective_mtu = connection
+        .effective_tunnel_mtu()
+        .min(tun.map(|tun| usize::from(tun.mtu())).unwrap_or(usize::MAX));
+    if frame_len > effective_mtu {
+        if unicast {
+            if let Some(tun) = tun {
+                let frame: &[u8] = match shared_frame.as_ref() {
+                    Some(shared) => shared.as_slice(),
+                    None => packet.as_ref().expect("frame").as_slice(),
+                };
+                write_downlink_error(
+                    frame,
+                    tun,
+                    server_ips,
+                    source_profile,
+                    RoutingOutcome::PacketTooBig,
+                    Some(effective_mtu),
+                    metrics,
+                )?;
+            }
+        }
+        return Ok(false);
+    }
+    let requires_scheduler = live_state.pending_tun_downlinks.uses_shared_capacity()
+        || live_state.pending_tun_downlinks.contains_session(session_id);
+    // The sessions guard held by the caller covers the stats lookup and (on
+    // the fast path) the token-bucket check.
+    let Some(stats) = sessions.bandwidth_stats(session_id) else {
+        return Ok(false);
+    };
+    let weight = stats.policy.weight;
+    let decision = if requires_scheduler {
+        None
+    } else {
+        Some(sessions.check_bandwidth(session_id, BandwidthDirection::Downlink, frame_len))
+    };
+    if let Some(decision) = decision {
+        metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, frame_len);
+        match decision {
+            BandwidthDecision::Allowed => {
+                let send_result = {
+                    let frame: &[u8] = match shared_frame.as_ref() {
+                        Some(shared) => shared.as_slice(),
+                        None => packet.as_ref().expect("frame").as_slice(),
+                    };
+                    live_state
+                        .clients
+                        .get_mut(&target)
+                        .map(|connection| connection.send_masque_downlink(frame))
+                };
+                match send_result {
+                    Some(Ok(())) => {
+                        metrics.record_bandwidth_scheduler_delivery(frame_len);
+                        return Ok(true);
+                    }
+                    Some(Err(crate::error::ConnectionError::DgramQueueFull)) => {
+                        let pending_packet = retain_tun_frame(packet, shared_frame);
+                        if let Err(reject) = enqueue_pending_tun_downlink_with_accounting(
+                            &mut live_state.pending_tun_downlinks,
+                            PendingTunDownlink {
+                                target,
+                                session_id,
+                                packet: pending_packet,
+                                queued_at: live_state.clock.now(),
+                                bandwidth_accounted: true,
+                            },
+                            weight,
+                            PendingTunDownlinkAdmission::TransportBackpressure,
+                            metrics,
+                        ) {
+                            log::warn!(
+                                "dropping admitted TUN downlink for {} after bounded transport backpressure rejection: {:?}",
+                                target,
+                                reject
+                            );
+                        }
+                        return Ok(false);
+                    }
+                    Some(Err(error)) => {
+                        metrics.record_tun_downlink_backpressure_drop(
+                            TunDownlinkBackpressureDrop::TerminalTransportError,
+                        );
+                        log::warn!("TUN downlink for {} failed: {:?}", target, error);
+                        return Err(DataPlaneFault::TransportSend {
+                            component: format!("server TUN downlink to {target}"),
+                            error: error.to_string(),
+                        });
+                    }
+                    None => return Ok(false),
+                }
+            }
+            BandwidthDecision::RateLimited => {
+                metrics.record_tun_downlink_backpressure_retry();
+            }
+            BandwidthDecision::DailyQuotaExceeded
+            | BandwidthDecision::MonthlyQuotaExceeded
+            | BandwidthDecision::ClockUnavailable => return Ok(false),
+        }
+    }
+    let enqueue_result = enqueue_scheduled_tun_downlink(
+        &mut live_state.pending_tun_downlinks,
+        target,
+        session_id,
+        weight,
+        retain_tun_frame(packet, shared_frame),
+        live_state.clock.now(),
+        metrics,
+    );
+    if let Err(reject) = enqueue_result {
+        log::warn!(
+            "dropping TUN downlink for {} after bounded scheduler rejection: {:?}",
+            target,
+            reject
+        );
+    }
+    Ok(false)
+}
+
+/// Resolve the source client's frozen ingress profile for ICMP composition.
+/// Local `clients` first (unsharded); the `profile_lookup` fallback lets a
+/// sharded coordinator consult the router's profile registry.
+fn resolve_source_profile(
+    live_state: &LiveServerState,
+    packet_slice: &[u8],
+    profile_lookup: &dyn Fn(&SocketAddr) -> Option<OsFingerprintProfile>,
+) -> Option<OsFingerprintProfile> {
+    let remote_addr = match packet_slice.first().map(|byte| byte >> 4) {
+        Some(4) if packet_slice.len() >= 20 => {
+            let source = Ipv4Addr::new(
+                packet_slice[12],
+                packet_slice[13],
+                packet_slice[14],
+                packet_slice[15],
+            );
+            live_state
+                .domain
+                .shared
+                .sessions
+                .read()
+                .get_by_client_ip(source)
+                .map(Session::remote_addr)
+        }
+        Some(6) if packet_slice.len() >= 40 => {
+            let source = Ipv6Addr::from(<[u8; 16]>::try_from(&packet_slice[8..24]).ok()?);
+            live_state
+                .domain
+                .shared
+                .sessions
+                .read()
+                .get_by_client_ipv6(source)
+                .map(Session::remote_addr)
+        }
+        _ => None,
+    }?;
+    live_state
+        .clients
+        .get(&remote_addr)
+        .map(QuicFuscateConnection::tunnel_ingress_profile)
+        .or_else(|| profile_lookup(&remote_addr))
+}
+
+/// Resolved downlink classification: unicast flag, ordered (addr, session)
+/// targets, and the source client's frozen ingress profile for ICMP
+/// composition.
+struct ClassifiedDownlink {
+    unicast: bool,
+    targets: smallvec::SmallVec<[(SocketAddr, SessionId); 4]>,
+    source_profile: OsFingerprintProfile,
+}
+
+/// Shared prelude of the TUN downlink path: local handling, route
+/// classification, TTL expiry, and target resolution. `Ok(None)` means the
+/// packet was fully handled here (local/unknown/malformed/expired).
+fn classify_server_tun_downlink(
+    live_state: &LiveServerState,
+    tun: &Arc<TunInterface>,
+    server_ips: ServerTunIps,
+    packet_slice: &[u8],
+    profile_lookup: &dyn Fn(&SocketAddr) -> Option<OsFingerprintProfile>,
     fingerprint_profile: OsFingerprintProfile,
-) -> Result<(), DataPlaneFault> {
-    let Some(tun) = live.server_tun.as_ref() else {
-        return Ok(());
-    };
-    let server_ips = ServerTunIps {
-        ipv4: live.server_tun_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
-        ipv6: live.server_tun_ipv6,
-    };
-    let packet_slice: &[u8] = packet.as_slice();
-    let source_profile =
-        source_fingerprint_profile(&live.live_state, packet_slice).unwrap_or(fingerprint_profile);
+    metrics: &Metrics,
+) -> Result<Option<ClassifiedDownlink>, DataPlaneFault> {
+    let source_profile = resolve_source_profile(live_state, packet_slice, profile_lookup)
+        .unwrap_or(fingerprint_profile);
     if handle_local_tun_packet(packet_slice, tun, server_ips, source_profile, metrics)? {
-        return Ok(());
+        return Ok(None);
     }
 
-    let policy = &live.live_state.domain.shared.forwarding_policy;
+    let policy = &live_state.domain.shared.forwarding_policy;
     let route = policy.classify_downlink(packet_slice, server_ips.ipv4, server_ips.ipv6);
     log::debug!(
-        "process_server_tun_packet: {}B route={:?} assigned_count={}",
+        "server TUN downlink: {}B route={:?} assigned_count={}",
         packet_slice.len(),
         route,
         policy.assigned_address_count()
@@ -733,13 +931,9 @@ fn process_server_tun_packet(
             None,
             metrics,
         )?;
-        return Ok(());
+        return Ok(None);
     }
-    // One read guard covers route-to-target resolution AND the per-target
-    // bandwidth checks below; the bandwidth manager serializes per client
-    // internally. Disjoint field borrows (`clients`, `pending_tun_downlinks`)
-    // stay usable while the guard is held.
-    let sessions = live.live_state.domain.shared.sessions.read();
+    let sessions = live_state.domain.shared.sessions.read();
     let mut targets = smallvec::SmallVec::<[(SocketAddr, SessionId); 4]>::new();
     match route {
         DownlinkRoute::Unicast { destination, .. } => {
@@ -776,20 +970,52 @@ fn process_server_tun_packet(
                 None,
                 metrics,
             )?;
-            return Ok(());
+            return Ok(None);
         }
         DownlinkRoute::Malformed => {
             metrics.routing_drop_malformed.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
+            return Ok(None);
         }
-        DownlinkRoute::Local { .. } => return Ok(()),
+        DownlinkRoute::Local { .. } => return Ok(None),
     }
+    Ok(Some(ClassifiedDownlink {
+        unicast: matches!(route, DownlinkRoute::Unicast { .. }),
+        targets,
+        source_profile,
+    }))
+}
 
-    log::debug!(
-        "process_server_tun_packet: targets={} clients_count={}",
-        targets.len(),
-        live.live_state.clients.len()
-    );
+fn process_server_tun_packet(
+    live_state: &mut LiveServerState,
+    tun_ctx: &ServerTunContext,
+    packet: crate::interface::TunPacket,
+    out: &mut [u8],
+    socket: &UdpSocket,
+    metrics: &Metrics,
+) -> Result<(), DataPlaneFault> {
+    let Some(tun) = tun_ctx.server_tun.as_ref() else {
+        return Ok(());
+    };
+    let server_ips = tun_ctx.server_ips;
+    let packet_slice: &[u8] = packet.as_slice();
+    let Some(ClassifiedDownlink { unicast, targets, source_profile }) =
+        classify_server_tun_downlink(
+            live_state,
+            tun,
+            server_ips,
+            packet_slice,
+            &|_| None,
+            tun_ctx.fingerprint_profile,
+            metrics,
+        )?
+    else {
+        return Ok(());
+    };
+
+    // Arc-cloned so the read guard borrows the local Arc, not `live_state`
+    // - `&mut live_state` stays usable while the guard is held.
+    let sessions = Arc::clone(&live_state.domain.shared.sessions);
+    let sessions = sessions.read();
     let mut direct_send_targets = smallvec::SmallVec::<[SocketAddr; 4]>::new();
     // The frame stays owned until the first enqueue retains it; direct sends
     // never pay for retention and additional queued targets share the block
@@ -797,122 +1023,123 @@ fn process_server_tun_packet(
     let mut packet = Some(packet);
     let mut shared_frame: Option<PendingTunPacket> = None;
     for (target, session_id) in targets {
-        let Some(connection) = live.live_state.clients.get(&target) else {
-            log::debug!("process_server_tun_packet: no connection for target {}", target);
-            continue;
-        };
-        let frame: &[u8] = match &shared_frame {
-            Some(shared) => shared.as_slice(),
-            None => packet.as_ref().expect("TUN frame owned until first enqueue").as_slice(),
-        };
-        let effective_mtu = connection.effective_tunnel_mtu().min(usize::from(tun.mtu()));
-        if frame.len() > effective_mtu {
-            if matches!(route, DownlinkRoute::Unicast { .. }) {
-                write_downlink_error(
-                    frame,
-                    tun,
-                    server_ips,
-                    source_profile,
-                    RoutingOutcome::PacketTooBig,
-                    Some(effective_mtu),
-                    metrics,
-                )?;
-            }
-            continue;
-        }
-        let requires_scheduler = live.live_state.pending_tun_downlinks.uses_shared_capacity()
-            || live.live_state.pending_tun_downlinks.contains_session(session_id);
-        // The guard held since route resolution covers the stats lookup and
-        // (when the fast path applies) the token-bucket check.
-        let Some(stats) = sessions.bandwidth_stats(session_id) else {
-            continue;
-        };
-        let weight = stats.policy.weight;
-        let decision = if requires_scheduler {
-            None
-        } else {
-            Some(sessions.check_bandwidth(session_id, BandwidthDirection::Downlink, frame.len()))
-        };
-        if let Some(decision) = decision {
-            metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, frame.len());
-            match decision {
-                BandwidthDecision::Allowed => {
-                    let send_result = live
-                        .live_state
-                        .clients
-                        .get_mut(&target)
-                        .map(|connection| connection.send_masque_downlink(frame));
-                    match send_result {
-                        Some(Ok(())) => {
-                            metrics.record_bandwidth_scheduler_delivery(frame.len());
-                            direct_send_targets.push(target);
-                            continue;
-                        }
-                        Some(Err(crate::error::ConnectionError::DgramQueueFull)) => {
-                            let pending_packet = retain_tun_frame(&mut packet, &mut shared_frame);
-                            if let Err(reject) = enqueue_pending_tun_downlink_with_accounting(
-                                &mut live.live_state.pending_tun_downlinks,
-                                PendingTunDownlink {
-                                    target,
-                                    session_id,
-                                    packet: pending_packet,
-                                    queued_at: live.live_state.clock.now(),
-                                    bandwidth_accounted: true,
-                                },
-                                weight,
-                                PendingTunDownlinkAdmission::TransportBackpressure,
-                                metrics,
-                            ) {
-                                log::warn!(
-                                    "dropping admitted TUN downlink for {} after bounded transport backpressure rejection: {:?}",
-                                    target,
-                                    reject
-                                );
-                            }
-                            continue;
-                        }
-                        Some(Err(error)) => {
-                            metrics.record_tun_downlink_backpressure_drop(
-                                TunDownlinkBackpressureDrop::TerminalTransportError,
-                            );
-                            log::warn!("TUN downlink for {} failed: {:?}", target, error);
-                            return Err(DataPlaneFault::TransportSend {
-                                component: format!("server TUN downlink to {target}"),
-                                error: error.to_string(),
-                            });
-                        }
-                        None => continue,
-                    }
-                }
-                BandwidthDecision::RateLimited => {
-                    metrics.record_tun_downlink_backpressure_retry();
-                }
-                BandwidthDecision::DailyQuotaExceeded
-                | BandwidthDecision::MonthlyQuotaExceeded
-                | BandwidthDecision::ClockUnavailable => continue,
-            }
-        }
-        let enqueue_result = enqueue_scheduled_tun_downlink(
-            &mut live.live_state.pending_tun_downlinks,
+        if deliver_tun_downlink_target(
+            live_state,
+            Some(tun),
+            server_ips,
             target,
             session_id,
-            weight,
-            retain_tun_frame(&mut packet, &mut shared_frame),
-            live.live_state.clock.now(),
+            &mut packet,
+            &mut shared_frame,
+            unicast,
+            source_profile,
+            &sessions,
             metrics,
-        );
-        if let Err(reject) = enqueue_result {
-            log::warn!(
-                "dropping TUN downlink for {} after bounded scheduler rejection: {:?}",
-                target,
-                reject
-            );
+        )? {
+            direct_send_targets.push(target);
         }
     }
 
     drop(sessions);
-    flush_tun_downlink_queue(live, &direct_send_targets, out, socket, metrics)?;
-    drain_pending_tun_downlinks(live, out, socket, metrics)
+    flush_tun_downlink_queue(live_state, &direct_send_targets, out, socket, metrics)?;
+    drain_pending_tun_downlinks(live_state, out, socket, metrics)
+}
+
+/// Coordinator-side TUN packet handling under sharding: classification and
+/// ICMP/local work stay here; each resolved target is shipped to its owning
+/// shard as `ShardMessage::Downlink` with a shared-retained frame.
+fn route_server_tun_packet(
+    live_state: &LiveServerState,
+    tun_ctx: &ServerTunContext,
+    router: &ShardRouter,
+    packet: crate::interface::TunPacket,
+    metrics: &Metrics,
+) -> Result<(), DataPlaneFault> {
+    let Some(tun) = tun_ctx.server_tun.as_ref() else {
+        return Ok(());
+    };
+    let packet_slice: &[u8] = packet.as_slice();
+    let Some(ClassifiedDownlink { unicast, targets, source_profile }) =
+        classify_server_tun_downlink(
+            live_state,
+            tun,
+            tun_ctx.server_ips,
+            packet_slice,
+            &|addr| router.profile_of(addr),
+            tun_ctx.fingerprint_profile,
+            metrics,
+        )?
+    else {
+        return Ok(());
+    };
+
+    let mut shared_frame: Option<PendingTunPacket> = None;
+    let mut packet = Some(packet);
+    for (target, session_id) in targets {
+        let Some(owner) = router.owner_of(&target) else {
+            continue;
+        };
+        let pending = retain_tun_frame(&mut packet, &mut shared_frame);
+        if router
+            .send(
+                owner,
+                ShardMessage::Downlink {
+                    target,
+                    session_id,
+                    packet: pending,
+                    kind: DownlinkKind::Tun { unicast, profile: source_profile },
+                },
+            )
+            .is_err()
+        {
+            metrics
+                .record_tun_downlink_backpressure_drop(TunDownlinkBackpressureDrop::QueueCapacity);
+            log::debug!("dropping routed TUN downlink for {}: shard queue full", target);
+        }
+    }
+    Ok(())
+}
+
+/// Owning-shard half of `ShardMessage::Downlink`. `Tun` payloads run the
+/// identical per-target semantics as the unsharded path (returns `true`
+/// when the packet was queued for direct flush); `Fanout` payloads go
+/// through the scheduled-queue helper only.
+pub(super) fn handle_shard_downlink(
+    live_state: &mut LiveServerState,
+    tun_ctx: &ServerTunContext,
+    target: SocketAddr,
+    session_id: SessionId,
+    packet: PendingTunPacket,
+    kind: DownlinkKind,
+    metrics: &Metrics,
+) -> Result<bool, DataPlaneFault> {
+    match kind {
+        DownlinkKind::Fanout => {
+            if live_state.deliver_fanout_target(target, session_id, packet, metrics) {
+                metrics.record_routing_outcome(RoutingOutcome::Fanout);
+            }
+            Ok(false)
+        }
+        DownlinkKind::Tun { unicast, profile } => {
+            let sessions = Arc::clone(&live_state.domain.shared.sessions);
+            let sessions = sessions.read();
+            let mut packet_slot = None;
+            let mut shared_frame = Some(packet);
+            deliver_tun_downlink_target(
+                live_state,
+                tun_ctx.server_tun.as_ref(),
+                tun_ctx.server_ips,
+                target,
+                session_id,
+                &mut packet_slot,
+                &mut shared_frame,
+                unicast,
+                profile,
+                &sessions,
+                metrics,
+            )
+        }
+    }
 }
 
 impl StandaloneServiceSignals {
@@ -931,35 +1158,49 @@ impl StandaloneServiceSignals {
 
 /// Drain bounded batches from the standalone TUN reader and report whether a
 /// follow-up wake-up is required for more queued packets.
+///
+/// `router == None`: packets are processed locally (legacy single-loop).
+/// `Some(router)`: the coordinator classifies and routes each packet's
+/// targets to owning shards; `live_state` supplies shared domain state only.
 pub(super) fn drain_server_tun_packets(
-    live: &mut ServerLiveRuntime,
+    live_state: &mut LiveServerState,
+    tun_ctx: &ServerTunContext,
+    router: Option<&ShardRouter>,
     tun_rx: &mut Option<std::sync::mpsc::Receiver<crate::interface::TunPacket>>,
     out: &mut [u8],
     socket: &UdpSocket,
     metrics: &Metrics,
-    fingerprint_profile: OsFingerprintProfile,
 ) -> Result<bool, DataPlaneFault> {
+    let reader_gone = |tun_ctx: &ServerTunContext| {
+        if tun_ctx
+            .tun_reader_shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
+        {
+            return None;
+        }
+        Some(tun_ctx.tun_fault.lock().clone().unwrap_or(DataPlaneFault::ChannelDisconnected {
+            component: "server TUN reader channel".to_string(),
+        }))
+    };
     for _ in 0..32 {
         let result = tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv);
         match result {
-            Some(Ok(packet)) => {
-                process_server_tun_packet(live, packet, out, socket, metrics, fingerprint_profile)?
-            }
+            Some(Ok(packet)) => match router {
+                Some(router) => {
+                    route_server_tun_packet(live_state, tun_ctx, router, packet, metrics)?
+                }
+                None => {
+                    process_server_tun_packet(live_state, tun_ctx, packet, out, socket, metrics)?
+                }
+            },
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Ok(false),
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
                 *tun_rx = None;
-                if live
-                    .tun_reader_shutdown
-                    .as_ref()
-                    .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
-                {
-                    return Ok(false);
+                if let Some(fault) = reader_gone(tun_ctx) {
+                    return Err(fault);
                 }
-                return Err(live.tun_fault.lock().clone().unwrap_or(
-                    DataPlaneFault::ChannelDisconnected {
-                        component: "server TUN reader channel".to_string(),
-                    },
-                ));
+                return Ok(false);
             }
             None => return Ok(false),
         }
@@ -967,21 +1208,22 @@ pub(super) fn drain_server_tun_packets(
 
     match tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv) {
         Some(Ok(packet)) => {
-            process_server_tun_packet(live, packet, out, socket, metrics, fingerprint_profile)?;
+            match router {
+                Some(router) => {
+                    route_server_tun_packet(live_state, tun_ctx, router, packet, metrics)?
+                }
+                None => {
+                    process_server_tun_packet(live_state, tun_ctx, packet, out, socket, metrics)?
+                }
+            }
             Ok(true)
         }
         Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
             *tun_rx = None;
-            if live
-                .tun_reader_shutdown
-                .as_ref()
-                .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
-            {
-                return Ok(false);
+            match reader_gone(tun_ctx) {
+                Some(fault) => Err(fault),
+                None => Ok(false),
             }
-            Err(live.tun_fault.lock().clone().unwrap_or(DataPlaneFault::ChannelDisconnected {
-                component: "server TUN reader channel".to_string(),
-            }))
         }
         Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => Ok(false),
     }

@@ -441,6 +441,15 @@ impl Metrics {
             self.client_fanout_dropped.load(Ordering::Relaxed)
         );
 
+        out.push_str(
+            "# HELP quicfuscate_shard_forward_dropped_total Datagrams/downlinks dropped on full shard channels\n",
+        );
+        out.push_str("# TYPE quicfuscate_shard_forward_dropped_total counter\n");
+        write_metric!(
+            "quicfuscate_shard_forward_dropped_total {}\n\n",
+            self.shard_forward_dropped.load(Ordering::Relaxed)
+        );
+
         // Stealth
         out.push_str("# HELP quicfuscate_stealth_http3_active Clients using HTTP/3 stealth\n");
         out.push_str("# TYPE quicfuscate_stealth_http3_active gauge\n");

@@ -462,7 +462,7 @@ pub(in crate::implementations::server) struct BlacklistSyncState {
 #[cfg(feature = "rate_limiter")]
 pub(in crate::implementations::server) struct BlacklistSyncOwner {
     pub(in crate::implementations::server) state: Arc<Mutex<BlacklistSyncState>>,
-    clock: crate::time_source::ProtocolClock,
+    pub(in crate::implementations::server) clock: crate::time_source::ProtocolClock,
 }
 
 #[cfg(feature = "rate_limiter")]
