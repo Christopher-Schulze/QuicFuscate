@@ -537,6 +537,18 @@ else
     log_critical "TLS ClientHello ownership contract failed with rc=$TLS_CLIENTHELLO_CONTRACT_RC (see $TLS_CLIENTHELLO_CONTRACT_LOG)"
 fi
 
+FINGERPRINT_FRESHNESS_LOG="$OUTPUT_DIR/fingerprint-freshness.log"
+set +e
+"$PROJECT_ROOT/scripts/audits/verify-fingerprint-freshness.sh" >"$FINGERPRINT_FRESHNESS_LOG" 2>&1
+FINGERPRINT_FRESHNESS_RC=$?
+set -e
+record_command_check "fingerprint_freshness" "$FINGERPRINT_FRESHNESS_RC" "artifact=$FINGERPRINT_FRESHNESS_LOG"
+if [ "$FINGERPRINT_FRESHNESS_RC" -eq 0 ]; then
+    log_info "Fingerprint freshness contract passed"
+else
+    log_critical "Fingerprint freshness contract failed with rc=$FINGERPRINT_FRESHNESS_RC (see $FINGERPRINT_FRESHNESS_LOG)"
+fi
+
 echo -e "\n> Checking allocations in hot paths..."
 HOT_PATH_ALLOC_LOG="$OUTPUT_DIR/hot-path-allocation.log"
 set +e

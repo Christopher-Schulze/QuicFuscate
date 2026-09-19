@@ -3986,7 +3986,7 @@
 
 ### TODO-1006 - Audit whether wire-level FEC recovery masks congestion loss from CC (RFC 9265)
 
-- OPEN. Wire-level FEC re-injects recovered datagrams into `conn.recv`, so recovered PNs get ACKed and may never reach the sender's loss detector - hiding congestion signal from the congestion controller (RFC 9265 violation pattern). Audit whether wire loss still reaches CC; if masked, restore visibility or document the bounded trade-off. Literature: RFC 9265, draft-zheng-quic-fec-extension (Repair-ACK prior art).
+- DONE (2026-09-19). Verdict: masked, but tightly bounded and observable - accepted as documented behavior. Masking applies only to losses recovered faster than `loss_delay` (~RTT); losses beyond repair capacity always reach CC, and post-declaration ACKs land as spurious loss (conservative direction). Both controller inputs are already correct (receiver wire-truth via `observe_wire_receive`; sender residual-loss via declared-loss callbacks). `quicfuscate_fec_packets_recovered` exposes masked volume. Repair-ACK remains the only complete fix - deferred as wire-format enhancement inside TODO-1011 item 3.
 - Detail: docs/todo/todo-1006-fec-congestion-signal-masking.md
 
 ### TODO-1007 - io_uring multishot recv + provided buffer ring for inbound
@@ -4001,7 +4001,7 @@
 
 ### TODO-1009 - TLS/browser fingerprint freshness and rotation validation
 
-- OPEN. 2025 evidence: uTLS ECH-GREASE bug made the Chrome parrot passively identifiable for ~2 years; JA4 fingerprints beyond JA3 fields. Bundled `browser_profiles/*.chlo` personas need a staleness contract, per-connection GREASE variance (no byte-identical ClientHellos), JA4-field coverage (extension order, ALPS, ECH shape), and a refresh policy.
+- PARTIAL. 2025 evidence: uTLS ECH-GREASE bug made the Chrome parrot passively identifiable for ~2 years; JA4 fingerprints beyond JA3 fields. Catalog is compiled-in code (`fingerprint_profile.rs`/`tls_profile.rs`), refreshed to the 2026-09 fleet (Chrome/Edge 153, Firefox 156, Safari 26, Opera 136, Brave 1.95) behind a `PROFILE_CATALOG_SNAPSHOT` marker. New gate `verify-fingerprint-freshness.sh` (snapshot age <= 6 months + UA version coherence + zero-random/entropy guards) is registered in the comprehensive audit. Synthetic cover hellos now draw per-call entropy for random/SID/key-share/GREASE/ECH/padding (no more byte-identical hellos) and emit X25519MLKEM768+X25519 hybrid key shares on non-Safari personas. Open: JA4 field diff vs real captures, refresh policy note.
 - Detail: docs/todo/todo-1009-fingerprint-freshness.md
 
 ### TODO-1010 - Next-generation stealth shaping research track

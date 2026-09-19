@@ -5,24 +5,29 @@ use crate::{parse_profile_slot, BrowserProfile, OsProfile};
 use qf_common::env_utils::EnvSnapshot;
 use qf_cpu::{CpuFeature, FeatureDetector};
 
-// Updated 2026-03: Chrome 136, Firefox 138, Edge 136, Safari 18.3.
-const UA_CHROME_WIN: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+// Fingerprint catalog snapshot date (YYYY-MM). The freshness audit gate
+// (scripts/audits/verify-fingerprint-freshness.sh) fails when this marker is
+// older than 6 months - browser personas rot, see TODO-1009.
+#[doc(hidden)]
+pub const PROFILE_CATALOG_SNAPSHOT: &str = "2026-09";
+// Updated 2026-09: Chrome 153, Firefox 156, Edge 153, Safari 26.0 (iOS/macOS 26 generation).
+const UA_CHROME_WIN: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 const UA_FIREFOX_WIN: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0";
-const UA_EDGE_WIN: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
-const UA_EDGE_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
-const UA_EDGE_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
-const UA_SAFARI_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
-const UA_CHROME_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0";
+const UA_EDGE_WIN: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0";
+const UA_EDGE_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0";
+const UA_EDGE_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0";
+const UA_SAFARI_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+const UA_CHROME_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 const UA_FIREFOX_MAC: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15.3; rv:138.0) Gecko/20100101 Firefox/138.0";
-const UA_CHROME_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15.3; rv:156.0) Gecko/20100101 Firefox/156.0";
+const UA_CHROME_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 const UA_FIREFOX_LINUX: &str =
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0";
-const UA_CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36";
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0";
+const UA_CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 16; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36";
 const UA_FIREFOX_ANDROID: &str =
-    "Mozilla/5.0 (Android 15; Mobile; rv:138.0) Gecko/138.0 Firefox/138.0";
-const UA_SAFARI_IOS: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1";
+    "Mozilla/5.0 (Android 16; Mobile; rv:156.0) Gecko/156.0 Firefox/156.0";
+const UA_SAFARI_IOS: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
 const LANG_EN_US_09: &str = "en-US,en;q=0.9";
 const LANG_EN_US_05: &str = "en-US,en;q=0.5";
 
@@ -300,7 +305,7 @@ impl FingerprintProfile {
                 certificate: None,
             },
             (BrowserProfile::Edge, OsProfile::Android) => Self {
-                browser, os,                user_agent: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36 EdgA/136.0.0.0".to_string(),
+                browser, os,                user_agent: "Mozilla/5.0 (Linux; Android 16; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36 EdgA/153.0.0.0".to_string(),
                 tls_cipher_suites: vec![0x1301, 0x1302, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xc013, 0xc014],
                 accept_language: LANG_EN_US_09.into(),
                 initial_max_data: 5_000_000,
@@ -380,7 +385,7 @@ mod tests {
 
         assert_eq!(profile.browser, BrowserProfile::Firefox);
         assert_eq!(profile.os, OsProfile::Linux);
-        assert!(profile.user_agent.contains("Firefox/138.0"));
+        assert_eq!(profile.user_agent, UA_FIREFOX_LINUX);
         assert_eq!(profile.accept_language, LANG_EN_US_05);
         assert!(profile.client_hello.as_ref().is_some_and(|hello| hello.len() > 50));
         assert!(profile.server_hello.is_some());

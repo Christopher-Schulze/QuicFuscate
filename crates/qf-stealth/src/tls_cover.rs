@@ -345,6 +345,39 @@ pub fn key_share_ext(group: u16, seed: u64) -> Vec<u8> {
     ext
 }
 
+/// Multi-entry key_share extension (type 0x0033). Each entry is
+/// `(group, share_len)`; share bytes are xorshift-expanded from
+/// `seed ^ index` so a single per-call seed yields independent-looking
+/// shares. Used to emit the modern Chrome/Firefox pair
+/// `X25519MLKEM768 (1216 B) + X25519 (32 B)`.
+#[doc(hidden)]
+pub fn key_share_ext_multi(entries: &[(u16, u16)], seed: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0, 0]); // client_shares length, filled below
+    for (idx, (group, share_len)) in entries.iter().enumerate() {
+        let mut kx = vec![0u8; *share_len as usize];
+        let mut x =
+            seed.wrapping_add(idx as u64).rotate_left(idx as u32 & 63) ^ 0x9E3779B97F4A7C15u64;
+        for b in &mut kx {
+            x ^= x << 7;
+            x ^= x >> 9;
+            x ^= x << 8;
+            *b = (x & 0xFF) as u8;
+        }
+        body.extend_from_slice(&u16be(*group));
+        body.extend_from_slice(&u16be(*share_len));
+        body.extend_from_slice(&kx);
+    }
+    let shares_len = (body.len() - 2) as u16;
+    body[0] = (shares_len >> 8) as u8;
+    body[1] = (shares_len & 0xFF) as u8;
+    let mut ext = Vec::with_capacity(4 + body.len());
+    ext.extend_from_slice(&0x0033u16.to_be_bytes());
+    ext.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    ext.extend_from_slice(&body);
+    ext
+}
+
 /// TLS 1.3 padding extension (type 0x0015). Fills with zeros.
 #[doc(hidden)]
 pub fn padding_ext(pad_len: usize) -> Vec<u8> {
@@ -420,7 +453,21 @@ impl TlsCover {
         sni: Option<&str>,
         environment: &qf_common::env_utils::EnvSnapshot,
     ) -> Vec<u8> {
-        let seed = (browser as u16) ^ ((os as u16) << 8);
+        // Per-call entropy: every synthetic hello draws fresh randomness for
+        // the ClientHello random field, session ID, key shares, GREASE value
+        // selection, and ECH/padding payloads. The persona seed previously
+        // made every connection with the same persona byte-identical - an
+        // immediate synthetic-traffic tell (TODO-1009).
+        use rand::Rng;
+        let mut rng = rand::rng();
+        let hello_random: [u8; 32] = rng.random();
+        let grease_cipher_idx = rng.random_range(0..16usize);
+        let grease_version_idx = rng.random_range(0..16usize);
+        let grease_group_idx = rng.random_range(0..16usize);
+        let grease_ext_seed: u16 = rng.random();
+        let key_share_seed: u64 = rng.random();
+        let ech_grease_seed: u16 = rng.random();
+        let ultra_pad_len = rng.random_range(16..48usize);
         let enable_grease = !matches!(browser, crate::BrowserProfile::Safari);
 
         // Browser-specific cipher suites
@@ -441,7 +488,7 @@ impl TlsCover {
 
         // Add GREASE cipher if enabled
         if enable_grease {
-            let grease = grease_value(seed as usize);
+            let grease = grease_value(grease_cipher_idx);
             if !ciphers.contains(&grease) {
                 ciphers.insert(0, grease);
             }
@@ -489,14 +536,11 @@ impl TlsCover {
             _ => vec!["h3", "h2", "http/1.1"],
         };
 
-        let seed_for_key =
-            ((browser as u64) * 0x9E37 + (os as u64) * 0xC2B2) ^ 0xA5A5_5A5A_F0F0_0F0F;
-
         for name in ext_order {
             match *name {
                 "grease" => {
                     if enable_grease {
-                        exts.extend_from_slice(&grease_ext(seed));
+                        exts.extend_from_slice(&grease_ext(grease_ext_seed));
                     }
                 }
                 "sni" => {
@@ -508,7 +552,7 @@ impl TlsCover {
                 "supported_versions" => {
                     let mut versions = vec![0x0304u16, 0x0303u16];
                     if enable_grease {
-                        let gv = grease_value(seed as usize);
+                        let gv = grease_value(grease_version_idx);
                         if !versions.contains(&gv) {
                             versions.insert(0, gv);
                         }
@@ -524,9 +568,15 @@ impl TlsCover {
                     exts.extend_from_slice(&signature_algorithms_cert_ext(&sigs));
                 }
                 "supported_groups" => {
-                    let mut groups = vec![0x001D, 0x0017, 0x0018];
+                    // Post-quantum hybrid key exchange is the modern browser
+                    // shape: Chrome/Firefox offer X25519MLKEM768 first, then
+                    // X25519 + NIST curves. Safari stays on the classic list.
+                    let mut groups = match browser {
+                        crate::BrowserProfile::Safari => vec![0x001D, 0x0017, 0x0018],
+                        _ => vec![0x11EC, 0x001D, 0x0017, 0x0018],
+                    };
                     if enable_grease {
-                        let g = grease_value(seed as usize);
+                        let g = grease_value(grease_group_idx);
                         if !groups.contains(&g) {
                             groups.insert(0, g);
                         }
@@ -534,7 +584,20 @@ impl TlsCover {
                     exts.extend_from_slice(&supported_groups_ext(&groups));
                 }
                 "psk_modes" => exts.extend_from_slice(&psk_key_exchange_modes_ext(&[0x01])),
-                "key_share" => exts.extend_from_slice(&key_share_ext(0x001D, seed_for_key)),
+                "key_share" => {
+                    // Chrome/Edge/Firefox send the X25519MLKEM768 hybrid share
+                    // (1216 B) followed by X25519 (32 B); Safari still sends a
+                    // bare X25519 share.
+                    match browser {
+                        crate::BrowserProfile::Safari => {
+                            exts.extend_from_slice(&key_share_ext(0x001D, key_share_seed));
+                        }
+                        _ => exts.extend_from_slice(&key_share_ext_multi(
+                            &[(0x11EC, 1216), (0x001D, 32)],
+                            key_share_seed,
+                        )),
+                    }
+                }
                 _ => {}
             }
         }
@@ -542,10 +605,9 @@ impl TlsCover {
         // Optional ULTRA extras: ECH-GREASE + padding to smooth lengths
         let ultra = environment.flag("QUICFUSCATE_TLS_COVER_ULTRA", false);
         if ultra {
-            exts.extend_from_slice(&ech_grease_ext(seed));
-            // Pad to pseudo-random target within a narrow band
-            let tgt = 16 + ((seed as usize) & 0x1F); // 16..47
-            exts.extend_from_slice(&padding_ext(tgt));
+            exts.extend_from_slice(&ech_grease_ext(ech_grease_seed));
+            // Pad to a random target within a narrow band
+            exts.extend_from_slice(&padding_ext(ultra_pad_len));
         }
 
         // Session ID behavior: Chrome/Edge/Safari often include 32B; Firefox empty
@@ -557,24 +619,21 @@ impl TlsCover {
                     extensions: &exts,
                 },
                 None,
+                &hello_random,
             ),
             _ => {
-                let mut buf = [0u8; 32];
-                // Derive pseudo-random SID from seed and optional SNI to keep determinism
-                let mut x = (seed as u64) ^ 0xC3_1D_00_5D_A5_5Au64 ^ (seed_for_key.rotate_left(17));
-                for b in &mut buf {
-                    x ^= x << 7;
-                    x ^= x >> 9;
-                    x ^= x << 8;
-                    *b = (x & 0xFF) as u8;
-                }
+                // Fresh random session ID per hello - real browsers draw a new
+                // one per connection, so persona-derived determinism was a
+                // fingerprint tell.
+                let sid: [u8; 32] = rng.random();
                 Self::client_hello_custom_with_sid(
                     ClientHelloParams {
                         tls_version: 0x0303,
                         cipher_suites: &ciphers,
                         extensions: &exts,
                     },
-                    Some(&buf[..]),
+                    Some(&sid[..]),
+                    &hello_random,
                 )
             }
         }
@@ -597,17 +656,18 @@ impl TlsCover {
     /// Builds a minimal ClientHello record using the provided parameters.
     #[cfg(test)]
     pub(super) fn client_hello_custom(params: ClientHelloParams) -> Vec<u8> {
-        Self::client_hello_custom_with_sid(params, None)
+        Self::client_hello_custom_with_sid(params, None, &[0u8; 32])
     }
 
     /// Builds a ClientHello with optional Session ID (for fingerprint parity per browser).
     pub(super) fn client_hello_custom_with_sid(
         params: ClientHelloParams,
         session_id: Option<&[u8]>,
+        hello_random: &[u8; 32],
     ) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&params.tls_version.to_be_bytes());
-        payload.extend_from_slice(&[0u8; 32]); // random
+        payload.extend_from_slice(hello_random);
         match session_id {
             Some(sid) => {
                 payload.push(sid.len() as u8);
@@ -763,7 +823,7 @@ mod tests {
         let params =
             ClientHelloParams { tls_version: 0x0303, cipher_suites: &[0x1301], extensions: &[] };
         let sid = [0xAA; 32];
-        let with_sid = TlsCover::client_hello_custom_with_sid(params, Some(&sid));
+        let with_sid = TlsCover::client_hello_custom_with_sid(params, Some(&sid), &[0u8; 32]);
         let without_sid = TlsCover::client_hello_custom(ClientHelloParams {
             tls_version: 0x0303,
             cipher_suites: &[0x1301],
@@ -925,5 +985,54 @@ mod tests {
         assert!(plan_tls_cover_record(20, false, false, "chrome", &environment)
             .expect("plan")
             .is_none());
+    }
+
+    #[test]
+    fn generate_client_hello_per_call_entropy_varies_random_sid_and_key_share() {
+        // Regression for TODO-1009: persona-seeded determinism made every
+        // hello from the same profile byte-identical. Two consecutive hellos
+        // must now differ in the random field, session ID, and key share
+        // while keeping identical record structure.
+        let a = TlsCover::generate_client_hello(
+            crate::BrowserProfile::Chrome,
+            crate::OsProfile::Windows,
+            Some("example.com"),
+        );
+        let b = TlsCover::generate_client_hello(
+            crate::BrowserProfile::Chrome,
+            crate::OsProfile::Windows,
+            Some("example.com"),
+        );
+        assert_eq!(a[0], 0x16);
+        assert_eq!(a[5], 0x01);
+        assert_ne!(a, b, "two hellos from one persona must never be byte-identical");
+        // hello random: bytes 11..43 of the record
+        assert_ne!(&a[11..43], &[0u8; 32], "hello random must not be the zero placeholder");
+        assert_ne!(&a[11..43], &b[11..43], "hello random must vary per call");
+        // session id: sid_len at 43, sid at 44..44+sid_len
+        let sid_len = a[43] as usize;
+        assert_eq!(sid_len, 32, "Chrome persona carries a 32-byte session ID");
+        assert_ne!(&a[44..44 + sid_len], &b[44..44 + sid_len], "session ID must vary per call");
+    }
+
+    #[test]
+    fn generate_client_hello_modern_key_share_shape() {
+        // Chrome-family hellos must offer the X25519MLKEM768 hybrid share
+        // (0x11EC, 1216 B) followed by X25519 (0x001D, 32 B) - a bare-X25519
+        // hello is a stale pre-PQ fingerprint.
+        let record = TlsCover::generate_client_hello(
+            crate::BrowserProfile::Chrome,
+            crate::OsProfile::Windows,
+            None,
+        );
+        assert!(
+            record.windows(2).any(|w| w == [0x11, 0xEC]),
+            "key_share must contain the X25519MLKEM768 group 0x11EC"
+        );
+        // key_share extension type 0x0033 must be present
+        assert!(
+            record.windows(2).any(|w| w == [0x00, 0x33]),
+            "key_share extension 0x0033 must be present"
+        );
     }
 }

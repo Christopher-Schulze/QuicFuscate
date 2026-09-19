@@ -33,10 +33,12 @@ pub struct TlsProfile {
 }
 
 impl TlsProfile {
-    /// Chrome 136 profile, the most common browser persona.
+    /// Chrome 153 profile, the most common browser persona.
+    /// (Function names keep their historical suffixes; the `name` label and
+    /// field values track PROFILE_CATALOG_SNAPSHOT, see TODO-1009.)
     pub fn chrome_130() -> Self {
         Self {
-            name: "Chrome/136.0.0.0".into(),
+            name: "Chrome/153.0.0.0".into(),
             cipher_suites: vec![0x1301, 0x1302, 0xc02b, 0xc02f, 0xc02c, 0xc030],
             groups: vec![0x001d, 0x0017, 0x0018, 0x001e],
             signature_algorithms: vec![
@@ -56,10 +58,10 @@ impl TlsProfile {
         }
     }
 
-    /// Firefox 138 profile.
+    /// Firefox 156 profile.
     pub fn firefox_133() -> Self {
         Self {
-            name: "Firefox/138.0".into(),
+            name: "Firefox/156.0".into(),
             cipher_suites: vec![0x1301, 0x1302, 0xc02b, 0xc02f],
             groups: vec![0x001d, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101],
             signature_algorithms: vec![
@@ -78,10 +80,10 @@ impl TlsProfile {
         }
     }
 
-    /// Safari 18.3 profile.
+    /// Safari 26.0 profile.
     pub fn safari_18() -> Self {
         Self {
-            name: "Safari/18.3".into(),
+            name: "Safari/26.0".into(),
             cipher_suites: vec![0x1301, 0x1302, 0xc02c, 0xc030],
             groups: vec![0x001d, 0x0017, 0x0018],
             signature_algorithms: vec![0x0403, 0x0503, 0x0807, 0x0804, 0x0805, 0x0401],
@@ -96,25 +98,25 @@ impl TlsProfile {
         }
     }
 
-    /// Edge 130 profile, derived from the Chromium persona.
+    /// Edge 153 profile, derived from the Chromium persona.
     pub fn edge_130() -> Self {
         let mut profile = Self::chrome_130();
-        profile.name = "Edge/130.0.0.0".into();
+        profile.name = "Edge/153.0.0.0".into();
         profile
     }
 
-    /// Opera 115 profile, derived from Chromium with an Opera extension marker.
+    /// Opera 136 profile, derived from Chromium with an Opera extension marker.
     pub fn opera_115() -> Self {
         let mut profile = Self::chrome_130();
-        profile.name = "Opera/115.0.0.0".into();
+        profile.name = "Opera/136.0.0.0".into();
         profile.extension_order.insert(5, 0x5500);
         profile
     }
 
-    /// Brave 1.73 profile, derived from Chromium with reduced GREASE and ECH disabled.
+    /// Brave 1.95 profile, derived from Chromium with reduced GREASE and ECH disabled.
     pub fn brave_1_73() -> Self {
         let mut profile = Self::chrome_130();
-        profile.name = "Brave/1.73.0".into();
+        profile.name = "Brave/1.95.0".into();
         profile.enable_ech = false;
         profile.grease_values.clear();
         profile
@@ -195,8 +197,8 @@ mod tests {
         let edge = TlsProfile::edge_130();
         let opera = TlsProfile::opera_115();
         let brave = TlsProfile::brave_1_73();
-        assert_eq!(edge.name, "Edge/130.0.0.0");
-        assert_eq!(opera.name, "Opera/115.0.0.0");
+        assert_eq!(edge.name, "Edge/153.0.0.0");
+        assert_eq!(opera.name, "Opera/136.0.0.0");
         assert!(opera.extension_order.contains(&0x5500));
         assert!(!brave.enable_ech);
         assert!(brave.grease_values.is_empty());
@@ -208,12 +210,12 @@ mod tests {
             let profile = TlsProfile::random();
             assert!(matches!(
                 profile.name.as_str(),
-                "Chrome/136.0.0.0"
-                    | "Firefox/138.0"
-                    | "Safari/18.3"
-                    | "Edge/130.0.0.0"
-                    | "Opera/115.0.0.0"
-                    | "Brave/1.73.0"
+                "Chrome/153.0.0.0"
+                    | "Firefox/156.0"
+                    | "Safari/26.0"
+                    | "Edge/153.0.0.0"
+                    | "Opera/136.0.0.0"
+                    | "Brave/1.95.0"
             ));
         }
     }

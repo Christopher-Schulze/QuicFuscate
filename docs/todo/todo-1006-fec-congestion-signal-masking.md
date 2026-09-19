@@ -4,7 +4,7 @@ title: Audit whether wire-level FEC recovery masks congestion loss from congesti
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-19
 depends_on: []
 ---
@@ -79,3 +79,38 @@ Phase 3 - Fix options (choose after Phase 1 verdict):
   deliberate-behavior note with the masking bound (repair capacity)
   written down.
 - Regression: qf-fec suite + `fec_decode16_elimination` bench green.
+
+## Verdict (2026-09-19): masked, but tightly bounded - accepted with
+## observability; Repair-ACK deferred
+
+Code trace confirming the mechanism:
+
+- `crates/qf-transport-recovery/src/lib.rs:detect_lost_packets` runs inside
+  `on_ack_received` and declares loss only for PNs still in `sp.sent` past
+  the packet/time thresholds. A PN the receiver recovered via FEC is
+  ACKed normally (the recovered datagram re-enters `conn.recv`), so if the
+  ACK arrives before the declaration window closes, the loss event never
+  fires - invisible to both the loss callback (`fec_cb_lost_packets`) and
+  the congestion controller.
+- Bound: masking applies only to losses recovered faster than
+  `loss_delay` (time-threshold ~ RTT scale). A PN whose ACK arrives after
+  declaration is a *spurious* loss - CC already backed off, which is the
+  conservative (RFC-9265-safe) direction. Losses exceeding repair capacity
+  are never masked at all.
+- Controller inputs are already correct on both axes: the receiver-side
+  `AdaptiveFec` gets wire truth via `observe_wire_receive(receive_report)`
+  (`src/core/connection.rs:1141`), and the sender side regulates on
+  *residual* (post-recovery) declared loss - which is the desired control
+  target, not a bug: the controller should drive unrecovered loss toward
+  zero, not chase raw wire loss it cannot see anyway.
+- Observability exists: `quicfuscate_fec_packets_recovered` is exported
+  (Prometheus export + admin JSON), so masked-loss volume is measurable
+  as (recovered) vs (declared lost).
+
+Decision: option (c) documented acceptance. For a private VPN transport the
+bounded masking is defensible - the hidden signal is exactly the slice FEC
+repaired quickly, and congestion-grade loss always exceeds repair capacity
+and reaches CC unmasked. Option (a) Repair-ACK remains the only complete
+fix and is recorded as a deferred wire-format enhancement in TODO-1011
+item 3 (the receiver-side `recovered_ids()` reporting half is tracked
+there; the sender-side CC accounting lands only if that work happens).

@@ -70,3 +70,46 @@ or a profile-adjacent README note (who captures, from what, cadence).
 - Staleness audit gate + per-connection GREASE variance test +
   JA4-coverage check green.
 - Documented refresh policy.
+
+## Implementation status (2026-09)
+
+Reality correction: the persona catalog is **code**, not `.chlo` files -
+`fingerprint_profile.rs` holds UA constants and `tls_profile.rs` holds the
+TlsProfile descriptors consumed by `profile_from_fingerprint` (timing/SNI/
+ALPN/QPACK knobs; the wire ClientHello itself is emitted by rustls, while
+`tls_cover.rs` builds the separate synthetic cover hello).
+
+DONE:
+- `PROFILE_CATALOG_SNAPSHOT` marker in `fingerprint_profile.rs` replaces the
+  `.chlo` recorded_at schema (Step 1 adapted: the catalog is compiled in).
+- `scripts/audits/verify-fingerprint-freshness.sh` (Step 2): fails when the
+  snapshot is >6 months old; enforces UA major-version coherence (Chrome/Edge
+  aligned, Firefox rv: aligned, Safari Version == iOS major); guards that the
+  zero `hello_random` placeholder stays inside cfg(test) code; guards that the
+  production builder draws per-call entropy. Registered in
+  `audit-all-comprehensive.sh` as `fingerprint_freshness`.
+- Catalog refreshed to the verified 2026-09 fleet: Chrome/Edge 153,
+  Firefox 156 (rv:156), Safari 26.0 (iOS 26), Opera 136, Brave 1.95
+  (Chromium 153). The gate immediately caught a stale inline Edge-Android UA
+  (Chrome/136) during first run.
+- Synthetic cover hello entropy (Step 3): `generate_client_hello` now draws
+  per-call `rand::rng()` for hello random, session ID, key-share seed, GREASE
+  value indices, ECH-GREASE seed, and padding length. Two consecutive hellos
+  from one persona are no longer byte-identical (previously: `random` was
+  literally `[0u8;32]` and every field was persona-seeded - an instant
+  synthetic tell). Regression test
+  `generate_client_hello_per_call_entropy_varies_random_sid_and_key_share`
+  asserts variance; GREASE *placement* stays fixed by construction (cipher
+  slot 0, fixed extension positions) matching real browsers.
+- Step 4 partial: non-Safari cover hellos now emit the modern
+  X25519MLKEM768 (0x11EC, 1216B) + X25519 (0x001D, 32B) key-share pair via
+  `key_share_ext_multi`; Safari keeps the classic X25519-only shape.
+  `generate_client_hello_modern_key_share_shape` guards it.
+
+OPEN:
+- JA4 full-field diff against real browser packet captures (extension order,
+  ALPS, supported_groups order, ECH shape) - requires capture evidence, not
+  derivable locally.
+- Refresh policy note (capture procedure/cadence) - Step 5.
+- Caveat: key-share bytes are pseudo-random *shaped* placeholders - valid
+  only because this path is strictly synthetic cover, never a real handshake.
