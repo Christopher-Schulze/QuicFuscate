@@ -3929,6 +3929,15 @@
 - DONE. Server GSO emission had no memory across flushes — on a route with a payload ceiling below the segment cap (IPv6 MTU 1280 vs 1472 fallback), every flush paid a doomed `sendmsg`+EMSGSIZE for the connection's life. New `udp_gso_path_blocked` flag on `QuicFuscateConnection` (path MTU is a stable route property) gates `plan_gso_run` per peer in both `live_auth` and TUN fanout; set on EMSGSIZE only, transient errors unaffected. Failed runs still fall through to per-packet tail — no drops.
 - Verified: `cargo check` macOS + Omega Linux release check clean.
 
+### TODO-995 - io_uring batch worker: evaluate default-enablement on Linux
+
+- OPEN (build/product decision, not implemented). The server-side `UringBatchWorker` is compile-gated behind `feature = "io_uring"` (`dep:io-uring`) but already has a runtime probe — `IoUring::builder()` returns `None` on kernels/container seccomp without rings, and `enable_uring_worker` falls back cleanly to sendmmsg/per-packet. Verified natively on Omega: 20/20 uring tests + sendmsg_zc/sqpoll probes green on kernel 6.17.
+- Decision needed: fold `io_uring` into the default Linux build (batch submit = fewer `io_uring_enter` vs `sendmmsg` per flush, plus zero-copy send path) vs. keeping it opt-in for dependency/binary-size hygiene. If enabled by default, keep an env kill-switch for ring setup failure domains.
+
+### TODO-996 - PGO (profile-guided optimization) for release builds
+
+- OPEN. Release profile already uses `opt-level=3`, `lto="thin"`, `codegen-units=1`. Next build-level lever is PGO (`-Cprofile-generate` instrumented run on a representative TUN-dataplane workload → `-Cprofile-use`); typical gains 5-15% on branch-heavy protocol paths. Needs a `scripts/build/pgo.sh` flow + documented Omega profiling run; evaluate `lto="fat"` in the same pass (marginal, ~8min builds already).
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.
