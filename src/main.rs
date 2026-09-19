@@ -299,6 +299,154 @@ async fn send_connected_datagram(
     }
 }
 
+/// Kernel-wide UDP GSO capability probe, cached per process — `UDP_SEGMENT`
+/// support is a socket option uniform across UDP sockets on this host.
+#[cfg(target_os = "linux")]
+fn linux_udp_gso_capable(fd: std::os::unix::io::RawFd) -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let capable = qf_transport_udp::probe_udp_gso(fd);
+            STATE.store(if capable { 1 } else { 2 }, Ordering::Relaxed);
+            capable
+        }
+    }
+}
+
+/// Largest flat staging window for one connected flush. QUIC datagrams are
+/// MTU-bounded (~1.5 KiB) so the 64-datagram burst fits in ~96 KiB; the cap
+/// only guards against an unusually large configured payload size.
+#[cfg(target_os = "linux")]
+const CLIENT_TX_STAGING_CAP: usize = 1 << 20;
+
+/// Linux TX path: stage the whole burst into one flat buffer, then emit
+/// contiguous same-length runs as a single `UDP_SEGMENT` sendmsg each. Under
+/// load most QUIC datagrams are MTU-sized, so one syscall replaces up to 64
+/// per-packet sendmsg calls — the same coalescing the server path already
+/// uses. Leftover spans fall back to the async per-packet send.
+#[cfg(target_os = "linux")]
+async fn flush_connected_outgoing(
+    socket: &tokio::net::UdpSocket,
+    conn: &mut QuicFuscateConnection,
+    out: &mut [u8],
+    mut diagnostics: Option<&mut ClientIoDiagnostics>,
+) -> Result<(), quicfuscate::engine::DataPlaneFault> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut flat: Vec<u8> = Vec::with_capacity(96 * 1024);
+    let mut spans: Vec<(usize, usize)> =
+        Vec::with_capacity(quicfuscate::transport::UDP_DATAGRAM_BURST_LIMIT);
+    while spans.len() < quicfuscate::transport::UDP_DATAGRAM_BURST_LIMIT
+        && flat.len() + out.len() <= CLIENT_TX_STAGING_CAP
+    {
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.record_send_poll();
+        }
+        match conn.send(out) {
+            Ok(len) if len > 0 => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_datagram(len);
+                }
+                let start = flat.len();
+                flat.extend_from_slice(&out[..len]);
+                spans.push((start, len));
+                telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
+            }
+            Ok(_) => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_zero();
+                }
+                break;
+            }
+            Err(ConnectionError::Done) => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_done();
+                }
+                break;
+            }
+            Err(e) => {
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.record_send_error();
+                }
+                log::error!("Send failed: {:?}", e);
+                return Err(quicfuscate::engine::DataPlaneFault::TransportSend {
+                    component: "standalone client connection send".to_string(),
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+    if spans.is_empty() {
+        return Ok(());
+    }
+
+    let peer =
+        socket.peer_addr().map_err(|error| quicfuscate::engine::DataPlaneFault::TransportSend {
+            component: "standalone client UDP socket".to_string(),
+            error: error.to_string(),
+        })?;
+    let fd = socket.as_raw_fd();
+    let mut gso_ok = linux_udp_gso_capable(fd);
+    let mut index = 0usize;
+    while index < spans.len() {
+        if gso_ok {
+            // Contiguous same-length run; a shorter tail datagram may close it.
+            let seg = spans[index].1;
+            let mut end = index + 1;
+            let mut total = seg;
+            while end < spans.len() && end - index < 64 && total + spans[end].1 <= u16::MAX as usize
+            {
+                let len = spans[end].1;
+                if len == seg {
+                    total += len;
+                    end += 1;
+                } else {
+                    if len < seg {
+                        end += 1;
+                    }
+                    break;
+                }
+            }
+            if end - index >= 2 && seg > 0 && seg <= u16::MAX as usize {
+                let run_start = spans[index].0;
+                let run_end = spans[end - 1].0 + spans[end - 1].1;
+                match qf_transport_udp::send_udp_segment(
+                    fd,
+                    peer,
+                    &flat[run_start..run_end],
+                    seg as u16,
+                ) {
+                    Ok(_) => {
+                        index = end;
+                        continue;
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Socket backpressure: finish the tail via the async
+                        // per-packet path, which waits for writability.
+                    }
+                    Err(error) => {
+                        log::debug!("UDP GSO send to {peer} failed, per-packet: {error}");
+                        gso_ok = false;
+                    }
+                }
+            }
+        }
+        let (start, len) = spans[index];
+        send_connected_datagram(socket, &flat[start..start + len]).await.map_err(|error| {
+            quicfuscate::engine::DataPlaneFault::TransportSend {
+                component: "standalone client UDP socket".to_string(),
+                error: error.to_string(),
+            }
+        })?;
+        index += 1;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
 async fn flush_connected_outgoing(
     socket: &tokio::net::UdpSocket,
     conn: &mut QuicFuscateConnection,

@@ -3873,6 +3873,12 @@
 - DONE. `on_ack` took `state.write()` per emitted ACK frame; at multi-Gbit/s rates the write storm starved the streaming-interval tick's `read()` — symbolized perf showed `compute_streaming_interval` at 82% server CPU plus 7.7% aarch64 lock atomics. `FecObserverState` is now all-atomics (`on_ack` is the single writer; EWMA races are benign), RwLock removed. Commit `8a690a7`.
 - Omega verification (scenario g, cpu-clock profile, PASS + flamegraph): **67.9 Mbit/s** vs 46.3 Mbit/s right after the BBR3 fix on the same single-core testbed — freed observer CPU feeds the dataplane.
 
+### TODO-986 - Standalone client TX: per-packet sendmsg instead of UDP_SEGMENT batching
+
+- Detail: `docs/todo/todo-986-client-tx-gso.md`
+- DONE. `flush_connected_outgoing` issued one `sendmsg` per QUIC datagram through tokio's `async_io` wrapper while the server path already coalesced via `UDP_SEGMENT`. The Linux client flush now stages the burst into one flat buffer + span table and emits contiguous same-length runs through `send_udp_segment` (up to 64 datagrams/64 KiB per syscall); singletons and post-`WouldBlock` tails keep the async per-packet path. Capability probed once process-wide.
+- Omega-verified: strace shows `cmsg_type=0x67` (UDP_SEGMENT) with `seg_size=1457` and `iov_len=4371` — three wire datagrams per syscall — on every send during scenario g; three consecutive PASS runs at 60.7-70.1 Mbit/s (single-core ceiling unchanged; ~2/3 of TX syscalls removed).
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
