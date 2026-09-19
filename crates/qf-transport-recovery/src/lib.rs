@@ -607,6 +607,11 @@ pub struct Recovery {
     lost_scratch: Vec<SentPacket>,
     /// Scratch for the lost packet-number prefix inside `detect_lost_packets`.
     lost_pn_scratch: Vec<u64>,
+    /// Sorted `sent_at` copy of the newly-acked set, built lazily only when the
+    /// persistent-congestion gap probe runs. Turns the per-lost-packet
+    /// `newly_acked.iter().any(...)` scan (O(lost x acked)) into a
+    /// `partition_point` binary search (O(lost x log acked)).
+    acked_times_scratch: Vec<Instant>,
 }
 
 impl Recovery {
@@ -670,6 +675,7 @@ impl Recovery {
             path_epoch: 0,
             acked_scratch: Vec::new(),
             lost_scratch: Vec::new(),
+            acked_times_scratch: Vec::new(),
             lost_pn_scratch: Vec::new(),
         }
     }
@@ -1396,6 +1402,10 @@ impl Recovery {
             if let Some(first_rtt_sample) = self.first_rtt_sample {
                 let period = self.persistent_congestion_period();
                 let mut declaration = None;
+                // Sorted sent_at view of newly_acked, filled on first gap probe
+                // so each lost packet costs a binary search, not a linear scan.
+                let mut acked_times = std::mem::take(&mut self.acked_times_scratch);
+                let mut acked_times_sorted = false;
                 for pkt in lost.iter().filter(|pkt| {
                     pkt.path_epoch == self.path_epoch
                         && pkt.ack_eliciting
@@ -1403,8 +1413,15 @@ impl Recovery {
                         && pkt.sent_at > first_rtt_sample
                 }) {
                     if let Some(prev) = self.pc_window.end {
-                        let acked_between =
-                            newly_acked.iter().any(|a| a.sent_at > prev && a.sent_at < pkt.sent_at);
+                        if !acked_times_sorted {
+                            acked_times.clear();
+                            acked_times.extend(newly_acked.iter().map(|a| a.sent_at));
+                            acked_times.sort_unstable();
+                            acked_times_sorted = true;
+                        }
+                        let first_after_prev = acked_times.partition_point(|t| *t <= prev);
+                        let acked_between = first_after_prev < acked_times.len()
+                            && acked_times[first_after_prev] < pkt.sent_at;
                         if acked_between || pkt.sent_at.saturating_duration_since(prev) > period {
                             self.pc_window.reset();
                         }
@@ -1515,6 +1532,7 @@ impl Recovery {
                     }
                     self.sync_from_cc();
                 }
+                self.acked_times_scratch = acked_times;
             }
         }
 

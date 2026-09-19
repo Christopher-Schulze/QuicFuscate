@@ -3949,6 +3949,11 @@
 - DONE. The bench ran full connection pairing + sent-byte seeding inside `b.iter` (~90% setup noise in every cell). Moved all three shapes to `iter_batched`/`SmallInput`; the honest ACK-accounting cost is ~28-130 ns per acknowledged packet (SentRing drain is already efficient, no production change needed).
 - Detail: docs/todo/todo-998-ack-bench-isolation.md
 
+### TODO-999 - Binary-search the persistent-congestion gap probe
+
+- DONE. `finish_ack_loss_accounting` scanned `newly_acked` linearly per loss-run candidate (O(lost x acked), up to ~2.7e8 comparisons under the 16384-packet cap). A lazily-filled sorted `sent_at` scratch + `partition_point` makes each probe O(log acked) with identical strict-interval semantics. All 7 persistent-congestion tests + 50/50 crate tests green, clippy clean.
+- Detail: docs/todo/todo-999-pc-gap-binary-search.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.
