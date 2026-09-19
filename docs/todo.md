@@ -375,7 +375,7 @@
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
 ### TODO-902 - io_uring TX triple-copy and channel1 fix
-- BLOCKED on Linux environment: the io_uring path builds only behind the `io_uring` feature on Linux; this macOS arm64 host cannot compile, run, or verify any change to `uring_batch.rs`/`worker.rs`. Evidence verified real (slot copy 543-546, `channel(1)` worker.rs:41); the 2x-throughput acceptance needs a live Linux x86_64 server loop (Omega is aarch64, no live workload).
+- PARTIAL (2026-09-19): stale claims corrected - `Sleep(1ms)` polling never existed (worker uses `blocking_recv`, sender uses `submit_and_wait`) and `channel(1)` is deliberate single-owner backpressure. The real defect (double flatten: caller staging + worker-side re-flatten of `&[(addr,&[u8])]`) is fixed via `WorkerRequest::ToFlat` + `send_batch_to_flat_with_disposition`: owned buffers are adopted in place and returned intact in `FlatToReply` for fallback resend/reuse; `submit_request` is generic with a `recover` callback so queue-full/unavailable returns the buffers too. Verified on Omega: io_uring clippy/check clean, flat-adoption test green, `tun-e2e-netns.sh` PASS with live `io_uring batch worker` evidence. Still open: 2x-throughput acceptance needs x86_64 bench hardware.
 - Detail: `docs/todo/todo-902-iouring-tx-triple-copy.md`
 
 ## Queue
@@ -3973,6 +3973,11 @@
 
 - DONE. Server `flush_live_server_outgoing` issued ~7 atomic RMWs per staged datagram (global `BYTES_SENT`, worker+global transport counters, session counters) even though the loop already accumulated byte/packet locals; client `io_driver` burst loops issued 3 RMWs per span. All now accumulate into locals and land one batched update per flush (`record_egress_batch`, `record_sent_batch`); early-return error paths flush accumulated counts first so totals are identical. Staging vectors are `with_capacity`-sized for a full burst, killing the growth-doubling memcpy chain. 28/28 metrics + 17/17 session + 17/17 io_driver tests green.
 - Detail: docs/todo/todo-1003-telemetry-atomic-batching.md
+
+### TODO-1004 - io_uring SendMsg injected-partial-failure completion accounting on kernel 6.17
+
+- OPEN. `uring_sendmsg_partial_send_retry_subsets_deliver_exactly_once` fails deterministically on Omega (aarch64, kernel 6.17): `completion set incomplete: 2/3, cq_overflow=0` where the SendMsgZc twin passes. Reproduces identically with the TODO-902 flat-adoption changes stashed - pre-existing, likely kernel-version-dependent accounting of rejected SQEs. Found during TODO-902 verification.
+- Detail: docs/todo/todo-1004-uring-injection-completion-accounting.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.

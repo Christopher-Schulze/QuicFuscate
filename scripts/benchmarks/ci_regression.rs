@@ -771,8 +771,7 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
         group.bench_function(format!("{inflight}_inflight_ack_all"), |b| {
             b.iter_batched(
                 || {
-                    let BenchConnectionPair { mut client, .. } =
-                        bench_paired_1rtt_connections();
+                    let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
                     client.bench_seed_sent_bytes_by_pn(inflight, 1200);
                     client
                 },
@@ -788,8 +787,7 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
             let half = inflight / 2;
             b.iter_batched(
                 || {
-                    let BenchConnectionPair { mut client, .. } =
-                        bench_paired_1rtt_connections();
+                    let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
                     client.bench_seed_sent_bytes_by_pn(inflight, 1200);
                     client
                 },
@@ -808,8 +806,7 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
         group.bench_function(format!("{inflight}_inflight_ack_sparse"), |b| {
             b.iter_batched(
                 || {
-                    let BenchConnectionPair { mut client, .. } =
-                        bench_paired_1rtt_connections();
+                    let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
                     client.bench_seed_sent_bytes_by_pn(inflight, 1200);
                     let mut ranges = Vec::with_capacity((inflight / 4) as usize);
                     let mut start = 0u64;

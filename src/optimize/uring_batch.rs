@@ -474,6 +474,19 @@ impl UringBatchSender {
         self.packet_addrs = addrs;
     }
 
+    /// Take the adopted payload storage back out after a completed flat
+    /// submission, so the worker can return the caller's buffers for reuse.
+    /// Only valid after the submission waited on every CQE: on `Ok` results
+    /// no in-flight SQE can still reference `payload_flat`. Quarantined or
+    /// rejected submissions must keep the retained storage untouched.
+    fn take_flat_payloads(&mut self) -> (Vec<u8>, Vec<(usize, usize)>, Vec<SocketAddr>) {
+        (
+            std::mem::take(&mut self.payload_flat),
+            std::mem::take(&mut self.payload_spans),
+            std::mem::take(&mut self.packet_addrs),
+        )
+    }
+
     fn validate_batch_admission(count: usize, payload_bytes: usize) -> std::io::Result<()> {
         if count > MAX_BATCH_PACKETS {
             return Err(std::io::Error::new(
@@ -1346,7 +1359,7 @@ impl Drop for UringBatchSender {
 }
 
 mod worker;
-pub use worker::UringBatchWorker;
+pub use worker::{FlatToReply, UringBatchWorker};
 mod recv;
 pub use recv::{RecvCompletion, UringRecvBatch};
 

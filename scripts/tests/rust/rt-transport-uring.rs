@@ -741,3 +741,58 @@ fn server_send_batch_to_helper_works_on_loopback() {
         assert!(actual.iter().all(|payload| expected.contains(payload)));
     }
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_batch_worker_flat_adoption_returns_buffers_intact() {
+    let worker = match UringBatchWorker::new(8) {
+        Some(worker) => worker,
+        None => {
+            eprintln!("skipping: io_uring not available");
+            return;
+        }
+    };
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver.set_read_timeout(Some(Duration::from_secs(2))).expect("set timeout");
+    let recv_addr = receiver.local_addr().expect("receiver address");
+    let sender_socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+
+    // Stage two datagrams into owned flat buffers exactly like the server
+    // flush path does.
+    let payloads: [&[u8]; 2] = [b"flat-alpha", b"flat-beta"];
+    let mut flat = Vec::with_capacity(256);
+    let mut spans = Vec::with_capacity(2);
+    for payload in payloads {
+        let start = flat.len();
+        flat.extend_from_slice(payload);
+        spans.push((recv_addr, start, payload.len()));
+    }
+    let staged_flat = flat.clone();
+    let staged_spans = spans.clone();
+
+    let reply = runtime.block_on(worker.send_batch_to_flat_with_disposition(
+        sender_socket.as_raw_fd(),
+        flat,
+        spans,
+    ));
+    let result = reply.result.expect("flat submission result");
+    assert_eq!(result.sent_count(), payloads.len(), "all flat datagrams sent");
+    for expected in payloads {
+        let mut buffer = [0u8; 256];
+        let (length, _) = receiver.recv_from(&mut buffer).expect("receive flat datagram");
+        assert_eq!(&buffer[..length], expected);
+    }
+
+    // The adopted buffers must come back intact so the caller can resend the
+    // unsent tail through the per-packet fallback.
+    assert_eq!(reply.flat, staged_flat, "flat buffer returned intact");
+    assert_eq!(reply.spans, staged_spans, "span table returned intact");
+
+    worker.request_shutdown();
+    worker.join().expect("join worker");
+}

@@ -773,12 +773,19 @@ pub async fn flush_live_server_outgoing(
         {
             use std::os::unix::io::AsRawFd;
             let fd = socket.as_raw_fd();
-            let packets: Vec<(SocketAddr, &[u8])> = staging_spans
-                .iter()
-                .map(|&(target, start, len)| (target, &staging_flat[start..start + len]))
-                .collect();
             if let Some(worker) = uring_worker {
-                match worker.send_batch_to_with_disposition(fd, &packets).await {
+                // Hand the staged buffers to the worker by value: the sender
+                // adopts them in place (no second flattening copy) and returns
+                // them emptied so the per-packet fallback below can resend the
+                // unsent tail and the next flush reuses their capacity.
+                let reply = worker
+                    .send_batch_to_flat_with_disposition(
+                        fd,
+                        std::mem::take(&mut staging_flat),
+                        std::mem::take(&mut staging_spans),
+                    )
+                    .await;
+                match reply.result {
                     Ok(result) => {
                         for (index, sent_slot) in sent.iter_mut().enumerate() {
                             *sent_slot = result.is_sent(index);
@@ -794,6 +801,8 @@ pub async fn flush_live_server_outgoing(
                         });
                     }
                 }
+                staging_flat = reply.flat;
+                staging_spans = reply.spans;
             }
         }
 
