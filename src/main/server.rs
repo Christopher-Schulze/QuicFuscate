@@ -47,6 +47,7 @@ pub(super) async fn run_server(
     drop_user: &str,
     drop_group: &str,
     audit_log_path: Option<PathBuf>,
+    wan_interface: Option<String>,
     startup_engine_config: Option<quicfuscate::engine::EngineConfig>,
 ) -> std::io::Result<()> {
     let config_path = config.as_ref();
@@ -132,6 +133,25 @@ pub(super) async fn run_server(
     .map_err(std::io::Error::other)?;
     apply_server_vpn_dns_override(&mut server_config, vpn_dns);
     server_config.allow_client_to_client = allow_client_to_client;
+    if let Some(wan) = wan_interface.as_deref() {
+        let wan = wan.trim();
+        if wan.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--wan-interface must not be empty",
+            ));
+        }
+        // Explicit interface selection must not silently fall back to the
+        // default-route autodetection, so reject names that do not resolve.
+        #[cfg(target_os = "linux")]
+        if tun_enable && !std::path::Path::new("/sys/class/net").join(wan).exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("--wan-interface {wan:?} does not exist"),
+            ));
+        }
+        server_config.wan_interface = wan.to_string();
+    }
     if tun_enable {
         apply_standalone_tun_server_config(
             &mut server_config,

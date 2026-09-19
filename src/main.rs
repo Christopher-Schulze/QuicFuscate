@@ -1041,6 +1041,12 @@ enum Commands {
         /// When set, security-relevant events are written to this file.
         #[clap(long = "audit-log", value_name = "PATH")]
         audit_log: Option<PathBuf>,
+
+        /// WAN/uplink interface for TUN NAT and forwarding rules (Linux only).
+        /// Overrides the default-route autodetection; must name an existing
+        /// interface when TUN mode is enabled.
+        #[clap(long = "wan-interface", value_name = "IFACE")]
+        wan_interface: Option<String>,
     },
     /// Verify the hash chain of an audit NDJSON file
     VerifyAuditLog {

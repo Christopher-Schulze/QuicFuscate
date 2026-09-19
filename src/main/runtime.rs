@@ -242,6 +242,7 @@ async fn async_main(
             drop_user,
             drop_group,
             audit_log,
+            wan_interface,
         } => {
             let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
             run_server(
@@ -286,6 +287,7 @@ async fn async_main(
                 &drop_user,
                 &drop_group,
                 audit_log,
+                wan_interface,
                 startup_engine_config,
             )
             .await?;
