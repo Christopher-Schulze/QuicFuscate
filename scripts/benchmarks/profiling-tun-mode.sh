@@ -30,7 +30,32 @@ DURATION=30
 READY_TIMEOUT=15
 DRY_RUN=0
 SCENARIO_FILTER=""
-NETEM_INTERFACE="lo"
+# Fully namespace-isolated topology (mirrors scripts/tests/tun-e2e-*-netns.sh):
+#   [cli-ns eth0] <--veth--> [srv-ns eth0 | tun0 | eth1] <--veth--> [lan-ns eth0]
+# Keeping the server in its own namespace confines its nftables/routing rules
+# to that namespace and avoids host FORWARD-policy interference (e.g. Tailscale
+# chains or other tenants dropping tunnel forwarding).
+PROF_NS="qf-prof-cli"
+PROF_SRV_NS="qf-prof-srv"
+PROF_LAN_NS="qf-prof-lan"
+VETH_NS="eth0"
+UNDERLAY_HOST="192.168.220.1"
+UNDERLAY_CLIENT="192.168.220.2"
+LAN_HOST="10.9.9.1"
+LAN_CLIENT="10.9.9.2"
+LAN_NET="10.9.9.0/24"
+TOPOLOGY_OWNED=0
+# Netem is applied to both underlay veth ends inside their namespaces so
+# impairment covers both QUIC directions without touching host qdiscs.
+NETEM_UPLINK_CLI="veth-qfc"
+NETEM_UPLINK_SRV="veth-qfs"
+# Each endpoint exposes its telemetry endpoint on loopback inside its own
+# namespace, so one port serves both without collision.
+TELEMETRY_PORT="${QF_PROFILE_TELEMETRY_PORT:-9898}"
+# Hardware PMU events (cycles:P) yield near-zero samples on virtualized
+# aarch64/x86 guests without PMU passthrough; cpu-clock is the software
+# fallback that always works.
+PERF_EVENT="cycles:P"
 
 usage() {
     cat <<'EOF'
@@ -48,8 +73,9 @@ Options:
   --key PATH                Server key override
   --duration SECONDS        Profile duration per scenario (1..3600)
   --ready-timeout SECONDS  Process/log readiness timeout (1..120)
-  --netem-interface NAME    Interface passed to tc (default: lo)
   --scenario LABEL          Run one scenario g-k
+  --perf-event EVENT        perf record event (default: cycles:P; use cpu-clock
+                            on VMs without PMU passthrough)
   --dry-run                 Record planned scenarios without executing commands
   --help                    Show this help
 EOF
@@ -57,7 +83,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --project-root|--binary|--output-dir|--flamegraph-dir|--cert|--key|--duration|--ready-timeout|--netem-interface|--scenario)
+        --project-root|--binary|--output-dir|--flamegraph-dir|--cert|--key|--duration|--ready-timeout|--netem-interface|--scenario|--perf-event)
             [[ $# -ge 2 ]] || { error "Missing value for $1"; exit 2; }
             case "$1" in
                 --project-root) PROJECT_ROOT="$2";;
@@ -68,8 +94,8 @@ while [[ $# -gt 0 ]]; do
                 --key) KEY_OVERRIDE="$2";;
                 --duration) DURATION="$2";;
                 --ready-timeout) READY_TIMEOUT="$2";;
-                --netem-interface) NETEM_INTERFACE="$2";;
                 --scenario) SCENARIO_FILTER="$2";;
+                --perf-event) PERF_EVENT="$2";;
             esac
             shift 2
             ;;
@@ -94,12 +120,11 @@ validate_positive_int "duration" "$DURATION" 3600
 validate_positive_int "ready timeout" "$READY_TIMEOUT" 120
 validate_control_free_value "project root" "$PROJECT_ROOT" 4096
 validate_control_free_value "binary path" "$BINARY" 4096
+validate_control_free_value "perf event" "$PERF_EVENT" 128
 validate_control_free_value "output directory" "$OUTPUT_DIR" 4096
 validate_control_free_value "flamegraph directory" "$FLAMEGRAPH_DIR" 4096
 validate_control_free_value "certificate path" "$CERT" 4096
 validate_control_free_value "key path" "$KEY" 4096
-validate_control_free_value "netem interface" "$NETEM_INTERFACE" 128
-
 SCENARIO_LABELS=(g h i j k)
 if [[ -n "$SCENARIO_FILTER" ]] && case " ${SCENARIO_LABELS[*]} " in *" $SCENARIO_FILTER "*) false;; *) true;; esac; then
     error "unknown scenario label: $SCENARIO_FILTER"
@@ -177,8 +202,8 @@ NETEM_INTERFACE_OWNED=0
 
 # shellcheck disable=SC2329
 cleanup_netem_on_exit() {
-    if (( NETEM_ACTIVE == 1 && NETEM_INTERFACE_OWNED == 1 )); then
-        "$TC_PATH" qdisc del dev "$NETEM_INTERFACE" root >/dev/null 2>&1 || true
+    if (( TOPOLOGY_OWNED == 1 )); then
+        teardown_topology >/dev/null 2>&1 || true
     fi
 }
 trap cleanup_netem_on_exit EXIT
@@ -209,28 +234,93 @@ write_csv_row() {
 
 # TUN runtime configuration is declared above with the preflight contract.
 
+# A veth pair is created on the host, then each end is moved into its target
+# namespace and renamed, so no host interfaces or host routes remain involved.
+move_link() {
+    local dev="$1" ns="$2" as="$3" addr="$4"
+    ip link set "$dev" netns "$ns" &&
+        ip netns exec "$ns" ip link set "$dev" name "$as" &&
+        ip netns exec "$ns" ip link set "$as" up &&
+        { [[ -z "$addr" ]] || ip netns exec "$ns" ip addr add "$addr" dev "$as"; }
+}
+
+setup_topology() {
+    local log_file="$1"
+    local existing="" ns
+    for ns in "$PROF_NS" "$PROF_SRV_NS" "$PROF_LAN_NS"; do
+        ip netns exec "$ns" true >/dev/null 2>&1 && existing="${existing:+$existing,}$ns"
+    done
+    if [[ -n "$existing" ]]; then
+        printf 'refusing to replace existing network namespace(s): %s\n' "$existing" >"$log_file"
+        return 1
+    fi
+    if ! {
+        ip netns add "$PROF_NS" && ip netns add "$PROF_SRV_NS" && ip netns add "$PROF_LAN_NS" &&
+        # underlay: client eth0 <-> server eth0
+        ip link add "$NETEM_UPLINK_CLI" type veth peer name "$NETEM_UPLINK_SRV" &&
+        move_link "$NETEM_UPLINK_CLI" "$PROF_NS" "$VETH_NS" "$UNDERLAY_CLIENT/24" &&
+        move_link "$NETEM_UPLINK_SRV" "$PROF_SRV_NS" "$VETH_NS" "$UNDERLAY_HOST/24" &&
+        # LAN leg: server eth1 <-> lan eth0
+        ip link add veth-qfl1 type veth peer name veth-qfl2 &&
+        move_link veth-qfl1 "$PROF_SRV_NS" eth1 "$LAN_HOST/24" &&
+        move_link veth-qfl2 "$PROF_LAN_NS" "$VETH_NS" "$LAN_CLIENT/24" &&
+        ip netns exec "$PROF_NS" ip link set lo up &&
+        ip netns exec "$PROF_SRV_NS" ip link set lo up &&
+        ip netns exec "$PROF_LAN_NS" ip link set lo up &&
+        ip netns exec "$PROF_LAN_NS" ip route add default via "$LAN_HOST" &&
+        ip netns exec "$PROF_NS" sysctl -wq net.ipv4.conf.all.rp_filter=0 &&
+        ip netns exec "$PROF_SRV_NS" sysctl -wq net.ipv4.conf.all.rp_filter=0 &&
+        ip netns exec "$PROF_LAN_NS" sysctl -wq net.ipv4.conf.all.rp_filter=0
+    } >"$log_file" 2>&1; then
+        teardown_topology >/dev/null 2>&1
+        return 1
+    fi
+    TOPOLOGY_OWNED=1
+    return 0
+}
+
+teardown_topology() {
+    local rc=0 ns dev
+    for ns in "$PROF_NS" "$PROF_SRV_NS" "$PROF_LAN_NS"; do
+        if ip netns exec "$ns" true >/dev/null 2>&1; then
+            ip netns del "$ns" || rc=1
+        fi
+    done
+    # Stray host-side veth ends only exist if setup aborted mid-move.
+    for dev in "$NETEM_UPLINK_CLI" "$NETEM_UPLINK_SRV" veth-qfl1 veth-qfl2; do
+        if ip link show "$dev" >/dev/null 2>&1; then
+            ip link del "$dev" || rc=1
+        fi
+    done
+    TOPOLOGY_OWNED=0
+    return "$rc"
+}
+
 setup_netem() {
     local delay="$1"; local loss="$2"; local log_file="$3"
-    echo "Configuring tc-netem on ${NETEM_INTERFACE}: delay=${delay} loss=${loss}"
-    if "$TC_PATH" qdisc add dev "$NETEM_INTERFACE" root netem delay "$delay" loss "$loss" >"$log_file" 2>&1; then
+    echo "Configuring tc-netem on ${PROF_NS}:${VETH_NS} + ${PROF_SRV_NS}:${VETH_NS}: delay=${delay} loss=${loss}"
+    if ip netns exec "$PROF_NS" "$TC_PATH" qdisc add dev "$VETH_NS" root netem delay "$delay" loss "$loss" >"$log_file" 2>&1 && \
+        ip netns exec "$PROF_SRV_NS" "$TC_PATH" qdisc add dev "$VETH_NS" root netem delay "$delay" loss "$loss" >>"$log_file" 2>&1; then
         NETEM_ACTIVE=1
         NETEM_INTERFACE_OWNED=1
         return 0
     fi
-    return $?
+    return 1
 }
 
 teardown_netem() {
     if (( NETEM_ACTIVE == 0 || NETEM_INTERFACE_OWNED == 0 )); then
         return 0
     fi
-    echo "Removing tc-netem from ${NETEM_INTERFACE}..."
-    if "$TC_PATH" qdisc del dev "$NETEM_INTERFACE" root >/dev/null 2>&1; then
+    echo "Removing tc-netem from ${PROF_NS}:${VETH_NS} + ${PROF_SRV_NS}:${VETH_NS}..."
+    local rc=0
+    ip netns exec "$PROF_NS" "$TC_PATH" qdisc del dev "$VETH_NS" root >/dev/null 2>&1 || rc=1
+    ip netns exec "$PROF_SRV_NS" "$TC_PATH" qdisc del dev "$VETH_NS" root >/dev/null 2>&1 || rc=1
+    if (( rc == 0 )); then
         NETEM_ACTIVE=0
         NETEM_INTERFACE_OWNED=0
-        return 0
     fi
-    return $?
+    return "$rc"
 }
 
 run_tun_scenario() {
@@ -257,11 +347,23 @@ run_tun_scenario() {
     local qkey_store="$admin_dir/qkeys.json"
     # The server requires a QKey for every new client; it is issued over the
     # unix admin socket after startup and never written into evidence files.
-    local server_command=("$BINARY" server --cert "$CERT" --key "$KEY" --listen 127.0.0.1:4433 --admin-socket "$admin_sock" --qkey-store "$qkey_store" --fec-mode "$fec_mode" --tun --tun-ip "$SERVER_TUN_IP" --tun-netmask "$TUN_NETMASK" -v)
-    local client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "REDACTED" --ca-file "$CA_CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
+    # --wan-interface pins the NAT/forwarding target to the LAN leg (eth1);
+    # autodetection would pick the underlay eth0 inside the server namespace.
+    local server_command=(ip netns exec "$PROF_SRV_NS" env QUICFUSCATE_METRICS_ADDR="127.0.0.1:$TELEMETRY_PORT" "$BINARY" --telemetry server --cert "$CERT" --key "$KEY" --listen "$UNDERLAY_HOST:4433" --admin-socket "$admin_sock" --qkey-store "$qkey_store" --fec-mode "$fec_mode" --tun --tun-ip "$SERVER_TUN_IP" --tun-netmask "$TUN_NETMASK" --wan-interface eth1 -v)
+    # QF_PROFILE_CLIENT_DIAGNOSTICS=1 enables the per-heartbeat dataplane
+    # diagnostic line (transport cwnd, dgram queue depth, send outcomes).
+    local client_diag_env=()
+    [[ "${QF_PROFILE_CLIENT_DIAGNOSTICS:-0}" == 1 ]] &&
+        client_diag_env=(QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS=1)
+    # QF_PROFILE_CLIENT_CONFIG attaches an extra --config TOML to the client for
+    # controlled A/B experiments (e.g. transport.enable_pacing=false).
+    local client_config_args=()
+    [[ -n "${QF_PROFILE_CLIENT_CONFIG:-}" ]] &&
+        client_config_args=(--config "$QF_PROFILE_CLIENT_CONFIG")
+    local client_command=(ip netns exec "$PROF_NS" env QUICFUSCATE_METRICS_ADDR="127.0.0.1:$TELEMETRY_PORT" "${client_diag_env[@]}" "$BINARY" --telemetry client --remote "$UNDERLAY_HOST:4433" --url https://127.0.0.1/ --qkey "REDACTED" --ca-file "$CA_CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls "${client_config_args[@]}" -v)
     # iperf binds to the server-assigned client TUN address, which only exists
     # after the client connects; record the static shape, resolve at runtime.
-    local iperf_shape=("$IPERF3_PATH" -c '<assigned-client-tun-ip>' -t "$DURATION" -P 4 -J)
+    local iperf_shape=(ip netns exec "$PROF_NS" "$IPERF3_PATH" -c "$LAN_CLIENT" -B '<assigned-client-tun-ip>' -t "$DURATION" -P 4 -J)
     local command_json; command_json="$(profile_command_bundle_json \
         "server=$(profile_command_json "${server_command[@]}")" \
         "client=$(profile_command_json "${client_command[@]}")" \
@@ -298,6 +400,20 @@ run_tun_scenario() {
     fi
 
     echo "=== Scenario $label: $title ==="
+    if ! setup_topology "$netem_log"; then
+        result="FAIL"
+        reason="topology_setup_failed"
+        record_scenario "$label" "$title" "$result" "$reason" "$command_json" \
+            "$(profile_typed_pairs_json status=FAIL method=topology_setup)" \
+            "$(profile_typed_pairs_json server_pid=null client_pid=null iperf_server_pid=null iperf_client_pid=null server_exit_status=null client_exit_status=null iperf_exit_status=null termination_requested=bool:false)" \
+            "$(profile_typed_pairs_json status=SKIP exit_status=null data_file=null)" \
+            "$(profile_typed_pairs_json status=SKIP exit_status=null output_file=null)" \
+            "$(profile_typed_pairs_json status=FAIL complete=bool:false throughput_mbps=null rtt= loss=)" \
+            "$(profile_typed_pairs_json status=FAIL netem_setup=SKIP netem_teardown=SKIP perf_data_retained=bool:false)" \
+            "$started_at" "$(profile_now_utc)"
+        write_csv_row "$csv" "$label" "$label" "$fec_mode" "$netem_delay" "$netem_loss" FAIL "$reason" "" "" "" SKIP SKIP FAIL "" "" ""
+        return
+    fi
     if [[ "$netem_delay" != 0ms || "$netem_loss" != 0% ]]; then
         if setup_netem "$netem_delay" "$netem_loss" "$netem_log"; then
             netem_setup_status="PASS"
@@ -312,6 +428,7 @@ run_tun_scenario() {
                 "$(profile_typed_pairs_json status=FAIL netem_setup=FAIL netem_teardown=SKIP perf_data_retained=bool:false)" \
                 "$started_at" "$(profile_now_utc)"
             write_csv_row "$csv" "$label" "$label" "$fec_mode" "$netem_delay" "$netem_loss" FAIL "$reason" "" "" "" SKIP SKIP FAIL "" "" ""
+            teardown_topology >/dev/null 2>&1
             return
         fi
     else
@@ -321,6 +438,14 @@ run_tun_scenario() {
     local server_pid=""; local client_pid=""; local iperf_server_pid=""; local iperf_client_pid=""; local perf_pid=""
     local server_exit_status="null"; local client_exit_status="null"; local iperf_server_exit_status="null"; local iperf_client_exit_status="null"
     local perf_exit_status="null"; local readiness_status="SKIP"; local readiness_reason=""
+
+    # Delegated post-drop teardown leaves the durable routing state and the
+    # inet quicfuscate_rt table behind by design; as the profiling run's service
+    # manager we reclaim them once no live server process owns them.
+    if ! pgrep -f "${BINARY} server" >/dev/null 2>&1; then
+        rm -f /run/quicfuscate/routing/*.json 2>/dev/null
+        nft delete table inet quicfuscate_rt >/dev/null 2>&1 || true
+    fi
 
     echo "  Starting the authenticated TUN endpoints..."
     "${server_command[@]}" >"$server_log" 2>&1 &
@@ -342,7 +467,7 @@ run_tun_scenario() {
             result="FAIL"
             reason="qkey_issue_failed"
         else
-            client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "$qkey" --ca-file "$CA_CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
+            client_command=(ip netns exec "$PROF_NS" env QUICFUSCATE_METRICS_ADDR="127.0.0.1:$TELEMETRY_PORT" "${client_diag_env[@]}" "$BINARY" --telemetry client --remote "$UNDERLAY_HOST:4433" --url https://127.0.0.1/ --qkey "$qkey" --ca-file "$CA_CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls "${client_config_args[@]}" -v)
         fi
     fi
 
@@ -361,20 +486,37 @@ run_tun_scenario() {
     fi
 
     if [[ "$result" == PASS ]]; then
-        CLIENT_TUN_IP="$(profile_discover_tun_addr "$CLIENT_TUN_NAME" "$READY_TIMEOUT")"
+        CLIENT_TUN_IP="$(profile_discover_tun_addr "$CLIENT_TUN_NAME" "$READY_TIMEOUT" "$PROF_NS")"
         if [[ -z "$CLIENT_TUN_IP" ]]; then
             result="FAIL"
             reason="client_tun_assignment_missing"
+        elif ! ip netns exec "$PROF_NS" ip route add "$LAN_NET" dev "$CLIENT_TUN_NAME" 2>>"$client_log"; then
+            # Forward path for LAN-side traffic: the client namespace only
+            # knows the tunnel subnet on qtun0; without this the iperf client
+            # cannot send to the LAN host through the tunnel at all.
+            result="FAIL"
+            reason="lan_forward_route_failed"
         fi
     fi
 
     if [[ "$result" == PASS ]]; then
-        local iperf_server_command=("$IPERF3_PATH" -s -B "$CLIENT_TUN_IP")
-        local iperf_client_command=("$IPERF3_PATH" -c "$CLIENT_TUN_IP" -t "$DURATION" -P 4 -J)
-        echo "  Starting iperf3 traffic for ${DURATION}s (client TUN ${CLIENT_TUN_IP})..."
+        # Realistic direction: the app behind the VPN client sends through the
+        # tunnel to a host on the server's WAN side, matching the NAT-gateway
+        # forwarding model (tun->wan allowed, wan->tun replies only).
+        local iperf_server_command=(ip netns exec "$PROF_LAN_NS" "$IPERF3_PATH" -s -B "$LAN_CLIENT")
+        # QF_PROFILE_IPERF_UDP_RATE switches the traffic to a UDP flood at the
+        # given bitrate (e.g. "2000M"), which removes inner-TCP dynamics from
+        # the dataplane measurement. Empty keeps the 4-stream TCP default.
+        local iperf_traffic_args=(-P 4)
+        if [[ -n "${QF_PROFILE_IPERF_UDP_RATE:-}" ]]; then
+            iperf_traffic_args=(-u -b "$QF_PROFILE_IPERF_UDP_RATE" -l 1400)
+        fi
+        local iperf_client_command=(ip netns exec "$PROF_NS" "$IPERF3_PATH" -c "$LAN_CLIENT" -B "$CLIENT_TUN_IP" -t "$DURATION" "${iperf_traffic_args[@]}" -J)
+        echo "  Starting iperf3 traffic for ${DURATION}s (client TUN ${CLIENT_TUN_IP} -> LAN ${LAN_CLIENT})..."
         "${iperf_server_command[@]}" >"$iperf_server_log" 2>&1 &
         iperf_server_pid=$!
-        if ! profile_wait_for_pid_alive "$iperf_server_pid" "$READY_TIMEOUT"; then
+        if ! profile_wait_for_pid_alive "$iperf_server_pid" "$READY_TIMEOUT" || \
+            ! profile_wait_for_tcp_listen "$LAN_CLIENT" 5201 "$READY_TIMEOUT" "$PROF_LAN_NS"; then
             result="FAIL"
             reason="iperf_server_not_ready"
         fi
@@ -383,7 +525,7 @@ run_tun_scenario() {
     if [[ "$result" == PASS ]]; then
         "${iperf_client_command[@]}" >"$iperf_client_log" 2>"$RUN_DIR/iperf3-client-${label}.stderr" &
         iperf_client_pid=$!
-        "$PERF_PATH" record -F 99 -g -p "$server_pid" -o "$perf_data" -- sleep "$DURATION" >"$perf_log" 2>&1 &
+        "$PERF_PATH" record -e "$PERF_EVENT" -F 99 -g -p "$server_pid" -o "$perf_data" -- sleep "$DURATION" >"$perf_log" 2>&1 &
         perf_pid=$!
         profile_wait_status "$iperf_client_pid"
         iperf_client_exit_status="$PROFILE_LAST_WAIT_STATUS"
@@ -467,6 +609,11 @@ run_tun_scenario() {
         [[ -n "$reason" ]] || reason="netem_teardown_failed"
     else
         netem_teardown_status="PASS"
+    fi
+    if ! teardown_topology; then
+        cleanup_status="FAIL"
+        result="FAIL"
+        [[ -n "$reason" ]] || reason="topology_teardown_failed"
     fi
     rm -rf "$admin_dir"
     if [[ "$cleanup_status" != PASS ]]; then

@@ -25,6 +25,9 @@ const PROBE_RTT_DURATION: Duration = Duration::from_millis(200);
 const STARTUP_GROWTH_TARGET: f64 = 1.25;
 const BW_PROBE_UP_ROUNDS: u64 = 3;
 const INITIAL_RTT: Duration = Duration::from_millis(100);
+/// Minimum ACK-clocked window for a delivery-rate sample. Must exceed typical
+/// ACK spacing on fast paths so the estimate is not quantized by frame arrival.
+const DELIVERY_RATE_WINDOW: Duration = Duration::from_millis(1);
 const STARTUP_PACING_GAIN: f64 = 2.77;
 
 /// Default pacing gain cycle (standard BBR3 - no stealth shaping).
@@ -70,6 +73,9 @@ pub struct Bbr3 {
     probe_rtt_min_stamp: Instant,
     delivered: u64,
     delivered_time: Instant,
+    /// Bytes acked since the `delivered_time` anchor; the delivery-rate sample
+    /// is taken over a whole window, never per ACK frame.
+    rate_window_acked: u64,
     app_limited: u64,
     round_count: u64,
     round_start: bool,
@@ -153,6 +159,7 @@ impl Bbr3 {
             probe_rtt_min_stamp: now,
             delivered: 0,
             delivered_time: now,
+            rate_window_acked: 0,
             app_limited: 0,
             round_count: 0,
             round_start: false,
@@ -194,25 +201,27 @@ impl Bbr3 {
 
     /// Run the BBR3 state machine on ACK.
     fn bbr3_on_ack(&mut self, acked_bytes: usize, now: Instant) {
-        // `delivered_time` is an ACK clock, not a send clock. Compute the
-        // delivery rate before advancing it so the interval covers the time
-        // since the previous delivery sample. Updating it from on_packet_sent
-        // would turn send-to-ACK latency into a false bandwidth spike.
-        let delivery_rate = if now > self.delivered_time {
-            let elapsed =
-                now.duration_since(self.delivered_time).max(Duration::from_millis(1)).as_secs_f64();
-            if elapsed > 0.0 {
-                (acked_bytes as f64 / elapsed).max(0.0) as u64
-            } else {
-                self.btlbw
-            }
+        // `delivered_time` anchors an ACK-clocked measurement window, not a
+        // per-ACK sample. Sampling each ACK frame against the time since the
+        // previous frame pins the estimate at `frame_bytes / 1ms` whenever ACKs
+        // arrive faster than 1kHz: the 1ms elapsed floor then becomes the hard
+        // throughput ceiling and pacing locks into that fixed point. Bytes are
+        // accumulated across frames until the window spans at least
+        // DELIVERY_RATE_WINDOW, so the sample always reflects a real interval.
+        self.rate_window_acked = self.rate_window_acked.saturating_add(acked_bytes as u64);
+        let window_elapsed = now.saturating_duration_since(self.delivered_time);
+        let delivery_rate = if window_elapsed >= DELIVERY_RATE_WINDOW {
+            let rate =
+                (self.rate_window_acked as f64 / window_elapsed.as_secs_f64()).max(0.0) as u64;
+            self.rate_window_acked = 0;
+            self.delivered_time = now;
+            rate
         } else {
             self.btlbw
         };
 
         // Update delivery tracking AFTER rate computation
         self.delivered += acked_bytes as u64;
-        self.delivered_time = now;
         self.round_start = self.delivered >= self.next_round_delivered;
         if self.round_start {
             self.round_count = self.round_count.saturating_add(1);
@@ -447,6 +456,7 @@ impl CongestionController for Bbr3 {
             self.min_rtt_expired = false;
             self.delivered = 0;
             self.delivered_time = event.now;
+            self.rate_window_acked = 0;
             self.app_limited = 0;
             self.round_count = 0;
             self.round_start = false;
@@ -622,6 +632,50 @@ mod tests {
         assert!(
             (11_800..=12_000).contains(&bbr.btlbw),
             "delivery rate must use the 101 ms ACK interval, got {}",
+            bbr.btlbw
+        );
+    }
+
+    #[test]
+    fn delivery_rate_not_capped_by_ack_frame_spacing() {
+        // Regression guard: a per-ACK sample with a 1 ms elapsed floor caps the
+        // estimate at frame_bytes * 1k/s. With the default 2-packet ACK policy
+        // that is ~2.9 MB/s and pacing converges to that fixed point on any
+        // sub-millisecond-RTT path. The windowed estimator must observe the
+        // real ~14.5 MB/s stream below.
+        let mut bbr = Bbr3::new(50_000, 1200);
+        let t0 = bbr.delivered_time;
+        let spacing = Duration::from_micros(200);
+        for i in 0..200_u64 {
+            let sent_at = t0 + spacing * i as u32;
+            bbr.on_packet_sent(i, 2912, sent_at);
+            // ACK every 2 packets every 200µs -> true rate ~14.5 MB/s.
+            bbr.on_ack(2912, sent_at + spacing);
+        }
+        assert!(
+            bbr.btlbw > 8_000_000,
+            "windowed delivery rate must exceed the old per-ACK ceiling, got {} B/s",
+            bbr.btlbw
+        );
+    }
+
+    #[test]
+    fn delivery_window_accumulates_across_dense_acks() {
+        // The window anchor only advances once a full window elapsed: a single
+        // sub-window ACK must keep accumulating bytes without producing a
+        // quantized sample.
+        let mut bbr = Bbr3::new(50_000, 1200);
+        let t0 = bbr.delivered_time;
+        bbr.on_ack(2912, t0 + Duration::from_micros(400));
+        assert_eq!(bbr.rate_window_acked, 2912);
+        assert_eq!(bbr.delivered_time, t0);
+        bbr.on_ack(2912, t0 + Duration::from_micros(1100));
+        assert_eq!(bbr.rate_window_acked, 0);
+        assert_eq!(bbr.delivered_time, t0 + Duration::from_micros(1100));
+        // 5824 B over 1.1 ms -> ~5.3 MB/s, above any per-frame ceiling.
+        assert!(
+            (5_000_000..=5_600_000).contains(&bbr.btlbw),
+            "unexpected windowed rate {} B/s",
             bbr.btlbw
         );
     }

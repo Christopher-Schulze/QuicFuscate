@@ -3853,6 +3853,12 @@
 - Linux `set_dns` ran `resolvectl dns <tun> <servers>` but never set a routing domain, so systemd-resolved kept the physical link's DHCP DNS eligible for unmatched names — queries leaked to the LAN/ISP resolver while the tunnel was up, and the client DoH proxy never saw them. `set_dns` now always emits `resolvectl domain <tun> <search...> "~."` (catch-all route-only domain); `revert` on restore covers it. Legacy resolv.conf, macOS, and Windows paths were never affected.
 - Regression: `systemd_domain_args_always_route_all_lookups_through_the_tunnel` (Linux-only, runs on Omega/CI).
 
+### TODO-983 - BBR3 delivery-rate floor capped throughput at ~23 Mbit/s on sub-ms-RTT paths
+- Detail: `docs/todo/todo-983-bbr3-delivery-rate-floor.md`
+- `bbr3_on_ack` sampled `acked_bytes / max(elapsed_since_last_ack, 1ms)` per ACK frame; at the default 2-packet ACK threshold that pinned `btlbw` (and thus `pacing_rate`) at ~2.9 MB/s whenever ACKs arrived faster than 1 kHz — a stable self-referential fixed point verified live on Omega (948k qtun0 TX drops at 98% loss under a 1.67 Gbit/s flood; `bytes_in_flight=0`, `send_zero_results`=68%). Bytes now accumulate into a window until it spans >=1 ms (`DELIVERY_RATE_WINDOW`), so the estimate measures a real interval; anchor/accumulator reset on `NewAddress`.
+- Regressions: `delivery_rate_not_capped_by_ack_frame_spacing` (fails on old estimator), `delivery_window_accumulates_across_dense_acks`.
+- Local proof: qf-transport-cc 96/96, fmt/clippy clean. Omega A/B: client `enable_pacing=false` lifted scenario-g TCP ~16->53 Mbit/s — pacer/estimate confirmed as primary wall; post-fix rerun pending. Note: Omega is single-core, absolute numbers are contention-bounded.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.

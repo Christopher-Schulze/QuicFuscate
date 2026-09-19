@@ -179,17 +179,32 @@ data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 end = data.get("end") or {}
 sum_received = end.get("sum_received") or {}
 sum_sent = end.get("sum_sent") or {}
-bits_per_second = sum_received.get("bits_per_second") or sum_sent.get("bits_per_second")
-seconds = end.get("sum_received", {}).get("seconds") or end.get("sum_sent", {}).get("seconds")
+# UDP client reports use end.sum (sender view); TCP uses sum_received/sum_sent.
+sum_udp = end.get("sum") or {}
+bits_per_second = (
+    sum_received.get("bits_per_second")
+    or sum_sent.get("bits_per_second")
+    or sum_udp.get("bits_per_second")
+)
+seconds = (
+    sum_received.get("seconds")
+    or sum_sent.get("seconds")
+    or sum_udp.get("seconds")
+)
 if not isinstance(bits_per_second, (int, float)) or not math.isfinite(bits_per_second) or bits_per_second <= 0:
     raise SystemExit("iperf JSON has no positive received or sent bitrate")
 if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds <= 0:
     raise SystemExit("iperf JSON has no positive measured duration")
-print(json.dumps({
+result = {
     "throughput_mbps": round(bits_per_second / 1_000_000, 6),
     "duration_sec": round(seconds, 6),
     "source": "iperf3_json",
-}))
+}
+if isinstance(sum_udp.get("lost_percent"), (int, float)):
+    result["udp_lost_percent"] = round(sum_udp["lost_percent"], 4)
+    result["udp_lost_packets"] = sum_udp.get("lost_packets")
+    result["udp_packets"] = sum_udp.get("packets")
+print(json.dumps(result))
 PY
 }
 
@@ -443,6 +458,61 @@ profile_wait_for_log_pattern() {
   return 1
 }
 
+# Wait until a TCP listener on addr:port is visible in /proc/net/tcp{,6}.
+# The kernel table is observed directly instead of connecting (a bare probe
+# would surface as a malformed iperf3 test) or waiting on the server log
+# (iperf3 block-buffers "Server listening" when stdout is redirected, so a
+# log-pattern wait only sees it at process exit).
+profile_wait_for_tcp_listen() {
+  local addr="$1"
+  local port="$2"
+  local timeout_secs="${3:-10}"
+  local netns="${4:-}"
+  local -a py_cmd=(python3)
+  [[ -n "$netns" ]] && py_cmd=(ip netns exec "$netns" python3)
+  local deadline=$((SECONDS + timeout_secs))
+  while (( SECONDS < deadline )); do
+    if "${py_cmd[@]}" - "$addr" "$port" <<'PY'
+import socket
+import sys
+
+addr, port = sys.argv[1], int(sys.argv[2])
+try:
+    want_v4 = socket.inet_pton(socket.AF_INET, addr)[::-1].hex().upper()
+except OSError:
+    want_v4 = None
+try:
+    packed = socket.inet_pton(socket.AF_INET6, addr)
+    want_v6 = "".join(
+        packed[i:i + 4][::-1].hex().upper() for i in range(0, 16, 4)
+    )
+except OSError:
+    want_v6 = None
+want_port = f"{port:04X}"
+for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        with open(table, encoding="ascii") as handle:
+            next(handle)
+            for line in handle:
+                fields = line.split()
+                local, state = fields[1], fields[3]
+                if state != "0A" or not local.endswith(":" + want_port):
+                    continue
+                want = want_v6 if table.endswith("tcp6") else want_v4
+                if local.split(":")[0] == want:
+                    sys.exit(0)
+    except OSError:
+        continue
+sys.exit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
 profile_wait_status() {
   local pid="$1"
   local status=0
@@ -534,10 +604,13 @@ profile_issue_qkey() {
 profile_discover_tun_addr() {
   local dev="$1"
   local timeout_secs="$2"
+  local netns="${3:-}"
+  local -a ip_cmd=(ip)
+  [[ -n "$netns" ]] && ip_cmd=(ip netns exec "$netns" ip)
   local deadline=$((SECONDS + timeout_secs))
   while (( SECONDS < deadline )); do
     local addr=""
-    addr="$(ip -o -4 addr show dev "$dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+    addr="$("${ip_cmd[@]}" -o -4 addr show dev "$dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
     if [[ -n "$addr" ]]; then
       printf '%s' "$addr"
       return 0

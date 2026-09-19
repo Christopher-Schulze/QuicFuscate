@@ -1143,11 +1143,37 @@ pub(super) async fn run_client(
                     }
                 }
                 if now >= next_stats_log {
-                    info!(
-                        "client stats: RTT {:.0} ms, Loss {:.2}%",
-                        conn.rtt_ms(),
-                        conn.loss_rate() * 100.0
-                    );
+                    if let Some(diagnostics) = io_diagnostics.as_ref() {
+                        let protocol_now = conn.protocol_clock().now();
+                        info!(
+                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
+                            conn.rtt_ms(),
+                            conn.loss_rate() * 100.0,
+                            conn.conn.stats().sent,
+                            conn.conn.stats().recv,
+                            conn.conn.stats().lost,
+                            conn.conn.dgram_send_queue_len(),
+                            conn.conn.bytes_in_flight(),
+                            conn.conn.cwnd(),
+                            diagnostics.send_polls,
+                            diagnostics.send_datagrams,
+                            diagnostics.send_zero_results,
+                            diagnostics.send_done_results,
+                            diagnostics.send_errors,
+                            conn.next_outbound_release_deadline().map(|deadline| {
+                                deadline.saturating_duration_since(protocol_now).as_millis()
+                            }),
+                            conn.conn.recovery_deadline().map(|deadline| {
+                                deadline.saturating_duration_since(protocol_now).as_millis()
+                            }),
+                        );
+                    } else {
+                        info!(
+                            "client stats: RTT {:.0} ms, Loss {:.2}%",
+                            conn.rtt_ms(),
+                            conn.loss_rate() * 100.0
+                        );
+                    }
                     next_stats_log = now + Duration::from_secs(1);
                 }
                 // Only drive the idle timeout when the connection has actually been
