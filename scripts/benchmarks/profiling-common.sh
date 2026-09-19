@@ -502,3 +502,41 @@ profile_csv_field() {
   value="${value//\"/\"\"}"
   printf '"%s"' "$value"
 }
+
+# Issue a client QKey over the server's unix admin socket.
+# Prints the token on stdout; empty output means the socket never answered.
+profile_issue_qkey() {
+  local sock="$1"
+  local timeout_secs="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  while (( SECONDS < deadline )); do
+    if [[ -S "$sock" ]]; then
+      local qkey=""
+      qkey="$(printf '{"cmd":"qkey"}\n' | nc -U "$sock" 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["data"]["qkey"])' 2>/dev/null)"
+      if [[ -n "$qkey" ]]; then
+        printf '%s' "$qkey"
+        return 0
+      fi
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+# Resolve the server-assigned IPv4 address configured on a TUN device.
+profile_discover_tun_addr() {
+  local dev="$1"
+  local timeout_secs="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  while (( SECONDS < deadline )); do
+    local addr=""
+    addr="$(ip -o -4 addr show dev "$dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+    if [[ -n "$addr" ]]; then
+      printf '%s' "$addr"
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}

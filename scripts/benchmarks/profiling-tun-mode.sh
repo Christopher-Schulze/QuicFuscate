@@ -155,8 +155,12 @@ PREREQUISITES_JSON="$(profile_pairs_json \
     status="$PREFLIGHT_STATUS" reason="$PREFLIGHT_REASON")"
 
 SERVER_TUN_IP="10.0.1.1"
-CLIENT_TUN_IP="10.0.1.2"
 TUN_NETMASK="255.255.255.0"
+CLIENT_TUN_NAME="qtun0"
+# The standalone client no longer accepts --tun-ip/--tun-netmask: the server
+# assigns the client tunnel address. The iperf bind target is discovered from
+# the client TUN device after connect instead of being assumed.
+CLIENT_TUN_IP=""
 FAILURES=0
 UNAVAILABLE_COUNT=0
 SCENARIO_FILES=()
@@ -235,14 +239,19 @@ run_tun_scenario() {
     local flamegraph_log="$RUN_DIR/flamegraph-${label}.log"
 
     local started_at; started_at="$(profile_now_utc)"
-    local server_command=("$BINARY" server --cert "$CERT" --key "$KEY" --listen 127.0.0.1:4433 --fec-mode "$fec_mode" --tun --tun-ip "$SERVER_TUN_IP" --tun-netmask "$TUN_NETMASK" -v)
-    local client_command=("$BINARY" client --remote 127.0.0.1:4433 --fec-mode "$fec_mode" --tun --tun-ip "$CLIENT_TUN_IP" --tun-netmask "$TUN_NETMASK" --disable-doh -v)
-    local iperf_server_command=("$IPERF3_PATH" -s -B "$CLIENT_TUN_IP")
-    local iperf_client_command=("$IPERF3_PATH" -c "$CLIENT_TUN_IP" -t "$DURATION" -P 4 -J)
+    local admin_sock="$RUN_DIR/admin-${label}.sock"
+    local qkey_store="$RUN_DIR/qkeys-${label}.json"
+    # The server requires a QKey for every new client; it is issued over the
+    # unix admin socket after startup and never written into evidence files.
+    local server_command=("$BINARY" server --cert "$CERT" --key "$KEY" --listen 127.0.0.1:4433 --admin-socket "$admin_sock" --qkey-store "$qkey_store" --fec-mode "$fec_mode" --tun --tun-ip "$SERVER_TUN_IP" --tun-netmask "$TUN_NETMASK" -v)
+    local client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "REDACTED" --ca-file "$CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
+    # iperf binds to the server-assigned client TUN address, which only exists
+    # after the client connects; record the static shape, resolve at runtime.
+    local iperf_shape=("$IPERF3_PATH" -c '<assigned-client-tun-ip>' -t "$DURATION" -P 4 -J)
     local command_json; command_json="$(profile_command_bundle_json \
         "server=$(profile_command_json "${server_command[@]}")" \
         "client=$(profile_command_json "${client_command[@]}")" \
-        "iperf=$(profile_command_json "${iperf_client_command[@]}")")"
+        "iperf=$(profile_command_json "${iperf_shape[@]}")")"
     local result="PASS"; local reason=""; local metrics_status="SKIP"; local metrics_complete=false
     local perf_status="SKIP"; local flamegraph_status="SKIP"; local flamegraph_exit_status="null"; local perf_data_retained=false
     local rtt=""; local loss=""; local throughput_json="{}"; local cleanup_status="PASS"; local termination_requested=false
@@ -312,6 +321,17 @@ run_tun_scenario() {
         reason="$readiness_reason"
     fi
 
+    local qkey=""
+    if [[ "$result" == PASS ]]; then
+        qkey="$(profile_issue_qkey "$admin_sock" "$READY_TIMEOUT")"
+        if [[ -z "$qkey" ]]; then
+            result="FAIL"
+            reason="qkey_issue_failed"
+        else
+            client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "$qkey" --ca-file "$CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
+        fi
+    fi
+
     if [[ "$result" == PASS ]]; then
         "${client_command[@]}" >"$client_log" 2>&1 &
         client_pid=$!
@@ -327,7 +347,17 @@ run_tun_scenario() {
     fi
 
     if [[ "$result" == PASS ]]; then
-        echo "  Starting iperf3 traffic for ${DURATION}s..."
+        CLIENT_TUN_IP="$(profile_discover_tun_addr "$CLIENT_TUN_NAME" "$READY_TIMEOUT")"
+        if [[ -z "$CLIENT_TUN_IP" ]]; then
+            result="FAIL"
+            reason="client_tun_assignment_missing"
+        fi
+    fi
+
+    if [[ "$result" == PASS ]]; then
+        local iperf_server_command=("$IPERF3_PATH" -s -B "$CLIENT_TUN_IP")
+        local iperf_client_command=("$IPERF3_PATH" -c "$CLIENT_TUN_IP" -t "$DURATION" -P 4 -J)
+        echo "  Starting iperf3 traffic for ${DURATION}s (client TUN ${CLIENT_TUN_IP})..."
         "${iperf_server_command[@]}" >"$iperf_server_log" 2>&1 &
         iperf_server_pid=$!
         if ! profile_wait_for_pid_alive "$iperf_server_pid" "$READY_TIMEOUT"; then
