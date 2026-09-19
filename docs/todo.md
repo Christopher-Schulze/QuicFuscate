@@ -3984,6 +3984,36 @@
 - DONE (2026-09-19). Linux `flush_connected_outgoing` wrote each datagram into `out` scratch and then copied it into the flat GSO staging buffer; `conn.send` is write-only in its output buffer, so the loop now publishes directly into `flat`'s spare capacity (`reserve` + `set_len(start+len)` on success), removing one ~1.2 KiB memcpy per outbound packet while keeping the staging layout, span table, GSO runs, fallback slicing, and diagnostics identical. Verified on Omega: clippy/check clean, `tun-e2e-netns.sh` PASS on the rebuilt release binary with 0% loss.
 - Detail: docs/todo/todo-1005-standalone-client-tx-memcpy.md
 
+### TODO-1006 - Audit whether wire-level FEC recovery masks congestion loss from CC (RFC 9265)
+
+- OPEN. Wire-level FEC re-injects recovered datagrams into `conn.recv`, so recovered PNs get ACKed and may never reach the sender's loss detector - hiding congestion signal from the congestion controller (RFC 9265 violation pattern). Audit whether wire loss still reaches CC; if masked, restore visibility or document the bounded trade-off. Literature: RFC 9265, draft-zheng-quic-fec-extension (Repair-ACK prior art).
+- Detail: docs/todo/todo-1006-fec-congestion-signal-masking.md
+
+### TODO-1007 - io_uring multishot recv + provided buffer ring for inbound
+
+- OPEN. `UringRecvBatch` re-arms one RecvMsg SQE per slot per completion; multishot `recv` + a provided-buffer ring (kernel >= 5.19) produces repeated CQEs from one SQE and turns re-arm bookkeeping into ring refill. Connected client path first (no per-packet sockaddr); server demux only if msghdr ancillary stays affordable. Note: upstream warns multishot `recvmsg` copies per-completion msghdr on the fly - measure before adopting there.
+- Detail: docs/todo/todo-1007-uring-multishot-recv.md
+
+### TODO-1008 - Evaluate io_uring send bundles for TX batching
+
+- OPEN (P3). `IORING_RECVSEND_BUNDLE` + provided-buffer sends push N buffers through the stack in one descent (~36% in axboe proxy benches). First measure whether per-SQE SendMsg remains a bottleneck post-TODO-902/1005; compare against simply widening GSO runs. Kernel floor must be confirmed before designing the probe.
+- Detail: docs/todo/todo-1008-uring-send-bundles.md
+
+### TODO-1009 - TLS/browser fingerprint freshness and rotation validation
+
+- OPEN. 2025 evidence: uTLS ECH-GREASE bug made the Chrome parrot passively identifiable for ~2 years; JA4 fingerprints beyond JA3 fields. Bundled `browser_profiles/*.chlo` personas need a staleness contract, per-connection GREASE variance (no byte-identical ClientHellos), JA4-field coverage (extension order, ALPS, ECH shape), and a refresh policy.
+- Detail: docs/todo/todo-1009-fingerprint-freshness.md
+
+### TODO-1010 - Next-generation stealth shaping research track
+
+- OPEN (standing). Five literature candidates to evaluate against FlowShaper/StealthBrain/TLS-Cover: ChameleonFlow-style padding-free burst-structure disruption (96.3->35.8% WF accuracy at 8.7% BW), Adaptive-Tamaraw per-cluster shaping parameters (~99pp overhead cut), WF-A2D position-aware perturbation (<2% BW, ~97% defense), QUICstep/CoMPS migration-based path splitting, UPGen per-deployment wire-image diversity. Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
+- Detail: docs/todo/todo-1010-stealth-shaping-research-track.md
+
+### TODO-1011 - FEC standards alignment and maximal-effectiveness audit
+
+- OPEN (standing). Evaluate: QUIRL application-tailored activation (FEC only where latency demands), NWCRG sliding-window RLC alignment (TinyMT32 coefficients, transport-param negotiation), Repair-ACK feedback (suppress retransmission + count loss for CC, pairs with TODO-1006), convolutional overlapping generations vs our interleaved/streaming-burst, unequal protection by traffic class.
+- Detail: docs/todo/todo-1011-fec-standards-alignment.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.
