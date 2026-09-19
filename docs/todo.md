@@ -4021,7 +4021,7 @@
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff
 
-- DONE (2026-09-19). The TUN fd cannot batch reads (one frame per `read`), but the handoff can: `reader_loop_with_shutdown_batched` drains the fd nonblocking per wave (`TUN_READ_BURST=32`) and hands one `Vec<TunPacket>` per channel send+notify. Consumer drains under a 128-frame budget; backpressured remainders park as `(wave, cursor)` backlog. Omega A/B (`perf stat`, 15 s iperf3 through TUN): epoll_pwait -15%, futex -6%, total syscalls -5%, throughput unchanged. e2e PASS.
+- DONE (2026-09-19). The TUN fd cannot batch reads (one frame per `read`), but the handoff can: `reader_loop_with_shutdown_batched` drains the fd nonblocking per wave (`TUN_READ_BURST=32`) and hands one `Vec<TunPacket>` per channel send+notify - applied to both the standalone client (128-frame drain budget, `(wave, cursor)` backlog) and the standalone server reader (32-frame budget, parked `IntoIter` remainder inside `drain_server_tun_packets`). Omega A/B (`perf stat`, 15 s iperf3 through TUN): epoll_pwait -15%, futex -6%, total syscalls -5%, throughput unchanged. e2e PASS.
 - Detail: docs/todo/todo-1013-tun-reader-wave-handoff.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)

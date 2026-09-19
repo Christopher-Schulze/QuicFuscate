@@ -41,7 +41,10 @@ impl ServerRuntime {
             return Err(std::io::Error::other("server admin action receiver unavailable"));
         };
         // Take the TUN reader channel (if any) for forwarding TUN->client datagrams.
+        // `pending_wave` parks a partially drained reader wave when the
+        // frame budget cuts a drain short; it is resumed before new waves.
         let mut tun_rx = self.live_mut().tun_rx.take();
+        let mut pending_wave: Option<std::vec::IntoIter<crate::interface::TunPacket>> = None;
         let tun_notify = self.live().tun_notify.clone();
         let tun_fault = self.live().tun_fault.clone();
         let tun_ctx = {
@@ -497,6 +500,7 @@ impl ServerRuntime {
                         &tun_ctx,
                         shard_router.as_deref(),
                         &mut tun_rx,
+                        &mut pending_wave,
                         &mut out[..],
                         &socket,
                         &metrics,
@@ -569,6 +573,7 @@ impl ServerRuntime {
                         &tun_ctx,
                         shard_router.as_deref(),
                         &mut tun_rx,
+                        &mut pending_wave,
                         &mut out[..],
                         &socket,
                         &metrics,

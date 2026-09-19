@@ -43,7 +43,7 @@ pub(super) struct ServerLiveRuntime {
     /// Channel receiving packets read from the server TUN interface (spawned reader thread).
     /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
     /// Carries pooled [`crate::interface::TunPacket`]s - no per-packet alloc/copy.
-    pub(super) tun_rx: Option<std::sync::mpsc::Receiver<crate::interface::TunPacket>>,
+    pub(super) tun_rx: Option<std::sync::mpsc::Receiver<Vec<crate::interface::TunPacket>>>,
     /// Cooperative cancellation for the standalone TUN reader.
     pub(super) tun_reader_shutdown: Option<Arc<AtomicBool>>,
     /// Owned reader handle. `stop()` joins it before releasing the TUN device.
@@ -1155,17 +1155,39 @@ impl StandaloneServiceSignals {
     }
 }
 
-/// Drain bounded batches from the standalone TUN reader and report whether a
-/// follow-up wake-up is required for more queued packets.
-///
+/// Drains at most `budget` frames from `iter`, routing/processing each. On
+/// budget exhaustion or a propagating dispatch error the unconsumed
+/// remainder stays inside the iterator - it is the caller's parked wave.
+fn drain_wave_frames(
+    iter: &mut std::vec::IntoIter<crate::interface::TunPacket>,
+    budget: &mut usize,
+    send_one: &mut impl FnMut(crate::interface::TunPacket) -> Result<(), DataPlaneFault>,
+) -> Result<(), DataPlaneFault> {
+    for packet in iter.by_ref() {
+        if *budget == 0 {
+            break;
+        }
+        send_one(packet)?;
+        *budget -= 1;
+    }
+    Ok(())
+}
+
 /// `router == None`: packets are processed locally (legacy single-loop).
 /// `Some(router)`: the coordinator classifies and routes each packet's
 /// targets to owning shards; `live_state` supplies shared domain state only.
+///
+/// Waves arrive batched: the TUN reader hands one `Vec<TunPacket>` per drain
+/// wave over the channel. The drain bound is frame-counted (32) so an
+/// oversized wave cannot starve the other loop arms; a remainder parks in
+/// `pending_wave` and is resumed before new waves are received.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_server_tun_packets(
     live_state: &mut LiveServerState,
     tun_ctx: &ServerTunContext,
     router: Option<&ShardRouter>,
-    tun_rx: &mut Option<std::sync::mpsc::Receiver<crate::interface::TunPacket>>,
+    tun_rx: &mut Option<std::sync::mpsc::Receiver<Vec<crate::interface::TunPacket>>>,
+    pending_wave: &mut Option<std::vec::IntoIter<crate::interface::TunPacket>>,
     out: &mut [u8],
     socket: &UdpSocket,
     metrics: &Metrics,
@@ -1182,18 +1204,36 @@ pub(super) fn drain_server_tun_packets(
             component: "server TUN reader channel".to_string(),
         }))
     };
-    for _ in 0..32 {
+    let mut send_one = |packet: crate::interface::TunPacket| match router {
+        Some(router) => route_server_tun_packet(live_state, tun_ctx, router, packet, metrics),
+        None => process_server_tun_packet(live_state, tun_ctx, packet, out, socket, metrics),
+    };
+    let mut budget = 32usize;
+
+    if let Some(iter) = pending_wave.as_mut() {
+        drain_wave_frames(iter, &mut budget, &mut send_one)?;
+        if iter.len() == 0 {
+            *pending_wave = None;
+        }
+        if budget == 0 {
+            // Preserve the wake-up contract: a remainder is parked, so the
+            // caller must re-arm rather than wait for a new reader notify.
+            return Ok(true);
+        }
+    }
+
+    while budget > 0 {
         let result = tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv);
         match result {
-            Some(Ok(packet)) => match router {
-                Some(router) => {
-                    route_server_tun_packet(live_state, tun_ctx, router, packet, metrics)?
+            Some(Ok(wave)) => {
+                let mut iter = wave.into_iter();
+                drain_wave_frames(&mut iter, &mut budget, &mut send_one)?;
+                if iter.len() > 0 {
+                    *pending_wave = Some(iter);
+                    return Ok(true);
                 }
-                None => {
-                    process_server_tun_packet(live_state, tun_ctx, packet, out, socket, metrics)?
-                }
-            },
-            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Ok(false),
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => break,
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
                 *tun_rx = None;
                 if let Some(fault) = reader_gone(tun_ctx) {
@@ -1206,15 +1246,8 @@ pub(super) fn drain_server_tun_packets(
     }
 
     match tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv) {
-        Some(Ok(packet)) => {
-            match router {
-                Some(router) => {
-                    route_server_tun_packet(live_state, tun_ctx, router, packet, metrics)?
-                }
-                None => {
-                    process_server_tun_packet(live_state, tun_ctx, packet, out, socket, metrics)?
-                }
-            }
+        Some(Ok(wave)) => {
+            *pending_wave = Some(wave.into_iter());
             Ok(true)
         }
         Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {

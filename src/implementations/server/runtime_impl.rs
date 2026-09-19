@@ -363,10 +363,16 @@ impl ServerRuntime {
                         // These packets are forwarded to the client via QUIC datagrams in the run_loop.
                         // Pooled `TunPacket`s cross the channel directly: zero
                         // alloc, zero copy - the block returns to the TUN pool
-                        // when the consumer drops it.
-                        let (tx, rx) = std::sync::mpsc::sync_channel::<crate::interface::TunPacket>(
-                            crate::interface::TUN_PACKET_QUEUE_CAPACITY,
-                        );
+                        // when the consumer drops it. The reader hands over
+                        // one Vec per drain wave (`TUN_READ_BURST`), so the
+                        // channel bound is wave-counted and still holds the
+                        // same ~queue-capacity packet budget.
+                        let (tx, rx) =
+                            std::sync::mpsc::sync_channel::<Vec<crate::interface::TunPacket>>(
+                                crate::interface::TUN_PACKET_QUEUE_CAPACITY
+                                    .div_ceil(crate::interface::TUN_READ_BURST)
+                                    .max(2),
+                            );
                         let tun_for_reader = tun_arc.clone();
                         let reader_shutdown = Arc::new(AtomicBool::new(false));
                         let shutdown_for_loop = Arc::clone(&reader_shutdown);
@@ -379,21 +385,11 @@ impl ServerRuntime {
                         let reader_spawn = std::thread::Builder::new()
                             .name("tun-reader".to_string())
                             .spawn(move || {
-                                let read_result = tun_for_reader.reader_loop_with_shutdown_owned(
+                                let read_result = tun_for_reader.reader_loop_with_shutdown_batched(
                                     &shutdown_for_loop,
-                                    move |packet| {
-                                        let v = packet.as_slice();
-                                        log::debug!(
-                                            "TUN reader: read {}B proto={:#x} dst={}",
-                                            v.len(),
-                                            v[0] >> 4,
-                                            if v[0] >> 4 == 4 && v.len() >= 20 {
-                                                format!("{}.{}.{}.{}", v[16], v[17], v[18], v[19])
-                                            } else {
-                                                String::from("?")
-                                            }
-                                        );
-                                        if tx.send(packet).is_err() {
+                                    move |wave: Vec<crate::interface::TunPacket>| {
+                                        log::debug!("TUN reader: wave of {} packets", wave.len());
+                                        if tx.send(wave).is_err() {
                                             if !shutdown_for_callback.load(Ordering::Acquire) {
                                                 let mut fault = fault_for_callback.lock();
                                                 if fault.is_none() {

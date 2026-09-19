@@ -54,3 +54,19 @@ wake+lock amortization.
 - `cargo check --bin quicfuscate`: clean on macOS and Omega Linux.
 - `tun-e2e-netns.sh` on Omega with the batched binary: PASS (5/5 echo both
   directions, 0% loss, clean teardown).
+
+## Server datapath (same change set)
+
+The standalone server reader (`runtime_impl.rs`) had the identical
+per-packet `send`+`notify` pattern - hotter still, since it aggregates
+every client's uplink. Same conversion:
+
+- Channel: `sync_channel<Vec<TunPacket>>`, bound wave-counted to preserve
+  the ~1024-packet backpressure budget.
+- `drain_server_tun_packets` (`tun_path.rs`) consumes waves under the
+  existing 32-frame budget; a partially drained wave parks in the caller's
+  `pending_wave` (`std::vec::IntoIter` carries the remainder position
+  intrinsically) and resumes before new waves, preserving the `Ok(true)`
+  re-arm contract.
+- Verified on Omega via `tun-e2e-netns.sh` with the batched server binary:
+  PASS, 0% loss both directions, clean teardown.

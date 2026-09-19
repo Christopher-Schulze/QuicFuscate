@@ -784,10 +784,7 @@ impl TunInterface {
             match self.read_block() {
                 Ok((block, len)) => {
                     let mut wave: Vec<TunPacket> = Vec::with_capacity(TUN_READ_BURST);
-                    match TunPacket::new(block, len) {
-                        Ok(packet) => wave.push(packet),
-                        Err(error) => return Err(error),
-                    }
+                    wave.push(TunPacket::new(block, len)?);
                     while wave.len() < TUN_READ_BURST {
                         match self.read_block() {
                             Ok((block, len)) => match TunPacket::new(block, len) {
