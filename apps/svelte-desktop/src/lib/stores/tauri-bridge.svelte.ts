@@ -25,6 +25,8 @@ import type {
   AppSettings,
   GeneralSettings,
   HardwareSettings,
+  TunnelStats,
+  CircuitHopStats,
 } from "$lib/types";
 import { parseTauriLogLine } from "$lib/timestamp-boundary";
 import {
@@ -83,6 +85,51 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+// Poll loops rebuild result objects on every tick. Writing them into $state
+// unconditionally notifies every subscriber and re-renders the tree even when
+// nothing changed, so each setter below is skipped when the value is identical.
+function flatRecordEqual<T>(a: Record<string, T>, b: Record<string, T>): boolean {
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) return false;
+  return aKeys.every((k) => Object.is(a[k], b[k]));
+}
+
+function hopStatsEqual(a: CircuitHopStats[], b: CircuitHopStats[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((h, i) => {
+    const o = b[i];
+    return h.index === o.index && h.role === o.role && h.established === o.established
+      && h.latencyMs === o.latencyMs && h.datagramBudget === o.datagramBudget;
+  });
+}
+
+function tunnelStatsEqual(a: TunnelStats | null | undefined, b: TunnelStats | null | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.latencyMs === b.latencyMs && a.lossPercent === b.lossPercent
+    && a.rxBytes === b.rxBytes && a.txBytes === b.txBytes
+    && a.rxPackets === b.rxPackets && a.txPackets === b.txPackets
+    && a.uptimeSecs === b.uptimeSecs && a.fecMode === b.fecMode
+    && a.stealthMode === b.stealthMode && a.fecActivityPercent === b.fecActivityPercent
+    && a.fecRecoveredPackets === b.fecRecoveredPackets && a.currentSni === b.currentSni
+    && a.circuitGeneration === b.circuitGeneration && a.circuitState === b.circuitState
+    && a.effectiveTunnelMtu === b.effectiveTunnelMtu && hopStatsEqual(a.hops, b.hops);
+}
+
+function throughputRecordEqual(
+  a: Record<string, { downBps: number; upBps: number }>,
+  b: Record<string, { downBps: number; upBps: number }>,
+): boolean {
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) return false;
+  return aKeys.every((k) => {
+    const x = a[k];
+    const y = b[k];
+    return y !== undefined && x.downBps === y.downBps && x.upBps === y.upBps;
+  });
 }
 
 type PersistedTunnel = {
@@ -279,7 +326,7 @@ export function startEnginePollers(): () => void {
         if (activeTunnelId && t.id === activeTunnelId && status.state === "Connected") next[t.id] = "active";
         else next[t.id] = "inactive";
       }
-      setTunnelStates(next);
+      if (!flatRecordEqual(current, next)) setTunnelStates(next);
       if (status.lastError) setError(status.lastError);
     } catch { /* ignore */ }
     finally { statusInFlight = false; }
@@ -313,27 +360,27 @@ export function startEnginePollers(): () => void {
         resetThroughput();
         return;
       }
-      updateTunnelStats((prev) => ({
-        ...prev,
-        [activeTunnelIdAtStart]: {
-          latencyMs: stats.latencyMs,
-          lossPercent: stats.lossPercent,
-          rxBytes: stats.rxBytes,
-          txBytes: stats.txBytes,
-          rxPackets: stats.rxPackets,
-          txPackets: stats.txPackets,
-          uptimeSecs: stats.uptimeSecs,
-          stealthMode: stats.stealthMode,
-          fecMode: stats.fecMode,
-          fecActivityPercent: stats.fecActivityPercent,
-          fecRecoveredPackets: stats.fecRecoveredPackets,
-          currentSni: stats.currentSni,
-          circuitGeneration: stats.circuitGeneration,
-          circuitState: stats.circuitState,
-          effectiveTunnelMtu: stats.effectiveTunnelMtu,
-          hops: stats.hops,
-        },
-      }));
+      const nextStats: TunnelStats = {
+        latencyMs: stats.latencyMs,
+        lossPercent: stats.lossPercent,
+        rxBytes: stats.rxBytes,
+        txBytes: stats.txBytes,
+        rxPackets: stats.rxPackets,
+        txPackets: stats.txPackets,
+        uptimeSecs: stats.uptimeSecs,
+        stealthMode: stats.stealthMode,
+        fecMode: stats.fecMode,
+        fecActivityPercent: stats.fecActivityPercent,
+        fecRecoveredPackets: stats.fecRecoveredPackets,
+        currentSni: stats.currentSni,
+        circuitGeneration: stats.circuitGeneration,
+        circuitState: stats.circuitState,
+        effectiveTunnelMtu: stats.effectiveTunnelMtu,
+        hops: stats.hops,
+      };
+      if (!tunnelStatsEqual(getTunnelStats()[activeTunnelIdAtStart], nextStats)) {
+        updateTunnelStats((prev) => ({ ...prev, [activeTunnelIdAtStart]: nextStats }));
+      }
 
       // Compute throughput from the shared monotonic sample contract.
       const now = readBrowserMonotonicMilliseconds();
@@ -362,7 +409,7 @@ export function startEnginePollers(): () => void {
           delete nextThroughput[id];
         }
       }
-      setThroughput(nextThroughput);
+      if (!throughputRecordEqual(getThroughput(), nextThroughput)) setThroughput(nextThroughput);
     } catch { /* ignore */ }
     finally { statsInFlight = false; }
   };

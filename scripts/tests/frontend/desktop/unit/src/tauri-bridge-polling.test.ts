@@ -283,4 +283,31 @@ describe("desktop engine poller ownership", () => {
       stop();
     }
   });
+
+  test("does not rewrite stores when polled values are unchanged", async () => {
+    const clock = getFrontendClockHarness();
+    clock.setMonotonicTime(1_000);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "engine_status") return Promise.resolve({ state: "Connected", activeTunnelId: "t1" });
+      if (command === "engine_stats") return Promise.resolve({ bytesIn: 100, bytesOut: 200 });
+      if (command === "engine_logs_since") return Promise.resolve({ cursor: 0, lines: [] });
+      return Promise.resolve(null);
+    });
+
+    const stop = startEnginePollers();
+    try {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(getTunnelStates()).toEqual({ t1: "active" });
+      const statesAfterFirst = getTunnelStates();
+      const statsAfterFirst = getTunnelStats();
+      const throughputAfterFirst = getThroughput();
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(getTunnelStates()).toBe(statesAfterFirst);
+      expect(getTunnelStats()).toBe(statsAfterFirst);
+      expect(getThroughput()).toBe(throughputAfterFirst);
+    } finally {
+      stop();
+    }
+  });
 });
