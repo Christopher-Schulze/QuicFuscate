@@ -83,6 +83,10 @@ BINARY="${BINARY_OVERRIDE:-$PROJECT_ROOT/target/release/quicfuscate}"
 OUTPUT_DIR="${OUTPUT_ROOT_OVERRIDE:-$PROJECT_ROOT/docs/profiling}"
 CERT="${CERT_OVERRIDE:-$PROJECT_ROOT/config/local/server.crt}"
 KEY="${KEY_OVERRIDE:-$PROJECT_ROOT/config/local/server.key}"
+# CA bundle the client verifies the server against. A CA-signed leaf requires
+# the issuing CA here; a plain (non-CA) self-signed cert can anchor itself.
+CA_CERT="${QF_PROFILE_CA_CERT:-$PROJECT_ROOT/config/local/ca.crt}"
+[[ -f "$CA_CERT" ]] || CA_CERT="$CERT"
 FLAMEGRAPH_PL="$FLAMEGRAPH_DIR/flamegraph.pl"
 STACKCOLLAPSE="$FLAMEGRAPH_DIR/stackcollapse-perf.pl"
 
@@ -254,7 +258,7 @@ run_tun_scenario() {
     # The server requires a QKey for every new client; it is issued over the
     # unix admin socket after startup and never written into evidence files.
     local server_command=("$BINARY" server --cert "$CERT" --key "$KEY" --listen 127.0.0.1:4433 --admin-socket "$admin_sock" --qkey-store "$qkey_store" --fec-mode "$fec_mode" --tun --tun-ip "$SERVER_TUN_IP" --tun-netmask "$TUN_NETMASK" -v)
-    local client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "REDACTED" --ca-file "$CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
+    local client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "REDACTED" --ca-file "$CA_CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
     # iperf binds to the server-assigned client TUN address, which only exists
     # after the client connects; record the static shape, resolve at runtime.
     local iperf_shape=("$IPERF3_PATH" -c '<assigned-client-tun-ip>' -t "$DURATION" -P 4 -J)
@@ -338,7 +342,7 @@ run_tun_scenario() {
             result="FAIL"
             reason="qkey_issue_failed"
         else
-            client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "$qkey" --ca-file "$CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
+            client_command=("$BINARY" client --remote 127.0.0.1:4433 --url https://127.0.0.1/ --qkey "$qkey" --ca-file "$CA_CERT" --verify-peer --fec-mode "$fec_mode" --tun --tun-name "$CLIENT_TUN_NAME" --disable-doh --no-utls -v)
         fi
     fi
 
@@ -346,7 +350,7 @@ run_tun_scenario() {
         "${client_command[@]}" >"$client_log" 2>&1 &
         client_pid=$!
         if profile_wait_for_pid_alive "$client_pid" "$READY_TIMEOUT" && \
-            profile_wait_for_log_pattern "$client_log" "QUIC connection established" "$READY_TIMEOUT"; then
+            profile_wait_for_log_pattern "$client_log" "Accepted authenticated client assignment" "$READY_TIMEOUT"; then
             readiness_status="PASS"
         else
             readiness_status="FAIL"
