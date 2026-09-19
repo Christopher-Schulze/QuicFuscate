@@ -112,6 +112,9 @@ loss, 150 lossy pings, 10s settle, 250 recovery pings):
   (live telemetry: `clean_ack_streak=95`, `estimated_loss_ppm=0`,
   `pending_transition=0`, `mode_switches_total=3`). No fountain at any point;
   the recovered snapshot shows `mode="zero"` inside the bounded window.
+- Omega severe profile (40% netem, fountain permitted): **PASS**. 0%/33%/0%
+  tunnel loss across the phases, `mode_switches_total=4`, mode back to `zero`
+  with `clean_ack_streak` still growing when the recovery snapshot ran.
 
 ## Notes
 
