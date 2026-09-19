@@ -714,16 +714,16 @@ pub async fn flush_live_server_outgoing(
     // syscall instead of one sendmsg per packet). Payloads stage into one
     // flat buffer plus a span table - one allocation per flush instead of one
     // `Vec` per datagram, and a GSO run is already contiguous in `flat`.
-    let mut staging_flat: Vec<u8> = Vec::new();
-    let mut staging_spans: Vec<(SocketAddr, usize, usize)> = Vec::new();
+    // Both buffers are pre-sized for a full burst so the growth-doubling chain
+    // (and its memcpy churn) never runs on the hot path; all per-packet
+    // telemetry accumulates into locals and lands as one atomic batch below.
+    let mut staging_flat: Vec<u8> =
+        Vec::with_capacity(crate::transport::UDP_DATAGRAM_BURST_LIMIT * 1_500);
+    let mut staging_spans: Vec<(SocketAddr, usize, usize)> =
+        Vec::with_capacity(crate::transport::UDP_DATAGRAM_BURST_LIMIT);
     while staging_spans.len() < crate::transport::UDP_DATAGRAM_BURST_LIMIT {
         match conn.send_with_info(out) {
             Ok((len, send_info)) if len > 0 => {
-                crate::telemetry::BYTES_SENT.inc_by(len as u64);
-                metrics.record_egress_datagram(len);
-                if let Some(stats) = session_stats.as_ref() {
-                    stats.record_sent(len as u64);
-                }
                 bytes_sent = bytes_sent.saturating_add(len as u64);
                 packets_sent = packets_sent.saturating_add(1);
                 let start = staging_flat.len();
@@ -747,6 +747,15 @@ pub async fn flush_live_server_outgoing(
             addr,
             crate::transport::UDP_DATAGRAM_BURST_LIMIT
         );
+    }
+
+    // Telemetry lands once per staged burst instead of per datagram.
+    if packets_sent > 0 {
+        crate::telemetry::BYTES_SENT.inc_by(bytes_sent);
+        metrics.record_egress_batch(bytes_sent, packets_sent);
+        if let Some(stats) = session_stats.as_ref() {
+            stats.record_sent_batch(bytes_sent, packets_sent);
+        }
     }
 
     if !staging_spans.is_empty() {

@@ -580,12 +580,14 @@ fn test_metrics_mirror_global_instrumentation_for_runtime_events() {
     metrics.record_rate_limited();
     metrics.record_ingress_datagram(321);
     metrics.record_egress_datagram(654);
+    metrics.record_egress_batch(1_000, 7);
+    metrics.record_egress_batch(9_999, 0); // zero-packet batches are dropped
 
     assert!(global.server.connections_rejected.load(Ordering::Relaxed) > rejected_before);
     assert!(global.server.auth_failed.load(Ordering::Relaxed) > auth_failed_before);
     assert!(global.server.rate_limited.load(Ordering::Relaxed) > rate_limited_before);
     assert!(global.transport.bytes_in.load(Ordering::Relaxed) >= bytes_in_before + 321);
-    assert!(global.transport.bytes_out.load(Ordering::Relaxed) >= bytes_out_before + 654);
+    assert!(global.transport.bytes_out.load(Ordering::Relaxed) >= bytes_out_before + 654 + 1_000);
     assert!(global.transport.packets_in.load(Ordering::Relaxed) > packets_in_before);
-    assert!(global.transport.packets_out.load(Ordering::Relaxed) > packets_out_before);
+    assert!(global.transport.packets_out.load(Ordering::Relaxed) >= packets_out_before + 8);
 }

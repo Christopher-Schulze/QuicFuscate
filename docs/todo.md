@@ -3969,6 +3969,11 @@
 - DONE. `pollStatus`/`pollStats` rebuilt `tunnelStates`, per-tunnel stats, and throughput objects every 500/900 ms and wrote them unconditionally; object writes always notify Svelte subscribers, so the render tree churned ~3x/sec while idle and bits-ui portal content remounted mid-click - the recurring `full-ui.pw.ts` "create tunnel" e2e flake. Write-site dedupe (`flatRecordEqual`/`tunnelStatsEqual`/`throughputRecordEqual`) skips identical-payload writes; 454/454 unit tests green, `svelte-check` clean.
 - Detail: docs/todo/todo-1002-poller-store-write-dedupe.md
 
+### TODO-1003 - Batch per-packet telemetry atomics in burst loops
+
+- DONE. Server `flush_live_server_outgoing` issued ~7 atomic RMWs per staged datagram (global `BYTES_SENT`, worker+global transport counters, session counters) even though the loop already accumulated byte/packet locals; client `io_driver` burst loops issued 3 RMWs per span. All now accumulate into locals and land one batched update per flush (`record_egress_batch`, `record_sent_batch`); early-return error paths flush accumulated counts first so totals are identical. Staging vectors are `with_capacity`-sized for a full burst, killing the growth-doubling memcpy chain. 28/28 metrics + 17/17 session + 17/17 io_driver tests green.
+- Detail: docs/todo/todo-1003-telemetry-atomic-batching.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

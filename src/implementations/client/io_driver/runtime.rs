@@ -327,11 +327,13 @@ impl IoDriver {
                     }
                 }
 
+                // Telemetry accumulates into locals across both loops and
+                // lands as one atomic batch instead of three RMWs per packet.
+                let mut flush_bytes = 0u64;
+                let mut flush_packets = 0u64;
                 for &(_, len) in &scratch.spans[..sent_prefix] {
-                    self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
-                    let global = crate::instrumentation::global();
-                    global.transport.record_bytes_out(len as u64);
-                    global.transport.record_packet_out();
+                    flush_bytes += len as u64;
+                    flush_packets += 1;
                 }
                 for &(start, len) in &scratch.spans[sent_prefix..] {
                     let payload = &scratch.flat[start..start + len];
@@ -339,10 +341,14 @@ impl IoDriver {
                         log::warn!("UDP send error during outbound flush: {}", e);
                         return Err(self.transport_send_error("client inbound UDP flush", e));
                     }
-                    self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
+                    flush_bytes += len as u64;
+                    flush_packets += 1;
+                }
+                if flush_packets > 0 {
+                    self.stats.udp_packets_sent.fetch_add(flush_packets, Ordering::Relaxed);
                     let global = crate::instrumentation::global();
-                    global.transport.record_bytes_out(len as u64);
-                    global.transport.record_packet_out();
+                    global.transport.record_bytes_out(flush_bytes);
+                    global.transport.record_packets_out(flush_packets);
                 }
 
                 if drained {
@@ -856,6 +862,10 @@ impl IoDriver {
                         }
                     }
 
+                    // Telemetry accumulates into locals across both passes and
+                    // lands as one atomic batch instead of three RMWs per span.
+                    let mut flush_bytes = 0u64;
+                    let mut flush_packets = 0u64;
                     for (index, &(start, len)) in batch_spans.iter().enumerate() {
                         if batch_sent[index] {
                             continue;
@@ -863,24 +873,31 @@ impl IoDriver {
                         let payload = &batch_flat[start..start + len];
                         if let Err(e) = socket.send(payload).await {
                             log::warn!("UDP send error: {}", e);
+                            if flush_packets > 0 {
+                                self.stats
+                                    .udp_packets_sent
+                                    .fetch_add(flush_packets, Ordering::Relaxed);
+                                let global = crate::instrumentation::global();
+                                global.transport.record_bytes_out(flush_bytes);
+                                global.transport.record_packets_out(flush_packets);
+                            }
                             return Err(self.transport_send_error("client TUN UDP send", e));
                         }
-
-                        {
-                            self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
-                            let global = crate::instrumentation::global();
-                            global.transport.record_bytes_out(payload.len() as u64);
-                            global.transport.record_packet_out();
-                        }
+                        flush_bytes += payload.len() as u64;
+                        flush_packets += 1;
                     }
                     for (index, &(_, len)) in batch_spans.iter().enumerate() {
                         if !batch_sent[index] {
                             continue;
                         }
-                        self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
+                        flush_bytes += len as u64;
+                        flush_packets += 1;
+                    }
+                    if flush_packets > 0 {
+                        self.stats.udp_packets_sent.fetch_add(flush_packets, Ordering::Relaxed);
                         let global = crate::instrumentation::global();
-                        global.transport.record_bytes_out(len as u64);
-                        global.transport.record_packet_out();
+                        global.transport.record_bytes_out(flush_bytes);
+                        global.transport.record_packets_out(flush_packets);
                     }
                 }
                 Ok(_) => {
@@ -1126,12 +1143,23 @@ impl IoDriver {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();
                         crate::telemetry::IO_URING_RECV_PACKETS.inc_by(completions.len() as u64);
 
+                        // Telemetry accumulates into locals and lands as one
+                        // atomic batch; early returns flush what was counted.
+                        let flush_batch = |batch_bytes: u64, batch_packets: u64| {
+                            if batch_packets > 0 {
+                                self.stats
+                                    .udp_packets_received
+                                    .fetch_add(batch_packets, Ordering::Relaxed);
+                                let global = crate::instrumentation::global();
+                                global.transport.record_bytes_in(batch_bytes);
+                                global.transport.record_packets_in(batch_packets);
+                            }
+                        };
+                        let mut batch_bytes = 0u64;
+                        let mut batch_packets = 0u64;
                         for mut c in completions {
-                            self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
-                            let global = crate::instrumentation::global();
-                            global.transport.record_bytes_in(c.len() as u64);
-                            global.transport.record_packet_in();
-
+                            batch_bytes += c.len() as u64;
+                            batch_packets += 1;
                             {
                                 let mut conn_guard = conn.lock();
                                 let recv_result = if let Some(block) = c.block {
@@ -1141,6 +1169,7 @@ impl IoDriver {
                                 };
                                 if let Err(e) = recv_result {
                                     log::debug!("Connection recv error: {:?}", e);
+                                    flush_batch(batch_bytes, batch_packets);
                                     return Err(self.transport_receive_error(
                                         "client io_uring QUIC receive",
                                         e,
@@ -1148,9 +1177,15 @@ impl IoDriver {
                                 }
                             }
 
-                            self.poll_http3_to_ingress(&conn, &ingress)?;
-                            self.drain_ingress_to_tun(&tun, &ingress)?;
+                            if let Err(error) = self
+                                .poll_http3_to_ingress(&conn, &ingress)
+                                .and_then(|()| self.drain_ingress_to_tun(&tun, &ingress))
+                            {
+                                flush_batch(batch_bytes, batch_packets);
+                                return Err(error);
+                            }
                         }
+                        flush_batch(batch_bytes, batch_packets);
                     }
                 }
                 Ok(Err(e)) => {
@@ -1301,27 +1336,45 @@ impl IoDriver {
         recv_flat: &mut [u8],
         spans: &[(usize, usize)],
     ) -> Result<(), EngineError> {
+        // Telemetry accumulates into locals and lands as one atomic batch;
+        // every early-return path flushes what was counted so the totals
+        // match the former per-packet accounting exactly.
+        let flush_batch = |batch_bytes: u64, batch_packets: u64| {
+            if batch_packets > 0 {
+                self.stats.udp_packets_received.fetch_add(batch_packets, Ordering::Relaxed);
+                let global = crate::instrumentation::global();
+                global.transport.record_bytes_in(batch_bytes);
+                global.transport.record_packets_in(batch_packets);
+            }
+        };
+        let mut batch_bytes = 0u64;
+        let mut batch_packets = 0u64;
         for &(offset, len) in spans {
             let payload = &mut recv_flat[offset..offset + len];
-            self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
-            let global = crate::instrumentation::global();
-            global.transport.record_bytes_in(payload.len() as u64);
-            global.transport.record_packet_in();
+            batch_bytes += len as u64;
+            batch_packets += 1;
 
             {
                 let mut conn_guard = conn.lock();
                 if let Err(e) = conn_guard.recv_mut(payload) {
                     log::debug!("Connection recv error: {:?}", e);
                     self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    flush_batch(batch_bytes, batch_packets);
                     return Err(EngineError::DataPlane(DataPlaneFault::TransportReceive {
                         component: "client QUIC receive".to_string(),
                         error: e.to_string(),
                     }));
                 }
             }
-            self.poll_http3_to_ingress(conn, ingress)?;
-            self.drain_ingress_to_tun(tun, ingress)?;
+            if let Err(error) = self
+                .poll_http3_to_ingress(conn, ingress)
+                .and_then(|()| self.drain_ingress_to_tun(tun, ingress))
+            {
+                flush_batch(batch_bytes, batch_packets);
+                return Err(error);
+            }
         }
+        flush_batch(batch_bytes, batch_packets);
         Ok(())
     }
 }

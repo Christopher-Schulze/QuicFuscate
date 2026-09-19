@@ -809,6 +809,19 @@ impl Metrics {
         global.transport.record_packet_out();
     }
 
+    /// Batch variant of [`Self::record_egress_datagram`]: one atomic update
+    /// per counter for a whole staged burst instead of four RMWs per packet.
+    pub fn record_egress_batch(&self, bytes: u64, packets: u64) {
+        if packets == 0 {
+            return;
+        }
+        self.bytes_out.fetch_add(bytes, Ordering::Relaxed);
+        self.packets_out.fetch_add(packets, Ordering::Relaxed);
+        let global = crate::instrumentation::global();
+        global.transport.record_bytes_out(bytes);
+        global.transport.record_packets_out(packets);
+    }
+
     pub fn record_uplink_route(&self, route: UplinkRoute) {
         let counter = match route {
             UplinkRoute::Local { .. } => &self.routing_local,

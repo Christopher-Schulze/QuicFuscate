@@ -73,6 +73,16 @@ impl SessionStats {
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Batch variant of [`Self::record_sent`]: two atomic updates for a whole
+    /// staged burst instead of two RMWs per packet.
+    pub fn record_sent_batch(&self, bytes: u64, packets: u64) {
+        if packets == 0 {
+            return;
+        }
+        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+        self.packets_sent.fetch_add(packets, Ordering::Relaxed);
+    }
+
     pub fn record_received(&self, bytes: u64) {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
         self.packets_received.fetch_add(1, Ordering::Relaxed);
