@@ -3900,6 +3900,11 @@
 - DONE. `drain_client_tun_uplink` returned `Ok(true)` on QUIC-DATAGRAM-queue backpressure → every caller ran `tun_notify.notify_one()` → immediate re-drain → `Backpressure` → notify — a busy wakeup loop while the send queue was full (each cycle also flushed outgoing). Backpressure now returns `Ok(false)`; retry is paced by the 5ms active housekeeping tick (`tun_backpressure_pending`), inbound-driven drains, and reader notifies. The drain-limit `Ok(true)` (more channel work) is preserved for full-speed bursts.
 - Omega A/B (`QF_PROFILE_IPERF_UDP_RATE=1G` flood): 29.7 → ~31-33 Mbit/s; residual wall is single-core contention (iperf generator ≈40% CPU, quicfuscate ≈25-30%, no hotspot) — multi-core hardware needed for a meaningful flood ceiling.
 
+### TODO-990 - Tokio worker count defaults to available_parallelism
+
+- Detail: `docs/todo/todo-990-worker-threads-available-parallelism.md`
+- DONE. `optimization.num_worker_threads = 0` (unset) fell back to a hardcoded `worker_threads(8)` — seven idle workers on single-core VMs. Now `worker_threads()` is only called when configured >0; unset uses Tokio's own default (`available_parallelism`). Omega A/B: auto(1) ≈ 57-58 Mbit/s vs forced 8 ≈ 56 Mbit/s — same throughput, 7 fewer workers.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

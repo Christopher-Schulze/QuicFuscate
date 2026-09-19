@@ -5005,7 +5005,7 @@ When stealth mode is active, the StealthShaper automatically wraps paced CUBIC, 
 #### CPU Affinity and Thread Count
 ```toml
 [optimization]
-num_worker_threads = 0   # 0 = auto (uses default of 8 threads)
+num_worker_threads = 0   # 0 = auto (Tokio default: available_parallelism)
 ```
 
 #### Memory Pool

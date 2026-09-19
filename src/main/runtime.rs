@@ -35,8 +35,7 @@ fn application_main() -> std::io::Result<()> {
     let worker_threads = startup_engine_config
         .as_ref()
         .map(|config| config.optimization.num_worker_threads)
-        .filter(|threads| *threads > 0)
-        .unwrap_or(8);
+        .filter(|threads| *threads > 0);
     let harden_server_runtime =
         matches!(&cli.command, Commands::Server { no_drop_privileges: false, .. });
     #[cfg(target_os = "linux")]
@@ -45,7 +44,13 @@ fn application_main() -> std::io::Result<()> {
             .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
     let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
-    runtime_builder.worker_threads(worker_threads).enable_all();
+    // Unset (0) defers to Tokio's default, which already matches
+    // `available_parallelism` — a fixed 8 only added idle-worker wakeups on
+    // small VMs.
+    if let Some(threads) = worker_threads {
+        runtime_builder.worker_threads(threads);
+    }
+    runtime_builder.enable_all();
     #[cfg(target_os = "linux")]
     if harden_server_runtime {
         runtime_builder.on_thread_start(|| {
