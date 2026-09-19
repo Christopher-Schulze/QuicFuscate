@@ -688,11 +688,10 @@ impl Connection {
         udp_payload: &[u8],
     ) -> Result<(), Error> {
         let flow_id = *self.masque_flow.get(&stream_id).unwrap_or(&0);
-        let buf = &mut self.masque_send_scratch;
-        buf.clear();
-        Self::encode_varint(flow_id, buf);
-        buf.extend_from_slice(udp_payload);
-        conn.dgram_send(buf).map_err(|e| match e {
+        let mut prefix = [0u8; 8];
+        let prefix_len = qf_transport_pn::varint::write_varint(flow_id, &mut prefix)
+            .map_err(|_| Error::InternalError)?;
+        conn.dgram_send_parts(&prefix[..prefix_len], udp_payload).map_err(|e| match e {
             crate::error::ConnectionError::DgramQueueFull => Error::DgramQueueFull,
             _ => Error::InternalError,
         })

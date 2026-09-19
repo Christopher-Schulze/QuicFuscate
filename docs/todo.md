@@ -3905,6 +3905,12 @@
 - Detail: `docs/todo/todo-990-worker-threads-available-parallelism.md`
 - DONE. `optimization.num_worker_threads = 0` (unset) fell back to a hardcoded `worker_threads(8)` — seven idle workers on single-core VMs. Now `worker_threads()` is only called when configured >0; unset uses Tokio's own default (`available_parallelism`). Omega A/B: auto(1) ≈ 57-58 Mbit/s vs forced 8 ≈ 56 Mbit/s — same throughput, 7 fewer workers.
 
+### TODO-991 - MASQUE datagram send without staged concatenation copy
+
+- Detail: `docs/todo/todo-991-masque-dgram-two-part-send.md`
+- DONE. `send_masque_datagram` copied each packet into `masque_send_scratch` to prepend the flow-id varint, then `dgram_send` copied again into the queue entry. New `dgram_send_parts(prefix, payload)` writes both slices into the queue entry directly (freelist + `zero_copy_dgram` paths); the varint is encoded on the stack and `masque_send_scratch` removed. Covers uplink, downlink and relay sends.
+- Verified: 47/47 MASQUE tests green, both dgram feature variants compile, Omega scenario g PASS.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

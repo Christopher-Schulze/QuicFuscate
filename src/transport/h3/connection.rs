@@ -108,9 +108,6 @@ pub struct Connection {
     /// Byte limit passed to `dgram_recv`; the tail beyond this bound is
     /// reserved for tunnel-ingress normalization growth.
     masque_recv_capacity: usize,
-    /// Reused scratch for flow-id varint + payload framing so
-    /// `send_masque_datagram` does not allocate per datagram.
-    masque_send_scratch: Vec<u8>,
 }
 
 /// Stream state tracking
@@ -302,7 +299,6 @@ impl Connection {
             stream_recv_buffer: vec![0u8; STREAM_RECV_BUFFER_SIZE],
             masque_recv_buffer: vec![0u8; masque_buffer_len + MASQUE_RECV_HEADROOM],
             masque_recv_capacity: masque_buffer_len,
-            masque_send_scratch: Vec::new(),
         };
 
         // Try to emit the mandatory control-stream prologue immediately. A connection can be

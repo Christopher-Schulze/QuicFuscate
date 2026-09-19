@@ -365,7 +365,20 @@ impl Connection {
     /// Enqueues a DATAGRAM frame for transmission on the next send call.
     #[inline(always)]
     pub fn dgram_send(&mut self, buf: &[u8]) -> Result<(), crate::error::ConnectionError> {
-        if buf.len() > self.dgram_send_max_size {
+        self.dgram_send_parts(&[], buf)
+    }
+
+    /// Enqueues a DATAGRAM frame assembled from `prefix` + `payload` without
+    /// staging a concatenated buffer first. Used by the MASQUE hot path where
+    /// the flow-id varint is a few bytes prepended to a whole packet.
+    #[inline(always)]
+    pub fn dgram_send_parts(
+        &mut self,
+        prefix: &[u8],
+        payload: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        let total = prefix.len() + payload.len();
+        if total > self.dgram_send_max_size {
             return Err(crate::error::ConnectionError::InvalidState);
         }
         if self.is_dgram_send_queue_full() {
@@ -374,17 +387,19 @@ impl Connection {
         #[cfg(not(feature = "zero_copy_dgram"))]
         {
             let mut entry = Self::take_dgram_freelist(&mut self.dgram_send_freelist);
-            entry.extend_from_slice(buf);
+            entry.extend_from_slice(prefix);
+            entry.extend_from_slice(payload);
             self.dgram_send_queue.push_back(entry);
         }
         #[cfg(feature = "zero_copy_dgram")]
         {
-            if buf.len() > self.dgram_pool.block_size() {
+            if total > self.dgram_pool.block_size() {
                 return Err(crate::error::ConnectionError::InvalidState);
             }
             let mut data = crate::optimize::PooledBlock::new(Arc::clone(&self.dgram_pool));
-            data[..buf.len()].copy_from_slice(buf);
-            self.dgram_send_queue.push_back(DatagramBuffer { data, len: buf.len() });
+            data[..prefix.len()].copy_from_slice(prefix);
+            data[prefix.len()..total].copy_from_slice(payload);
+            self.dgram_send_queue.push_back(DatagramBuffer { data, len: total });
         }
         Ok(())
     }
