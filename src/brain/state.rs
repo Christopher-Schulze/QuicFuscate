@@ -1,4 +1,5 @@
 use super::*;
+use crossbeam_utils::CachePadded;
 use std::collections::VecDeque;
 
 #[derive(Clone, Default, Debug)]
@@ -7,8 +8,8 @@ pub(super) struct Hist {
     pub(super) total: u64,
 }
 
-pub(super) fn new_atomic_bins(len: usize) -> Box<[AtomicU64]> {
-    (0..len.max(1)).map(|_| AtomicU64::new(0)).collect()
+pub(super) fn new_atomic_bins(len: usize) -> Box<[CachePadded<AtomicU64>]> {
+    (0..len.max(1)).map(|_| CachePadded::new(AtomicU64::new(0))).collect()
 }
 
 impl Hist {

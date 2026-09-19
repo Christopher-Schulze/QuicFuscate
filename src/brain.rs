@@ -1,5 +1,6 @@
 // QuicFuscate Brain (single-file, removable feature)
 
+use crossbeam_utils::CachePadded;
 #[cfg(any(test, feature = "rust-tests", feature = "orchestrator"))]
 use log::info;
 use log::trace;
@@ -125,15 +126,19 @@ pub struct StealthBrain {
     fec_hints: Arc<BrainFecHints>,
     level_hints: Arc<IntelligentLevelHints>,
     // Lock-free buffers for observer callbacks - drained in apply_policy's single write lock.
-    pending_ecn: AtomicU64, // packed: ect0 in bits 48..64, ect1 in bits 32..48, ce in bits 0..32
-    pending_ack: Mutex<PendingAckSamples>,
-    pending_packet_count: AtomicU64,
-    pending_reorder_count: AtomicU64,
-    pending_max_pn: AtomicU64,
-    pending_last_packet_time_ns: AtomicU64,
+    // Each per-packet counter and every histogram bin sits on its own cacheline:
+    // on_packet_recv writes from the dataplane thread while apply_policy swaps the
+    // same words from the housekeeping thread, so unpadded atomics would bounce one
+    // cacheline between writers on every packet and policy tick (false sharing).
+    pending_ecn: CachePadded<AtomicU64>, // packed: ect0 in bits 48..64, ect1 in bits 32..48, ce in bits 0..32
+    pending_ack: CachePadded<Mutex<PendingAckSamples>>,
+    pending_packet_count: CachePadded<AtomicU64>,
+    pending_reorder_count: CachePadded<AtomicU64>,
+    pending_max_pn: CachePadded<AtomicU64>,
+    pending_last_packet_time_ns: CachePadded<AtomicU64>,
     packet_time_base: Instant,
-    pending_size_bins: Box<[AtomicU64]>,
-    pending_iat_bins: Box<[AtomicU64]>,
+    pending_size_bins: Box<[CachePadded<AtomicU64>]>,
+    pending_iat_bins: Box<[CachePadded<AtomicU64>]>,
     // Server Push cover-traffic knobs and telemetry inputs
     #[cfg(any(test, feature = "rust-tests"))]
     server_push_enabled: AtomicBool,
@@ -178,12 +183,12 @@ impl StealthBrain {
             cfg,
             fec_hints,
             level_hints,
-            pending_ecn: AtomicU64::new(0),
-            pending_ack: Mutex::new(PendingAckSamples::default()),
-            pending_packet_count: AtomicU64::new(0),
-            pending_reorder_count: AtomicU64::new(0),
-            pending_max_pn: AtomicU64::new(0),
-            pending_last_packet_time_ns: AtomicU64::new(0),
+            pending_ecn: CachePadded::new(AtomicU64::new(0)),
+            pending_ack: CachePadded::new(Mutex::new(PendingAckSamples::default())),
+            pending_packet_count: CachePadded::new(AtomicU64::new(0)),
+            pending_reorder_count: CachePadded::new(AtomicU64::new(0)),
+            pending_max_pn: CachePadded::new(AtomicU64::new(0)),
+            pending_last_packet_time_ns: CachePadded::new(AtomicU64::new(0)),
             packet_time_base,
             pending_size_bins: new_atomic_bins(size_bins),
             pending_iat_bins: new_atomic_bins(iat_bins),
@@ -242,7 +247,7 @@ impl StealthBrain {
         }
     }
 
-    fn drain_pending_histogram(pending: &[AtomicU64], hist: &mut Hist) {
+    fn drain_pending_histogram(pending: &[CachePadded<AtomicU64>], hist: &mut Hist) {
         for (index, counter) in pending.iter().enumerate() {
             let added = counter.swap(0, Ordering::Relaxed);
             if let Some(bin) = hist.bins.get_mut(index) {

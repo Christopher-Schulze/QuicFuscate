@@ -3939,6 +3939,11 @@
 - DONE (Omega-verified end-to-end). `scripts/build/pgo-dataplane.sh` profiles the instrumented binary inside the real TUN scenario — `LLVM_PROFILE_FILE` propagates through `ip netns exec env` into both endpoints, SIGTERM-stop yields 38 non-empty profraws → llvm-profdata merge (9.2 MB) → `-Cprofile-use` rebuild. Distinct from the pre-existing `build-pgo-release.sh` (microbench-only workloads). PGO binary PASSes scenario g (45.6 Mbit/s, 0% loss — Omega contention band; definitive delta needs multi-core). `lto="fat"` evaluated + rejected (build-time cost vs marginal cross-crate inlining; PGO covers the better dimension). llvm-tools component installed on Omega for `llvm-profdata`.
 - Detail: docs/todo/todo-996-pgo-dataplane.md
 
+### TODO-997 - Cacheline-pad StealthBrain pending observer counters (false sharing)
+
+- DONE. `on_packet_recv` writes per packet from the dataplane thread while `apply_policy` swaps the same words from housekeeping; all pending counters plus the size/IAT histogram bins shared cachelines. Wrapped each hot counter and every histogram bin in `crossbeam_utils::CachePadded` (dep already in the tree). `brain_packet_observer` on Apple Silicon: workers_1 -30% time (+44% thrpt), workers_8 -37% time (+60% thrpt). 62/62 brain tests green.
+- Detail: docs/todo/todo-997-brain-pending-cacheline.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.
