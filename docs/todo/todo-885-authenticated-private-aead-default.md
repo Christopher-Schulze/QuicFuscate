@@ -4,7 +4,7 @@ title: Implement authenticated private AEAD negotiation and promote the proven d
 severity: CRITICAL
 phase: S
 priority: P0
-status: QUEUED
+status: IN_PROGRESS
 created: 2026-08-11
 depends_on: [TODO-883, TODO-884, TODO-681]
 ---
@@ -333,8 +333,14 @@ shipped `aead_preference="auto"` still maps to `None` until the TODO-884 winner 
 | client reconnect (fresh generation) | fresh negotiation; `activated_total` → 2 |
 | server errors across all runs | 0 |
 
-Observed gap (documented, not blocking while the mode is engine-gated): the negotiation
-machine has no silence deadline — `advanced-required` against a never-responding peer would
-park in `ProposalSent` indefinitely. `advanced-required` is currently rejected at engine
-construction (promotion gates), so this is unreachable today; it must gain a bounded
-negotiation deadline before that gate opens.
+Observed gap RESOLVED 2026-09-19 (`6e56611`): `PRIVATE_NEGOTIATION_DEADLINE` = 10s bounds
+every pending negotiation state via `created_at` on the protocol clock, checked inside
+`private_packet_protection_control_tick` (no timer thread, injectable test clock). On expiry
+`auto` falls back to standard (`force_standard_fallback`); `advanced-required` enters
+Terminal with `PrivateProtocolError::NegotiationTimeout` (fail-closed). Active, fallback,
+and terminal states never expire. Unit coverage: expired-pending, fresh-pending,
+standard-immunity, active/terminal-immunity.
+
+Remaining open gates (unchanged): packet-capture wire evidence, x86_64 second-witness
+benchmarks, side-channel review, and the TODO-884 winner freeze that maps
+`aead_preference="auto"` to a concrete family so the shipped default actually negotiates.
