@@ -4019,6 +4019,11 @@
 - DONE (2026-09-19). RX: `recv_connected_burst` fills 8 persistent 64 KiB slots in one `recvmmsg` per readiness wake on Linux (each slot possibly a UDP_GRO super-buffer, split in place); non-Linux keeps single-datagram semantics. TX (same change set): the non-GSO tail of `flush_connected_outgoing` now goes out in one `sendmmsg` instead of per-datagram `sendmsg` — measured on Omega with `perf stat` under a 15 s iperf3 tunnel run: sendmsg -31%, socket-TX syscalls -15%. Verified by `tun-e2e-netns.sh` on Omega (5/5 echo, 0% loss, clean teardown).
 - Detail: docs/todo/todo-1012-standalone-client-rx-burst.md
 
+### TODO-1013 - TUN reader: wave-batched channel handoff
+
+- DONE (2026-09-19). The TUN fd cannot batch reads (one frame per `read`), but the handoff can: `reader_loop_with_shutdown_batched` drains the fd nonblocking per wave (`TUN_READ_BURST=32`) and hands one `Vec<TunPacket>` per channel send+notify. Consumer drains under a 128-frame budget; backpressured remainders park as `(wave, cursor)` backlog. Omega A/B (`perf stat`, 15 s iperf3 through TUN): epoll_pwait -15%, futex -6%, total syscalls -5%, throughput unchanged. e2e PASS.
+- Detail: docs/todo/todo-1013-tun-reader-wave-handoff.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

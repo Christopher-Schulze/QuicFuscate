@@ -350,6 +350,27 @@ fn reader_loop_with_shutdown_exits_after_callback_requests_stop() {
 }
 
 #[test]
+fn batched_reader_loop_drains_queued_packets_into_one_wave() {
+    let pool = crate::optimize::global_pool();
+    let shutdown = AtomicBool::new(false);
+    let packets: Vec<Vec<u8>> = (0u8..5).map(|i| vec![0x45, 0, 0, 20, i]).collect();
+    let tun =
+        TunInterface::from_device_for_test(Box::new(DummyTun::with_reads(packets)), pool, false);
+
+    let mut waves: Vec<usize> = Vec::new();
+    tun.reader_loop_with_shutdown_batched(&shutdown, |wave| {
+        waves.push(wave.len());
+        shutdown.store(true, Ordering::Release);
+    })
+    .expect("batched reader must exit cleanly after shutdown");
+
+    // All five queued packets must arrive in a single wave: the fd is
+    // drained nonblocking after the first read instead of waking the
+    // consumer per packet.
+    assert_eq!(waves, vec![5]);
+}
+
+#[test]
 fn owned_reader_loop_transfers_pooled_packet_without_copying() {
     let pool = crate::optimize::global_pool();
     let shutdown = AtomicBool::new(false);

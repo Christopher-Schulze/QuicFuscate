@@ -50,7 +50,7 @@ pub use traffic::{TrafficAnalysisDefense, TrafficAnalysisPolicy};
 pub use tun::{
     register_tun_factory, registered_tun_factory, tun_capabilities, validate_tun_config,
     TunCapabilities, TunConfig, TunDevice, TunError, TunFactory, TunReadContract, TUN_IPV6_MIN_MTU,
-    TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY,
+    TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY, TUN_READ_BURST,
 };
 
 /// QUIC encryption levels used by the TLS and transport handshake paths.

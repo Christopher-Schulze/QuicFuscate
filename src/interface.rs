@@ -26,7 +26,7 @@ use crate::telemetry::TELEMETRY_ENABLED;
 pub(crate) use qf_transport_types::validate_tun_config;
 pub use qf_transport_types::{
     FastpathMode, TunCapabilities, TunConfig, TunDevice, TunError, TunFactory, TunReadContract,
-    TUN_IPV6_MIN_MTU, TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY,
+    TUN_IPV6_MIN_MTU, TUN_MIN_MTU, TUN_PACKET_QUEUE_CAPACITY, TUN_READ_BURST,
 };
 use std::io::{self};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -749,6 +749,67 @@ impl TunInterface {
             }
             match self.read_block() {
                 Ok((block, len)) => on_packet(TunPacket::new(block, len)?),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if !self.wait_for_readable(shutdown)? {
+                        return Ok(());
+                    }
+                }
+                Err(_) if shutdown.load(Ordering::Acquire) => {
+                    self.request_reader_shutdown()?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Batched variant of [`Self::reader_loop_with_shutdown_owned`]: after the
+    /// first packet of a wave the fd is drained nonblocking until `WouldBlock`
+    /// or `TUN_READ_BURST`, then the callback fires once with the whole wave.
+    /// The fd itself cannot batch reads (one frame per `read`), so the wave is
+    /// what amortizes channel-send and wakeup cost on the consumer side.
+    pub fn reader_loop_with_shutdown_batched<F>(
+        &self,
+        shutdown: &AtomicBool,
+        mut on_batch: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(Vec<TunPacket>),
+    {
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                self.request_reader_shutdown()?;
+                return Ok(());
+            }
+            match self.read_block() {
+                Ok((block, len)) => {
+                    let mut wave: Vec<TunPacket> = Vec::with_capacity(TUN_READ_BURST);
+                    match TunPacket::new(block, len) {
+                        Ok(packet) => wave.push(packet),
+                        Err(error) => return Err(error),
+                    }
+                    while wave.len() < TUN_READ_BURST {
+                        match self.read_block() {
+                            Ok((block, len)) => match TunPacket::new(block, len) {
+                                Ok(packet) => wave.push(packet),
+                                Err(error) => {
+                                    // Flush what was collected before
+                                    // surfacing the error - dropping the wave
+                                    // would lose valid packets silently.
+                                    on_batch(wave);
+                                    return Err(error);
+                                }
+                            },
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(_) if shutdown.load(Ordering::Acquire) => break,
+                            Err(error) => {
+                                on_batch(wave);
+                                return Err(error);
+                            }
+                        }
+                    }
+                    on_batch(wave);
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if !self.wait_for_readable(shutdown)? {
                         return Ok(());

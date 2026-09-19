@@ -538,7 +538,7 @@ pub(super) async fn run_client(
     let tun_notify = Arc::new(tokio::sync::Notify::new());
     #[allow(clippy::type_complexity)]
     let tun_setup: std::io::Result<(
-        Option<std::sync::mpsc::Receiver<quicfuscate::interface::TunPacket>>,
+        Option<std::sync::mpsc::Receiver<Vec<quicfuscate::interface::TunPacket>>>,
         Option<Arc<quicfuscate::interface::TunInterface>>,
         Option<u64>,
         Option<Arc<AtomicBool>>,
@@ -568,9 +568,16 @@ pub(super) async fn run_client(
                 // The reader owns the shutdown flag and is joined after the
                 // transport loop exits. The bounded channel still applies
                 // backpressure to the TUN source.
-                let (tx, rx) = std::sync::mpsc::sync_channel::<quicfuscate::interface::TunPacket>(
-                    quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY,
-                );
+                // Batched handoff: one `Vec` per drain wave (up to
+                // `TUN_READ_BURST` packets) instead of one send+notify per
+                // packet. The bound is wave-counted so the queue still holds
+                // ~`TUN_PACKET_QUEUE_CAPACITY` packets of backpressure.
+                let (tx, rx) =
+                    std::sync::mpsc::sync_channel::<Vec<quicfuscate::interface::TunPacket>>(
+                        quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY
+                            .div_ceil(quicfuscate::interface::TUN_READ_BURST)
+                            .max(2),
+                    );
                 let tun_for_reader = tun.clone();
                 let tun_reader_diagnostics = client_receive_diagnostics_enabled;
                 let reader_shutdown = Arc::new(AtomicBool::new(false));
@@ -592,13 +599,13 @@ pub(super) async fn run_client(
                             .spawn(reader)
                     },
                     move || {
-                        let read_result = tun_for_reader.reader_loop_with_shutdown_owned(
+                        let read_result = tun_for_reader.reader_loop_with_shutdown_batched(
                             &shutdown_for_loop,
-                            move |packet| {
+                            move |wave: Vec<quicfuscate::interface::TunPacket>| {
                                 if tun_reader_diagnostics {
-                                    info!("Client Wintun packet read: bytes={}", packet.len());
+                                    info!("Client TUN wave read: packets={}", wave.len());
                                 }
-                                if tx.send(packet).is_err() {
+                                if tx.send(wave).is_err() {
                                     if !shutdown_for_callback.load(Ordering::Acquire) {
                                         record_standalone_client_tun_fault(
                                             &fault_for_callback,
@@ -714,9 +721,10 @@ pub(super) async fn run_client(
         tun_reader_shutdown.is_some(),
         tun_reader_handle.is_some(),
     );
-    // TUN frame held when the QUIC DATAGRAM queue is full so a backpressured
-    // packet is not dropped before carrier acceptance.
-    let mut tun_backpressure_frame: Option<quicfuscate::interface::TunPacket> = None;
+    // TUN frames held when the QUIC DATAGRAM queue is full so a backpressured
+    // wave remainder is not dropped before carrier acceptance.
+    // Format: (wave, next_unsent_index).
+    let mut tun_backpressure_frame: Option<(Vec<quicfuscate::interface::TunPacket>, usize)> = None;
     let mut dns_runtime: Option<quicfuscate::implementations::client::ClientDnsRuntime> = None;
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);

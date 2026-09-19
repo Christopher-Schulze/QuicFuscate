@@ -1071,82 +1071,113 @@ pub(super) fn record_standalone_client_tun_fault(
     }
 }
 
-/// Drain TUN frames from `rx` and forward them through `conn` without dropping
-/// a frame that encounters DATAGRAM queue backpressure. A backpressured frame
-/// is held in `backlog` and retried on the next call before new frames.
+/// Outcome of one TUN frame handed to the MASQUE uplink.
+enum TunFrameSend {
+    /// Frame accepted (tunnelled or answered locally, e.g. ICMP too-big).
+    Sent,
+    /// The QUIC DATAGRAM queue is full; the caller must retain the frame.
+    Backpressured,
+}
+
+fn send_one_tun_frame(
+    conn: &mut QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    sid: u64,
+    frame: &quicfuscate::interface::TunPacket,
+    diagnostics_enabled: bool,
+) -> Result<TunFrameSend, quicfuscate::engine::DataPlaneFault> {
+    let frame_len = frame.len();
+    match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
+        Ok(ClientTunPacketDisposition::Tunnel) => {
+            if diagnostics_enabled {
+                info!("Client Wintun packet accepted by MASQUE uplink: bytes={frame_len}");
+            }
+            Ok(TunFrameSend::Sent)
+        }
+        Ok(ClientTunPacketDisposition::RespondPacketTooBig { mtu }) => {
+            if diagnostics_enabled {
+                info!(
+                    "Client Wintun packet answered locally above tunnel carrier: bytes={frame_len} mtu={mtu}"
+                );
+            }
+            Ok(TunFrameSend::Sent)
+        }
+        Err(ClientTunPacketError::Backpressure) => {
+            if diagnostics_enabled {
+                info!("Client MASQUE uplink backpressured: bytes={frame_len}");
+            }
+            Ok(TunFrameSend::Backpressured)
+        }
+        Err(ClientTunPacketError::Fault(fault)) => {
+            warn!("TUN packet send failed: {fault}");
+            Err(fault)
+        }
+    }
+}
+
+/// Uplink drain budget per invocation: bounds how many TUN frames one wake
+/// may push into the MASQUE queue before yielding to the other select arms.
+const TUN_DRAIN_FRAME_BUDGET: usize = 128;
+
+/// Drain batched TUN waves from `rx` and forward each frame through `conn`
+/// without dropping frames that encounter DATAGRAM queue backpressure. A
+/// backpressured or budget-cut wave remainder is held in `backlog` (with its
+/// cursor) and retried on the next call before new waves are received.
 fn drain_client_tun_uplink(
     conn: &mut QuicFuscateConnection,
     tun: &quicfuscate::interface::TunInterface,
     sid: u64,
-    rx: &std::sync::mpsc::Receiver<quicfuscate::interface::TunPacket>,
-    backlog: &mut Option<quicfuscate::interface::TunPacket>,
+    rx: &std::sync::mpsc::Receiver<Vec<quicfuscate::interface::TunPacket>>,
+    backlog: &mut Option<(Vec<quicfuscate::interface::TunPacket>, usize)>,
     diagnostics_enabled: bool,
 ) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
-    if let Some(frame) = backlog.take() {
-        let frame_len = frame.len();
-        match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
-            Ok(ClientTunPacketDisposition::Tunnel) => {
-                if diagnostics_enabled {
-                    info!("Client Wintun backlog accepted by MASQUE uplink: bytes={frame_len}");
+    let mut budget = TUN_DRAIN_FRAME_BUDGET;
+
+    // Resume the backpressured wave remainder first. Backpressure returns
+    // Ok(false): the send queue is full, so an immediate re-drain would just
+    // spin; the adaptive housekeeping tick (5 ms while a backlog is held)
+    // paces the retry.
+    if let Some((frames, cursor)) = backlog.as_mut() {
+        while *cursor < frames.len() && budget > 0 {
+            match send_one_tun_frame(conn, tun, sid, &frames[*cursor], diagnostics_enabled)? {
+                TunFrameSend::Sent => {
+                    *cursor += 1;
+                    budget -= 1;
                 }
+                TunFrameSend::Backpressured => return Ok(false),
             }
-            Ok(ClientTunPacketDisposition::RespondPacketTooBig { mtu }) => {
-                if diagnostics_enabled {
-                    info!(
-                        "Client Wintun backlog answered locally above tunnel carrier: bytes={frame_len} mtu={mtu}"
-                    );
-                }
-            }
-            Err(ClientTunPacketError::Backpressure) => {
-                if diagnostics_enabled {
-                    info!("Client MASQUE uplink remains backpressured: bytes={frame_len}");
-                }
-                *backlog = Some(frame);
-                // Do not self-notify: the send queue is full, so an immediate
-                // re-drain would just spin. The adaptive housekeeping tick
-                // (5ms while a backlog frame is held) paces the retry.
-                return Ok(false);
-            }
-            Err(ClientTunPacketError::Fault(fault)) => {
-                warn!("TUN packet send failed: {fault}");
-                return Err(fault);
-            }
+        }
+        if *cursor >= frames.len() {
+            *backlog = None;
         }
     }
 
-    for _ in 0..16 {
+    // Waves arrive batched (one channel item per reader drain wave). The
+    // frame budget - not a wave count - bounds this drain so oversized waves
+    // cannot starve the other select arms.
+    while budget > 0 {
         match rx.try_recv() {
-            Ok(frame) => {
-                let frame_len = frame.len();
-                match send_client_tun_packet(conn, tun, sid, frame.as_slice()) {
-                    Ok(ClientTunPacketDisposition::Tunnel) => {
-                        if diagnostics_enabled {
-                            info!(
-                                "Client Wintun packet accepted by MASQUE uplink: bytes={frame_len}"
-                            );
+            Ok(frames) => {
+                let mut cursor = 0usize;
+                while cursor < frames.len() && budget > 0 {
+                    match send_one_tun_frame(conn, tun, sid, &frames[cursor], diagnostics_enabled)?
+                    {
+                        TunFrameSend::Sent => {
+                            cursor += 1;
+                            budget -= 1;
+                        }
+                        TunFrameSend::Backpressured => {
+                            *backlog = Some((frames, cursor));
+                            return Ok(false);
                         }
                     }
-                    Ok(ClientTunPacketDisposition::RespondPacketTooBig { mtu }) => {
-                        if diagnostics_enabled {
-                            info!(
-                                "Client Wintun packet answered locally above tunnel carrier: bytes={frame_len} mtu={mtu}"
-                            );
-                        }
-                    }
-                    Err(ClientTunPacketError::Backpressure) => {
-                        if diagnostics_enabled {
-                            info!("Client MASQUE uplink backpressured: bytes={frame_len}");
-                        }
-                        *backlog = Some(frame);
-                        // Same backpressure rule as the backlog retry above:
-                        // return Ok(false) so the caller does not spin on a
-                        // full send queue; the housekeeping tick re-arms.
-                        return Ok(false);
-                    }
-                    Err(ClientTunPacketError::Fault(fault)) => {
-                        warn!("TUN packet send failed: {fault}");
-                        return Err(fault);
-                    }
+                }
+                if cursor < frames.len() {
+                    // Budget exhausted mid-wave: park the remainder; the
+                    // backlog keeps the adaptive tick active and preserves
+                    // the wake-up contract.
+                    *backlog = Some((frames, cursor));
+                    return Ok(true);
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1158,12 +1189,11 @@ fn drain_client_tun_uplink(
         }
     }
 
-    // Preserve the wake-up contract when the bounded drain limit was reached.
-    // Holding one frame in the existing backlog also keeps the adaptive tick
-    // active without probing the channel on every idle tick.
+    // Budget exhausted exactly at a wave boundary: probe once so a pending
+    // wave still re-arms the wake-up contract.
     match rx.try_recv() {
-        Ok(frame) => {
-            *backlog = Some(frame);
+        Ok(frames) => {
+            *backlog = Some((frames, 0));
             Ok(true)
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => Ok(false),

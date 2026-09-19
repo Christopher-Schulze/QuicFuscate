@@ -7,6 +7,11 @@ use std::sync::OnceLock;
 /// Maximum number of owned packets buffered between a blocking TUN reader and
 /// the async transport loop.
 pub const TUN_PACKET_QUEUE_CAPACITY: usize = 1024;
+/// Maximum number of packets one reader wave hands to the transport loop.
+/// The fd cannot batch reads itself (one frame per `read`), so the wave is
+/// what amortizes channel-send + wakeup cost: the reader drains the fd
+/// nonblocking after the first packet and emits one `Vec` per wave.
+pub const TUN_READ_BURST: usize = 32;
 /// Minimum valid IPv4 TUN MTU.
 pub const TUN_MIN_MTU: u16 = 576;
 /// Minimum valid MTU while IPv6 is enabled.
