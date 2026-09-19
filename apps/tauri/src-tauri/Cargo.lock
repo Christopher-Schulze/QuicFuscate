@@ -3597,6 +3597,7 @@ dependencies = [
  "crossbeam",
  "crossbeam-channel",
  "crossbeam-queue",
+ "crossbeam-utils",
  "env_logger",
  "fastrand",
  "getrandom 0.2.17",

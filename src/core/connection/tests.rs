@@ -910,7 +910,10 @@ fn next_send_deadline_includes_tls_handshake_readiness() {
     let mut connection = test_connection();
     connection.conn.enable_tls("unified").expect("unified TLS provider");
     let mut profile = qf_stealth::TlsProfile::chrome_130();
-    profile.timing_jitter = Some(Duration::from_millis(250));
+    // Wide margin: the provider clock is the real system clock, and a stalled
+    // CI scheduler slice could otherwise eat a sub-second window between
+    // configure_tls and the readiness read (observed as a CI flake).
+    profile.timing_jitter = Some(Duration::from_secs(30));
     connection.conn.configure_tls(&profile, "example.com").expect("TLS profile");
 
     let ready_at = connection
