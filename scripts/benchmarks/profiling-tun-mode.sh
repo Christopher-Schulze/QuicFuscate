@@ -161,6 +161,10 @@ CLIENT_TUN_NAME="qtun0"
 # assigns the client tunnel address. The iperf bind target is discovered from
 # the client TUN device after connect instead of being assumed.
 CLIENT_TUN_IP=""
+# Privilege-drop identity the server adopts; must match the binary defaults
+# (--drop-user/--drop-group) since the scenario does not override them.
+PROFILE_DROP_USER="${QF_PROFILE_DROP_USER:-quicfuscate}"
+PROFILE_DROP_GROUP="${QF_PROFILE_DROP_GROUP:-quicfuscate}"
 FAILURES=0
 UNAVAILABLE_COUNT=0
 SCENARIO_FILES=()
@@ -239,8 +243,13 @@ run_tun_scenario() {
     local flamegraph_log="$RUN_DIR/flamegraph-${label}.log"
 
     local started_at; started_at="$(profile_now_utc)"
-    local admin_sock="$RUN_DIR/admin-${label}.sock"
-    local qkey_store="$RUN_DIR/qkeys-${label}.json"
+    # The admin socket and QKey store are created after the privilege drop, so
+    # they must live in a directory writable by the drop identity (mirrors the
+    # systemd RuntimeDirectory deployment contract).
+    local admin_dir="$RUN_DIR/admin-${label}"
+    install -d -o "$PROFILE_DROP_USER" -g "$PROFILE_DROP_GROUP" -m 0750 "$admin_dir"
+    local admin_sock="$admin_dir/admin.sock"
+    local qkey_store="$admin_dir/qkeys.json"
     # The server requires a QKey for every new client; it is issued over the
     # unix admin socket after startup and never written into evidence files.
     local server_command=("$BINARY" server --cert "$CERT" --key "$KEY" --listen 127.0.0.1:4433 --admin-socket "$admin_sock" --qkey-store "$qkey_store" --fec-mode "$fec_mode" --tun --tun-ip "$SERVER_TUN_IP" --tun-netmask "$TUN_NETMASK" -v)
