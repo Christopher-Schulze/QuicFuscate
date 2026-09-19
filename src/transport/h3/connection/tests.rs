@@ -375,7 +375,7 @@ fn h3_receive_buffers_follow_transport_payload_limits() {
 
     assert_eq!(conn.max_recv_udp_payload_size(), MAX_PAYLOAD);
     assert_eq!(h3.masque_recv_capacity, MAX_PAYLOAD);
-    assert_eq!(h3.masque_recv_buffer.len(), MAX_PAYLOAD + MASQUE_RECV_HEADROOM);
+    assert!(h3.masque_recv_entry.is_none());
     assert_eq!(h3.stream_recv_buffer.len(), 64 * 1024);
 }
 

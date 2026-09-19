@@ -337,6 +337,32 @@ impl Connection {
         }
     }
 
+    /// Pops the front received DATAGRAM as an owned queue entry so callers can
+    /// dispatch it without copying. Hand it back via `dgram_recv_return` —
+    /// its allocation is reused (freelist) or recycled (pooled block).
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    #[inline(always)]
+    pub(crate) fn dgram_recv_take(&mut self) -> Option<Vec<u8>> {
+        self.dgram_recv_queue.pop_front()
+    }
+    #[cfg(feature = "zero_copy_dgram")]
+    #[inline(always)]
+    pub(crate) fn dgram_recv_take(&mut self) -> Option<DatagramBuffer> {
+        self.dgram_recv_queue.pop_front()
+    }
+
+    /// Returns an entry from `dgram_recv_take` for reuse.
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    #[inline(always)]
+    pub(crate) fn dgram_recv_return(&mut self, entry: Vec<u8>) {
+        Self::return_dgram_freelist(&mut self.dgram_recv_freelist, entry);
+    }
+    /// The pooled block recycles itself on drop; taking the parameter keeps
+    /// the call shape symmetric with the freelist variant.
+    #[cfg(feature = "zero_copy_dgram")]
+    #[inline(always)]
+    pub(crate) fn dgram_recv_return(&mut self, _entry: DatagramBuffer) {}
+
     /// Dequeues one received DATAGRAM frame into the caller's buffer.
     #[inline(always)]
     pub fn dgram_recv(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {

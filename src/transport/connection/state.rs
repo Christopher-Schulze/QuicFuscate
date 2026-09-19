@@ -219,11 +219,19 @@ type DatagramQueue = VecDeque<Vec<u8>>;
 #[cfg(feature = "zero_copy_dgram")]
 type DatagramQueue = VecDeque<DatagramBuffer>;
 
+/// Owned entry popped from `dgram_recv_queue` for zero-copy dispatch. The
+/// element type differs per feature: a reused `Vec` whose capacity doubles as
+/// normalization headroom, or a pooled fixed block.
+#[cfg(not(feature = "zero_copy_dgram"))]
+pub(crate) type DatagramEntry = Vec<u8>;
 #[cfg(feature = "zero_copy_dgram")]
-pub(super) struct DatagramBuffer {
+pub(crate) type DatagramEntry = DatagramBuffer;
+
+#[cfg(feature = "zero_copy_dgram")]
+pub(crate) struct DatagramBuffer {
     /// Pool-aware ownership guard. Dropping this buffer returns its block to `dgram_pool`.
-    pub(super) data: crate::optimize::PooledBlock,
-    pub(super) len: usize,
+    pub(crate) data: crate::optimize::PooledBlock,
+    pub(crate) len: usize,
 }
 
 /// Fixed-size 64 KB ring buffer for zero-copy stream I/O (feature-gated).

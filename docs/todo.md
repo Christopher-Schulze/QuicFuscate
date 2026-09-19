@@ -3911,6 +3911,12 @@
 - DONE. `send_masque_datagram` copied each packet into `masque_send_scratch` to prepend the flow-id varint, then `dgram_send` copied again into the queue entry. New `dgram_send_parts(prefix, payload)` writes both slices into the queue entry directly (freelist + `zero_copy_dgram` paths); the varint is encoded on the stack and `masque_send_scratch` removed. Covers uplink, downlink and relay sends.
 - Verified: 47/47 MASQUE tests green, both dgram feature variants compile, Omega scenario g PASS.
 
+### TODO-992 - MASQUE receive dispatches from the owned queue entry
+
+- Detail: `docs/todo/todo-992-masque-recv-owned-entry.md`
+- DONE. Inbound MASQUE datagrams were copied out of the QUIC recv queue into a permanent `masque_recv_buffer` scratch solely for `MASQUE_RECV_HEADROOM` normalization tail space. `dgram_recv_take`/`dgram_recv_return` now hand the owned queue entry (`Vec` freelist / pooled `DatagramBuffer`) to the H3 layer; flow-id decode, in-place normalization and dispatch run inside the entry's own allocation — zero hot-path copies and no permanent scratch. Oversized entries are dropped rather than truncated-dispatched.
+- Verified: 49/49 masque tests + 2 new recv-take tests green on default and `zero_copy_dgram`; Omega scenario g PASS (52.3 Mbit/s, 0% loss, no EMSGSIZE/panic).
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

@@ -697,32 +697,45 @@ impl Connection {
         })
     }
 
-    /// Receives one MASQUE DATAGRAM into the shared receive scratch and
-    /// returns `(flow_id, payload_offset, payload_len)` indexing into the
-    /// region exposed by [`Self::masque_recv_region`]. The payload stays in
-    /// place so callers can normalize and dispatch it without a copy; the
-    /// trailing `MASQUE_RECV_HEADROOM` bytes remain available for in-place
-    /// TCP option expansion.
+    /// Takes one MASQUE DATAGRAM off the transport receive queue as an owned
+    /// entry and returns `(flow_id, payload_offset, payload_len)` indexing
+    /// into the region exposed by [`Self::masque_recv_region`]. No copy: the
+    /// queue entry's backing allocation is the dispatch buffer, and it keeps
+    /// `MASQUE_RECV_HEADROOM` writable bytes past the payload for in-place
+    /// TCP option expansion. The previous entry is handed back to the
+    /// transport on the next call.
     pub fn try_recv_masque_datagram(
         &mut self,
         conn: &mut super::super::super::Connection,
     ) -> Option<(u64, usize, usize)> {
-        match conn.dgram_recv(&mut self.masque_recv_buffer[..self.masque_recv_capacity]) {
-            Ok(len) if len > 0 => {
-                if let Ok((flow_id, used)) = Self::decode_varint(&self.masque_recv_buffer[..len]) {
-                    return Some((flow_id, used, len - used));
-                }
-                None
-            }
-            _ => None,
+        if let Some(prev) = self.masque_recv_entry.take() {
+            conn.dgram_recv_return(prev);
         }
+        let mut entry = conn.dgram_recv_take()?;
+        let datagram_len = masque_entry_len(&entry);
+        if datagram_len == 0 || datagram_len > self.masque_recv_capacity {
+            conn.dgram_recv_return(entry);
+            return None;
+        }
+        let Ok((flow_id, used)) = Self::decode_varint(masque_entry_slice(&entry, datagram_len))
+        else {
+            conn.dgram_recv_return(entry);
+            return None;
+        };
+        masque_entry_expose_tail(&mut entry, datagram_len + MASQUE_RECV_HEADROOM);
+        self.masque_recv_entry = Some(entry);
+        Some((flow_id, used, datagram_len - used))
     }
 
-    /// Returns the receive-scratch region starting at `offset`, spanning the
-    /// payload plus the normalization headroom reported by the last
+    /// Returns the live receive region starting at `offset`, spanning the
+    /// payload plus the normalization headroom prepared by the last
     /// [`Self::try_recv_masque_datagram`] call.
     pub(crate) fn masque_recv_region(&mut self, offset: usize) -> &mut [u8] {
-        &mut self.masque_recv_buffer[offset..]
+        let entry = self
+            .masque_recv_entry
+            .as_mut()
+            .expect("masque_recv_region requires a live try_recv_masque_datagram entry");
+        masque_entry_mut(entry, offset)
     }
 
     /// Return the Flow-ID bound to one active CONNECT-UDP stream.
@@ -830,4 +843,63 @@ impl Connection {
     pub fn masque_flow_active(&self) -> bool {
         !self.masque_flow.is_empty()
     }
+}
+
+/// Length of the datagram payload inside a taken receive-queue entry.
+#[cfg(not(feature = "zero_copy_dgram"))]
+#[inline(always)]
+fn masque_entry_len(entry: &crate::transport::connection::DatagramEntry) -> usize {
+    entry.len()
+}
+#[cfg(feature = "zero_copy_dgram")]
+#[inline(always)]
+fn masque_entry_len(entry: &crate::transport::connection::DatagramEntry) -> usize {
+    entry.len
+}
+
+/// Immutable view of the first `len` datagram bytes.
+#[cfg(not(feature = "zero_copy_dgram"))]
+#[inline(always)]
+fn masque_entry_slice(entry: &crate::transport::connection::DatagramEntry, len: usize) -> &[u8] {
+    &entry[..len]
+}
+#[cfg(feature = "zero_copy_dgram")]
+#[inline(always)]
+fn masque_entry_slice(entry: &crate::transport::connection::DatagramEntry, len: usize) -> &[u8] {
+    &entry.data[..len]
+}
+
+/// Extends the writable region to `total` bytes so the tail past the payload
+/// serves as normalization headroom. Freelist `Vec`s keep capacity across
+/// reuse, so the resize amortizes to a len bump after warmup.
+#[cfg(not(feature = "zero_copy_dgram"))]
+#[inline(always)]
+fn masque_entry_expose_tail(entry: &mut crate::transport::connection::DatagramEntry, total: usize) {
+    entry.resize(total, 0);
+}
+/// Pooled blocks expose their whole fixed-size allocation; no work needed.
+#[cfg(feature = "zero_copy_dgram")]
+#[inline(always)]
+fn masque_entry_expose_tail(
+    _entry: &mut crate::transport::connection::DatagramEntry,
+    _total: usize,
+) {
+}
+
+/// Mutable region starting at `offset`; spans the payload plus tail headroom.
+#[cfg(not(feature = "zero_copy_dgram"))]
+#[inline(always)]
+fn masque_entry_mut(
+    entry: &mut crate::transport::connection::DatagramEntry,
+    offset: usize,
+) -> &mut [u8] {
+    &mut entry[offset..]
+}
+#[cfg(feature = "zero_copy_dgram")]
+#[inline(always)]
+fn masque_entry_mut(
+    entry: &mut crate::transport::connection::DatagramEntry,
+    offset: usize,
+) -> &mut [u8] {
+    &mut entry.data[offset..]
 }

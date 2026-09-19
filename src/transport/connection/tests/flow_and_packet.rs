@@ -796,3 +796,84 @@ fn overlapping_arrivals_in_any_order_total_the_covered_union() {
     let raw_total: u64 = arrivals.iter().map(|(start, end)| end - start).sum();
     assert!(raw_total > credited, "the fixture must actually contain overlap");
 }
+
+// ---- MASQUE receive: owned queue-entry dispatch (no scratch copy) ---------
+
+fn masque_wire_datagram(flow_id: u64, payload: &[u8]) -> Vec<u8> {
+    let mut dgram = Vec::with_capacity(8 + payload.len());
+    let mut scratch = [0u8; 8];
+    let used = qf_transport_pn::varint::write_varint(flow_id, &mut scratch).unwrap();
+    dgram.extend_from_slice(&scratch[..used]);
+    dgram.extend_from_slice(payload);
+    dgram
+}
+
+#[test]
+fn masque_recv_take_dispatches_fifo_payload_with_writable_headroom() {
+    let mut conn = make_conn();
+    conn.enable_datagrams(16, 16);
+    #[cfg(feature = "zero_copy_dgram")]
+    let pool = {
+        let pool = Arc::new(crate::optimize::MemoryPool::new(4, 128));
+        conn.dgram_pool = Arc::clone(&pool);
+        pool
+    };
+    let h3cfg = crate::transport::h3::Config::new().expect("h3 config");
+    let mut h3 =
+        crate::transport::h3::Connection::with_transport(&mut conn, &h3cfg).expect("h3 connection");
+
+    let first = masque_wire_datagram(7, b"alpha");
+    let second = masque_wire_datagram(9, b"beta-longer-payload");
+    conn.enqueue_received_datagram(std::borrow::Cow::Borrowed(&first));
+    conn.enqueue_received_datagram(std::borrow::Cow::Borrowed(&second));
+
+    let (flow_id, offset, payload_len) =
+        h3.try_recv_masque_datagram(&mut conn).expect("first datagram");
+    assert_eq!(flow_id, 7);
+    {
+        let region = h3.masque_recv_region(offset);
+        assert_eq!(&region[..payload_len], b"alpha");
+        assert!(
+            region.len() >= payload_len + crate::transport::h3::MASQUE_RECV_HEADROOM,
+            "normalization headroom must stay writable past the payload"
+        );
+        region[payload_len] = 0xAB;
+        region[payload_len + crate::transport::h3::MASQUE_RECV_HEADROOM - 1] = 0xCD;
+    }
+
+    let (flow_id, offset, payload_len) =
+        h3.try_recv_masque_datagram(&mut conn).expect("second datagram FIFO order");
+    assert_eq!(flow_id, 9);
+    assert_eq!(&h3.masque_recv_region(offset)[..payload_len], b"beta-longer-payload");
+
+    // Empty-queue take hands the last live entry back before reporting Done.
+    assert!(h3.try_recv_masque_datagram(&mut conn).is_none());
+    #[cfg(not(feature = "zero_copy_dgram"))]
+    assert!(conn.dgram_recv_freelist.len() >= 2, "both taken entries must return to the freelist");
+    #[cfg(feature = "zero_copy_dgram")]
+    assert_eq!(
+        pool.accounting_snapshot().1,
+        0,
+        "pooled blocks must be fully recycled once the queue drains"
+    );
+}
+
+#[test]
+fn masque_recv_take_drops_malformed_and_oversized_entries() {
+    let mut conn = make_conn();
+    conn.enable_datagrams(16, 16);
+    let h3cfg = crate::transport::h3::Config::new().expect("h3 config");
+    let mut h3 =
+        crate::transport::h3::Connection::with_transport(&mut conn, &h3cfg).expect("h3 conn");
+
+    // Truncated flow-id varint (0x40 opens a two-byte varint, one byte given).
+    conn.enqueue_received_datagram(std::borrow::Cow::Borrowed(&[0x40]));
+    assert!(h3.try_recv_masque_datagram(&mut conn).is_none());
+    assert_eq!(conn.dgram_recv_queue_len(), 0, "malformed entry must be consumed");
+
+    // Entry beyond the transport payload ceiling is dropped, never dispatched.
+    let oversized = masque_wire_datagram(0, &vec![0x55; conn.max_recv_udp_payload_size() + 1]);
+    conn.enqueue_received_datagram(std::borrow::Cow::Borrowed(&oversized));
+    assert!(h3.try_recv_masque_datagram(&mut conn).is_none());
+    assert_eq!(conn.dgram_recv_queue_len(), 0);
+}
