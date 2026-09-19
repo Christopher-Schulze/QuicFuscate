@@ -48,10 +48,32 @@ def parse_udp_socket(
                 "drops": drops,
             }
         )
+    if port is not None and remote_port is None:
+        # Local-port selector: SO_REUSEPORT RX sharding (TODO-901) legitimately
+        # binds N sibling sockets on the same endpoint. They share one
+        # (local, remote) tuple, so their kernel counters aggregate cleanly;
+        # a heterogeneous match set stays an ambiguity error.
+        if not rows:
+            raise ValueError(f"expected at least one UDP socket on port {port}, found 0")
+        endpoints = {
+            (
+                row["local_address_hex"],
+                row["remote_address_hex"],
+                row["remote_port"],
+            )
+            for row in rows
+        }
+        if len(endpoints) != 1:
+            raise ValueError(
+                f"UDP sockets on port {port} span {len(endpoints)} distinct endpoints"
+            )
+        merged = dict(rows[0])
+        for key in ("tx_queue_bytes", "rx_queue_bytes", "drops"):
+            merged[key] = sum(row[key] for row in rows)
+        merged["socket_count"] = len(rows)
+        return merged
     if len(rows) != 1:
-        if port is not None and remote_port is None:
-            selector = f"on port {port}"
-        elif port is None:
+        if port is None:
             selector = f"with remote port {remote_port}"
         else:
             selector = f"with local port {port} and remote port {remote_port}"
@@ -170,9 +192,21 @@ def self_test() -> int:
         "tx_queue_bytes": 0,
         "rx_queue_bytes": 128,
         "drops": 17,
+        "socket_count": 1,
     }
     if parsed != expected:
         raise AssertionError((parsed, expected))
+    sharded_fixture = fixture + (
+        "44: 01000A0A:1151 00000000:0000 07 00000000:00000020 00:00000000 00000000 "
+        "0        0 34567 2 0000000000000000 5\n"
+    )
+    aggregated = parse_udp_socket(sharded_fixture, 4433, None)
+    if (
+        aggregated["rx_queue_bytes"] != 160
+        or aggregated["drops"] != 22
+        or aggregated["socket_count"] != 2
+    ):
+        raise AssertionError(("SO_REUSEPORT sibling aggregation", aggregated))
     try:
         parse_udp_socket(fixture, 4434, None)
     except ValueError:

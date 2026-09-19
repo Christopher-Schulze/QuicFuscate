@@ -177,16 +177,29 @@ Deviations from the earlier sketch, all deliberate:
 - [x] Local macOS: `cargo check`/`clippy`/`fmt` clean; 557/557 server
   lib tests green (N=1 path unaffected; router unit tests cover
   register/rebind/unregister/wrong-shard-ignore/queue-full).
-- [ ] Omega (aarch64 Linux): N=1 regression + N=2..4 multi-client
-  netns correctness; SO_REUSEPORT bind evidence; `QUICFUSCATE_RX_SHARDS`
-  env knob; no-duplicate-delivery check; io_uring feature build.
+- [x] Omega (aarch64 Linux) 2026-09-19: first real compile of the
+  cfg(linux) paths surfaced and fixed two errors — `SO_REUSEPORT` now
+  via `qf_transport_udp::enable_reuse_port_fd` (raw `setsockopt`, same
+  convention as `UDP_GRO`; `socket2::Socket::set_reuse_port` does not
+  exist in 0.5.10) and a stale `live.` borrow in the cfg-gated
+  sendmmsg/GSO flush. 563/563 server tests green on Linux.
+- [x] Omega live N=1: `tun-e2e-netns.sh` PASS (0% loss both phases,
+  graceful stop, restart-ownership proof) — legacy path byte-identical.
+- [x] Omega live N=4 (`QUICFUSCATE_RX_SHARDS=4`): `tun-e2e-netns.sh`
+  PASS with `server RX sharding active: 4 dataplane shards` +
+  `spawned 4 dataplane shard workers` + 4 per-shard io_uring workers in
+  both normal and restart phases; clean teardown, no leaked processes
+  or netns. `tun-e2e-multi-client-dual-stack-netns.sh` data-plane
+  phases (H3 fallback, multi-client default-deny, unicast opt-in, v6
+  throughput) all pass under N=4; its only failure is the pre-existing
+  single-core "1472-byte payload 15% gain" host-throughput assertion
+  which fails identically at N=1 — not a sharding regression. The
+  harness's UDP-socket evidence helper now aggregates SO_REUSEPORT
+  sibling counters (`socket_count` field; remote-port selectors stay
+  exactly-one).
 - [ ] pps scaling: requires multicore x86_64; Omega (1 core) cannot
   evidence the >=3x pps criterion — remains open by hardware, not by
-  implementation.
-- [ ] `bench-linux-send-path-decision.sh --shards N`: not added — the
-  harness runs loopback micro benches, not a live sharded server; the
-  live knob is `QUICFUSCATE_RX_SHARDS=N`. A multi-client pps harness is
-  the follow-up once multicore hardware exists.
+  implementation. Worker io_uring/affinity tuning may also matter there.
 
 ### Risks
 - Kernel hash skew: uneven client distribution across shards under few-NAT-gateway test setups (mitigation: measure per-shard counts in the bench; document skew, do not add application rebalancing).

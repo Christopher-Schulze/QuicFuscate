@@ -374,6 +374,30 @@ pub fn enable_udp_gro(sock: &UdpSocket) -> std::io::Result<bool> {
     enable_udp_gro_fd(sock.as_raw_fd())
 }
 
+/// Enable `SO_REUSEPORT` on a socket.
+///
+/// Must be set before `bind`; every sibling socket bound to the same port
+/// then receives a kernel-hashed share of the 4-tuple space, which is the
+/// affinity mechanism behind server RX sharding (TODO-901).
+#[cfg(target_os = "linux")]
+pub fn enable_reuse_port_fd(fd: RawFd) -> std::io::Result<()> {
+    let val: libc::c_int = 1;
+    // SAFETY: `val` outlives the synchronous setsockopt call.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
+            &val as *const _ as *const c_void,
+            std::mem::size_of_val(&val) as socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Disable `UDP_GRO` on a socket (best-effort).
 ///
 /// Needed when a receiver that understands the `UDP_GRO` control message is

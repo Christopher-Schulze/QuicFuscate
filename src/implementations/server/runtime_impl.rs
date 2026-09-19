@@ -112,7 +112,10 @@ fn create_udp_socket(listen: SocketAddr, reuseport: bool) -> std::io::Result<std
             Some(socket2::Protocol::UDP),
         )?;
         socket.set_reuse_address(true)?;
-        socket.set_reuse_port(true)?;
+        {
+            use std::os::fd::AsRawFd;
+            qf_transport_udp::enable_reuse_port_fd(socket.as_raw_fd())?;
+        }
         socket.bind(&socket2::SockAddr::from(listen))?;
         let std_socket: std::net::UdpSocket = socket.into();
         tune_server_udp_socket(&std_socket)?;

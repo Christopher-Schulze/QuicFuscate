@@ -516,8 +516,7 @@ pub(super) fn flush_tun_downlink_queue(
                     i += 1;
                     continue;
                 }
-                let gso_blocked = live
-                    .live_state
+                let gso_blocked = live_state
                     .clients
                     .get(&staging[i].0)
                     .map(|c| c.udp_gso_path_blocked)
