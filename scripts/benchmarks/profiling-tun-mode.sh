@@ -446,7 +446,8 @@ run_tun_scenario() {
     fi
     if [[ -n "$iperf_server_pid" ]]; then
         if profile_pid_alive "$iperf_server_pid"; then termination_requested=true; fi
-        if ! profile_stop_pid "$iperf_server_pid"; then cleanup_status="FAIL"; fi
+        # iperf3 -s exits 1 on SIGTERM interrupt - a clean listener shutdown.
+        if ! profile_stop_pid "$iperf_server_pid" 1; then cleanup_status="FAIL"; fi
         iperf_server_exit_status="$PROFILE_LAST_WAIT_STATUS"
     fi
     if [[ -n "$client_pid" ]]; then

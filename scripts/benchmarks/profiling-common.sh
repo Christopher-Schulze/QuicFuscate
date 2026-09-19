@@ -458,6 +458,7 @@ profile_wait_status() {
 
 profile_stop_pid() {
   local pid="$1"
+  local extra_ok_status="${2:-}"
   local cleanup_status=0
   local wait_status=0
   if profile_pid_alive "$pid"; then
@@ -468,9 +469,14 @@ profile_stop_pid() {
   if [[ -d "/proc/$pid" || -n "${ZSH_VERSION:-}" || -n "${BASH_VERSION:-}" ]]; then
     profile_wait_status "$pid"
     wait_status="$PROFILE_LAST_WAIT_STATUS"
-    if [[ "$wait_status" -ne 0 && "$wait_status" -ne 143 && "$wait_status" -ne 15 ]]; then
-      cleanup_status=1
-    fi
+    case "$wait_status" in
+      0 | 143 | 15) ;;
+      "$extra_ok_status")
+        # An accepted extra status only counts when one was declared.
+        [[ -n "$extra_ok_status" ]] || cleanup_status=1
+        ;;
+      *) cleanup_status=1 ;;
+    esac
   fi
   # The caller reads both values in the parent shell after this direct call.
   # shellcheck disable=SC2034
