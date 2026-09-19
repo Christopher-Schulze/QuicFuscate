@@ -67,6 +67,40 @@ current FlowShaper/StealthBrain/TLS-Cover/chaff stack and adopt what wins.
   control - our kernel-level pacing/io_uring timing hooks align; prefer
   precision timing at the send syscall boundary over userspace sleep loops.
 
+## Implementation sketches (what "adopt" would mean in our code)
+
+1. ChameleonFlow adaptation - `crates/qf-stealth/src/lib.rs` FlowShaper:
+   a "restructure" mode holds a bounded reorder window (~5-15 ms) and emits
+   real packets in structure-breaking order instead of buying chaff bytes.
+   Natural fit: our outer datagrams are ours to shape (tunnel payload has
+   no semantic packet boundaries). Anchor: `FlowShaper::apply_jitter` /
+   `record_and_prune` and the send-loop batch drain. Success metric:
+   equal-or-better WF-defense signal at near-zero bandwidth overhead vs
+   chaff mode.
+
+2. Adaptive-Tamaraw mapping - `crates/qf-stealth/src/intelligent_policy.rs`
+   + StealthBrain policy table: add a per-flow-cluster parameter row
+   {jitter_range, pad_rate, chaff_rate} selected by early time-series
+   features we already collect (burst sizes, IAT histogram in
+   `record_and_prune`'s 2 s window). Conservative global parameters remain
+   the fallback until a cluster match is confident.
+
+3. WF-A2D positions - make `apply_jitter`/`apply_flight_pacing`
+   position-aware: burst head and burst boundaries carry the most WF
+   signal. FlowShaper already tracks burst history; weight the
+   perturbation by position-in-burst rather than uniformly.
+
+4. QUICstep - design study only: path validation/migration exists
+   (`PendingPathValidation`, transport config nat/migration). Handshake
+   phase over a cover channel, migrate post-auth. If the study is adopted,
+   it becomes its own multi-path plumbing TODO.
+
+5. UPGen formalization - expose deployment-seeded wire-image parameters in
+   the private-protocol config so two deployments do not share a shape
+   signature; today seeds/epochs vary per connection, not per deployment.
+
 ## Acceptance
 - Per candidate: adopt / adapt / reject with a written rationale in this
   file. Any adopted item becomes its own implementation TODO.
+- Rejected candidates keep the numbers that killed them (so the decision
+  stays auditable when the literature moves).

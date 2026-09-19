@@ -27,17 +27,53 @@ contiguous byte ranges, while UDP datagrams need per-datagram boundaries
 (GSO segmentation may cover part of this: one send of a GSO super-buffer
 already emits N wire datagrams).
 
-## Scope
-- First measure whether the current per-SQE `SendMsg(Zc)` batch is actually
-  the remaining bottleneck after TODO-902/1005 (perf on Omega: syscall vs
-  stack-descent share per datagram).
-- If per-request overhead dominates: prototype bundle-send for the
-  connected client path; verify kernel support on target floors
-  (bundle send landed ~6.10/6.11 era - confirm exact version before
-  designing the probe).
-- Compare against the simpler alternative already available: wider GSO
-  runs (fewer syscalls, same wire output).
+## Implementation plan
+
+Phase 0 - Measure first (no code change):
+- On Omega under the e2e throughput harness: `perf stat` syscall counts
+  (`io_uring_enter`, `sendmmsg`) + `perf record` breakdown of the worker
+  path. Question: after TODO-902/1005 removed the copies, what share of the
+  TX path is still per-SQE `msghdr` prep + per-request stack descent?
+- If per-request overhead < ~5% of path cost -> reject bundles, record the
+  numbers here, close.
+
+Phase 1 - Kernel floor:
+- `IORING_RECVSEND_BUNDLE` landed in the ~6.10/6.11 window; confirm the
+  exact version from kernel git/liburing changelog before writing any
+  probe. Omega runs 6.17 (fine); the `linux-transport-uring` CI lane's
+  ubuntu-latest kernel must be probed (if too old, the lane keeps the
+  fallback and the test must tolerate it - same two-contract pattern as
+  TODO-1004).
+
+Phase 2 - Prototype (only if Phase 0 justifies):
+- Send-side provided-buffer ring on the connected client socket: N
+  packet-sized buffers per bundle request, one stack descent per bundle.
+- Bundle vs datagram boundaries: bundles push byte ranges; UDP datagram
+  boundaries need either GSO super-buffers (already built by our staging)
+  or per-buffer datagram semantics - confirm the API contract before
+  designing.
+- Head-to-head on Omega: current `SendMsg(Zc)` batch vs bundle-send vs
+  wider-GSO runs. Adoption gate: >10% pps at iso-CPU or a measurable
+  syscall-count reduction per packet.
+
+## Risks
+- Buffer-ring ownership interacts with the quarantine model (TODO-1004):
+  a short submit with pending bundle SQEs must still quarantine the sender
+  rather than risk stale-pointer execution. Same contract must hold.
+- Send buffer rings serialize sends (FIFO) - verify that ordering matches
+  the fallback-resend semantics of `FlatReply` (unsent tail slicing).
+
+## Ruled out this research round (recorded so it stays ruled out)
+- **io_uring ZC-Rx (`iou-zcrx`, kernel >= 6.15)**: DMA straight into
+  userspace pages, but requires NIC header/data split + flow steering +
+  specific HW Rx queues configured by the operator. Not controllable on
+  cloud VMs or generic consumer NICs - adoption would silently no-op
+  everywhere we deploy. Revisit only if deployment targets gain smartNICs.
+- **SQPOLL busy-poll as default**: already opt-in via
+  `QUICFUSCATE_IO_URING_SQPOLL=1`; busy-polling trades latency for energy/
+  CPU - correct as opt-in, no default change.
 
 ## Acceptance
-- Either a measured adoption with before/after pps on Omega, or a written
-  rejection with the numbers showing why current batching suffices.
+- Either measured adoption (Omega before/after pps + syscall counts, CI
+  lane green) or a written rejection with the Phase 0 numbers showing why
+  current batching suffices.

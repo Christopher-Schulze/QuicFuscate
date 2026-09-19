@@ -51,6 +51,38 @@ IETF/IRTF direction shows as effective, and squeeze remaining overhead.
    handshake completion, TUN-encapsulated DNS/ICMP) get protection while
    bulk doesn't.
 
+## Implementation plan (per item, with code anchors)
+
+1. QUIRL-style gating - `crates/qf-fec/src/policy.rs`, `src/fec/`:
+   check whether the policy layer can express per-traffic-class protection
+   (control/TUN-encapsulated DNS+ICMP/early data = protected; bulk =
+   retransmission). The Kalman controller adapts redundancy globally; the
+   gap is *selective* protection, not adaptive strength. Deliverable:
+   per-class protection map in the policy + controller hook.
+
+2. NWCRG RLC diff-review - `crates/qf-fec/src/seed.rs`,
+   `fountain_codes.rs`: compare our coefficient-PRNG/window metadata vs
+   draft-roca's TinyMT32 + sliding-window design. Deliverable: written
+   divergence rationale (or alignment patch if their design is strictly
+   better).
+
+3. Repair-ACK feedback - `crates/qf-fec/src/receiver.rs` already knows
+   recovered `global_id`s (`emit_recovered`). Add a `recovered_ids()`
+   report consumable by the connection layer; sender-side consumption is
+   shared with TODO-1006 option (a). Deliverable: the reporting side +
+   wire-format proposal; sender accounting lands with 1006.
+
+4. Convolutional gap analysis - `crates/qf-fec/src/interleaved.rs`,
+   `variants.rs`: document where our interleaved/streaming-burst overlaps
+   with rQUIC's overlapping-generation coding and where it differs
+   (block-boundary repair gaps). Deliverable: gap note; new code only if
+   the gap is real.
+
+5. Unequal protection - `crates/qf-fec/src/policy.rs`,
+   `src/fec/internal.rs`: confirm which classes currently get FEC; the
+   draft-zheng guidance is *selective* protection, so this pairs with
+   item 1's per-class map.
+
 ## Acceptance
 - Written adopt/adapt/reject per item with code references.
 - Any adopted mechanism becomes its own implementation TODO.

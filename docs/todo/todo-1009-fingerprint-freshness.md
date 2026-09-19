@@ -27,22 +27,46 @@ QuicFuscate's `browser_profiles/*.chlo` dumps + persona rotation +
 - A fixed rotation set is itself a signature if all connections draw from a
   small static pool.
 
-## Scope
-- Add a profile-freshness contract: each bundled profile carries a
-  `recorded_from` browser version/date; profiles older than N months get a
-  staleness warning and the audit gate checks that at least one current
-  browser fingerprint exists.
-- Extend the rotation tests: consecutive connections must not re-emit the
-  identical ClientHello bytes (GREASE positions/values must vary like real
-  browsers).
-- Track JA4-relevant fields (not just JA3): extension order, ALPS,
-  ECH-GREASE shape, supported-groups ordering - write a self-check that
-  diffs our emitted hello against the recorded profile byte-for-byte except
-  sanctioned variance points.
-- Watch ECH deployment reality (Chrome/Firefox now ship ECH GREASE; real
-  browsers send ECH extensions - a profile without any ECH field is
-  becoming the anomaly).
+## Implementation plan
+
+Files: `crates/qf-stealth/src/fingerprint_profile.rs`,
+`crates/qf-stealth/src/tls_client_hello.rs`, `crates/qf-stealth/src/rotation.rs`,
+`browser_profiles/*.chlo` (+ `.b64`), `src/stealth/fingerprint.rs`.
+
+Step 1 - Schema: extend the `.chlo` profile format with
+`recorded_from` (browser + version, e.g. "chrome/131") and
+`recorded_at` (capture date). Backward compatible: missing metadata =
+unknown age = treated as stale.
+
+Step 2 - Audit gate: new `scripts/audits/verify-fingerprint-freshness.sh`
+(or extend an existing audit): fails if zero profiles are <= 6 months old;
+warns per stale profile. Wire into the audit suite (and clippy-matrix's
+`feature-matrix-coverage`-style companion job if a natural host exists -
+check `scripts/audits/` conventions first).
+
+Step 3 - GREASE variance test (unit/rt): two consecutive generated
+ClientHellos from the same profile must differ at GREASE value positions
+while keeping GREASE *placement* identical to the recorded profile - real
+browsers randomize values, not positions. Byte-identical hellos across
+consecutive connections = fail.
+
+Step 4 - JA4-field coverage self-check: diff emitted hello vs profile on
+the fields JA4/JA4+ actually fingerprint: extension order, ALPS,
+supported_groups order, key_share groups (post-quantum: X25519MLKEM768
+presence), ECH extension shape. A profile with no ECH field at all is
+flagged (real Chrome/Firefox send ECH GREASE since 2024 - its absence is
+becoming the tell).
+
+Step 5 - Refresh policy doc: capture/update procedure into CONTRIBUTING.md
+or a profile-adjacent README note (who captures, from what, cadence).
+
+## Risks
+- Staleness is an arms race - the gate makes it *visible*, not solved;
+  refresh cadence is an ops decision.
+- Profile schema change must stay readable by older builds (additive
+  fields only).
 
 ## Acceptance
-- Staleness audit gate + per-connection GREASE variance test green.
-- Documented policy for how/when profiles are refreshed.
+- Staleness audit gate + per-connection GREASE variance test +
+  JA4-coverage check green.
+- Documented refresh policy.

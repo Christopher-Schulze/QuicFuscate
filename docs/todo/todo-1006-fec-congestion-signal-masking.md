@@ -26,20 +26,56 @@ pushing into a congested path and worsens it. Today `fec_cb_lost_packets`
 feeds only the adaptive FEC controller; whether the QUIC CC still observes
 wire loss for recovered PNs is unverified.
 
-## Investigation
-- Trace whether a FEC-recovered PN still reaches the loss detector / CC as a
-  loss event (e.g. via wire-gap statistics reported back, or the ACK arriving
-  after the loss declaration deadline anyway).
-- If recovery masks loss: either feed a wire-loss estimate into CC
-  (companion to `recovery_loss_rate()`), or document the trade-off
-  explicitly as an intentional design choice with its bounds (only losses
-  within FEC capacity are hidden; losses beyond still hit CC).
-- Check draft-zheng-quic-fec-extension's Repair-ACK idea as prior art:
-  receiver reports FEC-recovered sources so the sender can both suppress
-  retransmission and still count the loss for CC.
+## Implementation plan
+
+Phase 1 - Trace (read-only, no code changes):
+- `src/transport/connection/api.rs:install_recovery_fec_callbacks` wires
+  `fec_cb_sent/lost` callbacks into the recovery module. Find the firing
+  site: the lost callback fires when the QUIC loss detector *declares* a PN
+  lost (PN-gap + time-threshold), not when the wire dropped it.
+- `src/core/connection.rs:~1001` `fec_wire_receiver.receive(data,
+  recovered_packets)` emits `WireDelivery::{Borrowed,Owned}` slices into
+  `conn.recv` - a recovered PN is then ACKed normally by the receiver.
+- Question A: if the receiver ACKs a recovered PN before the sender's
+  loss-declaration window closes, the PN is acked-first and the loss event
+  never fires - the wire loss is invisible to CC. Confirm by reading the
+  loss-declaration path in the recovery module (where `fec_cb_lost_packets`
+  increments vs where ACK processing removes in-flight PNs).
+- Question B (self-blinding check): `recovery_loss_rate()` feeds the
+  adaptive FEC controller. If it derives from *declared* losses, successful
+  recovery shrinks the measured loss rate exactly when FEC is working -
+  the controller could under-protect under sustained loss. Verify what the
+  estimator counts.
+
+Phase 2 - Deterministic test:
+- New rt-test: controlled loss burst inside FEC repair capacity. Assert
+  (a) stream data delivered without retransmission (recovery works),
+  (b) whether the sender-side loss detector/CC observed the wire loss
+  (cwnd/loss counter), (c) `recovery_loss_rate()` still reflects wire loss.
+
+Phase 3 - Fix options (choose after Phase 1 verdict):
+- (a) Sender-side wire-loss channel: `WireFecReceiver` knows recovered
+  source IDs (`emit_recovered`, global_id); receiver reports them in an
+  ACK-adjacent metadata frame (draft-zheng-quic-fec-extension Repair-ACK
+  prior art); sender counts wire loss for CC while suppressing
+  retransmission. Most correct, needs wire format addition.
+- (b) Estimator fusion: fold the receiver-reported recovery rate into
+  `recovery_loss_rate()` as a corrected loss estimate - cheaper, no wire
+  change, approximate.
+- (c) Documented acceptance: masking is bounded by repair capacity
+  (losses beyond capacity still declare normally); if the bound is
+  acceptable for a private VPN transport, write it down here and in
+  DOCUMENTATION.md instead of building (a)/(b).
+
+## Risks
+- Fixing (a) touches the wire format - version/negotiation care needed.
+- (b) is a heuristic; a wrong correction term could over-signal loss and
+  throttle unnecessarily.
 
 ## Acceptance
-- Documented verdict in this file: masked or not masked, with the exact code
-  path proving it.
-- If masked: either CC visibility restored or a deliberate-behavior note
-  with the masking bound (recovery capacity) written down.
+- Documented verdict in this file: masked or not masked, with the exact
+  code path proving it.
+- If masked: either CC visibility restored (option a or b) or a
+  deliberate-behavior note with the masking bound (repair capacity)
+  written down.
+- Regression: qf-fec suite + `fec_decode16_elimination` bench green.
