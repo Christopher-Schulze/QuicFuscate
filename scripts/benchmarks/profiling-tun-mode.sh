@@ -244,9 +244,10 @@ run_tun_scenario() {
 
     local started_at; started_at="$(profile_now_utc)"
     # The admin socket and QKey store are created after the privilege drop, so
-    # they must live in a directory writable by the drop identity (mirrors the
-    # systemd RuntimeDirectory deployment contract).
-    local admin_dir="$RUN_DIR/admin-${label}"
+    # they must live in a directory both traversable by and writable for the
+    # drop identity. Evidence dirs under $HOME are not traversable (0700/0750
+    # home dirs), so use /run - the systemd RuntimeDirectory location.
+    local admin_dir="/run/quicfuscate-profile/admin-${label}-$$"
     install -d -o "$PROFILE_DROP_USER" -g "$PROFILE_DROP_GROUP" -m 0750 "$admin_dir"
     local admin_sock="$admin_dir/admin.sock"
     local qkey_store="$admin_dir/qkeys.json"
@@ -462,6 +463,7 @@ run_tun_scenario() {
     else
         netem_teardown_status="PASS"
     fi
+    rm -rf "$admin_dir"
     if [[ "$cleanup_status" != PASS ]]; then
         result="FAIL"
         [[ -n "$reason" ]] || reason="cleanup_failed"
