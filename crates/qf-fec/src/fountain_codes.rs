@@ -210,6 +210,51 @@ impl LTEncoder {
         (encoded_scratch.as_slice(), indices_scratch.as_slice())
     }
 
+    /// Caller-buffer variant of [`Self::generate_symbol`]: XORs the selected
+    /// source symbols directly into `out` and returns the encoded length plus
+    /// the source indices. Lets repair generation write into the pooled wire
+    /// block directly, skipping the scratch-to-block copy the GF8/GF16
+    /// encoders already avoid.
+    ///
+    /// Returns `None` when `out` is smaller than the encoded length
+    /// (`max_symbol_len.min(symbol_size)`, or `symbol_size` when the encoder
+    /// holds no source symbols).
+    pub fn generate_symbol_into(
+        &mut self,
+        symbol_id: u64,
+        out: &mut [u8],
+    ) -> Option<(usize, &[usize])> {
+        if self.symbols.is_empty() {
+            if out.len() < self.symbol_size {
+                return None;
+            }
+            self.indices_scratch.clear();
+            out[..self.symbol_size].fill(0);
+            return Some((self.symbol_size, &self.indices_scratch));
+        }
+
+        deterministic_source_indices_into(
+            self.symbols.len(),
+            &self.degree_dist,
+            self.rng_seed,
+            symbol_id,
+            &mut self.indices_scratch,
+            &mut self.selected_scratch,
+        );
+        let encoded_len = self.max_symbol_len.min(self.symbol_size);
+        if out.len() < encoded_len {
+            return None;
+        }
+        out[..encoded_len].fill(0);
+        let Self { symbols, indices_scratch, .. } = self;
+        for &index in indices_scratch.iter() {
+            let source = symbols[index].as_slice();
+            let len = source.len().min(encoded_len);
+            fast_xor_inplace(&source[..len], &mut out[..len]);
+        }
+        Some((encoded_len, indices_scratch.as_slice()))
+    }
+
     /// Owning wrapper around [`Self::generate_symbol`] retained for tests and
     /// callers that need detached buffers.
     #[doc(hidden)]
@@ -1360,5 +1405,41 @@ mod tests {
         for (i, sym) in result.iter().enumerate() {
             assert_eq!(sym, &originals[i], "symbol {i} mismatch");
         }
+    }
+
+    #[test]
+    fn generate_symbol_into_matches_scratch_variant_byte_for_byte() {
+        let mut enc = LTEncoder::new(8, 64);
+        for i in 0u8..8 {
+            enc.add_source_symbol((0..64).map(|b| i.wrapping_mul(31).wrapping_add(b)).collect());
+        }
+        // Same symbol ids through both entry points must produce identical
+        // payloads and identical index lists (the indices scratch is shared).
+        for symbol_id in [1u64, 7, 42, 1_000_003] {
+            let (expected_data, expected_indices) = enc.generate_symbol_with_indices(symbol_id);
+            let mut out = vec![0xFFu8; expected_data.len() + 32];
+            let (written, indices) =
+                enc.generate_symbol_into(symbol_id, &mut out).expect("buffer large enough");
+            assert_eq!(written, expected_data.len());
+            assert_eq!(&out[..written], expected_data.as_slice());
+            assert_eq!(indices, expected_indices.as_slice());
+        }
+    }
+
+    #[test]
+    fn generate_symbol_into_rejects_undersized_buffers() {
+        let mut enc = LTEncoder::new(4, 32);
+        enc.add_source_symbol(vec![0x11; 32]);
+        let mut short = vec![0u8; 8];
+        assert!(enc.generate_symbol_into(9, &mut short).is_none());
+
+        // Empty encoder path needs the full symbol_size.
+        let mut empty = LTEncoder::new(4, 32);
+        assert!(empty.generate_symbol_into(9, &mut short).is_none());
+        let mut wide = vec![0xABu8; 64];
+        let (written, indices) = empty.generate_symbol_into(9, &mut wide).expect("full size");
+        assert_eq!(written, 32);
+        assert!(indices.is_empty());
+        assert!(wide[..written].iter().all(|b| *b == 0));
     }
 }

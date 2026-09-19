@@ -121,12 +121,15 @@ impl EncoderVariant {
             Self::GF4(encoder) => encoder.generate_repair_packet(index, pool),
             Self::Fountain(encoder) => {
                 let symbol_id = next_repair_id();
-                let (encoded_data, indices) = encoder.generate_symbol(symbol_id);
+                // Encode directly into the pooled wire block (same convention
+                // as the GF8/GF16 encoders) instead of scratch + copy.
+                let mut data_block = PooledBlock::new(Arc::clone(pool));
+                let (encoded_len, indices) =
+                    encoder.generate_symbol_into(symbol_id, &mut data_block[..])?;
                 let coefficient_len = indices.len().checked_mul(4)?;
                 if coefficient_len > pool.block_size() {
                     return None;
                 }
-                let data_block = copy_to_pooled_block(pool, encoded_data)?;
                 let mut coefficient_block = PooledBlock::new(Arc::clone(pool));
                 for (offset, index) in indices.iter().enumerate() {
                     let bytes = u32::try_from(*index).ok()?.to_be_bytes();
@@ -136,7 +139,7 @@ impl EncoderVariant {
                 FecPacket::from_pooled_blocks(
                     symbol_id,
                     Some(data_block),
-                    encoded_data.len(),
+                    encoded_len,
                     false,
                     Some(coefficient_block),
                     coefficient_len,

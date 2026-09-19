@@ -3954,6 +3954,11 @@
 - DONE. `finish_ack_loss_accounting` scanned `newly_acked` linearly per loss-run candidate (O(lost x acked), up to ~2.7e8 comparisons under the 16384-packet cap). A lazily-filled sorted `sent_at` scratch + `partition_point` makes each probe O(log acked) with identical strict-interval semantics. All 7 persistent-congestion tests + 50/50 crate tests green, clippy clean.
 - Detail: docs/todo/todo-999-pc-gap-binary-search.md
 
+### TODO-1000 - Fountain repair generation encodes into the pooled wire block
+
+- DONE. The Fountain arm of `generate_repair_packet` encoded into encoder scratch then copied into the `PooledBlock` (one `max_symbol_len` memcpy per repair). New `LTEncoder::generate_symbol_into` writes the XOR accumulation directly into the pooled wire block, matching the GF8/GF16 convention. Equivalence tests prove byte-identical payload + indices vs `generate_symbol`; 96/96 qf-fec tests green.
+- Detail: docs/todo/todo-1000-fountain-into-block.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.
