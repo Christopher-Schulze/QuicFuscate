@@ -33,6 +33,31 @@ const CQE_F_NOTIF: u32 = 1 << 3;
 /// `IORING_CQE_F_MORE`: a SendMsgZc primary CQE has a follow-up notification.
 const CQE_F_MORE: u32 = 1 << 1;
 
+/// `QUICFUSCATE_IO_URING=0|off` opts the whole process out of io_uring ring
+/// setup: the client send worker, the client recv batch, and the server batch
+/// worker all stay on their sendmmsg/per-packet fallbacks. The flag is read
+/// once per process; kernel probe + quarantine fallbacks remain the runtime
+/// failure domain, this switch exists for operator-controlled environments
+/// where ring setup itself must never be attempted.
+pub(crate) fn env_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED
+        .get_or_init(|| env_flag_disables(std::env::var("QUICFUSCATE_IO_URING").ok().as_deref()))
+}
+
+fn env_flag_disables(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => match crate::env_utils::parse_bool(value) {
+            Some(enabled) => !enabled,
+            None => {
+                log::warn!("invalid QUICFUSCATE_IO_URING value; retaining io_uring setup");
+                false
+            }
+        },
+        None => false,
+    }
+}
+
 /// Batch UDP sender backed by a reusable io_uring instance.
 ///
 /// A synchronous compatibility primitive for one owner and one send batch.
@@ -45,9 +70,11 @@ const CQE_F_MORE: u32 = 1 << 1;
 /// `queue_depth` capacity after warm-up. Payloads are copied into those owned
 /// slots before submission so kernel pointers never borrow the caller.
 ///
-/// **SQPOLL**: constructed with `IORING_SETUP_SQPOLL` when the kernel
-/// supports it (requires `CAP_SYS_ADMIN` on kernels < 5.12, unrestricted
-/// since 5.12). Falls back to standard mode silently. Check `sqpoll_active()`.
+/// **SQPOLL**: opt-in via `QUICFUSCATE_IO_URING_SQPOLL=1` (requires
+/// `CAP_SYS_ADMIN` on kernels < 5.12, unrestricted since 5.12), with a silent
+/// fallback to standard mode. The kernel poller thread survives the server's
+/// privilege transition and fails its per-thread UID verification, so the
+/// default is a standard ring. Check `sqpoll_active()`.
 ///
 /// **SendMsgZc**: experimental zero-copy send path (kernel 6.0+ for stability).
 /// It is probed at startup but remains disabled unless
@@ -285,9 +312,10 @@ impl<'a> IovecFailureInjection<'a> {
 impl UringBatchSender {
     /// Try to create a sender with the given queue depth.
     ///
-    /// Attempts SQPOLL mode first (eliminates `io_uring_enter` syscalls during
-    /// steady-state operation at the cost of a kernel polling thread).
-    /// Falls back to standard mode on `EPERM` or unsupported kernels.
+    /// Standard ring by default; SQPOLL (eliminates `io_uring_enter` syscalls
+    /// during steady-state operation at the cost of a kernel polling thread)
+    /// requires `QUICFUSCATE_IO_URING_SQPOLL=1`, with a silent fallback to
+    /// standard mode on `EPERM` or unsupported kernels.
     /// Probes `SendMsgZc` support via `io_uring::Probe`; activation still
     /// requires `QUICFUSCATE_IO_URING_ZC=1`.
     ///
@@ -311,24 +339,36 @@ impl UringBatchSender {
         let depth = queue_depth.max(4).checked_next_power_of_two()?;
         let environment = crate::env_utils::EnvSnapshot::capture();
 
-        // Try SQPOLL mode first: the kernel thread polls the SQ, eliminating
-        // io_uring_enter() syscalls while it is active.  Falls back on EPERM
-        // (requires CAP_SYS_ADMIN on kernels < 5.12) or any other error.
-        let (ring, sqpoll_active) = match IoUring::builder()
-            .setup_sqpoll(1000) // kernel poller sleeps after 1000 ms idle
-            .build(depth)
-        {
-            Ok(r) => {
-                log::debug!("io_uring SQPOLL mode active (depth={depth})");
-                (r, true)
+        // SQPOLL is explicit opt-in (QUICFUSCATE_IO_URING_SQPOLL=1), matching
+        // the SendMsgZc convention: its kernel poller thread survives the
+        // server's privilege transition and fails the post-drop per-thread UID
+        // verification, so the portable default is a standard ring.
+        let sqpoll_opt_in = environment.flag("QUICFUSCATE_IO_URING_SQPOLL", false);
+        let (ring, sqpoll_active) = if sqpoll_opt_in {
+            match IoUring::builder()
+                .setup_sqpoll(1000) // kernel poller sleeps after 1000 ms idle
+                .build(depth)
+            {
+                Ok(r) => {
+                    log::debug!("io_uring SQPOLL mode active (depth={depth})");
+                    (r, true)
+                }
+                Err(_) => match IoUring::new(depth) {
+                    Ok(r) => (r, false),
+                    Err(e) => {
+                        log::debug!("io_uring init failed (depth={depth}): {e}");
+                        return None;
+                    }
+                },
             }
-            Err(_) => match IoUring::new(depth) {
+        } else {
+            match IoUring::new(depth) {
                 Ok(r) => (r, false),
                 Err(e) => {
                     log::debug!("io_uring init failed (depth={depth}): {e}");
                     return None;
                 }
-            },
+            }
         };
 
         // Probe SendMsgZc support, but keep the path explicit opt-in. Kernel

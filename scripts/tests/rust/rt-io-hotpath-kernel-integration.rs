@@ -1,9 +1,7 @@
-#![cfg(feature = "rust-tests")]
-
-#[cfg(not(target_os = "linux"))]
-compile_error!(
-    "rt-io-hotpath-kernel-integration requires Linux; use test-transport.sh for an explicit SKIP"
-);
+// io_uring is a default feature, so this target builds on every platform:
+// the file-level cfg keeps it an empty test crate off Linux (test-transport.sh
+// owns the explicit SKIP signal there).
+#![cfg(all(feature = "rust-tests", target_os = "linux"))]
 
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;

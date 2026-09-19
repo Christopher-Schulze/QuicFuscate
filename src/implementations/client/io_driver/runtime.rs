@@ -39,7 +39,11 @@ impl IoDriver {
             Arc::new(SystemIoHotpathAdapter::default());
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         let (uring_sender, uring_available) = {
-            let worker = crate::optimize::uring_batch::UringBatchWorker::with_defaults();
+            let worker = if crate::optimize::uring_batch::env_disabled() {
+                None
+            } else {
+                crate::optimize::uring_batch::UringBatchWorker::with_defaults()
+            };
             let available = worker.is_some();
             if available {
                 log::info!("io_uring batch worker initialised");
@@ -1182,6 +1186,10 @@ impl IoDriver {
         conn: &Arc<parking_lot::Mutex<ClientDataPlane>>,
     ) -> Option<UringInboundRuntime> {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        if crate::optimize::uring_batch::env_disabled() {
+            return None;
+        }
 
         let socket_fd = socket.as_raw_fd();
         // Prefer UDP_GRO when the kernel accepts it: one RecvMsg can then

@@ -498,9 +498,11 @@ impl LiveServerState {
     pub(crate) fn enable_uring_worker(&mut self) {
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            self.uring_worker = LiveUringWorker::with_defaults().map(Arc::new);
-            if self.uring_worker.is_some() {
-                log::info!("server io_uring batch worker initialised");
+            if !crate::optimize::uring_batch::env_disabled() {
+                self.uring_worker = LiveUringWorker::with_defaults().map(Arc::new);
+                if self.uring_worker.is_some() {
+                    log::info!("server io_uring batch worker initialised");
+                }
             }
         }
     }

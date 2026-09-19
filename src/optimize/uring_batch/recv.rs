@@ -165,16 +165,31 @@ impl UringRecvBatch {
         let depth = depth.max(4).checked_next_power_of_two()?;
         let buf_size = buf_size.max(1500);
 
-        // Dedicated ring for receives (separate from send ring).
-        let ring = match IoUring::builder().setup_sqpoll(1000).build(depth) {
-            Ok(r) => r,
-            Err(_) => match IoUring::new(depth) {
+        // Dedicated ring for receives (separate from send ring). SQPOLL is
+        // opt-in (QUICFUSCATE_IO_URING_SQPOLL=1): its kernel poller thread
+        // survives privilege transitions and fails post-drop UID verification
+        // in the server role, so the portable default is a standard ring.
+        let sqpoll_opt_in =
+            crate::env_utils::EnvSnapshot::capture().flag("QUICFUSCATE_IO_URING_SQPOLL", false);
+        let ring = if sqpoll_opt_in {
+            match IoUring::builder().setup_sqpoll(1000).build(depth) {
+                Ok(r) => r,
+                Err(_) => match IoUring::new(depth) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log::debug!("io_uring recv ring init failed (depth={depth}): {e}");
+                        return None;
+                    }
+                },
+            }
+        } else {
+            match IoUring::new(depth) {
                 Ok(r) => r,
                 Err(e) => {
                     log::debug!("io_uring recv ring init failed (depth={depth}): {e}");
                     return None;
                 }
-            },
+            }
         };
 
         // Create eventfd for CQ -> Tokio wakeup.

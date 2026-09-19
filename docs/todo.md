@@ -3931,8 +3931,8 @@
 
 ### TODO-995 - io_uring batch worker: evaluate default-enablement on Linux
 
-- OPEN (build/product decision, not implemented). The server-side `UringBatchWorker` is compile-gated behind `feature = "io_uring"` (`dep:io-uring`) but already has a runtime probe — `IoUring::builder()` returns `None` on kernels/container seccomp without rings, and `enable_uring_worker` falls back cleanly to sendmmsg/per-packet. Verified natively on Omega: 20/20 uring tests + sendmsg_zc/sqpoll probes green on kernel 6.17.
-- Decision needed: fold `io_uring` into the default Linux build (batch submit = fewer `io_uring_enter` vs `sendmmsg` per flush, plus zero-copy send path) vs. keeping it opt-in for dependency/binary-size hygiene. If enabled by default, keep an env kill-switch for ring setup failure domains.
+- DONE (Omega-verified, kernel 6.17/aarch64). `io_uring` is now a default feature — the dep is Linux-target-gated so other platforms are unaffected, and every init point already probes + falls back to sendmmsg/per-packet. `QUICFUSCATE_IO_URING=0|off` is the operator kill-switch (cached OnceLock; gates server `enable_uring_worker`, client outbound worker, client inbound recv). **Found while verifying:** the SQPOLL-first builder spawned `iou-sqp-*` kernel threads that survive `setuid` and failed the server's post-drop per-thread UID verification — SQPOLL is now explicit opt-in via `QUICFUSCATE_IO_URING_SQPOLL=1` (send + recv rings), matching the `QUICFUSCATE_IO_URING_ZC` convention. Scenario g PASS (54.1 Mbit/s, 0% loss) with the worker active and privilege drop verified across 5 threads.
+- Detail: docs/todo/todo-995-iouring-default-linux.md
 
 ### TODO-996 - PGO (profile-guided optimization) for release builds
 

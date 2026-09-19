@@ -1,11 +1,10 @@
 // Integration test for io_uring batch UDP sender.
 //
-// Requires: Linux, feature = "io_uring", kernel >= 5.1.
+// Requires: Linux, kernel >= 5.1. io_uring is a default feature, so this
+// target builds on every platform: the file-level cfg keeps it an empty test
+// crate off Linux (test-transport.sh owns the explicit SKIP signal there).
 
-#![cfg(feature = "rust-tests")]
-
-#[cfg(not(target_os = "linux"))]
-compile_error!("rt-transport-uring requires Linux; use test-transport.sh for an explicit SKIP");
+#![cfg(all(feature = "rust-tests", target_os = "linux"))]
 
 #[cfg(target_os = "linux")]
 use std::collections::{HashMap, HashSet};

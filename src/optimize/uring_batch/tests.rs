@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn env_flag_disables_only_on_explicit_falsy() {
+    assert!(env_flag_disables(Some("0")));
+    assert!(env_flag_disables(Some("off")));
+    assert!(env_flag_disables(Some("false")));
+    assert!(env_flag_disables(Some(" NO ")));
+    assert!(!env_flag_disables(None));
+    assert!(!env_flag_disables(Some("1")));
+    assert!(!env_flag_disables(Some("on")));
+    // Unparseable values retain the enabled default (same contract as
+    // EnvSnapshot::flag).
+    assert!(!env_flag_disables(Some("maybe")));
+}
+
+#[test]
 fn new_returns_none_on_unsupported_platform() {
     // On macOS (or CI without io_uring) this should return None.
     // On Linux it may return Some - both outcomes are valid.

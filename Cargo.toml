@@ -172,7 +172,11 @@ proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
-default = ["client", "server", "rate_limiter"]
+# io_uring is in the default set: the dep is Linux-target-gated (no-op on
+# other platforms), every runtime entry probes the kernel and falls back to
+# sendmmsg/per-packet, and QUICFUSCATE_IO_URING=0|off is the operator
+# kill-switch for environments where ring setup must not be attempted.
+default = ["client", "server", "rate_limiter", "io_uring"]
 
 # --- Role features ---
 client = []
