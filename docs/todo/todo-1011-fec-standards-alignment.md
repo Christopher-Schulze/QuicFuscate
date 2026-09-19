@@ -87,3 +87,19 @@ IETF/IRTF direction shows as effective, and squeeze remaining overhead.
 - Written adopt/adapt/reject per item with code references.
 - Any adopted mechanism becomes its own implementation TODO.
 - Regression: `fec_decode16_elimination` bench and qf-fec suite stay green.
+
+## Implementation status (2026-09)
+
+REJECTED-BY-DESIGN - NWCRG/TinyMT32 wire seed: QuicFuscate already does the
+stronger variant. `seed.rs::derive_fountain_seed` derives the fountain PRNG
+seed via HKDF from the QUIC 1-RTT secret (nothing on the wire, both
+endpoints regenerate identical symbol sets), and `fountain_codes.rs`
+expands it with splitmix64 - strictly better than the draft's TinyMT32
+seeded-coefficient transport, which exists to put a seed on the wire. No
+interop pressure exists (custom data plane), so there is nothing to align
+*to*; the note stays for auditability.
+
+OPEN: QUIRL per-class gating needs a traffic-class concept the FEC path
+does not have yet (`manager.rs`/`policy.rs` treat traffic globally); the
+convolutional/overlapping-window gap analysis vs `interleaved.rs` and the
+Repair-ACK wire-format question (coupled to TODO-1006) remain.

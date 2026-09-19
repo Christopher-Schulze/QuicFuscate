@@ -104,3 +104,27 @@ current FlowShaper/StealthBrain/TLS-Cover/chaff stack and adopt what wins.
   file. Any adopted item becomes its own implementation TODO.
 - Rejected candidates keep the numbers that killed them (so the decision
   stays auditable when the literature moves).
+
+## Implementation status (2026-09)
+
+ADAPTED - candidate 3 (WF-A2D positions) landed first because it needs no
+new machinery: `FlowShaper::apply_jitter` is now position-aware via
+`is_burst_edge` - the first packet after a >=100 ms idle gap (or the very
+first packet) samples the full jitter range while burst-interior packets
+stay in the tight low half. Perturbation budget now lands on burst
+boundaries where WF classifiers extract their signal. Deterministic test
+`flow_shaper_widens_jitter_at_burst_edges` proves the contract with the
+injected `ManualTimeSource`.
+
+ADAPTED - candidate 1 (ChameleonFlow "shape what's there") partially:
+`derive_intelligent_runtime_policy` now halves `padding_rate` when
+ACK-clocked traffic is dense (`ack_us < 3_000`) - real packets already
+carry burst structure, so purchased chaff only widens the bandwidth
+footprint. Regression `dense_traffic_halves_padding_rate` covers both
+branches. The full ChameleonFlow reorder-window variant (redistribute real
+packets across time instead of adding chaff) stays open - it needs a
+bounded delay queue in the send path, which is a bigger surgery than the
+rate rule.
+
+OPEN: candidates 2, 4, 5 unchanged (per-cluster parameter row, QUICstep
+design study, UPGen deployment seeding).

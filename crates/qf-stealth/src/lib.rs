@@ -226,7 +226,7 @@ mod flow_shaping {
     use qf_common::time_source::ProtocolClock;
     use rand::Rng;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -258,6 +258,12 @@ mod flow_shaping {
         /// not contend on the history mutex - `record_and_prune` keeps it in
         /// sync while it already holds the lock.
         history_count: AtomicUsize,
+        /// Anchor instant; `Instant` is not atomic, so the last-send gap is
+        /// tracked as a microsecond offset from this anchor instead.
+        anchor: Instant,
+        /// Offset of the most recent recorded send in microseconds since
+        /// `anchor`; `u64::MAX` until the first packet is recorded.
+        last_send_offset_us: AtomicU64,
         _enabled: AtomicBool,
     }
 
@@ -282,6 +288,8 @@ mod flow_shaping {
                 jitter_max_us,
                 packet_history: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
                 history_count: AtomicUsize::new(0),
+                anchor: clock.now(),
+                last_send_offset_us: AtomicU64::new(u64::MAX),
                 _enabled: AtomicBool::new(true),
             }
         }
@@ -298,11 +306,39 @@ mod flow_shaping {
         ///   of the range so bursts stay tight;
         /// - idle (< 8 packets): sample from the FULL range for wide spread;
         /// - steady: unchanged uniform over `[max/2, max]`.
+        ///
+        /// TODO-1010 (WF-A2D): position-aware perturbation. Website-
+        /// fingerprinting classifiers extract most of their signal from burst
+        /// *boundaries* (train start/end timing), not the burst interior.
+        /// The first packet after an idle gap therefore always samples the
+        /// FULL jitter range regardless of the traffic class, while interior
+        /// burst packets stay tight - the perturbation budget lands where the
+        /// fingerprint lives instead of being spread uniformly.
         #[doc(hidden)]
         pub fn apply_jitter(&self) -> Duration {
-            let (min_us, max_us) = self.jitter_range_for_traffic();
+            let (min_us, max_us) = if self.is_burst_edge() {
+                (1, self.jitter_max_us)
+            } else {
+                self.jitter_range_for_traffic()
+            };
             let jitter_us = rand::rng().random_range(min_us..=max_us);
             Duration::from_micros(jitter_us)
+        }
+
+        /// Gap threshold in microseconds: an inter-send gap larger than this
+        /// marks the next packet as the start of a new burst train.
+        const BURST_EDGE_GAP_US: u64 = 100_000;
+
+        /// True when the next send is a burst-train edge (first packet ever,
+        /// or the first packet after a >=100 ms idle gap).
+        fn is_burst_edge(&self) -> bool {
+            let last = self.last_send_offset_us.load(Ordering::Relaxed);
+            if last == u64::MAX {
+                return true;
+            }
+            let now_offset_us =
+                self.clock.elapsed_since(self.anchor).as_micros().min(u64::MAX as u128) as u64;
+            now_offset_us.saturating_sub(last) >= Self::BURST_EDGE_GAP_US
         }
 
         /// Resolve the effective jitter range from recent traffic intensity.
@@ -337,6 +373,10 @@ mod flow_shaping {
         #[doc(hidden)]
         pub fn record_and_prune(&self, size: usize, packet_type: StealthPacketClass) {
             let now = self.clock.now();
+            self.last_send_offset_us.store(
+                self.clock.elapsed_since(self.anchor).as_micros().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
             let Ok(mut history) = self.packet_history.lock() else {
                 return;
             };
@@ -373,7 +413,8 @@ mod tests {
         BrowserProfile, CdnProvider, DomainFrontingManager, FlowShaper, OsProfile,
         StealthPacketClass,
     };
-    use std::time::Duration;
+    use qf_common::time_source::ProtocolClock;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn domain_rotation_is_deterministic_and_empty_falls_back() {
@@ -409,6 +450,45 @@ mod tests {
             shaper.record_and_prune(size, StealthPacketClass::Data);
         }
         assert!(shaper.history_len() <= 256);
+    }
+
+    #[test]
+    fn flow_shaper_widens_jitter_at_burst_edges() {
+        // TODO-1010 (WF-A2D): burst-interior packets keep the tight range,
+        // the first packet after an idle gap must sample the full range -
+        // burst boundaries carry the fingerprint, not the interior.
+        use qf_common::time_source::test_support::ManualTimeSource;
+        use std::time::SystemTime;
+
+        let clock_src = ManualTimeSource::new(Instant::now(), SystemTime::now());
+        let clock = ProtocolClock::from_source(clock_src.clone());
+        let shaper = FlowShaper::new_with_clock(1_000, false, &clock);
+
+        // Interior burst: >=32 packets with 2 ms gaps in the history window.
+        for _ in 0..40 {
+            shaper.record_and_prune(1_200, StealthPacketClass::Data);
+            clock_src.advance(Duration::from_millis(2));
+        }
+        for _ in 0..64 {
+            let jitter = shaper.apply_jitter();
+            assert!(
+                jitter <= Duration::from_micros(500),
+                "interior burst jitter {jitter:?} must stay in the low half"
+            );
+        }
+
+        // Edge: a 500 ms idle gap makes the next packet a train boundary.
+        // The full range becomes reachable, so at least one sample out of
+        // many must exceed the tight interior ceiling.
+        clock_src.advance(Duration::from_millis(500));
+        let mut saw_wide = false;
+        for _ in 0..256 {
+            if shaper.apply_jitter() > Duration::from_micros(500) {
+                saw_wide = true;
+                break;
+            }
+        }
+        assert!(saw_wide, "burst-edge packet never sampled the wide jitter range");
     }
 
     #[test]

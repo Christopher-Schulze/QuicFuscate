@@ -95,10 +95,19 @@ pub fn derive_intelligent_runtime_policy(
     let padding_rate = if !padding_enabled {
         0
     } else {
-        match inputs.level_hint {
+        let base = match inputs.level_hint {
             0 => 0,
             1 => environment.parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1").unwrap_or(50),
             _ => 100,
+        };
+        // ChameleonFlow principle (TODO-1010): when ACK-clocked activity is
+        // dense, reshaping the real packets already breaks the burst
+        // fingerprint - purchased chaff buys nothing and only widens the
+        // bandwidth footprint. Halve the padding rate under dense traffic.
+        if inputs.ack_us < 3_000.0 {
+            base / 2
+        } else {
+            base
         }
     };
     let timing_rate = match inputs.level_hint {
@@ -190,7 +199,13 @@ mod tests {
         let environment =
             EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1", "37")]);
         let policy = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs { level_hint: 1, signal_tos: 1, ..inputs() },
+            IntelligentStealthInputs {
+                level_hint: 1,
+                signal_tos: 1,
+                // Sparse traffic keeps the full configured rate.
+                ack_us: 12_000.0,
+                ..inputs()
+            },
             &environment,
         );
 
@@ -198,5 +213,24 @@ mod tests {
         assert_eq!(policy.padding_max, 512);
         assert_eq!(policy.padding_rate, 37);
         assert_eq!(policy.timing_rate, 0);
+    }
+
+    #[test]
+    fn dense_traffic_halves_padding_rate() {
+        // ChameleonFlow principle (TODO-1010): dense ACK-clocked traffic
+        // already carries burst structure, so the purchased padding rate is
+        // halved instead of widening the bandwidth footprint.
+        let environment =
+            EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1", "40")]);
+        let dense = derive_intelligent_runtime_policy(
+            IntelligentStealthInputs { level_hint: 1, signal_tos: 1, ack_us: 1_000.0, ..inputs() },
+            &environment,
+        );
+        let sparse = derive_intelligent_runtime_policy(
+            IntelligentStealthInputs { level_hint: 1, signal_tos: 1, ack_us: 12_000.0, ..inputs() },
+            &environment,
+        );
+        assert_eq!(dense.padding_rate, 20);
+        assert_eq!(sparse.padding_rate, 40);
     }
 }
