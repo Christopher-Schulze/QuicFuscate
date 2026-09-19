@@ -78,7 +78,7 @@ struct TextMutation {
 #[cfg(any(test, target_os = "linux"))]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedRoutingOwnership {
+pub(super) struct PersistedRoutingOwnership {
     schema: u8,
     tun_name: String,
     interface_index: u32,
@@ -103,10 +103,10 @@ struct PersistedRoutingOwnership {
 #[cfg(any(test, target_os = "linux"))]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedFirewallOwnership {
+pub(super) struct PersistedFirewallOwnership {
     schema: u8,
     owner_generation: String,
-    tun_name: String,
+    pub(super) tun_name: String,
     firewall_backend: crate::firewall::FirewallBackend,
     firewall_identity: String,
     owner_boot_id: String,
@@ -398,6 +398,95 @@ impl RoutingManager {
         self
     }
 
+    /// Rebuild a manager from persisted identity fields so explicit cleanup
+    /// removes exactly the identity that was installed, independent of the
+    /// flags on the current command line. The owner-liveness checks inside
+    /// `cleanup_stale` still apply unchanged.
+    #[cfg(any(test, target_os = "linux"))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_persisted_fields(
+        source: &str,
+        tun_name: &str,
+        server_ipv4: &str,
+        netmask: &str,
+        wan_interface: &str,
+        server_ipv6: Option<&str>,
+        ipv6_prefix_len: u8,
+        firewall_backend: crate::firewall::FirewallBackend,
+        client_to_client_enabled: bool,
+    ) -> Result<Self, RoutingError> {
+        let parse_v4 = |value: &str, label: &str| {
+            value.parse::<Ipv4Addr>().map_err(|error| {
+                RoutingError::CommandFailed(format!(
+                    "{source} has an invalid {label} {value:?}: {error}"
+                ))
+            })
+        };
+        let server_ip = parse_v4(server_ipv4, "IPv4 address")?;
+        let netmask = parse_v4(netmask, "netmask")?;
+        let routing = match server_ipv6 {
+            Some(ipv6) => {
+                let server_ipv6 = ipv6.parse::<Ipv6Addr>().map_err(|error| {
+                    RoutingError::CommandFailed(format!(
+                        "{source} has an invalid IPv6 address {ipv6:?}: {error}"
+                    ))
+                })?;
+                Self::new_dual_stack(
+                    tun_name.to_string(),
+                    server_ip,
+                    netmask,
+                    wan_interface.to_string(),
+                    server_ipv6,
+                    ipv6_prefix_len,
+                )
+            }
+            None => Self::new(tun_name.to_string(), server_ip, netmask, wan_interface.to_string()),
+        };
+        Ok(routing
+            .with_client_to_client(client_to_client_enabled)
+            .with_firewall_backend(firewall_backend))
+    }
+
+    /// Rebuild a manager from a durable routing record so explicit cleanup
+    /// removes exactly the identity that was installed, independent of the
+    /// flags on the current command line. The owner-liveness checks inside
+    /// `cleanup_stale` still apply unchanged.
+    #[cfg(any(test, target_os = "linux"))]
+    pub(super) fn from_persisted_state(
+        state: &PersistedRoutingOwnership,
+    ) -> Result<Self, RoutingError> {
+        Self::from_persisted_fields(
+            "durable routing state",
+            &state.tun_name,
+            &state.server_ipv4,
+            &state.netmask,
+            &state.wan_interface,
+            state.server_ipv6.as_deref(),
+            state.ipv6_prefix_len,
+            state.firewall_backend,
+            state.client_to_client_enabled,
+        )
+    }
+
+    /// Same as `from_persisted_state` for a firewall-only ownership record —
+    /// covers orphans whose routing record is already gone.
+    #[cfg(any(test, target_os = "linux"))]
+    pub(super) fn from_persisted_firewall_owner(
+        owner: &PersistedFirewallOwnership,
+    ) -> Result<Self, RoutingError> {
+        Self::from_persisted_fields(
+            "durable firewall ownership",
+            &owner.tun_name,
+            &owner.server_ipv4,
+            &owner.netmask,
+            &owner.wan_interface,
+            owner.server_ipv6.as_deref(),
+            owner.ipv6_prefix_len,
+            owner.firewall_backend,
+            owner.client_to_client_enabled,
+        )
+    }
+
     /// Returns true if IPv6 is enabled.
     pub fn is_ipv6_enabled(&self) -> bool {
         self.server_ipv6.is_some()
@@ -530,6 +619,22 @@ impl RoutingManager {
     /// the durable ownership contract.
     #[cfg(target_os = "linux")]
     pub fn cleanup_stale(&self) -> Result<(), RoutingError> {
+        self.cleanup_stale_impl(false)
+    }
+
+    /// Explicit operator-driven variant used by `--cleanup-firewall`.
+    ///
+    /// A surviving firewall-owner record whose routing record is already gone
+    /// is verified against its own generation marker and torn down instead of
+    /// being refused as a guessed cleanup — the durable record itself is the
+    /// ownership proof. Active-owner and cross-TUN rejections are unchanged.
+    #[cfg(target_os = "linux")]
+    pub fn cleanup_stale_explicit(&self) -> Result<(), RoutingError> {
+        self.cleanup_stale_impl(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_stale_impl(&self, explicit: bool) -> Result<(), RoutingError> {
         let mut owned_firewall = None;
         let durable_state_present = if let Some(state) = self.read_persisted_ownership()? {
             self.validate_persisted_ownership(&state)?;
@@ -584,13 +689,21 @@ impl RoutingManager {
                 )));
             }
             if self.fixed_firewall_resource_present()? {
-                return Err(RoutingError::CommandFailed(
-                    "durable firewall ownership exists without its routing record; refusing guessed firewall cleanup"
-                        .to_string(),
-                ));
+                if !explicit {
+                    return Err(RoutingError::CommandFailed(
+                        "durable firewall ownership exists without its routing record; refusing guessed firewall cleanup"
+                            .to_string(),
+                    ));
+                }
+                // The durable owner record carries a validated generation
+                // marker: verify the live resource against it, then tear it
+                // down through the same owned-firewall path.
+                owned_firewall = Some(owner);
+                true
+            } else {
+                self.remove_firewall_ownership(&owner)?;
+                false
             }
-            self.remove_firewall_ownership(&owner)?;
-            false
         } else {
             false
         };

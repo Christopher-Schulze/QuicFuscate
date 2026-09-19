@@ -3860,6 +3860,13 @@
 - Local proof: qf-transport-cc 96/96, fmt/clippy clean.
 - Omega proof (scenario g, 0% loss): TCP **46.3 Mbit/s** post-fix vs ~12-21 Mbit/s pinned; `outbound_release` never armed (pacer released); UDP flood shows live cwnd movement (203925->20277). A/B control: `enable_pacing=false` gave 53 Mbit/s — residual cap is the single-core testbed, not the transport.
 
+### TODO-984 - `--cleanup-firewall` unusable after config drift and unimplemented for the server
+
+- Detail: `docs/todo/todo-984-cleanup-firewall-record-driven.md`
+- DONE. `Commands::Server` never forwarded the flag, `--cert/--key` were unconditionally required, and `cleanup_stale_routing_records` rebuilt the `RoutingManager` from the *current* `ServerConfig` — so any post-crash drift (renamed/vanished WAN interface, different backend) hit the exact-identity check in `validate_persisted_ownership` and refused forever, leaving stale nftables state unremovable.
+- The maintenance path is now record-driven: `cleanup_persisted_routing_records()` rebuilds each manager from the persisted identity (`from_persisted_state` / `from_persisted_firewall_owner` for owner-record orphans), runs before cert loading and privilege drop, and exits without a listener. `cleanup_stale_explicit` additionally tears down firewall-only orphans whose resource is still present — verified via the durable `owner_generation` marker, not guessed. Active-owner, cross-TUN, and foreign-resource rejections are unchanged, and implicit startup cleanup keeps the strict current-config identity check.
+- Omega-verified on the release binary: drift case (record `wan_interface=eth1` vs autodetected `enp0s6`) cleaned after `kill -9` + namespace deletion; live-resource case removed `inet quicfuscate_rt` plus both durable records; cleanup against a running server refused with exit 1; graceful shutdown unaffected.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.

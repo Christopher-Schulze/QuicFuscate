@@ -971,12 +971,14 @@ enum Commands {
         listen: String,
 
         /// Path to the certificate file
-        #[clap(short, long, required = true)]
-        cert: PathBuf,
+        /// (not required for --cleanup-firewall maintenance mode)
+        #[clap(short, long, required_unless_present = "cleanup_firewall")]
+        cert: Option<PathBuf>,
 
         /// Path to the private key file
-        #[clap(short, long, required = true)]
-        key: PathBuf,
+        /// (not required for --cleanup-firewall maintenance mode)
+        #[clap(short, long, required_unless_present = "cleanup_firewall")]
+        key: Option<PathBuf>,
 
         #[command(flatten)]
         shared: SharedArgs,

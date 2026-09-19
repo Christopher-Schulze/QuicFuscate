@@ -437,6 +437,97 @@ fn test_windows_dual_stack_nat_is_rejected_before_side_effects() {
     ));
 }
 
+#[test]
+fn persisted_state_rebuilds_manager_identity_after_config_drift() {
+    let state = PersistedRoutingOwnership {
+        schema: ROUTING_STATE_SCHEMA,
+        tun_name: "qfserver0".to_string(),
+        interface_index: 17,
+        owner_boot_id: "boot-id".to_string(),
+        owner_pid: 42,
+        owner_start_time: 7,
+        server_ipv4: "10.8.0.1".to_string(),
+        netmask: "255.255.255.0".to_string(),
+        wan_interface: "veth-qfl".to_string(),
+        server_ipv6: Some("fd00::1".to_string()),
+        ipv6_prefix_len: 96,
+        firewall_backend: crate::firewall::FirewallBackend::Nftables,
+        firewall_owner_generation: firewall_owner_generation("qfserver0", "boot-id", 42, 7),
+        client_to_client_enabled: true,
+        ipv4_address: BoolMutation { before: false, after: true },
+        ipv6_address: Some(BoolMutation { before: false, after: true }),
+        link_up: BoolMutation { before: false, after: true },
+        ipv4_forwarding: TextMutation { before: "0\n".to_string(), after: "1".to_string() },
+        ipv6_forwarding: Some(TextMutation { before: "0\n".to_string(), after: "1".to_string() }),
+    };
+
+    let mgr = RoutingManager::from_persisted_state(&state).expect("rebuild from record");
+    assert_eq!(mgr.tun_name, "qfserver0");
+    assert_eq!(mgr.server_ip, Ipv4Addr::new(10, 8, 0, 1));
+    assert_eq!(mgr.netmask, Ipv4Addr::new(255, 255, 255, 0));
+    assert_eq!(mgr.wan_interface, "veth-qfl");
+    assert_eq!(mgr.server_ipv6, Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)));
+    assert_eq!(mgr.ipv6_prefix_len, 96);
+    assert_eq!(mgr.firewall_backend, crate::firewall::FirewallBackend::Nftables);
+    assert!(mgr.client_to_client_enabled);
+}
+
+#[test]
+fn persisted_firewall_owner_rebuilds_manager_identity() {
+    let owner = PersistedFirewallOwnership {
+        schema: FIREWALL_OWNER_SCHEMA,
+        owner_generation: firewall_owner_generation("qfserver0", "boot-id", 42, 7),
+        tun_name: "qfserver0".to_string(),
+        firewall_backend: crate::firewall::FirewallBackend::Iptables,
+        firewall_identity: firewall_identity(crate::firewall::FirewallBackend::Iptables)
+            .to_string(),
+        owner_boot_id: "boot-id".to_string(),
+        owner_pid: 42,
+        owner_start_time: 7,
+        server_ipv4: "10.8.0.1".to_string(),
+        netmask: "255.255.255.0".to_string(),
+        wan_interface: "enp0s6".to_string(),
+        server_ipv6: None,
+        ipv6_prefix_len: 64,
+        client_to_client_enabled: false,
+    };
+
+    let mgr = RoutingManager::from_persisted_firewall_owner(&owner).expect("rebuild from owner");
+    assert_eq!(mgr.tun_name, "qfserver0");
+    assert_eq!(mgr.wan_interface, "enp0s6");
+    assert_eq!(mgr.server_ipv6, None);
+    assert_eq!(mgr.firewall_backend, crate::firewall::FirewallBackend::Iptables);
+}
+
+#[test]
+fn persisted_state_rebuild_rejects_invalid_addresses() {
+    let mut state = PersistedRoutingOwnership {
+        schema: ROUTING_STATE_SCHEMA,
+        tun_name: "qfserver0".to_string(),
+        interface_index: 17,
+        owner_boot_id: "boot-id".to_string(),
+        owner_pid: 42,
+        owner_start_time: 7,
+        server_ipv4: "not-an-ip".to_string(),
+        netmask: "255.255.255.0".to_string(),
+        wan_interface: "eth0".to_string(),
+        server_ipv6: None,
+        ipv6_prefix_len: 64,
+        firewall_backend: crate::firewall::FirewallBackend::Iptables,
+        firewall_owner_generation: firewall_owner_generation("qfserver0", "boot-id", 42, 7),
+        client_to_client_enabled: false,
+        ipv4_address: BoolMutation { before: false, after: true },
+        ipv6_address: None,
+        link_up: BoolMutation { before: false, after: true },
+        ipv4_forwarding: TextMutation { before: "0\n".to_string(), after: "1".to_string() },
+        ipv6_forwarding: None,
+    };
+    assert!(RoutingManager::from_persisted_state(&state).is_err());
+    state.server_ipv4 = "10.8.0.1".to_string();
+    state.server_ipv6 = Some("not-an-ip".to_string());
+    assert!(RoutingManager::from_persisted_state(&state).is_err());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn delegated_teardown_succeeds_without_touching_host_state() {

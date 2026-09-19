@@ -293,6 +293,53 @@ pub(super) fn cleanup_stale_routing_records(
     Ok(())
 }
 
+/// Record-driven stale cleanup for the `--cleanup-firewall` maintenance path.
+///
+/// Startup cleanup validates persisted state against the *current* config, so
+/// a record whose WAN interface, backend or addressing has changed since the
+/// crash can never be cleaned that way. Here each durable record's own
+/// persisted identity drives removal instead — owner liveness, boot identity
+/// and foreign-resource checks inside `cleanup_stale` still apply unchanged,
+/// so active or ambiguous state is still refused.
+#[cfg(target_os = "linux")]
+pub fn cleanup_persisted_routing_records() -> Result<(), String> {
+    let tun_names = crate::implementations::server::routing::persisted_tun_names()
+        .map_err(|error| format!("enumerate stale routing records: {error}"))?;
+    for tun_name in &tun_names {
+        let Some(state) = RoutingManager::read_persisted_state_for(tun_name)
+            .map_err(|error| format!("read stale routing record {tun_name}: {error}"))?
+        else {
+            continue;
+        };
+        let routing = RoutingManager::from_persisted_state(&state)
+            .map_err(|error| format!("stale routing cleanup failed: {error}"))?;
+        routing
+            .cleanup_stale_explicit()
+            .map_err(|error| format!("stale routing cleanup failed: {error}"))?;
+    }
+    // A surviving firewall-owner record whose routing record is already gone
+    // is a firewall-only orphan; rebuild the manager from the owner identity.
+    let orphan_owner = match RoutingManager::read_persisted_firewall_owner()
+        .map_err(|error| format!("read durable firewall ownership: {error}"))?
+    {
+        Some(owner) => {
+            let has_record = RoutingManager::read_persisted_state_for(&owner.tun_name)
+                .map_err(|error| format!("read stale routing record {}: {error}", owner.tun_name))?
+                .is_some();
+            (!has_record).then_some(owner)
+        }
+        None => None,
+    };
+    if let Some(owner) = orphan_owner {
+        let routing = RoutingManager::from_persisted_firewall_owner(&owner)
+            .map_err(|error| format!("stale firewall cleanup failed: {error}"))?;
+        routing
+            .cleanup_stale_explicit()
+            .map_err(|error| format!("stale firewall cleanup failed: {error}"))?;
+    }
+    Ok(())
+}
+
 pub(super) fn teardown_routing(routing: RoutingManager) -> Result<(), RoutingError> {
     routing.teardown().map_err(|error| {
         log::error!("Routing teardown failed: {:?}", error);

@@ -48,6 +48,7 @@ pub(super) async fn run_server(
     drop_group: &str,
     audit_log_path: Option<PathBuf>,
     wan_interface: Option<String>,
+    cleanup_firewall: bool,
     startup_engine_config: Option<quicfuscate::engine::EngineConfig>,
 ) -> std::io::Result<()> {
     let config_path = config.as_ref();
@@ -67,8 +68,11 @@ pub(super) async fn run_server(
     #[cfg(not(target_os = "linux"))]
     let _ = (no_drop_privileges, drop_user, drop_group);
 
+    // --cleanup-firewall is a root maintenance command that never drops
+    // privileges and never opens sockets, so the drop-user identity and the
+    // startup capability preflight must not gate it.
     #[cfg(target_os = "linux")]
-    let privilege_target = if no_drop_privileges {
+    let privilege_target = if no_drop_privileges || cleanup_firewall {
         None
     } else {
         Some(quicfuscate::privilege::resolve_identity(drop_user, drop_group).map_err(|error| {
@@ -106,10 +110,12 @@ pub(super) async fn run_server(
             privilege_requirements,
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-        quicfuscate::privilege::validate_startup_capabilities(&initial, privilege_requirements)
-            .map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
-            })?;
+        if !cleanup_firewall {
+            quicfuscate::privilege::validate_startup_capabilities(&initial, privilege_requirements)
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+                })?;
+        }
         if privilege_target.is_some() && !initial.can_drop {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -160,6 +166,25 @@ pub(super) async fn run_server(
             tun_ip6.as_deref(),
             tun_prefix6,
         )?;
+    }
+
+    // --cleanup-firewall: recover stale routing/firewall state left by a
+    // crashed session, then exit without starting the listener. This runs
+    // before certificate loading, audit init, and the privilege drop so it
+    // only needs root privileges plus the resolved routing configuration.
+    if cleanup_firewall {
+        #[cfg(target_os = "linux")]
+        {
+            info!("Cleaning up stale server routing/firewall state...");
+            quicfuscate::implementations::server::cleanup_persisted_routing_records()
+                .map_err(std::io::Error::other)?;
+            info!("Stale server routing/firewall state cleaned up");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            info!("--cleanup-firewall: server keeps no durable firewall state on this platform");
+        }
+        return Ok(());
     }
 
     // Initialize the global audit log (TODO-515).

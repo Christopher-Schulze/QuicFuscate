@@ -245,6 +245,10 @@ async fn async_main(
             wan_interface,
         } => {
             let fec_mode = resolve_cli_fec_mode_override(shared.fec_mode);
+            // --cleanup-firewall exits before certificate loading; the
+            // certificate paths are only absent in that mode.
+            let cert = cert.unwrap_or_default();
+            let key = key.unwrap_or_default();
             run_server(
                 listen.as_str(),
                 cert.as_path(),
@@ -288,6 +292,7 @@ async fn async_main(
                 &drop_group,
                 audit_log,
                 wan_interface,
+                shared.cleanup_firewall,
                 startup_engine_config,
             )
             .await?;

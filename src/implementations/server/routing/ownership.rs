@@ -292,25 +292,42 @@ impl RoutingManager {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn read_persisted_ownership(
-        &self,
+    fn read_persisted_ownership_at(
+        path: &std::path::Path,
     ) -> Result<Option<PersistedRoutingOwnership>, RoutingError> {
-        let contents = match std::fs::read_to_string(&self.ownership_path) {
+        let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(RoutingError::CommandFailed(format!(
                     "read durable routing state {}: {error}",
-                    self.ownership_path.display()
+                    path.display()
                 )))
             }
         };
         serde_json::from_str(&contents).map(Some).map_err(|error| {
             RoutingError::CommandFailed(format!(
                 "parse durable routing state {}: {error}",
-                self.ownership_path.display()
+                path.display()
             ))
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn read_persisted_ownership(
+        &self,
+    ) -> Result<Option<PersistedRoutingOwnership>, RoutingError> {
+        Self::read_persisted_ownership_at(&self.ownership_path)
+    }
+
+    /// Read the durable routing record for a TUN name without requiring a
+    /// manager — used by explicit cleanup so the persisted identity itself
+    /// drives removal instead of the current invocation's flags.
+    #[cfg(target_os = "linux")]
+    pub(in crate::implementations::server) fn read_persisted_state_for(
+        tun_name: &str,
+    ) -> Result<Option<PersistedRoutingOwnership>, RoutingError> {
+        Self::read_persisted_ownership_at(&default_routing_state_path(tun_name))
     }
 
     #[cfg(target_os = "linux")]
@@ -405,15 +422,35 @@ impl RoutingManager {
 
     #[cfg(target_os = "linux")]
     fn firewall_owner_path(&self) -> PathBuf {
+        Self::firewall_owner_file_path()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn firewall_owner_file_path() -> PathBuf {
         Path::new(ROUTING_STATE_DIR).join(ROUTING_FIREWALL_OWNER_FILE)
+    }
+
+    /// Read the global durable firewall ownership record without a manager —
+    /// used by explicit cleanup to cover firewall-only orphans whose routing
+    /// record is already gone.
+    #[cfg(target_os = "linux")]
+    pub(in crate::implementations::server) fn read_persisted_firewall_owner(
+    ) -> Result<Option<PersistedFirewallOwnership>, RoutingError> {
+        Self::read_firewall_ownership_at(&Self::firewall_owner_file_path())
     }
 
     #[cfg(target_os = "linux")]
     pub(super) fn read_firewall_ownership(
         &self,
     ) -> Result<Option<PersistedFirewallOwnership>, RoutingError> {
-        let path = self.firewall_owner_path();
-        let metadata = match std::fs::symlink_metadata(&path) {
+        Self::read_firewall_ownership_at(&self.firewall_owner_path())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_firewall_ownership_at(
+        path: &std::path::Path,
+    ) -> Result<Option<PersistedFirewallOwnership>, RoutingError> {
+        let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
