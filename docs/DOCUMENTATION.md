@@ -429,7 +429,7 @@ This document provides comprehensive technical documentation for the system arch
   - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, version, recovery, frames, h3, xdp, udpfast, connection)
   - HTTP/3 streams: `fin_received` flag tracks stream completion for deterministic GC in `poll()`
   - UDP fast paths: runtime-owned GSO/GRO, `UdpFastPath`, sendmmsg/recvmmsg, and sendmsg_x batching in `crates/qf-transport-udp/src/lib.rs` + `fastpath.rs`; `src/optimize/udp.rs` and `src/transport/udpfast.rs` retain root compatibility projections
-- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` (packet size/count/reordering are complete; inter-arrival bins use every-eighth-packet sampling), sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter. `src/brain/state.rs` owns policy state, actuator snapshots, transition-reason helpers, and server-push state helpers; `src/brain/orchestrator.rs` owns the feature-gated deep-integration orchestrator.
+- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` — each per-packet counter and every histogram bin is `crossbeam_utils::CachePadded`, so dataplane writes and housekeeping drains no longer share cachelines (TODO-997) — sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter. `src/brain/state.rs` owns policy state, actuator snapshots, transition-reason helpers, and server-push state helpers; `src/brain/orchestrator.rs` owns the feature-gated deep-integration orchestrator.
 
 - `src/profile.rs`: test/compat-only `Aegis128Profile` adapter mapped to `simd::CryptoAeadPlan`
 - `src/engine/`: Embedded control plane (`QuicFuscateEngine`, `EngineConfig`, `EngineCommand`, `EngineEvent`, `EngineStats`) for programmatic runtime orchestration
@@ -2284,7 +2284,7 @@ if compress.should_compress(payload.len(), rtt_ms, loss, bw_bps) {
 }
 ```
 
-Pool-backed compression and decompression return a `PooledBlock` RAII owner. Dropping it returns the checked-out allocation through `MemoryPool::free()`, including malformed-input, compressor/decompressor, caller-error, and unwind paths. TUN reads use the same owner, and frame batching no longer allocates an unused intermediate pool block. FEC pooled-buffer ownership is closed by TODO-832; zero-copy DATAGRAM ownership is closed by TODO-833; exact decompression-length semantics remain TODO-603.
+Pool-backed compression and decompression return a `PooledBlock` RAII owner. Dropping it returns the checked-out allocation through `MemoryPool::free()`, including malformed-input, compressor/decompressor, caller-error, and unwind paths. TUN reads use the same owner, and frame batching no longer allocates an unused intermediate pool block. FEC pooled-buffer ownership is closed by TODO-832; zero-copy DATAGRAM ownership is closed by TODO-833; exact decompression-length semantics remain TODO-603. Every repair encoder accumulates directly into the pooled wire block — the GF lanes via chunked row accumulation and the Fountain path via `LTEncoder::generate_symbol_into` (TODO-1000) — so no scratch-to-block copy exists on the repair path.
 
 #### Unified TLS Provider Usage
 ```rust
