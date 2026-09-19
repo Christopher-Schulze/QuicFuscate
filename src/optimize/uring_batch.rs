@@ -487,6 +487,34 @@ impl UringBatchSender {
         )
     }
 
+    /// Bounds-check caller-supplied `(start, len)` spans against the flat
+    /// buffer and return the used payload extent (maximum span end). iovec
+    /// pointers index into `flat` unchecked, so an out-of-bounds span must be
+    /// rejected before adoption; admission is validated on the extent, not
+    /// `flat.len()`, because callers may hand over a larger reusable slab.
+    fn flat_spans_extent(
+        spans: impl Iterator<Item = (usize, usize)>,
+        flat_len: usize,
+    ) -> std::io::Result<usize> {
+        let mut extent = 0usize;
+        for (start, len) in spans {
+            let end = start.checked_add(len).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "io_uring flat span overflows usize",
+                )
+            })?;
+            if end > flat_len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "io_uring flat span exceeds payload buffer",
+                ));
+            }
+            extent = extent.max(end);
+        }
+        Ok(extent)
+    }
+
     fn validate_batch_admission(count: usize, payload_bytes: usize) -> std::io::Result<()> {
         if count > MAX_BATCH_PACKETS {
             return Err(std::io::Error::new(
@@ -659,7 +687,9 @@ impl UringBatchSender {
                 input_len,
             ));
         }
-        Self::validate_batch_admission(input_len, flat.len())
+        let payload_bytes = Self::flat_spans_extent(spans.iter().copied(), flat.len())
+            .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        Self::validate_batch_admission(input_len, payload_bytes)
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
         failure_injection
             .validate(input_len)
@@ -864,7 +894,10 @@ impl UringBatchSender {
                 input_len,
             ));
         }
-        Self::validate_batch_admission(input_len, flat.len())
+        let payload_bytes =
+            Self::flat_spans_extent(spans.iter().map(|&(_, start, len)| (start, len)), flat.len())
+                .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
+        Self::validate_batch_admission(input_len, payload_bytes)
             .map_err(|error| BatchSendError::not_submitted(error, input_len))?;
         failure_injection
             .validate(input_len)
@@ -1359,7 +1392,7 @@ impl Drop for UringBatchSender {
 }
 
 mod worker;
-pub use worker::{FlatToReply, UringBatchWorker};
+pub use worker::{FlatReply, FlatToReply, UringBatchWorker};
 mod recv;
 pub use recv::{RecvCompletion, UringRecvBatch};
 

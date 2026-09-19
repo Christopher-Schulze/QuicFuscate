@@ -796,3 +796,62 @@ fn uring_batch_worker_flat_adoption_returns_buffers_intact() {
     worker.request_shutdown();
     worker.join().expect("join worker");
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn uring_batch_worker_connected_flat_slab_returns_buffers_intact() {
+    let worker = match UringBatchWorker::new(8) {
+        Some(worker) => worker,
+        None => {
+            eprintln!("skipping: io_uring not available");
+            return;
+        }
+    };
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver.set_read_timeout(Some(Duration::from_secs(2))).expect("set timeout");
+    let recv_addr = receiver.local_addr().expect("receiver address");
+    let sender_socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    sender_socket.connect(recv_addr).expect("connect sender");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+
+    // Stage three datagrams into a reusable slab whose capacity (and length)
+    // far exceed the used extent - exactly what the client io_driver does.
+    let payloads: [&[u8]; 3] = [b"conn-flat-1", b"conn-flat-2", b"conn-flat-3"];
+    let mut flat = vec![0u8; 1 << 16];
+    let mut spans = Vec::with_capacity(payloads.len());
+    let mut watermark = 0usize;
+    for payload in payloads {
+        flat[watermark..watermark + payload.len()].copy_from_slice(payload);
+        spans.push((watermark, payload.len()));
+        watermark += payload.len();
+    }
+    let slab_len = flat.len();
+    let staged_flat = flat.clone();
+    let staged_spans = spans.clone();
+
+    let reply = runtime.block_on(worker.send_batch_flat_with_disposition(
+        sender_socket.as_raw_fd(),
+        flat,
+        spans,
+    ));
+    let result = reply.result.expect("connected flat submission result");
+    assert_eq!(result.sent_count(), payloads.len(), "all connected datagrams sent");
+    for expected in payloads {
+        let mut buffer = [0u8; 256];
+        let (length, _) = receiver.recv_from(&mut buffer).expect("receive datagram");
+        assert_eq!(&buffer[..length], expected);
+    }
+
+    // The slab must come back intact - full length, contents, and span table -
+    // so the caller can resend the unsent tail and reuse capacity next burst.
+    assert_eq!(reply.flat.len(), slab_len, "slab length preserved");
+    assert_eq!(reply.flat, staged_flat, "slab contents returned intact");
+    assert_eq!(reply.spans, staged_spans, "span table returned intact");
+
+    worker.request_shutdown();
+    worker.join().expect("join worker");
+}

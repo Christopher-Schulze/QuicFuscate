@@ -766,24 +766,23 @@ impl IoDriver {
                     {
                         use std::os::fd::AsRawFd;
                         let socket_fd = socket.as_raw_fd();
-                        // The reference vector is scoped to the synchronous
-                        // dispatch phase. It cannot keep borrowing
-                        // `batch_flat` into the next loop iteration, and
-                        // SmallVec keeps the configured maximum batch inline.
-                        #[cfg(feature = "io_uring")]
-                        let batch_refs: smallvec::SmallVec<[&[u8]; 256]> = batch_spans
-                            .iter()
-                            .map(|&(start, len)| &batch_flat[start..start + len])
-                            .collect();
 
-                        // io_uring batch path (preferred when available).
+                        // io_uring batch path (preferred when available). The
+                        // staged slab is handed to the worker by value - the
+                        // sender adopts it in place (no second flattening copy)
+                        // and returns it intact so the sendmmsg/per-packet
+                        // fallback below can still resend the unsent tail.
                         #[cfg(feature = "io_uring")]
                         if matches!(dispatch, OutboundDispatch::IoUringBatch) {
                             if let Some(worker) = self.uring_worker.as_ref() {
-                                match worker
-                                    .send_batch_with_disposition(socket_fd, &batch_refs)
-                                    .await
-                                {
+                                let reply = worker
+                                    .send_batch_flat_with_disposition(
+                                        socket_fd,
+                                        std::mem::take(&mut batch_flat),
+                                        std::mem::take(&mut batch_spans),
+                                    )
+                                    .await;
+                                match reply.result {
                                     Ok(result) => {
                                         for (index, sent_slot) in batch_sent.iter_mut().enumerate()
                                         {
@@ -808,6 +807,8 @@ impl IoDriver {
                                         ));
                                     }
                                 }
+                                batch_flat = reply.flat;
+                                batch_spans = reply.spans;
                             }
                         }
 

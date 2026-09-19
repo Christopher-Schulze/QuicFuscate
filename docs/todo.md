@@ -375,7 +375,7 @@
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
 ### TODO-902 - io_uring TX triple-copy and channel1 fix
-- PARTIAL (2026-09-19): stale claims corrected - `Sleep(1ms)` polling never existed (worker uses `blocking_recv`, sender uses `submit_and_wait`) and `channel(1)` is deliberate single-owner backpressure. The real defect (double flatten: caller staging + worker-side re-flatten of `&[(addr,&[u8])]`) is fixed via `WorkerRequest::ToFlat` + `send_batch_to_flat_with_disposition`: owned buffers are adopted in place and returned intact in `FlatToReply` for fallback resend/reuse; `submit_request` is generic with a `recover` callback so queue-full/unavailable returns the buffers too. Verified on Omega: io_uring clippy/check clean, flat-adoption test green, `tun-e2e-netns.sh` PASS with live `io_uring batch worker` evidence. Still open: 2x-throughput acceptance needs x86_64 bench hardware.
+- PARTIAL (2026-09-19): stale claims corrected - `Sleep(1ms)` polling never existed (worker uses `blocking_recv`, sender uses `submit_and_wait`) and `channel(1)` is deliberate single-owner backpressure. The real defect (double flatten: caller staging + worker-side re-flatten of `&[(addr,&[u8])]`) is fixed via `WorkerRequest::ToFlat` + `send_batch_to_flat_with_disposition`: owned buffers are adopted in place and returned intact in `FlatToReply` for fallback resend/reuse; `submit_request` is generic with a `recover` callback so queue-full/unavailable returns the buffers too. Client io_driver follow-up: `WorkerRequest::ConnectedFlat` + `send_batch_flat_with_disposition` adopt the persistent `batch_flat` slab by value (extent-validated because slab length exceeds used bytes; `flat_spans_extent` now bounds-checks all caller spans before unchecked iovec indexing); the per-flush `batch_refs` SmallVec and second flatten are gone. Verified on Omega: io_uring clippy/check clean, flat-adoption + connected-slab tests green, `tun-e2e-netns.sh` PASS with live `io_uring batch worker` evidence. Still open: 2x-throughput acceptance needs x86_64 bench hardware.
 - Detail: `docs/todo/todo-902-iouring-tx-triple-copy.md`
 
 ## Queue
@@ -3978,6 +3978,11 @@
 
 - OPEN. `uring_sendmsg_partial_send_retry_subsets_deliver_exactly_once` fails deterministically on Omega (aarch64, kernel 6.17): `completion set incomplete: 2/3, cq_overflow=0` where the SendMsgZc twin passes. Reproduces identically with the TODO-902 flat-adoption changes stashed - pre-existing, likely kernel-version-dependent accounting of rejected SQEs. Found during TODO-902 verification.
 - Detail: docs/todo/todo-1004-uring-injection-completion-accounting.md
+
+### TODO-1005 - Standalone client TX staged a second memcpy per packet before GSO coalescing
+
+- DONE (2026-09-19). Linux `flush_connected_outgoing` wrote each datagram into `out` scratch and then copied it into the flat GSO staging buffer; `conn.send` is write-only in its output buffer, so the loop now publishes directly into `flat`'s spare capacity (`reserve` + `set_len(start+len)` on success), removing one ~1.2 KiB memcpy per outbound packet while keeping the staging layout, span table, GSO runs, fallback slicing, and diagnostics identical. Verified on Omega: clippy/check clean, `tun-e2e-netns.sh` PASS on the rebuilt release binary with 0% loss.
+- Detail: docs/todo/todo-1005-standalone-client-tx-memcpy.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.

@@ -371,13 +371,29 @@ async fn flush_connected_outgoing(
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.record_send_poll();
         }
-        match conn.send(out) {
+        // Write the datagram straight into the flat staging buffer's spare
+        // capacity instead of staging through `out` and copying - one memcpy
+        // less per packet on the TX hot path.
+        let start = flat.len();
+        flat.reserve(out.len());
+        let send_result = {
+            let spare = &mut flat.spare_capacity_mut()[..out.len()];
+            // SAFETY: `conn.send` treats the buffer as write-only packet
+            // storage; it only reads back bytes it initialized itself within
+            // the call. Exactly `len` bytes are published via `set_len` on
+            // success, so no uninitialized data ever becomes readable.
+            let buf = unsafe {
+                std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), spare.len())
+            };
+            conn.send(buf)
+        };
+        match send_result {
             Ok(len) if len > 0 => {
                 if let Some(diagnostics) = diagnostics.as_deref_mut() {
                     diagnostics.record_send_datagram(len);
                 }
-                let start = flat.len();
-                flat.extend_from_slice(&out[..len]);
+                // SAFETY: `conn.send` initialized `len` bytes at `start`.
+                unsafe { flat.set_len(start + len) };
                 spans.push((start, len));
                 telemetry!(quicfuscate::telemetry::BYTES_SENT.inc_by(len as u64));
             }
