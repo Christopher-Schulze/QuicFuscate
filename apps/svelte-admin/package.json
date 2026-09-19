@@ -26,7 +26,7 @@
     "@quicfuscate/types": "workspace:*",
     "@quicfuscate/i18n": "workspace:*",
     "@quicfuscate/error-reporting": "workspace:*",
-    "smol-toml": "1.6.1",
+    "smol-toml": "1.8.0",
     "bits-ui": "^2.16.3",
     "clsx": "^2.1.1",
     "@lucide/svelte": "^0.577.0",
@@ -48,6 +48,6 @@
     "tailwindcss": "^4.0.6",
     "typescript": "^5.9.3",
     "vite": "^7.3.6",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }
