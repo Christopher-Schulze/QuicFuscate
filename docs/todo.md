@@ -3936,7 +3936,8 @@
 
 ### TODO-996 - PGO (profile-guided optimization) for release builds
 
-- OPEN. Release profile already uses `opt-level=3`, `lto="thin"`, `codegen-units=1`. Next build-level lever is PGO (`-Cprofile-generate` instrumented run on a representative TUN-dataplane workload → `-Cprofile-use`); typical gains 5-15% on branch-heavy protocol paths. Needs a `scripts/build/pgo.sh` flow + documented Omega profiling run; evaluate `lto="fat"` in the same pass (marginal, ~8min builds already).
+- DONE (Omega-verified end-to-end). `scripts/build/pgo-dataplane.sh` profiles the instrumented binary inside the real TUN scenario — `LLVM_PROFILE_FILE` propagates through `ip netns exec env` into both endpoints, SIGTERM-stop yields 38 non-empty profraws → llvm-profdata merge (9.2 MB) → `-Cprofile-use` rebuild. Distinct from the pre-existing `build-pgo-release.sh` (microbench-only workloads). PGO binary PASSes scenario g (45.6 Mbit/s, 0% loss — Omega contention band; definitive delta needs multi-core). `lto="fat"` evaluated + rejected (build-time cost vs marginal cross-crate inlining; PGO covers the better dimension). llvm-tools component installed on Omega for `llvm-profdata`.
+- Detail: docs/todo/todo-996-pgo-dataplane.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
