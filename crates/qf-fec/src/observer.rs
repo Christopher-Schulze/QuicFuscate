@@ -5,24 +5,25 @@
 //! redundancy delta to a live connection.
 
 use crate::{BrainFecHints, FecRuntimePolicy};
-use parking_lot::RwLock;
 use qf_common::env_utils::EnvSnapshot;
 use qf_transport_types::TransportObserver;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[derive(Default, Debug, Clone)]
-struct FecObserverSnapshot {
-    ack_delay_ewma_us: f64,
-    ecn_ect0: u64,
-    ecn_ect1: u64,
-    ecn_ce: u64,
-    ack_events: u64,
-}
-
+/// Lock-free telemetry counters. `on_ack` runs once per emitted ACK frame on
+/// the transport send path - under tunnel load that is a write storm that made
+/// the previous RwLock the single hottest lock in the process (reader starvation
+/// dominated `compute_streaming_interval`). All fields are scalar, so plain
+/// atomics remove the lock entirely; a torn EWMA read is a benign,
+/// self-correcting telemetry glitch.
 #[derive(Default, Debug)]
 struct FecObserverState {
-    snapshot: FecObserverSnapshot,
-    last_redundancy_ppm: u32,
+    ack_delay_ewma_bits: AtomicU64,
+    ecn_ect0: AtomicU64,
+    ecn_ect1: AtomicU64,
+    ecn_ce: AtomicU64,
+    ack_events: AtomicU64,
+    last_redundancy_ppm: AtomicU32,
 }
 
 /// Platform hints used to select the observer's ambient transport profile.
@@ -162,7 +163,7 @@ impl FecObserverAmbientInputs {
 /// Connection-local FEC telemetry and Brain hint bridge.
 #[doc(hidden)]
 pub struct FecObserver {
-    state: RwLock<FecObserverState>,
+    state: FecObserverState,
     ambient: FecObserverAmbientInputs,
     brain_hints: OnceLock<Arc<BrainFecHints>>,
 }
@@ -179,7 +180,7 @@ impl FecObserver {
     #[doc(hidden)]
     pub fn new_with_snapshot(environment: &EnvSnapshot) -> Self {
         Self {
-            state: RwLock::new(FecObserverState::default()),
+            state: FecObserverState::default(),
             ambient: FecObserverAmbientInputs::detect_with_snapshot(environment),
             brain_hints: OnceLock::new(),
         }
@@ -200,19 +201,21 @@ impl FecObserver {
     /// Compute the FEC-owned streaming interval from transport evidence.
     #[doc(hidden)]
     pub fn compute_streaming_interval(&self) -> u32 {
-        let state = self.state.read();
-        let snapshot = &state.snapshot;
+        let state = &self.state;
+        let ecn_ect0 = state.ecn_ect0.load(Ordering::Relaxed);
+        let ecn_ect1 = state.ecn_ect1.load(Ordering::Relaxed);
+        let ecn_ce = state.ecn_ce.load(Ordering::Relaxed);
+        let ack_delay_ewma_us = f64::from_bits(state.ack_delay_ewma_bits.load(Ordering::Relaxed));
 
         let mut interval = self.ambient.base_stream_interval;
-        let total_ecn =
-            snapshot.ecn_ect0.saturating_add(snapshot.ecn_ect1).saturating_add(snapshot.ecn_ce);
-        let ce_ratio = if total_ecn == 0 { 0.0 } else { snapshot.ecn_ce as f64 / total_ecn as f64 };
+        let total_ecn = ecn_ect0.saturating_add(ecn_ect1).saturating_add(ecn_ce);
+        let ce_ratio = if total_ecn == 0 { 0.0 } else { ecn_ce as f64 / total_ecn as f64 };
 
         if ce_ratio > 0.1 {
             interval = interval.saturating_sub(4).max(1);
         } else if ce_ratio > 0.05 {
             interval = interval.saturating_sub(2).max(2);
-        } else if ce_ratio < 0.001 && snapshot.ack_delay_ewma_us < 1000.0 {
+        } else if ce_ratio < 0.001 && ack_delay_ewma_us < 1000.0 {
             interval = interval.saturating_add(4).min(32);
         }
 
@@ -228,10 +231,9 @@ impl FecObserver {
     #[doc(hidden)]
     pub fn take_redundancy_hint(&self) -> Option<u32> {
         let _profile = self.ambient.profile.profile();
-        let mut state = self.state.write();
         let ppm_hint = self.brain_hints.get().map(|hints| hints.redundancy_ppm()).unwrap_or(0);
-        if ppm_hint > 0 && ppm_hint != state.last_redundancy_ppm {
-            state.last_redundancy_ppm = ppm_hint;
+        if ppm_hint > 0 && ppm_hint != self.state.last_redundancy_ppm.load(Ordering::Relaxed) {
+            self.state.last_redundancy_ppm.store(ppm_hint, Ordering::Relaxed);
             Some(ppm_hint)
         } else {
             None
@@ -241,24 +243,22 @@ impl FecObserver {
     /// Record one transport ACK delay sample.
     #[doc(hidden)]
     pub fn on_ack(&self, ack_delay: u64) {
-        let mut state = self.state.write();
-        let snapshot = &mut state.snapshot;
         let sample = ack_delay as f64;
-        snapshot.ack_delay_ewma_us = if snapshot.ack_events == 0 {
-            sample
-        } else {
-            0.2 * sample + 0.8 * snapshot.ack_delay_ewma_us
-        };
-        snapshot.ack_events = snapshot.ack_events.saturating_add(1);
+        let state = &self.state;
+        let events = state.ack_events.load(Ordering::Relaxed);
+        let ewma = f64::from_bits(state.ack_delay_ewma_bits.load(Ordering::Relaxed));
+        let next = if events == 0 { sample } else { 0.2 * sample + 0.8 * ewma };
+        state.ack_delay_ewma_bits.store(next.to_bits(), Ordering::Relaxed);
+        state.ack_events.store(events.saturating_add(1), Ordering::Relaxed);
     }
 
     /// Record the current transport ECN counters.
     #[doc(hidden)]
     pub fn on_ecn_update(&self, ect0: u64, ect1: u64, ce: u64) {
-        let mut state = self.state.write();
-        state.snapshot.ecn_ect0 = ect0;
-        state.snapshot.ecn_ect1 = ect1;
-        state.snapshot.ecn_ce = ce;
+        let state = &self.state;
+        state.ecn_ect0.store(ect0, Ordering::Relaxed);
+        state.ecn_ect1.store(ect1, Ordering::Relaxed);
+        state.ecn_ce.store(ce, Ordering::Relaxed);
     }
 }
 
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn transport_trait_callbacks_update_the_child_owned_observer() {
         let observer = FecObserver {
-            state: parking_lot::RwLock::new(FecObserverState::default()),
+            state: FecObserverState::default(),
             ambient: FecObserverAmbientInputs::new(
                 FecObserverProfilePolicy::Ambient(TransportProfile::Desktop),
                 8,
