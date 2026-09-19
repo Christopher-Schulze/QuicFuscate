@@ -1037,8 +1037,27 @@ impl UringBatchSender {
                 return Err(BatchSendError::quarantined(error, queued));
             }
         } else {
-            if let Err(error) = self.submit_and_wait(queued) {
-                return Err(BatchSendError::quarantined(error, queued));
+            match self.submit_and_wait(queued) {
+                Ok(submitted) if submitted < queued => {
+                    // The kernel stopped consuming SQEs early (e.g. an SQE
+                    // whose msghdr fails import at prep time on recent
+                    // kernels). The unconsumed tail stays pending in the SQ
+                    // ring and would execute with stale pointers on the next
+                    // submission - the sender must be quarantined.
+                    return Err(BatchSendError::quarantined(
+                        self.quarantine(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "io_uring kernel consumed only {submitted}/{queued} SendMsg SQEs; pending SQEs make the ring unsafe"
+                            ),
+                        )),
+                        queued,
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(BatchSendError::quarantined(error, queued));
+                }
             }
         }
         crate::telemetry::IO_URING_SUBMIT_CALLS.inc();
@@ -1114,7 +1133,20 @@ impl UringBatchSender {
     }
 
     fn submit_and_poll(&mut self, queued: usize, control: &SendControl<'_>) -> std::io::Result<()> {
-        self.ring.submit().map_err(|error| self.quarantine(error))?;
+        let submitted = self.ring.submit().map_err(|error| self.quarantine(error))?;
+        if submitted < queued {
+            // Short submit: the kernel stopped consuming SQEs early (e.g. an
+            // SQE whose msghdr fails import at prep time). The pending tail
+            // would execute with stale pointers on the next submission, so
+            // quarantine immediately instead of polling for completions that
+            // can never arrive.
+            return Err(self.quarantine(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "io_uring kernel consumed only {submitted}/{queued} SendMsg SQEs; pending SQEs make the ring unsafe"
+                ),
+            )));
+        }
         // UDP sendmsg CQEs land in microseconds - a fixed 1 ms sleep would add
         // up to a millisecond of dead time per batch. Spin briefly, then
         // escalate through yields to a capped sleep so the shutdown and

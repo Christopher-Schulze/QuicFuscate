@@ -111,6 +111,38 @@ fn assert_exactly_once_delivery(receiver: &UdpSocket, expected: &[&[u8]]) {
     }
 }
 
+/// Delivery contract when the kernel rejects an SQE at prep time: the SQEs
+/// are consumed in order, the submission loop stops at the failing entry, and
+/// the rest stay pending in the SQ ring - so exactly the datagrams *before*
+/// the injected slot hit the wire, the invalid and pending ones never do.
+/// The pending SQE must never fire afterwards (the ring is quarantined).
+#[cfg(target_os = "linux")]
+fn assert_short_submit_delivery(receiver: &UdpSocket, payloads: &[&[u8]]) {
+    receiver.set_read_timeout(Some(Duration::from_secs(2))).expect("set proof timeout");
+    let receive_capacity = payloads.iter().map(|payload| payload.len()).max().unwrap_or(1).max(1);
+    let mut buffer = vec![0u8; receive_capacity];
+    let (length, _) = receiver.recv_from(&mut buffer).expect("receive submitted datagram");
+    assert_eq!(
+        &buffer[..length],
+        payloads[0],
+        "only the datagram before the prep-rejected slot may arrive"
+    );
+    receiver.set_read_timeout(Some(Duration::from_millis(300))).expect("set drain timeout");
+    let mut extra = vec![0u8; receive_capacity];
+    match receiver.recv_from(&mut extra) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        Err(error) => panic!("unexpected drain receive error: {error}"),
+        Ok((length, _)) => panic!(
+            "datagram from the rejected or pending SQE must never arrive: {:?}",
+            &extra[..length]
+        ),
+    }
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn uring_batch_sender_initialises() {
@@ -171,39 +203,79 @@ fn uring_sendmsg_partial_send_retry_subsets_deliver_exactly_once() {
     connected_sender.connect(connected_destination).expect("connect proof sender");
     let connected_payloads: [&[u8]; 3] =
         [b"sendmsg-connected-0", b"sendmsg-connected-1", b"sendmsg-connected-2"];
-    let connected_result = sender
-        .send_batch_with_injected_iovec_failures(
-            connected_sender.as_raw_fd(),
-            &connected_payloads,
-            &[1],
-        )
-        .expect("connected injected partial send");
-    assert_partial_disposition(&connected_result);
-    let connected_fallbacks =
-        retry_connected_slots(&connected_sender, &connected_payloads, &connected_result);
-    assert_eq!(connected_fallbacks, 1);
-    assert_exactly_once_delivery(&connected_receiver, &connected_payloads);
+    let connected_outcome = sender.send_batch_with_injected_iovec_failures(
+        connected_sender.as_raw_fd(),
+        &connected_payloads,
+        &[1],
+    );
+    match connected_outcome {
+        Ok(connected_result) => {
+            // Issue-time msghdr import (older kernels): the invalid slot
+            // completes with an error CQE while the valid slots send.
+            assert_partial_disposition(&connected_result);
+            let connected_fallbacks =
+                retry_connected_slots(&connected_sender, &connected_payloads, &connected_result);
+            assert_eq!(connected_fallbacks, 1);
+            assert_exactly_once_delivery(&connected_receiver, &connected_payloads);
+        }
+        Err(error) => {
+            // Prep-time msghdr import (kernel 6.17 observed): the invalid SQE
+            // aborts the submission loop, so the kernel consumes only the
+            // prefix up to and including the failing slot - slot 0 executes,
+            // slot 1 fails at prep, and slot 2 stays pending in the SQ ring.
+            // The sender must quarantine: the pending SQE still references
+            // sender storage and would fire on any later submission.
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_short_submit_delivery(&connected_receiver, &connected_payloads);
+            assert!(
+                sender.send_batch(connected_sender.as_raw_fd(), &connected_payloads).is_err(),
+                "quarantined sender must reject further batches"
+            );
+        }
+    }
 
     let unconnected_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind unconnected receiver");
     let unconnected_destination =
         unconnected_receiver.local_addr().expect("unconnected destination");
+    // A prep-rejected sender is quarantined for good, so the unconnected
+    // proof gets a fresh sender - identical semantics on both kernel variants.
+    let mut unconnected_sender_ring = match UringBatchSender::new_for_sendmsg_proof(8) {
+        Some(sender) => sender,
+        None => panic!("io_uring became unavailable between connected and unconnected proofs"),
+    };
     let unconnected_sender = UdpSocket::bind("127.0.0.1:0").expect("bind unconnected sender");
     let unconnected_payloads: [&[u8]; 3] =
         [b"sendmsg-unconnected-0", b"sendmsg-unconnected-1", b"sendmsg-unconnected-2"];
     let packets: Vec<(std::net::SocketAddr, &[u8])> =
         unconnected_payloads.iter().map(|payload| (unconnected_destination, *payload)).collect();
-    let unconnected_result = sender
-        .send_batch_to_with_injected_iovec_failures(unconnected_sender.as_raw_fd(), &packets, &[1])
-        .expect("unconnected injected partial send");
-    assert_partial_disposition(&unconnected_result);
-    let unconnected_fallbacks = retry_unconnected_slots(
-        &unconnected_sender,
-        unconnected_destination,
-        &unconnected_payloads,
-        &unconnected_result,
+    let unconnected_outcome = unconnected_sender_ring.send_batch_to_with_injected_iovec_failures(
+        unconnected_sender.as_raw_fd(),
+        &packets,
+        &[1],
     );
-    assert_eq!(unconnected_fallbacks, 1);
-    assert_exactly_once_delivery(&unconnected_receiver, &unconnected_payloads);
+    match unconnected_outcome {
+        Ok(unconnected_result) => {
+            assert_partial_disposition(&unconnected_result);
+            let unconnected_fallbacks = retry_unconnected_slots(
+                &unconnected_sender,
+                unconnected_destination,
+                &unconnected_payloads,
+                &unconnected_result,
+            );
+            assert_eq!(unconnected_fallbacks, 1);
+            assert_exactly_once_delivery(&unconnected_receiver, &unconnected_payloads);
+        }
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_short_submit_delivery(&unconnected_receiver, &unconnected_payloads);
+            assert!(
+                unconnected_sender_ring
+                    .send_batch_to(unconnected_sender.as_raw_fd(), &packets)
+                    .is_err(),
+                "quarantined sender must reject further batches"
+            );
+        }
+    }
 
     println!(
         "QF_IO_URING_PARTIAL_SEND_STATUS=SUPPORTED mode=sendmsg connected_uring=2 connected_fallback=1 unconnected_uring=2 unconnected_fallback=1 duplicate_deliveries=0"

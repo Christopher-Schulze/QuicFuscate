@@ -3976,7 +3976,7 @@
 
 ### TODO-1004 - io_uring SendMsg injected-partial-failure completion accounting on kernel 6.17
 
-- OPEN. `uring_sendmsg_partial_send_retry_subsets_deliver_exactly_once` fails deterministically on Omega (aarch64, kernel 6.17): `completion set incomplete: 2/3, cq_overflow=0` where the SendMsgZc twin passes. Reproduces identically with the TODO-902 flat-adoption changes stashed - pre-existing, likely kernel-version-dependent accounting of rejected SQEs. Found during TODO-902 verification.
+- DONE (2026-09-19). Root cause via strace: kernel 6.17 imports `msghdr` at SQE prep time, so the injected-invalid SQE aborts the submission loop (`io_uring_enter` returns 2/3 consumed) and leaves the tail pending in the SQ ring - quarantine is the only safe response since the pending SQE would execute with stale pointers on the next submit. Sender now detects short-submit immediately with a precise `InvalidData` error (and skips the 250ms poll deadline); the test encodes both kernel contracts (issue-time `-EFAULT` CQE partial disposition vs prep-time short-submit quarantine) and asserts the pending SQE never fires. `rt-transport-uring` 22/22 on Omega.
 - Detail: docs/todo/todo-1004-uring-injection-completion-accounting.md
 
 ### TODO-1005 - Standalone client TX staged a second memcpy per packet before GSO coalescing
