@@ -3894,8 +3894,15 @@
 - Bug found via strace on Omega: recurring startup `EMSGSIZE` was a **segment size** above the route's UDP payload ceiling (`gso_size=1500` on a 1500-MTU link → kernel cap 1472), not the super-buffer byte cap from TODO-987. New `udp_gso_segment_mtu` probes `IP_MTU`/`IPV6_MTU`; `plan_gso_run` takes `max_seg` and skips runs that cannot fit one wire datagram; `UDP_GSO_MAX_PAYLOAD` tightened to 65507 (IPv4 total-length bound).
 - Omega-verified: scenario g PASS at 71.4 Mbit/s, **zero EMSGSIZE** in a full-tree strace (14,619 GSO super-buffers), 29/29 receiver + 5/5 gso_plan + 42/42 connection tests green.
 
+### TODO-989 - TUN uplink backpressure self-notify spin
+
+- Detail: `docs/todo/todo-989-tun-uplink-backpressure-spin.md`
+- DONE. `drain_client_tun_uplink` returned `Ok(true)` on QUIC-DATAGRAM-queue backpressure → every caller ran `tun_notify.notify_one()` → immediate re-drain → `Backpressure` → notify — a busy wakeup loop while the send queue was full (each cycle also flushed outgoing). Backpressure now returns `Ok(false)`; retry is paced by the 5ms active housekeeping tick (`tun_backpressure_pending`), inbound-driven drains, and reader notifies. The drain-limit `Ok(true)` (more channel work) is preserved for full-speed bursts.
+- Omega A/B (`QF_PROFILE_IPERF_UDP_RATE=1G` flood): 29.7 → ~31-33 Mbit/s; residual wall is single-core contention (iperf generator ≈40% CPU, quicfuscate ≈25-30%, no hotspot) — multi-core hardware needed for a meaningful flood ceiling.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
+- Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.
 - `qf_fec::interleaved` (0,0)-shape warn removed (sentinel normalization is expected for disabled FEC).

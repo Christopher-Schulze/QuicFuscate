@@ -1092,7 +1092,10 @@ fn drain_client_tun_uplink(
                     info!("Client MASQUE uplink remains backpressured: bytes={frame_len}");
                 }
                 *backlog = Some(frame);
-                return Ok(true);
+                // Do not self-notify: the send queue is full, so an immediate
+                // re-drain would just spin. The adaptive housekeeping tick
+                // (5ms while a backlog frame is held) paces the retry.
+                return Ok(false);
             }
             Err(ClientTunPacketError::Fault(fault)) => {
                 warn!("TUN packet send failed: {fault}");
@@ -1125,7 +1128,10 @@ fn drain_client_tun_uplink(
                             info!("Client MASQUE uplink backpressured: bytes={frame_len}");
                         }
                         *backlog = Some(frame);
-                        break;
+                        // Same backpressure rule as the backlog retry above:
+                        // return Ok(false) so the caller does not spin on a
+                        // full send queue; the housekeeping tick re-arms.
+                        return Ok(false);
                     }
                     Err(ClientTunPacketError::Fault(fault)) => {
                         warn!("TUN packet send failed: {fault}");
@@ -1140,10 +1146,6 @@ fn drain_client_tun_uplink(
                 });
             }
         }
-    }
-
-    if backlog.is_some() {
-        return Ok(true);
     }
 
     // Preserve the wake-up contract when the bounded drain limit was reached.
