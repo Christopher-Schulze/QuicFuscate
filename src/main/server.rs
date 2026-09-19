@@ -418,6 +418,7 @@ pub(super) async fn run_server(
                     ),
                 );
                 if tun_enable {
+                    runtime.delegate_host_routing_teardown();
                     log::warn!(
                         "Post-drop TUN descriptors remain active; host routing teardown is owned by the service manager or privileged orchestration layer"
                     );

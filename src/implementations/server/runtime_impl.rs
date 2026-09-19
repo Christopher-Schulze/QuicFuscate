@@ -849,6 +849,20 @@ impl ServerRuntime {
         self.live().metrics.clone()
     }
 
+    /// Delegate managed host routing teardown to privileged orchestration.
+    ///
+    /// Called after an irreversible privilege drop: this process then holds no
+    /// capability to mutate host routing or read the root-owned durable
+    /// record, so shutdown-time teardown would fail with permission errors and
+    /// report a dirty stop. The durable record stays for the next privileged
+    /// `cleanup_stale`.
+    #[cfg(target_os = "linux")]
+    pub fn delegate_host_routing_teardown(&self) {
+        if let Some(routing) = self.live.as_ref().and_then(|live| live.routing.as_ref()) {
+            routing.delegate_teardown();
+        }
+    }
+
     pub fn admin_actions_sender(&self) -> mpsc::UnboundedSender<AdminAction> {
         self.live().admin_actions_tx.clone()
     }

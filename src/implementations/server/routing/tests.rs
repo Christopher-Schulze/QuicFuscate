@@ -436,3 +436,29 @@ fn test_windows_dual_stack_nat_is_rejected_before_side_effects() {
         Err(RoutingError::UnsupportedConfiguration(_))
     ));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn delegated_teardown_succeeds_without_touching_host_state() {
+    let mgr = RoutingManager::new(
+        "qfdeleg0".to_string(),
+        Ipv4Addr::new(10, 8, 0, 1),
+        Ipv4Addr::new(255, 255, 255, 0),
+        "eth0".to_string(),
+    );
+    {
+        let mut ownership = mgr.ownership.lock().unwrap();
+        ownership.ipv4_address_added = true;
+        ownership.state_prepared = true;
+        ownership.firewall_configured = true;
+    }
+    mgr.delegate_teardown();
+    // A post-drop process holds no capability to mutate host routing or read
+    // the root-owned durable record; teardown must succeed as a no-op so the
+    // durable record survives for the next privileged cleanup_stale.
+    mgr.teardown().expect("delegated teardown must succeed");
+    mgr.teardown().expect("delegated teardown must stay a no-op");
+    let ownership = mgr.ownership.lock().unwrap();
+    assert!(ownership.ipv4_address_added, "delegation must not rewind recorded host mutations");
+    assert!(ownership.state_prepared);
+}

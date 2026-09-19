@@ -52,6 +52,11 @@ struct RoutingOwnership {
     state_prepared: bool,
     firewall_owner_generation: Option<String>,
     firewall_configured: bool,
+    /// Set once the process has irreversibly dropped privileges: host routing
+    /// teardown then belongs to the service manager or the next privileged
+    /// `cleanup_stale`, because the process no longer holds the capability to
+    /// mutate host routing or read the root-owned durable record.
+    teardown_delegated: bool,
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -772,6 +777,18 @@ impl RoutingManager {
         Err(RoutingError::UnsupportedPlatform)
     }
 
+    /// Mark host routing teardown as delegated to privileged orchestration.
+    ///
+    /// Called after an irreversible privilege drop: the process then holds no
+    /// capability to mutate host routing and cannot even read the root-owned
+    /// durable record. The record is deliberately retained so the next
+    /// privileged start can `cleanup_stale` any state this process owned.
+    #[cfg(target_os = "linux")]
+    pub fn delegate_teardown(&self) {
+        self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).teardown_delegated =
+            true;
+    }
+
     /// Tear down routing rules.
     #[cfg(target_os = "linux")]
     pub fn teardown(&self) -> Result<(), RoutingError> {
@@ -785,6 +802,7 @@ impl RoutingManager {
             ipv6_previous,
             state_prepared,
             firewall_configured,
+            teardown_delegated,
         ) = {
             let ownership = self.ownership.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
@@ -795,8 +813,16 @@ impl RoutingManager {
                 ownership.ipv6_forwarding_previous.clone(),
                 ownership.state_prepared,
                 ownership.firewall_configured,
+                ownership.teardown_delegated,
             )
         };
+
+        if teardown_delegated {
+            log::info!(
+                "host routing teardown delegated to privileged orchestration; durable record retained for cleanup_stale"
+            );
+            return Ok(());
+        }
 
         let owned_firewall = if state_prepared {
             let owner = self.current_firewall_owner()?;
