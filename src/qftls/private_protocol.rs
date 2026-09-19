@@ -928,6 +928,29 @@ impl PrivateNegotiationMachine {
         Err(error)
     }
 
+    /// Force the terminal state after a negotiation deadline expiry in fail-closed modes.
+    /// Active and terminal states are never rewritten.
+    pub(crate) fn force_terminal(&mut self) {
+        match self.state {
+            PrivateNegotiationState::AdvancedActive
+            | PrivateNegotiationState::AdvancedUpdating
+            | PrivateNegotiationState::Terminal => {}
+            _ => self.state = PrivateNegotiationState::Terminal,
+        }
+    }
+
+    /// Force the standards-only terminal state when the negotiation deadline expires in a mode
+    /// that tolerates fallback. Active or terminal states are never rewritten.
+    pub(crate) fn force_standard_fallback(&mut self) {
+        match self.state {
+            PrivateNegotiationState::AdvancedActive
+            | PrivateNegotiationState::AdvancedUpdating
+            | PrivateNegotiationState::StandardFallback
+            | PrivateNegotiationState::Terminal => {}
+            _ => self.state = PrivateNegotiationState::StandardFallback,
+        }
+    }
+
     fn fallback_or_fail(&mut self) -> Result<PrivateNegotiationMessage, PrivateProtocolError> {
         match self.mode {
             PacketProtectionMode::Auto => {
@@ -1059,6 +1082,8 @@ pub enum PrivateProtocolError {
     InvalidState,
     /// Auto mode selected standards-only fallback before private activation.
     StandardFallback,
+    /// The negotiation did not reach an active private owner before its deadline.
+    NegotiationTimeout,
 }
 
 impl fmt::Display for PrivateProtocolError {
@@ -1100,6 +1125,9 @@ impl fmt::Display for PrivateProtocolError {
             }
             Self::StandardFallback => {
                 formatter.write_str("private packet protection fell back to standard QUIC")
+            }
+            Self::NegotiationTimeout => {
+                formatter.write_str("private packet protection negotiation deadline expired")
             }
         }
     }

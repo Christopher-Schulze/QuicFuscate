@@ -97,8 +97,12 @@ impl QuicFuscateConnection {
             nonce,
         )
         .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?;
-        let mut runtime =
-            PrivatePacketProtectionRuntime::new(self.private_packet_protection_mode, role, machine);
+        let mut runtime = PrivatePacketProtectionRuntime::new(
+            self.private_packet_protection_mode,
+            role,
+            machine,
+            self.protocol_clock().now(),
+        );
         runtime
             .machine_mut()
             .install_exporter_root(exporter_root.as_slice())
@@ -148,6 +152,7 @@ impl QuicFuscateConnection {
             return Ok(());
         };
         let boundary = self.conn.next_application_send_packet_number()?.saturating_add(1);
+        let now = self.protocol_clock().now();
         let mut activation_pending = false;
         let mut messages = Vec::new();
         {
@@ -158,6 +163,15 @@ impl QuicFuscateConnection {
                 {
                     return Err(crate::error::ConnectionError::CryptoError(error.to_string()));
                 }
+            }
+            if runtime.negotiation_expired(now) {
+                if runtime.mode() == PacketProtectionMode::AdvancedRequired {
+                    runtime.machine_mut().force_terminal();
+                    return Err(crate::error::ConnectionError::CryptoError(
+                        PrivateProtocolError::NegotiationTimeout.to_string(),
+                    ));
+                }
+                runtime.machine_mut().force_standard_fallback();
             }
             runtime.ensure_local_confirmation(boundary);
             while let Some(payload) = runtime.take_outbound() {
@@ -223,6 +237,12 @@ impl QuicFuscateConnection {
 
 const MAX_OUTBOUND_MESSAGES: usize = 4;
 
+/// Authenticated private negotiation must reach an active private owner within this window.
+/// The exchange completes in a few round-trips; a silent or stalled peer must not park the
+/// state machine forever. `auto` falls back to standards-only protection, `advanced-required`
+/// fails closed.
+const PRIVATE_NEGOTIATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub(crate) struct PrivatePacketProtectionRuntime {
     mode: PacketProtectionMode,
     role: PrivateNegotiationRole,
@@ -231,6 +251,7 @@ pub(crate) struct PrivatePacketProtectionRuntime {
     last_error: Option<PrivateProtocolError>,
     owner_activation_attempted: bool,
     local_confirmation_queued: bool,
+    created_at: std::time::Instant,
 }
 
 impl PrivatePacketProtectionRuntime {
@@ -238,6 +259,7 @@ impl PrivatePacketProtectionRuntime {
         mode: PacketProtectionMode,
         role: PrivateNegotiationRole,
         machine: PrivateNegotiationMachine,
+        created_at: std::time::Instant,
     ) -> Self {
         Self {
             mode,
@@ -247,6 +269,22 @@ impl PrivatePacketProtectionRuntime {
             last_error: None,
             owner_activation_attempted: false,
             local_confirmation_queued: false,
+            created_at,
+        }
+    }
+
+    /// True while the negotiation is still pending past its deadline. Terminal and active
+    /// states never expire.
+    pub(crate) fn negotiation_expired(&self, now: std::time::Instant) -> bool {
+        if self.mode == PacketProtectionMode::Standard {
+            return false;
+        }
+        match self.machine.state() {
+            PrivateNegotiationState::AdvancedActive
+            | PrivateNegotiationState::AdvancedUpdating
+            | PrivateNegotiationState::StandardFallback
+            | PrivateNegotiationState::Terminal => false,
+            _ => now.duration_since(self.created_at) >= PRIVATE_NEGOTIATION_DEADLINE,
         }
     }
 
@@ -393,7 +431,12 @@ mod tests {
         let mut machine = machine(role);
         machine.install_exporter_root(&[0x77; PRIVATE_HASH_LEN]).expect("exporter root");
         machine.mark_authenticated().expect("authenticated state");
-        PrivatePacketProtectionRuntime::new(PacketProtectionMode::Auto, role, machine)
+        PrivatePacketProtectionRuntime::new(
+            PacketProtectionMode::Auto,
+            role,
+            machine,
+            std::time::Instant::now(),
+        )
     }
 
     #[test]
@@ -420,5 +463,42 @@ mod tests {
         assert!(client.take_error().is_none());
         assert_eq!(client.machine().state(), PrivateNegotiationState::SwitchScheduled);
         assert_eq!(server.machine().state(), PrivateNegotiationState::SwitchScheduled);
+    }
+
+    #[test]
+    fn negotiation_deadline_expires_pending_states_only() {
+        let now = std::time::Instant::now();
+        let past = now - PRIVATE_NEGOTIATION_DEADLINE - std::time::Duration::from_secs(1);
+
+        // A pending negotiation expires.
+        let mut pending = runtime(PrivateNegotiationRole::Client);
+        pending.start_client_proposal();
+        pending.created_at = past;
+        assert!(pending.negotiation_expired(now));
+
+        // A fresh pending runtime has not reached the deadline.
+        let fresh = runtime(PrivateNegotiationRole::Client);
+        assert!(!fresh.negotiation_expired(now));
+
+        // Standard mode never negotiates and never expires.
+        let mut standard_machine = machine(PrivateNegotiationRole::Client);
+        standard_machine.install_exporter_root(&[0x77; PRIVATE_HASH_LEN]).expect("exporter root");
+        standard_machine.mark_authenticated().expect("authenticated state");
+        let mut standard = PrivatePacketProtectionRuntime::new(
+            PacketProtectionMode::Standard,
+            PrivateNegotiationRole::Client,
+            standard_machine,
+            past,
+        );
+        assert!(!standard.negotiation_expired(now));
+
+        // Terminal and active states never expire.
+        pending.machine_mut().force_standard_fallback();
+        assert!(!pending.negotiation_expired(now));
+
+        let mut active = runtime(PrivateNegotiationRole::Server);
+        active.created_at = past;
+        active.machine_mut().force_terminal();
+        assert!(!active.negotiation_expired(now));
     }
 }
