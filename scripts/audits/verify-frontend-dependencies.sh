@@ -157,7 +157,7 @@ expected_workspace_versions = {
         "@types/node": "22.20.1",
         "svelte": "^5.56.8",
         "vite": "^7.3.6",
-        "vitest": "^4.1.10",
+        "vitest": "^4.1.11",
     },
     "apps/svelte-desktop/package.json": {
         "@playwright/test": playwright_version,
@@ -165,12 +165,12 @@ expected_workspace_versions = {
         "@types/node": "22.20.1",
         "svelte": "^5.56.8",
         "vite": "^7.3.6",
-        "vitest": "^4.1.10",
+        "vitest": "^4.1.11",
     },
     "packages/ui/package.json": {
         "svelte": "^5.56.8",
         "vite": "^7.3.6",
-        "vitest": "^4.1.10",
+        "vitest": "^4.1.11",
     },
 }
 
