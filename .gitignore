@@ -118,3 +118,4 @@ lcov.info
 
 # macOS debug symbols outside target/scripts/out (future-proof)
 **/*.dSYM/
+__pycache__/
