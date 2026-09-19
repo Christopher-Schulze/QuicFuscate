@@ -3917,6 +3917,12 @@
 - DONE. Inbound MASQUE datagrams were copied out of the QUIC recv queue into a permanent `masque_recv_buffer` scratch solely for `MASQUE_RECV_HEADROOM` normalization tail space. `dgram_recv_take`/`dgram_recv_return` now hand the owned queue entry (`Vec` freelist / pooled `DatagramBuffer`) to the H3 layer; flow-id decode, in-place normalization and dispatch run inside the entry's own allocation — zero hot-path copies and no permanent scratch. Oversized entries are dropped rather than truncated-dispatched.
 - Verified: 49/49 masque tests + 2 new recv-take tests green on default and `zero_copy_dgram`; Omega scenario g PASS (52.3 Mbit/s, 0% loss, no EMSGSIZE/panic).
 
+### TODO-993 - Per-record allocations in the production logger
+
+- Detail: `docs/todo/todo-993-log-record-allocations.md`
+- DONE. `ProductionLogger::log` allocated 3 `String`s per enabled record (target, message, file). `OwnedRecord` now uses `Cow<'static, str>` fed by `record.module_path_static()`/`file_static()` — standard `log!` sites borrow, only the formatted message still allocates. 3 allocs → 1 per record; custom `target:` strings keep exact semantics via the owned fallback.
+- Verified: qf-logging 22/22 tests, clippy/fmt clean.
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

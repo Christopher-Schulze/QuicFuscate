@@ -12,6 +12,7 @@
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -472,11 +473,21 @@ impl Log for ProductionLogger {
             return;
         }
 
+        // Borrow static module/file names when the record carries them —
+        // standard `log!` sites do, so only the formatted message allocates.
+        let target = match record.module_path_static() {
+            Some(module) if module == record.target() => Cow::Borrowed(module),
+            _ => Cow::Owned(record.target().to_string()),
+        };
+        let file = match record.file_static() {
+            Some(file) => Some(Cow::Borrowed(file)),
+            None => record.file().map(|f| Cow::Owned(f.to_string())),
+        };
         let owned = OwnedRecord {
             level: record.level(),
-            target: record.target().to_string(),
+            target,
             message: record.args().to_string(),
-            file: record.file().map(str::to_string),
+            file,
             line: record.line(),
         };
         if let Err(error) = self.sender.try_send(LogCommand::Record(owned)) {
@@ -493,9 +504,9 @@ impl Log for ProductionLogger {
 
 struct OwnedRecord {
     level: Level,
-    target: String,
+    target: Cow<'static, str>,
     message: String,
-    file: Option<String>,
+    file: Option<Cow<'static, str>>,
     line: Option<u32>,
 }
 
@@ -893,10 +904,10 @@ fn format_owned_json(record: &OwnedRecord) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("ts".into(), serde_json::Value::String(ts));
     obj.insert("level".into(), serde_json::Value::String(record.level.as_str().to_lowercase()));
-    obj.insert("target".into(), serde_json::Value::String(record.target.clone()));
+    obj.insert("target".into(), serde_json::Value::String(record.target.to_string()));
     obj.insert("msg".into(), serde_json::Value::String(record.message.clone()));
     if let Some(file) = &record.file {
-        obj.insert("file".into(), serde_json::Value::String(file.clone()));
+        obj.insert("file".into(), serde_json::Value::String(file.to_string()));
     }
     if let Some(line) = record.line {
         obj.insert("line".into(), serde_json::Value::Number(serde_json::Number::from(line)));
@@ -1190,7 +1201,7 @@ mod tests {
         sender
             .send(LogCommand::Record(OwnedRecord {
                 level: Level::Info,
-                target: "test".to_string(),
+                target: Cow::Borrowed("test"),
                 message: "before-rotate".to_string(),
                 file: None,
                 line: None,
@@ -1206,7 +1217,7 @@ mod tests {
         sender
             .send(LogCommand::Record(OwnedRecord {
                 level: Level::Info,
-                target: "test".to_string(),
+                target: Cow::Borrowed("test"),
                 message: "after-rotate".to_string(),
                 file: None,
                 line: None,
@@ -1254,7 +1265,7 @@ mod tests {
         sender
             .send(LogCommand::Record(OwnedRecord {
                 level: Level::Info,
-                target: "test".to_string(),
+                target: Cow::Borrowed("test"),
                 message: "before-reopen".to_string(),
                 file: None,
                 line: None,
@@ -1277,7 +1288,7 @@ mod tests {
         sender
             .send(LogCommand::Record(OwnedRecord {
                 level: Level::Info,
-                target: "test".to_string(),
+                target: Cow::Borrowed("test"),
                 message: "after-reopen".to_string(),
                 file: None,
                 line: None,
