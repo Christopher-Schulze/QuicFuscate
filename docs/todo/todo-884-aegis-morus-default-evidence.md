@@ -262,6 +262,12 @@ Observations:
 - Small-payload batch-open outliers observed: `aegis128x8 batch8_open 64B` at 43.6 MiB/s
   (~half of siblings) and `morus1280 batch8_open 64B` at 63.3 vs 133.3 seal. Worth a
   micro-check whether batch-open has a per-call penalty for short payloads.
+  RESOLVED 2026-09-19: re-measurement on the same Omega binary shows
+  `aegis128x8 batch8_open 64B` at 90.1 MiB/s (criterion reports +106% vs the
+  stale baseline); a second ARM64 witness (Apple Silicon) shows open/seal
+  symmetry within ~7% (193.4 vs 208.0 MiB/s). The outlier was measurement
+  noise on the single-core VM, not a code defect - the batch-open wrapper and
+  X8 decrypt loop are structurally symmetric with their seal counterparts.
 - Single-core VM; numbers are relative evidence, not absolute production rates.
 
 This fills the aarch64 cell. Cross-platform matrix now has ARM64 data; remaining gates
