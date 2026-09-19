@@ -65,10 +65,14 @@ This section is the fast path for skeptical review. It is not a marketing summar
 - Custom data-plane crypto with in-tree implementations:
   - product contract: `Aegis128L`, `Morus1280_128`
   - internal backend machine room: `Aegis128X4`, `Aegis128X8`
-- The Linux high-performance send path is `io_uring` with automatic SQPOLL (kernel >= 5.12
-  or `CAP_SYS_ADMIN`) and batched `SendMsg` as the production send default.
-  Experimental `SendMsgZc` zero-copy (kernel >= 6.0) is probed at startup but only enabled
-  when `QUICFUSCATE_IO_URING_ZC=1` is set.
+- The Linux high-performance send path is `io_uring` (default feature since TODO-995) with
+  batched `SendMsg` as the production send default. Every ring setup probes the kernel at
+  runtime and falls back to `sendmmsg`/per-packet I/O when unavailable;
+  `QUICFUSCATE_IO_URING=0|off|false|no` disables all io_uring setup (kill-switch, cached via
+  `OnceLock`). SQPOLL is opt-in via `QUICFUSCATE_IO_URING_SQPOLL=1` only: its kernel poller
+  threads survive privilege dropping and break the server's post-drop per-thread UID
+  verification. Experimental `SendMsgZc` zero-copy (kernel >= 6.0) is probed at startup but
+  only enabled when `QUICFUSCATE_IO_URING_ZC=1` is set.
 - The io_uring server send path batches all outgoing packets from a connection through one
   runtime-owned `UringBatchWorker`; client outbound dispatch uses the same bounded worker
   boundary. Direct `UringBatchSender` calls remain synchronous compatibility primitives.
