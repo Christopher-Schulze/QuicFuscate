@@ -126,6 +126,16 @@ impl QuicFuscateConnection {
         Ok(true)
     }
 
+    /// Commit the authenticated QKey transcript binding and immediately drive the private
+    /// packet-protection control plane after the server's authenticated assignment has been
+    /// accepted. Shared by every client assignment path so they cannot drift apart.
+    pub fn finalize_authenticated_assignment(
+        &mut self,
+    ) -> Result<(), crate::error::ConnectionError> {
+        self.mark_qkey_authenticated_from_token();
+        self.private_packet_protection_control_tick()
+    }
+
     /// Drive the authenticated private packet-protection negotiation forward: lazily create the
     /// runtime once TLS, QKey binding, and the control flow are present, emit any pending
     /// authenticated control capsules, and apply a scheduled owner switch at its packet-number

@@ -430,8 +430,7 @@ impl IoDriver {
             if let Some(assignment) = assignment {
                 if conn.lock().masque_tunnel_established() {
                     let mut guard = conn.lock();
-                    guard.mark_qkey_authenticated_from_token();
-                    guard.private_packet_protection_control_tick().map_err(|error| {
+                    guard.finalize_authenticated_assignment().map_err(|error| {
                         self.transport_send_error(
                             "client assignment private packet-protection control",
                             error,

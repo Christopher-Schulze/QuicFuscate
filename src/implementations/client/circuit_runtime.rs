@@ -720,6 +720,13 @@ impl ClientDataPlane {
         Ok(())
     }
 
+    /// Commit the QKey transcript binding on every active hop and prime the private control
+    /// owners after authenticated assignment. Single shared sequence for all assignment paths.
+    pub fn finalize_authenticated_assignment(&mut self) -> Result<(), EngineError> {
+        self.mark_qkey_authenticated_from_token();
+        self.private_packet_protection_control_tick()
+    }
+
     /// Send one private packet-protection capsule on the selected exit connection.
     pub fn send_private_packet_protection_capsule(
         &mut self,
