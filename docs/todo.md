@@ -3944,6 +3944,11 @@
 - DONE. `on_packet_recv` writes per packet from the dataplane thread while `apply_policy` swaps the same words from housekeeping; all pending counters plus the size/IAT histogram bins shared cachelines. Wrapped each hot counter and every histogram bin in `crossbeam_utils::CachePadded` (dep already in the tree). `brain_packet_observer` on Apple Silicon: workers_1 -30% time (+44% thrpt), workers_8 -37% time (+60% thrpt). 62/62 brain tests green.
 - Detail: docs/todo/todo-997-brain-pending-cacheline.md
 
+### TODO-998 - Isolate ack_sent_byte_accounting benchmark from connection setup
+
+- DONE. The bench ran full connection pairing + sent-byte seeding inside `b.iter` (~90% setup noise in every cell). Moved all three shapes to `iter_batched`/`SmallInput`; the honest ACK-accounting cost is ~28-130 ns per acknowledged packet (SentRing drain is already efficient, no production change needed).
+- Detail: docs/todo/todo-998-ack-bench-isolation.md
+
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - Under flood-rate input (iperf `-u -b 1G`) the **load generator itself** takes ~40% of the same core (plus ~25% for `perf record -a`), so the VPN dataplane sees only ~25-30% CPU — a ~30 Mbit/s flood ceiling is contention, not a datapath wall. For A/B evidence prefer moderate rates or subtract generator/profiler share.

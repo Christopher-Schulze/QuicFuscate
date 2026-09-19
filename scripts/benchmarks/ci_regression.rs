@@ -764,45 +764,68 @@ fn bench_ack_sent_byte_accounting(c: &mut Criterion) {
     use quicfuscate::transport::{bench_paired_1rtt_connections, BenchConnectionPair};
 
     let mut group = c.benchmark_group("ack_sent_byte_accounting");
+    // iter_batched keeps connection pairing + sent-byte seeding out of the timed
+    // loop so the metric isolates on_ack_received + apply_ack_outcome.
     for inflight in [32u64, 128, 512, 1024, 2048, 10240] {
         group.throughput(Throughput::Elements(inflight));
         group.bench_function(format!("{inflight}_inflight_ack_all"), |b| {
-            b.iter(|| {
-                let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
-                client.bench_seed_sent_bytes_by_pn(inflight, 1200);
-                let ranges = [(0u64, inflight)];
-                client.bench_account_ack_ranges(black_box(&ranges));
-                black_box(());
-            });
+            b.iter_batched(
+                || {
+                    let BenchConnectionPair { mut client, .. } =
+                        bench_paired_1rtt_connections();
+                    client.bench_seed_sent_bytes_by_pn(inflight, 1200);
+                    client
+                },
+                |mut client| {
+                    let ranges = [(0u64, inflight)];
+                    client.bench_account_ack_ranges(black_box(&ranges));
+                    black_box(());
+                },
+                BatchSize::SmallInput,
+            );
         });
         group.bench_function(format!("{inflight}_inflight_ack_half"), |b| {
-            b.iter(|| {
-                let half = inflight / 2;
-                let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
-                client.bench_seed_sent_bytes_by_pn(inflight, 1200);
-                let ranges = [(0u64, half)];
-                client.bench_account_ack_ranges(black_box(&ranges));
-                black_box(());
-            });
+            let half = inflight / 2;
+            b.iter_batched(
+                || {
+                    let BenchConnectionPair { mut client, .. } =
+                        bench_paired_1rtt_connections();
+                    client.bench_seed_sent_bytes_by_pn(inflight, 1200);
+                    client
+                },
+                |mut client| {
+                    let ranges = [(0u64, half)];
+                    client.bench_account_ack_ranges(black_box(&ranges));
+                    black_box(());
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
 
     // Sparse ACK ranges (every 4th PN) to stress range iteration vs map size.
     for inflight in [512u64, 2048, 10240] {
         group.bench_function(format!("{inflight}_inflight_ack_sparse"), |b| {
-            b.iter(|| {
-                let BenchConnectionPair { mut client, .. } = bench_paired_1rtt_connections();
-                client.bench_seed_sent_bytes_by_pn(inflight, 1200);
-                let mut ranges = Vec::with_capacity((inflight / 4) as usize);
-                let mut start = 0u64;
-                while start < inflight {
-                    let end = (start + 1).min(inflight);
-                    ranges.push((start, end));
-                    start += 4;
-                }
-                client.bench_account_ack_ranges(black_box(&ranges));
-                black_box(());
-            });
+            b.iter_batched(
+                || {
+                    let BenchConnectionPair { mut client, .. } =
+                        bench_paired_1rtt_connections();
+                    client.bench_seed_sent_bytes_by_pn(inflight, 1200);
+                    let mut ranges = Vec::with_capacity((inflight / 4) as usize);
+                    let mut start = 0u64;
+                    while start < inflight {
+                        let end = (start + 1).min(inflight);
+                        ranges.push((start, end));
+                        start += 4;
+                    }
+                    (client, ranges)
+                },
+                |(mut client, ranges)| {
+                    client.bench_account_ack_ranges(black_box(&ranges));
+                    black_box(());
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
