@@ -88,6 +88,37 @@ jobs:
           path: scripts/out/tests/privilege-memory-tls-proof/
           if-no-files-found: error
 
+  linux-transport-uring:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "stable"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run io_uring transport suites
+        shell: bash
+        run: |
+          # The only platform-gated suites the macOS gate can never cover.
+          # They accept both kernel contracts: the issue-time error CQE and
+          # the kernel >= 6.17 prep-time short-submit quarantine (TODO-1004).
+          cargo test --locked --features "rust-tests io_uring" \
+            --test rt-transport-uring --test rt-io-hotpath-kernel-integration
+
   frontend-dependency-security:
     timeout-minutes: 15
     runs-on: macos-latest
