@@ -384,8 +384,36 @@ struct FlushScratch {
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
 struct UringInboundRuntime {
-    receiver: crate::optimize::uring_batch::UringRecvBatch,
+    receiver: InboundReceiver,
     event: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+}
+
+/// io_uring inbound receiver: the per-slot `RecvMsg` batch or the
+/// provided-buffer multishot path (TODO-1007). Both drain into the same
+/// `RecvCompletion` stream.
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+enum InboundReceiver {
+    Batch(crate::optimize::uring_batch::UringRecvBatch),
+    Multishot(crate::optimize::uring_batch::UringRecvMultishot),
+}
+
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+impl InboundReceiver {
+    fn drain_completions(
+        &mut self,
+    ) -> std::io::Result<Vec<crate::optimize::uring_batch::RecvCompletion>> {
+        match self {
+            Self::Batch(receiver) => receiver.drain_completions(),
+            Self::Multishot(receiver) => receiver.drain_completions(),
+        }
+    }
+
+    fn eventfd_fd(&self) -> std::os::fd::RawFd {
+        match self {
+            Self::Batch(receiver) => receiver.eventfd_fd(),
+            Self::Multishot(receiver) => receiver.eventfd_fd(),
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]

@@ -1426,7 +1426,7 @@ impl Drop for UringBatchSender {
 mod worker;
 pub use worker::{FlatReply, FlatToReply, UringBatchWorker};
 mod recv;
-pub use recv::{RecvCompletion, UringRecvBatch};
+pub use recv::{RecvCompletion, UringRecvBatch, UringRecvMultishot};
 
 fn checked_slot_index(user_data: u64, depth: usize) -> std::io::Result<usize> {
     let idx = usize::try_from(user_data).map_err(|_| {

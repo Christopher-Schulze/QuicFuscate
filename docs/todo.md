@@ -3991,7 +3991,7 @@
 
 ### TODO-1007 - io_uring multishot recv + provided buffer ring for inbound
 
-- OPEN. `UringRecvBatch` re-arms one RecvMsg SQE per slot per completion; multishot `recv` + a provided-buffer ring (kernel >= 5.19) produces repeated CQEs from one SQE and turns re-arm bookkeeping into ring refill. Connected client path first (no per-packet sockaddr); server demux only if msghdr ancillary stays affordable. Note: upstream warns multishot `recvmsg` copies per-completion msghdr on the fly - measure before adopting there.
+- PARTIAL. `UringRecvMultishot` implemented and kernel-verified on Omega 6.17 (provided-buffer ring + single RecvMulti SQE, bid recycling + zero-len/rearm contracts green). Wired into the client engine path behind `QUICFUSCATE_IO_URING_RECV_MULTISHOT=1` (opt-in, batch fallback). Open: A/B throughput vs the UDP_GRO batch path on Omega before flipping the default; server demux stays on per-slot RecvMsg (needs per-packet sockaddr).
 - Detail: docs/todo/todo-1007-uring-multishot-recv.md
 
 ### TODO-1008 - Evaluate io_uring send bundles for TX batching

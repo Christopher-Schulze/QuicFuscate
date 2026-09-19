@@ -682,3 +682,532 @@ impl Drop for UringRecvBatch {
         }
     }
 }
+
+// Receive path: UringRecvMultishot (provided-buffer ring + RecvMulti)
+// ---------------------------------------------------------------------------
+//
+// TODO-1007: one `RecvMulti` SQE (`IORING_OP_RECV` + `IORING_RECV_MULTISHOT` +
+// `IOSQE_BUFFER_SELECT`) produces repeated CQEs, each picking a buffer from a
+// registered provided-buffer ring. Compared to `UringRecvBatch` this removes
+// the per-packet re-arm entirely: no per-slot msghdr/iovec state, no
+// `repost_pending` bookkeeping, one SQE instead of N per drain cycle.
+//
+// Constraint: `IORING_OP_RECV` carries no `msghdr`, so neither a per-packet
+// source address nor a `UDP_GRO` segment-size cmsg is available. This type is
+// therefore for connected sockets only, and the caller must NOT enable
+// `UDP_GRO` on the socket - a coalesced super-buffer would arrive without its
+// segment size and could not be split back into datagrams.
+
+/// Buffer-group id registered for the multishot receive ring.
+const MULTISHOT_BGID: u16 = 7;
+/// user_data tag carried by the single multishot request. Dedicated ring, so
+/// every CQE must carry this tag.
+const MULTISHOT_TAG: u64 = u64::MAX;
+
+/// One `io_uring_buf` ring entry (16 bytes). The provided-buffer ring is an
+/// mmap'd array of these; the ring tail aliases `bufs[0].resv` (kernel reads
+/// addr/len/bid only), so entries are written field-wise and `resv` is never
+/// touched - writing it would clobber the shared tail word.
+#[repr(C)]
+struct BufRingBuf {
+    addr: u64,
+    len: u32,
+    bid: u16,
+    resv_tail: u16,
+}
+
+const BUF_RING_ENTRY_BYTES: usize = std::mem::size_of::<BufRingBuf>();
+/// Byte offset of the shared tail u16 inside the ring mapping (the `tail`
+/// field of `struct io_uring_buf_ring`, aliasing `bufs[0].resv`).
+const BUF_RING_TAIL_OFFSET: usize = 14;
+
+/// Multishot UDP receiver backed by a dedicated io_uring ring, a provided
+/// buffer ring, and the same eventfd bridge as `UringRecvBatch`.
+///
+/// Connected sockets only. The kernel pulls one buffer per datagram from the
+/// ring; completions report the buffer id via `IORING_CQE_F_BUFFER`. Consumed
+/// buffers are pushed back onto the ring tail and the tail is advanced once
+/// per drain batch.
+pub struct UringRecvMultishot {
+    /// Optional so Drop can destroy the ring before unmapping the provided
+    /// buffer ring and returning pool-backed buffers.
+    ring: Option<IoUring>,
+    /// eventfd created with `EFD_NONBLOCK | EFD_CLOEXEC`, registered via
+    /// `register_eventfd_async`. Owned by this struct (closed in Drop).
+    eventfd: RawFd,
+    /// mmap'd provided-buffer ring (`entries * 16` bytes).
+    ring_map: *mut u8,
+    /// Number of ring entries (power of two, <= 32768).
+    ring_entries: u16,
+    /// Producer-side tail we publish to the kernel via the shared tail word.
+    local_tail: u16,
+    /// Contiguous buffer pool: `entries * buf_size` bytes when not pooled.
+    bufs: Vec<u8>,
+    /// Pool-backed buffers indexed by buffer id when pooled.
+    blocks: Vec<Option<AlignedBox<[u8]>>>,
+    memory_pool: Option<Arc<MemoryPool>>,
+    buf_size: usize,
+    socket_fd: RawFd,
+    /// Whether the multishot request is currently armed.
+    armed: bool,
+    /// A completion without `IORING_CQE_F_MORE` terminated the request; it
+    /// must be re-armed on the next drain.
+    rearm_pending: bool,
+    /// Total number of `-ENOBUFS` terminations observed (ring ran dry).
+    ring_starved_total: u64,
+    /// `(bid, backing addr)` pairs awaiting a ring re-add; collected during
+    /// the drain and published with a single tail advance. In pooled mode the
+    /// address is the freshly allocated replacement block.
+    refill: Vec<(u16, *mut u8)>,
+    #[cfg(test)]
+    zero_length_completions: usize,
+}
+
+// SAFETY: UringRecvMultishot owns its ring, eventfd, the mapped provided-buffer
+// ring and all backing buffers. Raw pointers into the mapping and backing are
+// only used through &mut self methods. Drop destroys the io_uring ring before
+// unmapping or freeing anything, so no kernel request can retain a pointer.
+unsafe impl Send for UringRecvMultishot {}
+
+impl UringRecvMultishot {
+    /// Create a contiguous multishot receiver. `entries` is the provided-buffer
+    /// ring depth (power of two, >= 8, <= 32768).
+    pub fn new(socket_fd: RawFd, entries: u16, buf_size: usize) -> Option<Self> {
+        Self::new_inner(socket_fd, entries, buf_size, None)
+    }
+
+    /// Create a multishot receiver whose buffers are `MemoryPool` blocks; the
+    /// completed block moves into `RecvCompletion` (zero-copy into conn.recv).
+    pub fn new_with_pool(
+        socket_fd: RawFd,
+        entries: u16,
+        buf_size: usize,
+        memory_pool: Arc<MemoryPool>,
+    ) -> Option<Self> {
+        Self::new_inner(socket_fd, entries, buf_size, Some(memory_pool))
+    }
+
+    fn new_inner(
+        socket_fd: RawFd,
+        entries: u16,
+        buf_size: usize,
+        memory_pool: Option<Arc<MemoryPool>>,
+    ) -> Option<Self> {
+        let entries = entries.max(8).checked_next_power_of_two()?;
+        let buf_size = buf_size.max(1500);
+
+        let ring = match IoUring::new(64) {
+            Ok(r) => r,
+            Err(e) => {
+                log::debug!("io_uring multishot recv ring init failed: {e}");
+                return None;
+            }
+        };
+
+        // SAFETY: eventfd(2) takes an initial count (0) and valid flags.
+        let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        if efd < 0 {
+            log::debug!("eventfd creation failed: {}", std::io::Error::last_os_error());
+            return None;
+        }
+        if ring.submitter().register_eventfd_async(efd).is_err() {
+            log::debug!("register_eventfd_async failed");
+            // SAFETY: efd is a valid open fd not used after this close.
+            unsafe {
+                libc::close(efd);
+            }
+            return None;
+        }
+
+        // Provided-buffer ring: entries * sizeof(io_uring_buf) anonymous map.
+        let map_len = entries as usize * BUF_RING_ENTRY_BYTES;
+        // SAFETY: mmap with a null hint, private anonymous mapping of map_len
+        // bytes; the result is validated against MAP_FAILED before use.
+        let ring_map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                map_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if ring_map == libc::MAP_FAILED {
+            log::debug!("buf ring mmap failed: {}", std::io::Error::last_os_error());
+            // SAFETY: efd is a valid open fd not used after this close.
+            unsafe {
+                libc::close(efd);
+            }
+            return None;
+        }
+
+        // SAFETY: ring_map points to a live map_len-byte mapping that stays
+        // valid until unregister + munmap in Drop; bgid is unique to this ring.
+        if let Err(e) = unsafe {
+            ring.submitter().register_buf_ring_with_flags(
+                ring_map as u64,
+                entries,
+                MULTISHOT_BGID,
+                0,
+            )
+        } {
+            log::debug!("register_buf_ring failed: {e}");
+            // SAFETY: ring_map/map_len describe the mapping created above.
+            unsafe {
+                libc::munmap(ring_map, map_len);
+                libc::close(efd);
+            }
+            return None;
+        }
+
+        let d = entries as usize;
+        let pooled = memory_pool.is_some();
+        let mut this = Self {
+            ring: Some(ring),
+            eventfd: efd,
+            ring_map: ring_map as *mut u8,
+            ring_entries: entries,
+            local_tail: 0,
+            bufs: if pooled { Vec::new() } else { vec![0u8; d * buf_size] },
+            blocks: Vec::new(),
+            memory_pool,
+            buf_size,
+            socket_fd,
+            armed: false,
+            rearm_pending: false,
+            ring_starved_total: 0,
+            refill: Vec::with_capacity(d),
+            #[cfg(test)]
+            zero_length_completions: 0,
+        };
+
+        if let Some(pool) = this.memory_pool.as_ref() {
+            let mut blocks: Vec<Option<AlignedBox<[u8]>>> = Vec::with_capacity(d);
+            for _ in 0..d {
+                let block = pool.alloc();
+                if block.len() < buf_size {
+                    pool.free(block);
+                    for block in blocks.into_iter().flatten() {
+                        pool.free(block);
+                    }
+                    // SAFETY: the io_uring ring is destroyed with `this` at the
+                    // end of this scope; munmap/close release our own objects.
+                    unsafe {
+                        libc::munmap(this.ring_map as *mut libc::c_void, map_len);
+                        libc::close(this.eventfd);
+                    }
+                    this.ring_map = std::ptr::null_mut();
+                    return None;
+                }
+                blocks.push(Some(block));
+            }
+            this.blocks = blocks;
+        } else {
+            this.blocks.resize_with(d, || None);
+        }
+
+        // Offer every buffer id to the kernel, then publish one tail advance.
+        for bid in 0..entries {
+            // SAFETY: bid < entries indexes a slot whose backing was allocated
+            // above; buffer_addr returns a live pointer into our storage.
+            let addr = unsafe { Self::buffer_addr(&this.bufs, &this.blocks, this.buf_size, bid) };
+            this.ring_add(bid, addr);
+        }
+        this.ring_advance();
+
+        log::debug!(
+            "io_uring multishot recv created: entries={entries}, buf_size={buf_size}, pooled={pooled}"
+        );
+        Some(this)
+    }
+
+    /// Backing pointer for a buffer id. Takes the backing fields directly so
+    /// the drain loop can call it while `self.ring` stays mutably borrowed.
+    ///
+    /// SAFETY: bid must be < the number of backing slots and, in pooled mode,
+    /// the slot must hold a block; the returned pointer is valid while the
+    /// backing storage lives.
+    unsafe fn buffer_addr(
+        bufs: &[u8],
+        blocks: &[Option<AlignedBox<[u8]>>],
+        buf_size: usize,
+        bid: u16,
+    ) -> *mut u8 {
+        let idx = bid as usize;
+        if let Some(block) = blocks.get(idx).and_then(|slot| slot.as_ref()) {
+            block.as_ptr() as *mut u8
+        } else if !bufs.is_empty() {
+            // SAFETY: idx < entries and bufs holds entries * buf_size bytes.
+            unsafe { bufs.as_ptr().add(idx * buf_size) as *mut u8 }
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    /// Stage a buffer id onto the ring tail without publishing it. Writes the
+    /// three kernel-consumed fields individually so the shared `resv`/tail
+    /// word at entry 0 is never clobbered.
+    fn ring_add(&mut self, bid: u16, addr: *mut u8) {
+        let idx = (self.local_tail & (self.ring_entries - 1)) as usize;
+        // SAFETY: idx < ring_entries; entry is inside the map_len mapping.
+        let entry = unsafe { self.ring_map.add(idx * BUF_RING_ENTRY_BYTES) as *mut BufRingBuf };
+        // SAFETY: entry points into our live mapping; field-wise stores avoid
+        // touching resv_tail which aliases the shared tail when idx == 0.
+        unsafe {
+            (*entry).addr = addr as u64;
+            (*entry).len = self.buf_size as u32;
+            (*entry).bid = bid;
+        }
+        self.local_tail = self.local_tail.wrapping_add(1);
+    }
+
+    /// Publish staged entries to the kernel with release ordering.
+    fn ring_advance(&mut self) {
+        // SAFETY: tail word lives at byte offset 14 of the mapping.
+        let tail_ptr = unsafe { self.ring_map.add(BUF_RING_TAIL_OFFSET) as *mut u16 };
+        std::sync::atomic::fence(Ordering::Release);
+        // SAFETY: tail_ptr addresses the shared tail word inside our mapping.
+        unsafe {
+            std::ptr::write_volatile(tail_ptr, self.local_tail);
+        }
+    }
+
+    /// Raw eventfd descriptor for Tokio `AsyncFd` registration.
+    #[inline]
+    pub fn eventfd_fd(&self) -> RawFd {
+        self.eventfd
+    }
+
+    /// Total `-ENOBUFS` ring-starvation events observed since creation.
+    #[inline]
+    pub fn ring_starved_total(&self) -> u64 {
+        self.ring_starved_total
+    }
+
+    /// Whether the multishot request is currently armed.
+    #[inline]
+    pub fn is_armed(&self) -> bool {
+        self.armed
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(super) fn zero_length_completions_seen(&self) -> usize {
+        self.zero_length_completions
+    }
+
+    /// Arm the multishot receive request. Call once after construction; the
+    /// request then produces CQEs until the kernel terminates it (no
+    /// `IORING_CQE_F_MORE`), at which point `drain_completions` re-arms it.
+    pub fn post_initial(&mut self) -> std::io::Result<()> {
+        self.arm_multishot()
+    }
+
+    fn arm_multishot(&mut self) -> std::io::Result<()> {
+        let Some(ring) = self.ring.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "io_uring multishot receive ring is closed",
+            ));
+        };
+        let fd = io_uring::types::Fd(self.socket_fd);
+        {
+            let mut sq = ring.submission();
+            let entry = opcode::RecvMulti::new(fd, MULTISHOT_BGID).build().user_data(MULTISHOT_TAG);
+            // SAFETY: the SQE references our registered bgid; backing buffers
+            // outlive the ring. Pushed within one submission borrow.
+            unsafe {
+                if sq.push(&entry).is_err() {
+                    self.rearm_pending = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "io_uring multishot recv SQE could not be queued",
+                    ));
+                }
+            }
+        }
+        ring.submit()?;
+        self.armed = true;
+        self.rearm_pending = false;
+        Ok(())
+    }
+
+    /// Drain all ready CQEs and return completed receives.
+    ///
+    /// Each CFE with `IORING_CQE_F_BUFFER` consumed one ring buffer; the
+    /// payload is either copied into `RecvCompletion::data` (contiguous mode)
+    /// or moved out as the pool block itself (pooled mode). Consumed bids are
+    /// re-staged and the tail advanced once per drain.
+    pub fn drain_completions(&mut self) -> std::io::Result<Vec<RecvCompletion>> {
+        let mut completions = Vec::new();
+        let Some(ring) = self.ring.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "io_uring multishot receive ring is closed",
+            ));
+        };
+        let mut drain_error = None;
+
+        {
+            let cq = ring.completion();
+            for cqe in cq {
+                if cqe.user_data() != MULTISHOT_TAG {
+                    drain_error = Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "unexpected user_data on multishot recv ring: {:#x}",
+                            cqe.user_data()
+                        ),
+                    ));
+                    continue;
+                }
+                if !io_uring::cqueue::more(cqe.flags()) {
+                    // The request terminated; it must be re-armed. A missing
+                    // MORE flag accompanies both normal termination and
+                    // -ENOBUFS.
+                    self.armed = false;
+                    self.rearm_pending = true;
+                }
+                let result = cqe.result();
+                if result < 0 {
+                    let errno = result.unsigned_abs();
+                    // ENOBUFS (105): provided ring ran dry; counted and the
+                    // re-arm above resumes reception after the refill below.
+                    if errno == 105 {
+                        self.ring_starved_total += 1;
+                    } else if errno != 11 && errno != 104 && errno != 111 {
+                        log::trace!("io_uring RecvMulti CQE error: errno={errno}");
+                    }
+                    continue;
+                }
+                if result == 0 {
+                    // Zero-length datagram. The kernel may or may not attach a
+                    // buffer id (kernel-version dependent): recycle the bid
+                    // when one was consumed, count the receive either way.
+                    #[cfg(test)]
+                    {
+                        self.zero_length_completions += 1;
+                    }
+                    if let Some(bid) = io_uring::cqueue::buffer_select(cqe.flags()) {
+                        if bid < self.ring_entries {
+                            // SAFETY: backing for bid is unchanged.
+                            let addr = unsafe {
+                                Self::buffer_addr(&self.bufs, &self.blocks, self.buf_size, bid)
+                            };
+                            if !addr.is_null() {
+                                self.refill.push((bid, addr));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let Some(bid) = io_uring::cqueue::buffer_select(cqe.flags()) else {
+                    drain_error = Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "io_uring multishot CQE carried no buffer id",
+                    ));
+                    continue;
+                };
+                if bid >= self.ring_entries {
+                    drain_error = Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("io_uring multishot buffer id {bid} out of range"),
+                    ));
+                    continue;
+                }
+                let len = (result as usize).min(self.buf_size);
+                if let Some(pool) = self.memory_pool.as_ref() {
+                    let idx = bid as usize;
+                    let Some(block) = self.blocks[idx].take() else {
+                        drain_error = Some(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("io_uring multishot pool slot {bid} has no backing block"),
+                        ));
+                        continue;
+                    };
+                    let mut replacement = pool.alloc();
+                    if replacement.len() < self.buf_size {
+                        // Pool exhausted or shrunk: keep the bid off the ring
+                        // (starvation is recoverable; re-arm refills lazily).
+                        pool.free(replacement);
+                        self.ring_starved_total += 1;
+                        self.blocks[idx] = None;
+                    } else {
+                        let addr = replacement.as_mut_ptr();
+                        self.blocks[idx] = Some(replacement);
+                        self.refill.push((bid, addr));
+                    }
+                    completions.push(RecvCompletion {
+                        data: Vec::new(),
+                        block: Some(block),
+                        len,
+                        addr: None,
+                    });
+                } else {
+                    let start = bid as usize * self.buf_size;
+                    let data = self.bufs[start..start + len].to_vec();
+                    completions.push(RecvCompletion { data, block: None, len, addr: None });
+                    // SAFETY: contiguous backing for bid is unchanged.
+                    let addr =
+                        unsafe { Self::buffer_addr(&self.bufs, &self.blocks, self.buf_size, bid) };
+                    if !addr.is_null() {
+                        self.refill.push((bid, addr));
+                    }
+                }
+            }
+        }
+
+        // Publish every staged refill with a single tail advance.
+        let refill = std::mem::take(&mut self.refill);
+        for (bid, addr) in refill {
+            self.ring_add(bid, addr);
+        }
+        self.ring_advance();
+
+        if self.rearm_pending {
+            match self.arm_multishot() {
+                Ok(()) => {}
+                Err(error) => {
+                    drain_error = drain_error.or(Some(error));
+                }
+            }
+        }
+
+        if let Some(error) = drain_error {
+            return Err(error);
+        }
+        Ok(completions)
+    }
+}
+
+impl Drop for UringRecvMultishot {
+    fn drop(&mut self) {
+        // Destroy the ring first: closing the io_uring fd unregisters the
+        // provided-buffer ring and guarantees no pending kernel request can
+        // reference the mapping or the backing buffers.
+        drop(self.ring.take());
+
+        if !self.ring_map.is_null() {
+            // SAFETY: ring_map/map_len describe the mapping created in
+            // new_inner and the io_uring ring is already destroyed.
+            unsafe {
+                libc::munmap(
+                    self.ring_map as *mut libc::c_void,
+                    self.ring_entries as usize * BUF_RING_ENTRY_BYTES,
+                );
+            }
+            self.ring_map = std::ptr::null_mut();
+        }
+        if let Some(pool) = self.memory_pool.as_ref() {
+            for block in self.blocks.drain(..).flatten() {
+                pool.free(block);
+            }
+        }
+        // SAFETY: self.eventfd is a valid open fd created during construction
+        // and the ring has already been destroyed, so no completion can use it.
+        unsafe {
+            libc::close(self.eventfd);
+        }
+    }
+}

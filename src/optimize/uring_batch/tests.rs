@@ -291,3 +291,108 @@ fn fill_sockaddr_ipv4_sets_correct_family() {
         assert_eq!((*sa).sin_addr.s_addr, u32::from_ne_bytes([127, 0, 0, 1]));
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn recv_multishot_delivers_and_recycles_buffers() {
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("receiver bind");
+    let receiver_addr = receiver.local_addr().expect("receiver address");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
+    let mut recv = match crate::optimize::uring_batch::UringRecvMultishot::new(
+        receiver.as_raw_fd(),
+        8,
+        2048,
+    ) {
+        Some(recv) => recv,
+        None => {
+            println!("QF_IO_URING_MULTISHOT_STATUS=UNAVAILABLE reason=init_or_buf_ring");
+            return;
+        }
+    };
+    recv.post_initial().expect("arm multishot recv");
+    assert!(recv.is_armed(), "multishot request must be armed after post_initial");
+
+    // Three waves of four datagrams over an eight-entry ring prove both
+    // delivery and bid recycling: every wave needs the ring refilled.
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    for wave in 0..3u8 {
+        for seq in 0..4u8 {
+            let payload = [0x51, 0x46, wave, seq];
+            sender.send_to(&payload, receiver_addr).expect("send datagram");
+        }
+        for _ in 0..200 {
+            for completion in recv.drain_completions().expect("drain multishot") {
+                seen.push(completion.as_slice().to_vec());
+            }
+            if seen.iter().filter(|d| d.len() == 4 && d[2] == wave).count() == 4 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(seen.len(), 12, "expected 12 datagrams, got {}", seen.len());
+    for wave in 0..3u8 {
+        for seq in 0..4u8 {
+            let expected = vec![0x51, 0x46, wave, seq];
+            assert!(seen.contains(&expected), "missing payload wave={wave} seq={seq}");
+        }
+    }
+    println!(
+        "QF_IO_URING_MULTISHOT_STATUS=SUPPORTED delivered=12 starved={} armed={}",
+        recv.ring_starved_total(),
+        recv.is_armed()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn recv_multishot_zero_length_and_rearm() {
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("receiver bind");
+    let receiver_addr = receiver.local_addr().expect("receiver address");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
+    let mut recv = match crate::optimize::uring_batch::UringRecvMultishot::new(
+        receiver.as_raw_fd(),
+        8,
+        2048,
+    ) {
+        Some(recv) => recv,
+        None => {
+            println!("QF_IO_URING_MULTISHOT_ZERO_STATUS=UNAVAILABLE reason=init");
+            return;
+        }
+    };
+    recv.post_initial().expect("arm multishot recv");
+
+    for _ in 0..3 {
+        sender.send_to(&[], receiver_addr).expect("zero datagram");
+    }
+    for _ in 0..200 {
+        recv.drain_completions().expect("drain zero datagrams");
+        if recv.zero_length_completions_seen() == 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(recv.zero_length_completions_seen(), 3);
+
+    // After zero-length completions (and any request termination + re-arm the
+    // kernel performed), a payload datagram must still be delivered.
+    let marker = [0x51, 0x46, 0x37];
+    sender.send_to(&marker, receiver_addr).expect("marker datagram");
+    let mut marker_seen = false;
+    for _ in 0..300 {
+        let completions = recv.drain_completions().expect("drain marker");
+        if completions.iter().any(|c| c.as_slice() == marker) {
+            marker_seen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(marker_seen, "multishot recv did not recover after zero datagrams");
+}

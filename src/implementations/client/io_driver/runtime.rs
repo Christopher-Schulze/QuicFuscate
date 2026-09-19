@@ -1227,35 +1227,68 @@ impl IoDriver {
         }
 
         let socket_fd = socket.as_raw_fd();
-        // Prefer UDP_GRO when the kernel accepts it: one RecvMsg can then
-        // deliver a coalesced super-buffer whose segment boundaries are
-        // restored from the per-slot cmsg storage inside UringRecvBatch. GRO
-        // needs 64 KiB buffers, which exceed pool block size, so this variant
-        // uses contiguous buffers; the pool-backed path stays the fallback.
-        let gro_enabled = qf_transport_udp::enable_udp_gro_fd(socket_fd).is_ok();
-        let mut receiver = if gro_enabled {
-            crate::optimize::uring_batch::UringRecvBatch::with_defaults_gro(socket_fd, false)
+
+        // TODO-1007: opt-in multishot path. A single RecvMulti SQE plus the
+        // provided-buffer ring removes the per-packet re-arm entirely. It must
+        // NOT run with UDP_GRO enabled on the socket: IORING_OP_RECV carries
+        // no msghdr, so a coalesced super-buffer would arrive without its
+        // segment size and could not be split back into datagrams.
+        let multishot_opt_in = crate::env_utils::EnvSnapshot::capture()
+            .flag("QUICFUSCATE_IO_URING_RECV_MULTISHOT", false);
+        let mut receiver = if multishot_opt_in {
+            let memory_pool = { conn.lock().recv_memory_pool() };
+            match crate::optimize::uring_batch::UringRecvMultishot::new_with_pool(
+                socket_fd,
+                64,
+                2048,
+                memory_pool,
+            ) {
+                Some(rx) => {
+                    log::debug!("io_uring client recv: multishot provided-buffer ring");
+                    Some(InboundReceiver::Multishot(rx))
+                }
+                None => None,
+            }
         } else {
             None
         };
-        if gro_enabled && receiver.is_none() {
-            // MTU-sized fallback slots cannot hold a super-buffer; a coalesced
-            // arrival would set MSG_TRUNC and lose its tail.
-            let _ = qf_transport_udp::disable_udp_gro_fd(socket_fd);
-        } else if gro_enabled {
-            log::debug!("io_uring client recv: UDP_GRO enabled (64 KiB slots)");
-        }
+
         if receiver.is_none() {
-            let memory_pool = { conn.lock().recv_memory_pool() };
-            receiver = crate::optimize::uring_batch::UringRecvBatch::with_defaults_pool(
-                socket_fd,
-                false,
-                memory_pool,
-            );
+            // Prefer UDP_GRO when the kernel accepts it: one RecvMsg can then
+            // deliver a coalesced super-buffer whose segment boundaries are
+            // restored from the per-slot cmsg storage inside UringRecvBatch. GRO
+            // needs 64 KiB buffers, which exceed pool block size, so this variant
+            // uses contiguous buffers; the pool-backed path stays the fallback.
+            let gro_enabled = qf_transport_udp::enable_udp_gro_fd(socket_fd).is_ok();
+            let mut batch = if gro_enabled {
+                crate::optimize::uring_batch::UringRecvBatch::with_defaults_gro(socket_fd, false)
+            } else {
+                None
+            };
+            if gro_enabled && batch.is_none() {
+                // MTU-sized fallback slots cannot hold a super-buffer; a coalesced
+                // arrival would set MSG_TRUNC and lose its tail.
+                let _ = qf_transport_udp::disable_udp_gro_fd(socket_fd);
+            } else if gro_enabled {
+                log::debug!("io_uring client recv: UDP_GRO enabled (64 KiB slots)");
+            }
+            if batch.is_none() {
+                let memory_pool = { conn.lock().recv_memory_pool() };
+                batch = crate::optimize::uring_batch::UringRecvBatch::with_defaults_pool(
+                    socket_fd,
+                    false,
+                    memory_pool,
+                );
+            }
+            receiver = batch.map(InboundReceiver::Batch);
         }
         let mut receiver = receiver?;
 
-        if receiver.post_initial().is_err() {
+        let post_result = match &mut receiver {
+            InboundReceiver::Batch(rx) => rx.post_initial(),
+            InboundReceiver::Multishot(rx) => rx.post_initial(),
+        };
+        if post_result.is_err() {
             log::debug!("io_uring recv post_initial failed");
             return None;
         }

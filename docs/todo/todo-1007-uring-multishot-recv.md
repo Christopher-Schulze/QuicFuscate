@@ -79,3 +79,34 @@ completion. Revisit only if measurements show the client win first.
   documented no-GRO variant), probe-fallback test.
 - Omega: `tun-e2e-netns.sh` + `rt-io-hotpath-kernel-integration` green.
 - CI: `linux-transport-uring` lane runs the same suite - no new lane needed.
+
+## Implementation status (2026-09)
+
+DONE (steps 1-2, kernel-verified):
+- `UringRecvMultishot` in `src/optimize/uring_batch/recv.rs` beside
+  `UringRecvBatch`: mmap'd provided-buffer ring registered via
+  `register_buf_ring_with_flags` (bgid 7), one `opcode::RecvMulti` SQE
+  (`IORING_OP_RECV|MULTISHOT|BUFFER_SELECT`), bid recovery via
+  `cqueue::buffer_select`, ring refill batched into a single tail advance per
+  drain. Contiguous and `MemoryPool`-backed modes; pooled completions move
+  the filled block into `RecvCompletion` (zero-copy handoff preserved).
+  Starvation counter `ring_starved_total` tracks `-ENOBUFS` terminations;
+  the request re-arms on any missing `IORING_CQE_F_MORE`.
+- Wired into the client engine path: `InboundReceiver` enum in
+  `implementations/client/io_driver.rs`; opt-in via
+  `QUICFUSCATE_IO_URING_RECV_MULTISHOT=1` with fallback to the existing
+  batch path. `UDP_GRO` is deliberately not enabled on the multishot socket
+  (no cmsg - a coalesced super-buffer would be un-splittable).
+- Kernel-verified on Omega (6.17): `recv_multishot_delivers_and_recycles_buffers`
+  (3 waves x 4 datagrams over an 8-entry ring = bid recycling proof) and
+  `recv_multishot_zero_length_and_rearm` (zero-len consumes no buffer id on
+  6.17 - counted anyway; delivery resumes after) both green; the whole lib
+  suite green, clippy clean.
+
+OPEN (steps 3-4):
+- A/B measurement vs the GRO batch path on Omega (`tun-e2e-bandwidth-netns.sh`
+  or iperf over the tunnel): multishot trades UDP_GRO coalescing for zero
+  re-arm; on the connected client socket the bet is re-arm elimination wins
+  at high pps, but the number must be measured, not assumed. Default stays
+  opt-in until the numbers land.
+- Server demux remains on `UringRecvBatch` (needs per-packet sockaddr).
