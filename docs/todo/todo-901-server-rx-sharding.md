@@ -197,6 +197,21 @@ Deviations from the earlier sketch, all deliberate:
   harness's UDP-socket evidence helper now aggregates SO_REUSEPORT
   sibling counters (`socket_count` field; remote-port selectors stay
   exactly-one).
+- [x] Omega live N=4 lifecycle: `test-graceful-shutdown.sh` PASS —
+  SIGHUP reload with `active_sessions_unchanged=2`, `ReloadTransport`
+  broadcast, drain running→stopped, new-connection rejection during
+  drain, client-close reconcile (2→1) via routed `ExpireRemotes`, clean
+  worker close-flush + join, audit chain valid. `tun-e2e-fec-netns.sh`
+  6/6 PASS under N=4 (25% netem → 9% tunnel loss; iperf3 at 10% loss)
+  and `tun-e2e-traffic-analysis-netns.sh` PASS under N=4.
+- [x] Post-sharding fixes found by live validation: coordinator
+  housekeeping delay iterated the always-empty coordinator `clients`
+  map → idle-interval pacing starved metric/session freshness under
+  sharding (router-aware activity signal now paces it at the active
+  rate); `test-graceful-shutdown.sh` had two stale grep patterns that
+  missed the `runtime_generation=N` field added in TODO-889 (fails
+  identically at N=1 — repaired, not sharding-related);
+  `udp-socket-evidence.py` now aggregates SO_REUSEPORT siblings.
 - [ ] pps scaling: requires multicore x86_64; Omega (1 core) cannot
   evidence the >=3x pps criterion — remains open by hardware, not by
   implementation. Worker io_uring/affinity tuning may also matter there.
