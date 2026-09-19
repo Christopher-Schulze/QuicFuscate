@@ -17,6 +17,11 @@ pub use fastpath::{likely, unlikely, UdpFastPath, MAX_BATCH_SIZE};
 #[cfg(target_os = "linux")]
 const UDP_BATCH_STACK: usize = 64;
 
+/// Maximum payload for one `UDP_SEGMENT` GSO super-buffer. The kernel encodes
+/// the UDP length field as `payload + 8` in a `u16`, so payload bytes must
+/// stay within `u16::MAX - 8` = 65527; larger buffers fail with `EMSGSIZE`.
+pub const UDP_GSO_MAX_PAYLOAD: usize = u16::MAX as usize - 8;
+
 #[cfg(target_os = "macos")]
 extern "C" {
     fn sendmsg_x(

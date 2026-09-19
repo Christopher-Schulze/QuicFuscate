@@ -721,7 +721,19 @@ pub(super) async fn run_client(
     let shutdown_signal = wait_shutdown_signal();
     tokio::pin!(shutdown_signal);
 
-    let exit_reason = loop {
+    // Enable kernel-side receive coalescing only now: the handshake and
+    // assignment paths above read via plain `recvmsg` without cmsg parsing and
+    // must keep single-datagram semantics. From here on the recv branch uses
+    // `recv_connected_segments`, which splits GRO super-buffers correctly.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Err(error) = qf_transport_udp::enable_udp_gro_fd(socket.as_raw_fd()) {
+            log::debug!("UDP GRO unavailable on client socket: {error}");
+        }
+    }
+
+    let exit_reason = 'runtime: loop {
         tokio::select! {
             _ = &mut shutdown_signal => {
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
@@ -739,7 +751,7 @@ pub(super) async fn run_client(
                 }
                 break ExitReason::CleanShutdown;
             }
-            recv_res = recv_connected_datagram(&socket, &mut buf) => {
+            recv_res = recv_connected_segments(&socket, &mut buf) => {
                 if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
                     break ExitReason::DataPlane(fault);
                 }
@@ -755,69 +767,81 @@ pub(super) async fn run_client(
                 }
                 last_runtime_progress = branch_started;
                 match recv_res {
-                    Ok(len) => {
+                    Ok((len, gso_size)) => {
                         telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
-                        let activity_before = io_diagnostics
-                            .as_ref()
-                            .map(|_| conn.conn.last_activity_marker());
                         if let Some(diagnostics) = io_diagnostics.as_mut() {
                             diagnostics.record_socket_datagram(len);
                         }
-                        match conn.recv(&buf[..len]) {
-                            Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
-                                | quicfuscate::error::ConnectionError::TlsAlert(_)
-                                | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
-                                if let Some(diagnostics) = io_diagnostics.as_mut() {
-                                    diagnostics.record_core_recv_error();
-                                }
-                                error!("TLS handshake failed: {}", error);
-                                break ExitReason::SocketError(error.to_string());
-                            }
-                            Err(error) => {
-                                if let Some(diagnostics) = io_diagnostics.as_mut() {
-                                    diagnostics.record_core_recv_error();
-                                }
-                                error!("QUIC recv failed: {:?}", error);
-                            }
-                            Ok(_) => {
-                                if let (Some(diagnostics), Some(before)) =
-                                    (io_diagnostics.as_mut(), activity_before)
-                                {
-                                    diagnostics.record_core_recv_success(
-                                        conn.conn.last_activity_marker() != before,
-                                    );
-                                }
-                                // conn.recv() only queues decoded H3/MASQUE
-                                // events internally. Drain them now so the
-                                // downlink payload reaches the TUN at wire
-                                // speed instead of waiting for the next
-                                // housekeeping tick (CLIENT_HOUSEKEEPING_IDLE).
-                                if tun_enable {
-                                    if let Err(e) =
-                                        conn.poll_http3_with(client_h3_downlink_body_cb(
-                                            &tun_writer,
-                                            &tun_reader_fault,
-                                            &tun_notify,
-                                            &tun_reader_shutdown,
-                                        ))
-                                    {
-                                        warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
+                        // A UDP_GRO super-buffer holds `gso_size`-aligned
+                        // datagrams; `conn.recv` still consumes one wire
+                        // datagram at a time, so split before feeding. A
+                        // `gso_size` of 0 means no cmsg arrived: the buffer is
+                        // one plain datagram, not len 1-byte slices.
+                        let seg = if gso_size > 0 { usize::from(gso_size) } else { len };
+                        let mut seg_off = 0usize;
+                        while seg_off < len {
+                            let seg_end = (seg_off + seg).min(len);
+                            let activity_before = io_diagnostics
+                                .as_ref()
+                                .map(|_| conn.conn.last_activity_marker());
+                            let seg_result = conn.recv(&buf[seg_off..seg_end]);
+                            seg_off = seg_end;
+                            match seg_result {
+                                Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
+                                    | quicfuscate::error::ConnectionError::TlsAlert(_)
+                                    | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
+                                    if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                        diagnostics.record_core_recv_error();
                                     }
-                                } else if let Err(e) = conn.poll_http3() {
-                                    warn!("HTTP/3 error: {:?}", e);
+                                    error!("TLS handshake failed: {}", error);
+                                    break 'runtime ExitReason::SocketError(error.to_string());
                                 }
-                                if let Err(error) =
-                                    flush_connected_outgoing(
-                                        &socket,
-                                        &mut conn,
-                                        &mut out,
-                                        io_diagnostics.as_mut(),
-                                    )
-                                    .await
-                                {
-                                    break ExitReason::DataPlane(error);
+                                Err(error) => {
+                                    if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                        diagnostics.record_core_recv_error();
+                                    }
+                                    error!("QUIC recv failed: {:?}", error);
+                                }
+                                Ok(_) => {
+                                    if let (Some(diagnostics), Some(before)) =
+                                        (io_diagnostics.as_mut(), activity_before)
+                                    {
+                                        diagnostics.record_core_recv_success(
+                                            conn.conn.last_activity_marker() != before,
+                                        );
+                                    }
                                 }
                             }
+                        }
+                        // conn.recv() only queues decoded H3/MASQUE
+                        // events internally. Drain them now so the
+                        // downlink payload reaches the TUN at wire
+                        // speed instead of waiting for the next
+                        // housekeeping tick (CLIENT_HOUSEKEEPING_IDLE).
+                        if tun_enable {
+                            if let Err(e) =
+                                conn.poll_http3_with(client_h3_downlink_body_cb(
+                                    &tun_writer,
+                                    &tun_reader_fault,
+                                    &tun_notify,
+                                    &tun_reader_shutdown,
+                                ))
+                            {
+                                warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
+                            }
+                        } else if let Err(e) = conn.poll_http3() {
+                            warn!("HTTP/3 error: {:?}", e);
+                        }
+                        if let Err(error) =
+                            flush_connected_outgoing(
+                                &socket,
+                                &mut conn,
+                                &mut out,
+                                io_diagnostics.as_mut(),
+                            )
+                            .await
+                        {
+                            break ExitReason::DataPlane(error);
                         }
                         // TUN uplink: forward frames from the TUN reader channel
                         // to the MASQUE data plane. This is done here (in the recv

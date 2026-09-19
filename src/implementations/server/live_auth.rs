@@ -811,7 +811,12 @@ pub async fn flush_live_server_outgoing(
             }
             #[cfg(target_os = "linux")]
             if gso_ok {
-                if let Some((end, seg_size)) = plan_gso_run(&staging_spans, &sent, index, 65_535) {
+                if let Some((end, seg_size)) = plan_gso_run(
+                    &staging_spans,
+                    &sent,
+                    index,
+                    qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
+                ) {
                     let run_start = staging_spans[index].1;
                     let run_end = staging_spans[end - 1].1 + staging_spans[end - 1].2;
                     let target = staging_spans[index].0;
@@ -1635,7 +1640,8 @@ mod gso_plan_tests {
         let a = addr(1000);
         let staging = vec![span(a, 0, 600), span(a, 600, 600), span(a, 1200, 250)];
         let sent = vec![false; 3];
-        let (end, seg) = plan_gso_run(&staging, &sent, 0, 65_535).expect("run");
+        let (end, seg) =
+            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).expect("run");
         assert_eq!((end, seg), (3, 600), "short tail must close the run");
     }
 
@@ -1646,12 +1652,13 @@ mod gso_plan_tests {
         // Different target ends the run before b.
         let staging = vec![span(a, 0, 600), span(b, 600, 600), span(a, 1200, 600)];
         let sent = vec![false; 3];
-        assert!(plan_gso_run(&staging, &sent, 0, 65_535).is_none());
+        assert!(plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).is_none());
 
         // An already-sent middle slot splits the run; index 1 is the start.
         let staging = vec![span(a, 0, 600), span(a, 600, 600), span(a, 1200, 600)];
         let sent = vec![false, true, false];
-        let (end, seg) = plan_gso_run(&staging, &sent, 2, 65_535).unwrap_or((0, 0));
+        let (end, seg) = plan_gso_run(&staging, &sent, 2, qf_transport_udp::UDP_GSO_MAX_PAYLOAD)
+            .unwrap_or((0, 0));
         assert_eq!((end, seg), (0, 0), "single packet is not a run");
     }
 
@@ -1660,10 +1667,11 @@ mod gso_plan_tests {
         let a = addr(1000);
         let staging: Vec<_> = (0..80).map(|i| span(a, i * 600, 600)).collect();
         let sent = vec![false; staging.len()];
-        let (end, seg) = plan_gso_run(&staging, &sent, 0, 65_535).expect("run");
+        let (end, seg) =
+            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).expect("run");
         assert_eq!(seg, 600);
         assert!(end <= 64, "run must respect the 64-segment cap");
-        // 65535/600 = 109 segments fit by bytes; the 64-segment cap binds.
+        // ~65.5K/600 = 109 segments fit by bytes; the 64-segment cap binds.
         assert_eq!(end, 64);
 
         // Tight payload cap cuts the run earlier.
@@ -1678,6 +1686,6 @@ mod gso_plan_tests {
         // run (it is not a valid tail either) - run collapses to a singleton.
         let staging = vec![span(a, 0, 600), span(a, 600, 900), span(a, 1500, 600)];
         let sent = vec![false; 3];
-        assert!(plan_gso_run(&staging, &sent, 0, 65_535).is_none());
+        assert!(plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).is_none());
     }
 }

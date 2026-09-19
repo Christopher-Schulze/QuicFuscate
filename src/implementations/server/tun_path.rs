@@ -450,7 +450,6 @@ fn flush_tun_downlink_queue(
         const TX_STAGED_MAX: usize = 256;
         const TX_FLAT_BYTES: usize = 4 * 1024 * 1024;
         const SEND_WINDOW: usize = 65_535;
-        const GSO_MAX_PAYLOAD: usize = 65_535;
 
         let fd = socket.as_raw_fd();
         let flat = &mut live.live_state.downlink_tx_flat;
@@ -519,9 +518,12 @@ fn flush_tun_downlink_queue(
                     i += 1;
                     continue;
                 }
-                if let Some((end, seg)) =
-                    super::live_auth::plan_gso_run(staging, &sent[..n_staged], i, GSO_MAX_PAYLOAD)
-                {
+                if let Some((end, seg)) = super::live_auth::plan_gso_run(
+                    staging,
+                    &sent[..n_staged],
+                    i,
+                    qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
+                ) {
                     if !pending.is_empty() {
                         let refs: smallvec::SmallVec<[(&[u8], SocketAddr); 64]> = pending
                             .iter()

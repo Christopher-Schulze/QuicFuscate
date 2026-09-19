@@ -240,6 +240,32 @@ async fn recv_connected_datagram(
         .await
 }
 
+/// Linux RX path: one `recvmsg` with `UDP_GRO` ancillary parsing. Returns the
+/// coalesced length plus the kernel segment size (`0`/`1` means a single
+/// datagram). The caller splits `buf[..len]` into `gso_size`-aligned
+/// datagrams before handing them to `conn.recv`.
+#[cfg(target_os = "linux")]
+async fn recv_connected_segments(
+    socket: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, u16)> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = socket.as_raw_fd();
+    socket
+        .async_io(Interest::READABLE, || qf_transport_udp::recv_msg_gro(fd, buf, false))
+        .await
+        .map(|(len, _peer, gso_size)| (len, gso_size))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn recv_connected_segments(
+    socket: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, u16)> {
+    recv_connected_datagram(socket, buf).await.map(|len| (len, 1))
+}
+
 #[cfg(not(unix))]
 async fn recv_connected_datagram(
     socket: &tokio::net::UdpSocket,
@@ -397,7 +423,9 @@ async fn flush_connected_outgoing(
             let seg = spans[index].1;
             let mut end = index + 1;
             let mut total = seg;
-            while end < spans.len() && end - index < 64 && total + spans[end].1 <= u16::MAX as usize
+            while end < spans.len()
+                && end - index < 64
+                && total + spans[end].1 <= qf_transport_udp::UDP_GSO_MAX_PAYLOAD
             {
                 let len = spans[end].1;
                 if len == seg {

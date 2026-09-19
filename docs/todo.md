@@ -3878,6 +3878,14 @@
 - Detail: `docs/todo/todo-986-client-tx-gso.md`
 - DONE. `flush_connected_outgoing` issued one `sendmsg` per QUIC datagram through tokio's `async_io` wrapper while the server path already coalesced via `UDP_SEGMENT`. The Linux client flush now stages the burst into one flat buffer + span table and emits contiguous same-length runs through `send_udp_segment` (up to 64 datagrams/64 KiB per syscall); singletons and post-`WouldBlock` tails keep the async per-packet path. Capability probed once process-wide.
 - Omega-verified: strace shows `cmsg_type=0x67` (UDP_SEGMENT) with `seg_size=1457` and `iov_len=4371` — three wire datagrams per syscall — on every send during scenario g; three consecutive PASS runs at 60.7-70.1 Mbit/s (single-core ceiling unchanged; ~2/3 of TX syscalls removed).
+- Follow-up fix (TODO-987): the run planner's byte cap was `u16::MAX`, but the kernel encodes payload+8 into the UDP length field — runs in `(65527, 65535]` failed with `EMSGSIZE`. All three planners now share `qf_transport_udp::UDP_GSO_MAX_PAYLOAD` (65527).
+
+### TODO-987 - Standalone client RX: per-packet recvmsg + UDP GSO cap off-by-header
+
+- Detail: `docs/todo/todo-987-client-rx-gro.md`
+- DONE. Client recv arm now uses `recv_connected_segments` (`recvmsg` + `UDP_GRO` ancillary parse on Linux, per-datagram fallback elsewhere); GRO super-buffers are split into `gso_size`-aligned datagrams before `conn.recv`, and H3/MASQUE drain + TX flush run once per batch. `UDP_GRO` is enabled only after handshake/assignment so the pre-loop plain-`recvmsg` paths keep single-datagram semantics.
+- Two verification bugs fixed: `gso_size==0` (no cmsg) must mean one whole-buffer datagram, not 1-byte slices; and every GSO run planner now caps at 65527 payload bytes (kernel UDP length field includes the 8-byte header) — the live `EMSGSIZE` seen on Omega is gone.
+- Omega-verified: scenario g PASS (44.5 Mbit/s single-core-contended), zero EMSGSIZE and zero len=1 parse flood in strace/logs; 4/4 `gso_plan_tests` green on aarch64.
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
