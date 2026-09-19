@@ -3857,9 +3857,11 @@
 - Detail: `docs/todo/todo-983-bbr3-delivery-rate-floor.md`
 - `bbr3_on_ack` sampled `acked_bytes / max(elapsed_since_last_ack, 1ms)` per ACK frame; at the default 2-packet ACK threshold that pinned `btlbw` (and thus `pacing_rate`) at ~2.9 MB/s whenever ACKs arrived faster than 1 kHz — a stable self-referential fixed point verified live on Omega (948k qtun0 TX drops at 98% loss under a 1.67 Gbit/s flood; `bytes_in_flight=0`, `send_zero_results`=68%). Bytes now accumulate into a window until it spans >=1 ms (`DELIVERY_RATE_WINDOW`), so the estimate measures a real interval; anchor/accumulator reset on `NewAddress`.
 - Regressions: `delivery_rate_not_capped_by_ack_frame_spacing` (fails on old estimator), `delivery_window_accumulates_across_dense_acks`.
-- Local proof: qf-transport-cc 96/96, fmt/clippy clean. Omega A/B: client `enable_pacing=false` lifted scenario-g TCP ~16->53 Mbit/s — pacer/estimate confirmed as primary wall; post-fix rerun pending. Note: Omega is single-core, absolute numbers are contention-bounded.
+- Local proof: qf-transport-cc 96/96, fmt/clippy clean.
+- Omega proof (scenario g, 0% loss): TCP **46.3 Mbit/s** post-fix vs ~12-21 Mbit/s pinned; `outbound_release` never armed (pacer released); UDP flood shows live cwnd movement (203925->20277). A/B control: `enable_pacing=false` gave 53 Mbit/s — residual cap is the single-core testbed, not the transport.
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
+- Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.
 - io_uring: `rt-transport-uring` 20/20 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel. The feature remains opt-in (not in the default feature set) and lives in the io_driver/engine client path, not the standalone `client` runtime.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.
 - `qf_fec::interleaved` (0,0)-shape warn removed (sentinel normalization is expected for disabled FEC).
