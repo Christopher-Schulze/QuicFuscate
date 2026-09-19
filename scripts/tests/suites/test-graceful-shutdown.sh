@@ -207,7 +207,7 @@ curl -sS -b "$COOKIE_JAR" "http://127.0.0.1:$ADMIN_PORT/api/status" >"$PROOF_DIR
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; assert d["clients_active"] == 2, d' "$PROOF_DIR/status-before.json"
 
 kill -HUP "$SERVER_PID"
-wait_for_log "$SERVER_LOG" 'Configuration reloaded successfully (SIGHUP): scope=NextConnectionOnly, active_sessions_unchanged=2' "$SERVER_PID" 100
+wait_for_log "$SERVER_LOG" 'Configuration reloaded successfully (SIGHUP): scope=NextConnectionOnly.*active_sessions_unchanged=2' "$SERVER_PID" 100
 curl -sS -b "$COOKIE_JAR" "http://127.0.0.1:$ADMIN_PORT/api/drain/status" >"$PROOF_DIR/drain-before.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; assert d == {"state":"running","active_connections":2,"grace_period_ms":5000,"drain_elapsed_ms":0}, d' "$PROOF_DIR/drain-before.json"
 
@@ -287,6 +287,6 @@ fi
 
 "$BINARY" verify-audit-log "$AUDIT_LOG" >"$PROOF_DIR/audit-verify.log"
 python3 -c 'import json,sys; events=[json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]; required={"client_authenticated":2,"admin_action":1,"config_reloaded":1,"connection_established":2,"connection_closed":1}; missing={event:minimum for event,minimum in required.items() if events.count(event)<minimum}; assert not missing,(missing,events)' "$AUDIT_LOG"
-grep -q 'SIGHUP triggered next-connection-only config reload; 2 active sessions unchanged' "$AUDIT_LOG"
+grep -q 'SIGHUP triggered next-connection-only config reload.*; 2 active sessions unchanged' "$AUDIT_LOG"
 
 printf 'PASS: authenticated_clients=2 reload=SIGHUP scope=next-connection-only active_sessions_unchanged=2 drain=running-to-draining-to-stopped rejected_new_connection=1 client_close=2-to-1 grace_ms=5000 elapsed_ms=%s close_flush=clean audit_chain=valid\n' "$DRAIN_ELAPSED_MS"

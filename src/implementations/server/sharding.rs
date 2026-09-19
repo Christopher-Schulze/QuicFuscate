@@ -158,6 +158,11 @@ impl ShardRouter {
         self.inner.read().addr_owner.len()
     }
 
+    /// Whether any shard currently owns a client address.
+    pub(super) fn is_empty(&self) -> bool {
+        self.inner.read().addr_owner.is_empty()
+    }
+
     /// Non-blocking post to `shard`; `Err(msg)` when the channel is full or
     /// closed. Callers convert the reject into the drop metric matching the
     /// message kind (UDP loss semantics).

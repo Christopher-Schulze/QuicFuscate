@@ -21,6 +21,19 @@ fn standalone_housekeeping_delay(live: &ServerLiveRuntime) -> Duration {
         return SERVER_HOUSEKEEPING_ACTIVE;
     }
 
+    // Sharded coordinator: its local `clients` map is empty by construction,
+    // so the per-connection loop below can never see live work. Pace global
+    // housekeeping (metrics sync, session reaping, DNS completions) at the
+    // active rate while the router owns any client — otherwise gauges like
+    // `clients_active` would go stale for a full idle interval.
+    if let Some(router) = live.shard_router.as_ref() {
+        return if router.is_empty() {
+            SERVER_HOUSEKEEPING_IDLE
+        } else {
+            SERVER_HOUSEKEEPING_ACTIVE
+        };
+    }
+
     let now = live.live_state.clock.now();
     let mut delay = SERVER_HOUSEKEEPING_IDLE;
     for connection in live.live_state.clients.values() {
