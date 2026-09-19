@@ -243,7 +243,7 @@ impl ServerRuntime {
                                 Arc::clone(&runtime_parts.live_state.revocation_manager);
                             let mut ingress_bytes = 0u64;
                             let mut ingress_pkts = 0u64;
-                            'batch: for (datagram, len, from) in batch.drain(..) {
+                            'batch: for (mut datagram, len, from) in batch.drain(..) {
                                 // Process each drained datagram through the same
                                 // serial stateful path as before (TODO-901 step 1:
                                 // one wakeup amortized across the burst; the
@@ -361,7 +361,7 @@ impl ServerRuntime {
                                 &socket,
                                 from,
                                 runtime_client,
-                                &datagram[..len],
+                                &mut datagram[..len],
                                 &mut out[..],
                                 &metrics,
                                 &client_snapshots,

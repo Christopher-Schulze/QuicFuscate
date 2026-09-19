@@ -784,7 +784,7 @@ pub(super) async fn run_client(
                             let activity_before = io_diagnostics
                                 .as_ref()
                                 .map(|_| conn.conn.last_activity_marker());
-                            let seg_result = conn.recv(&buf[seg_off..seg_end]);
+                            let seg_result = conn.recv_mut(&mut buf[seg_off..seg_end]);
                             seg_off = seg_end;
                             match seg_result {
                                 Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)

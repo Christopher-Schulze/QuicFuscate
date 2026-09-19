@@ -368,7 +368,7 @@ impl ClientDataPlane {
                     hop.peer_addr,
                     payload_len
                 );
-                hop.recv(&self.inner_ingress_scratch)
+                hop.recv_mut(&mut self.inner_ingress_scratch)
                     .map_err(|error| EngineError::Connection(error.to_string()))?;
                 if hop.conn.is_established() {
                     hop.poll_http3().map_err(|error| EngineError::Connection(error.to_string()))?;
@@ -508,6 +508,16 @@ impl ClientDataPlane {
         Ok(received)
     }
 
+    /// Mutable-buffer receive: systematic FEC payloads and raw datagrams are
+    /// delivered in place (zero-copy) instead of through pool copies.
+    pub fn recv_physical_mut(&mut self, payload: &mut [u8]) -> Result<usize, EngineError> {
+        let received = self.hops[0]
+            .recv_mut(payload)
+            .map_err(|error| EngineError::Connection(error.to_string()))?;
+        self.drive()?;
+        Ok(received)
+    }
+
     pub fn send_physical(&mut self, output: &mut [u8]) -> Result<usize, EngineError> {
         self.drive()?;
         match self.hops[0].send(output) {
@@ -519,6 +529,10 @@ impl ClientDataPlane {
 
     pub fn recv(&mut self, payload: &[u8]) -> Result<usize, EngineError> {
         self.recv_physical(payload)
+    }
+
+    pub fn recv_mut(&mut self, payload: &mut [u8]) -> Result<usize, EngineError> {
+        self.recv_physical_mut(payload)
     }
 
     pub fn recv_pooled_block(

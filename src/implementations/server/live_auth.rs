@@ -643,11 +643,15 @@ pub(in crate::implementations::server) fn plan_gso_run(
     sent: &[bool],
     start: usize,
     max_payload: usize,
+    max_seg: usize,
 ) -> Option<(usize, u16)> {
     const MAX_GSO_SEGMENTS: usize = 64;
     let (target, _, first_len) = staging[start];
     let seg = first_len;
-    if seg == 0 || seg > u16::MAX as usize {
+    // A GSO segment must itself fit a single wire datagram — the kernel
+    // rejects `gso_size > route_mtu - header` with EMSGSIZE, so `max_seg`
+    // carries the route/payload ceiling probed by the caller.
+    if seg == 0 || seg > max_seg.min(u16::MAX as usize) {
         return None;
     }
     let mut end = start + 1;
@@ -804,6 +808,14 @@ pub async fn flush_live_server_outgoing(
             use std::os::unix::io::AsRawFd;
             udp_gso_capable(socket.as_raw_fd())
         };
+        // Segment ceiling: GSO only pays when a segment still fits one wire
+        // datagram. The server socket is unconnected, so `IP_MTU` rarely
+        // reports a route — the conservative Ethernet payload ceiling stands.
+        #[cfg(target_os = "linux")]
+        let gso_seg_cap = {
+            use std::os::unix::io::AsRawFd;
+            qf_transport_udp::udp_gso_segment_mtu(socket.as_raw_fd()).unwrap_or(1472)
+        };
         while index < staging_spans.len() {
             if sent[index] {
                 index += 1;
@@ -816,6 +828,7 @@ pub async fn flush_live_server_outgoing(
                     &sent,
                     index,
                     qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
+                    gso_seg_cap,
                 ) {
                     let run_start = staging_spans[index].1;
                     let run_end = staging_spans[end - 1].1 + staging_spans[end - 1].2;
@@ -1163,7 +1176,7 @@ pub(super) async fn process_live_server_client_datagram(
     socket: &tokio::net::UdpSocket,
     addr: SocketAddr,
     runtime_client: LiveClientRuntime<'_>,
-    packet: &[u8],
+    packet: &mut [u8],
     out: &mut [u8],
     metrics: &Arc<Metrics>,
     client_snapshots: &Arc<std::sync::Mutex<std::collections::HashMap<SocketAddr, ClientSnapshot>>>,
@@ -1215,7 +1228,7 @@ pub(super) async fn process_live_server_client_datagram(
         component: "server local socket address".to_string(),
         error: error.to_string(),
     })?;
-    match conn.recv_on_path(packet, addr, local_addr) {
+    match conn.recv_on_path_mut(packet, addr, local_addr) {
         Ok(_) => {}
         Err(error) => {
             log::error!("QUIC recv failed for {}: {:?}", addr, error);
@@ -1641,7 +1654,8 @@ mod gso_plan_tests {
         let staging = vec![span(a, 0, 600), span(a, 600, 600), span(a, 1200, 250)];
         let sent = vec![false; 3];
         let (end, seg) =
-            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).expect("run");
+            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD, usize::MAX)
+                .expect("run");
         assert_eq!((end, seg), (3, 600), "short tail must close the run");
     }
 
@@ -1652,13 +1666,21 @@ mod gso_plan_tests {
         // Different target ends the run before b.
         let staging = vec![span(a, 0, 600), span(b, 600, 600), span(a, 1200, 600)];
         let sent = vec![false; 3];
-        assert!(plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).is_none());
+        assert!(plan_gso_run(
+            &staging,
+            &sent,
+            0,
+            qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
+            usize::MAX
+        )
+        .is_none());
 
         // An already-sent middle slot splits the run; index 1 is the start.
         let staging = vec![span(a, 0, 600), span(a, 600, 600), span(a, 1200, 600)];
         let sent = vec![false, true, false];
-        let (end, seg) = plan_gso_run(&staging, &sent, 2, qf_transport_udp::UDP_GSO_MAX_PAYLOAD)
-            .unwrap_or((0, 0));
+        let (end, seg) =
+            plan_gso_run(&staging, &sent, 2, qf_transport_udp::UDP_GSO_MAX_PAYLOAD, usize::MAX)
+                .unwrap_or((0, 0));
         assert_eq!((end, seg), (0, 0), "single packet is not a run");
     }
 
@@ -1668,14 +1690,15 @@ mod gso_plan_tests {
         let staging: Vec<_> = (0..80).map(|i| span(a, i * 600, 600)).collect();
         let sent = vec![false; staging.len()];
         let (end, seg) =
-            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).expect("run");
+            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD, usize::MAX)
+                .expect("run");
         assert_eq!(seg, 600);
         assert!(end <= 64, "run must respect the 64-segment cap");
         // ~65.5K/600 = 109 segments fit by bytes; the 64-segment cap binds.
         assert_eq!(end, 64);
 
         // Tight payload cap cuts the run earlier.
-        let (end, _) = plan_gso_run(&staging, &sent, 0, 1_800).expect("run");
+        let (end, _) = plan_gso_run(&staging, &sent, 0, 1_800, usize::MAX).expect("run");
         assert_eq!(end, 3, "1800-byte cap admits exactly three 600-byte segments");
     }
 
@@ -1686,6 +1709,30 @@ mod gso_plan_tests {
         // run (it is not a valid tail either) - run collapses to a singleton.
         let staging = vec![span(a, 0, 600), span(a, 600, 900), span(a, 1500, 600)];
         let sent = vec![false; 3];
-        assert!(plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD).is_none());
+        assert!(plan_gso_run(
+            &staging,
+            &sent,
+            0,
+            qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
+            usize::MAX
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn segment_above_route_mtu_ceiling_skips_run() {
+        let a = addr(1000);
+        // Wire datagrams of 1500 bytes cannot be GSO segments on a 1500-MTU
+        // route (UDP payload ceiling 1472) — the kernel answers EMSGSIZE.
+        let staging = vec![span(a, 0, 1500), span(a, 1500, 1500), span(a, 3000, 1500)];
+        let sent = vec![false; 3];
+        assert!(
+            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD, 1472).is_none()
+        );
+        // The same run coalesces when the route ceiling admits the segment.
+        let (end, seg) =
+            plan_gso_run(&staging, &sent, 0, qf_transport_udp::UDP_GSO_MAX_PAYLOAD, usize::MAX)
+                .expect("run");
+        assert_eq!((end, seg), (3, 1500));
     }
 }

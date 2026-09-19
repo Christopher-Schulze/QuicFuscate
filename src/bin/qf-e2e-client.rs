@@ -103,7 +103,8 @@ fn measure_authenticated_traffic_window(
             match socket.recv(buf) {
                 Ok(0) => break,
                 Ok(len) => {
-                    match conn.recv_on_path(&buf[..len], remote_addr, socket.local_addr()?) {
+                    match conn.recv_on_path_mut(&mut buf[..len], remote_addr, socket.local_addr()?)
+                    {
                         Ok(_) | Err(ConnectionError::Done) => {}
                         Err(error) => {
                             return Err(
@@ -273,7 +274,7 @@ fn hold_established_connection(
             match socket.recv(buf) {
                 Ok(0) => break,
                 Ok(len) => {
-                    match conn.recv(&buf[..len]) {
+                    match conn.recv_mut(&mut buf[..len]) {
                         Ok(_) | Err(ConnectionError::Done) => {}
                         Err(error) => {
                             return Err(
@@ -607,7 +608,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if len == 0 {
                     continue;
                 }
-                match conn.recv(&buf[..len]) {
+                match conn.recv_mut(&mut buf[..len]) {
                     Ok(_) => {}
                     Err(e) => {
                         last_recv_err = Some(format!("{:?}", e));

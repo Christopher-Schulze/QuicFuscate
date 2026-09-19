@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 pub(crate) use qf_fec::receiver::codec_for_mode;
-pub use qf_fec::receiver::WireFecReceiver;
+pub use qf_fec::receiver::{WireDelivery, WireFecReceiver};
 pub use qf_fec::wire::{
     is_framed, parse_packet, source_symbol_payload, write_packet, write_source_symbol,
     ParsedWirePacket, WireCodec, WireError, WirePacketMeta, WireProfile, WireReceiveReport,

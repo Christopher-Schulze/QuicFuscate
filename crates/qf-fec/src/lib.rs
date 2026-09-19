@@ -107,7 +107,7 @@ pub use observer::{
 #[doc(hidden)]
 pub use policy::FecRuntimePolicy;
 #[doc(hidden)]
-pub use receiver::{codec_for_mode, WireFecReceiver};
+pub use receiver::{codec_for_mode, WireDelivery, WireFecReceiver};
 #[doc(hidden)]
 pub use runtime::{FecGlobalResources, STREAM_ADJUST_MIN_MS};
 #[doc(hidden)]

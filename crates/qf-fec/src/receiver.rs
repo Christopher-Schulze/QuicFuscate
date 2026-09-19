@@ -31,6 +31,19 @@ fn copy_to_pooled_block(pool: &Arc<MemoryPool>, data: &[u8]) -> Option<PooledBlo
     Some(block)
 }
 
+/// One decoded datagram produced by the wire receiver.
+///
+/// `Borrowed` deliveries point into the input datagram (`start..start + len`)
+/// and carry no allocation; the caller can slice its own receive buffer.
+/// `Owned` deliveries are decoder-produced recoveries whose payloads live in
+/// pooled blocks.
+pub enum WireDelivery {
+    /// Payload is `datagram[start..start + len]` of the input datagram.
+    Borrowed { seq: u64, start: usize, len: usize },
+    /// Decoder-recovered packet with an owned pooled payload.
+    Owned(FecPacket),
+}
+
 #[doc(hidden)]
 pub fn codec_for_mode(mode: FecMode, block_source_count: usize) -> Result<WireCodec, WireError> {
     let mode = match mode {
@@ -234,7 +247,7 @@ impl ReceiveWindow {
     fn emit_recovered(
         &mut self,
         packet: FecPacket,
-        output: &mut Vec<FecPacket>,
+        output: &mut Vec<WireDelivery>,
     ) -> Result<Option<usize>, WireError> {
         let global_id = if self.profile.codec == WireCodec::Fountain {
             self.window_start().saturating_add(packet.id)
@@ -251,7 +264,7 @@ impl ReceiveWindow {
         let mut recovered = FecPacket::from_block(global_id, payload, Arc::clone(&self.mem_pool))
             .map_err(|_| WireError::PayloadTooLarge)?;
         recovered.seq = global_id;
-        output.push(recovered);
+        output.push(WireDelivery::Owned(recovered));
         Ok(Some(payload_len))
     }
 
@@ -271,11 +284,15 @@ impl ReceiveWindow {
         false
     }
 
+    /// `payload` is the wire datagram's coded-symbol region; `payload_off` is
+    /// its byte offset inside the original datagram so systematic deliveries
+    /// can borrow instead of copy.
     fn receive(
         &mut self,
         meta: WirePacketMeta,
         payload: &[u8],
-        output: &mut Vec<FecPacket>,
+        payload_off: usize,
+        output: &mut Vec<WireDelivery>,
     ) -> Result<WireReceiveReport, WireError> {
         let systematic_payload =
             if meta.systematic { Some(source_datagram_payload(payload)?) } else { None };
@@ -325,11 +342,10 @@ impl ReceiveWindow {
         self.decoder.take_packet(packet);
         if systematic && self.delivered.insert(meta.sequence) {
             let payload = systematic_payload.ok_or(WireError::InvalidSourceDatagramLength)?;
-            let mut original =
-                FecPacket::from_block(meta.sequence, payload, Arc::clone(&self.mem_pool))
-                    .map_err(|_| WireError::PayloadTooLarge)?;
-            original.seq = meta.sequence;
-            output.push(original);
+            // `payload` is `datagram[payload_off + SOURCE_LENGTH_LEN..end]`;
+            // `source_datagram_payload` validated the exact trailing length.
+            let start = payload_off + SOURCE_LENGTH_LEN;
+            output.push(WireDelivery::Borrowed { seq: meta.sequence, start, len: payload.len() });
             report.decoded_packets += 1;
         }
 
@@ -362,6 +378,9 @@ pub struct WireFecReceiver {
     mem_pool: Arc<MemoryPool>,
     policy: FecRuntimePolicy,
     fountain_seed: u64,
+    /// Scratch reused by the owned `receive` wrapper so the compat path does
+    /// not allocate a delivery vector per datagram.
+    delivery_scratch: Vec<WireDelivery>,
 }
 
 impl WireFecReceiver {
@@ -372,6 +391,7 @@ impl WireFecReceiver {
             mem_pool,
             policy: FecRuntimePolicy::detect(),
             fountain_seed: DEFAULT_FOUNTAIN_SEED,
+            delivery_scratch: Vec::new(),
         }
     }
 
@@ -384,10 +404,14 @@ impl WireFecReceiver {
         self.windows.clear();
     }
 
-    pub fn receive(
+    /// Borrowed-delivery receive: systematic datagrams are reported as ranges
+    /// into `datagram` (zero-copy — the caller slices its own buffer), while
+    /// decoder recoveries arrive `Owned`. `receive` keeps the owned-packet
+    /// shape for callers that cannot hand out mutable slices.
+    pub fn receive_borrowed(
         &mut self,
         datagram: &[u8],
-        output: &mut Vec<FecPacket>,
+        output: &mut Vec<WireDelivery>,
     ) -> Result<WireReceiveReport, WireError> {
         output.clear();
         let parsed = parse_packet(datagram)?;
@@ -415,17 +439,56 @@ impl WireFecReceiver {
                 ));
                 self.windows.len() - 1
             });
-        self.windows[window_index].receive(parsed.meta, parsed.payload, output)
+        // `parsed.payload` is a sub-slice of `datagram` by construction
+        // (`parse_packet` slices `datagram[HEADER_LEN..]`).
+        let payload_off = parsed.payload.as_ptr() as usize - datagram.as_ptr() as usize;
+        self.windows[window_index].receive(parsed.meta, parsed.payload, payload_off, output)
     }
 
-    /// Parse a framed peer datagram while local recovery policy is Off.
-    ///
-    /// Systematic payloads remain deliverable to QUIC, but repairs are discarded
-    /// without allocating decoder state or retaining a receive window.
-    pub fn receive_source_only(
-        &self,
+    /// Owned-packet wrapper over [`Self::receive_borrowed`]: borrowed ranges
+    /// are materialized into pooled blocks. Kept for callers/tests that only
+    /// have immutable datagram slices.
+    pub fn receive(
+        &mut self,
         datagram: &[u8],
         output: &mut Vec<FecPacket>,
+    ) -> Result<WireReceiveReport, WireError> {
+        let mut deliveries = std::mem::take(&mut self.delivery_scratch);
+        let result = self.receive_borrowed(datagram, &mut deliveries);
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                self.delivery_scratch = deliveries;
+                return Err(error);
+            }
+        };
+        output.clear();
+        output.reserve(deliveries.len());
+        for delivery in deliveries.drain(..) {
+            match delivery {
+                WireDelivery::Borrowed { seq, start, len } => {
+                    let mut packet = FecPacket::from_block(
+                        seq,
+                        &datagram[start..start + len],
+                        Arc::clone(&self.mem_pool),
+                    )
+                    .map_err(|_| WireError::PayloadTooLarge)?;
+                    packet.seq = seq;
+                    output.push(packet);
+                }
+                WireDelivery::Owned(packet) => output.push(packet),
+            }
+        }
+        self.delivery_scratch = deliveries;
+        Ok(report)
+    }
+
+    /// Borrowed variant of `receive_source_only`: the systematic payload is
+    /// reported as a range into `datagram` instead of a pooled copy.
+    pub fn receive_source_only_borrowed(
+        &self,
+        datagram: &[u8],
+        output: &mut Vec<WireDelivery>,
     ) -> Result<WireReceiveReport, WireError> {
         output.clear();
         let parsed = parse_packet(datagram)?;
@@ -441,11 +504,42 @@ impl WireFecReceiver {
         let payload = source_datagram_payload(parsed.payload)?;
         report.source_payload_bytes = payload.len();
         report.decoded_packets = 1;
-        let mut packet =
-            FecPacket::try_from_block(parsed.meta.sequence, payload, Arc::clone(&self.mem_pool))
-                .map_err(|_| WireError::ResourceExhausted)?;
-        packet.seq = parsed.meta.sequence;
-        output.push(packet);
+        let payload_off = parsed.payload.as_ptr() as usize - datagram.as_ptr() as usize;
+        output.push(WireDelivery::Borrowed {
+            seq: parsed.meta.sequence,
+            start: payload_off + SOURCE_LENGTH_LEN,
+            len: payload.len(),
+        });
+        Ok(report)
+    }
+
+    /// Parse a framed peer datagram while local recovery policy is Off.
+    ///
+    /// Systematic payloads remain deliverable to QUIC, but repairs are discarded
+    /// without allocating decoder state or retaining a receive window.
+    pub fn receive_source_only(
+        &self,
+        datagram: &[u8],
+        output: &mut Vec<FecPacket>,
+    ) -> Result<WireReceiveReport, WireError> {
+        let mut deliveries = Vec::new();
+        let report = self.receive_source_only_borrowed(datagram, &mut deliveries)?;
+        output.clear();
+        for delivery in deliveries.drain(..) {
+            match delivery {
+                WireDelivery::Borrowed { seq, start, len } => {
+                    let mut packet = FecPacket::try_from_block(
+                        seq,
+                        &datagram[start..start + len],
+                        Arc::clone(&self.mem_pool),
+                    )
+                    .map_err(|_| WireError::ResourceExhausted)?;
+                    packet.seq = seq;
+                    output.push(packet);
+                }
+                WireDelivery::Owned(packet) => output.push(packet),
+            }
+        }
         Ok(report)
     }
 
@@ -1267,5 +1361,204 @@ mod tests {
 
         assert_eq!(recovered.get(&1), Some(&sources[1]));
         assert_eq!(recovered.get(&3), Some(&sources[3]));
+    }
+
+    #[test]
+    fn borrowed_systematic_delivery_slices_wire_datagram_in_place() {
+        let pool = test_pool();
+        let mut receiver = WireFecReceiver::new(pool);
+        let payload = [0x40u8, 0x11, 0x22, 0x33, 0x44];
+        let protected = protected_datagram(&payload);
+        let meta = WirePacketMeta {
+            profile: WireProfile {
+                epoch: 40,
+                codec: WireCodec::Gf8,
+                source_count: 4,
+                total_count: 6,
+                interleave_depth: 1,
+            },
+            window: 0,
+            sequence: 3,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let mut wire = vec![0u8; 128];
+        let written = write_packet(meta, &protected, &mut wire).expect("source wire");
+
+        let mut deliveries = Vec::new();
+        let report = receiver
+            .receive_borrowed(&wire[..written], &mut deliveries)
+            .expect("borrowed source receive");
+        assert_eq!(report.decoded_packets, 1);
+        assert_eq!(deliveries.len(), 1);
+        match deliveries[0] {
+            WireDelivery::Borrowed { seq, start, len } => {
+                assert_eq!(seq, 3);
+                assert_eq!(start, HEADER_LEN + SOURCE_LENGTH_LEN);
+                assert_eq!(len, payload.len());
+                assert_eq!(&wire[start..start + len], &payload);
+            }
+            WireDelivery::Owned(_) => panic!("systematic delivery must be borrowed"),
+        }
+    }
+
+    #[test]
+    fn borrowed_duplicate_source_emits_no_delivery() {
+        let pool = test_pool();
+        let mut receiver = WireFecReceiver::new(pool);
+        let protected = protected_datagram(&[0x51; 16]);
+        let meta = WirePacketMeta {
+            profile: WireProfile {
+                epoch: 41,
+                codec: WireCodec::Gf8,
+                source_count: 4,
+                total_count: 6,
+                interleave_depth: 1,
+            },
+            window: 0,
+            sequence: 3,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let mut wire = vec![0u8; 128];
+        let written = write_packet(meta, &protected, &mut wire).expect("source wire");
+        let mut deliveries = Vec::new();
+
+        receiver.receive_borrowed(&wire[..written], &mut deliveries).expect("first source");
+        assert_eq!(deliveries.len(), 1);
+        receiver.receive_borrowed(&wire[..written], &mut deliveries).expect("duplicate source");
+        assert!(deliveries.is_empty(), "duplicate must be suppressed");
+    }
+
+    #[test]
+    fn borrowed_repair_recovers_missing_source_as_owned() {
+        let pool = test_pool();
+        let sources = [vec![0x51; 30], vec![0x62; 47], vec![0x73; 62], vec![0x84; 78]];
+        let protected_sources = sources.each_ref().map(|source| protected_datagram(source));
+        let mut encoder = crate::Encoder16::new(4, 6);
+        for (id, _) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, &protected_sources[id], &pool));
+        }
+        let repair = encoder.generate_repair_packet(0, &pool).expect("GF16 repair");
+        let profile = WireProfile {
+            epoch: 13,
+            codec: WireCodec::Gf16,
+            source_count: 4,
+            total_count: 6,
+            interleave_depth: 1,
+        };
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let mut wire = vec![0u8; 256];
+        let mut deliveries = Vec::new();
+
+        for source_id in [0usize, 2, 3] {
+            let meta = WirePacketMeta {
+                profile,
+                window: 0,
+                sequence: source_id as u64,
+                repair_index: SYSTEMATIC_REPAIR_INDEX,
+                block_index: 0,
+                systematic: true,
+            };
+            let written =
+                write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
+            receiver.receive_borrowed(&wire[..written], &mut deliveries).expect("source receive");
+        }
+
+        let repair_meta = WirePacketMeta {
+            profile,
+            window: 0,
+            sequence: repair.id,
+            repair_index: 0,
+            block_index: 0,
+            systematic: false,
+        };
+        let written =
+            write_packet(repair_meta, repair.payload_slice().expect("repair payload"), &mut wire)
+                .expect("repair wire");
+        receiver.receive_borrowed(&wire[..written], &mut deliveries).expect("repair receive");
+
+        let recovered = deliveries.iter().find_map(|delivery| match delivery {
+            WireDelivery::Owned(packet) => {
+                packet.payload_slice().map(|payload| (packet.id, payload.to_vec()))
+            }
+            WireDelivery::Borrowed { .. } => None,
+        });
+        assert_eq!(recovered, Some((1u64, sources[1].clone())));
+        assert!(
+            deliveries
+                .iter()
+                .all(|delivery| !matches!(delivery, WireDelivery::Borrowed { seq: 1, .. })),
+            "recovered source must arrive owned, not as a range into the repair datagram"
+        );
+    }
+
+    #[test]
+    fn source_only_borrowed_reports_payload_range() {
+        let pool = test_pool();
+        let receiver = WireFecReceiver::new(pool);
+        let payload = [0x77u8; 33];
+        let protected = protected_datagram(&payload);
+        let meta = WirePacketMeta {
+            profile: WireProfile {
+                epoch: 42,
+                codec: WireCodec::Gf8,
+                source_count: 4,
+                total_count: 6,
+                interleave_depth: 1,
+            },
+            window: 2,
+            sequence: 10,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let mut wire = vec![0u8; 128];
+        let written = write_packet(meta, &protected, &mut wire).expect("source wire");
+
+        let mut deliveries = Vec::new();
+        let report = receiver
+            .receive_source_only_borrowed(&wire[..written], &mut deliveries)
+            .expect("source-only borrowed receive");
+        assert_eq!(report.decoded_packets, 1);
+        match deliveries.as_slice() {
+            [WireDelivery::Borrowed { seq, start, len }] => {
+                assert_eq!(*seq, 10);
+                assert_eq!(&wire[*start..*start + *len], &payload);
+            }
+            _ => panic!("source-only systematic delivery must be borrowed"),
+        }
+    }
+
+    #[test]
+    fn owned_receive_wrapper_materializes_borrowed_ranges() {
+        let pool = test_pool();
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let payload = [0x19u8; 24];
+        let protected = protected_datagram(&payload);
+        let meta = WirePacketMeta {
+            profile: WireProfile {
+                epoch: 43,
+                codec: WireCodec::Gf8,
+                source_count: 4,
+                total_count: 6,
+                interleave_depth: 1,
+            },
+            window: 0,
+            sequence: 2,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let mut wire = vec![0u8; 128];
+        let written = write_packet(meta, &protected, &mut wire).expect("source wire");
+
+        let mut decoded = Vec::new();
+        receiver.receive(&wire[..written], &mut decoded).expect("owned receive");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].id, 2);
+        assert_eq!(decoded[0].payload_slice(), Some(&payload[..]));
     }
 }

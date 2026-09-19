@@ -481,7 +481,7 @@ impl IoDriver {
             match tokio::time::timeout(wait, socket.recv(&mut recv_buf)).await {
                 Ok(Ok(length)) if length > 0 => {
                     let mut guard = conn.lock();
-                    let recv_result = guard.recv(&recv_buf[..length]);
+                    let recv_result = guard.recv_mut(&mut recv_buf[..length]);
                     match &recv_result {
                         Ok(_) => {}
                         Err(EngineError::Connection(msg))
@@ -555,7 +555,7 @@ impl IoDriver {
                     let global = crate::instrumentation::global();
                     global.transport.record_bytes_in(length as u64);
                     global.transport.record_packet_in();
-                    conn.lock().recv(&recv_buf[..length]).map_err(|error| {
+                    conn.lock().recv_mut(&mut recv_buf[..length]).map_err(|error| {
                         self.transport_receive_error("client standby QUIC receive", error)
                     })?;
                     self.poll_http3_to_ingress(&conn, &ingress)?;
@@ -1038,7 +1038,7 @@ impl IoDriver {
                             .fetch_add((spans.len() - 1) as u64, Ordering::Relaxed);
                     }
 
-                    self.process_inbound_batch(&conn, &tun, &ingress, &recv_flat, &spans)?;
+                    self.process_inbound_batch(&conn, &tun, &ingress, &mut recv_flat, &spans)?;
                 }
                 Ok(Ok(_)) => {}
             }
@@ -1123,7 +1123,7 @@ impl IoDriver {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();
                         crate::telemetry::IO_URING_RECV_PACKETS.inc_by(completions.len() as u64);
 
-                        for c in completions {
+                        for mut c in completions {
                             self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
                             let global = crate::instrumentation::global();
                             global.transport.record_bytes_in(c.len() as u64);
@@ -1134,7 +1134,7 @@ impl IoDriver {
                                 let recv_result = if let Some(block) = c.block {
                                     conn_guard.recv_pooled_block(block, c.len)
                                 } else {
-                                    conn_guard.recv(&c.data)
+                                    conn_guard.recv_mut(&mut c.data)
                                 };
                                 if let Err(e) = recv_result {
                                     log::debug!("Connection recv error: {:?}", e);
@@ -1291,11 +1291,11 @@ impl IoDriver {
         conn: &Arc<parking_lot::Mutex<ClientDataPlane>>,
         tun: &Arc<parking_lot::Mutex<TunInterface>>,
         ingress: &ClientTunnelIngress,
-        recv_flat: &[u8],
+        recv_flat: &mut [u8],
         spans: &[(usize, usize)],
     ) -> Result<(), EngineError> {
         for &(offset, len) in spans {
-            let payload = &recv_flat[offset..offset + len];
+            let payload = &mut recv_flat[offset..offset + len];
             self.stats.udp_packets_received.fetch_add(1, Ordering::Relaxed);
             let global = crate::instrumentation::global();
             global.transport.record_bytes_in(payload.len() as u64);
@@ -1303,7 +1303,7 @@ impl IoDriver {
 
             {
                 let mut conn_guard = conn.lock();
-                if let Err(e) = conn_guard.recv(payload) {
+                if let Err(e) = conn_guard.recv_mut(payload) {
                     log::debug!("Connection recv error: {:?}", e);
                     self.stats.errors.fetch_add(1, Ordering::Relaxed);
                     return Err(EngineError::DataPlane(DataPlaneFault::TransportReceive {

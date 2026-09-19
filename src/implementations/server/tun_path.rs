@@ -452,6 +452,11 @@ fn flush_tun_downlink_queue(
         const SEND_WINDOW: usize = 65_535;
 
         let fd = socket.as_raw_fd();
+        // A GSO segment must fit one wire datagram — the kernel rejects
+        // `gso_size > route_mtu - header` with EMSGSIZE. The unconnected
+        // server socket rarely reports a route MTU, so the conservative
+        // Ethernet payload ceiling stands in when probing fails.
+        let gso_seg_cap = qf_transport_udp::udp_gso_segment_mtu(fd).unwrap_or(1472);
         let flat = &mut live.live_state.downlink_tx_flat;
         let staging = &mut live.live_state.downlink_tx_staging;
         if flat.len() < TX_FLAT_BYTES {
@@ -523,6 +528,7 @@ fn flush_tun_downlink_queue(
                     &sent[..n_staged],
                     i,
                     qf_transport_udp::UDP_GSO_MAX_PAYLOAD,
+                    gso_seg_cap,
                 ) {
                     if !pending.is_empty() {
                         let refs: smallvec::SmallVec<[(&[u8], SocketAddr); 64]> = pending

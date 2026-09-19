@@ -99,6 +99,8 @@ pub struct QuicFuscateConnection {
     fec_send_scratch: Vec<FecPacket>,
     // Reused FEC recovery scratch to avoid allocating a Vec for every packet on the receive path.
     fec_receive_scratch: Vec<FecPacket>,
+    // Reused delivery scratch for the borrowed-range receive path.
+    fec_delivery_scratch: Vec<wire::WireDelivery>,
     fec_wire_receiver: WireFecReceiver,
     fec_tx_seed: Option<u64>,
     fec_rx_seed: Option<u64>,
@@ -529,6 +531,7 @@ impl QuicFuscateConnection {
             outgoing_fec_packets: VecDeque::new(),
             fec_send_scratch: Vec::with_capacity(1),
             fec_receive_scratch: Vec::with_capacity(1),
+            fec_delivery_scratch: Vec::with_capacity(1),
             fec_wire_receiver: WireFecReceiver::new(fec_mem_pool),
             fec_tx_seed: None,
             fec_rx_seed: None,
@@ -886,6 +889,14 @@ impl QuicFuscateConnection {
         self.recv_on_path(data, self.peer_addr, self.local_addr)
     }
 
+    /// Mutable-buffer receive: framed systematic payloads are delivered by
+    /// slicing `data` in place (zero-copy — `conn.recv` decrypts in place), and
+    /// non-framed datagrams skip the pool-block copy entirely. Callers holding
+    /// a mutable receive buffer should prefer this over [`Self::recv`].
+    pub fn recv_mut(&mut self, data: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
+        self.recv_on_path_mut(data, self.peer_addr, self.local_addr)
+    }
+
     /// Processes an incoming raw datagram on its observed network path.
     pub fn recv_on_path(
         &mut self,
@@ -924,6 +935,45 @@ impl QuicFuscateConnection {
         self.recv_pooled_block_on_path(block, copy_len, from, to)
     }
 
+    /// Mutable-buffer variant of [`Self::recv_on_path`]: framed systematic
+    /// payloads are delivered by slicing `data` in place (zero-copy), and raw
+    /// datagrams reach `conn.recv` without the pool-block copy.
+    pub fn recv_on_path_mut(
+        &mut self,
+        data: &mut [u8],
+        from: SocketAddr,
+        to: SocketAddr,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        let len = data.len();
+        if wire::is_framed(data) {
+            let mut deliveries = std::mem::take(&mut self.fec_delivery_scratch);
+            let receive_report = match self.framed_wire_report_borrowed(data, &mut deliveries) {
+                Ok(report) => report,
+                Err(()) => {
+                    self.fec_delivery_scratch = deliveries;
+                    return Ok(len);
+                }
+            };
+            return self.finish_wire_receive_borrowed(
+                receive_report,
+                deliveries,
+                data,
+                len,
+                from,
+                to,
+            );
+        }
+
+        if self.fec.telemetry_enabled() {
+            self.fec.observe_wire_receive(wire::WireReceiveReport::raw_source(len));
+        }
+        self.deliver_wire_payload(data, from, to)?;
+        self.conn
+            .do_tls_handshake(self.tls_ch_override_template.as_deref())
+            .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
+        Ok(len)
+    }
+
     /// Parse a framed wire datagram through the FEC receiver. Returns `Err(())`
     /// for malformed/unsupported datagrams (caller treats them as consumed).
     fn framed_wire_report(
@@ -951,6 +1001,33 @@ impl QuicFuscateConnection {
         }
     }
 
+    /// Borrowed-range variant of [`Self::framed_wire_report`]: systematic
+    /// payloads are emitted as ranges into `data` rather than pooled copies.
+    fn framed_wire_report_borrowed(
+        &mut self,
+        data: &[u8],
+        deliveries: &mut Vec<wire::WireDelivery>,
+    ) -> Result<wire::WireReceiveReport, ()> {
+        if self.fec_rx_seed.is_none() {
+            if let Some(seed) = self.conn.fec_receive_fountain_seed() {
+                self.fec_wire_receiver.set_fountain_seed(seed);
+                self.fec_rx_seed = Some(seed);
+            }
+        }
+        let result = if self.fec.control_policy() == crate::fec::FecControlPolicy::Off {
+            self.fec_wire_receiver.receive_source_only_borrowed(data, deliveries)
+        } else {
+            self.fec_wire_receiver.receive_borrowed(data, deliveries)
+        };
+        match result {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                debug!("dropping malformed or unsupported FEC wire datagram: {error}");
+                Err(())
+            }
+        }
+    }
+
     /// Processes an incoming packet that already resides in a pooled block.
     pub fn recv_pooled_block(
         &mut self,
@@ -961,9 +1038,11 @@ impl QuicFuscateConnection {
     }
 
     /// Processes a pooled incoming datagram on its observed network path.
+    /// Borrowed deliveries slice the block in place; the block is recycled only
+    /// after every delivery has been consumed.
     pub fn recv_pooled_block_on_path(
         &mut self,
-        block: AlignedBox<[u8]>,
+        mut block: AlignedBox<[u8]>,
         len: usize,
         from: SocketAddr,
         to: SocketAddr,
@@ -973,43 +1052,69 @@ impl QuicFuscateConnection {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
 
-        let wire_framed = wire::is_framed(&block[..len]);
-        let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
-        let receive_report = if wire_framed {
-            let result = self.framed_wire_report(&block[..len], &mut recovered_packets);
-            self.optimization_manager.free_block(block);
-            match result {
-                Ok(report) => report,
-                Err(()) => {
-                    self.fec_receive_scratch = recovered_packets;
-                    return Ok(len);
-                }
-            }
-        } else {
-            let mem_pool = self.optimization_manager.memory_pool().clone();
-            let data = match PooledBlock::from_pool_block(Arc::clone(&mem_pool), block) {
-                Ok(data) => data,
-                Err(block) => {
-                    self.optimization_manager.free_block(block);
-                    return Err(crate::error::ConnectionError::BufferTooShort);
-                }
-            };
-            let packet = FecPacket::from_pooled_blocks(
-                self.packet_id_counter,
-                Some(data),
+        if wire::is_framed(&block[..len]) {
+            let mut deliveries = std::mem::take(&mut self.fec_delivery_scratch);
+            let receive_report =
+                match self.framed_wire_report_borrowed(&block[..len], &mut deliveries) {
+                    Ok(report) => report,
+                    Err(()) => {
+                        self.fec_delivery_scratch = deliveries;
+                        self.optimization_manager.free_block(block);
+                        return Ok(len);
+                    }
+                };
+            let result = self.finish_wire_receive_borrowed(
+                receive_report,
+                deliveries,
+                &mut block[..len],
                 len,
-                true,
-                None,
-                0,
-                mem_pool,
-            )
-            .map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
-            self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
-            recovered_packets.clear();
-            recovered_packets.push(packet);
-            wire::WireReceiveReport::raw_source(len)
-        };
-        self.finish_wire_receive(receive_report, recovered_packets, len, from, to)
+                from,
+                to,
+            );
+            self.optimization_manager.free_block(block);
+            return result;
+        }
+
+        // Raw datagram: decrypt in place inside the pooled block — no
+        // FecPacket wrap, no second buffer.
+        if self.fec.telemetry_enabled() {
+            self.fec.observe_wire_receive(wire::WireReceiveReport::raw_source(len));
+        }
+        let result = self.deliver_wire_payload(&mut block[..len], from, to);
+        self.optimization_manager.free_block(block);
+        result?;
+
+        self.conn
+            .do_tls_handshake(self.tls_ch_override_template.as_deref())
+            .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
+        Ok(len)
+    }
+
+    /// Stealth pre-processing + `conn.recv` for one QUIC datagram already
+    /// staged in mutable memory. Returns `Err` only for terminal TLS-class
+    /// failures; transient transport errors are logged and treated as probing
+    /// traffic so a single forged datagram cannot tear down the connection.
+    fn deliver_wire_payload(
+        &mut self,
+        data: &mut [u8],
+        from: SocketAddr,
+        to: SocketAddr,
+    ) -> Result<(), crate::error::ConnectionError> {
+        self.stealth_manager.process_incoming_packet(data, from);
+        let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
+        match self.conn.recv(data, &recv_info) {
+            Ok(_) => Ok(()),
+            Err(
+                error @ (crate::error::ConnectionError::TlsError(_)
+                | crate::error::ConnectionError::TlsAlert(_)
+                | crate::error::ConnectionError::PeerCertificateUnsupported),
+            ) => Err(error),
+            Err(error) => {
+                debug!("transport::recv failed (possible probe) len={}: {:?}", data.len(), error);
+                self.stealth_manager.handle_fallback(data, from);
+                Ok(())
+            }
+        }
     }
 
     /// Shared receive tail: telemetry observe, dispatch of recovered/source
@@ -1032,53 +1137,82 @@ impl QuicFuscateConnection {
             // holds an Arc clone of the shared buffer. In that case, copy the
             // payload into a fresh pooled buffer so conn.recv() can mutate it
             // (header protection removal + AEAD decryption are in-place).
-            if let Some(data) = packet.payload_mut_unique() {
-                self.stealth_manager.process_incoming_packet(data, from);
-                let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
-                if let Err(error) = self.conn.recv(data, &recv_info) {
-                    if matches!(
-                        error,
-                        crate::error::ConnectionError::TlsError(_)
-                            | crate::error::ConnectionError::TlsAlert(_)
-                            | crate::error::ConnectionError::PeerCertificateUnsupported
-                    ) {
-                        terminal_receive_error = Some(error);
-                        break;
-                    }
-                    debug!(
-                        "transport::recv failed (possible probe) len={}: {:?}",
-                        data.len(),
-                        error
-                    );
-                    self.stealth_manager.handle_fallback(data, from);
-                }
+            let result = if let Some(data) = packet.payload_mut_unique() {
+                self.deliver_wire_payload(data, from, to)
             } else if let Some(slice) = packet.payload_slice() {
                 let mut buf = PooledBlock::new(self.optimization_manager.memory_pool());
                 let n = slice.len().min(buf.len());
                 buf[..n].copy_from_slice(&slice[..n]);
-                let data = &mut buf[..n];
-                self.stealth_manager.process_incoming_packet(data, from);
-                let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
-                if let Err(error) = self.conn.recv(data, &recv_info) {
-                    if matches!(
-                        error,
-                        crate::error::ConnectionError::TlsError(_)
-                            | crate::error::ConnectionError::TlsAlert(_)
-                            | crate::error::ConnectionError::PeerCertificateUnsupported
-                    ) {
-                        terminal_receive_error = Some(error);
-                        break;
-                    }
-                    debug!(
-                        "transport::recv failed (possible probe) len={}: {:?}",
-                        data.len(),
-                        error
-                    );
-                    self.stealth_manager.handle_fallback(data, from);
-                }
+                self.deliver_wire_payload(&mut buf[..n], from, to)
+            } else {
+                Ok(())
+            };
+            if let Err(error) = result {
+                terminal_receive_error = Some(error);
+                break;
             }
         }
         self.fec_receive_scratch = recovered_packets;
+
+        if let Some(error) = terminal_receive_error {
+            return Err(error);
+        }
+
+        self.conn
+            .do_tls_handshake(self.tls_ch_override_template.as_deref())
+            .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
+
+        Ok(len)
+    }
+
+    /// Borrowed-delivery receive tail: systematic payloads are sliced in place
+    /// from `base` (the original socket/pool buffer — zero-copy), while decoder
+    /// recoveries arrive as pooled owned packets on the same dispatch path.
+    fn finish_wire_receive_borrowed(
+        &mut self,
+        receive_report: wire::WireReceiveReport,
+        mut deliveries: Vec<wire::WireDelivery>,
+        base: &mut [u8],
+        len: usize,
+        from: SocketAddr,
+        to: SocketAddr,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        if self.fec.telemetry_enabled() {
+            self.fec.observe_wire_receive(receive_report);
+        }
+
+        let mut terminal_receive_error = None;
+        for delivery in deliveries.drain(..) {
+            let result = match delivery {
+                wire::WireDelivery::Borrowed { start, len: payload_len, .. } => {
+                    let end = start + payload_len;
+                    if end <= base.len() {
+                        self.deliver_wire_payload(&mut base[start..end], from, to)
+                    } else {
+                        // Ranges are validated at parse time; out-of-bounds
+                        // here would indicate receiver corruption — skip safely.
+                        Ok(())
+                    }
+                }
+                wire::WireDelivery::Owned(mut packet) => {
+                    if let Some(data) = packet.payload_mut_unique() {
+                        self.deliver_wire_payload(data, from, to)
+                    } else if let Some(slice) = packet.payload_slice() {
+                        let mut buf = PooledBlock::new(self.optimization_manager.memory_pool());
+                        let n = slice.len().min(buf.len());
+                        buf[..n].copy_from_slice(&slice[..n]);
+                        self.deliver_wire_payload(&mut buf[..n], from, to)
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            if let Err(error) = result {
+                terminal_receive_error = Some(error);
+                break;
+            }
+        }
+        self.fec_delivery_scratch = deliveries;
 
         if let Some(error) = terminal_receive_error {
             return Err(error);

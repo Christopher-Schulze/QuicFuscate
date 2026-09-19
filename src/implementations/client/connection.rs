@@ -300,6 +300,13 @@ impl ClientConnection {
         guard.recv_physical(data)
     }
 
+    /// Mutable-buffer receive: QUIC datagrams are decrypted in place inside
+    /// `data` without intermediate pool copies.
+    pub fn recv_mut(&mut self, data: &mut [u8]) -> Result<usize, EngineError> {
+        let mut guard = self.inner.lock();
+        guard.recv_physical_mut(data)
+    }
+
     /// Get the remote peer address.
     pub fn peer_addr(&self) -> SocketAddr {
         self.remote_addr

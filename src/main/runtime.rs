@@ -962,7 +962,7 @@ async fn negotiate_standalone_assignment(
         }
         match tokio::time::timeout(wait, recv_connected_datagram(socket, recv_buf)).await {
             Ok(Ok(length)) if length > 0 => {
-                conn.recv(&recv_buf[..length]).map_err(|error| {
+                conn.recv_mut(&mut recv_buf[..length]).map_err(|error| {
                     std::io::Error::other(format!("assignment QUIC receive failed: {error}"))
                 })?;
                 if control_started {

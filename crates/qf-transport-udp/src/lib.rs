@@ -17,10 +17,12 @@ pub use fastpath::{likely, unlikely, UdpFastPath, MAX_BATCH_SIZE};
 #[cfg(target_os = "linux")]
 const UDP_BATCH_STACK: usize = 64;
 
-/// Maximum payload for one `UDP_SEGMENT` GSO super-buffer. The kernel encodes
-/// the UDP length field as `payload + 8` in a `u16`, so payload bytes must
-/// stay within `u16::MAX - 8` = 65527; larger buffers fail with `EMSGSIZE`.
-pub const UDP_GSO_MAX_PAYLOAD: usize = u16::MAX as usize - 8;
+/// Maximum payload for one `UDP_SEGMENT` GSO super-buffer. Two kernel limits
+/// apply: the `u16` UDP length field (`payload + 8 <= u16::MAX`) and, on IPv4,
+/// the `u16` IP total-length field (`20 + 8 + payload <= u16::MAX`). The IPv4
+/// bound is the tighter one — 65507 — and stays safe on IPv6, so planners use
+/// it unconditionally; larger buffers fail with `EMSGSIZE`.
+pub const UDP_GSO_MAX_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 
 #[cfg(target_os = "macos")]
 extern "C" {
@@ -309,6 +311,36 @@ impl UdpGsoConfig {
 #[cfg(target_os = "linux")]
 pub fn probe_udp_gso(fd: RawFd) -> bool {
     UdpGsoConfig::enable_fd(fd).map(|config| config.enabled).unwrap_or(false)
+}
+
+/// Largest `UDP_SEGMENT` segment size the socket's route accepts: the kernel
+/// rejects a GSO send when `gso_size` cannot fit a single wire datagram —
+/// i.e. when it exceeds `route_mtu - header_len` (28 bytes on IPv4, 48 on
+/// IPv6). Probes `IP_MTU`/`IPV6_MTU` on the connected socket; `None` when the
+/// kernel does not report a path MTU (planners then keep the conservative
+/// 1472-byte ceiling used for capability probing).
+#[cfg(target_os = "linux")]
+pub fn udp_gso_segment_mtu(fd: RawFd) -> Option<usize> {
+    const IP_MTU: libc::c_int = 14;
+    const IPV6_MTU: libc::c_int = 24;
+    let mut mtu: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as socklen_t;
+    // SAFETY: `mtu`/`len` are live locals for the synchronous getsockopt call.
+    let ret = unsafe {
+        libc::getsockopt(fd, libc::SOL_IP, IP_MTU, &mut mtu as *mut _ as *mut c_void, &mut len)
+    };
+    if ret == 0 && mtu > 0 {
+        return Some((mtu as usize).saturating_sub(28));
+    }
+    let mut len = std::mem::size_of::<libc::c_int>() as socklen_t;
+    // SAFETY: `mtu`/`len` are live locals for the synchronous getsockopt call.
+    let ret = unsafe {
+        libc::getsockopt(fd, libc::SOL_IPV6, IPV6_MTU, &mut mtu as *mut _ as *mut c_void, &mut len)
+    };
+    if ret == 0 && mtu > 0 {
+        return Some((mtu as usize).saturating_sub(48));
+    }
+    None
 }
 
 /// Enable receive-side UDP coalescing (`UDP_GRO`) on a socket.

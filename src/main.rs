@@ -416,6 +416,10 @@ async fn flush_connected_outgoing(
         })?;
     let fd = socket.as_raw_fd();
     let mut gso_ok = linux_udp_gso_capable(fd);
+    // A GSO segment must fit a single wire datagram — the kernel rejects
+    // `gso_size > route_mtu - header` with EMSGSIZE. Probe the route MTU once
+    // per flush; fall back to the conservative Ethernet payload ceiling.
+    let gso_seg_cap = qf_transport_udp::udp_gso_segment_mtu(fd).unwrap_or(1472);
     let mut index = 0usize;
     while index < spans.len() {
         if gso_ok {
@@ -438,7 +442,7 @@ async fn flush_connected_outgoing(
                     break;
                 }
             }
-            if end - index >= 2 && seg > 0 && seg <= u16::MAX as usize {
+            if end - index >= 2 && seg > 0 && seg <= gso_seg_cap {
                 let run_start = spans[index].0;
                 let run_end = spans[end - 1].0 + spans[end - 1].1;
                 match qf_transport_udp::send_udp_segment(
