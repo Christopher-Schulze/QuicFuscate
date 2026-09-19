@@ -1031,6 +1031,11 @@ impl LiveServerState {
                 )
                 .await?;
                 conn.update_state();
+                // TODO-885 telemetry: count the completed authenticated private
+                // upgrade once per connection (activation fact only).
+                if conn.take_private_upgrade_activated() {
+                    metrics.record_private_upgrade_activated();
+                }
                 if log_client_stats {
                     log::info!(
                         "client {} stats: RTT {:.0} ms, Loss {:.2}%",

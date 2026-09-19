@@ -32,6 +32,7 @@ FIREWALL_OWNER_PATH="/run/quicfuscate/routing/firewall-owner.json"
 SERVER_CONFIG_ARGS=()
 CLIENT_CONFIG_ARGS=()
 SERVER_PROFILE_ARGS=()
+SERVER_METRICS_ARGS=()
 SERVER_PRIVILEGE_ARGS=(--no-drop-privileges)
 SERVER_PID=""
 SERVER_LOG_PATH=""
@@ -56,6 +57,9 @@ if [ -n "${QF_E2E_SERVER_PROFILE:-}" ]; then
 fi
 if [ -n "${QF_E2E_SERVER_OS:-}" ]; then
   SERVER_PROFILE_ARGS+=(--os "$QF_E2E_SERVER_OS")
+fi
+if [ -n "${QF_E2E_METRICS_PORT:-}" ]; then
+  SERVER_METRICS_ARGS=(--metrics-port "$QF_E2E_METRICS_PORT")
 fi
 if [ "${QF_E2E_DROP_PRIVILEGES:-0}" = "1" ]; then
   SERVER_PRIVILEGE_ARGS=(
@@ -331,7 +335,8 @@ start_server() {
     --listen 10.10.0.1:4433 --admin-socket "$admin_socket" \
     --qkey-store "$QKEY_STORE" \
     --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
-    "${SERVER_PRIVILEGE_ARGS[@]}" "${SERVER_PROFILE_ARGS[@]}" -v "${SERVER_CONFIG_ARGS[@]}" \
+    "${SERVER_PRIVILEGE_ARGS[@]}" "${SERVER_PROFILE_ARGS[@]}" "${SERVER_METRICS_ARGS[@]}" \
+    -v "${SERVER_CONFIG_ARGS[@]}" \
     > "$log_path" 2>&1 &
   SERVER_PID=$!
 }

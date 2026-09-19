@@ -144,6 +144,7 @@ pub(super) async fn run_client(
         return Ok(());
     }
 
+    let mut private_protection_policy = None;
     if let Some(config_path) = config_path {
         let engine_config =
             quicfuscate::engine::EngineConfig::from_file(config_path).map_err(|error| {
@@ -155,6 +156,10 @@ pub(super) async fn run_client(
         if engine_config.circuit.is_some() {
             return run_circuit_client(config_path, engine_config).await;
         }
+        private_protection_policy = Some((
+            engine_config.crypto.packet_protection_mode,
+            engine_config.crypto.private_family(),
+        ));
     }
 
     if tun_enable
@@ -391,6 +396,9 @@ pub(super) async fn run_client(
             return Err(std::io::Error::other("client connection init failed"));
         }
     };
+    if let Some((mode, family)) = private_protection_policy {
+        conn.set_private_packet_protection_policy(mode, family);
+    }
 
     stealth_runtime
         .start(

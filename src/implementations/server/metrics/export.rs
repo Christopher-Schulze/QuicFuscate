@@ -450,6 +450,15 @@ impl Metrics {
             self.shard_forward_dropped.load(Ordering::Relaxed)
         );
 
+        out.push_str(
+            "# HELP quicfuscate_private_upgrade_activated_total Connections that completed the authenticated private packet-protection upgrade\n",
+        );
+        out.push_str("# TYPE quicfuscate_private_upgrade_activated_total counter\n");
+        write_metric!(
+            "quicfuscate_private_upgrade_activated_total {}\n\n",
+            self.private_upgrade_activated.load(Ordering::Relaxed)
+        );
+
         // Stealth
         out.push_str("# HELP quicfuscate_stealth_http3_active Clients using HTTP/3 stealth\n");
         out.push_str("# TYPE quicfuscate_stealth_http3_active gauge\n");

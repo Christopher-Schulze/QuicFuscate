@@ -940,6 +940,12 @@ async fn negotiate_standalone_assignment(
             }
             if let Some(assignment) = state.assignment() {
                 if conn.masque_tunnel_established() {
+                    conn.mark_qkey_authenticated_from_token();
+                    conn.private_packet_protection_control_tick().map_err(|error| {
+                        std::io::Error::other(format!(
+                            "client assignment private packet-protection control failed: {error}"
+                        ))
+                    })?;
                     return Ok(assignment.clone());
                 }
             }

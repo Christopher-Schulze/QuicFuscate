@@ -126,7 +126,11 @@ impl QuicFuscateConnection {
         Ok(true)
     }
 
-    pub(crate) fn private_packet_protection_control_tick(
+    /// Drive the authenticated private packet-protection negotiation forward: lazily create the
+    /// runtime once TLS, QKey binding, and the control flow are present, emit any pending
+    /// authenticated control capsules, and apply a scheduled owner switch at its packet-number
+    /// boundary. Safe to call repeatedly; a no-op while prerequisites are missing.
+    pub fn private_packet_protection_control_tick(
         &mut self,
     ) -> Result<(), crate::error::ConnectionError> {
         let _ = self.ensure_private_packet_protection_runtime()?;
@@ -182,6 +186,28 @@ impl QuicFuscateConnection {
             runtime.mark_owner_activation_attempted();
         }
         Ok(())
+    }
+
+    /// Low-cardinality telemetry latch (TODO-885): returns `true` exactly once
+    /// per connection when the negotiated private owner has become the effective
+    /// 1-RTT packet AEAD. Exposes only the activation fact - never keys,
+    /// transcripts, family internals, or peer-identifying values.
+    pub(crate) fn take_private_upgrade_activated(&mut self) -> bool {
+        if self.private_upgrade_observed {
+            return false;
+        }
+        let Some(runtime) = self.private_packet_protection_runtime.as_ref() else {
+            return false;
+        };
+        let active = {
+            let runtime = runtime.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            runtime.machine().state() == PrivateNegotiationState::AdvancedActive
+                && runtime.owner_activation_attempted()
+        };
+        if active {
+            self.private_upgrade_observed = true;
+        }
+        active
     }
 }
 

@@ -311,6 +311,9 @@ pub struct Metrics {
     /// Datagrams or downlinks dropped because a shard's bounded channel was
     /// full or closed (UDP loss semantics under SO_REUSEPORT sharding).
     pub shard_forward_dropped: AtomicU64,
+    /// Connections that completed the authenticated private packet-protection
+    /// upgrade (low-cardinality TODO-885 telemetry; no keys or transcripts).
+    pub private_upgrade_activated: AtomicU64,
 
     // Stealth metrics
     pub stealth_http3_active: AtomicU64,
@@ -458,6 +461,7 @@ impl Metrics {
             blacklist_sync_last_failure_uptime: AtomicU64::new(BLACKLIST_SYNC_TIME_UNKNOWN),
             client_fanout_dropped: AtomicU64::new(0),
             shard_forward_dropped: AtomicU64::new(0),
+            private_upgrade_activated: AtomicU64::new(0),
             stealth_http3_active: AtomicU64::new(0),
             stealth_tls13_active: AtomicU64::new(0),
             fec_packets_encoded: FecProcessCounter::new(FecProcessCounterKind::Emitted),
@@ -689,6 +693,10 @@ impl Metrics {
 
     pub fn record_shard_forward_drop(&self) {
         self.shard_forward_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_private_upgrade_activated(&self) {
+        self.private_upgrade_activated.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_ddos_sample(

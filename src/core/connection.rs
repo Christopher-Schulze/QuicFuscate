@@ -135,6 +135,8 @@ pub struct QuicFuscateConnection {
         Option<Arc<std::sync::Mutex<private_packet_protection::PrivatePacketProtectionRuntime>>>,
     private_packet_protection_mode: qf_crypto::PacketProtectionMode,
     private_packet_protection_family: Option<qf_crypto::PrivateAeadFamily>,
+    /// One-shot latch so the private upgrade is counted once per connection.
+    private_upgrade_observed: bool,
     masque_relay_response_queue: Option<Arc<std::sync::Mutex<MasqueRelayResponseQueue>>>,
     /// Locally-initiated MASQUE CONNECT-UDP stream id (client side).
     masque_stream_id: Option<u64>,
@@ -569,6 +571,7 @@ impl QuicFuscateConnection {
             private_packet_protection_runtime: None,
             private_packet_protection_mode: params.private_packet_protection_mode,
             private_packet_protection_family: params.private_packet_protection_family,
+            private_upgrade_observed: false,
             masque_relay_response_queue: None,
             masque_stream_id: None,
             masque_local_flows: HashMap::new(),
