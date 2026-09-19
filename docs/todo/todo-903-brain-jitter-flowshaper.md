@@ -4,7 +4,7 @@ title: Brain jitter gate and FlowShaper tuning
 severity: MEDIUM
 phase: S
 priority: P2
-status: QUEUED
+status: DONE
 created: 2026-08-21
 depends_on: []
 ---
@@ -20,9 +20,21 @@ Fix `src/transport/connection/send.rs:206-227` jitter gate hitting ALL packets i
 - `brain.rs:606` EnvSnapshot per ACK already covered by TODO-894.
 
 ## Acceptance
-- Jitter only on data packets, not ACK-only.
-- FlowShaper uses adaptive delay based on CE ratio, not uniform.
-- `scripts/tests/suites/test-performance-regression.sh --only latency` unchanged.
+- Jitter only on data packets, not ACK-only. DONE: transport jitter was already
+  gated on `SendInfo.congestion_controlled` (RFC 9002 sec. 7.2: identical
+  partition to ack-eliciting). The remaining gap was the FlowShaper path -
+  `StealthManager::process_outgoing_packet` saw only payload bytes and jittered
+  every datagram. It now takes an explicit `ack_only` classification from the
+  send path (`!send_info.congestion_controlled` at both call sites in
+  `core/connection/send.rs`), skips FlowShaper jitter for pure ACK datagrams,
+  still records them into shaper history as `StealthPacketClass::Ack` (they
+  occupy the wire, so they feed the rate estimator), and keeps the explicit
+  realtime choke applied - a configured bandwidth cap must hold for every byte.
+- FlowShaper uses adaptive delay based on CE ratio, not uniform. DONE (see
+  Deviations - history-derived traffic state instead of cross-crate CE wiring).
+- `scripts/tests/suites/test-performance-regression.sh --only latency`
+  unchanged. VERIFIED 2026-09-19: `--only latency --fast` PASS,
+  `connection_1rtt_send_recv/payload_1024B` 8.68us / 223.5 MiB/s.
 
 ## Out of Scope
 - No probe detection change.

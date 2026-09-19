@@ -369,7 +369,10 @@ impl QuicFuscateConnection {
         let delay_opt = if bypass_fec_for_path_control {
             None
         } else {
-            self.stealth_manager.process_outgoing_packet(&mut send_buffer[quic_range.clone()])
+            self.stealth_manager.process_outgoing_packet(
+                &mut send_buffer[quic_range.clone()],
+                !send_info.congestion_controlled,
+            )
         };
 
         let (packet_id, fec_data_len) = if wire_profile.is_some() {
@@ -567,7 +570,8 @@ impl QuicFuscateConnection {
         let delay_opt = if send_info.path_control {
             None
         } else {
-            self.stealth_manager.process_outgoing_packet(&mut buf[..write])
+            self.stealth_manager
+                .process_outgoing_packet(&mut buf[..write], !send_info.congestion_controlled)
         };
 
         let packet_id = self.packet_id_counter;

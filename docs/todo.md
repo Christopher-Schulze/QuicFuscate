@@ -419,7 +419,7 @@
 
 
 ### TODO-903 - Brain jitter gate and FlowShaper tuning
-- DONE. Jitter half: the core timing gate skips ACK-only packets via `SendInfo.congestion_controlled`; stealth jitter stays on every ack-eliciting packet (`282e096`). FlowShaper half: traffic-aware range from the bounded 2s history - burst >=32 records -> low half floored at min/2, idle <8 -> full spread, steady -> classic uniform; replaces the flat uniform that fingerprinted bursts as constant-ish profiles. CE-ratio deviation documented in the detail file. qf-stealth `127/127`, root flow_shaper `12/12`. Commit `65a6e7c`.
+- DONE. Jitter half: the core timing gate skips ACK-only packets via `SendInfo.congestion_controlled`; stealth jitter stays on every ack-eliciting packet (`282e096`). Residual gap closed: `StealthManager::process_outgoing_packet` still jittered every datagram through the FlowShaper path (AntiDpi) - it now takes the `ack_only` class from `!send_info.congestion_controlled` at both `core/connection/send.rs` call sites, bypasses FlowShaper jitter for pure ACK datagrams, keeps recording them as `StealthPacketClass::Ack` for the rate estimator, and leaves the explicit realtime choke applied (configured bandwidth cap covers every wire byte). FlowShaper half: traffic-aware range from the bounded 2s history - burst >=32 records -> low half floored at min/2, idle <8 -> full spread, steady -> classic uniform; replaces the flat uniform that fingerprinted bursts as constant-ish profiles. CE-ratio deviation documented in the detail file. qf-stealth `127/127`, root flow_shaper `12/12`, stealth suite `169/169` incl. `ack_only_packets_bypass_jitter_but_feed_history`. Commits `65a6e7c`, `282e096`.
 - Detail: `docs/todo/todo-903-brain-jitter-flowshaper.md`
 
 

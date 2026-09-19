@@ -622,14 +622,22 @@ impl StealthManager {
     /// Processes an outgoing packet payload, applying configured stealth techniques.
     /// Returns an optional delay Duration if the packet should be delayed (Async Scheduler).
     /// Does NOT block the thread.
+    ///
+    /// `ack_only` marks datagrams carrying no ack-eliciting frames (pure ACK /
+    /// PADDING / CONNECTION_CLOSE). They bypass FlowShaper jitter: delaying
+    /// pure ACKs inflates the peer's RTT measurement without changing the
+    /// wire-visible data-flow shape the jitter is meant to decorrelate. The
+    /// explicit realtime choke still applies - it is a configured bandwidth
+    /// cap that must hold for every byte leaving the socket.
     pub(crate) fn process_outgoing_packet(
         &self,
         _payload: &mut [u8],
+        ack_only: bool,
     ) -> Option<std::time::Duration> {
         // Shaping delays are merged in core::QuicFuscateConnection::send() with transport
         // jitter (when active). One release gate: next_packet_release.
         // - explicit realtime choke -> RateChoker
-        // - Anti-DPI without choke -> FlowShaper
+        // - Anti-DPI without choke -> FlowShaper (ack-eliciting packets only)
         let mut total_delay = std::time::Duration::ZERO;
         let mut choked_bytes = 0u64;
         let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
@@ -646,7 +654,7 @@ impl StealthManager {
                     }
                 }
             }
-        } else if anti_mode {
+        } else if anti_mode && !ack_only {
             if let Some(flow_shaper) = &self.flow_shaper {
                 total_delay = flow_shaper.apply_jitter() + flow_shaper.apply_flight_pacing(false);
             }
@@ -662,10 +670,14 @@ impl StealthManager {
             }
         }
 
-        // Record packet into history to consume PacketInfo fields
+        // Record packet into history to consume PacketInfo fields. ACK-only
+        // datagrams still occupy the wire, so they feed the rate estimator -
+        // they just are not delay targets.
         if anti_mode {
             if let Some(shaper) = &self.flow_shaper {
-                let ty = if choked_bytes == 0 {
+                let ty = if ack_only {
+                    StealthPacketClass::Ack
+                } else if choked_bytes == 0 {
                     StealthPacketClass::Data
                 } else {
                     StealthPacketClass::Retransmit

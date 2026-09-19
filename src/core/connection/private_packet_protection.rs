@@ -484,7 +484,7 @@ mod tests {
         let mut standard_machine = machine(PrivateNegotiationRole::Client);
         standard_machine.install_exporter_root(&[0x77; PRIVATE_HASH_LEN]).expect("exporter root");
         standard_machine.mark_authenticated().expect("authenticated state");
-        let mut standard = PrivatePacketProtectionRuntime::new(
+        let standard = PrivatePacketProtectionRuntime::new(
             PacketProtectionMode::Standard,
             PrivateNegotiationRole::Client,
             standard_machine,

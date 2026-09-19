@@ -146,6 +146,24 @@ mod stealth_coverage_tests {
     }
 
     #[test]
+    fn ack_only_packets_bypass_jitter_but_feed_history() {
+        let m = make_manager(StealthConfig::anti_dpi());
+        let shaper = m.flow_shaper.as_ref().expect("anti_dpi has FlowShaper");
+        let mut packet = vec![0u8; 64];
+
+        // ACK-only datagrams carry no ack-eliciting frames; jitter would only
+        // inflate the peer's RTT measurement, never shape the data flow.
+        assert!(m.process_outgoing_packet(&mut packet, true).is_none());
+        assert!(m.process_outgoing_packet(&mut packet, true).is_none());
+
+        // They still occupy the wire, so they feed the rate estimator history.
+        assert!(shaper.history_len() >= 2);
+
+        // Ack-eliciting packets remain jitter targets (jitter_us=3000, min>0).
+        assert!(m.process_outgoing_packet(&mut packet, false).is_some());
+    }
+
+    #[test]
     fn rate_choker_none_when_zero_target() {
         assert!(RateChoker::new(0, 100).is_none());
     }
