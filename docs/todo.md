@@ -4016,7 +4016,7 @@
 
 ### TODO-1012 - Standalone client RX: recvmmsg burst + persistent GRO slots
 
-- DONE (2026-09-19). `recv_connected_burst` fills 8 persistent 64 KiB slots in one `recvmmsg` per readiness wake on Linux (each slot possibly a UDP_GRO super-buffer, split in place); non-Linux keeps single-datagram semantics. The standalone client was the last per-wake single-syscall RX path. Verified by `tun-e2e-netns.sh` on Omega (5/5 echo, 0% loss, clean teardown).
+- DONE (2026-09-19). RX: `recv_connected_burst` fills 8 persistent 64 KiB slots in one `recvmmsg` per readiness wake on Linux (each slot possibly a UDP_GRO super-buffer, split in place); non-Linux keeps single-datagram semantics. TX (same change set): the non-GSO tail of `flush_connected_outgoing` now goes out in one `sendmmsg` instead of per-datagram `sendmsg` — measured on Omega with `perf stat` under a 15 s iperf3 tunnel run: sendmsg -31%, socket-TX syscalls -15%. Verified by `tun-e2e-netns.sh` on Omega (5/5 echo, 0% loss, clean teardown).
 - Detail: docs/todo/todo-1012-standalone-client-rx-burst.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)

@@ -1091,7 +1091,7 @@ The accelerate surface now re-exports only retained acceleration primitives acro
 
 ##### Network I/O Acceleration (transport_io submodule)
 - **UDP GSO/GRO**: retained runtime/compat helper surface for reduced syscall overhead on the active UDP fast-paths
-- **sendmmsg/recvmmsg**: runtime-owned Linux batching in `crates/qf-transport-udp/src/lib.rs` and `fastpath.rs`, with `src/optimize/udp.rs` and `src/transport/udpfast.rs` as root projections. The standalone client receive loop uses `recv_connected_burst` (`src/main.rs`), which fills 8 persistent 64 KiB slots per readiness wake via `recv_batch_gro` (`recvmmsg` + `UDP_GRO` cmsg parsing per slot); non-Linux platforms keep single-datagram semantics through the same interface (TODO-1012).
+- **sendmmsg/recvmmsg**: runtime-owned Linux batching in `crates/qf-transport-udp/src/lib.rs` and `fastpath.rs`, with `src/optimize/udp.rs` and `src/transport/udpfast.rs` as root projections. The standalone client receive loop uses `recv_connected_burst` (`src/main.rs`), which fills 8 persistent 64 KiB slots per readiness wake via `recv_batch_gro` (`recvmmsg` + `UDP_GRO` cmsg parsing per slot); non-Linux platforms keep single-datagram semantics through the same interface (TODO-1012). On TX, `flush_connected_outgoing` emits GSO-ineligible tail spans in one `sendmmsg` (`send_batch_fd`) instead of per-datagram `sendmsg`; only a mid-batch `WouldBlock` tail falls back to the awaited per-packet path (measured on Omega: sendmsg -31% under sustained tunnel load).
 - **sendmsg_x (macOS)**: retained macOS batching helper with explicit fallback to per-message `sendmsg`
 - **NIC Parallelism**: compatibility-oriented tuning helper, not a separately wired canonical runtime subsystem
 

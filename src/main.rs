@@ -531,6 +531,28 @@ async fn flush_connected_outgoing(
                 }
             }
         }
+        // Non-GSO-fitting tail: emit every remaining span in one `sendmmsg`
+        // instead of one `sendmsg` per datagram. A partial completion means
+        // the socket hit backpressure mid-batch; only that tail drops to the
+        // async per-packet path, which waits for writability.
+        let tail: SmallVec<
+            [(&[u8], std::net::SocketAddr); quicfuscate::transport::UDP_DATAGRAM_BURST_LIMIT],
+        > = spans[index..].iter().map(|&(start, len)| (&flat[start..start + len], peer)).collect();
+        match qf_transport_udp::send_batch_fd(fd, &tail) {
+            Ok(completed) => {
+                index += completed;
+                if index >= spans.len() {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(quicfuscate::engine::DataPlaneFault::TransportSend {
+                    component: "standalone client UDP socket".to_string(),
+                    error: error.to_string(),
+                });
+            }
+        }
         let (start, len) = spans[index];
         send_connected_datagram(socket, &flat[start..start + len]).await.map_err(|error| {
             quicfuscate::engine::DataPlaneFault::TransportSend {
