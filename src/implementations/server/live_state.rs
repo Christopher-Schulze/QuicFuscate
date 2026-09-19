@@ -34,6 +34,9 @@ pub struct LiveServerState {
     /// Present only when the runtime fans RX across N>1 shards.
     pub(super) shard_router: Option<Arc<ShardRouter>>,
     next_stats_log: Instant,
+    /// Reused snapshot of client addresses for the per-tick flush loop;
+    /// taken with `mem::take` so iteration can call `&mut self` methods.
+    key_addrs_scratch: Vec<SocketAddr>,
     /// Owned external blacklist synchronizer task and atomic due/in-flight claim.
     #[cfg(feature = "rate_limiter")]
     blacklist_sync: BlacklistSyncOwner,
@@ -509,6 +512,7 @@ impl LiveServerState {
             revocation_manager,
             qkey_tracker,
             next_stats_log: clock.now(),
+            key_addrs_scratch: Vec::new(),
             #[cfg(feature = "rate_limiter")]
             blacklist_sync: BlacklistSyncOwner::new_with_clock(&clock),
             uring_worker: None,
@@ -561,6 +565,7 @@ impl LiveServerState {
             shard_id,
             shard_router: Some(router),
             next_stats_log: self.clock.now(),
+            key_addrs_scratch: Vec::new(),
             #[cfg(feature = "rate_limiter")]
             blacklist_sync: BlacklistSyncOwner {
                 state: Arc::clone(&self.blacklist_sync.state),
@@ -955,8 +960,18 @@ impl LiveServerState {
         }
     }
 
-    fn key_addrs(&self) -> Vec<SocketAddr> {
-        self.clients.keys().copied().collect()
+    /// Snapshot client addresses into the reusable scratch vector (returned
+    /// via `mem::take` so the caller can mutate `self` while iterating).
+    fn take_key_addrs(&mut self) -> Vec<SocketAddr> {
+        let mut scratch = std::mem::take(&mut self.key_addrs_scratch);
+        scratch.clear();
+        scratch.extend(self.clients.keys().copied());
+        scratch
+    }
+
+    /// Return the scratch vector so its capacity survives the next tick.
+    fn restore_key_addrs(&mut self, scratch: Vec<SocketAddr>) {
+        self.key_addrs_scratch = scratch;
     }
 
     pub async fn run_housekeeping_tick(
@@ -1004,9 +1019,9 @@ impl LiveServerState {
         }
         self.drain_client_fanout(metrics);
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
-        let addresses = self.key_addrs();
+        let addresses = self.take_key_addrs();
         let uring_worker = self.uring_worker.clone();
-        for addr in addresses {
+        for &addr in &addresses {
             let session_stats = self.domain.session_stats_by_remote(addr);
             let session_id = self.domain.session_id_by_remote(addr);
             let established_conn_id = if let Some(conn) = self.get_mut(&addr) {
@@ -1059,6 +1074,7 @@ impl LiveServerState {
                 }
             }
         }
+        self.restore_key_addrs(addresses);
         self.enforce_qkey_auth_timeouts(metrics);
         self.reap_expired_sessions(accept_loop, metrics);
         self.reconcile(accept_loop, metrics);
@@ -1368,7 +1384,8 @@ impl LiveServerState {
         self.shutdown_all(reason, Some(metrics));
         let client_snapshots = Arc::clone(self.domain.client_snapshots());
         let uring_worker = self.uring_worker.clone();
-        for addr in self.key_addrs() {
+        let addresses = self.take_key_addrs();
+        for &addr in &addresses {
             let session_stats = self.domain.session_stats_by_remote(addr);
             let session_id = self.domain.session_id_by_remote(addr);
             if let Some(conn) = self.get_mut(&addr) {
@@ -1389,6 +1406,7 @@ impl LiveServerState {
                 }
             }
         }
+        self.restore_key_addrs(addresses);
         self.reconcile(accept_loop, metrics);
     }
 
