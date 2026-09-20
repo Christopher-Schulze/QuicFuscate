@@ -126,5 +126,19 @@ packets across time instead of adding chaff) stays open - it needs a
 bounded delay queue in the send path, which is a bigger surgery than the
 rate rule.
 
-OPEN: candidates 2, 4, 5 unchanged (per-cluster parameter row, QUICstep
-design study, UPGen deployment seeding).
+ADAPTED - candidate 2 (Adaptive Tamaraw) partially:
+`intelligent_policy.rs` now classifies traffic into `TrafficPhase`
+(Dense/Sparse/BurstEdge on smoothed `ack_us`; the brain's EMA supplies the
+hysteresis) and reads jitter scale from the phase table: dense 0.4, sparse
+0.6 (external pacing), burst-edge 0.85. Before, the split was a flat
+0.6/0.4 on `external_pacing` alone. The pairing is now coherent per phase -
+dense traffic stays tight because the real stream masks itself, idle and
+bursty phases get maximum jitter because burst edges carry the
+fingerprint. Test `tamaraw_phase_table_scales_jitter_by_density` pins both
+branches. A literal per-cluster (rho, gamma) row with disjoint upload vs
+download weights stays open: our policy is symmetric today, so the table
+has one axis; splitting it needs direction-aware signal plumbing
+(up/down ack density separately).
+
+OPEN: candidates 4, 5 unchanged (QUICstep design study, UPGen deployment
+seeding); the full ChameleonFlow reorder window stays open per above.

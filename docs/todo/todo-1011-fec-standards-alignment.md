@@ -101,5 +101,36 @@ interop pressure exists (custom data plane), so there is nothing to align
 
 OPEN: QUIRL per-class gating needs a traffic-class concept the FEC path
 does not have yet (`manager.rs`/`policy.rs` treat traffic globally); the
-convolutional/overlapping-window gap analysis vs `interleaved.rs` and the
-Repair-ACK wire-format question (coupled to TODO-1006) remain.
+Repair-ACK wire-format question (coupled to TODO-1006) remains.
+
+ANALYZED (2026-09) - convolutional/overlapping-window gap vs `interleaved.rs`:
+
+Current design: `InterleavedEncoder` splits sources round-robin across
+`depth` lanes (<=8), each lane an `EncoderVariant` with block-aligned
+windows. The block path (`adaptive_controller.rs` ~L256) emits repairs when
+`packets_in_window() >= k`, then `clear_window()` hard-resets the lane. The
+Streaming mode already encodes on the fly: `emit_streaming_repair` calls
+`generate_repair_packet` every `stream_every` packets over the *current*
+window contents (`FountainEncoder::generate_symbol_into` mixes whatever
+`symbols` holds), so repairs are not block-locked.
+
+Real gap vs convolutional/sliding-window (RFC 8681 RLC, rQUIC):
+- Ours: the window grows monotonically to k, then a hard reset. A repair
+  emitted early covers few sources (efficient), late repairs cover up to k.
+  The reset edge creates a coverage gap: packets right after `clear_window`
+  have zero repair coverage until the next `stream_every` tick - a burst
+  landing exactly on a window boundary sees unprotected packets.
+- Sliding-window: the coding window advances per packet (FIFO evict), so
+  coverage is phase-independent and repair-latency is bounded by ~1/rate,
+  not by distance-to-block-end (ours: up to k/d lane packets = k wire
+  packets before a loss is even repairable in block mode).
+
+Design option if adopted: replace `clear_window` at k with
+`evict_prefix(m)` on the fountain encoder (drop the oldest m sources once
+the window exceeds target w), keeping a constant-width sliding window.
+Decoder side already tracks per-source ids (`decoder8/16` unknowns are
+source-id keyed, not generation aligned), so overlapping equations are
+representable; the wire format needs the window base carried in the repair
+header so decoders can bound the equation set. Sized as a separate
+implementation TODO - it touches encoder windowing, decoder equation
+scoping, and the wire identity (`REPAIR_LANE_BITS` layout) simultaneously.

@@ -31,6 +31,33 @@ pub struct IntelligentStealthInputs {
     pub pad_max_high: usize,
 }
 
+/// Traffic-phase classification for the adaptive-Tamaraw policy table
+/// (TODO-1010): one coherent (padding, jitter) parameter pair per phase
+/// instead of independent thresholds. ACK-clocked density is the
+/// discriminator - the brain already EMA-smooths `ack_us`, which provides
+/// the hysteresis Tamaraw needs without extra state here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrafficPhase {
+    /// Dense ACK-clocked flow (ack_us < 3ms): real traffic already carries
+    /// the cover structure - buy minimal chaff, keep timing tight.
+    Dense,
+    /// Moderate activity: baseline defense parameters.
+    Sparse,
+    /// Idle/bursty phase (ack_us > 8ms): burst edges are the fingerprint -
+    /// maximal jitter variance and full padding are what mask them.
+    BurstEdge,
+}
+
+fn classify_phase(inputs: &IntelligentStealthInputs) -> TrafficPhase {
+    if inputs.ack_us < 3_000.0 {
+        TrafficPhase::Dense
+    } else if inputs.ack_us <= 8_000.0 {
+        TrafficPhase::Sparse
+    } else {
+        TrafficPhase::BurstEdge
+    }
+}
+
 /// Derive the concrete transport policy for one Intelligent-mode signal snapshot.
 #[doc(hidden)]
 pub fn derive_intelligent_runtime_policy(
@@ -39,13 +66,23 @@ pub fn derive_intelligent_runtime_policy(
 ) -> StealthRuntimePolicy {
     let external_pacing =
         inputs.ce_ratio_recent < 0.01 && inputs.ack_us < 8_000.0 && inputs.rtt_spike_weight == 0.0;
+    let phase = classify_phase(&inputs);
 
-    let timing_max_jitter_us = if external_pacing {
-        (inputs.jitter_max_us as f64 * 0.6) as u32
-    } else if inputs.ce_ratio_recent > 0.05 || inputs.rtt_spike_weight >= 4.0 {
+    // Adaptive Tamaraw (TODO-1010): congestion/anomaly overrides keep their
+    // defense priority; otherwise the phase table picks the jitter scale -
+    // dense flows stay tight (the real stream masks itself), sparse gets the
+    // baseline, and idle/bursty phases get the full range because burst
+    // edges are exactly where the fingerprint lives.
+    let timing_max_jitter_us = if inputs.ce_ratio_recent > 0.05 || inputs.rtt_spike_weight >= 4.0 {
         (inputs.jitter_max_us as f64 * 0.85) as u32
     } else {
-        (inputs.jitter_max_us as f64 * 0.4) as u32
+        let scale = match phase {
+            TrafficPhase::Dense => 0.4,
+            TrafficPhase::Sparse if external_pacing => 0.6,
+            TrafficPhase::Sparse => 0.4,
+            TrafficPhase::BurstEdge => 0.85,
+        };
+        (inputs.jitter_max_us as f64 * scale) as u32
     };
 
     let tos_anomaly = inputs.signal_tos > 0;
@@ -103,8 +140,9 @@ pub fn derive_intelligent_runtime_policy(
         // ChameleonFlow principle (TODO-1010): when ACK-clocked activity is
         // dense, reshaping the real packets already breaks the burst
         // fingerprint - purchased chaff buys nothing and only widens the
-        // bandwidth footprint. Halve the padding rate under dense traffic.
-        if inputs.ack_us < 3_000.0 {
+        // bandwidth footprint. Sparse and burst-edge phases keep the full
+        // rate: with little real traffic, padding is the only cover.
+        if phase == TrafficPhase::Dense {
             base / 2
         } else {
             base
@@ -155,14 +193,37 @@ mod tests {
 
     #[test]
     fn clean_level_uses_external_pacing_without_padding() {
+        // Dense clean traffic (ack_us=2400): the real stream masks itself,
+        // so the phase table keeps timing tight (0.4) rather than paying the
+        // old flat external-pacing scale.
         let policy = derive_intelligent_runtime_policy(inputs(), &EnvSnapshot::default());
 
         assert!(policy.external_pacing);
         assert!(!policy.timing_enabled);
-        assert_eq!(policy.timing_max_jitter_us, 600);
+        assert_eq!(policy.timing_max_jitter_us, 400);
         assert!(!policy.padding_enabled);
         assert_eq!(policy.padding_rate, 0);
         assert_eq!(policy.cc_profile, BrowserProfile::Edge);
+    }
+
+    #[test]
+    fn tamaraw_phase_table_scales_jitter_by_density() {
+        // Sparse clean traffic keeps the 0.6 external-pacing baseline...
+        let sparse = derive_intelligent_runtime_policy(
+            IntelligentStealthInputs { ack_us: 5_000.0, ..inputs() },
+            &EnvSnapshot::default(),
+        );
+        assert!(sparse.external_pacing);
+        assert_eq!(sparse.timing_max_jitter_us, 600);
+
+        // ...while idle/bursty traffic (ack_us > 8ms) gets the full range:
+        // burst edges carry the fingerprint, so masking them costs the most.
+        let bursty = derive_intelligent_runtime_policy(
+            IntelligentStealthInputs { ack_us: 12_000.0, level_hint: 1, ..inputs() },
+            &EnvSnapshot::default(),
+        );
+        assert!(!bursty.external_pacing);
+        assert_eq!(bursty.timing_max_jitter_us, 850);
     }
 
     #[test]
