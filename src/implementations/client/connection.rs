@@ -212,6 +212,10 @@ impl ClientConnection {
             config.crypto.packet_protection_mode,
             config.crypto.private_family(),
         );
+        if let Some(seed) = config.crypto.private_shape_seed_bytes() {
+            connection
+                .set_private_protocol_shape(crate::qftls::PrivateProtocolShape::from_seed(&seed));
+        }
         Ok(connection)
     }
 

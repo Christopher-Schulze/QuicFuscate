@@ -22,6 +22,7 @@ fn test_connection() -> QuicFuscateConnection {
         tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
         private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
         private_packet_protection_family: None,
+        private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
     })
 }
 
@@ -96,6 +97,7 @@ fn asymmetric_stealth_server_emits_no_raw_h3_cover_stream() {
             tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
             private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
             private_packet_protection_family: None,
+            private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
         })
     };
 

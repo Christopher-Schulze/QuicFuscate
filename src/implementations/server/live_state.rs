@@ -274,6 +274,11 @@ pub(crate) fn build_live_server_client_init(
                 runtime_policy.crypto.packet_protection_mode,
                 runtime_policy.crypto.private_family(),
             );
+            if let Some(seed) = runtime_policy.crypto.private_shape_seed_bytes() {
+                connection.set_private_protocol_shape(
+                    crate::qftls::PrivateProtocolShape::from_seed(&seed),
+                );
+            }
             Some(LiveClientInit {
                 connection,
                 pending_qkey_auth: initial_ctx.pending_qkey_auth,

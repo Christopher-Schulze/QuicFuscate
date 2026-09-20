@@ -4021,7 +4021,7 @@
 
 ### TODO-1014 - UPGen deployment-seeded private-protocol wire-image diversity
 
-- OPEN. Design study in TODO-1010: content entropy is already per-connection, but the private-capsule wire *shape* (QFPA magic, TLV order, AEAD preference list, exporter salts) is deployment-invariant - one capture signatures every deployment. Plan: `PrivateProtocolShape` derives TLV order, pad granule, AEAD preference ordering and negotiation pacing from a deployment seed provisioned with the QKey material (never negotiated on the wire; absent seed = canonical shape).
+- DONE (2026-09-20). Adapted from the TLV plan after code inspection showed a strict fixed-layout format: `PrivateProtocolShape` expands a 32-byte seed (HKDF, `qf private protocol shape v1`) into a Fisher-Yates permutation of eight wire blocks (nonces, hashes, ALPN, DCIDs, pad), a 0/16/32/64-byte pad granule with seed-derived content, and a pacing hint. Non-canonical shapes emit wire version 2; the version byte stays fixed so the decoder picks the layout before parsing. The authenticator binds the exact byte image - seed mismatch fails closed. Seed provisioning: `[crypto] private_shape_seed` (hex) -> `CryptoConfig::private_shape_seed_bytes()` -> `set_private_protocol_shape` -> `Machine::with_shape`, plumbed through client, circuit-hop, and server paths. Absent seed keeps byte-identical v1. 6 unit tests.
 - Detail: docs/todo/todo-1014-upgen-deployment-shape.md
 
 ### TODO-1015 - ChameleonFlow bounded reorder window for bulk datagrams

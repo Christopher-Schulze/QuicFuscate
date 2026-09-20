@@ -159,6 +159,10 @@ pub(super) async fn run_client(
         private_protection_policy = Some((
             engine_config.crypto.packet_protection_mode,
             engine_config.crypto.private_family(),
+            engine_config
+                .crypto
+                .private_shape_seed_bytes()
+                .map(|seed| quicfuscate::qftls::PrivateProtocolShape::from_seed(&seed)),
         ));
     }
 
@@ -396,8 +400,11 @@ pub(super) async fn run_client(
             return Err(std::io::Error::other("client connection init failed"));
         }
     };
-    if let Some((mode, family)) = private_protection_policy {
+    if let Some((mode, family, shape)) = private_protection_policy {
         conn.set_private_packet_protection_policy(mode, family);
+        if let Some(shape) = shape {
+            conn.set_private_protocol_shape(shape);
+        }
     }
 
     stealth_runtime

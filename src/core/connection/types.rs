@@ -231,4 +231,7 @@ pub struct ConnectionParams {
     pub private_packet_protection_mode: qf_crypto::PacketProtectionMode,
     /// Frozen product family selected by the engine policy, if private mode is enabled.
     pub private_packet_protection_family: Option<qf_crypto::PrivateAeadFamily>,
+    /// Deployment-seeded private protocol wire layout (TODO-1014).
+    /// Canonical unless provisioning installed a seed; never negotiated.
+    pub private_protocol_shape: crate::qftls::PrivateProtocolShape,
 }

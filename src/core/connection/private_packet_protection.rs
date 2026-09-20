@@ -96,7 +96,8 @@ impl QuicFuscateConnection {
             qkey_hash,
             nonce,
         )
-        .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?;
+        .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?
+        .with_shape(self.private_protocol_shape);
         let mut runtime = PrivatePacketProtectionRuntime::new(
             self.private_packet_protection_mode,
             role,
@@ -374,7 +375,8 @@ impl PrivatePacketProtectionRuntime {
     /// the Core owner after the callback returns, because only Core can read the transport PN.
     pub(crate) fn receive(&mut self, payload: &[u8]) {
         let result = (|| {
-            let message = PrivateNegotiationMessage::decode(payload)?;
+            let message =
+                PrivateNegotiationMessage::decode_with_shape(payload, self.machine.shape())?;
             match (self.role, message.kind) {
                 (PrivateNegotiationRole::Server, PrivateNegotiationKind::Proposal) => {
                     self.machine.receive_proposal(&message)?;

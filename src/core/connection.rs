@@ -135,6 +135,9 @@ pub struct QuicFuscateConnection {
         Option<Arc<std::sync::Mutex<private_packet_protection::PrivatePacketProtectionRuntime>>>,
     private_packet_protection_mode: qf_crypto::PacketProtectionMode,
     private_packet_protection_family: Option<qf_crypto::PrivateAeadFamily>,
+    /// Deployment-seeded private protocol wire layout (TODO-1014).
+    /// Canonical unless provisioning installed a seed; never negotiated.
+    private_protocol_shape: crate::qftls::PrivateProtocolShape,
     /// One-shot latch so the private upgrade is counted once per connection.
     private_upgrade_observed: bool,
     masque_relay_response_queue: Option<Arc<std::sync::Mutex<MasqueRelayResponseQueue>>>,
@@ -207,6 +210,16 @@ impl QuicFuscateConnection {
     ) {
         self.private_packet_protection_mode = mode;
         self.private_packet_protection_family = family;
+    }
+
+    /// Install the deployment-seeded private protocol wire layout.
+    ///
+    /// The shape derives from a seed provisioned with the deployment's
+    /// credential material; it is never negotiated on the wire. Canonical
+    /// when no seed was provisioned. A peer holding a different seed
+    /// fails closed at the message authenticator.
+    pub fn set_private_protocol_shape(&mut self, shape: crate::qftls::PrivateProtocolShape) {
+        self.private_protocol_shape = shape;
     }
 
     /// Commit the client-side QKey transcript binding after the server's authenticated
@@ -364,6 +377,7 @@ impl QuicFuscateConnection {
             tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
             private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
             private_packet_protection_family: None,
+            private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
         }))
     }
 
@@ -514,6 +528,7 @@ impl QuicFuscateConnection {
             ),
             private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
             private_packet_protection_family: None,
+            private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
         }))
     }
 
@@ -580,6 +595,7 @@ impl QuicFuscateConnection {
             private_packet_protection_runtime: None,
             private_packet_protection_mode: params.private_packet_protection_mode,
             private_packet_protection_family: params.private_packet_protection_family,
+            private_protocol_shape: params.private_protocol_shape,
             private_upgrade_observed: false,
             masque_relay_response_queue: None,
             masque_stream_id: None,

@@ -16,6 +16,10 @@ use std::fmt;
 pub const PRIVATE_PACKET_PROTECTION_CAPSULE_TYPE: u64 = 0x41;
 /// Current private packet-protection protocol version.
 pub const PRIVATE_PACKET_PROTECTION_VERSION: u8 = 1;
+/// Shaped layout version: emitted when a deployment seed configures a
+/// non-canonical `PrivateProtocolShape`. The version byte stays at its
+/// fixed position so a decoder can pick the layout before parsing.
+pub const PRIVATE_PACKET_PROTECTION_VERSION_SHAPED: u8 = 2;
 /// Maximum encoded private control payload.
 pub const MAX_PRIVATE_PACKET_PROTECTION_PAYLOAD: usize = 512;
 /// Maximum negotiated ALPN bytes retained in the transcript.
@@ -200,6 +204,83 @@ impl fmt::Debug for PrivateKeyMaterial {
     }
 }
 
+/// Number of permutable wire blocks in the shaped (v2) layout: local
+/// nonce, peer nonce, QKey transcript hash, context hash, ALPN, original
+/// DCID, current DCID, and the pad block. The fixed header (magic,
+/// version, scalar fields, length prefixes) and the trailing
+/// authenticator never move - the authenticator must close the message
+/// to bind every preceding byte.
+const SHAPED_BLOCK_COUNT: usize = 8;
+
+/// Deployment-seeded wire-image diversity (UPGen adaptation, TODO-1014).
+///
+/// Wire *semantics* are identical for every deployment; only wire
+/// *layout* permutes. Two endpoints holding the same 32-byte seed derive
+/// the same block order, pad length, and pacing hint; a deployment
+/// without a seed keeps the canonical layout. The seed travels with the
+/// provisioned credential material and is never negotiated on the wire -
+/// negotiating it would reintroduce a fixed signature.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrivateProtocolShape {
+    /// Emission order of the eight permutable blocks.
+    order: [u8; SHAPED_BLOCK_COUNT],
+    /// Pad block length in bytes: 0, 16, 32, or 64.
+    pad_len: u8,
+    /// Deterministic pad block content. The authenticator binds these
+    /// bytes, so both endpoints must reproduce them exactly - they derive
+    /// from the same seed as the layout.
+    pad_fill: [u8; 64],
+    /// Inter-capsule pacing hint in microseconds. A timing knob only -
+    /// it has no wire parse effect and carries no secret.
+    pub pacing_hint_us: u32,
+}
+
+impl PrivateProtocolShape {
+    /// Canonical shape: fixed layout order, no pad block, no pacing hint.
+    /// Emitted for every deployment without a configured seed.
+    pub const fn canonical() -> Self {
+        Self { order: [0, 1, 2, 3, 4, 5, 6, 7], pad_len: 0, pad_fill: [0u8; 64], pacing_hint_us: 0 }
+    }
+
+    /// True when this shape emits the canonical v1 layout. Canonical
+    /// deployments keep `PRIVATE_PACKET_PROTECTION_VERSION` so their wire
+    /// image is byte-identical to pre-shape releases.
+    pub fn is_canonical(&self) -> bool {
+        self.pad_len == 0 && self.order == Self::canonical().order
+    }
+
+    /// Expand a 32-byte deployment seed into a shape. The expansion is a
+    /// domain-separated HKDF; every knob derives from one seed so the
+    /// provisioning story stays a single opaque blob.
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let material = hkdf::hkdf_expand(seed, b"qf private protocol shape v1", 64);
+        // Fisher-Yates over the eight block indices, driven by the first
+        // 16 expansion bytes. Swapping each position with a derived index
+        // yields a uniform permutation.
+        let mut order = [0u8; SHAPED_BLOCK_COUNT];
+        for (idx, slot) in order.iter_mut().enumerate() {
+            *slot = idx as u8;
+        }
+        for idx in (1..SHAPED_BLOCK_COUNT).rev() {
+            let swap = (material[idx - 1] as usize) % (idx + 1);
+            order.swap(idx, swap);
+        }
+        // Pad granule: 0/16/32/64 bytes - enough to blur the fixed message
+        // length without bloating the control channel.
+        let pad_len = match material[16] % 4 {
+            0 => 0,
+            1 => 16,
+            2 => 32,
+            _ => 64,
+        };
+        let pacing_hint_us =
+            u32::from_be_bytes([material[17], material[18], material[19], material[20]]) % 2_000;
+        let mut pad_fill = [0u8; 64];
+        pad_fill.copy_from_slice(&material[0..64.min(material.len())]);
+        Self { order, pad_len, pad_fill, pacing_hint_us }
+    }
+}
+
 /// Strictly bounded private control message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrivateNegotiationMessage {
@@ -328,19 +409,42 @@ impl PrivateNegotiationMessage {
         &self,
         exporter_root: &[u8],
     ) -> Result<Vec<u8>, PrivateProtocolError> {
+        self.encode_authenticated_with(exporter_root, &PrivateProtocolShape::canonical())
+    }
+
+    /// Encode and authenticate with a deployment-derived layout. The
+    /// authenticator binds the exact encoded byte image, so both
+    /// endpoints must share the same shape or verification fails closed.
+    pub fn encode_authenticated_with(
+        &self,
+        exporter_root: &[u8],
+        shape: &PrivateProtocolShape,
+    ) -> Result<Vec<u8>, PrivateProtocolError> {
         self.validate()?;
         if exporter_root.len() != PRIVATE_HASH_LEN {
             return Err(PrivateProtocolError::InvalidSecretLength);
         }
         let mut authenticated = self.clone();
         authenticated.authenticator = [0u8; PRIVATE_HASH_LEN];
-        let canonical = authenticated.encode_raw()?;
+        let canonical = authenticated.encode_raw_shaped(shape)?;
         authenticated.authenticator = hkdf::hmac_sha256(exporter_root, &canonical);
-        authenticated.encode_raw()
+        authenticated.encode_raw_shaped(shape)
     }
 
-    /// Decode a bounded message without accepting trailing bytes.
+    /// Decode a bounded canonical message without accepting trailing bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, PrivateProtocolError> {
+        Self::decode_with_shape(bytes, &PrivateProtocolShape::canonical())
+    }
+
+    /// Decode a bounded message under a deployment-derived layout.
+    /// The wire version byte selects the layout: canonical deployments
+    /// accept only version 1, seeded deployments only the shaped layout.
+    /// A mismatched seed fails closed at the authenticator because the
+    /// field bytes land in different positions.
+    pub fn decode_with_shape(
+        bytes: &[u8],
+        shape: &PrivateProtocolShape,
+    ) -> Result<Self, PrivateProtocolError> {
         if bytes.len() > MAX_PRIVATE_PACKET_PROTECTION_PAYLOAD {
             return Err(PrivateProtocolError::PayloadTooLarge);
         }
@@ -348,7 +452,15 @@ impl PrivateNegotiationMessage {
         if reader.take(4)? != MAGIC {
             return Err(PrivateProtocolError::InvalidField("magic"));
         }
-        let version = reader.u8()?;
+        let wire_version = reader.u8()?;
+        let expected_version = if shape.is_canonical() {
+            PRIVATE_PACKET_PROTECTION_VERSION
+        } else {
+            PRIVATE_PACKET_PROTECTION_VERSION_SHAPED
+        };
+        if wire_version != expected_version {
+            return Err(PrivateProtocolError::UnsupportedVersion(wire_version));
+        }
         let kind = PrivateNegotiationKind::decode(reader.u8()?)?;
         let generation = reader.u32()?;
         let supported_families = reader.u8()?;
@@ -364,23 +476,47 @@ impl PrivateNegotiationMessage {
         let alpn_len = reader.u8()? as usize;
         let original_dcid_len = reader.u8()? as usize;
         let current_dcid_len = reader.u8()? as usize;
-        if reader.u8()? != 0 {
-            return Err(PrivateProtocolError::InvalidField("reserved byte"));
-        }
+        let tail = reader.u8()?;
+        let pad_len = if wire_version == PRIVATE_PACKET_PROTECTION_VERSION {
+            if tail != 0 {
+                return Err(PrivateProtocolError::InvalidField("reserved byte"));
+            }
+            0usize
+        } else {
+            if tail != shape.pad_len {
+                return Err(PrivateProtocolError::InvalidField("pad length"));
+            }
+            tail as usize
+        };
         if alpn_len > MAX_PRIVATE_ALPN_LEN
             || original_dcid_len > MAX_PRIVATE_CONNECTION_ID_LEN
             || current_dcid_len > MAX_PRIVATE_CONNECTION_ID_LEN
         {
             return Err(PrivateProtocolError::InvalidField("length bound"));
         }
-        let local_nonce = reader.array::<PRIVATE_NONCE_LEN>()?;
-        let peer_nonce = reader.array::<PRIVATE_NONCE_LEN>()?;
-        let qkey_transcript_hash = reader.array::<PRIVATE_HASH_LEN>()?;
-        let context_hash = reader.array::<PRIVATE_HASH_LEN>()?;
-        let alpn = reader.bytes(alpn_len)?.to_vec();
-        let original_dcid = reader.bytes(original_dcid_len)?.to_vec();
-        let current_dcid = reader.bytes(current_dcid_len)?.to_vec();
+        let mut local_nonce = [0u8; PRIVATE_NONCE_LEN];
+        let mut peer_nonce = [0u8; PRIVATE_NONCE_LEN];
+        let mut qkey_transcript_hash = [0u8; PRIVATE_HASH_LEN];
+        let mut context_hash = [0u8; PRIVATE_HASH_LEN];
+        let mut alpn = Vec::new();
+        let mut original_dcid = Vec::new();
+        let mut current_dcid = Vec::new();
+        for &block in &shape.order {
+            match block {
+                0 => local_nonce = reader.array::<PRIVATE_NONCE_LEN>()?,
+                1 => peer_nonce = reader.array::<PRIVATE_NONCE_LEN>()?,
+                2 => qkey_transcript_hash = reader.array::<PRIVATE_HASH_LEN>()?,
+                3 => context_hash = reader.array::<PRIVATE_HASH_LEN>()?,
+                4 => alpn = reader.bytes(alpn_len)?.to_vec(),
+                5 => original_dcid = reader.bytes(original_dcid_len)?.to_vec(),
+                6 => current_dcid = reader.bytes(current_dcid_len)?.to_vec(),
+                _ => {
+                    reader.take(pad_len)?;
+                }
+            }
+        }
         let authenticator = reader.array::<PRIVATE_HASH_LEN>()?;
+        let version = PRIVATE_PACKET_PROTECTION_VERSION;
         let message = Self {
             version,
             kind,
@@ -413,29 +549,48 @@ impl PrivateNegotiationMessage {
 
     /// Verify the transcript authenticator without exposing the exporter root.
     pub fn verify_authenticated(&self, exporter_root: &[u8]) -> Result<(), PrivateProtocolError> {
+        self.verify_authenticated_with(exporter_root, &PrivateProtocolShape::canonical())
+    }
+
+    /// Verify the transcript authenticator under a deployment-derived
+    /// layout. The expected authenticator is recomputed over the exact
+    /// shaped byte image, so a message encoded under a different shape
+    /// never verifies.
+    pub fn verify_authenticated_with(
+        &self,
+        exporter_root: &[u8],
+        shape: &PrivateProtocolShape,
+    ) -> Result<(), PrivateProtocolError> {
         if exporter_root.len() != PRIVATE_HASH_LEN {
             return Err(PrivateProtocolError::InvalidSecretLength);
         }
         self.validate()?;
         let mut unsigned = self.clone();
         unsigned.authenticator = [0u8; PRIVATE_HASH_LEN];
-        let expected = hkdf::hmac_sha256(exporter_root, &unsigned.encode_raw()?);
+        let expected = hkdf::hmac_sha256(exporter_root, &unsigned.encode_raw_shaped(shape)?);
         if !constant_time_equal(&expected, &self.authenticator) {
             return Err(PrivateProtocolError::AuthenticationFailed);
         }
         Ok(())
     }
 
-    fn encode_raw(&self) -> Result<Vec<u8>, PrivateProtocolError> {
+    /// Emit the fixed scalar header shared by every layout version.
+    /// `tail` is the canonical reserved byte for v1 and the pad block
+    /// length for the shaped layout.
+    fn encode_header(
+        &self,
+        wire_version: u8,
+        tail: u8,
+        bytes: &mut Vec<u8>,
+    ) -> Result<(), PrivateProtocolError> {
         let alpn_len = u8::try_from(self.alpn.len())
             .map_err(|_| PrivateProtocolError::InvalidField("ALPN length"))?;
         let original_len = u8::try_from(self.original_dcid.len())
             .map_err(|_| PrivateProtocolError::InvalidField("original DCID length"))?;
         let current_len = u8::try_from(self.current_dcid.len())
             .map_err(|_| PrivateProtocolError::InvalidField("current DCID length"))?;
-        let mut bytes = Vec::with_capacity(256);
         bytes.extend_from_slice(&MAGIC);
-        bytes.push(self.version);
+        bytes.push(wire_version);
         bytes.push(self.kind as u8);
         bytes.extend_from_slice(&self.generation.to_be_bytes());
         bytes.push(self.supported_families);
@@ -451,14 +606,41 @@ impl PrivateNegotiationMessage {
         bytes.push(alpn_len);
         bytes.push(original_len);
         bytes.push(current_len);
-        bytes.push(0);
-        bytes.extend_from_slice(&self.local_nonce);
-        bytes.extend_from_slice(&self.peer_nonce);
-        bytes.extend_from_slice(&self.qkey_transcript_hash);
-        bytes.extend_from_slice(&self.context_hash);
-        bytes.extend_from_slice(&self.alpn);
-        bytes.extend_from_slice(&self.original_dcid);
-        bytes.extend_from_slice(&self.current_dcid);
+        bytes.push(tail);
+        Ok(())
+    }
+
+    /// Append one permutable block in wire order.
+    fn push_block(&self, block: u8, shape: &PrivateProtocolShape, bytes: &mut Vec<u8>) {
+        match block {
+            0 => bytes.extend_from_slice(&self.local_nonce),
+            1 => bytes.extend_from_slice(&self.peer_nonce),
+            2 => bytes.extend_from_slice(&self.qkey_transcript_hash),
+            3 => bytes.extend_from_slice(&self.context_hash),
+            4 => bytes.extend_from_slice(&self.alpn),
+            5 => bytes.extend_from_slice(&self.original_dcid),
+            6 => bytes.extend_from_slice(&self.current_dcid),
+            _ => bytes.extend_from_slice(&shape.pad_fill[..shape.pad_len as usize]),
+        }
+    }
+
+    /// Encode under a deployment-derived layout. Canonical shapes emit
+    /// the byte-identical v1 image; non-canonical shapes mark the wire
+    /// version and permute the seven content blocks plus the pad block.
+    fn encode_raw_shaped(
+        &self,
+        shape: &PrivateProtocolShape,
+    ) -> Result<Vec<u8>, PrivateProtocolError> {
+        let mut bytes = Vec::with_capacity(256);
+        let (wire_version, tail) = if shape.is_canonical() {
+            (self.version, 0)
+        } else {
+            (PRIVATE_PACKET_PROTECTION_VERSION_SHAPED, shape.pad_len)
+        };
+        self.encode_header(wire_version, tail, &mut bytes)?;
+        for &block in &shape.order {
+            self.push_block(block, shape, &mut bytes);
+        }
         bytes.extend_from_slice(&self.authenticator);
         if bytes.len() > MAX_PRIVATE_PACKET_PROTECTION_PAYLOAD {
             return Err(PrivateProtocolError::PayloadTooLarge);
@@ -487,6 +669,9 @@ pub struct PrivateNegotiationMachine {
     write_boundary: Option<u64>,
     peer_write_boundary: Option<u64>,
     state: PrivateNegotiationState,
+    /// Deployment-derived wire layout. Canonical unless provisioning
+    /// installed a seed-derived shape before negotiation began.
+    shape: PrivateProtocolShape,
 }
 
 impl fmt::Debug for PrivateNegotiationMachine {
@@ -569,7 +754,22 @@ impl PrivateNegotiationMachine {
             write_boundary: None,
             peer_write_boundary: None,
             state,
+            shape: PrivateProtocolShape::canonical(),
         })
+    }
+
+    /// Install the deployment-derived wire layout before any message is
+    /// built or received. The shape must come from provisioned seed
+    /// material - never from the wire - and must match the peer's or
+    /// every message fails closed at its authenticator.
+    pub fn with_shape(mut self, shape: PrivateProtocolShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    /// The wire layout this machine encodes and expects.
+    pub const fn shape(&self) -> &PrivateProtocolShape {
+        &self.shape
     }
 
     /// Install the exact 32-byte exporter root after TLS and QKey authentication.
@@ -847,8 +1047,8 @@ impl PrivateNegotiationMachine {
             authenticator: [0u8; PRIVATE_HASH_LEN],
         };
         let root = self.exporter_root.as_ref().ok_or(PrivateProtocolError::InvalidState)?;
-        let encoded = message.encode_authenticated(root.as_slice())?;
-        PrivateNegotiationMessage::decode(&encoded)
+        let encoded = message.encode_authenticated_with(root.as_slice(), &self.shape)?;
+        PrivateNegotiationMessage::decode_with_shape(&encoded, &self.shape)
     }
 
     /// Authenticate an already validated state-machine message for the H3 control owner.
@@ -857,7 +1057,7 @@ impl PrivateNegotiationMachine {
         message: &PrivateNegotiationMessage,
     ) -> Result<Vec<u8>, PrivateProtocolError> {
         let root = self.exporter_root.as_ref().ok_or(PrivateProtocolError::InvalidState)?;
-        message.encode_authenticated(root.as_slice())
+        message.encode_authenticated_with(root.as_slice(), &self.shape)
     }
 
     fn verify_peer_message(
@@ -877,7 +1077,7 @@ impl PrivateNegotiationMachine {
             return Err(PrivateProtocolError::ContextMismatch);
         }
         let root = self.exporter_root.as_ref().ok_or(PrivateProtocolError::InvalidState)?;
-        message.verify_authenticated(root.as_slice())?;
+        message.verify_authenticated_with(root.as_slice(), &self.shape)?;
         let expected_context_hash = if message.kind == PrivateNegotiationKind::Proposal {
             self.role_ordered_context_hash(message.local_nonce, [0; PRIVATE_NONCE_LEN])
         } else {
@@ -1323,5 +1523,117 @@ mod tests {
         )
         .expect_err("private mode must require canonical connection IDs");
         assert_eq!(error, PrivateProtocolError::InvalidField("canonical connection ID"));
+    }
+
+    fn seeded_pair(seed: [u8; 32]) -> (PrivateNegotiationMachine, PrivateNegotiationMachine) {
+        let shape = PrivateProtocolShape::from_seed(&seed);
+        let (mut client, mut server) = authenticated_pair();
+        client = client.with_shape(shape);
+        server = server.with_shape(shape);
+        (client, server)
+    }
+
+    #[test]
+    fn distinct_seeds_produce_distinct_shapes() {
+        let shape_a = PrivateProtocolShape::from_seed(&[0xA1; 32]);
+        let shape_b = PrivateProtocolShape::from_seed(&[0xB2; 32]);
+        assert_ne!(shape_a, shape_b);
+        assert!(!shape_a.is_canonical());
+        assert!(!shape_b.is_canonical());
+    }
+
+    #[test]
+    fn seeded_shape_emits_shaped_version_and_round_trips() {
+        let seed = [0xA1; 32];
+        let shape = PrivateProtocolShape::from_seed(&seed);
+        let (mut client, mut server) = seeded_pair(seed);
+        let proposal = client.build_proposal().expect("proposal");
+        let encoded = proposal
+            .encode_authenticated_with(&[0x77; PRIVATE_HASH_LEN], &shape)
+            .expect("shaped encode");
+        assert_eq!(encoded[4], PRIVATE_PACKET_PROTECTION_VERSION_SHAPED);
+        let decoded =
+            PrivateNegotiationMessage::decode_with_shape(&encoded, &shape).expect("shaped decode");
+        assert_eq!(decoded, proposal);
+        decoded.verify_authenticated_with(&[0x77; PRIVATE_HASH_LEN], &shape).expect("shaped auth");
+        server.receive_proposal(&decoded).expect("receive proposal");
+        assert_eq!(server.state(), PrivateNegotiationState::ProposalReceived);
+    }
+
+    #[test]
+    fn absent_seed_keeps_canonical_v1_wire_image() {
+        let (mut client, _server) = authenticated_pair();
+        let proposal = client.build_proposal().expect("proposal");
+        let encoded = proposal.encode_authenticated(&[0x77; PRIVATE_HASH_LEN]).expect("encode");
+        assert_eq!(encoded[4], PRIVATE_PACKET_PROTECTION_VERSION);
+        // The canonical layout keeps the reserved byte zeroed and emits
+        // no pad block, so the wire image is byte-identical to
+        // pre-shape releases.
+        assert_eq!(encoded[37], 0);
+        let canonical = PrivateProtocolShape::canonical();
+        let reshaped = proposal
+            .encode_authenticated_with(&[0x77; PRIVATE_HASH_LEN], &canonical)
+            .expect("canonical shaped encode");
+        assert_eq!(encoded, reshaped);
+    }
+
+    #[test]
+    fn mismatched_seed_fails_closed() {
+        let (mut client, _server) = seeded_pair([0xA1; 32]);
+        let wrong_shape = PrivateProtocolShape::from_seed(&[0xB2; 32]);
+        let proposal = client.build_proposal().expect("proposal");
+        let encoded = client.encode_message(&proposal).expect("encode");
+
+        // A decoder holding a different seed must never accept the
+        // message: it either rejects during the permuted parse or the
+        // authenticator fails over the re-encoded byte image.
+        match PrivateNegotiationMessage::decode_with_shape(&encoded, &wrong_shape) {
+            Err(_) => {}
+            Ok(decoded) => {
+                assert!(decoded
+                    .verify_authenticated_with(&[0x77; PRIVATE_HASH_LEN], &wrong_shape)
+                    .is_err());
+            }
+        }
+        // A canonical decoder rejects the shaped wire version outright.
+        assert!(matches!(
+            PrivateNegotiationMessage::decode(&encoded),
+            Err(PrivateProtocolError::UnsupportedVersion(PRIVATE_PACKET_PROTECTION_VERSION_SHAPED))
+        ));
+    }
+
+    #[test]
+    fn seeded_full_negotiation_reaches_switch_scheduled() {
+        let seed = [0xC3; 32];
+        let (mut client, mut server) = seeded_pair(seed);
+        let proposal = client.build_proposal().expect("proposal");
+        let proposal_bytes = client.encode_message(&proposal).expect("proposal bytes");
+        let decoded = PrivateNegotiationMessage::decode_with_shape(&proposal_bytes, server.shape())
+            .expect("decode");
+        server.receive_proposal(&decoded).expect("proposal");
+        let selection = server.build_selection().expect("selection");
+        client.receive_selection(&selection).expect("selection");
+        let client_confirmation = client.build_confirmation(100).expect("client boundary");
+        server.receive_confirmation(&client_confirmation).expect("client confirmation");
+        let server_confirmation = server.build_confirmation(200).expect("server boundary");
+        client.receive_confirmation(&server_confirmation).expect("server confirmation");
+        assert_eq!(client.state(), PrivateNegotiationState::SwitchScheduled);
+        assert_eq!(server.state(), PrivateNegotiationState::SwitchScheduled);
+    }
+
+    #[test]
+    fn shaped_layout_binds_pad_block_and_order_to_authenticator() {
+        let seed = [0xD4; 32];
+        let shape = PrivateProtocolShape::from_seed(&seed);
+        let (mut client, _server) = seeded_pair(seed);
+        let proposal = client.build_proposal().expect("proposal");
+        let mut encoded = client.encode_message(&proposal).expect("encode");
+        // Flip one byte in the shaped body (after the 38-byte header,
+        // before the authenticator) - the authenticator must catch it.
+        let body_index = encoded.len() - PRIVATE_HASH_LEN - 1;
+        encoded[body_index] ^= 1;
+        let decoded = PrivateNegotiationMessage::decode_with_shape(&encoded, &shape)
+            .expect("tampered body still parses");
+        assert!(decoded.verify_authenticated_with(&[0x77; PRIVATE_HASH_LEN], &shape).is_err());
     }
 }

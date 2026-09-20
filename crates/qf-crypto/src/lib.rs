@@ -1186,6 +1186,10 @@ pub struct CryptoConfig {
     pub aead_preference: DataAeadPreference,
     /// Force a supported product-family AEAD name.
     pub force_aead: String,
+    /// Deployment seed for the private protocol wire layout, hex encoded.
+    /// Provisioned with the deployment's credential material and never
+    /// negotiated on the wire. Empty keeps the canonical layout.
+    pub private_shape_seed: String,
 }
 
 impl Default for CryptoConfig {
@@ -1194,6 +1198,7 @@ impl Default for CryptoConfig {
             packet_protection_mode: PacketProtectionMode::Auto,
             aead_preference: DataAeadPreference::Auto,
             force_aead: String::new(),
+            private_shape_seed: String::new(),
         }
     }
 }
@@ -1209,8 +1214,25 @@ impl CryptoConfig {
         }
     }
 
+    /// Decode the provisioned private protocol shape seed. Returns `None`
+    /// when no seed is configured; malformed values fail validation, so a
+    /// `Some` is always exactly 32 bytes.
+    pub fn private_shape_seed_bytes(&self) -> Option<[u8; 32]> {
+        let value = self.private_shape_seed.trim();
+        if value.is_empty() {
+            return None;
+        }
+        decode_hex_32(value)
+    }
+
     /// Validate the operator-facing product-family override.
     pub fn validate(&self) -> Result<(), String> {
+        let seed = self.private_shape_seed.trim();
+        if !seed.is_empty() && decode_hex_32(seed).is_none() {
+            return Err(
+                "crypto.private_shape_seed must be 64 hex characters (32 bytes)".to_string()
+            );
+        }
         let force = self.force_aead.trim();
         if !force.is_empty() {
             let value = force.to_ascii_lowercase();
@@ -1247,6 +1269,31 @@ impl CryptoConfig {
         }
         Ok(())
     }
+}
+
+fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
+    let value = value.trim();
+    if value.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    let (pairs, _) = value.as_bytes().as_chunks::<2>();
+    for (index, pair) in pairs.iter().enumerate() {
+        let high = match pair[0] {
+            b'0'..=b'9' => pair[0] - b'0',
+            b'a'..=b'f' => pair[0] - b'a' + 10,
+            b'A'..=b'F' => pair[0] - b'A' + 10,
+            _ => return None,
+        };
+        let low = match pair[1] {
+            b'0'..=b'9' => pair[1] - b'0',
+            b'a'..=b'f' => pair[1] - b'a' + 10,
+            b'A'..=b'F' => pair[1] - b'A' + 10,
+            _ => return None,
+        };
+        out[index] = (high << 4) | low;
+    }
+    Some(out)
 }
 
 /// Install data-plane AEAD selection without depending on the root engine configuration.
