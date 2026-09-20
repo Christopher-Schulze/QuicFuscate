@@ -334,9 +334,13 @@ fn deterministic_client_hello_cipher_suites(record: &[u8]) -> Vec<u16> {
 }
 
 #[test]
-fn deterministic_client_hello_metadata_excludes_chacha_for_chrome_and_firefox() {
+fn deterministic_client_hello_metadata_matches_browser_tls13_shape() {
     use super::{BrowserProfile, FingerprintProfile, OsProfile};
 
+    // TODO-1009: the synthesized hello is browser-mimicry cover - real
+    // browsers offer the full TLS 1.3 trio including TLS_CHACHA20_POLY1305
+    // (0x1303) and never carry TLS 1.2 suites in an h3-first hello. The
+    // ChaCha-removal handshake policy does not apply to the cover path.
     for (browser, os) in
         [(BrowserProfile::Chrome, OsProfile::Windows), (BrowserProfile::Firefox, OsProfile::Linux)]
     {
@@ -344,8 +348,17 @@ fn deterministic_client_hello_metadata_excludes_chacha_for_chrome_and_firefox() 
         let hello = profile.client_hello.as_ref().expect("ClientHello metadata");
         let suites = deterministic_client_hello_cipher_suites(hello);
         assert!(
-            !suites.iter().any(|suite| matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9)),
-            "deterministic ClientHello for {:?}/{:?} contains ChaCha: {:?}",
+            suites
+                .iter()
+                .all(|suite| { (0x1301..=0x1305).contains(suite) || (suite & 0x0F0F) == 0x0A0A }),
+            "h3 hello for {:?}/{:?} carries non-TLS1.3 suites: {:?}",
+            browser,
+            os,
+            suites
+        );
+        assert!(
+            suites.contains(&0x1303),
+            "browser-parity hello for {:?}/{:?} must offer 0x1303 like real browsers: {:?}",
             browser,
             os,
             suites
