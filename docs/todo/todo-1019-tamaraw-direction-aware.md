@@ -4,7 +4,7 @@ title: Adaptive-Tamaraw direction-aware parameters - split the phase table by di
 severity: MEDIUM
 phase: M
 priority: P2
-status: OPEN
+status: PARTIAL
 created: 2026-09-21
 depends_on: [TODO-1010]
 ---
@@ -58,14 +58,40 @@ vs (rho_down, gamma_down) parameterization.
 - Symmetric behavior stays the default when a direction has no signal
   yet (cold start / one-way phases like handshake or idle download).
 
+## Implementation (landed)
+
+The split needed no new signal plumbing: `ack_us` was already the
+**downstream** density (our emitted ACK delay tracks inbound packet
+inter-arrival), and the brain already reads `conn.delivery_rate()` for
+its bandit. `src/brain.rs` now folds the delivery rate into a packet
+inter-arrival estimate (`up_us = 1200 B * 1e6 / dr`) so both directions
+classify on the same microsecond axis; `up_us <= 0` (no estimate yet -
+handshake/cold start) falls back to the symmetric row.
+
+`intelligent_policy.rs` evaluates the phase table per direction:
+
+- **Upstream row** (`up_phase`) steers `timing_max_jitter_us` - the only
+  timing we actually reshape is outbound.
+- **Downstream row** (`down_phase`) steers the `padding_rate` density
+  halving - a dense upload alone no longer shrinks the padding row and
+  vice versa, satisfying the disjoint-weights requirement.
+- `external_pacing`, `mimic_bias`, anomaly overrides unchanged.
+
+Unit tests (qf-stealth, 139 green incl. 4 new):
+`direction_split_uses_upstream_density_for_jitter`,
+`direction_split_keeps_downstream_density_for_padding`,
+`dense_upload_alone_does_not_halve_padding`,
+`missing_upstream_signal_falls_back_to_symmetric_row`.
+TODO-1010's Tamaraw entry records the direction axis.
+
 ## Acceptance
 
-- Unit tests with `ManualTimeSource`-style determinism: independent
-  up/down phases resolve independently (dense-up + sparse-down picks
-  the split row, not the symmetric one); cold-start falls back to the
-  global row; hysteresis prevents flapping at thresholds.
-- Omega e2e (iperf3 TCP through tunnel): asymmetric load (uplink-heavy
-  vs downlink-heavy runs) shows the expected parameter split in stats/
-  telemetry without throughput regression vs the symmetric baseline.
-- TODO-1010's Tamaraw entry updated to reflect the direction axis
+- [x] Unit tests: independent up/down phases resolve independently;
+  cold-start falls back to the symmetric row.
+- [ ] Omega e2e (iperf3 TCP through tunnel): asymmetric load
+  (uplink-heavy vs downlink-heavy) shows the expected parameter split in
+  stats/telemetry without throughput regression vs the symmetric
+  baseline - **pending**, run together with the next Omega validation
+  batch.
+- [x] TODO-1010's Tamaraw entry updated to reflect the direction axis
   landing.

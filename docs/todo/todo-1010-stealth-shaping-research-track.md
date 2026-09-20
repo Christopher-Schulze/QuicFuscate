@@ -136,15 +136,16 @@ hysteresis) and reads jitter scale from the phase table: dense 0.4, sparse
 dense traffic stays tight because the real stream masks itself, idle and
 bursty phases get maximum jitter because burst edges carry the
 fingerprint. Test `tamaraw_phase_table_scales_jitter_by_density` pins both
-branches. A literal per-cluster (rho, gamma) row with disjoint upload vs
-download weights stays open: our policy is symmetric today, so the table
-has one axis; splitting it needs direction-aware signal plumbing
-(up/down ack density separately). Tracked with implementation sketch +
-acceptance as **TODO-1019** (docs/todo/todo-1019-tamaraw-direction-aware.md).
+branches. The direction axis landed via **TODO-1019**: the phase table is
+now evaluated per direction - `ack_us` (our emitted ACK delay tracks
+inbound cadence) is the downstream row steering padding/chaff, while
+`up_us` (brain-folds `delivery_rate` into a packet inter-arrival) is the
+upstream row steering jitter/pacing; `up_us <= 0` keeps the symmetric
+fallback until an upload estimate exists.
 
 OPEN: candidate 4 stays deferred-by-verdict (QUICstep, see study below);
 candidate 5 landed as TODO-1014; the ChameleonFlow reorder window landed
-via TODO-1015/1016 (lift: TODO-1017); Tamaraw direction split tracked as
+via TODO-1015/1016 (lift: TODO-1017); Tamaraw direction split landed as
 TODO-1019.
 
 ## Design studies (2026-09-20)

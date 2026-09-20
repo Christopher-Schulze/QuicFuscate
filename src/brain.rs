@@ -614,11 +614,20 @@ impl TransportObserver for StealthBrain {
                 st.last_masque_hint_change = now;
             }
             let prefer_masque_effective = st.last_masque_hint;
+            // TODO-1019 upstream density: fold the congestion controller's
+            // delivery rate (bytes/s) into a packet inter-arrival estimate
+            // with a nominal MTU-sized datagram, so the direction-aware
+            // phase table can classify upload on the same microsecond
+            // axis as the downstream ACK cadence. Zero (no estimate yet,
+            // e.g. during handshake) keeps the symmetric fallback row.
+            const NOMINAL_PKT_BYTES: f64 = 1_200.0;
+            let up_us = if dr_now > 0 { (NOMINAL_PKT_BYTES * 1e6) / dr_now as f64 } else { 0.0 };
             let mut stealth_policy = qf_stealth::derive_intelligent_runtime_policy(
                 qf_stealth::IntelligentStealthInputs {
                     level_hint: effective_level,
                     ce_ratio_recent,
                     ack_us,
+                    up_us,
                     size_div,
                     iat_div,
                     reorder_ratio,

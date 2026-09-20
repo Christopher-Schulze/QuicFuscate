@@ -4046,7 +4046,7 @@
 
 ### TODO-1019 - Adaptive-Tamaraw direction-aware parameters
 
-- OPEN (P2, 2026-09-21). Remainder of TODO-1010 candidate 2: the phase table is symmetric today (one axis). Plan: receive-side density EMA alongside `ack_us`, per-direction `TrafficPhase` -> per-direction {jitter_scale, padding_rate, chaff_rate} rows, conservative global fallback until confident.
+- PARTIAL (P2, 2026-09-21). Direction axis landed: `ack_us` is the downstream row (padding/chaff halving), `up_us` (brain folds `delivery_rate` into an inter-arrival) is the upstream row (jitter scale); `up_us <= 0` keeps the symmetric fallback. qf-stealth 139 green incl. 4 split tests; TODO-1010 entry updated. Remaining: Omega asymmetric-load telemetry validation (batched with next Omega run).
 - Detail: docs/todo/todo-1019-tamaraw-direction-aware.md
 
 ### TODO-1020 - Standalone TUN client -> io_driver migration decision
