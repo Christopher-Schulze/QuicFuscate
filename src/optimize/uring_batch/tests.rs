@@ -399,8 +399,16 @@ fn recv_multishot_zero_length_and_rearm() {
 
 /// Flood benchmark for TODO-1007: `UringRecvBatch` (per-slot RecvMsg re-arm,
 /// with UDP_GRO) vs `UringRecvMultishot` (one RecvMulti SQE + provided-buffer
-/// ring, no GRO possible). Measures drain calls per datagram (syscall
-/// amortization proxy) and wall time for a fixed datagram count.
+/// ring, no GRO possible). Two phases:
+///
+///   Phase 1 - individual datagrams (WAN-realistic: Internet senders do not
+///     emit UDP_SEGMENT trains, so UDP_GRO rarely coalesces in production).
+///   Phase 2 - GSO trains (the case where UDP_GRO genuinely wins: one
+///     kernel-side delivery carries N segments).
+///
+/// Per mode reported: drain calls per datagram (syscall amortization), wall
+/// time, and RUSAGE_THREAD CPU per datagram (isolated to the drain thread;
+/// the flood runs on a separate thread).
 ///
 /// Gated behind `QF_URING_BENCH=1` and `#[ignore]` - it is a measurement,
 /// not a correctness gate. Run on a quiet Linux host:
@@ -420,6 +428,14 @@ fn recv_flood_bench_batch_vs_multishot() {
 
     const DATAGRAMS: usize = 20_000;
     const PAYLOAD: usize = 1_200;
+    const TRAIN_SEGS: usize = 16;
+
+    struct Stats {
+        datagrams: usize,
+        drain_calls: usize,
+        wall: Duration,
+        cpu: Duration,
+    }
 
     fn set_rcvbuf(fd: std::os::fd::RawFd, bytes: i32) {
         // SAFETY: setsockopt on a live fd with a plain i32 optval.
@@ -434,12 +450,24 @@ fn recv_flood_bench_batch_vs_multishot() {
         }
     }
 
-    fn run_flood<Flood, Drain>(flood: Flood, mut drain: Drain) -> (usize, usize, Duration)
+    /// CPU time attributed to the calling thread only (utime + stime) - the
+    /// flood thread's own sendmsg cost stays out of the measurement.
+    fn thread_cpu() -> Duration {
+        // SAFETY: rusage is plain out-param storage.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) };
+        let micros = (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64 * 1_000_000
+            + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64;
+        Duration::from_micros(micros)
+    }
+
+    fn run_flood<Flood, Drain>(flood: Flood, mut drain: Drain) -> Stats
     where
         Flood: FnOnce() -> usize,
         Drain: FnMut() -> usize,
     {
         let started = Instant::now();
+        let cpu_start = thread_cpu();
         let sent = flood();
         let mut received = 0usize;
         let mut drain_calls = 0usize;
@@ -448,11 +476,75 @@ fn recv_flood_bench_batch_vs_multishot() {
             received += drain();
             drain_calls += 1;
         }
-        (received, drain_calls, started.elapsed())
+        Stats {
+            datagrams: received,
+            drain_calls,
+            wall: started.elapsed(),
+            cpu: thread_cpu() - cpu_start,
+        }
     }
 
-    // Shared sender: one thread floods `count` fixed-size datagrams.
-    let flood = |addr: std::net::SocketAddr| {
+    /// Receiver-under-test: one variant per production RX strategy.
+    enum BenchRecv {
+        Batch(crate::optimize::uring_batch::UringRecvBatch),
+        Multishot(crate::optimize::uring_batch::UringRecvMultishot),
+    }
+    impl BenchRecv {
+        fn drain(&mut self) -> std::io::Result<usize> {
+            match self {
+                Self::Batch(recv) => recv.drain_completions().map(|c| c.len()),
+                Self::Multishot(recv) => recv.drain_completions().map(|c| c.len()),
+            }
+        }
+    }
+
+    /// Run one (receiver, flood) combination end to end and print its stats.
+    fn run_mode<MakeRecv, Flood>(label: &str, make_recv: MakeRecv, flood: Flood) -> Stats
+    where
+        MakeRecv: FnOnce(std::os::fd::RawFd) -> BenchRecv,
+        Flood: FnOnce(std::net::SocketAddr) -> usize + Send + 'static,
+    {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = receiver.local_addr().unwrap();
+        set_rcvbuf(receiver.as_raw_fd(), 64 * 1024 * 1024);
+        let mut recv = make_recv(receiver.as_raw_fd());
+        let (tx_done, rx_done) = std::sync::mpsc::channel::<usize>();
+        let flood_handle = std::thread::spawn(move || tx_done.send(flood(addr)).unwrap());
+        let mut errs = 0u64;
+        let stats = run_flood(
+            || rx_done.recv().unwrap_or(DATAGRAMS),
+            || match recv.drain() {
+                Ok(n) => n,
+                Err(e) => {
+                    errs += 1;
+                    if errs <= 5 {
+                        println!("{label} drain error: {e}");
+                    }
+                    0
+                }
+            },
+        );
+        let _ = flood_handle.join();
+        let starved = match &recv {
+            BenchRecv::Multishot(recv) => {
+                format!("starved={} armed={}", recv.ring_starved_total(), recv.is_armed())
+            }
+            BenchRecv::Batch(_) => String::new(),
+        };
+        println!(
+            "{label}: datagrams={} drain_calls={} per_datagram={:.4} wall_ms={} cpu_ms={} cpu_us_per_dgram={:.2} drain_errors={errs} {starved}",
+            stats.datagrams,
+            stats.drain_calls,
+            stats.drain_calls as f64 / stats.datagrams.max(1) as f64,
+            stats.wall.as_millis(),
+            stats.cpu.as_millis(),
+            stats.cpu.as_micros() as f64 / stats.datagrams.max(1) as f64,
+        );
+        stats
+    }
+
+    // Phase 1 sender: one thread floods fixed-size individual datagrams.
+    let flood_individual = |addr: std::net::SocketAddr| {
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
         let payload = vec![0xabu8; PAYLOAD];
         let mut sent = 0usize;
@@ -468,85 +560,86 @@ fn recv_flood_bench_batch_vs_multishot() {
         sent
     };
 
-    // --- Mode A: UringRecvBatch with UDP_GRO (the production default) ---
-    let (a_recv, a_calls, a_time) = {
-        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("A bind");
-        let addr = receiver.local_addr().unwrap();
-        set_rcvbuf(receiver.as_raw_fd(), 64 * 1024 * 1024);
-        let _gro = qf_transport_udp::enable_udp_gro_fd(receiver.as_raw_fd());
-        let mut recv = crate::optimize::uring_batch::UringRecvBatch::new(
-            receiver.as_raw_fd(),
-            64,
-            65_535,
-            false,
-        )
-        .expect("UringRecvBatch init");
-        recv.post_initial().expect("A arm");
-        let (tx_done, rx_done) = std::sync::mpsc::channel::<usize>();
-        let flood_handle = std::thread::spawn(move || tx_done.send(flood(addr)).unwrap());
-        let mut errs = 0u64;
-        let result = run_flood(
-            || rx_done.recv().unwrap_or(DATAGRAMS),
-            || match recv.drain_completions() {
-                Ok(c) => c.len(),
-                Err(e) => {
-                    errs += 1;
-                    if errs <= 5 {
-                        println!("batch drain error: {e}");
-                    }
-                    0
+    // Phase 2 sender: UDP_SEGMENT trains so receiver-side UDP_GRO genuinely
+    // coalesces. Each sendmsg emits up to TRAIN_SEGS wire datagrams.
+    let flood_gso = |addr: std::net::SocketAddr| {
+        let std::net::SocketAddr::V4(v4) = addr else {
+            panic!("bench is IPv4-only");
+        };
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
+        let fd = sender.as_raw_fd();
+        let dest = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: v4.port().to_be(),
+            sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) },
+            sin_zero: [0; 8],
+        };
+        let mut sent = 0usize;
+        while sent < DATAGRAMS {
+            let segs = (DATAGRAMS - sent).min(TRAIN_SEGS);
+            let train = vec![0xcdu8; segs * PAYLOAD];
+            let mut iov = libc::iovec { iov_base: train.as_ptr() as *mut _, iov_len: train.len() };
+            // CMSG_SPACE(u16) <= 32 bytes on every supported ABI.
+            let mut control = [0u8; 64];
+            // SAFETY: msg/iov/control layout matches sendmsg(2) ABI; the cmsg
+            // fits inside the 64-byte control storage.
+            let rc = unsafe {
+                let mut msg: libc::msghdr = std::mem::zeroed();
+                msg.msg_name = &dest as *const _ as *mut _;
+                msg.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as u32;
+                msg.msg_iov = &mut iov;
+                msg.msg_iovlen = 1;
+                msg.msg_control = control.as_mut_ptr() as *mut _;
+                msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) as usize;
+                let cmsg = libc::CMSG_FIRSTHDR(&msg);
+                (*cmsg).cmsg_level = libc::SOL_UDP;
+                (*cmsg).cmsg_type = libc::UDP_SEGMENT;
+                (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as usize;
+                std::ptr::write(libc::CMSG_DATA(cmsg) as *mut u16, PAYLOAD as u16);
+                libc::sendmsg(fd, &msg, 0)
+            };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    std::thread::yield_now();
+                    continue;
                 }
-            },
-        );
-        let _ = flood_handle.join();
-        println!("batch_gro drain_errors={errs}");
-        result
+                panic!("gso flood send failed: {e}");
+            }
+            sent += segs;
+        }
+        sent
     };
 
-    // --- Mode B: UringRecvMultishot (provided-buffer ring, no GRO) ---
-    let (b_recv, b_calls, b_time) = {
-        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("B bind");
-        let addr = receiver.local_addr().unwrap();
-        set_rcvbuf(receiver.as_raw_fd(), 64 * 1024 * 1024);
-        let mut recv = crate::optimize::uring_batch::UringRecvMultishot::new(
-            receiver.as_raw_fd(),
-            256,
-            65_535,
-        )
-        .expect("UringRecvMultishot init");
-        recv.post_initial().expect("B arm");
-        let (tx_done, rx_done) = std::sync::mpsc::channel::<usize>();
-        let flood_handle = std::thread::spawn(move || tx_done.send(flood(addr)).unwrap());
-        let mut errs = 0u64;
-        let result = run_flood(
-            || rx_done.recv().unwrap_or(DATAGRAMS),
-            || match recv.drain_completions() {
-                Ok(c) => c.len(),
-                Err(e) => {
-                    errs += 1;
-                    if errs <= 5 {
-                        println!("multishot drain error: {e}");
-                    }
-                    0
-                }
-            },
-        );
-        let _ = flood_handle.join();
-        println!(
-            "multishot drain_errors={errs} starved={} armed={}",
-            recv.ring_starved_total(),
-            recv.is_armed()
-        );
-        result
+    let make_batch = |fd| {
+        let _gro = qf_transport_udp::enable_udp_gro_fd(fd);
+        let mut batch = crate::optimize::uring_batch::UringRecvBatch::new(fd, 64, 65_535, false)
+            .expect("UringRecvBatch init");
+        batch.post_initial().expect("batch arm");
+        BenchRecv::Batch(batch)
+    };
+    let make_multishot = |fd| {
+        let mut multi = crate::optimize::uring_batch::UringRecvMultishot::new(fd, 256, 65_535)
+            .expect("UringRecvMultishot init");
+        multi.post_initial().expect("multishot arm");
+        BenchRecv::Multishot(multi)
     };
 
+    println!("== phase 1: individual datagrams (WAN-realistic, GRO rarely engages) ==");
+    let a1 = run_mode("p1 batch_gro", make_batch, flood_individual);
+    let b1 = run_mode("p1 multishot", make_multishot, flood_individual);
     println!(
-        "QF_URING_BENCH_RESULT batch_gro: datagrams={a_recv} drain_calls={a_calls} \
-         per_datagram={:.3} wall_ms={} | multishot: datagrams={b_recv} drain_calls={b_calls} \
-         per_datagram={:.3} wall_ms={}",
-        a_calls as f64 / a_recv.max(1) as f64,
-        a_time.as_millis(),
-        b_calls as f64 / b_recv.max(1) as f64,
-        b_time.as_millis(),
+        "P1-RESULT multishot drains={:.1}x batch, cpu={:.1}x batch",
+        a1.drain_calls as f64 / b1.drain_calls.max(1) as f64,
+        b1.cpu.as_secs_f64() / a1.cpu.as_secs_f64().max(1e-9),
+    );
+
+    println!("== phase 2: GSO trains (UDP_GRO coalescing actually engages) ==");
+    let a2 = run_mode("p2 batch_gro", make_batch, flood_gso);
+    let b2 = run_mode("p2 multishot", make_multishot, flood_gso);
+    println!(
+        "P2-RESULT multishot drains={:.1}x batch, cpu={:.1}x batch",
+        a2.drain_calls as f64 / b2.drain_calls.max(1) as f64,
+        b2.cpu.as_secs_f64() / a2.cpu.as_secs_f64().max(1e-9),
     );
 }

@@ -3991,7 +3991,7 @@
 
 ### TODO-1007 - io_uring multishot recv + provided buffer ring for inbound
 
-- PARTIAL. `UringRecvMultishot` implemented and kernel-verified on Omega 6.17 (provided-buffer ring + single RecvMulti SQE, bid recycling + zero-len/rearm contracts green). Wired into the client engine path behind `QUICFUSCATE_IO_URING_RECV_MULTISHOT=1` (opt-in, batch fallback). Open: A/B throughput vs the UDP_GRO batch path on Omega before flipping the default; server demux stays on per-slot RecvMsg (needs per-packet sockaddr).
+- DONE (2026-09-20). `UringRecvMultishot` implemented and kernel-verified on Omega 6.17, now the **default** client RX path (`QUICFUSCATE_IO_URING_RECV_MULTISHOT=0` opts back out to batch+GRO). Decision data (`recv_flood_bench`, 20k datagrams, RUSAGE_THREAD-isolated): individual datagrams - multishot 4x fewer drains, 30% less CPU (1.19 vs 1.69 us/dgram); GSO trains - batch+GRO 2.4x less CPU (0.54 vs 1.28). GSO trains do not survive the wire (receive-side GRO needs same-kernel `gso_size`), so the WAN edge client defaults to multishot; same-host/VM deployments opt out via env. Also fixed a CQ-overflow deadlock the bench exposed (`IoUring::new(64)` left only 128 CQ slots - a full CQ parked the terminating -ENOBUFS CQE in the kernel overflow list, surfaced only on io_uring_enter; `setup_cqsize(entries+64)` + one flushing `submit()` per drain). Buffer ring is 64x2KB pool blocks vs 64x64KB contiguous (~128KB vs 4MB). Server demux stays on per-slot RecvMsg (needs per-packet sockaddr).
 - Detail: docs/todo/todo-1007-uring-multishot-recv.md
 
 ### TODO-1008 - Evaluate io_uring send bundles for TX batching

@@ -1228,14 +1228,23 @@ impl IoDriver {
 
         let socket_fd = socket.as_raw_fd();
 
-        // TODO-1007: opt-in multishot path. A single RecvMulti SQE plus the
-        // provided-buffer ring removes the per-packet re-arm entirely. It must
-        // NOT run with UDP_GRO enabled on the socket: IORING_OP_RECV carries
-        // no msghdr, so a coalesced super-buffer would arrive without its
+        // TODO-1007: multishot is the default client RX path. A single
+        // RecvMulti SQE plus the provided-buffer ring removes the per-packet
+        // re-arm entirely; measured on Omega (recv_flood_bench, kernel 6.17):
+        // individual-datagram floods drain 4x fewer rounds at ~30% less CPU
+        // than batch+GRO, and the buffer ring is 64x2KB pool blocks instead of
+        // 64x64KB contiguous. batch+GRO only wins when receive coalescing can
+        // actually engage - same-kernel paths (veth/loopback/virtio) where
+        // skb->gso_size survives; wire traffic never arrives as GSO trains, so
+        // WAN edge traffic is the multishot case. Set
+        // QUICFUSCATE_IO_URING_RECV_MULTISHOT=0 to opt out (same-host/VM
+        // deployments, or kernels where RecvMulti behaves badly). It must NOT
+        // run with UDP_GRO enabled on the socket: IORING_OP_RECV carries no
+        // msghdr, so a coalesced super-buffer would arrive without its
         // segment size and could not be split back into datagrams.
-        let multishot_opt_in = crate::env_utils::EnvSnapshot::capture()
-            .flag("QUICFUSCATE_IO_URING_RECV_MULTISHOT", false);
-        let mut receiver = if multishot_opt_in {
+        let multishot_enabled = crate::env_utils::EnvSnapshot::capture()
+            .flag("QUICFUSCATE_IO_URING_RECV_MULTISHOT", true);
+        let mut receiver = if multishot_enabled {
             let memory_pool = { conn.lock().recv_memory_pool() };
             match crate::optimize::uring_batch::UringRecvMultishot::new_with_pool(
                 socket_fd,

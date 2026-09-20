@@ -76,13 +76,19 @@ This section is the fast path for skeptical review. It is not a marketing summar
 - The io_uring server send path batches all outgoing packets from a connection through one
   runtime-owned `UringBatchWorker`; client outbound dispatch uses the same bounded worker
   boundary. Direct `UringBatchSender` calls remain synchronous compatibility primitives.
-- The client inbound path uses a dedicated `UringRecvBatch` ring with pre-posted `RecvMsg` SQEs
-  and an **eventfd bridge** to Tokio: `register_eventfd_async(eventfd)` wakes a
-  `tokio::io::unix::AsyncFd` on CQ completions. In pool-backed mode those RecvMsg slots point
-  directly at shared `MemoryPool` blocks; completions transfer the filled block into
-  `core::recv_pooled_block()` while immediately arming the ring slot with a replacement block.
-  This removes the io_uring-to-FEC memcpy on the Linux client fast path. Fallback to Tokio
-  `recv()` + `try_recv()` when io_uring is unavailable.
+- The client inbound path defaults to `UringRecvMultishot` (TODO-1007): one
+  `RecvMulti` SQE plus a 64-entry provided-buffer ring (2 KiB pool blocks, ~128 KiB)
+  eliminates the per-packet re-arm entirely, and each completion moves the filled
+  pool block into `core::recv_pooled_block()` (zero-copy io_uring-to-FEC handoff).
+  `QUICFUSCATE_IO_URING_RECV_MULTISHOT=0` falls back to `UringRecvBatch` with
+  `UDP_GRO` (64 pre-posted `RecvMsg` SQEs, 64 KiB contiguous slots, per-slot
+  re-arm) - the better choice only on same-kernel paths (veth/virtio/loopback)
+  where receive coalescing can actually engage; wire traffic never arrives as
+  GSO trains. The CQ is sized `entries + 64` and each drain ends with one
+  overflow-flushing `submit()` so kernel-parked completions (including the
+  terminating `-ENOBUFS` CQE) cannot deadlock the armed request. Both variants
+  bridge to Tokio through `register_eventfd_async(eventfd)` + `AsyncFd`.
+  Fallback to Tokio `recv()` + `try_recv()` when io_uring is unavailable.
 - MSG_ZEROCOPY is not part of the final runtime story.
 - Server RX can be sharded across multiple UDP sockets on the same port via Linux
   `SO_REUSEPORT` (TODO-901): `server.rx_shards` (`QUICFUSCATE_RX_SHARDS`), `0` =

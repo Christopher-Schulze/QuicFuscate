@@ -4,7 +4,7 @@ title: io_uring multishot recv + provided buffer ring for the inbound fast path
 severity: MEDIUM
 phase: M
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-19
 depends_on: []
 ---
@@ -105,11 +105,17 @@ DONE (steps 1-2, kernel-verified):
 
 MEASURED (step 3, 2026-09, Omega kernel 6.17, loopback flood bench
 `recv_flood_bench_batch_vs_multishot`, `QF_URING_BENCH=1`, 20k x 1200B
-datagrams, pre-buffered then drained):
-- UringRecvBatch+GRO: 313 drain rounds for 20000 datagrams (0.016
-  drains/datagram), 113 ms.
-- UringRecvMultishot: 79 drain rounds for 20000 datagrams (0.004
-  drains/datagram), 105 ms, 78 self-healed -ENOBUFS re-arms.
+datagrams, pre-buffered then drained; drain-side CPU isolated via
+RUSAGE_THREAD so the flood thread's sendmsg cost stays out):
+- Phase 1, individual datagrams (WAN-realistic: Internet senders do not
+  emit UDP_SEGMENT trains, and receive-side UDP_GRO only coalesces when
+  skb->gso_size survives the path - i.e. same-kernel veth/loopback/virtio):
+  batch+GRO 313 drain rounds, 1.69 us/dgram CPU; multishot 79 drain
+  rounds (4x fewer), 1.19 us/dgram CPU (~30% less).
+- Phase 2, UDP_SEGMENT GSO trains (where UDP_GRO genuinely coalesces):
+  batch+GRO 20 drain rounds, 0.54 us/dgram; multishot 79 rounds, 1.28
+  us/dgram (2.4x more CPU) - each train segment still consumes one
+  provided buffer + one CQE.
 - The bench also exposed and now covers a production bug fixed in the same
   change: the io_uring instance was built with `IoUring::new(64)` so the CQ
   held only 128 entries. Once full, the kernel parked further completions -
@@ -118,9 +124,20 @@ datagrams, pre-buffered then drained):
   Fix: `setup_cqsize(entries + 64)` plus one overflow-flushing `submit()` per
   drain while armed.
 
+DECISION (2026-09-20) - multishot is the default client RX path:
+- The edge client talks to servers across real networks, where inbound
+  datagrams arrive individually (phase 1 profile) - multishot wins both
+  metrics there. Phase 2 only materializes on same-kernel deployments
+  (VM-to-VM virtio, containers, same-host), which opt out via
+  `QUICFUSCATE_IO_URING_RECV_MULTISHOT=0` to get batch+GRO back.
+- Per-datagram `conn.recv` cost is identical in both modes (every wire
+  datagram enters conn.recv once), so the e2e question collapses to the
+  measured delivery-path cost - answered above.
+- Bonus: the provided-buffer ring is 64x2KB pool-backed blocks (~128KB)
+  versus 64x64KB contiguous GRO slots (~4MB).
+- Kernel <5.19 or any register/submit failure falls back to the batch
+  path unchanged; -ENOBUFS terminations self-heal via re-arm (78 events
+  over the 20k flood, all recovered).
+
 OPEN (step 4):
-- The flood bench answers the syscall-amortization question (multishot wins
-  ~4x on drain rounds); the remaining question is end-to-end: does the
-  multishot path beat the GRO path under real tunnel traffic once conn.recv
-  per-datagram cost is included. Keep opt-in until an e2e A/B lands.
 - Server demux remains on `UringRecvBatch` (needs per-packet sockaddr).
