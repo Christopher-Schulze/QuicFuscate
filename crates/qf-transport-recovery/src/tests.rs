@@ -1241,6 +1241,21 @@ mod sent_ring_tests {
     }
 
     #[test]
+    fn drain_range_starting_past_the_tracked_window_is_a_noop() {
+        // Peer-supplied ACK ranges may begin above every tracked pn (e.g.
+        // after ring eviction under loss). The clamp must not invert the
+        // range - this used to panic as "range start index N out of range".
+        let mut ring = SentRing::default();
+        for pn in 0..6 {
+            ring.insert(pkt(pn), |_, _| unreachable!());
+        }
+        ring.drain_range(15, 30, |_| panic!("nothing tracked in [15, 30)"));
+        assert_eq!(ring.len(), 6);
+        ring.drain_range(15, u64::MAX, |_| panic!("nothing tracked above base+len"));
+        assert_eq!(ring.len(), 6);
+    }
+
+    #[test]
     fn sparse_span_past_the_slot_cap_evicts_oldest() {
         let mut ring = SentRing::default();
         ring.insert(pkt(0), |_, _| unreachable!());

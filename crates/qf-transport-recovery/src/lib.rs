@@ -358,6 +358,9 @@ impl SentRing {
         }
         let lo = start.max(self.base).saturating_sub(self.base) as usize;
         let hi = (end.saturating_sub(self.base) as usize).min(self.slots.len());
+        if lo >= hi {
+            return;
+        }
         for slot in self.slots.range_mut(lo..hi) {
             if let Some(pkt) = slot.take() {
                 self.live -= 1;
