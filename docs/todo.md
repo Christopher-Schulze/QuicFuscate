@@ -4006,7 +4006,7 @@
 
 ### TODO-1010 - Next-generation stealth shaping research track
 
-- PARTIAL (standing). Implemented: WF-A2D position-aware perturbation in FlowShaper (burst edges after >=100ms idle gaps sample the full jitter range; interior packets stay tight; ProtocolClock-injected, ManualTimeSource-tested) and the ChameleonFlow density principle in intelligent_policy (padding rate halves when real ACK-clocked traffic is dense, `ack_us < 3000` — shaping what is there instead of buying chaff). Still open: Adaptive-Tamaraw per-cluster parameters, QUICstep/CoMPS migration-as-censorship-primitive (design study), UPGen deployment-seeded wire-image diversity. Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
+- PARTIAL (standing). Implemented: WF-A2D position-aware perturbation in FlowShaper (burst edges after >=100ms idle gaps sample the full jitter range; interior packets stay tight; ProtocolClock-injected, ManualTimeSource-tested) and the ChameleonFlow density principle in intelligent_policy (padding rate halves when real ACK-clocked traffic is dense, `ack_us < 3000` — shaping what is there instead of buying chaff). Design studies done (2026-09-20): QUICstep deferred (custom handshake already defeats Initial-parsing censors; relay topology not justified), UPGen adapted as TODO-1014, ChameleonFlow reorder window adapted as TODO-1015 (Bulk-class only). Still open: Adaptive-Tamaraw per-cluster direction-aware parameters. Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
 - Detail: docs/todo/todo-1010-stealth-shaping-research-track.md
 
 ### TODO-1011 - FEC standards alignment and maximal-effectiveness audit
@@ -4018,6 +4018,16 @@
 
 - DONE (2026-09-19). RX: `recv_connected_burst` fills 8 persistent 64 KiB slots in one `recvmmsg` per readiness wake on Linux (each slot possibly a UDP_GRO super-buffer, split in place); non-Linux keeps single-datagram semantics. TX (same change set): the non-GSO tail of `flush_connected_outgoing` now goes out in one `sendmmsg` instead of per-datagram `sendmsg` — measured on Omega with `perf stat` under a 15 s iperf3 tunnel run: sendmsg -31%, socket-TX syscalls -15%. Verified by `tun-e2e-netns.sh` on Omega (5/5 echo, 0% loss, clean teardown).
 - Detail: docs/todo/todo-1012-standalone-client-rx-burst.md
+
+### TODO-1014 - UPGen deployment-seeded private-protocol wire-image diversity
+
+- OPEN. Design study in TODO-1010: content entropy is already per-connection, but the private-capsule wire *shape* (QFPA magic, TLV order, AEAD preference list, exporter salts) is deployment-invariant - one capture signatures every deployment. Plan: `PrivateProtocolShape` derives TLV order, pad granule, AEAD preference ordering and negotiation pacing from a deployment seed provisioned with the QKey material (never negotiated on the wire; absent seed = canonical shape).
+- Detail: docs/todo/todo-1014-upgen-deployment-shape.md
+
+### TODO-1015 - ChameleonFlow bounded reorder window for bulk datagrams
+
+- OPEN (depends on TODO-1011 classes). Design study in TODO-1010: redistribute real packets inside a bounded window (W ~5-15 ms, k ~8) instead of buying chaff. Scope narrowed to `DatagramClass::Bulk` only - inner TCP tolerates reorder; ACK/control/protected traffic bypasses. PN allocation at compose time makes send-order reorder wire-legal. Success metric: train-structure entropy gain at <=2 ms median added bulk latency, ~0 bandwidth overhead.
+- Detail: docs/todo/todo-1015-bulk-reorder-window.md
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff
 

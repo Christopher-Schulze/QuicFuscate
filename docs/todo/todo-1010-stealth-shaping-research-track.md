@@ -142,3 +142,102 @@ has one axis; splitting it needs direction-aware signal plumbing
 
 OPEN: candidates 4, 5 unchanged (QUICstep design study, UPGen deployment
 seeding); the full ChameleonFlow reorder window stays open per above.
+
+## Design studies (2026-09-20)
+
+### Candidate 4 - QUICstep / CoMPS connection-migration splitting: STUDY
+
+What the literature proposes: run the handshake (the SNI/ALPN-bearing,
+fingerprint-heavy phase) over a cover path, then migrate the data phase to
+a different path. The censor never sees the identifying phase on the data
+path, and the cover channel carries only a few KB instead of the full flow.
+
+Verified plumbing anchors:
+- `PendingPathValidation` + path validation state machines exist in
+  `src/transport/connection/lifecycle.rs`; migration/config knobs live in
+  `src/transport/config.rs` (nat/migration flags) and
+  `src/implementations/client/connection.rs`.
+- Our handshake is already non-standard: no QUIC Initial packet format,
+  so the Initial-decryption SNI-extraction the GFW performs on stock QUIC
+  does not apply. The residual risk is correlation of the data phase to a
+  known deployment endpoint, not handshake parsing.
+
+Design outcome:
+- The paper's win condition (hide the SNI-bearing handshake from the data
+  path's censor) partially transfers: our handshake has no visible SNI to
+  hide, but splitting still severs the timing/size correlation between the
+  auth phase and the bulk phase at the observer's vantage point.
+- Real cost: migration needs a second reachable endpoint (relay or
+  multi-homed server); a migration within the same /24 is itself a
+  detectable signal. Server-side would need dual-socket accept or a
+  relay-aware path table - that is deployment topology, not plumbing.
+- VERDICT: **defer** - the marginal gain over the current posture (custom
+  handshake + residual-only GFW pressure) does not justify a relay
+  topology requirement. Revisit if a concrete deployment scenario demands
+  endpoint decoupling; the plumbing hooks above are the entry points.
+
+### Candidate 5 - UPGen deployment-seeded wire-image diversity: STUDY
+
+What the literature proposes: per-deployment protocol variants so traffic
+classifies as "unknown benign encrypted" rather than matching a single
+circumvention-protocol signature. One wire signature must not identify
+every deployment.
+
+Verified anchors (`src/qftls/private_protocol.rs`,
+`src/transport/packet/private_selection.rs`):
+- Per-connection variance exists today: packet-AEAD keys/epochs derive via
+  HKDF from the authenticated transcript (exporter labels, key-phase
+  epochs in `private_selection.rs`). Content entropy is already
+  per-connection.
+- Deployment-invariant shape today: `QFPA` magic, capsule type 0x41,
+  protocol version 1, `KNOWN_FLAGS`, the Proposal/Selection/Confirmation
+  message layout, `PRIVATE_TAG_LEN`, exporter salts - every deployment
+  emits the same outer capsule structure. A censor with one deployment's
+  capture can signature-match all of them.
+
+Design outcome:
+- Introduce a `PrivateProtocolShape` descriptor: a deployment seed
+  (provisioned with the server config, shared with clients out-of-band)
+  expands via HKDF into shape knobs - TLV field order in the Proposal,
+  pad-to granule for control capsules, the AEAD-family preference list
+  ordering, and the negotiation pacing pattern. Wire *semantics* stay
+  fixed; wire *layout* permutes per deployment.
+- Correctness constraint: both sides must derive the same shape, so the
+  seed must be part of the provisioned credential material (like the QKey
+  registry entries), never negotiated - negotiating the seed on the wire
+  would reintroduce a fixed signature.
+- Anti-goal respected: this does not touch the standard QUIC-compatible
+  path; it only permutes the already-private capsule namespace.
+- VERDICT: **adapt** - moderate surgery, real signature-diversity win.
+  Spawned as TODO-1014.
+
+### Candidate 1 remainder - ChameleonFlow bounded reorder window: STUDY
+
+The density rule (padding halves under dense ACK-clocked traffic) already
+captures the cheap half. The full variant redistributes real packets
+across a small time window instead of buying chaff.
+
+Verified anchors: `FlowShaper::apply_jitter`/`is_burst_edge` already
+implement time-domain perturbation at burst edges; the emit funnel is the
+packet-composed send path (`src/transport/connection/send.rs` ->
+`src/core/connection/send.rs`), and TODO-1011's `DatagramClass::Bulk`
+already marks the subset of traffic whose inner protocol tolerates
+delay/reorder.
+
+Design outcome:
+- A reorder window is a bounded delay queue (W ~ 5-15 ms, k ~ 8 packets)
+  in the send drain: hold bulk-classified datagrams, emit them in a
+  seed-permuted order to break train-length/direction alternation
+  fingerprints. Packet-number allocation happens at compose time, so
+  reordering composed packets is wire-legal (send order need not equal
+  PN order).
+- Hard constraints discovered: ACK/control packets must bypass the window
+  (they are latency-critical and reordering them breaks QUIC's own
+  clocking); interaction with the io_uring multishot drain and the
+  sendmmsg batch tail needs care so the window does not just move the
+  burst signature one layer down.
+- VERDICT: **adapt with constraint** - apply the window only to
+  `DatagramClass::Bulk` entries (TCP-in-tunnel tolerates it; protected
+  classes keep strict order). Spawned as TODO-1015; success metric =
+  train-structure entropy gain at <= 2 ms median added latency on bulk
+  packets.
