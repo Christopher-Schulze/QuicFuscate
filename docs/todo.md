@@ -4031,7 +4031,7 @@
 
 ### TODO-1016 - Deferral drain serializes emission under per-packet stealth deferral
 
-- OPEN (2026-09-20). Omega evidence: `stealth_timing` (per-packet jitter/hold deferral) collapses the standalone `quicfuscate client --tun` datapath to ~1.8 Mbit/s vs 74.3 Mbit/s baseline (~1 packet per loop tick; `CLIENT_HOUSEKEEPING_ACTIVE` 5 ms floor; ~2.4 ms even with a 1 ms floor patch) - same collapse with jitter alone, i.e. pre-existing, blocks TODO-1015 wire parity. Done so far: `emit_ripe_or_yield` drain-starvation fix, shared window deadlines, `next_packet_release` merge. Remaining: deadline-driven sub-5ms wake in the standalone housekeeping loop or batch-window drain; io_driver runtime is the better long-term owner.
+- PARTIAL (2026-09-20). Omega evidence: `stealth_timing` (per-packet jitter/hold deferral) collapses the standalone `quicfuscate client --tun` datapath to ~1.8 Mbit/s vs 74.3 Mbit/s baseline - same collapse with jitter alone, i.e. pre-existing, blocks TODO-1015 wire parity. Done so far: `emit_ripe_or_yield` drain-starvation fix, shared window deadlines, `next_packet_release` merge, and `client_housekeeping_delay` now honors armed send deadlines with a 1 ms floor instead of the flat 5 ms tick - measured 1.88 -> 3.98 Mbit/s (2.1x). Remaining: residual ~2.4 ms wake tick still bounds ~1 packet/wake; drain-loop or batch-materialize the deferral batch per send call, or migrate the standalone path to io_driver.
 - Detail: docs/todo/todo-1016-deferral-drain-serialization.md
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff

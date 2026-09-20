@@ -26,10 +26,13 @@ impl QuicFuscateConnection {
         .min()
     }
 
-    /// TODO-1015: maximum per-packet hold applied to bulk-only datagrams
-    /// inside the reorder window. Sampling is uniform over [0, 3 ms], so
-    /// the median added latency (~1.5 ms) stays under the 2 ms acceptance
-    /// bound while still spacing a bulk train across multiple drain cycles.
+    /// TODO-1015: maximum hold applied to a bulk reorder window. The draw
+    /// is shared by every bulk packet arriving while the window is open.
+    /// Uniform over [0, 3 ms]: ~1.5 ms median added bulk latency, within
+    /// the 2 ms acceptance bound. The standalone client's loop-tick-bound
+    /// deferral drain (TODO-1016) limits the effective batch size on that
+    /// path; the io_driver runtime's deadline-driven loop drains batches
+    /// at higher resolution.
     pub(crate) const REORDER_HOLD_MAX_US: u64 = 3_000;
     /// Two bulk packets closer than this belong to the same burst train;
     /// train members are eligible for the hold + permuted emission.
@@ -69,22 +72,22 @@ impl QuicFuscateConnection {
         }
         // Windowed batch release: every bulk packet inside the open window
         // shares the same deadline so one wake emits the whole permuted
-        // batch. Once the window expired the next burst member draws a
-        // fresh window.
-        if let Some(window) = self.bulk_window_release.get() {
-            if now < window {
-                return Some(window);
+        // batch. The window must span several packet inter-arrivals or it
+        // degenerates to one packet per wake under a loop-tick-bound drain.
+        if let Some(open) = self.bulk_window_release.get() {
+            if now < open {
+                return Some(open);
             }
-            self.bulk_window_release.set(None);
         }
         let hold_us = crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_HOLD_MAX_US + 1);
-        if hold_us > 0 {
-            let window = now + Duration::from_micros(hold_us);
-            self.bulk_window_release.set(Some(window));
-            log::debug!("reorder_window: bulk window +{hold_us}us");
-            return Some(window);
+        if hold_us == 0 {
+            self.bulk_window_release.set(None);
+            return None;
         }
-        None
+        let window = now + Duration::from_micros(hold_us);
+        self.bulk_window_release.set(Some(window));
+        log::debug!("reorder_window: bulk window +{hold_us}us");
+        Some(window)
     }
 
     /// Emission index into `outgoing_fec_packets` honoring per-packet hold

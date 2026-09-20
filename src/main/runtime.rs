@@ -1346,6 +1346,10 @@ fn drain_uplink_any(
 
 const CLIENT_HOUSEKEEPING_ACTIVE: Duration = Duration::from_millis(5);
 const CLIENT_HOUSEKEEPING_IDLE: Duration = Duration::from_millis(250);
+/// CPU guard for deadline-armed waits: a pending send deadline may wake
+/// far earlier than the active/idle ticks, but never below 1 ms so a
+/// misbehaving deadline cannot spin the loop.
+const CLIENT_HOUSEKEEPING_DEADLINE_FLOOR: Duration = Duration::from_millis(1);
 
 fn client_housekeeping_delay(
     conn: &QuicFuscateConnection,
@@ -1354,6 +1358,10 @@ fn client_housekeeping_delay(
     tun_backpressure_pending: bool,
     heartbeat_deadline: Option<tokio::time::Instant>,
 ) -> Duration {
+    let send_deadline_wait = || {
+        let now = conn.protocol_clock().now();
+        conn.next_send_deadline().map(|deadline| deadline.saturating_duration_since(now))
+    };
     let active = !conn.conn.is_established()
         || !request_sent
         || (tun_enable && !conn.masque_tunnel_established())
@@ -1361,6 +1369,12 @@ fn client_housekeeping_delay(
         || conn.conn.dgram_send_queue_len() > 0
         || tun_backpressure_pending;
     if active {
+        // An armed send deadline (stealth release, pacing, reorder hold)
+        // must not wait a full active tick behind queued datagrams:
+        // wake at the deadline instead, bounded by the 1 ms CPU guard.
+        if let Some(wait) = send_deadline_wait() {
+            return wait.max(CLIENT_HOUSEKEEPING_DEADLINE_FLOOR);
+        }
         return CLIENT_HOUSEKEEPING_ACTIVE;
     }
 
@@ -1369,13 +1383,20 @@ fn client_housekeeping_delay(
     // resulting duration crosses into Tokio.
     let now = conn.protocol_clock().now();
     let mut delay = CLIENT_HOUSEKEEPING_IDLE;
-    if let Some(deadline) = conn.next_send_deadline() {
+    let send_deadline = conn.next_send_deadline();
+    if let Some(deadline) = send_deadline {
         delay = delay.min(deadline.saturating_duration_since(now));
     }
     if let Some(deadline) = heartbeat_deadline {
         delay = delay.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
     }
-    delay.max(CLIENT_HOUSEKEEPING_ACTIVE)
+    // An armed send deadline keeps its sub-tick wake resolution; the 5 ms
+    // floor applies only to non-deadline waits.
+    if send_deadline.is_some() {
+        delay.max(CLIENT_HOUSEKEEPING_DEADLINE_FLOOR)
+    } else {
+        delay.max(CLIENT_HOUSEKEEPING_ACTIVE)
+    }
 }
 
 fn synchronize_client_tun_mtu(

@@ -51,14 +51,21 @@ a pre-existing drain limitation, not a TODO-1015 regression.
   reorder-aware drain cannot emit them early.
 - `next_packet_release` merge (min of pending deadlines) instead of
   overwrite - a hold-only packet no longer erases an earlier wake.
+- `client_housekeeping_delay` honors an armed send deadline in both the
+  active and idle branch: wake at the deadline with a 1 ms CPU guard
+  (`CLIENT_HOUSEKEEPING_DEADLINE_FLOOR`) instead of the flat 5 ms floor.
+  Omega re-measurement (uTLS + `JITTER_US=1`, iperf uplink):
+  1.88 -> 3.98 Mbit/s (2.1x), ~460 pkt/s.
 
 ## Remaining work
-- Redesign the standalone client housekeeping wait: deadline-driven wake
-  with sub-5ms resolution (e.g. floor 1ms when a send deadline is armed,
-  keep 5ms only for non-deadline active ticks). Watch CPU on the
-  single-core Omega class of hosts before shipping.
-- Consider a batch window drain: when N packets share a deferral window,
-  emit them in one flush round instead of one packet per `send()` call.
+- The residual ~2.4 ms wake tick bounds the drain to ~1 packet per wake
+  (~420-460 pkt/s): `conn.send()` returns one datagram per call and a
+  deferred packet ends the flush early whenever nothing is ripe yet.
+  Options: drain-loop the queued deferral batch inside one send call,
+  or batch the materialize step so one wake converts >1 queued datagram.
+- An 8 ms shared window did NOT help (2.07 Mbit/s): bulk arrival rate
+  under the tick-bound drain is too thin to fill windows - the limit is
+  the drain, not the window size. Kept 3 ms window (acceptance <=2 ms).
 - Decide whether the standalone TUN path should migrate to the io_driver
   runtime instead of growing its own scheduler.
 - Acceptance: uTLS + `JITTER_US=5000` uplink >= 80% of the no-stealth
