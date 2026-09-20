@@ -105,11 +105,46 @@ DONE:
   X25519MLKEM768 (0x11EC, 1216B) + X25519 (0x001D, 32B) key-share pair via
   `key_share_ext_multi`; Safari keeps the classic X25519-only shape.
   `generate_client_hello_modern_key_share_shape` guards it.
+- Step 4 JA4 field-level diff (reproducible): test-only
+  `dump_persona_client_hellos_as_hex` exports every persona hello;
+  `scripts/audits/ja4_diff.py` parses a TLS-record hello into JA4 + field
+  lists (FoxIO-compliant: GREASE excluded from counts, sorted
+  cipher/extension hashes, signature algorithms folded into the c-hash).
+  Diffing the synthetic output against the FoxIO Chrome QUIC reference
+  (`q13d0312h3_55b375c5d22e_178839b6cec1`) surfaced and fixed three real
+  tells:
+  1. **ECH-GREASE was opt-in** (`QUICFUSCATE_TLS_COVER_ULTRA`) while real
+     browsers emit it unconditionally - now always on; ULTRA only adds the
+     padding extension.
+  2. **TLS 1.2 cipher suites in an h3 hello** - QUIC hellos only carry
+     TLS 1.3 suites; the list is now filtered to 0x1301..=0x1305 when ALPN
+     leads with h3, and the ChaCha-removal handshake policy no longer
+     applies to the cover path (every real browser offers 0x1303). The
+     cipher hash now matches the real Chrome QUIC hash `55b375c5d22e`
+     byte-for-byte.
+  3. **Missing quic_transport_params (0x0039)** - mandatory per RFC 9001,
+     its absence is an instant QUIC-aware DPI tell. Emitted for all
+     h3-first personas with Chrome-plausible values + fresh
+     initial_source_connection_id per call. Chrome/Edge additionally emit
+     ALPS (0x4469) + compress_certificate (0x001B); Firefox compress_cert
+     only; Safari QTP only.
+  Result: Chrome persona now reads `t13d0312h3_55b375c5d22e_*` - identical
+  a/b segments to the real Chrome QUIC reference (the `t`/`q` prefix
+  difference is the TLS-record wrapping our cover path uses, not a field
+  deviation). Regression tests:
+  `h3_first_hello_advertises_tls13_only_and_quic_transport_params`,
+  `chrome_hello_matches_browser_quic_extension_shape` (12 non-GREASE
+  extensions with SNI, matching the reference count).
 
 OPEN:
-- JA4 full-field diff against real browser packet captures (extension order,
-  ALPS, supported_groups order, ECH shape) - requires capture evidence, not
-  derivable locally.
+- JA4 c-hash byte-parity against the specific FoxIO reference build was
+  deliberately not chased: it fingerprints one Chrome snapshot's exact
+  extension set and chasing it is over-fitting (different Chrome builds
+  differ). Structural parity (counts, cipher hash, mandatory fields) is
+  the maintained contract.
+- Real-browser packet captures are still absent locally/Omega; the audit
+  relies on published FoxIO references instead.
 - Refresh policy note (capture procedure/cadence) - Step 5.
-- Caveat: key-share bytes are pseudo-random *shaped* placeholders - valid
-  only because this path is strictly synthetic cover, never a real handshake.
+- Caveat: key-share and SCID bytes are pseudo-random *shaped* placeholders
+  - valid only because this path is strictly synthetic cover, never a
+  real handshake.

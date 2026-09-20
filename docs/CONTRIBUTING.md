@@ -156,6 +156,27 @@ Component conventions:
 - Use the CLI to list available fingerprints and verify selection
 - Ensure TLS Cover and real TLS fingerprint modes remain consistent with the profile set
 
+### Fingerprint refresh policy (persona catalog)
+The persona catalog lives in code (`crates/qf-stealth/src/fingerprint_profile.rs`
+UA constants + `tls_profile.rs` descriptors + `tls_cover.rs` cover-hello shape).
+`PROFILE_CATALOG_SNAPSHOT` marks the capture date; the
+`fingerprint_freshness` audit gate fails the audit suite once the snapshot is
+older than 6 months.
+
+Refresh procedure, per release cadence (or whenever the gate fires):
+1. Check the current stable channel versions of Chrome/Edge, Firefox,
+   Safari/iOS, Opera, Brave and update the UA constants + snapshot date.
+2. Verify the wire shape, not just strings: run
+   `cargo test -p qf-stealth dump_persona -- --nocapture` and pipe into
+   `python3 scripts/audits/ja4_diff.py -`. Compare JA4 a/b segments and the
+   extension list against current FoxIO ja4db browser QUIC references
+   (cipher hash `55b375c5d22e` = stock TLS 1.3 trio; watch for new
+   extensions such as post-quantum or ALPS changes).
+3. Keep the mandatory-for-QUIC fields honest: `quic_transport_params`
+   (0x0039) must always ride h3-first hellos, ECH-GREASE stays
+   unconditional, and TLS 1.2 cipher suites must never appear in an
+   h3-first hello - both are regression-tested in `tls_cover.rs`.
+
 
 ## Configuration & Docs
 - `docs/DOCUMENTATION.md` is the single source of truth. Update it for any user-facing change:

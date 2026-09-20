@@ -229,13 +229,6 @@ pub fn grease_ext(seed: u16) -> Vec<u8> {
     ext
 }
 
-/// Returns true for cipher suites excluded from the real TLS ClientHello policy.
-/// TLS Cover record encryption remains separately configurable.
-#[doc(hidden)]
-pub fn is_client_hello_cipher_removed(cipher_suite: u16) -> bool {
-    matches!(cipher_suite, 0x1303 | 0xCCA8 | 0xCCA9)
-}
-
 #[doc(hidden)]
 pub fn alpn_ext(protocols: &[&str]) -> Vec<u8> {
     let mut names = Vec::new();
@@ -413,6 +406,91 @@ pub fn ech_grease_ext(seed: u16) -> Vec<u8> {
     ext
 }
 
+/// QUIC transport_parameters extension (0x0039, RFC 9000 §18). Mandatory in
+/// every real QUIC ClientHello - a hello carrying h3 ALPN without it fails
+/// QUIC-aware DPI parsing immediately. Values mirror current Chrome h3.
+#[doc(hidden)]
+pub fn quic_transport_params_ext(scid_seed: u64) -> Vec<u8> {
+    fn qvarint_len(v: u64) -> u64 {
+        if v < 64 {
+            1
+        } else if v < 16384 {
+            2
+        } else if v < (1 << 30) {
+            4
+        } else {
+            8
+        }
+    }
+    fn qvarint(out: &mut Vec<u8>, v: u64) {
+        if v < 64 {
+            out.push(v as u8);
+        } else if v < 16384 {
+            out.extend_from_slice(&((v as u16) | 0x4000).to_be_bytes());
+        } else if v < (1 << 30) {
+            out.extend_from_slice(&((v as u32) | 0x8000_0000).to_be_bytes());
+        } else {
+            out.extend_from_slice(&(v | 0xC000_0000_0000_0000).to_be_bytes());
+        }
+    }
+    fn tp(body: &mut Vec<u8>, id: u64, val: u64) {
+        qvarint(body, id);
+        qvarint(body, qvarint_len(val));
+        qvarint(body, val);
+    }
+    let mut body = Vec::with_capacity(96);
+    tp(&mut body, 0x01, 30_000); // max_idle_timeout
+    tp(&mut body, 0x03, 1_472); // max_udp_payload_size
+    tp(&mut body, 0x04, 15_728_640); // initial_max_data
+    tp(&mut body, 0x05, 6_291_456); // initial_max_stream_data_bidi_local
+    tp(&mut body, 0x06, 6_291_456); // initial_max_stream_data_bidi_remote
+    tp(&mut body, 0x07, 6_291_456); // initial_max_stream_data_uni
+    tp(&mut body, 0x08, 100); // initial_max_streams_bidi
+    tp(&mut body, 0x09, 103); // initial_max_streams_uni
+    tp(&mut body, 0x0A, 3); // ack_delay_exponent
+    tp(&mut body, 0x0B, 25); // max_ack_delay
+    qvarint(&mut body, 0x0C); // disable_active_migration: empty value
+    qvarint(&mut body, 0);
+    tp(&mut body, 0x0E, 8); // active_connection_id_limit
+    qvarint(&mut body, 0x0F); // initial_source_connection_id: 8 fresh bytes
+    qvarint(&mut body, 8);
+    body.extend_from_slice(&scid_seed.to_be_bytes());
+    tp(&mut body, 0x20, 65_536); // max_datagram_frame_size
+    let mut ext = Vec::with_capacity(4 + body.len());
+    ext.extend_from_slice(&0x0039u16.to_be_bytes());
+    ext.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    ext.extend_from_slice(&body);
+    ext
+}
+
+/// ALPS application_settings extension (0x4469) as Chrome emits for h3:
+/// a u8-length-prefixed list of u8-length-prefixed protocol names.
+#[doc(hidden)]
+pub fn application_settings_h3_ext() -> Vec<u8> {
+    let body = [0x03u8, 0x02, b'h', b'3'];
+    let mut ext = Vec::with_capacity(4 + body.len());
+    ext.extend_from_slice(&0x4469u16.to_be_bytes());
+    ext.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    ext.extend_from_slice(&body);
+    ext
+}
+
+/// compress_certificate extension (0x001B): u8-length-prefixed u16 algorithm
+/// list. Chrome offers brotli (0x0002); Firefox brotli + zstd.
+#[doc(hidden)]
+pub fn compress_certificate_ext(algos: &[u16]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(1 + 2 * algos.len());
+    body.push((algos.len() * 2) as u8);
+    for a in algos {
+        body.extend_from_slice(&u16be(*a));
+    }
+    let mut ext = Vec::with_capacity(4 + body.len());
+    ext.extend_from_slice(&0x001Bu16.to_be_bytes());
+    ext.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    ext.extend_from_slice(&body);
+    ext
+}
+
 #[doc(hidden)]
 pub fn sni_ext(host: &str) -> Vec<u8> {
     let name_bytes = host.as_bytes();
@@ -467,6 +545,7 @@ impl TlsCover {
         let grease_ext_seed: u16 = rng.random();
         let key_share_seed: u64 = rng.random();
         let ech_grease_seed: u16 = rng.random();
+        let qtp_scid_seed: u64 = rng.random();
         let ultra_pad_len = rng.random_range(16..48usize);
         let enable_grease = !matches!(browser, crate::BrowserProfile::Safari);
 
@@ -482,9 +561,24 @@ impl TlsCover {
             ],
         };
 
-        // The real TLS policy removes ChaCha from every deterministic ClientHello.
-        // Synthetic TLS Cover record encryption is a separate, explicit choice.
-        ciphers.retain(|cipher_suite| !is_client_hello_cipher_removed(*cipher_suite));
+        // NOTE: the real-handshake cipher policy (ChaCha removal) does NOT
+        // apply here - this is the synthetic cover hello whose whole job is
+        // byte-level browser mimicry, and every real browser offers
+        // TLS_CHACHA20_POLY1305_SHA256 (0x1303).
+
+        // OS-specific ALPN
+        let alpns = match (browser, os) {
+            (crate::BrowserProfile::Safari, crate::OsProfile::IOS) => vec!["h3", "http/1.1"],
+            _ => vec!["h3", "h2", "http/1.1"],
+        };
+
+        // An h3-first ALPN emulates a QUIC ClientHello: QUIC can only run
+        // TLS 1.3, so TLS 1.2 cipher suites in the list would be a shape no
+        // real browser emits (JA4-visible, TODO-1009). Real Chrome QUIC
+        // sends exactly [1301, 1302, 1303].
+        if alpns.first() == Some(&"h3") {
+            ciphers.retain(|cs| (0x1301..=0x1305).contains(cs));
+        }
 
         // Add GREASE cipher if enabled
         if enable_grease {
@@ -528,12 +622,6 @@ impl TlsCover {
                 "key_share",
                 "alpn",
             ][..],
-        };
-
-        // OS-specific ALPN
-        let alpns = match (browser, os) {
-            (crate::BrowserProfile::Safari, crate::OsProfile::IOS) => vec!["h3", "http/1.1"],
-            _ => vec!["h3", "h2", "http/1.1"],
         };
 
         for name in ext_order {
@@ -602,10 +690,32 @@ impl TlsCover {
             }
         }
 
-        // Optional ULTRA extras: ECH-GREASE + padding to smooth lengths
+        // QUIC transport parameters (0x0039) are mandatory in every real
+        // QUIC ClientHello (RFC 9001) - an h3-ALPN hello without them is an
+        // immediate synthetic tell to QUIC-aware DPI. Chrome additionally
+        // sends ALPS (0x4469) and compress_certificate (0x001B), Firefox
+        // only compress_certificate; Safari sends neither beyond QTP.
+        if alpns.first() == Some(&"h3") {
+            exts.extend_from_slice(&quic_transport_params_ext(qtp_scid_seed));
+            match browser {
+                crate::BrowserProfile::Chrome | crate::BrowserProfile::Edge => {
+                    exts.extend_from_slice(&application_settings_h3_ext());
+                    exts.extend_from_slice(&compress_certificate_ext(&[0x0002]));
+                }
+                crate::BrowserProfile::Firefox => {
+                    exts.extend_from_slice(&compress_certificate_ext(&[0x0002, 0x0003]));
+                }
+                _ => {}
+            }
+        }
+
+        // ECH GREASE (0xFE0D) is unconditional browser behavior since 2023
+        // (Chrome/Edge/Firefox always; Safari since iOS 17.5/macOS 14.5) -
+        // its absence is a JA4-visible synthetic tell (TODO-1009). ULTRA only
+        // adds the smoothing padding extension on top.
+        exts.extend_from_slice(&ech_grease_ext(ech_grease_seed));
         let ultra = environment.flag("QUICFUSCATE_TLS_COVER_ULTRA", false);
         if ultra {
-            exts.extend_from_slice(&ech_grease_ext(ech_grease_seed));
             // Pad to a random target within a narrow band
             exts.extend_from_slice(&padding_ext(ultra_pad_len));
         }
@@ -893,6 +1003,25 @@ mod tests {
         );
     }
 
+    /// Dumps one synthetic ClientHello per persona as hex lines for external
+    /// JA4/fingerprint tooling (`--nocapture`). The output feeds
+    /// `scripts/audits/` capture comparisons (TODO-1009).
+    #[test]
+    fn dump_persona_client_hellos_as_hex() {
+        let personas: [(&str, crate::BrowserProfile, crate::OsProfile); 5] = [
+            ("chrome-win", crate::BrowserProfile::Chrome, crate::OsProfile::Windows),
+            ("edge-win", crate::BrowserProfile::Edge, crate::OsProfile::Windows),
+            ("firefox-linux", crate::BrowserProfile::Firefox, crate::OsProfile::Linux),
+            ("safari-macos", crate::BrowserProfile::Safari, crate::OsProfile::MacOS),
+            ("safari-ios", crate::BrowserProfile::Safari, crate::OsProfile::IOS),
+        ];
+        for (name, browser, os) in personas {
+            let record = TlsCover::generate_client_hello(browser, os, Some("example.com"));
+            let hex: String = record.iter().map(|b| format!("{b:02x}")).collect();
+            println!("PERSONA_HELLO {name} {hex}");
+        }
+    }
+
     #[test]
     fn test_ech_grease_ext_deterministic() {
         let ext1 = ech_grease_ext(42);
@@ -1034,5 +1163,79 @@ mod tests {
             record.windows(2).any(|w| w == [0x00, 0x33]),
             "key_share extension 0x0033 must be present"
         );
+    }
+
+    /// Parse a TLS-record ClientHello into (cipher suites, extension types).
+    fn parse_hello(record: &[u8]) -> (Vec<u16>, Vec<u16>) {
+        // record header (5) + handshake header (4) + version (2) + random (32)
+        let mut p = 5 + 4 + 2 + 32;
+        let sid_len = record[p] as usize;
+        p += 1 + sid_len;
+        let cs_len = u16::from_be_bytes([record[p], record[p + 1]]) as usize;
+        p += 2;
+        let ciphers = record[p..p + cs_len]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
+            .collect();
+        p += cs_len;
+        p += 1 + record[p] as usize; // compression methods
+        let ext_total = u16::from_be_bytes([record[p], record[p + 1]]) as usize;
+        p += 2;
+        let end = p + ext_total;
+        let mut exts = Vec::new();
+        while p + 4 <= end {
+            let ty = u16::from_be_bytes([record[p], record[p + 1]]);
+            let ln = u16::from_be_bytes([record[p + 2], record[p + 3]]) as usize;
+            exts.push(ty);
+            p += 4 + ln;
+        }
+        (ciphers, exts)
+    }
+
+    #[test]
+    fn h3_first_hello_advertises_tls13_only_and_quic_transport_params() {
+        // Regression guard (TODO-1009): an h3-ALPN hello must carry only
+        // TLS 1.3 cipher suites plus the mandatory quic_transport_params
+        // extension (RFC 9001) - legacy suites or a missing 0x0039 are
+        // immediate synthetic tells.
+        for browser in [
+            crate::BrowserProfile::Chrome,
+            crate::BrowserProfile::Edge,
+            crate::BrowserProfile::Firefox,
+            crate::BrowserProfile::Safari,
+        ] {
+            for os in [crate::OsProfile::Windows, crate::OsProfile::IOS] {
+                let record = TlsCover::generate_client_hello(browser, os, None);
+                let (ciphers, exts) = parse_hello(&record);
+                assert!(
+                    ciphers.iter().all(|c| (0x1301..=0x1305).contains(c) || (c & 0x0F0F) == 0x0A0A),
+                    "h3 hello must only carry TLS 1.3 or GREASE ciphers: {ciphers:?}"
+                );
+                assert!(
+                    exts.contains(&0x0039),
+                    "h3 hello must carry quic_transport_params (0x0039)"
+                );
+                assert!(exts.contains(&0xFE0D), "hello must carry ECH-GREASE (0xFE0D)");
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_hello_matches_browser_quic_extension_shape() {
+        let record = TlsCover::generate_client_hello(
+            crate::BrowserProfile::Chrome,
+            crate::OsProfile::Windows,
+            Some("cdn.example"),
+        );
+        let (_ciphers, exts) = parse_hello(&record);
+        // Chrome h3 shape: QTP + ALPS + compress_certificate alongside the
+        // base extension set (FoxIO Chrome QUIC reference: 12 non-GREASE).
+        for want in [0x0039u16, 0x4469, 0x001B] {
+            assert!(exts.contains(&want), "Chrome h3 hello missing ext {want:#06x}");
+        }
+        let non_grease = exts.iter().filter(|e| (*e & 0x0F0F) != 0x0A0A).count();
+        assert_eq!(non_grease, 12, "Chrome h3 should emit 12 non-GREASE extensions");
     }
 }
