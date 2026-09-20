@@ -125,7 +125,11 @@ impl OutgoingFecPacket {
 
     pub(crate) fn telemetry_shape(&self) -> (bool, usize) {
         match self.wire_meta {
-            None => (true, self.packet.data_len),
+            // Raw packets carry their payload length; repair-ACK reports
+            // (is_systematic == false, TODO-1006) count as non-source wire
+            // bytes so they do not inflate the source-payload telemetry.
+            None if self.packet.is_systematic => (true, self.packet.data_len),
+            None => (false, 0),
             Some(meta) if meta.systematic => {
                 (true, self.packet.data_len.saturating_sub(2 * wire::SOURCE_LENGTH_LEN))
             }

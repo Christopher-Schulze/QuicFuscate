@@ -171,6 +171,59 @@ impl QuicFuscateConnection {
         }
     }
 
+    /// TODO-1006 repair-ACK producer (receiver side): drains the wire
+    /// receiver's recovered-source log into one bounded report datagram
+    /// and front-queues it. The datagram is already a complete wire
+    /// frame, so `wire_meta: None` emits the bytes raw through
+    /// `to_raw` - it consumes no `fec_tx_sequence` slot, carries no
+    /// systematic position the decoder could confuse, and is marked
+    /// non-bulk so the reorder permutation never displaces it (its CC
+    /// signal is latency-relevant). Best-effort like an ACK: a lost
+    /// report is covered by the next recovery burst.
+    pub(crate) fn enqueue_repair_ack_report(
+        &mut self,
+    ) -> Result<(), crate::error::ConnectionError> {
+        let Some(epoch) = self.fec_wire_receiver.last_rx_epoch() else {
+            return Ok(());
+        };
+        let mut entries = [wire::RepairAckEntry::default(); wire::MAX_REPAIR_ACK_ENTRIES];
+        let count = self.fec_wire_receiver.drain_recovered(&mut entries);
+        if count == 0 {
+            return Ok(());
+        }
+        let mut block = PooledBlock::new(self.optimization_manager.memory_pool());
+        let len = wire::write_repair_ack(epoch, &entries[..count], &mut block)
+            .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+        let send_pool = block.pool();
+        let packet = FecPacket::from_pooled_blocks(
+            self.packet_id_counter,
+            Some(block),
+            len,
+            false,
+            None,
+            0,
+            send_pool,
+        )
+        .map_err(crate::error::ConnectionError::Transport)?;
+        self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+        self.outgoing_fec_packets.push_front(OutgoingFecPacket {
+            packet,
+            wire_meta: None,
+            send_info: crate::transport::SendInfo {
+                from: self.local_addr,
+                to: self.peer_addr,
+                at: self.clock.now(),
+                congestion_controlled: false,
+                path_control: false,
+                bulk_only: false,
+            },
+            congestion_controlled: false,
+            was_displaced: false,
+        });
+        crate::telemetry::FEC_REPAIR_ACK_ENTRIES_SENT.inc_by(count as u64);
+        Ok(())
+    }
+
     /// Queue one ack-eliciting transport keepalive for the next send poll.
     pub fn queue_keepalive_ping(&mut self) {
         self.conn.queue_cover_ping();
@@ -320,6 +373,17 @@ impl QuicFuscateConnection {
             .post_handshake_datagram_ready()
             .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
         let path_control_pending = self.conn.has_sendable_path_control();
+
+        // --- TODO-1006 REPAIR-ACK REPORT ---
+        // The wire receiver logged decoder recoveries for the sender:
+        // drain them into one bounded report datagram and front-queue it
+        // so it emits on this call (or the next emit pass if a deferral
+        // window is open - queued entries emit through emit_ripe_or_yield
+        // while production stalls). Reports ride the normal emission path
+        // - no extra socket writes, no FEC sequence slot consumed.
+        if established && self.fec_wire_receiver.has_pending_recovered() {
+            self.enqueue_repair_ack_report()?;
+        }
 
         // --- REALITY FALLBACK RESPONSE POLLING ---
         // Check if there are any responses from upstream to send back (bypass stealth scheduler)

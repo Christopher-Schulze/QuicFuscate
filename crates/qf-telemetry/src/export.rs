@@ -372,6 +372,18 @@ pub fn export_telemetry_text() -> String {
             "quicfuscate_fec_fountain_decoder_propagation_work_total {}",
             FEC_FOUNTAIN_DECODER_PROPAGATION_WORK.get()
         );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_repair_ack_entries_sent_total {}",
+            FEC_REPAIR_ACK_ENTRIES_SENT.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_repair_ack_entries_received_total {}",
+            FEC_REPAIR_ACK_ENTRIES_RECEIVED.get()
+        );
+        let _ =
+            writeln!(out, "quicfuscate_fec_repair_ack_stale_total {}", FEC_REPAIR_ACK_STALE.get());
     } // end fec
 
     // MASQUE

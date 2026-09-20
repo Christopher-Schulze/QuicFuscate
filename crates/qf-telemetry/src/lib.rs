@@ -736,6 +736,14 @@ pub static FEC_FOUNTAIN_DECODER_EVICTIONS: Counter = Counter::new();
 pub static FEC_FOUNTAIN_DECODER_ADMISSION_REJECTIONS: Counter = Counter::new();
 /// Fountain decoder dependency entries examined during propagation.
 pub static FEC_FOUNTAIN_DECODER_PROPAGATION_WORK: Counter = Counter::new();
+/// Repair-ACK report entries emitted toward the peer (TODO-1006).
+pub static FEC_REPAIR_ACK_ENTRIES_SENT: Counter = Counter::new();
+/// Repair-ACK report entries consumed from the peer and fed to
+/// congestion control as unmasked wire loss (TODO-1006).
+pub static FEC_REPAIR_ACK_ENTRIES_RECEIVED: Counter = Counter::new();
+/// Repair-ACK datagrams dropped because their epoch does not match the
+/// active send profile - reports refer to a rotated sequence space.
+pub static FEC_REPAIR_ACK_STALE: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
     let _ = value.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

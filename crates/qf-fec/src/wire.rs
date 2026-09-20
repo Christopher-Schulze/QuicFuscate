@@ -16,7 +16,32 @@ pub const MAX_TOTAL_COUNT: u16 = super::MAX_FOUNTAIN_SOURCE_SYMBOLS as u16;
 pub const MAX_GF8_BLOCK_SOURCE_COUNT: usize = u8::MAX as usize;
 
 const FLAG_SYSTEMATIC: u8 = 1 << 0;
-const KNOWN_FLAGS: u8 = FLAG_SYSTEMATIC;
+const FLAG_REPAIR_ACK: u8 = 1 << 1;
+const KNOWN_FLAGS: u8 = FLAG_SYSTEMATIC | FLAG_REPAIR_ACK;
+
+/// One recovered-source report entry inside a repair-ACK datagram
+/// (TODO-1006, draft-zheng-quic-fec-extension style feedback).
+///
+/// `id` is the global wire sequence the receiver's FEC decoder
+/// reconstructed; `payload_len` is the recovered source payload length so
+/// the sender can feed congestion control the masked loss size - the wire
+/// sequence does not map back to a QUIC packet number at this layer, so
+/// the byte length is the only accounting signal carried.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RepairAckEntry {
+    /// Global wire sequence of a decoder-recovered source datagram.
+    pub id: u64,
+    /// Recovered source payload length in bytes.
+    pub payload_len: u16,
+}
+
+/// Serialized size of one [`RepairAckEntry`]: u64 id + u16 length.
+pub const REPAIR_ACK_ENTRY_LEN: usize = 8 + 2;
+/// Entries carried by one repair-ACK datagram: the 32-byte header, a
+/// 2-byte count, and 64 * 10 bytes of entries total 674 bytes - well
+/// inside any path MTU, so a report never fragments.
+pub const MAX_REPAIR_ACK_ENTRIES: usize = 64;
+const REPAIR_ACK_COUNT_LEN: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[doc(hidden)]
@@ -339,6 +364,9 @@ pub enum WireError {
     RepairOutsideWindow,
     EpochProfileMismatch,
     ResourceExhausted,
+    /// Returned by `parse_packet` when the datagram is a repair-ACK report
+    /// (never a coded packet), and by `parse_repair_ack` when it is not.
+    RepairAckFrame,
 }
 
 impl fmt::Display for WireError {
@@ -352,6 +380,16 @@ impl std::error::Error for WireError {}
 #[inline]
 pub fn is_framed(datagram: &[u8]) -> bool {
     datagram.starts_with(&MAGIC)
+}
+
+/// Fast repair-ACK discrimination for the framed-input path (TODO-1006).
+/// A repair-ACK is feedback for the sender, not a coded packet: callers
+/// must consume it before handing the datagram to the FEC decoder.
+#[inline]
+pub fn is_repair_ack(datagram: &[u8]) -> bool {
+    datagram.len() >= HEADER_LEN
+        && datagram.starts_with(&MAGIC)
+        && datagram[3] & FLAG_REPAIR_ACK != 0
 }
 
 pub fn write_packet(
@@ -400,6 +438,9 @@ pub fn parse_packet(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> 
     if datagram[7] != 0 {
         return Err(WireError::UnsupportedFlags(datagram[7]));
     }
+    if datagram[3] & FLAG_REPAIR_ACK != 0 {
+        return Err(WireError::RepairAckFrame);
+    }
 
     let systematic = datagram[3] & FLAG_SYSTEMATIC != 0;
     let payload_len = u16::from_be_bytes([datagram[30], datagram[31]]) as usize;
@@ -430,6 +471,121 @@ pub fn parse_packet(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> 
     .validate()?;
 
     Ok(ParsedWirePacket { meta, payload: &datagram[HEADER_LEN..] })
+}
+
+/// A parsed repair-ACK datagram (TODO-1006). The payload is decoded
+/// lazily through [`ParsedRepairAck::entries`] - no allocation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParsedRepairAck<'a> {
+    /// Wire epoch the reporting receiver observed on the recovered
+    /// sources - lets the sender drop reports that refer to a sequence
+    /// space it already rotated away from.
+    pub epoch: u32,
+    entries: &'a [u8],
+}
+
+impl ParsedRepairAck<'_> {
+    /// Number of reported recoveries.
+    pub fn len(&self) -> usize {
+        self.entries.len() / REPAIR_ACK_ENTRY_LEN
+    }
+
+    /// True when the report carries no entries (kept for completeness;
+    /// the writer never emits an empty report).
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Iterates the reported `(id, payload_len)` pairs in wire order.
+    pub fn entries(&self) -> impl Iterator<Item = RepairAckEntry> + '_ {
+        self.entries.as_chunks::<REPAIR_ACK_ENTRY_LEN>().0.iter().map(|chunk| RepairAckEntry {
+            id: u64::from_be_bytes(chunk[..8].try_into().expect("entry id")),
+            payload_len: u16::from_be_bytes([chunk[8], chunk[9]]),
+        })
+    }
+}
+
+/// Serializes one repair-ACK report datagram (TODO-1006). Layout reuses
+/// the standard 32-byte header (magic, version, `FLAG_REPAIR_ACK`, epoch)
+/// followed by a u16 count and `count` 10-byte entries.
+pub fn write_repair_ack(
+    epoch: u32,
+    entries: &[RepairAckEntry],
+    output: &mut [u8],
+) -> Result<usize, WireError> {
+    if entries.is_empty() || entries.len() > MAX_REPAIR_ACK_ENTRIES {
+        return Err(WireError::PayloadTooLarge);
+    }
+    let payload_len = REPAIR_ACK_COUNT_LEN
+        .checked_add(
+            entries.len().checked_mul(REPAIR_ACK_ENTRY_LEN).ok_or(WireError::PayloadTooLarge)?,
+        )
+        .ok_or(WireError::PayloadTooLarge)?;
+    let wire_len = HEADER_LEN.checked_add(payload_len).ok_or(WireError::PayloadTooLarge)?;
+    if output.len() < wire_len {
+        return Err(WireError::BufferTooShort);
+    }
+
+    output[..HEADER_LEN].fill(0);
+    output[0..2].copy_from_slice(&MAGIC);
+    output[2] = VERSION;
+    output[3] = FLAG_REPAIR_ACK;
+    output[8..12].copy_from_slice(&epoch.to_be_bytes());
+    output[30..32].copy_from_slice(&(payload_len as u16).to_be_bytes());
+    output[HEADER_LEN..HEADER_LEN + REPAIR_ACK_COUNT_LEN]
+        .copy_from_slice(&(entries.len() as u16).to_be_bytes());
+    for (index, entry) in entries.iter().enumerate() {
+        let offset = HEADER_LEN + REPAIR_ACK_COUNT_LEN + index * REPAIR_ACK_ENTRY_LEN;
+        output[offset..offset + 8].copy_from_slice(&entry.id.to_be_bytes());
+        output[offset + 8..offset + REPAIR_ACK_ENTRY_LEN]
+            .copy_from_slice(&entry.payload_len.to_be_bytes());
+    }
+    Ok(wire_len)
+}
+
+/// Parses one repair-ACK report datagram (TODO-1006). Rejects anything
+/// that is not exactly a well-formed report - unknown flags, trailing
+/// bytes, or a count that does not match the payload length.
+pub fn parse_repair_ack(datagram: &[u8]) -> Result<ParsedRepairAck<'_>, WireError> {
+    if datagram.len() < HEADER_LEN {
+        return Err(WireError::BufferTooShort);
+    }
+    if datagram[0..2] != MAGIC {
+        return Err(WireError::BadMagic);
+    }
+    if datagram[2] != VERSION {
+        return Err(WireError::UnsupportedVersion(datagram[2]));
+    }
+    if datagram[3] & FLAG_REPAIR_ACK == 0 {
+        return Err(WireError::RepairAckFrame);
+    }
+    if datagram[3] & !KNOWN_FLAGS != 0 {
+        return Err(WireError::UnsupportedFlags(datagram[3]));
+    }
+    if datagram[7] != 0 {
+        return Err(WireError::UnsupportedFlags(datagram[7]));
+    }
+    let payload_len = u16::from_be_bytes([datagram[30], datagram[31]]) as usize;
+    if datagram.len() != HEADER_LEN + payload_len {
+        return Err(WireError::LengthMismatch);
+    }
+    let payload = &datagram[HEADER_LEN..];
+    if payload.len() < REPAIR_ACK_COUNT_LEN {
+        return Err(WireError::BufferTooShort);
+    }
+    let count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    if count == 0
+        || count > MAX_REPAIR_ACK_ENTRIES
+        || payload.len() != REPAIR_ACK_COUNT_LEN + count * REPAIR_ACK_ENTRY_LEN
+    {
+        return Err(WireError::LengthMismatch);
+    }
+    Ok(ParsedRepairAck {
+        epoch: u32::from_be_bytes(
+            datagram[8..12].try_into().map_err(|_| WireError::BufferTooShort)?,
+        ),
+        entries: &payload[REPAIR_ACK_COUNT_LEN..],
+    })
 }
 
 pub fn write_source_symbol(payload: &[u8], output: &mut [u8]) -> Result<usize, WireError> {
@@ -501,6 +657,58 @@ mod tests {
         let parsed = parse_packet(&output[..written]).expect("parse packet");
         assert_eq!(parsed.meta, meta);
         assert_eq!(parsed.payload, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn repair_ack_round_trip_and_frame_isolation() {
+        let entries = [
+            RepairAckEntry { id: 42, payload_len: 1200 },
+            RepairAckEntry { id: u64::MAX, payload_len: 0 },
+        ];
+        let mut output = [0u8; HEADER_LEN + REPAIR_ACK_COUNT_LEN + 2 * REPAIR_ACK_ENTRY_LEN];
+        let written = write_repair_ack(9, &entries, &mut output).expect("repair ack");
+        assert_eq!(written, output.len());
+        assert!(is_framed(&output[..written]));
+        assert!(is_repair_ack(&output[..written]));
+
+        let parsed = parse_repair_ack(&output[..written]).expect("parse repair ack");
+        assert_eq!(parsed.epoch, 9);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed.entries().collect::<Vec<_>>(), entries);
+
+        // A repair-ACK must never enter the coded-packet path, and a
+        // coded packet must never parse as a repair-ACK.
+        assert_eq!(parse_packet(&output[..written]), Err(WireError::RepairAckFrame));
+        let meta = WirePacketMeta {
+            profile: profile(WireCodec::Gf8),
+            window: 0,
+            sequence: 3,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 3,
+            systematic: true,
+        };
+        let mut coded = [0u8; HEADER_LEN + 3];
+        let coded_len = write_packet(meta, &[1, 2, 3], &mut coded).expect("coded packet");
+        assert!(!is_repair_ack(&coded[..coded_len]));
+        assert_eq!(parse_repair_ack(&coded[..coded_len]), Err(WireError::RepairAckFrame));
+    }
+
+    #[test]
+    fn repair_ack_rejects_bad_shape() {
+        let mut output = [0u8; HEADER_LEN + REPAIR_ACK_COUNT_LEN + REPAIR_ACK_ENTRY_LEN];
+        let entries = [RepairAckEntry { id: 1, payload_len: 1 }];
+        assert_eq!(write_repair_ack(1, &[], &mut output), Err(WireError::PayloadTooLarge));
+        let written = write_repair_ack(1, &entries, &mut output).expect("repair ack");
+        assert_eq!(parse_repair_ack(&output[..written - 1]), Err(WireError::LengthMismatch));
+        // Count field disagreeing with payload length.
+        let mut corrupt = output;
+        corrupt[HEADER_LEN] = 0;
+        corrupt[HEADER_LEN + 1] = 2;
+        assert_eq!(parse_repair_ack(&corrupt[..written]), Err(WireError::LengthMismatch));
+        // Unknown flag bits are still rejected on the report path.
+        let mut bad_flags = output;
+        bad_flags[3] |= 0x80;
+        assert_eq!(parse_repair_ack(&bad_flags[..written]), Err(WireError::UnsupportedFlags(0x82)));
     }
 
     #[test]

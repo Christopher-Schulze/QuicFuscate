@@ -36,8 +36,8 @@ IETF/IRTF direction shows as effective, and squeeze remaining overhead.
 3. **Repair-ACK feedback (draft-zheng-quic-fec-extension)** - receiver
    tells sender which sources FEC recovered; sender suppresses redundant
    retransmission and can count the loss for CC (pairs with TODO-1006).
-   Check whether our wire receiver can report recovered source IDs back
-   cheaply (small side-channel or folded into ACK-adjacent metadata).
+   DONE (2026-09-21): implemented end-to-end - see the Repair-ACK section
+   below for wire format, consumption semantics, and test coverage.
 
 4. **Convolutional/overlapping generations (rQUIC)** - overlap coding
    windows so repair capacity spreads uniformly instead of block-aligned;
@@ -66,11 +66,9 @@ IETF/IRTF direction shows as effective, and squeeze remaining overhead.
    divergence rationale (or alignment patch if their design is strictly
    better).
 
-3. Repair-ACK feedback - `crates/qf-fec/src/receiver.rs` already knows
-   recovered `global_id`s (`emit_recovered`). Add a `recovered_ids()`
-   report consumable by the connection layer; sender-side consumption is
-   shared with TODO-1006 option (a). Deliverable: the reporting side +
-   wire-format proposal; sender accounting lands with 1006.
+3. Repair-ACK feedback - DONE (2026-09-21): reporting side, wire format,
+   and sender-side CC accounting all landed. Details in the Repair-ACK
+   section below.
 
 4. Convolutional gap analysis - `crates/qf-fec/src/interleaved.rs`,
    `variants.rs`: document where our interleaved/streaming-burst overlaps
@@ -134,8 +132,8 @@ Why this satisfies QUIRL: QUIC DATAGRAM frames are never retransmitted
 bulk inside the tunnel retransmits end-to-end; spending outer FEC repair
 on it pays for protection the inner stack duplicates. Protected classes
 keep full framing + repair. Items 2-4 unchanged: NWCRG rejected-by-design
-(stronger HKDF seed already shipped), Repair-ACK stays open under
-TODO-1006 (its wire-format decision is independent of class gating).
+(stronger HKDF seed already shipped), Repair-ACK landed 2026-09-21
+(see section below; its wire format is independent of class gating).
 
 Verified on Omega (2026-09-20, `tun-e2e-netns.sh` + ready-hook): with 3%
 netem loss on both underlay veths, a 15 s iperf3 TCP run through the
@@ -179,3 +177,51 @@ representable; the wire format needs the window base carried in the repair
 header so decoders can bound the equation set. Sized as a separate
 implementation TODO - it touches encoder windowing, decoder equation
 scoping, and the wire identity (`REPAIR_LANE_BITS` layout) simultaneously.
+
+## Repair-ACK implementation (item 3, DONE 2026-09-21; closes TODO-1006 option (a))
+
+Wire format (`crates/qf-fec/src/wire.rs`): the report reuses the standard
+32-byte FEC header with dedicated `FLAG_REPAIR_ACK` (bit 1, registered in
+`KNOWN_FLAGS`). Payload = u16 count + up to `MAX_REPAIR_ACK_ENTRIES` (64)
+entries of `REPAIR_ACK_ENTRY_LEN` (10 B: u64 global wire id + u16 payload
+len) => worst case 674 B, always MTU-bounded. `parse_packet` rejects it
+with `WireError::RepairAckFrame` so the decoder can never confuse it with
+a coded packet; `is_repair_ack`/`write_repair_ack`/`parse_repair_ack` are
+re-exported through `src/fec/wire.rs`.
+
+Receiver side (`crates/qf-fec/src/receiver.rs`): `emit_recovered` enqueues
+a `RepairAckEntry { id, payload_len }` into a bounded `pending_recovered`
+deque (`RECOVERED_REPORT_CAP` = 1024, oldest dropped on overflow).
+`receive_borrowed` tracks `last_rx_epoch`; `has_pending_recovered`,
+`drain_recovered`, and `last_rx_epoch` expose the queue.
+
+Sender side: `QuicFuscateConnection::enqueue_repair_ack_report`
+(`src/core/connection/send.rs`) drains the queue into one report datagram,
+front-queues it as `wire_meta: None` + `is_systematic: false` + non-bulk +
+`congestion_controlled: false` (emits raw, consumes no `fec_tx_sequence`
+slot, reorder permutation never displaces it, `telemetry_shape` no longer
+counts it as source payload). Best-effort like an ACK - a lost report is
+covered by the next recovery burst.
+
+Consumption (`src/core/connection.rs`): all three framed receive paths
+(`recv_on_path`, `recv_on_path_mut`, `recv_pooled_block_on_path`) check
+`is_repair_ack` before the decoder and hand off to `consume_repair_ack`,
+which validates the report epoch against the active `fec_tx_profile`
+(stale epochs increment `FEC_REPAIR_ACK_STALE` and are dropped) and calls
+`Connection::record_fec_wire_loss` per entry. That hook routes through
+`recovery.on_loss_packet(0, payload_len, now)` - the PN-less loss path -
+so the CC's configured `fec_on_lost` callback increments the adaptive
+feedback counters exactly once (no manual counter writes; verified by
+test). Wire truth now reaches CC for losses FEC masked.
+
+Telemetry (`crates/qf-telemetry`): `FEC_REPAIR_ACK_ENTRIES_SENT`,
+`FEC_REPAIR_ACK_ENTRIES_RECEIVED`, `FEC_REPAIR_ACK_STALE`, exported as
+`quicfuscate_fec_repair_ack_entries_{sent,received}_total` and
+`quicfuscate_fec_repair_ack_stale_total`.
+
+Tests: wire round-trip/reject cases in `qf-fec::wire`, receiver
+pending/drain/epoch tracking in `qf-fec::receiver`, and core round-trip +
+stale-epoch drop in `core::connection::tests`
+(`repair_ack_round_trip_reports_masked_wire_loss_to_cc`,
+`repair_ack_stale_epoch_is_dropped`). 1767 lib tests green, clippy clean,
+`zero_copy_dgram` build verified.

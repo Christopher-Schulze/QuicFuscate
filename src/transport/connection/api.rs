@@ -1005,6 +1005,22 @@ impl Connection {
             },
         );
     }
+
+    /// TODO-1006 repair-ACK consumption: the peer's FEC receiver reported
+    /// that it reconstructed one of our wire datagrams - a wire loss our
+    /// loss detector never saw because the recovered QUIC packet was
+    /// ACKed normally (the RFC 9265 masking channel). Feed it to the
+    /// congestion controller as a real loss event so the wire truth
+    /// reaches CC. The CC-internal `fec_on_lost` hook then increments the
+    /// callback counters, so the adaptive controller's sender-side
+    /// estimate tracks wire loss rather than only post-recovery declared
+    /// loss. The report carries wire sequences, not QUIC packet numbers,
+    /// so the PN-less loss path is used; a true PN that still declares
+    /// lost later over-signals slightly, which is the conservative
+    /// direction.
+    pub(crate) fn record_fec_wire_loss(&mut self, lost_bytes: usize, now: Instant) {
+        self.recovery.on_loss_packet(0, lost_bytes, now);
+    }
     /// Adjust ACK-eliciting threshold at runtime
     pub fn set_ack_eliciting_threshold(&mut self, thr: u64) {
         self.config.ack_eliciting_threshold = thr.max(1);

@@ -974,6 +974,12 @@ impl QuicFuscateConnection {
         // Framed wire datagrams only need a slice read - skip the pool block
         // checkout + copy + free round-trip entirely for the common FEC path.
         if wire::is_framed(data) {
+            // TODO-1006: a repair-ACK report is sender feedback, not a
+            // coded packet - consume it before the decoder sees it.
+            if wire::is_repair_ack(data) {
+                self.consume_repair_ack(data);
+                return Ok(data.len());
+            }
             let mut recovered_packets = std::mem::take(&mut self.fec_receive_scratch);
             let receive_report = match self.framed_wire_report(data, &mut recovered_packets) {
                 Ok(report) => report,
@@ -1013,6 +1019,10 @@ impl QuicFuscateConnection {
     ) -> Result<usize, crate::error::ConnectionError> {
         let len = data.len();
         if wire::is_framed(data) {
+            if wire::is_repair_ack(data) {
+                self.consume_repair_ack(data);
+                return Ok(len);
+            }
             let mut deliveries = std::mem::take(&mut self.fec_delivery_scratch);
             let receive_report = match self.framed_wire_report_borrowed(data, &mut deliveries) {
                 Ok(report) => report,
@@ -1039,6 +1049,37 @@ impl QuicFuscateConnection {
             .do_tls_handshake(self.tls_ch_override_template.as_deref())
             .map_err(|e| crate::error::ConnectionError::Transport(e.to_string()))?;
         Ok(len)
+    }
+
+    /// TODO-1006 repair-ACK consumer (sender side): the peer reports which
+    /// wire sources its FEC decoder recovered - exactly the slice of wire
+    /// loss our loss detector never saw because recovered QUIC packets get
+    /// ACKed normally (RFC 9265 masking). Each reported entry feeds
+    /// congestion control as a real loss event and the FEC callback
+    /// counters so the adaptive controller's sender-side estimate tracks
+    /// wire truth instead of only post-recovery declared loss. Reports
+    /// stamped with a stale epoch are dropped: a profile rotation already
+    /// reset the sequence space they refer to. Malformed reports are
+    /// logged and ignored - feedback never tears down the connection.
+    fn consume_repair_ack(&mut self, data: &[u8]) {
+        let report = match wire::parse_repair_ack(data) {
+            Ok(report) => report,
+            Err(error) => {
+                debug!("dropping malformed FEC repair-ack datagram: {error}");
+                return;
+            }
+        };
+        if self.fec_tx_profile.map(|profile| profile.epoch) != Some(report.epoch) {
+            crate::telemetry::FEC_REPAIR_ACK_STALE.inc();
+            return;
+        }
+        let now = self.clock.now();
+        let mut count = 0u64;
+        for entry in report.entries() {
+            self.conn.record_fec_wire_loss(entry.payload_len as usize, now);
+            count += 1;
+        }
+        crate::telemetry::FEC_REPAIR_ACK_ENTRIES_RECEIVED.inc_by(count);
     }
 
     /// Parse a framed wire datagram through the FEC receiver. Returns `Err(())`
@@ -1120,6 +1161,11 @@ impl QuicFuscateConnection {
         }
 
         if wire::is_framed(&block[..len]) {
+            if wire::is_repair_ack(&block[..len]) {
+                self.consume_repair_ack(&block[..len]);
+                self.optimization_manager.free_block(block);
+                return Ok(len);
+            }
             let mut deliveries = std::mem::take(&mut self.fec_delivery_scratch);
             let receive_report =
                 match self.framed_wire_report_borrowed(&block[..len], &mut deliveries) {

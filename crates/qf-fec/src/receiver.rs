@@ -15,10 +15,11 @@ const RECEIVE_WINDOW_LIMIT: usize = 4;
 type RepairKey = (u64, u16, u8);
 
 pub use crate::wire::{
-    is_framed, parse_packet, source_symbol_payload, write_packet, write_source_symbol,
-    ParsedWirePacket, WireCodec, WireError, WirePacketMeta, WireProfile, WireReceiveReport,
-    HEADER_LEN, MAGIC, MAX_DATAGRAM_OVERHEAD, MAX_GF8_BLOCK_SOURCE_COUNT, MAX_SOURCE_COUNT,
-    MAX_TOTAL_COUNT, SOURCE_LENGTH_LEN, SYSTEMATIC_REPAIR_INDEX, VERSION,
+    is_framed, is_repair_ack, parse_packet, parse_repair_ack, source_symbol_payload, write_packet,
+    write_repair_ack, write_source_symbol, ParsedRepairAck, ParsedWirePacket, RepairAckEntry,
+    WireCodec, WireError, WirePacketMeta, WireProfile, WireReceiveReport, HEADER_LEN, MAGIC,
+    MAX_DATAGRAM_OVERHEAD, MAX_GF8_BLOCK_SOURCE_COUNT, MAX_REPAIR_ACK_ENTRIES, MAX_SOURCE_COUNT,
+    MAX_TOTAL_COUNT, REPAIR_ACK_ENTRY_LEN, SOURCE_LENGTH_LEN, SYSTEMATIC_REPAIR_INDEX, VERSION,
 };
 use crate::wire::{source_datagram_payload, WireMode};
 
@@ -248,6 +249,7 @@ impl ReceiveWindow {
         &mut self,
         packet: FecPacket,
         output: &mut Vec<WireDelivery>,
+        pending: &mut VecDeque<RepairAckEntry>,
     ) -> Result<Option<usize>, WireError> {
         let global_id = if self.profile.codec == WireCodec::Fountain {
             self.window_start().saturating_add(packet.id)
@@ -265,6 +267,13 @@ impl ReceiveWindow {
             .map_err(|_| WireError::PayloadTooLarge)?;
         recovered.seq = global_id;
         output.push(WireDelivery::Owned(recovered));
+        if pending.len() >= RECOVERED_REPORT_CAP {
+            pending.pop_front();
+        }
+        pending.push_back(RepairAckEntry {
+            id: global_id,
+            payload_len: payload_len.min(u16::MAX as usize) as u16,
+        });
         Ok(Some(payload_len))
     }
 
@@ -293,6 +302,7 @@ impl ReceiveWindow {
         payload: &[u8],
         payload_off: usize,
         output: &mut Vec<WireDelivery>,
+        pending: &mut VecDeque<RepairAckEntry>,
     ) -> Result<WireReceiveReport, WireError> {
         let systematic_payload =
             if meta.systematic { Some(source_datagram_payload(payload)?) } else { None };
@@ -362,7 +372,7 @@ impl ReceiveWindow {
                 recovered = self.decoder.get_partial_result();
             }
             for packet in recovered {
-                if let Some(payload_len) = self.emit_recovered(packet, output)? {
+                if let Some(payload_len) = self.emit_recovered(packet, output, pending)? {
                     report.decoded_packets += 1;
                     report.recovered_packets += 1;
                     report.recovered_payload_bytes += payload_len;
@@ -381,7 +391,21 @@ pub struct WireFecReceiver {
     /// Scratch reused by the owned `receive` wrapper so the compat path does
     /// not allocate a delivery vector per datagram.
     delivery_scratch: Vec<WireDelivery>,
+    /// TODO-1006 repair-ACK backlog: global ids the decoder recovered,
+    /// waiting for the connection layer to report them back to the
+    /// sender. Bounded FIFO - reports are best-effort feedback, so the
+    /// oldest entries drop first under sustained recovery bursts.
+    pending_recovered: VecDeque<RepairAckEntry>,
+    /// Wire epoch of the most recent framed datagram. Stamped onto
+    /// emitted repair-ACK reports so the peer can drop reports that
+    /// refer to a rotated sequence space.
+    last_rx_epoch: Option<u32>,
 }
+
+/// Upper bound on queued repair-ACK entries (TODO-1006). Larger than any
+/// plausible recovery burst between two send polls; overflow drops the
+/// oldest report, which is the direction that loses the least signal.
+const RECOVERED_REPORT_CAP: usize = 1024;
 
 impl WireFecReceiver {
     pub fn new(mem_pool: Arc<MemoryPool>) -> Self {
@@ -392,6 +416,8 @@ impl WireFecReceiver {
             policy: FecRuntimePolicy::detect(),
             fountain_seed: DEFAULT_FOUNTAIN_SEED,
             delivery_scratch: Vec::new(),
+            pending_recovered: VecDeque::new(),
+            last_rx_epoch: None,
         }
     }
 
@@ -402,6 +428,28 @@ impl WireFecReceiver {
         }
         self.fountain_seed = seed;
         self.windows.clear();
+    }
+
+    /// TODO-1006 repair-ACK reporting half: true while recovered source
+    /// ids wait to be reported back to the sender.
+    pub fn has_pending_recovered(&self) -> bool {
+        !self.pending_recovered.is_empty()
+    }
+
+    /// Drains up to `out.len()` queued recovery reports in FIFO order.
+    /// Returns the number of entries written.
+    pub fn drain_recovered(&mut self, out: &mut [RepairAckEntry]) -> usize {
+        let count = out.len().min(self.pending_recovered.len());
+        for (slot, entry) in out.iter_mut().zip(self.pending_recovered.drain(..count)) {
+            *slot = entry;
+        }
+        count
+    }
+
+    /// Wire epoch observed on the most recent framed datagram, stamped
+    /// onto emitted repair-ACK reports.
+    pub fn last_rx_epoch(&self) -> Option<u32> {
+        self.last_rx_epoch
     }
 
     /// Borrowed-delivery receive: systematic datagrams are reported as ranges
@@ -442,7 +490,14 @@ impl WireFecReceiver {
         // `parsed.payload` is a sub-slice of `datagram` by construction
         // (`parse_packet` slices `datagram[HEADER_LEN..]`).
         let payload_off = parsed.payload.as_ptr() as usize - datagram.as_ptr() as usize;
-        self.windows[window_index].receive(parsed.meta, parsed.payload, payload_off, output)
+        self.last_rx_epoch = Some(parsed.meta.profile.epoch);
+        self.windows[window_index].receive(
+            parsed.meta,
+            parsed.payload,
+            payload_off,
+            output,
+            &mut self.pending_recovered,
+        )
     }
 
     /// Owned-packet wrapper over [`Self::receive_borrowed`]: borrowed ranges
@@ -956,6 +1011,69 @@ mod tests {
         assert_eq!(report.decoded_packets, 1);
         assert_eq!(report.recovered_packets, 1);
         assert_eq!(report.recovered_payload_bytes, sources[1].len());
+    }
+
+    #[test]
+    fn receiver_queues_recovered_ids_for_repair_ack_report() {
+        let pool = test_pool();
+        let sources = [vec![0x10; 31], vec![0x20; 47], vec![0x30; 63], vec![0x40; 79]];
+        let protected_sources = sources.each_ref().map(|source| protected_datagram(source));
+        let mut encoder = crate::Encoder8::new(4, 6);
+        for (id, _) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, &protected_sources[id], &pool));
+        }
+        let repair = encoder.generate_repair_packet(0, &pool).expect("repair packet");
+        let profile = WireProfile {
+            epoch: 11,
+            codec: WireCodec::Gf8,
+            source_count: 4,
+            total_count: 6,
+            interleave_depth: 1,
+        };
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let mut wire = vec![0u8; 256];
+        let mut decoded = Vec::new();
+        assert!(!receiver.has_pending_recovered());
+        assert_eq!(receiver.last_rx_epoch(), None);
+
+        for source_id in [0usize, 2, 3] {
+            let meta = WirePacketMeta {
+                profile,
+                window: 0,
+                sequence: source_id as u64,
+                repair_index: SYSTEMATIC_REPAIR_INDEX,
+                block_index: 0,
+                systematic: true,
+            };
+            let written =
+                write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
+            receiver.receive(&wire[..written], &mut decoded).expect("source receive");
+        }
+        // Delivered-but-unrecovered sources are not reported.
+        assert!(!receiver.has_pending_recovered());
+        assert_eq!(receiver.last_rx_epoch(), Some(11));
+
+        let repair_meta = WirePacketMeta {
+            profile,
+            window: 0,
+            sequence: repair.id,
+            repair_index: 0,
+            block_index: 0,
+            systematic: false,
+        };
+        let repair_payload = repair.payload_slice().expect("repair payload");
+        let written = write_packet(repair_meta, repair_payload, &mut wire).expect("repair wire");
+        receiver.receive(&wire[..written], &mut decoded).expect("repair receive");
+
+        assert!(receiver.has_pending_recovered());
+        let mut entries = [RepairAckEntry::default(); 4];
+        let count = receiver.drain_recovered(&mut entries);
+        assert_eq!(count, 1);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[0].payload_len as usize, sources[1].len());
+        assert!(!receiver.has_pending_recovered());
+        // The drain consumed the report: a second drain returns nothing.
+        assert_eq!(receiver.drain_recovered(&mut entries), 0);
     }
 
     #[test]

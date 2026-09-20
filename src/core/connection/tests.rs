@@ -42,6 +42,14 @@ fn fec_packet(id: u64, payload: &[u8], coefficients: Option<&[u8]>) -> FecPacket
     FecPacket::new(id, Some(data), payload.len(), coefficients.is_none(), coeffs, coeff_len, pool)
 }
 
+/// Wire source-symbol layout: u16 length prefix + datagram payload.
+fn protected_datagram(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(wire::SOURCE_LENGTH_LEN + payload.len());
+    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
 fn test_send_info() -> crate::transport::SendInfo {
     crate::transport::SendInfo {
         from: "127.0.0.1:29101".parse().unwrap(),
@@ -599,6 +607,129 @@ fn pending_path_control_preempts_buffered_fec_datagram() {
         (new_local, new_peer, true, false, 1)
     );
     assert!(!wire::is_framed(&wire[..written]));
+}
+
+/// TODO-1006 end-to-end at connection scope: a decoder recovery on the
+/// reporter side drains into one repair-ACK wire datagram, and the peer
+/// consumes it as an unmasked wire loss for congestion control and the
+/// adaptive-FEC callback counters.
+#[test]
+fn repair_ack_round_trip_reports_masked_wire_loss_to_cc() {
+    let mut reporter = test_connection();
+    let mut sender = test_connection();
+    let profile = WireProfile {
+        epoch: 11,
+        codec: wire::WireCodec::Gf8,
+        source_count: 4,
+        total_count: 6,
+        interleave_depth: 1,
+    };
+    let pool = reporter.optimization_manager.memory_pool();
+    let sources = [vec![0x10u8; 31], vec![0x20; 47], vec![0x30; 63], vec![0x40; 79]];
+    let protected: Vec<Vec<u8>> = sources.iter().map(|source| protected_datagram(source)).collect();
+    let mut encoder = qf_fec::Encoder8::new(4, 6);
+    for (id, protected_source) in protected.iter().enumerate() {
+        // The encoder codes source symbols (length prefix + protected
+        // datagram); the wire carries only the protected datagram.
+        let mut symbol_buf = vec![0u8; wire::SOURCE_LENGTH_LEN + protected_source.len()];
+        let symbol_len =
+            wire::write_source_symbol(protected_source, &mut symbol_buf).expect("source symbol");
+        encoder.take_packet(fec_packet(id as u64, &symbol_buf[..symbol_len], None));
+    }
+    let repair = encoder.generate_repair_packet(0, &pool).expect("repair packet");
+
+    // Sources 0, 2, 3 arrive framed; source 1 is the wire loss the
+    // decoder repairs - exactly the masked-loss case from TODO-1006.
+    // `framed_wire_report` drives the wire receiver directly so the test
+    // does not need deliverable QUIC payloads.
+    let mut wire_buf = vec![0u8; 256];
+    let mut scratch = Vec::new();
+    for source_id in [0usize, 2, 3] {
+        let meta = WirePacketMeta {
+            profile,
+            window: 0,
+            sequence: source_id as u64,
+            repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+        };
+        let written =
+            wire::write_packet(meta, &protected[source_id], &mut wire_buf).expect("source wire");
+        reporter.framed_wire_report(&wire_buf[..written], &mut scratch).expect("source receive");
+    }
+    let repair_meta = WirePacketMeta {
+        profile,
+        window: 0,
+        sequence: repair.id,
+        repair_index: 0,
+        block_index: 0,
+        systematic: false,
+    };
+    let repair_payload = repair.payload_slice().expect("repair payload").to_vec();
+    let written = wire::write_packet(repair_meta, &repair_payload, &mut wire_buf).expect("repair");
+    let mut decoded = Vec::new();
+    reporter.fec_wire_receiver.receive(&wire_buf[..written], &mut decoded).expect("repair receive");
+
+    assert!(reporter.fec_wire_receiver.has_pending_recovered());
+
+    // The production call site gates on `is_established`, which needs a
+    // completed TLS handshake the bench pair does not have; the enqueue +
+    // emission mechanics under test are identical.
+    reporter.enqueue_repair_ack_report().expect("enqueue report");
+    assert!(!reporter.fec_wire_receiver.has_pending_recovered());
+
+    let mut out = [0u8; 2048];
+    let mut report_len = None;
+    for _ in 0..8 {
+        let (written, _info) = reporter.send_with_info(&mut out).expect("send poll");
+        if wire::is_repair_ack(&out[..written]) {
+            report_len = Some(written);
+            break;
+        }
+    }
+    let written = report_len.expect("emitted datagrams must include the repair-ACK report");
+    let parsed = wire::parse_repair_ack(&out[..written]).expect("report parses");
+    assert_eq!(
+        parsed.entries().collect::<Vec<_>>(),
+        [wire::RepairAckEntry { id: 1, payload_len: sources[1].len() as u16 }]
+    );
+
+    // Sender side: the report's epoch must match the active send profile.
+    // Baseline first: the bench pair's own recovery can already hold
+    // declared losses - the report must add exactly the one recovery.
+    sender.fec_tx_profile = Some(profile);
+    let baseline = sender.conn.take_fec_callback_feedback().lost_packets;
+    sender
+        .recv_on_path(&out[..written], sender.peer_addr, sender.local_addr)
+        .expect("repair-ack consume");
+    let feedback = sender.conn.take_fec_callback_feedback();
+    assert_eq!(
+        feedback.lost_packets,
+        baseline + 1,
+        "the recovered wire loss must reach the sender-side loss accounting"
+    );
+}
+
+/// A report stamped with an epoch the sender already rotated away from
+/// must be dropped without touching loss accounting (TODO-1006).
+#[test]
+fn repair_ack_stale_epoch_is_dropped() {
+    let mut sender = test_connection();
+    sender.fec_tx_profile = Some(WireProfile {
+        epoch: 12,
+        codec: wire::WireCodec::Gf8,
+        source_count: 4,
+        total_count: 6,
+        interleave_depth: 1,
+    });
+    let mut out = [0u8; 128];
+    let entries = [wire::RepairAckEntry { id: 1, payload_len: 1200 }];
+    let written = wire::write_repair_ack(11, &entries, &mut out).expect("repair ack");
+    let baseline = sender.conn.take_fec_callback_feedback().lost_packets;
+    sender
+        .recv_on_path(&out[..written], sender.peer_addr, sender.local_addr)
+        .expect("stale consume");
+    assert_eq!(sender.conn.take_fec_callback_feedback().lost_packets, baseline);
 }
 
 #[test]
