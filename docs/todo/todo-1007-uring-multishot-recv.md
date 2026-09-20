@@ -103,10 +103,24 @@ DONE (steps 1-2, kernel-verified):
   6.17 - counted anyway; delivery resumes after) both green; the whole lib
   suite green, clippy clean.
 
-OPEN (steps 3-4):
-- A/B measurement vs the GRO batch path on Omega (`tun-e2e-bandwidth-netns.sh`
-  or iperf over the tunnel): multishot trades UDP_GRO coalescing for zero
-  re-arm; on the connected client socket the bet is re-arm elimination wins
-  at high pps, but the number must be measured, not assumed. Default stays
-  opt-in until the numbers land.
+MEASURED (step 3, 2026-09, Omega kernel 6.17, loopback flood bench
+`recv_flood_bench_batch_vs_multishot`, `QF_URING_BENCH=1`, 20k x 1200B
+datagrams, pre-buffered then drained):
+- UringRecvBatch+GRO: 313 drain rounds for 20000 datagrams (0.016
+  drains/datagram), 113 ms.
+- UringRecvMultishot: 79 drain rounds for 20000 datagrams (0.004
+  drains/datagram), 105 ms, 78 self-healed -ENOBUFS re-arms.
+- The bench also exposed and now covers a production bug fixed in the same
+  change: the io_uring instance was built with `IoUring::new(64)` so the CQ
+  held only 128 entries. Once full, the kernel parked further completions -
+  including the terminating -ENOBUFS CQE - in the overflow list, which only
+  surfaces on `io_uring_enter`. The request looked armed while silently dead.
+  Fix: `setup_cqsize(entries + 64)` plus one overflow-flushing `submit()` per
+  drain while armed.
+
+OPEN (step 4):
+- The flood bench answers the syscall-amortization question (multishot wins
+  ~4x on drain rounds); the remaining question is end-to-end: does the
+  multishot path beat the GRO path under real tunnel traffic once conn.recv
+  per-datagram cost is included. Keep opt-in until an e2e A/B lands.
 - Server demux remains on `UringRecvBatch` (needs per-packet sockaddr).

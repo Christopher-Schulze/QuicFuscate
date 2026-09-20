@@ -796,7 +796,12 @@ impl UringRecvMultishot {
         let entries = entries.max(8).checked_next_power_of_two()?;
         let buf_size = buf_size.max(1500);
 
-        let ring = match IoUring::new(64) {
+        // CQ must hold the whole provided-buffer ring plus termination
+        // headroom: a full CQ parks completions in the kernel overflow list,
+        // including the terminating -ENOBUFS CQE, and that list only drains
+        // into the visible CQ on the next io_uring_enter.
+        let cqsize = (entries as u32).saturating_add(64).clamp(256, 32768);
+        let ring = match IoUring::builder().setup_cqsize(cqsize).build(8) {
             Ok(r) => r,
             Err(e) => {
                 log::debug!("io_uring multishot recv ring init failed: {e}");
@@ -1169,6 +1174,17 @@ impl UringRecvMultishot {
             match self.arm_multishot() {
                 Ok(()) => {}
                 Err(error) => {
+                    drain_error = drain_error.or(Some(error));
+                }
+            }
+        } else if self.armed {
+            // Flush the kernel CQ overflow list into the visible ring: when
+            // the CQ filled up, the kernel parks further completions there -
+            // including the terminating -ENOBUFS CQE - and only io_uring_enter
+            // moves them. Without this the armed flag can report true while
+            // the request already terminated invisibly.
+            if let Some(ring) = self.ring.as_mut() {
+                if let Err(error) = ring.submit() {
                     drain_error = drain_error.or(Some(error));
                 }
             }
