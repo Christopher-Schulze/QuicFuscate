@@ -2,24 +2,42 @@
 
 use super::*;
 
+/// Outcome of one transport-datagram materialization into the outgoing
+/// queue (TODO-1016 batch produce loop).
+enum ProduceOutcome {
+    /// The transport had nothing pending to produce.
+    Done,
+    /// A packet was queued and may emit immediately. Stops the produce
+    /// loop so the no-drain hot path keeps one materialization per
+    /// `send_with_info` call; inside `burst_draining` the loop continues.
+    Ready,
+}
+
 impl QuicFuscateConnection {
-    /// Earliest outgoing release imposed by the pacing or stealth scheduler.
+    /// Earliest outgoing release imposed by the pacer or an open deferral
+    /// window edge (TODO-1016).
     pub fn next_outbound_release_deadline(&self) -> Option<Instant> {
-        [self.outbound_pacer.next_release(), self.next_packet_release].into_iter().flatten().min()
+        [
+            self.outbound_pacer.next_release(),
+            self.bulk_window_release.get(),
+            self.stealth_window_release.get(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Earliest instant the caller should poll `send` again.
     ///
-    /// This merges outer pacing, stealth release, QUIC recovery, the TLS
-    /// profile handshake-readiness deadline, and the one transport-owned
-    /// traffic-analysis deadline.
+    /// This merges outer pacing, the stealth/reorder gather-window edges,
+    /// QUIC recovery, the TLS profile handshake-readiness deadline, and
+    /// the one transport-owned traffic-analysis deadline.
     pub fn next_send_deadline(&self) -> Option<Instant> {
         [
             self.next_outbound_release_deadline(),
             self.conn.recovery_deadline(),
             self.conn.traffic_analysis_deadline(),
             self.conn.handshake_send_ready_at(),
-            self.earliest_reorder_hold(),
         ]
         .into_iter()
         .flatten()
@@ -38,27 +56,32 @@ impl QuicFuscateConnection {
     /// train members are eligible for the hold + permuted emission.
     pub(crate) const REORDER_BURST_WINDOW: Duration = Duration::from_millis(10);
 
-    /// Earliest pending reorder-window hold across the outgoing queue.
-    pub(crate) fn earliest_reorder_hold(&self) -> Option<Instant> {
-        self.outgoing_fec_packets.iter().filter_map(|packet| packet.hold_until).min()
-    }
-
-    /// Assigns a randomized hold to a bulk-only packet when a burst is in
-    /// progress. A burst is time-based, not queue-based: any bulk packet
-    /// arriving within `REORDER_BURST_WINDOW` of the previous one belongs
-    /// to the same train, so the hold gathers train members inside the
-    /// window where the drain then permutes them (ChameleonFlow). A lone
-    /// bulk packet - the head of a train after a quiet gap - passes
-    /// through unheld: delaying it would cost latency with zero
-    /// redistribution gain. Returns `None` when stealth timing is
-    /// disabled or the packet is not bulk-only.
-    pub(crate) fn reorder_hold_for(
-        &self,
-        send_info: &crate::transport::SendInfo,
-        now: Instant,
-    ) -> Option<Instant> {
+    /// Ticks the bulk reorder window for a just-produced packet
+    /// (ChameleonFlow). A burst is time-based, not queue-based: any bulk
+    /// packet arriving within `REORDER_BURST_WINDOW` of the previous one
+    /// belongs to the same train. The window itself is a gather timer,
+    /// not a packet hold - a produced-and-held packet counts in-flight
+    /// from `conn.send`, so holding the window opener past ~PTO declares
+    /// it lost on every epoch (measured ~26% on Omega). The opener rides
+    /// out unheld as the train head; production stalls while the window
+    /// is open (`deferral_window_open`) so the backlog gathers in the
+    /// transport's own datagram queue as honest backpressure. At the edge
+    /// the drain phase arms and the queued batch emits permuted.
+    ///
+    /// A lone bulk packet - the head of a train after a quiet gap - ticks
+    /// without arming: delaying it would cost latency with zero
+    /// redistribution gain. No-op when stealth timing is disabled, the
+    /// packet is not bulk-only, or the drain phase is active.
+    pub(crate) fn reorder_window_tick(&self, send_info: &crate::transport::SendInfo, now: Instant) {
         if !send_info.bulk_only || !self.conn.transport_stealth_timing_active() {
-            return None;
+            return;
+        }
+        if self.burst_draining.get() {
+            // Post-edge drain: this packet is part of the burst the window
+            // gathered. The permuted pick among the ripe batch does the
+            // reordering; a fresh window would re-serialize the drain into
+            // one packet per cycle.
+            return;
         }
         let burst_in_progress = self.conn.dgram_send_queue_len() > 0
             || !self.outgoing_fec_packets.is_empty()
@@ -68,75 +91,84 @@ impl QuicFuscateConnection {
                 .is_some_and(|queued| now.duration_since(queued) <= Self::REORDER_BURST_WINDOW);
         self.last_bulk_queued.set(Some(now));
         if !burst_in_progress {
-            return None;
+            return;
         }
-        // Windowed batch release: every bulk packet inside the open window
-        // shares the same deadline so one wake emits the whole permuted
-        // batch. The window must span several packet inter-arrivals or it
-        // degenerates to one packet per wake under a loop-tick-bound drain.
         if let Some(open) = self.bulk_window_release.get() {
             if now < open {
-                return Some(open);
+                // Mid-window production is already stalled by the caller's
+                // window-open check; a packet that still slips through
+                // rides out rather than reintroducing produced-and-held
+                // in-flight inflation.
+                return;
             }
+            // The window edge just passed: consume it and switch to the
+            // drain phase instead of opening a new window for this packet.
+            self.bulk_window_release.set(None);
+            self.arm_burst_drain();
+            return;
         }
         let hold_us = crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_HOLD_MAX_US + 1);
         if hold_us == 0 {
             self.bulk_window_release.set(None);
-            return None;
+            return;
         }
         let window = now + Duration::from_micros(hold_us);
         self.bulk_window_release.set(Some(window));
         log::debug!("reorder_window: bulk window +{hold_us}us");
-        Some(window)
     }
 
-    /// Emission index into `outgoing_fec_packets` honoring per-packet hold
-    /// windows. Returns `None` while every queued packet still waits inside
-    /// its hold window - the caller then yields and re-polls at
-    /// [`Self::earliest_reorder_hold`].
+    /// Emission index into `outgoing_fec_packets`. Every queued packet is
+    /// ripe on arrival (deferral windows are timers, not per-packet
+    /// holds), so the pick is pure train-order logic.
     ///
-    /// Non-bulk entries keep strict FIFO priority: the first ripe entry is
-    /// emitted unless it is bulk-only AND at least one other bulk entry is
-    /// also ripe, in which case a permuted pick reshuffles the bulk run.
-    /// That is the ChameleonFlow step: burst-train order on the wire stops
-    /// mirroring composition order while control/ACK/framed traffic keeps
-    /// its sequence.
-    pub(crate) fn pick_reorder_emit_index(&self, now: Instant) -> Option<usize> {
-        let mut first_ripe: Option<usize> = None;
-        let mut ripe_bulk_count = 0usize;
-        for (idx, packet) in self.outgoing_fec_packets.iter().enumerate() {
-            if packet.hold_until.is_some_and(|hold| now < hold) {
-                continue;
-            }
-            if first_ripe.is_none() {
-                first_ripe = Some(idx);
-            }
-            if packet.send_info.bulk_only {
-                ripe_bulk_count += 1;
-            }
+    /// Non-bulk entries keep strict FIFO priority: the head is emitted
+    /// unless it is bulk-only AND a second bulk entry is queued, in
+    /// which case a fair coin swaps the adjacent bulk pair. That is the
+    /// ChameleonFlow step with bounded displacement: burst-train order on
+    /// the wire stops mirroring composition order while control/ACK/
+    /// framed traffic keeps its sequence.
+    ///
+    /// The displacement is capped at one position - the only reorder
+    /// depth that cannot trip QUIC's packet-threshold loss detection
+    /// (k = 3). The head is marked `was_displaced` when a swap passes
+    /// over it: a displaced head is never displaced again and emits as
+    /// the next pick, so production arriving between the two picks can
+    /// never push it further back. Unbounded picks displaced datagrams
+    /// three or more positions and were measured on Omega as ~25%
+    /// spurious loss with cwnd churn (~5x throughput cost); a naive
+    /// adjacent swap without the displaced-head guard still leaked ~4%
+    /// because the stranded head could slip behind freshly produced
+    /// datagrams.
+    pub(crate) fn pick_reorder_emit_index(&mut self) -> Option<usize> {
+        let front_is_bulk =
+            self.outgoing_fec_packets.front().is_some_and(|packet| packet.send_info.bulk_only);
+        if !front_is_bulk {
+            return self.outgoing_fec_packets.front().map(|_| 0);
         }
-        let first = first_ripe?;
-        let first_is_bulk =
-            self.outgoing_fec_packets.get(first).is_some_and(|packet| packet.send_info.bulk_only);
-        if !first_is_bulk || ripe_bulk_count < 2 {
-            return Some(first);
+        // A displaced head emits unconditionally - it already spent its
+        // one allowed displacement.
+        if self.outgoing_fec_packets.front().is_some_and(|packet| packet.was_displaced) {
+            return Some(0);
         }
-        let pick = crate::transport::rand::fast_rand_u64_uniform(ripe_bulk_count as u64) as usize;
-        let mut seen = 0usize;
-        self.outgoing_fec_packets
+        // Locate the second bulk entry: swapping with it displaces the
+        // head by exactly one position - the maximum that stays below
+        // the loss-detection packet threshold.
+        let second_bulk = self
+            .outgoing_fec_packets
             .iter()
             .enumerate()
-            .find_map(|(idx, packet)| {
-                let ripe = packet.hold_until.is_none_or(|hold| now >= hold);
-                if ripe && packet.send_info.bulk_only {
-                    if seen == pick {
-                        return Some(idx);
-                    }
-                    seen += 1;
+            .skip(1)
+            .find(|(_, packet)| packet.send_info.bulk_only)
+            .map(|(idx, _)| idx);
+        match second_bulk {
+            Some(idx) if crate::transport::rand::fast_rand_u64_uniform(2) == 1 => {
+                if let Some(head) = self.outgoing_fec_packets.front_mut() {
+                    head.was_displaced = true;
                 }
-                None
-            })
-            .or(Some(first))
+                Some(idx)
+            }
+            _ => self.outgoing_fec_packets.front().map(|_| 0),
+        }
     }
 
     /// Queue one ack-eliciting transport keepalive for the next send poll.
@@ -274,11 +306,6 @@ impl QuicFuscateConnection {
         // before the pacing/stealth scheduler so probes never wait on shaping.
         if self.conn.recovery_deadline().is_some_and(|recovery_deadline| now >= recovery_deadline) {
             self.conn.on_recovery_timeout(now);
-            // Recovery takes precedence over pacing/stealth release; force
-            // an immediate send attempt so PTO probes can emit.
-            if self.next_packet_release.is_some_and(|r| r > now) {
-                self.next_packet_release = None;
-            }
         }
 
         self.conn
@@ -321,32 +348,53 @@ impl QuicFuscateConnection {
         // Never delay Initial/Handshake flights. Delaying them can stall the connection setup and
         // makes short-lived clients (like E2E) time out. Stealth timing only applies post-handshake.
         if !established {
-            self.next_packet_release = None;
+            self.bulk_window_release.set(None);
+            self.stealth_window_release.set(None);
+            self.burst_draining.set(false);
             self.outbound_pacer.reset();
-        } else if !path_control_pending {
-            if let Some(release_time) = self.next_packet_release {
-                if now < release_time {
-                    log::trace!(
-                        "connection.send: next_packet_release blocks until {:?}",
-                        release_time
-                    );
-                    return Ok((
-                        0,
-                        crate::transport::SendInfo {
-                            from: self.local_addr,
-                            to: self.peer_addr,
-                            at: now,
-                            congestion_controlled: false,
-                            path_control: false,
-                            bulk_only: false,
-                        },
-                    )); // WouldBlock / Yield
-                }
-                // Timer expired, clear block and proceed
-                self.next_packet_release = None;
-            }
+        } else if !path_control_pending && self.deferral_window_open(now) {
+            self.send_yield_counts[0].set(self.send_yield_counts[0].get() + 1);
+            log::trace!(
+                "connection.send: deferral window open, production stalls until {:?}",
+                [self.bulk_window_release.get(), self.stealth_window_release.get()]
+                    .into_iter()
+                    .flatten()
+                    .min()
+            );
+            // TODO-1016: while the window is open nothing is
+            // produced - produced-but-held packets occupy QUIC's
+            // in-flight window and trigger spurious PTO loss
+            // (~38% measured on Omega), collapsing cwnd and the
+            // pacing rate. The transport's own datagram queue
+            // holds the backlog as honest backpressure; the drain
+            // phase after the edge materializes it exempt from
+            // new jitter draws. A queued drain leftover still emits.
+            return self.emit_ripe_or_yield(
+                buf,
+                now,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                    bulk_only: false,
+                },
+            );
         }
-        if established && !path_control_pending && self.outbound_pacer.is_blocked(now) {
+        // The budgeted burst drain bypasses the delivery-rate pacer: the
+        // reorder window exists to emit the gathered backlog as one
+        // clustered train, which per-packet rate trickle would dissolve -
+        // and a queued batch trickling out at pacing rate would sit past
+        // PTO and read as loss (measured ~30% on Omega). The train size is
+        // bounded by the drain budget, not the pacer; sends are still
+        // recorded so the pacer debt shapes the inter-train gap.
+        if established
+            && !path_control_pending
+            && !self.burst_draining.get()
+            && self.outbound_pacer.is_blocked(now)
+        {
+            self.send_yield_counts[1].set(self.send_yield_counts[1].get() + 1);
             log::trace!("connection.send: outbound_pacer blocked dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
                 self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
             return Ok((
@@ -370,12 +418,17 @@ impl QuicFuscateConnection {
         // new send() call would generate another FEC packet and push it onto
         // outgoing_fec_packets without ever draining the buffer.
         if !path_control_pending && !self.outgoing_fec_packets.is_empty() {
-            let Some(emit_idx) = self.pick_reorder_emit_index(now) else {
+            let Some(emit_idx) = self.pick_reorder_emit_index() else {
+                self.send_yield_counts[2].set(self.send_yield_counts[2].get() + 1);
                 // Every queued packet still waits inside its reorder hold
                 // window (TODO-1015). The runtime re-polls at the deadline
-                // merged from earliest_reorder_hold().
-                return Ok((
-                    0,
+                // merged from earliest_reorder_hold(). Nothing is produced
+                // while a hold is open (TODO-1016): the transport's own
+                // datagram queue is the window accumulator, so held
+                // packets never inflate QUIC's in-flight clock.
+                return self.emit_ripe_or_yield(
+                    buf,
+                    now,
                     crate::transport::SendInfo {
                         from: self.local_addr,
                         to: self.peer_addr,
@@ -384,7 +437,7 @@ impl QuicFuscateConnection {
                         path_control: false,
                         bulk_only: false,
                     },
-                ));
+                );
             };
             // Write from the queued item without removing it. A capacity or serialization
             // failure must leave the packet exactly where it was, in order, for the next
@@ -424,12 +477,197 @@ impl QuicFuscateConnection {
         // stealth/jitter deferral actually fires and the bytes must be
         // materialized into a pooled block for the outgoing queue. Only legal
         // when the queue is empty: path_control_pending skips the flush above,
-        // so a non-empty queue must keep the ordered push/pop emission.
-        if wire_profile.is_none() && self.outgoing_fec_packets.is_empty() {
+        // so a non-empty queue must keep the ordered push/pop emission. The
+        // burst drain also routes through the queue: produced packets must
+        // pass the reorder-aware pick so the gathered backlog emits permuted
+        // instead of in arrival order.
+        if wire_profile.is_none()
+            && self.outgoing_fec_packets.is_empty()
+            && !self.burst_draining.get()
+        {
             return self.send_with_info_raw(buf, now, established);
         }
 
-        // Otherwise, generate a new QUIC packet using a pooled buffer.
+        // Batch-materialize pending transport datagrams into the outgoing
+        // queue (TODO-1016). Under stealth deferral every produced packet
+        // stays held; producing only one per call would serialize the
+        // drain to one packet per loop tick - measured ~2 Mbit/s against
+        // a 74 Mbit/s no-stealth baseline on Omega. Keep producing while
+        // packets defer, up to a bounded batch, so the next wake emits a
+        // full ripe batch in one sendmmsg/GSO burst. A non-deferred
+        // (Ready) packet stops the loop so the no-stealth hot path keeps
+        // exactly one materialization per call.
+        self.produce_while_held(now, established, wire_profile)?;
+
+        // Pop the first ripe packet from the buffer to send it now.
+        if !self.outgoing_fec_packets.is_empty() {
+            let Some(emit_idx) = self.pick_reorder_emit_index() else {
+                return Ok((
+                    0,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                        bulk_only: false,
+                    },
+                ));
+            };
+            self.emit_queued_packet(buf, now, emit_idx)
+        } else {
+            Ok((
+                0,
+                crate::transport::SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: false,
+                    path_control: false,
+                    bulk_only: false,
+                },
+            ))
+        }
+    }
+
+    /// TODO-1016: maximum transport datagrams materialized into the
+    /// outgoing queue per `send_with_info` call while deferral is active.
+    /// Sized to one socket burst so each housekeeping wake fills a full
+    /// emission train instead of a fraction of it.
+    pub(crate) const PRODUCE_BATCH_MAX: usize = 64;
+
+    /// TODO-1016: bound on packets held inside an open deferral window.
+    /// Production pauses at this depth so a long window cannot grow the
+    /// outgoing queue without bound (~2x the socket batch burst).
+    pub(crate) const DEFER_QUEUE_CAP: usize = 128;
+
+    /// Materialize transport datagrams into the outgoing queue in bounded
+    /// batches (TODO-1016). A Deferred packet opens its stealth window
+    /// and stops the loop - producing more would pile held bytes onto
+    /// QUIC's in-flight window. Ready stops too: the no-stealth hot path
+    /// keeps one materialization per call. Only inside `burst_draining`
+    /// does the loop continue past Ready, filling the drain ahead of the
+    /// one-packet-per-call emitter.
+    /// True while either deferral window is open (TODO-1016). Production
+    /// must stall: a packet materialized now would have to sit held in
+    /// the outgoing queue, and produced-and-held packets count in-flight
+    /// from `conn.send` - holds past ~PTO read as spurious loss. The
+    /// transport's own datagram queue gathers the backlog as honest
+    /// backpressure instead.
+    pub(crate) fn deferral_window_open(&self, now: Instant) -> bool {
+        self.bulk_window_release.get().is_some_and(|open| now < open)
+            || self.stealth_window_release.get().is_some_and(|open| now < open)
+    }
+
+    fn produce_while_held(
+        &mut self,
+        now: Instant,
+        established: bool,
+        wire_profile: Option<WireProfile>,
+    ) -> Result<(), crate::error::ConnectionError> {
+        for _ in 0..Self::PRODUCE_BATCH_MAX {
+            if self.outgoing_fec_packets.len() >= Self::DEFER_QUEUE_CAP {
+                break;
+            }
+            // An open deferral window gathers the transport backlog;
+            // producing into it would only refill the held queue.
+            if self.deferral_window_open(now) {
+                self.send_yield_counts[0].set(self.send_yield_counts[0].get() + 1);
+                break;
+            }
+            // Drain epoch budget spent: once the queued batch has fully
+            // emitted the epoch is over and the flag releases, otherwise
+            // stop materializing and let the tail emit down - still
+            // unpaced while the flag stays armed.
+            if self.burst_draining.get() && self.drain_budget.get() == 0 {
+                if self.outgoing_fec_packets.is_empty() {
+                    self.burst_draining.set(false);
+                } else {
+                    break;
+                }
+            }
+            match self.produce_one_queued(now, established, wire_profile)? {
+                ProduceOutcome::Done => break,
+                ProduceOutcome::Ready => {
+                    if !self.burst_draining.get() {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Smallest stealth window worth arming (TODO-1016). A deferral
+    /// shorter than the runtime's wake granularity cannot shape the
+    /// wire - the drain cannot respond faster than the loop's ~1ms
+    /// housekeeping floor - so the draw is quantized down to a direct
+    /// emission instead of opening an O(1)-packet cycle.
+    pub(crate) const STEALTH_MIN_WINDOW: Duration = Duration::from_millis(1);
+
+    /// Upper bound on packets one drain epoch materializes (TODO-1016).
+    /// Armed from the transport backlog at the window edge; under
+    /// sustained load that backlog never reaches zero, so the cap is what
+    /// ends each burst train and re-opens the window cycle.
+    const DRAIN_BUDGET_MAX: usize = 32;
+
+    /// Arm the post-edge burst drain (TODO-1016). The budget mirrors the
+    /// transport backlog gathered during the window (plus the triggering
+    /// packet already consumed by `conn.send`), capped so a pathologically
+    /// deep backlog cannot stretch the train past a bounded burst.
+    fn arm_burst_drain(&self) {
+        self.burst_draining.set(true);
+        let backlog = self.conn.dgram_send_queue_len().saturating_add(1);
+        self.drain_budget.set(backlog.min(Self::DRAIN_BUDGET_MAX));
+        self.send_yield_counts[5].set(self.send_yield_counts[5].get() + 1);
+    }
+
+    /// Fold a stealth/jitter release into the shared deferral window
+    /// (TODO-1016). The draw becomes a gather timer, not a per-packet
+    /// hold - a produced-and-held packet would count in-flight from
+    /// `conn.send` and declare lost past ~PTO. This packet rides out as
+    /// the train head; production stalls while the window is open so the
+    /// backlog gathers in the transport's own datagram queue as honest
+    /// backpressure. The first produce after the edge consumes the
+    /// expired window and arms `burst_draining`; every produce during
+    /// the drain skips its jitter draw, which keeps QUIC's in-flight
+    /// clock free of the hold duration.
+    pub(crate) fn stealth_window_tick(&self, release: Option<Instant>, now: Instant) {
+        if self.burst_draining.get() {
+            // Drain members ride the burst without a fresh draw. The
+            // drain never ends here - clearing is owned by the budget
+            // check in the produce loop and by the transport-Done path
+            // once the backlog is actually empty.
+            return;
+        }
+        let Some(target) = release else { return };
+        if target.saturating_duration_since(now) < Self::STEALTH_MIN_WINDOW {
+            return;
+        }
+        if let Some(open) = self.stealth_window_release.get() {
+            if now < open {
+                return;
+            }
+            // The window edge just passed: consume it and switch to the
+            // drain phase instead of opening a new window for this packet.
+            self.stealth_window_release.set(None);
+            self.arm_burst_drain();
+            return;
+        }
+        self.stealth_window_release.set(Some(target));
+    }
+
+    /// Materialize one transport datagram into `outgoing_fec_packets`.
+    /// Returns `Done` when the transport has nothing pending, `Ready`
+    /// when the produced packet may emit immediately, and `Deferred`
+    /// when a stealth/jitter hold keeps it queued - the caller then
+    /// keeps producing to fill the shared window's batch.
+    fn produce_one_queued(
+        &mut self,
+        now: Instant,
+        established: bool,
+        wire_profile: Option<WireProfile>,
+    ) -> Result<ProduceOutcome, crate::error::ConnectionError> {
         let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
         let send_result = if wire_profile.is_some() {
             if send_buffer.len() <= 2 * wire::SOURCE_LENGTH_LEN {
@@ -447,26 +685,24 @@ impl QuicFuscateConnection {
             Err(crate::error::ConnectionError::Done) => {
                 log::trace!("connection.send: conn.send returned Done dgram_queue={} out_fec={} bytes_in_flight={} cwnd={}",
                     self.conn.dgram_send_queue_len(), self.outgoing_fec_packets.len(), self.conn.bytes_in_flight(), self.conn.cwnd());
-                // No packet currently pending is a normal state for polling loops.
                 drop(send_buffer);
-                return Ok((
-                    0,
-                    crate::transport::SendInfo {
-                        from: self.local_addr,
-                        to: self.peer_addr,
-                        at: now,
-                        congestion_controlled: false,
-                        path_control: false,
-                        bulk_only: false,
-                    },
-                ));
+                // Done doubles as the congestion gate (RFC 9002 sec. 7.2):
+                // with transport backlog still queued the drain must stay
+                // armed so it resumes the burst once ACKs release cwnd -
+                // clearing here would reopen a window per packet. Queued
+                // members likewise keep it armed so the tail emits
+                // unpaced. Only a fully emptied state ends the drain.
+                if self.conn.dgram_send_queue_len() == 0 && self.outgoing_fec_packets.is_empty() {
+                    self.burst_draining.set(false);
+                }
+                self.send_yield_counts[3].set(self.send_yield_counts[3].get() + 1);
+                return Ok(ProduceOutcome::Done);
             }
             Err(crate::error::ConnectionError::BufferTooShort) => {
                 drop(send_buffer);
                 return Err(crate::error::ConnectionError::BufferTooShort);
             }
             Err(e) => {
-                // The PooledBlock guard recycles the buffer on this early return.
                 drop(send_buffer);
                 return Err(crate::error::ConnectionError::Transport(e.to_string()));
             }
@@ -474,19 +710,12 @@ impl QuicFuscateConnection {
 
         if write == 0 {
             log::trace!("connection.send: conn.send returned write=0");
-            // The buffer is recycled automatically via Drop.
             drop(send_buffer);
-            return Ok((
-                0,
-                crate::transport::SendInfo {
-                    from: self.local_addr,
-                    to: self.peer_addr,
-                    at: now,
-                    congestion_controlled: false,
-                    path_control: false,
-                    bulk_only: false,
-                },
-            ));
+            if self.conn.dgram_send_queue_len() == 0 && self.outgoing_fec_packets.is_empty() {
+                self.burst_draining.set(false);
+            }
+            self.send_yield_counts[3].set(self.send_yield_counts[3].get() + 1);
+            return Ok(ProduceOutcome::Done);
         }
 
         // Path-control packets must reach the peer before a Core-side FEC
@@ -585,19 +814,19 @@ impl QuicFuscateConnection {
                     packet,
                     send_info,
                     congestion_controlled: send_info.congestion_controlled,
-                    hold_until: None,
+                    was_displaced: false,
                 });
             }
             self.fec_tx_sequence = self.fec_tx_sequence.wrapping_add(1);
         } else {
             self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
-            let hold_until = self.reorder_hold_for(&send_info, now);
+            self.reorder_window_tick(&send_info, now);
             let outgoing = OutgoingFecPacket {
                 packet: fec_packet,
                 wire_meta: None,
                 send_info,
                 congestion_controlled: send_info.congestion_controlled,
-                hold_until,
+                was_displaced: false,
             };
             if send_info.path_control {
                 self.outgoing_fec_packets.push_front(outgoing);
@@ -622,64 +851,17 @@ impl QuicFuscateConnection {
             } else {
                 None
             };
-            if let Some(release_at) =
-                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
-            {
-                // The deferred packet is the one just queued: mark it held
-                // until its stealth release so the reorder-aware drain
-                // cannot emit it early while ripe packets keep flowing.
-                if let Some(back) = self.outgoing_fec_packets.back_mut() {
-                    back.hold_until =
-                        [back.hold_until, Some(release_at)].into_iter().flatten().max();
-                }
-                self.next_packet_release =
-                    [self.next_packet_release, Some(release_at)].into_iter().flatten().min();
-                // Keep the drain alive: a deferred datagram must not starve
-                // already-ripe queued packets behind an empty yield.
-                return self.emit_ripe_or_yield(
-                    buf,
-                    now,
-                    crate::transport::SendInfo {
-                        from: self.local_addr,
-                        to: self.peer_addr,
-                        at: now,
-                        congestion_controlled: false,
-                        path_control: false,
-                        bulk_only: false,
-                    },
-                );
-            }
+            self.stealth_window_tick(
+                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter),
+                now,
+            );
         }
-
-        // Pop the first packet from the buffer to send it now.
-        if !self.outgoing_fec_packets.is_empty() {
-            let Some(emit_idx) = self.pick_reorder_emit_index(now) else {
-                return Ok((
-                    0,
-                    crate::transport::SendInfo {
-                        from: self.local_addr,
-                        to: self.peer_addr,
-                        at: now,
-                        congestion_controlled: false,
-                        path_control: false,
-                        bulk_only: false,
-                    },
-                ));
-            };
-            self.emit_queued_packet(buf, now, emit_idx)
-        } else {
-            Ok((
-                0,
-                crate::transport::SendInfo {
-                    from: self.local_addr,
-                    to: self.peer_addr,
-                    at: now,
-                    congestion_controlled: false,
-                    path_control: false,
-                    bulk_only: false,
-                },
-            ))
+        // Every datagram materialized inside a drain epoch spends one unit
+        // of its budget - including the packet whose window edge armed it.
+        if self.burst_draining.get() {
+            self.drain_budget.set(self.drain_budget.get().saturating_sub(1));
         }
+        Ok(ProduceOutcome::Ready)
     }
 
     /// Emit the queued packet at `emit_idx`: transactional write into the
@@ -699,6 +881,9 @@ impl QuicFuscateConnection {
             (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
         };
         self.outgoing_fec_packets.remove(emit_idx);
+        if self.burst_draining.get() {
+            self.send_yield_counts[4].set(self.send_yield_counts[4].get() + 1);
+        }
         send_info.at = now;
         log::trace!(
             "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
@@ -724,7 +909,7 @@ impl QuicFuscateConnection {
         now: Instant,
         zero_send_info: crate::transport::SendInfo,
     ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
-        match self.pick_reorder_emit_index(now) {
+        match self.pick_reorder_emit_index() {
             Some(emit_idx) => self.emit_queued_packet(buf, now, emit_idx),
             None => Ok((0, zero_send_info)),
         }
@@ -750,9 +935,23 @@ impl QuicFuscateConnection {
             path_control: false,
             bulk_only: false,
         };
+        // An open deferral window gathers the transport backlog: producing
+        // now would only queue a packet that has to sit held, inflating
+        // QUIC's in-flight clock toward a spurious PTO loss (TODO-1016).
+        if self.deferral_window_open(now) {
+            self.send_yield_counts[0].set(self.send_yield_counts[0].get() + 1);
+            return Ok((0, zero_send_info(now)));
+        }
         let (write, mut send_info) = match self.conn.send(buf) {
             Ok(v) => v,
             Err(crate::error::ConnectionError::Done) => {
+                // `Done` also covers congestion gating while datagrams are
+                // still queued - the drain epoch ends only when the
+                // transport backlog is actually empty.
+                if self.conn.dgram_send_queue_len() == 0 {
+                    self.burst_draining.set(false);
+                }
+                self.send_yield_counts[3].set(self.send_yield_counts[3].get() + 1);
                 return Ok((0, zero_send_info(now)));
             }
             Err(crate::error::ConnectionError::BufferTooShort) => {
@@ -761,6 +960,10 @@ impl QuicFuscateConnection {
             Err(e) => return Err(crate::error::ConnectionError::Transport(e.to_string())),
         };
         if write == 0 {
+            if self.conn.dgram_send_queue_len() == 0 {
+                self.burst_draining.set(false);
+            }
+            self.send_yield_counts[3].set(self.send_yield_counts[3].get() + 1);
             return Ok((0, zero_send_info(now)));
         }
 
@@ -780,12 +983,18 @@ impl QuicFuscateConnection {
             } else {
                 None
             };
-            let release_at =
-                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter);
-            let hold_until = self.reorder_hold_for(&send_info, now);
-            if release_at.is_some() || hold_until.is_some() {
-                // Deferred or windowed emission retains the datagram in the
-                // outgoing queue (stealth deferral and/or TODO-1015 bulk hold).
+            self.stealth_window_tick(
+                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter),
+                now,
+            );
+            self.reorder_window_tick(&send_info, now);
+            // A window edge expiring inside the ticks arms the drain
+            // mid-call: this packet belongs to the burst batch, so it
+            // takes the queue + permuted-pick path instead of slipping
+            // out in order ahead of the train it triggered. An armed
+            // drain also queues raw-path packets so the batch emits
+            // through one reorder-aware emitter.
+            if self.burst_draining.get() {
                 let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
                 if send_buffer.len() < write {
                     return Err(crate::error::ConnectionError::BufferTooShort);
@@ -808,17 +1017,11 @@ impl QuicFuscateConnection {
                     wire_meta: None,
                     send_info,
                     congestion_controlled: send_info.congestion_controlled,
-                    // Both deferral kinds share one per-packet marker: a
-                    // stealth release and a bulk window hold both must
-                    // elapse before the drain may emit this packet.
-                    hold_until: [hold_until, release_at].into_iter().flatten().max(),
+                    was_displaced: false,
                 });
-                // Merge with any earlier pending stealth release instead of
-                // overwriting it - a hold-only datagram (release_at = None)
-                // must not erase the wake deadline of a packet that is still
-                // waiting for its stealth release.
-                self.next_packet_release =
-                    [self.next_packet_release, release_at].into_iter().flatten().min();
+                // A datagram materialized inside a drain epoch spends one
+                // unit of its budget.
+                self.drain_budget.set(self.drain_budget.get().saturating_sub(1));
                 return self.emit_ripe_or_yield(buf, now, zero_send_info(now));
             }
         }

@@ -635,7 +635,7 @@ impl StealthManager {
         ack_only: bool,
     ) -> Option<std::time::Duration> {
         // Shaping delays are merged in core::QuicFuscateConnection::send() with transport
-        // jitter (when active). One release gate: next_packet_release.
+        // jitter (when active). One release gate: the shared deferral window.
         // - explicit realtime choke -> RateChoker
         // - Anti-DPI without choke -> FlowShaper (ack-eliciting packets only)
         let mut total_delay = std::time::Duration::ZERO;

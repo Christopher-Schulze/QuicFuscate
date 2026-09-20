@@ -1278,7 +1278,7 @@ pub(super) async fn run_client(
                     if let Some(diagnostics) = io_diagnostics.as_ref() {
                         let protocol_now = conn.protocol_clock().now();
                         info!(
-                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
+                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} yield_window={} yield_pacer={} yield_held={} yield_done={} drain_emits={} drain_entries={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
                             conn.rtt_ms(),
                             conn.loss_rate() * 100.0,
                             conn.conn.stats().sent,
@@ -1292,6 +1292,12 @@ pub(super) async fn run_client(
                             diagnostics.send_zero_results,
                             diagnostics.send_done_results,
                             diagnostics.send_errors,
+                            conn.send_yield_counts()[0],
+                            conn.send_yield_counts()[1],
+                            conn.send_yield_counts()[2],
+                            conn.send_yield_counts()[3],
+                            conn.send_yield_counts()[4],
+                            conn.send_yield_counts()[5],
                             conn.next_outbound_release_deadline().map(|deadline| {
                                 deadline.saturating_duration_since(protocol_now).as_millis()
                             }),

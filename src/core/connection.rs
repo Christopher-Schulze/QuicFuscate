@@ -155,16 +155,42 @@ pub struct QuicFuscateConnection {
     tls_ch_override_template: Option<String>,
 
     // Async Stealth Scheduler State
-    next_packet_release: Option<std::time::Instant>,
     /// Last time a bulk-only datagram entered `outgoing_fec_packets`;
     /// trains closer than `REORDER_BURST_WINDOW` share one reorder window.
     last_bulk_queued: std::cell::Cell<Option<std::time::Instant>>,
-    /// Shared release deadline for the current bulk reorder window. All
-    /// bulk packets queued inside one window carry this same `hold_until`
-    /// so they ripen together and leave in a single permuted batch -
-    /// per-packet staggered deadlines would serialize emission into one
-    /// wake per packet and collapse throughput under sustained bulk load.
+    /// Gather-timer edge of the current bulk reorder window (TODO-1015/
+    /// TODO-1016). The window is a timer, not a packet hold: the opener
+    /// emits immediately as the train head, production stalls while it is
+    /// open so the transport datagram queue gathers the backlog, and the
+    /// edge arms a drain that emits the batch permuted in one burst.
     bulk_window_release: std::cell::Cell<Option<std::time::Instant>>,
+    /// Gather-timer edge of the current stealth-deferral window
+    /// (TODO-1016). A jitter draw arms the timer instead of holding the
+    /// produced packet - produced-and-held packets would count in-flight
+    /// from `conn.send` and read as spurious PTO loss. The packet rides
+    /// out as the train head; the window's edge arms the budgeted drain
+    /// that emits the backlog the window gathered.
+    stealth_window_release: std::cell::Cell<Option<std::time::Instant>>,
+    /// TODO-1016: set while the transport backlog accumulated during an
+    /// open stealth window drains after the window edge. Produced packets
+    /// skip their jitter draw and ride the expired edge so their in-flight
+    /// clock starts at real emission time - holding produced packets would
+    /// inflate QUIC's RTT/cwnd pacing with the hold duration. Cleared when
+    /// the budgeted batch is emitted or the transport backlog empties;
+    /// the next produced packet then draws a fresh window edge.
+    burst_draining: std::cell::Cell<bool>,
+    /// TODO-1016: packets the armed drain may still materialize, counted
+    /// down per produced datagram. Armed at the window edge from the
+    /// transport backlog (capped): under sustained load the backlog never
+    /// reaches zero, so an unbounded drain would hold the pacer bypass
+    /// open and flood the path - the budget closes each burst train after
+    /// the gathered batch and hands cadence back to the window cycle.
+    drain_budget: std::cell::Cell<usize>,
+    /// TODO-1016 diagnostics: per-cause counts of `send()` polls that
+    /// returned an empty result, used by the runtime stats line to tell
+    /// armed-window yields, pacer yields, all-held pick misses, and
+    /// transport Done drains apart without trace-level logging.
+    pub(crate) send_yield_counts: [std::cell::Cell<u64>; 6],
     outbound_pacer: OutboundPacer,
     /// Linux UDP_GSO emission was rejected by this peer's route (EMSGSIZE);
     /// further sends to it skip run planning and go out per-packet. Path MTU
@@ -608,9 +634,13 @@ impl QuicFuscateConnection {
             #[cfg(feature = "orchestrator")]
             runtime_system: sysinfo::System::new(),
             tls_ch_override_template: environment.first(["QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE"]),
-            next_packet_release: None,
+
             last_bulk_queued: std::cell::Cell::new(None),
             bulk_window_release: std::cell::Cell::new(None),
+            stealth_window_release: std::cell::Cell::new(None),
+            burst_draining: std::cell::Cell::new(false),
+            drain_budget: std::cell::Cell::new(0),
+            send_yield_counts: std::array::from_fn(|_| std::cell::Cell::new(0)),
             outbound_pacer: OutboundPacer::default(),
             #[cfg(target_os = "linux")]
             udp_gso_path_blocked: false,
@@ -1477,6 +1507,14 @@ impl QuicFuscateConnection {
     /// Returns the current estimated RTT in milliseconds.
     pub fn rtt_ms(&self) -> f32 {
         self.stats.rtt
+    }
+
+    /// TODO-1016 diagnostics: empty-`send()` counts by cause -
+    /// [armed stealth window, outbound pacer, all-held pick miss,
+    /// transport Done, drain-phase emits, drain-phase entries]. Read-only
+    /// snapshot for the runtime stats line.
+    pub fn send_yield_counts(&self) -> [u64; 6] {
+        std::array::from_fn(|i| self.send_yield_counts[i].get())
     }
 
     /// Returns the current estimated packet loss rate in [0.0, 1.0].

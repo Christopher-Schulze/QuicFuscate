@@ -413,7 +413,7 @@ fn outgoing_zero_mode_packet_preserves_raw_quic_datagram() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     };
     let mut wire = [0u8; 64];
 
@@ -447,7 +447,7 @@ fn outgoing_repair_packet_preserves_fec_wire_metadata() {
         wire_meta: Some(meta),
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     };
     let mut wire = [0u8; 128];
 
@@ -487,7 +487,7 @@ fn outgoing_systematic_packet_preserves_protected_quic_datagram() {
         wire_meta: Some(meta),
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     };
     let mut wire_datagram = [0u8; 128];
 
@@ -520,14 +520,14 @@ fn buffered_fec_packet_survives_an_output_capacity_failure() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     });
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
         packet: fec_packet(8, &payload, None),
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     });
 
     // A buffer far too small for the packet forces the write to fail.
@@ -571,7 +571,7 @@ fn pending_path_control_preempts_buffered_fec_datagram() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     });
     connection.conn.migrate(new_local, new_peer).expect("migration candidate");
     assert_eq!(
@@ -611,7 +611,7 @@ fn path_control_metadata_survives_raw_fec_queueing() {
         wire_meta: None,
         send_info,
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     };
     let mut wire = [0u8; 64];
 
@@ -701,7 +701,7 @@ fn active_fec_off_preserves_queued_sources_and_discards_only_repairs() {
             }),
             send_info: test_send_info(),
             congestion_controlled: true,
-            hold_until: None,
+            was_displaced: false,
         });
     }
     connection.fec_tx_profile = Some(profile);
@@ -1004,159 +1004,254 @@ fn bulk_send_info() -> crate::transport::SendInfo {
 fn reorder_window_permutates_ripe_bulk_run() {
     let mut connection = test_connection();
     // Four ripe bulk packets form a train; repeated picks must not always
-    // return the FIFO head or the window is not permuting anything.
+    // return the FIFO head or the window is not permuting anything. The
+    // swap is displacement-bounded: only the adjacent bulk pair may
+    // trade places, so no pick ever exceeds index 1 - deeper picks trip
+    // QUIC's packet-threshold loss detection (TODO-1016 Omega finding).
     for id in 0..4u64 {
         connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
             packet: fec_packet(id, &[id as u8; 8], None),
             wire_meta: None,
             send_info: bulk_send_info(),
             congestion_controlled: true,
-            hold_until: None,
+            was_displaced: false,
         });
     }
-    let now = Instant::now();
     let mut seen = std::collections::HashSet::new();
     for _ in 0..200 {
-        let idx = connection.pick_reorder_emit_index(now).expect("ripe bulk must emit");
-        assert!(idx < 4);
+        let idx = connection.pick_reorder_emit_index().expect("ripe bulk must emit");
+        assert!(idx <= 1, "reorder displacement must stay below the loss threshold");
         seen.insert(idx);
     }
     assert!(seen.len() > 1, "permuted picks must vary across the bulk run: {seen:?}");
 }
 
 #[test]
-fn reorder_window_non_bulk_bypasses_held_bulk() {
+fn reorder_displaced_head_emits_next_unconditionally() {
     let mut connection = test_connection();
-    let hold = Instant::now() + Duration::from_millis(10);
-    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
-        packet: fec_packet(1, &[0xAA; 8], None),
-        wire_meta: None,
-        send_info: bulk_send_info(),
-        congestion_controlled: true,
-        hold_until: Some(hold),
-    });
-    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
-        packet: fec_packet(2, &[0xBB; 8], None),
-        wire_meta: None,
-        send_info: test_send_info(),
-        congestion_controlled: true,
-        hold_until: None,
-    });
-
-    let now = Instant::now();
-    assert_eq!(
-        connection.pick_reorder_emit_index(now),
-        Some(1),
-        "a ripe control/ACK packet must bypass a still-held bulk packet"
-    );
-    assert_eq!(
-        connection.pick_reorder_emit_index(hold),
-        Some(0),
-        "the bulk packet becomes eligible once its hold expires"
-    );
-}
-
-#[test]
-fn reorder_window_yields_until_earliest_hold() {
-    let mut connection = test_connection();
-    let hold = Instant::now() + Duration::from_millis(10);
-    for id in 0..2u64 {
+    // A displaced head carries `was_displaced`: it must emit as the very
+    // next pick no matter how much bulk arrives behind it, so production
+    // between the two picks of a swap can never push it deeper - the
+    // invariant that keeps reorder below the packet-loss threshold.
+    for id in 0..3u64 {
         connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
             packet: fec_packet(id, &[id as u8; 8], None),
             wire_meta: None,
             send_info: bulk_send_info(),
             congestion_controlled: true,
-            hold_until: Some(hold),
+            was_displaced: id == 0,
         });
     }
-    let now = Instant::now();
+    for _ in 0..64 {
+        assert_eq!(
+            connection.pick_reorder_emit_index(),
+            Some(0),
+            "a displaced head must emit next, never slip further back"
+        );
+    }
+}
+
+#[test]
+fn reorder_window_control_head_keeps_fifo_priority() {
+    let mut connection = test_connection();
+    // A control/ACK queue head keeps strict FIFO priority even when a
+    // bulk train waits behind it - reorder only ever shuffles bulk runs.
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(1, &[0xAA; 8], None),
+        wire_meta: None,
+        send_info: test_send_info(),
+        congestion_controlled: true,
+        was_displaced: false,
+    });
+    for id in 2..4u64 {
+        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            packet: fec_packet(id, &[id as u8; 8], None),
+            wire_meta: None,
+            send_info: bulk_send_info(),
+            congestion_controlled: true,
+            was_displaced: false,
+        });
+    }
     assert_eq!(
-        connection.pick_reorder_emit_index(now),
-        None,
-        "nothing may emit while every queued packet is held"
-    );
-    assert_eq!(
-        connection.earliest_reorder_hold(),
-        Some(hold),
-        "the send deadline must surface the earliest pending hold"
+        connection.pick_reorder_emit_index(),
+        Some(0),
+        "a non-bulk head emits first no matter how long the bulk train is"
     );
 }
 
 #[test]
-fn reorder_hold_skips_lone_bulk_and_disabled_stealth() {
+fn deferral_window_opens_as_timer_and_surfaces_deadline() {
+    let connection = test_connection();
+    let now = Instant::now();
+    let edge = now + Duration::from_millis(2);
+
+    assert!(!connection.deferral_window_open(now), "no window armed yet");
+    connection.bulk_window_release.set(Some(edge));
+
+    assert!(
+        connection.deferral_window_open(now),
+        "an armed bulk window must stall production until its edge"
+    );
+    assert_eq!(
+        connection.next_outbound_release_deadline(),
+        Some(edge),
+        "the runtime must wake at the window edge, not a fixed tick"
+    );
+    assert!(
+        !connection.deferral_window_open(edge),
+        "the window is consumed at its edge, never held past it"
+    );
+
+    // The stealth window participates in the same stall + deadline merge.
+    connection.bulk_window_release.set(None);
+    connection.stealth_window_release.set(Some(edge));
+    assert!(connection.deferral_window_open(now));
+    assert_eq!(connection.next_outbound_release_deadline(), Some(edge));
+}
+
+#[test]
+fn reorder_window_tick_arms_gather_timer_not_packet_hold() {
     let mut connection = test_connection();
     let now = Instant::now();
     let bulk = bulk_send_info();
 
-    // Disabled stealth timing never holds, even inside a burst.
+    // Disabled stealth timing never arms a window, even inside a burst.
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
         packet: fec_packet(9, &[0xCC; 8], None),
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     });
-    assert!(connection.reorder_hold_for(&bulk, now).is_none());
+    connection.reorder_window_tick(&bulk, now);
+    assert!(connection.bulk_window_release.get().is_none());
 
     // Enabled stealth timing still skips a lone bulk packet. The bench pair
     // runs with external pacing on, which gates the jitter path off.
     connection.conn.set_external_pacing(false);
     connection.conn.set_stealth_timing(true, 5_000);
     connection.outgoing_fec_packets.clear();
+    connection.reorder_window_tick(&bulk, now);
     assert!(
-        connection.reorder_hold_for(&bulk, now).is_none(),
+        connection.bulk_window_release.get().is_none(),
         "a lone bulk packet pays latency with zero redistribution gain"
     );
 
-    // With a queued burst the hold engages, bounded by the window ceiling.
+    // With a queued burst the window arms, bounded by the ceiling. A zero
+    // draw legitimately arms nothing (~1/3001 chance), so retry ticks.
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
         packet: fec_packet(10, &[0xDD; 8], None),
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        hold_until: None,
+        was_displaced: false,
     });
-    let mut held = 0usize;
+    let mut armed_at = None;
     for _ in 0..64 {
-        if let Some(hold) = connection.reorder_hold_for(&bulk, now) {
-            held += 1;
-            assert!(hold > now);
-            assert!(
-                hold - now <= Duration::from_micros(QuicFuscateConnection::REORDER_HOLD_MAX_US)
-            );
+        if connection.bulk_window_release.get().is_none() {
+            connection.reorder_window_tick(&bulk, now);
         }
-        // A zero draw legitimately produces no hold (~1/3001 chance).
+        if let Some(edge) = connection.bulk_window_release.get() {
+            armed_at = Some(edge);
+            break;
+        }
     }
-    assert!(held > 32, "burst-context bulk should receive holds overwhelmingly: {held}/64");
+    let edge = armed_at.expect("burst-context bulk must arm the gather window");
+    assert!(edge > now);
+    assert!(edge - now <= Duration::from_micros(QuicFuscateConnection::REORDER_HOLD_MAX_US));
 
-    // Non-bulk traffic never receives a hold even mid-burst.
-    assert!(connection.reorder_hold_for(&test_send_info(), now).is_none());
+    // A mid-window tick keeps the timer without re-arming or clearing.
+    connection.reorder_window_tick(&bulk, now + Duration::from_micros(10));
+    assert_eq!(connection.bulk_window_release.get(), Some(edge));
+    assert!(!connection.burst_draining.get());
+
+    // The first tick past the edge consumes the window and arms the drain
+    // instead of opening a new window for that packet.
+    connection.reorder_window_tick(&bulk, edge + Duration::from_micros(1));
+    assert!(connection.bulk_window_release.get().is_none());
+    assert!(connection.burst_draining.get(), "the edge must arm the drain phase");
+
+    // Non-bulk traffic never arms a window even mid-burst.
+    connection.burst_draining.set(false);
+    connection.reorder_window_tick(&test_send_info(), now);
+    assert!(connection.bulk_window_release.get().is_none());
 }
 
 #[test]
-fn reorder_window_time_window_marks_burst_trains() {
+fn reorder_window_marks_burst_trains_by_time() {
     let mut connection = test_connection();
     connection.conn.set_external_pacing(false);
     connection.conn.set_stealth_timing(true, 5_000);
     let bulk = bulk_send_info();
     let t0 = Instant::now();
 
-    // Head of a train: nothing queued, no recent bulk -> passes unheld.
-    assert!(connection.reorder_hold_for(&bulk, t0).is_none());
+    // Head of a train: nothing queued, no recent bulk -> no window.
+    connection.reorder_window_tick(&bulk, t0);
+    assert!(connection.bulk_window_release.get().is_none());
 
     // A follower inside REORDER_BURST_WINDOW joins the burst even with
-    // empty queues - the hold gathers it for the permuted drain.
+    // empty queues - the timer gathers the train for the permuted drain.
     let t1 = t0 + Duration::from_millis(5);
-    let mut held = 0usize;
-    for _ in 0..32 {
-        if connection.reorder_hold_for(&bulk, t1).is_some() {
-            held += 1;
+    let mut armed = false;
+    for _ in 0..64 {
+        if connection.bulk_window_release.get().is_none() {
+            connection.reorder_window_tick(&bulk, t1);
+        }
+        if connection.bulk_window_release.get().is_some() {
+            armed = true;
+            break;
         }
     }
-    assert!(held > 16, "train follower inside window should hold: {held}/32");
+    assert!(armed, "a train follower inside the window must arm the gather timer");
 
     // After a quiet gap beyond the window the next bulk is a new train
-    // head and again passes unheld.
+    // head and again passes without arming.
+    connection.burst_draining.set(false);
+    connection.bulk_window_release.set(None);
     let t2 = t1 + QuicFuscateConnection::REORDER_BURST_WINDOW + Duration::from_millis(5);
-    assert!(connection.reorder_hold_for(&bulk, t2).is_none());
+    connection.reorder_window_tick(&bulk, t2);
+    assert!(connection.bulk_window_release.get().is_none());
+}
+
+#[test]
+fn stealth_window_tick_arms_timer_and_edge_arms_drain() {
+    let connection = test_connection();
+    let now = Instant::now();
+    let edge = now + Duration::from_millis(2);
+
+    // No draw and a sub-granularity draw both arm nothing.
+    connection.stealth_window_tick(None, now);
+    connection.stealth_window_tick(Some(now + QuicFuscateConnection::STEALTH_MIN_WINDOW / 2), now);
+    assert!(connection.stealth_window_release.get().is_none());
+
+    // A real draw arms the gather timer; the packet itself rides out.
+    connection.stealth_window_tick(Some(edge), now);
+    assert_eq!(connection.stealth_window_release.get(), Some(edge));
+
+    // Mid-window draws keep the shared edge instead of staggering per
+    // packet deadlines.
+    connection.stealth_window_tick(Some(now + Duration::from_millis(10)), now);
+    assert_eq!(connection.stealth_window_release.get(), Some(edge));
+
+    // The first tick past the edge consumes it and arms the drain.
+    connection.stealth_window_tick(Some(edge + Duration::from_millis(5)), edge);
+    assert!(connection.stealth_window_release.get().is_none());
+    assert!(connection.burst_draining.get());
+
+    // During the drain no new window arms - members ride the burst.
+    connection.stealth_window_tick(Some(edge + Duration::from_millis(9)), edge);
+    assert!(connection.stealth_window_release.get().is_none());
+}
+
+#[test]
+fn empty_transport_backlog_ends_the_drain_epoch() {
+    let mut connection = test_connection();
+    connection.burst_draining.set(true);
+    connection.drain_budget.set(4);
+    let mut wire = [0u8; 2048];
+    // The bench transport has nothing pending: send_with_info hits the
+    // transport-Done path, which must release the drain flag once the
+    // backlog is actually empty.
+    let _ = connection.send_with_info(&mut wire);
+    assert!(!connection.burst_draining.get(), "an emptied backlog ends the drain epoch");
 }

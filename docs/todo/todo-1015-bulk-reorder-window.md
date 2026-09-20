@@ -117,5 +117,22 @@ Verified under default and `zero_copy_dgram` feature sets.
   (deadline-driven, 1ms-capable) is the right carrier for the full
   effect; revisit wire evidence after TODO-1016.
 
-OPEN: wire-level reorder evidence + throughput/RTT parity, blocked by
-TODO-1016 drain serialization.
+OPEN: atomic pair emission to lift reorder throughput toward the
+reorder-off ceiling (see TODO-1016).
+
+## Architecture update (2026-09-20, TODO-1016 cycle)
+
+The design moved from per-packet holds to gather timers: produced-and-
+held packets inflate QUIC's in-flight clock into spurious PTO loss.
+`reorder_window_tick` now arms `bulk_window_release`; the opener emits
+as train head, production stalls while the window is open, and the edge
+arms the budgeted drain that emits permuted.
+
+Permutation itself was isolated as the last loss source: unbounded
+picks displace datagrams >=3 positions and trip QUIC's packet-threshold
+loss detection (measured ~24% QUIC loss, 12.8 Mbit/s). The pick is now
+bounded: only the adjacent bulk pair swaps (50% coin) and the displaced
+head is marked `was_displaced` so it emits unconditionally next -
+displacement <= 1, QUIC-safe at 1.5% loss / 37.4 Mbit/s. Tests updated
+to the timer semantics plus `reorder_displaced_head_emits_next_
+unconditionally`.
