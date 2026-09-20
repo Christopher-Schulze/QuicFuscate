@@ -119,3 +119,9 @@ backpressured instead of early-returning:
 - Gates: `cargo build --release`, `cargo clippy -D warnings`,
   `cargo fmt` clean; `client_drain_does_not_recurse_into_blocking_inner`
   green.
+- Platform caveat: the channel-fallback change
+  (`drain_client_tun_uplink`, append-while-parked waves) is exercised
+  only on Wintun/fd-less backends - untested on Windows; the fd path
+  carries all unix validation. Backlog `Vec`+cursor retains sent slots
+  until full drain - bounded churn, compaction option tracked as
+  **TODO-1026**.

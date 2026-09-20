@@ -137,3 +137,15 @@ head is marked `was_displaced` so it emits unconditionally next -
 displacement <= 1, QUIC-safe at 1.5% loss / 37.4 Mbit/s. Tests updated
 to the timer semantics plus `reorder_displaced_head_emits_next_
 unconditionally`.
+
+## State reconciliation (2026-09-21)
+
+The "remaining lift" chain closed: atomic pair emission landed in
+TODO-1017 (done), the scheduler defect behind the ~38% kernel-TUN
+loss was root-caused to the backpressured park path and fixed in
+TODO-1021 (done, `qtun0 TX dropped`=0 at 60 M and 140 M offered).
+What remains before this feature's acceptance can be re-validated
+end-to-end is the **wire-FEC bypass**: with a committed wire profile
+`reorder_window_tick` is unreachable, so reorder cannot arm at all
+under adaptive FEC - tracked as TODO-1022. The >=80%-of-baseline
+throughput criterion therefore still rides on TODO-1022's resolution.

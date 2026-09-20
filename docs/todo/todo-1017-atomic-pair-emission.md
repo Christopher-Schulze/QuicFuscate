@@ -129,3 +129,14 @@ runtime-scheduling problem, not a reorder-algorithm problem.
   members); a pair counts as its two members against the budget.
 - Zero-copy path (`zero_copy_dgram`) must not gain an extra copy for
   the pair emit.
+
+## State reconciliation (2026-09-21)
+
+All three follow-up levers resolved: (1) TODO-1020 verdict STAY -
+io_driver would not change the measured profile; (2) the standalone
+scheduling fix landed as TODO-1021 (drain-into-bounded-backlog under
+backpressure; Omega: `qtun0 TX dropped`=0 at both 60 M and 140 M
+offered, `send_polls`/`send_datagrams` 27x -> 1.7x); (3) GSO segment-
+level permutation remains optional/unscheduled. Residual: reorder
+windows cannot arm under committed wire FEC (TODO-1022), which blocks
+the reorder-active revalidation - mechanism here is done and tested.

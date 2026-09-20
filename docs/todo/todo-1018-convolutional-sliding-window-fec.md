@@ -144,5 +144,20 @@ need a separate revision.
 ## Remaining
 
 - Fountain family still block-mode (separate wire revision needed).
+- Verified non-issues during implementation (do not re-investigate):
+  interleaved lane routing is consistent by construction (encoder
+  assigns `packet_idx % depth`, decoder routes on `packet.seq % depth`,
+  and `FecPacket::new` sets `seq = id`); `DecoderVariant::
+  new_with_depth` per-lane `k` derivation is correct (total `k`, not
+  `block_k`); recovered sources carry `id = sid` so frontier/block
+  placement is consistent.
+- GF16 sliding variant not implemented: `Decoder16`/`Encoder<GF16>`
+  need the same coverage-aware anchor validation + right-aligned
+  coefficient rows (the `sliding` flag currently only permits
+  `WireCodec::StreamingGf8`; a GF16 sliding codec would be a new
+  `WireCodec` discriminant + wire revision).
+- `Decoder8::equations` grows unbounded under adversarial repair
+  floods (lazy-layer `pending_repairs` is capped at 64, admitted rows
+  are not) - tracked as **TODO-1023** (memory-DoS hardening).
 - `fec_decode16_elimination` bench unchanged - GF8 path only; no
   repair-rate regression expected but not benched.

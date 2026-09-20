@@ -57,6 +57,10 @@ flow this may starve window arming even without wire FEC.
 
 ## Acceptance
 
+- Verify `stealth_window_tick` / pacer wiring is identical in both
+  send branches - if the wire-FEC path also skips the stealth window
+  tick, the same silent-disable applies to per-packet stealth
+  deferral, not just reorder.
 - Reorder windows arm under wire-FEC-active bulk load (or an explicit,
   documented decision that they must not, with the gating made
   deliberate rather than incidental).
