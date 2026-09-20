@@ -70,3 +70,48 @@ every client's uplink. Same conversion:
   re-arm contract.
 - Verified on Omega via `tun-e2e-netns.sh` with the batched server binary:
   PASS, 0% loss both directions, clean teardown.
+
+## Follow-up: reactor-integrated uplink (AsyncFd) - supersedes the channel
+
+The wave batching above amortized the reader thread, but the thread itself
+was only needed because the TUN fd lived outside the Tokio reactor. The fd
+is already `O_NONBLOCK`, so on unix the standalone client now registers it
+via `tokio::io::unix::AsyncFd` (`TunReadSource`, `src/main/runtime.rs`) and
+reads uplink frames as an ordinary `select!` branch - reader thread,
+channel, `ppoll`, and notify chain all removed for the client path.
+
+Bug found during e2e validation (worth recording): the readiness branch
+initially gated the drain on `masque_tunnel_established() && h3_stream_id`.
+AsyncFd readiness stays latched until an inner read returns `WouldBlock`,
+so skipping the read left the bit set and the branch spun (1.35M
+`readable()` resolves in 14 s, zero reads, 100% ping loss). Fix: the drain
+always runs on a readiness fire; frames read before the carrier is ready
+park in the bounded backlog (`TUN_PACKET_QUEUE_CAPACITY`), exactly the
+buffering the reader channel used to provide. `drain_uplink_any` now
+dispatches fd-vs-channel for all three drain call sites.
+
+Measured A/B (Omega, `perf stat`, 12 s window, iperf3 TCP through TUN,
+same harness for both binaries):
+
+| syscall | reader-thread | reactor-fd | delta |
+|---|---|---|---|
+| ppoll | 4,544 | 0 | -100% (reader poll loop gone) |
+| read | 29,439 | 23,513 | -20% |
+| epoll_pwait | 20,282 | 23,831 | +17% (readiness moves into the reactor) |
+| futex | 22,212 | 24,026 | +8% |
+| sendmsg+sendmmsg | 8,954 | 8,713 | -3% |
+| recvmmsg | 20,364 | 21,800 | +7% |
+| write | 10,193 | 9,956 | -2% |
+| **total** | **~116k** | **~98k** | **-16%** |
+
+Throughput: 18.3 -> 17.5 Mbit/s (-4%, inside single-core noise on the
+Neoverse-N1). Net: one OS thread and its entire synchronization surface
+removed, ~16% fewer syscalls, same throughput.
+
+Verification: `tun-e2e-netns.sh` PASS both directions, 0% loss, clean
+teardown. The server-side reader thread intentionally remains: the server
+runtime has its own event-loop ownership story and is a separate task.
+
+Non-unix fallback: `TunReadSource` is an uninhabited enum off unix -
+`Option<TunReadSource>` is always `None`, the select branch never fires,
+and the reader-thread path stays the fallback (Wintun has no pollable fd).

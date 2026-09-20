@@ -1205,6 +1205,210 @@ fn drain_client_tun_uplink(
     }
 }
 
+/// Reactor-integrated TUN read end (unix): the TUN fd sits in the Tokio
+/// reactor via `AsyncFd`, so uplink readiness arrives as an ordinary
+/// `select!` branch instead of a dedicated reader thread + channel +
+/// notify chain. The kernel TUN queue provides the buffering the channel
+/// used to fake - backpressure is now real backpressure.
+///
+/// Non-unix platforms get an uninhabited stub: `Option<TunReadSource>` is
+/// then always `None`, the select branch is permanently disabled, and the
+/// reader-thread fallback stays the only path.
+#[cfg(unix)]
+pub(super) struct TunReadSource {
+    fd: tokio::io::unix::AsyncFd<TunReadEnd>,
+}
+
+#[cfg(unix)]
+pub(super) struct TunReadEnd {
+    /// Keeps the TUN device alive for the lifetime of the AsyncFd.
+    tun: Arc<quicfuscate::interface::TunInterface>,
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for TunReadEnd {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+}
+
+#[cfg(unix)]
+impl TunReadSource {
+    fn new(tun: Arc<quicfuscate::interface::TunInterface>, fd: std::os::fd::RawFd) -> Option<Self> {
+        tokio::io::unix::AsyncFd::new(TunReadEnd { tun, fd }).map(|fd| Self { fd }).ok()
+    }
+
+    /// Builds the read end when the backend exposes a pollable nonblocking
+    /// descriptor. Returns `None` on fd-less backends (Wintun), which keeps
+    /// the reader-thread path.
+    pub(super) fn from_tun(tun: &Arc<quicfuscate::interface::TunInterface>) -> Option<Self> {
+        Self::new(Arc::clone(tun), tun.raw_fd()?)
+    }
+
+    async fn readable(&self) {
+        let _ = self.fd.readable().await;
+    }
+
+    /// Nonblocking packet read: `Err(WouldBlock)` means either the fd lost
+    /// readiness or the read itself would block - both clear readiness and
+    /// wait for the next level-triggered wake.
+    fn try_read_packet(&self) -> std::io::Result<(quicfuscate::optimize::PooledBlock, usize)> {
+        let result = self.fd.try_io(tokio::io::Interest::READABLE, |end| end.tun.read_block());
+        if let Err(error) = &result {
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                warn!("tun-fd try_io read failed: {error}");
+            }
+        }
+        result
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) enum TunReadSource {}
+
+#[cfg(not(unix))]
+impl TunReadSource {
+    pub(super) fn from_tun(_tun: &Arc<quicfuscate::interface::TunInterface>) -> Option<Self> {
+        None
+    }
+    async fn readable(&self) {
+        match *self {}
+    }
+}
+
+/// FD-sourced variant of [`drain_client_tun_uplink`]: identical backlog and
+/// budget semantics, but packets come straight off the descriptor via
+/// `try_io` (level-triggered - remaining data re-fires the branch without a
+/// self-notify). A real read error surfaces as `ReaderStopped`, matching the
+/// old reader-thread fault contract.
+///
+/// IMPORTANT: this drain must run unconditionally when the readiness branch
+/// fires. The `AsyncFd` readiness bit stays set until an inner read returns
+/// `WouldBlock`; skipping the read (e.g. because the MASQUE tunnel is not
+/// established yet or `h3_stream_id` is still `None`) leaves the bit set and
+/// the select branch spins forever. Packets read before the carrier is ready
+/// are parked in `backlog` - the same buffering the reader channel used to
+/// provide. The backlog is bounded by `TUN_PACKET_QUEUE_CAPACITY`; overflow
+/// drops the new packet, mirroring the old bounded-channel overflow.
+#[cfg(unix)]
+fn drain_client_tun_uplink_fd(
+    conn: &mut QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    sid: Option<u64>,
+    tun_fd: &TunReadSource,
+    backlog: &mut Option<(Vec<quicfuscate::interface::TunPacket>, usize)>,
+    diagnostics_enabled: bool,
+) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
+    let mut budget = TUN_DRAIN_FRAME_BUDGET;
+    let sendable = sid.is_some() && conn.masque_tunnel_established();
+
+    if let Some((frames, cursor)) = backlog.as_mut() {
+        if sendable {
+            let sid = sid.expect("sendable implies sid");
+            while *cursor < frames.len() && budget > 0 {
+                match send_one_tun_frame(conn, tun, sid, &frames[*cursor], diagnostics_enabled)? {
+                    TunFrameSend::Sent => {
+                        *cursor += 1;
+                        budget -= 1;
+                    }
+                    TunFrameSend::Backpressured => return Ok(false),
+                }
+            }
+            if *cursor >= frames.len() {
+                *backlog = None;
+            }
+        }
+    }
+
+    while budget > 0 {
+        // `try_io` yields Err(WouldBlock) when the registration lost
+        // readiness or the read itself would block - either way readiness is
+        // cleared and the level-triggered branch re-fires on new data.
+        let packet = match tun_fd.try_read_packet() {
+            Ok((block, len)) => {
+                quicfuscate::interface::TunPacket::new(block, len).map_err(|error| {
+                    quicfuscate::engine::DataPlaneFault::ReaderStopped {
+                        component: "standalone client TUN fd".to_string(),
+                        error: error.to_string(),
+                    }
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => {
+                return Err(quicfuscate::engine::DataPlaneFault::ReaderStopped {
+                    component: "standalone client TUN fd".to_string(),
+                    error: error.to_string(),
+                });
+            }
+        };
+        budget -= 1;
+        if sendable {
+            let sid = sid.expect("sendable implies sid");
+            match send_one_tun_frame(conn, tun, sid, &packet, diagnostics_enabled)? {
+                TunFrameSend::Sent => {}
+                TunFrameSend::Backpressured => {
+                    *backlog = Some((vec![packet], 0));
+                    return Ok(false);
+                }
+            }
+        } else {
+            // Carrier not ready yet: park the frame exactly like the old
+            // reader channel did, bounded so a stalled tunnel cannot grow
+            // memory without limit.
+            let cap = quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY;
+            match backlog.as_mut() {
+                Some((frames, _)) if frames.len() >= cap => {
+                    // Queue full: drop, matching bounded-channel overflow.
+                }
+                Some((frames, _)) => {
+                    frames.push(packet);
+                }
+                None => {
+                    *backlog = Some((vec![packet], 0));
+                }
+            }
+        }
+    }
+
+    Ok(backlog.is_some() && sendable)
+}
+
+/// Uplink drain dispatcher used by every select branch that can make TUN
+/// progress: reactor-fd reads when `tun_read_end` is armed (unix only), the
+/// reader-channel waves otherwise. Returns `true` when more work may be
+/// pending so callers keep the notify/tick wake contract alive.
+#[allow(clippy::too_many_arguments)]
+fn drain_uplink_any(
+    conn: &mut QuicFuscateConnection,
+    tun: &quicfuscate::interface::TunInterface,
+    h3_stream_id: Option<u64>,
+    tun_rx: &Option<std::sync::mpsc::Receiver<Vec<quicfuscate::interface::TunPacket>>>,
+    tun_read_end: &Option<TunReadSource>,
+    backlog: &mut Option<(Vec<quicfuscate::interface::TunPacket>, usize)>,
+    diagnostics_enabled: bool,
+) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
+    #[cfg(unix)]
+    if let Some(end) = tun_read_end.as_ref() {
+        return drain_client_tun_uplink_fd(
+            conn,
+            tun,
+            h3_stream_id,
+            end,
+            backlog,
+            diagnostics_enabled,
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = tun_read_end;
+    if conn.masque_tunnel_established() {
+        if let (Some(rx), Some(sid)) = (tun_rx.as_ref(), h3_stream_id) {
+            return drain_client_tun_uplink(conn, tun, sid, rx, backlog, diagnostics_enabled);
+        }
+    }
+    Ok(false)
+}
+
 const CLIENT_HOUSEKEEPING_ACTIVE: Duration = Duration::from_millis(5);
 const CLIENT_HOUSEKEEPING_IDLE: Duration = Duration::from_millis(250);
 

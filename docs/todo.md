@@ -4021,7 +4021,8 @@
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff
 
-- DONE (2026-09-19). The TUN fd cannot batch reads (one frame per `read`), but the handoff can: `reader_loop_with_shutdown_batched` drains the fd nonblocking per wave (`TUN_READ_BURST=32`) and hands one `Vec<TunPacket>` per channel send+notify - applied to both the standalone client (128-frame drain budget, `(wave, cursor)` backlog) and the standalone server reader (32-frame budget, parked `IntoIter` remainder inside `drain_server_tun_packets`). Omega A/B (`perf stat`, 15 s iperf3 through TUN): epoll_pwait -15%, futex -6%, total syscalls -5%, throughput unchanged. e2e PASS.
+- DONE (2026-09-19, superseded same day). The TUN fd cannot batch reads (one frame per `read`), but the handoff can: `reader_loop_with_shutdown_batched` drains the fd nonblocking per wave (`TUN_READ_BURST=32`) and hands one `Vec<TunPacket>` per channel send+notify - applied to both the standalone client (128-frame drain budget, `(wave, cursor)` backlog) and the standalone server reader (32-frame budget, parked `IntoIter` remainder inside `drain_server_tun_packets`). Omega A/B (`perf stat`, 15 s iperf3 through TUN): epoll_pwait -15%, futex -6%, total syscalls -5%, throughput unchanged. e2e PASS.
+- Superseded for the standalone client (2026-09-20): the reader thread existed only because the `O_NONBLOCK` TUN fd lived outside the Tokio reactor. On unix the fd is now registered via `AsyncFd` (`TunReadSource`) and uplink frames arrive as a plain `select!` branch - thread, channel, `ppoll`, and notify chain removed. Validated A/B on Omega (12 s iperf3 through TUN): `ppoll` 4,544 -> 0, `read` -20%, total syscalls -16%, throughput within single-core noise. The server keeps its reader thread (separate event-loop ownership story). e2e PASS both directions.
 - Detail: docs/todo/todo-1013-tun-reader-wave-handoff.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)

@@ -276,7 +276,8 @@ fn validate_tun_write_len(written: usize, expected: usize) -> io::Result<usize> 
 }
 
 impl TunPacket {
-    fn new(block: PooledBlock, len: usize) -> io::Result<Self> {
+    #[doc(hidden)]
+    pub fn new(block: PooledBlock, len: usize) -> io::Result<Self> {
         let len = validate_tun_read_len(len, block.len())?;
         Ok(Self { block, len })
     }
@@ -521,6 +522,15 @@ impl TunInterface {
         }
         self.configured_mtu.store(mtu, Ordering::Release);
         Ok(())
+    }
+
+    /// Raw descriptor of the TUN backend for reactor registration
+    /// (`tokio::io::unix::AsyncFd`). Returns `None` on backends without a
+    /// pollable descriptor (e.g. Wintun) - callers keep the reader thread
+    /// there. The fd is already `O_NONBLOCK`.
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.dev.raw_fd()
     }
 
     /// Reads one packet into a pooled block and returns `(block, len)`.

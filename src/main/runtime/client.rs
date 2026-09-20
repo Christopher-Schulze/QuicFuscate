@@ -545,6 +545,7 @@ pub(super) async fn run_client(
         Option<Arc<AtomicBool>>,
         Option<Arc<parking_lot::Mutex<Option<quicfuscate::engine::DataPlaneFault>>>>,
         Option<std::thread::JoinHandle<()>>,
+        Option<super::TunReadSource>,
     )> = if tun_enable {
         let effective_tun_mtu =
             negotiated_tun_mtu.min(u16::try_from(conn.effective_tunnel_mtu()).unwrap_or(u16::MAX));
@@ -561,45 +562,95 @@ pub(super) async fn run_client(
         match quicfuscate::interface::TunInterface::open(tcfg, pool) {
             Ok(tun) => {
                 // Share the TUN via a plain Arc (no Mutex): read_block() and write()
-                // both take &self and the kernel serializes the fd, so the blocking
-                // reader thread must NOT hold a lock that would starve the downlink
-                // writer (that deadlock left the tunnel one-directional).
+                // both take &self and the kernel serializes the fd, so the
+                // uplink reader must NOT hold a lock that would starve the
+                // downlink writer (that deadlock left the tunnel one-directional).
                 let tun = Arc::new(tun);
-                // The reader owns the shutdown flag and is joined after the
-                // transport loop exits. The bounded channel still applies
-                // backpressure to the TUN source.
-                // Batched handoff: one `Vec` per drain wave (up to
-                // `TUN_READ_BURST` packets) instead of one send+notify per
-                // packet. The bound is wave-counted so the queue still holds
-                // ~`TUN_PACKET_QUEUE_CAPACITY` packets of backpressure.
-                let (tx, rx) =
-                    std::sync::mpsc::sync_channel::<Vec<quicfuscate::interface::TunPacket>>(
-                        quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY
-                            .div_ceil(quicfuscate::interface::TUN_READ_BURST)
-                            .max(2),
-                    );
-                let tun_for_reader = tun.clone();
-                let tun_reader_diagnostics = client_receive_diagnostics_enabled;
                 let reader_shutdown = Arc::new(AtomicBool::new(false));
                 let reader_failed = Arc::new(AtomicBool::new(false));
                 let reader_fault = Arc::new(parking_lot::Mutex::new(None));
-                let shutdown_for_loop = Arc::clone(&reader_shutdown);
-                let shutdown_for_callback = Arc::clone(&reader_shutdown);
-                let failed_for_error = Arc::clone(&reader_failed);
-                let failed_for_callback = Arc::clone(&reader_failed);
-                let fault_for_error = Arc::clone(&reader_fault);
-                let fault_for_callback = Arc::clone(&reader_fault);
-                let tun_notify_for_reader = Arc::clone(&tun_notify);
-                let tun_notify_for_callback_failure = Arc::clone(&tun_notify);
-                let tun_notify_for_error = Arc::clone(&tun_notify);
-                match spawn_client_tun_reader(
-                    |reader| {
-                        std::thread::Builder::new()
-                            .name("client-tun-reader".to_string())
-                            .spawn(reader)
+
+                // Install the MASQUE->TUN sink unconditionally: the downlink
+                // writer is needed whether uplink reads arrive via the
+                // reactor-integrated fd (unix) or the fallback reader thread.
+                let tun_for_cb = tun.clone();
+                let fault_for_masque = Arc::clone(&reader_fault);
+                let notify_for_masque = Arc::clone(&tun_notify);
+                let shutdown_for_masque = Arc::clone(&reader_shutdown);
+                conn.set_masque_datagram_cb(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
+                    move |payload: &[u8]| {
+                        // Only write raw IPv4/IPv6 packets. CONNECT-UDP
+                        // capsules are not TUN payloads.
+                        if !payload.is_empty() && (payload[0] >> 4 == 4 || payload[0] >> 4 == 6) {
+                            if let Err(error) = tun_for_cb.write(payload) {
+                                warn!("Client TUN write (MASQUE downlink) failed: {:?}", error);
+                                record_standalone_client_tun_fault(
+                                    &fault_for_masque,
+                                    &notify_for_masque,
+                                    &shutdown_for_masque,
+                                    quicfuscate::engine::DataPlaneFault::TunWrite {
+                                        component: "standalone client MASQUE downlink".to_string(),
+                                        error: error.to_string(),
+                                    },
+                                );
+                            }
+                        }
                     },
-                    move || {
-                        let read_result = tun_for_reader.reader_loop_with_shutdown_batched(
+                ))));
+
+                // Reactor-integrated uplink (unix): when the TUN backend
+                // exposes a pollable nonblocking fd, uplink readiness arrives
+                // as a plain `select!` branch - no reader thread, no channel,
+                // no notify. The kernel TUN queue supplies the buffering the
+                // channel used to fake, so backpressure stays real.
+                let tun_read_end = super::TunReadSource::from_tun(&tun);
+                info!(
+                    "client TUN uplink mode: {}",
+                    if tun_read_end.is_some() { "reactor-fd" } else { "reader-thread" }
+                );
+                if let Some(end) = tun_read_end {
+                    Ok((
+                        None,
+                        Some(tun),
+                        None,
+                        Some(reader_shutdown),
+                        Some(reader_failed),
+                        Some(reader_fault),
+                        None,
+                        Some(end),
+                    ))
+                } else {
+                    // Fallback: backends without a pollable fd (Wintun) keep the
+                    // dedicated reader thread + wave channel.
+                    // Batched handoff: one `Vec` per drain wave (up to
+                    // `TUN_READ_BURST` packets) instead of one send+notify per
+                    // packet. The bound is wave-counted so the queue still holds
+                    // ~`TUN_PACKET_QUEUE_CAPACITY` packets of backpressure.
+                    let (tx, rx) =
+                        std::sync::mpsc::sync_channel::<Vec<quicfuscate::interface::TunPacket>>(
+                            quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY
+                                .div_ceil(quicfuscate::interface::TUN_READ_BURST)
+                                .max(2),
+                        );
+                    let tun_for_reader = tun.clone();
+                    let tun_reader_diagnostics = client_receive_diagnostics_enabled;
+                    let shutdown_for_loop = Arc::clone(&reader_shutdown);
+                    let shutdown_for_callback = Arc::clone(&reader_shutdown);
+                    let failed_for_error = Arc::clone(&reader_failed);
+                    let failed_for_callback = Arc::clone(&reader_failed);
+                    let fault_for_error = Arc::clone(&reader_fault);
+                    let fault_for_callback = Arc::clone(&reader_fault);
+                    let tun_notify_for_reader = Arc::clone(&tun_notify);
+                    let tun_notify_for_callback_failure = Arc::clone(&tun_notify);
+                    let tun_notify_for_error = Arc::clone(&tun_notify);
+                    match spawn_client_tun_reader(
+                        |reader| {
+                            std::thread::Builder::new()
+                                .name("client-tun-reader".to_string())
+                                .spawn(reader)
+                        },
+                        move || {
+                            let read_result = tun_for_reader.reader_loop_with_shutdown_batched(
                             &shutdown_for_loop,
                             move |wave: Vec<quicfuscate::interface::TunPacket>| {
                                 if tun_reader_diagnostics {
@@ -624,57 +675,24 @@ pub(super) async fn run_client(
                                 tun_notify_for_reader.notify_one();
                             },
                         );
-                        if let Err(error) = read_result {
-                            warn!("Client TUN reader stopped with error: {error}");
-                            if !shutdown_for_loop.load(Ordering::Acquire) {
-                                record_standalone_client_tun_fault(
-                                    &fault_for_error,
-                                    &tun_notify_for_error,
-                                    &shutdown_for_loop,
-                                    quicfuscate::engine::DataPlaneFault::ReaderStopped {
-                                        component: "standalone client TUN reader".to_string(),
-                                        error: error.to_string(),
-                                    },
-                                );
-                                failed_for_error.store(true, Ordering::Release);
-                            }
-                        }
-                    },
-                ) {
-                    Ok(reader_handle) => {
-                        // Install the MASQUE->TUN sink so downlink CONNECT-UDP
-                        // datagrams are written to the client TUN by the H3 poll.
-                        let tun_for_cb = tun.clone();
-                        let fault_for_masque = Arc::clone(&reader_fault);
-                        let notify_for_masque = Arc::clone(&tun_notify);
-                        let shutdown_for_masque = Arc::clone(&reader_shutdown);
-                        conn.set_masque_datagram_cb(std::sync::Arc::new(std::sync::Mutex::new(
-                            Box::new(move |payload: &[u8]| {
-                                // Only write raw IPv4/IPv6 packets. CONNECT-UDP
-                                // capsules are not TUN payloads.
-                                if !payload.is_empty()
-                                    && (payload[0] >> 4 == 4 || payload[0] >> 4 == 6)
-                                {
-                                    if let Err(error) = tun_for_cb.write(payload) {
-                                        warn!(
-                                            "Client TUN write (MASQUE downlink) failed: {:?}",
-                                            error
-                                        );
-                                        record_standalone_client_tun_fault(
-                                            &fault_for_masque,
-                                            &notify_for_masque,
-                                            &shutdown_for_masque,
-                                            quicfuscate::engine::DataPlaneFault::TunWrite {
-                                                component: "standalone client MASQUE downlink"
-                                                    .to_string(),
-                                                error: error.to_string(),
-                                            },
-                                        );
-                                    }
+                            if let Err(error) = read_result {
+                                warn!("Client TUN reader stopped with error: {error}");
+                                if !shutdown_for_loop.load(Ordering::Acquire) {
+                                    record_standalone_client_tun_fault(
+                                        &fault_for_error,
+                                        &tun_notify_for_error,
+                                        &shutdown_for_loop,
+                                        quicfuscate::engine::DataPlaneFault::ReaderStopped {
+                                            component: "standalone client TUN reader".to_string(),
+                                            error: error.to_string(),
+                                        },
+                                    );
+                                    failed_for_error.store(true, Ordering::Release);
                                 }
-                            }),
-                        )));
-                        Ok((
+                            }
+                        },
+                    ) {
+                        Ok(reader_handle) => Ok((
                             Some(rx),
                             Some(tun),
                             None,
@@ -682,15 +700,16 @@ pub(super) async fn run_client(
                             Some(reader_failed),
                             Some(reader_fault),
                             Some(reader_handle),
-                        ))
+                            None,
+                        )),
+                        Err(error) => Err(error),
                     }
-                    Err(error) => Err(error),
                 }
             }
             Err(e) => Err(std::io::Error::other(format!("client TUN open failed: {e:?}"))),
         }
     } else {
-        Ok((None, None, None, None, None, None, None))
+        Ok((None, None, None, None, None, None, None, None))
     };
     let (
         tun_rx,
@@ -700,6 +719,7 @@ pub(super) async fn run_client(
         _tun_reader_failed,
         tun_reader_fault,
         mut tun_reader_handle,
+        tun_read_end,
     ) = match tun_setup {
         Ok(resources) => resources,
         Err(error) => {
@@ -716,10 +736,10 @@ pub(super) async fn run_client(
     };
     let tun_activation_ready = client_tun_activation_ready(
         tun_enable,
-        tun_rx.is_some(),
+        tun_rx.is_some() || tun_read_end.is_some(),
         tun_writer.is_some(),
         tun_reader_shutdown.is_some(),
-        tun_reader_handle.is_some(),
+        tun_reader_handle.is_some() || tun_read_end.is_some(),
     );
     // TUN frames held when the QUIC DATAGRAM queue is full so a backpressured
     // wave remainder is not dropped before carrier acceptance.
@@ -875,12 +895,13 @@ pub(super) async fn run_client(
                         // packets, the recv branch is always ready first and the
                         // housekeeping tick may never fire, starving the TUN uplink.
                         if tun_enable && conn.masque_tunnel_established() {
-                            if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                                let more_tun = match drain_client_tun_uplink(
+                            if let Some(ref tun) = tun_writer {
+                                let more_tun = match drain_uplink_any(
                                     &mut conn,
                                     tun,
-                                    sid,
-                                    rx,
+                                    h3_stream_id,
+                                    &tun_rx,
+                                    &tun_read_end,
                                     &mut tun_backpressure_frame,
                                     client_receive_diagnostics_enabled,
                                 ) {
@@ -931,6 +952,62 @@ pub(super) async fn run_client(
                     next_heartbeat_probe,
                 ));
             }
+            _ = async {
+                match tun_read_end.as_ref() {
+                    Some(end) => end.readable().await,
+                    None => std::future::pending().await,
+                }
+            }, if tun_writer.is_some() && tun_read_end.is_some() => {
+                let branch_started = std::time::Instant::now();
+                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+                if client_receive_diagnostics_enabled
+                    && scheduling_gap >= Duration::from_millis(250)
+                {
+                    info!(
+                        "Client runtime resumed: branch=tun-fd-ready scheduling_gap_ms={}",
+                        scheduling_gap.as_millis()
+                    );
+                }
+                last_runtime_progress = branch_started;
+                // The drain must run on every readiness fire, even before the
+                // MASQUE tunnel is established or `h3_stream_id` is known:
+                // skipping the read leaves the AsyncFd readiness bit set and
+                // the branch spins. Pre-carrier frames are parked in the
+                // backlog instead (same buffering the reader channel gave).
+                if let (Some(end), Some(ref tun)) = (&tun_read_end, &tun_writer) {
+                    let more_tun = match drain_client_tun_uplink_fd(
+                        &mut conn,
+                        tun,
+                        h3_stream_id,
+                        end,
+                        &mut tun_backpressure_frame,
+                        client_receive_diagnostics_enabled,
+                    ) {
+                        Ok(more_tun) => more_tun,
+                        Err(fault) => break ExitReason::DataPlane(fault),
+                    };
+                    if more_tun {
+                        tun_notify.notify_one();
+                    }
+                    if let Err(error) = flush_connected_outgoing(
+                        &socket,
+                        &mut conn,
+                        &mut out,
+                        io_diagnostics.as_mut(),
+                    )
+                    .await
+                    {
+                        break ExitReason::DataPlane(error);
+                    }
+                }
+                housekeeping.reset_after(client_housekeeping_delay(
+                    &conn,
+                    tun_writer.is_some(),
+                    request_sent,
+                    tun_backpressure_frame.is_some(),
+                    next_heartbeat_probe,
+                ));
+            }
             _ = tun_notify.notified(), if tun_writer.is_some() => {
                 if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
                     break ExitReason::DataPlane(fault);
@@ -947,14 +1024,13 @@ pub(super) async fn run_client(
                 }
                 last_runtime_progress = branch_started;
                 if conn.masque_tunnel_established() {
-                    if let (Some(ref rx), Some(sid), Some(ref tun)) =
-                        (&tun_rx, h3_stream_id, &tun_writer)
-                    {
-                        let more_tun = match drain_client_tun_uplink(
+                    if let Some(ref tun) = tun_writer {
+                        let more_tun = match drain_uplink_any(
                             &mut conn,
                             tun,
-                            sid,
-                            rx,
+                            h3_stream_id,
+                            &tun_rx,
+                            &tun_read_end,
                             &mut tun_backpressure_frame,
                             client_receive_diagnostics_enabled,
                         ) {
@@ -1050,12 +1126,13 @@ pub(super) async fn run_client(
                     // wake the event loop immediately; the adaptive tick remains
                     // as a bounded retry path for transport progress.
                     if conn.masque_tunnel_established() {
-                        if let (Some(ref rx), Some(sid), Some(ref tun)) = (&tun_rx, h3_stream_id, &tun_writer) {
-                            let more_tun = match drain_client_tun_uplink(
+                        if let Some(ref tun) = tun_writer {
+                            let more_tun = match drain_uplink_any(
                                 &mut conn,
                                 tun,
-                                sid,
-                                rx,
+                                h3_stream_id,
+                                &tun_rx,
+                                &tun_read_end,
                                 &mut tun_backpressure_frame,
                                 client_receive_diagnostics_enabled,
                             ) {
