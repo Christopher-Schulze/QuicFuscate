@@ -4,7 +4,7 @@ title: Standalone TUN drain spins on latched readiness while the dgram queue bac
 severity: HIGH
 phase: L
 priority: P1
-status: PARTIAL
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1017, TODO-1020]
 ---
@@ -96,6 +96,26 @@ backpressured instead of early-returning:
 - FIFO preserved: appended frames queue behind `cursor`; sends resume
   in cursor order once the backlog drains.
 
-Remaining: Omega validation rerun (60 M UDP + reorder): expect
-`qtun0 TX dropped` -> ~0 (drops move into `tun_drops` once the 1024
-cap saturates) and `send_polls`/`send_datagrams` collapsing from ~27x.
+## Validation (done, Omega `tun-e2e-netns.sh`, release build)
+
+- 60 Mbit/s UDP (at-capacity regime): `qtun0 TX dropped = 0`,
+  `tun_drops = 0`, iperf `0/55102 (0%)` loss,
+  `send_polls/send_datagrams` = 1.67x (baseline ~27x, ~96 % empty).
+- 140 Mbit/s UDP (saturated regime, offered > emission): `qtun0 TX
+  dropped = 0`, `tun_drops = 68,984` ≈ iperf loss `68,961/128,538
+  (54%)`, `send_polls/send_datagrams` = 1.72x, `transport_sent` =
+  59,641 (~63 Mbit/s real emission capacity on the single-core VM).
+- Semantics shift: backpressure loss is now **bounded, FIFO-ordered
+  and counted** (`tun_drops`) in the userspace backlog instead of
+  silently dropped in the kernel TUN queue. The backlog cap
+  (`TUN_PACKET_QUEUE_CAPACITY` unsent frames) bounds memory.
+- Regime caveat: `yield_window = 0` / `drain_entries = 0` in both runs —
+  reorder windows did not arm (`reorder_window_tick` only runs on the
+  non-wire-FEC path; wire-profile sends bypass it). The defect is
+  scheduler-level and was exercised directly by the saturation run,
+  so this does not block the fix — but wire-FEC-active traffic
+  currently cannot arm reorder windows at all, which is a separate
+  architectural gap worth a follow-up TODO.
+- Gates: `cargo build --release`, `cargo clippy -D warnings`,
+  `cargo fmt` clean; `client_drain_does_not_recurse_into_blocking_inner`
+  green.

@@ -4056,8 +4056,13 @@
 
 ### TODO-1021 - Backpressured TUN park path spins the select loop
 
-- OPEN (P1, 2026-09-21). `drain_client_tun_uplink_fd` returns early on `DgramQueueFull` without reading the fd -> latched AsyncFd readiness -> unbounded select spin (~96% empty send_polls) while the kernel queue drops (`qtun0 TX dropped` ~= iperf loss at 60 M offered). Fix: keep draining the fd into the bounded backlog (cap `TUN_PACKET_QUEUE_CAPACITY`=1024, counted overflow drops, FIFO preserved) exactly like the `!sendable` park path - clears readiness, stops the spin, frees CPU for emission.
+- DONE (P1, 2026-09-21). Both drains now keep consuming their source under carrier backpressure instead of early-returning: fd path appends behind the parked cursor to `WouldBlock` (AsyncFd readiness clears each wake -> select arm pends, spin gone), channel fallback keeps receiving waves so the reader thread never stalls on a full bounded channel. Backlog bounded by `TUN_PACKET_QUEUE_CAPACITY` unsent frames; overflow counted via new `tun_drops=` stat; `carrier_full` reports `Ok(false)` so the 5 ms housekeeping tick paces retries (no self-notify spin). Omega validation: 60 M -> `qtun0 TX dropped`=0, `tun_drops`=0, iperf 0% loss, `send_polls/send_datagrams` 1.67x (baseline ~27x); 140 M saturation -> `qtun0`=0, `tun_drops`=68,984 ~= iperf loss 68,961 (54%) - loss now bounded+counted in userspace, `transport_sent` ~= 63 Mbit/s real single-core capacity.
 - Detail: docs/todo/todo-1021-tun-park-spin.md
+
+### TODO-1022 - Reorder window never arms on the wire-FEC send path
+
+- OPEN (P2, 2026-09-21). Surfaced by TODO-1021 validation (`yield_window`=0/`drain_entries`=0 in both runs): `reorder_window_tick` is invoked only in the `wire_profile.is_none()` branch of `src/core/connection/send.rs`, so wire-FEC-active traffic cannot arm ChameleonFlow reorder windows at all - the feature silently disables itself exactly when FEC is committed. Also suspicious: `bulk_only` requires zero coalesced control/stream frames, which may starve arming under clean flow even without wire FEC. Decide intended interaction (tick in the wire branch gated on `bulk_only`, with repair-latency guard) vs documented intentional bypass.
+- Detail: docs/todo/todo-1022-reorder-window-wire-fec-bypass.md
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff
 
