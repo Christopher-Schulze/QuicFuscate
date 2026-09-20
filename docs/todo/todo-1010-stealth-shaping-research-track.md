@@ -121,10 +121,11 @@ ADAPTED - candidate 1 (ChameleonFlow "shape what's there") partially:
 ACK-clocked traffic is dense (`ack_us < 3_000`) - real packets already
 carry burst structure, so purchased chaff only widens the bandwidth
 footprint. Regression `dense_traffic_halves_padding_rate` covers both
-branches. The full ChameleonFlow reorder-window variant (redistribute real
-packets across time instead of adding chaff) stays open - it needs a
-bounded delay queue in the send path, which is a bigger surgery than the
-rate rule.
+branches. The full ChameleonFlow reorder-window variant (redistribute
+real packets across time instead of adding chaff) LANDED via TODO-1015 +
+TODO-1016: bulk-classified datagrams get a gather-timer reorder window
+with bounded adjacent swap (displacement <= 1, QUIC-safe); remaining
+throughput lift is tracked as TODO-1017 (atomic pair emission).
 
 ADAPTED - candidate 2 (Adaptive Tamaraw) partially:
 `intelligent_policy.rs` now classifies traffic into `TrafficPhase`
@@ -138,10 +139,13 @@ fingerprint. Test `tamaraw_phase_table_scales_jitter_by_density` pins both
 branches. A literal per-cluster (rho, gamma) row with disjoint upload vs
 download weights stays open: our policy is symmetric today, so the table
 has one axis; splitting it needs direction-aware signal plumbing
-(up/down ack density separately).
+(up/down ack density separately). Tracked with implementation sketch +
+acceptance as **TODO-1019** (docs/todo/todo-1019-tamaraw-direction-aware.md).
 
-OPEN: candidates 4, 5 unchanged (QUICstep design study, UPGen deployment
-seeding); the full ChameleonFlow reorder window stays open per above.
+OPEN: candidate 4 stays deferred-by-verdict (QUICstep, see study below);
+candidate 5 landed as TODO-1014; the ChameleonFlow reorder window landed
+via TODO-1015/1016 (lift: TODO-1017); Tamaraw direction split tracked as
+TODO-1019.
 
 ## Design studies (2026-09-20)
 

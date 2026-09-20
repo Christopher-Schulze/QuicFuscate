@@ -90,16 +90,14 @@ Reproduce on Omega: `QUICFUSCATE_STEALTH_JITTER_US=1` + uTLS + iperf uplink.
   holds, edge consumes+drains, displaced-head invariant, deadline merge,
   empty-backlog drain end.
 
-## Remaining work
-- Residual ~37.4/59.9 Mbit/s gap vs reorder-off: each swapped head pays
-  one emit slot, halving train emission under dense bulk. Improvement
-  path: atomic pair emission (both packets of a swap emitted in one
-  drain tick, or GSO segment-level permutation) instead of slot swaps.
-- Residual ~1.5% QUIC loss: displaced heads waiting one loop slot can
-  still cross time-threshold on fast links; atomic pair emission removes
-  it too.
-- Decide whether the standalone TUN path should migrate to the io_driver
-  runtime instead of growing its own scheduler.
-- Acceptance: uTLS + `JITTER_US=5000` uplink >= 80% of the no-stealth
-  baseline on Omega (currently ~62%), ping RTT overhead bounded and
-  documented.
+## Remaining work (moved to follow-up TODOs, 2026-09-21)
+- Residual ~37.4/59.9 Mbit/s gap vs reorder-off + residual ~1.5% QUIC
+  loss: each swapped head pays one emit slot and displaced heads
+  waiting one loop slot can cross time-threshold on fast links.
+  Improvement path and acceptance moved to **TODO-1017** (atomic pair
+  emission / GSO segment-level permutation).
+- Standalone TUN -> io_driver migration decision moved to **TODO-1020**
+  (study-scoped, written verdict is the deliverable).
+- Acceptance carried to TODO-1017: uTLS + `JITTER_US=5000` uplink >=
+  80% of the no-stealth baseline on Omega (currently ~62%), ping RTT
+  overhead bounded and documented.

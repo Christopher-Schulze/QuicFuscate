@@ -4,7 +4,7 @@ title: ChameleonFlow-style bounded reorder window for bulk datagrams
 severity: MEDIUM
 phase: L
 priority: P2
-status: OPEN
+status: PARTIAL
 created: 2026-09-20
 depends_on: [TODO-1011]
 ---
@@ -118,7 +118,8 @@ Verified under default and `zero_copy_dgram` feature sets.
   effect; revisit wire evidence after TODO-1016.
 
 OPEN: atomic pair emission to lift reorder throughput toward the
-reorder-off ceiling (see TODO-1016).
+reorder-off ceiling - tracked with full plan + acceptance as
+**TODO-1017** (docs/todo/todo-1017-atomic-pair-emission.md).
 
 ## Architecture update (2026-09-20, TODO-1016 cycle)
 

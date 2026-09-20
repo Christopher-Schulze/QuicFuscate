@@ -176,7 +176,9 @@ source-id keyed, not generation aligned), so overlapping equations are
 representable; the wire format needs the window base carried in the repair
 header so decoders can bound the equation set. Sized as a separate
 implementation TODO - it touches encoder windowing, decoder equation
-scoping, and the wire identity (`REPAIR_LANE_BITS` layout) simultaneously.
+scoping, and the wire identity (`REPAIR_LANE_BITS` layout)
+simultaneously. Spawned as **TODO-1018**
+(docs/todo/todo-1018-convolutional-sliding-window-fec.md).
 
 ## Repair-ACK implementation (item 3, DONE 2026-09-21; closes TODO-1006 option (a))
 
