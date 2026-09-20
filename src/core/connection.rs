@@ -158,6 +158,15 @@ pub struct QuicFuscateConnection {
     /// Last time a bulk-only datagram entered `outgoing_fec_packets`;
     /// trains closer than `REORDER_BURST_WINDOW` share one reorder window.
     last_bulk_queued: std::cell::Cell<Option<std::time::Instant>>,
+    /// TODO-1017: ChameleonFlow quiet phase. A reorder window may not
+    /// arm before this instant; armed at the window edge with a fresh
+    /// uniform draw. Without it every sustained train re-arms a window
+    /// on the first tick after a drain, so nearly all bulk traffic pays
+    /// the gather-stall cadence and the emitted rate falls below the
+    /// offered rate - the difference drops in the kernel TUN queue
+    /// (Omega: 21k/55k datagrams). The quiet phase keeps reordering
+    /// occasional inside an otherwise FIFO stream.
+    reorder_quiet_until: std::cell::Cell<Option<std::time::Instant>>,
     /// Gather-timer edge of the current bulk reorder window (TODO-1015/
     /// TODO-1016). The window is a timer, not a packet hold: the opener
     /// emits immediately as the train head, production stalls while it is
@@ -636,6 +645,7 @@ impl QuicFuscateConnection {
             tls_ch_override_template: environment.first(["QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE"]),
 
             last_bulk_queued: std::cell::Cell::new(None),
+            reorder_quiet_until: std::cell::Cell::new(None),
             bulk_window_release: std::cell::Cell::new(None),
             stealth_window_release: std::cell::Cell::new(None),
             burst_draining: std::cell::Cell::new(false),

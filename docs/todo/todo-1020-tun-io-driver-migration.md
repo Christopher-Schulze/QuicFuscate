@@ -44,7 +44,19 @@ cost/benefit table - implementation TODO only if the verdict is
    bookkeeping? Quantify against post-TODO-1016 behavior (drain epochs
    already emit batches; is the remaining gap scheduler-caused at
    all?).
-3. Migration cost: which code moves, what tests cover the loop today,
+3. **TUN-ingest backpressure profile** (added from TODO-1017 findings):
+   Omega measured ~38-44% uplink loss at 60 M offered with reorder
+   active - ~100% kernel TUN-queue drops (`qtun0 TX dropped`). The
+   standalone path parks fd reads the moment `dgram_send_queue` (1024)
+   backpressures (`drain_client_tun_uplink_fd` ->
+   `tun_backpressure_frame`), while the loop keeps burning `conn.send`
+   polls (~96% empty yields). Compare against io_driver's
+   `enqueue_tun_datagram` (flush-before-sleep retry,
+   `io_driver/runtime.rs` ~L608): does its ingest stop pulling the fd
+   earlier/later, does its loop spin the same way under emission gaps,
+   and does the measured rate ceiling (~3.4-3.7k pkt/s on Omega's
+   single-core) change?
+4. Migration cost: which code moves, what tests cover the loop today,
    what e2e coverage (`tun-e2e-netns.sh`) verifies parity.
 
 ## Acceptance

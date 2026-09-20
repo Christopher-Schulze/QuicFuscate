@@ -4036,7 +4036,7 @@
 
 ### TODO-1017 - Atomic pair emission for bounded bulk reorder swaps
 
-- OPEN (P1, 2026-09-21). Closes TODO-1016's measured residuals: each adjacent swap costs one emit slot (~62% of the reorder-off ceiling) and a displaced head waiting one loop slot can still cross time-threshold (~1.5% QUIC loss). Plan: emit both datagrams of a swap in one drain pass (option 1), GSO segment-level permutation as the possible stronger follow-up (option 2). Acceptance: >= 80% of no-stealth baseline on Omega, residual QUIC loss < 0.5%.
+- PARTIAL (P1, 2026-09-21). Implemented as swap-on-join (`pair_swap_on_join` + `paired` flag, plain-FIFO emission, displacement <= 1 by construction) plus a ChameleonFlow quiet phase (`reorder_quiet_until`, ~13% max window duty). Omega falsified the throughput hypothesis: 35.8 Mbit/s vs 59.9 baseline - the loss is ~100% kernel TUN-queue drops (`qtun0 TX dropped` ~= iperf loss), caused by the runtime's poll-spin scheduling under emission gaps saturating the 1024-entry dgram queue and parking fd reads on the contended single-core VM. `UDPRATE=30M` control: 0% loss. Real levers moved to TODO-1020 (ingest/backpressure comparison) and a standalone-runtime scheduling fix (see detail file).
 - Detail: docs/todo/todo-1017-atomic-pair-emission.md
 
 ### TODO-1018 - Sliding-window (convolutional) FEC coding window

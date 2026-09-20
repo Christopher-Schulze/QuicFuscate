@@ -52,6 +52,17 @@ impl QuicFuscateConnection {
     /// path; the io_driver runtime's deadline-driven loop drains batches
     /// at higher resolution.
     pub(crate) const REORDER_HOLD_MAX_US: u64 = 3_000;
+    /// Upper bound of the randomized quiet phase drawn at each reorder
+    /// window edge (TODO-1017). Without a quiet phase every sustained
+    /// bulk train re-arms a gather window on the first tick after a
+    /// drain, so nearly all traffic pays the window-stall cadence and
+    /// the emitted rate drops below the offered rate - the deficit
+    /// drops in the kernel TUN queue (Omega measured 21k of 55k
+    /// datagrams at `qtun0 TX dropped`, matching iperf receiver loss).
+    /// Mean quiet ~10 ms bounds the reorder duty cycle to ~13%, which
+    /// is the ChameleonFlow shape: occasional reordered trains inside
+    /// an otherwise FIFO stream.
+    pub(crate) const REORDER_QUIET_MAX_US: u64 = 20_000;
     /// Two bulk packets closer than this belong to the same burst train;
     /// train members are eligible for the hold + permuted emission.
     pub(crate) const REORDER_BURST_WINDOW: Duration = Duration::from_millis(10);
@@ -101,10 +112,17 @@ impl QuicFuscateConnection {
                 // in-flight inflation.
                 return;
             }
-            // The window edge just passed: consume it and switch to the
-            // drain phase instead of opening a new window for this packet.
+            // The window edge just passed: consume it, open the quiet
+            // phase, and switch to the drain phase instead of opening a
+            // new window for this packet.
             self.bulk_window_release.set(None);
+            let quiet_us =
+                crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_QUIET_MAX_US + 1);
+            self.reorder_quiet_until.set(Some(now + Duration::from_micros(quiet_us)));
             self.arm_burst_drain();
+            return;
+        }
+        if self.reorder_quiet_until.get().is_some_and(|until| now < until) {
             return;
         }
         let hold_us = crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_HOLD_MAX_US + 1);
@@ -117,58 +135,42 @@ impl QuicFuscateConnection {
         log::debug!("reorder_window: bulk window +{hold_us}us");
     }
 
-    /// Emission index into `outgoing_fec_packets`. Every queued packet is
-    /// ripe on arrival (deferral windows are timers, not per-packet
-    /// holds), so the pick is pure train-order logic.
-    ///
-    /// Non-bulk entries keep strict FIFO priority: the head is emitted
-    /// unless it is bulk-only AND a second bulk entry is queued, in
-    /// which case a fair coin swaps the adjacent bulk pair. That is the
-    /// ChameleonFlow step with bounded displacement: burst-train order on
-    /// the wire stops mirroring composition order while control/ACK/
-    /// framed traffic keeps its sequence.
-    ///
-    /// The displacement is capped at one position - the only reorder
+    /// TODO-1017 atomic pair emission: a freshly queued bulk datagram
+    /// may swap places with the bulk entry directly ahead of it (fair
+    /// coin). Both members are marked `paired` so neither can swap
+    /// again - every displacement stays <= 1 position, the only reorder
     /// depth that cannot trip QUIC's packet-threshold loss detection
-    /// (k = 3). The head is marked `was_displaced` when a swap passes
-    /// over it: a displaced head is never displaced again and emits as
-    /// the next pick, so production arriving between the two picks can
-    /// never push it further back. Unbounded picks displaced datagrams
-    /// three or more positions and were measured on Omega as ~25%
-    /// spurious loss with cwnd churn (~5x throughput cost); a naive
-    /// adjacent swap without the displaced-head guard still leaked ~4%
-    /// because the stranded head could slip behind freshly produced
-    /// datagrams.
-    pub(crate) fn pick_reorder_emit_index(&mut self) -> Option<usize> {
-        let front_is_bulk =
-            self.outgoing_fec_packets.front().is_some_and(|packet| packet.send_info.bulk_only);
-        if !front_is_bulk {
-            return self.outgoing_fec_packets.front().map(|_| 0);
+    /// (k = 3).
+    ///
+    /// Because the swap happens at join time, emission is plain FIFO:
+    /// the pair always emits back-to-back inside one flush batch
+    /// (sendmmsg), so a swap never costs an emit slot and no displaced
+    /// datagram ever waits a pick. That is the atomicity the previous
+    /// pick-time swap lacked: its displaced head emitted one loop slot
+    /// later, which measured ~62% of the reorder-off ceiling plus ~1.5%
+    /// residual loss on Omega. Unbounded permutation (displacement
+    /// >= 3) measured ~25% spurious loss - still rejected.
+    pub(crate) fn pair_swap_on_join(&mut self) {
+        let len = self.outgoing_fec_packets.len();
+        if len < 2 {
+            return;
         }
-        // A displaced head emits unconditionally - it already spent its
-        // one allowed displacement.
-        if self.outgoing_fec_packets.front().is_some_and(|packet| packet.was_displaced) {
-            return Some(0);
+        let (prev, last) = (len - 2, len - 1);
+        let swappable = self.outgoing_fec_packets[prev].send_info.bulk_only
+            && self.outgoing_fec_packets[last].send_info.bulk_only
+            && !self.outgoing_fec_packets[prev].paired
+            && !self.outgoing_fec_packets[last].paired;
+        if swappable && crate::transport::rand::fast_rand_u64_uniform(2) == 1 {
+            self.outgoing_fec_packets.swap(prev, last);
+            self.outgoing_fec_packets[prev].paired = true;
+            self.outgoing_fec_packets[last].paired = true;
         }
-        // Locate the second bulk entry: swapping with it displaces the
-        // head by exactly one position - the maximum that stays below
-        // the loss-detection packet threshold.
-        let second_bulk = self
-            .outgoing_fec_packets
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, packet)| packet.send_info.bulk_only)
-            .map(|(idx, _)| idx);
-        match second_bulk {
-            Some(idx) if crate::transport::rand::fast_rand_u64_uniform(2) == 1 => {
-                if let Some(head) = self.outgoing_fec_packets.front_mut() {
-                    head.was_displaced = true;
-                }
-                Some(idx)
-            }
-            _ => self.outgoing_fec_packets.front().map(|_| 0),
-        }
+    }
+
+    /// FIFO emission - the queue order already carries any reorder
+    /// permutation (see `pair_swap_on_join`).
+    pub(crate) fn next_emit_index(&self) -> Option<usize> {
+        self.outgoing_fec_packets.front().map(|_| 0)
     }
 
     /// TODO-1006 repair-ACK producer (receiver side): drains the wire
@@ -218,7 +220,7 @@ impl QuicFuscateConnection {
                 bulk_only: false,
             },
             congestion_controlled: false,
-            was_displaced: false,
+            paired: false,
         });
         crate::telemetry::FEC_REPAIR_ACK_ENTRIES_SENT.inc_by(count as u64);
         Ok(())
@@ -414,6 +416,7 @@ impl QuicFuscateConnection {
         if !established {
             self.bulk_window_release.set(None);
             self.stealth_window_release.set(None);
+            self.reorder_quiet_until.set(None);
             self.burst_draining.set(false);
             self.outbound_pacer.reset();
         } else if !path_control_pending && self.deferral_window_open(now) {
@@ -482,7 +485,7 @@ impl QuicFuscateConnection {
         // new send() call would generate another FEC packet and push it onto
         // outgoing_fec_packets without ever draining the buffer.
         if !path_control_pending && !self.outgoing_fec_packets.is_empty() {
-            let Some(emit_idx) = self.pick_reorder_emit_index() else {
+            let Some(emit_idx) = self.next_emit_index() else {
                 self.send_yield_counts[2].set(self.send_yield_counts[2].get() + 1);
                 // Every queued packet still waits inside its reorder hold
                 // window (TODO-1015). The runtime re-polls at the deadline
@@ -565,7 +568,7 @@ impl QuicFuscateConnection {
 
         // Pop the first ripe packet from the buffer to send it now.
         if !self.outgoing_fec_packets.is_empty() {
-            let Some(emit_idx) = self.pick_reorder_emit_index() else {
+            let Some(emit_idx) = self.next_emit_index() else {
                 return Ok((
                     0,
                     crate::transport::SendInfo {
@@ -848,7 +851,8 @@ impl QuicFuscateConnection {
             let source_sequence = self.fec_tx_sequence;
             let window = (source_sequence / profile.source_count as u64) as u32;
             self.fec.on_send_into(fec_packet, &mut self.fec_send_scratch);
-            for packet in self.fec_send_scratch.drain(..) {
+            let mut drained = std::mem::take(&mut self.fec_send_scratch);
+            for packet in drained.drain(..) {
                 let (sequence, repair_index, block_index) = if packet.is_systematic {
                     (
                         source_sequence,
@@ -878,8 +882,9 @@ impl QuicFuscateConnection {
                     packet,
                     send_info,
                     congestion_controlled: send_info.congestion_controlled,
-                    was_displaced: false,
+                    paired: false,
                 });
+                self.pair_swap_on_join();
             }
             self.fec_tx_sequence = self.fec_tx_sequence.wrapping_add(1);
         } else {
@@ -890,12 +895,13 @@ impl QuicFuscateConnection {
                 wire_meta: None,
                 send_info,
                 congestion_controlled: send_info.congestion_controlled,
-                was_displaced: false,
+                paired: false,
             };
             if send_info.path_control {
                 self.outgoing_fec_packets.push_front(outgoing);
             } else {
                 self.outgoing_fec_packets.push_back(outgoing);
+                self.pair_swap_on_join();
             }
         }
 
@@ -973,7 +979,7 @@ impl QuicFuscateConnection {
         now: Instant,
         zero_send_info: crate::transport::SendInfo,
     ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
-        match self.pick_reorder_emit_index() {
+        match self.next_emit_index() {
             Some(emit_idx) => self.emit_queued_packet(buf, now, emit_idx),
             None => Ok((0, zero_send_info)),
         }
@@ -991,9 +997,10 @@ impl QuicFuscateConnection {
         now: Instant,
         established: bool,
     ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
+        let (local_addr, peer_addr) = (self.local_addr, self.peer_addr);
         let zero_send_info = |at: Instant| crate::transport::SendInfo {
-            from: self.local_addr,
-            to: self.peer_addr,
+            from: local_addr,
+            to: peer_addr,
             at,
             congestion_controlled: false,
             path_control: false,
@@ -1081,8 +1088,9 @@ impl QuicFuscateConnection {
                     wire_meta: None,
                     send_info,
                     congestion_controlled: send_info.congestion_controlled,
-                    was_displaced: false,
+                    paired: false,
                 });
+                self.pair_swap_on_join();
                 // A datagram materialized inside a drain epoch spends one
                 // unit of its budget.
                 self.drain_budget.set(self.drain_budget.get().saturating_sub(1));

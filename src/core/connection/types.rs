@@ -101,12 +101,11 @@ pub(crate) struct OutgoingFecPacket {
     pub(crate) wire_meta: Option<WirePacketMeta>,
     pub(crate) send_info: crate::transport::SendInfo,
     pub(crate) congestion_controlled: bool,
-    /// TODO-1015: set when a reorder swap displaced this packet behind
-    /// the adjacent bulk entry. A displaced head must emit next - it is
-    /// never displaced a second time, which bounds the wire-order
-    /// displacement at exactly one position and keeps the packet safely
-    /// below QUIC's packet-threshold loss detection (k = 3).
-    pub(crate) was_displaced: bool,
+    /// TODO-1017: member of a completed adjacent bulk swap. Paired
+    /// packets never swap again, which bounds every reorder
+    /// displacement to <= 1 position (below QUIC's packet-loss
+    /// threshold k = 3) without emit-time bookkeeping.
+    pub(crate) paired: bool,
 }
 
 impl OutgoingFecPacket {

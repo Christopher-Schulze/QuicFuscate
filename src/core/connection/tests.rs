@@ -421,7 +421,7 @@ fn outgoing_zero_mode_packet_preserves_raw_quic_datagram() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     };
     let mut wire = [0u8; 64];
 
@@ -455,7 +455,7 @@ fn outgoing_repair_packet_preserves_fec_wire_metadata() {
         wire_meta: Some(meta),
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     };
     let mut wire = [0u8; 128];
 
@@ -495,7 +495,7 @@ fn outgoing_systematic_packet_preserves_protected_quic_datagram() {
         wire_meta: Some(meta),
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     };
     let mut wire_datagram = [0u8; 128];
 
@@ -528,14 +528,14 @@ fn buffered_fec_packet_survives_an_output_capacity_failure() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     });
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
         packet: fec_packet(8, &payload, None),
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     });
 
     // A buffer far too small for the packet forces the write to fail.
@@ -579,7 +579,7 @@ fn pending_path_control_preempts_buffered_fec_datagram() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     });
     connection.conn.migrate(new_local, new_peer).expect("migration candidate");
     assert_eq!(
@@ -742,7 +742,7 @@ fn path_control_metadata_survives_raw_fec_queueing() {
         wire_meta: None,
         send_info,
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     };
     let mut wire = [0u8; 64];
 
@@ -832,7 +832,7 @@ fn active_fec_off_preserves_queued_sources_and_discards_only_repairs() {
             }),
             send_info: test_send_info(),
             congestion_controlled: true,
-            was_displaced: false,
+            paired: false,
         });
     }
     connection.fec_tx_profile = Some(profile);
@@ -1134,51 +1134,69 @@ fn bulk_send_info() -> crate::transport::SendInfo {
 #[test]
 fn reorder_window_permutates_ripe_bulk_run() {
     let mut connection = test_connection();
-    // Four ripe bulk packets form a train; repeated picks must not always
-    // return the FIFO head or the window is not permuting anything. The
-    // swap is displacement-bounded: only the adjacent bulk pair may
-    // trade places, so no pick ever exceeds index 1 - deeper picks trip
-    // QUIC's packet-threshold loss detection (TODO-1016 Omega finding).
-    for id in 0..4u64 {
-        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
-            packet: fec_packet(id, &[id as u8; 8], None),
-            wire_meta: None,
-            send_info: bulk_send_info(),
-            congestion_controlled: true,
-            was_displaced: false,
-        });
+    // Join-time swaps permute the bulk run while every displacement
+    // stays bounded to <= 1 position: each packet's join index vs its
+    // final queue position must never differ by more than one slot -
+    // the invariant that keeps reorder below QUIC's packet-threshold
+    // loss detection (k = 3, TODO-1017). Over 64 trains the fair coin
+    // must fire at least once and the order must actually change.
+    let mut saw_permutation = false;
+    for _ in 0..64 {
+        connection.outgoing_fec_packets.clear();
+        for id in 0..6u64 {
+            connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+                packet: fec_packet(id, &[id as u8; 8], None),
+                wire_meta: None,
+                send_info: bulk_send_info(),
+                congestion_controlled: true,
+                paired: false,
+            });
+            connection.pair_swap_on_join();
+        }
+        for (position, entry) in connection.outgoing_fec_packets.iter().enumerate() {
+            let join_index = entry.packet.id as usize;
+            assert!(
+                position.abs_diff(join_index) <= 1,
+                "reorder displacement must stay below the loss threshold"
+            );
+            if position != join_index {
+                saw_permutation = true;
+            }
+        }
     }
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..200 {
-        let idx = connection.pick_reorder_emit_index().expect("ripe bulk must emit");
-        assert!(idx <= 1, "reorder displacement must stay below the loss threshold");
-        seen.insert(idx);
-    }
-    assert!(seen.len() > 1, "permuted picks must vary across the bulk run: {seen:?}");
+    assert!(saw_permutation, "the fair coin must swap at least once over 64 trains");
 }
 
 #[test]
-fn reorder_displaced_head_emits_next_unconditionally() {
+fn reorder_paired_member_never_swaps_twice() {
     let mut connection = test_connection();
-    // A displaced head carries `was_displaced`: it must emit as the very
-    // next pick no matter how much bulk arrives behind it, so production
-    // between the two picks of a swap can never push it deeper - the
-    // invariant that keeps reorder below the packet-loss threshold.
-    for id in 0..3u64 {
+    // A `paired` entry already spent its one allowed swap: a fresh bulk
+    // datagram joining behind it must not swap with it, so a displaced
+    // packet can never slip a second position (TODO-1017).
+    for (id, paired) in [(0u64, true), (1, true)] {
         connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
             packet: fec_packet(id, &[id as u8; 8], None),
             wire_meta: None,
             send_info: bulk_send_info(),
             congestion_controlled: true,
-            was_displaced: id == 0,
+            paired,
         });
     }
     for _ in 0..64 {
+        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            packet: fec_packet(99, &[0x99; 8], None),
+            wire_meta: None,
+            send_info: bulk_send_info(),
+            congestion_controlled: true,
+            paired: false,
+        });
+        connection.pair_swap_on_join();
         assert_eq!(
-            connection.pick_reorder_emit_index(),
-            Some(0),
-            "a displaced head must emit next, never slip further back"
+            connection.outgoing_fec_packets.back().map(|entry| entry.packet.id),
+            Some(99),
+            "a paired predecessor must not swap - the displaced member stays put"
         );
+        connection.outgoing_fec_packets.pop_back();
     }
 }
 
@@ -1186,28 +1204,35 @@ fn reorder_displaced_head_emits_next_unconditionally() {
 fn reorder_window_control_head_keeps_fifo_priority() {
     let mut connection = test_connection();
     // A control/ACK queue head keeps strict FIFO priority even when a
-    // bulk train waits behind it - reorder only ever shuffles bulk runs.
+    // bulk train joins behind it - swaps only ever touch bulk pairs, so
+    // the non-bulk entry never leaves its absolute position.
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
         packet: fec_packet(1, &[0xAA; 8], None),
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     });
-    for id in 2..4u64 {
+    for id in 2..6u64 {
         connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
             packet: fec_packet(id, &[id as u8; 8], None),
             wire_meta: None,
             send_info: bulk_send_info(),
             congestion_controlled: true,
-            was_displaced: false,
+            paired: false,
         });
+        connection.pair_swap_on_join();
     }
     assert_eq!(
-        connection.pick_reorder_emit_index(),
-        Some(0),
-        "a non-bulk head emits first no matter how long the bulk train is"
+        connection.outgoing_fec_packets.front().map(|entry| entry.packet.id),
+        Some(1),
+        "a non-bulk head emits first no matter how the bulk train permutes"
     );
+    // The bulk train behind it may permute but must keep every member
+    // within one slot of its join index.
+    for (position, entry) in connection.outgoing_fec_packets.iter().enumerate().skip(1) {
+        assert!(position.abs_diff(entry.packet.id as usize - 1) <= 1);
+    }
 }
 
 #[test]
@@ -1252,7 +1277,7 @@ fn reorder_window_tick_arms_gather_timer_not_packet_hold() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     });
     connection.reorder_window_tick(&bulk, now);
     assert!(connection.bulk_window_release.get().is_none());
@@ -1275,7 +1300,7 @@ fn reorder_window_tick_arms_gather_timer_not_packet_hold() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
-        was_displaced: false,
+        paired: false,
     });
     let mut armed_at = None;
     for _ in 0..64 {
@@ -1306,6 +1331,64 @@ fn reorder_window_tick_arms_gather_timer_not_packet_hold() {
     connection.burst_draining.set(false);
     connection.reorder_window_tick(&test_send_info(), now);
     assert!(connection.bulk_window_release.get().is_none());
+}
+
+#[test]
+fn reorder_quiet_phase_blocks_immediate_rearming() {
+    let mut connection = test_connection();
+    connection.conn.set_external_pacing(false);
+    connection.conn.set_stealth_timing(true, 5_000);
+    let bulk = bulk_send_info();
+    let now = Instant::now();
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(10, &[0xDD; 8], None),
+        wire_meta: None,
+        send_info: test_send_info(),
+        congestion_controlled: true,
+        paired: false,
+    });
+
+    // Arm a window, then tick past its edge: the drain arms and the
+    // quiet phase opens.
+    let mut edge = None;
+    for _ in 0..64 {
+        if connection.bulk_window_release.get().is_none() {
+            connection.reorder_window_tick(&bulk, now);
+        }
+        if let Some(e) = connection.bulk_window_release.get() {
+            edge = Some(e);
+            break;
+        }
+    }
+    let edge = edge.expect("burst-context bulk must arm the gather window");
+    connection.reorder_window_tick(&bulk, edge + Duration::from_micros(1));
+    assert!(connection.burst_draining.get());
+    let quiet_until =
+        connection.reorder_quiet_until.get().expect("the window edge must open the quiet phase");
+    assert!(quiet_until >= edge);
+
+    // During the quiet phase no new window arms even with a live burst.
+    connection.burst_draining.set(false);
+    let mid_quiet = edge + Duration::from_nanos(500);
+    assert!(mid_quiet < quiet_until);
+    connection.reorder_window_tick(&bulk, mid_quiet);
+    assert!(connection.bulk_window_release.get().is_none());
+    assert!(!connection.burst_draining.get());
+
+    // Once the quiet phase ends the train may gather again.
+    let after_quiet = quiet_until + Duration::from_millis(1);
+    connection.last_bulk_queued.set(Some(after_quiet));
+    let mut rearmed = false;
+    for _ in 0..64 {
+        if connection.bulk_window_release.get().is_none() {
+            connection.reorder_window_tick(&bulk, after_quiet);
+        }
+        if connection.bulk_window_release.get().is_some() {
+            rearmed = true;
+            break;
+        }
+    }
+    assert!(rearmed, "a train after the quiet phase must be able to arm a window");
 }
 
 #[test]
