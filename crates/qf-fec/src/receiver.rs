@@ -74,6 +74,37 @@ struct ReceiveWindow {
     mem_pool: Arc<MemoryPool>,
 }
 
+/// Receiver-global state shared by all retained receive windows
+/// (TODO-1018 sliding-window equations straddle aligned windows).
+///
+/// `delivered_global` dedups emissions across windows: a sliding repair
+/// can recover a source whose aligned home is a different retained
+/// window, so a per-window `delivered` set alone would double-emit.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct ReceiveShared {
+    delivered_global: HashSet<u64>,
+    /// Highest pruned sequence-space horizon; `advance_horizon` skips
+    /// the retain pass unless the frontier actually moved.
+    horizon: u64,
+}
+
+impl ReceiveShared {
+    /// Prune dedup state once the newest observed aligned window moves
+    /// forward. Sliding coverage reaches back at most one aligned
+    /// window; entries behind the oldest retained window
+    /// (`RECEIVE_WINDOW_LIMIT - 1`) can never be emitted or referenced
+    /// again.
+    fn advance_horizon(&mut self, window: u32, source_count: u16) {
+        let horizon = window.saturating_sub(RECEIVE_WINDOW_LIMIT as u32 - 1) as u64
+            * u64::from(source_count.max(1));
+        if horizon > self.horizon {
+            self.delivered_global.retain(|&seq| seq >= horizon);
+            self.horizon = horizon;
+        }
+    }
+}
+
 impl ReceiveWindow {
     fn new(
         profile: WireProfile,
@@ -211,23 +242,49 @@ impl ReceiveWindow {
                 &mut coefficients,
             )?;
             if meta.profile.codec == WireCodec::StreamingGf8 {
-                let block_start = self.window_start().saturating_add(meta.block_index as u64);
-                let span =
-                    meta.sequence
+                if meta.sliding {
+                    // Sliding-window equation (TODO-1018): anchored at
+                    // `meta.sequence`, it covers the trailing `covered`
+                    // lane sources ending there - including sources from
+                    // the previous aligned window. Positions that would
+                    // map below the lane's first source are zeroed.
+                    let depth = meta.profile.interleave_depth as u64;
+                    let lane_sources = meta
+                        .sequence
+                        .saturating_sub(meta.block_index as u64)
+                        .checked_div(depth)
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    let covered =
+                        lane_sources.min(meta.profile.block_source_count() as u64) as usize;
+                    let prefix = coefficient_len.saturating_sub(covered);
+                    coefficients[..prefix].fill(0);
+                } else {
+                    let block_start = self.window_start().saturating_add(meta.block_index as u64);
+                    let span = meta
+                        .sequence
                         .saturating_sub(block_start)
                         .checked_div(meta.profile.interleave_depth as u64)
                         .unwrap_or(0)
                         .saturating_add(1)
-                        .min(meta.profile.block_source_count() as u64) as usize;
-                if span > coefficient_len {
-                    return Err(WireError::ResourceExhausted);
+                        .min(meta.profile.block_source_count() as u64)
+                        as usize;
+                    if span > coefficient_len {
+                        return Err(WireError::ResourceExhausted);
+                    }
+                    coefficients[span..coefficient_len].fill(0);
                 }
-                coefficients[span..coefficient_len].fill(0);
             }
             (Some(coefficients), coefficient_len)
         };
         let decoder_anchor = if meta.profile.codec == WireCodec::StreamingGf8 {
-            self.block_anchor(meta.block_index)
+            if meta.sliding {
+                // Sliding equation anchors at the newest covered source
+                // (the repair's own sequence), not the aligned block end.
+                meta.sequence
+            } else {
+                self.block_anchor(meta.block_index)
+            }
         } else {
             meta.sequence
         };
@@ -250,6 +307,7 @@ impl ReceiveWindow {
         packet: FecPacket,
         output: &mut Vec<WireDelivery>,
         pending: &mut VecDeque<RepairAckEntry>,
+        shared: &mut ReceiveShared,
     ) -> Result<Option<usize>, WireError> {
         let global_id = if self.profile.codec == WireCodec::Fountain {
             self.window_start().saturating_add(packet.id)
@@ -259,7 +317,12 @@ impl ReceiveWindow {
         let symbol = packet.payload_slice().ok_or(WireError::InvalidSourceSymbolLength)?;
         let protected_payload = source_symbol_payload(symbol)?;
         let payload = source_datagram_payload(protected_payload)?;
-        if !self.delivered.insert(global_id) {
+        // Sliding repairs can recover sources whose aligned home is a
+        // sibling window; dedup against the receiver-global set so each
+        // source is emitted exactly once regardless of which window's
+        // equation recovered it (TODO-1018).
+        self.delivered.insert(global_id);
+        if !shared.delivered_global.insert(global_id) {
             return Ok(None);
         }
         let payload_len = payload.len();
@@ -277,11 +340,69 @@ impl ReceiveWindow {
         Ok(Some(payload_len))
     }
 
-    fn streaming_repair_has_missing_source(&self, meta: WirePacketMeta) -> bool {
+    /// Borrow a known source symbol by id for cross-window seeding of
+    /// sliding equations (TODO-1018).
+    fn known_source(&self, seq: u64) -> Option<&[u8]> {
+        self.decoder.known_source(seq)
+    }
+
+    /// Whether this window's decoder retains an equation that covers
+    /// `seq` (TODO-1018). Only a *sliding* equation can cover sources
+    /// outside this window's aligned range.
+    fn pending_covers(&self, seq: u64) -> bool {
+        self.decoder.pending_covers(seq)
+    }
+
+    /// Drain any recovered sources currently queued in the decoder and
+    /// emit them through the shared dedup path (TODO-1018). Used after
+    /// cross-window seeding, where a completed equation would otherwise
+    /// wait for the window's next datagram.
+    fn drain_decoder_recoveries(
+        &mut self,
+        output: &mut Vec<WireDelivery>,
+        pending: &mut VecDeque<RepairAckEntry>,
+        shared: &mut ReceiveShared,
+    ) -> Result<(), WireError> {
+        let mut recovered = if self.decoder.full_recovery_needed() {
+            self.decoder.get_result().unwrap_or_default()
+        } else {
+            self.decoder.get_partial_result()
+        };
+        if recovered.is_empty() {
+            recovered = self.decoder.get_partial_result();
+        }
+        for packet in recovered {
+            let _ = self.emit_recovered(packet, output, pending, shared)?;
+        }
+        Ok(())
+    }
+
+    fn streaming_repair_has_missing_source(
+        &self,
+        meta: WirePacketMeta,
+        shared: &ReceiveShared,
+    ) -> bool {
         let depth = self.profile.interleave_depth as u64;
-        let mut sequence = self.window_start().saturating_add(meta.block_index as u64);
+        let mut sequence = if meta.sliding {
+            // Sliding equation (TODO-1018): the covered set is the
+            // trailing `covered` lane sources ending at the anchor, which
+            // may begin before the current aligned window.
+            let lane_sources = meta
+                .sequence
+                .saturating_sub(meta.block_index as u64)
+                .checked_div(depth)
+                .unwrap_or(0)
+                .saturating_add(1);
+            let covered = lane_sources.min(self.profile.block_source_count() as u64);
+            meta.sequence.saturating_sub(covered.saturating_sub(1).saturating_mul(depth))
+        } else {
+            self.window_start().saturating_add(meta.block_index as u64)
+        };
         while sequence <= meta.sequence {
-            if !self.delivered.contains(&sequence) {
+            // Sliding coverage may start before this window's aligned
+            // range; the receiver-global set tracks deliveries across
+            // all retained windows.
+            if !shared.delivered_global.contains(&sequence) && !self.delivered.contains(&sequence) {
                 return true;
             }
             let next = sequence.saturating_add(depth);
@@ -303,6 +424,7 @@ impl ReceiveWindow {
         payload_off: usize,
         output: &mut Vec<WireDelivery>,
         pending: &mut VecDeque<RepairAckEntry>,
+        shared: &mut ReceiveShared,
     ) -> Result<WireReceiveReport, WireError> {
         let systematic_payload =
             if meta.systematic { Some(source_datagram_payload(payload)?) } else { None };
@@ -318,7 +440,7 @@ impl ReceiveWindow {
         }
         if !systematic
             && meta.profile.codec == WireCodec::StreamingGf8
-            && !self.streaming_repair_has_missing_source(meta)
+            && !self.streaming_repair_has_missing_source(meta, shared)
         {
             return Ok(report);
         }
@@ -350,7 +472,10 @@ impl ReceiveWindow {
         }
 
         self.decoder.take_packet(packet);
-        if systematic && self.delivered.insert(meta.sequence) {
+        if systematic
+            && self.delivered.insert(meta.sequence)
+            && shared.delivered_global.insert(meta.sequence)
+        {
             let payload = systematic_payload.ok_or(WireError::InvalidSourceDatagramLength)?;
             // `payload` is `datagram[payload_off + SOURCE_LENGTH_LEN..end]`;
             // `source_datagram_payload` validated the exact trailing length.
@@ -372,7 +497,7 @@ impl ReceiveWindow {
                 recovered = self.decoder.get_partial_result();
             }
             for packet in recovered {
-                if let Some(payload_len) = self.emit_recovered(packet, output, pending)? {
+                if let Some(payload_len) = self.emit_recovered(packet, output, pending, shared)? {
                     report.decoded_packets += 1;
                     report.recovered_packets += 1;
                     report.recovered_payload_bytes += payload_len;
@@ -400,6 +525,10 @@ pub struct WireFecReceiver {
     /// emitted repair-ACK reports so the peer can drop reports that
     /// refer to a rotated sequence space.
     last_rx_epoch: Option<u32>,
+    /// Cross-window dedup state for sliding-window equations
+    /// (TODO-1018): repairs anchored in one aligned window can cover -
+    /// and recover - sources belonging to a retained sibling window.
+    shared: ReceiveShared,
 }
 
 /// Upper bound on queued repair-ACK entries (TODO-1006). Larger than any
@@ -418,6 +547,7 @@ impl WireFecReceiver {
             delivery_scratch: Vec::new(),
             pending_recovered: VecDeque::new(),
             last_rx_epoch: None,
+            shared: ReceiveShared::default(),
         }
     }
 
@@ -487,17 +617,126 @@ impl WireFecReceiver {
                 ));
                 self.windows.len() - 1
             });
+        self.shared.advance_horizon(parsed.meta.window, parsed.meta.profile.source_count);
         // `parsed.payload` is a sub-slice of `datagram` by construction
         // (`parse_packet` slices `datagram[HEADER_LEN..]`).
         let payload_off = parsed.payload.as_ptr() as usize - datagram.as_ptr() as usize;
         self.last_rx_epoch = Some(parsed.meta.profile.epoch);
-        self.windows[window_index].receive(
+        if parsed.meta.sliding {
+            self.seed_sliding_sources(parsed.meta, window_index, output);
+        }
+        let report = self.windows[window_index].receive(
             parsed.meta,
             parsed.payload,
             payload_off,
             output,
             &mut self.pending_recovered,
-        )
+            &mut self.shared,
+        );
+        if parsed.meta.systematic {
+            self.propagate_source_to_next_window(parsed.meta, parsed.payload, output);
+        }
+        report
+    }
+
+    /// TODO-1018: a sliding equation anchored in window `w + 1` can
+    /// cover sources of window `w`. When such a source arrives late
+    /// (after the repair), forward it into that sibling window's decoder
+    /// so its retained equation can still solve. Sliding coverage
+    /// reaches back at most one aligned window, so `w + 1` is the only
+    /// possible consumer.
+    fn propagate_source_to_next_window(
+        &mut self,
+        meta: WirePacketMeta,
+        payload: &[u8],
+        output: &mut Vec<WireDelivery>,
+    ) {
+        let next = meta.window.wrapping_add(1);
+        let Some(next_index) = self
+            .windows
+            .iter()
+            .position(|window| window.profile == meta.profile && window.window == next)
+        else {
+            return;
+        };
+        if !self.windows[next_index].pending_covers(meta.sequence) {
+            return;
+        }
+        let Ok(mut seed) = self.windows[next_index].source_packet(meta, payload) else {
+            return;
+        };
+        seed.seq = meta.sequence;
+        self.windows[next_index].decoder.seed_known_source(seed);
+        // The seed can complete a retained equation; drain it now so the
+        // recovered source is not stranded until the sibling window sees
+        // its next datagram.
+        let _ = self.windows[next_index].drain_decoder_recoveries(
+            output,
+            &mut self.pending_recovered,
+            &mut self.shared,
+        );
+    }
+
+    /// TODO-1018: a sliding equation anchored in this window can cover
+    /// lane sources that live in the previous aligned window. Copy the
+    /// already-known ones out of the sibling windows' decoders and seed
+    /// them into this window's decoder so the equation is solvable.
+    /// Bounded: at most `block_source_count` lane positions exist, and
+    /// only the pre-window prefix needs seeding.
+    fn seed_sliding_sources(
+        &mut self,
+        meta: WirePacketMeta,
+        window_index: usize,
+        output: &mut Vec<WireDelivery>,
+    ) {
+        let cover_start = meta.sliding_cover_start();
+        let window_start = meta.window as u64 * meta.profile.source_count as u64;
+        if cover_start >= window_start {
+            return;
+        }
+        let depth = u64::from(meta.profile.interleave_depth.max(1));
+        let mut seq = cover_start;
+        while seq < window_start {
+            // Borrowed lookup first (immutable scan over sibling
+            // windows), then an owned pooled copy so the seed does not
+            // alias decoder state.
+            let seed_block = self
+                .windows
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != window_index)
+                .find_map(|(_, window)| window.known_source(seq))
+                .and_then(|bytes| {
+                    copy_to_pooled_block(&self.mem_pool, bytes).map(|block| (block, bytes.len()))
+                });
+            if let Some((block, data_len)) = seed_block {
+                if let Ok(mut seed) = FecPacket::from_pooled_blocks(
+                    seq,
+                    Some(block),
+                    data_len,
+                    true,
+                    None,
+                    0,
+                    Arc::clone(&self.mem_pool),
+                ) {
+                    seed.seq = seq;
+                    self.windows[window_index].decoder.seed_known_source(seed);
+                }
+            }
+            let next = seq.saturating_add(depth);
+            if next == seq {
+                break;
+            }
+            seq = next;
+        }
+        // Seeded sources can complete equations already retained in this
+        // window's decoder (e.g. a duplicate sliding repair was
+        // suppressed earlier); drain so recoveries are not stranded.
+        let _ = self.windows[window_index].drain_decoder_recoveries(
+            output,
+            &mut self.pending_recovered,
+            &mut self.shared,
+        );
     }
 
     /// Owned-packet wrapper over [`Self::receive_borrowed`]: borrowed ranges
@@ -670,6 +909,7 @@ mod tests {
                 repair_index: (symbol_id as usize % limit) as u16,
                 block_index: 0,
                 systematic: false,
+                sliding: false,
             };
             if symbol_id < limit as u64 {
                 assert!(window.remember_fountain_repair(meta));
@@ -691,6 +931,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 1,
             systematic: true,
+            sliding: false,
         };
         let payload = [0x40, 0x11, 0x22, 0x33];
         let mut wire = [0u8; 128];
@@ -718,6 +959,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let source_len =
             write_packet(source_meta, &source_payload, &mut wire).expect("source wire");
@@ -760,6 +1002,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let mut datagram = vec![0u8; HEADER_LEN + payload.len()];
         let written = write_packet(meta, &payload, &mut datagram).expect("source wire");
@@ -790,6 +1033,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let mut wire = [0u8; 64];
         let written = write_packet(meta, &[1, 2, 3], &mut wire).expect("wire packet must encode");
@@ -838,6 +1082,7 @@ mod tests {
             repair_index: 0,
             block_index: 0,
             systematic: false,
+            sliding: false,
         };
         let payload = vec![0xA5; oversized_payload_len];
         let mut datagram = vec![0; HEADER_LEN + payload.len()];
@@ -982,6 +1227,7 @@ mod tests {
                 repair_index: SYSTEMATIC_REPAIR_INDEX,
                 block_index: 0,
                 systematic: true,
+                sliding: false,
             };
             let written =
                 write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
@@ -995,6 +1241,7 @@ mod tests {
             repair_index: 0,
             block_index: 0,
             systematic: false,
+            sliding: false,
         };
         let repair_payload = repair.payload_slice().expect("repair payload");
         let written = write_packet(repair_meta, repair_payload, &mut wire).expect("repair wire");
@@ -1044,6 +1291,7 @@ mod tests {
                 repair_index: SYSTEMATIC_REPAIR_INDEX,
                 block_index: 0,
                 systematic: true,
+                sliding: false,
             };
             let written =
                 write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
@@ -1060,6 +1308,7 @@ mod tests {
             repair_index: 0,
             block_index: 0,
             systematic: false,
+            sliding: false,
         };
         let repair_payload = repair.payload_slice().expect("repair payload");
         let written = write_packet(repair_meta, repair_payload, &mut wire).expect("repair wire");
@@ -1094,6 +1343,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let payload = [0x40, 0x11, 0x22, 0x33];
         let protected_payload = protected_datagram(&payload);
@@ -1139,6 +1389,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let mut wire = [0u8; 128];
         let written =
@@ -1182,6 +1433,7 @@ mod tests {
                 repair_index: SYSTEMATIC_REPAIR_INDEX,
                 block_index: 0,
                 systematic: true,
+                sliding: false,
             };
             let written =
                 write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
@@ -1195,6 +1447,7 @@ mod tests {
             repair_index: 0,
             block_index: 0,
             systematic: false,
+            sliding: false,
         };
         let written =
             write_packet(repair_meta, repair.payload_slice().expect("repair payload"), &mut wire)
@@ -1237,6 +1490,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let written =
             write_packet(source_meta, &protected_sources[0], &mut wire).expect("source wire");
@@ -1249,6 +1503,7 @@ mod tests {
             repair_index: 0,
             block_index: 0,
             systematic: false,
+            sliding: false,
         };
         let written =
             write_packet(repair_meta, repair.payload_slice().expect("repair payload"), &mut wire)
@@ -1292,6 +1547,7 @@ mod tests {
                 repair_index: SYSTEMATIC_REPAIR_INDEX,
                 block_index: 0,
                 systematic: true,
+                sliding: false,
             };
             let written =
                 write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
@@ -1305,6 +1561,7 @@ mod tests {
             repair_index: 0,
             block_index: 0,
             systematic: false,
+            sliding: false,
         };
         let written =
             write_packet(repair_meta, repair.payload_slice().expect("repair payload"), &mut wire)
@@ -1366,6 +1623,7 @@ mod tests {
                 repair_index: SYSTEMATIC_REPAIR_INDEX,
                 block_index: 0,
                 systematic: true,
+                sliding: false,
             };
             let payload = protected_datagram(&[window as u8]);
             let written = write_packet(meta, &payload, &mut wire).expect("source wire");
@@ -1396,6 +1654,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let first_payload = protected_datagram(&[1]);
         let written =
@@ -1442,6 +1701,7 @@ mod tests {
                 repair_index: SYSTEMATIC_REPAIR_INDEX,
                 block_index: 0,
                 systematic: true,
+                sliding: false,
             };
             let written =
                 write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
@@ -1464,6 +1724,7 @@ mod tests {
                 repair_index,
                 block_index: 0,
                 systematic: false,
+                sliding: false,
             };
             let written = write_packet(meta, payload, &mut wire).expect("repair wire");
             receiver.receive(&wire[..written], &mut decoded).expect("repair receive");
@@ -1500,6 +1761,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let mut wire = vec![0u8; 128];
         let written = write_packet(meta, &protected, &mut wire).expect("source wire");
@@ -1539,6 +1801,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let mut wire = vec![0u8; 128];
         let written = write_packet(meta, &protected, &mut wire).expect("source wire");
@@ -1579,6 +1842,7 @@ mod tests {
                 repair_index: SYSTEMATIC_REPAIR_INDEX,
                 block_index: 0,
                 systematic: true,
+                sliding: false,
             };
             let written =
                 write_packet(meta, &protected_sources[source_id], &mut wire).expect("source wire");
@@ -1592,6 +1856,7 @@ mod tests {
             repair_index: 0,
             block_index: 0,
             systematic: false,
+            sliding: false,
         };
         let written =
             write_packet(repair_meta, repair.payload_slice().expect("repair payload"), &mut wire)
@@ -1632,6 +1897,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let mut wire = vec![0u8; 128];
         let written = write_packet(meta, &protected, &mut wire).expect("source wire");
@@ -1669,6 +1935,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let mut wire = vec![0u8; 128];
         let written = write_packet(meta, &protected, &mut wire).expect("source wire");
@@ -1678,5 +1945,289 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].id, 2);
         assert_eq!(decoded[0].payload_slice(), Some(&payload[..]));
+    }
+
+    // ---- TODO-1018: sliding-window (convolutional) FEC ----
+
+    fn sliding_profile(depth: u8) -> WireProfile {
+        WireProfile {
+            epoch: 21,
+            codec: WireCodec::StreamingGf8,
+            source_count: 4 * depth as u16,
+            total_count: 8 * depth as u16,
+            interleave_depth: depth,
+        }
+    }
+
+    fn sliding_encoder(k: usize, n: usize, depth: usize) -> crate::InterleavedEncoder {
+        crate::InterleavedEncoder::new_with_policy(
+            FecMode::Streaming,
+            k,
+            n,
+            depth,
+            &FecRuntimePolicy::detect(),
+        )
+    }
+
+    fn wire_source_meta(profile: WireProfile, sequence: u64, window: u32) -> WirePacketMeta {
+        WirePacketMeta {
+            profile,
+            window,
+            sequence,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: (sequence % profile.interleave_depth as u64) as u8,
+            systematic: true,
+            sliding: false,
+        }
+    }
+
+    /// `receive` clears its output vector per call, so these helpers
+    /// accumulate every delivery across calls.
+    fn deliver_source(
+        receiver: &mut WireFecReceiver,
+        meta: WirePacketMeta,
+        protected: &[u8],
+        wire: &mut [u8],
+        decoded: &mut Vec<FecPacket>,
+    ) {
+        let written = write_packet(meta, protected, wire).expect("source wire");
+        let mut out = Vec::new();
+        receiver.receive(&wire[..written], &mut out).expect("source receive");
+        decoded.append(&mut out);
+    }
+
+    fn deliver_sliding_repair(
+        receiver: &mut WireFecReceiver,
+        profile: WireProfile,
+        repair: &FecPacket,
+        wire: &mut [u8],
+        decoded: &mut Vec<FecPacket>,
+    ) {
+        let meta = WirePacketMeta {
+            profile,
+            window: (repair.id / profile.source_count as u64) as u32,
+            sequence: repair.id,
+            repair_index: (repair.seq >> 4) as u16,
+            block_index: (repair.seq & 0x0F) as u8,
+            systematic: false,
+            sliding: true,
+        };
+        let written = write_packet(meta, repair.payload_slice().expect("repair payload"), wire)
+            .expect("repair wire");
+        let mut out = Vec::new();
+        receiver.receive(&wire[..written], &mut out).expect("repair receive");
+        decoded.append(&mut out);
+    }
+
+    #[test]
+    fn sliding_repair_recovers_source_across_aligned_window_boundary() {
+        // k=4 sliding window: after five sources the trailing window is
+        // {1,2,3,4} and a repair anchored at 4 straddles the aligned
+        // boundary (window 0 = seqs 0..3, window 1 = seqs 4..7).
+        let pool = test_pool();
+        let profile = sliding_profile(1);
+        let sources: Vec<Vec<u8>> = (0..5u8).map(|i| vec![0xA0 + i; 32 + i as usize]).collect();
+        let protected: Vec<Vec<u8>> = sources.iter().map(|s| protected_datagram(s)).collect();
+        let mut encoder = sliding_encoder(4, 8, 1);
+        for (id, p) in protected.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, p, &pool));
+        }
+        let repair = encoder.generate_repair_packet(0, &pool).expect("sliding repair");
+        assert_eq!(repair.id, 4, "sliding repair anchors at newest retained source");
+
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let mut wire = vec![0u8; 256];
+        let mut decoded = Vec::new();
+        // Deliver everything the equation covers except seq 3, which
+        // lives in the previous aligned window.
+        for seq in [1u64, 2, 4] {
+            let meta = wire_source_meta(profile, seq, (seq / 4) as u32);
+            deliver_source(&mut receiver, meta, &protected[seq as usize], &mut wire, &mut decoded);
+        }
+        deliver_sliding_repair(&mut receiver, profile, &repair, &mut wire, &mut decoded);
+
+        let recovered: Vec<u64> = decoded.iter().map(|p| p.id).collect();
+        assert_eq!(
+            recovered.iter().filter(|&&id| id == 3).count(),
+            1,
+            "sliding equation must recover the pre-window source exactly once, got {recovered:?}"
+        );
+        let packet = decoded.iter().find(|p| p.id == 3).expect("recovered seq 3");
+        assert_eq!(packet.payload_slice(), Some(&sources[3][..]));
+
+        // A late systematic arrival of the same source must not emit a
+        // duplicate (receiver-global dedup).
+        let meta = wire_source_meta(profile, 3, 0);
+        deliver_source(&mut receiver, meta, &protected[3], &mut wire, &mut decoded);
+        assert_eq!(decoded.iter().filter(|p| p.id == 3).count(), 1);
+    }
+
+    #[test]
+    fn sliding_repair_covers_only_the_trailing_window() {
+        // After eight sources the lane window holds {4,5,6,7}; the
+        // repair must not reach back into the evicted prefix {0..3}.
+        let pool = test_pool();
+        let profile = sliding_profile(1);
+        let sources: Vec<Vec<u8>> = (0..8u8).map(|i| vec![0x30 + i; 24]).collect();
+        let protected: Vec<Vec<u8>> = sources.iter().map(|s| protected_datagram(s)).collect();
+        let mut encoder = sliding_encoder(4, 8, 1);
+        for (id, p) in protected.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, p, &pool));
+        }
+        let repair = encoder.generate_repair_packet(0, &pool).expect("sliding repair");
+        assert_eq!(repair.id, 7);
+
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let mut wire = vec![0u8; 256];
+        let mut decoded = Vec::new();
+        // seq 3 is never delivered and cannot be recovered: it is
+        // outside the trailing window the equation covers.
+        for seq in [4u64, 5, 7] {
+            let meta = wire_source_meta(profile, seq, (seq / 4) as u32);
+            deliver_source(&mut receiver, meta, &protected[seq as usize], &mut wire, &mut decoded);
+        }
+        deliver_sliding_repair(&mut receiver, profile, &repair, &mut wire, &mut decoded);
+
+        assert!(decoded.iter().all(|p| p.id != 3), "evicted sources must not be recoverable");
+        let packet = decoded.iter().find(|p| p.id == 6).expect("recovered seq 6");
+        assert_eq!(packet.payload_slice(), Some(&sources[6][..]));
+    }
+
+    #[test]
+    fn sliding_repair_recovers_lane_source_across_windows_interleaved() {
+        // depth=2: lane 0 sources are seqs 0,2,4,6,8; after nine feeds
+        // the lane window is {2,4,6,8} and the equation anchored at 8
+        // straddles the aligned boundary at seq 8.
+        let pool = test_pool();
+        let profile = sliding_profile(2);
+        let sources: Vec<Vec<u8>> = (0..9u8).map(|i| vec![0x50 + i; 24]).collect();
+        let protected: Vec<Vec<u8>> = sources.iter().map(|s| protected_datagram(s)).collect();
+        let mut encoder = sliding_encoder(8, 16, 2);
+        for (id, p) in protected.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, p, &pool));
+        }
+        // i=0 selects lane 0; its retained window is {2,4,6,8}.
+        let repair = encoder.generate_repair_packet(0, &pool).expect("lane repair");
+        assert_eq!(repair.id, 8);
+
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let mut wire = vec![0u8; 256];
+        let mut decoded = Vec::new();
+        // Drop seq 6 (window 0, lane 0); deliver the rest of the
+        // equation's coverage.
+        for seq in [2u64, 4, 8] {
+            let meta = wire_source_meta(profile, seq, (seq / 8) as u32);
+            deliver_source(&mut receiver, meta, &protected[seq as usize], &mut wire, &mut decoded);
+        }
+        deliver_sliding_repair(&mut receiver, profile, &repair, &mut wire, &mut decoded);
+
+        let packet = decoded.iter().find(|p| p.id == 6).expect("recovered seq 6");
+        assert_eq!(packet.payload_slice(), Some(&sources[6][..]));
+        assert_eq!(decoded.iter().filter(|p| p.id == 6).count(), 1);
+    }
+
+    #[test]
+    fn sliding_burst_recovery_randomized_emit_schedule() {
+        // Deterministic pseudo-random schedule: emit a repair after
+        // every second source (repair ordinals wrap within capacity),
+        // drop a burst straddling the aligned boundary, then verify
+        // every source is delivered exactly once with intact payload.
+        let pool = test_pool();
+        let profile = sliding_profile(1);
+        let count = 12usize;
+        let sources: Vec<Vec<u8>> = (0..count).map(|i| vec![0x70 + i as u8; 24]).collect();
+        let protected: Vec<Vec<u8>> = sources.iter().map(|s| protected_datagram(s)).collect();
+        let mut encoder = sliding_encoder(4, 8, 1);
+        let capacity = 4usize; // represented repairs: n - k
+        let mut repairs = Vec::new();
+        let mut state = 0x9E3779B9u32;
+        for (id, p) in protected.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, p, &pool));
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            if !state.is_multiple_of(3) && id >= 3 {
+                let repair =
+                    encoder.generate_repair_packet(id % capacity, &pool).expect("scheduled repair");
+                repairs.push(repair);
+            }
+        }
+
+        let mut receiver = WireFecReceiver::new(Arc::clone(&pool));
+        let mut wire = vec![0u8; 256];
+        let mut decoded = Vec::new();
+        // Drop the boundary-straddling burst {3,4,5} plus seq 9; feed
+        // survivors and repairs in emission order.
+        let dropped = [3u64, 4, 5, 9];
+        let mut repair_iter = repairs.iter();
+        state = 0x9E3779B9u32;
+        for id in 0..count as u64 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let emitted = !state.is_multiple_of(3) && id >= 3;
+            if !dropped.contains(&id) {
+                let meta = wire_source_meta(profile, id, (id / 4) as u32);
+                deliver_source(
+                    &mut receiver,
+                    meta,
+                    &protected[id as usize],
+                    &mut wire,
+                    &mut decoded,
+                );
+            }
+            if emitted {
+                let repair = repair_iter.next().expect("matching repair");
+                deliver_sliding_repair(&mut receiver, profile, repair, &mut wire, &mut decoded);
+            }
+        }
+
+        for id in 0..count as u64 {
+            let matches: Vec<_> = decoded.iter().filter(|p| p.id == id).collect();
+            assert_eq!(matches.len(), 1, "seq {id} must be delivered exactly once");
+            assert_eq!(matches[0].payload_slice(), Some(&sources[id as usize][..]));
+        }
+    }
+
+    #[test]
+    fn sliding_wire_metadata_round_trips_and_validates() {
+        let profile = sliding_profile(1);
+        let meta = WirePacketMeta {
+            profile,
+            window: 1,
+            sequence: 5,
+            repair_index: 2,
+            block_index: 0,
+            systematic: false,
+            sliding: true,
+        };
+        let mut wire = vec![0u8; 256];
+        let payload = vec![0x42; 40];
+        let written = write_packet(meta, &payload, &mut wire).expect("sliding wire write");
+        let parsed = parse_packet(&wire[..written]).expect("sliding wire parse");
+        assert!(parsed.meta.sliding);
+        assert_eq!(parsed.meta.sequence, 5);
+        assert_eq!(parsed.meta.window, 1);
+        assert_eq!(parsed.meta.repair_index, 2);
+
+        // Sliding is repair-only: systematic + sliding must be rejected.
+        let bad = WirePacketMeta { systematic: true, sliding: true, ..meta };
+        assert!(bad.validate().is_err());
+        // Sliding is StreamingGf8-only: other codecs reject it.
+        let bad_codec = WirePacketMeta {
+            profile: WireProfile { codec: WireCodec::Gf8, ..profile },
+            sliding: true,
+            ..meta
+        };
+        assert!(bad_codec.validate().is_err());
+        // The anchor's aligned window must match (no cross-window smear).
+        let bad_window = WirePacketMeta { window: 0, ..meta };
+        assert!(bad_window.validate().is_err());
+        // A legacy aligned repair stays valid and parses sliding=false.
+        let legacy = WirePacketMeta { sliding: false, ..meta };
+        legacy.validate().expect("legacy aligned repair stays valid");
+        let written = write_packet(legacy, &payload, &mut wire).expect("legacy write");
+        let parsed = parse_packet(&wire[..written]).expect("legacy parse");
+        assert!(!parsed.meta.sliding);
     }
 }

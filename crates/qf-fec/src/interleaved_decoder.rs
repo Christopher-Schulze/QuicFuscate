@@ -110,6 +110,34 @@ impl InterleavedDecoder {
         }
     }
 
+    /// Inject a known systematic packet into the lane selected by its
+    /// sequence, bypassing lazy buffering (TODO-1018). Used to seed
+    /// sliding-window equations with sources delivered before the
+    /// current aligned window.
+    #[doc(hidden)]
+    pub fn seed_known_source(&mut self, packet: FecPacket) {
+        let block_idx = (packet.seq % self.depth as u64) as usize;
+        if block_idx < self.blocks.len() {
+            self.blocks[block_idx].seed_known_source(packet);
+        }
+    }
+
+    /// Borrow a known source symbol by id via lane routing
+    /// (TODO-1018).
+    #[doc(hidden)]
+    pub fn known_source(&self, seq: u64) -> Option<&[u8]> {
+        let block_idx = (seq % self.depth as u64) as usize;
+        self.blocks.get(block_idx)?.known_source(seq)
+    }
+
+    /// Whether the lane for `seq` has an unsolved equation or buffered
+    /// repair covering it (TODO-1018).
+    #[doc(hidden)]
+    pub fn pending_covers(&self, seq: u64) -> bool {
+        let block_idx = (seq % self.depth as u64) as usize;
+        self.blocks.get(block_idx).is_some_and(|block| block.pending_covers(seq))
+    }
+
     /// Collect fully recovered packets from all interleaved blocks.
     pub fn get_result(&mut self) -> Option<VecDeque<FecPacket>> {
         let mut combined = VecDeque::new();

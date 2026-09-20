@@ -5,14 +5,21 @@ impl AdaptiveFec {
         let mut encoder = self.encoder.lock();
 
         if encoder.packets_in_window() > 0 {
-            let coeff = self.stream_idx;
-            if coeff < 255 {
-                // Generic repair generation; backend selection is internal.
-                if let Some(repair) = encoder.generate_repair_packet(coeff, &self.mem_pool) {
-                    output_queue.push_back(repair);
-                }
-                self.stream_idx = self.stream_idx.wrapping_add(1);
+            // TODO-1018: sliding repairs run continuously, so the flat
+            // repair ordinal must wrap. The wire profile for
+            // StreamingGf8 advertises `total = source + configured_total`,
+            // making the repair capacity equal to the represented `n` -
+            // the flat index cycles mod n so `repair_index` stays below
+            // the per-lane capacity `validate()` enforces, while each
+            // equation remains unique through its anchor.
+            let (_k, n) = encoder.params();
+            let capacity = n.max(1);
+            let coeff = self.stream_idx % capacity;
+            // Generic repair generation; backend selection is internal.
+            if let Some(repair) = encoder.generate_repair_packet(coeff, &self.mem_pool) {
+                output_queue.push_back(repair);
             }
+            self.stream_idx = self.stream_idx.wrapping_add(1);
         }
     }
 

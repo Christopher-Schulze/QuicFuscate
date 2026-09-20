@@ -784,6 +784,7 @@ fn bench_fec_wire_envelope(c: &mut Criterion) {
         repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
         block_index: 0,
         systematic: true,
+        sliding: false,
     };
     let payload = vec![0xA5; INNER_QUIC_LEN];
     let mut encoded = vec![0u8; OUTER_MTU];

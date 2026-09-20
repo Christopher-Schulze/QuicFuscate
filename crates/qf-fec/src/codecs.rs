@@ -583,13 +583,30 @@ pub struct GF16;
 pub struct Encoder<F> {
     k: usize,
     window: VecDeque<FecPacket>,
+    /// Sliding-window emission (TODO-1018): repairs anchor at the newest
+    /// retained source and cover the trailing window, right-aligning the
+    /// coefficient row so partial windows stay decoder-consistent.
+    sliding: bool,
     _field: std::marker::PhantomData<F>,
 }
 
 impl<F> Encoder<F> {
     /// Create a new encoder with source block size `k` and sliding window capacity.
     pub fn new(k: usize, _n: usize) -> Self {
-        Self { k, window: VecDeque::with_capacity(k), _field: std::marker::PhantomData }
+        Self {
+            k,
+            window: VecDeque::with_capacity(k),
+            sliding: false,
+            _field: std::marker::PhantomData,
+        }
+    }
+
+    /// Create an encoder that emits sliding-window repairs (Streaming
+    /// mode): the window is never cleared, `take_packet` evicts the
+    /// oldest source once full, and generated repairs carry the trailing
+    /// window anchored at the newest source.
+    pub fn new_sliding(k: usize, n: usize) -> Self {
+        Self { sliding: true, ..Self::new(k, n) }
     }
 
     #[doc(hidden)]
@@ -680,6 +697,19 @@ impl Encoder<GF8> {
             .write_repair_coefficients(block_source_count, repair_index, &mut coeff_box)
             .ok()?;
         let wlen = self.window.len().min(self.k);
+        // Sliding-window repairs (TODO-1018) right-align the coefficient
+        // row: position j pairs window[j] with coeff[k-wlen+j], matching
+        // the decoder's anchor-relative mapping (position k-1 <-> the
+        // anchor = newest retained source). Block emissions only run on a
+        // full window, where base == 0 and this is identical.
+        let coeff_base = if self.sliding { self.k - wlen } else { 0 };
+        if coeff_base > 0 {
+            // Zero the unused prefix in the packet itself so the row is
+            // self-describing on every path - decoders without wire
+            // metadata would otherwise map those positions onto phantom
+            // sources and retain the equation forever.
+            coeff_box[..coeff_base].fill(0);
+        }
 
         // Manual row accumulation: out[i] ^= c[j] * data[j][i]. XOR accumulation
         // is commutative, so for large payloads the byte range is split into
@@ -698,7 +728,7 @@ impl Encoder<GF8> {
                         if start < s_len {
                             let len = (s_len - start).min(acc.len());
                             gf_tables::gf_mul_scalar_slice(
-                                coeff_box[j],
+                                coeff_box[coeff_base + j],
                                 &data[start..start + len],
                                 &mut acc[..len],
                             );
@@ -711,7 +741,7 @@ impl Encoder<GF8> {
             for (j, pkt) in self.window.iter().enumerate().take(wlen) {
                 if let Some(data) = pkt.payload_slice() {
                     let len = data.len().min(max_len);
-                    let c = coeff_box[j];
+                    let c = coeff_box[coeff_base + j];
                     // Accumulate: out[i] ^= c * data[i]
                     gf_tables::gf_mul_scalar_slice(c, &data[..len], &mut out[..len]);
                 }

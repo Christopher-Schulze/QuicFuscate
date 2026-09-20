@@ -870,14 +870,25 @@ impl QuicFuscateConnection {
                         (packet.seq & 0x0F) as u8,
                     )
                 };
+                // Repairs carry the sliding flag under the streaming codec
+                // (TODO-1018) and are tagged by their *anchor's* window -
+                // a lane anchor may legitimately sit one aligned window
+                // behind the newest source when lanes lag.
+                let repair_window = if packet.is_systematic {
+                    window
+                } else {
+                    (sequence / profile.source_count as u64) as u32
+                };
                 self.outgoing_fec_packets.push_back(OutgoingFecPacket {
                     wire_meta: Some(WirePacketMeta {
                         profile,
-                        window,
+                        window: repair_window,
                         sequence,
                         repair_index,
                         block_index,
                         systematic: packet.is_systematic,
+                        sliding: !packet.is_systematic
+                            && profile.codec == wire::WireCodec::StreamingGf8,
                     }),
                     packet,
                     send_info,

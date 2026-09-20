@@ -1556,6 +1556,15 @@ TODO-681 records that `QUICFUSCATE_GHASH` on x86 and `QUICFUSCATE_GHASH_PMULL` o
 - Emits 1 repair per N sources
 - `QUICFUSCATE_FEC_STREAM_EVERY`: Overrides repair cadence (min 1; default computed from CPU profile)
 - Aggressive profiles can use N=1 for maximum redundancy
+- TODO-1018: the coding window is a persistent sliding window, not an
+  aligned block. Repairs anchor at the newest retained source and cover
+  the trailing `k` lane sources - coverage is phase-independent and a
+  burst straddling a former block boundary stays repairable. Wire
+  repairs carry `FLAG_SLIDING` (bit 2); peers lacking the flag
+  strict-reject via `UnsupportedFlags`. The receiver dedups emissions
+  receiver-globally (a sibling window's equation may recover this
+  window's source) and seeds/pre-propagates lane sources across the one
+  retained aligned window sliding coverage can reach back into.
 
 #### Benchmark Coverage
 

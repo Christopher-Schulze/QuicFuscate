@@ -73,13 +73,12 @@ fn source_id_for_params(k: usize, depth: usize, base_id: u64, j: usize) -> Optio
     if k == 0 || j >= k || depth == 0 {
         return None;
     }
-    if depth == 1 {
-        let start = u64::try_from(k - 1).ok()?;
-        base_id.checked_sub(start)?.checked_add(j as u64)
-    } else {
-        let span = (k - 1 - j).checked_mul(depth)?;
-        base_id.checked_sub(u64::try_from(span).ok()?)
-    }
+    // Unified anchor-relative mapping: position j covers the source
+    // `base - (k-1-j)·depth`. Computing the subtraction first
+    // (`base - (k-1) + j`) underflows for sliding anchors smaller than
+    // k-1 even when the position itself is in range (TODO-1018).
+    let span = (k - 1 - j).checked_mul(depth)?;
+    base_id.checked_sub(u64::try_from(span).ok()?)
 }
 
 #[inline]
@@ -92,9 +91,45 @@ fn anchor_is_valid(k: usize, depth: usize, anchor: u64) -> bool {
             .is_some_and(|span| anchor >= span)
 }
 
+/// Coverage-aware anchor check for sliding-window equations (TODO-1018).
+///
+/// A sliding repair anchored near stream start legitimately carries a
+/// shortened row: the receiver zeroes positions that would map below the
+/// first lane source. The full-span `anchor_is_valid` would reject those
+/// equations, so validity here is judged against the lowest *nonzero*
+/// coefficient position - the furthest back the equation actually
+/// reaches. For a full row (j_min = 0) this is identical to
+/// `anchor_is_valid`.
+#[inline]
+fn sliding_anchor_is_valid(k: usize, depth: usize, anchor: u64, coeffs: &[u8]) -> bool {
+    if k == 0 || depth == 0 {
+        return false;
+    }
+    let Some(j_min) = coeffs.iter().take(k).position(|&c| c != 0) else {
+        return false;
+    };
+    (k - 1 - j_min)
+        .checked_mul(depth)
+        .and_then(|span| u64::try_from(span).ok())
+        .is_some_and(|span| anchor >= span)
+}
+
 #[inline]
 fn id_is_in_window(k: usize, depth: usize, anchor: u64, id: u64) -> bool {
     (0..k).any(|j| source_id_for_params(k, depth, anchor, j) == Some(id))
+}
+
+/// Whether a coefficient row anchored at `base_id` covers source `sid`
+/// (TODO-1018): some nonzero position maps to it. Used to decide if a
+/// late systematic arrival unblocks a retained sliding equation in a
+/// sibling window.
+#[inline]
+pub(crate) fn coeff_covers(k: usize, depth: usize, base_id: u64, coeffs: &[u8], sid: u64) -> bool {
+    coeffs
+        .iter()
+        .enumerate()
+        .take(k)
+        .any(|(j, &c)| c != 0 && source_id_for_params(k, depth, base_id, j) == Some(sid))
 }
 
 #[inline]

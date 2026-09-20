@@ -449,6 +449,7 @@ fn outgoing_repair_packet_preserves_fec_wire_metadata() {
         repair_index: 2,
         block_index: 0,
         systematic: false,
+        sliding: false,
     };
     let outgoing = OutgoingFecPacket {
         packet,
@@ -489,6 +490,7 @@ fn outgoing_systematic_packet_preserves_protected_quic_datagram() {
         repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
         block_index: 0,
         systematic: true,
+        sliding: false,
     };
     let outgoing = OutgoingFecPacket {
         packet: fec_packet(0, &source_symbol, None),
@@ -652,6 +654,7 @@ fn repair_ack_round_trip_reports_masked_wire_loss_to_cc() {
             repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
             block_index: 0,
             systematic: true,
+            sliding: false,
         };
         let written =
             wire::write_packet(meta, &protected[source_id], &mut wire_buf).expect("source wire");
@@ -664,6 +667,7 @@ fn repair_ack_round_trip_reports_masked_wire_loss_to_cc() {
         repair_index: 0,
         block_index: 0,
         systematic: false,
+        sliding: false,
     };
     let repair_payload = repair.payload_slice().expect("repair payload").to_vec();
     let written = wire::write_packet(repair_meta, &repair_payload, &mut wire_buf).expect("repair");
@@ -829,6 +833,7 @@ fn active_fec_off_preserves_queued_sources_and_discards_only_repairs() {
                 repair_index: if systematic { wire::SYSTEMATIC_REPAIR_INDEX } else { 0 },
                 block_index: 0,
                 systematic,
+                sliding: false,
             }),
             send_info: test_send_info(),
             congestion_controlled: true,

@@ -16,6 +16,7 @@ fn stateless_version_negotiation_skips_fec_envelopes() {
         repair_index: 0,
         block_index: 0,
         systematic: false,
+        sliding: false,
     };
     let payload = vec![0; crate::transport::MIN_CLIENT_INITIAL_LEN - crate::fec::wire::HEADER_LEN];
     let mut datagram = vec![0; crate::transport::MIN_CLIENT_INITIAL_LEN];

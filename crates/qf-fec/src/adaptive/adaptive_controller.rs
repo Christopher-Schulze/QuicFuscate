@@ -256,34 +256,44 @@ impl AdaptiveFec {
         // Check if we should generate repair packets
         let (k, n) = encoder.params();
         if encoder.packets_in_window() >= k {
-            let base = n.saturating_sub(k);
-            if base > 0 {
-                // Extra repairs scale with redundancy hint (ppm)
-                let extra = if mode == FecMode::Light {
-                    0
-                } else if self.red_ppm_hint > 120_000 {
-                    ((self.red_ppm_hint - 120_000) / 50_000) as usize
-                } else {
-                    0
-                };
-                let total = (base + extra.min(4)).min(base + 4);
-                let free = output.capacity().saturating_sub(output.len());
-                if free < total {
-                    output.reserve_exact(total - free);
-                }
-                for repair_index in 0..total {
-                    if let Some(repair) =
-                        encoder.generate_repair_packet(repair_index, &self.mem_pool)
-                    {
-                        output.push(repair);
+            // Sliding-window codec (TODO-1018): the streaming window
+            // never resets - `take_packet` evicts the oldest source once
+            // full, so every `stream_every` repair covers the trailing
+            // k sources and coverage is phase-independent. There is no
+            // aligned block boundary to close out, so the block emit and
+            // `clear_window()` below are skipped for this mode.
+            if self.streaming_mode {
+                // Steady state reached: the sliding window is full and
+                // stays full. `window_complete` keeps its bookkeeping
+                // meaning even though no boundary emission happens.
+                self.window_complete = true;
+            } else {
+                let base = n.saturating_sub(k);
+                if base > 0 {
+                    // Extra repairs scale with redundancy hint (ppm)
+                    let extra = if mode == FecMode::Light {
+                        0
+                    } else if self.red_ppm_hint > 120_000 {
+                        ((self.red_ppm_hint - 120_000) / 50_000) as usize
+                    } else {
+                        0
+                    };
+                    let total = (base + extra.min(4)).min(base + 4);
+                    let free = output.capacity().saturating_sub(output.len());
+                    if free < total {
+                        output.reserve_exact(total - free);
+                    }
+                    for repair_index in 0..total {
+                        if let Some(repair) =
+                            encoder.generate_repair_packet(repair_index, &self.mem_pool)
+                        {
+                            output.push(repair);
+                        }
                     }
                 }
+                encoder.clear_window();
+                self.window_complete = true;
             }
-            encoder.clear_window();
-            if mode == FecMode::Streaming {
-                self.stream_idx = 0;
-            }
-            self.window_complete = true;
         }
         drop(encoder);
 
@@ -494,13 +504,16 @@ impl AdaptiveFec {
             Self::run_feedback_phase(diagnostics_enabled, "transition-encoder-window", || {
                 let mut encoder = self.encoder.lock();
                 if encoder.packets_in_window() != 0 {
-                    if !clean_zero_transition {
+                    if !clean_zero_transition && !self.streaming_mode {
                         return true;
                     }
                     // Systematic packets were already sent and framed repairs are
                     // self-describing at the receiver. Once transport ACKs prove the
                     // path clean, retaining a partial repair-only window cannot improve
                     // delivery and must not delay the bounded return to raw Zero mode.
+                    // Sliding windows (TODO-1018) never drain on their own; the pending
+                    // transition replaces the encoder anyway, so commit must not wait
+                    // for an aligned boundary that no longer exists.
                     encoder.clear_window();
                 }
                 false

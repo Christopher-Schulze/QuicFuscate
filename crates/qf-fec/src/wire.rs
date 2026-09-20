@@ -17,7 +17,12 @@ pub const MAX_GF8_BLOCK_SOURCE_COUNT: usize = u8::MAX as usize;
 
 const FLAG_SYSTEMATIC: u8 = 1 << 0;
 const FLAG_REPAIR_ACK: u8 = 1 << 1;
-const KNOWN_FLAGS: u8 = FLAG_SYSTEMATIC | FLAG_REPAIR_ACK;
+/// Sliding-window repair (TODO-1018): the equation is anchored at
+/// `sequence` and covers the trailing coding window, which may reach
+/// into the previous aligned window. Receivers without the flag strict
+/// -reject via [`WireError::UnsupportedFlags`] instead of misdecoding.
+const FLAG_SLIDING: u8 = 1 << 2;
+const KNOWN_FLAGS: u8 = FLAG_SYSTEMATIC | FLAG_REPAIR_ACK | FLAG_SLIDING;
 
 /// One recovered-source report entry inside a repair-ACK datagram
 /// (TODO-1006, draft-zheng-quic-fec-extension style feedback).
@@ -257,6 +262,11 @@ pub struct WirePacketMeta {
     pub repair_index: u16,
     pub block_index: u8,
     pub systematic: bool,
+    /// True on sliding-window repairs (TODO-1018): only legal for
+    /// `WireCodec::StreamingGf8` non-systematic packets. The decoder then
+    /// anchors the equation at `sequence` instead of the aligned block
+    /// end, so the covered set may straddle a window boundary.
+    pub sliding: bool,
 }
 
 impl WirePacketMeta {
@@ -264,6 +274,9 @@ impl WirePacketMeta {
         self.profile.validate()?;
         if self.block_index >= self.profile.interleave_depth {
             return Err(WireError::InvalidBlockIndex);
+        }
+        if self.sliding && (self.systematic || self.profile.codec != WireCodec::StreamingGf8) {
+            return Err(WireError::InvalidRepairMetadata);
         }
         if self.systematic {
             if self.repair_index != SYSTEMATIC_REPAIR_INDEX
@@ -307,6 +320,24 @@ impl WirePacketMeta {
             }
         }
         Ok(self)
+    }
+
+    /// Earliest lane source covered by a sliding equation (TODO-1018).
+    ///
+    /// The equation anchored at `sequence` covers the trailing
+    /// `min(block_source_count, lane_sources)` sources of its lane
+    /// ending at the anchor - including sources from the previous
+    /// aligned window. Only meaningful for `sliding` repairs.
+    pub fn sliding_cover_start(self) -> u64 {
+        let depth = u64::from(self.profile.interleave_depth.max(1));
+        let lane_sources = self
+            .sequence
+            .saturating_sub(u64::from(self.block_index))
+            .checked_div(depth)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let covered = lane_sources.min(u64::from(self.profile.block_source_count()));
+        self.sequence.saturating_sub(covered.saturating_sub(1).saturating_mul(depth))
     }
 }
 
@@ -407,7 +438,8 @@ pub fn write_packet(
     output[..HEADER_LEN].fill(0);
     output[0..2].copy_from_slice(&MAGIC);
     output[2] = VERSION;
-    output[3] = if meta.systematic { FLAG_SYSTEMATIC } else { 0 };
+    output[3] = if meta.systematic { FLAG_SYSTEMATIC } else { 0 }
+        | if meta.sliding { FLAG_SLIDING } else { 0 };
     output[4] = meta.profile.codec as u8;
     output[5] = meta.profile.interleave_depth;
     output[6] = meta.block_index;
@@ -467,6 +499,7 @@ pub fn parse_packet(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> 
         repair_index: u16::from_be_bytes([datagram[28], datagram[29]]),
         block_index: datagram[6],
         systematic,
+        sliding: datagram[3] & FLAG_SLIDING != 0,
     }
     .validate()?;
 
@@ -651,6 +684,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 3,
             systematic: true,
+            sliding: false,
         };
         let mut output = [0u8; HEADER_LEN + 3];
         let written = write_packet(meta, &[1, 2, 3], &mut output).expect("wire packet");
@@ -686,6 +720,7 @@ mod tests {
             repair_index: SYSTEMATIC_REPAIR_INDEX,
             block_index: 3,
             systematic: true,
+            sliding: false,
         };
         let mut coded = [0u8; HEADER_LEN + 3];
         let coded_len = write_packet(meta, &[1, 2, 3], &mut coded).expect("coded packet");

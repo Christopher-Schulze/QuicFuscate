@@ -300,6 +300,7 @@ fn test_live_udp_datagram_buffer_serializes_full_1500_byte_fec_envelope() {
         repair_index: crate::fec::wire::SYSTEMATIC_REPAIR_INDEX,
         block_index: 0,
         systematic: true,
+        sliding: false,
     };
     let payload = vec![0u8; 1500 - crate::fec::wire::HEADER_LEN];
     let mut output = vec![0u8; LIVE_UDP_DATAGRAM_BUFFER_SIZE];

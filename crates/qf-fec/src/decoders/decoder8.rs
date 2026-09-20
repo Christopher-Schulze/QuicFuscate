@@ -1,5 +1,6 @@
 use super::{
-    anchor_is_valid, record_decoder_solve, source_id_for_params, validate_decoder_dimensions,
+    record_decoder_solve, sliding_anchor_is_valid, source_id_for_params,
+    validate_decoder_dimensions,
 };
 use crate::codecs::FecPacket;
 use crate::gf_tables;
@@ -192,6 +193,26 @@ impl Decoder8 {
         source_id_for_params(self.k, self.depth, base_id, j).unwrap_or(0)
     }
 
+    /// Borrow a delivered/recovered source symbol by id (TODO-1018).
+    /// Sliding-window equations arriving in a later aligned window can
+    /// reach back into sources this decoder already knows; sibling
+    /// windows expose their knowns through this accessor for seeding.
+    #[doc(hidden)]
+    pub fn known_source(&self, id: u64) -> Option<&[u8]> {
+        self.known.get(&id).map(|(buf, len)| &buf[..*len])
+    }
+
+    /// Whether any retained (unsolved) equation covers source `sid`
+    /// (TODO-1018). A sliding equation anchored in the next aligned
+    /// window can reference this window's sources; when such a source
+    /// arrives late, it is seeded into the equation's decoder.
+    #[doc(hidden)]
+    pub fn pending_covers(&self, sid: u64) -> bool {
+        self.equations
+            .iter()
+            .any(|eq| super::coeff_covers(self.k, self.depth, eq.base_id, &eq.coeffs, sid))
+    }
+
     #[doc(hidden)]
     pub fn take_packet(&mut self, p: FecPacket) {
         if self.k == 0 {
@@ -221,7 +242,7 @@ impl Decoder8 {
                 if p.coeff_len != self.k
                     || len > self.mem_pool.block_size()
                     || d.len() < len
-                    || !anchor_is_valid(self.k, self.depth, p.id)
+                    || !sliding_anchor_is_valid(self.k, self.depth, p.id, coeffs)
                 {
                     return;
                 }

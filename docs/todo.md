@@ -4041,7 +4041,7 @@
 
 ### TODO-1018 - Sliding-window (convolutional) FEC coding window
 
-- OPEN (P2, 2026-09-21). Spawned from TODO-1011 item 4. `clear_window()` hard-resets leave a coverage gap on window boundaries; plan: `evict_prefix(m)` sliding window (eviction primitive `evict_oldest_symbol` exists), window base carried in the repair identity (`REPAIR_LANE_BITS` layout, wire-compat decision needed), decoder equation bounding.
+- DONE (P2, 2026-09-21, Streaming GF8 scope). Implemented end-to-end: `FLAG_SLIDING` wire bit (strict-reject compat), `Encoder::new_sliding` (no clear, FIFO evict, right-aligned self-describing coefficient rows), controller skips boundary emit/clear, decoder unified anchor-relative sid mapping (fixes a real underflow mapping positions to phantom sid 0), coverage-aware anchor validation, receiver-global cross-window dedup + sibling-window source seeding + late-source propagation, lazy layer flushes frontier-straddling repairs immediately (fixes stranded burst tails). Fountain stays block-mode (separate wire revision). 1768 lib + 104 qf-fec tests green.
 - Detail: docs/todo/todo-1018-convolutional-sliding-window-fec.md
 
 ### TODO-1019 - Adaptive-Tamaraw direction-aware parameters

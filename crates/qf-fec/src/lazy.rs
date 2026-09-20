@@ -239,12 +239,23 @@ impl LazyDecoder {
                 return;
             }
 
+            let repair_anchor_block = packet.id / self.depth as u64;
             self.pending_repairs.push_back(packet);
             let incomplete_tail = !self.seen_seqs.len().is_multiple_of(self.k);
             let tail_loss_repair = if self.streaming_mode && incomplete_tail {
-                let seen_in_block = self.seen_seqs.len() % self.k;
-                let missing_tail_sources = self.k.saturating_sub(seen_in_block).max(1);
-                self.pending_repairs.len() >= missing_tail_sources
+                // TODO-1018: a sliding repair straddling the coverage
+                // frontier (cover_start <= seen_max < anchor) provably
+                // covers unseen sources at the delivery edge - flush it
+                // instead of batching to the stale missing-tail threshold,
+                // which stranded burst tails. Repairs anchored far past
+                // the frontier stay in the bounded pending ring: flushing
+                // them early would grow the inner equation set unbounded.
+                // Recovered sources advance seen_max in get_result, so
+                // deep bursts admit the next straddling repair each round.
+                self.seen_seq_max.is_some_and(|max| {
+                    repair_anchor_block > max
+                        && repair_anchor_block.saturating_sub(self.k as u64 - 1) <= max
+                }) || self.pending_repairs.len() >= self.k
             } else {
                 incomplete_tail
             };
@@ -266,7 +277,19 @@ impl LazyDecoder {
         self.repairs_skipped = 0;
         let result = self.inner.get_result();
         self.full_recovery_pending = false;
-        if result.is_some() {
+        if let Some(ref packets) = result {
+            // TODO-1018: a recovered source is delivery evidence - fold it
+            // into seen tracking so the coverage frontier advances and the
+            // next straddling sliding repair is admitted rather than
+            // stranded behind a stale seen_seq_max.
+            for packet in packets {
+                let block_seq = self.source_block_seq(packet.seq);
+                self.seen_seqs.insert(block_seq);
+                self.seen_seq_min =
+                    Some(self.seen_seq_min.map_or(block_seq, |min| min.min(block_seq)));
+                self.seen_seq_max =
+                    Some(self.seen_seq_max.map_or(block_seq, |max| max.max(block_seq)));
+            }
             self.partial_recovery_pending = false;
         }
         result
@@ -289,6 +312,48 @@ impl LazyDecoder {
         let result = self.inner.get_partial_result();
         self.partial_recovery_pending = false;
         result
+    }
+
+    /// Inject an already-known systematic packet directly into the inner
+    /// decoder, bypassing lazy buffering (TODO-1018). Sliding-window
+    /// equations may cover sources delivered in a previous aligned
+    /// window; seeding them as known keeps those equations solvable
+    /// instead of underdetermined.
+    #[doc(hidden)]
+    pub fn seed_known_source(&mut self, packet: FecPacket) {
+        if packet.is_systematic {
+            self.inner.take_packet(packet);
+        }
+    }
+
+    /// Borrow a known source symbol by id (TODO-1018). Sources can sit
+    /// in the lazy `pending_sources` buffer before flush, so both stores
+    /// are consulted.
+    #[doc(hidden)]
+    pub fn known_source(&self, id: u64) -> Option<&[u8]> {
+        if let Some(bytes) = self.inner.known_source(id) {
+            return Some(bytes);
+        }
+        self.pending_sources
+            .iter()
+            .find(|p| p.id == id && p.is_systematic)
+            .and_then(|p| p.payload_slice())
+    }
+
+    /// Whether any unsolved equation or buffered repair covers `sid`
+    /// (TODO-1018). A late systematic arrival is forwarded to the
+    /// sibling window's decoder only when something there can use it.
+    #[doc(hidden)]
+    pub fn pending_covers(&self, sid: u64) -> bool {
+        if self.inner.pending_covers(sid) {
+            return true;
+        }
+        self.pending_repairs.iter().any(|p| {
+            p.coefficients.as_ref().is_some_and(|coeffs| {
+                let len = p.coeff_len.min(coeffs.len());
+                crate::decoders::coeff_covers(self.k, self.depth, p.id, &coeffs[..len], sid)
+            })
+        })
     }
 
     /// Update the connection-local fountain seed when the active decoder is fountain-based.

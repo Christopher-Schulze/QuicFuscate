@@ -88,7 +88,11 @@ impl EncoderVariant {
                     Self::GF16(Encoder16::new(k, n))
                 }
             }
-            FecBackendFamily::Streaming => Self::GF8(Encoder::<GF8>::new(k, n)),
+            // Sliding-window codec (TODO-1018): the lane window slides
+            // continuously instead of hard-resetting at aligned block
+            // boundaries, so every emitted repair covers the trailing
+            // k sources regardless of window phase.
+            FecBackendFamily::Streaming => Self::GF8(Encoder::<GF8>::new_sliding(k, n)),
         }
     }
 
@@ -329,6 +333,25 @@ impl DecoderVariant {
                     let _ = decoder.add_fountain_symbol(packet.id, payload);
                 }
             }
+        }
+    }
+
+    /// Borrow a known source symbol by id for cross-window seeding
+    /// (TODO-1018). Only the GF8 backend backs sliding equations.
+    #[doc(hidden)]
+    pub fn known_source(&self, id: u64) -> Option<&[u8]> {
+        match self {
+            Self::GF8(decoder) => decoder.known_source(id),
+            _ => None,
+        }
+    }
+
+    /// Whether any retained equation covers source `sid` (TODO-1018).
+    #[doc(hidden)]
+    pub fn pending_covers(&self, sid: u64) -> bool {
+        match self {
+            Self::GF8(decoder) => decoder.pending_covers(sid),
+            _ => false,
         }
     }
 
