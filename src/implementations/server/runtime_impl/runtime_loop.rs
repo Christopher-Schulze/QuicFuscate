@@ -40,11 +40,12 @@ impl ServerRuntime {
             }
             return Err(std::io::Error::other("server admin action receiver unavailable"));
         };
-        // Take the TUN reader channel (if any) for forwarding TUN->client datagrams.
-        // `pending_wave` parks a partially drained reader wave when the
-        // frame budget cuts a drain short; it is resumed before new waves.
-        let mut tun_rx = self.live_mut().tun_rx.take();
-        let mut pending_wave: Option<std::vec::IntoIter<crate::interface::TunPacket>> = None;
+        // Take the TUN uplink ingress (if any) for forwarding TUN->client
+        // datagrams: reactor-integrated fd on unix, reader channel waves on
+        // fd-less backends. A `Channel` variant carries its own parked
+        // remainder (`pending`); the `Fd` variant reads frames directly.
+        let mut tun_ingress =
+            std::mem::replace(&mut self.live_mut().tun_ingress, ServerTunIngress::Closed);
         let tun_notify = self.live().tun_notify.clone();
         let tun_fault = self.live().tun_fault.clone();
         let tun_ctx = {
@@ -61,7 +62,7 @@ impl ServerRuntime {
             }
         };
         if tun_enable {
-            metrics.set_tun_data_plane_ready(tun_rx.is_some());
+            metrics.set_tun_data_plane_ready(tun_ingress.is_live());
         }
         let mut runtime_fault: Option<DataPlaneFault> = None;
         // Ingress datagram slots are recycled through `ingress_pool` so the
@@ -111,7 +112,7 @@ impl ServerRuntime {
         let mut server_signals = match ServerSignals::install() {
             Ok(signals) => signals,
             Err(error) => {
-                drop(tun_rx);
+                drop(tun_ingress);
                 let live = self.live_mut();
                 live.admin_actions_rx = Some(admin_actions_rx);
                 live.service_signals.shutdown_all();
@@ -131,7 +132,7 @@ impl ServerRuntime {
             profile_interval_secs,
             runtime_config.runtime_policy_generation.clone(),
         ) {
-            drop(tun_rx);
+            drop(tun_ingress);
             self.live_mut().admin_actions_rx = Some(admin_actions_rx);
             self.live_mut().service_signals.shutdown_all();
             let shutdown_error = self.shutdown_stealth_runtime().await.err();
@@ -499,8 +500,7 @@ impl ServerRuntime {
                         &mut self.live_mut().live_state,
                         &tun_ctx,
                         shard_router.as_deref(),
-                        &mut tun_rx,
-                        &mut pending_wave,
+                        &mut tun_ingress,
                         &mut out[..],
                         &socket,
                         &metrics,
@@ -559,7 +559,10 @@ impl ServerRuntime {
                     }
                     housekeeping.reset_after(standalone_housekeeping_delay(self.live()));
                 }
-                _ = tun_notify.notified(), if tun_enable && tun_rx.is_some() => {
+                // Uplink progress wait: fd readiness on the reactor path,
+                // reader-wave notify on the channel path; `Closed` never
+                // resolves so the arm stays parked.
+                _ = tun_ingress.wait_progress(&tun_notify), if tun_enable && tun_ingress.is_live() => {
                     if let Some(fault) = tun_fault
                         .lock()
                         .clone()
@@ -572,8 +575,7 @@ impl ServerRuntime {
                         &mut self.live_mut().live_state,
                         &tun_ctx,
                         shard_router.as_deref(),
-                        &mut tun_rx,
-                        &mut pending_wave,
+                        &mut tun_ingress,
                         &mut out[..],
                         &socket,
                         &metrics,
@@ -600,7 +602,7 @@ impl ServerRuntime {
             }
         }
 
-        drop(tun_rx);
+        drop(tun_ingress);
         self.live_mut().admin_actions_rx = Some(admin_actions_rx);
         // Hard-close dataplane shards before domain teardown: their clients
         // reference shared sessions, so CLOSE frames must flush first.

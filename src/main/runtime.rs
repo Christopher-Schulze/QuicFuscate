@@ -1205,77 +1205,12 @@ fn drain_client_tun_uplink(
     }
 }
 
-/// Reactor-integrated TUN read end (unix): the TUN fd sits in the Tokio
-/// reactor via `AsyncFd`, so uplink readiness arrives as an ordinary
-/// `select!` branch instead of a dedicated reader thread + channel +
-/// notify chain. The kernel TUN queue provides the buffering the channel
-/// used to fake - backpressure is now real backpressure.
-///
-/// Non-unix platforms get an uninhabited stub: `Option<TunReadSource>` is
-/// then always `None`, the select branch is permanently disabled, and the
+/// Reactor-integrated TUN read end lives in the library
+/// (`quicfuscate::interface::TunReadSource`): a real `AsyncFd` wrapper on
+/// unix, an uninhabited enum elsewhere - `Option<TunReadSource>` is
+/// permanently `None` off unix, so the select branch never fires and the
 /// reader-thread fallback stays the only path.
-#[cfg(unix)]
-pub(super) struct TunReadSource {
-    fd: tokio::io::unix::AsyncFd<TunReadEnd>,
-}
-
-#[cfg(unix)]
-pub(super) struct TunReadEnd {
-    /// Keeps the TUN device alive for the lifetime of the AsyncFd.
-    tun: Arc<quicfuscate::interface::TunInterface>,
-    fd: std::os::fd::RawFd,
-}
-
-#[cfg(unix)]
-impl std::os::fd::AsRawFd for TunReadEnd {
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.fd
-    }
-}
-
-#[cfg(unix)]
-impl TunReadSource {
-    fn new(tun: Arc<quicfuscate::interface::TunInterface>, fd: std::os::fd::RawFd) -> Option<Self> {
-        tokio::io::unix::AsyncFd::new(TunReadEnd { tun, fd }).map(|fd| Self { fd }).ok()
-    }
-
-    /// Builds the read end when the backend exposes a pollable nonblocking
-    /// descriptor. Returns `None` on fd-less backends (Wintun), which keeps
-    /// the reader-thread path.
-    pub(super) fn from_tun(tun: &Arc<quicfuscate::interface::TunInterface>) -> Option<Self> {
-        Self::new(Arc::clone(tun), tun.raw_fd()?)
-    }
-
-    async fn readable(&self) {
-        let _ = self.fd.readable().await;
-    }
-
-    /// Nonblocking packet read: `Err(WouldBlock)` means either the fd lost
-    /// readiness or the read itself would block - both clear readiness and
-    /// wait for the next level-triggered wake.
-    fn try_read_packet(&self) -> std::io::Result<(quicfuscate::optimize::PooledBlock, usize)> {
-        let result = self.fd.try_io(tokio::io::Interest::READABLE, |end| end.tun.read_block());
-        if let Err(error) = &result {
-            if error.kind() != std::io::ErrorKind::WouldBlock {
-                warn!("tun-fd try_io read failed: {error}");
-            }
-        }
-        result
-    }
-}
-
-#[cfg(not(unix))]
-pub(super) enum TunReadSource {}
-
-#[cfg(not(unix))]
-impl TunReadSource {
-    pub(super) fn from_tun(_tun: &Arc<quicfuscate::interface::TunInterface>) -> Option<Self> {
-        None
-    }
-    async fn readable(&self) {
-        match *self {}
-    }
-}
+pub(super) use quicfuscate::interface::TunReadSource;
 
 /// FD-sourced variant of [`drain_client_tun_uplink`]: identical backlog and
 /// budget semantics, but packets come straight off the descriptor via

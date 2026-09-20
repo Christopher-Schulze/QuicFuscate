@@ -40,10 +40,10 @@ pub(super) struct ServerLiveRuntime {
     /// Server TUN IP for ICMP echo reply handling.
     pub(super) server_tun_ip: Option<Ipv4Addr>,
     pub(super) server_tun_ipv6: Option<Ipv6Addr>,
-    /// Channel receiving packets read from the server TUN interface (spawned reader thread).
-    /// Forwarded to the appropriate client via QUIC datagrams in the run_loop.
-    /// Carries pooled [`crate::interface::TunPacket`]s - no per-packet alloc/copy.
-    pub(super) tun_rx: Option<std::sync::mpsc::Receiver<Vec<crate::interface::TunPacket>>>,
+    /// TUN uplink ingress: reactor-integrated fd read (unix) or the
+    /// wave-batched reader channel (fd-less backends). Replaces the bare
+    /// receiver so the run loop sees one source abstraction.
+    pub(super) tun_ingress: ServerTunIngress,
     /// Cooperative cancellation for the standalone TUN reader.
     pub(super) tun_reader_shutdown: Option<Arc<AtomicBool>>,
     /// Owned reader handle. `stop()` joins it before releasing the TUN device.
@@ -1173,21 +1173,57 @@ fn drain_wave_frames(
     Ok(())
 }
 
+/// Server TUN uplink source. Unix registers the `O_NONBLOCK` TUN fd with the
+/// Tokio reactor (`TunReadSource`) and the run loop reads frames straight off
+/// the descriptor - no reader thread, channel, or `ppoll`. Backends without
+/// a pollable fd (Wintun) keep the wave-batched reader thread.
+///
+/// Fd contract (same as the client): readiness stays latched until an inner
+/// read returns `WouldBlock`, so the drain must run on every readiness fire -
+/// the server dispatch has no carrier gate, so every frame is processed or
+/// dropped through the bounded downlink queues anyway.
+pub(super) enum ServerTunIngress {
+    Fd(crate::interface::TunReadSource),
+    Channel {
+        rx: std::sync::mpsc::Receiver<Vec<crate::interface::TunPacket>>,
+        /// Parks a partially drained reader wave when the 32-frame drain
+        /// budget cuts mid-wave; resumed before new waves are received.
+        pending: Option<std::vec::IntoIter<crate::interface::TunPacket>>,
+    },
+    Closed,
+}
+
+impl ServerTunIngress {
+    /// Waits for uplink progress: fd readiness on the reactor path, channel
+    /// waves on the reader-thread path. On `Closed` (or an fd-less platform
+    /// where `Fd` cannot exist) this never resolves.
+    pub(super) async fn wait_progress(&self, notify: &tokio::sync::Notify) {
+        match self {
+            ServerTunIngress::Fd(end) => end.readable().await,
+            ServerTunIngress::Channel { .. } => notify.notified().await,
+            ServerTunIngress::Closed => std::future::pending().await,
+        }
+    }
+
+    pub(super) fn is_live(&self) -> bool {
+        !matches!(self, ServerTunIngress::Closed)
+    }
+}
+
 /// `router == None`: packets are processed locally (legacy single-loop).
 /// `Some(router)`: the coordinator classifies and routes each packet's
 /// targets to owning shards; `live_state` supplies shared domain state only.
 ///
-/// Waves arrive batched: the TUN reader hands one `Vec<TunPacket>` per drain
-/// wave over the channel. The drain bound is frame-counted (32) so an
-/// oversized wave cannot starve the other loop arms; a remainder parks in
-/// `pending_wave` and is resumed before new waves are received.
+/// Ingress dispatch: `Fd` reads frames one-by-one off the reactor-registered
+/// descriptor (kernel queue buffers; `WouldBlock` clears readiness), while
+/// `Channel` consumes reader waves under the same frame-counted drain bound
+/// (32) with a parked `IntoIter` remainder.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drain_server_tun_packets(
     live_state: &mut LiveServerState,
     tun_ctx: &ServerTunContext,
     router: Option<&ShardRouter>,
-    tun_rx: &mut Option<std::sync::mpsc::Receiver<Vec<crate::interface::TunPacket>>>,
-    pending_wave: &mut Option<std::vec::IntoIter<crate::interface::TunPacket>>,
+    ingress: &mut ServerTunIngress,
     out: &mut [u8],
     socket: &UdpSocket,
     metrics: &Metrics,
@@ -1210,54 +1246,85 @@ pub(super) fn drain_server_tun_packets(
     };
     let mut budget = 32usize;
 
-    if let Some(iter) = pending_wave.as_mut() {
-        drain_wave_frames(iter, &mut budget, &mut send_one)?;
-        if iter.len() == 0 {
-            *pending_wave = None;
+    match ingress {
+        ServerTunIngress::Fd(end) => {
+            while budget > 0 {
+                // `try_io` yields Err(WouldBlock) when readiness was lost or
+                // the fd drained empty - either way the level-triggered
+                // branch re-fires on the next frame.
+                let packet = match end.try_read_packet() {
+                    Ok((block, len)) => {
+                        crate::interface::TunPacket::new(block, len).map_err(|error| {
+                            DataPlaneFault::ReaderStopped {
+                                component: "server TUN fd".to_string(),
+                                error: error.to_string(),
+                            }
+                        })?
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => {
+                        return Err(DataPlaneFault::ReaderStopped {
+                            component: "server TUN fd".to_string(),
+                            error: error.to_string(),
+                        });
+                    }
+                };
+                send_one(packet)?;
+                budget -= 1;
+            }
+            Ok(budget == 0)
         }
-        if budget == 0 {
-            // Preserve the wake-up contract: a remainder is parked, so the
-            // caller must re-arm rather than wait for a new reader notify.
-            return Ok(true);
-        }
-    }
-
-    while budget > 0 {
-        let result = tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv);
-        match result {
-            Some(Ok(wave)) => {
-                let mut iter = wave.into_iter();
-                drain_wave_frames(&mut iter, &mut budget, &mut send_one)?;
-                if iter.len() > 0 {
-                    *pending_wave = Some(iter);
+        ServerTunIngress::Channel { rx, pending } => {
+            if let Some(iter) = pending.as_mut() {
+                drain_wave_frames(iter, &mut budget, &mut send_one)?;
+                if iter.len() == 0 {
+                    *pending = None;
+                }
+                if budget == 0 {
+                    // Preserve the wake-up contract: a remainder is parked, so
+                    // the caller must re-arm rather than wait for a new reader
+                    // notify.
                     return Ok(true);
                 }
             }
-            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => break,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                *tun_rx = None;
-                if let Some(fault) = reader_gone(tun_ctx) {
-                    return Err(fault);
-                }
-                return Ok(false);
-            }
-            None => return Ok(false),
-        }
-    }
 
-    match tun_rx.as_ref().map(std::sync::mpsc::Receiver::try_recv) {
-        Some(Ok(wave)) => {
-            *pending_wave = Some(wave.into_iter());
-            Ok(true)
-        }
-        Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-            *tun_rx = None;
-            match reader_gone(tun_ctx) {
-                Some(fault) => Err(fault),
-                None => Ok(false),
+            while budget > 0 {
+                match rx.try_recv() {
+                    Ok(wave) => {
+                        let mut iter = wave.into_iter();
+                        drain_wave_frames(&mut iter, &mut budget, &mut send_one)?;
+                        if iter.len() > 0 {
+                            *pending = Some(iter);
+                            return Ok(true);
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        *ingress = ServerTunIngress::Closed;
+                        if let Some(fault) = reader_gone(tun_ctx) {
+                            return Err(fault);
+                        }
+                        return Ok(false);
+                    }
+                }
+            }
+
+            match rx.try_recv() {
+                Ok(wave) => {
+                    *pending = Some(wave.into_iter());
+                    Ok(true)
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    *ingress = ServerTunIngress::Closed;
+                    match reader_gone(tun_ctx) {
+                        Some(fault) => Err(fault),
+                        None => Ok(false),
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => Ok(false),
             }
         }
-        Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => Ok(false),
+        ServerTunIngress::Closed => Ok(false),
     }
 }
 

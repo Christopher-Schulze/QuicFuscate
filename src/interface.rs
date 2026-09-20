@@ -661,6 +661,31 @@ impl TunInterface {
         self.dev.raw_fd()
     }
 
+    /// Wraps the TUN fd in a Tokio `AsyncFd` so uplink readiness arrives as
+    /// an ordinary reactor wake inside an owning `select!` loop - no reader
+    /// thread, channel, or notify chain. The kernel TUN queue supplies the
+    /// buffering the channel used to fake, so backpressure stays real.
+    ///
+    /// Returns `None` on backends without a pollable fd; callers keep the
+    /// wave-batched reader thread as the fallback there.
+    ///
+    /// IMPORTANT for consumers: the readiness bit stays latched until an
+    /// inner read returns `WouldBlock`. The drain must therefore run on
+    /// every readiness fire - gating reads on carrier state spins the
+    /// branch. Park pre-carrier frames in a bounded backlog instead.
+    #[cfg(unix)]
+    pub fn reactor_read_end(self: &Arc<Self>) -> Option<TunReadSource> {
+        TunReadSource::new(Arc::clone(self), self.dev.raw_fd()?)
+    }
+
+    /// Non-unix companion: `TunReadSource` is uninhabited there, so this
+    /// always returns `None` and callers stay on the reader-thread path.
+    #[cfg(not(unix))]
+    pub fn reactor_read_end(self: &Arc<Self>) -> Option<TunReadSource> {
+        let _ = self;
+        None
+    }
+
     /// Waits until the device is readable or shutdown is requested.
     #[cfg(unix)]
     fn wait_for_readable(&self, shutdown: &AtomicBool) -> io::Result<bool> {
@@ -844,6 +869,79 @@ impl TunInterface {
     {
         let shutdown = AtomicBool::new(false);
         self.reader_loop_with_shutdown(&shutdown, |packet| on_packet(packet))
+    }
+}
+
+/// Reactor-integrated TUN read end (unix): wraps the nonblocking TUN
+/// descriptor in a Tokio `AsyncFd` so uplink readiness arrives as an ordinary
+/// `select!` branch. Replaces the reader thread + channel + notify chain for
+/// event-loop consumers; the kernel TUN queue supplies the buffering the
+/// channel used to fake.
+///
+/// Readiness contract: `readable()` resolves while the fd has data; the
+/// latched readiness bit only clears when an inner read returns `WouldBlock`.
+/// Consumers MUST run `try_read_packet` on every fire (parking frames in a
+/// bounded backlog when the carrier cannot accept them) or the branch spins.
+#[cfg(unix)]
+pub struct TunReadSource {
+    fd: tokio::io::unix::AsyncFd<TunReadEnd>,
+}
+
+/// Holds the `Arc<TunInterface>` that owns the descriptor for the lifetime of
+/// the `AsyncFd` registration - dropping the interface while the reactor
+/// still polls the fd would race `close(2)`.
+#[cfg(unix)]
+pub struct TunReadEnd {
+    tun: Arc<TunInterface>,
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for TunReadEnd {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+}
+
+#[cfg(unix)]
+impl TunReadSource {
+    fn new(tun: Arc<TunInterface>, fd: std::os::fd::RawFd) -> Option<Self> {
+        tokio::io::unix::AsyncFd::new(TunReadEnd { tun, fd }).map(|fd| Self { fd }).ok()
+    }
+
+    /// Resolves once the fd reports readable readiness. The returned readiness
+    /// stays latched until a `try_read_packet` inner read hits `WouldBlock`.
+    pub async fn readable(&self) {
+        let _ = self.fd.readable().await;
+    }
+
+    /// Nonblocking packet read off the registered descriptor. `Err(WouldBlock)`
+    /// means either the registration lost readiness or the fd was empty -
+    /// either way readiness is cleared and the level-triggered branch re-fires
+    /// on new data. Any other error is a real read fault (reader-stopped
+    /// semantics, matching the reader-thread contract).
+    pub fn try_read_packet(&self) -> io::Result<(PooledBlock, usize)> {
+        self.fd.try_io(tokio::io::Interest::READABLE, |end| end.tun.read_block())
+    }
+}
+
+/// Non-unix stub: no reactor-capable descriptor exists (Wintun exposes no
+/// pollable fd), so the type is uninhabited and `reactor_read_end()` always
+/// returns `None`. `Option<TunReadSource>` is therefore always `None` and
+/// every `select!` arm gated on it compiles but never fires.
+#[cfg(not(unix))]
+pub enum TunReadSource {}
+
+#[cfg(not(unix))]
+impl TunReadSource {
+    /// Unreachable by construction - the type cannot be instantiated.
+    pub async fn readable(&self) {
+        match *self {}
+    }
+
+    /// Unreachable by construction - the type cannot be instantiated.
+    pub fn try_read_packet(&self) -> io::Result<(PooledBlock, usize)> {
+        match *self {}
     }
 }
 

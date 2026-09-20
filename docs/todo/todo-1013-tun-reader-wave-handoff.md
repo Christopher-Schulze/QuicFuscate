@@ -115,3 +115,24 @@ runtime has its own event-loop ownership story and is a separate task.
 Non-unix fallback: `TunReadSource` is an uninhabited enum off unix -
 `Option<TunReadSource>` is always `None`, the select branch never fires,
 and the reader-thread path stays the fallback (Wintun has no pollable fd).
+
+## Server side: same migration, verified
+
+The standalone server followed the same pattern: `ServerTunIngress`
+(`src/implementations/server/tun_path.rs`) replaces the bare receiver with
+`Fd(TunReadSource)` | `Channel { rx, pending }` | `Closed`. On unix the
+server TUN fd sits in the reactor (`reactor_read_end`); the reader thread,
+wave channel, and notify hop are skipped entirely. `wait_progress` merges
+fd-readiness and channel-notify into one `select!` arm; the drain bound
+stays 32 frames. No carrier gate exists server-side, so the fd drain has
+no backlog leg - frames dispatch straight into the bounded downlink
+queues.
+
+Verified on Omega: `tun-e2e-netns.sh` PASS (5/5 both directions, 0% loss,
+clean teardown incl. server crash/restart), server log confirms
+"reactor-fd ingress (no reader thread)" for both generations.
+
+`TunReadSource`/`TunReadEnd` moved to `quicfuscate::interface` so the
+binary (`main::runtime`) and library (`implementations::server`) share the
+same reactor-fd type; off unix the enum is uninhabited and every gated
+select arm compiles away.

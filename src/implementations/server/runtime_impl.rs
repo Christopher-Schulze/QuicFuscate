@@ -310,41 +310,43 @@ impl ServerRuntime {
         let server_tun_ipv6 = server_config.ipv6_server_ip;
         let tun_notify = Arc::new(tokio::sync::Notify::new());
         let tun_fault = Arc::new(Mutex::new(None));
-        let (server_tun, tun_rx, routing, tun_reader_shutdown, tun_reader_handle) = match tun_config
-        {
-            Some(tun_config) => {
-                let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
-                #[cfg(target_os = "linux")]
-                {
-                    crate::interface::validate_tun_config(&tun_config)
-                        .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
-                    cleanup_stale_routing_records(tun_config.name.as_deref(), &server_config)
-                        .map_err(std::io::Error::other)?;
-                }
+        let (server_tun, tun_ingress, routing, tun_reader_shutdown, tun_reader_handle) =
+            match tun_config {
+                Some(tun_config) => {
+                    let optm = crate::optimize::OptimizationManager::from_cfg(opt_params);
+                    #[cfg(target_os = "linux")]
+                    {
+                        crate::interface::validate_tun_config(&tun_config)
+                            .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+                        cleanup_stale_routing_records(tun_config.name.as_deref(), &server_config)
+                            .map_err(std::io::Error::other)?;
+                    }
 
-                match open_server_tun(tun_config, optm.memory_pool()) {
-                    Ok(tun) => {
-                        #[cfg(target_os = "linux")]
-                        let routing = {
-                            let routing =
-                                configured_routing_manager(tun.name().to_string(), &server_config)
-                                    .map_err(std::io::Error::other)?;
-                            if let Err(error) = routing.setup() {
-                                let rollback_error = routing.teardown().err();
-                                crate::audit::audit_typed(
-                                    crate::audit::AuditEventType::FirewallRuleAdded,
-                                    crate::audit::AuditSeverity::Critical,
-                                    None,
-                                    None,
-                                    crate::audit::AuditContext {
-                                        actor: crate::audit::AuditActor::System,
-                                        target: crate::audit::AuditTarget::Route,
-                                        outcome: crate::audit::AuditOutcome::Failed,
-                                        reason: Some("routing_setup_failed"),
-                                    },
-                                    &format!("Standalone server routing setup failed: {error}"),
-                                );
-                                let detail = rollback_error.map_or_else(
+                    match open_server_tun(tun_config, optm.memory_pool()) {
+                        Ok(tun) => {
+                            #[cfg(target_os = "linux")]
+                            let routing = {
+                                let routing = configured_routing_manager(
+                                    tun.name().to_string(),
+                                    &server_config,
+                                )
+                                .map_err(std::io::Error::other)?;
+                                if let Err(error) = routing.setup() {
+                                    let rollback_error = routing.teardown().err();
+                                    crate::audit::audit_typed(
+                                        crate::audit::AuditEventType::FirewallRuleAdded,
+                                        crate::audit::AuditSeverity::Critical,
+                                        None,
+                                        None,
+                                        crate::audit::AuditContext {
+                                            actor: crate::audit::AuditActor::System,
+                                            target: crate::audit::AuditTarget::Route,
+                                            outcome: crate::audit::AuditOutcome::Failed,
+                                            reason: Some("routing_setup_failed"),
+                                        },
+                                        &format!("Standalone server routing setup failed: {error}"),
+                                    );
+                                    let detail = rollback_error.map_or_else(
                                     || format!("standalone server routing setup failed: {error}"),
                                     |rollback| {
                                         format!(
@@ -352,83 +354,107 @@ impl ServerRuntime {
                                         )
                                     },
                                 );
-                                return Err(std::io::Error::other(detail));
-                            }
-                            Some(routing)
-                        };
-                        #[cfg(not(target_os = "linux"))]
-                        let routing = None;
-                        let tun_arc = Arc::new(tun);
-                        // Spawn a blocking reader thread that forwards TUN frames into a channel.
-                        // These packets are forwarded to the client via QUIC datagrams in the run_loop.
-                        // Pooled `TunPacket`s cross the channel directly: zero
-                        // alloc, zero copy - the block returns to the TUN pool
-                        // when the consumer drops it. The reader hands over
-                        // one Vec per drain wave (`TUN_READ_BURST`), so the
-                        // channel bound is wave-counted and still holds the
-                        // same ~queue-capacity packet budget.
-                        let (tx, rx) =
-                            std::sync::mpsc::sync_channel::<Vec<crate::interface::TunPacket>>(
-                                crate::interface::TUN_PACKET_QUEUE_CAPACITY
-                                    .div_ceil(crate::interface::TUN_READ_BURST)
-                                    .max(2),
-                            );
-                        let tun_for_reader = tun_arc.clone();
-                        let reader_shutdown = Arc::new(AtomicBool::new(false));
-                        let shutdown_for_loop = Arc::clone(&reader_shutdown);
-                        let shutdown_for_callback = Arc::clone(&reader_shutdown);
-                        let fault_for_loop = Arc::clone(&tun_fault);
-                        let fault_for_callback = Arc::clone(&tun_fault);
-                        let tun_notify_for_reader = Arc::clone(&tun_notify);
-                        let tun_notify_for_callback_failure = Arc::clone(&tun_notify);
-                        let tun_notify_for_reader_error = Arc::clone(&tun_notify);
-                        let reader_spawn = std::thread::Builder::new()
-                            .name("tun-reader".to_string())
-                            .spawn(move || {
-                                let read_result = tun_for_reader.reader_loop_with_shutdown_batched(
-                                    &shutdown_for_loop,
-                                    move |wave: Vec<crate::interface::TunPacket>| {
-                                        log::debug!("TUN reader: wave of {} packets", wave.len());
-                                        if tx.send(wave).is_err() {
-                                            if !shutdown_for_callback.load(Ordering::Acquire) {
-                                                let mut fault = fault_for_callback.lock();
-                                                if fault.is_none() {
-                                                    *fault =
+                                    return Err(std::io::Error::other(detail));
+                                }
+                                Some(routing)
+                            };
+                            #[cfg(not(target_os = "linux"))]
+                            let routing = None;
+                            let tun_arc = Arc::new(tun);
+                            // Reactor-integrated uplink (unix): register the
+                            // O_NONBLOCK TUN fd with the Tokio reactor and read
+                            // frames inside the run loop - no reader thread,
+                            // channel, ppoll, or notify hop. Backends without a
+                            // pollable fd (Wintun) fall back to the wave-batched
+                            // reader thread below.
+                            if let Some(end) = tun_arc.reactor_read_end() {
+                                log::info!(
+                                    "Server TUN uplink: reactor-fd ingress (no reader thread)"
+                                );
+                                (Some(tun_arc), ServerTunIngress::Fd(end), routing, None, None)
+                            } else {
+                                // Spawn a blocking reader thread that forwards TUN frames into a channel.
+                                // These packets are forwarded to the client via QUIC datagrams in the run_loop.
+                                // Pooled `TunPacket`s cross the channel directly: zero
+                                // alloc, zero copy - the block returns to the TUN pool
+                                // when the consumer drops it. The reader hands over
+                                // one Vec per drain wave (`TUN_READ_BURST`), so the
+                                // channel bound is wave-counted and still holds the
+                                // same ~queue-capacity packet budget.
+                                let (tx, rx) = std::sync::mpsc::sync_channel::<
+                                    Vec<crate::interface::TunPacket>,
+                                >(
+                                    crate::interface::TUN_PACKET_QUEUE_CAPACITY
+                                        .div_ceil(crate::interface::TUN_READ_BURST)
+                                        .max(2),
+                                );
+                                let tun_for_reader = tun_arc.clone();
+                                let reader_shutdown = Arc::new(AtomicBool::new(false));
+                                let shutdown_for_loop = Arc::clone(&reader_shutdown);
+                                let shutdown_for_callback = Arc::clone(&reader_shutdown);
+                                let fault_for_loop = Arc::clone(&tun_fault);
+                                let fault_for_callback = Arc::clone(&tun_fault);
+                                let tun_notify_for_reader = Arc::clone(&tun_notify);
+                                let tun_notify_for_callback_failure = Arc::clone(&tun_notify);
+                                let tun_notify_for_reader_error = Arc::clone(&tun_notify);
+                                let reader_spawn = std::thread::Builder::new()
+                                    .name("tun-reader".to_string())
+                                    .spawn(move || {
+                                        let read_result = tun_for_reader
+                                            .reader_loop_with_shutdown_batched(
+                                                &shutdown_for_loop,
+                                                move |wave: Vec<crate::interface::TunPacket>| {
+                                                    log::debug!(
+                                                        "TUN reader: wave of {} packets",
+                                                        wave.len()
+                                                    );
+                                                    if tx.send(wave).is_err() {
+                                                        if !shutdown_for_callback
+                                                            .load(Ordering::Acquire)
+                                                        {
+                                                            let mut fault =
+                                                                fault_for_callback.lock();
+                                                            if fault.is_none() {
+                                                                *fault =
                                                         Some(DataPlaneFault::ChannelDisconnected {
                                                             component: "server TUN reader channel"
                                                                 .to_string(),
                                                         });
+                                                            }
+                                                            drop(fault);
+                                                            tun_notify_for_callback_failure
+                                                                .notify_one();
+                                                        }
+                                                        shutdown_for_callback
+                                                            .store(true, Ordering::Release);
+                                                        return;
+                                                    }
+                                                    tun_notify_for_reader.notify_one();
+                                                },
+                                            );
+                                        if let Err(error) = read_result {
+                                            if !shutdown_for_loop.load(Ordering::Acquire) {
+                                                log::warn!(
+                                                    "TUN reader stopped with error: {error}"
+                                                );
+                                                let mut fault = fault_for_loop.lock();
+                                                if fault.is_none() {
+                                                    *fault = Some(DataPlaneFault::ReaderStopped {
+                                                        component: "server TUN reader".to_string(),
+                                                        error: error.to_string(),
+                                                    });
                                                 }
                                                 drop(fault);
-                                                tun_notify_for_callback_failure.notify_one();
+                                                tun_notify_for_reader_error.notify_one();
                                             }
-                                            shutdown_for_callback.store(true, Ordering::Release);
-                                            return;
                                         }
-                                        tun_notify_for_reader.notify_one();
-                                    },
-                                );
-                                if let Err(error) = read_result {
-                                    if !shutdown_for_loop.load(Ordering::Acquire) {
-                                        log::warn!("TUN reader stopped with error: {error}");
-                                        let mut fault = fault_for_loop.lock();
-                                        if fault.is_none() {
-                                            *fault = Some(DataPlaneFault::ReaderStopped {
-                                                component: "server TUN reader".to_string(),
-                                                error: error.to_string(),
-                                            });
-                                        }
-                                        drop(fault);
-                                        tun_notify_for_reader_error.notify_one();
-                                    }
-                                }
-                            });
-                        let reader_handle = match reader_spawn {
-                            Ok(handle) => handle,
-                            Err(error) => {
-                                let routing_error =
-                                    routing.and_then(|routing| teardown_routing(routing).err());
-                                let detail = routing_error.map_or_else(
+                                    });
+                                let reader_handle = match reader_spawn {
+                                    Ok(handle) => handle,
+                                    Err(error) => {
+                                        let routing_error = routing
+                                            .and_then(|routing| teardown_routing(routing).err());
+                                        let detail = routing_error.map_or_else(
                                     || format!("standalone TUN reader spawn failed: {error}"),
                                     |routing_error| {
                                         format!(
@@ -436,27 +462,30 @@ impl ServerRuntime {
                                         )
                                     },
                                 );
-                                return Err(std::io::Error::other(detail));
+                                        return Err(std::io::Error::other(detail));
+                                    }
+                                };
+                                log::info!(
+                                    "Server TUN reader thread spawned for bidirectional forwarding"
+                                );
+                                (
+                                    Some(tun_arc),
+                                    ServerTunIngress::Channel { rx, pending: None },
+                                    routing,
+                                    Some(reader_shutdown),
+                                    Some(reader_handle),
+                                )
                             }
-                        };
-                        log::info!("Server TUN reader thread spawned for bidirectional forwarding");
-                        (
-                            Some(tun_arc),
-                            Some(rx),
-                            routing,
-                            Some(reader_shutdown),
-                            Some(reader_handle),
-                        )
-                    }
-                    Err(error) => {
-                        return Err(std::io::Error::other(format!(
-                            "standalone server TUN open failed: {error}"
-                        )));
+                        }
+                        Err(error) => {
+                            return Err(std::io::Error::other(format!(
+                                "standalone server TUN open failed: {error}"
+                            )));
+                        }
                     }
                 }
-            }
-            None => (None, None, None, None, None),
-        };
+                None => (None, ServerTunIngress::Closed, None, None, None),
+            };
 
         let metrics = Arc::new(Metrics::new_with_clock(&clock));
         metrics.set_memory_lock_status(qf_memory_lock::current_status());
@@ -483,7 +512,7 @@ impl ServerRuntime {
             routing,
             server_tun_ip,
             server_tun_ipv6,
-            tun_rx,
+            tun_ingress,
             tun_reader_shutdown,
             tun_reader_handle,
             tun_notify,
@@ -675,7 +704,10 @@ impl ServerRuntime {
         if let Some(shutdown) = live.tun_reader_shutdown.as_ref() {
             shutdown.store(true, Ordering::Release);
         }
-        live.tun_rx.take();
+        // Reactor-fd ingress needs no shutdown flag or join - dropping the
+        // AsyncFd deregisters it; the channel variant unblocks the bounded
+        // send by dropping the receiver.
+        live.tun_ingress = super::tun_path::ServerTunIngress::Closed;
         let wake_error = live.server_tun.as_ref().and_then(|tun| {
             tun.request_reader_shutdown()
                 .err()
@@ -1677,6 +1709,7 @@ impl Drop for ServerRuntime {
     fn drop(&mut self) {
         let live_needs_cleanup = self.live.as_ref().is_some_and(|live| {
             live.server_tun.is_some()
+                || live.tun_ingress.is_live()
                 || live.tun_reader_handle.is_some()
                 || live.tun_reader_shutdown.is_some()
                 || live.routing.is_some()

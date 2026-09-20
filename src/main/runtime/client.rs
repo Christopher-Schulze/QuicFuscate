@@ -603,11 +603,10 @@ pub(super) async fn run_client(
                 // as a plain `select!` branch - no reader thread, no channel,
                 // no notify. The kernel TUN queue supplies the buffering the
                 // channel used to fake, so backpressure stays real.
-                let tun_read_end = super::TunReadSource::from_tun(&tun);
-                info!(
-                    "client TUN uplink mode: {}",
-                    if tun_read_end.is_some() { "reactor-fd" } else { "reader-thread" }
-                );
+                let tun_read_end = tun.reactor_read_end();
+                if tun_read_end.is_none() {
+                    info!("client TUN uplink: fd not reactor-capable, using reader thread");
+                }
                 if let Some(end) = tun_read_end {
                     Ok((
                         None,
