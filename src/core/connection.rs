@@ -153,6 +153,15 @@ pub struct QuicFuscateConnection {
 
     // Async Stealth Scheduler State
     next_packet_release: Option<std::time::Instant>,
+    /// Last time a bulk-only datagram entered `outgoing_fec_packets`;
+    /// trains closer than `REORDER_BURST_WINDOW` share one reorder window.
+    last_bulk_queued: std::cell::Cell<Option<std::time::Instant>>,
+    /// Shared release deadline for the current bulk reorder window. All
+    /// bulk packets queued inside one window carry this same `hold_until`
+    /// so they ripen together and leave in a single permuted batch -
+    /// per-packet staggered deadlines would serialize emission into one
+    /// wake per packet and collapse throughput under sustained bulk load.
+    bulk_window_release: std::cell::Cell<Option<std::time::Instant>>,
     outbound_pacer: OutboundPacer,
     /// Linux UDP_GSO emission was rejected by this peer's route (EMSGSIZE);
     /// further sends to it skip run planning and go out per-packet. Path MTU
@@ -584,6 +593,8 @@ impl QuicFuscateConnection {
             runtime_system: sysinfo::System::new(),
             tls_ch_override_template: environment.first(["QUICFUSCATE_TLS_CH_OVERRIDE_TEMPLATE"]),
             next_packet_release: None,
+            last_bulk_queued: std::cell::Cell::new(None),
+            bulk_window_release: std::cell::Cell::new(None),
             outbound_pacer: OutboundPacer::default(),
             #[cfg(target_os = "linux")]
             udp_gso_path_blocked: false,

@@ -4026,8 +4026,13 @@
 
 ### TODO-1015 - ChameleonFlow bounded reorder window for bulk datagrams
 
-- OPEN (depends on TODO-1011 classes). Design study in TODO-1010: redistribute real packets inside a bounded window (W ~5-15 ms, k ~8) instead of buying chaff. Scope narrowed to `DatagramClass::Bulk` only - inner TCP tolerates reorder; ACK/control/protected traffic bypasses. PN allocation at compose time makes send-order reorder wire-legal. Success metric: train-structure entropy gain at <=2 ms median added bulk latency, ~0 bandwidth overhead.
+- PARTIAL (2026-09-20). Implemented as a shared batch window inside `outgoing_fec_packets`: `reorder_hold_for` draws one window deadline per burst (`bulk_window_release`, uniform 0..=3 ms; time-based burst detection via `last_bulk_queued` / `REORDER_BURST_WINDOW` = 10 ms), gated on transport stealth timing (performance mode unaffected); `pick_reorder_emit_index` keeps strict FIFO for non-bulk while permuting emission inside ripe bulk runs; `emit_ripe_or_yield` keeps the drain alive when a new datagram defers; `next_packet_release` now merges pending deadlines instead of overwriting. 5 regression tests in `src/core/connection/tests.rs`, green under default + `zero_copy_dgram`. Omega: mechanism live (4676 window draws under iperf), but wire-parity blocked by the pre-existing deferral-drain serialization -> TODO-1016.
 - Detail: docs/todo/todo-1015-bulk-reorder-window.md
+
+### TODO-1016 - Deferral drain serializes emission under per-packet stealth deferral
+
+- OPEN (2026-09-20). Omega evidence: `stealth_timing` (per-packet jitter/hold deferral) collapses the standalone `quicfuscate client --tun` datapath to ~1.8 Mbit/s vs 74.3 Mbit/s baseline (~1 packet per loop tick; `CLIENT_HOUSEKEEPING_ACTIVE` 5 ms floor; ~2.4 ms even with a 1 ms floor patch) - same collapse with jitter alone, i.e. pre-existing, blocks TODO-1015 wire parity. Done so far: `emit_ripe_or_yield` drain-starvation fix, shared window deadlines, `next_packet_release` merge. Remaining: deadline-driven sub-5ms wake in the standalone housekeeping loop or batch-window drain; io_driver runtime is the better long-term owner.
+- Detail: docs/todo/todo-1016-deferral-drain-serialization.md
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff
 

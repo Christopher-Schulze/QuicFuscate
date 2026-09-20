@@ -19,10 +19,121 @@ impl QuicFuscateConnection {
             self.conn.recovery_deadline(),
             self.conn.traffic_analysis_deadline(),
             self.conn.handshake_send_ready_at(),
+            self.earliest_reorder_hold(),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// TODO-1015: maximum per-packet hold applied to bulk-only datagrams
+    /// inside the reorder window. Sampling is uniform over [0, 3 ms], so
+    /// the median added latency (~1.5 ms) stays under the 2 ms acceptance
+    /// bound while still spacing a bulk train across multiple drain cycles.
+    pub(crate) const REORDER_HOLD_MAX_US: u64 = 3_000;
+    /// Two bulk packets closer than this belong to the same burst train;
+    /// train members are eligible for the hold + permuted emission.
+    pub(crate) const REORDER_BURST_WINDOW: Duration = Duration::from_millis(10);
+
+    /// Earliest pending reorder-window hold across the outgoing queue.
+    pub(crate) fn earliest_reorder_hold(&self) -> Option<Instant> {
+        self.outgoing_fec_packets.iter().filter_map(|packet| packet.hold_until).min()
+    }
+
+    /// Assigns a randomized hold to a bulk-only packet when a burst is in
+    /// progress. A burst is time-based, not queue-based: any bulk packet
+    /// arriving within `REORDER_BURST_WINDOW` of the previous one belongs
+    /// to the same train, so the hold gathers train members inside the
+    /// window where the drain then permutes them (ChameleonFlow). A lone
+    /// bulk packet - the head of a train after a quiet gap - passes
+    /// through unheld: delaying it would cost latency with zero
+    /// redistribution gain. Returns `None` when stealth timing is
+    /// disabled or the packet is not bulk-only.
+    pub(crate) fn reorder_hold_for(
+        &self,
+        send_info: &crate::transport::SendInfo,
+        now: Instant,
+    ) -> Option<Instant> {
+        if !send_info.bulk_only || !self.conn.transport_stealth_timing_active() {
+            return None;
+        }
+        let burst_in_progress = self.conn.dgram_send_queue_len() > 0
+            || !self.outgoing_fec_packets.is_empty()
+            || self
+                .last_bulk_queued
+                .get()
+                .is_some_and(|queued| now.duration_since(queued) <= Self::REORDER_BURST_WINDOW);
+        self.last_bulk_queued.set(Some(now));
+        if !burst_in_progress {
+            return None;
+        }
+        // Windowed batch release: every bulk packet inside the open window
+        // shares the same deadline so one wake emits the whole permuted
+        // batch. Once the window expired the next burst member draws a
+        // fresh window.
+        if let Some(window) = self.bulk_window_release.get() {
+            if now < window {
+                return Some(window);
+            }
+            self.bulk_window_release.set(None);
+        }
+        let hold_us = crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_HOLD_MAX_US + 1);
+        if hold_us > 0 {
+            let window = now + Duration::from_micros(hold_us);
+            self.bulk_window_release.set(Some(window));
+            log::debug!("reorder_window: bulk window +{hold_us}us");
+            return Some(window);
+        }
+        None
+    }
+
+    /// Emission index into `outgoing_fec_packets` honoring per-packet hold
+    /// windows. Returns `None` while every queued packet still waits inside
+    /// its hold window - the caller then yields and re-polls at
+    /// [`Self::earliest_reorder_hold`].
+    ///
+    /// Non-bulk entries keep strict FIFO priority: the first ripe entry is
+    /// emitted unless it is bulk-only AND at least one other bulk entry is
+    /// also ripe, in which case a permuted pick reshuffles the bulk run.
+    /// That is the ChameleonFlow step: burst-train order on the wire stops
+    /// mirroring composition order while control/ACK/framed traffic keeps
+    /// its sequence.
+    pub(crate) fn pick_reorder_emit_index(&self, now: Instant) -> Option<usize> {
+        let mut first_ripe: Option<usize> = None;
+        let mut ripe_bulk_count = 0usize;
+        for (idx, packet) in self.outgoing_fec_packets.iter().enumerate() {
+            if packet.hold_until.is_some_and(|hold| now < hold) {
+                continue;
+            }
+            if first_ripe.is_none() {
+                first_ripe = Some(idx);
+            }
+            if packet.send_info.bulk_only {
+                ripe_bulk_count += 1;
+            }
+        }
+        let first = first_ripe?;
+        let first_is_bulk =
+            self.outgoing_fec_packets.get(first).is_some_and(|packet| packet.send_info.bulk_only);
+        if !first_is_bulk || ripe_bulk_count < 2 {
+            return Some(first);
+        }
+        let pick = crate::transport::rand::fast_rand_u64_uniform(ripe_bulk_count as u64) as usize;
+        let mut seen = 0usize;
+        self.outgoing_fec_packets
+            .iter()
+            .enumerate()
+            .find_map(|(idx, packet)| {
+                let ripe = packet.hold_until.is_none_or(|hold| now >= hold);
+                if ripe && packet.send_info.bulk_only {
+                    if seen == pick {
+                        return Some(idx);
+                    }
+                    seen += 1;
+                }
+                None
+            })
+            .or(Some(first))
     }
 
     /// Queue one ack-eliciting transport keepalive for the next send poll.
@@ -256,6 +367,22 @@ impl QuicFuscateConnection {
         // new send() call would generate another FEC packet and push it onto
         // outgoing_fec_packets without ever draining the buffer.
         if !path_control_pending && !self.outgoing_fec_packets.is_empty() {
+            let Some(emit_idx) = self.pick_reorder_emit_index(now) else {
+                // Every queued packet still waits inside its reorder hold
+                // window (TODO-1015). The runtime re-polls at the deadline
+                // merged from earliest_reorder_hold().
+                return Ok((
+                    0,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                        bulk_only: false,
+                    },
+                ));
+            };
             // Write from the queued item without removing it. A capacity or serialization
             // failure must leave the packet exactly where it was, in order, for the next
             // send; popping first silently discarded a locally queued packet that was never
@@ -263,14 +390,14 @@ impl QuicFuscateConnection {
             let (len, mut send_info, shape, congestion_controlled) = {
                 let packet = self
                     .outgoing_fec_packets
-                    .front()
+                    .get(emit_idx)
                     .ok_or_else(|| "buffered FEC queue emptied unexpectedly".to_string())?;
                 let len = packet.write_to(buf)?;
                 (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
             };
             // Commit: the bytes are in the caller's buffer, so ownership transfers now.
-            // Dropping the popped packet recycles its pool block.
-            self.outgoing_fec_packets.pop_front();
+            // Dropping the removed packet recycles its pool block.
+            self.outgoing_fec_packets.remove(emit_idx);
             send_info.at = now;
             if self.fec.telemetry_enabled() {
                 let (systematic, source_payload_bytes) = shape;
@@ -455,16 +582,19 @@ impl QuicFuscateConnection {
                     packet,
                     send_info,
                     congestion_controlled: send_info.congestion_controlled,
+                    hold_until: None,
                 });
             }
             self.fec_tx_sequence = self.fec_tx_sequence.wrapping_add(1);
         } else {
             self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+            let hold_until = self.reorder_hold_for(&send_info, now);
             let outgoing = OutgoingFecPacket {
                 packet: fec_packet,
                 wire_meta: None,
                 send_info,
                 congestion_controlled: send_info.congestion_controlled,
+                hold_until,
             };
             if send_info.path_control {
                 self.outgoing_fec_packets.push_front(outgoing);
@@ -492,7 +622,35 @@ impl QuicFuscateConnection {
             if let Some(release_at) =
                 Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
             {
-                self.next_packet_release = Some(release_at);
+                // The deferred packet is the one just queued: mark it held
+                // until its stealth release so the reorder-aware drain
+                // cannot emit it early while ripe packets keep flowing.
+                if let Some(back) = self.outgoing_fec_packets.back_mut() {
+                    back.hold_until =
+                        [back.hold_until, Some(release_at)].into_iter().flatten().max();
+                }
+                self.next_packet_release =
+                    [self.next_packet_release, Some(release_at)].into_iter().flatten().min();
+                // Keep the drain alive: a deferred datagram must not starve
+                // already-ripe queued packets behind an empty yield.
+                return self.emit_ripe_or_yield(
+                    buf,
+                    now,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                        bulk_only: false,
+                    },
+                );
+            }
+        }
+
+        // Pop the first packet from the buffer to send it now.
+        if !self.outgoing_fec_packets.is_empty() {
+            let Some(emit_idx) = self.pick_reorder_emit_index(now) else {
                 return Ok((
                     0,
                     crate::transport::SendInfo {
@@ -503,36 +661,9 @@ impl QuicFuscateConnection {
                         path_control: false,
                         bulk_only: false,
                     },
-                )); // Yield immediately, do not send the just-generated packets yet.
-            }
-        }
-
-        // Pop the first packet from the buffer to send it now.
-        if !self.outgoing_fec_packets.is_empty() {
-            // Same transactional shape as the buffered flush above: write from the front, and
-            // transfer ownership only once the bytes are committed to the caller's buffer.
-            let (len, mut send_info, shape, congestion_controlled) = {
-                let packet = self
-                    .outgoing_fec_packets
-                    .front()
-                    .ok_or_else(|| "FEC queue emptied unexpectedly".to_string())?;
-                let len = packet.write_to(buf)?;
-                (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
+                ));
             };
-            self.outgoing_fec_packets.pop_front();
-            send_info.at = now;
-            log::trace!(
-                "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
-                len,
-                self.conn.dgram_send_queue_len(),
-                self.outgoing_fec_packets.len()
-            );
-            if self.fec.telemetry_enabled() {
-                let (systematic, source_payload_bytes) = shape;
-                self.fec.observe_wire_send(systematic, source_payload_bytes, len);
-            }
-            self.record_paced_packet(now, len, congestion_controlled);
-            Ok((len, send_info))
+            self.emit_queued_packet(buf, now, emit_idx)
         } else {
             Ok((
                 0,
@@ -545,6 +676,54 @@ impl QuicFuscateConnection {
                     bulk_only: false,
                 },
             ))
+        }
+    }
+
+    /// Emit the queued packet at `emit_idx`: transactional write into the
+    /// caller buffer, ownership transfer only after the bytes are committed.
+    fn emit_queued_packet(
+        &mut self,
+        buf: &mut [u8],
+        now: Instant,
+        emit_idx: usize,
+    ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
+        let (len, mut send_info, shape, congestion_controlled) = {
+            let packet = self
+                .outgoing_fec_packets
+                .get(emit_idx)
+                .ok_or_else(|| "FEC queue emptied unexpectedly".to_string())?;
+            let len = packet.write_to(buf)?;
+            (len, packet.send_info, packet.telemetry_shape(), packet.congestion_controlled)
+        };
+        self.outgoing_fec_packets.remove(emit_idx);
+        send_info.at = now;
+        log::trace!(
+            "connection.send: emitting packet len={} dgram_queue_after={} remaining_fec={}",
+            len,
+            self.conn.dgram_send_queue_len(),
+            self.outgoing_fec_packets.len()
+        );
+        if self.fec.telemetry_enabled() {
+            let (systematic, source_payload_bytes) = shape;
+            self.fec.observe_wire_send(systematic, source_payload_bytes, len);
+        }
+        self.record_paced_packet(now, len, congestion_controlled);
+        Ok((len, send_info))
+    }
+
+    /// A newly deferred datagram must not starve the drain: when another
+    /// queued packet is already ripe, emit it instead of yielding empty so
+    /// the send pipeline keeps flowing at drain rate rather than
+    /// serializing into one packet per poll tick.
+    fn emit_ripe_or_yield(
+        &mut self,
+        buf: &mut [u8],
+        now: Instant,
+        zero_send_info: crate::transport::SendInfo,
+    ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
+        match self.pick_reorder_emit_index(now) {
+            Some(emit_idx) => self.emit_queued_packet(buf, now, emit_idx),
+            None => Ok((0, zero_send_info)),
         }
     }
 
@@ -598,10 +777,12 @@ impl QuicFuscateConnection {
             } else {
                 None
             };
-            if let Some(release_at) =
-                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter)
-            {
-                // Deferred emission retains the datagram in the outgoing queue.
+            let release_at =
+                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter);
+            let hold_until = self.reorder_hold_for(&send_info, now);
+            if release_at.is_some() || hold_until.is_some() {
+                // Deferred or windowed emission retains the datagram in the
+                // outgoing queue (stealth deferral and/or TODO-1015 bulk hold).
                 let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
                 if send_buffer.len() < write {
                     return Err(crate::error::ConnectionError::BufferTooShort);
@@ -624,9 +805,18 @@ impl QuicFuscateConnection {
                     wire_meta: None,
                     send_info,
                     congestion_controlled: send_info.congestion_controlled,
+                    // Both deferral kinds share one per-packet marker: a
+                    // stealth release and a bulk window hold both must
+                    // elapse before the drain may emit this packet.
+                    hold_until: [hold_until, release_at].into_iter().flatten().max(),
                 });
-                self.next_packet_release = Some(release_at);
-                return Ok((0, zero_send_info(now)));
+                // Merge with any earlier pending stealth release instead of
+                // overwriting it - a hold-only datagram (release_at = None)
+                // must not erase the wake deadline of a packet that is still
+                // waiting for its stealth release.
+                self.next_packet_release =
+                    [self.next_packet_release, release_at].into_iter().flatten().min();
+                return self.emit_ripe_or_yield(buf, now, zero_send_info(now));
             }
         }
 

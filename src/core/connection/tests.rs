@@ -411,6 +411,7 @@ fn outgoing_zero_mode_packet_preserves_raw_quic_datagram() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
+        hold_until: None,
     };
     let mut wire = [0u8; 64];
 
@@ -444,6 +445,7 @@ fn outgoing_repair_packet_preserves_fec_wire_metadata() {
         wire_meta: Some(meta),
         send_info: test_send_info(),
         congestion_controlled: true,
+        hold_until: None,
     };
     let mut wire = [0u8; 128];
 
@@ -483,6 +485,7 @@ fn outgoing_systematic_packet_preserves_protected_quic_datagram() {
         wire_meta: Some(meta),
         send_info: test_send_info(),
         congestion_controlled: true,
+        hold_until: None,
     };
     let mut wire_datagram = [0u8; 128];
 
@@ -515,12 +518,14 @@ fn buffered_fec_packet_survives_an_output_capacity_failure() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
+        hold_until: None,
     });
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
         packet: fec_packet(8, &payload, None),
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
+        hold_until: None,
     });
 
     // A buffer far too small for the packet forces the write to fail.
@@ -564,6 +569,7 @@ fn pending_path_control_preempts_buffered_fec_datagram() {
         wire_meta: None,
         send_info: test_send_info(),
         congestion_controlled: true,
+        hold_until: None,
     });
     connection.conn.migrate(new_local, new_peer).expect("migration candidate");
     assert_eq!(
@@ -603,6 +609,7 @@ fn path_control_metadata_survives_raw_fec_queueing() {
         wire_meta: None,
         send_info,
         congestion_controlled: true,
+        hold_until: None,
     };
     let mut wire = [0u8; 64];
 
@@ -692,6 +699,7 @@ fn active_fec_off_preserves_queued_sources_and_discards_only_repairs() {
             }),
             send_info: test_send_info(),
             congestion_controlled: true,
+            hold_until: None,
         });
     }
     connection.fec_tx_profile = Some(profile);
@@ -978,4 +986,175 @@ fn outbound_pacer_decays_partial_burst_after_elapsed_time() {
 
     assert!(pacer.next_release.is_none());
     assert_eq!(pacer.burst_bytes, 3_000);
+}
+
+// ---------------------------------------------------------------------------
+// TODO-1015: ChameleonFlow bounded reorder window on bulk datagrams
+// ---------------------------------------------------------------------------
+
+fn bulk_send_info() -> crate::transport::SendInfo {
+    let mut info = test_send_info();
+    info.bulk_only = true;
+    info
+}
+
+#[test]
+fn reorder_window_permutates_ripe_bulk_run() {
+    let mut connection = test_connection();
+    // Four ripe bulk packets form a train; repeated picks must not always
+    // return the FIFO head or the window is not permuting anything.
+    for id in 0..4u64 {
+        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            packet: fec_packet(id, &[id as u8; 8], None),
+            wire_meta: None,
+            send_info: bulk_send_info(),
+            congestion_controlled: true,
+            hold_until: None,
+        });
+    }
+    let now = Instant::now();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..200 {
+        let idx = connection.pick_reorder_emit_index(now).expect("ripe bulk must emit");
+        assert!(idx < 4);
+        seen.insert(idx);
+    }
+    assert!(seen.len() > 1, "permuted picks must vary across the bulk run: {seen:?}");
+}
+
+#[test]
+fn reorder_window_non_bulk_bypasses_held_bulk() {
+    let mut connection = test_connection();
+    let hold = Instant::now() + Duration::from_millis(10);
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(1, &[0xAA; 8], None),
+        wire_meta: None,
+        send_info: bulk_send_info(),
+        congestion_controlled: true,
+        hold_until: Some(hold),
+    });
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(2, &[0xBB; 8], None),
+        wire_meta: None,
+        send_info: test_send_info(),
+        congestion_controlled: true,
+        hold_until: None,
+    });
+
+    let now = Instant::now();
+    assert_eq!(
+        connection.pick_reorder_emit_index(now),
+        Some(1),
+        "a ripe control/ACK packet must bypass a still-held bulk packet"
+    );
+    assert_eq!(
+        connection.pick_reorder_emit_index(hold),
+        Some(0),
+        "the bulk packet becomes eligible once its hold expires"
+    );
+}
+
+#[test]
+fn reorder_window_yields_until_earliest_hold() {
+    let mut connection = test_connection();
+    let hold = Instant::now() + Duration::from_millis(10);
+    for id in 0..2u64 {
+        connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+            packet: fec_packet(id, &[id as u8; 8], None),
+            wire_meta: None,
+            send_info: bulk_send_info(),
+            congestion_controlled: true,
+            hold_until: Some(hold),
+        });
+    }
+    let now = Instant::now();
+    assert_eq!(
+        connection.pick_reorder_emit_index(now),
+        None,
+        "nothing may emit while every queued packet is held"
+    );
+    assert_eq!(
+        connection.earliest_reorder_hold(),
+        Some(hold),
+        "the send deadline must surface the earliest pending hold"
+    );
+}
+
+#[test]
+fn reorder_hold_skips_lone_bulk_and_disabled_stealth() {
+    let mut connection = test_connection();
+    let now = Instant::now();
+    let bulk = bulk_send_info();
+
+    // Disabled stealth timing never holds, even inside a burst.
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(9, &[0xCC; 8], None),
+        wire_meta: None,
+        send_info: test_send_info(),
+        congestion_controlled: true,
+        hold_until: None,
+    });
+    assert!(connection.reorder_hold_for(&bulk, now).is_none());
+
+    // Enabled stealth timing still skips a lone bulk packet. The bench pair
+    // runs with external pacing on, which gates the jitter path off.
+    connection.conn.set_external_pacing(false);
+    connection.conn.set_stealth_timing(true, 5_000);
+    connection.outgoing_fec_packets.clear();
+    assert!(
+        connection.reorder_hold_for(&bulk, now).is_none(),
+        "a lone bulk packet pays latency with zero redistribution gain"
+    );
+
+    // With a queued burst the hold engages, bounded by the window ceiling.
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(10, &[0xDD; 8], None),
+        wire_meta: None,
+        send_info: test_send_info(),
+        congestion_controlled: true,
+        hold_until: None,
+    });
+    let mut held = 0usize;
+    for _ in 0..64 {
+        if let Some(hold) = connection.reorder_hold_for(&bulk, now) {
+            held += 1;
+            assert!(hold > now);
+            assert!(
+                hold - now <= Duration::from_micros(QuicFuscateConnection::REORDER_HOLD_MAX_US)
+            );
+        }
+        // A zero draw legitimately produces no hold (~1/3001 chance).
+    }
+    assert!(held > 32, "burst-context bulk should receive holds overwhelmingly: {held}/64");
+
+    // Non-bulk traffic never receives a hold even mid-burst.
+    assert!(connection.reorder_hold_for(&test_send_info(), now).is_none());
+}
+
+#[test]
+fn reorder_window_time_window_marks_burst_trains() {
+    let mut connection = test_connection();
+    connection.conn.set_external_pacing(false);
+    connection.conn.set_stealth_timing(true, 5_000);
+    let bulk = bulk_send_info();
+    let t0 = Instant::now();
+
+    // Head of a train: nothing queued, no recent bulk -> passes unheld.
+    assert!(connection.reorder_hold_for(&bulk, t0).is_none());
+
+    // A follower inside REORDER_BURST_WINDOW joins the burst even with
+    // empty queues - the hold gathers it for the permuted drain.
+    let t1 = t0 + Duration::from_millis(5);
+    let mut held = 0usize;
+    for _ in 0..32 {
+        if connection.reorder_hold_for(&bulk, t1).is_some() {
+            held += 1;
+        }
+    }
+    assert!(held > 16, "train follower inside window should hold: {held}/32");
+
+    // After a quiet gap beyond the window the next bulk is a new train
+    // head and again passes unheld.
+    let t2 = t1 + QuicFuscateConnection::REORDER_BURST_WINDOW + Duration::from_millis(5);
+    assert!(connection.reorder_hold_for(&bulk, t2).is_none());
 }

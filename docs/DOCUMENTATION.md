@@ -969,6 +969,13 @@ The stealth timing system has been fully refactored to eliminate blocking `std::
 - `RustlsProviderImpl::apply_profile_to_config()` records a profile-ready deadline instead of sleeping; `flush_handshake_io()` suppresses CRYPTO emission until that deadline expires, preserving the synchronous provider API without blocking an executor.
 - When delay expires, clears the block and proceeds to flush `outgoing_fec_packets`.
 
+#### Bulk Reorder Window (TODO-1015, ChameleonFlow)
+
+- `reorder_hold_for` draws one shared window deadline per burst (`bulk_window_release`, uniform 0-3 ms): every bulk-only datagram (`SendInfo.bulk_only`, TODO-1011) queued inside the open window carries the same `hold_until`, so the batch ripens together. Burst detection is time-based (`last_bulk_queued`, `REORDER_BURST_WINDOW` = 10 ms); train heads after a quiet gap pass unheld. Gated on transport stealth timing (`stealth_timing_enabled && !external_pacing`); performance mode is unaffected.
+- `pick_reorder_emit_index` drains the queue: the first ripe entry wins, so control/ACK/framed traffic keeps strict FIFO and bypasses held bulk naturally. Inside a ripe bulk run (>=2 entries) a permuted pick reshuffles emission order - composed packet numbers no longer mirror wire order within a train, breaking burst-structure fingerprints without buying chaff bytes.
+- `emit_ripe_or_yield` keeps the drain alive: a newly deferred datagram emits an already-ripe queued packet instead of yielding empty. Stealth-released packets carry `hold_until = release_at` so the drain respects stealth deferral; `next_packet_release` merges pending deadlines (min) rather than overwriting.
+- `earliest_reorder_hold` merges into `next_send_deadline`. Note: on the standalone TUN client the deferral drain is loop-tick bound (~1 packet per tick under sustained per-packet deferral, see TODO-1016) - the window mechanics are correct and unit-tested, wire-level parity on that path awaits the drain fix.
+
 #### Traffic-Analysis Defense Scheduler
 
 `transport::Connection` owns one `TrafficAnalysisScheduler` deadline and one pending chaff slot for both enabled defenses:

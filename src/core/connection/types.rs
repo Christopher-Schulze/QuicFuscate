@@ -101,6 +101,12 @@ pub(crate) struct OutgoingFecPacket {
     pub(crate) wire_meta: Option<WirePacketMeta>,
     pub(crate) send_info: crate::transport::SendInfo,
     pub(crate) congestion_controlled: bool,
+    /// TODO-1015: earliest emission instant for windowed bulk packets.
+    /// `None` means the packet is ripe as soon as it is reached. Bulk-only
+    /// datagrams (inner TCP tolerates reorder) carry a short randomized hold
+    /// so the drain can redistribute them inside a burst train; control,
+    /// ACK, framed, and protected traffic never waits.
+    pub(crate) hold_until: Option<Instant>,
 }
 
 impl OutgoingFecPacket {
