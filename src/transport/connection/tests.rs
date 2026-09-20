@@ -7,6 +7,7 @@
 use super::*;
 use crate::error::ConnectionError;
 use crate::transport::config::Config;
+use crate::transport::DatagramClass;
 use crate::transport::PROTOCOL_VERSION;
 #[cfg(feature = "zero_copy_dgram")]
 use std::sync::Arc;

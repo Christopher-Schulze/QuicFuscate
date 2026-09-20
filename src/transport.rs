@@ -1,8 +1,9 @@
 pub use qf_transport_types::{
-    BrainRuntimePermissions, BrowserProfile, CongestionControlAlgorithm, ConnectionId, EcnCounts,
-    EcnMark, Epoch, FecControlDelta, Frame, Header, PacketType, PathStats, RecvInfo, SendInfo,
-    Stats, StealthRuntimeDelta, StealthRuntimePolicy, TransportError as Error, TransportObserver,
-    TransportPolicyError, TransportPolicyTarget, MAX_CONN_ID_LEN,
+    BrainRuntimePermissions, BrowserProfile, CongestionControlAlgorithm, ConnectionId,
+    DatagramClass, EcnCounts, EcnMark, Epoch, FecControlDelta, Frame, Header, PacketType,
+    PathStats, RecvInfo, SendInfo, Stats, StealthRuntimeDelta, StealthRuntimePolicy,
+    TransportError as Error, TransportObserver, TransportPolicyError, TransportPolicyTarget,
+    MAX_CONN_ID_LEN,
 };
 pub use qf_transport_version::{is_supported_version, PROTOCOL_VERSION, PROTOCOL_VERSION_V2};
 use std::collections::BTreeMap;

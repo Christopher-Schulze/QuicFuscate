@@ -4011,7 +4011,7 @@
 
 ### TODO-1011 - FEC standards alignment and maximal-effectiveness audit
 
-- PARTIAL (standing). NWCRG/TinyMT32 wire-seed alignment rejected-by-design: `seed.rs` already derives the fountain seed via HKDF from the QUIC 1-RTT secret (nothing on the wire) and `fountain_codes.rs` expands it with splitmix64 - strictly stronger than the draft's wire-carried seed. Still open: QUIRL application-tailored activation (needs a traffic-class concept the FEC path lacks), Repair-ACK wire format (paired with TODO-1006), convolutional vs interleaved gap analysis, unequal protection by traffic class.
+- PARTIAL (standing). NWCRG/TinyMT32 wire-seed alignment rejected-by-design: `seed.rs` already derives the fountain seed via HKDF from the QUIC 1-RTT secret (nothing on the wire) and `fountain_codes.rs` expands it with splitmix64 - strictly stronger than the draft's wire-carried seed. QUIRL unequal protection DONE (2026-09-20): `DatagramClass::{Protected,Bulk}` - `masque_classify.rs` classifies the inner IP packet per MASQUE datagram (TCP >128 B payload = Bulk, DNS/small UDP/ICMP/fragments/extensions = Protected), `DatagramSendEntry.class` -> `SendInfo.bulk_only` -> `strip_framing_headroom` emits bulk-only packets unframed (no wire-format change; the receiver routes unframed past the FEC decoder already). Bulk keeps stealth shaping and consumes no systematic sequence slot. e2e-verified on Omega: 3% netem loss + 15 s iperf3 TCP -> wire mix framed=9705/unframed=22589, tunnel stable both directions. Still open: Repair-ACK wire format (paired with TODO-1006), convolutional vs interleaved gap analysis documented below.
 - Detail: docs/todo/todo-1011-fec-standards-alignment.md
 
 ### TODO-1012 - Standalone client RX: recvmmsg burst + persistent GRO slots

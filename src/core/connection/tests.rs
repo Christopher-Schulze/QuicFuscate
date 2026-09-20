@@ -48,6 +48,7 @@ fn test_send_info() -> crate::transport::SendInfo {
         at: Instant::now(),
         congestion_controlled: true,
         path_control: false,
+        bulk_only: false,
     }
 }
 
@@ -628,13 +629,41 @@ fn path_control_bypass_moves_reserved_quic_datagram_and_disables_fec() {
     let mut send_info = test_send_info();
     send_info.path_control = true;
 
-    let effective_profile = QuicFuscateConnection::bypass_fec_for_path_control(
+    let effective_profile = QuicFuscateConnection::strip_framing_headroom(
         Some(profile),
-        &send_info,
+        send_info.path_control || send_info.bulk_only,
         &mut send_buffer,
         payload.len(),
     )
     .expect("path control bypass");
+
+    assert!(effective_profile.is_none());
+    assert_eq!(&send_buffer[..payload.len()], &payload);
+}
+
+#[test]
+fn bulk_only_strips_framing_headroom_and_disables_fec() {
+    let profile = WireProfile {
+        epoch: 1,
+        codec: wire::WireCodec::Gf8,
+        source_count: 4,
+        total_count: 7,
+        interleave_depth: 1,
+    };
+    let payload = [0x40, 0x01, 0x02, 0x03];
+    let mut send_buffer = [0xAA; 64];
+    let quic_offset = 2 * wire::SOURCE_LENGTH_LEN;
+    send_buffer[quic_offset..quic_offset + payload.len()].copy_from_slice(&payload);
+    let mut send_info = test_send_info();
+    send_info.bulk_only = true;
+
+    let effective_profile = QuicFuscateConnection::strip_framing_headroom(
+        Some(profile),
+        send_info.path_control || send_info.bulk_only,
+        &mut send_buffer,
+        payload.len(),
+    )
+    .expect("bulk-only unframing");
 
     assert!(effective_profile.is_none());
     assert_eq!(&send_buffer[..payload.len()], &payload);

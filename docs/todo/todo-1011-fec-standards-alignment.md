@@ -99,9 +99,54 @@ seeded-coefficient transport, which exists to put a seed on the wire. No
 interop pressure exists (custom data plane), so there is nothing to align
 *to*; the note stays for auditability.
 
-OPEN: QUIRL per-class gating needs a traffic-class concept the FEC path
-does not have yet (`manager.rs`/`policy.rs` treat traffic globally); the
-Repair-ACK wire-format question (coupled to TODO-1006) remains.
+IMPLEMENTED (2026-09-20) - items 1 + 5: QUIRL-style unequal protection.
+
+Design decision: class gating happens at *packet granularity* via the
+existing framed/unframed wire dichotomy - no wire-format change needed
+(the receiver routes unframed packets past the FEC decoder already, the
+path-control bypass established that precedent). `DatagramClass` travels
+from payload classification to the emit gate:
+
+- `crates/qf-transport-types`: `DatagramClass::{Protected, Bulk}` +
+  `SendInfo::bulk_only` (packet's application payload is exclusively bulk
+  datagrams - any coalesced control/stream content keeps it framed).
+- `src/transport/h3/connection/masque_classify.rs`:
+  `classify_tunneled_payload` parses the inner IP packet per datagram.
+  TCP segments >128 B payload = Bulk; SYN/FIN/RST and small segments stay
+  Protected. UDP payloads >384 B = Bulk; port-53 and small datagrams stay
+  Protected. ICMP, IPv4 fragments, IPv6 extension headers, truncated or
+  non-IP payloads always stay Protected (classification only ever removes
+  redundancy where it is provably redundant).
+- `src/transport/connection`: `DatagramSendEntry` carries the class on the
+  send queue (both `zero_copy_dgram` variants);
+  `dgram_send_parts_classified` feeds it from `send_masque_datagram`;
+  `maybe_stage_one_datagram_frame` returns the staged class; the packet
+  composer sets `SendInfo::bulk_only`.
+- `src/core/connection/send.rs`: `strip_framing_headroom` (formerly
+  `bypass_fec_for_path_control`) emits `path_control || bulk_only` packets
+  unframed. Bulk packets keep stealth scheduling, normal queue position
+  (push_back, not the path-control front jump), and consume no
+  `fec_tx_sequence` slot - the systematic wire sequence stays dense, so
+  interleaved-decoder gap detection is unaffected.
+
+Why this satisfies QUIRL: QUIC DATAGRAM frames are never retransmitted
+(RFC 9221), so "rely on retransmission" means the *inner* protocol - TCP
+bulk inside the tunnel retransmits end-to-end; spending outer FEC repair
+on it pays for protection the inner stack duplicates. Protected classes
+keep full framing + repair. Items 2-4 unchanged: NWCRG rejected-by-design
+(stronger HKDF seed already shipped), Repair-ACK stays open under
+TODO-1006 (its wire-format decision is independent of class gating).
+
+Verified on Omega (2026-09-20, `tun-e2e-netns.sh` + ready-hook): with 3%
+netem loss on both underlay veths, a 15 s iperf3 TCP run through the
+tunnel produced wire mix framed=9705 / unframed=22589 (~70% of wire
+packets carried no FEC framing - the bulk class in action) while ICMP
+echo stayed framed and the tunnel passed 5/5 pings both directions with
+clean routing/firewall teardown. Unit coverage: `masque_classify` table
+tests plus `bulk_class_datagram_marks_packet_bulk_only_for_fec_gating`,
+`bulk_class_loses_bulk_only_when_control_coalesces`, and
+`bulk_only_strips_framing_headroom_and_disables_fec`; all green under
+default and `zero_copy_dgram` builds.
 
 ANALYZED (2026-09) - convolutional/overlapping-window gap vs `interleaved.rs`:
 

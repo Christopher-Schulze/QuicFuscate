@@ -330,6 +330,7 @@ impl Connection {
                         to: self.peer_addr,
                         congestion_controlled: !ack_only,
                         path_control: false,
+                        bulk_only: false,
                     },
                 ));
             }
@@ -408,6 +409,7 @@ impl Connection {
         let mut wrote_ack_eliciting = false;
         let mut stream_transmission_id = None;
         let mut staged_datagram = false;
+        let mut staged_bulk = false;
         let mut packet_contents = recovery::SentPacketContents::default();
 
         // Post-handshake Application-level CRYPTO (e.g. NewSessionTicket) is not
@@ -462,11 +464,13 @@ impl Connection {
                     packet_contents.stream_retransmission |= emission.retransmission;
                 }
                 // FEC feed removed (handled by core)
-                let (off_after_dgram, dgram_ack_eliciting) =
+                let (off_after_dgram, staged_class) =
                     self.maybe_stage_one_datagram_frame(out, off)?;
                 off = off_after_dgram;
+                let dgram_ack_eliciting = staged_class.is_some();
                 wrote_ack_eliciting |= dgram_ack_eliciting;
                 staged_datagram = dgram_ack_eliciting;
+                staged_bulk = staged_class == Some(crate::transport::DatagramClass::Bulk);
                 packet_contents.datagram |= dgram_ack_eliciting;
             }
         }
@@ -567,6 +571,10 @@ impl Connection {
             at: now,
             congestion_controlled: wrote_ack_eliciting,
             path_control: false,
+            // TODO-1011: the packet skips FEC framing only when its entire
+            // application payload is a bulk-class datagram - no control,
+            // stream, or chaff content coalesced into it.
+            bulk_only: staged_bulk && !packet_contents.control && !packet_contents.stream,
         };
         self.stats.sent += 1;
         self.stats.sent_bytes += total as u64;

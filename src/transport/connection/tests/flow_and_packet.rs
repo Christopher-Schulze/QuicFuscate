@@ -250,19 +250,22 @@ fn owned_datagram_insufficient_output_preserves_queue() {
     let mut c = make_conn();
     c.enable_datagrams(16, 16);
     let payload_len = 16_384;
-    c.dgram_send_queue.push_back(vec![0xAB; payload_len]);
+    c.dgram_send_queue.push_back(DatagramSendEntry {
+        data: vec![0xAB; payload_len],
+        class: DatagramClass::Protected,
+    });
     let mut output = vec![0u8; 1 + 2 + payload_len];
 
     assert_eq!(
         c.maybe_stage_one_datagram_frame(&mut output, 0).expect("insufficient output is a no-op"),
-        (0, false)
+        (0, None)
     );
     assert_eq!(c.dgram_send_queue_len(), 1);
     assert_eq!(c.dgram_send_queue_byte_size(), payload_len);
     assert!(c
         .dgram_send_queue
         .front()
-        .is_some_and(|payload| payload.iter().all(|byte| *byte == 0xAB)));
+        .is_some_and(|payload| payload.data.iter().all(|byte| *byte == 0xAB)));
 }
 
 #[test]
@@ -274,7 +277,7 @@ fn zero_copy_dgram_byte_equivalence_for_accepted_payload() {
     c.dgram_send(&payload).expect("accepted DATAGRAM must enqueue");
     assert_eq!(c.dgram_send_queue_byte_size(), payload.len());
     #[cfg(not(feature = "zero_copy_dgram"))]
-    assert_eq!(c.dgram_send_queue.front().unwrap().as_slice(), payload.as_slice());
+    assert_eq!(c.dgram_send_queue.front().unwrap().data.as_slice(), payload.as_slice());
     #[cfg(feature = "zero_copy_dgram")]
     {
         let front = c.dgram_send_queue.front().unwrap();
@@ -303,10 +306,10 @@ fn zero_copy_dgram_returns_pool_blocks_at_queue_boundaries() {
 
     c.dgram_send(&[0x5A; 32]).expect("second DATAGRAM enqueue must allocate one block");
     let mut output = [0u8; 128];
-    let (written, ack_eliciting) =
+    let (written, staged_class) =
         c.maybe_stage_one_datagram_frame(&mut output, 0).expect("DATAGRAM serialization");
     assert!(written > 0);
-    assert!(ack_eliciting);
+    assert!(staged_class.is_some());
     c.commit_staged_datagram_frame().expect("DATAGRAM commit");
     assert_eq!(pool.accounting_snapshot(), before);
 
@@ -395,13 +398,17 @@ fn zero_copy_dgram_insufficient_output_preserves_pool_owned_buffer() {
     let before = pool.accounting_snapshot();
     let mut data = crate::optimize::PooledBlock::new(Arc::clone(&pool));
     data[..payload_len].fill(0xAB);
-    c.dgram_send_queue.push_back(DatagramBuffer { data, len: payload_len });
+    c.dgram_send_queue.push_back(DatagramSendEntry {
+        data,
+        len: payload_len,
+        class: DatagramClass::Protected,
+    });
     assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
 
     let mut output = vec![0u8; 1 + 2 + payload_len];
     assert_eq!(
         c.maybe_stage_one_datagram_frame(&mut output, 0).expect("insufficient output is a no-op"),
-        (0, false)
+        (0, None)
     );
     assert_eq!(c.dgram_send_queue_len(), 1);
     assert_eq!(pool.accounting_snapshot().1, before.1 + 1);
@@ -444,12 +451,61 @@ fn datagram_frame_reservation_matches_four_byte_length_varint() {
     let reserve = c.pending_datagram_frame_reserve().expect("queued DATAGRAM reserve");
     assert_eq!(reserve, 1 + 4 + payload.len());
     let mut output = vec![0u8; reserve];
-    let (written, ack_eliciting) =
+    let (written, staged_class) =
         c.maybe_stage_one_datagram_frame(&mut output, 0).expect("boundary DATAGRAM encode");
     assert_eq!(written, reserve);
-    assert!(ack_eliciting);
+    assert!(staged_class.is_some());
     c.commit_staged_datagram_frame().expect("boundary DATAGRAM commit");
     assert_eq!(c.dgram_send_queue_len(), 0);
+}
+
+#[test]
+fn bulk_class_datagram_marks_packet_bulk_only_for_fec_gating() {
+    // TODO-1011: a packet whose only application payload is a Bulk-class
+    // datagram must report `bulk_only` so the core send path skips FEC
+    // framing; protected datagrams must keep it clear.
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
+    pair.client.enable_datagrams(16, 16);
+    // Keep the composed packet free of coalesced control frames so the
+    // bulk_only condition (datagram-only payload) is exercised exactly.
+    pair.client.pending_control.clear();
+    let mut packet = [0u8; 1500];
+
+    pair.client
+        .dgram_send_parts_classified(b"", b"bulk-payload", DatagramClass::Bulk)
+        .expect("bulk datagram enqueue");
+    let (written, info) = pair.client.send(&mut packet).expect("bulk packet send");
+    assert!(written > 0);
+    assert!(info.bulk_only, "packet carrying only a bulk datagram must be bulk_only");
+    assert!(!info.path_control);
+    assert!(info.congestion_controlled);
+
+    pair.client
+        .dgram_send_parts_classified(b"", b"protected-payload", DatagramClass::Protected)
+        .expect("protected datagram enqueue");
+    let (written, info) = pair.client.send(&mut packet).expect("protected packet send");
+    assert!(written > 0);
+    assert!(!info.bulk_only, "protected datagrams keep FEC framing");
+}
+
+#[test]
+fn bulk_class_loses_bulk_only_when_control_coalesces() {
+    // A bulk datagram coalesced with control or stream content must stay
+    // framed: the packet carries data that deserves repair protection.
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
+    pair.client.enable_datagrams(16, 16);
+    pair.client.pending_control.clear();
+    pair.client.pending_control.push_back(crate::transport::Frame::Ping { mtu_probe: None });
+    let mut packet = [0u8; 1500];
+
+    pair.client
+        .dgram_send_parts_classified(b"", b"bulk-payload", DatagramClass::Bulk)
+        .expect("bulk datagram enqueue");
+    let (written, info) = pair.client.send(&mut packet).expect("mixed packet send");
+    assert!(written > 0);
+    assert!(!info.bulk_only, "coalesced control content keeps the packet framed");
 }
 
 // ---- Recovery / FEC Escalation ---------------------------------------

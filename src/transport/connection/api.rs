@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::DatagramClass;
 
 mod stream_and_path;
 
@@ -403,6 +404,19 @@ impl Connection {
         prefix: &[u8],
         payload: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
+        self.dgram_send_parts_classified(prefix, payload, DatagramClass::Protected)
+    }
+
+    /// Enqueues a DATAGRAM with an explicit FEC protection class (TODO-1011).
+    /// `Bulk` datagrams skip connection-level FEC framing when they are the
+    /// packet's only application payload.
+    #[inline(always)]
+    pub(crate) fn dgram_send_parts_classified(
+        &mut self,
+        prefix: &[u8],
+        payload: &[u8],
+        class: DatagramClass,
+    ) -> Result<(), crate::error::ConnectionError> {
         let total = prefix.len() + payload.len();
         if total > self.dgram_send_max_size {
             return Err(crate::error::ConnectionError::InvalidState);
@@ -415,7 +429,7 @@ impl Connection {
             let mut entry = Self::take_dgram_freelist(&mut self.dgram_send_freelist);
             entry.extend_from_slice(prefix);
             entry.extend_from_slice(payload);
-            self.dgram_send_queue.push_back(entry);
+            self.dgram_send_queue.push_back(DatagramSendEntry { data: entry, class });
         }
         #[cfg(feature = "zero_copy_dgram")]
         {
@@ -425,7 +439,7 @@ impl Connection {
             let mut data = crate::optimize::PooledBlock::new(Arc::clone(&self.dgram_pool));
             data[..prefix.len()].copy_from_slice(prefix);
             data[prefix.len()..total].copy_from_slice(payload);
-            self.dgram_send_queue.push_back(DatagramBuffer { data, len: total });
+            self.dgram_send_queue.push_back(DatagramSendEntry { data, len: total, class });
         }
         Ok(())
     }
@@ -511,7 +525,7 @@ impl Connection {
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn dgram_send_queue_byte_size(&self) -> usize {
         #[cfg(not(feature = "zero_copy_dgram"))]
-        return self.dgram_send_queue.iter().map(|v| v.len()).sum();
+        return self.dgram_send_queue.iter().map(|v| v.data.len()).sum();
         #[cfg(feature = "zero_copy_dgram")]
         return self.dgram_send_queue.iter().map(|v| v.len).sum();
     }
@@ -555,7 +569,7 @@ impl Connection {
     pub fn dgram_purge_outgoing<FN: Fn(&[u8]) -> bool>(&mut self, f: FN) {
         #[cfg(not(feature = "zero_copy_dgram"))]
         {
-            self.dgram_send_queue.retain(|d| !f(d));
+            self.dgram_send_queue.retain(|d| !f(&d.data));
         }
         #[cfg(feature = "zero_copy_dgram")]
         {

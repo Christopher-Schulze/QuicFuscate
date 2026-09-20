@@ -1743,6 +1743,12 @@ Mode Selection & Hysteresis
   - Malformed, unsupported, or resource-exhausting FEC envelopes are dropped without terminating the authenticated QUIC connection. Recovered QUIC datagrams still pass normal header protection and AEAD authentication.
   - `FecMode::Zero` remains a raw ownership-preserving passthrough, allowing the QUIC core to decrypt and remove header protection in place without an extra copy.
 
+#### Per-Class Unequal Protection (TODO-1011)
+- QUIC DATAGRAM frames are never retransmitted (RFC 9221), so connection-level FEC is the only loss protection a framed datagram gets. QUIRL-style gating spends repair bandwidth only where the payload cannot recover itself: `DatagramClass::{Protected, Bulk}` (`qf-transport-types`) travels from payload classification to the emit gate without any wire-format change - receivers already route unframed packets past the FEC decoder.
+- Classification (`src/transport/h3/connection/masque_classify.rs`) parses the inner IP packet per MASQUE datagram: TCP segments above 128 B payload are `Bulk` (SYN/FIN/RST and small segments stay `Protected`); UDP payloads above 384 B are `Bulk` (port 53 and small datagrams stay `Protected`); ICMP, IPv4 fragments, IPv6 extension-header chains, and truncated or non-IP payloads always stay `Protected`.
+- Plumbing: `dgram_send_parts_classified` stores the class on `DatagramSendEntry` (both `zero_copy_dgram` variants), `maybe_stage_one_datagram_frame` returns the staged class, and the packet composer sets `SendInfo::bulk_only` only when the packet's application payload is exclusively bulk datagrams - any coalesced control or stream content keeps it framed.
+- Emit (`src/core/connection/send.rs`): `strip_framing_headroom` emits `path_control || bulk_only` packets unframed. Bulk packets keep stealth scheduling and normal queue position, and consume no `fec_tx_sequence` slot, so the systematic wire sequence stays dense and interleaved-decoder gap detection is unaffected. The `Bulk` class relies on the *inner* protocol's end-to-end reliability (e.g. TCP inside the tunnel) rather than outer retransmission.
+
 - Semantics & Safety
   - `epoch`, `window`, `sequence`, `source_count`, `total_count`, `interleave_depth`, `block_index`, and `repair_index` fully define decoder ownership and deterministic repair reconstruction.
 - The validated product wire path bounds payload and coefficient lengths against its profile and pool block contract; decoder-internal buffer return and failure cleanup are implemented under TODO-832.

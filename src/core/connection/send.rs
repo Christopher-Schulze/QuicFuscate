@@ -116,13 +116,16 @@ impl QuicFuscateConnection {
         Ok(Some(profile))
     }
 
-    pub(super) fn bypass_fec_for_path_control(
+    /// Strips the FEC framing headroom for a packet that must go on the wire
+    /// unframed: path-control packets (peer parses Initials before FEC exists)
+    /// and `bulk_only` packets (TODO-1011: inner protocol owns reliability).
+    pub(super) fn strip_framing_headroom(
         wire_profile: Option<WireProfile>,
-        send_info: &crate::transport::SendInfo,
+        unframed: bool,
         send_buffer: &mut [u8],
         write: usize,
     ) -> Result<Option<WireProfile>, crate::error::ConnectionError> {
-        if wire_profile.is_none() || !send_info.path_control {
+        if wire_profile.is_none() || !unframed {
             return Ok(wire_profile);
         }
 
@@ -192,6 +195,7 @@ impl QuicFuscateConnection {
                     at: now,
                     congestion_controlled: false,
                     path_control: false,
+                    bulk_only: false,
                 },
             ));
         }
@@ -220,6 +224,7 @@ impl QuicFuscateConnection {
                             at: now,
                             congestion_controlled: false,
                             path_control: false,
+                            bulk_only: false,
                         },
                     )); // WouldBlock / Yield
                 }
@@ -238,6 +243,7 @@ impl QuicFuscateConnection {
                     at: now,
                     congestion_controlled: false,
                     path_control: false,
+                    bulk_only: false,
                 },
             ));
         }
@@ -321,6 +327,7 @@ impl QuicFuscateConnection {
                         at: now,
                         congestion_controlled: false,
                         path_control: false,
+                        bulk_only: false,
                     },
                 ));
             }
@@ -347,13 +354,18 @@ impl QuicFuscateConnection {
                     at: now,
                     congestion_controlled: false,
                     path_control: false,
+                    bulk_only: false,
                 },
             ));
         }
 
-        let bypass_fec_for_path_control = send_info.path_control;
+        // Path-control packets must reach the peer before a Core-side FEC
+        // context exists; bulk-only packets skip framing because their inner
+        // protocol already retransmits (TODO-1011). Only path-control bypasses
+        // stealth scheduling and front-queues - bulk traffic stays shaped.
+        let unframed = send_info.path_control || send_info.bulk_only;
         let wire_profile =
-            Self::bypass_fec_for_path_control(wire_profile, &send_info, &mut send_buffer, write)?;
+            Self::strip_framing_headroom(wire_profile, unframed, &mut send_buffer, write)?;
 
         // The buffer may be larger than the written data; the length is tracked separately.
         // Stealth padding may be applied by the transport configuration; do not mutate the
@@ -366,7 +378,7 @@ impl QuicFuscateConnection {
         } else {
             0..write
         };
-        let delay_opt = if bypass_fec_for_path_control {
+        let delay_opt = if send_info.path_control {
             None
         } else {
             self.stealth_manager.process_outgoing_packet(
@@ -464,7 +476,7 @@ impl QuicFuscateConnection {
         // Single outbound stealth timing owner: core merges StealthManager shaping delay
         // with transport jitter (when enabled) into one release deadline. Connection::send
         // no longer maintains a parallel next_send_at gate.
-        if established && !bypass_fec_for_path_control {
+        if established && !send_info.path_control {
             // TODO-903: ACK-only packets are not congestion-controlled
             // (SendInfo.congestion_controlled == false, set from
             // wrote_ack_eliciting in the transport). Delaying them only delays
@@ -489,6 +501,7 @@ impl QuicFuscateConnection {
                         at: now,
                         congestion_controlled: false,
                         path_control: false,
+                        bulk_only: false,
                     },
                 )); // Yield immediately, do not send the just-generated packets yet.
             }
@@ -529,6 +542,7 @@ impl QuicFuscateConnection {
                     at: now,
                     congestion_controlled: false,
                     path_control: false,
+                    bulk_only: false,
                 },
             ))
         }
@@ -552,6 +566,7 @@ impl QuicFuscateConnection {
             at,
             congestion_controlled: false,
             path_control: false,
+            bulk_only: false,
         };
         let (write, mut send_info) = match self.conn.send(buf) {
             Ok(v) => v,

@@ -8,6 +8,7 @@ use super::cover_content::{generate_fake_css, generate_fake_image_data, generate
 use super as h3;
 
 mod masque_and_webtransport;
+mod masque_classify;
 mod receive;
 
 #[cfg(test)]

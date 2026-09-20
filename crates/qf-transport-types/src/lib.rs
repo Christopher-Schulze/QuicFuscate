@@ -201,6 +201,22 @@ pub struct RecvInfo {
     pub ecn: Option<EcnMark>,
 }
 
+/// Reliability class of one outgoing DATAGRAM payload (TODO-1011).
+///
+/// QUIC DATAGRAM frames are never retransmitted (RFC 9221 sec. 2), so the
+/// connection-level FEC layer is the only loss protection a datagram gets.
+/// Class gating decides whether that protection is spent on a payload.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DatagramClass {
+    /// Protected: the packet is FEC-framed like every other datagram.
+    #[default]
+    Protected,
+    /// Bulk: the inner protocol already provides end-to-end reliability
+    /// (e.g. TCP inside the tunnel), so the packet skips FEC framing and
+    /// goes on the wire unframed.
+    Bulk,
+}
+
 /// Information about a sent datagram.
 #[derive(Debug, Clone, Copy)]
 pub struct SendInfo {
@@ -214,6 +230,11 @@ pub struct SendInfo {
     pub congestion_controlled: bool,
     /// Whether the datagram exclusively carries path validation frames.
     pub path_control: bool,
+    /// Whether the packet's application payload consists solely of
+    /// [`DatagramClass::Bulk`] datagrams. Such packets skip connection-level
+    /// FEC framing: their inner protocol recovers losses itself, and repair
+    /// bandwidth stays reserved for protected traffic (TODO-1011).
+    pub bulk_only: bool,
 }
 
 /// ACK block list carried inside [`Frame::Ack`].
@@ -448,6 +469,7 @@ mod tests {
             at: Instant::now(),
             congestion_controlled: false,
             path_control: true,
+            bulk_only: false,
         };
         assert!(!send.congestion_controlled);
         assert!(send.path_control);

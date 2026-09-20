@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::DatagramClass;
 
 impl Connection {
     pub(super) fn enqueue_peer_stream_reset(
@@ -1156,7 +1157,7 @@ impl Connection {
     #[inline(always)]
     pub(super) fn pending_datagram_frame_reserve(&self) -> Option<usize> {
         #[cfg(not(feature = "zero_copy_dgram"))]
-        let payload_len = self.dgram_send_queue.front()?.len();
+        let payload_len = self.dgram_send_queue.front()?.data.len();
         #[cfg(feature = "zero_copy_dgram")]
         let payload_len = self.dgram_send_queue.front()?.len;
         let payload_len_u64 = u64::try_from(payload_len).ok()?;
@@ -1169,43 +1170,36 @@ impl Connection {
     ///
     /// The caller must commit the front item only after the complete packet has
     /// passed padding, header protection, and AEAD sealing. DATAGRAM frames are
-    /// ack-eliciting per RFC 9221 sec. 2.
+    /// ack-eliciting per RFC 9221 sec. 2. Returns the staged entry's
+    /// [`DatagramClass`] so the caller can mark bulk-only packets
+    /// (`SendInfo::bulk_only`) for FEC gating (TODO-1011).
     #[inline(always)]
     pub(super) fn maybe_stage_one_datagram_frame(
         &mut self,
         out: &mut [u8],
         mut off: usize,
-    ) -> Result<(usize, bool), crate::error::ConnectionError> {
+    ) -> Result<(usize, Option<DatagramClass>), crate::error::ConnectionError> {
         if let Some(need) = self.pending_datagram_frame_reserve() {
             let tag_reserve = self.tag_reserve_1rtt();
             log::trace!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} queue_len={}",
                 off, need, tag_reserve, out.len(), self.dgram_send_queue.len());
             if off + need + tag_reserve <= out.len() {
+                let Some(front) = self.dgram_send_queue.front() else {
+                    return Err(crate::error::ConnectionError::Done);
+                };
                 #[cfg(not(feature = "zero_copy_dgram"))]
-                {
-                    let Some(front) = self.dgram_send_queue.front() else {
-                        return Err(crate::error::ConnectionError::Done);
-                    };
-                    let frame = Frame::Datagram { data: Cow::Borrowed(front.as_slice()) };
-                    log::trace!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={:?}", frames::wire_len(&frame));
-                    let written = frames::to_bytes(&frame, &mut out[off..])?;
-                    log::trace!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
-                    off += written;
-                    return Ok((off, true));
-                }
+                let frame = Frame::Datagram { data: Cow::Borrowed(front.data.as_slice()) };
                 #[cfg(feature = "zero_copy_dgram")]
-                {
-                    let Some(front) = self.dgram_send_queue.front() else {
-                        return Err(crate::error::ConnectionError::Done);
-                    };
-                    let frame = Frame::Datagram { data: Cow::Borrowed(&front.data[..front.len]) };
-                    let written = frames::to_bytes(&frame, &mut out[off..])?;
-                    off += written;
-                    return Ok((off, true));
-                }
+                let frame = Frame::Datagram { data: Cow::Borrowed(&front.data[..front.len]) };
+                let class = front.class;
+                log::trace!("maybe_flush_one_datagram_frame: attempting to write frame, frame_wire_len={:?}", frames::wire_len(&frame));
+                let written = frames::to_bytes(&frame, &mut out[off..])?;
+                log::trace!("maybe_flush_one_datagram_frame: wrote {} bytes", written);
+                off += written;
+                return Ok((off, Some(class)));
             }
         }
-        Ok((off, false))
+        Ok((off, None))
     }
 
     /// Commits a previously staged DATAGRAM frame after packet sealing succeeds.
@@ -1218,7 +1212,7 @@ impl Connection {
             let Some(dgram) = self.dgram_send_queue.pop_front() else {
                 return Err(crate::error::ConnectionError::InvalidState);
             };
-            Self::return_dgram_freelist(&mut self.dgram_send_freelist, dgram);
+            Self::return_dgram_freelist(&mut self.dgram_send_freelist, dgram.data);
         }
         #[cfg(feature = "zero_copy_dgram")]
         {
@@ -1496,6 +1490,7 @@ impl Connection {
             at: now,
             congestion_controlled: true,
             path_control: true,
+            bulk_only: false,
         };
         self.mark_unvalidated_path_send(send_local, send_peer, off);
         self.stats.sent += 1;

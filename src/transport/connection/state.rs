@@ -39,7 +39,7 @@ pub struct Connection {
     pub(super) version_negotiation: super::version::VersionNegotiationState,
     pub(super) stats: Stats,
     pub(super) dgram_recv_queue: DatagramQueue,
-    pub(super) dgram_send_queue: DatagramQueue,
+    pub(super) dgram_send_queue: DatagramSendQueue,
     #[cfg(not(feature = "zero_copy_dgram"))]
     /// Bounded free-list of drained queue buffers; enqueue reuses them instead
     /// of a fresh `Vec` allocation per DATAGRAM.
@@ -218,6 +218,25 @@ type DatagramQueue = VecDeque<Vec<u8>>;
 
 #[cfg(feature = "zero_copy_dgram")]
 type DatagramQueue = VecDeque<DatagramBuffer>;
+
+/// One queued outgoing DATAGRAM plus its FEC protection class (TODO-1011).
+/// `Bulk` payloads skip connection-level FEC framing entirely; the inner
+/// protocol's own reliability mechanism (e.g. TCP inside the tunnel)
+/// recovers losses instead.
+#[cfg(not(feature = "zero_copy_dgram"))]
+pub(crate) struct DatagramSendEntry {
+    pub(crate) data: Vec<u8>,
+    pub(crate) class: crate::transport::DatagramClass,
+}
+
+#[cfg(feature = "zero_copy_dgram")]
+pub(crate) struct DatagramSendEntry {
+    pub(crate) data: crate::optimize::PooledBlock,
+    pub(crate) len: usize,
+    pub(crate) class: crate::transport::DatagramClass,
+}
+
+type DatagramSendQueue = VecDeque<DatagramSendEntry>;
 
 /// Owned entry popped from `dgram_recv_queue` for zero-copy dispatch. The
 /// element type differs per feature: a reused `Vec` whose capacity doubles as

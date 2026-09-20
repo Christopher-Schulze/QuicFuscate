@@ -45,6 +45,7 @@ pub use state::Connection;
 #[cfg(feature = "zero_copy_dgram")]
 use state::DatagramBuffer;
 pub(crate) use state::DatagramEntry;
+use state::DatagramSendEntry;
 #[cfg(feature = "stream_ring_buffer")]
 pub use state::StreamRingBuffer;
 

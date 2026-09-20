@@ -691,9 +691,14 @@ impl Connection {
         let mut prefix = [0u8; 8];
         let prefix_len = qf_transport_pn::varint::write_varint(flow_id, &mut prefix)
             .map_err(|_| Error::InternalError)?;
-        conn.dgram_send_parts(&prefix[..prefix_len], udp_payload).map_err(|e| match e {
-            crate::error::ConnectionError::DgramQueueFull => Error::DgramQueueFull,
-            _ => Error::InternalError,
+        // TODO-1011: classify the inner payload so bulk-class packets skip
+        // FEC framing; ambiguous payloads stay protected (super::masque_classify).
+        let class = super::masque_classify::classify_tunneled_payload(udp_payload);
+        conn.dgram_send_parts_classified(&prefix[..prefix_len], udp_payload, class).map_err(|e| {
+            match e {
+                crate::error::ConnectionError::DgramQueueFull => Error::DgramQueueFull,
+                _ => Error::InternalError,
+            }
         })
     }
 
