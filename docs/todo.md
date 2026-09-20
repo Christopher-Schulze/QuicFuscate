@@ -4051,8 +4051,13 @@
 
 ### TODO-1020 - Standalone TUN client -> io_driver migration decision
 
-- OPEN (P3, 2026-09-21). Carried from TODO-1016 remaining work: the standalone select! loop and the io_driver runtime are two schedulers with overlapping responsibility. Study-scoped: capability diff, post-1016 gain analysis, migration cost; written verdict (migrate/stay/partial) is the deliverable.
+- DONE (P3, 2026-09-21). Verdict: STAY. The standalone loop is the client lifecycle orchestrator (MASQUE/H3 setup, kill switch, DoH DNS, heartbeat, MTU sync, diagnostics) - none of which has an io_driver home; io_driver is a pure data-plane pump on a prepared ClientDataPlane and would add an Arc<Mutex> to every hot-path call, lose the outbound deadline floor, and emit one datagram per idle wake vs the standalone's burst-limit flush. The measured Omega gap is not scheduler-caused: both schedulers translate next_send_deadline into wake cadence over the same conn.send. The study's actionable finding - the backpressured park path spins the select loop on latched AsyncFd readiness - is scoped as TODO-1021.
 - Detail: docs/todo/todo-1020-tun-io-driver-migration.md
+
+### TODO-1021 - Backpressured TUN park path spins the select loop
+
+- OPEN (P1, 2026-09-21). `drain_client_tun_uplink_fd` returns early on `DgramQueueFull` without reading the fd -> latched AsyncFd readiness -> unbounded select spin (~96% empty send_polls) while the kernel queue drops (`qtun0 TX dropped` ~= iperf loss at 60 M offered). Fix: keep draining the fd into the bounded backlog (cap `TUN_PACKET_QUEUE_CAPACITY`=1024, counted overflow drops, FIFO preserved) exactly like the `!sendable` park path - clears readiness, stops the spin, frees CPU for emission.
+- Detail: docs/todo/todo-1021-tun-park-spin.md
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff
 

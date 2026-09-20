@@ -909,7 +909,7 @@ pub(super) async fn run_client(
                                     &tun_rx,
                                     &tun_read_end,
                                     &mut tun_backpressure_frame,
-                                    client_receive_diagnostics_enabled,
+                                    io_diagnostics.as_mut(),
                                 ) {
                                     Ok(more_tun) => more_tun,
                                     Err(fault) => break ExitReason::DataPlane(fault),
@@ -987,7 +987,7 @@ pub(super) async fn run_client(
                         h3_stream_id,
                         end,
                         &mut tun_backpressure_frame,
-                        client_receive_diagnostics_enabled,
+                        io_diagnostics.as_mut(),
                     ) {
                         Ok(more_tun) => more_tun,
                         Err(fault) => break ExitReason::DataPlane(fault),
@@ -1038,7 +1038,7 @@ pub(super) async fn run_client(
                             &tun_rx,
                             &tun_read_end,
                             &mut tun_backpressure_frame,
-                            client_receive_diagnostics_enabled,
+                            io_diagnostics.as_mut(),
                         ) {
                             Ok(more_tun) => more_tun,
                             Err(fault) => break ExitReason::DataPlane(fault),
@@ -1140,7 +1140,7 @@ pub(super) async fn run_client(
                                 &tun_rx,
                                 &tun_read_end,
                                 &mut tun_backpressure_frame,
-                                client_receive_diagnostics_enabled,
+                                io_diagnostics.as_mut(),
                             ) {
                                 Ok(more_tun) => more_tun,
                                 Err(fault) => break ExitReason::DataPlane(fault),
@@ -1278,7 +1278,7 @@ pub(super) async fn run_client(
                     if let Some(diagnostics) = io_diagnostics.as_ref() {
                         let protocol_now = conn.protocol_clock().now();
                         info!(
-                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} yield_window={} yield_pacer={} yield_held={} yield_done={} drain_emits={} drain_entries={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
+                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} tun_drops={} yield_window={} yield_pacer={} yield_held={} yield_done={} drain_emits={} drain_entries={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
                             conn.rtt_ms(),
                             conn.loss_rate() * 100.0,
                             conn.conn.stats().sent,
@@ -1292,6 +1292,7 @@ pub(super) async fn run_client(
                             diagnostics.send_zero_results,
                             diagnostics.send_done_results,
                             diagnostics.send_errors,
+                            diagnostics.tun_dropped_frames,
                             conn.send_yield_counts()[0],
                             conn.send_yield_counts()[1],
                             conn.send_yield_counts()[2],

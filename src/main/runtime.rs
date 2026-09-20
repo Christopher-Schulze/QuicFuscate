@@ -1122,21 +1122,28 @@ const TUN_DRAIN_FRAME_BUDGET: usize = 128;
 /// Drain batched TUN waves from `rx` and forward each frame through `conn`
 /// without dropping frames that encounter DATAGRAM queue backpressure. A
 /// backpressured or budget-cut wave remainder is held in `backlog` (with its
-/// cursor) and retried on the next call before new waves are received.
+/// cursor) and retried on the next call; while a remainder is parked,
+/// arriving waves keep being received and appended behind the cursor
+/// (bounded by `TUN_PACKET_QUEUE_CAPACITY`) so the reader thread never
+/// stalls on a full channel.
 fn drain_client_tun_uplink(
     conn: &mut QuicFuscateConnection,
     tun: &quicfuscate::interface::TunInterface,
     sid: u64,
     rx: &std::sync::mpsc::Receiver<Vec<quicfuscate::interface::TunPacket>>,
     backlog: &mut Option<(Vec<quicfuscate::interface::TunPacket>, usize)>,
-    diagnostics_enabled: bool,
+    mut diagnostics: Option<&mut ClientIoDiagnostics>,
 ) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
     let mut budget = TUN_DRAIN_FRAME_BUDGET;
+    let diagnostics_enabled = diagnostics.is_some();
+    // Set once the carrier answers DgramQueueFull this wake. The drain still
+    // pulls waves into the bounded backlog so the reader thread never stalls
+    // on a full channel (which would surface as kernel TUN-queue drops
+    // upstream), but the wake contract reports "no more work" - the adaptive
+    // housekeeping tick, not a self-notify, paces the retry.
+    let mut carrier_full = false;
 
-    // Resume the backpressured wave remainder first. Backpressure returns
-    // Ok(false): the send queue is full, so an immediate re-drain would just
-    // spin; the adaptive housekeeping tick (5 ms while a backlog is held)
-    // paces the retry.
+    // Resume the backpressured wave remainder first.
     if let Some((frames, cursor)) = backlog.as_mut() {
         while *cursor < frames.len() && budget > 0 {
             match send_one_tun_frame(conn, tun, sid, &frames[*cursor], diagnostics_enabled)? {
@@ -1144,11 +1151,15 @@ fn drain_client_tun_uplink(
                     *cursor += 1;
                     budget -= 1;
                 }
-                TunFrameSend::Backpressured => return Ok(false),
+                TunFrameSend::Backpressured => {
+                    carrier_full = true;
+                    break;
+                }
             }
         }
         if *cursor >= frames.len() {
             *backlog = None;
+            carrier_full = false;
         }
     }
 
@@ -1158,26 +1169,54 @@ fn drain_client_tun_uplink(
     while budget > 0 {
         match rx.try_recv() {
             Ok(frames) => {
-                let mut cursor = 0usize;
-                while cursor < frames.len() && budget > 0 {
-                    match send_one_tun_frame(conn, tun, sid, &frames[cursor], diagnostics_enabled)?
-                    {
-                        TunFrameSend::Sent => {
-                            cursor += 1;
-                            budget -= 1;
-                        }
-                        TunFrameSend::Backpressured => {
-                            *backlog = Some((frames, cursor));
-                            return Ok(false);
+                if backlog.is_none() {
+                    let mut cursor = 0usize;
+                    while cursor < frames.len() && budget > 0 {
+                        match send_one_tun_frame(
+                            conn,
+                            tun,
+                            sid,
+                            &frames[cursor],
+                            diagnostics_enabled,
+                        )? {
+                            TunFrameSend::Sent => {
+                                cursor += 1;
+                                budget -= 1;
+                            }
+                            TunFrameSend::Backpressured => {
+                                carrier_full = true;
+                                break;
+                            }
                         }
                     }
-                }
-                if cursor < frames.len() {
-                    // Budget exhausted mid-wave: park the remainder; the
-                    // backlog keeps the adaptive tick active and preserves
-                    // the wake-up contract.
-                    *backlog = Some((frames, cursor));
-                    return Ok(true);
+                    if cursor < frames.len() {
+                        // Backpressured or budget-cut mid-wave: park the
+                        // remainder; the backlog keeps the adaptive tick
+                        // active and preserves the wake-up contract.
+                        *backlog = Some((frames, cursor));
+                        if budget == 0 {
+                            return Ok(true);
+                        }
+                    }
+                } else {
+                    // Carrier full: append the wave behind the parked cursor
+                    // (FIFO preserved), bounded by the unsent-frame cap;
+                    // overflow drops with bounded-channel semantics. Reading
+                    // the channel while parked unblocks the reader thread.
+                    let cap = quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY;
+                    let Some((parked, cursor)) = backlog.as_mut() else {
+                        unreachable!("backlog presence checked above");
+                    };
+                    let room = cap.saturating_sub(parked.len() - *cursor);
+                    let take = room.min(frames.len());
+                    let dropped = frames.len() - take;
+                    parked.extend(frames.into_iter().take(take));
+                    if let Some(d) = diagnostics.as_mut() {
+                        for _ in 0..dropped {
+                            d.record_tun_drop();
+                        }
+                    }
+                    budget = budget.saturating_sub(take);
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1193,10 +1232,23 @@ fn drain_client_tun_uplink(
     // wave still re-arms the wake-up contract.
     match rx.try_recv() {
         Ok(frames) => {
-            *backlog = Some((frames, 0));
+            if let Some((parked, cursor)) = backlog.as_mut() {
+                let cap = quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY;
+                let room = cap.saturating_sub(parked.len() - *cursor);
+                let take = room.min(frames.len());
+                let dropped = frames.len() - take;
+                parked.extend(frames.into_iter().take(take));
+                if let Some(d) = diagnostics.as_mut() {
+                    for _ in 0..dropped {
+                        d.record_tun_drop();
+                    }
+                }
+            } else {
+                *backlog = Some((frames, 0));
+            }
             Ok(true)
         }
-        Err(std::sync::mpsc::TryRecvError::Empty) => Ok(false),
+        Err(std::sync::mpsc::TryRecvError::Empty) => Ok(backlog.is_some() && !carrier_full),
         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
             Err(quicfuscate::engine::DataPlaneFault::ChannelDisconnected {
                 component: "standalone client TUN reader channel".to_string(),
@@ -1222,10 +1274,12 @@ pub(super) use quicfuscate::interface::TunReadSource;
 /// fires. The `AsyncFd` readiness bit stays set until an inner read returns
 /// `WouldBlock`; skipping the read (e.g. because the MASQUE tunnel is not
 /// established yet or `h3_stream_id` is still `None`) leaves the bit set and
-/// the select branch spins forever. Packets read before the carrier is ready
-/// are parked in `backlog` - the same buffering the reader channel used to
-/// provide. The backlog is bounded by `TUN_PACKET_QUEUE_CAPACITY`; overflow
-/// drops the new packet, mirroring the old bounded-channel overflow.
+/// the select branch spins forever. The same holds while the carrier is
+/// backpressured: reads keep running and park in `backlog` instead of
+/// returning early, so readiness always clears to `WouldBlock` and the
+/// kernel queue drains into userspace rather than dropping. The backlog is
+/// bounded by `TUN_PACKET_QUEUE_CAPACITY` (unsent frames); overflow drops
+/// the new packet, mirroring the old bounded-channel overflow.
 #[cfg(unix)]
 fn drain_client_tun_uplink_fd(
     conn: &mut QuicFuscateConnection,
@@ -1233,13 +1287,20 @@ fn drain_client_tun_uplink_fd(
     sid: Option<u64>,
     tun_fd: &TunReadSource,
     backlog: &mut Option<(Vec<quicfuscate::interface::TunPacket>, usize)>,
-    diagnostics_enabled: bool,
+    mut diagnostics: Option<&mut ClientIoDiagnostics>,
 ) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
     let mut budget = TUN_DRAIN_FRAME_BUDGET;
     let sendable = sid.is_some() && conn.masque_tunnel_established();
+    let diagnostics_enabled = diagnostics.is_some();
+    // Set once the carrier answers DgramQueueFull this wake. The drain still
+    // pulls frames into the bounded backlog so the kernel queue drains into
+    // userspace and readiness clears to WouldBlock, but the wake contract
+    // reports "no more work" - the adaptive housekeeping tick, not a
+    // self-notify, paces the retry.
+    let mut carrier_full = false;
 
-    if let Some((frames, cursor)) = backlog.as_mut() {
-        if sendable {
+    if sendable {
+        if let Some((frames, cursor)) = backlog.as_mut() {
             let sid = sid.expect("sendable implies sid");
             while *cursor < frames.len() && budget > 0 {
                 match send_one_tun_frame(conn, tun, sid, &frames[*cursor], diagnostics_enabled)? {
@@ -1247,11 +1308,19 @@ fn drain_client_tun_uplink_fd(
                         *cursor += 1;
                         budget -= 1;
                     }
-                    TunFrameSend::Backpressured => return Ok(false),
+                    // A still-full carrier must NOT return early: skipping
+                    // the fd reads below leaves the AsyncFd readiness bit
+                    // latched, the select arm spins on every poll, and the
+                    // kernel TUN queue drops what the fd never consumed.
+                    TunFrameSend::Backpressured => {
+                        carrier_full = true;
+                        break;
+                    }
                 }
             }
             if *cursor >= frames.len() {
                 *backlog = None;
+                carrier_full = false;
             }
         }
     }
@@ -1278,23 +1347,28 @@ fn drain_client_tun_uplink_fd(
             }
         };
         budget -= 1;
-        if sendable {
+        if sendable && backlog.is_none() {
             let sid = sid.expect("sendable implies sid");
             match send_one_tun_frame(conn, tun, sid, &packet, diagnostics_enabled)? {
                 TunFrameSend::Sent => {}
                 TunFrameSend::Backpressured => {
+                    carrier_full = true;
                     *backlog = Some((vec![packet], 0));
-                    return Ok(false);
                 }
             }
         } else {
-            // Carrier not ready yet: park the frame exactly like the old
-            // reader channel did, bounded so a stalled tunnel cannot grow
-            // memory without limit.
+            // Carrier not ready or full: park the frame behind the backlog
+            // cursor (FIFO preserved), bounded by the unsent-frame cap so a
+            // stalled tunnel cannot grow memory without limit; overflow
+            // drops match bounded-channel semantics. Reads keep running so
+            // the kernel queue drains into userspace instead of dropping.
             let cap = quicfuscate::interface::TUN_PACKET_QUEUE_CAPACITY;
             match backlog.as_mut() {
-                Some((frames, _)) if frames.len() >= cap => {
+                Some((frames, cursor)) if frames.len() - *cursor >= cap => {
                     // Queue full: drop, matching bounded-channel overflow.
+                    if let Some(d) = diagnostics.as_mut() {
+                        d.record_tun_drop();
+                    }
                 }
                 Some((frames, _)) => {
                     frames.push(packet);
@@ -1306,7 +1380,7 @@ fn drain_client_tun_uplink_fd(
         }
     }
 
-    Ok(backlog.is_some() && sendable)
+    Ok(backlog.is_some() && sendable && !carrier_full)
 }
 
 /// Uplink drain dispatcher used by every select branch that can make TUN
@@ -1321,24 +1395,17 @@ fn drain_uplink_any(
     tun_rx: &Option<std::sync::mpsc::Receiver<Vec<quicfuscate::interface::TunPacket>>>,
     tun_read_end: &Option<TunReadSource>,
     backlog: &mut Option<(Vec<quicfuscate::interface::TunPacket>, usize)>,
-    diagnostics_enabled: bool,
+    diagnostics: Option<&mut ClientIoDiagnostics>,
 ) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
     #[cfg(unix)]
     if let Some(end) = tun_read_end.as_ref() {
-        return drain_client_tun_uplink_fd(
-            conn,
-            tun,
-            h3_stream_id,
-            end,
-            backlog,
-            diagnostics_enabled,
-        );
+        return drain_client_tun_uplink_fd(conn, tun, h3_stream_id, end, backlog, diagnostics);
     }
     #[cfg(not(unix))]
     let _ = tun_read_end;
     if conn.masque_tunnel_established() {
         if let (Some(rx), Some(sid)) = (tun_rx.as_ref(), h3_stream_id) {
-            return drain_client_tun_uplink(conn, tun, sid, rx, backlog, diagnostics_enabled);
+            return drain_client_tun_uplink(conn, tun, sid, rx, backlog, diagnostics);
         }
     }
     Ok(false)

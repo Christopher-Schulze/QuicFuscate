@@ -55,6 +55,7 @@ struct ClientIoDiagnostics {
     send_zero_results: u64,
     send_done_results: u64,
     send_errors: u64,
+    tun_dropped_frames: u64,
     last_send_at: Option<Instant>,
 }
 
@@ -77,6 +78,10 @@ impl ClientIoDiagnostics {
 
     fn record_send_poll(&mut self) {
         self.send_polls = self.send_polls.saturating_add(1);
+    }
+
+    fn record_tun_drop(&mut self) {
+        self.tun_dropped_frames = self.tun_dropped_frames.saturating_add(1);
     }
 
     fn record_send_datagram(&mut self, bytes: usize) {
