@@ -4,7 +4,7 @@ title: Deferral drain serializes emission under per-packet stealth deferral
 severity: HIGH
 phase: L
 priority: P1
-status: PARTIAL
+status: DONE
 created: 2026-09-20
 depends_on: []
 blocks: [TODO-1015]
@@ -114,4 +114,5 @@ scheduler redesign itself is landed; the remaining cut is
 userspace `tun_drops` under gather-window cadence.
 
 Pressure-aware skip/refill/abort landed with TODO-1015
-(2026-09-21). The 80% gate still waits on Omega revalidation.
+(2026-09-21). Omega 80% gate closed: 59.986 / 59.999 Mbit/s
+(`JITTER_US=5000` vs `0`), `qtun0 TX dropped=0`.

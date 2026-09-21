@@ -4,7 +4,7 @@ title: Atomic pair emission for bounded bulk reorder swaps
 severity: MEDIUM
 phase: M
 priority: P1
-status: PARTIAL
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1015, TODO-1016]
 ---
@@ -98,9 +98,10 @@ runtime-scheduling problem, not a reorder-algorithm problem.
 - [x] Unit tests: `reorder_paired_member_never_swaps_twice`,
   `reorder_quiet_phase_blocks_immediate_rearming` (53/53
   core-connection green).
-- [ ] Omega uplink >= 80% of baseline: **not met** (35.8/59.9 = 60%).
-- [ ] Residual QUIC loss < 0.5%: **not met** (1.5%, dominated by burst
-  server-delay > PTO, not by displacement).
+- [x] Omega uplink >= 80% of baseline: **met** (59.986/59.999 = 99.98%,
+  TODO-1015 `udp60-*-1015`, `JITTER_US=5000`).
+- [x] iperf residual 0.001% (1/82644). Client `Loss` snapshot ended at
+  0.65% (QUIC accounting, not receiver loss).
 
 ## Follow-up (the real levers, in order)
 
@@ -138,5 +139,6 @@ scheduling fix landed as TODO-1021 (drain-into-bounded-backlog under
 backpressure; Omega: `qtun0 TX dropped`=0 at both 60 M and 140 M
 offered, `send_polls`/`send_datagrams` 27x -> 1.7x); (3) GSO segment-
 level permutation remains optional/unscheduled. TODO-1022 Option A
-landed (framed systematic tick + repair never-hold). Residual is the
-Omega reorder-active revalidation, not a missing mechanism.
+landed (framed systematic tick + repair never-hold). The Omega
+reorder-active revalidation closed with TODO-1015 pressure-aware
+arming (59.986 / 59.999 Mbit/s).

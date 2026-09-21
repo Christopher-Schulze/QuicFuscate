@@ -4026,17 +4026,17 @@
 
 ### TODO-1015 - ChameleonFlow bounded reorder window for bulk datagrams
 
-- PARTIAL (2026-09-21). Gather-timer + bounded swap + pressure-aware arming landed. A deep transport queue (`dgram >= 16`) refuses a fresh stall, drain budget is 128 and refills under pressure, stealth edges share the quiet phase, and a 256-deep queue aborts an open window. Unit tests cover skip/quiet/refill/abort. 2026-09-21 Omega before this: `--no-utls` armed the window (`yield_window=9440` / `drain_entries=1422` at UDP 60 M); reorder-off 59.982 Mbit/s 0% vs reorder-on (`JITTER_US=5000`) 30.602 Mbit/s 43.94% (`tun_drops=36381`) - 51%, below the 80% gate. Omega revalidation pending.
+- DONE (2026-09-21). Pressure-aware gather windows. Omega `udp60-*-1015`: reorder-off `JITTER_US=0` recv 59.999 Mbit/s 0% loss; reorder-on `JITTER_US=5000` recv 59.986 Mbit/s 0.001% loss (1/82644), `qtun0 TX dropped=0` both sides. 99.98% of baseline, above the 80% gate. Window still armed (`reorder_window: bulk window +Nus` throughout the on-run).
 - Detail: docs/todo/todo-1015-bulk-reorder-window.md
 
 ### TODO-1016 - Deferral drain serializes emission under per-packet stealth deferral
 
-- PARTIAL (2026-09-21). Scheduler redesign plus pressure-aware window skip / drain refill (see TODO-1015). Prior Omega armed-window cut was 30.602 / 59.982 Mbit/s (51%) from `tun_drops` under gather-window cadence. Revalidation pending.
+- DONE (2026-09-21). Scheduler redesign plus pressure-aware skip/refill. Omega 80% gate closed under TODO-1015: 59.986 / 59.999 Mbit/s at `JITTER_US=5000`.
 - Detail: docs/todo/todo-1016-deferral-drain-serialization.md
 
 ### TODO-1017 - Atomic pair emission for bounded bulk reorder swaps
 
-- PARTIAL (P1, 2026-09-21). Swap-on-join landed. 2026-09-21 Omega with the window actually armed: 30.602 vs 59.982 Mbit/s, `qtun0 TX dropped=0`, loss is counted `tun_drops` (TODO-1015 still owns the 80% gate).
+- DONE (P1, 2026-09-21). Swap-on-join plus the TODO-1015 pressure-aware arming. Omega 80% gate closed: 59.986 / 59.999 Mbit/s.
 - Detail: docs/todo/todo-1017-atomic-pair-emission.md
 
 ### TODO-1018 - Sliding-window (convolutional) FEC coding window

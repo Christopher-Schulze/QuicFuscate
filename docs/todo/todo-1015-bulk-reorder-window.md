@@ -4,7 +4,7 @@ title: ChameleonFlow-style bounded reorder window for bulk datagrams
 severity: MEDIUM
 phase: L
 priority: P2
-status: PARTIAL
+status: DONE
 created: 2026-09-20
 depends_on: [TODO-1011]
 ---
@@ -183,4 +183,11 @@ Tests: `deferral_window_skips_arm_under_dgram_pressure`,
 `drain_budget_refills_under_dgram_pressure`,
 `open_window_aborts_when_dgram_queue_hits_abort_depth`.
 
-Omega 80% revalidation is still open.
+Omega 80% revalidation (2026-09-21, `udp60-off-1015` / `udp60-on-1015`):
+
+| variant | recv Mbit/s | iperf loss | qtun0 TX dropped |
+|---|---|---|---|
+| `JITTER_US=0` | 59.999 | 0 / 82660 | 0 |
+| `JITTER_US=5000` | 59.986 | 1 / 82644 (0.001%) | 0 |
+
+99.98% of baseline. Window arming proven live via `reorder_window: bulk window +Nus` on the on-run. Gate closed.
