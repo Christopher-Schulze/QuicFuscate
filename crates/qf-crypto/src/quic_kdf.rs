@@ -16,15 +16,22 @@ fn traffic_secret_array(
     Ok(secret_array)
 }
 
-fn hkdf_expand_label(prk: &[u8; 32], label: &[u8], out_len: usize) -> Vec<u8> {
+fn hkdf_expand_label(
+    prk: &[u8; 32],
+    label: &[u8],
+    out_len: usize,
+) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     let full_label_len = b"tls13 ".len() + label.len();
+    if full_label_len > 255 || out_len > u16::MAX as usize {
+        return Err(super::aead::KeyMaterialError::Expand { out_len });
+    }
     let mut info = Vec::with_capacity(2 + 1 + full_label_len + 1);
     info.extend_from_slice(&(out_len as u16).to_be_bytes());
     info.push(full_label_len as u8);
     info.extend_from_slice(b"tls13 ");
     info.extend_from_slice(label);
     info.push(0);
-    hkdf_expand(prk, &info, out_len)
+    hkdf_expand(prk, &info, out_len).map_err(|_| super::aead::KeyMaterialError::Expand { out_len })
 }
 
 fn packet_labels(version: u32) -> (&'static [u8], &'static [u8], &'static [u8], &'static [u8]) {
@@ -61,7 +68,7 @@ pub fn derive_client_initial_secret(
     initial_secret: &[u8],
 ) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     let prk = traffic_secret_array(initial_secret)?;
-    Ok(hkdf_expand_label(&prk, b"client in", TRAFFIC_SECRET_LEN))
+    hkdf_expand_label(&prk, b"client in", TRAFFIC_SECRET_LEN)
 }
 
 /// Derive server initial secret from an exact 32-byte initial secret.
@@ -69,7 +76,7 @@ pub fn derive_server_initial_secret(
     initial_secret: &[u8],
 ) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     let prk = traffic_secret_array(initial_secret)?;
-    Ok(hkdf_expand_label(&prk, b"server in", TRAFFIC_SECRET_LEN))
+    hkdf_expand_label(&prk, b"server in", TRAFFIC_SECRET_LEN)
 }
 
 /// Derive packet protection key from an exact 32-byte traffic secret.
@@ -87,7 +94,7 @@ pub fn derive_pkt_key_for_version(
     version: u32,
 ) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     let prk = traffic_secret_array(secret)?;
-    Ok(hkdf_expand_label(&prk, packet_labels(version).0, key_len))
+    hkdf_expand_label(&prk, packet_labels(version).0, key_len)
 }
 
 /// Derive packet protection IV from an exact 32-byte traffic secret.
@@ -105,7 +112,7 @@ pub fn derive_pkt_iv_for_version(
     version: u32,
 ) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     let prk = traffic_secret_array(secret)?;
-    Ok(hkdf_expand_label(&prk, packet_labels(version).1, iv_len))
+    hkdf_expand_label(&prk, packet_labels(version).1, iv_len)
 }
 
 /// Derive header protection key from an exact 32-byte traffic secret.
@@ -123,7 +130,7 @@ pub fn derive_hdr_key_for_version(
     version: u32,
 ) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     let prk = traffic_secret_array(secret)?;
-    Ok(hkdf_expand_label(&prk, packet_labels(version).2, key_len))
+    hkdf_expand_label(&prk, packet_labels(version).2, key_len)
 }
 
 /// Derive next secret for key update from an exact 32-byte traffic secret (RFC 9001, Section 6).
@@ -137,7 +144,7 @@ pub fn derive_next_secret_for_version(
     version: u32,
 ) -> Result<Vec<u8>, super::aead::KeyMaterialError> {
     let prk = traffic_secret_array(secret)?;
-    Ok(hkdf_expand_label(&prk, packet_labels(version).3, TRAFFIC_SECRET_LEN))
+    hkdf_expand_label(&prk, packet_labels(version).3, TRAFFIC_SECRET_LEN)
 }
 
 /// Helper to derive all keys from a secret at once
@@ -216,6 +223,37 @@ mod tests {
         assert_eq!(
             hex::encode(server_secret),
             "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b"
+        );
+    }
+
+    #[test]
+    fn initial_packet_keys_match_rfc9001_appendix_a1() {
+        let initial = derive_initial_secret(&RFC9001_DCID, 0x00000001);
+        let client = derive_client_initial_secret(&initial).expect("valid initial secret");
+        let server = derive_server_initial_secret(&initial).expect("valid initial secret");
+        assert_eq!(
+            hex::encode(derive_pkt_key(&client, 16).expect("valid client secret")),
+            "1f369613dd76d5467730efcbe3b1a22d"
+        );
+        assert_eq!(
+            hex::encode(derive_pkt_iv(&client, 12).expect("valid client secret")),
+            "fa044b2f42a3fd3b46fb255c"
+        );
+        assert_eq!(
+            hex::encode(derive_hdr_key(&client, 16).expect("valid client secret")),
+            "9f50449e04a0e810283a1e9933adedd2"
+        );
+        assert_eq!(
+            hex::encode(derive_pkt_key(&server, 16).expect("valid server secret")),
+            "cf3a5331653c364c88f0f379b6067e37"
+        );
+        assert_eq!(
+            hex::encode(derive_pkt_iv(&server, 12).expect("valid server secret")),
+            "0ac1493ca1905853b0bba03e"
+        );
+        assert_eq!(
+            hex::encode(derive_hdr_key(&server, 16).expect("valid server secret")),
+            "c206b8d9b9f0f37644430b490eeaa314"
         );
     }
 

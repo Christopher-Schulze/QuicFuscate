@@ -10,6 +10,8 @@ pub enum KeyMaterialError {
         actual: usize,
         minimum: bool,
     },
+    /// HKDF-Expand rejected the requested output length.
+    Expand { out_len: usize },
 }
 
 impl std::fmt::Display for KeyMaterialError {
@@ -23,6 +25,9 @@ impl std::fmt::Display for KeyMaterialError {
                 formatter,
                 "{algorithm} {material} must be exactly {expected} bytes, got {actual}"
             ),
+            Self::Expand { out_len } => {
+                write!(formatter, "HKDF-Expand rejected an output length of {out_len} bytes")
+            }
         }
     }
 }

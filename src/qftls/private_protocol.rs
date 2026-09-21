@@ -185,7 +185,8 @@ impl PrivateEpochSchedule {
         info.extend_from_slice(&self.context_hash);
         let prk = hkdf::hkdf_extract(EXPORTER_SALT, self.root.as_slice());
         let material =
-            hkdf::hkdf_expand(&prk, &info, PrivateAeadFamily::KEY_LEN + PrivateAeadFamily::IV_LEN);
+            hkdf::hkdf_expand(&prk, &info, PrivateAeadFamily::KEY_LEN + PrivateAeadFamily::IV_LEN)
+                .map_err(|_| PrivateProtocolError::InvalidField("hkdf"))?;
         let key =
             SecretBytes::new(material[..PrivateAeadFamily::KEY_LEN].to_vec(), "private_packet_key");
         let iv =
@@ -253,7 +254,13 @@ impl PrivateProtocolShape {
     /// domain-separated HKDF; every knob derives from one seed so the
     /// provisioning story stays a single opaque blob.
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        let material = hkdf::hkdf_expand(seed, b"qf private protocol shape v1", 64);
+        // 64 bytes is inside the HKDF-SHA256 limit. A rejection means ring
+        // refused a legal length; the canonical layout is then the only
+        // shape both peers can still share.
+        let Some(material) = hkdf::hkdf_expand(seed, b"qf private protocol shape v1", 64).ok()
+        else {
+            return Self::canonical();
+        };
         // Fisher-Yates over the eight block indices, driven by the first
         // 16 expansion bytes. Swapping each position with a derived index
         // yields a uniform permutation.

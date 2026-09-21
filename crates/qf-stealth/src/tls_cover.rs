@@ -22,7 +22,7 @@ pub fn derive_tls_cover_material(
     qf_common::rng::fill_secure(&mut entropy)?;
     let material = derive_tls_cover_material_from_entropy(profile, is_server, &entropy);
     entropy.zeroize();
-    Ok(material)
+    material
 }
 
 /// Deterministically derive TLS Cover material from explicit entropy.
@@ -31,21 +31,28 @@ pub fn derive_tls_cover_material_from_entropy(
     profile: &str,
     is_server: bool,
     entropy: &[u8; TLS_COVER_KEY_LEN],
-) -> ([u8; TLS_COVER_KEY_LEN], [u8; TLS_COVER_IV_LEN]) {
+) -> std::io::Result<([u8; TLS_COVER_KEY_LEN], [u8; TLS_COVER_IV_LEN])> {
     let mut prk = qf_crypto::hkdf::hkdf_extract(TLS_COVER_HKDF_SALT, entropy);
     let info = format!(
         "quicfuscate:tls-cover:{}:{}",
         profile,
         if is_server { "server" } else { "client" }
     );
-    let mut output = qf_crypto::hkdf::hkdf_expand(&prk, info.as_bytes(), TLS_COVER_MATERIAL_LEN);
+    let expanded = qf_crypto::hkdf::hkdf_expand(&prk, info.as_bytes(), TLS_COVER_MATERIAL_LEN);
+    prk.zeroize();
+    let mut output = expanded.map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "TLS Cover HKDF-Expand rejected a legal length",
+        )
+    })?;
     let mut key = [0u8; TLS_COVER_KEY_LEN];
     let mut iv = [0u8; TLS_COVER_IV_LEN];
     key.copy_from_slice(&output[..TLS_COVER_KEY_LEN]);
     iv.copy_from_slice(&output[TLS_COVER_KEY_LEN..]);
     prk.zeroize();
     output.zeroize();
-    (key, iv)
+    Ok((key, iv))
 }
 
 /// Plaintext and timing plan for one synthetic encrypted TLS Cover record.
@@ -1065,10 +1072,23 @@ mod tests {
     #[test]
     fn tls_cover_material_derivation_is_deterministic_and_domain_separated() {
         let entropy = [0x5a; TLS_COVER_KEY_LEN];
-        let client = derive_tls_cover_material_from_entropy("chrome", false, &entropy);
-        assert_eq!(client, derive_tls_cover_material_from_entropy("chrome", false, &entropy));
-        assert_ne!(client, derive_tls_cover_material_from_entropy("chrome", true, &entropy));
-        assert_ne!(client, derive_tls_cover_material_from_entropy("firefox", false, &entropy));
+        let client = derive_tls_cover_material_from_entropy("chrome", false, &entropy)
+            .expect("legal TLS Cover length");
+        assert_eq!(
+            client,
+            derive_tls_cover_material_from_entropy("chrome", false, &entropy)
+                .expect("legal TLS Cover length")
+        );
+        assert_ne!(
+            client,
+            derive_tls_cover_material_from_entropy("chrome", true, &entropy)
+                .expect("legal TLS Cover length")
+        );
+        assert_ne!(
+            client,
+            derive_tls_cover_material_from_entropy("firefox", false, &entropy)
+                .expect("legal TLS Cover length")
+        );
     }
 
     #[test]

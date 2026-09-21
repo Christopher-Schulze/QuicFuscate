@@ -1,60 +1,69 @@
-use sha2::Digest;
+use crate::error::ConnectionError;
+use ring::hkdf::{KeyType, Prk, HKDF_SHA256};
+
+/// RFC 5869 limit for HKDF-SHA256: 255 * HashLen.
+const HKDF_SHA256_MAX: usize = 255 * 32;
+
+struct ExpandLen(usize);
+
+impl KeyType for ExpandLen {
+    fn len(&self) -> usize {
+        self.0
+    }
+}
 
 /// One-shot SHA-256 digest of `data`.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
+    let digest = ring::digest::digest(&ring::digest::SHA256, data);
     let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
+    out.copy_from_slice(digest.as_ref());
     out
 }
 
 /// HMAC-SHA-256 keyed hash.
 ///
-/// `Hmac<Sha256>::new_from_slice` is infallible for this digest implementation:
-/// the key is normalized to the fixed SHA-256 block size before construction.
-/// The dependency still exposes a fallible trait API, so the narrow lint
-/// disposition below keeps that proven invariant visible at the call site.
-#[allow(clippy::expect_used)]
+/// Ring accepts every key length, including an empty key, per RFC 2104.
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    use hmac::Mac;
-    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
-    // HMAC accepts any key length, including an empty key, per RFC 2104.
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(data);
-    let result = mac.finalize();
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
+    let tag = ring::hmac::sign(&key, data);
     let mut out = [0u8; 32];
-    out.copy_from_slice(&result.into_bytes());
+    out.copy_from_slice(tag.as_ref());
     out
 }
 
 /// HKDF-Extract: derive a pseudorandom key from salt and input keying material.
+///
+/// `ring::hkdf::Salt::extract` is this HMAC and then keeps the PRK inside `Prk`.
+/// Callers of this function, including RFC 9001 initial-secret tests, need the
+/// raw 32 bytes, so the HMAC is invoked directly.
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; 32] {
-    let (prk, _) = hkdf::Hkdf::<sha2::Sha256>::extract(Some(salt), ikm);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&prk);
-    out
+    hmac_sha256(salt, ikm)
 }
 
 /// HKDF-Expand: expand a pseudorandom key with context info to `out_len` bytes.
 ///
-/// # Panics
-/// Panics if `out_len` exceeds the RFC 5869 limit of 255 * HashLen = 8160 bytes for SHA-256.
-#[allow(clippy::expect_used)]
-pub fn hkdf_expand(prk: &[u8; 32], info: &[u8], out_len: usize) -> Vec<u8> {
-    // RFC 5869 sec. 2.3: L must be <= 255*HashLen. For SHA-256 that is 255*32 = 8160 bytes.
-    assert!(
-        out_len <= 255 * 32,
-        "HKDF-Expand: out_len {} exceeds RFC 5869 limit of 8160 bytes",
-        out_len
-    );
-    // from_prk() only fails when prk is shorter than HashLen; our fixed [u8; 32] always satisfies this.
-    let hk = hkdf::Hkdf::<sha2::Sha256>::from_prk(prk).expect("PRK length is valid for SHA-256");
+/// Returns an error when `out_len` exceeds the RFC 5869 limit of 255 * HashLen
+/// (8160 bytes for SHA-256). The expand loop is ring's.
+pub fn hkdf_expand(
+    prk: &[u8; 32],
+    info: &[u8],
+    out_len: usize,
+) -> Result<Vec<u8>, ConnectionError> {
+    if out_len > HKDF_SHA256_MAX {
+        return Err(ConnectionError::CryptoError(
+            "HKDF-Expand output exceeds the RFC 5869 limit".into(),
+        ));
+    }
+    let prk = Prk::new_less_safe(HKDF_SHA256, prk);
+    let info_parts = [info];
+    let okm = prk.expand(&info_parts, ExpandLen(out_len)).map_err(|_| {
+        ConnectionError::CryptoError("HKDF-Expand rejected the output length".into())
+    })?;
     let mut out = vec![0u8; out_len];
-    // expand() only fails when out_len exceeds the RFC limit, which we already assert above.
-    hk.expand(info, &mut out).expect("output length within HKDF limits");
-    out
+    okm.fill(&mut out).map_err(|_| {
+        ConnectionError::CryptoError("HKDF-Expand rejected the output buffer".into())
+    })?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -75,7 +84,9 @@ mod tests {
 
     #[test]
     fn hkdf_expand_accepts_fixed_prk_at_rfc_limit() {
-        let output = hkdf_expand(&[0x42; 32], b"strict-contract", 255 * 32);
+        let output = hkdf_expand(&[0x42; 32], b"strict-contract", 255 * 32)
+            .expect("RFC 5869 maximum length is accepted");
         assert_eq!(output.len(), 255 * 32);
+        assert!(hkdf_expand(&[0x42; 32], b"strict-contract", 255 * 32 + 1).is_err());
     }
 }

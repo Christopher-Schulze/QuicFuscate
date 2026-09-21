@@ -477,7 +477,7 @@
 - Detail: `docs/todo/todo-1049-delete-dead-first-party-aead.md`
 
 ### TODO-1050 - Derive QUIC packet keys with ring HKDF
-- OPEN. Replace in-tree HKDF-Expand-Label with `ring::hkdf`. RFC 9001 Appendix A is the gate. Not a per-packet change.
+- DONE. `hkdf.rs` extract, expand, HMAC-SHA256, and SHA-256 are ring. The hand-rolled expand loop and the production expects are gone. RFC 9001 Appendix A.1 key, IV, and HP vectors already matched the previous labels, so the bytes did not change. A rustls Initial seal opens with these keys and the reverse. qf-crypto 60/60. Clippy `-D warnings` on `qf-crypto --lib` is clean.
 - Detail: `docs/todo/todo-1050-quic-kdf-via-ring-hkdf.md`
 
 ### TODO-1051 - Remaining datapath speed without a new cipher

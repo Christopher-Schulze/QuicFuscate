@@ -1191,3 +1191,46 @@ fn apply_hp_rejects_short_sample_and_packet_number_buffer() {
     let mut no_packet_number = [];
     assert!(apply_hp(0x40, &mut no_packet_number, &[0u8; SAMPLE_LEN], true, &hp).is_err());
 }
+
+#[test]
+fn derived_initial_keys_match_rustls_initial_seal() {
+    use crate::crypto::aead::{AeadOpen, AeadSeal};
+
+    let dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+    let suite = rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256
+        .tls13()
+        .and_then(|suite| suite.quic_suite())
+        .expect("ring AES-128-GCM QUIC suite");
+    let rustls_keys = suite.keys(&dcid, rustls::Side::Client, rustls::quic::Version::V1);
+    let header = b"qf-initial";
+    let plaintext = b"hello-initial";
+    let mut payload = plaintext.to_vec();
+    let tag =
+        rustls_keys.local.packet.encrypt_in_place(7, header, &mut payload).expect("rustls seal");
+    payload.extend_from_slice(tag.as_ref());
+
+    let initial = crate::crypto::kdf::derive_initial_secret(&dcid, 0x0000_0001);
+    let client = crate::crypto::kdf::derive_client_initial_secret(&initial).expect("client secret");
+    let key = crate::crypto::kdf::derive_pkt_key_for_version(&client, 16, 0x0000_0001)
+        .expect("packet key");
+    let iv =
+        crate::crypto::kdf::derive_pkt_iv_for_version(&client, 12, 0x0000_0001).expect("packet iv");
+    let mut key16 = [0u8; 16];
+    let mut iv12 = [0u8; 12];
+    key16.copy_from_slice(&key);
+    iv12.copy_from_slice(&iv);
+    let ours = crate::crypto::RingAesGcm128::from_arrays(&key16, &iv12).expect("install");
+    let opened = ours.open_with_u64_counter(7, header, &mut payload).expect("open rustls seal");
+    assert_eq!(&payload[..opened], plaintext);
+
+    let mut outbound = vec![0u8; plaintext.len() + 16];
+    outbound[..plaintext.len()].copy_from_slice(plaintext);
+    let sealed =
+        ours.seal_with_u64_counter(9, header, &mut outbound, plaintext.len(), None).expect("seal");
+    let plain = rustls_keys
+        .local
+        .packet
+        .decrypt_in_place(9, header, &mut outbound[..sealed])
+        .expect("rustls open");
+    assert_eq!(plain, plaintext);
+}

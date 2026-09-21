@@ -16,8 +16,6 @@ aggressive_inline = ["qf-cpu/aggressive_inline"]
 internal_avx10_preview = ["qf-cpu/internal_avx10_preview"]
 
 [dependencies]
-hmac = "0.12"
-hkdf = "0.12"
 log = "0.4"
 qf-common = { path = "../qf-common" }
 qf-cpu = { path = "../qf-cpu" }
@@ -26,7 +24,6 @@ qf-telemetry = { path = "../qf-telemetry" }
 ring = "0.17.14"
 aegis = "=0.9.18"
 serde = { version = "1.0", features = ["derive"] }
-sha2 = "0.10"
 zeroize = "1.8"
 
 [dev-dependencies]

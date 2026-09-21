@@ -134,8 +134,14 @@ impl TlsCoverProvider {
         profile: &str,
         is_server: bool,
         entropy: &[u8; 32],
-    ) -> ([u8; 32], [u8; 12]) {
-        qf_stealth::derive_tls_cover_material_from_entropy(profile, is_server, entropy)
+    ) -> Result<([u8; 32], [u8; 12]), crate::error::ConnectionError> {
+        qf_stealth::derive_tls_cover_material_from_entropy(profile, is_server, entropy).map_err(
+            |_| {
+                crate::error::ConnectionError::CryptoError(
+                    "TLS Cover HKDF-Expand rejected a legal length".to_string(),
+                )
+            },
+        )
     }
 
     /// Enable/disable performance mode

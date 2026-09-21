@@ -1574,8 +1574,6 @@ version = "0.5.0"
 dependencies = [
  "aegis",
  "hex",
- "hkdf",
- "hmac",
  "log",
  "qf-common",
  "qf-cpu",
@@ -1584,7 +1582,6 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "sha2",
  "zeroize",
 ]
 

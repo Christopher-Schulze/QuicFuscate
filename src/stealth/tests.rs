@@ -238,17 +238,21 @@ fn tls_cover_material_derivation_is_domain_separated() {
 
     let entropy = [0xA5u8; 32];
     let chrome_client =
-        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", false, &entropy);
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", false, &entropy)
+            .expect("legal TLS Cover length");
     let chrome_server =
-        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", true, &entropy);
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", true, &entropy)
+            .expect("legal TLS Cover length");
     let firefox_client =
-        TlsCoverProvider::derive_tls_cover_material_from_entropy("firefox", false, &entropy);
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("firefox", false, &entropy)
+            .expect("legal TLS Cover length");
 
     assert_ne!(chrome_client, chrome_server, "client and server material must differ");
     assert_ne!(chrome_client, firefox_client, "profile rotation must derive fresh material");
     assert_eq!(
         chrome_client,
-        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", false, &entropy),
+        TlsCoverProvider::derive_tls_cover_material_from_entropy("chrome", false, &entropy)
+            .expect("legal TLS Cover length"),
         "fixed entropy and context must remain deterministic"
     );
 }
