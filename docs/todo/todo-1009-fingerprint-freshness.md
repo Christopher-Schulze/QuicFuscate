@@ -4,7 +4,7 @@ title: TLS/browser fingerprint freshness management and rotation validation
 severity: MEDIUM
 phase: M
 priority: P2
-status: PARTIAL
+status: DONE
 created: 2026-09-19
 depends_on: []
 ---
@@ -136,15 +136,15 @@ DONE:
   `chrome_hello_matches_browser_quic_extension_shape` (12 non-GREASE
   extensions with SNI, matching the reference count).
 
-OPEN:
-- JA4 c-hash byte-parity against the specific FoxIO reference build was
-  deliberately not chased: it fingerprints one Chrome snapshot's exact
-  extension set and chasing it is over-fitting (different Chrome builds
-  differ). Structural parity (counts, cipher hash, mandatory fields) is
-  the maintained contract.
-- Real-browser packet captures are still absent locally/Omega; the audit
-  relies on published FoxIO references instead.
-- Refresh policy note (capture procedure/cadence) - Step 5.
-- Caveat: key-share and SCID bytes are pseudo-random *shaped* placeholders
-  - valid only because this path is strictly synthetic cover, never a
-  real handshake.
+CLOSED (2026-09-21). Steps 1-4 landed. Step 5 refresh policy lives in
+`docs/CONTRIBUTING.md` (`Fingerprint refresh policy`): 6-month
+`PROFILE_CATALOG_SNAPSHOT` gate, UA bump + JA4 a/b vs FoxIO, mandatory
+QTP/ECH-GREASE/TLS1.3-only checks.
+
+Accepted residuals (not follow-up work):
+- JA4 c-hash byte-parity against one FoxIO Chrome snapshot is
+  over-fitting; structural parity is the contract.
+- Real-browser packet captures stay unpublished; the audit uses FoxIO
+  references.
+- Key-share and SCID bytes are shaped placeholders on the synthetic
+  cover path only.
