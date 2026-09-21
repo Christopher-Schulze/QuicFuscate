@@ -242,7 +242,7 @@
 - Detail: `docs/todo/todo-904-ci-lane-consolidation.md`
 
 ### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
-- Local correctness reconciliation is active against the pinned CFRG AEGIS-128L vectors and the official CAESAR MORUS-1280-128 reference. No advanced family is promoted or enabled by this work. The standard AES-GCM baseline remains the live rollback path. Winner freeze from existing ARM cells is TODO-1028 (not started).
+- Local correctness reconciliation is active. No advanced family is promoted. Same-API bakeoff is TODO-1032 through TODO-1044. Old ARM freeze (TODO-1028) is blocked. Ship default is TODO-1033 rustls AES-GCM.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
 ### TODO-906 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
@@ -384,11 +384,11 @@
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
-- IN_PROGRESS. Core implemented and live-proven on Omega (ARM64, real TUN+QKey+MASQUE): authenticated proposal/selection/confirmation capsules over H3/MASQUE, TLS-exporter-bound directional keys, deterministic packet-number boundary switch, `quicfuscate_private_upgrade_activated_total` telemetry reaching 1 on live upgrade, 0% ping loss through the switch, interop matrix green (auto↔auto activates, standard↔auto stays standard, reconnect re-negotiates). Two real bugs fixed: standalone client assignment path skipped QKey-transcript marking + control tick and never applied the configured private policy (`91029a0`, consolidated into one finalize method `a2a6695`); pending negotiations parked forever - now bounded by `PRIVATE_NEGOTIATION_DEADLINE` 10s, auto→standard fallback, advanced-required→Terminal fail-closed (`6e56611`). Remaining execution is split: TODO-1028 freezes the 884 family from existing ARM cells; TODO-1029 is the Omega pcap/wire proof. x86_64 second witness and side-channel review stay on 884/681.
+- IN_PROGRESS. Core implemented and live-proven on Omega. Remaining: TODO-1029 pcap, TODO-1044 family freeze. Ship default is TODO-1033 rustls AES-GCM. TODO-1028 must not freeze from old ARM cells.
 - Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
 
 ### TODO-1028 - Freeze TODO-884 advanced-family winner from existing ARM evidence
-- OPEN. Do not run new benches. Freeze or honestly refuse a winner using the already captured ARM64 Criterion cells (macOS primitive + Omega 2026-09-19). Must call out the apples-to-oranges rustls-full-path vs first-party-primitive confound. Maps `aead_preference="auto"` only after the freeze record exists.
+- BLOCKED. Superseded as a freeze source. Old ARM cells are not same-API. Freeze/refuse is TODO-1044.
 - Detail: `docs/todo/todo-1028-freeze-884-arm-winner.md`
 
 ### TODO-1029 - Omega pcap/wire proof for private AEAD upgrade (TODO-885)
@@ -396,16 +396,64 @@
 - Detail: `docs/todo/todo-1029-omega-pcap-private-aead.md`
 
 ### TODO-1030 - Custom-vs-standard systems audit (crypto, stealth, FEC, 0-RTT)
-- OPEN. Decision audit only until explicitly started. Inventory every first-party primitive and protocol custom, compare to the standard owner, and record whether custom still earns its keep on speed, stealth, FEC, reviewability, and reliability. 0-RTT later-work is TODO-1031. Same-API AEAD bakeoff is TODO-1032.
+- OPEN. Umbrella index for the 1031-1044 cluster. Keep/replace table lives here after the bakeoff.
 - Detail: `docs/todo/todo-1030-custom-vs-standard-systems-audit.md`
 
 ### TODO-1031 - Later rustls-standard 0-RTT investigation (never private AEAD)
-- OPEN. Do not implement now. After the crypto posture is settled, investigate Chrome-like resume 0-RTT on rustls PacketKey plus the existing strike register. Private-AEAD 0-RTT stays out of scope. Replay, resume fingerprint, and reconnect latency must be proven before any enable.
+- OPEN. Do not implement now. rustls PacketKey + strike register only. Private-AEAD 0-RTT out of scope.
 - Detail: `docs/todo/todo-1031-later-rustls-0rtt-investigation.md`
 
-### TODO-1032 - Same-API AEAD bakeoff: rustls/ring, aws-lc, libaegis, first-party
-- OPEN. Do not start until explicitly requested. Fair primitive plus full packet-path (HP+AAD+PN) matrix on ARM and later x86. Answers whether any AEGIS/MORUS owner beats rustls AES-GCM, why first-party is slow, and whether first-party can be saved.
+### TODO-1032 - Same-API AEAD bakeoff parent program
+- OPEN. Parent matrix and decision rule. Children: 1037 pin, 1038 harness, 1039 profile, 1040 distinguish, 1041 integration, 1042-1043 next-gen (gated), 1044 freeze.
 - Detail: `docs/todo/todo-1032-same-api-aead-bakeoff.md`
+
+### TODO-1033 - Ship default rustls AES-GCM
+- OPEN. `packet_protection_mode=standard`. Private upgrade stays inert. Bakeoff cannot flip this default.
+- Detail: `docs/todo/todo-1033-ship-default-rustls-aes-gcm.md`
+
+### TODO-1034 - Replace first-party Initial AES-GCM and AesHp with ring/aws-lc
+- OPEN. Same RFC 9001 algorithm, audited impl. No AEGIS/MORUS on Initial.
+- Detail: `docs/todo/todo-1034-replace-initial-aes-hp-ring.md`
+
+### TODO-1035 - Move TLS-Cover and first-party ChaCha20-Poly1305 onto rustls/ring
+- OPEN. Cover needs an AEAD, not a first-party one.
+- Detail: `docs/todo/todo-1035-move-cover-chacha-to-rustls.md`
+
+### TODO-1036 - Evaluate rustls aws-lc-rs for the standard AES-GCM path
+- OPEN. Legal standard-path speed. Default stays ring until R-LC wins 1038.
+- Detail: `docs/todo/todo-1036-rustls-aws-lc-rs-standard-path.md`
+
+### TODO-1037 - Pin standard AEGIS/MORUS/rustls owners
+- OPEN. Bench-only deps, licenses, APIs. S-MORUS may be UNAVAILABLE.
+- Detail: `docs/todo/todo-1037-pin-standard-aead-owners.md`
+
+### TODO-1038 - Same-API harness and matrix execution
+- OPEN. Primitive + packet path + batch. macOS ARM and Omega. 1400 B P1 is the decision size.
+- Detail: `docs/todo/todo-1038-same-api-aead-matrix.md`
+
+### TODO-1039 - Profile why first-party AEGIS/MORUS lose
+- OPEN. Waste split before any rewrite. No code change.
+- Detail: `docs/todo/todo-1039-profile-first-party-aead-slowpath.md`
+
+### TODO-1040 - QUIC-shaped ciphertext distinguishability
+- OPEN. Cheap distinguisher test. Private cipher is never more Chrome. Prices stealth residue only.
+- Detail: `docs/todo/todo-1040-quic-ciphertext-distinguishability.md`
+
+### TODO-1041 - Honest AEAD/FEC/stealth/transport integration contract
+- OPEN. Allowed hooks: batch, pool, epoch fence. Forbidden: FEC-then-seal, cipher mutation, XOR.
+- Detail: `docs/todo/todo-1041-aead-fec-stealth-integration-contract.md`
+
+### TODO-1042 - Next-gen custom AEGIS/MORUS design (gated)
+- OPEN. Starts only if 1041 has a unique hook or 1039 shows closable waste. Spec-byte-identical. Prefer wrap libaegis.
+- Detail: `docs/todo/todo-1042-nextgen-custom-aead-design.md`
+
+### TODO-1043 - Next-gen custom impl and re-bench (gated)
+- OPEN. N-* vs C-* vs S-* vs rustls on the 1038 matrix. Feature-gated. No default flip.
+- Detail: `docs/todo/todo-1043-nextgen-custom-aead-impl-rebench.md`
+
+### TODO-1044 - Post-auth AEAD owner decision
+- OPEN. rustls AES-GCM stays the ship default. Picks none / opt-in S-AEGIS / opt-in N-* / opt-in C-*. Silent auto upgrade forbidden.
+- Detail: `docs/todo/todo-1044-post-auth-aead-owner-decision.md`
 
 ## Completed
 

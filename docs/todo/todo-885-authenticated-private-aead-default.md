@@ -347,7 +347,10 @@ benchmarks, side-channel review, and the TODO-884 winner freeze that maps
 
 ## Split remaining work (2026-09-21, no implementation)
 
-- TODO-1028 owns the 884 winner freeze from existing ARM cells.
+- TODO-1044 owns the family freeze. TODO-1028 is blocked and must not freeze
+  from the old ARM cells.
 - TODO-1029 owns Omega pcap/wire proof for this upgrade path.
-- Do not execute either task until explicitly started. Live telemetry proof
+- Ship default is rustls AES-GCM (TODO-1033). This task stays the opt-in
+  private upgrade machine and must not override that default.
+- Do not execute freeze or pcap until explicitly started. Live telemetry proof
   (`activated_total=1`) stays recorded above and is not a substitute for pcap.

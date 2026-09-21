@@ -6,7 +6,7 @@ phase: S
 priority: P1
 status: OPEN
 created: 2026-09-21
-depends_on: [TODO-884]
+depends_on: [TODO-884, TODO-1044]
 ---
 
 # TODO-1028: Freeze TODO-884 winner from existing ARM cells
@@ -33,4 +33,6 @@ TODO-885 `aead_preference="auto"` maps to `None` until a frozen family exists, s
 
 ## Notes
 
-Do not start until explicitly requested. This task is the 884 remaining decision, not a rewrite of first-party AEGIS/MORUS.
+BLOCKED. Do not freeze from the 2026-08/09 ARM cells. Those runs are not same-API and must not pick a shipped family. TODO-1044 is the freeze. This file stays only so the old 884 gate has a pointer.
+
+If TODO-1044 refuses a private family, this task records `refuse` and leaves `aead_preference="auto"` as `None`.

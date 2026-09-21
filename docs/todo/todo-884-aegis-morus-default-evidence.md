@@ -275,10 +275,11 @@ This fills the aarch64 cell. Cross-platform matrix now has ARM64 data; remaining
 
 ## Split remaining work (2026-09-21, no implementation)
 
-- Winner freeze from the existing ARM cells is TODO-1028. Do not start new
-  Criterion runs for that freeze. The Omega rustls row is a full 1-RTT packet
-  path including header protection; the AEGIS/MORUS rows are data-AEAD
-  primitives. Those two rows must not be treated as a same-API speed verdict.
+- Winner freeze from the existing ARM cells is blocked. TODO-1028 must not
+  freeze a family from those cells. The same-API bakeoff is TODO-1032 through
+  TODO-1044. The freeze is TODO-1044.
+- The Omega rustls row is a full 1-RTT packet path including header
+  protection; the AEGIS/MORUS rows are data-AEAD primitives. Those two rows
+  must not be treated as a same-API speed verdict.
 - TODO-885 packet-capture wire evidence is TODO-1029.
-- Product-default policy (ship `standard` vs keep `auto`) is decided in
-  TODO-1030, not by this freeze.
+- Product default is rustls AES-GCM (TODO-1033), independent of the bakeoff.
