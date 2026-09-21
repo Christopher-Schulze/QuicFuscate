@@ -974,7 +974,7 @@ impl QuicFuscateConnection {
         payload: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
         if payload.is_empty()
-            || payload.len() > self.effective_tunnel_mtu()
+            || payload.len() > MAX_INNER_IP_PACKET_LEN
             || !matches!(payload.first().map(|byte| byte >> 4), Some(4 | 6))
         {
             debug!(

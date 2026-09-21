@@ -381,7 +381,7 @@ impl ServerHostResources {
         }
 
         let tun = open_server_tun(tun_config, pool).map_err(EngineError::Tun)?;
-        log::info!("Server TUN interface opened: {}", tun.name());
+        log::info!("Server TUN interface opened: {} mtu={}", tun.name(), tun.mtu());
 
         #[cfg(target_os = "linux")]
         let routing = {
