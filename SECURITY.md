@@ -52,7 +52,7 @@ The following areas are in scope:
 
 QuicFuscate is a VPN/obfuscation tool. Security-critical design decisions are documented in `docs/DOCUMENTATION.md`. The codebase uses:
 
-- AEAD encryption: AEGIS-128L (hardware AES path) or MORUS-1280-128 (software fallback) - runtime selection via `CryptoAeadPlan` based on CPU capabilities. AES-128-GCM and ChaCha20-Poly1305 are available modules but are NOT part of the data-plane AEAD contract.
+- Packet protection: rustls AES-128-GCM for the handshake, Initial, header protection, and every stealth mode. Performance mode uses libaegis AEGIS-128L for the authenticated 1-RTT payload only. There is no MORUS owner and no CPU selector among AEGIS widths.
 - Argon2id for admin password hashing
 - SHA-256 for QKey token verification
 - 0-RTT anti-replay via strike register (RFC 8446 Section 8)

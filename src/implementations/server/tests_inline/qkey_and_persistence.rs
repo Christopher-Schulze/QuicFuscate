@@ -1,11 +1,11 @@
 use super::*;
 #[test]
 fn test_normalize_qkey_stealth_accepts_valid_presets() {
-    assert_eq!(normalize_qkey_stealth(Some("auto")).unwrap(), "auto");
-    assert_eq!(normalize_qkey_stealth(Some("max")).unwrap(), "max");
+    assert_eq!(normalize_qkey_stealth(Some("dynamic")).unwrap(), "dynamic");
+    assert_eq!(normalize_qkey_stealth(Some("Stealth MAX")).unwrap(), "Stealth MAX");
     assert_eq!(normalize_qkey_stealth(Some("manual")).unwrap(), "manual");
     assert_eq!(normalize_qkey_stealth(Some("off")).unwrap(), "off");
-    assert_eq!(normalize_qkey_stealth(None).unwrap(), "auto");
+    assert_eq!(normalize_qkey_stealth(None).unwrap(), "dynamic");
 }
 
 #[test]
@@ -534,7 +534,7 @@ fn test_apply_runtime_stealth_overrides_keeps_fronting_explicit_only() {
     );
     assert!(!sc.enable_domain_fronting);
 
-    sc.mode = StealthMode::AntiDpi;
+    sc.mode = StealthMode::StealthMax;
     apply_runtime_stealth_overrides(
         &mut sc,
         BrowserProfile::Chrome,

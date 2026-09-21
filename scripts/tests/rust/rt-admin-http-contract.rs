@@ -21,7 +21,7 @@ impl DummyHandler {
     fn new(listen: String) -> Self {
         let token = "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
         let config = qkey::QKeyConfig::new("127.0.0.1:4433", "127.0.0.1:4433")
-            .with_stealth("auto")
+            .with_stealth("dynamic")
             .with_extra("nonce=contract")
             .with_token(token);
         let qkey = qkey::generate(&config);

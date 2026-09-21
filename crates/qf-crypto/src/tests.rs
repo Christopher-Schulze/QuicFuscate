@@ -1,8 +1,9 @@
 use super::chacha20poly1305::ChaCha20Poly1305;
 use super::{DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AUTO};
-use crate::crypto::aead::{AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem};
-use crate::{CryptoConfig, DataAeadPreference, PacketProtectionMode, PrivateAeadFamily};
-use qf_cpu::CryptoAeadPlan;
+use crate::crypto::aead::{AeadOpen, AeadSeal};
+use crate::{
+    CryptoConfig, DataAeadPreference, LibAegis128Variant, PacketProtectionMode, PrivateAeadFamily,
+};
 use std::sync::Mutex;
 
 // DATA_AEAD_OVERRIDE_MODE is process-global. Serialize override tests to avoid races.
@@ -75,13 +76,8 @@ fn aead_rejects_packet_numbers_above_quic_limit() {
     assert!(aes.seal_with_u64_counter(invalid_counter, &[], &mut aes_buf, 0, None).is_err());
     assert!(aes.open_with_u64_counter(invalid_counter, &[], &mut aes_buf).is_err());
 
-    for plan in [
-        CryptoAeadPlan::Aegis128L,
-        CryptoAeadPlan::Aegis128X4,
-        CryptoAeadPlan::Aegis128X8,
-        CryptoAeadPlan::Morus,
-    ] {
-        let (seal, open) = super::build_data_aead(plan, &key16, &iv12);
+    for variant in [LibAegis128Variant::L, LibAegis128Variant::X2, LibAegis128Variant::X4] {
+        let (seal, open) = super::select_libaegis128_packet(variant, &key16, &iv12);
         let mut data_buf = vec![0u8; 16];
         assert!(seal.seal_with_u64_counter(invalid_counter, &[], &mut data_buf, 0, None).is_err());
         assert!(open.open_with_u64_counter(invalid_counter, &[], &mut data_buf).is_err());
@@ -91,7 +87,7 @@ fn aead_rejects_packet_numbers_above_quic_limit() {
 #[test]
 fn data_aead_config_force_overrides_preference() {
     let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    super::install_data_aead_selection(DataAeadPreference::Morus, "aegis-128l");
+    super::install_data_aead_selection(DataAeadPreference::Auto, "aegis");
     assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_L);
     super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
 }
@@ -111,8 +107,9 @@ fn data_aead_config_force_internal_width_aliases_fall_back_to_auto() {
 #[test]
 fn crypto_config_preserves_wire_shape_and_force_validation() {
     let config = CryptoConfig::default();
-    assert_eq!(config.packet_protection_mode, PacketProtectionMode::Auto);
+    assert_eq!(config.packet_protection_mode, PacketProtectionMode::Standard);
     assert_eq!(config.aead_preference, DataAeadPreference::Auto);
+    assert!(config.private_family().is_none());
     assert!(config.validate().is_ok());
 
     let encoded = serde_json::to_string(&config).expect("crypto config serializes");
@@ -129,7 +126,7 @@ fn private_packet_selector_requires_exact_key_and_iv_material() {
     let key = [0x11u8; PrivateAeadFamily::KEY_LEN];
     let iv = [0x22u8; PrivateAeadFamily::IV_LEN];
     let plaintext = b"private-roundtrip";
-    for family in [PrivateAeadFamily::Aegis128L, PrivateAeadFamily::Morus1280_128] {
+    for family in [PrivateAeadFamily::Aegis128L] {
         let (seal, open) =
             super::select_private_packet_data_aead(family, &key, &iv).expect("exact material");
         let mut packet = vec![0u8; plaintext.len() + PrivateAeadFamily::TAG_LEN];
@@ -163,195 +160,121 @@ fn packet_protection_mode_validation_is_fail_closed() {
 }
 
 #[test]
-fn data_aead_internal_aegis_x4_backend_roundtrip() {
-    let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let key = [0x11u8; 32];
-    let iv = [0x22u8; 16];
-    let ad = b"ad";
-    let pt = b"hello-quicfuscate";
-    let mut k16 = [0u8; 16];
-    k16.copy_from_slice(&key[..16]);
-    let mut iv12 = [0u8; 12];
-    iv12.copy_from_slice(&iv[..12]);
-
-    let (seal, open) = super::build_data_aead(CryptoAeadPlan::Aegis128X4, &k16, &iv12);
-    let mut buf = vec![0u8; pt.len() + 16];
-    buf[..pt.len()].copy_from_slice(pt);
-    let out_len = seal.seal_with_u64_counter(7, ad, buf.as_mut_slice(), pt.len(), None).unwrap();
-    assert_eq!(out_len, pt.len() + 16);
-    let pt_len = open.open_with_u64_counter(7, ad, buf.as_mut_slice()).unwrap();
-    assert_eq!(pt_len, pt.len());
-    assert_eq!(&buf[..pt_len], pt);
-
-    super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
+fn default_crypto_config_ships_standard_without_private_family() {
+    let config = CryptoConfig::default();
+    assert_eq!(config.packet_protection_mode, PacketProtectionMode::Standard);
+    assert_eq!(config.aead_preference, DataAeadPreference::Auto);
+    assert!(config.force_aead.is_empty());
+    assert!(config.private_family().is_none());
+    assert!(config.validate().is_ok());
+    assert_ne!(config.packet_protection_mode, PacketProtectionMode::AdvancedRequired);
 }
 
 #[test]
-fn data_aead_x4_batch_seal_open_roundtrip() {
-    let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let key = [0x5Au8; 16];
-    let iv = [0x6Bu8; 12];
-    let ad = b"transport-batch-ad";
-    let pt = b"batch-payload-12345";
+fn ring_aes_gcm128_matches_nist_and_first_party_oracle() {
+    let key = [0u8; 16];
+    let iv = [0u8; 12];
+    let expected = hex_to_bytes(concat!(
+        "0388dace60b6a392f328c2b971b2fe78",
+        "ab6e47d42cec13bdf53a67b21257bddf",
+    ));
 
-    let (seal, open) = super::build_data_aead(CryptoAeadPlan::Aegis128X4, &key, &iv);
-    assert!(seal.supports_batch_seal());
-    assert!(open.supports_batch_open());
+    let mut ring_buffer = [0u8; 32];
+    let ring_seal = super::RingAesGcm128::new(&key, &iv).expect("valid ring AES-128-GCM material");
+    let ring_len = ring_seal
+        .seal_with_u64_counter(0, &[], &mut ring_buffer, 16, None)
+        .expect("ring NIST AES-GCM sealing must succeed");
+    assert_eq!(ring_len, expected.len());
+    assert_eq!(ring_buffer.as_slice(), expected.as_slice());
 
-    let mut bufs: Vec<Vec<u8>> = (0..8)
-        .map(|_| {
-            let mut b = vec![0u8; pt.len() + 16];
-            b[..pt.len()].copy_from_slice(pt);
-            b
-        })
-        .collect();
-    let mut seal_items: Vec<AeadSealItem<'_>> = bufs
-        .iter_mut()
-        .enumerate()
-        .map(|(i, buf)| AeadSealItem {
-            counter: i as u64 + 1,
-            ad,
-            buf: buf.as_mut_slice(),
-            plaintext_len: pt.len(),
-        })
-        .collect();
-    seal.seal_batch(seal_items.as_mut_slice()).unwrap();
+    let mut first_party = [0u8; 32];
+    let oracle = super::AesGcm128::new(&key, &iv).expect("valid first-party AES-128-GCM material");
+    oracle.seal_with_u64_counter(0, &[], &mut first_party, 16, None).expect("oracle seal");
+    assert_eq!(ring_buffer, first_party);
 
-    let mut open_items: Vec<AeadOpenItem<'_>> = bufs
-        .iter_mut()
-        .enumerate()
-        .map(|(i, buf)| AeadOpenItem { counter: i as u64 + 1, ad, buf: buf.as_mut_slice() })
-        .collect();
-    open.open_batch(open_items.as_mut_slice()).unwrap();
-    for buf in &bufs {
-        assert_eq!(&buf[..pt.len()], pt);
-    }
-
-    super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
+    let ring_open = super::RingAesGcm128::new(&key, &iv).expect("valid ring AES-128-GCM material");
+    let plaintext_len = ring_open
+        .open_with_u64_counter(0, &[], &mut ring_buffer)
+        .expect("ring NIST AES-GCM opening must succeed");
+    assert_eq!(plaintext_len, 16);
+    assert_eq!(&ring_buffer[..plaintext_len], &[0u8; 16]);
 }
 
 #[test]
-fn data_aead_internal_aegis_x8_backend_roundtrip() {
-    let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    let key = [0x33u8; 32];
-    let iv = [0x44u8; 16];
-    let ad = b"ad";
-    let pt = b"hello-quicfuscate-x8";
-    let mut k16 = [0u8; 16];
-    k16.copy_from_slice(&key[..16]);
-    let mut iv12 = [0u8; 12];
-    iv12.copy_from_slice(&iv[..12]);
+fn ring_and_first_party_aes_gcm_roundtrip_across_quic_counters() {
+    let key = [0x11u8; 16];
+    let iv = [0x22u8; 12];
+    let ad = b"quic-aad";
+    let plaintext = b"initial-payload-bytes";
+    let ring = super::RingAesGcm128::from_arrays(&key, &iv).expect("ring AES");
+    let oracle = super::AesGcm128::from_arrays(&key, &iv);
+    for counter in [0u64, 1, 7, 255, 1 << 20] {
+        let mut ring_buf = vec![0u8; plaintext.len() + 16];
+        ring_buf[..plaintext.len()].copy_from_slice(plaintext);
+        ring.seal_with_u64_counter(counter, ad, &mut ring_buf, plaintext.len(), None)
+            .expect("ring seal");
+        let mut oracle_buf = vec![0u8; plaintext.len() + 16];
+        oracle_buf[..plaintext.len()].copy_from_slice(plaintext);
+        oracle
+            .seal_with_u64_counter(counter, ad, &mut oracle_buf, plaintext.len(), None)
+            .expect("oracle seal");
+        assert_eq!(ring_buf, oracle_buf, "ciphertext diverged at counter {counter}");
 
-    let (seal, open) = super::build_data_aead(CryptoAeadPlan::Aegis128X8, &k16, &iv12);
-    let mut buf = vec![0u8; pt.len() + 16];
-    buf[..pt.len()].copy_from_slice(pt);
-    let out_len = seal.seal_with_u64_counter(9, ad, buf.as_mut_slice(), pt.len(), None).unwrap();
-    assert_eq!(out_len, pt.len() + 16);
-    let pt_len = open.open_with_u64_counter(9, ad, buf.as_mut_slice()).unwrap();
-    assert_eq!(pt_len, pt.len());
-    assert_eq!(&buf[..pt_len], pt);
-
-    super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
-}
-
-#[test]
-fn aegis_x_variants_match_aegis128l() {
-    // For a fixed key/nonce, all variants must produce identical ciphertext and tag.
-    let key = [0x55u8; 16];
-    let nonce = [0x66u8; 16];
-    let ad = b"associated-data-123";
-
-    for &len in &[0usize, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255] {
-        let mut pt = vec![0u8; len];
-        for (i, b) in pt.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
-        }
-
-        let mut a1 = crate::crypto::Aegis128L::new(&key, &nonce).unwrap();
-        let mut c1 = pt.clone();
-        let t1 = a1.encrypt_in_place(&mut c1, ad);
-
-        let mut a4 = crate::crypto::Aegis128X4::new(&key, &nonce).unwrap();
-        let mut c4 = pt.clone();
-        let t4 = a4.encrypt_in_place(&mut c4, ad);
-        assert_eq!(c4, c1);
-        assert_eq!(t4, t1);
-
-        let mut a8 = crate::crypto::Aegis128X8::new(&key, &nonce).unwrap();
-        let mut c8 = pt.clone();
-        let t8 = a8.encrypt_in_place(&mut c8, ad);
-        assert_eq!(c8, c1);
-        assert_eq!(t8, t1);
+        let opened =
+            ring.open_with_u64_counter(counter, ad, &mut oracle_buf).expect("ring opens oracle");
+        assert_eq!(&oracle_buf[..opened], plaintext);
+        let opened =
+            oracle.open_with_u64_counter(counter, ad, &mut ring_buf).expect("oracle opens ring");
+        assert_eq!(&ring_buf[..opened], plaintext);
     }
 }
 
 #[test]
-fn aegis_x_variants_cross_decrypt() {
-    let key = [0x77u8; 16];
-    let nonce = [0x88u8; 16];
-    let ad = b"ad";
-    let mut pt = vec![0u8; 333];
-    for (i, b) in pt.iter_mut().enumerate() {
-        *b = (i as u8).wrapping_mul(13).wrapping_add(9);
-    }
+fn ring_aes_hp_matches_fips197_and_first_party_oracle() {
+    use crate::crypto::aead::{AesHp, PacketHeaderProtector};
 
-    let mut a1 = crate::crypto::Aegis128L::new(&key, &nonce).unwrap();
-    let mut ct = pt.clone();
-    let tag = a1.encrypt_in_place(&mut ct, ad);
+    let key: [u8; 16] =
+        hex_to_bytes("000102030405060708090a0b0c0d0e0f").try_into().expect("16-byte key");
+    let sample: [u8; 16] =
+        hex_to_bytes("00112233445566778899aabbccddeeff").try_into().expect("16-byte sample");
+    let expected = [0x69, 0xc4, 0xe0, 0xd8, 0x6a];
 
-    let mut a8 = crate::crypto::Aegis128X8::new(&key, &nonce).unwrap();
-    let mut dec = ct.clone();
-    a8.decrypt_in_place(&mut dec, ad, &tag).unwrap();
-    assert_eq!(dec, pt);
-
-    let mut a4 = crate::crypto::Aegis128X4::new(&key, &nonce).unwrap();
-    let mut dec2 = ct;
-    a4.decrypt_in_place(&mut dec2, ad, &tag).unwrap();
-    assert_eq!(dec2, pt);
+    let ring = super::RingAesHp::from_key(&key).expect("ring AES-HP");
+    let oracle = AesHp::from_key(&key);
+    let ring_mask = ring.new_mask(&sample).expect("ring mask");
+    let oracle_mask = oracle.new_mask(&sample).expect("oracle mask");
+    assert_eq!(ring_mask, expected);
+    assert_eq!(ring_mask, oracle_mask);
 }
 
 #[test]
-fn aegis_x_variants_match_ciphertext_and_tag_across_matrix() {
-    let key = [0x91u8; 16];
-    let ad_lengths = [0usize, 1, 7, 15, 16, 17, 31, 48];
-    let payload_lengths =
-        [0usize, 1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 511];
+fn ring_chacha20poly1305_matches_rfc8439_and_first_party_oracle() {
+    let key = hex_to_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    let nonce = hex_to_bytes("000000000000004a00000000");
+    let plaintext = hex_to_bytes(concat!(
+        "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66",
+        "202739393a20497420776173207468652062657374206f662074696d65732c2069742077",
+        "61732074686520776f727374206f662074696d65732e",
+    ));
 
-    for nonce_seed in 0u8..4 {
-        let nonce = [nonce_seed.wrapping_mul(17).wrapping_add(3); 16];
-        for &ad_len in &ad_lengths {
-            let mut ad = vec![0u8; ad_len];
-            for (idx, byte) in ad.iter_mut().enumerate() {
-                *byte = nonce_seed.wrapping_mul(29).wrapping_add(idx as u8);
-            }
+    let mut ring_buf = plaintext.clone();
+    ring_buf.resize(plaintext.len() + 16, 0);
+    let ring = super::RingChaCha20Poly1305::new(&key, &nonce).expect("ring ChaCha");
+    ring.seal_with_u64_counter(0, &[], ring_buf.as_mut_slice(), plaintext.len(), None)
+        .expect("ring ChaCha seal");
 
-            for &pt_len in &payload_lengths {
-                let mut pt = vec![0u8; pt_len];
-                for (idx, byte) in pt.iter_mut().enumerate() {
-                    *byte = nonce_seed
-                        .wrapping_mul(41)
-                        .wrapping_add((idx as u8).wrapping_mul(9))
-                        .wrapping_add(ad_len as u8);
-                }
+    let mut oracle_buf = plaintext.clone();
+    oracle_buf.resize(plaintext.len() + 16, 0);
+    let oracle = ChaCha20Poly1305::new(&key, &nonce).expect("oracle ChaCha");
+    oracle
+        .seal_with_u64_counter(0, &[], oracle_buf.as_mut_slice(), plaintext.len(), None)
+        .expect("oracle ChaCha seal");
+    assert_eq!(ring_buf, oracle_buf);
 
-                let mut a1 = crate::crypto::Aegis128L::new(&key, &nonce).unwrap();
-                let mut c1 = pt.clone();
-                let t1 = a1.encrypt_in_place(&mut c1, &ad);
-
-                let mut a4 = crate::crypto::Aegis128X4::new(&key, &nonce).unwrap();
-                let mut c4 = pt.clone();
-                let t4 = a4.encrypt_in_place(&mut c4, &ad);
-                assert_eq!(c4, c1, "x4 ciphertext diverged for pt_len={pt_len} ad_len={ad_len}");
-                assert_eq!(t4, t1, "x4 tag diverged for pt_len={pt_len} ad_len={ad_len}");
-
-                let mut a8 = crate::crypto::Aegis128X8::new(&key, &nonce).unwrap();
-                let mut c8 = pt.clone();
-                let t8 = a8.encrypt_in_place(&mut c8, &ad);
-                assert_eq!(c8, c1, "x8 ciphertext diverged for pt_len={pt_len} ad_len={ad_len}");
-                assert_eq!(t8, t1, "x8 tag diverged for pt_len={pt_len} ad_len={ad_len}");
-            }
-        }
-    }
+    let opened = ring
+        .open_with_u64_counter(0, &[], oracle_buf.as_mut_slice())
+        .expect("ring opens oracle ChaCha");
+    assert_eq!(&oracle_buf[..opened], plaintext.as_slice());
 }
 
 #[test]
@@ -363,6 +286,15 @@ fn data_aead_config_preference_is_conditional() {
     let mode = super::data_aead_override_mode();
     assert!(mode == DATA_AEAD_OVERRIDE_AUTO || mode == DATA_AEAD_OVERRIDE_AEGIS_L);
     super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
+}
+
+#[test]
+fn payload_protection_pin_follows_stealth_mode() {
+    assert_eq!(
+        super::payload_protection_pin(true),
+        (PacketProtectionMode::Auto, Some(PrivateAeadFamily::Aegis128L))
+    );
+    assert_eq!(super::payload_protection_pin(false), (PacketProtectionMode::Standard, None));
 }
 
 #[test]
@@ -497,490 +429,11 @@ fn crypto_constructors_reject_invalid_key_and_iv_lengths() {
     assert!(super::AesGcm128::new(&[0u8; 16], &[0u8; 11]).is_err());
     assert!(super::AesGcm128::new(&[0u8; 16], &[0u8; 13]).is_err());
 
-    assert!(super::Aegis128LAead::new(&[0u8; 15], &[0u8; 12]).is_err());
-    assert!(super::Aegis128LAead::new(&[0u8; 17], &[0u8; 12]).is_err());
-    assert!(super::Aegis128X4Aead::new(&[0u8; 16], &[0u8; 11]).is_err());
-    assert!(super::Aegis128X8Aead::new(&[0u8; 16], &[0u8; 13]).is_err());
-
-    assert!(super::MorusAead::new(&[0u8; 15], &[0u8; 12]).is_err());
-    assert!(super::MorusAead::new(&[0u8; 17], &[0u8; 12]).is_err());
-    assert!(super::MorusAead::new(&[0u8; 16], &[0u8; 11]).is_err());
-    assert!(super::MorusAead::new(&[0u8; 16], &[0u8; 13]).is_err());
-
-    assert!(super::aegis::Aegis128L::new(&[0u8; 15], &[0u8; 16]).is_err());
-    assert!(super::aegis::Aegis128L::new(&[0u8; 16], &[0u8; 15]).is_err());
     assert!(super::aead::AesHp::new(&[0u8; 15]).is_err());
     assert!(super::aead::AesHp::new(&[0u8; 32]).is_ok());
 
     assert!(super::select_data_aead(&[0u8; 15], &[0u8; 12]).is_err());
     assert!(super::select_data_aead(&[0u8; 16], &[0u8; 13]).is_err());
-}
-
-/// Differential property test: AEGIS-128L and MORUS-1280-128 must satisfy the
-/// same correctness and authentication invariants over a deterministic
-/// pseudorandom input space. Each scenario picks key, IV, nonce, associated
-/// data length, and plaintext length from a splitmix64 stream and asserts
-/// both candidates share the same shape of behavior - roundtrip, ciphertext
-/// change relative to plaintext, wrong-AD rejection, tag-flip rejection, and
-/// nonce sensitivity. This is the symmetrized differential coverage for the
-/// active TODO-884 evidence program; it does not promote a winner and
-/// remains bounded to the local Rust correctness harness.
-#[test]
-fn aegis_morus_differential_invariants() {
-    use super::aegis::{Aegis128L, AegisError};
-    use super::morus::{AeadError, MorusAead};
-
-    // Splitmix64 - self-contained, deterministic, zero-dependency PRNG so
-    // the test reproduces the exact same input space across runs.
-    fn next_u64(state: &mut u64) -> u64 {
-        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = *state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    const SCENARIOS: usize = 64;
-
-    let mut state: u64 = 0xDEAD_BEEF_CAFE_BABEu64;
-    for scenario in 0..SCENARIOS {
-        // Key (16 bytes), IV (12 bytes), nonce (16 bytes), alt-nonce (16 bytes).
-        let key: [u8; 16] = {
-            let mut k = [0u8; 16];
-            let (slots, _) = k.as_chunks_mut::<8>();
-            for slot in slots {
-                slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
-            }
-            k
-        };
-        let iv: [u8; 12] = {
-            let n0 = next_u64(&mut state).to_le_bytes();
-            let n1 = next_u64(&mut state).to_le_bytes();
-            let mut v = [0u8; 12];
-            v[..8].copy_from_slice(&n0);
-            v[8..].copy_from_slice(&n1[..4]);
-            v
-        };
-        let nonce: [u8; 16] = {
-            let mut n = [0u8; 16];
-            let (slots, _) = n.as_chunks_mut::<8>();
-            for slot in slots {
-                slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
-            }
-            n
-        };
-        let mut alt_nonce = nonce;
-        alt_nonce[0] ^= 0xFF;
-
-        // AD length in [0, 96); plaintext length in [0, 1024).
-        let ad_len = (next_u64(&mut state) as usize) % 96;
-        let msg_len = (next_u64(&mut state) as usize) % 1024;
-        let ad: Vec<u8> =
-            (0..ad_len).map(|i| (i as u8).wrapping_mul(13).wrapping_add(0x5A)).collect();
-        let msg: Vec<u8> = (0..msg_len)
-            .map(|i| (i as u8).wrapping_mul(7).wrapping_add((scenario as u8).wrapping_mul(31)))
-            .collect();
-
-        // Wrong AD: prefer a length mutation; fall back to a sentinel byte.
-        let wrong_ad: Vec<u8> =
-            if ad.is_empty() { vec![0xFF] } else { ad[..ad.len() - 1].to_vec() };
-
-        // === AEGIS-128L ===
-        let mut aegis_buf = msg.clone();
-        let aegis_tag = Aegis128L::new(&key, &nonce)
-            .expect("AEGIS valid 16-byte key+nonce")
-            .encrypt_in_place(&mut aegis_buf, &ad);
-        let aegis_ct = aegis_buf;
-
-        // Invariant 1: roundtrip.
-        let pt = Aegis128L::new(&key, &nonce)
-            .unwrap()
-            .decrypt_verified(&aegis_ct, &ad, &aegis_tag)
-            .expect("AEGIS roundtrip must succeed");
-        assert_eq!(pt, msg, "AEGIS scenario {scenario}: roundtrip mismatch");
-
-        // Invariant 2: ciphertext differs from plaintext when non-empty.
-        if !msg.is_empty() {
-            assert_ne!(
-                aegis_ct, msg,
-                "AEGIS scenario {scenario}: ciphertext must differ from plaintext"
-            );
-        }
-
-        // Invariant 3: wrong AD fails authentication.
-        assert_eq!(
-            Aegis128L::new(&key, &nonce)
-                .unwrap()
-                .decrypt_verified(&aegis_ct, &wrong_ad, &aegis_tag),
-            Err(AegisError::InvalidTag),
-            "AEGIS scenario {scenario}: wrong AD must fail authentication"
-        );
-
-        // Invariant 4: single tag-bit flip fails authentication.
-        let mut aegis_bad_tag = aegis_tag;
-        aegis_bad_tag[0] ^= 0x01;
-        assert_eq!(
-            Aegis128L::new(&key, &nonce).unwrap().decrypt_verified(&aegis_ct, &ad, &aegis_bad_tag),
-            Err(AegisError::InvalidTag),
-            "AEGIS scenario {scenario}: tag bit flip must fail authentication"
-        );
-
-        // Invariant 5: alternate nonce must change either ciphertext or tag.
-        let mut aegis_alt_buf = msg.clone();
-        let aegis_alt_tag =
-            Aegis128L::new(&key, &alt_nonce).unwrap().encrypt_in_place(&mut aegis_alt_buf, &ad);
-        if !msg.is_empty() {
-            assert_ne!(
-                aegis_alt_buf, aegis_ct,
-                "AEGIS scenario {scenario}: alternate nonce must change ciphertext"
-            );
-        } else {
-            assert_ne!(
-                aegis_alt_tag, aegis_tag,
-                "AEGIS scenario {scenario}: alternate nonce must change tag (empty plaintext)"
-            );
-        }
-
-        // === MORUS-1280-128 ===
-        let morus = MorusAead::from_arrays(&key, &iv);
-        let mut morus_buf = msg.clone();
-        let morus_tag = morus.encrypt_in_place(&mut morus_buf, &ad, &nonce);
-        let morus_ct = morus_buf;
-
-        // Invariant 1: roundtrip.
-        let mut morus_pt = morus_ct.clone();
-        morus
-            .decrypt_in_place(&mut morus_pt, &morus_tag, &ad, &nonce)
-            .expect("MORUS roundtrip must succeed");
-        assert_eq!(morus_pt, msg, "MORUS scenario {scenario}: roundtrip mismatch");
-
-        // Invariant 2: ciphertext differs from plaintext when non-empty.
-        if !msg.is_empty() {
-            assert_ne!(
-                morus_ct, msg,
-                "MORUS scenario {scenario}: ciphertext must differ from plaintext"
-            );
-        }
-
-        // Invariant 3: wrong AD fails authentication.
-        let mut morus_bad = morus_ct.clone();
-        assert_eq!(
-            morus.decrypt_in_place(&mut morus_bad, &morus_tag, &wrong_ad, &nonce),
-            Err(AeadError::TagMismatch),
-            "MORUS scenario {scenario}: wrong AD must fail authentication"
-        );
-
-        // Invariant 4: single tag-bit flip fails authentication.
-        let mut morus_bad_tag = morus_tag;
-        morus_bad_tag[0] ^= 0x01;
-        let mut morus_bad = morus_ct.clone();
-        assert_eq!(
-            morus.decrypt_in_place(&mut morus_bad, &morus_bad_tag, &ad, &nonce),
-            Err(AeadError::TagMismatch),
-            "MORUS scenario {scenario}: tag bit flip must fail authentication"
-        );
-
-        // Invariant 5: alternate nonce must change either ciphertext or tag.
-        let mut morus_alt_buf = msg.clone();
-        let morus_alt_tag = morus.encrypt_in_place(&mut morus_alt_buf, &ad, &alt_nonce);
-        if !msg.is_empty() {
-            assert_ne!(
-                morus_alt_buf, morus_ct,
-                "MORUS scenario {scenario}: alternate nonce must change ciphertext"
-            );
-        } else {
-            assert_ne!(
-                morus_alt_tag, morus_tag,
-                "MORUS scenario {scenario}: alternate nonce must change tag (empty plaintext)"
-            );
-        }
-    }
-}
-
-/// Differential property test at the QUIC packet-path AeadSeal/AeadOpen
-/// trait layer: both Aegis128LAead and MorusAead must satisfy the same
-/// correctness and authentication invariants over a deterministic
-/// pseudorandom input space when reached through the public trait API.
-/// This complements `aegis_morus_differential_invariants` (which exercises
-/// the low-level Aegis128L::new and MorusAead::from_arrays APIs) by adding
-/// the trait-layer coverage that the QUIC transport actually consumes.
-/// Both candidates must satisfy the public AeadSeal/AeadOpen contract
-/// identically; neither is promoted.
-#[test]
-fn aegis_morus_aead_trait_differential() {
-    use super::aead::{AeadOpen, AeadSeal};
-    use super::aegis::Aegis128LAead;
-    use super::morus::MorusAead;
-
-    // Splitmix64 - self-contained, deterministic, zero-dependency PRNG so
-    // the test reproduces the exact same input space across runs.
-    fn next_u64(state: &mut u64) -> u64 {
-        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = *state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    const SCENARIOS: usize = 32;
-
-    let mut state: u64 = 0x1234_5678_9ABC_DEF0u64;
-    for scenario in 0..SCENARIOS {
-        // Key (16 bytes), IV (12 bytes), counter (u64, 1..=100).
-        let key: [u8; 16] = {
-            let mut k = [0u8; 16];
-            let (slots, _) = k.as_chunks_mut::<8>();
-            for slot in slots {
-                slot.copy_from_slice(&next_u64(&mut state).to_le_bytes());
-            }
-            k
-        };
-        let iv: [u8; 12] = {
-            let n0 = next_u64(&mut state).to_le_bytes();
-            let n1 = next_u64(&mut state).to_le_bytes();
-            let mut v = [0u8; 12];
-            v[..8].copy_from_slice(&n0);
-            v[8..].copy_from_slice(&n1[..4]);
-            v
-        };
-        let counter = (next_u64(&mut state) % 100) + 1;
-
-        // AD length in [0, 48); payload length in [0, 256).
-        let ad_len = (next_u64(&mut state) as usize) % 48;
-        let payload_len = (next_u64(&mut state) as usize) % 256;
-        let ad: Vec<u8> =
-            (0..ad_len).map(|i| (i as u8).wrapping_mul(11).wrapping_add(0x33)).collect();
-        let payload: Vec<u8> =
-            (0..payload_len).map(|i| (i as u8).wrapping_mul(17).wrapping_add(0x77)).collect();
-
-        // Wrong AD: prefer a length mutation; fall back to a sentinel byte.
-        let wrong_ad: Vec<u8> =
-            if ad.is_empty() { vec![0xAA] } else { ad[..ad.len() - 1].to_vec() };
-
-        // === Aegis128LAead via AeadSeal/AeadOpen ===
-        let aegis = Aegis128LAead::from_arrays(&key, &iv);
-        let mut aegis_buf = vec![0u8; payload.len() + 16];
-        aegis_buf[..payload.len()].copy_from_slice(&payload);
-        let aegis_sealed_len = aegis
-            .seal_with_u64_counter(counter, &ad, &mut aegis_buf, payload.len(), None)
-            .expect("AEGIS seal must succeed");
-        assert_eq!(
-            aegis_sealed_len,
-            payload.len() + 16,
-            "AEGIS scenario {scenario}: sealed length mismatch"
-        );
-
-        // Invariant 1: roundtrip via open_with_u64_counter.
-        let aegis_pt_len = aegis
-            .open_with_u64_counter(counter, &ad, &mut aegis_buf)
-            .expect("AEGIS open must succeed");
-        assert_eq!(aegis_pt_len, payload.len(), "AEGIS scenario {scenario}: pt length mismatch");
-        assert_eq!(
-            &aegis_buf[..aegis_pt_len],
-            &payload[..],
-            "AEGIS scenario {scenario}: roundtrip mismatch"
-        );
-
-        // Invariant 2: bit-flip forgery detected.
-        let mut aegis_forged = vec![0u8; payload.len() + 16];
-        aegis_forged[..payload.len()].copy_from_slice(&payload);
-        aegis
-            .seal_with_u64_counter(counter, &ad, &mut aegis_forged, payload.len(), None)
-            .expect("AEGIS reseal must succeed");
-        aegis_forged[0] ^= 0x01;
-        assert!(
-            aegis.open_with_u64_counter(counter, &ad, &mut aegis_forged).is_err(),
-            "AEGIS scenario {scenario}: bit-flip forgery must fail"
-        );
-
-        // Invariant 3: wrong-AD forgery detected.
-        let mut aegis_wrong_ad = vec![0u8; payload.len() + 16];
-        aegis_wrong_ad[..payload.len()].copy_from_slice(&payload);
-        aegis
-            .seal_with_u64_counter(counter, &ad, &mut aegis_wrong_ad, payload.len(), None)
-            .expect("AEGIS reseal must succeed");
-        assert!(
-            aegis.open_with_u64_counter(counter, &wrong_ad, &mut aegis_wrong_ad).is_err(),
-            "AEGIS scenario {scenario}: wrong-AD must fail"
-        );
-
-        // === MorusAead via AeadSeal/AeadOpen ===
-        let morus = MorusAead::from_arrays(&key, &iv);
-        let mut morus_buf = vec![0u8; payload.len() + 16];
-        morus_buf[..payload.len()].copy_from_slice(&payload);
-        let morus_sealed_len = morus
-            .seal_with_u64_counter(counter, &ad, &mut morus_buf, payload.len(), None)
-            .expect("MORUS seal must succeed");
-        assert_eq!(
-            morus_sealed_len,
-            payload.len() + 16,
-            "MORUS scenario {scenario}: sealed length mismatch"
-        );
-
-        // Invariant 1: roundtrip via open_with_u64_counter.
-        let morus_pt_len = morus
-            .open_with_u64_counter(counter, &ad, &mut morus_buf)
-            .expect("MORUS open must succeed");
-        assert_eq!(morus_pt_len, payload.len(), "MORUS scenario {scenario}: pt length mismatch");
-        assert_eq!(
-            &morus_buf[..morus_pt_len],
-            &payload[..],
-            "MORUS scenario {scenario}: roundtrip mismatch"
-        );
-
-        // Invariant 2: bit-flip forgery detected.
-        let mut morus_forged = vec![0u8; payload.len() + 16];
-        morus_forged[..payload.len()].copy_from_slice(&payload);
-        morus
-            .seal_with_u64_counter(counter, &ad, &mut morus_forged, payload.len(), None)
-            .expect("MORUS reseal must succeed");
-        morus_forged[0] ^= 0x01;
-        assert!(
-            morus.open_with_u64_counter(counter, &ad, &mut morus_forged).is_err(),
-            "MORUS scenario {scenario}: bit-flip forgery must fail"
-        );
-
-        // Invariant 3: wrong-AD forgery detected.
-        let mut morus_wrong_ad = vec![0u8; payload.len() + 16];
-        morus_wrong_ad[..payload.len()].copy_from_slice(&payload);
-        morus
-            .seal_with_u64_counter(counter, &ad, &mut morus_wrong_ad, payload.len(), None)
-            .expect("MORUS reseal must succeed");
-        assert!(
-            morus.open_with_u64_counter(counter, &wrong_ad, &mut morus_wrong_ad).is_err(),
-            "MORUS scenario {scenario}: wrong-AD must fail"
-        );
-    }
-}
-
-/// Differential property test at the QUIC packet-size boundary: both
-/// Aegis128LAead and MorusAead must satisfy the same correctness and
-/// authentication invariants at the 1200, 1400, and 1500-byte payload
-/// sizes that the QUIC transport actually uses. This complements
-/// `aegis_morus_aead_trait_differential` (which sweeps up to 256 bytes)
-/// by exercising the realistic packet-payload range and one oversized
-/// 1500-byte edge case. Neither candidate is promoted; both must satisfy
-/// the same roundtrip and forgery invariants at every payload size.
-#[test]
-fn aegis_morus_quic_payload_boundary_differential() {
-    use super::aead::{AeadOpen, AeadSeal};
-    use super::aegis::Aegis128LAead;
-    use super::morus::MorusAead;
-
-    // The QUIC-relevant payload sizes from the TODO-884 evidence program.
-    const PAYLOAD_SIZES: &[usize] = &[1200, 1400, 1500];
-
-    // A deterministic fixed key/IV/AD/counter triple so this test is
-    // reproducible across runs without depending on an RNG.
-    let key: [u8; 16] = [
-        0x5A, 0xA5, 0x3C, 0xC3, 0x69, 0x96, 0x0F, 0xF0, 0x12, 0x21, 0xAB, 0xBA, 0xCD, 0xDC, 0xEF,
-        0xFE,
-    ];
-    let iv: [u8; 12] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC];
-    let ad: [u8; 17] = *b"quic-boundary-ad!";
-    let counter: u64 = 42;
-
-    let wrong_ad: [u8; 18] = *b"wrong-boundary-ad!";
-
-    for &payload_len in PAYLOAD_SIZES {
-        // Deterministic payload: every byte is a function of its index.
-        let payload: Vec<u8> =
-            (0..payload_len).map(|i| (i as u8).wrapping_mul(23).wrapping_add(0x5C)).collect();
-
-        // === Aegis128LAead via AeadSeal/AeadOpen ===
-        let aegis = Aegis128LAead::from_arrays(&key, &iv);
-        let mut aegis_buf = vec![0u8; payload.len() + 16];
-        aegis_buf[..payload.len()].copy_from_slice(&payload);
-        let aegis_sealed_len = aegis
-            .seal_with_u64_counter(counter, &ad, &mut aegis_buf, payload.len(), None)
-            .expect("AEGIS seal at QUIC boundary must succeed");
-        assert_eq!(
-            aegis_sealed_len,
-            payload.len() + 16,
-            "AEGIS {payload_len}B: sealed length mismatch"
-        );
-
-        // Roundtrip.
-        let aegis_pt_len = aegis
-            .open_with_u64_counter(counter, &ad, &mut aegis_buf)
-            .expect("AEGIS open at QUIC boundary must succeed");
-        assert_eq!(aegis_pt_len, payload.len(), "AEGIS {payload_len}B: pt length mismatch");
-        assert_eq!(
-            &aegis_buf[..aegis_pt_len],
-            &payload[..],
-            "AEGIS {payload_len}B: roundtrip mismatch"
-        );
-
-        // Bit-flip forgery.
-        let mut aegis_forged = vec![0u8; payload.len() + 16];
-        aegis_forged[..payload.len()].copy_from_slice(&payload);
-        aegis
-            .seal_with_u64_counter(counter, &ad, &mut aegis_forged, payload.len(), None)
-            .expect("AEGIS reseal at QUIC boundary must succeed");
-        aegis_forged[0] ^= 0x01;
-        assert!(
-            aegis.open_with_u64_counter(counter, &ad, &mut aegis_forged).is_err(),
-            "AEGIS {payload_len}B: bit-flip forgery must fail"
-        );
-
-        // Wrong-AD forgery.
-        let mut aegis_wrong_ad = vec![0u8; payload.len() + 16];
-        aegis_wrong_ad[..payload.len()].copy_from_slice(&payload);
-        aegis
-            .seal_with_u64_counter(counter, &ad, &mut aegis_wrong_ad, payload.len(), None)
-            .expect("AEGIS reseal at QUIC boundary must succeed");
-        assert!(
-            aegis.open_with_u64_counter(counter, &wrong_ad, &mut aegis_wrong_ad).is_err(),
-            "AEGIS {payload_len}B: wrong-AD must fail"
-        );
-
-        // === MorusAead via AeadSeal/AeadOpen ===
-        let morus = MorusAead::from_arrays(&key, &iv);
-        let mut morus_buf = vec![0u8; payload.len() + 16];
-        morus_buf[..payload.len()].copy_from_slice(&payload);
-        let morus_sealed_len = morus
-            .seal_with_u64_counter(counter, &ad, &mut morus_buf, payload.len(), None)
-            .expect("MORUS seal at QUIC boundary must succeed");
-        assert_eq!(
-            morus_sealed_len,
-            payload.len() + 16,
-            "MORUS {payload_len}B: sealed length mismatch"
-        );
-
-        // Roundtrip.
-        let morus_pt_len = morus
-            .open_with_u64_counter(counter, &ad, &mut morus_buf)
-            .expect("MORUS open at QUIC boundary must succeed");
-        assert_eq!(morus_pt_len, payload.len(), "MORUS {payload_len}B: pt length mismatch");
-        assert_eq!(
-            &morus_buf[..morus_pt_len],
-            &payload[..],
-            "MORUS {payload_len}B: roundtrip mismatch"
-        );
-
-        // Bit-flip forgery.
-        let mut morus_forged = vec![0u8; payload.len() + 16];
-        morus_forged[..payload.len()].copy_from_slice(&payload);
-        morus
-            .seal_with_u64_counter(counter, &ad, &mut morus_forged, payload.len(), None)
-            .expect("MORUS reseal at QUIC boundary must succeed");
-        morus_forged[0] ^= 0x01;
-        assert!(
-            morus.open_with_u64_counter(counter, &ad, &mut morus_forged).is_err(),
-            "MORUS {payload_len}B: bit-flip forgery must fail"
-        );
-
-        // Wrong-AD forgery.
-        let mut morus_wrong_ad = vec![0u8; payload.len() + 16];
-        morus_wrong_ad[..payload.len()].copy_from_slice(&payload);
-        morus
-            .seal_with_u64_counter(counter, &ad, &mut morus_wrong_ad, payload.len(), None)
-            .expect("MORUS reseal at QUIC boundary must succeed");
-        assert!(
-            morus.open_with_u64_counter(counter, &wrong_ad, &mut morus_wrong_ad).is_err(),
-            "MORUS {payload_len}B: wrong-AD must fail"
-        );
-    }
 }
 
 /// AEAD length arithmetic must be checked before it can wrap.

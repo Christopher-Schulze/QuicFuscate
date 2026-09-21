@@ -985,7 +985,7 @@ test.describe("Web Admin UI", () => {
             success: true,
             data: {
               keys: created && !revoked
-                ? [{ id: issuedId, name: issuedName, stealth: "auto", fec: "auto", expires_at: null, created_at: 0 }]
+                ? [{ id: issuedId, name: issuedName, stealth: "dynamic", fec: "auto", expires_at: null, created_at: 0 }]
                 : [],
             },
           }),

@@ -62,9 +62,7 @@ This section is the fast path for skeptical review. It is not a marketing summar
 
 - Runtime correctness is defined by checked-in code, targeted tests, and audit scripts.
 - AI-assisted development is part of the repository workflow; code truth is defined by checked-in code and gates, not by assistant claims.
-- Custom data-plane crypto with in-tree implementations:
-  - product contract: `Aegis128L`, `Morus1280_128`
-  - internal backend machine room: `Aegis128X4`, `Aegis128X8`
+- Packet protection: rustls AES-128-GCM for handshake, Initial, header protection, `stealth`, `Stealth MAX`, and `dynamic`. `off` and `performance` pin libaegis AEGIS-128L for the authenticated 1-RTT payload. `manual` selects either cipher. No MORUS owner and no width selector.
 - The Linux high-performance send path is `io_uring` (default feature since TODO-995) with
   batched `SendMsg` as the production send default. Every ring setup probes the kernel at
   runtime and falls back to `sendmmsg`/per-packet I/O when unavailable;
@@ -126,7 +124,7 @@ If a claim is not backed by one of the proof surfaces below, treat it as untrust
 
 | Boundary | Canonical owner | Constraint | Strongest proof surfaces |
 |---|---|---|---|
-| Data-plane AEAD posture | `src/crypto/`, `crates/qf-simd/` | Product contract is `Aegis128L` or `Morus1280_128`; internal width variants remain backend machine room only | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/src/targets/crypto_operations.rs` |
+| Data-plane AEAD posture | `crates/qf-crypto/`, `src/transport/packet/` | rustls AES-128-GCM, except `off` and `performance`, which pin `aegis` for the post-auth payload. `manual` can select `aegis`. | `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, `scripts/tests/fuzz/src/targets/crypto_operations.rs` |
 | TLS-visible handshake boundary | `src/qftls.rs` | rustls owns real TLS protocol semantics; TLS Cover is overlay/cover only | `docs/todo/done/todo-85-tls-cover-and-rustls-boundary-clarification.md`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
 | Packet protection ownership | `src/transport/packet.rs`, `src/transport/connection/` | Packet protection and data-plane AEAD are fork-specific transport decisions, not TLS cipher-suite claims; public packet, CID, token, and CRYPTO ranges fail closed before mutation | `docs/todo/done/todo-76-forked-aead-protocol-posture-clarification.md`, `scripts/tests/rust/rt-transport-packet-headers.rs`, targeted transport rust-tests, `audit-runtime-guardrails.sh` |
 | Unsafe SIMD / crypto machine room | `src/crypto/`, `crates/qf-simd/`, `src/optimize/` | Unsafe and SIMD stay internal or parity-scoped; product/runtime claims stay at owner boundaries only | `cargo clippy --all-targets --all-features -- -W clippy::all`, `scripts/tests/audits/audit-all-comprehensive.sh`, `scripts/tests/audits/audit-runtime-guardrails.sh` |
@@ -199,7 +197,7 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 | Runtime soak and chaos | `scripts/tests/suites/test-runtime-soak-chaos.sh` | control-plane, integration, and runtime stability evidence |
 | DDoS admission | `scripts/tests/suites/test-ddos-admission.sh` | sustained activation/clear hysteresis, established-client bidirectional continuity, real Retry handshake, real MaxMind decisions, strict-HTTPS blacklist refresh, cache restart, failed-refresh last-known-good preservation, and bounded resource evidence |
 | FEC empirical proof | `scripts/tests/suites/test-fec-auto-controller-proof.sh`, `scripts/tests/suites/test-fec-auto-controller-scenarios.sh` | clean-path efficiency, escalation, cadence, recovery, and backend-family evidence |
-| Retained crypto performance evidence | `scripts/benchmarks/suites/bench-retained-crypto-backends.sh` | whether retained `Aegis128L` / `Aegis128X4` / `Aegis128X8` / `Morus1280_128` machine room earns its complexity |
+| Retained crypto performance evidence | `scripts/benchmarks/suites/bench-retained-crypto-backends.sh` | libaegis AEGIS-128L throughput against the pinned performance-mode owner |
 
 ### Evidence Limits
 
@@ -217,10 +215,9 @@ Use this section as the shortest non-marketing answer to "what evidence exists r
 ### Current Release Checkpoint
 
 - **First GitHub Release published: `v0.4.0`** - https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.4.0
-- **Current public GitHub release: `v0.4.4`** - https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.4.4
-- Release Build run `30612996058` published version-coherent native x86_64 and ARM64 Linux server bundles, macOS DMG and signed updater archive, Linux deb and signed AppImage, signed Windows MSI, checksums, provenance, and a signed three-platform `latest.json` updater manifest.
-- Server release artifacts include separate native x86_64 and ARM64 bundles. The ARM64 artifact is architecture-named and carries an adjacent SHA-256 file so an operator cannot mistake the x86_64 bundle for an AArch64 deployment.
-- Last fully verified release checkpoint: `bf929bfddd1ca129c21d480f2ece31fb03a37c42` (`v0.4.4` tag).
+- **Current public GitHub release: `v0.5.0`** - https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.5.0
+- Root `Cargo.toml` and `apps/tauri/src-tauri/tauri.conf.json` carry `0.5.0`.
+- The `v0.4.4` checkpoint remains commit `bf929bfddd1ca129c21d480f2ece31fb03a37c42`. Release Build run `30612996058` published that tag's native server bundles, desktop artifacts, and signed `latest.json`.
 - GitHub `CI` run `30611849921`, `Clippy Matrix` run `30611849920`, and Release Build run `30612996058` are green on `bf929bfddd1ca129c21d480f2ece31fb03a37c42`.
 - `cargo audit` clean: 0 vulnerabilities, 0 warnings (crossbeam-epoch RUSTSEC-2026-0204 patched: 0.9.18 -> 0.9.20).
 - The repository owns its release and CI Rust toolchain through `rust-toolchain.toml`, set to the floating `stable` channel (always latest stable); no nightly toolchain is installed or required. The fuzz lane runs on the same stable toolchain using deterministic corpus + generated-input regression tests instead of nightly-only `cargo-fuzz` + AddressSanitizer. This is a floating-stable baseline, not an MSRV promise; no older Rust compatibility is currently supported or claimed.
@@ -437,7 +434,6 @@ This document provides comprehensive technical documentation for the system arch
   - UDP fast paths: runtime-owned GSO/GRO, `UdpFastPath`, sendmmsg/recvmmsg, and sendmsg_x batching in `crates/qf-transport-udp/src/lib.rs` + `fastpath.rs`; `src/optimize/udp.rs` and `src/transport/udpfast.rs` retain root compatibility projections
 - `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` — each per-packet counter and every histogram bin is `crossbeam_utils::CachePadded`, so dataplane writes and housekeeping drains no longer share cachelines (TODO-997) — sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter. `src/brain/state.rs` owns policy state, actuator snapshots, transition-reason helpers, and server-push state helpers; `src/brain/orchestrator.rs` owns the feature-gated deep-integration orchestrator.
 
-- `src/profile.rs`: test/compat-only `Aegis128Profile` adapter mapped to `simd::CryptoAeadPlan`
 - `src/engine/`: Embedded control plane (`QuicFuscateEngine`, `EngineConfig`, `EngineCommand`, `EngineEvent`, `EngineStats`) for programmatic runtime orchestration
 - `src/compress.rs`: Compression manager (zstd-only) with adaptive policy, telemetry-backed decisions, and optional dictionaries
   - `src/qftls.rs`: Boundary split between rustls real TLS protocol and optional TLS Cover overlay; `qftls/packet_protection.rs` owns packet-owner snapshots and standard-suite metadata, `qftls/private_protocol.rs` owns bounded private negotiation, `qftls/tls_cover_provider.rs` owns the cover adapter, `qftls/rustls_provider.rs` owns standard rustls handshake/key installation, and `qftls/rustls_provider/tests.rs` owns the provider-specific regression suite.
@@ -530,7 +526,7 @@ stealth toggles. TODO-464 through TODO-471 are complete and define the productio
 - TLS: RealTLS via rustls with optional TLS Cover that emits synthetic encrypted QUIC cover records from the active profile (no external uTLS/FFI in the cover layer). TLS Cover does not own or synthesize the real ClientHello. The Engine client path now passes the uTLS/persona decision instead of hardcoding it off; a shared filtered rustls provider removes ChaCha suites from real client offers and server-accepted suites.
 - HTTP/3/QPACK: ALPN, header sets, QPACK policy, and framing must align with the selected persona snapshot.
 - Core H3/MASQUE: production VPN/TUN payloads use the Core H3/MASQUE data plane. It is the sole active CONNECT-UDP/capsule carrier; the retired `stealth::MasqueManager` and stealth-local DoH resolver are preserved only under `archive/`.
-- Domain Fronting: useful only with explicit, vetted fronting configuration. Blind fronting defaults are disabled for Performance, Stealth, and clean Intelligent mode.
+- Domain Fronting: useful only with explicit, vetted fronting configuration. Blind fronting defaults are disabled for `performance`, `stealth`, and clean `dynamic`.
 - DoH: DNS resolution stays inside the tunnel path and the canonical stealth runtime carries no standalone XOR obfuscation layer.
 - Active Probe Detection + Reality Fallback: probe-like traffic is detected and, when required, relayed via `RealityProxy` to preserve realistic upstream behavior under active scanning.
 - Cover Traffic: Cover PING, H3-framed cover requests, randomized bounded Server Push cover, and escalated WebTransport cover are valid layers.
@@ -545,8 +541,8 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
   - `stealth.normalize_target_size` is required by, and only valid with, `padding_strategy = "normalize"`. It must lie in `1200..=65527`: below the QUIC minimum datagram the target could not carry a conformant packet. Selecting `normalize` without it, or with an out-of-range value, fails validation naming the key; setting it alongside any other strategy is rejected as a contradiction rather than ignored, because a silently unused target is how a configuration comes to claim normalization it does not perform. The value flows `StealthSection` -> `StealthConfig` -> `Config::set_stealth_normalize_target()` -> transport strategy 5, which pads each 1-RTT packet up to the target where capacity allows.
 - Mode defaults:
   - Stealth: Adaptive with a small cap (`max_padding_size = 86`) - low overhead, smooths packet sizes.
-  - Anti-DPI: BrowserMimic with larger cap (`max_padding_size = 256`).
-- Timing obfuscation (Anti-DPI default): per-packet random jitter (us) gated in `transport::Config.set_stealth_timing`; enforced as a send gate in `Connection::send()`.
+  - Stealth MAX: BrowserMimic with larger cap (`max_padding_size = 256`).
+- Timing obfuscation (Stealth MAX default): per-packet random jitter (us) gated in `transport::Config.set_stealth_timing`; enforced as a send gate in `Connection::send()`.
 - Hot-path randomness: padding-rate rolls, Random/BrowserMimic padding samples, and jitter samples use `transport::rand::fast_rand_u64_uniform`, a secure-seeded non-cryptographic per-thread SplitMix64 helper. This is intentionally limited to cover heuristics; connection IDs, path challenges, keys, nonces, tokens, and authentication material stay on secure RNG APIs.
 - Hardware integration: On GFNI-capable x86 policies, `accelerate::stealth::add_tls_padding` activates a GFNI-based padding generator that also feeds `StealthManager::apply_padding`; fallbacks (AVX2/SSE2/Scalar) remain unchanged and telemetry (`STEALTH_PADDING_GFNI_OPS`) counts the generated bytes.
 
@@ -559,7 +555,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - Real TLS: implemented via rustls in `src/qftls.rs` with `CombinedProvider` orchestrating a rustls protocol stack plus optional TLS Cover overlay. Client certificate verification is enabled by default and mandatory in release builds; `--verify-peer` is retained as a compatibility flag, `--ca-file` adds a private trust anchor, and negotiated HTTP/3 is unavailable until rustls completes.
 - Client SNI derivation (TODO-732): a configured `connection.sni` stays authoritative. When it is empty, the fallback is derived from the already validated `SocketAddr` as `remote_addr.ip().to_string()`, matching `qf-e2e-client`, and is therefore an IP literal because `connection.remote` must parse as a socket address. The previous `remote.split(':').next()` is only correct for `host:port`; for the bracketed IPv6 form `[2001:db8::1]:4433` it yielded `[`, which then reached the stealth headers and the TLS configuration, so a dual-stack deployment failed on one address family only. The desktop tunnel list uses the existing `parseRemote()` for the same display fallback rather than a second parser.
 - Client CA ownership: `transport::Config::load_verify_locations_from_file()` reads, PEM-parses, and Rustls-validates every configured certificate before retaining the path on that transport configuration. `enable_tls()` passes the path into the connection-local provider, including version-negotiation and profile/SNI rebuilds; no process-global client CA state exists. Missing, unreadable, empty, malformed, or invalid-DER bundles fail before standalone kill-switch publication, and error messages expose the path without certificate contents.
-- TLS Cover: cover provider in `qftls::CombinedProvider` is enabled by default and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Generates synthetic QUIC `CRYPTO` frames during the TLS handshake phase only (correct QUIC behavior per RFC 9001 - CRYPTO frames do not appear post-handshake in real QUIC). Post-handshake cover is provided by QUIC Cover PINGs, H3-framed cover requests and Server Push/WebTransport, plus transport TrafficPadding. Raw random bytes are never injected into an H3 stream. The canonical runtime cover mode now comes from the active `StealthManager::runtime_tls_profile(...)`: `off`, `performance`, and `intelligent` drive the cover layer into performance mode, while stealth-heavy modes keep timing/jitter enabled. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) enables TLS Cover extras in the stealth manager (ticket manager and cert chain emulator) but does not control the cover provider itself. Cipher selection is automatic (`auto`) and prefers AES-128-GCM when hardware AES (AESNI/VAES/SVE AES) is available, otherwise falls back to ChaCha20-Poly1305. Each provider obtains fresh OS entropy and derives connection-local key/IV material through domain-separated HKDF. `CryptoContext::install_tls_cover_cipher` is the single install/rotation contract: exact active material is an idempotent no-op that preserves sequence numbers, fresh material retires the previous identity and resets both directions, retired material is rejected, and sequence exhaustion fails closed with `AeadLimitReached`. Cover-frame generation never performs lazy reinstallation. On x86 the ChaCha keystream dispatches AVX-512 -> AVX2 -> AVX -> SSE4.1/SSSE3 -> Scalar with telemetry (`CHACHA20_X4_AVX2_OPS`, `CHACHA20_X4_AVX_OPS`, `CHACHA20_X4_SSE41_OPS`, `CHACHA20_X4_SCALAR_OPS`). Override via `QUICFUSCATE_TLS_COVER_CIPHER=auto|chacha|aes`.
+- TLS Cover: cover provider in `qftls::CombinedProvider` is enabled by default and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Generates synthetic QUIC `CRYPTO` frames during the TLS handshake phase only (correct QUIC behavior per RFC 9001 - CRYPTO frames do not appear post-handshake in real QUIC). Post-handshake cover is provided by QUIC Cover PINGs, H3-framed cover requests and Server Push/WebTransport, plus transport TrafficPadding. Raw random bytes are never injected into an H3 stream. The canonical runtime cover mode now comes from the active `StealthManager::runtime_tls_profile(...)`: `off`, `performance`, and `dynamic` drive the cover layer into performance mode, while `stealth` and `Stealth MAX` keep timing/jitter enabled. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) enables TLS Cover extras in the stealth manager (ticket manager and cert chain emulator) but does not control the cover provider itself. Cipher selection is automatic (`auto`) and prefers AES-128-GCM when hardware AES (AESNI/VAES/SVE AES) is available, otherwise falls back to ChaCha20-Poly1305. Each provider obtains fresh OS entropy and derives connection-local key/IV material through domain-separated HKDF. `CryptoContext::install_tls_cover_cipher` is the single install/rotation contract: exact active material is an idempotent no-op that preserves sequence numbers, fresh material retires the previous identity and resets both directions, retired material is rejected, and sequence exhaustion fails closed with `AeadLimitReached`. Cover-frame generation never performs lazy reinstallation. On x86 the ChaCha keystream dispatches AVX-512 -> AVX2 -> AVX -> SSE4.1/SSSE3 -> Scalar with telemetry (`CHACHA20_X4_AVX2_OPS`, `CHACHA20_X4_AVX_OPS`, `CHACHA20_X4_SSE41_OPS`, `CHACHA20_X4_SCALAR_OPS`). Override via `QUICFUSCATE_TLS_COVER_CIPHER=auto|chacha|aes`.
 - Ownership split: `qftls::CombinedProvider` provides a single runtime interface that keeps rustls as the security-critical protocol owner and composes the cover layer for observable mimicry behavior where enabled.
 - ClientHello boundary: `TlsCoverProvider` emits synthetic decoy records and reports no ClientHello-override support. Real ClientHello protocol/configuration remains owned by rustls. `TlsClientHelloProfileCatalog` exposes deterministic persona combinations, while `FingerprintProfile::client_hello` is compatibility/audit metadata only. The transport configuration has no ClientHello template setter or wire override storage; TODO-766 owns this removal. TODO-598 closes the real-TLS ChaCha policy gap and removes the dead advanced builder.
 - Fork boundary: rustls/TLS Cover governs the TLS-visible handshake story only. The custom 1-RTT data-plane AEAD posture in `src/crypto/` and `src/transport/*` is a separate fork-specific transport decision, valid only under the explicit full-fork assumption, and must not be interpreted as a TLS cipher-suite or upstream interoperability claim.
@@ -587,8 +583,8 @@ register described below stays in place for the point where the wiring lands.
 
 #### Environment Controls
 - `QUICFUSCATE_TLS_COVER=0|1` - enable or disable the TLS Cover provider in `qftls` (default: enabled, set to `0` to disable).
-- `QUICFUSCATE_USE_TLS_COVER_EXTRAS=0|1` (alias: `QUICFUSCATE_USE_TLS_COVER`) - enable TLS Cover extras in `StealthManager` (ticket manager and cert emulator); does not control the cover provider (default follows active stealth preset: on for `off|performance|base|stealth|anti-dpi|intelligent`, off for `manual` unless explicitly set).
-- `QUICFUSCATE_STEALTH_MODE=off|performance|base|stealth|anti-dpi|intelligent|auto|manual` - selects the stealth baseline (`auto` is an alias for `intelligent`); `qftls` uses it only as a fallback/bootstrap hint before the runtime `TlsProfile` has been applied. The canonical cover-performance decision comes from `StealthManager::runtime_tls_profile(...)`.
+- `QUICFUSCATE_USE_TLS_COVER_EXTRAS=0|1` (env name `QUICFUSCATE_USE_TLS_COVER` is the same switch) - enable TLS Cover extras in `StealthManager` (ticket manager and cert emulator); does not control the cover provider (default follows the active stealth mode: on for `off`, `performance`, `stealth`, `Stealth MAX`, and `dynamic`, off for `manual` unless explicitly set).
+- `QUICFUSCATE_STEALTH_MODE` is one of `off`, `performance`, `stealth`, `Stealth MAX`, `dynamic`, `manual`. `qftls` uses it only as a bootstrap hint before the runtime `TlsProfile` is applied. The cover-performance decision comes from `StealthManager::runtime_tls_profile(...)`.
 - `QUICFUSCATE_TLS_COVER_PROFILE=chrome|firefox|safari|edge|random` - select TLS Cover browser profile.
 - `QUICFUSCATE_TLS_COVER_CIPHER=auto|chacha|aes` - control TLS Cover cipher (auto prefers AES-128-GCM when hardware AES is detected, else ChaCha20-Poly1305).
 - `QUICFUSCATE_TLS_COVER_ULTRA=1` - enable the ultra TLS Cover profile variant (extra padding extension). ECH-GREASE (0xFE0D) is emitted unconditionally since TODO-1009 - real browsers send it always, so its absence was a JA4-visible tell.
@@ -670,30 +666,27 @@ let provider = create_provider(false)?;
 ### Obfuscation-Modes Overview
 
 The stealth stack offers multiple modes balancing performance, compatibility risk, and cover traffic.
-Performance stays fast and low-risk, Intelligent is the adaptive default, Stealth spends a moderate
-cover budget, and Anti-DPI is the aggressive profile.
+Performance stays fast and low-risk, dynamic is the adaptive default, stealth spends a moderate
+cover budget, and Stealth MAX is the aggressive profile.
 
 Preset layer vs runtime layer:
 
 | Source | Input | Runtime mapping |
 |---|---|---|
 | Engine config (`engine.stealth.mode`) | `off` | `StealthMode::Off` |
-| Engine config (`engine.stealth.mode`) | `performance` (alias: `base`) | `StealthMode::Performance` baseline |
-| Engine config (`engine.stealth.mode`) | `stealth` | `StealthMode::Stealth` baseline |
-| Engine config (`engine.stealth.mode`) | `anti-dpi` (alias: `antidpi`, `max` for QKey compat) | `StealthMode::AntiDpi` baseline |
-| Engine config (`engine.stealth.mode`) | `auto` (alias: `intelligent`) | `StealthMode::Intelligent` adaptive baseline |
-| Engine config (`engine.stealth.mode`) | `manual` | `StealthMode::Manual` with explicit sub-fields |
-| QKey/Admin preset (`stealth`) | `off` | enforced as `StealthMode::Off` |
-| QKey/Admin preset (`stealth`) | `max` | enforced as `StealthMode::AntiDpi` |
-| QKey/Admin preset (`stealth`) | `manual` | enforced as `StealthMode::Manual` |
-| QKey/Admin preset (`stealth`) | `auto` | no forced override, runtime baseline remains active |
-| Runtime/env aliases | `base\|performance` | mapped to `StealthMode::Performance` |
-| Runtime/env aliases | `dynamic\|intelligent\|auto` | mapped to `StealthMode::Intelligent` |
-| Runtime/env aliases | `stealthmax\|stealth-max\|max\|antidpi` | mapped to `StealthMode::AntiDpi` |
+| Engine config (`engine.stealth.mode`) | `performance` | `StealthMode::Performance` |
+| Engine config (`engine.stealth.mode`) | `stealth` | `StealthMode::Stealth` |
+| Engine config (`engine.stealth.mode`) | `Stealth MAX` | `StealthMode::AntiDpi` |
+| Engine config (`engine.stealth.mode`) | `dynamic` | `StealthMode::Intelligent` |
+| Engine config (`engine.stealth.mode`) | `manual` | `StealthMode::Manual` |
+| QKey preset (`stealth`) | `off` | `StealthMode::Off` |
+| QKey preset (`stealth`) | `Stealth MAX` | `StealthMode::AntiDpi` |
+| QKey preset (`stealth`) | `manual` | `StealthMode::Manual` |
+| QKey preset (`stealth`) | `dynamic` | no extra override |
 
 Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, values shown when relevant)
 
-| Feature | Performance | Stealth | Anti-DPI | Intelligent |
+| Feature | performance | stealth | Stealth MAX | dynamic |
 |---|---:|---:|---:|---:|
 | uTLS/Persona | on | on | on | on |
 | Domain Fronting | off | explicit only | on with explicit domains or built-in aggressive list | off at Level 0; explicit/escalated only |
@@ -798,7 +791,7 @@ Final stealth stack:
 - The canonical stealth plan keeps this off by default and reserves it for manual or compatibility-only extreme-pressure tuning.
 
 #### Probe Escalation (runtime)
-- Escalation triggers on active probe detection only when `dynamic_enabled` is true (Intelligent mode). Performance and Stealth modes do not auto-escalate on probe - this would violate the user's explicit performance preference.
+- Escalation triggers on active probe detection only when `dynamic_enabled` is true (`dynamic`). `performance` and `stealth` do not auto-escalate on probe.
 - Escalation window lasts 20 minutes and tightens cover traffic interval to 2500 ms.
 - Server push cover traffic is enabled at runtime during escalation.
 - While server push cover is active, the regular cover-request scheduler is suppressed so only one active cover-traffic owner shapes burst behavior at a time.
@@ -1085,7 +1078,7 @@ let policy: Box<dyn SimdPolicy> = if cpu_supports_avx512gfni() {
 ```
 
 #### SIMD Dispatch Intersection Contract (TODO-834)
-`CpuFeatures::simd_dispatch_matrix()` in `crates/qf-cpu/src/lib.rs` is the single runtime conjunction table for target-feature callers. `FeatureDetector`, its cached CPUID/OS capability observation, and profile-override test hooks are physically owned by `crates/qf-cpu/src/feature_detection.rs` and re-exported from the leaf facade without changing the public path. It requires AVX-512F plus VL for ACK canonicalization, F plus BW for byte/word paths, F plus BW plus VBMI2 for VBMI2 paths, F plus CD plus VPOPCNTDQ for histogram population count, F plus VL plus VNNI for SHA-256 VNNI, F plus VAES plus AES-NI plus SSE2 for the delegated VAES/AES path, VPCLMUL/PCLMUL plus SSE4.1 for GF16, FMA with AVX-512 or AVX2 for neural dot products, and AVX plus SSE4.1 plus SSSE3 for the AVX ChaCha path. GHASH, AEGIS, AES-GCM, and MORUS direct crypto dispatch use the exact `features_full()` fields for their target attributes. The same matrix drives profile selection, FEC kernel thresholds, string dispatch, ACK dispatch, test wrappers, and telemetry expectations.
+`CpuFeatures::simd_dispatch_matrix()` in `crates/qf-cpu/src/lib.rs` is the single runtime conjunction table for target-feature callers. `FeatureDetector`, its cached CPUID/OS capability observation, and profile-override test hooks are physically owned by `crates/qf-cpu/src/feature_detection.rs` and re-exported from the leaf facade without changing the public path. It requires AVX-512F plus VL for ACK canonicalization, F plus BW for byte/word paths, F plus BW plus VBMI2 for VBMI2 paths, F plus CD plus VPOPCNTDQ for histogram population count, F plus VL plus VNNI for SHA-256 VNNI, F plus VAES plus AES-NI plus SSE2 for the delegated VAES/AES path, VPCLMUL/PCLMUL plus SSE4.1 for GF16, FMA with AVX-512 or AVX2 for neural dot products, and AVX plus SSE4.1 plus SSSE3 for the AVX ChaCha path. GHASH and AES-GCM direct crypto dispatch use the exact `features_full()` fields for their target attributes. The same matrix drives profile selection, FEC kernel thresholds, string dispatch, ACK dispatch, test wrappers, and telemetry expectations.
 
 TODO-834 also makes runtime SVE2 selection fall back to the compiled NEON/scalar implementation when the compiler target does not include SVE2, removes the unused profile-based BMI2 router, removes scalar x86 SHA and scalar ARM GF16 PMULL claims, routes the former scalar-only pattern module explicitly through its scalar owner, replaces the remaining AVX2 alias guards in FEC and packet transport with the exact compiled/runtime matrix, corrects the x86 four-byte packet-number store to preserve network byte order, and limits remaining `CpuProfile` consumers to safe policy, sizing, telemetry, or RISC-V-specific selection. The supported local source gates and target-specific native x86/Linux/Windows execution remain separate evidence boundaries under TODO-682, TODO-683, and TODO-836; TODO-835's release-safe boundary implementation is complete.
 
@@ -1477,10 +1470,10 @@ pub struct MacTun {
 - `benches/fingerprint_normalizer.rs` asserts zero allocations after warmup and measures the common IPv4 UDP path. The privileged Omega matrix is owned by `scripts/tests/fingerprint-runtime-proof-netns.sh`. The hook now records ICMP echo, open and closed TCP, closed UDP, packet-trace Nmap output, both TUN directions, checksums, IP-ID progression, disabled byte-exact passthrough, and non-SYN transport-byte preservation under verifier schema `quicfuscate.fingerprint-pcap.v3`. Existing evidence run `evidence-fingerprint-20260731i` against binary SHA-256 `37c4ac6f7c79cd53e3e6f327dc9fcbff780b3d072eee73818110843b42d51dfa` remains the TODO-543 baseline. Completed TODO-765 retains the exact five-profile response-contract evidence at `/home/ubuntu/SOFTWARE/QuicFuscate/candidate-todo765-20260801c/evidence-todo765-20260801c` for binary SHA-256 `f8c8f1e811edd4e9a47f54521c4a893e309e41fb42c02bdb6654d93189ff5b59`: each profile proves 82 client and 82 server response packets, vector counts `tcp_syn_response=30`, `tcp_rst_response=32`, `icmp_echo_reply=11`, `icmp_udp_port_unreachable=6`, and `tcp_sequence_fields=65`; disabled mode is byte-exact, enabled modes preserve non-SYN transport bytes and consecutive server IP IDs, and all checksums pass. p0f passes all five primary profile signatures; Nmap exits successfully but reports no exact OS match for enabled profiles, so no exact active classifier claim is made.
 
 ### Cryptography Design (AEAD-First, Efficient by Construction)
-- Product-level data-plane AEAD posture: retained `Aegis128L` and `Morus1280_128` families with hardware-aware automatic selection.
+- Product packet protection: rustls AES-128-GCM. `off` and `performance` pin `aegis` for the authenticated 1-RTT payload. `manual` can select `aegis`.
 - Constant-time tag glue for the documented backends and strict nonce/tag checks on hot paths; the AES table fallback remains separately scoped under TODO-681
 - Perfect Forward Secrecy via ephemeral X25519
-- Runtime selection via FeatureDetector and `simd::planner` (CryptoAeadPlan) chooses the best internal implementation for the selected data-plane AEAD posture
+- There is no CPU selector among AEGIS-128L, 128X2, and 128X4. 128X2 and 128X4 are measurement constructors only.
 - TODO-681's implementation pass now gives `Aes128Ctx` and AES-GCM retained schedules explicit zeroization owners, clears temporary flat AES schedules before return, clears temporary AES-NI schedules after use, and zeroizes the ChaCha base nonce, derived nonce, and Poly1305 one-time key. The AES table fallback is explicitly not constant-time or cache-side-channel-resistant and is not a security-sensitive backend. x86 GHASH override parsing and the independent AArch64 PMULL boolean control are covered as separate release configuration surfaces. Checked `len + 16` arithmetic is closed by TODO-716, and every qf-crypto AEAD trait boundary rejects packet numbers above QUIC's 62-bit limit before nonce derivation. Native ISA, compiler-erasure, and side-channel execution proof remain unclaimed.
 
 #### Crypto key and nonce lifecycle
@@ -1490,29 +1483,13 @@ pub struct MacTun {
 - x86 `QUICFUSCATE_GHASH` supports `auto`, `vpclmul`, `pclmul`, `sse`, `scalar`, and `ref`, with runtime feature checks and fallback. AArch64 `QUICFUSCATE_GHASH_PMULL` is an independent boolean enable that never bypasses NEON/PMULL feature checks. The AES table fallback uses state-indexed lookups and is explicitly excluded from constant-time claims.
 
 #### AEAD Policy and Implementation Status
-- AEGIS implementation is fully internal in `src/crypto/`; there are no active references to external AEGIS forks.
-- Canonical data-plane posture is exactly two productive families: `Aegis128L` and `Morus1280_128`.
-- Fallback policy: only `Morus1280_128` is retained when AES-backed paths are unavailable.
-- This is intentionally retained custom runtime crypto, not a pure external-lib-only posture.
-- External crates are used only as baseline vectors, interoperability checks, or differential/reference oracles where available. They are not the canonical runtime providers for the retained AEGIS/MORUS data-plane contract.
-- Runtime selection:
-  - x86/x86_64 with AES uses AEGIS; large VAES-capable payloads may use `Aegis128X8` as an internal backend.
-  - AArch64 uses `Morus1280_128` automatically because Omega ARM/AArch64 Criterion evidence shows MORUS beats retained AEGIS L/X4/X8 for 64B, 1024B, 1400B, and 8192B single and batch8 seal/open trait paths.
-  - Architectures without an evidence-backed AEGIS advantage fall back to `Morus1280_128`.
-- Packet hot path dispatch: Initial, Handshake, pre-auth 1-RTT, and header protection use the exact standard owners installed by rustls. After authenticated private control completes, the deterministic packet-number boundary selects the negotiated private payload owner while header protection remains standard. Retained `DataAead` variants (`Aegis128L`, `Aegis128X4`, `Aegis128X8`, `Morus`) remain planner-owned private families; 0-RTT is disabled.
+- The live private payload owner is libaegis (`aegis` 0.9.18), not a first-party AEGIS or MORUS implementation.
+- `off` and `performance` pin AEGIS-128L for the authenticated payload. `stealth`, `Stealth MAX`, and `dynamic` stay on AES-128-GCM. `manual` uses AEGIS only when `packet_protection_mode = "auto"` and `aead_preference = "aegis"`. The shipped config is `mode = "dynamic"`, so the default stays AES-GCM.
+- Packet hot path: Initial, Handshake, pre-auth 1-RTT, and header protection use the rustls/ring AES-128-GCM owners. After authenticated private control completes, `off` and `performance` install `aegis` for the payload and leave header protection on AES. 0-RTT is disabled.
 - Private transition wiring: `src/qftls/private_protocol.rs` defines the bounded `0x41` MASQUE control-capsule payload, strict proposal/selection/confirmation parsing, exporter-root HMAC, canonical role-ordered context binding, exact directional key/IV derivation, downgrade checks, and terminal fail-closed state transitions. `src/core/connection/private_packet_protection.rs` bridges accepted H3/MASQUE flows and authenticated QKey transcript state to the transport installer. The server primes that owner after authenticated peer-flow acceptance, and the client primes it after assignment/QKey binding for the direct connection and every active circuit hop, before a subsequent H3 poll can consume the first proposal. The owner activates only after TLS, QKey, flow, schedule, and boundary checks pass; `advanced-required` remains rejected until TODO-883, TODO-884, and TODO-681 promotion gates are complete.
 - Deployment-seeded wire-image diversity (TODO-1014, UPGen adaptation): `PrivateProtocolShape` expands a per-installation 32-byte seed (HKDF, domain `qf private protocol shape v1`) into a Fisher-Yates permutation of eight wire blocks (both nonces, both hashes, ALPN, both DCIDs, a pad block), a 0/16/32/64-byte pad granule with seed-derived content, and an inter-capsule pacing hint. A non-canonical shape emits wire version 2 (`PRIVATE_PACKET_PROTECTION_VERSION_SHAPED`); the fixed scalar header and the trailing authenticator never move, and the authenticator binds the exact encoded byte image, so a seed mismatch fails closed at authentication or earlier at the version gate. The seed is provisioned via `[crypto] private_shape_seed` (64 hex chars) and never negotiated on the wire; absent seed emits byte-identical v1. It must be generated per installation - reuse across deployments silently re-collapses diversity.
-- AEGIS secret retirement and concurrency: L/X4/X8 wrappers wipe the retained 16-byte key and 12-byte IV. Single-packet operations construct local derived state; batch operations reuse one local state with `reinit`. No wrapper-level mutex or shared mutable cipher state remains, so concurrent packets on one `DataAead` instance cannot serialize or cross-contaminate state. Inner cipher drop uses the same state-wipe primitive.
-- Physical owner split: `crates/qf-crypto/src/aegis.rs` retains the AEGIS state machines, wrappers, and algorithm core, while `crates/qf-crypto/src/aegis/batch.rs` owns the `AeadSeal`/`AeadOpen` single-packet adapters and batch lifecycle. The module is private and the qf-crypto public API remains unchanged; AEGIS/MORUS are available only through the authenticated private 1-RTT owner and are not promoted as the universal default.
-- Performance evidence:
-  - retained backend evidence is produced by `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`
-  - the suite records hardware profile, per-backend throughput, and per-size winners for `Aegis128L`, `Aegis128X4`, `Aegis128X8`, and `Morus1280_128`
-  - TODO-582 local Criterion comparison (10 samples, 1-second warm-up, 2-second measurement) found no significant scalar-GHASH regression at 64/1024/8192 B and improved AEGIS-128L 1400 B batch8 seal/open medians from 7.9277/8.3971 us to 7.3575/7.4099 us; exact Omega/Linux throughput evidence remains a separate protected boundary.
-- Current TODO-884 evidence on ARM64 macOS 15.6.1 uses the pinned release `ci_regression` Criterion groups with ten samples, 200 ms warm-up, 500 ms measurement, and 1,000 resamples. At 1400 B, the retained MORUS mean is 0.816/0.883 us for seal/open, versus the fastest retained AEGIS mean of 7.038/8.423 us; the live rustls AES-GCM packet-key means are 0.320/0.318 us for AES-128-GCM-SHA-256 and 0.368/0.350 us for AES-256-GCM-SHA-384. The latest paired live standard 1-RTT connection group measures 38.659 us (AES-128) and 35.367 us (AES-256) at 1400 B. These are local ARM64 signals only; same-host repeated runs vary materially, private-family promotion remains unclaimed, and the exact decision-grade table and external-gate limits are owned by TODO-884.
-- Post-refactor local gate evidence on 2026-08-13 is green: root `cargo check --all-features`, strict root Clippy for library, binary, and example targets, formatting, and the serial all-feature root library matrix exit `0`; the matrix reports `1,749` passed, `0` failed, and `1` ignored out of `1,750` tests. The qf-crypto release wrapper reports AEGIS `18/18`, MORUS `21/21`, AES-GCM `8/8`, and TLS-Cover `3/3`, with the ARM64 GHASH parity lane explicitly skipped because it requires x86_64. Tauri `cargo check`, both Svelte checks, and the runtime guardrail audit exit `0`; the audit reports `Critical: 0` and `Warnings: 0`. The structural audit reports `442` Rust files, no file above `2,000` lines, and no textual `include!` assembly. These are local implementation and refactor gates only; private-family promotion and external Linux/Windows, packet-capture, side-channel, and privileged multi-hop evidence remain separate blockers.
-- The retained suite uses the canonical `morus1280_128` identity and accepts `morus` only as a CLI alias. Its corrected fast runs pass all twelve backend/size cells; the earlier identity-mismatch false fail is retained as a harness-repair note in TODO-884. Fast spot-check throughput is not decision-grade because consecutive runs vary materially; Criterion artifacts with confidence intervals are authoritative.
-- Fresh 2026-08-14 local evidence: `cargo test --all-features --lib -- --test-threads=1` runs `1,750` tests and passes `1,749`, with one intentional ignored native mlock test; `test-crypto.sh --fast` passes AEGIS `18/18`, MORUS `21/21`, AES-GCM `8/8`, and TLS-Cover `3/3`; `test-security.sh` passes `27/27` plus `12/12` property tests; the retained-backend runner records twelve valid cells and `ok=1` in `scripts/out/benchmarks/bench-retained-crypto-backends-20260814-final/`. On this ARM64 host MORUS leads the three spot sizes at `57.666`, `121.580`, and `282.972 MB/s`. The current refactor structure gate reports `442` Rust files with zero oversized or source-assembly files, and the extracted server test domains pass `163/163` in the focused all-feature surface. These are local correctness and primitive throughput signals only; no advanced-family promotion is made without the TODO-884 native, side-channel, packet-path, and VPN gates.
-- CI regression evidence for retained backend packet trait paths lives in `scripts/benchmarks/ci_regression.rs` as `data_aead_single_seal_batch`, `data_aead_single_open_batch`, `data_aead_batch8_seal`, and `data_aead_batch8_open`.
+- Performance evidence for the pinned owner is `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`, which measures `aegis`.
+- CI regression evidence for the payload owner lives in `scripts/benchmarks/ci_regression.rs` as `data_aead_single_seal_batch`, `data_aead_single_open_batch`, `data_aead_batch8_seal`, and `data_aead_batch8_open`.
 - AArch64 SVE2 AES batching for the AEGIS update step is not enabled in the current build profile.
 - Testing: see `scripts/tests/suites/test-crypto.sh` and the comprehensive test runner. Edge cases (including non-32-byte payloads) are validated to ensure tag verification parity between encrypt/decrypt.
 
@@ -1532,7 +1509,7 @@ TODO-681 records that `QUICFUSCATE_GHASH` on x86 and `QUICFUSCATE_GHASH_PMULL` o
 - Scope: all seven `src/crypto` primitive files, every current unsafe function/block, target-feature dispatch, fixed-width load/store, constructor, Drop path, AEAD and batch trait boundary, direct packet/TLS-cover caller, crypto test/runtime fixture, audit script, documentation claim, and relevant history were read.
 - Resolved historical claims: TODO-582's AEGIS mutex/`unwrap` path, TODO-626's tag-comparison claim, and TODO-627's exact key/IV constructor boundary remain closed. TODO-631 is valid only for the target-specific `AesGcm128` schedule owner; it does not cover `Aes128Ctx` or temporary AES schedules.
 - Current reconciliation: TODO-834's exact crypto dispatch intersections are reflected in the current source and have been reconciled against this audit; native x86, AVX10, and ARM alternate-ISA execution remain unproved.
-- Open findings: compiler-level register erasure for transient AES/ChaCha/AEGIS values, GHASH release-control and native proof, AES table fallback side-channel scope, and fail-closed/native ISA test proof. AEGIS implicit state copies are source-closed by its non-`Copy` `Drop` owner; checked seal/batch lengths, primitive packet-number rejection, and the MORUS loader precondition are also source-closed.
+- Open findings: compiler-level register erasure for transient AES/ChaCha/AEGIS values, GHASH release-control and native proof, AES table fallback side-channel scope, and fail-closed/native ISA test proof. AEGIS implicit state copies are source-closed by its non-`Copy` `Drop` owner; checked seal/batch lengths and primitive packet-number rejection are also source-closed.
 - Audit status: source-and-owner reconciliation plus the current local implementation/tests; no native alternate-ISA, sanitizer, Miri, compiler-erasure, or positive side-channel proof is claimed for TODO-681.
   
 
@@ -1583,7 +1560,6 @@ TODO-681 records that `QUICFUSCATE_GHASH` on x86 and `QUICFUSCATE_GHASH_PMULL` o
 - Omega ARM/AArch64 streaming decode reference after TODO-501 lazy tail-loss gating: Streaming clean 128-packet batch `211.75 us` (`-99.213%` time versus the stale full-recovery wakeup baseline) and Streaming deterministic 10% loss batch `307.97 us` (`-97.963%` time), while Tetrys-style tail-loss recovery remains green.
 - Omega ARM/AArch64 lazy-fast-path reference after TODO-498 source-buffer replay: zero passthrough `285.14 ns`, zero reuse `266.47 ns`, Normal no-loss `1.284 us`, Normal no-loss reuse `1.244 us`.
 - Omega ARM/AArch64 send-reuse-hotpath reference after TODO-499: Zero/1400B `233.37 ns`, Normal/1400B `1.1081 us`, Strong/1400B `408.48 ns`, Streaming/1400B `380.88 ns`.
-- Omega ARM/AArch64 data AEAD reference after TODO-500: MORUS wins every retained-backend packet trait path tested; 1400B single seal/open are `1.1944 us` / `1.1885 us` for MORUS versus best AEGIS `2.0736 us` / `2.1307 us`, and batch8 seal/open are `9.3550 us` / `9.4560 us` for MORUS versus best AEGIS `16.699 us` / `17.010 us`.
 - Omega server fastpath reference after TODO-502: `scripts/install/setup-netfilter-fastpath.sh` removes stale lower-priority UDP/4433 ACCEPT rules before reinserting at INPUT line 1, so QuicFuscate UDP bypasses `ts-input` and other prepended chains before the measured `nft_do_chain` path. Repeated Omega runs leave exactly one UDP/4433 ACCEPT rule at line 1. Rules are owner-scoped under TODO-744: every rule carries `-m comment --comment quicfuscate-fastpath`, and insert and delete use that exact spec, so the helper can only remove what it created. It previously matched on protocol, port, and target alone, which made an operator's or a distribution's identical rule indistinguishable from its own and deleted it. The port is validated before any mutation and bounded to 1024..65535, because inserting an unconditional top-of-chain ACCEPT for a system port would bypass every preceding policy rule for a service QuicFuscate does not own. `--dry-run` prints the exact commands without executing them, and the helper refuses to run if the iptables `comment` match is unavailable rather than creating an unowned rule.
 
 #### Connection Benchmark Coverage
@@ -1597,8 +1573,6 @@ TODO-681 records that `QUICFUSCATE_GHASH` on x86 and `QUICFUSCATE_GHASH_PMULL` o
 - Stream readiness membership is kept in HashSets for O(1) average admission checks while VecDeque order remains the scheduling contract; front removals are O(1), and priority reordering remains an explicit control-path scan.
 - `QuicFuscateConnection` retains one configured MemoryPool block as the reusable HTTP/3 body-read buffer; the default block is 64 KiB and is returned to the pool on connection drop.
 - The measured routine remains the real 1-RTT path: `stream_send -> send -> recv`.
-- Omega ARM/AArch64 reference after TODO-500 AArch64 MORUS auto-selection: `connection_1rtt_send_recv` is about `4.70 us` for 256B, `5.50 us` for 1024B, and `5.84 us` for 1400B; `connection_1rtt_stealth_compare` is about `5.48 us` stealth-off and `5.55 us` stealth-on.
-
 #### Galois Field Implementations
 
 **GF(2^8) - 8-bit Galois Field:**
@@ -1856,10 +1830,7 @@ Audit module (`src/audit/`):
 Optimize submodules (`src/optimize/`):
 - `src/optimize/brain.rs` - stable optimize facade for moving-average, percentile, activation, and softmax hotpaths; `src/optimize/brain/histogram.rs` owns histogram/Jensen-Shannon kernels and preserves the existing public re-exports.
 - `src/optimize/compress.rs` - compression-oriented acceleration primitives.
-- `src/optimize/crypto/mod.rs` - optimize crypto namespace root.
-- `src/optimize/crypto/aegis.rs` - AEGIS acceleration kernels.
-- `src/optimize/crypto/morus.rs` - MORUS acceleration kernels.
-- `src/optimize/crypto/planner.rs` - crypto backend planning and dispatch helpers.
+- `src/optimize/crypto/mod.rs` - optimize crypto namespace. It re-exports the ChaCha x4 helper. There is no AEGIS or MORUS kernel and no cipher planner in this folder.
 - `src/optimize/iter.rs` - SIMD-backed reduction helpers.
 - `src/optimize/memory.rs` - memory pool and allocation tuning internals.
 - `src/optimize/random.rs` - test/compat random helper paths; not the canonical security entropy API.
@@ -1976,10 +1947,9 @@ Tips
 ### AEGIS
 - Integrated internally in `src/crypto/`; validated via integration tests in `scripts/tests/rust/rt-baseline-oracles.rs`.
 - TODO-884 pins the CFRG AEGIS-128L vectors at commit `8e289c40` and requires the implementation to match the five valid 128-bit-tag vectors plus all four verification-failure vectors. The update and finalization logic follows the pinned CFRG reference: `new0 = AESENC(S7, S0 XOR M0)`, `new4 = AESENC(S3, S4 XOR M1)`, finalization uses `S2 XOR (ad_bits || msg_bits)`, seven `(t,t)` updates, and `S0..S6` for the 128-bit tag. AEGIS-256-bit tags are not part of the QuicFuscate API.
-- TODO-884 also pins the final CAESAR MORUS v2 reference package (`morusv2_code.zip`, SHA-256 `1f21f972d10e9303358fa88ee46c961d501653b73ea33047ebe83d4388fa9bbf`) and requires official empty, partial, exact, and multi-block vectors before any advanced-default decision. The authenticated private activation path exists, but neither family is promoted as the universal live default by this evidence work; standard AES-GCM remains the rollback baseline.
 - Workflow: develop -> test -> clippy. Deterministic, offline; run in repo root.
-- Config accepts a typed `[crypto] packet_protection_mode` (`standard`, `auto`, or `advanced-required`) plus the retained private-family migration fields `aead_preference` and `force_aead`. `auto` starts with standard protection and may attempt the authenticated private 1-RTT upgrade when a valid family, peer control exchange, and all local gates are present; it remains standard on unsupported or failed pre-activation negotiation. `standard` rejects a conflicting private-family selection; `advanced-required` requires an explicit family and fails closed at engine construction while TODO-883, TODO-884, and TODO-681 remain incomplete. The exact private selector accepts only 16-byte keys and 12-byte IVs, while Initial, Handshake, pre-auth 1-RTT, header protection, and 0-RTT remain standard. `aegis-128x4` and `aegis-128x8` remain internal backend names, not supported runtime config values.
-- `src/profile.rs` is a test/compat alias surface for `Aegis128Profile` and converts to/from `simd::CryptoAeadPlan` via `select()`/`select_for_len()` helpers. It is gated behind `cfg(any(test, feature = "rust-tests"))` and is not part of the default product-facing crate surface.
+- Config accepts a typed `[crypto] packet_protection_mode` plus `aead_preference` and `force_aead`. Those fields do not select the live payload owner. `[stealth] mode = "off"` and `"performance"` pin libaegis AEGIS-128L for the authenticated post-handshake 1-RTT payload. `stealth`, `Stealth MAX`, and `dynamic` pin rustls AES-128-GCM for the whole connection. `manual` uses AEGIS only when `packet_protection_mode = "auto"` and `aead_preference = "aegis"`; otherwise it stays on AES-128-GCM. The shipped config is `mode = "dynamic"`, so the default stays AES-GCM. Handshake, Initial, header protection, and pre-auth 1-RTT stay rustls/ring AES-128-GCM in every mode. AEGIS is not a QUIC or TLS cipher suite. Same-API P1 on macOS ARM and Omega Neoverse-N1 (64, 1200, 1400, 8192 B) pins AEGIS-128L over 128X2 and 128X4; X4 is slower than AES-GCM at QUIC packet size on both hosts. X2/X4 remain measurement constructors only.
+- `Aegis128Profile` and `CryptoAeadPlan` are gone. Stealth mode pins the payload cipher.
 
 We do not list the crate's file structure exhaustively; instead we focus on the essential aspects and how to run the tests.
 
@@ -1987,13 +1957,13 @@ We do not list the crate's file structure exhaustively; instead we focus on the 
 - Why:
   - AEAD-first design with strong performance (AEGIS-128L) and constant-time tag verification.
   - Security behavior: on authentication failure (wrong tag/AD/nonce) an error is returned; no plaintext is produced.
-  - Fully internal retained AEGIS runtime implementation; baseline-oracle coverage exists separately and does not define runtime ownership.
+  - The performance-mode payload owner is libaegis AEGIS-128L. First-party AEGIS and MORUS are not in the build.
 - What:
-  - Internal implementation in `src/crypto/`: `Aegis128L` with retained internal batching backends `Aegis128X4` / `Aegis128X8`, plus `Morus1280_128`.
+  - `crates/qf-crypto/src/libaegis_aead.rs` owns AEGIS-128L plus the measurement-only 128X2 and 128X4 constructors.
   - Tests:
     - `scripts/tests/rust/rt-baseline-oracles.rs` covers baseline vectors and oracle-style roundtrips.
-    - `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, and `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs` are the primary retained proof surfaces for the custom runtime contract and backend parity.
-  - Tooling: central runner `./scripts/tests/suites/test-crypto.sh` executes qf-crypto leaf filters plus root integration fixtures, fails closed when a filter matches zero tests, and records a validated JSON artifact. `--only aegis,morus,aes-gcm,ghash,chacha,aes-hp,simd,integration` runs only selected contract groups and records omitted groups as explicit `SKIP` entries; `--fast` retains the minimal confidence profile. Clippy remains a separate strict `-D warnings` gate.
+    - `scripts/tests/rust/rt-security-suite.rs`, `scripts/tests/rust/rt-property-suite.rs`, and `scripts/tests/fuzz/src/targets/crypto_operations.rs` are the primary proof surfaces for the packet-protection contract.
+  - Tooling: central runner `./scripts/tests/suites/test-crypto.sh` executes qf-crypto leaf filters plus root integration fixtures, fails closed when a filter matches zero tests, and records a validated JSON artifact. `--only aegis,aes-gcm,ghash,chacha,aes-hp,simd,integration` runs only selected contract groups and records omitted groups as explicit `SKIP` entries; `--fast` retains the minimal confidence profile. Clippy remains a separate strict `-D warnings` gate.
     - Manual invocation (equivalent in repo root):
       - `cargo test`
       - `cargo clippy -- -D warnings`
@@ -2007,14 +1977,14 @@ cargo test
 ```
 
 #### Step-by-Step Guide
-1. Install prerequisites: the pinned Rust `1.97.1` toolchain with Cargo.
+1. Install prerequisites: Rust stable (`rust-toolchain.toml`) with Cargo.
 2. Run the test script: `./scripts/tests/suites/test-crypto.sh`.
 3. Manual invocation (in repo root):
    - `cargo test`
    - `cargo clippy -- -D warnings`
 
 #### Integration Guidelines and Optimization Strategy
-- Data-plane AEAD follows `CryptoAeadPlan` from `qf-cpu` and `crates/qf-simd/` compatibility dispatch, then resolves once in `src/crypto/` into concrete packet dispatch wrappers.
+- The payload cipher is pinned by stealth mode in `payload_protection_pin`. It is not selected per CPU or per packet length.
 - On tag failure: constant-time verify -> error; no plaintext is emitted.
 - Keep cipher concerns isolated; avoid mixing AEGIS logic into transport code.
 - Keep performance- and safety-critical crypto changes covered by `scripts/tests/suites/test-crypto.sh`.
@@ -2049,7 +2019,6 @@ let text = telemetry::export_telemetry_text();
   - Central SIMD dispatch helpers (`SimdDispatch`), MemoryPool, telemetry
 - `crates/qf-simd/`
   - Architecture-specific SIMD dispatch and per-domain acceleration helpers
-  - CryptoAeadPlan (LAesni/LNeon/Morus by default; wider plans exist but are not selected by default)
   - QPACK Huffman encoding/decoding: runtime dispatch includes AVX2 (x86), NEON (ARM) and an SVE2 wrapper (encode/decode) with scalar fallback
   - QUIC varint encode/decode & header validation dispatch: SVE2 (VL-scalable predicates) -> NEON -> scalar; `transport::pn` uses these paths directly.
   - Bitstream pack/unpack: NEON fast paths for bit widths 1-8; SVE2 wrapper routes to NEON.
@@ -2063,8 +2032,7 @@ let text = telemetry::export_telemetry_text();
   - Wiedemann/Berlekamp-Massey and bitsliced GF multiplication on ARM NEON are always available (feature `internal_wiedemann` enables Wiedemann test coverage); Berlekamp-Massey has a VL-aware SVE2 path (`FEC_BERLEKAMP_SVE2_OPS` telemetry), otherwise falls back to NEON/scalar.
   - SVE2-aware matrix multiply uses real VL-SVE2 XOR-stores; SSSE3 dispatch added (`matrix_multiply_ssse3`) falling back to scalar only for `X86_P0a`.
 - `src/crypto/`
-  - AEAD glue; consumes FeatureDetector/plan at instantiation for runtime selection. Retained data-plane packet AEADs use enum dispatch, with boxed dispatch retained only for Rustls packet-key adapters and public benchmark/test helper APIs.
-- MORUS-1280-128 scalar and SIMD backends are instrumented via `MORUS1280_SCALAR_OPS`, `MORUS1280_SSE2_OPS`, `MORUS1280_SSSE3_OPS`, `MORUS1280_SSE41_OPS`, `MORUS1280_SSE42_OPS`, and `MORUS1280_NEON_OPS`.
+  - Packet AEAD glue. Performance mode installs libaegis AEGIS-128L after authentication. Rustls packet keys stay on AES-128-GCM.
   - ChaCha20-Poly1305: ChaCha keystream SIMD XOR (SSE4.1/SSSE3->AVX->AVX2->AVX-512, NEON & SVE2), Poly1305 MAC dispatch (SSE2/AVX2/AVX-512, NEON/SVE2)
   - AES-128-GCM: `Aes128Ctx` caches round keys once; CTR uses 4-lane AESNI/AESE batches, SSSE3 hosts use SIMD fallback (`aes128_encrypt_block_ssse3`, `ctr_xor_ssse3`, telemetry `AES_BLOCK_SSSE3_OPS`/`AES_CTR_SSSE3_OPS`), NEON/SVE2 use AESE/PMULL paths, and non-SIMD CPUs use the scalar T-Table.
   - SHA-256/HMAC: `Sha256Plan` streams 64-byte blocks zero-copy into the `sha2-asm::compress256` backend (batch size 1 for AVX2, 2 for VNNI), places T0/T1 prefetches ahead and prioritizes AVX2/VNNI -> SHA-NI -> NEON/SVE2. Telemetry logs all paths (`SHA256_*`, `HMAC_SHA256_*`).
@@ -2325,7 +2293,7 @@ let mut provider = create_provider(is_server)?;
 
 #### Build System
 - Pure Cargo build; no external system dependencies beyond the Rust toolchain.
-- AEGIS and MORUS are implemented under `src/crypto/` and are part of the core build.
+- Packet protection lives in `crates/qf-crypto/`. The product payload names are rustls AES-128-GCM and `aegis`.
 
 #### Custom TLS Hooks
 Not applicable. AEGIS is a symmetric AEAD and does not expose TLS handshake hooks.
@@ -2335,7 +2303,7 @@ See "Unified TLS Provider (RealTLS + TLS Cover) -> Fingerprint Source Model" for
 
 #### Advanced Optimizations
 - Crypto hotpaths use Rust `#[target_feature]` gated intrinsics (`aes`, `sse2`, `avx2`, `vaes`, `neon`); runtime dispatch via qf-cpu's `FeatureDetector` selects the best backend. Hardware ISA names are not Cargo features and must not be used as hardware-proof selectors.
-- AEGIS/MORUS implementations include unsafe blocks for SIMD lanes where necessary; all sensitive operations remain constant-time by design.
+- SIMD lanes in `crates/qf-crypto/` use `unsafe` only where the architecture intrinsic requires it. Tag checks stay constant-time.
 - Transport/H3 uses zero-copy iovecs, io_uring fast paths (feature `io_uring`, crate `io-uring` v0.7), pool-backed compression buffers, and aligned pools (`MemoryPool`) for minimal copies. The client `IoDriver` submits batch `SendMsg` work through the runtime-owned `UringBatchWorker` before falling back to `sendmmsg`; direct `UringBatchSender` remains the synchronous compatibility primitive. The client also uses pool-backed `UringRecvBatch` slots on Linux so inbound datagrams can enter FEC through `core::recv_pooled_block()` without an intermediate `Vec` copy. In FEC Zero mode, receive keeps the payload uniquely owned so the core avoids the copy-on-mutate fallback.
 - Frame parsing is zero-copy: `Frame<'a>` uses `Cow<'a, [u8]>` for data fields, borrowing directly from the decrypted packet buffer in `from_bytes()`. Combined with the in-order Stream fast path (sequential data copies directly to recv_buf, skipping the recv_frags BTreeMap), the common-case receive path avoids heap allocation entirely. Vec-backed stream send flushes use `frames::write_stream_frame()` to encode directly from `send_buf` into the packet buffer, avoiding a temporary owned `Frame::Stream` payload allocation. ARM stream parsing bounds every SIMD-reported cursor advance against the scalar cursor, and all frame writers use checked output tails.
 - ACK sent-byte accounting drains acknowledged and packet-threshold-lost ranges from `sent_packets_by_pn` without collect-then-remove passes. Sparse/narrow ACK ranges use `BTreeMap::extract_if`; large contiguous ACK ranges and packet-threshold loss prefixes use `BTreeMap::split_off`. ACK frames with many sparse ranges classify the packet-threshold prefix in one ordered drain pass, preserving largest-ACK RTT sampling and recovery/loss semantics while reducing repeated prefix walks.
@@ -2396,26 +2364,9 @@ cargo test
 cargo build --release
 ```
 
-#### Runtime Dispatch (Selector)
+#### Payload cipher pin
 
-At runtime, the data-plane AEAD plan is selected based on CPU features and measured backend policy via qf-cpu's `FeatureDetector` and planner boundary. The build must select a target CPU or explicit Rust target features separately when an ISA-specific binary is required:
-
-```bash
-RUSTFLAGS="-C target-feature=+avx2" cargo build --release
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-```
-
-```rust
-use quicfuscate::simd::CryptoAeadPlan;
-
-let plan = CryptoAeadPlan::select();
-let selected = match plan {
-    CryptoAeadPlan::Aegis128L => "aegis-128l",
-    CryptoAeadPlan::Aegis128X4 => "aegis-128l (x4 backend)",
-    CryptoAeadPlan::Aegis128X8 => "aegis-128l (x8 backend)",
-    CryptoAeadPlan::Morus => "morus-1280-128",
-};
-```
+`off` and `performance` offer libaegis AEGIS-128L after authentication. `stealth`, `Stealth MAX`, and `dynamic` keep rustls AES-128-GCM. `manual` follows `aead_preference` when `packet_protection_mode = "auto"`. The pin is `engine_mode_uses_libaegis` plus `payload_protection_pin`.
 
 Benchmarks
 - Script: `./scripts/benchmarks/suites/bench-crypto.sh` - runs the explicit `--fast` native-cell smoke matrix or the complete architecture matrix and records the effective mode and selected cells in `results.json` under `scripts/out/benchmarks/`.
@@ -2508,7 +2459,7 @@ Step-by-step guide for deploying QuicFuscate on a Linux server.
 #### System Requirements
 - Linux server (Ubuntu 22.04+ / Debian 12+ / RHEL 9+ recommended)
 - Minimum 2 CPU cores, 2 GB RAM (4+ cores recommended for production)
-- Pinned Rust `1.97.1` toolchain (for building from source)
+- Rust stable (`rust-toolchain.toml`, `channel = "stable"`) for building from source
 - Root or sudo access for TUN device and firewall configuration
 
 **System dependencies (Ubuntu/Debian):**
@@ -3511,7 +3462,7 @@ mode = "auto"
 #### Maximum Stealth
 ```toml
 [stealth]
-mode = "anti-dpi"
+mode = "Stealth MAX"
 
 [fec]
 mode = "auto"
@@ -3584,12 +3535,12 @@ The following table is the ownership and invalid-value contract for every produc
 | Engine, transport, crypto, and I/O startup owners | `MEMORY_POOL_MB`, `FASTPATH`, `GHASH*`, `CHACHA20_X4`, `FEC_KERNEL`, `BBR_MIN_RTT_WINDOW_MS`, `IO_URING_ZC`, `TRACE_TLS`, `TLS_CH_OVERRIDE_TEMPLATE`, `BRAIN`, `ORCHESTRATOR`, `METRICS_ADDR`, `CTL_SOCKET` | Typed flags, positive numbers, allowlisted modes, and trimmed endpoint/path strings. Invalid values warn and retain safe defaults; hardware overrides fall back to runtime capability dispatch. | Owner construction or first-use snapshot; no background live reread. |
 | Validated server policy loaders | `AUTH_*`, `DDOS_*`, `RATE_LIMIT_*`, `CLIENT_*`, `SERVER_DOWNLINK_*`, `DNS_*`, `GEOIP_*`, `BLACKLIST_*`, `QKEY_TTL_SECS`, `ADMIN_USER`, `ADMIN_PASSWORD`, `ALLOW_WEAK_ADMIN_DEFAULTS` | Deliberate subsystem exception. Direct reads are startup-bound, cross-field validated, and return typed configuration errors or explicit warnings. | Server configuration construction; no live reread. |
 | QKey encrypted registry loader | `QKEY_ENC_KEY`, `QKEY_ENC_KEY_FILE`, `QKEY_ENC_PREVIOUS_KEY`, `QKEY_ENC_PREVIOUS_KEY_FILE` | Deliberate `var_os` exception for secret material. Exactly one value/file source is accepted per role; malformed, unreadable, non-Unicode file-selector, or conflicting sources return a typed error. | Registry load/reload boundary; no per-request environment read. |
-| Test/build/OS environment | `MORUS`, `PROFILE_OVERRIDE`, `QFTLS_PRELOAD_CHILD`, `WFP_PERSISTENCE_CHILD`, `GITHUB_SHA`, `HOSTNAME`, `COMPUTERNAME`, `WATCHDOG_*`, `NOTIFY_SOCKET` | Not product runtime configuration. These values belong to isolated tests, build evidence, hostname discovery, or systemd protocol integration. | Test/process or operating-system boundary only. |
+| Test/build/OS environment | `PROFILE_OVERRIDE`, `QFTLS_PRELOAD_CHILD`, `WFP_PERSISTENCE_CHILD`, `GITHUB_SHA`, `HOSTNAME`, `COMPUTERNAME`, `WATCHDOG_*`, `NOTIFY_SOCKET` | Not product runtime configuration. These values belong to isolated tests, build evidence, hostname discovery, or systemd protocol integration. | Test/process or operating-system boundary only. |
 
 **Core Stealth:**
 - `QUICFUSCATE_BROWSER`: `chrome|firefox|safari|edge`
 - `QUICFUSCATE_OS`: `windows|linux|macos|ios|android`
-- `QUICFUSCATE_STEALTH_MODE`: `off|performance|base|stealth|anti-dpi|intelligent|auto|manual` (aliases: `antidpi`, `stealthmax`, `stealth-max`, `dynamic`, `auto`)
+- `QUICFUSCATE_STEALTH_MODE`: `off`, `performance`, `stealth`, `Stealth MAX`, `dynamic`, `manual`
 - `QUICFUSCATE_USE_TLS_COVER_EXTRAS` (alias: `QUICFUSCATE_USE_TLS_COVER`): `0|1|true|false` - enables TLS Cover extras in `StealthManager` (ticket manager and cert emulator)
 - `QUICFUSCATE_TLS_COVER_PROFILE`: `chrome|firefox|safari|edge|random`
 - `QUICFUSCATE_TLS_COVER_CIPHER`: `auto|chacha|aes`
@@ -4076,7 +4027,7 @@ Core H3/MASQUE is the canonical VPN/TUN data-plane carrier and the only active C
 - Telemetry: `MASQUE_BYTES_SENT`, `MASQUE_BYTES_RECEIVED`, and capsule counters per type.
 
 Notes
-- Canonical Stealth, Anti-DPI, Performance, and Intelligent modes use the production H3/MASQUE TUN carrier when TUN mode is active.
+- Canonical `stealth`, `Stealth MAX`, `performance`, and `dynamic` use the production H3/MASQUE TUN carrier when TUN mode is active.
 - Peer unidirectional stream prefixes are retained across transport chunks. Unknown stream types discard all subsequent bytes; duplicate control or QPACK streams fail with `StreamCreationError`; closure of control or QPACK streams fails with `ClosedCriticalStream`.
 - Control streams require SETTINGS first and reject duplicate SETTINGS, HTTP/2-reserved frame types, reserved or duplicate setting identifiers, illegal frame placement, malformed fixed-size control payloads, increasing GOAWAY identifiers, and non-increasing `MAX_PUSH_ID` updates. Request and push streams reject DATA before initial HEADERS and reject HEADERS or DATA after trailers; informational responses retain the awaiting-final-headers state.
 - WebTransport-capable cover connections validate the draft-specific SETTINGS contract before a client opens `webtransport-h3` Extended CONNECT. The session is pending until a final 2xx response. Both roles can then open bounded unidirectional and bidirectional cover-data streams; fragmented stream prefixes retain state, early data remains buffered until session readiness, and unnegotiated, unknown-session, duplicate, over-limit, wrong-initiator, reset, and post-close transitions fail closed. This is internal application-cover behavior only. Core H3/MASQUE remains the sole VPN/TUN carrier, and external draft-16 interoperability remains unclaimed until the required QUIC DATAGRAM and `reset_stream_at` transport parameters and reset semantics exist.
@@ -4230,7 +4181,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-stealth.sh` - Stealth suite (browser/OS profiles, padding, DoH, H3 masquerade, rotation); supports granular `--only modes,qftls,padding,masque,integration` selection with explicit omitted-scope evidence
 - `test-stealth-brain.sh` - StealthBrain ACK policy optimization tests with per-cell required-command status and explicit optional probe status
 - `test-probe-detection.sh` - Active-probe validation (detector invariants, reality fallback rotation, optional stealth pressure path)
-- `test-crypto.sh` - Crypto suite (AEGIS/MORUS/AES-GCM/ChaCha20/HKDF/CT operations); supports granular `--only` scope selection with explicit omitted-scope evidence
+- `test-crypto.sh` - Crypto suite (`aegis`, AES-GCM, ChaCha20, HKDF). `--only aegis,aes-gcm,ghash,chacha,aes-hp,simd,integration` selects groups and records omitted groups as `SKIP`.
 - `test-transport.sh` - Transport suite (varint/frames/loss/BBR/0-RTT/validated migration/DATAGRAM; io_uring on Linux); `--only basic,uring,anti-replay,cc,integration` runs only the selected contract groups and records omitted groups as explicit `SKIP` entries, while the default remains complete.
 - `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`). `--only batch,memory,simd,cpu,zero-copy,telemetry,integration,stress` runs selected contract groups, records every canonical scope before execution, and emits `SKIP` with `reason=not_selected_by_scope` or `fast_profile_omits_scope`. Unscoped full and `--fast` keep the previous command order; `--fast --only` honors the requested scopes instead of the reduced fast omission list. Optional library tests use target-scoped discovery and fail closed on discovery or zero-test execution. `scripts/tests/fast/test-optimization-scope-contract.sh` is the JSON-inspecting help/selection/skip/failure contract.
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest). Dynamic library-test selection uses release/`--lib` discovery with explicit feature and prerequisite status.
@@ -4720,7 +4671,6 @@ Notes
 
 ### Test-only Environment Overrides
 These env vars are only read under `#[cfg(test)]` or with the `rust-tests` feature; they are not part of the runtime contract:
-- `QUICFUSCATE_MORUS` - force MORUS plan selection.
 - `QUICFUSCATE_PROFILE_OVERRIDE` - override CPU profile selection in tests.
 - `QUICFUSCATE_GF16_TEST_ITERS` - iteration count for GF16 consistency tests.
 - `QUICFUSCATE_TEST_UNSET` - used only by EnvGuard tests.
@@ -5194,7 +5144,7 @@ This and every later dated audit or reconciliation section are historical eviden
 - **Memory and pooled-buffer ownership**: the feature-gated `src/optimize/unsafe.rs` pool now uses a synchronized exact-base ownership registry, separates fallback blocks, checks packet/runtime boundaries in release builds, and bounds prefetch arithmetic under TODO-826. The active safe `MemoryPool` can accept same-sized foreign blocks, mishandle ephemeral returns, and fail to make TLS-aware shrink progress. Generic compression, TUN, and transport-frame failure paths use `PooledBlock` under TODO-831, FEC failure paths use the same ownership contract under TODO-832, and feature-gated `DatagramBuffer` now owns a `PooledBlock` under TODO-833. TODO-826 through TODO-833 close the implementation split on ARM64 macOS; umbrella TODO-678 remains blocked only by unavailable Miri and native Linux/Windows/ISA evidence. TODO-516, TODO-646, TODO-682, TODO-683, TODO-687, TODO-730, TODO-734, and TODO-767 retain adjacent contracts; TODO-689 is archived.
 - **SIMD unsafe surface**: TODO-679 completed the read-only audit of all 31 files in `src/simd/*` and `src/optimize/simd/*`, including the historical 138 unsafe function declarations, 102 actual target-feature attributes, direct callers, tests, audit scripts, and history. The current source inventory is 131 unsafe declarations, 120 target-feature attributes, and 131 local `# Safety` sections. TODO-834 completed the exact dispatch-owner audit and implementation of the SVE2 decode, ACK AVX512VL, SHA-VNNI, AES/VAES, GF16, AVX-512 compression/pattern/histogram, neural FMA, optimization string, stale BMI2 profile, scalar-claim, FEC, and packet transport boundaries. TODO-835 closes the release-safe short-needle, matrix, BMI2, Berlekamp-Massey, private repeating-key, and private ChaCha XOR length boundaries with focused malformed-input tests; remaining vector tails were cross-checked. TODO-836 closes the blanket safety-doc suppression, adds local contracts to all 131 unsafe declarations, makes the guardrail visibility-complete and exact-feature-aware, and makes 24 unsupported-ISA test returns emit explicit `SIMD_SKIP` accounting. The 2026-08-07 umbrella reconciliation also passed the SIMD feature-contract gate and cargo metadata; the aggregate runtime guardrail still reports four pre-existing critical findings and one warning outside this SIMD owner. Native x86/Linux, Windows, SVE2, sanitizer, and Miri evidence remain explicit unclaimed proof boundaries.
 - **Optimize brain/transport/stealth unsafe**: TODO-680's read-only audit and 2026-08-07 source reconciliation cover all ten current Optimize boundaries, CPU profile mapping, direct callers, vector tails, malformed-input fixtures, Linux/macOS UDP FFI, guardrails, documentation, history, and the TODO-834 delta. TODO-834 resolved the former P1f-to-AVX2 reduction route, P4a-to-AVX512 moving-average route, BMI2 bitmap dispatch predicate, AVX2 packet-number byte order, and stale SVE2 search symbol. Remaining findings are reversed/clipped bitmap arithmetic, SSE2 short-pattern overwrite, overflow-prone pattern positions, SVE2 Base64 output coverage, public packet-number and length contracts, VNNI truncation beyond 64 samples, invalid percentile behavior, formal safety documentation, and native/profile proof. TODO-837 now owns the implemented UDP result/ownership contract; its local test and native-proof status is recorded in the dedicated section. TODO-682 split shared transport remediation into TODO-837-TODO-842.
-- **Crypto unsafe primitives**: TODO-681's full source-and-owner reconciliation covers AES, AEGIS, MORUS, GCM, Poly1305, ChaCha, direct callers, dispatch, lifecycles, length and nonce boundaries, tests, guardrails, docs, and history. TODO-834's exact dispatch delta is reconciled. Open work remains for schedule and transient-state erasure, GHASH release/native proof, AES table side-channel scope, copied-AEGIS state, and fail-closed/native ISA evidence; checked AEAD lengths (TODO-716), primitive/API packet-number rejection, and the MORUS release-safe loader precondition are locally implemented and tested.
+- **Crypto unsafe primitives**: TODO-681's full source-and-owner reconciliation covers AES, AEGIS, GCM, Poly1305, ChaCha, direct callers, dispatch, lifecycles, length and nonce boundaries, tests, guardrails, docs, and history. TODO-834's exact dispatch delta is reconciled. Open work remains for schedule and transient-state erasure, GHASH release/native proof, AES table side-channel scope, copied-AEGIS state, and fail-closed/native ISA evidence; checked AEAD lengths (TODO-716) and primitive/API packet-number rejection are locally implemented and tested.
 - **Transport unsafe**: TODO-682's current-source and owner reconciliation covers transport batching, shared UDP FFI, AF_XDP removal, frame/packet SIMD, public packet lengths, PMTU/prefetch, direct callers, tests, suites, guardrails, documentation, and history. TODO-834 resolved the historical AVX2 packet-number endian mismatch and exact x86 ACK dispatch delta; TODO-831 removed the historical temporary batch pool path. Remediation owners TODO-837 through TODO-842 are complete, including native Linux syscall/kernel paths and native x86_64 AVX2 packet-number parity. Main CI run `31455640097`, Linux fastpath job `93669407582`, supplies the final hosted proof at revision `abb9c8149ee5d4e46983e129720fc2d88698a45f`.
 - **Interface/platform unsafe**: TODO-683 completed the read-only audit of
   `interface.rs`, Wintun, Linux/macOS/Windows platform backends, Windows WFP,
@@ -5447,7 +5397,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 ## Implementation Reconciliation (2026-08-03, crypto key and IV constructor boundaries)
 
-- **Typed boundary:** `src/crypto/aead.rs` owns `KeyMaterialError` plus exact-length helpers. `ChaCha20Poly1305` requires a 32-byte key and 12-byte IV; `AesGcm128`, AEGIS L/X4/X8 wrappers, and `MorusAead` require a 16-byte key and 12-byte IV. Public data-AEAD selection and the benchmark builder enforce the same 16/12 contract before copying into fixed arrays.
+- **Typed boundary:** `src/crypto/aead.rs` owns `KeyMaterialError` plus exact-length helpers. `ChaCha20Poly1305` requires a 32-byte key and 12-byte IV. AES-128-GCM and libaegis AEGIS-128L require a 16-byte key and a 12-byte IV.
 - **Header protection:** `AesHp::new` rejects secrets shorter than 16 bytes without a panic. Its documented raw-secret API still consumes the first 16 bytes of a longer secret; all packet setup paths derive the exact 16-byte header-protection key first and use the typed array constructor, so a 32-byte traffic secret is never silently installed as an HP key.
 - **Propagation:** QKey registry encryption/decryption, TLS cover ciphers, packet initial/handshake/0-RTT/1-RTT setup, examples, runtime fixtures, property/security fixtures, and the retained backend benchmark all propagate or prove the fallible constructor boundary. No key/IV `unwrap_or(0)` construction fallback remains; TODO-633 closes exact 32-byte QUIC traffic-secret derivation, while header-protection sample handling remains separately owned by TODO-629.
 - **Verification:** Locked all-target/all-feature check and strict Clippy passed. Serial crypto tests passed 143/143, QKey registry storage 11/11, packet tests 25/25, baseline/property/security integration targets 6/6, 12/12, and 24/24, and all four retained backend benchmark smokes executed successfully. The Criterion benchmark target compiled with `--no-run`. The full local library passed 2,194/2,196; DNS resolution remains TODO-807 and rustls ClientHello readiness remains TODO-768. TODO-758 supersedes the former fuzz manifest path failure and closes hosted nightly sanitizer execution in job `93844215976`.
@@ -6209,7 +6159,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - `src/rng.rs` and `src/secret.rs` now re-export qf-common in production and root test builds. qf-common's `rust-tests` feature owns deterministic entropy-failure injection and erasure observation, so the former root `#[path]` duplicate implementations are gone without widening the default production API.
 - qf-common's canonical tests pass `28/28`; the root library passes `2423/2423`. The six duplicate root copies of qf-common's RNG/secret tests no longer compile because the canonical child tests already execute; no unique behavioral coverage was removed. The complete workspace all-target run is green with `97` result blocks and no failure markers. Workspace checking, strict `rust-tests` Clippy, formatting, and diff hygiene pass.
 - Working-tree seam evidence is `scripts/out/audits/workspace-seams-20260809T025044/workspace-seams.json` at base revision `d69e10446c92be684346387d613c28340f18b25f` plus the four compatibility-hook source edits: fourteen workspace packages, 243 Rust files, 203,765 source lines, 145 product-module edges, the same 14-module product SCC, and `protected_changes=[]`.
-- The remaining backend seam audit finds no additional safe leaf: `profile.rs` is a one-way compatibility alias over `simd::CryptoAeadPlan`, so a separate crate would add a wrapper without removing a product-cycle node; the other non-SCC contracts are already extracted or canonicalized. The 14-module SCC remains the next decomposition boundary and requires a coordinated cycle-breaking design.
+- The `Aegis128Profile` compatibility alias was removed with the AEAD width selector. The 14-module SCC remains the next decomposition boundary and requires a coordinated cycle-breaking design.
 - The release gate is green: `target/release/quicfuscate --help` returned the canonical CLI, the binary is 9,949,312 bytes, and SHA-256 is `ef9a6d84072683643a97eb6f8b57b0815c7bc9a8311eff1149019a7a69adc4bb`. The target was cleaned at 12,004,968 KiB before the release rebuild and ended at 494,116 KiB. All-feature all-target Clippy remains platform-blocked by the existing macOS-incompatible Linux guard at `scripts/tests/rust/rt-io-hotpath-kernel-integration.rs:4`.
 - Latest Graphify evidence is fail-closed `BLOCKED` with exit 2 at `scripts/out/audits/graphify-20260809T005700Z/graphify-evidence.json`; semantic extraction, complete language coverage, and relationship proof remain unavailable.
 
@@ -6232,8 +6182,8 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 ## Crypto Workspace Leaf (2026-08-09, TODO-562)
 
-- `crates/qf-crypto/` now owns the former `src/crypto/` implementation: AEGIS, MORUS, AES, ChaCha20, AES-GCM, Poly1305, HKDF, QUIC key derivation, header protection, data-plane AEAD selection, and the root-independent `DataAeadPreference` plus `CryptoConfig` serde/default/validation contracts. The root `src/crypto/mod.rs` remains a compatibility adapter; transport-facing header protection and packet AEAD contracts are owned by qf-crypto, while `engine::AeadPreference` and `engine::CryptoConfig` are compatibility reexports and the root `DataAeadConfig` trait is only the runtime adapter.
-- The physical qf-crypto ownership is split without changing public paths: `src/aegis.rs` retains AEGIS state and wrappers while `src/aegis/batch.rs` owns the AEGIS AEAD trait and homogeneous batch adapters; `src/morus.rs` retains MORUS state-transition and backend-dispatch kernels while `src/morus/state_ops.rs` owns MORUS initialization, stream/finalization, block I/O, and partial-block helpers. These are private child modules and the existing public API remains unchanged.
+- `crates/qf-crypto/` now owns the former `src/crypto/` implementation: libaegis `aegis`, AES, ChaCha20, AES-GCM, Poly1305, HKDF, QUIC key derivation, header protection, data-plane AEAD selection, and the root-independent `DataAeadPreference` plus `CryptoConfig` serde/default/validation contracts. The root `src/crypto/mod.rs` remains a compatibility adapter; transport-facing header protection and packet AEAD contracts are owned by qf-crypto, while `engine::AeadPreference` and `engine::CryptoConfig` are compatibility reexports and the root `DataAeadConfig` trait is only the runtime adapter.
+- First-party `aegis.rs` and `morus.rs` were removed. The private payload owner is `crates/qf-crypto/src/libaegis_aead.rs`.
 - qf-crypto depends only on `qf-common`, `qf-cpu`, `qf-error`, and `qf-telemetry` among workspace crates. Root feature forwarding covers `rust-tests`, `benches`, `std`, `prefetch`, `aggressive_inline`, and `internal_avx10_preview`. No frontend or Tauri path changed, and this backend cut requires no frontend field/API addition.
 - Isolated qf-crypto tests pass `136/136`; strict all-target/all-feature Clippy and root all-target compatibility checking pass. The complete serial workspace all-target `rust-tests` run previously passed 102 result blocks with `3,005` passed, `0` failed, and `6` ignored; qf-crypto contributed `135/135` before the configuration-owner test was added. Formatting and workspace `rust-tests` Clippy pass for the current code.
 - The CI Clippy matrix invokes `cargo clippy --workspace --all-targets` for every covered feature combination, so extracted leaves are linted with the root package.
@@ -6277,7 +6227,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 ## CPU Profile Compatibility Owner (2026-08-09, TODO-562)
 
-- `crates/qf-cpu/src/profile.rs` now owns the former root `src/profile.rs` implementation for `Aegis128Profile` conversions and length-aware AEAD profile selection. The root `quicfuscate::profile` module is a compatibility re-export, so existing callers retain the same public path without a duplicate implementation.
+- `Aegis128Profile`, `CryptoAeadPlan`, and the root `profile` re-export were removed. qf-cpu no longer selects a data-plane cipher.
 - The move adds no workspace dependency and remains inside qf-cpu's existing `qf-common`, `qf-telemetry`, `libc`, and `log` boundary. Isolated qf-cpu all-target/all-feature tests pass `64/64`; strict all-target/all-feature Clippy, root all-target checking with `rust-tests`, root strict Clippy with `rust-tests`, and the complete workspace all-target `rust-tests` suite exit 0 with root `2,148/2,148` and zero registered-target failures. Formatting, diff hygiene, and the protected frontend/Tauri path check pass. No frontend field or API projection is required.
 - The guarded workspace test run ends at `8,260,072 KiB` target usage with `4,115,300 KiB` free, below the 12-GiB cleanup threshold.
 - Current seam evidence is `scripts/out/audits/workspace-seams-20260809T071500Z/workspace-seams.json`: twenty-two workspace packages, 255 Rust files, 204,112 source lines, 134 product-module edges, 47 Cargo workspace dependency edges, and the unchanged 11-module product SCC; `protected_changes=[]`. The remaining transport product SCC is not claimed as decomposed by this compatibility-owner move.
@@ -7296,11 +7246,9 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 - A ready preview remains available for 30 seconds. The owner captures `SIGINT` and `SIGTERM`, always reaps the child, allows two seconds for graceful `SIGTERM` cleanup, and escalates to `SIGKILL` when required. Status `1` identifies port, spawn, or server-lifecycle failure; `2` identifies invalid arguments or local configuration; `124` identifies readiness timeout; `125` identifies unreaped cleanup; `130` and `143` preserve caller interruption.
 - Five real Bun subprocess fixtures prove argument rejection, successful readiness and bounded shutdown, readiness timeout cleanup, occupied-port ownership preservation, and SIGTERM-resistant escalation. Final Admin and Tauri-delegated Desktop commands each completed build, HTTP readiness, the 30-second lifetime, and graceful cleanup with no listener remaining on ports 1430 or 4173. No UI component, state, route, or style changed.
 
-## MORUS Scalar-Path Bug Fix and Miri Coverage (2026-08-23, TODO-884/898)
+## Histogram Miri Guard (2026-08-23)
 
-- Miri on Omega (aarch64 Linux, nightly) exposed a latent correctness bug in the MORUS-1280-128 scalar fallback path. `Morus1280State::update()` Round 3 (`morus.rs:534-537`) omitted the message-block XOR (`^m`) that all SIMD backends (NEON, SSE2/4.1/4.2/SSSE3) include. This produced wrong ciphertext and authentication tags on any platform hitting the scalar fallback. Native tests never caught it because aarch64 always dispatches to NEON and x86_64 always dispatches to SSE2+. Fixed in commit `39e0578`.
-- The brain histogram NEON/SVE2 dispatch paths in `decay_histogram()` and `jensen_shannon_divergence()` lacked `cfg!(miri)` guards, causing Miri to attempt `vcvtq_u64_f64` (llvm.fptoui.sat.v2i64.v2f64) which it cannot emulate. Added `!cfg!(miri)` gates to force scalar fallback under Miri.
-- Full qf-crypto Miri suite on Omega: **151/151 passed, 0 failed, 0 UB**. Native `cargo test --all-features --lib` on Omega: **1793/1793 passed**. Strict Clippy `-D warnings` under both `--features rust-tests` and `--all-features` passes clean. Fuzz contract and 7/7 fuzz targets pass.
+- The brain histogram NEON/SVE2 dispatch paths in `decay_histogram()` and `jensen_shannon_divergence()` lacked `cfg!(miri)` guards, causing Miri to attempt `vcvtq_u64_f64` which it cannot emulate. `!cfg!(miri)` gates force the scalar fallback under Miri.
 
 ## Tauri-Specta Type-Safe IPC Bindings (2026-08-23)
 

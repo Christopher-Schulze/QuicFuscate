@@ -233,13 +233,18 @@ export function normalizeCcSelection(raw: string | null): CcSelection {
 }
 
 export function stealthPresetFromMode(mode: string | null): StealthPresetUi {
-  const m = (mode ?? "").toLowerCase();
-  if (m === "off") return "off";
-  if (m === "manual") return "manual";
-  if (m === "performance" || m === "base") return "performance";
-  if (m === "stealth") return "stealth";
-  if (m === "anti-dpi" || m === "antidpi" || m === "max" || m === "stealthmax" || m === "stealth-max") return "antidpi";
-  return "auto";
+  const m = (mode ?? "").trim();
+  if (
+    m === "off" ||
+    m === "manual" ||
+    m === "performance" ||
+    m === "stealth" ||
+    m === "Stealth MAX" ||
+    m === "dynamic"
+  ) {
+    return m;
+  }
+  return "dynamic";
 }
 
 export function fecPresetFromConfig(contents: string): "auto" | "off" {

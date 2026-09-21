@@ -173,10 +173,6 @@ pub mod memory_lock;
 /// Runtime metrics collection - counters, gauges, and histograms for all subsystems.
 pub mod metrics;
 /// Performance optimization subsystem - memory pools, crypto planning, transport tuning.
-#[doc(hidden)]
-#[cfg(any(test, feature = "rust-tests"))]
-/// Browser/OS TLS fingerprint profile definitions (test-only).
-pub mod profile;
 /// TLS provider system - rustls integration with custom ClientHello and ALPN handling.
 pub mod qftls;
 /// REALITY fallback reverse proxy for censorship-resistant server fronting.

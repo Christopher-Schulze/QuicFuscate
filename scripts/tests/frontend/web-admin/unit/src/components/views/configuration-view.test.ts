@@ -35,7 +35,7 @@ import { adminApiSchemas } from "../../../../../../../../apps/svelte-admin/src/l
 
 const BASE_CONFIG = `
 [stealth]
-mode = "intelligent"
+mode = "dynamic"
 
 [fec]
 mode = "auto"

@@ -278,10 +278,10 @@ impl StealthConfig {
     }
 
     /// Creates Anti-DPI mode - all features with aggressive settings.
-    pub fn anti_dpi() -> Self {
-        let domains = DomainFrontingManager::ultra_stealth();
+    pub fn stealth_max() -> Self {
+        let domains = DomainFrontingManager::broad_provider_rotation();
         Self {
-            mode: StealthMode::AntiDpi,
+            mode: StealthMode::StealthMax,
             enable_domain_fronting: true,
             fronting_domains: domains.domains().to_vec(),
             enable_http3_masquerading: true,
@@ -336,9 +336,9 @@ impl StealthConfig {
             StealthMode::Off => Self::off(),
             StealthMode::Performance => Self::performance(),
             StealthMode::Stealth => Self::stealth(),
-            StealthMode::AntiDpi => Self::anti_dpi(),
+            StealthMode::StealthMax => Self::stealth_max(),
             StealthMode::Manual => Self::manual(),
-            StealthMode::Intelligent => Self::intelligent(),
+            StealthMode::Dynamic => Self::dynamic(),
         }
     }
 
@@ -408,11 +408,6 @@ impl StealthConfig {
             enable_cover_ping: false,
             cover_ping_interval_ms: 0,
         }
-    }
-
-    /// Creates an ultra-stealth configuration (alias for anti_dpi).
-    pub fn ultra_stealth() -> Self {
-        Self::anti_dpi()
     }
 
     /// Creates Manual mode - custom configuration.
@@ -516,9 +511,9 @@ impl StealthConfig {
     }
 
     /// Creates Intelligent mode - starts like Performance and escalates intelligently.
-    pub fn intelligent() -> Self {
+    pub fn dynamic() -> Self {
         let mut cfg = Self::performance();
-        cfg.mode = StealthMode::Intelligent;
+        cfg.mode = StealthMode::Dynamic;
         cfg.dynamic_enabled = true;
         cfg
     }
@@ -778,8 +773,8 @@ impl StealthConfig {
         {
             return Err("slots rotation requires at least one profile slot".into());
         }
-        if matches!(self.mode, StealthMode::Intelligent) && !self.dynamic_enabled {
-            return Err("intelligent mode requires dynamic_enabled to remain enabled".into());
+        if matches!(self.mode, StealthMode::Dynamic) && !self.dynamic_enabled {
+            return Err("dynamic mode requires dynamic_enabled to remain enabled".into());
         }
         if matches!(self.mode, StealthMode::Performance)
             && (self.enable_timing_obfuscation
@@ -805,7 +800,7 @@ impl StealthConfig {
         }
         if self.enable_domain_fronting
             && self.fronting_domains.is_empty()
-            && !matches!(self.mode, StealthMode::AntiDpi)
+            && !matches!(self.mode, StealthMode::StealthMax)
         {
             log::warn!(
                 "domain fronting is enabled without fronting_domains; it will be disabled outside Anti-DPI"
@@ -852,12 +847,12 @@ impl StealthConfig {
     pub fn apply_env_overrides_with_snapshot(&mut self, environment: &EnvSnapshot) {
         // Primary mode override first (sets a known baseline)
         if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_STEALTH_MODE"]) {
-            let m = v.trim().to_ascii_lowercase();
-            *self = match m.as_str() {
-                "base" | "performance" => StealthConfig::performance(),
+            let m = v.trim();
+            *self = match m {
+                "performance" => StealthConfig::performance(),
                 "stealth" => StealthConfig::stealth(),
-                "anti-dpi" | "antidpi" | "stealthmax" | "stealth-max" => StealthConfig::anti_dpi(),
-                "dynamic" | "intelligent" | "auto" => StealthConfig::intelligent(),
+                "Stealth MAX" => StealthConfig::stealth_max(),
+                "dynamic" => StealthConfig::dynamic(),
                 "manual" => StealthConfig::manual(),
                 "off" => StealthConfig::off(),
                 _ => {
@@ -1015,19 +1010,19 @@ mod tests {
         assert_eq!(stealth.padding_strategy, PaddingStrategy::Adaptive);
         assert!(stealth.use_tls_cover);
 
-        let intelligent = StealthConfig::intelligent();
-        assert_eq!(intelligent.mode, StealthMode::Intelligent);
+        let intelligent = StealthConfig::dynamic();
+        assert_eq!(intelligent.mode, StealthMode::Dynamic);
         assert!(intelligent.dynamic_enabled);
     }
 
     #[test]
     fn toml_projection_applies_mode_before_explicit_fields() {
         let config = StealthConfig::from_toml(
-            "[stealth]\nmode = 'anti-dpi'\ninitial_browser = 'Firefox'\ninitial_os = 'Linux'\nmax_padding_size = 384\n",
+            "[stealth]\nmode = 'Stealth MAX'\ninitial_browser = 'Firefox'\ninitial_os = 'Linux'\nmax_padding_size = 384\n",
         )
         .expect("parse stealth configuration");
 
-        assert_eq!(config.mode, StealthMode::AntiDpi);
+        assert_eq!(config.mode, StealthMode::StealthMax);
         assert_eq!(config.initial_browser, BrowserProfile::Firefox);
         assert_eq!(config.initial_os, OsProfile::Linux);
         assert_eq!(config.max_padding_size, 384);

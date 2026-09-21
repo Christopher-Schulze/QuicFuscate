@@ -70,7 +70,7 @@ pub static H3_ERRORS: AtomicU64 = AtomicU64::new(0);
 /// MASQUE state gauge: 0 = inactive, 1 = active (CONNECT-UDP established).
 pub static MASQUE_ACTIVE: AtomicU64 = AtomicU64::new(0);
 
-/// AEGIS plan gauge: 0=MORUS, 1=AEGIS-128L, 4=AEGIS-128X4, 8=AEGIS-128X8.
+/// 1 after a performance-mode libaegis AEGIS-128L payload owner is installed, otherwise 0.
 pub static AEGIS_PLAN: AtomicU64 = AtomicU64::new(0);
 
 /// Brain MASQUE hint: 0 = no preference, 1 = prefer MASQUE path.
@@ -256,42 +256,8 @@ pub static BRAIN_HISTOGRAM_SVE2_OPS: Counter = Counter::new();
 /// Brain histogram computations via scalar fallback.
 pub static BRAIN_HISTOGRAM_SCALAR_OPS: Counter = Counter::new();
 
-/// Total AEAD plan selection decisions made.
-pub static PLAN_DECISIONS_TOTAL: Counter = Counter::new();
-/// Plan selections that chose the default backend.
-pub static PLAN_DECISIONS_DEFAULT: Counter = Counter::new();
-/// Plan selections based on payload length heuristic.
-pub static PLAN_DECISIONS_LEN: Counter = Counter::new();
-/// Plan selections that chose AEGIS-128L.
-pub static PLAN_DECISIONS_L: Counter = Counter::new();
-/// Plan selections that chose AEGIS-128X4 (4-way unrolled).
-pub static PLAN_DECISIONS_X4: Counter = Counter::new();
-/// Plan selections that chose AEGIS-128X8 (8-way unrolled).
-pub static PLAN_DECISIONS_X8: Counter = Counter::new();
-/// Plan selections that chose AEGIS-128L on NEON.
-pub static PLAN_DECISIONS_NEON_L: Counter = Counter::new();
-/// Plan selections that chose MORUS fallback.
-pub static PLAN_DECISIONS_MORUS: Counter = Counter::new();
-/// Data-plane AEAD operations using AEGIS-128L backend.
+/// Data-plane AEAD operations using libaegis AEGIS-128L.
 pub static DATA_AEAD_BACKEND_AEGIS_L_TOTAL: Counter = Counter::new();
-/// Data-plane AEAD operations using AEGIS-128X4 backend.
-pub static DATA_AEAD_BACKEND_AEGIS_X4_TOTAL: Counter = Counter::new();
-/// Data-plane AEAD operations using AEGIS-128X8 backend.
-pub static DATA_AEAD_BACKEND_AEGIS_X8_TOTAL: Counter = Counter::new();
-/// Data-plane AEAD operations using MORUS fallback backend.
-pub static DATA_AEAD_BACKEND_MORUS_TOTAL: Counter = Counter::new();
-/// MORUS-1280 operations via scalar backend.
-pub static MORUS1280_SCALAR_OPS: Counter = Counter::new();
-/// MORUS-1280 operations via SSE2 backend.
-pub static MORUS1280_SSE2_OPS: Counter = Counter::new();
-/// MORUS-1280 operations via SSSE3 backend.
-pub static MORUS1280_SSSE3_OPS: Counter = Counter::new();
-/// MORUS-1280 operations via SSE4.1 backend.
-pub static MORUS1280_SSE41_OPS: Counter = Counter::new();
-/// MORUS-1280 operations via SSE4.2 backend.
-pub static MORUS1280_SSE42_OPS: Counter = Counter::new();
-/// MORUS-1280 operations via NEON backend.
-pub static MORUS1280_NEON_OPS: Counter = Counter::new();
 
 /// Accepted 0-RTT early data attempts.
 pub static ZERO_RTT_ACCEPT_TOTAL: Counter = Counter::new();

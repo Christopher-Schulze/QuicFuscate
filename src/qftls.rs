@@ -800,7 +800,7 @@ impl CombinedProvider {
             let mut tls_cover = TlsCoverProvider::new_with_snapshot(is_server, environment, clock)?;
 
             // In base/performance mode, TLS Cover still runs but without artificial delays
-            if stealth_mode == "base" || stealth_mode == "performance" || stealth_mode == "off" {
+            if stealth_mode == "performance" || stealth_mode == "off" {
                 tls_cover.set_performance_mode(true);
                 log::info!("TLS Cover enabled in performance mode: full cover traffic, no delays");
             } else {

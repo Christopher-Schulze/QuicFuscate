@@ -525,12 +525,12 @@ impl StealthMetrics {
         }
     }
 
-    /// Record a stealth mode selection ("off", "auto", or "max").
+    /// Record a stealth mode selection ("off", "dynamic", or "Stealth MAX").
     pub fn record_mode(&self, mode: &str) {
         match mode {
             "off" => self.mode_off.fetch_add(1, Ordering::Relaxed),
-            "auto" => self.mode_auto.fetch_add(1, Ordering::Relaxed),
-            "max" => self.mode_max.fetch_add(1, Ordering::Relaxed),
+            "dynamic" => self.mode_auto.fetch_add(1, Ordering::Relaxed),
+            "Stealth MAX" => self.mode_max.fetch_add(1, Ordering::Relaxed),
             _ => 0,
         };
     }

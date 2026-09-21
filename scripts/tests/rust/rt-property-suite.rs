@@ -18,7 +18,7 @@ use std::borrow::Cow;
 const MAX_VARINT: u64 = 0x3fff_ffff_ffff_ffff;
 
 static DATA_AEAD_CONFIG_MUTEX: Mutex<()> = Mutex::new(());
-const PUBLIC_AEGIS_ALIASES: [&str; 3] = ["aegis", "aegis-128l", "aegis128l"];
+const PUBLIC_AEGIS_NAME: &str = "aegis";
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -86,7 +86,7 @@ proptest! {
         let iv = [0x22u8; 12];
 
         let mut baseline_cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-        baseline_cfg.force_aead = "aegis-128l".to_string();
+        baseline_cfg.force_aead = "aegis".to_string();
         install_data_aead_config(&baseline_cfg);
         let (baseline_seal, baseline_open) =
             select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
@@ -100,7 +100,7 @@ proptest! {
             .expect("baseline open");
         prop_assert_eq!(&baseline_buf[..baseline_opened], plaintext.as_slice());
 
-        for alias in PUBLIC_AEGIS_ALIASES {
+        let alias = PUBLIC_AEGIS_NAME;
             let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
             cfg.force_aead = alias.to_string();
             install_data_aead_config(&cfg);
@@ -119,7 +119,6 @@ proptest! {
                 "alias {} diverged from public Aegis128L plaintext contract",
                 alias
             );
-        }
     }
 
     #[test]
@@ -133,7 +132,7 @@ proptest! {
         let iv = [0x61u8; 12];
 
         let mut baseline_cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-        baseline_cfg.force_aead = "aegis-128l".to_string();
+        baseline_cfg.force_aead = "aegis".to_string();
         install_data_aead_config(&baseline_cfg);
         let (baseline_seal, _) =
             select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
@@ -143,7 +142,7 @@ proptest! {
             .seal_with_u64_counter(counter, &aad, &mut baseline_buf, plaintext.len(), None)
             .expect("baseline seal");
 
-        for alias in PUBLIC_AEGIS_ALIASES {
+        let alias = PUBLIC_AEGIS_NAME;
             let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
             cfg.force_aead = alias.to_string();
             install_data_aead_config(&cfg);
@@ -161,11 +160,10 @@ proptest! {
                 "alias {} changed ciphertext/tag bytes",
                 alias
             );
-        }
     }
 
     #[test]
-    fn prop_data_aead_morus_roundtrip(
+    fn prop_data_aead_aegis_roundtrip(
         counter in 0u64..=MAX_VARINT,
         plaintext in proptest::collection::vec(any::<u8>(), 0..192),
         aad in proptest::collection::vec(any::<u8>(), 0..48),
@@ -175,17 +173,17 @@ proptest! {
         let iv = [0x88u8; 12];
 
         let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-        cfg.force_aead = "morus".to_string();
+        cfg.force_aead = "aegis".to_string();
         install_data_aead_config(&cfg);
         let (seal, open) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
         let mut buf = vec![0u8; plaintext.len() + 16];
         buf[..plaintext.len()].copy_from_slice(&plaintext);
         let sealed = seal
             .seal_with_u64_counter(counter, &aad, &mut buf, plaintext.len(), None)
-            .expect("morus seal");
+            .expect("aegis seal");
         let opened = open
             .open_with_u64_counter(counter, &aad, &mut buf)
-            .expect("morus open");
+            .expect("aegis open");
 
         prop_assert_eq!(sealed, plaintext.len() + 16);
         prop_assert_eq!(opened, plaintext.len());

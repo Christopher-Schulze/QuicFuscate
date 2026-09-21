@@ -23,6 +23,8 @@ qf-common = { path = "../qf-common" }
 qf-cpu = { path = "../qf-cpu" }
 qf-error = { path = "../qf-error" }
 qf-telemetry = { path = "../qf-telemetry" }
+ring = "0.17.14"
+aegis = "=0.9.18"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 subtle = "2.6"

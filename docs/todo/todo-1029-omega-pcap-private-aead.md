@@ -4,7 +4,7 @@ title: Omega pcap/wire proof for private AEAD upgrade (TODO-885)
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: UNAVAILABLE
 created: 2026-09-21
 depends_on: [TODO-885]
 ---
@@ -36,3 +36,7 @@ TODO-885 has live TUN+QKey+MASQUE proof and `quicfuscate_private_upgrade_activat
 ## Notes
 
 Do not start until explicitly requested. Telemetry-only activation is already recorded in TODO-885 and must not be restated as wire proof.
+
+## Result (2026-09-21)
+
+UNAVAILABLE. This session did not capture client or server UDP. The Omega checkout used for the bakeoff (`/home/ubuntu/aead-bakeoff-1038`) is an rsync of the bench tree, not a VPN end-to-end capture. `/home/ubuntu/TESTING/QuicFuscate` was not mutated. `quicfuscate_private_upgrade_activated_total` remains telemetry, not wire proof. TODO-1044's opt-in must not be enabled in production until a capture meets the acceptance list above.

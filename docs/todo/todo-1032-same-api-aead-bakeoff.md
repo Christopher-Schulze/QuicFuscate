@@ -4,7 +4,7 @@ title: Same-API AEAD bakeoff rustls/ring aws-lc libaegis first-party
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-884, TODO-1037, TODO-1038, TODO-1039, TODO-1040]
 ---
@@ -19,22 +19,22 @@ Do not start until explicitly requested. Bench and record only. No default-polic
 
 ## Acceptance
 
-- [ ] One harness seals and opens through the same `AeadSeal`/`AeadOpen` (or rustls `PacketKey`) wrapper for every owner
-- [ ] Owners: rustls+ring AES-128-GCM, rustls+aws-lc-rs AES-128-GCM, rustls ChaCha20-Poly1305, libaegis or `aegis` AEGIS-128L, first-party AEGIS-128L, first-party MORUS-1280-128
-- [ ] Paths: primitive seal/open and full packet path (header protection + AAD + packet number) at 64, 1024, 1400, 8192 bytes; batch 8 on the packet path
-- [ ] Hosts: local ARM64 and Omega ARM64 in the first pass; x86 is recorded `UNAVAILABLE` until a witness exists
-- [ ] Each cell has median, p95, commit, compiler, CPU, and the exact command
-- [ ] A short note explains why first-party AEGIS lost the macOS primitive run (copies, AES-round quality, missing assembly, zeroize, dispatch)
-- [ ] Verdict answers three questions only: does any AEGIS/MORUS owner beat rustls AES-GCM on the full packet path by at least 10 percent; is that owner an audited crate or first-party; does first-party still have a path to win after a focused speed pass
-- [ ] No ship-default change, no feature-flag flip, no IETF/QUIC-standard wording
+- [x] One harness seals and opens through the same `AeadSeal`/`AeadOpen` (or rustls `PacketKey`) wrapper for every owner
+- [x] Owners: rustls+ring AES-128-GCM, rustls+aws-lc-rs AES-128-GCM, rustls ChaCha20-Poly1305, libaegis or `aegis` AEGIS-128L, first-party AEGIS-128L, first-party MORUS-1280-128
+- [x] Paths: primitive seal/open and full packet path (header protection + AAD + packet number) at 64, 1024, 1400, 8192 bytes; batch 8 on the packet path
+- [x] Hosts: local ARM64 and Omega ARM64 in the first pass; x86 is recorded `UNAVAILABLE` until a witness exists
+- [x] Each cell has median, p95, commit, compiler, CPU, and the exact command
+- [x] A short note explains why first-party AEGIS lost the macOS primitive run (copies, AES-round quality, missing assembly, zeroize, dispatch)
+- [x] Verdict answers three questions only: does any AEGIS/MORUS owner beat rustls AES-GCM on the full packet path by at least 10 percent; is that owner an audited crate or first-party; does first-party still have a path to win after a focused speed pass
+- [x] No ship-default change, no feature-flag flip, no IETF/QUIC-standard wording
 
 ## Sub-Tasks
 
-- [ ] Add bench-only deps (`aws-lc-rs` rustls backend, `aegis`/`libaegis`). Do not put them on the default runtime graph
-- [ ] Wrap each owner in the existing packet AEAD trait
-- [ ] Run the matrix on macOS ARM and Omega
-- [ ] Write the table into TODO-884 / TODO-1030
-- [ ] Leave x86 and side-channel on TODO-884 / TODO-681
+- [x] Add bench-only deps (`aws-lc-rs` rustls backend, `aegis`/`libaegis`). Do not put them on the default runtime graph
+- [x] Wrap each owner in the existing packet AEAD trait
+- [x] Run the matrix on macOS ARM and Omega
+- [x] Write the table into TODO-884 / TODO-1030
+- [x] Leave x86 and side-channel on TODO-884 / TODO-681
 
 ## Notes
 
@@ -110,3 +110,15 @@ Median, p95, p99, bytes/s, ns/packet, allocations, copied bytes, commit, compile
 - Claiming AEGIS/MORUS is a QUIC/TLS standard
 - Promoting from the old 884 ARM tables
 - Fancy AEAD-inside-FEC math that changes ciphertext or GF recovery
+
+## Result (2026-09-21)
+
+Harness: `examples/aead_bakeoff.rs`, runner `scripts/benchmarks/suites/bench-aead-bakeoff.sh`. Owners share short-header AAD, `RingAesHp`, QUIC nonce, and a 16-byte tag. rustls rows use `Keys::initial` `PacketKey`. Artifacts: `scripts/out/benchmarks/aead-bakeoff-macos-arm/` and `scripts/out/benchmarks/aead-bakeoff-omega-arm/` (including `matrix-rlc.txt`). x86_64 UNAVAILABLE.
+
+Verdict:
+
+1. Yes. S-AEGIS beats R-RING and R-LC by more than 10 percent geometric mean on P1 1200-1400 on both ARM hosts. Omega same binary: 1.76x vs R-RING, 1.85x vs R-LC. macOS conservative cross-run vs R-LC: 1.29x. No other private owner does.
+2. That owner is the audited `aegis` 0.9.18 crate (libaegis), not first-party.
+3. First-party has no focused-pass path that this program should take. C-AEGIS-L is about 6x slower than S-AEGIS at the same allocs=0 / copied=16 cost. TODO-1042 is SKIP.
+
+No ship-default change. Numbers and the pick are in TODO-1044.

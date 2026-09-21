@@ -81,7 +81,7 @@ fn mixed_traffic_only_triggers_on_probe_signatures() {
 
 #[test]
 fn stealth_manager_updates_probe_telemetry_counters() {
-    let mut cfg = StealthConfig::intelligent();
+    let mut cfg = StealthConfig::dynamic();
     cfg.dynamic_enabled = true;
     cfg.enable_traffic_padding = true;
     cfg.enable_timing_obfuscation = true;

@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 #[cfg(not(windows))]
 use qf_cpu::{prefetch, PrefetchHint};
 pub use qf_cpu::{
-    AmxCapability, CpuFeature, CpuFeatures, CpuProfile, CryptoAeadPlan, FeatureDetector,
+    AmxCapability, CpuFeature, CpuFeatures, CpuProfile, FeatureDetector,
 };
 
 #[cfg(not(windows))]

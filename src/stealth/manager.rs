@@ -147,10 +147,10 @@ impl StealthManager {
         // escalation-only paths. Light Stealth timing stays on the transport
         // timing gate.
         let flow_shaper = if config.enable_timing_obfuscation || config.dynamic_enabled {
-            let jitter_us = if matches!(config.mode, StealthMode::AntiDpi) { 3000 } else { 750 };
+            let jitter_us = if matches!(config.mode, StealthMode::StealthMax) { 3000 } else { 750 };
             Some(FlowShaper::new_with_clock(
                 jitter_us,
-                matches!(config.mode, StealthMode::AntiDpi),
+                matches!(config.mode, StealthMode::StealthMax),
                 &clock,
             ))
         } else {
@@ -269,8 +269,8 @@ impl StealthManager {
         if !config.fronting_domains.is_empty() {
             return Some(DomainFrontingManager::new(config.fronting_domains.clone()));
         }
-        if matches!(config.mode, StealthMode::AntiDpi) {
-            return Some(DomainFrontingManager::ultra_stealth());
+        if matches!(config.mode, StealthMode::StealthMax) {
+            return Some(DomainFrontingManager::broad_provider_rotation());
         }
         warn!(
             "Domain fronting requested without configured fronting domains outside Anti-DPI - disabling for a coherent H3 persona"
@@ -348,7 +348,7 @@ impl StealthManager {
     /// `self.fingerprint`.
     pub fn maybe_rotate_fingerprint(&self) {
         let escalated = self.escalated.load(Ordering::Relaxed);
-        let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
+        let anti_mode = matches!(self.config.mode, StealthMode::StealthMax);
         let mode_allows = match self.config.fingerprint_rotation_mode {
             RotationMode::Fixed => false,
             RotationMode::Slots | RotationMode::All => self.config.enable_fingerprint_rotation,
@@ -420,7 +420,7 @@ impl StealthManager {
         }
         profile.cover_performance_mode = matches!(
             self.config.mode,
-            StealthMode::Off | StealthMode::Performance | StealthMode::Intelligent
+            StealthMode::Off | StealthMode::Performance | StealthMode::Dynamic
         );
         if profile.cover_performance_mode {
             profile.timing_jitter = None;
@@ -520,7 +520,7 @@ impl StealthManager {
     /// `--no-utls` only skips the persona/ACK overlay; reorder and jitter
     /// still need these transport flags or the window never arms.
     pub(crate) fn apply_stealth_transport_knobs(&self, config: &mut crate::transport::Config) {
-        if matches!(self.config.mode, StealthMode::AntiDpi) {
+        if matches!(self.config.mode, StealthMode::StealthMax) {
             config.set_external_pacing(true);
         }
 
@@ -647,7 +647,7 @@ impl StealthManager {
         // - Anti-DPI without choke -> FlowShaper (ack-eliciting packets only)
         let mut total_delay = std::time::Duration::ZERO;
         let mut choked_bytes = 0u64;
-        let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
+        let anti_mode = matches!(self.config.mode, StealthMode::StealthMax);
 
         if self.config.enable_realtime_choke {
             if let Ok(mut guard) = self.rate_choker.lock() {
@@ -826,7 +826,7 @@ impl StealthManager {
                 // an already-established connection.
 
                 // Anti-DPI mode with realtime choke: activate rate choker.
-                let anti_mode = matches!(self.config.mode, StealthMode::AntiDpi);
+                let anti_mode = matches!(self.config.mode, StealthMode::StealthMax);
                 if anti_mode && self.config.enable_realtime_choke {
                     if let Ok(mut guard) = self.rate_choker.lock() {
                         *guard = RateChoker::new_with_clock(50, 12, &self.clock);
@@ -866,8 +866,8 @@ impl StealthManager {
     fn cover_header_emission_allowed(&self) -> bool {
         match self.config.mode {
             StealthMode::Off | StealthMode::Performance => false,
-            StealthMode::Intelligent => self.intelligent_runtime_level() >= 1,
-            StealthMode::Stealth | StealthMode::AntiDpi | StealthMode::Manual => true,
+            StealthMode::Dynamic => self.intelligent_runtime_level() >= 1,
+            StealthMode::Stealth | StealthMode::StealthMax | StealthMode::Manual => true,
         }
     }
 
@@ -899,7 +899,7 @@ impl StealthManager {
 
     /// Returns true if the manager is running in Intelligent (adaptive) mode.
     pub(crate) fn is_intelligent_runtime(&self) -> bool {
-        matches!(self.config.mode, StealthMode::Intelligent)
+        matches!(self.config.mode, StealthMode::Dynamic)
     }
 
     pub(crate) fn environment_snapshot(&self) -> Arc<crate::env_utils::EnvSnapshot> {
@@ -1045,7 +1045,7 @@ impl StealthManager {
 
     fn server_push_burst_interval_secs(&self) -> u64 {
         if self.config.server_push_burst_interval == 0 {
-            if matches!(self.config.mode, StealthMode::Intelligent) {
+            if matches!(self.config.mode, StealthMode::Dynamic) {
                 // Level 2 (anti-dpi pressure): burst every 15s for stronger cover.
                 // Level 0/1: every 30s to keep overhead minimal.
                 if self.intelligent_runtime_level() >= 2 {
@@ -1079,7 +1079,7 @@ impl StealthManager {
         let escalated = self.escalated.load(Ordering::Relaxed);
         let runtime_enabled = self.server_push_runtime_enabled.load(Ordering::Relaxed) || escalated;
         let enabled = self.config.enable_server_push_cover || runtime_enabled;
-        enabled && (!matches!(self.config.mode, StealthMode::Intelligent) || intelligent_level >= 1)
+        enabled && (!matches!(self.config.mode, StealthMode::Dynamic) || intelligent_level >= 1)
     }
 
     fn current_server_push_state(&self) -> Option<(std::time::Instant, f32)> {
@@ -1121,7 +1121,7 @@ impl StealthManager {
 
     /// Returns whether this connection persona may negotiate WebTransport cover.
     pub(crate) fn webtransport_cover_enabled(&self) -> bool {
-        let active = matches!(self.config.mode, StealthMode::AntiDpi)
+        let active = matches!(self.config.mode, StealthMode::StealthMax)
             || (self.is_intelligent_runtime() && self.intelligent_runtime_level() >= 2);
         active && self.config.enable_http3_masquerading
     }
@@ -1223,7 +1223,7 @@ impl StealthManager {
         }
     }
 
-    /// Escalate to a specific stealth level (0=Performance, 1=Stealth, 2=AntiDpi).
+    /// Escalate to a specific stealth level (0=performance, 1=stealth, 2=Stealth MAX).
     /// Each level sets graduated intensity on padding/timing/rotation.
     pub(crate) fn escalate_to_level(&self, level: u8) {
         let padding_rate = match level {
@@ -1368,7 +1368,7 @@ impl StealthManager {
     /// Intelligent-mode hook: prefer the production Core H3/MASQUE carrier
     /// when probe or escalation pressure justifies it.
     fn maybe_escalate_masque_intelligent(&self) {
-        if !matches!(self.config.mode, StealthMode::Intelligent) {
+        if !matches!(self.config.mode, StealthMode::Dynamic) {
             return;
         }
         let desired_preference = self.desired_masque_preference();
@@ -1387,7 +1387,7 @@ impl StealthManager {
     /// Syncs MASQUE preference using a telemetry hint value (test-only).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn sync_masque_preference_with_hint_for_test(&self, telemetry_hint: u64) {
-        if !matches!(self.config.mode, StealthMode::Intelligent) {
+        if !matches!(self.config.mode, StealthMode::Dynamic) {
             return;
         }
         let desired_preference = self.desired_masque_preference_with_hint(telemetry_hint);

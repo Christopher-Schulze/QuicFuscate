@@ -115,7 +115,7 @@ normalize_target_size = 1200
 
 #[test]
 fn anti_dpi_preset_uses_packet_normalize_with_target() {
-    let cfg = StealthConfig::anti_dpi();
+    let cfg = StealthConfig::stealth_max();
     assert_eq!(cfg.padding_strategy, PaddingStrategy::BrowserMimic);
     // Anti-DPI carries a normalize_target for operators who switch to PacketNormalize
     assert_eq!(cfg.normalize_target_size, 1200);
@@ -143,7 +143,7 @@ fn stealth_preset_enables_cover_ping() {
 
 #[test]
 fn anti_dpi_preset_has_aggressive_cover_ping() {
-    let cfg = StealthConfig::anti_dpi();
+    let cfg = StealthConfig::stealth_max();
     assert!(cfg.enable_cover_ping);
     assert_eq!(cfg.cover_ping_interval_ms, 15_000);
 }

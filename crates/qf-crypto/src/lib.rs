@@ -1,22 +1,12 @@
 #![allow(unexpected_cfgs)]
 //! # Crypto Module
 //!
-//! This module owns QuicFuscate's retained custom data-plane crypto machine room.
-//! The public runtime contract is intentionally narrow:
-//! - `Aegis128L`
-//! - `Morus1280_128`
-//!
-//! Internal backend width selection (`Aegis128X4` / `Aegis128X8`) remains an
-//! implementation detail chosen by the planner and hardware detection logic.
-//!
-//! External crates may appear in tests or baseline oracles, but they are not
-//! the canonical runtime providers for the retained data-plane AEAD contract.
+//! Packet crypto. The ship default is rustls/ring AES-128-GCM. The only
+//! private post-auth owner is libaegis AEGIS-128L, and only when the operator
+//! selects it. There is no first-party AEGIS or MORUS implementation.
 
-use qf_cpu::CryptoAeadPlan;
 #[cfg(target_arch = "x86_64")]
 use qf_cpu::FeatureDetector;
-#[cfg(target_arch = "x86_64")]
-use qf_cpu::{prefetch, PrefetchHint};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -37,53 +27,10 @@ pub(crate) use qf_telemetry as telemetry;
 
 const DATA_AEAD_OVERRIDE_AUTO: u8 = 0;
 const DATA_AEAD_OVERRIDE_AEGIS_L: u8 = 1;
-const DATA_AEAD_OVERRIDE_MORUS: u8 = 2;
 
 static DATA_AEAD_OVERRIDE_MODE: AtomicU8 = AtomicU8::new(DATA_AEAD_OVERRIDE_AUTO);
 
-/// Representative payload length used to auto-select the data-plane AEAD
-/// backend width for 0-RTT/1-RTT packet protection.
-///
-/// This is intentionally distinct from QUIC Initial packet sizing
-/// (approximately 1200 bytes). Typical 1-RTT
-/// datagrams carry a payload close to the path MTU (~1400 B), and the
-/// X4/X8 wide backends are only selected once the workload crosses the
-/// planner's length thresholds. Feeding an Initial-sized length would
-/// under-select the wide backends on AVX/VAES-capable hosts.
-///
-/// Forced product-family overrides (`force_aead` / `AeadPreference`) bypass
-/// this length entirely, so changing it never affects explicit family pinning.
-/// Internal AEGIS width backends remain planner-owned implementation details.
-pub(crate) use qf_cpu::DEFAULT_DATA_PLANE_AEAD_LEN;
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn prefetch_aegis_state(ptr: *const u8) {
-    prefetch(ptr, PrefetchHint::T0);
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn prefetch_aegis_state(_ptr: *const u8) {}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn prefetch_morus_buffer(ptr: *const u8, len: usize) {
-    if len > 64 {
-        prefetch(ptr, PrefetchHint::T0);
-    }
-}
-
 // aarch64 intrinsics are imported locally where used via core::arch::aarch64
-
-// ============================================================================
-// Hardware-accelerated crypto with AES-NI for AEGIS and MORUS
-// ============================================================================
-
-// ============================================================================
-// AEGIS-128 RUNTIME DISPATCH SYSTEM
-// ============================================================================
-// Selector logic centralized in simd::CryptoAeadPlan (SSOT).
 
 // Note: keep tests focused on functional behavior; avoid hygiene-only symbol touches.
 
@@ -153,8 +100,6 @@ pub(crate) mod chacha20poly1305 {
         }
     }
 
-    // MORUS SSSE3 wrappers are defined in impl MorusAead (outside this module)
-
     impl Drop for ChaCha20Poly1305 {
         fn drop(&mut self) {
             self.key.zeroize();
@@ -222,10 +167,6 @@ pub(crate) mod chacha20poly1305 {
 /// Re-export of the ChaCha20-Poly1305 AEAD cipher (RFC 8439).
 pub use chacha20poly1305::ChaCha20Poly1305;
 
-// ============================================================================
-// AEGIS helpers and hardware-accelerated primitives live in this module.
-// Keep selection logic centralized in simd::CryptoAeadPlan.
-// ============================================================================
 
 /// Cross-platform AES-128 encryption for a single block.
 ///
@@ -255,14 +196,6 @@ fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     }
     crate::crypto::aes::aes128_encrypt_block(key, block)
 }
-
-/// AEGIS-128L/X4/X8 AEAD cipher.
-pub mod aegis;
-pub use self::aegis::*;
-
-/// MORUS-1280-128 AEAD cipher.
-pub mod morus;
-pub use self::morus::*;
 
 /// Manages cryptographic keys and provides secure random data.
 /// This manager ensures that all cryptographic operations are backed by
@@ -339,6 +272,9 @@ pub(crate) fn checked_seal_capacity(
 }
 
 pub mod aead;
+mod libaegis_aead;
+mod ring_aead;
+pub use ring_aead::{RingAesGcm128, RingAesHp, RingChaCha20Poly1305};
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
@@ -680,51 +616,41 @@ fn make_nonce16(iv: &[u8; 12], counter: u64) -> Result<[u8; 16], crate::error::C
 
 pub type BoxedDataAeadPair = (Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>);
 
-#[inline(always)]
-fn build_aegis_data_aead(plan: CryptoAeadPlan, key: &[u8; 16], iv: &[u8; 12]) -> BoxedDataAeadPair {
-    match plan {
-        CryptoAeadPlan::Aegis128L => (
-            Box::new(Aegis128LAead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-            Box::new(Aegis128LAead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
-        ),
-        CryptoAeadPlan::Aegis128X4 => (
-            Box::new(Aegis128X4Aead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-            Box::new(Aegis128X4Aead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
-        ),
-        CryptoAeadPlan::Aegis128X8 => (
-            Box::new(Aegis128X8Aead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-            Box::new(Aegis128X8Aead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
-        ),
-        CryptoAeadPlan::Morus => unreachable!("MORUS is built through build_morus_data_aead"),
-    }
-}
-
-#[inline(always)]
-fn build_morus_data_aead(key: &[u8; 16], iv: &[u8; 12]) -> BoxedDataAeadPair {
-    (
-        Box::new(MorusAead::from_arrays(key, iv)) as Box<dyn AeadSeal + Send + Sync>,
-        Box::new(MorusAead::from_arrays(key, iv)) as Box<dyn AeadOpen + Send + Sync>,
-    )
-}
-
-/// Concrete data-plane AEAD dispatch without vtable calls for retained backends.
 enum DataAead {
-    Aegis128L(Aegis128LAead),
-    Aegis128X4(Aegis128X4Aead),
-    Aegis128X8(Aegis128X8Aead),
-    Morus(MorusAead),
+    L(libaegis_aead::LibAegis128L),
+    X2(libaegis_aead::LibAegis128X2),
+    X4(libaegis_aead::LibAegis128X4),
 }
 
 impl DataAead {
     #[inline(always)]
-    fn new(plan: CryptoAeadPlan, key: &[u8; 16], iv: &[u8; 12]) -> Self {
-        match plan {
-            CryptoAeadPlan::Aegis128L => Self::Aegis128L(Aegis128LAead::from_arrays(key, iv)),
-            CryptoAeadPlan::Aegis128X4 => Self::Aegis128X4(Aegis128X4Aead::from_arrays(key, iv)),
-            CryptoAeadPlan::Aegis128X8 => Self::Aegis128X8(Aegis128X8Aead::from_arrays(key, iv)),
-            CryptoAeadPlan::Morus => Self::Morus(MorusAead::from_arrays(key, iv)),
+    fn from_variant(
+        variant: libaegis_aead::LibAegis128Variant,
+        key: &[u8; 16],
+        iv: &[u8; 12],
+    ) -> Self {
+        match variant {
+            libaegis_aead::LibAegis128Variant::L => {
+                Self::L(libaegis_aead::LibAegis128L::from_arrays(key, iv))
+            }
+            libaegis_aead::LibAegis128Variant::X2 => {
+                Self::X2(libaegis_aead::LibAegis128X2::from_arrays(key, iv))
+            }
+            libaegis_aead::LibAegis128Variant::X4 => {
+                Self::X4(libaegis_aead::LibAegis128X4::from_arrays(key, iv))
+            }
         }
     }
+}
+
+macro_rules! dispatch_data_aead {
+    ($self:expr, $method:ident($($arg:expr),* $(,)?)) => {
+        match $self {
+            DataAead::L(aead) => aead.$method($($arg),*),
+            DataAead::X2(aead) => aead.$method($($arg),*),
+            DataAead::X4(aead) => aead.$method($($arg),*),
+        }
+    };
 }
 
 impl AeadSeal for DataAead {
@@ -737,22 +663,12 @@ impl AeadSeal for DataAead {
         len: usize,
         extra_in: Option<&[u8]>,
     ) -> Result<usize, crate::error::ConnectionError> {
-        match self {
-            Self::Aegis128L(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
-            Self::Aegis128X4(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
-            Self::Aegis128X8(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
-            Self::Morus(aead) => aead.seal_with_u64_counter(counter, ad, buf, len, extra_in),
-        }
+        dispatch_data_aead!(self, seal_with_u64_counter(counter, ad, buf, len, extra_in))
     }
 
     #[inline(always)]
     fn supports_batch_seal(&self) -> bool {
-        match self {
-            Self::Aegis128L(aead) => aead.supports_batch_seal(),
-            Self::Aegis128X4(aead) => aead.supports_batch_seal(),
-            Self::Aegis128X8(aead) => aead.supports_batch_seal(),
-            Self::Morus(aead) => aead.supports_batch_seal(),
-        }
+        dispatch_data_aead!(self, supports_batch_seal())
     }
 
     #[inline(always)]
@@ -760,12 +676,7 @@ impl AeadSeal for DataAead {
         &self,
         items: &mut [crate::crypto::aead::AeadSealItem<'_>],
     ) -> Result<(), crate::error::ConnectionError> {
-        match self {
-            Self::Aegis128L(aead) => aead.seal_batch(items),
-            Self::Aegis128X4(aead) => aead.seal_batch(items),
-            Self::Aegis128X8(aead) => aead.seal_batch(items),
-            Self::Morus(aead) => aead.seal_batch(items),
-        }
+        dispatch_data_aead!(self, seal_batch(items))
     }
 }
 
@@ -777,22 +688,12 @@ impl AeadOpen for DataAead {
         ad: &[u8],
         buf: &mut [u8],
     ) -> Result<usize, crate::error::ConnectionError> {
-        match self {
-            Self::Aegis128L(aead) => aead.open_with_u64_counter(counter, ad, buf),
-            Self::Aegis128X4(aead) => aead.open_with_u64_counter(counter, ad, buf),
-            Self::Aegis128X8(aead) => aead.open_with_u64_counter(counter, ad, buf),
-            Self::Morus(aead) => aead.open_with_u64_counter(counter, ad, buf),
-        }
+        dispatch_data_aead!(self, open_with_u64_counter(counter, ad, buf))
     }
 
     #[inline(always)]
     fn supports_batch_open(&self) -> bool {
-        match self {
-            Self::Aegis128L(aead) => aead.supports_batch_open(),
-            Self::Aegis128X4(aead) => aead.supports_batch_open(),
-            Self::Aegis128X8(aead) => aead.supports_batch_open(),
-            Self::Morus(aead) => aead.supports_batch_open(),
-        }
+        dispatch_data_aead!(self, supports_batch_open())
     }
 
     #[inline(always)]
@@ -800,12 +701,7 @@ impl AeadOpen for DataAead {
         &self,
         items: &mut [crate::crypto::aead::AeadOpenItem<'_>],
     ) -> Result<(), crate::error::ConnectionError> {
-        match self {
-            Self::Aegis128L(aead) => aead.open_batch(items),
-            Self::Aegis128X4(aead) => aead.open_batch(items),
-            Self::Aegis128X8(aead) => aead.open_batch(items),
-            Self::Morus(aead) => aead.open_batch(items),
-        }
+        dispatch_data_aead!(self, open_batch(items))
     }
 }
 
@@ -925,14 +821,8 @@ impl AeadOpen for PacketAeadOpen {
 #[cfg(feature = "benches")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BenchDataAeadBackend {
-    /// AEGIS-128L (single-lane AES-based AEAD).
+    /// libaegis AEGIS-128L.
     Aegis128L,
-    /// AEGIS-128X4 (4-lane parallel AEGIS).
-    Aegis128X4,
-    /// AEGIS-128X8 (8-lane parallel AEGIS).
-    Aegis128X8,
-    /// MORUS-1280-128 (lightweight AEAD, no AES dependency).
-    Morus,
 }
 
 #[cfg(feature = "benches")]
@@ -940,65 +830,38 @@ impl BenchDataAeadBackend {
     /// Returns the canonical lowercase name of this AEAD backend.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Aegis128L => "aegis128l",
-            Self::Aegis128X4 => "aegis128x4",
-            Self::Aegis128X8 => "aegis128x8",
-            Self::Morus => "morus1280_128",
+            Self::Aegis128L => "aegis",
         }
     }
 }
 
 #[inline(always)]
-fn record_data_aead_plan(plan: CryptoAeadPlan) {
-    let width = match plan {
-        CryptoAeadPlan::Aegis128L => 1,
-        CryptoAeadPlan::Aegis128X4 => 4,
-        CryptoAeadPlan::Aegis128X8 => 8,
-        CryptoAeadPlan::Morus => 0,
-    };
-    crate::telemetry::AEGIS_PLAN.store(width, std::sync::atomic::Ordering::Relaxed);
-    match plan {
-        CryptoAeadPlan::Aegis128L => qf_telemetry::DATA_AEAD_BACKEND_AEGIS_L_TOTAL.inc(),
-        CryptoAeadPlan::Aegis128X4 => qf_telemetry::DATA_AEAD_BACKEND_AEGIS_X4_TOTAL.inc(),
-        CryptoAeadPlan::Aegis128X8 => qf_telemetry::DATA_AEAD_BACKEND_AEGIS_X8_TOTAL.inc(),
-        CryptoAeadPlan::Morus => qf_telemetry::DATA_AEAD_BACKEND_MORUS_TOTAL.inc(),
-    }
+fn record_libaegis_owner() {
+    crate::telemetry::AEGIS_PLAN.store(1, std::sync::atomic::Ordering::Relaxed);
+    qf_telemetry::DATA_AEAD_BACKEND_AEGIS_L_TOTAL.inc();
 }
 
 #[inline(always)]
-fn resolve_data_aead_plan(default_workload_len: usize) -> CryptoAeadPlan {
-    match data_aead_override_mode() {
-        DATA_AEAD_OVERRIDE_AEGIS_L => CryptoAeadPlan::Aegis128L,
-        DATA_AEAD_OVERRIDE_MORUS => CryptoAeadPlan::Morus,
-        _ => CryptoAeadPlan::select_for_len(default_workload_len),
-    }
-}
-
-#[inline(always)]
-fn build_data_aead(plan: CryptoAeadPlan, key: &[u8; 16], iv: &[u8; 12]) -> BoxedDataAeadPair {
-    record_data_aead_plan(plan);
-    match plan {
-        CryptoAeadPlan::Morus => build_morus_data_aead(key, iv),
-        CryptoAeadPlan::Aegis128L | CryptoAeadPlan::Aegis128X4 | CryptoAeadPlan::Aegis128X8 => {
-            build_aegis_data_aead(plan, key, iv)
-        }
-    }
-}
-
-#[inline(always)]
-fn build_packet_data_aead(
-    plan: CryptoAeadPlan,
-    key: &[u8; 16],
-    iv: &[u8; 12],
-) -> (PacketAeadSeal, PacketAeadOpen) {
-    record_data_aead_plan(plan);
+fn build_data_aead(key: &[u8; 16], iv: &[u8; 12]) -> BoxedDataAeadPair {
+    record_libaegis_owner();
     (
-        PacketAeadSeal::data(DataAead::new(plan, key, iv)),
-        PacketAeadOpen::data(DataAead::new(plan, key, iv)),
+        Box::new(libaegis_aead::LibAegis128L::from_arrays(key, iv))
+            as Box<dyn AeadSeal + Send + Sync>,
+        Box::new(libaegis_aead::LibAegis128L::from_arrays(key, iv))
+            as Box<dyn AeadOpen + Send + Sync>,
     )
 }
 
-/// Constructs a boxed seal/open AEAD pair for the given benchmark backend.
+#[inline(always)]
+fn build_packet_data_aead(key: &[u8; 16], iv: &[u8; 12]) -> (PacketAeadSeal, PacketAeadOpen) {
+    record_libaegis_owner();
+    (
+        PacketAeadSeal::data(DataAead::from_variant(libaegis_aead::LibAegis128Variant::L, key, iv)),
+        PacketAeadOpen::data(DataAead::from_variant(libaegis_aead::LibAegis128Variant::L, key, iv)),
+    )
+}
+
+/// Constructs a boxed seal/open pair for the libaegis benchmark backend.
 #[cfg(feature = "benches")]
 pub fn build_data_aead_for_benches(
     backend: BenchDataAeadBackend,
@@ -1010,16 +873,11 @@ pub fn build_data_aead_for_benches(
     k16.copy_from_slice(key);
     let mut iv12 = [0u8; 12];
     iv12.copy_from_slice(iv);
-    let plan = match backend {
-        BenchDataAeadBackend::Aegis128L => CryptoAeadPlan::Aegis128L,
-        BenchDataAeadBackend::Aegis128X4 => CryptoAeadPlan::Aegis128X4,
-        BenchDataAeadBackend::Aegis128X8 => CryptoAeadPlan::Aegis128X8,
-        BenchDataAeadBackend::Morus => CryptoAeadPlan::Morus,
-    };
-    Ok(build_data_aead(plan, &k16, &iv12))
+    let _ = backend;
+    Ok(build_data_aead(&k16, &iv12))
 }
 
-/// Selects the optimal data-plane AEAD backend and returns a seal/open pair.
+/// Returns the libaegis seal/open pair. This is not the ship-default packet owner.
 pub fn select_data_aead(
     key: &[u8],
     iv: &[u8],
@@ -1029,33 +887,26 @@ pub fn select_data_aead(
     k16.copy_from_slice(key);
     let mut iv12 = [0u8; 12];
     iv12.copy_from_slice(iv);
-
-    let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
-    Ok(build_data_aead(plan, &k16, &iv12))
+    Ok(build_data_aead(&k16, &iv12))
 }
 
-/// Selects the data-plane AEAD backend for packet hot paths without boxed dispatch.
+/// Returns the libaegis packet owner. This is not the ship-default packet owner.
 pub fn select_packet_data_aead(key: &[u8; 32], iv: &[u8; 12]) -> (PacketAeadSeal, PacketAeadOpen) {
     let mut k16 = [0u8; 16];
     k16.copy_from_slice(&key[..16]);
     let mut iv12 = [0u8; 12];
     iv12.copy_from_slice(iv);
-
-    let plan = resolve_data_aead_plan(DEFAULT_DATA_PLANE_AEAD_LEN);
-    build_packet_data_aead(plan, &k16, &iv12)
+    build_packet_data_aead(&k16, &iv12)
 }
 
 /// Product-level private packet-AEAD family exposed to the authenticated negotiation layer.
 ///
-/// Internal AEGIS width variants remain planner-owned and cannot appear in this contract.
+/// The only family is libaegis AEGIS-128L. Wire id 2 (the removed MORUS id) is rejected by the decoder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrivateAeadFamily {
-    /// AEGIS-128L with the exact 128-bit key profile.
+    /// libaegis AEGIS-128L with the exact 128-bit key profile.
     Aegis128L,
-    /// MORUS-1280-128 with the exact 128-bit key profile.
-    #[serde(rename = "morus-1280-128")]
-    Morus1280_128,
 }
 
 impl PrivateAeadFamily {
@@ -1066,19 +917,17 @@ impl PrivateAeadFamily {
     /// Exact authentication tag length shared with the QUIC packet shape.
     pub const TAG_LEN: usize = 16;
 
-    /// Stable protocol identifier. Internal SIMD widths deliberately have no identifier.
+    /// Stable protocol identifier. The removed MORUS id 2 is not assigned.
     pub const fn protocol_id(self) -> u8 {
         match self {
             Self::Aegis128L => 1,
-            Self::Morus1280_128 => 2,
         }
     }
 
     /// Stable low-cardinality diagnostic label.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Aegis128L => "aegis-128l",
-            Self::Morus1280_128 => "morus-1280-128",
+            Self::Aegis128L => "aegis",
         }
     }
 }
@@ -1105,11 +954,24 @@ pub fn select_private_packet_data_aead(
     key16.copy_from_slice(key);
     let mut iv12 = [0u8; PrivateAeadFamily::IV_LEN];
     iv12.copy_from_slice(iv);
-    let plan = match family {
-        PrivateAeadFamily::Aegis128L => CryptoAeadPlan::Aegis128L,
-        PrivateAeadFamily::Morus1280_128 => CryptoAeadPlan::Morus,
-    };
-    Ok(build_packet_data_aead(plan, &key16, &iv12))
+    Ok(build_packet_data_aead(&key16, &iv12))
+}
+
+pub use libaegis_aead::LibAegis128Variant;
+
+/// Build one libaegis AEGIS-128 packet owner.
+///
+/// `L`, `X2`, and `X4` do not open each other's ciphertext. The private
+/// negotiation path stays on `L` until a same-host matrix pins a single variant.
+pub fn select_libaegis128_packet(
+    variant: LibAegis128Variant,
+    key: &[u8; 16],
+    iv: &[u8; 12],
+) -> (PacketAeadSeal, PacketAeadOpen) {
+    (
+        PacketAeadSeal::data(DataAead::from_variant(variant, key, iv)),
+        PacketAeadOpen::data(DataAead::from_variant(variant, key, iv)),
+    )
 }
 
 fn data_aead_override_mode() -> u8 {
@@ -1120,25 +982,19 @@ fn set_data_aead_override_mode(mode: u8) {
     DATA_AEAD_OVERRIDE_MODE.store(mode, Ordering::Relaxed);
 }
 
-/// Apply data-plane AEAD settings from config.
+/// Product-level private AEAD family preference.
 ///
-/// This affects 0-RTT/1-RTT packet protection selection in the forked transport layer.
-/// It is a fork-specific data-plane decision, not a TLS cipher-suite decision, and is valid only under the explicit full-fork assumption.
-/// The config surface selects product AEAD families only; internal AEGIS width backends are planner-owned implementation details.
-/// It is not an upstream QUIC interoperability claim.
-/// Initial/Handshake remain AES-GCM at the QUIC/TLS boundary.
-/// Product-level data-plane AEAD preference supplied by the root configuration adapter.
+/// `auto` selects no private family. Explicit `aegis` opts into libaegis
+/// and is rejected when `packet_protection_mode` is `standard`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DataAeadPreference {
     /// Select the backend from hardware and workload characteristics.
     #[default]
     Auto,
-    /// Prefer the AEGIS-128L product family when hardware permits it.
-    #[serde(rename = "aegis-128l")]
+    /// Opt into libaegis AEGIS-128L. This is not selected by `auto`.
+    #[serde(rename = "aegis")]
     Aegis128L,
-    /// Prefer MORUS-1280-128.
-    Morus,
 }
 
 impl DataAeadPreference {
@@ -1147,7 +1003,6 @@ impl DataAeadPreference {
         match self {
             Self::Auto => None,
             Self::Aegis128L => Some(PrivateAeadFamily::Aegis128L),
-            Self::Morus => Some(PrivateAeadFamily::Morus1280_128),
         }
     }
 }
@@ -1157,9 +1012,10 @@ impl DataAeadPreference {
 #[serde(rename_all = "kebab-case")]
 pub enum PacketProtectionMode {
     /// Keep the complete connection on standards-compatible rustls QUIC keys.
-    Standard,
-    /// Use standard protection unless a future authenticated private upgrade proves safe.
+    /// This is the shipped product default.
     #[default]
+    Standard,
+    /// Use standard protection unless an explicit authenticated private upgrade is configured.
     Auto,
     /// Require a completed authenticated private upgrade and fail closed otherwise.
     AdvancedRequired,
@@ -1173,6 +1029,22 @@ impl PacketProtectionMode {
             Self::Auto => "auto",
             Self::AdvancedRequired => "advanced-required",
         }
+    }
+}
+
+/// Pin the post-auth payload cipher.
+///
+/// `use_aegis` is set for `off` and `performance`, and for `manual` when the
+/// operator selected AEGIS-128L. Header protection, Initial, and handshake stay
+/// rustls AES-128-GCM. Stealth-using modes pass `false` and keep AES-128-GCM
+/// for the whole connection. The upgrade completes only when both peers agree.
+pub const fn payload_protection_pin(
+    use_aegis: bool,
+) -> (PacketProtectionMode, Option<PrivateAeadFamily>) {
+    if use_aegis {
+        (PacketProtectionMode::Auto, Some(PrivateAeadFamily::Aegis128L))
+    } else {
+        (PacketProtectionMode::Standard, None)
     }
 }
 
@@ -1195,7 +1067,7 @@ pub struct CryptoConfig {
 impl Default for CryptoConfig {
     fn default() -> Self {
         Self {
-            packet_protection_mode: PacketProtectionMode::Auto,
+            packet_protection_mode: PacketProtectionMode::Standard,
             aead_preference: DataAeadPreference::Auto,
             force_aead: String::new(),
             private_shape_seed: String::new(),
@@ -1208,8 +1080,7 @@ impl CryptoConfig {
     pub fn private_family(&self) -> Option<PrivateAeadFamily> {
         let force = self.force_aead.trim().to_ascii_lowercase();
         match force.as_str() {
-            "aegis-128l" | "aegis128l" | "aegis" => Some(PrivateAeadFamily::Aegis128L),
-            "morus" | "morus-1280-128" | "morus1280-128" => Some(PrivateAeadFamily::Morus1280_128),
+            "aegis" => Some(PrivateAeadFamily::Aegis128L),
             _ => self.aead_preference.private_family(),
         }
     }
@@ -1236,16 +1107,7 @@ impl CryptoConfig {
         let force = self.force_aead.trim();
         if !force.is_empty() {
             let value = force.to_ascii_lowercase();
-            let supported = matches!(
-                value.as_str(),
-                "auto"
-                    | "aegis-128l"
-                    | "aegis128l"
-                    | "aegis"
-                    | "morus"
-                    | "morus-1280-128"
-                    | "morus1280-128"
-            );
+            let supported = matches!(value.as_str(), "auto" | "aegis");
             if !supported {
                 return Err(format!("crypto.force_aead has unsupported value: {force}"));
             }
@@ -1296,7 +1158,12 @@ fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// Install data-plane AEAD selection without depending on the root engine configuration.
+/// Record the operator private-family choice.
+///
+/// Compatibility Initial, Handshake, and pre-auth 1-RTT secret installs use
+/// ring AES-128-GCM. The authenticated private owner is always libaegis
+/// AEGIS-128L when a caller uses the private selector. `auto` does not select
+/// it. This is not a TLS cipher suite.
 pub fn install_data_aead_selection(preference: DataAeadPreference, force_aead: &str) {
     let has_hw_aes = {
         #[cfg(target_arch = "x86_64")]
@@ -1319,11 +1186,8 @@ pub fn install_data_aead_selection(preference: DataAeadPreference, force_aead: &
         let v = force.to_ascii_lowercase();
         match v.as_str() {
             "auto" => set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO),
-            "aegis-128l" | "aegis128l" | "aegis" => {
+            "aegis" => {
                 set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_L)
-            }
-            "morus" | "morus-1280-128" | "morus1280-128" => {
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_MORUS)
             }
             _ => {
                 // Validation should reject unknown values; keep runtime behavior stable.
@@ -1344,7 +1208,6 @@ pub fn install_data_aead_selection(preference: DataAeadPreference, force_aead: &
                 set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
             }
         }
-        DataAeadPreference::Morus => set_data_aead_override_mode(DATA_AEAD_OVERRIDE_MORUS),
     }
 }
 

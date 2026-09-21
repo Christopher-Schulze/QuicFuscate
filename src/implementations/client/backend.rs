@@ -391,16 +391,15 @@ impl ClientBackend {
         config.connection.qkey_id = Some(qkey_id);
 
         if let Some(stealth) = qkey_config.stealth {
-            let s = stealth.trim().to_ascii_lowercase();
-            config.stealth.mode = match s.as_str() {
+            let s = stealth.trim();
+            config.stealth.mode = match s {
                 "off" => qf_engine_types::StealthMode::Off,
                 "performance" => qf_engine_types::StealthMode::Performance,
                 "stealth" => qf_engine_types::StealthMode::Stealth,
-                "anti-dpi" | "antidpi" | "anti_dpi" | "max" => {
-                    qf_engine_types::StealthMode::AntiDpi
-                }
+                "Stealth MAX" => qf_engine_types::StealthMode::StealthMax,
                 "manual" => qf_engine_types::StealthMode::Manual,
-                _ => qf_engine_types::StealthMode::Auto,
+                "dynamic" => qf_engine_types::StealthMode::Dynamic,
+                _ => qf_engine_types::StealthMode::Dynamic,
             };
         }
 

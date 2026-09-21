@@ -156,9 +156,15 @@ pub(super) async fn run_client(
         if engine_config.circuit.is_some() {
             return run_circuit_client(config_path, engine_config).await;
         }
+        let (mode, family) = quicfuscate::crypto::payload_protection_pin(
+            quicfuscate::engine::engine_mode_uses_libaegis(
+                engine_config.stealth.mode,
+                engine_config.crypto.private_family().is_some(),
+            ),
+        );
         private_protection_policy = Some((
-            engine_config.crypto.packet_protection_mode,
-            engine_config.crypto.private_family(),
+            mode,
+            family,
             engine_config
                 .crypto
                 .private_shape_seed_bytes()

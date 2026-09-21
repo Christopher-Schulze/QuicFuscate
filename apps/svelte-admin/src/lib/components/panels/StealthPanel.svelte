@@ -33,12 +33,12 @@
   }: Props = $props();
 
   const STEALTH_OPTIONS = [
-    { value: "auto", label: "Auto" },
-    { value: "performance", label: "Performance" },
-    { value: "stealth", label: "Stealth" },
-    { value: "antidpi", label: "AntiDPI" },
-    { value: "manual", label: "Manual" },
-    { value: "off", label: "Off" },
+    { value: "dynamic", label: "dynamic" },
+    { value: "performance", label: "performance" },
+    { value: "stealth", label: "stealth" },
+    { value: "Stealth MAX", label: "Stealth MAX" },
+    { value: "manual", label: "manual" },
+    { value: "off", label: "off" },
   ];
 
   const FEC_OPTIONS = [

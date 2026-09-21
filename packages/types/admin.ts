@@ -60,7 +60,7 @@ export type LogMode = "verbose" | "normal" | "minimal" | "no-log";
 
 export type PendingIpAction = "block" | "unblock";
 
-export type StealthPresetUi = "auto" | "performance" | "stealth" | "antidpi" | "manual" | "off";
+export type StealthPresetUi = "dynamic" | "performance" | "stealth" | "Stealth MAX" | "manual" | "off";
 
 export type CcSelection = CongestionControlAlgorithm | "__custom__";
 

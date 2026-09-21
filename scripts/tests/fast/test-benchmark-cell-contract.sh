@@ -68,7 +68,7 @@ document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 items = document["items"]
 requested = {
     "aes_gcm_seal/1024B",
-    "data_aead_single_seal_batch/aegis128l_1400B",
+    "data_aead_single_seal_batch/aegis_1400B",
     "connection_1rtt_send_recv/payload_1024B",
     "stream_frame_encoding/1024B_direct_writer",
     "varint/roundtrip_8vals",

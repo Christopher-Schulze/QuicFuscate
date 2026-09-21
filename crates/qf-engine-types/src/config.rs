@@ -234,9 +234,9 @@ impl From<&EngineConfig> for QKeyConfig {
             StealthMode::Off => None,
             StealthMode::Performance => Some("performance"),
             StealthMode::Stealth => Some("stealth"),
-            StealthMode::AntiDpi => Some("anti-dpi"),
+            StealthMode::StealthMax => Some("Stealth MAX"),
             StealthMode::Manual => Some("manual"),
-            StealthMode::Auto => Some("auto"),
+            StealthMode::Dynamic => Some("dynamic"),
         };
         let fec = match config.fec.mode {
             crate::FecMode::Off => None,
@@ -321,7 +321,7 @@ pub const MAX_NORMALIZE_TARGET_SIZE: usize = 65_527;
 impl Default for StealthSection {
     fn default() -> Self {
         Self {
-            mode: StealthMode::Auto,
+            mode: StealthMode::Dynamic,
             use_utls: true,
             enable_domain_fronting: false,
             enable_http3_masquerading: true,
@@ -372,9 +372,9 @@ impl StealthSection {
             StealthMode::Off => qf_stealth::StealthMode::Off,
             StealthMode::Performance => qf_stealth::StealthMode::Performance,
             StealthMode::Stealth => qf_stealth::StealthMode::Stealth,
-            StealthMode::AntiDpi => qf_stealth::StealthMode::AntiDpi,
+            StealthMode::StealthMax => qf_stealth::StealthMode::StealthMax,
             StealthMode::Manual => qf_stealth::StealthMode::Manual,
-            StealthMode::Auto => qf_stealth::StealthMode::Intelligent,
+            StealthMode::Dynamic => qf_stealth::StealthMode::Dynamic,
         };
         let mut runtime = qf_stealth::StealthConfig::from_mode(runtime_mode);
         runtime.enable_domain_fronting = self.enable_domain_fronting;
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(config.transport.quic_versions, [QuicVersion::V2, QuicVersion::V1]);
         assert_eq!(config.transport.cc_algorithm, CcAlgorithm::Bbr3);
         assert_eq!(config.crypto.aead_preference, AeadPreference::Auto);
-        assert_eq!(config.crypto.packet_protection_mode, PacketProtectionMode::Auto);
+        assert_eq!(config.crypto.packet_protection_mode, PacketProtectionMode::Standard);
         assert!(config.stealth.enable_network_fingerprint_normalization);
         assert!(!config.stealth.suppress_icmp_unreachable);
     }
@@ -556,13 +556,13 @@ mod tests {
         let mut config = EngineConfig::default();
         config.connection.remote = "198.51.100.7:443".to_string();
         config.connection.sni = "vpn.example.com".to_string();
-        config.stealth.mode = StealthMode::AntiDpi;
+        config.stealth.mode = StealthMode::StealthMax;
         config.fec.mode = crate::FecMode::Auto;
 
         let qkey = QKeyConfig::from(&config);
         assert_eq!(qkey.remote, config.connection.remote);
         assert_eq!(qkey.sni, config.connection.sni);
-        assert_eq!(qkey.stealth.as_deref(), Some("anti-dpi"));
+        assert_eq!(qkey.stealth.as_deref(), Some("Stealth MAX"));
         assert_eq!(qkey.fec.as_deref(), Some("auto"));
         assert!(qkey.validate());
 
@@ -803,12 +803,12 @@ suppress_icmp_unreachable = true
         let config = EngineConfig::builder()
             .mode(EngineMode::Server)
             .remote("0.0.0.0:4433")
-            .stealth_mode(StealthMode::AntiDpi)
+            .stealth_mode(StealthMode::StealthMax)
             .build()
             .unwrap();
 
         assert_eq!(config.engine.mode, EngineMode::Server);
-        assert_eq!(config.stealth.mode, StealthMode::AntiDpi);
+        assert_eq!(config.stealth.mode, StealthMode::StealthMax);
     }
 
     #[test]
@@ -982,7 +982,7 @@ mode = "roaming"
     #[test]
     fn private_packet_policy_roundtrips_as_typed_config_and_validates() {
         let config = EngineConfig::from_toml(
-            "[crypto]\npacket_protection_mode = \"advanced-required\"\naead_preference = \"aegis-128l\"\n",
+            "[crypto]\npacket_protection_mode = \"advanced-required\"\naead_preference = \"aegis\"\n",
         )
         .expect("private packet policy parses");
         assert_eq!(config.crypto.packet_protection_mode, PacketProtectionMode::AdvancedRequired);

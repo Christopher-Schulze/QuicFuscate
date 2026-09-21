@@ -208,10 +208,13 @@ impl ClientConnection {
             clock.clone(),
         )
         .map_err(EngineError::Connection)?;
-        connection.set_private_packet_protection_policy(
-            config.crypto.packet_protection_mode,
-            config.crypto.private_family(),
+        let (mode, family) = qf_crypto::payload_protection_pin(
+            crate::engine::engine_mode_uses_libaegis(
+                config.stealth.mode,
+                config.crypto.private_family().is_some(),
+            ),
         );
+        connection.set_private_packet_protection_policy(mode, family);
         if let Some(seed) = config.crypto.private_shape_seed_bytes() {
             connection
                 .set_private_protocol_shape(crate::qftls::PrivateProtocolShape::from_seed(&seed));
@@ -898,7 +901,7 @@ mod tests {
 
         let sc = ClientConnection::build_stealth_config(&config).unwrap();
         assert!(sc.max_padding_size > 0);
-        assert_eq!(sc.mode, crate::stealth::StealthMode::Intelligent);
+        assert_eq!(sc.mode, crate::stealth::StealthMode::Dynamic);
         assert!(!sc.enable_domain_fronting);
         assert!(ClientConnection::should_use_utls(&config));
 

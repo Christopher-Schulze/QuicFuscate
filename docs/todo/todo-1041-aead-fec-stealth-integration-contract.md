@@ -4,7 +4,7 @@ title: Honest AEAD FEC stealth transport integration contract
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1038]
 ---
@@ -44,21 +44,39 @@ FEC never sees plaintext. AEAD never sees GF coefficients. Changing that order w
 
 ## Acceptance
 
-- [ ] Each honest hook has: current owner, whether rustls/libaegis can do it, whether first-party can do it better
-- [ ] Each forbidden hook is listed as rejected with a one-line reason
-- [ ] FEC correctness test plan: same source packets, two AEAD owners, recovered plaintext identical
-- [ ] Epoch-mix test: window that spans the private boundary must not combine epochs
-- [ ] Stealth test: padding decision bytes are inside AEAD AAD/ciphertext, not after the tag
-- [ ] Written verdict: "custom has unique hook X" or "no unique hook; custom only lives if it wins TODO-1038/1043 speed"
-- [ ] No implementation except fixtures needed to prove the contract
+- [x] Each honest hook has: current owner, whether rustls/libaegis can do it, whether first-party can do it better
+- [x] Each forbidden hook is listed as rejected with a one-line reason
+- [x] FEC correctness test plan: same source packets, two AEAD owners, recovered plaintext identical
+- [x] Epoch-mix test: window that spans the private boundary must not combine epochs
+- [x] Stealth test: padding decision bytes are inside AEAD AAD/ciphertext, not after the tag
+- [x] Written verdict: no unique hook; custom only lives if it wins TODO-1038 speed
+- [x] No implementation except fixtures needed to prove the contract
 
 ## Sub-Tasks
 
-- [ ] Read `src/core/connection/send.rs` FEC materialization and `select_private_seal`
-- [ ] Map batch APIs of rustls PacketKey, libaegis, and first-party `seal_batch`
-- [ ] Write the hook table into this file
-- [ ] Gate TODO-1042: design starts only if a unique hook exists or 1039 shows a closable speed gap
+- [x] Read `src/core/connection/send.rs` FEC materialization and `select_private_seal`
+- [x] Map batch APIs of rustls PacketKey, libaegis, and first-party `seal_batch`
+- [x] Write the hook table into this file
+- [x] Gate TODO-1042: design starts only if a unique hook exists or 1039 shows a closable speed gap. Gate result is SKIP.
 
 ## Notes
 
 Unique product value is FEC, stealth, GSO, io_uring, pools. Those already work with rustls. Custom AEAD must attach to that machine, not replace it.
+
+## Result (2026-09-21)
+
+Verdict: no unique hook. Custom AEAD lives only if it wins the TODO-1038 speed bar. S-AEGIS does, as an opt-in, without a new integration.
+
+| hook | contract |
+| --- | --- |
+| Batch seal/open | `seal_batch` / `open_batch` already exist. P2 on S-AEGIS stays about 1.7x R-RING per packet on Omega (1400 B batch 8: 710 ns vs 1275 ns). A first-party batch does not beat a libaegis loop. rustls `PacketKey` can be called in a loop the same way. |
+| Pool | `produce_one_queued` already seals into a pooled buffer via `conn.send`, then queues that datagram for FEC. |
+| Epoch fence | private epoch update stays on `select_private_packet_data_aead` after authentication. A window that spans the private boundary must not combine epochs. That fence is connection state, not a cipher feature. |
+| Padding | QUIC PADDING frames are written before AEAD. They are inside the ciphertext. |
+| Forbidden FEC-then-seal | rejected. FEC input is the sealed datagram. |
+| Forbidden cipher mutation / XOR on sealed packets | rejected. Either breaks AEAD integrity. |
+| Forbidden trial decrypt | rejected. One owner per epoch. |
+
+FEC correctness plan, not a new fixture: take the same source packets, seal once with ring AES-GCM and once with S-AEGIS, run FEC encode/decode on each sealed datagram, and require the recovered plaintext to match that owner only. Epoch-mix plan: a repair symbol from the pre-auth epoch must not enter the post-auth window. Stealth plan: padding bytes are counted inside the AEAD input, not appended after the tag.
+
+Gate for TODO-1042: do not start a new permutation. Wrapping libaegis is the opt-in owner, not a next-gen design.

@@ -174,7 +174,7 @@ mod domain_fronting {
         /// Create the built-in broad provider rotation.
         #[inline]
         #[doc(hidden)]
-        pub fn ultra_stealth() -> Self {
+        pub fn broad_provider_rotation() -> Self {
             Self::from_providers(vec![
                 CdnProvider::Cloudflare,
                 CdnProvider::Fastly,
@@ -432,7 +432,7 @@ mod tests {
     fn provider_catalogs_have_expected_domains() {
         let manager = DomainFrontingManager::from_providers(vec![CdnProvider::Cloudflare]);
         assert!(manager.domains().iter().any(|domain| domain.contains("cloudflare")));
-        assert!(DomainFrontingManager::ultra_stealth().domains().len() >= 20);
+        assert!(DomainFrontingManager::broad_provider_rotation().domains().len() >= 20);
     }
 
     #[test]

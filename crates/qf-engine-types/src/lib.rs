@@ -125,23 +125,40 @@ pub enum EngineMode {
 
 /// Stealth operation mode exposed by the engine configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
 pub enum StealthMode {
-    /// Stealth disabled, with no obfuscation applied.
+    /// No stealth features.
+    #[serde(rename = "off")]
     Off,
-    /// Zero-overhead browser-like stealth path.
+    /// Cheap browser baseline. Costly stealth features stay off.
+    #[serde(rename = "performance")]
     Performance,
-    /// Balanced stealth with adaptive padding and timing defenses.
+    /// Balanced stealth.
+    #[serde(rename = "stealth")]
     Stealth,
-    /// Maximum anti-DPI mode with aggressive defenses.
-    #[serde(rename = "anti-dpi", alias = "antidpi", alias = "max")]
-    AntiDpi,
-    /// Manual control through the individual stealth feature fields.
+    /// Aggressive stealth.
+    #[serde(rename = "Stealth MAX")]
+    StealthMax,
+    /// Operator-selected stealth flags and payload cipher.
+    #[serde(rename = "manual")]
     Manual,
-    /// Adaptive mode that escalates defenses under censorship pressure.
+    /// Starts like performance and escalates.
     #[default]
-    #[serde(alias = "intelligent")]
-    Auto,
+    #[serde(rename = "dynamic")]
+    Dynamic,
+}
+
+impl StealthMode {
+    /// The one config name for this mode.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Performance => "performance",
+            Self::Stealth => "stealth",
+            Self::StealthMax => "Stealth MAX",
+            Self::Manual => "manual",
+            Self::Dynamic => "dynamic",
+        }
+    }
 }
 
 /// FEC mode exposed by the engine configuration contract.

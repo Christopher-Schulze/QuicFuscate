@@ -106,9 +106,7 @@ grep -Fq 'actions/upload-artifact@v7' "$SCHEDULED_WORKFLOW" \
 CRYPTO_TARGET="$FUZZ_DIR/src/targets/crypto_operations.rs"
 grep -Fq 'PUBLIC_FORCE_AEAD_VALUES' "$CRYPTO_TARGET" \
   || fail "crypto fuzz target lacks the public AEAD value inventory"
-grep -Fq 'INTERNAL_AEGIS_BACKEND_VALUES' "$CRYPTO_TARGET" \
-  || fail "crypto fuzz target lacks the internal backend inventory"
-for value in auto aegis-128l aegis128l aegis morus morus-1280-128 morus1280-128 aegis-128x4 aegis-128x8; do
+for value in auto aegis; do
   grep -Fq "\"$value\"" "$CRYPTO_TARGET" || fail "crypto fuzz target does not cover $value"
 done
 

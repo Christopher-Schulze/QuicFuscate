@@ -22,7 +22,7 @@
   import type { TunnelConfig, TunnelPolicyView } from "$lib/types";
 
   const DEFAULT_POLICY: TunnelPolicyView = {
-    stealth: "auto", fec: "auto", mtu: "server", cc: "server",
+    stealth: "dynamic", fec: "auto", mtu: "server", cc: "server",
     sniDisplay: "QKey Policy", customDetails: [], source: "server",
   };
 

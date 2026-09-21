@@ -412,7 +412,7 @@ impl QuicFuscateConnection {
             optimization_manager,
             fec_config,
             tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
-            private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
+            private_packet_protection_mode: qf_crypto::PacketProtectionMode::Standard,
             private_packet_protection_family: None,
             private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
         }))
@@ -563,7 +563,7 @@ impl QuicFuscateConnection {
                 tunnel_ingress_profile,
                 icmp_unreachable_policy,
             ),
-            private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
+            private_packet_protection_mode: qf_crypto::PacketProtectionMode::Standard,
             private_packet_protection_family: None,
             private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
         }))

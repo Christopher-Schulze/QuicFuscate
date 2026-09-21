@@ -214,7 +214,7 @@ run_microbench_cell() {
 CELL=0
 for sz in "${SIZES[@]}"; do
   info "Running microbenches for size=$sz, iters=$ITERS"
-  for kind in aes-block ghash aes-gcm chacha-x4 morus-enc morus-dec poly1305-mac sha256 hmac-sha256; do
+  for kind in aes-block ghash aes-gcm chacha-x4 poly1305-mac sha256 hmac-sha256; do
     CELL=$((CELL + 1))
     run_microbench_cell "$kind" "$sz" "$ITERS" "$CELL"
   done

@@ -7,7 +7,7 @@ import { DEFAULT_STEALTH_MANUAL } from "../../../../../../../../apps/svelte-admi
 
 function makeProps(overrides: Record<string, unknown> = {}) {
   return {
-    stealthPreset: "auto" as const,
+    stealthPreset: "dynamic" as const,
     fecPreset: "auto" as const,
     stealthManual: { ...DEFAULT_STEALTH_MANUAL },
     transportCc: "bbr3" as const,
@@ -69,7 +69,7 @@ describe("StealthPanel", () => {
   });
 
   test("does not render manual flags when preset is not manual", () => {
-    render(StealthPanel, { props: makeProps({ stealthPreset: "auto" }) });
+    render(StealthPanel, { props: makeProps({ stealthPreset: "dynamic" }) });
     expect(screen.queryByText("Domain Fronting")).not.toBeInTheDocument();
     expect(screen.queryByText("HTTP3 Masquerading")).not.toBeInTheDocument();
   });

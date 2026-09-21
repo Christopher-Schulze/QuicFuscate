@@ -1,11 +1,11 @@
 <script lang="ts">
   const stealthItems = [
-    { label: "Auto", desc: "Intelligent adaptive behavior." },
-    { label: "Performance", desc: "Domain fronting + HTTP3 masquerading + TLS cover performance profile." },
-    { label: "Stealth", desc: "Balanced masking with adaptive padding." },
-    { label: "AntiDPI", desc: "Maximum anti-censorship & detection resistance." },
-    { label: "Manual", desc: "Feature flags controlled explicitly." },
-    { label: "Off", desc: "Disable stealth transformations." },
+    { label: "dynamic", desc: "Starts like performance and escalates." },
+    { label: "performance", desc: "Cheap browser baseline. Costly stealth stays off." },
+    { label: "stealth", desc: "Balanced masking with adaptive padding." },
+    { label: "Stealth MAX", desc: "Aggressive anti-censorship and detection resistance." },
+    { label: "manual", desc: "Feature flags controlled explicitly." },
+    { label: "off", desc: "No stealth features." },
   ];
 
   const ccItems = [
@@ -28,7 +28,7 @@
         <div class="text-[11px] font-bold tracking-[0.08em] text-accent/70 mb-2.5 dashboard-heading-sans">Stealth</div>
         {#each stealthItems as item (item.label)}
           <div class="flex items-baseline gap-1.5 py-[3px]">
-            <span class="text-[10px] font-semibold text-black/75 shrink-0 dashboard-heading-sans w-[72px]">{item.label}</span>
+            <span class="text-[10px] font-semibold text-black/75 shrink-0 dashboard-heading-sans w-[92px]">{item.label}</span>
             <span class="text-[10px] text-black/40 leading-[14px] dashboard-heading-sans">{item.desc}</span>
           </div>
         {/each}

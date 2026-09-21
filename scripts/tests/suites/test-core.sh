@@ -301,7 +301,6 @@ fi
 
 if scope_selected telemetry; then
   run_cargo test --release --test rt-telemetry-http -- --nocapture
-  run_cargo test --release --test rt-profile-aegis-selection -- --nocapture
   run_cargo test --release --test rt-qftls-profiles -- --nocapture
   run_cargo test --release --test rt-admin-http-contract -- --nocapture
 fi

@@ -325,14 +325,14 @@ pub fn apply_qkey_policy_overrides(
     fec_config: &mut crate::fec::FecConfig,
 ) {
     if let Some(mode_raw) = record.stealth.as_deref() {
-        let mode = mode_raw.trim().to_ascii_lowercase();
-        let mapped = match mode.as_str() {
+        let mode = mode_raw.trim();
+        let mapped = match mode {
             "off" => Some(crate::stealth::StealthMode::Off),
             "performance" => Some(crate::stealth::StealthMode::Performance),
             "stealth" => Some(crate::stealth::StealthMode::Stealth),
-            "anti-dpi" | "antidpi" | "max" => Some(crate::stealth::StealthMode::AntiDpi),
+            "Stealth MAX" => Some(crate::stealth::StealthMode::StealthMax),
             "manual" => Some(crate::stealth::StealthMode::Manual),
-            "auto" | "intelligent" => Some(crate::stealth::StealthMode::Intelligent),
+            "dynamic" => Some(crate::stealth::StealthMode::Dynamic),
             _ => None,
         };
         if let Some(mapped) = mapped {

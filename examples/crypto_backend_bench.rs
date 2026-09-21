@@ -18,25 +18,15 @@ fn format_mbps(bytes: usize, ns: u128) -> f64 {
 }
 
 fn backend_from_str(value: &str) -> Result<BenchDataAeadBackend, String> {
-    Ok(match value {
-        "aegis128l" | "aegis-l" | "l" => BenchDataAeadBackend::Aegis128L,
-        "aegis128x4" | "aegis-x4" | "x4" => BenchDataAeadBackend::Aegis128X4,
-        "aegis128x8" | "aegis-x8" | "x8" => BenchDataAeadBackend::Aegis128X8,
-        "morus" | "morus1280_128" | "morus1280-128" => BenchDataAeadBackend::Morus,
-        other => {
-            return Err(format!(
-                "unknown backend {other:?}; expected aegis128l, aegis128x4, aegis128x8, or morus1280_128"
-            ))
-        }
-    })
+    match value {
+        "aegis" => Ok(BenchDataAeadBackend::Aegis128L),
+        other => Err(format!("unknown backend {other:?}; expected aegis")),
+    }
 }
 
 fn backend_counter_value(backend: BenchDataAeadBackend) -> u64 {
     match backend {
         BenchDataAeadBackend::Aegis128L => telemetry::DATA_AEAD_BACKEND_AEGIS_L_TOTAL.get(),
-        BenchDataAeadBackend::Aegis128X4 => telemetry::DATA_AEAD_BACKEND_AEGIS_X4_TOTAL.get(),
-        BenchDataAeadBackend::Aegis128X8 => telemetry::DATA_AEAD_BACKEND_AEGIS_X8_TOTAL.get(),
-        BenchDataAeadBackend::Morus => telemetry::DATA_AEAD_BACKEND_MORUS_TOTAL.get(),
     }
 }
 
@@ -87,7 +77,7 @@ fn bench_backend(backend: BenchDataAeadBackend, total_bytes: usize, iters: usize
 
 fn print_help() {
     eprintln!(
-        "Crypto backend bench\n\nCommands:\n  profile\n  run <backend:aegis128l|aegis128x4|aegis128x8|morus|morus1280_128> <bytes_per_iter> <iters>"
+        "Crypto backend bench\n\nCommands:\n  profile\n  run <backend:aegis> <bytes_per_iter> <iters>"
     );
 }
 

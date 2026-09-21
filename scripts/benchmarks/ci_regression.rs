@@ -4,8 +4,8 @@
 // - AES-128 block encrypt (handshake crypto)
 // - GHASH (GCM authentication)
 // - AES-128-GCM seal (handshake AEAD)
-// - MORUS encrypt/decrypt (data-plane AEAD)
-// - Retained data-plane AEAD backend seal/open (AEGIS L/X4/X8 vs MORUS)
+// - AES-128-GCM seal
+// - libaegis aegis seal/open for the performance-mode payload owner
 // - Varint encode/decode (QUIC transport framing)
 // - QUIC header validation (SIMD-routed)
 // - Popcnt (ECN/bitmap ops)
@@ -86,73 +86,6 @@ fn bench_aes_gcm(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// MORUS encrypt
-// ---------------------------------------------------------------------------
-fn bench_morus_encrypt(c: &mut Criterion) {
-    use quicfuscate::crypto::MorusAead;
-
-    let key = [0u8; 16];
-    let iv = [0u8; 12];
-    let nonce = [0u8; 16];
-    let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv).expect("exact MORUS benchmark fixture lengths");
-
-    for size in [64, 1024, 8192] {
-        let mut buffer = vec![0u8; size];
-        let mut group = c.benchmark_group("morus_encrypt");
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_function(format!("{size}B"), |b| {
-            b.iter(|| {
-                // Reset buffer content between iterations to avoid constant folding
-                buffer.fill(0xAA);
-                black_box(morus.encrypt_in_place(
-                    black_box(&mut buffer),
-                    black_box(&ad),
-                    black_box(&nonce),
-                ));
-            });
-        });
-        group.finish();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MORUS decrypt
-// ---------------------------------------------------------------------------
-fn bench_morus_decrypt(c: &mut Criterion) {
-    use quicfuscate::crypto::MorusAead;
-
-    let key = [0xA5u8; 16];
-    let iv = [0x5Au8; 12];
-    let nonce = [0u8; 16];
-    let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv).expect("exact MORUS benchmark fixture lengths");
-
-    for size in [64, 1024, 8192] {
-        let plaintext = vec![0u8; size];
-        let mut ciphertext = plaintext.clone();
-        let tag = morus.encrypt_in_place(&mut ciphertext, &ad, &nonce);
-        let frozen_ct = ciphertext.clone();
-
-        let mut group = c.benchmark_group("morus_decrypt");
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_function(format!("{size}B"), |b| {
-            let mut work = vec![0u8; size];
-            b.iter(|| {
-                work.copy_from_slice(&frozen_ct);
-                let _ = black_box(morus.decrypt_in_place(
-                    black_box(&mut work),
-                    black_box(&tag),
-                    black_box(&ad),
-                    black_box(&nonce),
-                ));
-            });
-        });
-        group.finish();
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Retained data-plane AEAD backends (real packet trait path)
 // ---------------------------------------------------------------------------
 fn bench_data_aead_backends(c: &mut Criterion) {
@@ -164,12 +97,7 @@ fn bench_data_aead_backends(c: &mut Criterion) {
     let key = [0xA5u8; 16];
     let iv = [0x5Au8; 12];
     let ad = b"ci-regression-data-aead";
-    let backends = [
-        BenchDataAeadBackend::Aegis128L,
-        BenchDataAeadBackend::Aegis128X4,
-        BenchDataAeadBackend::Aegis128X8,
-        BenchDataAeadBackend::Morus,
-    ];
+    let backends = [BenchDataAeadBackend::Aegis128L];
 
     for size in [64usize, 1024, 1400, 8192] {
         let mut single_seal = c.benchmark_group("data_aead_single_seal_batch");
@@ -1062,8 +990,6 @@ criterion_group!(
     bench_aes_block,
     bench_ghash,
     bench_aes_gcm,
-    bench_morus_encrypt,
-    bench_morus_decrypt,
     bench_data_aead_backends,
     bench_rustls_standard_packet_keys,
 );

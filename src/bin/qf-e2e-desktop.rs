@@ -62,13 +62,14 @@ where
 }
 
 fn map_stealth_mode(value: &str) -> StealthMode {
-    match value.trim().to_ascii_lowercase().as_str() {
+    match value.trim() {
         "off" => StealthMode::Off,
         "performance" => StealthMode::Performance,
         "stealth" => StealthMode::Stealth,
-        "anti-dpi" | "antidpi" | "max" => StealthMode::AntiDpi,
+        "Stealth MAX" => StealthMode::StealthMax,
         "manual" => StealthMode::Manual,
-        _ => StealthMode::Auto,
+        "dynamic" => StealthMode::Dynamic,
+        _ => StealthMode::Dynamic,
     }
 }
 

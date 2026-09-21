@@ -244,6 +244,10 @@ pub(crate) fn build_live_server_client_init(
     if let Some(ref record) = initial_ctx.qkey_record {
         apply_qkey_policy_overrides(record, &mut conn_stealth_cfg, &mut conn_fec_cfg);
     }
+    let use_aegis = crate::engine::runtime_mode_uses_libaegis(
+        conn_stealth_cfg.mode,
+        runtime_policy.crypto.private_family().is_some(),
+    );
     let opt_params = runtime_policy.optimize;
     let mut selected_transport = runtime_policy.transport;
     if let Err(error) = selected_transport.select_version(initial_ctx.version) {
@@ -270,10 +274,8 @@ pub(crate) fn build_live_server_client_init(
         request.clock,
     ) {
         Ok(mut connection) => {
-            connection.set_private_packet_protection_policy(
-                runtime_policy.crypto.packet_protection_mode,
-                runtime_policy.crypto.private_family(),
-            );
+            let (mode, family) = qf_crypto::payload_protection_pin(use_aegis);
+            connection.set_private_packet_protection_policy(mode, family);
             if let Some(seed) = runtime_policy.crypto.private_shape_seed_bytes() {
                 connection.set_private_protocol_shape(
                     crate::qftls::PrivateProtocolShape::from_seed(&seed),

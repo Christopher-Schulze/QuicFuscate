@@ -183,75 +183,6 @@ fn bench_chacha_x4(total_bytes: usize, iters: usize) {
     );
 }
 
-fn bench_morus_encrypt(total_bytes: usize, iters: usize) {
-    use quicfuscate::crypto::MorusAead;
-    let key = [0u8; 16];
-    let iv = [0u8; 12];
-    let nonce = [0u8; 16];
-    let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv).expect("validated benchmark key and IV lengths");
-    let mut buffer = vec![0u8; total_bytes];
-    let mut sink: u8 = 0;
-
-    let start = Instant::now();
-    for i in 0..iters {
-        if !buffer.is_empty() {
-            buffer[0] = buffer[0].wrapping_add((i as u8).wrapping_add(1));
-        }
-        let tag = morus.encrypt_in_place(&mut buffer, &ad, &nonce);
-        sink ^= tag[0] ^ buffer.first().copied().unwrap_or(0);
-    }
-    let elapsed = start.elapsed().as_nanos();
-    let processed = total_bytes * iters;
-    println!(
-        "bench,morus-enc,bytes,{},iters,{},ns_total,{},mbps,{:.3},sink,{}",
-        processed,
-        iters,
-        elapsed,
-        format_mbps(processed, elapsed),
-        sink
-    );
-}
-
-fn bench_morus_decrypt(total_bytes: usize, iters: usize) {
-    use quicfuscate::crypto::MorusAead;
-    let key = [0xA5u8; 16];
-    let iv = [0x5Au8; 12];
-    let nonce = [0u8; 16];
-    let ad: [u8; 0] = [];
-    let morus = MorusAead::new(&key, &iv).expect("validated benchmark key and IV lengths");
-
-    let mut plaintext = vec![0u8; total_bytes];
-    for (idx, byte) in plaintext.iter_mut().enumerate() {
-        *byte = (idx as u8).wrapping_mul(17).wrapping_add(1);
-    }
-
-    let mut ciphertext = plaintext.clone();
-    let tag = morus.encrypt_in_place(&mut ciphertext, &ad, &nonce);
-    let mut work = ciphertext.clone();
-    let mut sink = tag[0];
-
-    let start = Instant::now();
-    for _ in 0..iters {
-        work.copy_from_slice(&ciphertext);
-        morus
-            .decrypt_in_place(&mut work, &tag, &ad, &nonce)
-            .expect("decrypt_in_place should succeed");
-        sink ^= work.first().copied().unwrap_or(0);
-    }
-
-    let elapsed = start.elapsed().as_nanos();
-    let processed = total_bytes * iters;
-    println!(
-        "bench,morus-dec,bytes,{},iters,{},ns_total,{},mbps,{:.3},sink,{}",
-        processed,
-        iters,
-        elapsed,
-        format_mbps(processed, elapsed),
-        sink
-    );
-}
-
 fn bench_poly1305_mac(total_bytes: usize, iters: usize) {
     use quicfuscate::crypto::poly1305;
 
@@ -366,7 +297,7 @@ fn print_profile_info() {
 
 fn print_help() {
     eprintln!(
-        "Microbench CLI\n\nCommands:\n  profile\n  aes-block <bytes_per_iter> <iters>\n  ghash <bytes_per_iter> <iters>\n  ghash-short <iters>\n  aes-gcm <bytes_per_iter> <iters>\n  chacha-x4 <bytes_per_iter> <iters>\n  morus-enc <bytes_per_iter> <iters>\n  morus-dec <bytes_per_iter> <iters>\n  poly1305-mac <bytes_per_iter> <iters>\n  sha256 <bytes_per_iter> <iters> [backend:auto|avx2|vnni|scalar] (requires --features benches)\n  hmac-sha256 <bytes_per_iter> <iters>\n  varint <values_per_iter> <iters>\n  hdr-validate <headers_per_iter> <iters>\n  bitpack <bit_width:1-8> <values_per_iter> <iters>\n  bitunpack <bit_width:1-8> <values_per_iter> <iters>\n  qpack-enc <bytes_per_iter> <iters>\n  qpack-dec <bytes_per_iter> <iters>\n  popcnt <bytes_per_iter> <iters>\nSizes accept suffixes: B, KiB, MiB"
+        "Microbench CLI\n\nCommands:\n  profile\n  aes-block <bytes_per_iter> <iters>\n  ghash <bytes_per_iter> <iters>\n  ghash-short <iters>\n  aes-gcm <bytes_per_iter> <iters>\n  chacha-x4 <bytes_per_iter> <iters>\n  poly1305-mac <bytes_per_iter> <iters>\n  sha256 <bytes_per_iter> <iters> [backend:auto|avx2|vnni|scalar] (requires --features benches)\n  hmac-sha256 <bytes_per_iter> <iters>\n  varint <values_per_iter> <iters>\n  hdr-validate <headers_per_iter> <iters>\n  bitpack <bit_width:1-8> <values_per_iter> <iters>\n  bitunpack <bit_width:1-8> <values_per_iter> <iters>\n  qpack-enc <bytes_per_iter> <iters>\n  qpack-dec <bytes_per_iter> <iters>\n  popcnt <bytes_per_iter> <iters>\nSizes accept suffixes: B, KiB, MiB"
     );
 }
 
@@ -416,8 +347,6 @@ fn main() {
         "ghash" => bench_ghash(bytes, iters),
         "aes-gcm" => bench_aes_gcm(bytes, iters),
         "chacha-x4" => bench_chacha_x4(bytes, iters),
-        "morus-enc" => bench_morus_encrypt(bytes, iters),
-        "morus-dec" => bench_morus_decrypt(bytes, iters),
         "poly1305-mac" => bench_poly1305_mac(bytes, iters),
         "sha256" => bench_sha256(bytes, iters, args.get(4).map(String::as_str)),
         "hmac-sha256" => bench_hmac_sha256(bytes, iters),

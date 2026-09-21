@@ -24,7 +24,7 @@
 //! let config = EngineConfig::builder()
 //!     .mode(EngineMode::Client)
 //!     .remote("vpn.example.com:4433")
-//!     .stealth_mode(StealthMode::Auto)
+//!     .stealth_mode(StealthMode::Dynamic)
 //!     .build()?;
 //!
 //! engine.start()?;

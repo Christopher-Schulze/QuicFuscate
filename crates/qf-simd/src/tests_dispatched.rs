@@ -141,8 +141,7 @@ fn crc32_incremental_vs_full() {
 fn acceleration_planner_global_returns_consistent() {
     let p1 = planner::AccelerationPlanner::global();
     let p2 = planner::AccelerationPlanner::global();
-    // Same singleton, same default AEAD
-    assert_eq!(p1.crypto_default_aead(), p2.crypto_default_aead());
+    assert_eq!(p1.transport_batch_size(), p2.transport_batch_size());
 }
 
 #[test]
@@ -150,34 +149,6 @@ fn simd_ops_instance_returns_consistent() {
     let s1 = SimdOps::instance();
     let s2 = SimdOps::instance();
     assert!(std::ptr::eq(s1, s2), "SimdOps::instance should return same pointer");
-}
-
-#[test]
-fn crypto_aead_plan_select_returns_valid_variant() {
-    let plan = CryptoAeadPlan::select();
-    // Must be one of the four valid variants
-    match plan {
-        CryptoAeadPlan::Aegis128L
-        | CryptoAeadPlan::Aegis128X4
-        | CryptoAeadPlan::Aegis128X8
-        | CryptoAeadPlan::Morus => {}
-    }
-}
-
-#[test]
-fn crypto_aead_plan_length_based_selection() {
-    // Small payload should not select X8
-    let small = CryptoAeadPlan::select_for_len(10);
-    assert_ne!(small, CryptoAeadPlan::Aegis128X8, "10-byte payload should not use X8");
-
-    // Large payload selection should still be valid
-    let large = CryptoAeadPlan::select_for_len(4096);
-    match large {
-        CryptoAeadPlan::Aegis128L
-        | CryptoAeadPlan::Aegis128X4
-        | CryptoAeadPlan::Aegis128X8
-        | CryptoAeadPlan::Morus => {}
-    }
 }
 
 // ===================== Transport QUIC varint encode/decode =====================

@@ -10,7 +10,7 @@ fn canonical_stealth_modes_keep_padding_ssot() {
     assert!(stealth.enable_http3_masquerading);
     assert!(stealth.use_tls_cover);
 
-    let anti_dpi = StealthConfig::anti_dpi();
+    let anti_dpi = StealthConfig::stealth_max();
     assert_eq!(anti_dpi.padding_strategy, PaddingStrategy::BrowserMimic);
     assert!(anti_dpi.enable_http3_masquerading);
     assert!(anti_dpi.use_tls_cover);
@@ -28,11 +28,11 @@ fn validate_rejects_qpack_without_http3() {
 
 #[test]
 fn validate_rejects_intelligent_without_dynamic() {
-    let mut cfg = StealthConfig::intelligent();
+    let mut cfg = StealthConfig::dynamic();
     cfg.dynamic_enabled = false;
     let err = cfg.validate().expect_err("intelligent mode without dynamic must be rejected");
     assert!(err.contains("intelligent mode requires dynamic_enabled"));
-    assert_eq!(cfg.mode, StealthMode::Intelligent);
+    assert_eq!(cfg.mode, StealthMode::Dynamic);
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn runtime_tls_profile_tracks_cover_performance_mode_from_stealth_mode() {
         Arc::clone(&crypto),
     );
     let intelligent = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::clone(&optimization),
         Arc::clone(&crypto),
     );
@@ -79,12 +79,12 @@ fn runtime_tls_profile_tracks_cover_performance_mode_from_stealth_mode() {
 #[test]
 fn stealth_manager_constructs_without_a_tokio_runtime() {
     let manager = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
 
-    assert_eq!(manager.mode(), StealthMode::Intelligent);
+    assert_eq!(manager.mode(), StealthMode::Dynamic);
     assert!(manager.reality_proxy.is_some());
 }
 
@@ -97,7 +97,7 @@ fn brain_runtime_permissions_lock_operator_overrides() {
     let _bias = EnvGuard::set("QUICFUSCATE_STEALTH_MIMIC_BIAS", "safari");
 
     let manager = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -627,10 +627,10 @@ fn flow_shaper_flight_pacing_handshake_is_15ms() {
 fn padding_strategy_defaults_per_mode() {
     use super::{PaddingStrategy, StealthConfig};
     assert_eq!(StealthConfig::stealth().padding_strategy, PaddingStrategy::Adaptive);
-    assert_eq!(StealthConfig::anti_dpi().padding_strategy, PaddingStrategy::BrowserMimic);
+    assert_eq!(StealthConfig::stealth_max().padding_strategy, PaddingStrategy::BrowserMimic);
     assert_eq!(StealthConfig::performance().padding_strategy, PaddingStrategy::Random);
     assert_eq!(StealthConfig::manual().padding_strategy, PaddingStrategy::Random);
-    assert_eq!(StealthConfig::intelligent().padding_strategy, PaddingStrategy::Random);
+    assert_eq!(StealthConfig::dynamic().padding_strategy, PaddingStrategy::Random);
 }
 
 #[test]
@@ -758,10 +758,10 @@ fn domain_fronting_result_always_in_list() {
 }
 
 #[test]
-fn domain_fronting_ultra_stealth_returns_non_empty() {
-    let mgr = super::DomainFrontingManager::ultra_stealth();
+fn domain_fronting_broad_rotation_returns_non_empty() {
+    let mgr = super::DomainFrontingManager::broad_provider_rotation();
     let d = mgr.get_fronted_domain();
-    assert!(!d.is_empty(), "ultra_stealth must return a non-empty domain");
+    assert!(!d.is_empty(), "broad provider rotation must return a non-empty domain");
 }
 
 // --- Http3Masquerade Tests ---
@@ -907,7 +907,7 @@ fn active_probe_detector_benign_packet_ignored() {
 fn server_push_cover_plan_none_after_burst() {
     let optimization = Arc::new(OptimizationManager::new());
     let crypto = Arc::new(CryptoManager::new());
-    let mut cfg = StealthConfig::anti_dpi();
+    let mut cfg = StealthConfig::stealth_max();
     cfg.enable_server_push_cover = true;
     cfg.server_push_burst_interval = 30; // 30-second interval
     let mgr = StealthManager::new(cfg, optimization, crypto);
@@ -937,7 +937,7 @@ fn server_push_cover_plan_disabled_returns_none() {
 #[test]
 fn test_escalate_to_level_0_no_overhead() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -950,7 +950,7 @@ fn test_escalate_to_level_0_no_overhead() {
 #[test]
 fn test_escalate_to_level_1_partial_padding() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -965,7 +965,7 @@ fn test_escalate_to_level_1_partial_padding() {
 #[test]
 fn test_escalate_to_level_2_full_overhead() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -978,7 +978,7 @@ fn test_escalate_to_level_2_full_overhead() {
 #[test]
 fn test_de_escalate_from_level_2_to_0() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -993,7 +993,7 @@ fn test_de_escalate_from_level_2_to_0() {
 #[test]
 fn test_gradual_escalation_ladder() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -1012,7 +1012,7 @@ fn test_gradual_escalation_ladder() {
 #[test]
 fn test_single_probe_no_escalation() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -1028,7 +1028,7 @@ fn test_single_probe_no_escalation() {
 #[test]
 fn test_three_probes_in_60s_escalate_to_level_1() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -1052,7 +1052,7 @@ fn test_three_probes_in_60s_escalate_to_level_1() {
 #[test]
 fn test_eight_probes_in_120s_escalate_to_level_2() {
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -1082,7 +1082,7 @@ fn test_de_escalation_after_quiet_period() {
     std::env::set_var("QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC", "1");
 
     let mgr = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -1377,12 +1377,12 @@ fn masque_preference_is_connection_owned_and_does_not_leak_between_connections()
     let crypto = Arc::new(CryptoManager::new());
 
     let first = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::clone(&optimization),
         Arc::clone(&crypto),
     );
     let second = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::clone(&optimization),
         Arc::clone(&crypto),
     );
@@ -1425,12 +1425,12 @@ fn interleaved_masque_updates_keep_per_connection_outcomes_deterministic() {
     let crypto = Arc::new(CryptoManager::new());
 
     let first = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::clone(&optimization),
         Arc::clone(&crypto),
     );
     let second = StealthManager::new(
-        StealthConfig::intelligent(),
+        StealthConfig::dynamic(),
         Arc::clone(&optimization),
         Arc::clone(&crypto),
     );

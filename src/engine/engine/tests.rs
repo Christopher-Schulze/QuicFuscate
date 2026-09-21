@@ -113,14 +113,14 @@ fn started_client_setters_update_the_next_connection_projection() {
     engine.client_runtime = Some(runtime);
     engine.state = EngineState::Running;
 
-    engine.set_stealth_mode(crate::engine::StealthMode::AntiDpi).expect("stealth update");
+    engine.set_stealth_mode(crate::engine::StealthMode::StealthMax).expect("stealth update");
     engine.set_cc_algorithm(crate::engine::CcAlgorithm::Cubic).expect("congestion-control update");
     engine.set_traffic_padding(true).expect("padding update");
     engine.set_timing_obfuscation(true).expect("timing update");
     engine.set_0rtt(false).expect("0-RTT update");
 
     let next = engine.client_runtime.as_ref().expect("client runtime").next_config();
-    assert_eq!(next.stealth.mode, crate::engine::StealthMode::AntiDpi);
+    assert_eq!(next.stealth.mode, crate::engine::StealthMode::StealthMax);
     assert_eq!(next.transport.cc_algorithm, crate::engine::CcAlgorithm::Cubic);
     assert!(next.stealth.enable_traffic_padding);
     assert!(next.stealth.enable_timing_obfuscation);

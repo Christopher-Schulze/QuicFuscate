@@ -26,12 +26,12 @@ fn runtime_policy_generation_is_shared_and_saturating() {
 #[test]
 fn engine_mode_defaults_match_configuration_contract() {
     assert_eq!(EngineMode::default(), EngineMode::Client);
-    assert_eq!(StealthMode::default(), StealthMode::Auto);
+    assert_eq!(StealthMode::default(), StealthMode::Dynamic);
     assert_eq!(FecMode::default(), FecMode::Auto);
     assert!(qf_fec::EngineFecMode::adaptive_requested(FecMode::Auto));
     assert!(!qf_fec::EngineFecMode::adaptive_requested(FecMode::Off));
     assert_ne!(EngineMode::Client, EngineMode::Server);
-    assert_ne!(StealthMode::Off, StealthMode::AntiDpi);
+    assert_ne!(StealthMode::Off, StealthMode::StealthMax);
 }
 
 #[test]

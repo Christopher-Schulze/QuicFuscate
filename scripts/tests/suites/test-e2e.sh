@@ -56,12 +56,23 @@ run_case() {
   local -a env_vals=()
   local -a env_set=()
   if [[ -n "$envs" ]]; then
-    local -a env_pairs=()
-    local IFS=' '
-    read -r -a env_pairs <<< "$envs"
-    for pair in "${env_pairs[@]}"; do
-      local key="${pair%%=*}"
-      local val="${pair#*=}"
+    local rest="$envs"
+    while [[ -n "$rest" ]]; do
+      rest="${rest#"${rest%%[![:space:]]*}"}"
+      [[ -z "$rest" ]] && break
+      local key val
+      if [[ "$rest" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\"([^\"]*)\"(.*)$ ]]; then
+        key="${BASH_REMATCH[1]}"
+        val="${BASH_REMATCH[2]}"
+        rest="${BASH_REMATCH[3]}"
+      elif [[ "$rest" =~ ^([A-Za-z_][A-Za-z0-9_]*)=([^[:space:]]*)(.*)$ ]]; then
+        key="${BASH_REMATCH[1]}"
+        val="${BASH_REMATCH[2]}"
+        rest="${BASH_REMATCH[3]}"
+      else
+        echo "[FAIL] Invalid environment assignment in: $rest"
+        return 1
+      fi
       env_keys+=("$key")
       if [[ -n "${!key+x}" ]]; then
         env_set+=("1")
@@ -156,7 +167,7 @@ fi
 # Full-stack stealth
 if scope_selected stealth && { (( ! FAST )) || [[ "$ONLY" != "all" ]]; }; then
   run_case "E2E Full-Stack Stealth" \
-    "QUICFUSCATE_STEALTH_MODE=anti_dpi QUICFUSCATE_BROWSER=chrome QUICFUSCATE_OS=windows QUICFUSCATE_DOH=1 QUICFUSCATE_H3_MASQUERADE=1 QUICFUSCATE_STEALTH_PADDING=1" \
+    "QUICFUSCATE_STEALTH_MODE=\"Stealth MAX\" QUICFUSCATE_BROWSER=chrome QUICFUSCATE_OS=windows QUICFUSCATE_DOH=1 QUICFUSCATE_H3_MASQUERADE=1 QUICFUSCATE_STEALTH_PADDING=1" \
     "test:it-stealth-mode-matrix" \
     "test_mode_feature_matrix_core_expectations"
 fi
@@ -178,9 +189,9 @@ if (( INTEGRATION )) || [[ "$ONLY" != "all" && "$ONLY" == *integration* ]]; then
 
   if scope_selected integration-stealth; then
     run_case "E2E Stealth Mode" \
-      "QUICFUSCATE_STEALTH_MODE=anti_dpi QUICFUSCATE_BROWSER_PROFILE=chrome QUICFUSCATE_OS_PROFILE=windows" \
+      "QUICFUSCATE_STEALTH_MODE=\"Stealth MAX\" QUICFUSCATE_BROWSER_PROFILE=chrome QUICFUSCATE_OS_PROFILE=windows" \
       "test:it-stealth-mode-matrix" \
-      "test_anti_dpi_escalation_stack_is_cumulative_and_reversible"
+      "test_stealth_max_escalation_stack_is_cumulative_and_reversible"
   fi
 
   if scope_selected integration-loss; then

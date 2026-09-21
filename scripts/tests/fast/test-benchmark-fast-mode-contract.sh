@@ -96,19 +96,19 @@ PY
 
 case "$(uname -m)" in
   x86_64)
-    CRYPTO_FULL_CELLS="crypto_all_native,crypto_all_sse2,crypto_all_avx2,morus_native,morus_sse2,aes_gcm_native,aes_gcm_aesni,aes_gcm_vaes,chacha20_poly1305_native"
+    CRYPTO_FULL_CELLS="crypto_all_native,crypto_all_sse2,crypto_all_avx2,aes_gcm_native,aes_gcm_aesni,aes_gcm_vaes,chacha20_poly1305_native"
     ;;
   aarch64|arm64)
-    CRYPTO_FULL_CELLS="crypto_all_native,crypto_all_neon,morus_native,morus_neon,aes_gcm_native,aes_gcm_crypto,chacha20_poly1305_native"
+    CRYPTO_FULL_CELLS="crypto_all_native,crypto_all_neon,aes_gcm_native,aes_gcm_crypto,chacha20_poly1305_native"
     ;;
   *)
-    CRYPTO_FULL_CELLS="crypto_all_native,morus_native,aes_gcm_native,chacha20_poly1305_native"
+    CRYPTO_FULL_CELLS="crypto_all_native,aes_gcm_native,chacha20_poly1305_native"
     ;;
 esac
 
 crypto_fast_dir="$(run_dry crypto scripts/benchmarks/suites/bench-crypto.sh fast)"
 assert_mode_metadata "$crypto_fast_dir/results.json" fast \
-  "crypto_all_native,morus_native,aes_gcm_native,chacha20_poly1305_native"
+  "crypto_all_native,aes_gcm_native,chacha20_poly1305_native"
 crypto_full_dir="$(run_dry crypto scripts/benchmarks/suites/bench-crypto.sh full)"
 assert_mode_metadata "$crypto_full_dir/results.json" full "$CRYPTO_FULL_CELLS"
 

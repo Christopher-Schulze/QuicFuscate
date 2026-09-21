@@ -12,8 +12,8 @@
   [![Obfuscation](https://img.shields.io/badge/Obfuscation-Enabled-6A5ACD?style=for-the-badge)](#stealth-techniques)
   [![DPI-Resistant](https://img.shields.io/badge/DPI-Resistant-FF8C00?style=for-the-badge)](#stealth-techniques)
   [![FEC](https://img.shields.io/badge/FEC-RLNC%2BTetrys-9F7AEA?style=for-the-badge)](https://en.wikipedia.org/wiki/Forward_error_correction)
-  [![AEGIS-128](https://img.shields.io/badge/Encryption-AEGIS--128-2F855A?style=for-the-badge)](https://en.wikipedia.org/wiki/AEGIS)
-  [![MORUS-1280](https://img.shields.io/badge/Encryption-MORUS--1280--128-2B6CB0?style=for-the-badge)](https://en.wikipedia.org/wiki/MORUS_(cipher))
+  [![AES-GCM](https://img.shields.io/badge/Encryption-AES--128--GCM-2B6CB0?style=for-the-badge)](https://datatracker.ietf.org/doc/html/rfc9001)
+  [![AEGIS-128L](https://img.shields.io/badge/Performance-AEGIS--128L-2F855A?style=for-the-badge)](https://www.rfc-editor.org/rfc/rfc10032)
   [![SIMD](https://img.shields.io/badge/SIMD-Optimized-FFA500?style=for-the-badge&logo=cpu)](https://en.wikipedia.org/wiki/SIMD)
 </div>
 
@@ -26,7 +26,7 @@
 - [Runtime Layer Model](#runtime-layer-model)
 - [Core Features](#core-features)
   - [Stealth Techniques](#stealth-techniques)
-  - [AEAD Cryptography](#next-gen-hardware-accelerated-aead-cryptography)
+  - [Packet Protection](#packet-protection)
   - [Adaptive FEC](#adaptive-fec--recovery)
   - [StealthBrain](#adaptive-runtime-intelligence-stealthbrain)
   - [Control Plane](#server-authoritative-control-plane-qkey--admin-web)
@@ -61,7 +61,7 @@ QuicFuscate is a stealth transport and VPN runtime built on a custom QUIC-based 
 - Censorship-resistant runtime with browser-grade traffic observables
   (rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, profile-coherent timing/padding; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists)
 - Adaptive SIMD dispatch (AVX2/AVX-512/NEON) with runtime CPU feature detection for optimal performance paths
-- AEAD selection at runtime (`Aegis128L` family, `Morus1280_128`) with automatic CPU feature detection;
+- Handshake and stealth modes use rustls AES-128-GCM. `off` and `performance` pin libaegis AEGIS-128L for the post-auth payload. `manual` can choose either.
   PFS by default via ephemeral X25519 key exchange
 - Hybrid FEC (Adaptive RLNC + Tetrys-like Streaming) with ownership-preserving zero-overhead receive at 0% loss; escalates seamlessly under loss up to Wiedemann (GF(2^8), bitsliced, multi-U/block-BM with Rayon parallelization) and streaming burst (1 repair per N sources, partial-recovery toggle, SIMD-optimized GF(2^16) nibble paths)
 - Zero-copy I/O with tunable memory pool and optional io_uring UDP fast path (Linux)
@@ -85,7 +85,7 @@ QuicFuscate organizes its runtime into four explicit layers. This layering defin
 - examples:
   - `src/core.rs`
   - `src/transport/connection/`
-  - `src/crypto/` production ciphers (`Aegis128L`, `Morus1280_128`)
+  - `crates/qf-crypto/` packet protection (rustls AES-128-GCM; libaegis AEGIS-128L for `off` and `performance`)
   - `src/fec/` public API (`auto` / `off` modes)
 
 ### 2. Adaptive Policy/Control
@@ -126,7 +126,7 @@ Rule of thumb:
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
   - Aligns ALPN, header sets, and framing to common web patterns<br>
 - **MASQUE Tunneling**: Core HTTP/3 CONNECT-UDP/capsule carrier for authenticated TUN traffic
-  - Selected by an active TUN bridge or Intelligent-mode escalation; the retired standalone manager is not part of the runtime<br>
+  - Selected by an active TUN bridge or `dynamic` escalation; the retired standalone manager is not part of the runtime<br>
 - **TLS Profile Metadata**: Deterministic compatibility ClientHello metadata remains available in memory for audit and compatibility inspection; rustls owns the wire handshake<br>
 - **DNS-over-HTTPS (DoH)**: Resolves DNS via HTTPS to hide queries from on-path resolvers<br>
 - **QPACK Header Shaping**: Encodes realistic HTTP/3 headers with QPACK for indistinguishable request patterns<br>
@@ -141,14 +141,12 @@ TLS Cover is an optional lightweight synthetic exchange for stealth shaping and 
 When TLS Cover is disabled, the stack uses native TLS handshake profile selection only.
 Risk/Tradeoff: enabling TLS Cover adds cover-byte volume and processing overhead.
 
-### Next-Gen Hardware-Accelerated AEAD Cryptography
-- **AEGIS-128L**: Authenticated encryption with hardware acceleration when AES instructions are available<br>
-- **AEGIS internal batching backends (`Aegis128X4` / `Aegis128X8`)**: internal AEGIS-128L implementation details selected automatically on AES hardware for throughput (x86_64 selects X8 when VAES batching is available, otherwise X4; aarch64 selects X4)<br>
-- **MORUS-1280-128**: Authenticated encryption with a portable SIMD-friendly design for hosts without hardware AES<br>
+### Packet Protection
+- **rustls AES-128-GCM**: Handshake, Initial, header protection, and the payload for `stealth`, `Stealth MAX`, and `dynamic`<br>
+- **libaegis AEGIS-128L**: Post-auth 1-RTT payload for `off` and `performance`. `manual` selects either cipher. Both peers must agree. 128X2 and 128X4 are measurement owners, not a runtime switch<br>
 - **Perfect Forward Secrecy**: ephemeral key exchange; past sessions remain safe if long-term keys leak<br>
-- **Nonce Discipline & Constant-Time Glue**: Per-packet nonce handling and constant-time hot-path glue reduce side-channel exposure under load<br>
-Runtime AEAD selection: `Aegis128L` when hardware AES is available, `Morus1280_128` otherwise. The dispatcher selects the best internal AEGIS backend automatically - `Aegis128X8` on x86_64 with VAES, `Aegis128X4` on x86_64 (AES-NI), `Aegis128X4` on aarch64 (AES+NEON). This is custom data-plane crypto, not a TLS cipher-suite claim. See "Cryptography Design" in ./docs/DOCUMENTATION.md.<br>
-AEGIS-128L and MORUS-1280-128 are the production AEAD ciphers; the runtime selects hardware-accelerated backends where available. External crates serve as baseline vectors and differential oracles for validation, not as runtime providers.
+- **Nonce Discipline**: Per-packet nonce handling stays on the QUIC packet-number construction<br>
+AEGIS is not a QUIC or TLS cipher suite. The shipped config is `mode = "dynamic"`, so the default payload cipher is AES-128-GCM. See "Cryptography Design" in ./docs/DOCUMENTATION.md.<br>
 
 ### Adaptive FEC & Recovery
 - **Hybrid RLNC + Streaming (Tetrys-like)**: Systematic sliding-window coding keeps source packets intact and emits repairs when the active window reaches the configured threshold<br>
@@ -170,7 +168,7 @@ AEGIS-128L and MORUS-1280-128 are the production AEAD ciphers; the runtime selec
 - **Operational Surface**: Admin endpoints expose status, configuration, and QKey operations while desktop clients consume issued keys for controlled connect/disconnect workflows
 
 ### Performance Optimizations
-- **Runtime CPU Dispatch**: Central feature detection selects optimal SIMD/crypto paths per host (x86/ARM) with safe scalar fallback where required<br>
+- **Runtime CPU Dispatch**: Feature detection selects SIMD paths per host (x86/ARM), with a scalar fallback where required. It does not choose the payload cipher<br>
 - **SIMD Acceleration**: ARM NEON and x86 AVX2/AVX-512 optimizations
   - Hot loops (FEC arithmetic, crypto glue) vectorized where safe for multi-Gbps throughput<br>
 - **Bit-Sliced GF Multiplication**: Faster FEC arithmetic via dedicated AVX2/AVX512/NEON kernels
@@ -182,7 +180,7 @@ AEGIS-128L and MORUS-1280-128 are the production AEAD ciphers; the runtime selec
 - **UDP Fast Path**: Portable batching (sendmmsg/recvmmsg), GSO/GRO (Linux), and optional io_uring path for reduced syscall overhead<br>
 - **Tunable Memory Pool**: Pre-allocated buffers for zero-copy I/O; adjust capacity/block size per workload<br>
 - **Connection Multiplexing**: Multiple streams over a single connection<br>
-- **0-RTT Handshake**: Reduced latency for subsequent connections; protected by a SHA-256 strike register (RFC 8446 Section 8) that rejects duplicate 0-RTT packets<br>
+- **0-RTT**: Not available. Asking for early data fails configuration validation because packet-protection keys for 0-RTT are not installed<br>
 - **Telemetry Hooks**: Throughput, latency, and repair-efficiency counters expose operational tuning signals
 - **Pluggable Congestion Control**: BBR3 (default), BBR2 (IETF draft-ietf-ccwg-bbr), and Reno with zero-vtable enum dispatch via `cc_dispatch!` macro. StealthShaper wraps any CC algorithm at runtime to apply browser-realistic gain patterns and pacing jitter during stealth mode
 
@@ -235,9 +233,10 @@ Development focuses on hardening and operational validation across all runtime s
 ### Reviewer Truth Snapshot
 - Runtime correctness is defined by checked-in code, targeted tests, and audit scripts.
 - AI-assisted development is part of the repository workflow; code truth is defined by checked-in code and gates, not by assistant claims.
-- Custom data-plane crypto with in-tree implementations:
-  - product contract: `Aegis128L`, `Morus1280_128`
-  - internal backend machine room: `Aegis128X4`, `Aegis128X8`
+- Packet protection:
+  - `stealth`, `Stealth MAX`, `dynamic`: rustls AES-128-GCM for the whole connection
+  - `off` and `performance`: libaegis AEGIS-128L for the post-auth payload
+  - `manual`: operator selects AES-128-GCM or AEGIS-128L
 - The Linux high-performance send path is `io_uring` (SQPOLL auto-probed; outbound defaults to batched `SendMsg`; inbound via `RecvMsg` + eventfd bridge).
 - Experimental zero-copy send uses `io_uring SendMsgZc` (not `MSG_ZEROCOPY`/`SO_ZEROCOPY`) and is disabled unless `QUICFUSCATE_IO_URING_ZC=1` is set.
 - MSG_ZEROCOPY is not part of the final runtime story.
@@ -256,7 +255,7 @@ Development focuses on hardening and operational validation across all runtime s
 - Data-plane AEAD proof surfaces:
   - `scripts/tests/rust/rt-security-suite.rs`
   - `scripts/tests/rust/rt-property-suite.rs`
-  - `scripts/tests/fuzz/fuzz_targets/crypto_operations.rs`
+  - `scripts/tests/fuzz/src/targets/crypto_operations.rs`
 - Retained backend evidence:
   - `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`
 - Runtime/FEC evidence:
@@ -271,7 +270,7 @@ Development focuses on hardening and operational validation across all runtime s
   - targeted rust-tests in `scripts/tests/rust/`
   - property checks in `scripts/tests/rust/rt-property-suite.rs`
 - Fuzzed:
-  - crypto/runtime fuzz targets in `scripts/tests/fuzz/fuzz_targets/`
+  - crypto/runtime fuzz targets in `scripts/tests/fuzz/src/targets/`
 - Audited:
   - `scripts/tests/audits/audit-runtime-guardrails.sh`
 - Soak- and chaos-checked:
@@ -293,7 +292,7 @@ QuicFuscate uses a modular, consolidated layout:
 - `src/engine/` (embedded control plane API: lifecycle, commands/events, stats, runtime orchestration).
 - `src/implementations/` (client/server runtime wiring, admin HTTP, QKey registry, platform integration).
 - `src/optimize/` (CPU/SIMD dispatch, memory/telemetry/perf-focused acceleration modules).
-The project is built as a single Rust crate that exposes a library and one CLI binary (`quicfuscate` with `client` and `server` subcommands).
+The product binary is the root `quicfuscate` package in a Cargo workspace. Leaf crates live under `crates/`. The CLI has `client` and `server` subcommands.
 The transport subsystem uses `src/transport.rs` as the module root and focused submodules under `src/transport/` (`connection/`, `packet.rs`, `frames.rs`, `recovery.rs`, `udpfast.rs`, `batch.rs`, `config.rs`, `pn.rs`, `h3.rs`, `anti_replay.rs`, `cc/`). The `cc/` directory contains the pluggable congestion control trait and implementations (`reno.rs`, `bbr2.rs`, `bbr3.rs`, `stealth_shaper.rs`). The io_uring batch sender lives in `src/optimize/uring_batch.rs` (feature-gated, Linux-only); UDP/GSO compatibility helpers are test-only.
 
 ## Technical Specifications
@@ -301,7 +300,7 @@ The transport subsystem uses `src/transport.rs` as the module root and focused s
 | Component           | Technology                                                                 |
 |---------------------|----------------------------------------------------------------------------|
 | Transport Protocol  | Forked QUIC-like transport with HTTP/3/TLS cover surfaces                  |
-| Encryption          | AEGIS-128L family, MORUS-1280-128                                          |
+| Encryption          | rustls AES-128-GCM. `off` and `performance` use libaegis AEGIS-128L for the post-auth payload. `manual` can select either |
 | Key Exchange        | X25519 (ephemeral); Perfect Forward Secrecy by default                      |
 | Error Correction    | Hybrid Adaptive FEC (RLNC + Streaming)                                     |
 | Stealth/Obfuscation | rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, adaptive padding/timing/protocol mimicry, active-probe detection + Reality fallback, server-push cover traffic; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists |
@@ -359,7 +358,7 @@ QuicFuscate works out of the box with curated browser/OS TLS profiles. The activ
 Execute the test suite with Cargo:
 
 ```bash
-# Default suite (1150+ lib tests)
+# Library suite
 cargo test
 
 # Extended suite with additional integration test paths
@@ -394,7 +393,7 @@ Top runtime environment variables (quick reference):
 
 ```
   QUICFUSCATE_METRICS_ADDR         Telemetry bind address (default 127.0.0.1:9898)
-  QUICFUSCATE_STEALTH_MODE         Stealth baseline (off|performance|stealth|anti-dpi|intelligent|manual); "base" is an alias for "performance"
+  QUICFUSCATE_STEALTH_MODE         off | performance | stealth | Stealth MAX | dynamic | manual
   QUICFUSCATE_TLS_COVER            TLS Cover provider gate (0|1)
   QUICFUSCATE_USE_TLS_COVER_EXTRAS TLS Cover extras gate in StealthManager (0|1)
   QUICFUSCATE_NETWORK_FINGERPRINT_NORMALIZATION Decoded server-uplink IP/TCP normalization (0|1)
@@ -482,7 +481,7 @@ Release artifacts are built only for `v*` tags or an explicit manual workflow di
 
 ## Releases
 
-This project is published as open source plus CI-built GitHub Release artifacts. The current public release is [`v0.4.4`](https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.4.4).
+This project is published as open source plus CI-built GitHub Release artifacts. The current public release is [`v0.5.0`](https://github.com/Christopher-Schulze/QuicFuscate/releases/tag/v0.5.0). The root package version is `0.5.0`.
 
 Tagged releases build native x86_64 and ARM64 Linux server bundles and signed Tauri desktop artifacts. Windows MSI publication is required; macOS and Linux desktop jobs are non-blocking and appear only when their signed updater artifacts are available.
 

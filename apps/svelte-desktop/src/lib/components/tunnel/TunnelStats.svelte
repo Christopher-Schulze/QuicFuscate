@@ -57,12 +57,12 @@
     return v === "off" || v === "zero";
   }
 
-  const stealthPolicyRaw = $derived(normalizeMode(policy.stealth));
-  const stealthRuntimeRaw = $derived(normalizeMode(stats?.stealthMode, ""));
-  const stealthIsIntelligent = $derived(stealthPolicyRaw === "auto" || stealthPolicyRaw === "intelligent");
+  const stealthPolicyRaw = $derived((policy.stealth ?? "").trim());
+  const stealthRuntimeRaw = $derived((stats?.stealthMode ?? "").trim());
+  const stealthIsDynamic = $derived(stealthPolicyRaw === "dynamic");
   const stealthLiveRaw = $derived(stealthRuntimeRaw || stealthPolicyRaw);
   const stealthDisplayRaw = $derived(
-    stealthIsIntelligent && (stealthLiveRaw === "auto" || stealthLiveRaw === "intelligent" || !stealthLiveRaw)
+    stealthIsDynamic && (stealthLiveRaw === "dynamic" || !stealthLiveRaw)
       ? "performance" : stealthLiveRaw
   );
   const stealthMode = $derived(tunnel ? displayStealthMode(stealthDisplayRaw) : "-");
@@ -130,8 +130,8 @@
         <!-- Middle: Stealth/FEC card -->
         <div class="relative h-[64px] w-full rounded-[10px] border border-[rgba(255,255,255,0.82)] bg-white/72 shadow-[inset_0_1px_0_rgba(255,255,255,0.88),0_1px_3px_rgba(18,26,44,0.08)] flex overflow-hidden">
           <div class="relative flex-1 min-w-0 px-2.5 pt-[8px] pb-[8px] flex flex-col overflow-hidden">
-            {#if tunnel && stealthIsIntelligent}
-              <span class="absolute right-1.5 top-[6px] inline-flex h-[13px] items-center justify-center rounded-[4px] border min-w-[13px] px-[2px] text-[7px] font-bold leading-none border-[rgba(255,255,255,0.82)] bg-white/82 text-[rgb(22,163,74)] shadow-[inset_0_1px_0_rgba(255,255,255,0.86),0_1px_2px_rgba(18,26,44,0.12)]">I</span>
+            {#if tunnel && stealthIsDynamic}
+              <span class="absolute right-1.5 top-[6px] inline-flex h-[13px] items-center justify-center rounded-[4px] border min-w-[13px] px-[2px] text-[7px] font-bold leading-none border-[rgba(255,255,255,0.82)] bg-white/82 text-[rgb(22,163,74)] shadow-[inset_0_1px_0_rgba(255,255,255,0.86),0_1px_2px_rgba(18,26,44,0.12)]">D</span>
             {/if}
             <span class="text-[9px] font-semibold text-black tracking-[0.03em] leading-none truncate pr-4">Stealth Mode</span>
             <span class="mt-auto w-full text-[10px] font-semibold truncate text-center text-[#6366f1] leading-none">{stealthMode}</span>

@@ -117,7 +117,7 @@ mod qkey_auth_tests {
     #[test]
     fn engine_qkey_id_matches_registry_qkey_id() {
         let cfg = qkey::QKeyConfig::new("127.0.0.1:4433", DEFAULT_RUNTIME_SNI_HOST)
-            .with_stealth("auto")
+            .with_stealth("dynamic")
             .with_fec("auto")
             .with_token("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let qkey_value = qkey::generate(&cfg);

@@ -50,7 +50,7 @@
   let configText = $state("");
   let dirty = $state(false);
 
-  let stealthPreset = $state<StealthPresetUi>("auto");
+  let stealthPreset = $state<StealthPresetUi>("dynamic");
   let fecPreset = $state<"auto" | "off">("auto");
   let stealthManual = $state<StealthManualSettings>({ ...DEFAULT_STEALTH_MANUAL });
   let transportCc = $state<CcSelection>("bbr3");
@@ -163,10 +163,10 @@
     const normalizedMode =
       preset === "performance" ? "performance"
         : preset === "stealth" ? "stealth"
-          : preset === "antidpi" ? "anti-dpi"
+          : preset === "Stealth MAX" ? "Stealth MAX"
             : preset === "manual" ? "manual"
               : preset === "off" ? "off"
-                : "intelligent";
+                : "dynamic";
     stealthPreset = preset;
     configText = setSectionValue(configText, "stealth", "mode", `"${normalizedMode}"`);
     dirty = true;

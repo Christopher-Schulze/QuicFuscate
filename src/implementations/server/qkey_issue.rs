@@ -206,7 +206,7 @@ pub fn issue_unix_admin_qkey(
             name: None,
             port: None,
             ttl_seconds: None,
-            stealth: Some("auto"),
+            stealth: Some("dynamic"),
             fec: None,
             sni_strategy: Some(DF_SNI_MODE_AUTO_ROTATING),
             sni_domain: None,
@@ -317,13 +317,13 @@ pub(super) fn normalize_qkey_name(name: Option<&str>) -> Result<Option<String>, 
 }
 
 pub(super) fn normalize_qkey_stealth(stealth: Option<&str>) -> Result<&'static str, String> {
-    let stealth_raw = stealth.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("auto");
-    match stealth_raw.to_ascii_lowercase().as_str() {
-        "auto" => Ok("auto"),
-        "max" => Ok("max"),
+    let stealth_raw = stealth.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("dynamic");
+    match stealth_raw {
+        "dynamic" => Ok("dynamic"),
+        "Stealth MAX" => Ok("Stealth MAX"),
         "manual" => Ok("manual"),
         "off" => Ok("off"),
-        _ => Err("Invalid stealth preset. Valid: auto, max, manual, off".to_string()),
+        _ => Err("Invalid stealth preset. Valid: dynamic, Stealth MAX, manual, off".to_string()),
     }
 }
 
@@ -463,7 +463,7 @@ pub fn apply_runtime_stealth_overrides(
     sc.doh_provider.push_str(doh_provider);
     sc.fronting_domains = front_domain.to_vec();
     sc.enable_domain_fronting = !disable_fronting
-        && (!sc.fronting_domains.is_empty() || matches!(sc.mode, StealthMode::AntiDpi));
+        && (!sc.fronting_domains.is_empty() || matches!(sc.mode, StealthMode::StealthMax));
     sc.enable_http3_masquerading = !disable_http3;
     if disable_http3 {
         sc.use_qpack_headers = false;

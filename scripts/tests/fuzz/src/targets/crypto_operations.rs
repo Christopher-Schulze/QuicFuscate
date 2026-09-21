@@ -11,17 +11,7 @@ use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
 use quicfuscate::crypto::{install_data_aead_config, select_data_aead, ChaCha20Poly1305};
 use quicfuscate::engine::{AeadPreference, CryptoConfig};
 
-pub const PUBLIC_FORCE_AEAD_VALUES: [&str; 7] = [
-    "auto",
-    "aegis-128l",
-    "aegis128l",
-    "aegis",
-    "morus",
-    "morus-1280-128",
-    "morus1280-128",
-];
-
-pub const INTERNAL_AEGIS_BACKEND_VALUES: [&str; 2] = ["aegis-128x4", "aegis-128x8"];
+pub const PUBLIC_FORCE_AEAD_VALUES: [&str; 2] = ["auto", "aegis"];
 
 pub fn exercise(data: &[u8]) {
     if data.len() < 44 {
@@ -49,13 +39,8 @@ pub fn exercise(data: &[u8]) {
         return;
     }
 
-    let selector = usize::from(data[0])
-        % (PUBLIC_FORCE_AEAD_VALUES.len() + INTERNAL_AEGIS_BACKEND_VALUES.len());
-    let force = if selector < PUBLIC_FORCE_AEAD_VALUES.len() {
-        PUBLIC_FORCE_AEAD_VALUES[selector]
-    } else {
-        INTERNAL_AEGIS_BACKEND_VALUES[selector - PUBLIC_FORCE_AEAD_VALUES.len()]
-    };
+    let force = PUBLIC_FORCE_AEAD_VALUES
+        [usize::from(data[0]) % PUBLIC_FORCE_AEAD_VALUES.len()];
     let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
     cfg.force_aead = force.to_string();
     install_data_aead_config(&cfg);

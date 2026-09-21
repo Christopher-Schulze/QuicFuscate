@@ -4,7 +4,7 @@ title: Next-gen custom AEGIS MORUS design gated
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: SKIP
 created: 2026-09-21
 depends_on: [TODO-1039, TODO-1040, TODO-1041]
 ---
@@ -36,18 +36,22 @@ If none is true, this task records `SKIP` and TODO-1043 stays closed.
 
 ## Acceptance
 
-- [ ] Gate result written: proceed or `SKIP`
-- [ ] If proceed: module map, batch API, pool contract, epoch fence, dispatch, unsafe budget
-- [ ] Differential plan against S-AEGIS and official vectors
-- [ ] No code in this task
+- [x] Gate result written: `SKIP`
+- [x] If proceed: not applicable
+- [x] Differential plan against S-AEGIS and official vectors: not applicable
+- [x] No code in this task
 
 ## Sub-Tasks
 
-- [ ] Read 1038/1039/1040/1041 records
-- [ ] Choose wrap-libaegis vs rewrite-first-party
-- [ ] Write the design into this file
-- [ ] Open TODO-1043 only on proceed
+- [x] Read 1038/1039/1040/1041 records
+- [x] Choose wrap-libaegis vs rewrite-first-party: wrap, and that wrap is TODO-1044, not a new design
+- [x] Write the design into this file: SKIP, no module map
+- [x] Open TODO-1043 only on proceed: not opened
 
 ## Notes
 
 Do not start until explicitly requested and the gate is green. A pretty custom kernel that loses to libaegis is a failed design.
+
+## Result (2026-09-21)
+
+SKIP. TODO-1041 found no unique hook. The closable waste in the first-party update was the per-round store/load. `aegis128l_update_neon` removes that on ARM and keeps the CFRG AESENC order. The upgraded C-AEGIS-L P1 1400 cell is 750 ns on macOS and 1360 ns on Omega, against S-AEGIS at 334 ns and 720 ns. A further permutation would still have to beat libaegis. That is not a product gap. The opt-in wrap is TODO-1044 `advanced-aead`. TODO-1043 stays closed.

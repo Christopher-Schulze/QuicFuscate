@@ -18,13 +18,13 @@ while [[ $# -gt 0 ]]; do
     --jobs) JOBS="$2"; shift;;
     --features) CARGO_FEATURES="$2"; shift;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
-    --help|-h) echo "Usage: $(basename "$0") [--only aegis,morus,aes-gcm,ghash,chacha,aes-hp,simd,integration] [options]"; echo "Crypto & AEAD Comprehensive Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
+    --help|-h) echo "Usage: $(basename "$0") [--only aegis,aes-gcm,ghash,chacha,aes-hp,simd,integration] [options]"; echo "Crypto & AEAD Comprehensive Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
     *) echo "Unknown flag: $1" >&2; exit 2;;
   esac; shift
 done
 
 validate_scope_selection() {
-  qf_validate_scope_selection "$ONLY" "aegis,morus,aes-gcm,ghash,chacha,aes-hp,simd,integration"
+  qf_validate_scope_selection "$ONLY" "aegis,aes-gcm,ghash,chacha,aes-hp,simd,integration"
 }
 
 scope_selected() {
@@ -33,7 +33,7 @@ scope_selected() {
 
 fast_scope_selected() {
   case "$1" in
-    aegis|morus|aes-gcm|integration) return 0;;
+    aegis|aes-gcm|integration) return 0;;
     *) return 1;;
   esac
 }
@@ -71,7 +71,7 @@ record_scope_skip() {
     "raw_output="
 }
 
-for scope in aegis morus aes-gcm ghash chacha aes-hp simd integration; do
+for scope in aegis aes-gcm ghash chacha aes-hp simd integration; do
   if ! scope_selected "$scope" || { (( FAST )) && [[ "$ONLY" == "all" ]] && ! fast_scope_selected "$scope"; }; then
     record_scope_skip "$scope"
   fi
@@ -115,9 +115,6 @@ if (( FAST )); then
   if scope_selected aegis; then
     run_qf_crypto_filter aegis128l
   fi
-  if scope_selected morus; then
-    run_qf_crypto_filter morus
-  fi
   if scope_selected aes-gcm; then
     run_qf_crypto_filter aes_gcm
   fi
@@ -139,12 +136,6 @@ fi
 if scope_selected aegis; then
   echo -e "\n> Testing AEGIS-128L..."
   run_qf_crypto_filter aegis128l
-fi
-
-# Test MORUS-1280-128
-if scope_selected morus; then
-  echo -e "\n> Testing MORUS-1280-128..."
-  run_qf_crypto_filter morus
 fi
 
 # Test AES-GCM with hardware acceleration

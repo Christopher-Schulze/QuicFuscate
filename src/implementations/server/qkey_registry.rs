@@ -514,10 +514,9 @@ fn policy_from_parsed_qkey(cfg: &qf_engine_types::QKeyConfig) -> (Option<String>
     let stealth = cfg
         .stealth
         .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-        .filter(|s| s != "auto");
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "dynamic")
+        .map(str::to_string);
     let fec = cfg
         .fec
         .as_deref()
@@ -555,7 +554,7 @@ mod tests {
 
     fn mk_qkey_with_token(token_hex: &str) -> String {
         let cfg = qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
-            .with_stealth("auto")
+            .with_stealth("dynamic")
             .with_fec("auto")
             .with_token(token_hex);
         qkey::generate(&cfg)

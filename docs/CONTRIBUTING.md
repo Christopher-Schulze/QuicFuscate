@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing! This document explains how to set up your environment, the development workflow, coding standards, and how to submit high-quality pull requests that fit the project's architecture and quality bar.
 
-QuicFuscate is a monolithic Rust crate with a small, carefully curated `scripts/` toolchain. Documentation is centralized in `docs/DOCUMENTATION.md` and must remain the single source of truth.
+QuicFuscate is a Cargo workspace. The product runtime stays in the root `quicfuscate` package. Leaf crates live under `crates/`. Documentation is centralized in `docs/DOCUMENTATION.md`.
 
 
 ## Table of Contents
@@ -21,11 +21,11 @@ QuicFuscate is a monolithic Rust crate with a small, carefully curated `scripts/
 
 
 ## Project Architecture
-- Single crate under `src/`
+- Workspace root under `src/`, with leaf crates under `crates/`
   - `src/core.rs` - QUIC session and I/O core
-  - `src/crypto/` - AEAD, cipher, key exchange glue (mod.rs + aegis, aes, chacha, morus, hkdf)
-  - `src/fec/` - FEC (encoder/decoder/adaptive/GF tables, mod.rs + internal, gf_tables, fountain_codes, etc.)
-  - `src/stealth/` - DoH, HTTP/3 masquerading, TLS Cover, fingerprinting, domain fronting, QPACK helpers (mod.rs + tls_cover)
+  - `crates/qf-crypto/` - packet protection. rustls AES-128-GCM is the handshake and stealth payload. `off` and `performance` use libaegis AEGIS-128L after authentication
+  - `crates/qf-fec/` - FEC backend. The root `src/fec/` module is the compatibility projection
+  - `src/stealth/` - DoH, HTTP/3 masquerading, TLS Cover, fingerprinting, domain fronting, QPACK helpers
   - TLS fingerprints: deterministic in-memory ClientHello synthesis in `src/stealth/` (no on-disk profiles required). Optional external base64 dumps under top-level `browser_profiles/` are used by the TLS utility scripts for auditing only.
 - Script workflow
   - Consolidated build/test/audit/bench scripts under `scripts/{build,benchmarks,tests,utils}/`
@@ -40,7 +40,7 @@ The design favors consolidation into well-organized module directories (`src/fec
 
 ## Getting Started
 Prerequisites:
-- Pinned Rust `1.97.1` (selected by `rust-toolchain.toml`; no MSRV is promised)
+- Rust stable, selected by `rust-toolchain.toml` (`channel = "stable"`). No MSRV is promised. The version contract in `config/tool-versions.env` is `RUST_TOOLCHAIN="stable"`
 - Git, Bash
 - bun (for frontend apps under `apps/` and shared packages under `packages/`)
 - python3 (required by some scripts, for example `scripts/tests/suites/test-e2e-admin-web.sh`)

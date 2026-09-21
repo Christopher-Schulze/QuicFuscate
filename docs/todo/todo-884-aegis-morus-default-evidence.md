@@ -283,3 +283,4 @@ This fills the aarch64 cell. Cross-platform matrix now has ARM64 data; remaining
   must not be treated as a same-API speed verdict.
 - TODO-885 packet-capture wire evidence is TODO-1029.
 - Product default is rustls AES-GCM (TODO-1033), independent of the bakeoff.
+- TODO-1028 refuse is recorded. TODO-1044 picks opt-in S-AEGIS behind `advanced-aead` and does not promote a universal default from these cells.

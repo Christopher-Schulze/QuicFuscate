@@ -1,6 +1,6 @@
 #![cfg(feature = "rust-tests")]
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::{Aegis128LAead, AesGcm128, MorusAead};
+use quicfuscate::crypto::{select_private_packet_data_aead, AesGcm128, PrivateAeadFamily};
 use quicfuscate::fec::matrix_multiply_scalar;
 
 fn make_vec(data: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -16,8 +16,8 @@ fn aegis128l_roundtrip() {
 
     buf.resize(buf.len() + 16, 0);
 
-    let seal = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
-    let open = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
+    let (seal, open) = select_private_packet_data_aead(PrivateAeadFamily::Aegis128L, &key, &iv)
+        .expect("exact AEGIS fixture lengths");
 
     let pt_len = buf.len() - 16;
     let ct_len = seal.seal_with_u64_counter(7, ad, &mut buf, pt_len, None).expect("seal");
@@ -51,16 +51,16 @@ fn aes_gcm_roundtrip() {
 }
 
 #[test]
-fn morus_roundtrip() {
+fn libaegis_roundtrip() {
     let key = [0x55u8; 16];
     let iv = [0x66u8; 12];
-    let mut buf = b"morus stream data".to_vec();
+    let mut buf = b"aegis stream data".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = MorusAead::new(&key, &iv).expect("exact MORUS fixture lengths");
-    let open = MorusAead::new(&key, &iv).expect("exact MORUS fixture lengths");
+    let (seal, open) = select_private_packet_data_aead(PrivateAeadFamily::Aegis128L, &key, &iv)
+        .expect("exact libaegis fixture lengths");
 
-    let ad = b"morus aad";
+    let ad = b"aegis aad";
     let pt_len = buf.len() - 16;
     let ct_len = seal.seal_with_u64_counter(0, ad, &mut buf, pt_len, None).expect("seal");
     assert_eq!(ct_len, buf.len());
@@ -68,7 +68,7 @@ fn morus_roundtrip() {
     let mut decrypt_buf = buf.clone();
     let pt_len = open.open_with_u64_counter(0, ad, &mut decrypt_buf).expect("open");
     decrypt_buf.truncate(pt_len);
-    assert_eq!(decrypt_buf, b"morus stream data");
+    assert_eq!(decrypt_buf, b"aegis stream data");
 }
 
 #[test]
@@ -78,8 +78,8 @@ fn aegis128l_rejects_tampered_tag() {
     let mut buf = b"tamper aegis".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
-    let open = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
+    let (seal, open) = select_private_packet_data_aead(PrivateAeadFamily::Aegis128L, &key, &iv)
+        .expect("exact AEGIS fixture lengths");
     let ad = b"aad";
     let pt_len = buf.len() - 16;
     let ct_len = seal.seal_with_u64_counter(9, ad, &mut buf, pt_len, None).expect("seal");

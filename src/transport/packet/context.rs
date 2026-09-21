@@ -1,5 +1,17 @@
 use super::*;
 
+fn standard_aes128_gcm(
+    key: &[u8; 32],
+    iv: &[u8; 12],
+) -> Result<(crate::crypto::PacketAeadSeal, crate::crypto::PacketAeadOpen), ConnectionError> {
+    let mut key16 = [0u8; 16];
+    key16.copy_from_slice(&key[..16]);
+    Ok((
+        crate::crypto::PacketAeadSeal::dynamic(Box::new(RingAesGcm128::from_arrays(&key16, iv)?)),
+        crate::crypto::PacketAeadOpen::dynamic(Box::new(RingAesGcm128::from_arrays(&key16, iv)?)),
+    ))
+}
+
 impl CryptoContext {
     /// Return the exact effective packet-key owners installed on this connection.
     pub fn packet_protection_snapshot(&self) -> crate::qftls::PacketProtectionSnapshot {
@@ -146,13 +158,13 @@ impl CryptoContext {
         let (write_key, write_iv) = derive_key_iv(write_secret)?;
         let write_hp = derive_hp_key(write_secret)?;
         let read_hp = derive_hp_key(read_secret)?;
-        let (_, open) = select_packet_data_aead(&read_key, &read_iv);
-        let (seal, _) = select_packet_data_aead(&write_key, &write_iv);
+        let (_, open) = standard_aes128_gcm(&read_key, &read_iv)?;
+        let (seal, _) = standard_aes128_gcm(&write_key, &write_iv)?;
         self.zero_rtt_enabled = true;
         self.open_0rtt = Some(open);
         self.seal_0rtt = Some(seal);
-        self.hp_0rtt = Some(Box::new(crate::crypto::aead::AesHp::from_key(&write_hp)));
-        self.hp_0rtt_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&read_hp)));
+        self.hp_0rtt = Some(Box::new(crate::crypto::RingAesHp::from_key(&write_hp)?));
+        self.hp_0rtt_open = Some(Box::new(crate::crypto::RingAesHp::from_key(&read_hp)?));
         self.refresh_compatibility_zero_rtt_snapshot();
         Ok(())
     }
@@ -226,10 +238,10 @@ impl CryptoContext {
         let mut iv12 = [0u8; 12];
         k16.copy_from_slice(&wkey);
         iv12.copy_from_slice(&wiv);
-        self.seal_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv12)));
+        self.seal_initial = Some(Box::new(RingAesGcm128::from_arrays(&k16, &iv12)?));
         k16.copy_from_slice(&rkey);
         iv12.copy_from_slice(&riv);
-        self.open_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv12)));
+        self.open_initial = Some(Box::new(RingAesGcm128::from_arrays(&k16, &iv12)?));
         self.packet_protection.initial.packet_aead_owner =
             crate::qftls::PacketProtectionOwner::QuicInitialStandard;
         self.packet_protection.initial.standard_cipher_suite =
@@ -243,8 +255,8 @@ impl CryptoContext {
         let (key, iv) = derive_key_iv(secret)?;
         let mut k16 = [0u8; 16];
         k16.copy_from_slice(&key[..16]);
-        let seal = AesGcm128::from_arrays(&k16, &iv);
-        let open = AesGcm128::from_arrays(&k16, &iv);
+        let seal = RingAesGcm128::from_arrays(&k16, &iv)?;
+        let open = RingAesGcm128::from_arrays(&k16, &iv)?;
         self.seal_handshake = Some(Box::new(seal));
         self.open_handshake = Some(Box::new(open));
         self.refresh_transport_handshake_snapshot();
@@ -262,8 +274,8 @@ impl CryptoContext {
     ) -> Result<(), ConnectionError> {
         let hp_key_w = derive_hp_key_for_version(write_secret, version)?;
         let hp_key_r = derive_hp_key_for_version(read_secret, version)?;
-        self.hp_initial = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key_w)));
-        self.hp_initial_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key_r)));
+        self.hp_initial = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key_w)?));
+        self.hp_initial_open = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key_r)?));
         self.packet_protection.initial.header_protection_owner =
             crate::qftls::PacketProtectionOwner::QuicInitialStandard;
         self.packet_protection.initial.standard_cipher_suite =
@@ -274,28 +286,28 @@ impl CryptoContext {
     /// Install AES-based Header Protection for Handshake packets
     pub fn install_hp_handshake(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
         let hp_key = derive_hp_key(secret)?;
-        self.hp_handshake = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
-        self.hp_handshake_open = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+        self.hp_handshake = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
+        self.hp_handshake_open = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
         self.refresh_transport_handshake_snapshot();
         Ok(())
     }
 
     fn install_read_1rtt_secret(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
         let (key, iv) = derive_key_iv(secret)?;
-        let (_, open) = select_packet_data_aead(&key, &iv);
+        let (_, open) = standard_aes128_gcm(&key, &iv)?;
         let hp_key = derive_hp_key(secret)?;
         self.open_1rtt = Some(Arc::new(open));
-        self.hp_1rtt_open = Some(Arc::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+        self.hp_1rtt_open = Some(Arc::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
         self.refresh_compatibility_one_rtt_snapshot();
         Ok(())
     }
 
     fn install_write_1rtt_secret(&mut self, secret: &[u8]) -> Result<(), ConnectionError> {
         let (key, iv) = derive_key_iv(secret)?;
-        let (seal, _) = select_packet_data_aead(&key, &iv);
+        let (seal, _) = standard_aes128_gcm(&key, &iv)?;
         let hp_key = derive_hp_key(secret)?;
         self.seal_1rtt = Some(Arc::new(seal));
-        self.hp_1rtt = Some(Arc::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+        self.hp_1rtt = Some(Arc::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
         self.refresh_compatibility_one_rtt_snapshot();
         Ok(())
     }
@@ -509,7 +521,7 @@ impl CryptoContext {
         self.stage_private_read_update()?;
         let next = crate::crypto::kdf::derive_next_secret(cur.as_slice())?;
         let (key, iv) = derive_key_iv(&next)?;
-        let (_, open) = select_packet_data_aead(&key, &iv);
+        let (_, open) = standard_aes128_gcm(&key, &iv)?;
         if let Some(prev_open) = self.open_1rtt.take() {
             self.push_previous_read_key(prev_open);
         }
@@ -526,7 +538,7 @@ impl CryptoContext {
         };
         let next = crate::crypto::kdf::derive_next_secret(cur)?;
         let (key, iv) = derive_key_iv(&next)?;
-        let (seal, _) = select_packet_data_aead(&key, &iv);
+        let (seal, _) = standard_aes128_gcm(&key, &iv)?;
         let private_next = if self.private_seal_1rtt.is_some() {
             let next_epoch =
                 self.private_write_epoch.checked_add(1).ok_or(ConnectionError::KeyUpdateError)?;
@@ -673,33 +685,33 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                     crate::crypto::aead::Algorithm::AES128_GCM => {
                         let mut k16 = [0u8; 16];
                         k16.copy_from_slice(&key[..16]);
-                        self.open_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
+                        self.open_initial = Some(Box::new(RingAesGcm128::from_arrays(&k16, &iv)?));
                     }
                 }
                 let hp_key = derive_hp_key(secret)?;
-                self.hp_initial_open =
-                    Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+                self.hp_initial_open = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
             }
             crate::crypto::aead::Level::Handshake => {
                 match alg {
                     crate::crypto::aead::Algorithm::AES128_GCM => {
                         let mut k16 = [0u8; 16];
                         k16.copy_from_slice(&key[..16]);
-                        self.open_handshake = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
+                        self.open_handshake =
+                            Some(Box::new(RingAesGcm128::from_arrays(&k16, &iv)?));
                     }
                 }
                 let hp_key = derive_hp_key(secret)?;
                 self.hp_handshake_open =
-                    Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+                    Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
                 self.refresh_transport_handshake_snapshot();
             }
             crate::crypto::aead::Level::ZeroRTT => {
                 if self.zero_rtt_enabled {
-                    let (_, open) = select_packet_data_aead(&key, &iv);
+                    let (_, open) = standard_aes128_gcm(&key, &iv)?;
                     self.open_0rtt = Some(open);
                     let hp_key = derive_hp_key(secret)?;
                     self.hp_0rtt_open =
-                        Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+                        Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
                     self.refresh_compatibility_zero_rtt_snapshot();
                 }
             }
@@ -726,30 +738,31 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                     crate::crypto::aead::Algorithm::AES128_GCM => {
                         let mut k16 = [0u8; 16];
                         k16.copy_from_slice(&key[..16]);
-                        self.seal_initial = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
+                        self.seal_initial = Some(Box::new(RingAesGcm128::from_arrays(&k16, &iv)?));
                     }
                 }
                 let hp_key = derive_hp_key(secret)?;
-                self.hp_initial = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+                self.hp_initial = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
             }
             crate::crypto::aead::Level::Handshake => {
                 match alg {
                     crate::crypto::aead::Algorithm::AES128_GCM => {
                         let mut k16 = [0u8; 16];
                         k16.copy_from_slice(&key[..16]);
-                        self.seal_handshake = Some(Box::new(AesGcm128::from_arrays(&k16, &iv)));
+                        self.seal_handshake =
+                            Some(Box::new(RingAesGcm128::from_arrays(&k16, &iv)?));
                     }
                 }
                 let hp_key = derive_hp_key(secret)?;
-                self.hp_handshake = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+                self.hp_handshake = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
                 self.refresh_transport_handshake_snapshot();
             }
             crate::crypto::aead::Level::ZeroRTT => {
                 if self.zero_rtt_enabled {
-                    let (seal, _) = select_packet_data_aead(&key, &iv);
+                    let (seal, _) = standard_aes128_gcm(&key, &iv)?;
                     self.seal_0rtt = Some(seal);
                     let hp_key = derive_hp_key(secret)?;
-                    self.hp_0rtt = Some(Box::new(crate::crypto::aead::AesHp::from_key(&hp_key)));
+                    self.hp_0rtt = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
                     self.refresh_compatibility_zero_rtt_snapshot();
                 }
             }

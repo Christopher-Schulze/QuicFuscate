@@ -242,7 +242,7 @@
 - Detail: `docs/todo/todo-904-ci-lane-consolidation.md`
 
 ### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
-- Local correctness reconciliation is active. No advanced family is promoted. Same-API bakeoff is TODO-1032 through TODO-1044. Old ARM freeze (TODO-1028) is blocked. Ship default is TODO-1033 rustls AES-GCM.
+- DONE for the bakeoff decision. No advanced family is the ship default. TODO-1044 picks opt-in S-AEGIS behind `advanced-aead`. TODO-1028 refuses the old ARM freeze. Ship default stays TODO-1033 rustls AES-GCM. TODO-1029 pcap remains open before any production private enable.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
 ### TODO-906 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
@@ -384,19 +384,19 @@
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
-- IN_PROGRESS. Core implemented and live-proven on Omega. Remaining: TODO-1029 pcap, TODO-1044 family freeze. Ship default is TODO-1033 rustls AES-GCM. TODO-1028 must not freeze from old ARM cells.
+- IN_PROGRESS. Core implemented. TODO-1044 recorded the family as opt-in S-AEGIS, not the ship default, and `auto` still installs no family. Remaining gate: TODO-1029 pcap before any production private enable.
 - Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
 
 ### TODO-1028 - Freeze TODO-884 advanced-family winner from existing ARM evidence
-- BLOCKED. Superseded as a freeze source. Old ARM cells are not same-API. Freeze/refuse is TODO-1044.
+- REFUSED. Old ARM cells are not same-API and do not freeze a family. `aead_preference="auto"` stays `None`. The opt-in owner is TODO-1044.
 - Detail: `docs/todo/todo-1028-freeze-884-arm-winner.md`
 
 ### TODO-1029 - Omega pcap/wire proof for private AEAD upgrade (TODO-885)
-- OPEN. Packet-capture evidence that post-activation 1-RTT payload AEAD is the negotiated private owner while Initial/Handshake/pre-auth 1-RTT/header protection stay rustls-standard. Telemetry-only proof is not enough.
+- UNAVAILABLE. No packet capture this session. Telemetry is not wire proof. Production private enable stays blocked.
 - Detail: `docs/todo/todo-1029-omega-pcap-private-aead.md`
 
 ### TODO-1030 - Custom-vs-standard systems audit (crypto, stealth, FEC, 0-RTT)
-- OPEN. Umbrella index for the 1031-1044 cluster. Keep/replace table lives here after the bakeoff.
+- DONE. Keep/replace record is in the detail file. Ship default is `packet_protection_mode=standard`. Opt-in post-auth owner is S-AEGIS. TODO-1031 stays open.
 - Detail: `docs/todo/todo-1030-custom-vs-standard-systems-audit.md`
 
 ### TODO-1031 - Later rustls-standard 0-RTT investigation (never private AEAD)
@@ -404,56 +404,137 @@
 - Detail: `docs/todo/todo-1031-later-rustls-0rtt-investigation.md`
 
 ### TODO-1032 - Same-API AEAD bakeoff parent program
-- OPEN. Parent matrix and decision rule. Children: 1037 pin, 1038 harness, 1039 profile, 1040 distinguish, 1041 integration, 1042-1043 next-gen (gated), 1044 freeze.
+- DONE. S-AEGIS clears 10 percent vs R-RING and R-LC on both ARM hosts at P1 1200-1400. First-party does not. x86_64 UNAVAILABLE. Default unchanged.
 - Detail: `docs/todo/todo-1032-same-api-aead-bakeoff.md`
 
 ### TODO-1033 - Ship default rustls AES-GCM
-- OPEN. `packet_protection_mode=standard`. Private upgrade stays inert. Bakeoff cannot flip this default.
+- DONE. `packet_protection_mode=standard`. Bakeoff did not flip the default.
 - Detail: `docs/todo/todo-1033-ship-default-rustls-aes-gcm.md`
 
 ### TODO-1034 - Replace first-party Initial AES-GCM and AesHp with ring/aws-lc
-- OPEN. Same RFC 9001 algorithm, audited impl. No AEGIS/MORUS on Initial.
+- DONE. Initial seal/open and header protection are ring AES-128. First-party Initial is slower on the same API (Omega P1 1200: I-RING 1120 ns, F-AES 115441 ns).
 - Detail: `docs/todo/todo-1034-replace-initial-aes-hp-ring.md`
 
 ### TODO-1035 - Move TLS-Cover and first-party ChaCha20-Poly1305 onto rustls/ring
-- OPEN. Cover needs an AEAD, not a first-party one.
+- DONE. TLS-Cover and production QKey storage use ring AES-GCM / ChaCha20-Poly1305. The QKey test fixture at the legacy envelope still uses first-party ChaCha for interop.
 - Detail: `docs/todo/todo-1035-move-cover-chacha-to-rustls.md`
 
 ### TODO-1036 - Evaluate rustls aws-lc-rs for the standard AES-GCM path
-- OPEN. Legal standard-path speed. Default stays ring until R-LC wins 1038.
+- ARM verdict DONE: keep ring. `rustls-aws-lc` stays a non-default feature. Omega P1 1400 R-LC 1360 ns vs R-RING 1280 ns. macOS P1 1400 R-LC 583 ns vs R-RING 667 ns, inside timer noise.
+- OPEN: x86_64 VAES remeasure. Do not flip the default until that cell exists. Same harness as TODO-1038, owners R-RING and R-LC, sizes 1200 and 1400, P1 median.
 - Detail: `docs/todo/todo-1036-rustls-aws-lc-rs-standard-path.md`
 
 ### TODO-1037 - Pin standard AEGIS/MORUS/rustls owners
-- OPEN. Bench-only deps, licenses, APIs. S-MORUS may be UNAVAILABLE.
+- DONE. Pins: aegis 0.9.18, morus 0.1.3 (unmaintained, license-clean, measured), ring 0.17.14, rustls PacketKey, aws-lc-rs 1.18.1 behind `rustls-aws-lc`. Default graph has none of the bakeoff crates.
 - Detail: `docs/todo/todo-1037-pin-standard-aead-owners.md`
 
 ### TODO-1038 - Same-API harness and matrix execution
-- OPEN. Primitive + packet path + batch. macOS ARM and Omega. 1400 B P1 is the decision size.
+- DONE. Artifacts in `scripts/out/benchmarks/aead-bakeoff-macos-arm/` and `aead-bakeoff-omega-arm/`. x86_64 UNAVAILABLE. Decision size P1 1400.
 - Detail: `docs/todo/todo-1038-same-api-aead-matrix.md`
 
 ### TODO-1039 - Profile why first-party AEGIS/MORUS lose
-- OPEN. Waste split before any rewrite. No code change.
+- DONE. No second permutation. In-place NEON AESENC cut C-AEGIS-L P1 1400 from 2500/4120 ns to 750/1360 ns (macOS/Omega). S-AEGIS stays ahead at 334/720 ns. allocs=0, copied=16. Omega `perf` blocked (`perf_event_paranoid=4`).
 - Detail: `docs/todo/todo-1039-profile-first-party-aead-slowpath.md`
 
 ### TODO-1040 - QUIC-shaped ciphertext distinguishability
-- OPEN. Cheap distinguisher test. Private cipher is never more Chrome. Prices stealth residue only.
+- DONE. 10k x 1400 B, both ARM hosts, `cheap_keyless_distinguisher=false`. Private ciphertext is not a stealth win over AES-GCM.
 - Detail: `docs/todo/todo-1040-quic-ciphertext-distinguishability.md`
 
 ### TODO-1041 - Honest AEAD/FEC/stealth/transport integration contract
-- OPEN. Allowed hooks: batch, pool, epoch fence. Forbidden: FEC-then-seal, cipher mutation, XOR.
+- DONE. No unique hook. Pipeline stays pad, then AEAD+HP, then timing, then FEC of the sealed datagram.
 - Detail: `docs/todo/todo-1041-aead-fec-stealth-integration-contract.md`
 
 ### TODO-1042 - Next-gen custom AEGIS/MORUS design (gated)
-- OPEN. Starts only if 1041 has a unique hook or 1039 shows closable waste. Spec-byte-identical. Prefer wrap libaegis.
+- SKIP. No unique hook. In-place NEON AESENC is in the existing update and still loses to libaegis. No new permutation.
 - Detail: `docs/todo/todo-1042-nextgen-custom-aead-design.md`
 
 ### TODO-1043 - Next-gen custom impl and re-bench (gated)
-- OPEN. N-* vs C-* vs S-* vs rustls on the 1038 matrix. Feature-gated. No default flip.
+- SKIP. TODO-1042 did not proceed. No N-* row.
 - Detail: `docs/todo/todo-1043-nextgen-custom-aead-impl-rebench.md`
 
 ### TODO-1044 - Post-auth AEAD owner decision
-- OPEN. rustls AES-GCM stays the ship default. Picks none / opt-in S-AEGIS / opt-in N-* / opt-in C-*. Silent auto upgrade forbidden.
+- DONE. Pick: opt-in S-AEGIS. Ship default stays `packet_protection_mode=standard`. `auto` does not upgrade. Production enable still waits on TODO-1029. The removal of homemade AEGIS/MORUS is TODO-1045.
 - Detail: `docs/todo/todo-1044-post-auth-aead-owner-decision.md`
+
+### TODO-1045 - Drop homemade AEGIS/MORUS, keep rustls AES-GCM-128 and libaegis
+- IN_PROGRESS. `off` and `performance` pin post-auth payload to libaegis AEGIS-128L. `stealth`, `Stealth MAX`, and `dynamic` pin AES-GCM-128. `manual` selects either. Homemade AEGIS, MORUS, and `CryptoAeadPlan` are removed.
+- Detail: `docs/todo/todo-1045-drop-homemade-aead-keep-libaegis.md`
+
+### TODO-1046 - FEC repairs as normal QUIC packets in stealth modes
+- OPEN. `stealth`, `Stealth MAX`, `dynamic`, and `manual` must not prepend `0xF1 0xEC`. Repairs are normal QUIC packets. `off` and `performance` keep the wrapper. Solver stays.
+- Detail: `docs/todo/todo-1046-in-quic-fec-framing.md`
+
+### TODO-1047 - Real ClientHello and transport parameters from one browser capture
+- OPEN. Initial transport parameters are one hardcoded blob. The persona catalog does not reach that blob. One capture per persona becomes the only source.
+- Detail: `docs/todo/todo-1047-browser-capture-clienthello.md`
+
+### TODO-1048 - Replace domain fronting with a real Reality fallback
+- OPEN. Drop SNI-vs-certificate fronting. Cover list is relayed for real. Probe without a secret gets the live cover handshake.
+- Detail: `docs/todo/todo-1048-reality-replaces-domain-fronting.md`
+
+### TODO-1049 - Delete dead first-party AES-GCM and ChaCha
+- OPEN. Ring and libaegis stay. First-party AES-GCM, ChaCha, Poly1305, and `chacha20_blocks_x4` go. Legacy QKey test seals with ring.
+- Detail: `docs/todo/todo-1049-delete-dead-first-party-aead.md`
+
+### TODO-1050 - Derive QUIC packet keys with ring HKDF
+- OPEN. Replace in-tree HKDF-Expand-Label with `ring::hkdf`. RFC 9001 Appendix A is the gate. Not a per-packet change.
+- Detail: `docs/todo/todo-1050-quic-kdf-via-ring-hkdf.md`
+
+### TODO-1051 - Remaining datapath speed without a new cipher
+- OPEN. Do not reopen DONE GSO/sendmmsg work. Couple `seal_batch` to an already admitted uniform run. SIMD only for GF, XOR, checksum, varint, Huffman. x86 aws-lc stays in TODO-1036.
+- Detail: `docs/todo/todo-1051-datapath-speed-not-cipher.md`
+
+### TODO-1052 - One wire byte budget for padding, cover, and FEC
+- OPEN. One cap. Repairs spend first under loss. `stealth` uses a persona trace. Random padding goes away. `off` and `performance` spend nothing.
+- Detail: `docs/todo/todo-1052-one-wire-byte-budget.md`
+
+### TODO-1053 - One send clock under the PTO threshold
+- OPEN. Congestion control is the only continuous limiter. Extra delay must be `< pto/4`. Pure ACKs stay undelayed. No choke beside BBR.
+- Detail: `docs/todo/todo-1053-single-clock-under-pto.md`
+
+### TODO-1054 - Cover PING only when the persona trace would send
+- OPEN. Delete the 15 s / 30 s grid. PING follows TODO-1052 or stays silent. Idle timeout may send one counted keepalive.
+- Detail: `docs/todo/todo-1054-cover-ping-follows-persona-trace.md`
+
+### TODO-1055 - QPACK, User-Agent, and server push only on the outer hop
+- OPEN. Inner tunnel turns masquerade and push off. Outer MASQUE/H3 hop may use the persona headers and must debit the byte budget.
+- Detail: `docs/todo/todo-1055-outer-hop-only-h3-masquerade.md`
+
+### TODO-1056 - Persona change via connection migration, not a 120 s handshake
+- OPEN. No timer-driven ClientHello. Disguise is a QUIC port/CID migration on a 2 to 10 minute draw. A new browser persona requires a new connection.
+- Detail: `docs/todo/todo-1056-persona-rotation-via-migration.md`
+
+### TODO-1057 - Shape the outer IP and UDP header to the claimed OS
+- OPEN. Client UDP socket gets persona TTL/DF/IP-ID. Inner TCP/ICMP normalizer stays on the exit path only.
+- Detail: `docs/todo/todo-1057-outer-ip-udp-persona.md`
+
+### TODO-1058 - DoH uses the same persona and is the only DNS
+- OPEN. Stealth modes disable UDP/53 fallback. DoH TLS uses the TODO-1047 persona. `off` and `performance` may keep UDP DNS.
+- Detail: `docs/todo/todo-1058-doh-matches-persona.md`
+
+### TODO-1059 - dynamic keeps one wire image for the whole connection
+- OPEN. Default image is the stealth image, AES-GCM, chosen at connect. Escalation may change repair ratio and Reality only. It must not change lengths, framing, or AEAD.
+- Detail: `docs/todo/todo-1059-dynamic-holds-one-wire-image.md`
+
+### TODO-1060 - Brain sensors may switch repairs and Reality, not the packet shape
+- OPEN. Keep loss/RTT/probe sensors. Delete bandit-chosen padding and jitter. Shape comes from the frozen image or later from Maybenot.
+- Detail: `docs/todo/todo-1060-brain-sensors-not-pattern.md`
+
+### TODO-1061 - Maybenot as the measured wire defense
+- OPEN. Adapter only until a simulator number exists. Not the default. Cap and PTO clamp are mandatory. No bandit beside it.
+- Detail: `docs/todo/todo-1061-maybenot-wire-defense.md`
+
+### TODO-1062 - Stop emitting the synthetic ClientHello
+- OPEN. Delete xorshift key shares and any path that would send `generate_client_hello`. Persona means rustls plus TODO-1047.
+- Detail: `docs/todo/todo-1062-remove-synthetic-clienthello.md`
+
+### TODO-1063 - When UDP is blocked, fall back to MASQUE or real TLS
+- OPEN. One fallback to a configured MASQUE or real TLS hop. No Vision port. Default remains direct UDP until an outer hop is set.
+- Detail: `docs/todo/todo-1063-udp-blocked-fallback.md`
+
+### TODO-1064 - ECH only on a shared outer hop
+- OPEN. Client ECH via rustls only when the outer hop's HTTPS record has an `ech` parameter, fetched over DoH. No server ECH. No ECH on a dedicated VPN IP.
+- Detail: `docs/todo/todo-1064-ech-on-shared-outer-hop.md`
 
 ## Completed
 

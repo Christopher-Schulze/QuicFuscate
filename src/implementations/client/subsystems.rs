@@ -66,7 +66,7 @@ mod tests {
             .stealth
             .to_runtime_config(&config.fingerprint_rotation)
             .expect("default stealth projection");
-        assert_eq!(runtime.mode, crate::stealth::StealthMode::Intelligent);
+        assert_eq!(runtime.mode, crate::stealth::StealthMode::Dynamic);
         assert_eq!(runtime.initial_browser, crate::stealth::BrowserProfile::Chrome);
         assert_eq!(runtime.initial_os, crate::stealth::OsProfile::Windows);
     }

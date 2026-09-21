@@ -134,6 +134,7 @@ zeroize = "1.8"
 zstd = "0.13"
 zstd-sys = { version = "2.0.16", optional = true }
 hex = "0.4"
+aegis = { version = "=0.9.18", optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 maxminddb = { version = "0.29", optional = true }
 
@@ -215,6 +216,11 @@ internal_avx10_preview = ["qf-cpu/internal_avx10_preview", "qf-crypto/internal_a
 rust-tests = ["qf-compress/rust-tests", "qf-cpu/rust-tests", "qf-crypto/rust-tests", "qf-dns/rust-tests", "qf-fec/rust-tests", "qf-harness/rust-tests", "qf-logging/rust-tests", "qf-memory-lock/rust-tests", "qf-memory-pool/rust-tests", "qf-metrics/rust-tests", "qf-reality/rust-tests", "qf-stealth/rust-tests", "qf-simd/rust-tests", "qf-transport-anti-replay/rust-tests", "qf-transport-batch/rust-tests", "qf-transport-cc/rust-tests", "qf-transport-nat/rust-tests", "qf-transport-pn/rust-tests", "qf-transport-path/rust-tests", "qf-transport-recovery/rust-tests", "qf-transport-version/rust-tests", "qf-transport-types/rust-tests", "qf-transport-udp/rust-tests"]
 process-probes = ["client", "server", "rate_limiter", "rust-tests"]
 benches = ["qf-crypto/benches", "qf-fec/benches", "qf-simd/benches"]
+aead-bakeoff = ["dep:aegis"]
+# Empty alias. libaegis is a normal qf-crypto dependency (TODO-1045). The
+# feature name remains so existing command lines still parse.
+advanced-aead = []
+rustls-aws-lc = ["rustls/aws-lc-rs"]
 masque-tests = []
 tun-tests = []
 simd-selfcheck = []
@@ -289,6 +295,11 @@ required-features = ["tun-tests"]
 [[example]]
 name = "crypto_backend_bench"
 path = "examples/crypto_backend_bench.rs"
+required-features = ["benches"]
+
+[[example]]
+name = "aead_bakeoff"
+path = "examples/aead_bakeoff.rs"
 required-features = ["benches"]
 
 [[example]]
@@ -462,11 +473,6 @@ required-features = ["rust-tests"]
 [[test]]
 name = "rt-probe-detection"
 path = "scripts/tests/rust/rt-probe-detection.rs"
-required-features = ["rust-tests"]
-
-[[test]]
-name = "rt-profile-aegis-selection"
-path = "scripts/tests/rust/rt-profile-aegis-selection.rs"
 required-features = ["rust-tests"]
 
 [[test]]

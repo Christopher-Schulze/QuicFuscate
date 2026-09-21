@@ -1,5 +1,9 @@
 use crate::crypto::aead::{self as tls_aead, AeadOpen, AeadSeal};
-use crate::crypto::{select_packet_data_aead, AesGcm128};
+#[cfg(test)]
+use crate::crypto::select_packet_data_aead;
+#[cfg(test)]
+use crate::crypto::AesGcm128;
+use crate::crypto::RingAesGcm128;
 use crate::error::ConnectionError;
 use std::collections::VecDeque;
 use std::sync::Arc;

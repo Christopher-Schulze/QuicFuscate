@@ -86,7 +86,7 @@ echo "> crypto_backend_bench"
 expect_rejected "crypto_backend_bench rejects an unknown backend" \
   cargo run --quiet --example crypto_backend_bench --features benches -- run nosuchbackend 1024 10
 expect_rejected "crypto_backend_bench rejects zero iterations" \
-  cargo run --quiet --example crypto_backend_bench --features benches -- run morus 1024 0
+  cargo run --quiet --example crypto_backend_bench --features benches -- run aegis 1024 0
 
 echo "> brain_probe"
 expect_rejected "brain_probe rejects jitter without a unit" \

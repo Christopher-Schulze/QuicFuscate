@@ -44,7 +44,7 @@ else
   ITERS=1000
 fi
 
-BACKENDS=("aegis128l" "aegis128x4" "aegis128x8" "morus1280_128")
+BACKENDS=("aegis")
 
 {
   echo "suite=bench-retained-crypto-backends"

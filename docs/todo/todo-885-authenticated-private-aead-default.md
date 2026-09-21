@@ -308,7 +308,7 @@ is created on the first post-auth tick (silent early return once `runtime.is_som
 ## Live Verification: Private Upgrade Activates End-to-End (2026-09-19, Omega ARM64)
 
 After the standalone-client fix, a live run (server `--tun` + `--metrics-port`, client `--tun`
-+ `--qkey`, `packet_protection_mode="auto"`, `aead_preference="aegis-128l"` on both peers)
++ `--qkey`, `packet_protection_mode="auto"`, `aead_preference="aegis"` on both peers)
 shows:
 
 - `quicfuscate_private_upgrade_activated_total 1` — the negotiated private owner became the
@@ -320,7 +320,7 @@ shows:
   under the previous owner. No connection impact; traffic continued cleanly.
 
 This is the first live proof that the `auto` upgrade path negotiates and activates the
-private owner end-to-end. Note the activation used an explicit `aegis-128l` family — the
+private owner end-to-end. Note the activation used an explicit `aegis` family — the
 shipped `aead_preference="auto"` still maps to `None` until the TODO-884 winner is frozen
 (planner-owned default remains an open gate).
 
@@ -328,8 +328,8 @@ shipped `aead_preference="auto"` still maps to `None` until the TODO-884 winner 
 
 | Scenario | Result |
 |---|---|
-| auto+aegis-128l ↔ auto+aegis-128l | upgrade activates; `activated_total=1` |
-| standard ↔ auto+aegis-128l | connects, stays standard; metric stays 0 |
+| auto+aegis ↔ auto+aegis | upgrade activates; `activated_total=1` |
+| standard ↔ auto+aegis | connects, stays standard; metric stays 0 |
 | client reconnect (fresh generation) | fresh negotiation; `activated_total` → 2 |
 | server errors across all runs | 0 |
 
@@ -352,5 +352,8 @@ benchmarks, side-channel review, and the TODO-884 winner freeze that maps
 - TODO-1029 owns Omega pcap/wire proof for this upgrade path.
 - Ship default is rustls AES-GCM (TODO-1033). This task stays the opt-in
   private upgrade machine and must not override that default.
-- Do not execute freeze or pcap until explicitly started. Live telemetry proof
-  (`activated_total=1`) stays recorded above and is not a substitute for pcap.
+- TODO-1044 picked opt-in S-AEGIS. `aead_preference="auto"` still installs no
+  family. The sentence above that says `auto` becomes the product default is
+  superseded: the shipped default is `standard`.
+- TODO-1029 pcap is still required before any production private enable.
+  Live telemetry proof (`activated_total=1`) is not a substitute.

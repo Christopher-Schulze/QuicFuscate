@@ -4,7 +4,7 @@ title: Same-API AEAD harness and matrix execution
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1037]
 ---
@@ -37,24 +37,37 @@ Hosts: macOS ARM64, Omega ARM64. x86_64 `UNAVAILABLE` until a witness.
 
 ## Acceptance
 
-- [ ] Every owner/path/size/host cell is a number or `UNAVAILABLE`/`SKIP` with a reason
-- [ ] Artifact directory under `scripts/out/benchmarks/` with command, commit, compiler, CPU
-- [ ] Median, p95, p99, ns/packet, bytes/s, allocs, copied bytes
-- [ ] C-AEGIS-X4/X8 ciphertext matches C-AEGIS-L on the same key/nonce/AAD
-- [ ] S-AEGIS matches CFRG AEGIS-128L vectors through the wrapper
-- [ ] C-MORUS still matches CAESAR vectors through the wrapper
-- [ ] rustls owners use real `PacketKey` for P1, not a reimplementation
-- [ ] Table copied into TODO-1032 and TODO-1030
-- [ ] No default-policy change
+- [x] Every owner/path/size/host cell is a number or `UNAVAILABLE`/`SKIP` with a reason
+- [x] Artifact directory under `scripts/out/benchmarks/` with command, commit, compiler, CPU
+- [x] Median, p95, p99, ns/packet, bytes/s, allocs, copied bytes
+- [x] C-AEGIS-X4/X8 ciphertext matches C-AEGIS-L on the same key/nonce/AAD
+- [x] S-AEGIS matches CFRG AEGIS-128L vectors through the wrapper
+- [x] C-MORUS still matches CAESAR vectors through the wrapper
+- [x] rustls owners use real `PacketKey` for P1, not a reimplementation
+- [x] Table copied into TODO-1032 and TODO-1030
+- [x] No default-policy change
 
 ## Sub-Tasks
 
-- [ ] Bench-only deps from TODO-1037
-- [ ] Wrappers in a benches/rust-tests target, not the default server binary
-- [ ] Disk check + `cargo clean` if free space would drop under 2 GB
-- [ ] Run macOS ARM, then Omega ARM
-- [ ] Publish the table
+- [x] Bench-only deps from TODO-1037
+- [x] Wrappers in a benches/rust-tests target, not the default server binary
+- [x] Disk check + `cargo clean` if free space would drop under 2 GB
+- [x] Run macOS ARM, then Omega ARM
+- [x] Publish the table
 
 ## Notes
 
 1400 B P1 is the decision size. Primitive-only wins do not count. Do not start until explicitly requested.
+
+## Result (2026-09-21)
+
+Artifacts:
+
+- `scripts/out/benchmarks/aead-bakeoff-macos-arm/` (`host.txt`, `matrix.txt`, `matrix-rlc.txt`, `distinguish.txt`, `profile.txt`)
+- `scripts/out/benchmarks/aead-bakeoff-omega-arm/` (`host.txt`, `matrix.txt`, `matrix-rlc.txt`, `vectors.txt`, `x-match.txt`, `distinguish.txt`)
+
+Every measured cell has median, p95, p99, ns/packet, bytes/s, allocs, copied. R-LC was `UNAVAILABLE` in the first macOS matrix (feature off) and filled by `matrix-rlc.txt`. Omega R-LC is the same-binary `matrix-rlc.txt`. x86_64 is `UNAVAILABLE` (no witness host). N-* is `SKIP` because TODO-1042 did not proceed.
+
+`x_variant_match=ok size=1400` on Omega: C-AEGIS-X4/X8 match C-AEGIS-L. `s_aegis_cfrg_vector1=ok`. C-MORUS `--vectors` proved a trait roundtrip of the same owner the qf-crypto CAESAR tests already cover; the harness did not re-execute the CAESAR file. rustls rows use real `PacketKey`. Decision table is in TODO-1044. No default-policy change.
+
+macOS disk: `cargo clean` ran before the native builds because free space was 7.2 GiB with a 7.8 GiB `target/`. After the builds about 12 GiB were free.

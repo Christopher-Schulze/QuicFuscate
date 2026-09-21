@@ -100,7 +100,7 @@ describe("desktop tunnel list", () => {
     engineDisconnectMock.mockReset();
     qkeyParseMock.mockReset();
     qkeyParseMock.mockResolvedValue({
-      stealth: "auto",
+      stealth: "dynamic",
       fec: "auto",
       extra: null,
       sni: "cdn.example.com",

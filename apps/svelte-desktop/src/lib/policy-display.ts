@@ -5,15 +5,18 @@ function normalize(raw: string | null | undefined): string {
 }
 
 export function displayStealthMode(raw: string | null | undefined): string {
-  const v = normalize(raw);
-  if (!v) return "Auto";
-  if (v === "off") return "Off";
-  if (v === "manual") return "Manual";
-  if (v === "performance" || v === "base") return "Performance";
-  if (v === "stealth") return "Stealth";
-  if (v === "anti-dpi" || v === "antidpi" || v === "max" || v === "stealthmax" || v === "stealth-max") return "AntiDPI";
-  if (v === "auto" || v === "intelligent") return "Auto";
-  return "Auto";
+  const v = (raw ?? "").trim();
+  if (
+    v === "off" ||
+    v === "manual" ||
+    v === "performance" ||
+    v === "stealth" ||
+    v === "Stealth MAX" ||
+    v === "dynamic"
+  ) {
+    return v;
+  }
+  return v || "dynamic";
 }
 
 export function displayFecMode(raw: string | null | undefined): string {

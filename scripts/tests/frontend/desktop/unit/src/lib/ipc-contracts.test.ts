@@ -75,7 +75,7 @@ describe("parseEngineStats", () => {
     packetsIn: 3,
     packetsOut: 4,
     uptimeSecs: 60,
-    stealthMode: "auto",
+    stealthMode: "dynamic",
     fecMode: "auto",
     fecActivityPercent: 10,
     fecRecoveredPackets: 2,

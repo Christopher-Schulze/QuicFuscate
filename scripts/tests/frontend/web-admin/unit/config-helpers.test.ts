@@ -36,7 +36,7 @@ describe("normalizeTomlTextForUi", () => {
 });
 
 describe("setSectionValue", () => {
-  const base = `[server]\nport = 4433\n\n[stealth]\nmode = "auto"\n`;
+  const base = `[server]\nport = 4433\n\n[stealth]\nmode = "dynamic"\n`;
 
   test("updates existing key in section", () => {
     const result = setSectionValue(base, "server", "port", "8443");
@@ -63,7 +63,7 @@ describe("setSectionValue", () => {
 });
 
 describe("readSectionValue", () => {
-  const config = `[server]\nport = 4433\nbind = "0.0.0.0"\n\n[stealth]\nmode = "auto" # intelligent\n`;
+  const config = `[server]\nport = 4433\nbind = "0.0.0.0"\n\n[stealth]\nmode = "dynamic" # starts as performance\n`;
 
   test("reads existing value", () => {
     expect(readSectionValue(config, "server", "port")).toBe("4433");
@@ -74,7 +74,7 @@ describe("readSectionValue", () => {
   });
 
   test("strips inline comments", () => {
-    expect(readSectionValue(config, "stealth", "mode")).toBe("auto");
+    expect(readSectionValue(config, "stealth", "mode")).toBe("dynamic");
   });
 
   test("returns null for missing key", () => {
@@ -198,8 +198,8 @@ describe("normalizeCcSelection", () => {
 });
 
 describe("stealthPresetFromMode", () => {
-  test("maps auto", () => {
-    expect(stealthPresetFromMode("auto")).toBe("auto");
+  test("maps dynamic", () => {
+    expect(stealthPresetFromMode("dynamic")).toBe("dynamic");
   });
 
   test("maps off", () => {
@@ -210,26 +210,27 @@ describe("stealthPresetFromMode", () => {
     expect(stealthPresetFromMode("manual")).toBe("manual");
   });
 
-  test("maps performance and its alias base", () => {
+  test("maps performance", () => {
     expect(stealthPresetFromMode("performance")).toBe("performance");
-    expect(stealthPresetFromMode("base")).toBe("performance");
   });
 
   test("maps stealth", () => {
     expect(stealthPresetFromMode("stealth")).toBe("stealth");
   });
 
-  test("maps anti-dpi variants to antidpi", () => {
-    expect(stealthPresetFromMode("anti-dpi")).toBe("antidpi");
-    expect(stealthPresetFromMode("antidpi")).toBe("antidpi");
-    expect(stealthPresetFromMode("max")).toBe("antidpi");
-    expect(stealthPresetFromMode("stealthmax")).toBe("antidpi");
-    expect(stealthPresetFromMode("stealth-max")).toBe("antidpi");
+  test("maps Stealth MAX", () => {
+    expect(stealthPresetFromMode("Stealth MAX")).toBe("Stealth MAX");
   });
 
-  test("defaults unknown to auto", () => {
-    expect(stealthPresetFromMode("unknown")).toBe("auto");
-    expect(stealthPresetFromMode(null)).toBe("auto");
+  test("does not accept old names", () => {
+    expect(stealthPresetFromMode("auto")).toBe("dynamic");
+    expect(stealthPresetFromMode("base")).toBe("dynamic");
+    expect(stealthPresetFromMode("anti-dpi")).toBe("dynamic");
+    expect(stealthPresetFromMode("max")).toBe("dynamic");
+  });
+
+  test("defaults empty to dynamic", () => {
+    expect(stealthPresetFromMode(null)).toBe("dynamic");
   });
 });
 

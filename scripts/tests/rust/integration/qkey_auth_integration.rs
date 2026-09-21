@@ -107,7 +107,7 @@ fn mk_hex(ch: char) -> String {
 
 fn mk_qkey(remote: &str, sni: &str, token_hex: &str) -> String {
     let cfg = qkey::QKeyConfig::new(remote, sni)
-        .with_stealth("auto")
+        .with_stealth("dynamic")
         .with_fec("auto")
         .with_token(token_hex);
     qkey::generate(&cfg)

@@ -128,7 +128,7 @@ CPU_THRESHOLD=10
 
 # Fast-mode test selection (reduced set)
 if (( FAST )); then
-  THROUGHPUT_TESTS=(aes_gcm_seal/1024B data_aead_single_seal_batch/aegis128l_1400B)
+  THROUGHPUT_TESTS=(aes_gcm_seal/1024B data_aead_single_seal_batch/aegis_1400B)
   LATENCY_TESTS=(connection_1rtt_send_recv/payload_1024B stream_frame_encoding/1024B_direct_writer)
   HOTPATH_TESTS=(varint/roundtrip_8vals)
   RUN_MEM_CPU=0
@@ -137,7 +137,7 @@ if (( FAST )); then
   SCALABILITY_STREAMS=(100)
   echo "FAST mode enabled: reduced performance test set"
 else
-  THROUGHPUT_TESTS=(aes_gcm_seal/1024B data_aead_single_seal_batch/aegis128l_1400B morus_encrypt/1024B morus_decrypt/1024B)
+  THROUGHPUT_TESTS=(aes_gcm_seal/1024B data_aead_single_seal_batch/aegis_1400B)
   LATENCY_TESTS=(connection_1rtt_send_recv/payload_1024B stream_frame_encoding/1024B_direct_writer header_validate/short_and_long)
   HOTPATH_TESTS=(varint/roundtrip_8vals packet_number/encode_all_lengths)
   RUN_MEM_CPU=1

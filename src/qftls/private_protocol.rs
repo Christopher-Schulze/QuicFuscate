@@ -337,7 +337,7 @@ impl PrivateNegotiationMessage {
         if self.generation == 0 {
             return Err(PrivateProtocolError::InvalidField("generation"));
         }
-        if self.supported_families == 0 || self.supported_families & !0x03 != 0 {
+        if self.supported_families == 0 || self.supported_families & !0x01 != 0 {
             return Err(PrivateProtocolError::InvalidField("supported families"));
         }
         if self.flags & !KNOWN_FLAGS != 0 {
@@ -1181,7 +1181,7 @@ fn decode_family(value: u8) -> Result<Option<PrivateAeadFamily>, PrivateProtocol
     match value {
         0 => Ok(None),
         1 => Ok(Some(PrivateAeadFamily::Aegis128L)),
-        2 => Ok(Some(PrivateAeadFamily::Morus1280_128)),
+        2 => Err(PrivateProtocolError::InvalidField("family")),
         _ => Err(PrivateProtocolError::InvalidField("family")),
     }
 }
@@ -1421,7 +1421,7 @@ mod tests {
         server.receive_proposal(&proposal).expect("proposal");
         let selection = server.build_selection().expect("selection");
         let mut downgrade = selection.clone();
-        downgrade.selected_family = Some(PrivateAeadFamily::Morus1280_128);
+        downgrade.selected_family = None;
         assert!(client.receive_selection(&downgrade).is_err());
     }
 
@@ -1464,7 +1464,7 @@ mod tests {
         let mut server = PrivateNegotiationMachine::new(
             PacketProtectionMode::AdvancedRequired,
             PrivateNegotiationRole::Server,
-            Some(PrivateAeadFamily::Morus1280_128),
+            None,
             7,
             1,
             b"h3".to_vec(),
@@ -1487,7 +1487,7 @@ mod tests {
         let mut auto_server = PrivateNegotiationMachine::new(
             PacketProtectionMode::Auto,
             PrivateNegotiationRole::Server,
-            Some(PrivateAeadFamily::Morus1280_128),
+            None,
             7,
             1,
             b"h3".to_vec(),

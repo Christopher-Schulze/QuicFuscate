@@ -55,7 +55,7 @@ function makeStats(overrides: Partial<TStats> = {}): TStats {
 
 function makePolicy(overrides: Partial<TunnelPolicyView> = {}): TunnelPolicyView {
   return {
-    stealth: "auto",
+    stealth: "dynamic",
     fec: "auto",
     mtu: "1350",
     cc: "bbr3",
@@ -190,7 +190,7 @@ describe("tunnel/TunnelStats", () => {
 
   test("displays policy summary line with stealth, fec, cc, mtu", async () => {
     renderStats({
-      policy: makePolicy({ stealth: "auto", fec: "auto", cc: "bbr3", mtu: "1350" }),
+      policy: makePolicy({ stealth: "dynamic", fec: "auto", cc: "bbr3", mtu: "1350" }),
     });
 
     await waitFor(() => {
@@ -328,13 +328,13 @@ describe("tunnel/TunnelStats", () => {
     });
   });
 
-  test("shows intelligent badge 'I' when stealth policy is auto", async () => {
+  test("shows dynamic badge when stealth policy is dynamic", async () => {
     renderStats({
-      policy: makePolicy({ stealth: "auto" }),
+      policy: makePolicy({ stealth: "dynamic" }),
     });
 
     await waitFor(() => {
-      expect(screen.getByText("I")).toBeInTheDocument();
+      expect(screen.getByText("D")).toBeInTheDocument();
     });
   });
 });

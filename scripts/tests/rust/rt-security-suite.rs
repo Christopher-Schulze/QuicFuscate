@@ -9,7 +9,7 @@ use crossbeam_channel::bounded;
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
 use quicfuscate::crypto::ChaCha20Poly1305;
-use quicfuscate::crypto::{install_data_aead_config, select_data_aead, Aegis128LAead};
+use quicfuscate::crypto::{install_data_aead_config, select_data_aead};
 use quicfuscate::engine::{AeadPreference, CryptoConfig};
 use quicfuscate::error::ConnectionError;
 use quicfuscate::fec::{Encoder8, FecDecoder8, FecPacket};
@@ -239,13 +239,8 @@ fn data_aead_public_aliases_match_aegis128l_roundtrip() {
     let plaintext = b"quicfuscate-public-aead-alias-roundtrip";
     let aad = b"alias-ad";
 
-    let baseline = seal_and_open_via_selected_aead("aegis-128l", plaintext, aad);
+    let baseline = seal_and_open_via_selected_aead("aegis", plaintext, aad);
     assert_eq!(baseline, plaintext);
-
-    for alias in ["aegis", "aegis-128x4", "aegis-128x8"] {
-        let opened = seal_and_open_via_selected_aead(alias, plaintext, aad);
-        assert_eq!(opened, baseline, "alias {alias} diverged from Aegis128L contract");
-    }
 }
 
 #[test]
@@ -255,29 +250,23 @@ fn data_aead_aliases_handle_unaligned_tail_payloads() {
     let aad = b"unaligned-tail-ad";
     let payload = b"tail-heavy-payload-with-nonmultiple-length";
 
-    let direct = Aegis128LAead::new(&key, &iv).expect("exact AEGIS fixture lengths");
+    let (seal, open) = select_data_aead(&key, &iv).expect("exact AEGIS fixture lengths");
     let mut baseline_buf = vec![0u8; payload.len() + 16];
     baseline_buf[..payload.len()].copy_from_slice(payload);
-    let baseline_len = direct
+    let baseline_len = seal
         .seal_with_u64_counter(11, aad, &mut baseline_buf, payload.len(), None)
         .expect("baseline seal");
-    let opened_len =
-        direct.open_with_u64_counter(11, aad, &mut baseline_buf).expect("baseline open");
+    let opened_len = open.open_with_u64_counter(11, aad, &mut baseline_buf).expect("baseline open");
     assert_eq!(baseline_len, payload.len() + 16);
     assert_eq!(&baseline_buf[..opened_len], payload);
-
-    for alias in ["aegis-128x4", "aegis-128x8"] {
-        let opened = seal_and_open_via_selected_aead(alias, payload, aad);
-        assert_eq!(opened, payload, "alias {alias} failed on unaligned tail payload");
-    }
 }
 
 #[test]
-fn data_aead_force_morus_roundtrip() {
-    let plaintext = b"quicfuscate-public-morus-roundtrip";
-    let aad = b"morus-ad";
+fn data_aead_force_aegis_roundtrip() {
+    let plaintext = b"quicfuscate-public-aegis-roundtrip";
+    let aad = b"aegis-ad";
 
-    let opened = seal_and_open_via_selected_aead("morus", plaintext, aad);
+    let opened = seal_and_open_via_selected_aead("aegis", plaintext, aad);
     assert_eq!(opened, plaintext);
 }
 

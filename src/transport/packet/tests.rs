@@ -164,7 +164,7 @@ fn authenticated_private_owner_selects_standard_then_private_by_packet_boundary(
         .expect("standard write secret");
         crypto
             .install_authenticated_private_1rtt(
-                qf_crypto::PrivateAeadFamily::Morus1280_128,
+                qf_crypto::PrivateAeadFamily::Aegis128L,
                 &[0x61; qf_crypto::PrivateAeadFamily::KEY_LEN],
                 &[0x62; qf_crypto::PrivateAeadFamily::IV_LEN],
                 &[0x61; qf_crypto::PrivateAeadFamily::KEY_LEN],

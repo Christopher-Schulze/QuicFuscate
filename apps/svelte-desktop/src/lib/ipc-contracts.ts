@@ -143,7 +143,7 @@ export function parseEngineStats(raw: unknown): EngineStatsContract | null {
     if (value === undefined || value === null) return fallback;
     return boundedString(value, MAX_IPC_STRING);
   };
-  const stealthMode = optionalMode(raw.stealthMode, "auto");
+  const stealthMode = optionalMode(raw.stealthMode, "dynamic");
   const fecMode = optionalMode(raw.fecMode, "auto");
   const circuitState = optionalMode(raw.circuitState, "idle");
   if (stealthMode === null || fecMode === null || circuitState === null) return null;

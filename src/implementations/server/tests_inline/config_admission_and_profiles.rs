@@ -337,7 +337,7 @@ fn validated_retry_uses_retry_scid_for_initial_keys_and_restores_qkey_identity()
     let token_hex = "a".repeat(64);
     let qkey = qf_engine_types::generate(
         &qf_engine_types::QKeyConfig::new("127.0.0.1:4433", "example.com")
-            .with_stealth("auto")
+            .with_stealth("dynamic")
             .with_fec("auto")
             .with_token(&token_hex),
     );

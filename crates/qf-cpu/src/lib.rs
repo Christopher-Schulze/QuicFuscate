@@ -1,7 +1,7 @@
 //! CPU feature detection, cache-aware dispatch, and low-level SIMD policy contracts.
 //!
 //! This workspace leaf owns runtime hardware capability observation and the pure policy
-//! selectors consumed by crypto, FEC, transport, and optimization code. It has no dependency on
+//! selectors consumed by FEC, transport, and optimization code. It has no dependency on
 //! any product subsystem; environment values and metrics cross the boundary through qf-common
 //! and qf-telemetry.
 
@@ -39,22 +39,6 @@ impl OptimizeConfig {
     }
 }
 
-/// Unified AEAD plan for the data plane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CryptoAeadPlan {
-    /// Single-lane AEGIS-128L (best for small payloads).
-    Aegis128L,
-    /// Four-lane parallel AEGIS-128L (mid-size payloads, requires AES-NI or NEON-AES).
-    Aegis128X4,
-    /// Eight-lane parallel AEGIS-128L (large payloads, requires VAES + AVX2/AVX-512).
-    Aegis128X8,
-    /// MORUS-1280-128 fallback when hardware AES is unavailable.
-    Morus,
-}
-
-/// Representative 1-RTT payload length used by the AEAD planner.
-pub const DEFAULT_DATA_PLANE_AEAD_LEN: usize = 1400;
-
 /// Count ASCII printable bytes (`0x20..=0x7E`) with the scalar implementation.
 #[inline(always)]
 pub fn count_ascii_printable(bytes: &[u8]) -> usize {
@@ -69,8 +53,6 @@ pub mod compression;
 pub mod iter;
 /// Hardware-aware acceleration planner.
 pub mod planner;
-/// Compatibility profile aliases for the AEAD planner.
-pub mod profile;
 /// SIMD histograms and pattern search for compression heuristics.
 pub mod simd_compress;
 /// SIMD-aware sorting and argsort helpers.
@@ -79,68 +61,6 @@ pub mod sort;
 pub mod string;
 /// SIMD-accelerated transport aggregation and packet-number helpers.
 pub mod transport;
-
-impl CryptoAeadPlan {
-    /// Profile-based default (no message length), used when size is unknown.
-    pub fn select() -> Self {
-        if Self::morus_forced() {
-            return Self::record_selection(Self::Morus, false);
-        }
-
-        let plans = planner::AccelerationPlanner::global();
-        Self::record_selection(plans.crypto_default_aead(), false)
-    }
-
-    /// Full heuristic with message length thresholds.
-    pub fn select_for_len(len: usize) -> Self {
-        if Self::morus_forced() {
-            return Self::record_selection(Self::Morus, true);
-        }
-
-        let plans = planner::AccelerationPlanner::global();
-        Self::record_selection(plans.crypto_aead_for_len(len), true)
-    }
-
-    fn morus_forced() -> bool {
-        #[cfg(any(test, feature = "rust-tests"))]
-        {
-            if let Ok(value) = std::env::var("QUICFUSCATE_MORUS") {
-                let value = value.to_ascii_lowercase();
-                return value == "1" || value == "true" || value == "force";
-            }
-            false
-        }
-        #[cfg(not(any(test, feature = "rust-tests")))]
-        {
-            false
-        }
-    }
-
-    #[inline(always)]
-    fn record_selection(plan: Self, len_based: bool) -> Self {
-        telemetry::PLAN_DECISIONS_TOTAL.inc();
-        if len_based {
-            telemetry::PLAN_DECISIONS_LEN.inc();
-        } else {
-            telemetry::PLAN_DECISIONS_DEFAULT.inc();
-        }
-        match plan {
-            Self::Aegis128L => telemetry::PLAN_DECISIONS_L.inc(),
-            Self::Aegis128X4 => {
-                telemetry::PLAN_DECISIONS_L.inc();
-                telemetry::PLAN_DECISIONS_X4.inc();
-                #[cfg(target_arch = "aarch64")]
-                telemetry::PLAN_DECISIONS_NEON_L.inc();
-            }
-            Self::Aegis128X8 => {
-                telemetry::PLAN_DECISIONS_L.inc();
-                telemetry::PLAN_DECISIONS_X8.inc();
-            }
-            Self::Morus => telemetry::PLAN_DECISIONS_MORUS.inc(),
-        }
-        plan
-    }
-}
 
 /// Hint type for cache prefetching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

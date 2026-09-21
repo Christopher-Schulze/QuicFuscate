@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Verification stays on by default. To connect to a server with a private CA,
         // point the client at that CA rather than turning this off.
         .verify_peer(!options.insecure_no_verify)
-        .stealth_mode(StealthMode::Auto)
+        .stealth_mode(StealthMode::Dynamic)
         .aead_preference(quicfuscate::engine::AeadPreference::Auto)
         .cc_algorithm(quicfuscate::engine::CcAlgorithm::Bbr3)
         .build()?;
@@ -156,8 +156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n5. Runtime control examples...");
 
     // Change stealth mode
-    println!("   Setting stealth mode to AntiDpi...");
-    engine.set_stealth_mode(StealthMode::AntiDpi)?;
+    println!("   Setting stealth mode to Stealth MAX...");
+    engine.set_stealth_mode(StealthMode::StealthMax)?;
     println!("   Stealth mode: {:?}", engine.stealth_mode());
 
     // Enable traffic padding

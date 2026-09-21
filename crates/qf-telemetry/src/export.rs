@@ -399,44 +399,12 @@ pub fn export_telemetry_text() -> String {
     let _ = writeln!(out, "quicfuscate_aegis_plan {}", get(&AEGIS_PLAN));
 
     if congestion {
-        // Plan selection metrics
-        let _ = writeln!(out, "quicfuscate_plan_decisions_total {}", PLAN_DECISIONS_TOTAL.get());
-        let _ =
-            writeln!(out, "quicfuscate_plan_decisions_default {}", PLAN_DECISIONS_DEFAULT.get());
-        let _ = writeln!(out, "quicfuscate_plan_decisions_len {}", PLAN_DECISIONS_LEN.get());
-        let _ = writeln!(out, "quicfuscate_plan_select_l_total {}", PLAN_DECISIONS_L.get());
-        let _ = writeln!(out, "quicfuscate_plan_select_x4_total {}", PLAN_DECISIONS_X4.get());
-        let _ = writeln!(out, "quicfuscate_plan_select_x8_total {}", PLAN_DECISIONS_X8.get());
-        let _ =
-            writeln!(out, "quicfuscate_plan_select_neon_l_total {}", PLAN_DECISIONS_NEON_L.get());
-        let _ = writeln!(out, "quicfuscate_plan_select_morus_total {}", PLAN_DECISIONS_MORUS.get());
         let _ = writeln!(
             out,
             "quicfuscate_data_aead_backend_aegis_l_total {}",
             DATA_AEAD_BACKEND_AEGIS_L_TOTAL.get()
         );
-        let _ = writeln!(
-            out,
-            "quicfuscate_data_aead_backend_aegis_x4_total {}",
-            DATA_AEAD_BACKEND_AEGIS_X4_TOTAL.get()
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_data_aead_backend_aegis_x8_total {}",
-            DATA_AEAD_BACKEND_AEGIS_X8_TOTAL.get()
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_data_aead_backend_morus_total {}",
-            DATA_AEAD_BACKEND_MORUS_TOTAL.get()
-        );
-        let _ = writeln!(out, "quicfuscate_morus1280_scalar_ops {}", MORUS1280_SCALAR_OPS.get());
-        let _ = writeln!(out, "quicfuscate_morus1280_sse2_ops {}", MORUS1280_SSE2_OPS.get());
-        let _ = writeln!(out, "quicfuscate_morus1280_ssse3_ops {}", MORUS1280_SSSE3_OPS.get());
-        let _ = writeln!(out, "quicfuscate_morus1280_sse41_ops {}", MORUS1280_SSE41_OPS.get());
-        let _ = writeln!(out, "quicfuscate_morus1280_sse42_ops {}", MORUS1280_SSE42_OPS.get());
-        let _ = writeln!(out, "quicfuscate_morus1280_neon_ops {}", MORUS1280_NEON_OPS.get());
-    } // end congestion (plan/aead)
+    }
 
     if congestion {
         // Compression decision metrics

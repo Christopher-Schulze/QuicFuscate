@@ -57,7 +57,7 @@
   import type { AdminQKeyTimestamp, QKeyEntry } from "$lib/types";
 
   type DomainFrontingMode = "auto" | "off" | "manual";
-  type QKeyStealthMode = "auto" | "max" | "manual" | "off";
+  type QKeyStealthMode = "dynamic" | "Stealth MAX" | "manual" | "off";
   type QKeyFecMode = "auto" | "off";
   type IssuedQKey = {
     value: string;
@@ -85,7 +85,7 @@
   let qkeyFrontingMode = $state<DomainFrontingMode>("auto");
   let qkeyFixedDomain = $state<(typeof FRONTING_SNI_ALLOWLIST)[number]>(FRONTING_SNI_ALLOWLIST[0]);
   let advancedOpen = $state(false);
-  let qkeyStealthMode = $state<QKeyStealthMode>("auto");
+  let qkeyStealthMode = $state<QKeyStealthMode>("dynamic");
   let qkeyFecMode = $state<QKeyFecMode>("auto");
   let issuedQKey = $state<IssuedQKey | null>(null);
   let busyCreate = $state(false);
@@ -149,7 +149,7 @@
       qkeyFrontingMode = "auto";
       qkeyFixedDomain = FRONTING_SNI_ALLOWLIST[0];
       advancedOpen = false;
-      qkeyStealthMode = "auto";
+      qkeyStealthMode = "dynamic";
       qkeyFecMode = "auto";
     }
   });
@@ -283,7 +283,7 @@
       qkeyFrontingMode = "auto";
       qkeyFixedDomain = FRONTING_SNI_ALLOWLIST[0];
       advancedOpen = false;
-      qkeyStealthMode = "auto";
+      qkeyStealthMode = "dynamic";
       qkeyFecMode = "auto";
       await fetchQKeyList({ invalidate: true });
       if (!viewActive) return;
@@ -532,10 +532,10 @@
                   <Select
                     value={qkeyStealthMode}
                     options={[
-                      { value: "auto", label: "Auto" },
-                      { value: "max", label: "Max" },
-                      { value: "manual", label: "Manual" },
-                      { value: "off", label: "Off" },
+                      { value: "dynamic", label: "dynamic" },
+                      { value: "Stealth MAX", label: "Stealth MAX" },
+                      { value: "manual", label: "manual" },
+                      { value: "off", label: "off" },
                     ]}
                     onchange={(v) => { qkeyStealthMode = v as QKeyStealthMode; }}
                     ariaLabel="Stealth mode"

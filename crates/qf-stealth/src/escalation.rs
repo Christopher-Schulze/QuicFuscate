@@ -105,7 +105,7 @@ impl ProbeHistory {
 /// This complements the brain's pressure-based hysteresis by providing
 /// probe-count-driven escalation that matches the TODO-416 acceptance criteria.
 pub struct EscalationState {
-    /// Current escalation level (0=Performance, 1=Stealth, 2=AntiDpi).
+    /// Current escalation level (0=performance, 1=stealth, 2=Stealth MAX).
     current_level: AtomicU8,
     /// Bounded millisecond buckets for the independent 60/120-second windows.
     probe_timestamps: Mutex<ProbeHistory>,

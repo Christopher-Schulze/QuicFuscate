@@ -25,8 +25,8 @@ fn test_mode_feature_matrix_core_expectations() {
     let off = StealthConfig::from_mode(StealthMode::Off);
     let perf = StealthConfig::from_mode(StealthMode::Performance);
     let stealth = StealthConfig::from_mode(StealthMode::Stealth);
-    let anti = StealthConfig::from_mode(StealthMode::AntiDpi);
-    let intelligent = StealthConfig::from_mode(StealthMode::Intelligent);
+    let anti = StealthConfig::from_mode(StealthMode::StealthMax);
+    let intelligent = StealthConfig::from_mode(StealthMode::Dynamic);
 
     assert!(!off.enable_http3_masquerading);
     assert!(!off.enable_domain_fronting);
@@ -51,17 +51,17 @@ fn test_mode_feature_matrix_core_expectations() {
     assert!(anti.enable_server_push_cover);
     assert!(anti.use_tls_cover);
 
-    assert_eq!(intelligent.mode, StealthMode::Intelligent);
+    assert_eq!(intelligent.mode, StealthMode::Dynamic);
     assert!(intelligent.dynamic_enabled);
     assert!(intelligent.enable_http3_masquerading);
     assert!(!intelligent.enable_domain_fronting);
 }
 
 #[test]
-fn test_anti_dpi_escalation_stack_is_cumulative_and_reversible() {
+fn test_stealth_max_escalation_stack_is_cumulative_and_reversible() {
     let perf = StealthConfig::performance();
     let stealth = StealthConfig::stealth();
-    let anti = StealthConfig::anti_dpi();
+    let anti = StealthConfig::stealth_max();
 
     assert!(stealth.enable_http3_masquerading >= perf.enable_http3_masquerading);
     assert!(stealth.use_tls_cover >= perf.use_tls_cover);
@@ -83,8 +83,8 @@ fn test_no_mode_silently_disables_required_primitives() {
     let modes = [
         StealthMode::Performance,
         StealthMode::Stealth,
-        StealthMode::AntiDpi,
-        StealthMode::Intelligent,
+        StealthMode::StealthMax,
+        StealthMode::Dynamic,
     ];
     for mode in modes {
         let cfg = StealthConfig::from_mode(mode);
@@ -105,11 +105,11 @@ fn test_no_mode_silently_disables_required_primitives() {
         "Stealth mode must not front domains without explicit fronting domains"
     );
     assert!(
-        !StealthConfig::from_mode(StealthMode::Intelligent).enable_domain_fronting,
+        !StealthConfig::from_mode(StealthMode::Dynamic).enable_domain_fronting,
         "Intelligent mode starts from the clean Performance baseline"
     );
     assert!(
-        StealthConfig::from_mode(StealthMode::AntiDpi).enable_domain_fronting,
+        StealthConfig::from_mode(StealthMode::StealthMax).enable_domain_fronting,
         "Anti-DPI mode is the only preset that enables domain fronting by default"
     );
 }
@@ -133,7 +133,7 @@ fn test_conflicting_stealth_feature_combinations_are_rejected() {
 
 #[test]
 fn test_intelligent_runtime_push_requires_nonzero_level_hint() {
-    let manager = manager_for_mode(StealthMode::Intelligent);
+    let manager = manager_for_mode(StealthMode::Dynamic);
     manager.enable_server_push_runtime_for_test(true, Some(0.8));
     assert!(manager.server_push_cover_plan_for_test().is_none());
 }
@@ -141,7 +141,7 @@ fn test_intelligent_runtime_push_requires_nonzero_level_hint() {
 #[test]
 fn test_intelligent_masque_preference_uses_hint_fallback() {
     let manager =
-        manager_for_config_with_core_masque(StealthConfig::from_mode(StealthMode::Intelligent));
+        manager_for_config_with_core_masque(StealthConfig::from_mode(StealthMode::Dynamic));
     manager.set_masque_preferred(true);
     manager.sync_masque_preference_with_hint_for_test(0);
     assert!(!manager.masque_preferred());
@@ -169,13 +169,13 @@ fn test_should_trigger_server_push_mode_matrix() {
     std::thread::sleep(Duration::from_millis(1100));
     assert!(stealth.server_push_cover_plan_for_test().is_some());
 
-    let mut anti_cfg = StealthConfig::anti_dpi();
+    let mut anti_cfg = StealthConfig::stealth_max();
     anti_cfg.server_push_burst_interval = 1;
     let anti = manager_for_config(anti_cfg);
     std::thread::sleep(Duration::from_millis(1100));
     assert!(anti.server_push_cover_plan_for_test().is_some());
 
-    let mut intelligent_cfg = StealthConfig::from_mode(StealthMode::Intelligent);
+    let mut intelligent_cfg = StealthConfig::from_mode(StealthMode::Dynamic);
     intelligent_cfg.server_push_burst_interval = 1;
     let intelligent = manager_for_config(intelligent_cfg);
     intelligent.enable_server_push_runtime_for_test(true, Some(0.8));

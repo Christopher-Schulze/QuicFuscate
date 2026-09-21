@@ -1,7 +1,7 @@
 //! Connection-local TLS Cover record-cipher state.
 
 use crate::aead::{AeadOpen, AeadSeal};
-use crate::{AesGcm128, ChaCha20Poly1305};
+use crate::{RingAesGcm128, RingChaCha20Poly1305};
 use qf_error::ConnectionError;
 
 const TLS_COVER_TAG_LENGTH: usize = 16;
@@ -44,16 +44,16 @@ impl TlsCoverKeyMaterial<'_> {
         crate::hkdf::sha256(&encoded[..encoded_length])
     }
 
-    fn cipher_pair(self) -> (TlsCoverCipher, TlsCoverCipher) {
+    fn cipher_pair(self) -> Result<(TlsCoverCipher, TlsCoverCipher), ConnectionError> {
         match self {
-            Self::ChaCha20Poly1305 { key, iv } => (
-                TlsCoverCipher::ChaCha(ChaCha20Poly1305::from_arrays(key, iv)),
-                TlsCoverCipher::ChaCha(ChaCha20Poly1305::from_arrays(key, iv)),
-            ),
-            Self::Aes128Gcm { key, iv } => (
-                TlsCoverCipher::AesGcm(AesGcm128::from_arrays(key, iv)),
-                TlsCoverCipher::AesGcm(AesGcm128::from_arrays(key, iv)),
-            ),
+            Self::ChaCha20Poly1305 { key, iv } => Ok((
+                TlsCoverCipher::ChaCha(RingChaCha20Poly1305::from_arrays(key, iv)?),
+                TlsCoverCipher::ChaCha(RingChaCha20Poly1305::from_arrays(key, iv)?),
+            )),
+            Self::Aes128Gcm { key, iv } => Ok((
+                TlsCoverCipher::AesGcm(RingAesGcm128::from_arrays(key, iv)?),
+                TlsCoverCipher::AesGcm(RingAesGcm128::from_arrays(key, iv)?),
+            )),
         }
     }
 }
@@ -68,8 +68,8 @@ pub enum TlsCoverInstallOutcome {
 }
 
 enum TlsCoverCipher {
-    ChaCha(ChaCha20Poly1305),
-    AesGcm(AesGcm128),
+    ChaCha(RingChaCha20Poly1305),
+    AesGcm(RingAesGcm128),
 }
 
 impl TlsCoverCipher {
@@ -130,7 +130,7 @@ impl TlsCoverCipherState {
             return Err(ConnectionError::KeyUpdateError);
         }
 
-        let (seal, open) = material.cipher_pair();
+        let (seal, open) = material.cipher_pair()?;
         if let Some(active_identity) = self.active_identity.replace(identity) {
             self.retired_identities.push(active_identity);
         }

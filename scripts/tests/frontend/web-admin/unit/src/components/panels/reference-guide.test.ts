@@ -27,18 +27,18 @@ describe("ReferenceGuide", () => {
 
   test("renders all stealth mode labels", () => {
     render(ReferenceGuide);
-    // "Auto" and "Off" appear in both Stealth and FEC sections
-    expect(screen.getAllByText("Auto").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("Performance")).toBeInTheDocument();
-    // "Stealth" already checked as section heading
-    expect(screen.getByText("AntiDPI")).toBeInTheDocument();
-    expect(screen.getByText("Manual")).toBeInTheDocument();
+    expect(screen.getByText("dynamic")).toBeInTheDocument();
+    expect(screen.getByText("performance")).toBeInTheDocument();
+    expect(screen.getByText("Stealth MAX")).toBeInTheDocument();
+    expect(screen.getByText("manual")).toBeInTheDocument();
+    expect(screen.getByText("off")).toBeInTheDocument();
+    expect(screen.getByText("Auto")).toBeInTheDocument();
   });
 
   test("renders stealth mode descriptions", () => {
     render(ReferenceGuide);
-    expect(screen.getByText("Intelligent adaptive behavior.")).toBeInTheDocument();
-    expect(screen.getByText("Maximum anti-censorship & detection resistance.")).toBeInTheDocument();
+    expect(screen.getByText("Starts like performance and escalates.")).toBeInTheDocument();
+    expect(screen.getByText("Aggressive anti-censorship and detection resistance.")).toBeInTheDocument();
     expect(screen.getByText("Feature flags controlled explicitly.")).toBeInTheDocument();
   });
 

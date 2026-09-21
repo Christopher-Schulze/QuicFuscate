@@ -130,7 +130,7 @@ if scope_selected modes; then
   run_cargo_with_env QUICFUSCATE_STEALTH_MODE=stealth -- test --release --lib stealth:: -- --nocapture
 
   echo -e "\n> Testing Stealth Mode: Maximum..."
-  run_cargo_with_env QUICFUSCATE_STEALTH_MODE=anti_dpi -- test --release --lib stealth:: -- --nocapture
+  run_cargo_with_env 'QUICFUSCATE_STEALTH_MODE=Stealth MAX' -- test --release --lib stealth:: -- --nocapture
 fi
 
 # Test qftls profile mapping

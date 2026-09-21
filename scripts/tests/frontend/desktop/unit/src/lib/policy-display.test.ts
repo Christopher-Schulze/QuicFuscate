@@ -8,83 +8,40 @@ import {
 
 describe("policy-display", () => {
   describe("displayStealthMode", () => {
-    test("returns Auto for null", () => {
-      expect(displayStealthMode(null)).toBe("Auto");
+    test("returns dynamic for null", () => {
+      expect(displayStealthMode(null)).toBe("dynamic");
     });
 
-    test("returns Auto for undefined", () => {
-      expect(displayStealthMode(undefined)).toBe("Auto");
+    test("returns dynamic for undefined", () => {
+      expect(displayStealthMode(undefined)).toBe("dynamic");
     });
 
-    test("returns Auto for empty string", () => {
-      expect(displayStealthMode("")).toBe("Auto");
+    test("returns dynamic for empty string", () => {
+      expect(displayStealthMode("")).toBe("dynamic");
     });
 
-    test("returns Auto for whitespace-only string", () => {
-      expect(displayStealthMode("   ")).toBe("Auto");
+    test("returns dynamic for whitespace-only string", () => {
+      expect(displayStealthMode("   ")).toBe("dynamic");
     });
 
-    test("returns Off for 'off'", () => {
-      expect(displayStealthMode("off")).toBe("Off");
+    test("returns the one name for each mode", () => {
+      expect(displayStealthMode("off")).toBe("off");
+      expect(displayStealthMode("manual")).toBe("manual");
+      expect(displayStealthMode("performance")).toBe("performance");
+      expect(displayStealthMode("stealth")).toBe("stealth");
+      expect(displayStealthMode("Stealth MAX")).toBe("Stealth MAX");
+      expect(displayStealthMode("dynamic")).toBe("dynamic");
     });
 
-    test("returns Manual for 'manual'", () => {
-      expect(displayStealthMode("manual")).toBe("Manual");
+    test("trims whitespace and does not accept old names", () => {
+      expect(displayStealthMode("  performance  ")).toBe("performance");
+      expect(displayStealthMode("auto")).toBe("auto");
+      expect(displayStealthMode("max")).toBe("max");
     });
 
-    test("returns Performance for 'performance'", () => {
-      expect(displayStealthMode("performance")).toBe("Performance");
-    });
-
-    test("returns Performance for 'base' alias", () => {
-      expect(displayStealthMode("base")).toBe("Performance");
-    });
-
-    test("returns Stealth for 'stealth'", () => {
-      expect(displayStealthMode("stealth")).toBe("Stealth");
-    });
-
-    test("returns AntiDPI for 'anti-dpi'", () => {
-      expect(displayStealthMode("anti-dpi")).toBe("AntiDPI");
-    });
-
-    test("returns AntiDPI for 'antidpi'", () => {
-      expect(displayStealthMode("antidpi")).toBe("AntiDPI");
-    });
-
-    test("returns AntiDPI for 'max'", () => {
-      expect(displayStealthMode("max")).toBe("AntiDPI");
-    });
-
-    test("returns AntiDPI for 'stealthmax'", () => {
-      expect(displayStealthMode("stealthmax")).toBe("AntiDPI");
-    });
-
-    test("returns AntiDPI for 'stealth-max'", () => {
-      expect(displayStealthMode("stealth-max")).toBe("AntiDPI");
-    });
-
-    test("returns Auto for 'auto'", () => {
-      expect(displayStealthMode("auto")).toBe("Auto");
-    });
-
-    test("returns Auto for 'intelligent'", () => {
-      expect(displayStealthMode("intelligent")).toBe("Auto");
-    });
-
-    test("handles uppercase input (case-insensitive normalization)", () => {
-      expect(displayStealthMode("OFF")).toBe("Off");
-      expect(displayStealthMode("STEALTH")).toBe("Stealth");
-      expect(displayStealthMode("ANTI-DPI")).toBe("AntiDPI");
-    });
-
-    test("handles mixed case and whitespace", () => {
-      expect(displayStealthMode("  Performance  ")).toBe("Performance");
-    });
-
-    test("returns Auto for unknown mode string", () => {
-      expect(displayStealthMode("unknown-mode")).toBe("Auto");
-      expect(displayStealthMode("turbo")).toBe("Auto");
+    test("returns unknown strings unchanged", () => {
+      expect(displayStealthMode("unknown-mode")).toBe("unknown-mode");
+      expect(displayStealthMode("turbo")).toBe("turbo");
     });
   });
 

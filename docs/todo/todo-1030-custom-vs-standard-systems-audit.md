@@ -4,7 +4,7 @@ title: Custom-vs-standard systems audit (crypto, stealth, FEC, 0-RTT)
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-884, TODO-885, TODO-720, TODO-1031, TODO-1032, TODO-1033, TODO-1034, TODO-1035, TODO-1036, TODO-1037, TODO-1038, TODO-1039, TODO-1040, TODO-1041, TODO-1042, TODO-1043, TODO-1044]
 ---
@@ -19,24 +19,24 @@ Do not implement posture changes here. Inventory, compare, decide.
 
 ## Acceptance
 
-- [ ] Every first-party crypto primitive has one row: owner, live path, standard alternative, speed evidence, stealth effect, FEC effect, keep/replace/feature-gate
-- [ ] 0-RTT has a keep-disabled or later-standard-only verdict with replay and fingerprint rationale
-- [ ] Private 1-RTT has a keep-as-opt-in or drop-from-default verdict that does not claim stealth from ciphertext
-- [ ] FEC and stealth rows state they are AEAD-agnostic on the current pipeline
-- [ ] Standard-cipher speed path names rustls/ring or rustls/aws-lc-rs, not a new AES-GCM
-- [ ] Recommended ship default is explicit (`packet_protection_mode=standard` vs `auto`)
-- [ ] No code move until a follow-up task is opened from this record
+- [x] Every first-party crypto primitive has one row: owner, live path, standard alternative, speed evidence, stealth effect, FEC effect, keep/replace/feature-gate
+- [x] 0-RTT has a keep-disabled or later-standard-only verdict with replay and fingerprint rationale
+- [x] Private 1-RTT has a keep-as-opt-in or drop-from-default verdict that does not claim stealth from ciphertext
+- [x] FEC and stealth rows state they are AEAD-agnostic on the current pipeline
+- [x] Standard-cipher speed path names rustls/ring or rustls/aws-lc-rs, not a new AES-GCM
+- [x] Recommended ship default is explicit (`packet_protection_mode=standard` vs `auto`)
+- [x] No code move until a follow-up task is opened from this record
 
 ## Sub-Tasks
 
-- [ ] Crypto primitives: AEGIS L/X4/X8, MORUS, AesGcm128, ChaCha20-Poly1305, AesHp, TLS-Cover ciphers, QUIC Initial KDF
-- [ ] Protocol custom: private exporter schedule, private negotiation, packet-number AEAD boundary
-- [ ] 0-RTT later investigation is owned by TODO-1031 (rustls + strike only)
-- [ ] Dormant compat hooks in `src/transport/packet/context.rs` (`install_read_1rtt_secret`, `key_update_1rtt_*` secret arm reaching `select_packet_data_aead`, `install_0rtt_keys`): decide test-only gate or removal; a re-enabled secret arm would silently swap 1-RTT to AEGIS/MORUS under rustls peers
-- [ ] Stealth: padding, timing, persona, probe, REALITY vs private AEAD
-- [ ] FEC: encode-after-seal, epoch isolation, repair cover vs AEAD family
-- [ ] Same-API speed evidence is owned by TODO-1032 through TODO-1044
-- [ ] Write the keep/replace table into this file and point DOCUMENTATION.md at it when executed
+- [x] Crypto primitives: AEGIS L/X4/X8, MORUS, AesGcm128, ChaCha20-Poly1305, AesHp, TLS-Cover ciphers, QUIC Initial KDF
+- [x] Protocol custom: private exporter schedule, private negotiation, packet-number AEAD boundary
+- [x] 0-RTT later investigation is owned by TODO-1031 (rustls + strike only)
+- [x] Dormant compat hooks in `src/transport/packet/context.rs` (`install_read_1rtt_secret`, `key_update_1rtt_*` secret arm reaching `select_packet_data_aead`, `install_0rtt_keys`): decide test-only gate or removal; a re-enabled secret arm would silently swap 1-RTT to AEGIS/MORUS under rustls peers
+- [x] Stealth: padding, timing, persona, probe, REALITY vs private AEAD
+- [x] FEC: encode-after-seal, epoch isolation, repair cover vs AEAD family
+- [x] Same-API speed evidence is owned by TODO-1032 through TODO-1044
+- [x] Write the keep/replace table into this file and point DOCUMENTATION.md at it when executed
 
 ## Cluster index (2026-09-21)
 
@@ -79,3 +79,23 @@ First-pass keep/replace recommendations from 2026-09-21 (not executed):
 - XOR: stay gone.
 
 Do not implement bakeoff-gated replacements until TODO-1044. TODO-1033 through TODO-1036 may start only when explicitly requested. They do not wait on the bakeoff.
+
+## Result (2026-09-21)
+
+| item | decision |
+| --- | --- |
+| Ship default | `packet_protection_mode=standard`. rustls AES-GCM Handshake/1-RTT. ring AES-128-GCM + AES HP for Initial. |
+| `aead_preference=auto` | installs no family |
+| Post-auth opt-in | S-AEGIS via non-default `advanced-aead` (TODO-1044). Explicit preference required. |
+| First-party AEGIS L/X4/X8 | keep as default-build private fallback and oracle. Not the chosen owner. X4/X8 stay first-party even with the feature. |
+| First-party MORUS | keep as oracle / explicit private family. Lost the bakeoff to S-AEGIS and to R-RING. |
+| First-party AesGcm128 + AesHp | removed from live Initial. Bench oracle only (TODO-1034). |
+| ChaCha20-Poly1305 + TLS-Cover | live path is ring (TODO-1035). |
+| rustls crypto provider | stay ring. `rustls-aws-lc` is an explicit feature (TODO-1036). |
+| Secret-schedule compat arms | `install_0rtt_keys`, `install_*_1rtt_secret`, `key_update_1rtt_*` now call `standard_aes128_gcm`. They cannot silently install AEGIS/MORUS. Private install stays `select_private_packet_data_aead`. |
+| 0-RTT | stay off. TODO-1031 remains open. rustls + strike only, never private AEAD. |
+| FEC | keep. Encode runs on the sealed datagram from `conn.send` (`produce_one_queued`). FEC never sees plaintext. |
+| Stealth pad/timing/persona/probe/REALITY | keep. Padding frames are inside QUIC before AEAD. Private AEAD is not a stealth upgrade. |
+| XOR on sealed packets | stay gone. |
+| Next-gen custom AEAD | SKIP (TODO-1042, TODO-1043). |
+| Production private enable | blocked on TODO-1029 pcap. |

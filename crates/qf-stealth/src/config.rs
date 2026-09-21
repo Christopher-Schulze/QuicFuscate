@@ -18,53 +18,36 @@ pub enum PaddingStrategy {
 /// High-level stealth operating modes controlling which obfuscation features are active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum StealthMode {
-    /// Disabled - no stealth features.
-    #[serde(alias = "off", alias = "Off")]
+    /// No stealth features.
+    #[serde(rename = "off")]
     Off,
-    /// Performance - stealth baseline with all costly features off.
-    #[serde(alias = "Performance", alias = "performance", alias = "Base", alias = "base")]
+    /// Cheap browser baseline. Costly stealth features stay off.
+    #[serde(rename = "performance")]
     Performance,
-    /// Stealth - balanced features with minimal overhead.
-    #[serde(alias = "stealth", alias = "Stealth")]
+    /// Balanced stealth.
+    #[serde(rename = "stealth")]
     Stealth,
-    /// Anti-DPI - aggressive stealth with higher overhead.
-    #[serde(
-        alias = "StealthMax",
-        alias = "stealthmax",
-        alias = "stealth-max",
-        alias = "Anti-DPI",
-        alias = "AntiDPI",
-        alias = "anti-dpi",
-        alias = "antidpi",
-        alias = "max",
-        alias = "Max"
-    )]
-    AntiDpi,
-    /// Manual - user controlled.
-    #[serde(alias = "manual", alias = "Manual")]
+    /// Aggressive stealth.
+    #[serde(rename = "Stealth MAX")]
+    StealthMax,
+    /// Operator-selected stealth flags.
+    #[serde(rename = "manual")]
     Manual,
-    /// Intelligent - starts at a baseline and escalates based on signals.
-    #[serde(
-        alias = "Dynamic",
-        alias = "dynamic",
-        alias = "auto",
-        alias = "Auto",
-        alias = "intelligent"
-    )]
-    Intelligent,
+    /// Starts like performance and escalates.
+    #[serde(rename = "dynamic")]
+    Dynamic,
 }
 
 impl StealthMode {
-    /// Static variant name identical to the `Debug` representation - lets hot
-    /// paths record the mode without a `format!("{:?}")` allocation.
+    /// The one config name for this mode.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Off => "Off",
-            Self::Performance => "Performance",
-            Self::Stealth => "Stealth",
-            Self::AntiDpi => "AntiDpi",
-            Self::Manual => "Manual",
-            Self::Intelligent => "Intelligent",
+            Self::Off => "off",
+            Self::Performance => "performance",
+            Self::Stealth => "stealth",
+            Self::StealthMax => "Stealth MAX",
+            Self::Manual => "manual",
+            Self::Dynamic => "dynamic",
         }
     }
 }
@@ -95,15 +78,20 @@ mod tests {
     }
 
     #[test]
-    fn stealth_mode_aliases_preserve_legacy_wire_values() {
+    fn stealth_mode_has_one_name() {
         assert_eq!(
-            serde_json::from_str::<StealthMode>("\"Anti-DPI\"").unwrap(),
-            StealthMode::AntiDpi
+            serde_json::from_str::<StealthMode>("\"Stealth MAX\"").unwrap(),
+            StealthMode::StealthMax
         );
         assert_eq!(
-            serde_json::from_str::<StealthMode>("\"Dynamic\"").unwrap(),
-            StealthMode::Intelligent
+            serde_json::from_str::<StealthMode>("\"dynamic\"").unwrap(),
+            StealthMode::Dynamic
         );
+        assert_eq!(serde_json::to_string(&StealthMode::Performance).unwrap(), "\"performance\"");
+        assert!(serde_json::from_str::<StealthMode>("\"anti-dpi\"").is_err());
+        assert!(serde_json::from_str::<StealthMode>("\"auto\"").is_err());
+        assert!(serde_json::from_str::<StealthMode>("\"base\"").is_err());
+        assert!(serde_json::from_str::<StealthMode>("\"max\"").is_err());
     }
 
     #[test]

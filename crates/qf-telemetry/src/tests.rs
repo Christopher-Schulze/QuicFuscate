@@ -116,36 +116,13 @@ fn io_uring_counters_exported_in_telemetry_text() {
 
 #[test]
 fn crypto_backend_selection_metrics_exported_in_telemetry_text() {
-    let plan_x4_before = PLAN_DECISIONS_X4.get();
-    let plan_x8_before = PLAN_DECISIONS_X8.get();
     let aegis_l_before = DATA_AEAD_BACKEND_AEGIS_L_TOTAL.get();
-    let aegis_x4_before = DATA_AEAD_BACKEND_AEGIS_X4_TOTAL.get();
-    let aegis_x8_before = DATA_AEAD_BACKEND_AEGIS_X8_TOTAL.get();
-    let morus_before = DATA_AEAD_BACKEND_MORUS_TOTAL.get();
-
-    PLAN_DECISIONS_X4.inc();
-    PLAN_DECISIONS_X8.inc();
     DATA_AEAD_BACKEND_AEGIS_L_TOTAL.inc();
-    DATA_AEAD_BACKEND_AEGIS_X4_TOTAL.inc();
-    DATA_AEAD_BACKEND_AEGIS_X8_TOTAL.inc();
-    DATA_AEAD_BACKEND_MORUS_TOTAL.inc();
 
     let out = export_telemetry_text();
-    assert!(out.contains(&format!("quicfuscate_plan_select_x4_total {}", plan_x4_before + 1)));
-    assert!(out.contains(&format!("quicfuscate_plan_select_x8_total {}", plan_x8_before + 1)));
     assert!(out
         .contains(&format!("quicfuscate_data_aead_backend_aegis_l_total {}", aegis_l_before + 1)));
-    assert!(out.contains(&format!(
-        "quicfuscate_data_aead_backend_aegis_x4_total {}",
-        aegis_x4_before + 1
-    )));
-    assert!(out.contains(&format!(
-        "quicfuscate_data_aead_backend_aegis_x8_total {}",
-        aegis_x8_before + 1
-    )));
-    assert!(
-        out.contains(&format!("quicfuscate_data_aead_backend_morus_total {}", morus_before + 1))
-    );
+    assert!(out.contains("quicfuscate_aegis_plan "));
 }
 
 #[test]

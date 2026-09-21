@@ -70,11 +70,12 @@ enabled = true
 # ==============================================================================
 
 # [crypto]
-# Retained migration policy only until authenticated private negotiation exists.
-# The effective live QUIC packet owner remains rustls-standard and is reported separately.
-# packet_protection_mode = "auto" # Options: "standard", "auto", "advanced-required"
-# aead_preference = "auto"     # Options: "auto", "aegis-128l", "morus"
-# force_aead = ""              # Request future private AEAD policy
+# Handshake and header protection stay rustls AES-GCM.
+# [stealth] mode = "off" or "performance" pins post-auth payload to libaegis AEGIS-128L.
+# stealth, Stealth MAX, and dynamic keep AES-128-GCM. manual can select either.
+# packet_protection_mode = "standard"
+# aead_preference = "auto"
+# force_aead = ""
 
 # ==============================================================================
 # STEALTH
@@ -82,13 +83,13 @@ enabled = true
 
 [stealth]
 mode = "performance"
-# Options: "off", "performance", "stealth", "anti-dpi", "intelligent", "manual"
-# - off:          no stealth features
-# - performance:  minimal fingerprinting, costly features off (alias: "base")
-# - stealth:      balanced features with minimal overhead
-# - anti-dpi:     ultra stealth with aggressive settings (alias: "max")
-# - intelligent:  adaptive mode, escalates on probe detection (alias: "auto")
-# - manual:       custom (use settings below)
+# Options: "off", "performance", "stealth", "Stealth MAX", "dynamic", "manual"
+# - off:          no stealth features. Post-auth payload is libaegis AEGIS-128L.
+# - performance:  cheap browser baseline, costly features locked off. Payload is AEGIS-128L.
+# - stealth:      balanced features. Payload stays AES-128-GCM.
+# - Stealth MAX:  aggressive stealth. Payload stays AES-128-GCM.
+# - dynamic:      starts like performance and escalates. Payload stays AES-128-GCM.
+# - manual:       operator picks each flag and the payload cipher.
 
 # Manual mode settings (only used when mode = "manual"):
 # enable_domain_fronting = true

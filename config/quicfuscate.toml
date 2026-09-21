@@ -144,22 +144,14 @@ max_early_data_size = 16384
 # ==============================================================================
 
 [crypto]
-# Packet protection policy. "auto" starts with standard protection and may attempt
-# the authenticated private 1-RTT upgrade when all local and peer gates pass.
-# "advanced-required" fails closed until the promotion gates are complete.
-# Options: "standard", "auto", "advanced-required"
-packet_protection_mode = "auto"
-# Retained private packet-AEAD policy. These values select the planner-owned family
-# for the authenticated private 1-RTT path; standard Initial, Handshake, pre-auth
-# 1-RTT, header protection, and 0-RTT ownership remain unchanged.
-# Options: "auto", "aegis-128l", "morus"
-# - auto: Select best based on CPU features (recommended)
-# - aegis-128l: Prefer AEGIS-128L when hardware AES is available
-# - morus: Prefer MORUS-1280-128
+# The post-auth payload cipher is pinned by [stealth] mode:
+# off and performance use libaegis AEGIS-128L.
+# stealth, Stealth MAX, and dynamic stay on AES-128-GCM.
+# manual follows the selection below. Leave both at the defaults for AES-128-GCM.
+# To select AEGIS in manual mode, set packet_protection_mode = "auto"
+# and aead_preference = "aegis".
+packet_protection_mode = "standard"
 aead_preference = "auto"
-
-# Request a specific private AEAD family for the authenticated post-handshake path.
-# Options: "auto", "aegis-128l", "morus" (empty string = use preference above)
 force_aead = ""
 
 # ==============================================================================
@@ -168,14 +160,15 @@ force_aead = ""
 
 [stealth]
 # Stealth operation mode
-# Options: "off", "performance", "stealth", "anti-dpi", "intelligent", "manual"
-# - off:          No stealth features enabled
-# - performance:  Minimal fingerprinting, costly features off (alias: "base")
-# - stealth:      Balanced features with minimal overhead
-# - anti-dpi:     Ultra stealth with aggressive settings (alias: "max")
-# - intelligent:  Adaptive mode, escalates on probe detection (alias: "auto")
-# - manual:       Custom configuration (use settings below)
-mode = "auto"
+# Options: "off", "performance", "stealth", "Stealth MAX", "dynamic", "manual"
+# - off:          No stealth features. Post-auth payload is libaegis AEGIS-128L.
+# - performance:  Cheap browser baseline, costly features locked off.
+#                 Post-auth payload is libaegis AEGIS-128L.
+# - stealth:      Balanced features. Payload stays AES-128-GCM.
+# - Stealth MAX:  Aggressive stealth. Payload stays AES-128-GCM.
+# - dynamic:      Starts like performance and escalates. Payload stays AES-128-GCM.
+# - manual:       Operator picks each stealth flag and the payload cipher.
+mode = "dynamic"
 
 # Manual mode settings (only used when mode = "manual")
 # ------------------------------------------------------------------------------
@@ -543,7 +536,7 @@ cleanup_firewall_on_start = false
 
 # Maximum privacy and stealth (performance impact)
 # [preset.max_stealth]
-# stealth.mode = "max"
+# stealth.mode = "Stealth MAX"
 # fec.mode = "auto"
 # fingerprint_rotation.enabled = true
 # fingerprint_rotation.mode = "all"
@@ -551,7 +544,7 @@ cleanup_firewall_on_start = false
 
 # Balanced performance and stealth (recommended)
 # [preset.balanced]
-# stealth.mode = "auto"
+# stealth.mode = "dynamic"
 # fec.mode = "auto"
 # fingerprint_rotation.enabled = false
 

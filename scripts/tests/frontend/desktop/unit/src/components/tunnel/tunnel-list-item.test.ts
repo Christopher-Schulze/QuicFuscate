@@ -36,7 +36,7 @@ function makeTunnel(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
 
 function makePolicy(overrides: Partial<TunnelPolicyView> = {}): TunnelPolicyView {
   return {
-    stealth: "auto",
+    stealth: "dynamic",
     fec: "auto",
     mtu: "1350",
     cc: "bbr3",

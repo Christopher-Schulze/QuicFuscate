@@ -1371,14 +1371,15 @@ fn build_client_engine_config_with_circuit(
 
     // Apply server-issued QKey policy for connection behavior.
     if let Some(ref stealth) = qk.stealth {
-        let mode = stealth.trim().to_ascii_lowercase();
-        cfg.stealth.mode = match mode.as_str() {
+        let mode = stealth.trim();
+        cfg.stealth.mode = match mode {
             "off" => quicfuscate::engine::StealthMode::Off,
             "performance" => quicfuscate::engine::StealthMode::Performance,
             "stealth" => quicfuscate::engine::StealthMode::Stealth,
-            "anti-dpi" | "antidpi" | "max" => quicfuscate::engine::StealthMode::AntiDpi,
+            "Stealth MAX" => quicfuscate::engine::StealthMode::StealthMax,
             "manual" => quicfuscate::engine::StealthMode::Manual,
-            _ => quicfuscate::engine::StealthMode::Auto,
+            "dynamic" => quicfuscate::engine::StealthMode::Dynamic,
+            _ => quicfuscate::engine::StealthMode::Dynamic,
         };
         if cfg.stealth.mode == quicfuscate::engine::StealthMode::Off {
             cfg.stealth.use_utls = false;
@@ -1699,8 +1700,8 @@ async fn engine_stats(
     };
     let stealth_mode = engine
         .active_stealth_mode()
-        .map(|mode| format!("{:?}", mode).to_lowercase())
-        .unwrap_or_else(|| format!("{:?}", engine.stealth_mode()).to_lowercase());
+        .map(|mode| mode.as_str().to_string())
+        .unwrap_or_else(|| engine.stealth_mode().as_str().to_string());
     let circuit = engine.active_circuit_diagnostics();
     let circuit_generation = circuit.as_ref().map_or(0, |value| value.generation);
     let circuit_state = circuit
@@ -2698,12 +2699,12 @@ mod tests {
         let qk = quicfuscate::engine::qkey::generate(
             &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
-                .with_stealth("auto")
+                .with_stealth("dynamic")
                 .with_fec("auto"),
         );
         let settings = mk_settings_with_connection("max", "off");
         let cfg = build_client_engine_config(&qk, None, Some(&settings)).expect("cfg");
-        assert_eq!(cfg.stealth.mode, quicfuscate::engine::StealthMode::Auto);
+        assert_eq!(cfg.stealth.mode, quicfuscate::engine::StealthMode::Dynamic);
         assert_eq!(cfg.fec.mode, quicfuscate::engine::FecMode::Auto);
         assert_eq!(cfg.logging.level, "debug");
     }
@@ -2713,7 +2714,7 @@ mod tests {
         let qk = quicfuscate::engine::qkey::generate(
             &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
-                .with_stealth("auto")
+                .with_stealth("dynamic")
                 .with_fec("auto"),
         );
         let settings = mk_settings_with_connection("auto", "off");
@@ -2735,15 +2736,15 @@ mod tests {
     }
 
     #[test]
-    fn config_builder_accepts_qkey_stealth_antidpi_alias() {
+    fn config_builder_accepts_qkey_stealth_max() {
         let qk = quicfuscate::engine::qkey::generate(
             &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
-                .with_stealth("anti-dpi"),
+                .with_stealth("Stealth MAX"),
         );
         let settings = mk_settings_with_connection("auto", "auto");
         let cfg = build_client_engine_config(&qk, None, Some(&settings)).expect("cfg");
-        assert_eq!(cfg.stealth.mode, quicfuscate::engine::StealthMode::AntiDpi);
+        assert_eq!(cfg.stealth.mode, quicfuscate::engine::StealthMode::StealthMax);
     }
 
     #[test]
@@ -2751,7 +2752,7 @@ mod tests {
         let qk = quicfuscate::engine::qkey::generate(
             &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
-                .with_stealth("  OFF  ")
+                .with_stealth("  off  ")
                 .with_fec("  AUTO  "),
         );
         let settings = mk_settings_with_connection("max", "auto");
@@ -2778,7 +2779,7 @@ mod tests {
         let qk = quicfuscate::engine::qkey::generate(
             &quicfuscate::engine::qkey::QKeyConfig::new("127.0.0.1:4433", "example.com")
                 .with_token(&"a".repeat(64))
-                .with_stealth("auto")
+                .with_stealth("dynamic")
                 .with_fec("auto"),
         );
         let settings = serde_json::json!({
@@ -2786,7 +2787,7 @@ mod tests {
         });
         let cfg = build_client_engine_config(&qk, None, Some(&settings)).expect("cfg");
         assert_eq!(cfg.logging.level, "trace");
-        assert_eq!(cfg.stealth.mode, quicfuscate::engine::StealthMode::Auto);
+        assert_eq!(cfg.stealth.mode, quicfuscate::engine::StealthMode::Dynamic);
         assert_eq!(cfg.fec.mode, quicfuscate::engine::FecMode::Auto);
     }
 

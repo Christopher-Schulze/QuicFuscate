@@ -51,8 +51,8 @@ mod stealth_coverage_tests {
 
     #[test]
     fn manager_intelligent_mode_enables_dynamic_and_probe_detector() {
-        let m = make_manager(StealthConfig::intelligent());
-        assert_eq!(m.mode(), StealthMode::Intelligent);
+        let m = make_manager(StealthConfig::dynamic());
+        assert_eq!(m.mode(), StealthMode::Dynamic);
         assert!(m.is_intelligent_runtime());
         assert!(m.probe_detector.is_some());
         // Intelligent inherits Performance base -> flow_shaper present (dynamic_enabled=true)
@@ -66,8 +66,8 @@ mod stealth_coverage_tests {
 
     #[test]
     fn intelligent_levels_do_not_cross_connection_boundaries() {
-        let first = make_manager(StealthConfig::intelligent());
-        let second = make_manager(StealthConfig::intelligent());
+        let first = make_manager(StealthConfig::dynamic());
+        let second = make_manager(StealthConfig::dynamic());
 
         first.set_brain_level_for_test(2);
         assert_eq!(first.intelligent_runtime_level(), 2);
@@ -76,8 +76,8 @@ mod stealth_coverage_tests {
 
     #[test]
     fn manager_anti_dpi_mode_has_all_features() {
-        let m = make_manager(StealthConfig::anti_dpi());
-        assert_eq!(m.mode(), StealthMode::AntiDpi);
+        let m = make_manager(StealthConfig::stealth_max());
+        assert_eq!(m.mode(), StealthMode::StealthMax);
         assert!(m.flow_shaper.is_some());
         assert!(m.cover_traffic.is_some());
         assert!(m.domain_fronting.is_some());
@@ -87,7 +87,7 @@ mod stealth_coverage_tests {
     fn cover_cache_is_none_when_reality_disabled() {
         // QUICFUSCATE_REALITY_ENABLED defaults to false, so the cover cache
         // should not be initialized.
-        let m = make_manager(StealthConfig::intelligent());
+        let m = make_manager(StealthConfig::dynamic());
         assert!(m.cover_cache.is_none(), "cover_cache should be None when reality is disabled");
         assert!(m.cover_handshake_material().is_none(), "no material when cache is absent");
     }
@@ -98,9 +98,9 @@ mod stealth_coverage_tests {
             (StealthConfig::off(), StealthMode::Off),
             (StealthConfig::performance(), StealthMode::Performance),
             (StealthConfig::stealth(), StealthMode::Stealth),
-            (StealthConfig::anti_dpi(), StealthMode::AntiDpi),
+            (StealthConfig::stealth_max(), StealthMode::StealthMax),
             (StealthConfig::manual(), StealthMode::Manual),
-            (StealthConfig::intelligent(), StealthMode::Intelligent),
+            (StealthConfig::dynamic(), StealthMode::Dynamic),
         ] {
             let m = make_manager(config);
             assert_eq!(m.mode(), expected);
@@ -147,7 +147,7 @@ mod stealth_coverage_tests {
 
     #[test]
     fn ack_only_packets_bypass_jitter_but_feed_history() {
-        let m = make_manager(StealthConfig::anti_dpi());
+        let m = make_manager(StealthConfig::stealth_max());
         let shaper = m.flow_shaper.as_ref().expect("anti_dpi has FlowShaper");
         let mut packet = vec![0u8; 64];
 
@@ -200,9 +200,9 @@ mod stealth_coverage_tests {
             StealthMode::Off,
             StealthMode::Performance,
             StealthMode::Stealth,
-            StealthMode::AntiDpi,
+            StealthMode::StealthMax,
             StealthMode::Manual,
-            StealthMode::Intelligent,
+            StealthMode::Dynamic,
         ];
         for mode in modes {
             let cfg = StealthConfig::from_mode(mode);
@@ -217,9 +217,9 @@ mod stealth_coverage_tests {
     }
 
     #[test]
-    fn config_ultra_stealth_is_anti_dpi() {
-        let cfg = StealthConfig::ultra_stealth();
-        assert_eq!(cfg.mode, StealthMode::AntiDpi);
+    fn config_stealth_max_matches_preset() {
+        let cfg = StealthConfig::stealth_max();
+        assert_eq!(cfg.mode, StealthMode::StealthMax);
     }
 
     #[test]
@@ -264,9 +264,9 @@ mod stealth_coverage_tests {
     #[test]
     fn normal_modes_do_not_enable_domain_fronting_by_default() {
         assert!(!StealthConfig::performance().enable_domain_fronting);
-        assert!(!StealthConfig::intelligent().enable_domain_fronting);
+        assert!(!StealthConfig::dynamic().enable_domain_fronting);
         assert!(!StealthConfig::stealth().enable_domain_fronting);
-        assert!(StealthConfig::anti_dpi().enable_domain_fronting);
+        assert!(StealthConfig::stealth_max().enable_domain_fronting);
     }
 
     #[test]
@@ -296,7 +296,7 @@ mod stealth_coverage_tests {
 
     #[test]
     fn active_persona_does_not_rotate_mid_session() {
-        let mut cfg = StealthConfig::anti_dpi();
+        let mut cfg = StealthConfig::stealth_max();
         cfg.fingerprint_rotation_interval = 1;
         let m = make_manager(cfg);
         let before = m.current_persona_name();
@@ -391,8 +391,8 @@ mod stealth_coverage_tests {
         for (value, expected) in [
             ("performance", StealthMode::Performance),
             ("stealth", StealthMode::Stealth),
-            ("anti-dpi", StealthMode::AntiDpi),
-            ("intelligent", StealthMode::Intelligent),
+            ("Stealth MAX", StealthMode::StealthMax),
+            ("dynamic", StealthMode::Dynamic),
             ("off", StealthMode::Off),
             ("manual", StealthMode::Manual),
         ] {
@@ -509,8 +509,8 @@ mod stealth_coverage_tests {
     }
 
     #[test]
-    fn domain_fronting_ultra_stealth_has_many_domains() {
-        let df = DomainFrontingManager::ultra_stealth();
+    fn domain_fronting_broad_rotation_has_many_domains() {
+        let df = DomainFrontingManager::broad_provider_rotation();
         assert!(
             df.domains().len() >= 20,
             "ultra stealth should have 20+ domains, got {}",
@@ -721,7 +721,7 @@ mod stealth_coverage_tests {
 
     #[test]
     fn server_push_cover_active_in_anti_dpi() {
-        let m = make_manager(StealthConfig::anti_dpi());
+        let m = make_manager(StealthConfig::stealth_max());
         assert!(m.server_push_cover_active());
     }
 
@@ -730,10 +730,10 @@ mod stealth_coverage_tests {
         let performance = make_manager(StealthConfig::performance());
         assert!(performance.webtransport_cover_plan().is_none());
 
-        let intelligent = make_manager(StealthConfig::intelligent());
+        let intelligent = make_manager(StealthConfig::dynamic());
         assert!(intelligent.webtransport_cover_plan().is_none());
 
-        let anti_dpi = make_manager(StealthConfig::anti_dpi());
+        let anti_dpi = make_manager(StealthConfig::stealth_max());
         let (authority, path) = anti_dpi.webtransport_cover_plan().expect("anti-dpi cover plan");
         assert!(!authority.is_empty());
         assert!(path.ends_with("/wt/session"));
@@ -745,7 +745,7 @@ mod stealth_coverage_tests {
         assert!(!performance.cover_header_emission_allowed());
         assert!(performance.cover_headers_due().is_none());
 
-        let intelligent = make_manager(StealthConfig::intelligent());
+        let intelligent = make_manager(StealthConfig::dynamic());
         assert!(!intelligent.cover_header_emission_allowed());
         assert!(intelligent.cover_headers_due().is_none());
 
@@ -810,7 +810,7 @@ mod stealth_coverage_tests {
             std::env::remove_var("QUICFUSCATE_PADDING_STRATEGY");
         }
 
-        let m = make_manager(StealthConfig::intelligent());
+        let m = make_manager(StealthConfig::dynamic());
         let perms = m.brain_runtime_permissions();
         assert!(perms.ack_threshold);
         assert!(perms.external_pacing);
@@ -1062,7 +1062,7 @@ mod stealth_coverage_tests {
 
     #[test]
     fn anti_dpi_uses_packet_normalize() {
-        let cfg = StealthConfig::anti_dpi();
+        let cfg = StealthConfig::stealth_max();
         assert_eq!(cfg.normalize_target_size, 1200);
         assert_eq!(cfg.padding_strategy, PaddingStrategy::BrowserMimic);
     }

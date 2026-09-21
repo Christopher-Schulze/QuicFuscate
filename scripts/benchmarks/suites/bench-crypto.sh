@@ -39,15 +39,6 @@ case "$(uname -m)" in
     (( FAST )) || SELECTED_CELLS+=(crypto_all_neon)
     ;;
 esac
-SELECTED_CELLS+=(morus_native)
-case "$(uname -m)" in
-  x86_64)
-    (( FAST )) || SELECTED_CELLS+=(morus_sse2)
-    ;;
-  aarch64|arm64)
-    (( FAST )) || SELECTED_CELLS+=(morus_neon)
-    ;;
-esac
 SELECTED_CELLS+=(aes_gcm_native)
 case "$(uname -m)" in
   x86_64)
@@ -226,16 +217,6 @@ elif [[ "$FAST" -eq 0 && ( $(uname -m) == "aarch64" || $(uname -m) == "arm64" ) 
     measure_throughput "crypto_all_neon" "crypto::tests" "RUSTFLAGS=-C target-feature=+neon" --
 fi
 
-# MORUS-1280-128 Benchmarks
-echo -e "\n${YELLOW}=== MORUS-1280-128 Performance ===${NC}"
-measure_throughput "morus_native" "crypto::morus::morus_tests" --
-
-if [[ "$FAST" -eq 0 && $(uname -m) == "x86_64" ]]; then
-    measure_throughput "morus_sse2" "crypto::morus::morus_tests" "RUSTFLAGS=-C target-feature=+sse2" --
-elif [[ "$FAST" -eq 0 && ( $(uname -m) == "aarch64" || $(uname -m) == "arm64" ) ]]; then
-    measure_throughput "morus_neon" "crypto::morus::morus_tests" "RUSTFLAGS=-C target-feature=+neon" --
-fi
-
 # AES-GCM Benchmarks
 echo -e "\n${YELLOW}=== AES-GCM Performance ===${NC}"
 measure_throughput "aes_gcm_native" "crypto::gcm::tests" --
@@ -264,7 +245,7 @@ Algorithm         | Native | SSE2/NEON | AVX2/Crypto | AVX512/VAES
 EOF
 
 # Parse results and add to comparison
-for algo in crypto_all morus aes_gcm chacha20_poly1305; do
+for algo in crypto_all aes_gcm chacha20_poly1305; do
     native=$(grep "16384" "$OUTPUT_DIR/${algo}_native.txt" 2>/dev/null | awk '{print $NF}' || echo "N/A")
     sse2=$(grep "16384" "$OUTPUT_DIR/${algo}_sse2.txt" 2>/dev/null | awk '{print $NF}' || \
            grep "16384" "$OUTPUT_DIR/${algo}_neon.txt" 2>/dev/null | awk '{print $NF}' || echo "N/A")
