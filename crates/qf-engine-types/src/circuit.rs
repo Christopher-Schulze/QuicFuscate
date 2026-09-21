@@ -20,6 +20,25 @@ pub const NESTED_HTTP_DATAGRAM_OVERHEAD: u16 = 10;
 /// Exact worst-case carrier overhead subtracted for every recursive MASQUE layer.
 pub const NESTED_MASQUE_OVERHEAD: u16 =
     NESTED_FEC_OVERHEAD + NESTED_QUIC_OVERHEAD + NESTED_HTTP_DATAGRAM_OVERHEAD;
+/// IPv4 minimum that assignment and TUN construction already reject below.
+const MIN_IPV4_TUN_MTU: u16 = 576;
+/// IPv6 minimum link MTU; assignment rejects a smaller advertised TUN.
+const MIN_IPV6_TUN_MTU: u16 = 1280;
+
+/// Inner CONNECT-IP TUN and assignment MTU for one confirmed outer path ceiling.
+///
+/// Subtracts one MASQUE carrier layer. Never exceeds the operator ceiling.
+/// Floors at the IPv4 or IPv6 minimum so open/assignment stay legal.
+pub fn inner_tun_mtu(path_mtu: u16, ipv6: bool) -> u16 {
+    let floor = if ipv6 { MIN_IPV6_TUN_MTU } else { MIN_IPV4_TUN_MTU };
+    path_mtu.saturating_sub(NESTED_MASQUE_OVERHEAD).max(floor).min(path_mtu)
+}
+
+/// Lower an already-opened inner TUN to the tightest live client budget.
+pub fn follow_live_inner_mtu(current_tun_mtu: u16, min_live_client: u16, ipv6: bool) -> u16 {
+    let floor = if ipv6 { MIN_IPV6_TUN_MTU } else { MIN_IPV4_TUN_MTU };
+    min_live_client.max(floor).min(current_tun_mtu)
+}
 
 /// Function assigned to one authenticated circuit hop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -523,6 +542,13 @@ mod tests {
         assert_eq!(NESTED_QUIC_OVERHEAD, 1 + 20 + 4 + 16);
         assert_eq!(NESTED_HTTP_DATAGRAM_OVERHEAD, 2 + 8);
         assert_eq!(NESTED_MASQUE_OVERHEAD, 87);
+        assert_eq!(inner_tun_mtu(1500, false), 1413);
+        assert_eq!(inner_tun_mtu(1500, true), 1413);
+        assert_eq!(inner_tun_mtu(1280, false), 1193);
+        assert_eq!(inner_tun_mtu(1280, true), 1280);
+        assert_eq!(inner_tun_mtu(576, false), 576);
+        assert_eq!(follow_live_inner_mtu(1413, 1280, true), 1280);
+        assert_eq!(follow_live_inner_mtu(1413, 1600, false), 1413);
 
         let circuit = CircuitConfig {
             hops: vec![

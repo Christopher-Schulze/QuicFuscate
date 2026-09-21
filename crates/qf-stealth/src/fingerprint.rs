@@ -273,7 +273,7 @@ impl PacketNormalizer {
     /// Applies the complete packet policy exactly once.
     ///
     /// Disabled mode returns before inspecting packet bytes. IPv4 header
-    /// normalization is followed by SYN or SYN-ACK TCP normalization. Optional
+    /// normalization is followed by pure-SYN TCP normalization. Optional
     /// ICMP suppression is evaluated before mutation and never drops PMTUD
     /// signals.
     pub fn normalize(&self, pkt: &mut [u8]) -> NormalizeResult {
@@ -373,8 +373,12 @@ impl PacketNormalizer {
         if protocol != 6 || u16::from_be_bytes([pkt[6], pkt[7]]) & 0x3fff != 0 {
             return pkt.len();
         }
+        if Self::ipv4_destination_is_private(pkt) {
+            return pkt.len();
+        }
         let tcp = ip_hdr_len;
-        if pkt.len() < tcp + 20 || pkt[tcp + 13] & 0x02 == 0 {
+        let flags = pkt[tcp + 13];
+        if pkt.len() < tcp + 20 || flags & 0x02 == 0 || flags & 0x10 != 0 {
             return pkt.len();
         }
         let data_offset = ((pkt[tcp + 12] >> 4) as usize) * 4;
@@ -437,6 +441,21 @@ impl PacketNormalizer {
 
     fn has_expiring_ipv4_ttl(pkt: &[u8]) -> bool {
         Self::parse_ipv4_header(pkt).is_some_and(|_| pkt[8] <= 1)
+    }
+
+    /// Inner VPN assignments stay on RFC1918. Rewriting those SYNs to a
+    /// persona window-scale (Windows=2 vs Linux=10) desynchronizes the two
+    /// kernel stacks as soon as the server sends on a client-initiated flow.
+    fn ipv4_destination_is_private(pkt: &[u8]) -> bool {
+        if pkt.len() < 20 {
+            return false;
+        }
+        match pkt[16] {
+            10 => true,
+            172 if (16..=31).contains(&pkt[17]) => true,
+            192 if pkt[17] == 168 => true,
+            _ => false,
+        }
     }
 
     /// Normalizes the IPv4 layer of a packet to match the target OS profile.
@@ -509,14 +528,17 @@ impl PacketNormalizer {
 
     /// Normalizes the TCP layer of a packet to match the target OS profile.
     ///
-    /// On **SYN segments** (where OS fingerprinting is most effective):
+    /// On **pure SYN segments** (where OS fingerprinting is most effective):
     /// - **Window size** - set to the profile's default window.
     /// - **MSS option** - set to the profile's MSS value.
     /// - **TCP option ordering** - options are reordered to match the profile's
     ///   characteristic sequence (e.g. macOS places Window Scale before SACK
     ///   Permitted, unlike Linux/Windows/Android).
     ///
-    /// On non-SYN segments, only the window is left untouched (it reflects
+    /// SYN-ACK is left untouched. Rewriting the responder's window scale
+    /// desynchronizes the initiator (Windows scale 2 vs Linux scale 10
+    /// collapses the send window and blackholes TUN downlink).
+    /// On other non-SYN segments the window is left untouched (it reflects
     /// dynamic flow-control state and must not be clobbered).
     ///
     /// The TCP checksum is updated incrementally for window and MSS changes,
@@ -555,8 +577,9 @@ impl PacketNormalizer {
 
         let flags = pkt[tcp + 13];
         let is_syn = (flags & 0x02) != 0;
+        let is_ack = (flags & 0x10) != 0;
 
-        if !is_syn {
+        if !is_syn || is_ack || Self::ipv4_destination_is_private(pkt) {
             return (false, packet_len);
         }
         let mut modified = false;

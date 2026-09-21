@@ -225,7 +225,7 @@ fn test_profile_from_str() {
 
 #[test]
 fn test_normalize_ipv4_ttl_linux() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 200, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 200, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
     normalizer.normalize_ipv4(&mut pkt);
     assert_eq!(pkt[8], 64, "TTL should be normalized to 64 for Linux");
@@ -234,7 +234,7 @@ fn test_normalize_ipv4_ttl_linux() {
 
 #[test]
 fn test_normalize_ipv4_ttl_windows() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
     normalizer.normalize_ipv4(&mut pkt);
     assert_eq!(pkt[8], 128, "TTL should be normalized to 128 for Windows");
@@ -243,7 +243,7 @@ fn test_normalize_ipv4_ttl_windows() {
 
 #[test]
 fn test_normalize_ipv4_ttl_macos() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 200, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 200, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::MacOS);
     normalizer.normalize_ipv4(&mut pkt);
     assert_eq!(pkt[8], 64, "TTL should be normalized to 64 for macOS");
@@ -252,7 +252,7 @@ fn test_normalize_ipv4_ttl_macos() {
 
 #[test]
 fn test_normalize_ipv4_ttl_android() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 200, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 200, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Android);
     normalizer.normalize_ipv4(&mut pkt);
     assert_eq!(pkt[8], 64, "TTL should be normalized to 64 for Android");
@@ -284,7 +284,7 @@ fn tunnel_ingress_preserves_expiring_ipv4_packets_before_normalization() {
 #[test]
 fn test_incremental_checksum_matches_full_recompute() {
     // Build a packet, change the TTL, and compare incremental vs full recompute.
-    let mut pkt_a = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 100, 8192, 1460, 0xABCD);
+    let mut pkt_a = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 100, 8192, 1460, 0xABCD);
     let mut pkt_b = pkt_a.clone();
 
     // Incremental update on pkt_a
@@ -306,7 +306,7 @@ fn test_incremental_checksum_matches_full_recompute() {
 #[test]
 fn test_incremental_checksum_odd_offset() {
     // Test incremental update at an odd offset (low byte of a 16-bit word).
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0xABCD);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0xABCD);
     let original_cksum = u16::from_be_bytes([pkt[10], pkt[11]]);
 
     // Change byte at odd offset 5 (low byte of IP ID at offset 4-5).
@@ -316,7 +316,7 @@ fn test_incremental_checksum_odd_offset() {
     pkt[5] = new_byte;
 
     // Verify by full recompute.
-    let mut ref_pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0xABCD);
+    let mut ref_pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0xABCD);
     ref_pkt[5] = new_byte;
     ref_pkt[10] = 0;
     ref_pkt[11] = 0;
@@ -331,7 +331,7 @@ fn test_incremental_checksum_odd_offset() {
 
 #[test]
 fn test_tcp_incremental_checksum() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let ip_hdr_len = 20;
     let tcp = ip_hdr_len;
 
@@ -342,7 +342,7 @@ fn test_tcp_incremental_checksum() {
     pkt[tcp + 14] = new_hi;
 
     // Verify by full recompute.
-    let mut ref_pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut ref_pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     ref_pkt[tcp + 14] = new_hi;
     recompute_tcp_checksum(&mut ref_pkt, ip_hdr_len);
 
@@ -357,7 +357,7 @@ fn test_tcp_incremental_checksum() {
 
 #[test]
 fn test_normalize_tcp_window_linux() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
     normalizer.normalize_tcp(&mut pkt, 20);
     let window = u16::from_be_bytes([pkt[34], pkt[35]]);
@@ -367,7 +367,7 @@ fn test_normalize_tcp_window_linux() {
 
 #[test]
 fn test_normalize_tcp_window_windows() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
     normalizer.normalize_tcp(&mut pkt, 20);
     let window = u16::from_be_bytes([pkt[34], pkt[35]]);
@@ -377,7 +377,7 @@ fn test_normalize_tcp_window_windows() {
 
 #[test]
 fn test_normalize_tcp_window_android() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Android);
     normalizer.normalize_tcp(&mut pkt, 20);
     let window = u16::from_be_bytes([pkt[34], pkt[35]]);
@@ -389,7 +389,7 @@ fn test_normalize_tcp_window_android() {
 
 #[test]
 fn test_normalize_tcp_mss() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1200, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1200, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
     normalizer.normalize_tcp(&mut pkt, 20);
 
@@ -423,7 +423,7 @@ fn test_normalize_tcp_mss() {
 #[test]
 fn test_tcp_option_reorder_macos() {
     // Build a SYN with Linux-style order: MSS, SACK_PERM, WindowScale, Timestamp
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::MacOS);
     normalizer.normalize_tcp(&mut pkt, 20);
 
@@ -441,7 +441,7 @@ fn test_tcp_option_reorder_macos() {
 
 #[test]
 fn test_tcp_option_reorder_linux() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
     normalizer.normalize_tcp(&mut pkt, 20);
 
@@ -543,7 +543,7 @@ fn canonical_p0f_option_vectors_and_lengths_are_exact() {
         ),
     ];
     for (profile, expected_len, expected_options) in cases {
-        let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+        let mut packet = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 37, 8192, 1200, 0x1234);
         packet.reserve_exact(4);
         let normalizer = PacketNormalizer::new(profile);
         assert_eq!(normalizer.normalize_vec(&mut packet), NormalizeResult::Modified);
@@ -553,7 +553,7 @@ fn canonical_p0f_option_vectors_and_lengths_are_exact() {
         assert!(verify_tcp_checksum(&packet, 20));
     }
 
-    let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+    let mut packet = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 37, 8192, 1200, 0x1234);
     packet.reserve_exact(4);
     PacketNormalizer::new(OsFingerprintProfile::Linux).normalize_vec(&mut packet);
     assert_eq!(packet.len(), 60);
@@ -572,7 +572,7 @@ fn canonical_p0f_option_vectors_and_lengths_are_exact() {
 
 #[test]
 fn macos_canonical_expansion_supports_jumbo_syn_without_allocation() {
-    let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+    let mut packet = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 37, 8192, 1200, 0x1234);
     PacketNormalizer::new(OsFingerprintProfile::Linux).normalize_vec(&mut packet);
     assert_eq!(packet.len(), 60);
     packet.resize(9_000, 0x5a);
@@ -600,7 +600,7 @@ fn macos_canonical_expansion_supports_jumbo_syn_without_allocation() {
 
 #[test]
 fn test_full_normalization_linux_valid_checksums() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 200, 8192, 1200, 0xAAAA);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 200, 8192, 1200, 0xAAAA);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
     normalizer.normalize_ipv4(&mut pkt);
     normalizer.normalize_tcp(&mut pkt, 20);
@@ -612,7 +612,7 @@ fn test_full_normalization_linux_valid_checksums() {
 
 #[test]
 fn test_full_normalization_windows_valid_checksums() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1200, 0xBBBB);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1200, 0xBBBB);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
     normalizer.normalize_ipv4(&mut pkt);
     normalizer.normalize_tcp(&mut pkt, 20);
@@ -624,7 +624,7 @@ fn test_full_normalization_windows_valid_checksums() {
 
 #[test]
 fn test_full_normalization_macos_valid_checksums() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 200, 8192, 1200, 0xCCCC);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 200, 8192, 1200, 0xCCCC);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::MacOS);
     normalizer.normalize_ipv4(&mut pkt);
     normalizer.normalize_tcp(&mut pkt, 20);
@@ -636,7 +636,7 @@ fn test_full_normalization_macos_valid_checksums() {
 
 #[test]
 fn test_full_normalization_android_valid_checksums() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 200, 8192, 1200, 0xDDDD);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 200, 8192, 1200, 0xDDDD);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Android);
     normalizer.normalize_ipv4(&mut pkt);
     normalizer.normalize_tcp(&mut pkt, 20);
@@ -650,7 +650,7 @@ fn test_full_normalization_android_valid_checksums() {
 
 #[test]
 fn test_ip_id_is_rewritten() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0xAAAA);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0xAAAA);
     let original_id = u16::from_be_bytes([pkt[4], pkt[5]]);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Linux);
     normalizer.normalize_ipv4(&mut pkt);
@@ -682,7 +682,7 @@ fn test_normalize_non_ipv4_packet_ignored() {
 
 #[test]
 fn disabled_profile_is_byte_for_byte_passthrough() {
-    let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+    let mut packet = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 37, 8192, 1200, 0x1234);
     packet.shrink_to_fit();
     let original = packet.clone();
     let original_capacity = packet.capacity();
@@ -695,7 +695,7 @@ fn disabled_profile_is_byte_for_byte_passthrough() {
 
 #[test]
 fn complete_normalization_updates_ipv4_and_tcp_once() {
-    let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+    let mut packet = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 37, 8192, 1200, 0x1234);
     let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
     assert_eq!(normalizer.normalize(&mut packet), NormalizeResult::Modified);
     assert_eq!(packet[8], 128);
@@ -734,7 +734,7 @@ fn suppress_policy_drops_unreachable_but_preserves_fragmentation_needed() {
 
 #[test]
 fn fragmented_ipv4_packet_preserves_fragment_identity() {
-    let mut packet = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 37, 8192, 1200, 0x1234);
+    let mut packet = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 37, 8192, 1200, 0x1234);
     packet[6] = 0x20;
     packet[7] = 0x01;
     packet[10..12].fill(0);
@@ -758,9 +758,38 @@ fn test_normalize_too_short_packet_ignored() {
 }
 
 #[test]
+fn test_normalize_tcp_private_dest_syn_keeps_peer_window_scale() {
+    let mut pkt = build_tcp_syn([10, 0, 1, 2], [10, 0, 1, 1], 64, 65535, 1361, 0x1234);
+    recompute_tcp_checksum(&mut pkt, 20);
+    let original_tcp = pkt[20..].to_vec();
+    let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
+    normalizer.normalize_tcp(&mut pkt, 20);
+    assert_eq!(
+        u16::from_be_bytes([pkt[34], pkt[35]]),
+        65535,
+        "inner VPN SYN window must not be rewritten to the persona default"
+    );
+    assert_eq!(pkt[20..], original_tcp, "inner VPN SYN TCP bytes must stay untouched");
+}
+
+#[test]
+fn test_normalize_tcp_syn_ack_keeps_peer_window_scale() {
+    let mut pkt = build_tcp_syn([10, 0, 1, 2], [10, 0, 1, 1], 64, 65535, 1361, 0x1234);
+    pkt[33] = 0x12; // SYN+ACK
+    recompute_tcp_checksum(&mut pkt, 20);
+    let original = pkt.clone();
+
+    let normalizer = PacketNormalizer::new(OsFingerprintProfile::Windows);
+    normalizer.normalize_tcp(&mut pkt, 20);
+    let window = u16::from_be_bytes([pkt[34], pkt[35]]);
+    assert_eq!(window, 65535, "SYN-ACK window must stay the peer's advertised value");
+    assert_eq!(pkt[20..], original[20..], "SYN-ACK TCP bytes must not be rewritten");
+}
+
+#[test]
 fn test_normalize_tcp_non_syn_unchanged_window() {
     // Build a non-SYN packet (ACK flag) - window should not be modified.
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 5000, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 5000, 1460, 0x1234);
     // Change SYN flag to ACK.
     pkt[33] = 0x10; // ACK flag
     recompute_tcp_checksum(&mut pkt, 20);
@@ -845,7 +874,7 @@ fn test_normalize_tcp_non_tcp_protocol_ignored() {
 
 #[test]
 fn test_parse_ipv4_header_valid() {
-    let pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     let (ihl, proto) = PacketNormalizer::parse_ipv4_header(&pkt).unwrap();
     assert_eq!(ihl, 20);
     assert_eq!(proto, 6); // TCP
@@ -883,7 +912,7 @@ fn test_normalize_icmp_ttl() {
 
 #[test]
 fn test_normalize_df_bit_set() {
-    let mut pkt = build_tcp_syn([10, 0, 0, 1], [10, 0, 0, 2], 64, 8192, 1460, 0x1234);
+    let mut pkt = build_tcp_syn([10, 0, 0, 1], [203, 0, 113, 2], 64, 8192, 1460, 0x1234);
     // Clear DF bit initially.
     pkt[6] &= !0x40;
     // Recompute IP checksum.

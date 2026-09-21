@@ -707,9 +707,14 @@ pub(super) fn spawn_dns_intercept(
 }
 
 pub(crate) fn open_server_tun(
-    tun_config: TunConfig,
+    mut tun_config: TunConfig,
     pool: Arc<MemoryPool>,
 ) -> Result<TunInterface, String> {
+    let requested = tun_config.mtu;
+    tun_config.mtu = qf_engine_types::inner_tun_mtu(requested, tun_config.ip6.is_some());
+    if tun_config.mtu != requested {
+        log::info!("Server TUN MTU {requested} reduced to inner MASQUE budget {}", tun_config.mtu);
+    }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (tun_config, pool);

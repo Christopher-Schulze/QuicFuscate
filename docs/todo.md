@@ -4026,17 +4026,17 @@
 
 ### TODO-1015 - ChameleonFlow bounded reorder window for bulk datagrams
 
-- PARTIAL (2026-09-20). Now implemented as a gather-timer window + bounded swap on the TODO-1016 architecture: `reorder_window_tick` arms `bulk_window_release` per burst train (uniform 0..=3 ms, burst detection via `last_bulk_queued`/`REORDER_BURST_WINDOW` = 10 ms), gated on transport stealth timing; the opener emits unheld as train head while production stalls so the transport datagram queue gathers the backlog; the edge arms the budgeted drain which emits permuted. `pick_reorder_emit_index` swaps only the adjacent bulk pair and marks the displaced head `was_displaced` (never displaced twice -> displacement <= 1 < packet-loss threshold k=3); non-bulk keeps strict FIFO. Omega: unbounded permutation measured as ~24% QUIC loss (threshold trips), naive adjacent swap 4.2%, guarded swap 1.5% at 37.4 Mbit/s - reorder active and QUIC-safe; atomic pair emission is the remaining lift (TODO-1017, done). State reconciliation 2026-09-21: follow-up chain closed through TODO-1017/1020/1021; the >=80%-of-baseline revalidation is blocked by TODO-1022 (reorder cannot arm under committed wire FEC) - see detail file.
+- PARTIAL (2026-09-20). Gather-timer + bounded swap landed. 2026-09-21 Omega: `--no-utls` now applies stealth knobs so the window actually arms (`yield_window=9440` / `drain_entries=1422` at UDP 60 M). Reorder-off recv 59.982 Mbit/s 0% loss; reorder-on (`JITTER_US=5000`) recv 30.602 Mbit/s 43.94% loss (`tun_drops=36381`, `qtun0 TX dropped=0`) - 51% of baseline, below the 80% gate.
 - Detail: docs/todo/todo-1015-bulk-reorder-window.md
 
 ### TODO-1016 - Deferral drain serializes emission under per-packet stealth deferral
 
-- PARTIAL (2026-09-20). Root cause chain fully diagnosed and the scheduler redesigned: deferral windows are gather timers, not packet holds (produced-and-held packets inflated QUIC's in-flight clock into ~38% spurious PTO loss). Implemented: `reorder_window_tick`/`stealth_window_tick` arm `bulk_window_release`/`stealth_window_release`; `deferral_window_open` stalls production (transport queue = honest backpressure); window edge arms `burst_draining` + `drain_budget` (<=32) whose members skip jitter draw and pacer; `Done` ends the drain only when the transport backlog is truly empty; `next_packet_release`/`hold_until` machinery removed; yield/drain counters in the client stats line. Omega UDP 60M: 1.88 -> 37.4 Mbit/s with reorder active (20x), 0 wire drops; reorder-off isolation run: 59.9 Mbit/s. Remaining lift moved to TODO-1017 (atomic pair emission, done) and the io_driver migration decision to TODO-1020 (done, STAY). State reconciliation 2026-09-21: the >=80%-of-baseline acceptance stays formally open pending TODO-1022 (reorder windows cannot arm under committed wire FEC) - see detail file.
+- PARTIAL (2026-09-20). Scheduler redesign landed. 2026-09-21 Omega revalidation with the window actually armed: 30.602 / 59.982 Mbit/s (51%), `qtun0 TX dropped=0`, remaining cut is userspace `tun_drops` under gather-window cadence.
 - Detail: docs/todo/todo-1016-deferral-drain-serialization.md
 
 ### TODO-1017 - Atomic pair emission for bounded bulk reorder swaps
 
-- PARTIAL (P1, 2026-09-21). Implemented as swap-on-join (`pair_swap_on_join` + `paired` flag, plain-FIFO emission, displacement <= 1 by construction) plus a ChameleonFlow quiet phase (`reorder_quiet_until`, ~13% max window duty). Omega falsified the throughput hypothesis: 35.8 Mbit/s vs 59.9 baseline - the loss is ~100% kernel TUN-queue drops (`qtun0 TX dropped` ~= iperf loss), caused by the runtime's poll-spin scheduling under emission gaps saturating the 1024-entry dgram queue and parking fd reads on the contended single-core VM. `UDPRATE=30M` control: 0% loss. Real levers moved to TODO-1020 (done, STAY) and a standalone-runtime scheduling fix (done, TODO-1021 - spin removed, kernel drops became counted `tun_drops`). State reconciliation 2026-09-21: mechanism complete; reorder-active revalidation blocked by TODO-1022 - see detail file.
+- PARTIAL (P1, 2026-09-21). Swap-on-join landed. 2026-09-21 Omega with the window actually armed: 30.602 vs 59.982 Mbit/s, `qtun0 TX dropped=0`, loss is counted `tun_drops` (TODO-1015 still owns the 80% gate).
 - Detail: docs/todo/todo-1017-atomic-pair-emission.md
 
 ### TODO-1018 - Sliding-window (convolutional) FEC coding window
@@ -4046,7 +4046,7 @@
 
 ### TODO-1019 - Adaptive-Tamaraw direction-aware parameters
 
-- PARTIAL (P2, 2026-09-21). Direction axis landed: `ack_us` is the downstream row (padding/chaff halving), `up_us` (brain folds `delivery_rate` into an inter-arrival) is the upstream row (jitter scale); `up_us <= 0` keeps the symmetric fallback. qf-stealth 139 green incl. 4 split tests; TODO-1010 entry updated. Remaining: Omega asymmetric-load telemetry validation (batched with next Omega run).
+- PARTIAL (P2, 2026-09-21). Direction axis landed (unit-proven). TODO-1027 closed: Omega `-R` 90.171 Mbit/s / SWAP 131.614 / up 93.847. Client stats now emit `ack_us` `up_us` `stealth_pad` `stealth_jitter_us`. Omega A/B of the split is the remaining gate.
 - Detail: docs/todo/todo-1019-tamaraw-direction-aware.md
 
 ### TODO-1020 - Standalone TUN client -> io_driver migration decision
@@ -4061,23 +4061,28 @@
 
 ### TODO-1022 - Reorder window never arms on the wire-FEC send path
 
-- OPEN (P2, 2026-09-21). Surfaced by TODO-1021 validation (`yield_window`=0/`drain_entries`=0 in both runs): `reorder_window_tick` is invoked only in the `wire_profile.is_none()` branch of `src/core/connection/send.rs`, so wire-FEC-active traffic cannot arm ChameleonFlow reorder windows at all - the feature silently disables itself exactly when FEC is committed. Also suspicious: `bulk_only` requires zero coalesced control/stream frames, which may starve arming under clean flow even without wire FEC. Decide intended interaction (tick in the wire branch gated on `bulk_only`, with repair-latency guard) vs documented intentional bypass.
+- DONE (P2, 2026-09-21). Option A + live Omega: Streaming `force_on` committed (`k=64 n=80`); Protected UDP 20 M/256 B showed `yield_window=28390` `drain_entries=2806` `qtun0 TX dropped=0`. Earlier live zeros were `--no-utls` skipping stealth knobs, not a remaining wire-path miss. `FecConfig::from_toml` now accepts `force_on`.
 - Detail: docs/todo/todo-1022-reorder-window-wire-fec-bypass.md
 
 ### TODO-1023 - FEC decoder equation matrices unbounded under adversarial repairs
 
-- OPEN (P2, 2026-09-21). Lazy-layer admission is capped (`pending_repairs`=64), but admitted rows in `Decoder8::equations` (and the `Decoder16` equivalent) have no bound - a malicious/corrupted peer can grow receiver memory at repair rate with well-formed unsolvable repairs; sliding windows remove the periodic `clear_window` side-effect flush. Fix: explicit row cap scaled to `k*depth`, oldest/least-useful eviction, eviction telemetry counter, verify sliding-mode recovery under cap.
+- DONE (P2, 2026-09-21). Decoder4/8/16 `equations` now FIFO-cap at `2*k*depth` with `fec_decoder_equation_evictions_total`. Flood + sliding `n-k` recovery tests green; qf-fec 109/109; fountain was already bounded.
 - Detail: docs/todo/todo-1023-fec-decoder-equations-bound.md
 
 ### TODO-1024 - audit-todo-consistency.sh permanently red (95 legacy frontmatter violations)
 
-- OPEN (P3, 2026-09-21). The TODO consistency gate FAILs with 95 violations - all legacy detail files (~TODO-978..996 era) lacking YAML frontmatter, masking any real new violation in the noise. Preferred fix: scripted one-pass backfill of minimal frontmatter (id/title/status/created) so the gate goes green with a uniform format; alternative is a declared legacy grandfather cutover in the script.
+- DONE (P3, 2026-09-21). 65 legacy details backfilled with minimal frontmatter; audit vocabulary + Check 3 heading-bullet parser updated. `audit-todo-consistency.sh` exits 0 (353 files, 0 violations).
 - Detail: docs/todo/todo-1024-todo-audit-frontmatter-legacy.md
 
 ### TODO-1025 - Omega E2E ready-hook scripts live only in /tmp
 
-- OPEN (P3, 2026-09-21). `QF_E2E_READY_HOOK=/tmp/hook-udp.sh` (the script that captures `qtun0` counters + launches iperf inside the namespaces - the evidence chain behind TODO-1017/1021) exists only on the Omega host's /tmp: unversioned, lost on reboot, not reproducible from a fresh checkout. Persist into `scripts/tests/`, wire a repo-relative default, document the env contract.
+- DONE (P3, 2026-09-21). Versioned hooks in `scripts/tests/tun-e2e-hooks/` plus `scripts/tests/tun-e2e-omega-udp.sh`. `QF_E2E_READY_HOOK` stays optional on the default e2e path; env contract is in the `tun-e2e-netns.sh` header.
 - Detail: docs/todo/todo-1025-persist-e2e-ready-hook.md
+
+### TODO-1027 - Server TUN MTU 1500 vs client effective 1413 blackholes TCP downlink
+
+- DONE (P1, 2026-09-21). Open/assignment 1413. Real `-R` stall was Windows wscale=2 on inner-VPN SYNs; skip SYN-ACK + RFC1918 dest. Omega `-R` 90.171 Mbit/s 0 retrans, SWAP 131.614, up 93.847, UDP 60 M 0% loss.
+- Detail: docs/todo/todo-1027-server-tun-mtu-downlink.md
 
 ### TODO-1026 - TUN uplink backlog retains sent slots until fully drained
 
@@ -4096,7 +4101,7 @@
 - io_uring: `rt-transport-uring` 22/22 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel, plus the kernel 6.17 prep-time short-submit quarantine contract (TODO-1004). The feature is in the default set since TODO-995 (the dep is Linux-target-gated, so other platforms are unaffected; `QUICFUSCATE_IO_URING=0|off` is the kill-switch) and lives in the io_driver/engine client path and the server outbound worker, not the standalone `client` runtime. A dedicated `linux-transport-uring` CI lane now runs both suites on every push.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.
 - `qf_fec::interleaved` (0,0)-shape warn removed (sentinel normalization is expected for disabled FEC).
-- Pending Omega validation batch (2026-09-21, next session): TODO-1019 asymmetric-load Tamaraw parameter split (uplink- vs downlink-heavy), TODO-1022 reorder-under-wire-FEC arming + revalidation of the TODO-1015/1016 >=80%-of-baseline criterion, TODO-1023 decoder equation bound behavior under repair flood. The `QF_E2E_READY_HOOK` scripts currently live in Omega /tmp only (TODO-1025).
+- Omega batch 2026-09-21 (`scripts/tests/tun-e2e-omega-batch.sh` on `/home/ubuntu/TESTING/QuicFuscate`, one release bin, no second install): ping 0% both ways; UDP 60 M reorder-off 59.982 Mbit/s 0% loss; UDP 60 M reorder-on (after stealth-knob fix) 30.602 Mbit/s 43.94% loss, `qtun0 TX dropped=0`; UDP 140 M offered recv ~67 Mbit/s 51% loss `qtun0`=0 (1-core ceiling); TODO-1022 Streaming `force_on` `yield_window=28390` `drain_entries=2806`; TCP up 93.847 Mbit/s; TCP `-R` 90.171 Mbit/s 0 retrans after TODO-1027 fingerprint skip (earlier 0.023 Mbit stall closed). Extra host trees `/home/ubuntu/QuicFuscate` and `/home/ubuntu/quicfuscate-src` were already present; not cloned again.
 
 ### WAN forwarding + NAT verified end-to-end on Omega (aarch64 Linux, nftables backend)
 - Topology: ns-cli --veth--> ns-srv --veth--> ns-wan (fake WAN 192.168.100.0/24; ns-srv default route via veth-wan).

@@ -8,6 +8,32 @@ fn test_server_runtime_new() {
 }
 
 #[test]
+fn server_assignment_mtu_follows_inner_masque_budget() {
+    let engine_config = EngineConfig::default();
+    assert_eq!(engine_config.interface.tun_mtu, 1500);
+    let server_config = ServerConfig::default();
+    assert!(server_config.ipv6_server_ip.is_some());
+    let runtime = ServerRuntime::new(engine_config, server_config).expect("default server runtime");
+    assert_eq!(runtime.assignment_settings.mtu, qf_engine_types::inner_tun_mtu(1500, true));
+    assert_eq!(runtime.assignment_settings.mtu, 1413);
+}
+
+#[test]
+fn server_assignment_mtu_ipv4_only_still_subtracts_masque_overhead() {
+    let engine_config = EngineConfig::default();
+    let server_config = ServerConfig {
+        ipv6_server_ip: None,
+        ipv6_pool_start: None,
+        ipv6_pool_end: None,
+        ipv6_dns_servers: Vec::new(),
+        ..ServerConfig::default()
+    };
+    let runtime =
+        ServerRuntime::new(engine_config, server_config).expect("ipv4-only server runtime");
+    assert_eq!(runtime.assignment_settings.mtu, 1413);
+}
+
+#[test]
 fn server_runtime_accepts_matching_embedded_tun_override() {
     let mut engine_config = EngineConfig::default();
     engine_config.interface.tun_ip = Some(IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1)));

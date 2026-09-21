@@ -15,10 +15,11 @@ mod qkey;
 mod tests;
 
 pub use circuit::{
-    CircuitConfig, CircuitConfigError, CircuitDiversityPolicy, HopConfig, HopEndpoint,
-    HopPersonaConfig, HopPolicyOverrides, HopRole, DEFAULT_PRODUCT_HOPS, MAX_CIRCUIT_HOPS,
-    MAX_CIRCUIT_HOP_LABEL_CHARS, MIN_INNER_QUIC_DATAGRAM, NESTED_FEC_OVERHEAD,
-    NESTED_HTTP_DATAGRAM_OVERHEAD, NESTED_MASQUE_OVERHEAD, NESTED_QUIC_OVERHEAD,
+    follow_live_inner_mtu, inner_tun_mtu, CircuitConfig, CircuitConfigError,
+    CircuitDiversityPolicy, HopConfig, HopEndpoint, HopPersonaConfig, HopPolicyOverrides, HopRole,
+    DEFAULT_PRODUCT_HOPS, MAX_CIRCUIT_HOPS, MAX_CIRCUIT_HOP_LABEL_CHARS, MIN_INNER_QUIC_DATAGRAM,
+    NESTED_FEC_OVERHEAD, NESTED_HTTP_DATAGRAM_OVERHEAD, NESTED_MASQUE_OVERHEAD,
+    NESTED_QUIC_OVERHEAD,
 };
 pub use config::{
     EngineConfig, EngineConfigBuilder, StealthSection, MAX_NORMALIZE_TARGET_SIZE,

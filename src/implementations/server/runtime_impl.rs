@@ -182,7 +182,10 @@ impl ServerRuntime {
             .validate_engine_interface_alignment(&engine_config.interface)
             .map_err(EngineError::Config)?;
         let assignment_settings = server_config
-            .assignment_settings(engine_config.interface.tun_mtu)
+            .assignment_settings(qf_engine_types::inner_tun_mtu(
+                engine_config.interface.tun_mtu,
+                server_config.ipv6_server_ip.is_some(),
+            ))
             .map_err(EngineError::Config)?;
         server_config.auth_policy.validate().map_err(EngineError::Config)?;
         server_config.dns_admission.validate().map_err(|error| {

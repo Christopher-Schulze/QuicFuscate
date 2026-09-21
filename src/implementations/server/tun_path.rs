@@ -692,6 +692,16 @@ pub(super) struct ServerTunContext {
     pub(super) fingerprint_profile: OsFingerprintProfile,
 }
 
+/// Admit downlink frames against the opened inner TUN MTU.
+///
+/// `effective_tunnel_mtu()` floors at 1280 until DPLPMTUD confirms the path.
+/// The server TUN is already opened at `inner_tun_mtu(path)` (1413 on a 1500
+/// path). Re-clamping to the pre-confirm floor rejects the kernel's MSS-sized
+/// segments and blackholes TCP downlink.
+pub(super) fn tun_downlink_admit_mtu(tun_mtu: Option<u16>, connection_effective: usize) -> usize {
+    tun_mtu.map(usize::from).unwrap_or(connection_effective)
+}
+
 /// One downlink target processed on the shard that owns the connection:
 /// MTU gate (+ PacketTooBig ICMP for unicast), bandwidth decision, then
 /// direct send or bounded scheduled enqueue. Returns `true` when the packet
@@ -718,9 +728,8 @@ fn deliver_tun_downlink_target(
         Some(shared) => shared.len(),
         None => packet.as_ref().expect("TUN frame owned until first enqueue").len(),
     };
-    let effective_mtu = connection
-        .effective_tunnel_mtu()
-        .min(tun.map(|tun| usize::from(tun.mtu())).unwrap_or(usize::MAX));
+    let effective_mtu =
+        tun_downlink_admit_mtu(tun.map(|tun| tun.mtu()), connection.effective_tunnel_mtu());
     if frame_len > effective_mtu {
         if unicast {
             if let Some(tun) = tun {
@@ -758,6 +767,10 @@ fn deliver_tun_downlink_target(
         metrics.record_bandwidth_decision(BandwidthDirection::Downlink, decision, frame_len);
         match decision {
             BandwidthDecision::Allowed => {
+                let masque_mtu = live_state
+                    .clients
+                    .get(&target)
+                    .map(QuicFuscateConnection::effective_masque_mtu);
                 let send_result = {
                     let frame: &[u8] = match shared_frame.as_ref() {
                         Some(shared) => shared.as_slice(),
@@ -772,6 +785,29 @@ fn deliver_tun_downlink_target(
                     Some(Ok(())) => {
                         metrics.record_bandwidth_scheduler_delivery(frame_len);
                         return Ok(true);
+                    }
+                    Some(Err(
+                        crate::error::ConnectionError::BufferTooShort
+                        | crate::error::ConnectionError::Done,
+                    )) => {
+                        if unicast {
+                            if let Some(tun) = tun {
+                                let frame: &[u8] = match shared_frame.as_ref() {
+                                    Some(shared) => shared.as_slice(),
+                                    None => packet.as_ref().expect("frame").as_slice(),
+                                };
+                                write_downlink_error(
+                                    frame,
+                                    tun,
+                                    server_ips,
+                                    source_profile,
+                                    RoutingOutcome::PacketTooBig,
+                                    masque_mtu,
+                                    metrics,
+                                )?;
+                            }
+                        }
+                        return Ok(false);
                     }
                     Some(Err(crate::error::ConnectionError::DgramQueueFull)) => {
                         let pending_packet = retain_tun_frame(packet, shared_frame);

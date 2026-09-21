@@ -517,6 +517,13 @@ fn authenticated_server_uplink_is_typed_as_local() {
 }
 
 #[test]
+fn tun_downlink_admit_mtu_uses_opened_inner_tun_not_pre_pmtu_floor() {
+    assert_eq!(tun_downlink_admit_mtu(Some(1413), 1280), 1413);
+    assert_eq!(tun_downlink_admit_mtu(Some(1413), 1413), 1413);
+    assert_eq!(tun_downlink_admit_mtu(None, 1280), 1280);
+}
+
+#[test]
 fn oversized_ipv4_packets_get_ptb_before_any_tun_write_for_both_df_states() {
     let server_ip = Ipv4Addr::new(10, 0, 1, 1);
     let client_ip = Ipv4Addr::new(10, 0, 1, 2);
