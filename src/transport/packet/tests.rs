@@ -616,6 +616,29 @@ fn retry_header_parses_token_payload() {
 }
 
 #[test]
+fn retry_integrity_matches_rfc9001_appendix_a4() {
+    // RFC 9001 Appendix A.4. The ODCID is part of the pseudo-packet only.
+    // Packet bytes and tag are copied from the RFC, not produced by this function.
+    let odcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+    let mut packet = vec![
+        0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5,
+        0x74, 0x6f, 0x6b, 0x65, 0x6e,
+    ];
+    let expected_tag = [
+        0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82, 0x90, 0x58, 0xfb, 0x3f, 0x0f, 0x24, 0x96,
+        0xba,
+    ];
+    append_retry_tag(&mut packet, &odcid, crate::transport::PROTOCOL_VERSION)
+        .expect("append RFC Retry tag");
+    assert_eq!(&packet[packet.len() - 16..], &expected_tag);
+    verify_retry_tag(&packet, &odcid, crate::transport::PROTOCOL_VERSION)
+        .expect("RFC Retry tag verifies");
+    let last = packet.len() - 1;
+    packet[last] ^= 1;
+    assert!(verify_retry_tag(&packet, &odcid, crate::transport::PROTOCOL_VERSION).is_err());
+}
+
+#[test]
 fn retry_integrity_roundtrips_for_v1_and_v2() {
     let odcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
     for version in [crate::transport::PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {

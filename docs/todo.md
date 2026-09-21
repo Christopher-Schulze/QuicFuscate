@@ -536,6 +536,26 @@
 - OPEN. Client ECH via rustls only when the outer hop's HTTPS record has an `ech` parameter, fetched over DoH. No server ECH. No ECH on a dedicated VPN IP.
 - Detail: `docs/todo/todo-1064-ech-on-shared-outer-hop.md`
 
+### TODO-1065 - Retry integrity tag must match the RFC vector and must not panic
+- DONE. `aes128_gcm_tag_aad_only` returns `Result`. RFC 9001 Appendix A.4 tag `04a265ba2eff4d829058fb3f0f2496ba` matches for ODCID `8394c8f03e515708`. The 16-byte XOR compare is unchanged. `cargo test --offline --lib retry_integrity` 2/2.
+- Detail: `docs/todo/todo-1065-retry-tag-rfc-vector.md`
+
+### TODO-1066 - Freeze one pre-ring QFENC1 ciphertext and open it with ring
+- OPEN. Capture one envelope from the first-party sealer at `a87b9584` and check those bytes in. Current `decrypt` must open them. Do not reseal the fixture with ring.
+- Detail: `docs/todo/todo-1066-legacy-qkey-golden-ciphertext.md`
+
+### TODO-1067 - Rewrite present-tense claims about deleted crypto
+- OPEN. Fix TODO-1035's first-party ChaCha bullet, TODO-626's live `subtle` claim, the GHASH regression-proof paragraph, the MAP 2026-08-01 subtle sentence, the TODO-1049 "Current code" section, and the 2026-08-03 AesHp/ChaCha constructor paragraph. Historical close counts stay.
+- Detail: `docs/todo/todo-1067-stale-crypto-status-claims.md`
+
+### TODO-1068 - Audit the crypto owner by behavior, not only by source strings
+- OPEN. Keep check 4n's name predicates. Add a run of the NIST AES-GCM test, the libaegis CFRG test, and the Retry RFC tag test. The unsafe-fn contract gate already exists; verify it, do not reimplement. Do not touch the unrelated AMX/Windows/Linux criticals.
+- Detail: `docs/todo/todo-1068-crypto-owner-behavior-audit.md`
+
+### TODO-1069 - Remove the write-only DATA_AEAD_OVERRIDE_MODE selector residue
+- OPEN. The atomic mode global is written by `install_data_aead_selection` and read only in tests; the live selection path is `PrivateAeadFamily`/`payload_protection_pin`. Remove the dead global machinery or wire it, and retarget the tests to `CryptoConfig::validate`.
+- Detail: `docs/todo/todo-1069-remove-write-only-aead-override.md`
+
 ## Completed
 
 ### TODO-899 - Multi-RHS Gauss for FEC decode under loss

@@ -32,16 +32,20 @@ fn bind_key(
     Ok(LessSafeKey::new(unbound))
 }
 
-/// RFC 9001 §17.2.5 Retry integrity tag: AES-128-GCM over `aad` with an empty
+/// RFC 9001 section 5.8 Retry integrity tag: AES-128-GCM over `aad` with an empty
 /// plaintext and the fixed per-version Retry key/nonce pair.
-pub fn aes128_gcm_tag_aad_only(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8]) -> [u8; 16] {
-    let key = bind_key(&AES_128_GCM, key).expect("fixed-size AES-128-GCM key is valid");
+pub fn aes128_gcm_tag_aad_only(
+    key: &[u8; 16],
+    nonce: &[u8; 12],
+    aad: &[u8],
+) -> Result<[u8; 16], ConnectionError> {
+    let key = bind_key(&AES_128_GCM, key)?;
     let tag = key
         .seal_in_place_separate_tag(Nonce::assume_unique_for_key(*nonce), Aad::from(aad), &mut [])
-        .expect("sealing an empty payload cannot fail");
+        .map_err(|_| crypto_failure())?;
     let mut out = [0u8; 16];
     out.copy_from_slice(tag.as_ref());
-    out
+    Ok(out)
 }
 
 /// RFC 9001 AES-128-GCM owner backed by ring.

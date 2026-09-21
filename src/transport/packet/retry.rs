@@ -37,7 +37,7 @@ pub fn append_retry_tag(
     pseudo.extend_from_slice(odcid);
     pseudo.extend_from_slice(&buf[..hdr_len]);
     let (key, nonce) = retry_integrity_material(version)?;
-    let tag = crate::crypto::aes128_gcm_tag_aad_only(key, nonce, &pseudo);
+    let tag = crate::crypto::aes128_gcm_tag_aad_only(key, nonce, &pseudo)?;
     buf.extend_from_slice(&tag);
     Ok(())
 }
@@ -57,7 +57,7 @@ pub fn verify_retry_tag(packet: &[u8], odcid: &[u8], version: u32) -> Result<(),
     pseudo.extend_from_slice(odcid);
     pseudo.extend_from_slice(&packet[..hdr_len]);
     let (key, nonce) = retry_integrity_material(version)?;
-    let tag = crate::crypto::aes128_gcm_tag_aad_only(key, nonce, &pseudo);
+    let tag = crate::crypto::aes128_gcm_tag_aad_only(key, nonce, &pseudo)?;
     let mut diff = 0u8;
     for i in 0..16 {
         diff |= tag[i] ^ tag_in[i];
