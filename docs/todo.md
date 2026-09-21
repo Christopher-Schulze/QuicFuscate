@@ -3961,7 +3961,7 @@
 
 ### TODO-1001 - Decide fate of benchmark-only SIMD sort/shuffle surface
 
-- OPEN. `qf_cpu::sort::{argsort, sort_f32, sort_u32}` and `optimize::random::shuffle` have zero non-test, non-bench callers workspace-wide, yet `sort_simd`/`shuffle_simd` run in every `ci_regression` pass and the sort kernels carry SIMD/unsafe weight that TODO-681's audit budget must justify. Recommendation: delete or pin as intentional public API.
+- DONE (2026-09-21). Pinned as rust-tests / parity surface (`rt-argsort-parity`, `rt-simd-selfcheck`). `sort_simd`/`shuffle_simd` stay library-quality CI cells, not production-path guards. Not deleted: the AVX2 comparison probe depends on them.
 - Detail: docs/todo/todo-1001-orphan-simd-sort-shuffle.md
 
 ### TODO-1002 - Dedupe engine-poller store writes (render churn + e2e stability)
@@ -3996,22 +3996,22 @@
 
 ### TODO-1008 - Evaluate io_uring send bundles for TX batching
 
-- OPEN (P3). `IORING_RECVSEND_BUNDLE` + provided-buffer sends push N buffers through the stack in one descent (~36% in axboe proxy benches). First measure whether per-SQE SendMsg remains a bottleneck post-TODO-902/1005; compare against simply widening GSO runs. Kernel floor must be confirmed before designing the probe.
+- DONE (P3, 2026-09-21). Rejected. Omega 6.17 uAPI has no `IORING_RECVSEND_BUNDLE`; GSO + sendmmsg already cover the one-descent batch; standalone TUN is not on io_uring. Revisit only if a deployment kernel ships the flag and a multi-core io_driver profile shows per-SQE descent above ~5%.
 - Detail: docs/todo/todo-1008-uring-send-bundles.md
 
 ### TODO-1009 - TLS/browser fingerprint freshness and rotation validation
 
-- PARTIAL. 2025 evidence: uTLS ECH-GREASE bug made the Chrome parrot passively identifiable for ~2 years; JA4 fingerprints beyond JA3 fields. Catalog is compiled-in code (`fingerprint_profile.rs`/`tls_profile.rs`), refreshed to the 2026-09 fleet (Chrome/Edge 153, Firefox 156, Safari 26, Opera 136, Brave 1.95) behind a `PROFILE_CATALOG_SNAPSHOT` marker. New gate `verify-fingerprint-freshness.sh` (snapshot age <= 6 months + UA version coherence + zero-random/entropy guards) is registered in the comprehensive audit. Synthetic cover hellos now draw per-call entropy for random/SID/key-share/GREASE/ECH/padding (no more byte-identical hellos) and emit X25519MLKEM768+X25519 hybrid key shares on non-Safari personas. JA4 diff tooling landed (`dump_persona_client_hellos_as_hex` + `scripts/audits/ja4_diff.py`, FoxIO-compliant) and fixed three real tells vs the Chrome QUIC reference: ECH-GREASE is now unconditional (was ULTRA-gated), h3-first hellos carry TLS 1.3 suites only (cipher hash now byte-identical to real Chrome QUIC `55b375c5d22e`), and mandatory `quic_transport_params` (0x0039) is emitted for all h3 personas (+ALPS/compress_certificate on Chrome-family). Chrome persona now matches the reference a/b segments. Refresh policy documented in docs/CONTRIBUTING.md. Open: real-browser captures unavailable locally; c-hash byte-parity intentionally not over-fit.
+- DONE (2026-09-21). Catalog + freshness gate + per-call entropy + hybrid key shares + JA4 tooling. Chrome a/b matches FoxIO `55b375c5d22e`. Refresh policy is in `docs/CONTRIBUTING.md`. Residuals accepted: no local browser captures; c-hash byte-parity not over-fit.
 - Detail: docs/todo/todo-1009-fingerprint-freshness.md
 
 ### TODO-1010 - Next-generation stealth shaping research track
 
-- PARTIAL (standing). Implemented: WF-A2D position-aware perturbation in FlowShaper (burst edges after >=100ms idle gaps sample the full jitter range; interior packets stay tight; ProtocolClock-injected, ManualTimeSource-tested) and the ChameleonFlow density principle in intelligent_policy (padding rate halves when real ACK-clocked traffic is dense, `ack_us < 3000` — shaping what is there instead of buying chaff). Design studies done (2026-09-20): QUICstep deferred (custom handshake already defeats Initial-parsing censors; relay topology not justified), UPGen adapted as TODO-1014, ChameleonFlow reorder window adapted as TODO-1015 (Bulk-class only). Still open: Adaptive-Tamaraw per-cluster direction-aware parameters (tracked as TODO-1019). Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
+- DONE (2026-09-21). All five candidates have a written verdict. Landed: WF-A2D burst-edge jitter, ChameleonFlow density + reorder (TODO-1015/1016/1017, Omega 99.98% of baseline), Adaptive-Tamaraw direction rows (TODO-1019), UPGen shape seed (TODO-1014). QUICstep stays deferred-by-verdict. Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
 - Detail: docs/todo/todo-1010-stealth-shaping-research-track.md
 
 ### TODO-1011 - FEC standards alignment and maximal-effectiveness audit
 
-- PARTIAL (standing). NWCRG/TinyMT32 wire-seed alignment rejected-by-design: `seed.rs` already derives the fountain seed via HKDF from the QUIC 1-RTT secret (nothing on the wire) and `fountain_codes.rs` expands it with splitmix64 - strictly stronger than the draft's wire-carried seed. QUIRL unequal protection DONE (2026-09-20): `DatagramClass::{Protected,Bulk}` - `masque_classify.rs` classifies the inner IP packet per MASQUE datagram (TCP >128 B payload = Bulk, DNS/small UDP/ICMP/fragments/extensions = Protected), `DatagramSendEntry.class` -> `SendInfo.bulk_only` -> `strip_framing_headroom` emits bulk-only packets unframed (no wire-format change; the receiver routes unframed past the FEC decoder already). Bulk keeps stealth shaping and consumes no systematic sequence slot. e2e-verified on Omega: 3% netem loss + 15 s iperf3 TCP -> wire mix framed=9705/unframed=22589, tunnel stable both directions. Repair-ACK feedback DONE (2026-09-21, closes TODO-1006 option (a)): dedicated wire flag, bounded 64-entry report (<=674 B), receiver-side pending queue (cap 1024), epoch-validated consumption feeding `recovery.on_loss_packet` once per entry, telemetry exported. Still open: convolutional sliding-window coding, spawned as TODO-1018 (gap analysis in the detail file).
+- DONE (2026-09-21). All five findings closed: QUIRL Bulk/Protected gating, TinyMT32 rejected-by-design, Repair-ACK, sliding-window Streaming GF8 (TODO-1018), unequal protection via the same class gate. Omega 3% netem: framed=9705/unframed=22589, tunnel stable.
 - Detail: docs/todo/todo-1011-fec-standards-alignment.md
 
 ### TODO-1012 - Standalone client RX: recvmmsg burst + persistent GRO slots
@@ -4101,11 +4101,11 @@
 - io_uring: `rt-transport-uring` 22/22 + `rt-io-hotpath-kernel-integration` green natively (`--features rust-tests,io_uring`) - recv_batch loopback/repost, sendmsg_zc, sqpoll and zc-probe verified against the real kernel, plus the kernel 6.17 prep-time short-submit quarantine contract (TODO-1004). The feature is in the default set since TODO-995 (the dep is Linux-target-gated, so other platforms are unaffected; `QUICFUSCATE_IO_URING=0|off` is the kill-switch) and lives in the io_driver/engine client path and the server outbound worker, not the standalone `client` runtime. A dedicated `linux-transport-uring` CI lane now runs both suites on every push.
 - `qf_memory_lock` warn (`RLIMIT_MEMLOCK finite -> mlockall MCL_CURRENT only`) is intentional operator guidance, not a defect: the process still locks current memory; future allocations need `LimitMEMLOCK=infinity` on the systemd unit to stay locked.
 - `qf_fec::interleaved` (0,0)-shape warn removed (sentinel normalization is expected for disabled FEC).
-- Omega batch 2026-09-21 (`scripts/tests/tun-e2e-omega-batch.sh` on `/home/ubuntu/TESTING/QuicFuscate`, one release bin, no second install): ping 0% both ways; UDP 60 M reorder-off 59.982 Mbit/s 0% loss; UDP 60 M reorder-on (after stealth-knob fix) 30.602 Mbit/s 43.94% loss, `qtun0 TX dropped=0`; UDP 140 M offered recv ~67 Mbit/s 51% loss `qtun0`=0 (1-core ceiling); TODO-1022 Streaming `force_on` `yield_window=28390` `drain_entries=2806`; TCP up 93.847 Mbit/s; TCP `-R` 90.171 Mbit/s 0 retrans after TODO-1027 fingerprint skip (earlier 0.023 Mbit stall closed). Extra host trees `/home/ubuntu/QuicFuscate` and `/home/ubuntu/quicfuscate-src` were already present; not cloned again.
+- Omega batch 2026-09-21 (`scripts/tests/tun-e2e-omega-batch.sh` on `/home/ubuntu/TESTING/QuicFuscate`, one release bin, no second install): ping 0% both ways; UDP 60 M reorder-off 59.999 Mbit/s 0% loss; UDP 60 M reorder-on (`JITTER_US=5000`, after TODO-1015 pressure-aware windows) 59.986 Mbit/s 0.001% loss, `qtun0 TX dropped=0`; UDP 140 M offered recv ~67 Mbit/s 51% loss `qtun0`=0 (1-core ceiling); TODO-1022 Streaming `force_on` `yield_window=28390` `drain_entries=2806`; TCP up 93.847 Mbit/s; TCP `-R` 90.171 Mbit/s 0 retrans after TODO-1027 fingerprint skip. Extra host trees `/home/ubuntu/QuicFuscate` and `/home/ubuntu/quicfuscate-src` were already present; not cloned again.
 
 ### WAN forwarding + NAT verified end-to-end on Omega (aarch64 Linux, nftables backend)
 - Topology: ns-cli --veth--> ns-srv --veth--> ns-wan (fake WAN 192.168.100.0/24; ns-srv default route via veth-wan).
 - `configured_routing_manager` auto-detection correctly picked `veth-wan` (default-route dev) over `veth-srv` (QUIC underlay) when configured `eth0` was absent - no flag needed for standard deployments.
 - Client 10.0.1.2 -> WAN host 192.168.100.2 through tunnel: 4/4, ~0.56ms RTT.
 - WAN-side wire shows src `192.168.100.1` (masqueraded), client TUN wire shows `10.0.1.2` - SNAT + conntrack return path both verified.
-- Residual enhancement (low): `wan_interface` has no CLI/config knob; deployments with non-default-route WAN (policy routing, multi-WAN, wg0 uplink) cannot pin it. Consider `--wan-interface` or `[server] wan_interface`.
+- WAN pin is already shipped: `--wan-interface` and `[server] wan_interface` override default-route autodetection (must name a live iface when TUN is on).
