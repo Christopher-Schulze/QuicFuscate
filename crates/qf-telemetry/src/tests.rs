@@ -275,6 +275,7 @@ fn fec_decoder_telemetry_is_exported() {
         "quicfuscate_fec_decoder_solve_success_ratio_ppm ",
         "quicfuscate_fec_decoder_solve_time_ns_total ",
         "quicfuscate_fec_decoder_dedup_evictions_total ",
+        "quicfuscate_fec_decoder_equation_evictions_total ",
         "quicfuscate_fec_fountain_decoder_evictions_total ",
         "quicfuscate_fec_fountain_decoder_admission_rejections_total ",
         "quicfuscate_fec_fountain_decoder_propagation_work_total ",

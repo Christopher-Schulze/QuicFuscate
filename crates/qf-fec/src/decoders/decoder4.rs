@@ -1,4 +1,7 @@
-use super::{anchor_is_valid, source_id_for_params, validate_decoder_dimensions};
+use super::{
+    admit_equation, anchor_is_valid, equation_row_cap, source_id_for_params,
+    validate_decoder_dimensions,
+};
 use crate::codecs::FecPacket;
 use qf_memory_pool::{MemoryPool, PooledBlock};
 use std::collections::{HashMap, VecDeque};
@@ -97,7 +100,7 @@ impl Decoder4 {
             data_buf[..n].copy_from_slice(&d[..n]);
 
             let eq = Equation4 { base_id: p.id, coeffs: coeffs.to_vec(), data: data_buf, len: n };
-            self.equations.push_back(eq);
+            admit_equation(&mut self.equations, eq, equation_row_cap(self.k, self.depth));
             self.try_peel_all();
         }
     }
@@ -206,5 +209,15 @@ impl Decoder4 {
         let mut res = VecDeque::new();
         std::mem::swap(&mut res, &mut self.emit_q);
         res
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_equations(&self) -> usize {
+        self.equations.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn equation_capacity(&self) -> usize {
+        equation_row_cap(self.k, self.depth)
     }
 }

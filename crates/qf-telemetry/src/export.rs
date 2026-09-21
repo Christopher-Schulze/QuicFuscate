@@ -359,6 +359,11 @@ pub fn export_telemetry_text() -> String {
         );
         let _ = writeln!(
             out,
+            "quicfuscate_fec_decoder_equation_evictions_total {}",
+            FEC_DECODER_EQUATION_EVICTIONS.get()
+        );
+        let _ = writeln!(
+            out,
             "quicfuscate_fec_fountain_decoder_evictions_total {}",
             FEC_FOUNTAIN_DECODER_EVICTIONS.get()
         );

@@ -1,6 +1,7 @@
 #![allow(private_interfaces)]
 
 use qf_memory_pool::{MemoryPool, PooledBlock};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 #[doc(hidden)]
@@ -142,6 +143,26 @@ fn record_decoder_solve(started: std::time::Instant, solved: bool) {
     }
 }
 
+/// Hard cap on retained unsolved repair equations (TODO-1023).
+///
+/// `2 * k * depth` holds a full sliding window of legitimate k+x
+/// redundancy plus a second generation. Floor at `k` so a single
+/// block still keeps one generation of repairs.
+pub(crate) fn equation_row_cap(k: usize, depth: usize) -> usize {
+    let window = depth.max(1);
+    k.saturating_mul(window).saturating_mul(2).max(k).max(1)
+}
+
+/// Admit one unsolved equation under FIFO oldest-first eviction.
+pub(crate) fn admit_equation<T>(equations: &mut VecDeque<T>, equation: T, cap: usize) {
+    let cap = cap.max(1);
+    while equations.len() >= cap {
+        let _ = equations.pop_front();
+        qf_telemetry::FEC_DECODER_EQUATION_EVICTIONS.inc();
+    }
+    equations.push_back(equation);
+}
+
 mod decoder16;
 mod decoder4;
 mod decoder8;
@@ -149,3 +170,168 @@ mod decoder8;
 pub use decoder16::Decoder16;
 pub use decoder4::Decoder4;
 pub use decoder8::{multiply_gf256_with_scratch, Decoder8, WiedemannScratch};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codecs::{Encoder, FecPacket, GF8};
+    use qf_memory_pool::MemoryPool;
+    use std::sync::Arc;
+
+    fn test_pool() -> Arc<MemoryPool> {
+        Arc::new(MemoryPool::new(64, 8192))
+    }
+
+    fn source_packet(id: u64, payload: &[u8], pool: &Arc<MemoryPool>) -> FecPacket {
+        let mut data = pool.alloc();
+        data[..payload.len()].copy_from_slice(payload);
+        FecPacket::new(id, Some(data), payload.len(), true, None, 0, Arc::clone(pool))
+    }
+
+    fn junk_repair8(id: u64, k: usize, pool: &Arc<MemoryPool>) -> FecPacket {
+        let payload_len = 16;
+        let mut data = pool.alloc();
+        data[..payload_len].fill(0x5A);
+        let mut coeffs = pool.alloc();
+        coeffs[..k].fill(1);
+        FecPacket::new(id, Some(data), payload_len, false, Some(coeffs), k, Arc::clone(pool))
+    }
+
+    fn junk_repair16(id: u64, k: usize, pool: &Arc<MemoryPool>) -> FecPacket {
+        let payload_len = 16;
+        let mut data = pool.alloc();
+        data[..payload_len].fill(0x5A);
+        let coeff_len = k.saturating_mul(2);
+        let mut coeffs = pool.alloc();
+        for slot in coeffs[..coeff_len].chunks_mut(2) {
+            slot[0] = 0;
+            slot[1] = 1;
+        }
+        FecPacket::new(
+            id,
+            Some(data),
+            payload_len,
+            false,
+            Some(coeffs),
+            coeff_len,
+            Arc::clone(pool),
+        )
+    }
+
+    fn junk_repair4(id: u64, k: usize, pool: &Arc<MemoryPool>) -> FecPacket {
+        let payload_len = 16;
+        let mut data = pool.alloc();
+        data[..payload_len].fill(0x5A);
+        let mut coeffs = pool.alloc();
+        coeffs[..k].fill(1);
+        FecPacket::new(id, Some(data), payload_len, false, Some(coeffs), k, Arc::clone(pool))
+    }
+
+    fn flood_and_assert<F>(mut take: F, cap: usize, flood: usize, first_id: u64)
+    where
+        F: FnMut(u64),
+    {
+        let before = qf_telemetry::FEC_DECODER_EQUATION_EVICTIONS.get();
+        for offset in 0..flood {
+            take(first_id.saturating_add(offset as u64));
+        }
+        let evicted = qf_telemetry::FEC_DECODER_EQUATION_EVICTIONS.get().saturating_sub(before);
+        assert!(
+            evicted >= flood.saturating_sub(cap) as u64,
+            "flood must evict oldest unsolved rows: evicted={evicted} flood={flood} cap={cap}"
+        );
+    }
+
+    #[test]
+    fn equation_row_cap_scales_with_k_and_depth() {
+        assert_eq!(equation_row_cap(4, 1), 8);
+        assert_eq!(equation_row_cap(4, 2), 16);
+        assert_eq!(equation_row_cap(1, 1), 2);
+        assert_eq!(equation_row_cap(8, 0), 16);
+    }
+
+    #[test]
+    fn decoder8_repair_flood_respects_equation_cap() {
+        let pool = test_pool();
+        let k = 4;
+        let mut decoder = Decoder8::new(k, Arc::clone(&pool));
+        let cap = decoder.equation_capacity();
+        assert_eq!(cap, 8);
+        flood_and_assert(
+            |id| {
+                decoder.take_packet(junk_repair8(id, k, &pool));
+                assert!(decoder.retained_equations() <= cap);
+            },
+            cap,
+            40,
+            3,
+        );
+        assert_eq!(decoder.retained_equations(), cap);
+    }
+
+    #[test]
+    fn decoder16_repair_flood_respects_equation_cap() {
+        let pool = test_pool();
+        let k = 4;
+        let mut decoder = Decoder16::new(k, Arc::clone(&pool));
+        let cap = decoder.equation_capacity();
+        assert_eq!(cap, 8);
+        // Decoder16 binds to the first valid anchor; flood the same window.
+        let before = qf_telemetry::FEC_DECODER_EQUATION_EVICTIONS.get();
+        for _ in 0..40 {
+            decoder.take_packet(junk_repair16(3, k, &pool));
+            assert!(decoder.retained_equations() <= cap);
+        }
+        let evicted = qf_telemetry::FEC_DECODER_EQUATION_EVICTIONS.get().saturating_sub(before);
+        assert!(evicted >= 32, "same-window flood must evict at the cap, evicted={evicted}");
+        assert_eq!(decoder.retained_equations(), cap);
+    }
+
+    #[test]
+    fn decoder4_repair_flood_respects_equation_cap() {
+        let pool = test_pool();
+        let k = 4;
+        let mut decoder = Decoder4::new(k, Arc::clone(&pool));
+        let cap = decoder.equation_capacity();
+        assert_eq!(cap, 8);
+        flood_and_assert(
+            |id| {
+                decoder.take_packet(junk_repair4(id, k, &pool));
+                assert!(decoder.retained_equations() <= cap);
+            },
+            cap,
+            40,
+            3,
+        );
+        assert_eq!(decoder.retained_equations(), cap);
+    }
+
+    #[test]
+    fn decoder8_sliding_recovers_n_minus_k_burst_under_cap() {
+        let pool = test_pool();
+        let k = 4;
+        let mut encoder = Encoder::<GF8>::new_sliding(k, 8);
+        let sources: Vec<Vec<u8>> = (0..8).map(|i| vec![0xA0 + i as u8; 32]).collect();
+        for (id, payload) in sources.iter().enumerate() {
+            encoder.take_packet(source_packet(id as u64, payload, &pool));
+        }
+        let repairs: Vec<FecPacket> = (0..k)
+            .map(|idx| encoder.generate_repair_packet(idx, &pool).expect("sliding repair"))
+            .collect();
+
+        let mut decoder = Decoder8::new(k, Arc::clone(&pool));
+        assert!(decoder.equation_capacity() >= k);
+        for repair in repairs {
+            decoder.take_packet(repair);
+            assert!(decoder.retained_equations() <= decoder.equation_capacity());
+        }
+
+        let recovered = decoder.get_result().expect("n-k sliding burst must recover under the cap");
+        let mut ids: Vec<u64> = recovered.iter().map(|packet| packet.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![4, 5, 6, 7]);
+        for packet in &recovered {
+            assert_eq!(packet.payload_slice(), Some(sources[packet.id as usize].as_slice()));
+        }
+    }
+}

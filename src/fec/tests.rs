@@ -472,8 +472,25 @@ w0 = 128
     assert_eq!(config.window_sizes.get(&FecMode::Ultra), Some(&1024));
     assert_eq!(config.window_sizes.get(&FecMode::Fountain), Some(&128));
     assert_eq!(config.configured_stream_every, Some(0));
+    assert!(!config.force_on);
     let error = config.validate().expect_err("stream_every=0 must fail validation");
     assert!(error.contains("configured_stream_every"));
+}
+
+#[test]
+fn standalone_fec_parser_accepts_force_on() {
+    let config = FecConfig::from_toml(
+        r#"
+[adaptive_fec]
+control_policy = "auto"
+initial_mode = "streaming"
+force_on = true
+"#,
+    )
+    .expect("force_on is a public FEC knob");
+    assert_eq!(config.initial_mode, FecMode::Streaming);
+    assert!(config.force_on);
+    config.validate().expect("force_on + auto is valid");
 }
 
 #[test]

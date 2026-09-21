@@ -4,7 +4,7 @@ title: FEC decoder equation matrices grow unbounded under adversarial repairs
 severity: MEDIUM
 phase: L
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1018]
 ---
@@ -68,3 +68,20 @@ Introduce an explicit equation bound per receive window:
   loss of `n-k` sources (cap must not break the TODO-1018 recovery
   path).
 - No regression in the 104 qf-fec tests; clippy/fmt clean.
+
+## Implementation (2026-09-21)
+
+Shared `equation_row_cap(k, depth) = 2*k*max(depth,1)` (floor `k`)
+and FIFO `admit_equation` in `crates/qf-fec/src/decoders.rs`. Decoder4,
+Decoder8, and Decoder16 all admit through that helper. Evictions
+increment `FEC_DECODER_EQUATION_EVICTIONS` /
+`quicfuscate_fec_decoder_equation_evictions_total`. Fountain decoder
+was already bounded (`FEC_FOUNTAIN_DECODER_EVICTIONS`). `pending_covers`
+was already bounded.
+
+Verified: flood tests for Decoder4/8/16 stay at the cap with eviction
+counts; Decoder8 sliding recovers an `n-k` burst under the cap;
+`cargo test -p qf-fec --lib` 109/109; clippy/fmt clean.
+
+Adjacent (not this TODO): `Decoder8.known` / `Decoder16.known` remain
+unbounded source maps across a long-lived sliding stream.

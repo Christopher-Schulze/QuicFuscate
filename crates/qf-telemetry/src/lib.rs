@@ -730,6 +730,8 @@ pub static FEC_DECODER_SOLVE_SUCCESSES: Counter = Counter::new();
 pub static FEC_DECODER_SOLVE_TIME_NS: Counter = Counter::new();
 /// Receive-window repair dedup entries evicted at the bounded FIFO limit.
 pub static FEC_DECODER_DEDUP_EVICTIONS: Counter = Counter::new();
+/// Unsolved GF decoder equations evicted at the bounded FIFO limit (TODO-1023).
+pub static FEC_DECODER_EQUATION_EVICTIONS: Counter = Counter::new();
 /// Fountain decoder equations evicted at the bounded FIFO limit.
 pub static FEC_FOUNTAIN_DECODER_EVICTIONS: Counter = Counter::new();
 /// Fountain repair symbols rejected by decoder state or admission limits.

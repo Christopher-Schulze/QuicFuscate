@@ -1,6 +1,7 @@
 use super::{
-    anchor_is_valid, copy_to_pooled_block, id_is_in_window, record_decoder_solve,
-    source_id_for_params, validate_decoder_dimensions, MAX_DECODER_SOURCE_COUNT,
+    admit_equation, anchor_is_valid, copy_to_pooled_block, equation_row_cap, id_is_in_window,
+    record_decoder_solve, source_id_for_params, validate_decoder_dimensions,
+    MAX_DECODER_SOURCE_COUNT,
 };
 use crate::codecs::FecPacket;
 use crate::gf_tables;
@@ -140,7 +141,7 @@ impl Decoder16 {
                 self.try_peel_all();
                 return;
             }
-            self.equations.push_back(equation);
+            admit_equation(&mut self.equations, equation, equation_row_cap(self.k, self.depth));
             let _ = self.try_eliminate();
         }
     }
@@ -172,6 +173,16 @@ impl Decoder16 {
     #[doc(hidden)]
     pub fn get_partial_result(&mut self) -> VecDeque<FecPacket> {
         std::mem::take(&mut self.emit_q)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_equations(&self) -> usize {
+        self.equations.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn equation_capacity(&self) -> usize {
+        equation_row_cap(self.k, self.depth)
     }
 
     fn is_complete(&self) -> bool {

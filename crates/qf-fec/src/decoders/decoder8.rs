@@ -1,6 +1,6 @@
 use super::{
-    record_decoder_solve, sliding_anchor_is_valid, source_id_for_params,
-    validate_decoder_dimensions,
+    admit_equation, equation_row_cap, record_decoder_solve, sliding_anchor_is_valid,
+    source_id_for_params, validate_decoder_dimensions,
 };
 use crate::codecs::FecPacket;
 use crate::gf_tables;
@@ -255,7 +255,7 @@ impl Decoder8 {
                     self.try_peel_all();
                     return;
                 }
-                self.equations.push_back(equation);
+                admit_equation(&mut self.equations, equation, equation_row_cap(self.k, self.depth));
                 let _ = self.try_eliminate();
             }
         }
@@ -849,6 +849,16 @@ impl Decoder8 {
     #[doc(hidden)]
     pub fn get_partial_result(&mut self) -> VecDeque<FecPacket> {
         std::mem::take(&mut self.emit_q)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_equations(&self) -> usize {
+        self.equations.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn equation_capacity(&self) -> usize {
+        equation_row_cap(self.k, self.depth)
     }
 
     /// Returns true if enough source packets have been recovered to fill the block.
