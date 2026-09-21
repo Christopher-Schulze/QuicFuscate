@@ -4,7 +4,7 @@ title: Evaluate io_uring send bundles / provided-buffer sends for TX batching
 severity: LOW
 phase: S
 priority: P3
-status: OPEN
+status: DONE
 created: 2026-09-19
 depends_on: ["TODO-1007"]
 ---
@@ -77,3 +77,31 @@ Phase 2 - Prototype (only if Phase 0 justifies):
 - Either measured adoption (Omega before/after pps + syscall counts, CI
   lane green) or a written rejection with the Phase 0 numbers showing why
   current batching suffices.
+
+## Verdict (2026-09-21): reject
+
+Phase 0 + kernel floor, no prototype.
+
+Kernel floor on Omega (`6.17.0-1018-oracle`):
+`/usr/include/linux/io_uring.h` exposes `IORING_RECVSEND_POLL_FIRST` and
+`IORING_RECVSEND_FIXED_BUF` but **not** `IORING_RECVSEND_BUNDLE`. There
+is no liburing on the host. A bundle probe cannot compile against the
+shipped uAPI. The `linux-transport-uring` CI lane would need the same
+flag and would have to carry a third fallback contract on top of
+TODO-1004 quarantine.
+
+Phase 0 cost share (already measured, no new `perf` run needed):
+- TODO-1005 removed the per-packet TX memcpy. TODO-1012 replaced the
+  non-GSO tail with one `sendmmsg` (Omega: `sendmsg` -31%, socket-TX
+  syscalls -15%).
+- GSO already does the "one stack descent, N wire datagrams" job
+  bundles advertise, using a contiguous super-buffer we already stage.
+- The standalone TUN client does not use io_uring (TODO-1020 STAY).
+  Bundles would only touch the io_driver / server worker, which is not
+  the 1-core TUN ceiling.
+
+Adoption gate (>10% pps at iso-CPU) is unreachable on this host: the
+uAPI is missing, and the remaining TX cost after GSO+sendmmsg is not
+per-SQE `msghdr` prep. Revisit only if a deployment kernel ships
+`IORING_RECVSEND_BUNDLE` in its installed headers **and** a multi-core
+io_driver profile shows per-SQE descent above ~5% of path cost.
