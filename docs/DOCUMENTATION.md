@@ -5387,6 +5387,8 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 ## Implementation Reconciliation (2026-08-03, crypto key and IV constructor boundaries)
 
+Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` were removed by TODO-1049. The live owners are `RingAesHp` and `RingChaCha20Poly1305`.
+
 - **Typed boundary:** `src/crypto/aead.rs` owns `KeyMaterialError` plus exact-length helpers. `ChaCha20Poly1305` requires a 32-byte key and 12-byte IV. AES-128-GCM and libaegis AEGIS-128L require a 16-byte key and a 12-byte IV.
 - **Header protection:** `AesHp::new` rejects secrets shorter than 16 bytes without a panic. Its documented raw-secret API still consumes the first 16 bytes of a longer secret; all packet setup paths derive the exact 16-byte header-protection key first and use the typed array constructor, so a 32-byte traffic secret is never silently installed as an HP key.
 - **Propagation:** QKey registry encryption/decryption, TLS cover ciphers, packet initial/handshake/0-RTT/1-RTT setup, examples, runtime fixtures, property/security fixtures, and the retained backend benchmark all propagate or prove the fallible constructor boundary. No key/IV `unwrap_or(0)` construction fallback remains; TODO-633 closes exact 32-byte QUIC traffic-secret derivation, while header-protection sample handling remains separately owned by TODO-629.
@@ -5404,7 +5406,7 @@ This read-only pass reconciled the current Cargo target inventory, runner refere
 
 - **Test boundary (superseded):** `GHASH_TEST_OVERRIDE`, `__test_set_ghash_override`, `GHASH_OVERRIDE`, `QUICFUSCATE_GHASH`, and `GHASH_PMULL_ENABLED` are removed with the first-party GHASH backend (TODO-1049); ring owns GHASH internally and no in-tree override surface remains.
 - **Benchmark:** the former `ghash-short`/`ghash` microbench commands are removed with the first-party GHASH backend (TODO-1049); `micro-crypto-all.sh` now measures the surviving `sha256` and `hmac-sha256` cells.
-- **Regression proof:** Native all-target check and strict Clippy passed. The complete Crypto group passed 144/144, GCM passed 11/11 with `QUICFUSCATE_GHASH_PMULL=0` and `=1`, the release short-packet benchmark completed 1,000 packets, and the runner smoke completed with isolated artifacts. The x86_64-Apple cross-check remains blocked by pre-existing `avx10.1-*` feature-macro errors and the existing non-constant `_mm_prefetch` argument at `src/optimize/parts/cache_and_const.rs:54`; no x86 runtime proof is claimed on this ARM host.
+- **Regression proof (2026-08-03 historical run, not a current gate):** Native all-target check and strict Clippy passed. The complete Crypto group passed 144/144, GCM passed 11/11 with `QUICFUSCATE_GHASH_PMULL=0` and `=1`, the release short-packet benchmark completed 1,000 packets, and the runner smoke completed with isolated artifacts. That override no longer exists (TODO-1049). Current proof is the qf-crypto library test count recorded on TODO-1049. The x86_64-Apple cross-check remains blocked by pre-existing `avx10.1-*` feature-macro errors and the existing non-constant `_mm_prefetch` argument at `src/optimize/parts/cache_and_const.rs:54`; no x86 runtime proof is claimed on this ARM host.
 - **Scope boundary:** No UI, Omega, or unrelated crypto backend behavior changed. The broader project audit remains open under its existing task owners.
 
 ## Implementation Reconciliation (2026-08-03, QUIC nonce and packet-number lifecycle)

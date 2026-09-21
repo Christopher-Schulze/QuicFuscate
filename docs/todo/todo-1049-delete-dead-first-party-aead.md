@@ -15,7 +15,9 @@ depends_on: [TODO-1034, TODO-1035, TODO-1050]
 
 The live packet path seals with ring and, for `off` / `performance` 1-RTT payload, libaegis. The first-party AES-GCM and ChaCha implementations remain in the tree. They are the "we rolled our own" surface. They are slower than the libraries, which is why they are not the owners. Dead code still counts.
 
-## Current code
+## Plan at open
+
+The modules below were present when this task opened. They are gone. See Result.
 
 Live owners, do not touch except call-site updates:
 

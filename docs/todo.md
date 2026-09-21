@@ -416,7 +416,7 @@
 - Detail: `docs/todo/todo-1034-replace-initial-aes-hp-ring.md`
 
 ### TODO-1035 - Move TLS-Cover and first-party ChaCha20-Poly1305 onto rustls/ring
-- DONE. TLS-Cover and production QKey storage use ring AES-GCM / ChaCha20-Poly1305. The QKey test fixture at the legacy envelope still uses first-party ChaCha for interop.
+- DONE. TLS-Cover and production QKey storage use ring AES-GCM / ChaCha20-Poly1305. The legacy `QFENC1` fixture seals with `RingChaCha20Poly1305`; TODO-1066 keeps one first-party ciphertext from `a87b9584` and opens it with ring.
 - Detail: `docs/todo/todo-1035-move-cover-chacha-to-rustls.md`
 
 ### TODO-1036 - Evaluate rustls aws-lc-rs for the standard AES-GCM path
@@ -545,7 +545,7 @@
 - Detail: `docs/todo/todo-1066-legacy-qkey-golden-ciphertext.md`
 
 ### TODO-1067 - Rewrite present-tense claims about deleted crypto
-- OPEN. Fix TODO-1035's first-party ChaCha bullet, TODO-626's live `subtle` claim, the GHASH regression-proof paragraph, the MAP 2026-08-01 subtle sentence, the TODO-1049 "Current code" section, and the 2026-08-03 AesHp/ChaCha constructor paragraph. Historical close counts stay.
+- DONE. TODO-1035 no longer says the fixture uses first-party ChaCha. TODO-626 is marked historical. The GHASH regression-proof paragraphs in DOCUMENTATION and MAP are dated 2026-08-03. The MAP subtle sentence is stamped superseded by TODO-1049. TODO-1049 "Current code" is now "Plan at open". The 2026-08-03 constructor section is labeled a historical snapshot. Historical close counts were not rewritten.
 - Detail: `docs/todo/todo-1067-stale-crypto-status-claims.md`
 
 ### TODO-1068 - Audit the crypto owner by behavior, not only by source strings
@@ -3698,7 +3698,7 @@
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
 - Detail: `docs/todo/todo-547-fec-wire-framing-live-one-rtt-integrity.md`
 ### TODO-626 - Constant-time tag comparison claim reconciled
-- The canonical helper delegates to `subtle::ConstantTimeEq`; all 13 production tag-verification call sites use it, byte-position-complete mismatch coverage passes inside the 141-test `qf-crypto` matrix, and strict crate Clippy passes.
+- Historical close (not the live owner): the helper delegated to `subtle::ConstantTimeEq` across 13 call sites inside the then-current 141-test `qf-crypto` matrix. TODO-1049 removed that dependency. Tag comparison now stays inside ring and libaegis.
 - Detail: `docs/todo/done/todo-626-crypto-non-constant-time-tag-comparison.md`
 
 ### TODO-602 - Superseded by the canonical legacy client pipeline cleanup

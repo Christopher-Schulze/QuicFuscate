@@ -4,7 +4,7 @@ title: Rewrite present-tense claims about deleted crypto
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-22
 depends_on: [TODO-1049]
 ---
@@ -51,9 +51,23 @@ One pass, one checklist in this file's Notes: path, line, action (rewrite or sta
 
 ## Sub-Tasks
 
-- [ ] Fix the six numbered hits.
-- [ ] Re-run the pattern list. Record leftovers and why each is allowed.
-- [ ] TODO-1035, TODO-626, TODO-1049 detail, DOCUMENTATION, and MAP agree that ring and libaegis are the AEAD owners and that `subtle` and GHASH overrides are gone.
+- [x] Fix the six numbered hits.
+- [x] Re-run the pattern list. Record leftovers and why each is allowed.
+- [x] TODO-1035, TODO-626, TODO-1049 detail, DOCUMENTATION, and MAP agree that ring and libaegis are the AEAD owners and that `subtle` and GHASH overrides are gone.
+
+## Notes
+
+Leftovers after the edit, all allowed:
+
+- `docs/MAP.md` and `docs/DOCUMENTATION.md` still contain `subtle::ConstantTimeEq` and `QUICFUSCATE_GHASH` inside sentences dated 2026-08-01 or 2026-08-03, or marked superseded by TODO-1049.
+- `AesHp::new` remains only under the 2026-08-03 historical snapshot banner.
+- `docs/todo.md` TODO-1035 title still says "first-party ChaCha20-Poly1305" as the historical task name. The status bullet no longer claims the fixture uses it.
+- `docs/todo.md` TODO-1066 records that the golden was sealed by first-party ChaCha at `a87b9584`. That is a past fact.
+- Audit-script negative patterns were not edited.
+
+## Result
+
+The six required hits are stamped or rewritten. Historical close counts, including TODO-1045's 104/104, were left alone.
 
 ## Acceptance
 
