@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 use proptest::prelude::*;
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
 use quicfuscate::crypto::RingChaCha20Poly1305;
-use quicfuscate::crypto::{install_data_aead_config, select_data_aead};
-use quicfuscate::engine::{AeadPreference, CryptoConfig};
+use quicfuscate::crypto::select_data_aead;
 use quicfuscate::fec::{Encoder8, FecDecoder8, FecPacket};
 use quicfuscate::optimize::MemoryPool;
 use quicfuscate::rng::push_hex_byte;
@@ -85,9 +84,6 @@ proptest! {
         let key = [0x11u8; 16];
         let iv = [0x22u8; 12];
 
-        let mut baseline_cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-        baseline_cfg.force_aead = "aegis".to_string();
-        install_data_aead_config(&baseline_cfg);
         let (baseline_seal, baseline_open) =
             select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
         let mut baseline_buf = vec![0u8; plaintext.len() + 16];
@@ -101,9 +97,6 @@ proptest! {
         prop_assert_eq!(&baseline_buf[..baseline_opened], plaintext.as_slice());
 
         let alias = PUBLIC_AEGIS_NAME;
-            let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-            cfg.force_aead = alias.to_string();
-            install_data_aead_config(&cfg);
             let (seal, open) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
             let mut buf = vec![0u8; plaintext.len() + 16];
             buf[..plaintext.len()].copy_from_slice(&plaintext);
@@ -131,9 +124,6 @@ proptest! {
         let key = [0x51u8; 16];
         let iv = [0x61u8; 12];
 
-        let mut baseline_cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-        baseline_cfg.force_aead = "aegis".to_string();
-        install_data_aead_config(&baseline_cfg);
         let (baseline_seal, _) =
             select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
         let mut baseline_buf = vec![0u8; plaintext.len() + 16];
@@ -143,9 +133,6 @@ proptest! {
             .expect("baseline seal");
 
         let alias = PUBLIC_AEGIS_NAME;
-            let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-            cfg.force_aead = alias.to_string();
-            install_data_aead_config(&cfg);
             let (seal, _) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
             let mut buf = vec![0u8; plaintext.len() + 16];
             buf[..plaintext.len()].copy_from_slice(&plaintext);
@@ -172,9 +159,6 @@ proptest! {
         let key = [0x77u8; 16];
         let iv = [0x88u8; 12];
 
-        let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-        cfg.force_aead = "aegis".to_string();
-        install_data_aead_config(&cfg);
         let (seal, open) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
         let mut buf = vec![0u8; plaintext.len() + 16];
         buf[..plaintext.len()].copy_from_slice(&plaintext);

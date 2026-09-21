@@ -553,7 +553,7 @@
 - Detail: `docs/todo/todo-1068-crypto-owner-behavior-audit.md`
 
 ### TODO-1069 - Remove the write-only DATA_AEAD_OVERRIDE_MODE selector residue
-- OPEN. The atomic mode global is written by `install_data_aead_selection` and read only in tests; the live selection path is `PrivateAeadFamily`/`payload_protection_pin`. Remove the dead global machinery or wire it, and retarget the tests to `CryptoConfig::validate`.
+- DONE. The atomic, `install_data_aead_selection`, and `install_data_aead_config` are gone. Tests assert `CryptoConfig::validate`. Callers in qf-crypto, fuzz, rt-property, and rt-security were retargeted. qf-crypto 59/59. Fuzz `crypto_operations_stable` passed. Property and security suites compile.
 - Detail: `docs/todo/todo-1069-remove-write-only-aead-override.md`
 
 ## Completed

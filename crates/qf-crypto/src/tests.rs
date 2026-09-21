@@ -1,13 +1,8 @@
 use super::RingChaCha20Poly1305;
-use super::{DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AUTO};
 use crate::crypto::aead::{AeadOpen, AeadSeal};
 use crate::{
     CryptoConfig, DataAeadPreference, LibAegis128Variant, PacketProtectionMode, PrivateAeadFamily,
 };
-use std::sync::Mutex;
-
-// DATA_AEAD_OVERRIDE_MODE is process-global. Serialize override tests to avoid races.
-static DATA_AEAD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(hex.len() / 2);
@@ -70,23 +65,20 @@ fn aead_rejects_packet_numbers_above_quic_limit() {
 }
 
 #[test]
-fn data_aead_config_force_overrides_preference() {
-    let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    super::install_data_aead_selection(DataAeadPreference::Auto, "aegis");
-    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AEGIS_L);
-    super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
+fn data_aead_config_force_aegis_is_accepted_when_protection_is_auto() {
+    let mut config = CryptoConfig::default();
+    config.packet_protection_mode = PacketProtectionMode::Auto;
+    config.force_aead = "aegis".to_string();
+    assert!(config.validate().is_ok());
 }
 
 #[test]
-fn data_aead_config_force_internal_width_aliases_fall_back_to_auto() {
-    let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    super::install_data_aead_selection(DataAeadPreference::Auto, "aegis-128x4");
-    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AUTO);
-
-    super::install_data_aead_selection(DataAeadPreference::Auto, "aegis-128x8");
-    assert_eq!(super::data_aead_override_mode(), DATA_AEAD_OVERRIDE_AUTO);
-
-    super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
+fn data_aead_config_force_internal_width_aliases_fail_closed() {
+    for spelling in ["aegis-128x4", "aegis-128x8"] {
+        let mut config = CryptoConfig::default();
+        config.force_aead = spelling.to_string();
+        assert!(config.validate().is_err(), "{spelling} must fail closed");
+    }
 }
 
 #[test]
@@ -230,14 +222,12 @@ fn ring_chacha20poly1305_roundtrips_across_quic_counters() {
 }
 
 #[test]
-fn data_aead_config_preference_is_conditional() {
-    let _guard = DATA_AEAD_TEST_LOCK.lock().unwrap();
-    super::install_data_aead_selection(DataAeadPreference::Aegis128L, "");
-    // On platforms without hardware AES, preference should not override defaults.
-    // On platforms with hardware AES, preference activates AEGIS-128L.
-    let mode = super::data_aead_override_mode();
-    assert!(mode == DATA_AEAD_OVERRIDE_AUTO || mode == DATA_AEAD_OVERRIDE_AEGIS_L);
-    super::set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
+fn data_aead_config_preference_aegis_conflicts_with_standard() {
+    let mut config = CryptoConfig::default();
+    config.aead_preference = DataAeadPreference::Aegis128L;
+    assert!(config.validate().is_err());
+    config.packet_protection_mode = PacketProtectionMode::Auto;
+    assert!(config.validate().is_ok());
 }
 
 #[test]

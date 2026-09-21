@@ -9,8 +9,7 @@ use crossbeam_channel::bounded;
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
 use quicfuscate::crypto::RingChaCha20Poly1305;
-use quicfuscate::crypto::{install_data_aead_config, select_data_aead};
-use quicfuscate::engine::{AeadPreference, CryptoConfig};
+use quicfuscate::crypto::select_data_aead;
 use quicfuscate::error::ConnectionError;
 use quicfuscate::fec::{Encoder8, FecDecoder8, FecPacket};
 use quicfuscate::optimize::{ConstPacketPool, MemoryPool};
@@ -217,11 +216,7 @@ fn crypto_properties_roundtrip() {
     assert_eq!(&buf[..opened_len], plaintext);
 }
 
-fn seal_and_open_via_selected_aead(force_aead: &str, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
-    let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
-    cfg.force_aead = force_aead.to_string();
-    install_data_aead_config(&cfg);
-
+fn seal_and_open_via_selected_aead(plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let key = [0x42u8; 16];
     let iv = [0x24u8; 12];
     let (seal, open) = select_data_aead(&key, &iv).expect("exact data-plane fixture lengths");
@@ -239,7 +234,7 @@ fn data_aead_public_aliases_match_aegis128l_roundtrip() {
     let plaintext = b"quicfuscate-public-aead-alias-roundtrip";
     let aad = b"alias-ad";
 
-    let baseline = seal_and_open_via_selected_aead("aegis", plaintext, aad);
+    let baseline = seal_and_open_via_selected_aead(plaintext, aad);
     assert_eq!(baseline, plaintext);
 }
 
@@ -266,7 +261,7 @@ fn data_aead_force_aegis_roundtrip() {
     let plaintext = b"quicfuscate-public-aegis-roundtrip";
     let aad = b"aegis-ad";
 
-    let opened = seal_and_open_via_selected_aead("aegis", plaintext, aad);
+    let opened = seal_and_open_via_selected_aead(plaintext, aad);
     assert_eq!(opened, plaintext);
 }
 

@@ -6,8 +6,8 @@
 //! `crypto.force_aead` spelling.
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::{install_data_aead_config, select_data_aead, RingChaCha20Poly1305};
-use quicfuscate::engine::{AeadPreference, CryptoConfig};
+use quicfuscate::crypto::{select_data_aead, RingChaCha20Poly1305};
+use quicfuscate::engine::{AeadPreference, CryptoConfig, PacketProtectionMode};
 
 pub const PUBLIC_FORCE_AEAD_VALUES: [&str; 2] = ["auto", "aegis"];
 
@@ -41,7 +41,10 @@ pub fn exercise(data: &[u8]) {
         [usize::from(data[0]) % PUBLIC_FORCE_AEAD_VALUES.len()];
     let mut cfg = CryptoConfig { aead_preference: AeadPreference::Auto, ..Default::default() };
     cfg.force_aead = force.to_string();
-    install_data_aead_config(&cfg);
+    if force == "aegis" {
+        cfg.packet_protection_mode = PacketProtectionMode::Auto;
+    }
+    assert!(cfg.validate().is_ok(), "accepted force_aead must validate");
 
     let mut key16 = [0u8; 16];
     key16.copy_from_slice(&data[..16]);

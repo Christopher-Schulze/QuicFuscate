@@ -4,7 +4,7 @@ title: Remove the write-only DATA_AEAD_OVERRIDE_MODE selector residue
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-22
 depends_on: [TODO-1049]
 ---
@@ -74,17 +74,24 @@ removed multi-backend selector and keeps dead state plus test scaffolding alive.
 
 ## Sub-Tasks
 
-- [ ] Caller inventory re-run and recorded in Notes (expected: no production callers;
+- [x] Caller inventory re-run and recorded in Notes (expected: no production callers;
       test callers `qf-crypto/src/tests.rs` + `crypto_operations.rs` + `rt-property-suite.rs`
       + `rt-security-suite.rs`).
-- [ ] Atomic, constants, getter/setter, `install_data_aead_selection` removed; compat adapter
+- [x] Atomic, constants, getter/setter, `install_data_aead_selection` removed; compat adapter
       removed or reduced to its remaining purpose.
-- [ ] No-op `install_data_aead_config` calls deleted in `crypto_operations.rs`,
+- [x] No-op `install_data_aead_config` calls deleted in `crypto_operations.rs`,
       `rt-property-suite.rs`, `rt-security-suite.rs` (5+1+1 call sites).
-- [ ] Tests retargeted to `CryptoConfig::validate` semantics; qf-crypto test count updated in
+- [x] Tests retargeted to `CryptoConfig::validate` semantics; qf-crypto test count updated in
       `docs/todo.md` where quoted.
-- [ ] `cargo test -p qf-crypto --lib --offline` green; `cargo check --all-targets` clean;
-      rt-property-suite and rt-security-suite still compile and pass under `rust-tests`.
+- [x] `cargo test -p qf-crypto --lib --offline` 59/59. `cargo check --offline --features rust-tests --test rt-property-suite --test rt-security-suite` clean. Fuzz `crypto_operations_stable` passed.
+
+## Notes
+
+No production caller. Test callers were the four files listed above, plus the `DataAeadConfig` impl in `src/engine/config.rs`. `select_data_aead` never read the atomic.
+
+## Result
+
+The global, the installer, and the compat trait are gone. `aegis-128x4` and `aegis-128x8` still fail `CryptoConfig::validate`. `aegis` with `packet_protection_mode = auto` still validates. qf-crypto 59/59. `cargo check --offline --features rust-tests --test rt-property-suite --test rt-security-suite` is clean. Fuzz `crypto_operations_stable` passed. The isolated fuzz lockfile resolve was discarded.
 
 ## Acceptance
 

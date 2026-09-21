@@ -6,7 +6,6 @@
 //! selects it. There is no first-party AEGIS or MORUS implementation.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU8, Ordering};
 
 // Internal compatibility aliases keep the moved source readable while making the crate boundary
 // explicit: crypto owns the machine room and consumes only common, error, CPU, and telemetry
@@ -18,11 +17,6 @@ pub(crate) use qf_telemetry as telemetry;
 // Removed: rand::rngs::OsRng + RngCore. Secure randomness comes from
 // qf-common's fill_secure_or_abort, which wraps getrandom directly and
 // avoids coupling to any rand_core version.
-
-const DATA_AEAD_OVERRIDE_AUTO: u8 = 0;
-const DATA_AEAD_OVERRIDE_AEGIS_L: u8 = 1;
-
-static DATA_AEAD_OVERRIDE_MODE: AtomicU8 = AtomicU8::new(DATA_AEAD_OVERRIDE_AUTO);
 
 // aarch64 intrinsics are imported locally where used via core::arch::aarch64
 
@@ -498,15 +492,6 @@ pub fn select_libaegis128_packet(
     )
 }
 
-#[cfg(test)]
-fn data_aead_override_mode() -> u8 {
-    DATA_AEAD_OVERRIDE_MODE.load(Ordering::Relaxed)
-}
-
-fn set_data_aead_override_mode(mode: u8) {
-    DATA_AEAD_OVERRIDE_MODE.store(mode, Ordering::Relaxed);
-}
-
 /// Product-level private AEAD family preference.
 ///
 /// `auto` selects no private family. Explicit `aegis` opts into libaegis
@@ -682,63 +667,6 @@ fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
     }
     Some(out)
 }
-
-/// Record the operator private-family choice.
-///
-/// Compatibility Initial, Handshake, and pre-auth 1-RTT secret installs use
-/// ring AES-128-GCM. The authenticated private owner is always libaegis
-/// AEGIS-128L when a caller uses the private selector. `auto` does not select
-/// it. This is not a TLS cipher suite.
-pub fn install_data_aead_selection(preference: DataAeadPreference, force_aead: &str) {
-    let has_hw_aes = {
-        #[cfg(target_arch = "x86_64")]
-        {
-            qf_cpu::FeatureDetector::instance().features_full().aesni
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            qf_cpu::FeatureDetector::instance().features_full().aes
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            false
-        }
-    };
-
-    // Highest priority: explicit string override.
-    let force = force_aead.trim();
-    if !force.is_empty() {
-        let v = force.to_ascii_lowercase();
-        match v.as_str() {
-            "auto" => set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO),
-            "aegis" => {
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_L)
-            }
-            _ => {
-                // Validation should reject unknown values; keep runtime behavior stable.
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
-            }
-        }
-        return;
-    }
-
-    // Preference-based override.
-    match preference {
-        DataAeadPreference::Auto => set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO),
-        DataAeadPreference::Aegis128L => {
-            // Preference: only take effect when AES hardware is available; otherwise keep auto.
-            if has_hw_aes {
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AEGIS_L);
-            } else {
-                set_data_aead_override_mode(DATA_AEAD_OVERRIDE_AUTO);
-            }
-        }
-    }
-}
-
-// ============================================================================
-// CRYPTO SUBMODULES: AEAD traits/HP, HKDF KDF, minimal GCM helper
-// ============================================================================
 
 /// Re-export of QUIC key derivation (HKDF-based Initial/Handshake/1-RTT key schedule).
 pub use self::quic_kdf as kdf;
