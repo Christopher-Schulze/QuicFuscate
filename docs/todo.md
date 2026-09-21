@@ -242,7 +242,7 @@
 - Detail: `docs/todo/todo-904-ci-lane-consolidation.md`
 
 ### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
-- Local correctness reconciliation is active against the pinned CFRG AEGIS-128L vectors and the official CAESAR MORUS-1280-128 reference. No advanced family is promoted or enabled by this work. The standard AES-GCM baseline remains the live rollback path.
+- Local correctness reconciliation is active against the pinned CFRG AEGIS-128L vectors and the official CAESAR MORUS-1280-128 reference. No advanced family is promoted or enabled by this work. The standard AES-GCM baseline remains the live rollback path. Winner freeze from existing ARM cells is TODO-1028 (not started).
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
 ### TODO-906 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
@@ -384,8 +384,28 @@
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
-- IN_PROGRESS. Core implemented and live-proven on Omega (ARM64, real TUN+QKey+MASQUE): authenticated proposal/selection/confirmation capsules over H3/MASQUE, TLS-exporter-bound directional keys, deterministic packet-number boundary switch, `quicfuscate_private_upgrade_activated_total` telemetry reaching 1 on live upgrade, 0% ping loss through the switch, interop matrix green (auto↔auto activates, standard↔auto stays standard, reconnect re-negotiates). Two real bugs fixed: standalone client assignment path skipped QKey-transcript marking + control tick and never applied the configured private policy (`91029a0`, consolidated into one finalize method `a2a6695`); pending negotiations parked forever - now bounded by `PRIVATE_NEGOTIATION_DEADLINE` 10s, auto→standard fallback, advanced-required→Terminal fail-closed (`6e56611`). Still open: packet-capture wire evidence, x86_64 second witness, side-channel review, and the TODO-884 winner freeze for `aead_preference="auto"` (currently maps to None → shipped default stays inert).
+- IN_PROGRESS. Core implemented and live-proven on Omega (ARM64, real TUN+QKey+MASQUE): authenticated proposal/selection/confirmation capsules over H3/MASQUE, TLS-exporter-bound directional keys, deterministic packet-number boundary switch, `quicfuscate_private_upgrade_activated_total` telemetry reaching 1 on live upgrade, 0% ping loss through the switch, interop matrix green (auto↔auto activates, standard↔auto stays standard, reconnect re-negotiates). Two real bugs fixed: standalone client assignment path skipped QKey-transcript marking + control tick and never applied the configured private policy (`91029a0`, consolidated into one finalize method `a2a6695`); pending negotiations parked forever - now bounded by `PRIVATE_NEGOTIATION_DEADLINE` 10s, auto→standard fallback, advanced-required→Terminal fail-closed (`6e56611`). Remaining execution is split: TODO-1028 freezes the 884 family from existing ARM cells; TODO-1029 is the Omega pcap/wire proof. x86_64 second witness and side-channel review stay on 884/681.
 - Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
+
+### TODO-1028 - Freeze TODO-884 advanced-family winner from existing ARM evidence
+- OPEN. Do not run new benches. Freeze or honestly refuse a winner using the already captured ARM64 Criterion cells (macOS primitive + Omega 2026-09-19). Must call out the apples-to-oranges rustls-full-path vs first-party-primitive confound. Maps `aead_preference="auto"` only after the freeze record exists.
+- Detail: `docs/todo/todo-1028-freeze-884-arm-winner.md`
+
+### TODO-1029 - Omega pcap/wire proof for private AEAD upgrade (TODO-885)
+- OPEN. Packet-capture evidence that post-activation 1-RTT payload AEAD is the negotiated private owner while Initial/Handshake/pre-auth 1-RTT/header protection stay rustls-standard. Telemetry-only proof is not enough.
+- Detail: `docs/todo/todo-1029-omega-pcap-private-aead.md`
+
+### TODO-1030 - Custom-vs-standard systems audit (crypto, stealth, FEC, 0-RTT)
+- OPEN. Decision audit only until explicitly started. Inventory every first-party primitive and protocol custom, compare to the standard owner, and record whether custom still earns its keep on speed, stealth, FEC, reviewability, and reliability. 0-RTT later-work is TODO-1031. Same-API AEAD bakeoff is TODO-1032.
+- Detail: `docs/todo/todo-1030-custom-vs-standard-systems-audit.md`
+
+### TODO-1031 - Later rustls-standard 0-RTT investigation (never private AEAD)
+- OPEN. Do not implement now. After the crypto posture is settled, investigate Chrome-like resume 0-RTT on rustls PacketKey plus the existing strike register. Private-AEAD 0-RTT stays out of scope. Replay, resume fingerprint, and reconnect latency must be proven before any enable.
+- Detail: `docs/todo/todo-1031-later-rustls-0rtt-investigation.md`
+
+### TODO-1032 - Same-API AEAD bakeoff: rustls/ring, aws-lc, libaegis, first-party
+- OPEN. Do not start until explicitly requested. Fair primitive plus full packet-path (HP+AAD+PN) matrix on ARM and later x86. Answers whether any AEGIS/MORUS owner beats rustls AES-GCM, why first-party is slow, and whether first-party can be saved.
+- Detail: `docs/todo/todo-1032-same-api-aead-bakeoff.md`
 
 ## Completed
 

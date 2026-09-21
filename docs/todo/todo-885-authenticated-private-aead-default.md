@@ -344,3 +344,10 @@ standard-immunity, active/terminal-immunity.
 Remaining open gates (unchanged): packet-capture wire evidence, x86_64 second-witness
 benchmarks, side-channel review, and the TODO-884 winner freeze that maps
 `aead_preference="auto"` to a concrete family so the shipped default actually negotiates.
+
+## Split remaining work (2026-09-21, no implementation)
+
+- TODO-1028 owns the 884 winner freeze from existing ARM cells.
+- TODO-1029 owns Omega pcap/wire proof for this upgrade path.
+- Do not execute either task until explicitly started. Live telemetry proof
+  (`activated_total=1`) stays recorded above and is not a substitute for pcap.
