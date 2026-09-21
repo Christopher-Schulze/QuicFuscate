@@ -4,7 +4,7 @@ title: Next-generation stealth shaping - research track from 2025 literature
 severity: MEDIUM
 phase: L
 priority: P2
-status: PARTIAL
+status: DONE
 created: 2026-09-19
 depends_on: []
 ---
@@ -143,10 +143,11 @@ inbound cadence) is the downstream row steering padding/chaff, while
 upstream row steering jitter/pacing; `up_us <= 0` keeps the symmetric
 fallback until an upload estimate exists.
 
-OPEN: candidate 4 stays deferred-by-verdict (QUICstep, see study below);
-candidate 5 landed as TODO-1014; the ChameleonFlow reorder window landed
-via TODO-1015/1016 (lift: TODO-1017); Tamaraw direction split landed as
-TODO-1019.
+CLOSED (2026-09-21): every candidate has a written verdict and a home.
+Candidate 4 stays deferred-by-verdict (QUICstep, see study below).
+Candidate 5 landed as TODO-1014. ChameleonFlow reorder + 80% gate closed
+via TODO-1015/1016/1017. Tamaraw direction split landed as TODO-1019.
+This standing track has no remaining adopt/adapt work.
 
 ## Design studies (2026-09-20)
 
