@@ -1,3 +1,10 @@
+---
+id: TODO-961
+title: `apply_policy` observer call: `Option::take` instead of `Arc::clone`
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-961 - `apply_policy` observer call: `Option::take` instead of `Arc::clone`
 
 ## Status

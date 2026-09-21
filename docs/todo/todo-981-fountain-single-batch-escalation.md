@@ -1,3 +1,10 @@
+---
+id: TODO-981
+title: Adaptive FEC: single lossy batch escalates to Fountain; Kalman freeze pins stale estimate
+status: OPEN
+created: 2026-09-19
+---
+
 # TODO-981 - Adaptive FEC: single lossy batch escalates to Fountain; Kalman freeze pins stale estimate
 
 ## Symptom

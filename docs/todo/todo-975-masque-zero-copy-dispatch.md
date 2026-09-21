@@ -1,3 +1,10 @@
+---
+id: TODO-975
+title: MASQUE per-packet alloc/copy/lock elimination (uplink + downlink)
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-975 - MASQUE per-packet alloc/copy/lock elimination (uplink + downlink)
 
 Status: DONE (local; Omega verification pending)

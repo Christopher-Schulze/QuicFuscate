@@ -1,3 +1,10 @@
+---
+id: TODO-947
+title: DATAGRAM queues: bounded buffer free-list instead of alloc/free per datagram
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-947 - DATAGRAM queues: bounded buffer free-list instead of alloc/free per datagram
 
 ## Status

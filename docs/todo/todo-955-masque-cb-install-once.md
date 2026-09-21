@@ -1,3 +1,10 @@
+---
+id: TODO-955
+title: MASQUE datagram sink: install once instead of rebind per datagram
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-955 - MASQUE datagram sink: install once instead of rebind per datagram
 
 ## Status

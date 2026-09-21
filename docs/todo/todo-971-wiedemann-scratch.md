@@ -1,3 +1,10 @@
+---
+id: TODO-971
+title: Wiedemann per-worker matrix/rhs scratch + lookup build
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-971 - Wiedemann per-worker matrix/rhs scratch + lookup build
 
 ## Status

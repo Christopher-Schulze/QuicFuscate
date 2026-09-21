@@ -144,8 +144,16 @@ The "remaining lift" chain closed: atomic pair emission landed in
 TODO-1017 (done), the scheduler defect behind the ~38% kernel-TUN
 loss was root-caused to the backpressured park path and fixed in
 TODO-1021 (done, `qtun0 TX dropped`=0 at 60 M and 140 M offered).
-What remains before this feature's acceptance can be re-validated
-end-to-end is the **wire-FEC bypass**: with a committed wire profile
-`reorder_window_tick` is unreachable, so reorder cannot arm at all
-under adaptive FEC - tracked as TODO-1022. The >=80%-of-baseline
-throughput criterion therefore still rides on TODO-1022's resolution.
+TODO-1022 Option A landed: framed systematic sources now tick the
+gather window on the wire-FEC path; repairs are forced non-bulk and
+pre-paired so they never arm or swap. Unit test
+`reorder_window_tick_arms_under_committed_wire_fec` is green. The
+>=80%-of-baseline Omega revalidation failed on 2026-09-21 after
+the `--no-utls` knob fix actually armed the window: UDP 60 M
+reorder-off recv 59.982 Mbit/s / 0% loss vs reorder-on
+(`JITTER_US=5000`) recv 30.602 Mbit/s / 43.94% loss
+(`tun_drops=36381`, `qtun0 TX dropped=0`, `yield_window=9440`,
+`drain_entries=1422`). Kernel drops stay gone; the remaining
+cut is userspace `tun_drops` under the gather-window cadence.
+Window arming itself is proven (also under committed FEC,
+TODO-1022).

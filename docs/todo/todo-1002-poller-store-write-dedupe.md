@@ -1,3 +1,10 @@
+---
+id: TODO-1002
+title: TODO-1002 — Dedupe engine-poller store writes (render churn)
+status: DONE
+created: 2026-09-19
+---
+
 # TODO-1002 — Dedupe engine-poller store writes (render churn)
 
 ## Status

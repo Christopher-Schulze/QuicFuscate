@@ -1,3 +1,10 @@
+---
+id: TODO-944
+title: H3-Poll-Loop: `conn.stats().clone()` pro Iteration -> lazy fetch
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-944 - H3-Poll-Loop: `conn.stats().clone()` pro Iteration -> lazy fetch
 
 ## Status

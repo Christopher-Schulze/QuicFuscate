@@ -1,3 +1,10 @@
+---
+id: TODO-964
+title: FEC repair encoders: in-place `par_chunks_mut` instead of scratch vecs + merge
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-964 - FEC repair encoders: in-place `par_chunks_mut` instead of scratch vecs + merge
 
 ## Status

@@ -1,3 +1,10 @@
+---
+id: TODO-946
+title: `send_with_info`: raw datagrams emit directly from the caller buffer
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-946 - `send_with_info`: raw datagrams emit directly from the caller buffer
 
 ## Status

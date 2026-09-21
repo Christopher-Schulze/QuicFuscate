@@ -4,7 +4,7 @@ title: io_uring TX triple-copy and channel1 fix
 severity: MEDIUM
 phase: S
 priority: P1
-status: IN_PROGRESS
+status: PARTIAL
 created: 2026-08-21
 depends_on: []
 ---

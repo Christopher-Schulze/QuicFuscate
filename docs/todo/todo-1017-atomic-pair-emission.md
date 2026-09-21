@@ -137,6 +137,6 @@ io_driver would not change the measured profile; (2) the standalone
 scheduling fix landed as TODO-1021 (drain-into-bounded-backlog under
 backpressure; Omega: `qtun0 TX dropped`=0 at both 60 M and 140 M
 offered, `send_polls`/`send_datagrams` 27x -> 1.7x); (3) GSO segment-
-level permutation remains optional/unscheduled. Residual: reorder
-windows cannot arm under committed wire FEC (TODO-1022), which blocks
-the reorder-active revalidation - mechanism here is done and tested.
+level permutation remains optional/unscheduled. TODO-1022 Option A
+landed (framed systematic tick + repair never-hold). Residual is the
+Omega reorder-active revalidation, not a missing mechanism.

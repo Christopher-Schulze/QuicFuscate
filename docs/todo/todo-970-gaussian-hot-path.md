@@ -1,3 +1,10 @@
+---
+id: TODO-970
+title: Gaussian elimination hot path acceleration (Decoder8/16)
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-970 - Gaussian elimination hot path acceleration (Decoder8/16)
 
 ## Status

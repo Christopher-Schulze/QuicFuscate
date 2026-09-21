@@ -1,3 +1,10 @@
+---
+id: TODO-956
+title: Recovery ACK path: reuse scratch vectors instead of per-ACK allocations
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-956 - Recovery ACK path: reuse scratch vectors instead of per-ACK allocations
 
 ## Status

@@ -1,3 +1,10 @@
+---
+id: TODO-958
+title: `AckOutcome`: inline `SmallVec` for `newly_acked`/`lost`
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-958 - `AckOutcome`: inline `SmallVec` for `newly_acked`/`lost`
 
 ## Status

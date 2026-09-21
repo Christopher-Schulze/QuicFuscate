@@ -1,3 +1,10 @@
+---
+id: TODO-962
+title: `benches/ack_pipeline.rs`: criterion evidence for the alloc-free ACK path
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-962 - `benches/ack_pipeline.rs`: criterion evidence for the alloc-free ACK path
 
 ## Status

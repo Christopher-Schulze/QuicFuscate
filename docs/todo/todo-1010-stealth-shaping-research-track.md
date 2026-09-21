@@ -4,7 +4,7 @@ title: Next-generation stealth shaping - research track from 2025 literature
 severity: MEDIUM
 phase: L
 priority: P2
-status: OPEN
+status: PARTIAL
 created: 2026-09-19
 depends_on: []
 ---

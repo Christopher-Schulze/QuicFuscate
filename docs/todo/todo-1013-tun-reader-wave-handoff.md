@@ -1,3 +1,10 @@
+---
+id: TODO-1013
+title: TODO-1013 — TUN reader: wave-batched channel handoff
+status: DONE
+created: 2026-09-20
+---
+
 # TODO-1013 — TUN reader: wave-batched channel handoff
 
 Status: DONE (implementation + Omega A/B measurement + e2e verification)

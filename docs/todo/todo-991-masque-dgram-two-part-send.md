@@ -1,3 +1,10 @@
+---
+id: TODO-991
+title: TODO-991 — MASQUE datagram send without staged concatenation copy
+status: OPEN
+created: 2026-09-19
+---
+
 # TODO-991 — MASQUE datagram send without staged concatenation copy
 
 ## Context

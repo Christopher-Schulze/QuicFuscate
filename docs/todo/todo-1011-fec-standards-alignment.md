@@ -4,7 +4,7 @@ title: FEC standards alignment - NWCRG RLC window, application-tailored gating, 
 severity: MEDIUM
 phase: M
 priority: P2
-status: OPEN
+status: PARTIAL
 created: 2026-09-19
 depends_on: []
 ---

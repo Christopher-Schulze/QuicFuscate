@@ -1,3 +1,10 @@
+---
+id: TODO-906
+title: Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
+status: DONE
+created: 2026-08-23
+---
+
 # TODO-906: Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
 
 Renumbered from the collided "TODO-894" used in commit `2a3beb2`; number 894

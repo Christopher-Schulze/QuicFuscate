@@ -1,3 +1,10 @@
+---
+id: TODO-959
+title: FlowShaper: lock-free history length on the jitter path
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-959 - FlowShaper: lock-free history length on the jitter path
 
 ## Status

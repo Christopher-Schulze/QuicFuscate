@@ -1,3 +1,10 @@
+---
+id: TODO-986
+title: Standalone client TX: per-packet sendmsg instead of UDP_SEGMENT batching
+status: OPEN
+created: 2026-09-19
+---
+
 # TODO-986 - Standalone client TX: per-packet sendmsg instead of UDP_SEGMENT batching
 
 ## Symptom

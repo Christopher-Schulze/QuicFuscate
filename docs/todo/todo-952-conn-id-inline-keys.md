@@ -1,3 +1,10 @@
+---
+id: TODO-952
+title: Server live state: `ConnectionId` keys instead of `Vec<u8>` conn_id allocs
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-952 - Server live state: `ConnectionId` keys instead of `Vec<u8>` conn_id allocs
 
 ## Status

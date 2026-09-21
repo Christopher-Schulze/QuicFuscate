@@ -1,3 +1,10 @@
+---
+id: TODO-939
+title: Client-RX Standardpfad: Per-Datagram-Kopie in Batch-Slots -> Flat+Spans
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-939 - Client-RX Standardpfad: Per-Datagram-Kopie in Batch-Slots -> Flat+Spans
 
 ## Status

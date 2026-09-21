@@ -1,3 +1,10 @@
+---
+id: TODO-905
+title: Bound PTO backoff for nested circuit hops
+status: DONE
+created: 2026-08-23
+---
+
 # TODO-905: Bound PTO backoff for nested circuit hops
 
 Renumbered from the collided "TODO-895" used in commits `22b6198`/`bfa920e`;

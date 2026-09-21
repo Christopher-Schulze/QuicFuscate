@@ -1,3 +1,10 @@
+---
+id: TODO-972
+title: PathScheduler per-packet Vec allocs (latent multipath flaw)
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-972 - PathScheduler per-packet Vec allocs (latent multipath flaw)
 
 Status: DONE (local; dormant code - no production caller exists yet)

@@ -107,8 +107,8 @@ Reproduce on Omega: `QUICFUSCATE_STEALTH_JITTER_US=1` + uTLS + iperf uplink.
 Both follow-ups closed: TODO-1017 (atomic pair emission, swap-on-join)
 and TODO-1020 (io_driver verdict: STAY) are done, and the scheduling
 defect they surfaced - the backpressured park path spinning the select
-loop - is fixed in TODO-1021 (done, Omega-verified). The 80%-of-
-baseline acceptance remains formally open: reorder windows currently
-cannot arm under a committed wire-FEC profile (TODO-1022), so the
-reorder-active revalidation could not run yet. This file's scheduler
-redesign itself is landed and verified.
+loop - is fixed in TODO-1021 (done, Omega-verified). The 80%-of-baseline acceptance is still open after the 2026-09-21
+Omega re-run that actually armed the window (see TODO-1015):
+30.602 / 59.982 Mbit/s (51%) with `qtun0 TX dropped=0`. The
+scheduler redesign itself is landed; the remaining cut is
+userspace `tun_drops` under gather-window cadence.

@@ -1,3 +1,10 @@
+---
+id: TODO-973
+title: MemoryPool ownership ledger: fused free-path transition
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-973 - MemoryPool ownership ledger: fused free-path transition
 
 Status: DONE (local + Omega aarch64 Linux)

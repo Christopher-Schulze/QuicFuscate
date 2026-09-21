@@ -1,3 +1,10 @@
+---
+id: TODO-963
+title: Multi-hop inner ingress: buffer reuse instead of alloc+drop per datagram
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-963 - Multi-hop inner ingress: buffer reuse instead of alloc+drop per datagram
 
 ## Status

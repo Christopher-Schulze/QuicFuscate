@@ -4,7 +4,7 @@ title: audit-todo-consistency.sh permanently red - 95 legacy files lack YAML fro
 severity: LOW
 phase: L
 priority: P3
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: []
 ---
@@ -45,3 +45,16 @@ scriptable, and a uniform format keeps the audit simple.
   only the header block is added.
 - The audit's remaining checks (index cross-references, DONE
   acceptance classification) still run over all files.
+
+## Implementation (2026-09-21)
+
+Option A. 65 legacy details received minimal frontmatter
+(`id`/`title`/`status`/`created`); bodies unchanged. The audit now
+accepts the live vocabulary (PARTIAL, BLOCKED, IN_PROGRESS, ACTIVE,
+COMPLETED, CLOSED, AUDIT_COMPLETE, QUEUED), tokenizes annotated
+`status:` values, and Check 3 reads `### TODO-N` heading bullets in
+`docs/todo.md` (legacy `**STATUS**` tables still work). Four real
+index/detail drifts were aligned (902/1009/1010/1011 -> PARTIAL).
+
+`docs/todo/audit-todo-consistency.sh` exits 0 (353 files, 0
+violations). Check 3/4 are live signal again.

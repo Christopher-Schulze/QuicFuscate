@@ -1,3 +1,10 @@
+---
+id: TODO-976
+title: Per-client bandwidth admission mutex sharding
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-976 - Per-client bandwidth admission mutex sharding
 
 Status: DONE (local + Omega aarch64 Linux)

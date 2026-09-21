@@ -1,3 +1,10 @@
+---
+id: TODO-974
+title: Vectored `stream_send_parts` for H3 DATA frames
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-974 - Vectored `stream_send_parts` for H3 DATA frames
 
 Status: DONE (local + Omega aarch64 Linux)

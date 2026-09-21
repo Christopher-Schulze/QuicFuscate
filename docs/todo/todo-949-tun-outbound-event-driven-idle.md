@@ -1,3 +1,10 @@
+---
+id: TODO-949
+title: TUN outbound loop: event-driven idle wait instead of 100us polling
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-949 - TUN outbound loop: event-driven idle wait instead of 100us polling
 
 ## Status

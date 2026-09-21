@@ -1,3 +1,10 @@
+---
+id: TODO-967
+title: Fountain decoder: stale-tolerant symbol queues
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-967 - Fountain decoder: stale-tolerant symbol queues
 
 ## Status

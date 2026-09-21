@@ -1,3 +1,10 @@
+---
+id: TODO-978
+title: Standalone client: downlink waited on 250ms housekeeping tick
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-978 - Standalone client: downlink waited on 250ms housekeeping tick
 
 Status: DONE (local tests + Omega aarch64 Linux hop-measurement)

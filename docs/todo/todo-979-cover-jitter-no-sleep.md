@@ -1,3 +1,10 @@
+---
+id: TODO-979
+title: TLS cover jitter: deferred emission instead of thread::sleep
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-979 - TLS cover jitter: deferred emission instead of thread::sleep
 
 Status: DONE (local tests; deadline plumbing shared with the startup fix)

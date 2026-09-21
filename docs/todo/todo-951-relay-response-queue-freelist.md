@@ -1,3 +1,10 @@
+---
+id: TODO-951
+title: MASQUE relay response queue: buffer freelist instead of alloc/drop per datagram
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-951 - MASQUE relay response queue: buffer freelist instead of alloc/drop per datagram
 
 ## Status

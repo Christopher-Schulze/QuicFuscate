@@ -1,3 +1,10 @@
+---
+id: TODO-990
+title: TODO-990 — Tokio worker count defaults to available_parallelism
+status: OPEN
+created: 2026-09-19
+---
+
 # TODO-990 — Tokio worker count defaults to available_parallelism
 
 ## Context

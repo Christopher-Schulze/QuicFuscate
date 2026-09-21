@@ -1,3 +1,10 @@
+---
+id: TODO-985
+title: FecObserver RwLock write storm starves the telemetry tick (82% server CPU)
+status: OPEN
+created: 2026-09-19
+---
+
 # TODO-985 - FecObserver RwLock write storm starves the telemetry tick (82% server CPU)
 
 ## Symptom

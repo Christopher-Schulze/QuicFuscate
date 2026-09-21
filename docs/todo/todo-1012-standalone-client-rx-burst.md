@@ -1,3 +1,10 @@
+---
+id: TODO-1012
+title: TODO-1012 — Standalone client RX: recvmmsg burst + persistent GRO slots
+status: DONE
+created: 2026-09-20
+---
+
 # TODO-1012 — Standalone client RX: recvmmsg burst + persistent GRO slots
 
 Status: DONE (implementation + Omega e2e verification)

@@ -1,3 +1,10 @@
+---
+id: TODO-953
+title: Acquire path: O(clients) DCID parse -> slice+memcmp; triple session lock -> one
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-953 - Acquire path: O(clients) DCID parse -> slice+memcmp; triple session lock -> one
 
 ## Status

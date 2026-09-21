@@ -1,3 +1,10 @@
+---
+id: TODO-960
+title: `total_send_buffered_bytes`: running counter instead of O(streams) scan
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-960 - `total_send_buffered_bytes`: running counter instead of O(streams) scan
 
 ## Status

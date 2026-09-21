@@ -1,3 +1,10 @@
+---
+id: TODO-965
+title: Feature-matrix verification and `rust-tests` repair
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-965 - Feature-matrix verification and `rust-tests` repair
 
 ## Status

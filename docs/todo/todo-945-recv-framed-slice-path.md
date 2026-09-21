@@ -1,3 +1,10 @@
+---
+id: TODO-945
+title: `recv_on_path`: Pool-Checkout + Copy + Free pro framed Datagramm -> Slice-Pfad
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-945 - `recv_on_path`: Pool-Checkout + Copy + Free pro framed Datagramm -> Slice-Pfad
 
 ## Status

@@ -1,3 +1,10 @@
+---
+id: TODO-969
+title: Decoder8/16 single-pass solve + SmallVec rejection evidence
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-969 - Decoder8/16 single-pass solve + SmallVec rejection evidence
 
 ## Status

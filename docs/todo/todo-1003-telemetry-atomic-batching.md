@@ -1,3 +1,10 @@
+---
+id: TODO-1003
+title: TODO-1003 — Batch per-packet telemetry atomics in send/recv burst loops
+status: DONE
+created: 2026-09-19
+---
+
 # TODO-1003 — Batch per-packet telemetry atomics in send/recv burst loops
 
 ## Status

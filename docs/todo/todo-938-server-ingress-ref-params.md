@@ -1,3 +1,10 @@
+---
+id: TODO-938
+title: Server-Ingress: Per-Datagram Arc-Clones + Settings-Clone
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-938 - Server-Ingress: Per-Datagram Arc-Clones + Settings-Clone
 
 ## Status

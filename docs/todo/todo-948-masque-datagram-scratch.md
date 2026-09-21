@@ -1,3 +1,10 @@
+---
+id: TODO-948
+title: MASQUE datagram path: reused scratch instead of per-datagram Vec
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-948 - MASQUE datagram path: reused scratch instead of per-datagram Vec
 
 ## Status

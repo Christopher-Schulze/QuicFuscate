@@ -1,3 +1,10 @@
+---
+id: TODO-940
+title: Server-TUN-Uplink: `to_vec` pro Frame im Reader-Thread -> Pool-Channel
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-940 - Server-TUN-Uplink: `to_vec` pro Frame im Reader-Thread -> Pool-Channel
 
 ## Status

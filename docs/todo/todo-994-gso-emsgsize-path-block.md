@@ -1,3 +1,10 @@
+---
+id: TODO-994
+title: TODO-994 — GSO EMSGSIZE marks the peer path permanently
+status: OPEN
+created: 2026-09-19
+---
+
 # TODO-994 — GSO EMSGSIZE marks the peer path permanently
 
 ## Context

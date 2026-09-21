@@ -1,3 +1,10 @@
+---
+id: TODO-968
+title: Fountain propagation through a source-index reverse map
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-968 - Fountain propagation through a source-index reverse map
 
 ## Status

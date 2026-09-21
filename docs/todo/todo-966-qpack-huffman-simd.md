@@ -1,3 +1,10 @@
+---
+id: TODO-966
+title: QPACK Huffman encode through SIMD dispatch
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-966 - QPACK Huffman encode through SIMD dispatch
 
 ## Status

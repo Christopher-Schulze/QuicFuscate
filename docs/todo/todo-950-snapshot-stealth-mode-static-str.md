@@ -1,3 +1,10 @@
+---
+id: TODO-950
+title: Per-datagram `format!("{:?}")` for snapshot stealth mode -> `&'static str`
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-950 - Per-datagram `format!("{:?}")` for snapshot stealth mode -> `&'static str`
 
 ## Status

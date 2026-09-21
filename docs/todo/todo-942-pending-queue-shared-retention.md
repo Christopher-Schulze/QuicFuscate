@@ -1,3 +1,10 @@
+---
+id: TODO-942
+title: Pending TUN downlink queue: retain the pooled `TunPacket` block
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-942 - Pending TUN downlink queue: retain the pooled `TunPacket` block
 
 ## Status

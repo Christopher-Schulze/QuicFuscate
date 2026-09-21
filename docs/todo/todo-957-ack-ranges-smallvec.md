@@ -1,3 +1,10 @@
+---
+id: TODO-957
+title: `Frame::Ack.ranges`: inline `SmallVec` instead of a heap `Vec` per ACK
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-957 - `Frame::Ack.ranges`: inline `SmallVec` instead of a heap `Vec` per ACK
 
 ## Status

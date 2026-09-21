@@ -1,3 +1,10 @@
+---
+id: TODO-954
+title: `LiveClientRuntime`: borrowed `&'a Arc` fields instead of 3 clones per datagram
+status: DONE
+created: 2026-09-18
+---
+
 # TODO-954 - `LiveClientRuntime`: borrowed `&'a Arc` fields instead of 3 clones per datagram
 
 ## Status
