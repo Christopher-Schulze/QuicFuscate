@@ -40,6 +40,12 @@ pub trait TransportPolicyTarget {
     /// Returns the latest delivery-rate estimate used by Brain's bandit.
     fn delivery_rate(&self) -> u64;
 
+    /// Live CC pacing rate in bytes/s. Used only for the Tamaraw `up_us` row.
+    /// Default stays 0 so the bandit path is unchanged when a target has no CC.
+    fn pacing_rate_bps(&self) -> u64 {
+        0
+    }
+
     /// Reports whether this connection accepts intelligent stealth mutations.
     fn intelligent_stealth_runtime_enabled(&self) -> bool;
 

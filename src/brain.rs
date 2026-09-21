@@ -621,7 +621,15 @@ impl TransportObserver for StealthBrain {
             // axis as the downstream ACK cadence. Zero (no estimate yet,
             // e.g. during handshake) keeps the symmetric fallback row.
             const NOMINAL_PKT_BYTES: f64 = 1_200.0;
-            let up_us = if dr_now > 0 { (NOMINAL_PKT_BYTES * 1e6) / dr_now as f64 } else { 0.0 };
+            let up_rate = conn.pacing_rate_bps();
+            let up_us = if up_rate > 0 { (NOMINAL_PKT_BYTES * 1e6) / up_rate as f64 } else { 0.0 };
+            let density_us_u32 = |value: f64| -> u32 {
+                if value.is_finite() && value > 0.0 {
+                    value.min(u32::MAX as f64) as u32
+                } else {
+                    0
+                }
+            };
             let mut stealth_policy = qf_stealth::derive_intelligent_runtime_policy(
                 qf_stealth::IntelligentStealthInputs {
                     level_hint: effective_level,
@@ -644,6 +652,12 @@ impl TransportObserver for StealthBrain {
             stealth_policy.timing_max_jitter_us = ((stealth_policy.timing_max_jitter_us as i64)
                 + ((stealth_policy.timing_max_jitter_us as i64 * dither_pct) / 100))
                 .max(0) as u32;
+            self.level_hints.set_tamaraw_snapshot(
+                density_us_u32(ack_us),
+                density_us_u32(up_us),
+                stealth_policy.padding_rate,
+                stealth_policy.timing_max_jitter_us,
+            );
 
             let mut thr_local = thr;
             if let Some(arm) = st.bandit_last_arm.take() {

@@ -66,6 +66,10 @@ impl qf_transport_types::TransportPolicyTarget for Connection {
         self.delivery_rate()
     }
 
+    fn pacing_rate_bps(&self) -> u64 {
+        self.recovery.get_pacing_rate().unwrap_or(0)
+    }
+
     fn intelligent_stealth_runtime_enabled(&self) -> bool {
         self.intelligent_stealth_runtime_enabled()
     }

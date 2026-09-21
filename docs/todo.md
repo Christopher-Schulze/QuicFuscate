@@ -4046,7 +4046,7 @@
 
 ### TODO-1019 - Adaptive-Tamaraw direction-aware parameters
 
-- PARTIAL (P2, 2026-09-21). Direction axis landed (unit-proven). TODO-1027 closed: Omega `-R` 90.171 Mbit/s / SWAP 131.614 / up 93.847. Client stats now emit `ack_us` `up_us` `stealth_pad` `stealth_jitter_us`. Omega A/B of the split is the remaining gate.
+- DONE (P2, 2026-09-21). Direction axis + client-stats snapshot. Omega `tcp-1019d`: up 88.625 / `-R` 142.163, `up_us` 37-63 vs 827-1379, both Dense so jitter stays ~2 ms. `pacing_rate_bps` is the `up_us` source; do not stuff it into `delivery_rate()`.
 - Detail: docs/todo/todo-1019-tamaraw-direction-aware.md
 
 ### TODO-1020 - Standalone TUN client -> io_driver migration decision

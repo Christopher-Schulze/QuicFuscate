@@ -4,7 +4,7 @@ title: Adaptive-Tamaraw direction-aware parameters - split the phase table by di
 severity: MEDIUM
 phase: M
 priority: P2
-status: PARTIAL
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1010]
 ---
@@ -88,10 +88,14 @@ TODO-1010's Tamaraw entry records the direction axis.
 
 - [x] Unit tests: independent up/down phases resolve independently;
   cold-start falls back to the symmetric row.
-- [ ] Omega e2e (iperf3 TCP through tunnel): asymmetric load
-  (uplink-heavy vs downlink-heavy) shows the expected parameter split in
-  stats/telemetry without throughput regression vs the symmetric
-  baseline - **pending**, run together with the next Omega validation
-  batch.
+- [x] Omega e2e 2026-09-21 (`tcp-1019d`, `JITTER_US=0`, pacing_rate_bps
+  for `up_us` only; bandit still reads the unused `stats.delivery_rate`):
+  uplink 88.625 Mbit/s 0 retrans, hot `up_us` 37-63 / `ack_us` 2-743 /
+  `stealth_jitter_us` 1800-2140; `-R` 142.163 Mbit/s 1 retrans, hot
+  `up_us` 827-1379 / `ack_us` 2-1058 / `stealth_jitter_us` 1900-2200.
+  Direction inputs split; both stay Dense (`up_us` < 3000) so the jitter
+  row correctly does not diverge. `stealth_pad=0` at Intelligent level 0.
+  Feeding pacing into `Connection::delivery_rate()` was tried and
+  reverted: it collapsed `-R` to 9.3 Mbit via the bandit.
 - [x] TODO-1010's Tamaraw entry updated to reflect the direction axis
   landing.

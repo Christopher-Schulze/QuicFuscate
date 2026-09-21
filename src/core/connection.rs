@@ -371,6 +371,8 @@ impl QuicFuscateConnection {
 
         if use_utls {
             stealth_manager.apply_utls_profile(&mut config);
+        } else {
+            stealth_manager.apply_stealth_transport_knobs(&mut config);
         }
 
         // Each client connection should use a fresh, unpredictable SCID to avoid linkability.
@@ -1576,6 +1578,12 @@ impl QuicFuscateConnection {
     /// Returns the current estimated packet loss rate in [0.0, 1.0].
     pub fn loss_rate(&self) -> f32 {
         self.stats.loss_rate
+    }
+
+    /// Last Tamaraw direction-table snapshot: `(ack_us, up_us, padding_rate, jitter_us)`.
+    pub fn tamaraw_runtime_snapshot(&self) -> (u32, u32, u8, u32) {
+        let hints = self.stealth_manager.intelligent_level_hints();
+        (hints.last_ack_us(), hints.last_up_us(), hints.last_padding_rate(), hints.last_jitter_us())
     }
 
     /// Return exact connection-local FEC policy, mode, and wire evidence.

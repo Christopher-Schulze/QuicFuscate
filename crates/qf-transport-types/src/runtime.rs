@@ -55,6 +55,14 @@ pub struct IntelligentLevelHints {
     brain_level: AtomicU32,
     probe_level: AtomicU32,
     prefer_masque: AtomicU32,
+    /// Last downstream density (`ack_us`) published by the Brain, microseconds.
+    last_ack_us: AtomicU32,
+    /// Last upstream density (`up_us`) published by the Brain, microseconds.
+    last_up_us: AtomicU32,
+    /// Last derived padding rate (0-100) after the direction-aware table.
+    last_padding_rate: AtomicU32,
+    /// Last derived outbound jitter ceiling, microseconds.
+    last_jitter_us: AtomicU32,
 }
 
 impl IntelligentLevelHints {
@@ -65,6 +73,10 @@ impl IntelligentLevelHints {
             brain_level: AtomicU32::new(0),
             probe_level: AtomicU32::new(0),
             prefer_masque: AtomicU32::new(0),
+            last_ack_us: AtomicU32::new(0),
+            last_up_us: AtomicU32::new(0),
+            last_padding_rate: AtomicU32::new(0),
+            last_jitter_us: AtomicU32::new(0),
         }
     }
 
@@ -119,6 +131,44 @@ impl IntelligentLevelHints {
             .max(self.probe_level.load(Ordering::Relaxed))
             .min(2)
     }
+
+    /// Publishes the last Tamaraw direction-table inputs and derived knobs.
+    #[inline(always)]
+    #[doc(hidden)]
+    pub fn set_tamaraw_snapshot(&self, ack_us: u32, up_us: u32, padding_rate: u8, jitter_us: u32) {
+        self.last_ack_us.store(ack_us, Ordering::Relaxed);
+        self.last_up_us.store(up_us, Ordering::Relaxed);
+        self.last_padding_rate.store(u32::from(padding_rate), Ordering::Relaxed);
+        self.last_jitter_us.store(jitter_us, Ordering::Relaxed);
+    }
+
+    /// Downstream ACK-cadence density in microseconds.
+    #[inline(always)]
+    #[doc(hidden)]
+    pub fn last_ack_us(&self) -> u32 {
+        self.last_ack_us.load(Ordering::Relaxed)
+    }
+
+    /// Upstream delivery-rate density in microseconds.
+    #[inline(always)]
+    #[doc(hidden)]
+    pub fn last_up_us(&self) -> u32 {
+        self.last_up_us.load(Ordering::Relaxed)
+    }
+
+    /// Last derived padding rate after the downstream phase row.
+    #[inline(always)]
+    #[doc(hidden)]
+    pub fn last_padding_rate(&self) -> u8 {
+        self.last_padding_rate.load(Ordering::Relaxed).min(100) as u8
+    }
+
+    /// Last derived outbound jitter ceiling after the upstream phase row.
+    #[inline(always)]
+    #[doc(hidden)]
+    pub fn last_jitter_us(&self) -> u32 {
+        self.last_jitter_us.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +208,12 @@ mod tests {
         let second = IntelligentLevelHints::new();
         assert_eq!(second.effective_level(), 0);
         assert!(!second.prefer_masque());
+        first.set_tamaraw_snapshot(1_000, 12_000, 20, 850);
+        assert_eq!(first.last_ack_us(), 1_000);
+        assert_eq!(first.last_up_us(), 12_000);
+        assert_eq!(first.last_padding_rate(), 20);
+        assert_eq!(first.last_jitter_us(), 850);
+        assert_eq!(second.last_ack_us(), 0);
+        assert_eq!(second.last_up_us(), 0);
     }
 }
