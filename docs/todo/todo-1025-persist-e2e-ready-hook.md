@@ -4,7 +4,7 @@ title: Omega E2E ready-hook scripts live only in /tmp - not reproducible
 severity: LOW
 phase: L
 priority: P3
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: []
 ---
@@ -46,3 +46,20 @@ endpoints are up.
 - Hook stdout (qtun0 counters, iperf results) lands in the run log
   or a named evidence file, not lost to `tail` truncation.
 - No behavioral change to the e2e script itself.
+
+## Implementation (2026-09-21)
+
+Versioned hooks:
+- `scripts/tests/tun-e2e-hooks/udp-ready.sh`
+- `scripts/tests/tun-e2e-hooks/tcp-ready.sh`
+- `scripts/tests/tun-e2e-hooks/ready-lib.sh`
+- Wrappers: `scripts/tests/tun-e2e-omega-udp.sh`,
+  `scripts/tests/tun-e2e-omega-tcp.sh`,
+  `scripts/tests/tun-e2e-omega-batch.sh`
+- FEC pin: `scripts/tests/tun-e2e-hooks/fec-streaming.toml`
+  (`force_on` via `FecConfig::from_toml`)
+
+`tun-e2e-netns.sh` default path is unchanged (`QF_E2E_READY_HOOK`
+still optional). Optional `QF_E2E_FEC_CONFIG` passes `--fec-config`
+to both sides. Hook env also accepts `IPERF_LEN` / `IPERF_REVERSE` /
+`IPERF_MSS`. Live Omega batch 2026-09-21 used these wrappers.

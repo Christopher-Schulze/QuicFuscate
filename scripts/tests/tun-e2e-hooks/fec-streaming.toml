@@ -1,0 +1,10 @@
+# Force streaming GF8 at bootstrap so the wire profile commits even on a
+# clean netns path (TODO-1022). High hysteresis slows an immediate
+# downshift back to Zero during a short evidence run.
+[adaptive_fec]
+control_policy = "auto"
+initial_mode = "streaming"
+force_on = true
+stream_every = 4
+hysteresis = 0.5
+kalman_enabled = true

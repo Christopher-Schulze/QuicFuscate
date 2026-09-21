@@ -10,6 +10,19 @@
 # Requirements: root, Linux, iproute2, procps, openssl, python3, nc (openbsd-netcat).
 # Run on the target server (e.g. omega). Single-host loopback short-circuits
 # TUN routing, so netns + veth is mandatory.
+#
+# Ready-hook contract (TODO-1025): QF_E2E_READY_HOOK is optional. When set it
+# must be an executable path run after both TUN assignments and handshakes
+# exist. The versioned hooks live at scripts/tests/tun-e2e-hooks/:
+#   TAG=udp60 UDPRATE=60M DURATION=15 \
+#   QF_E2E_READY_HOOK=$PROJECT_ROOT/scripts/tests/tun-e2e-hooks/udp-ready.sh \
+#   QF_E2E_HOOK_OUTPUT_DIR=/tmp/qf-e2e-hooks \
+#   ./scripts/tests/tun-e2e-netns.sh
+# UDP evidence wrapper: ./scripts/tests/tun-e2e-omega-udp.sh
+# Hook env: TAG, UDPRATE (UDP), DURATION, IPERF_LEN (optional), IPERF_REVERSE
+# (TCP, optional), QF_E2E_HOOK_OUTPUT_DIR (absolute). Optional QF_E2E_FEC_CONFIG
+# is a TOML path passed as --fec-config to both sides (not with --config).
+# Hook stdout (qtun0 counters, iperf results) lands in the e2e run log.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -51,6 +64,14 @@ if [ -n "${QF_E2E_SERVER_CONFIG:-}" ]; then
 fi
 if [ -n "${QF_E2E_CLIENT_CONFIG:-}" ]; then
   CLIENT_CONFIG_ARGS=(--config "$QF_E2E_CLIENT_CONFIG")
+fi
+if [ -n "${QF_E2E_FEC_CONFIG:-}" ]; then
+  if [ -n "${QF_E2E_SERVER_CONFIG:-}" ] || [ -n "${QF_E2E_CLIENT_CONFIG:-}" ]; then
+    echo "FAIL: QF_E2E_FEC_CONFIG cannot combine with QF_E2E_SERVER_CONFIG or QF_E2E_CLIENT_CONFIG" >&2
+    exit 2
+  fi
+  SERVER_CONFIG_ARGS+=(--fec-config "$QF_E2E_FEC_CONFIG")
+  CLIENT_CONFIG_ARGS+=(--fec-config "$QF_E2E_FEC_CONFIG")
 fi
 if [ -n "${QF_E2E_SERVER_PROFILE:-}" ]; then
   SERVER_PROFILE_ARGS+=(--profile "$QF_E2E_SERVER_PROFILE")
