@@ -92,14 +92,6 @@ pub fn export_telemetry_text() -> String {
     let _ = writeln!(out, "quicfuscate_tls-cover_aes_gcm_ops {}", FAKETLS_AES_GCM_OPS.get());
     let _ =
         writeln!(out, "quicfuscate_tls-cover_cipher_failures {}", FAKETLS_CIPHER_FAILURES.get());
-    let _ = writeln!(out, "quicfuscate_aes_block_aesni_ops {}", AES_BLOCK_AESNI_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_block_vaes_ops {}", AES_BLOCK_VAES_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_block_aese_ops {}", AES_BLOCK_AESE_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_block_ssse3_ops {}", AES_BLOCK_SSSE3_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_block_sve_ops {}", AES_BLOCK_SVE_OPS.get());
-    let _ =
-        writeln!(out, "quicfuscate_aes_block_neon_table_ops {}", AES_BLOCK_NEON_TABLE_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_block_scalar_ops {}", AES_BLOCK_SCALAR_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_avx2_ops {}", SHA256_AVX2_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_vnni_ops {}", SHA256_VNNI_OPS.get());
     let _ = writeln!(out, "quicfuscate_sha256_neon_ops {}", SHA256_NEON_OPS.get());
@@ -110,22 +102,6 @@ pub fn export_telemetry_text() -> String {
     let _ = writeln!(out, "quicfuscate_hmac_sha256_neon_ops {}", HMAC_SHA256_NEON_OPS.get());
     let _ = writeln!(out, "quicfuscate_hmac_sha256_sve2_ops {}", HMAC_SHA256_SVE2_OPS.get());
     let _ = writeln!(out, "quicfuscate_hmac_sha256_scalar_ops {}", HMAC_SHA256_SCALAR_OPS.get());
-    let _ = writeln!(out, "quicfuscate_chacha20_x4_avx2_ops {}", CHACHA20_X4_AVX2_OPS.get());
-    let _ = writeln!(out, "quicfuscate_chacha20_x4_avx_ops {}", CHACHA20_X4_AVX_OPS.get());
-    let _ = writeln!(out, "quicfuscate_chacha20_x4_sse41_ops {}", CHACHA20_X4_SSE41_OPS.get());
-    let _ = writeln!(out, "quicfuscate_chacha20_x4_neon_ops {}", CHACHA20_X4_NEON_OPS.get());
-    let _ = writeln!(out, "quicfuscate_chacha20_x4_scalar_ops {}", CHACHA20_X4_SCALAR_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_ctr_aesni_ops {}", AES_CTR_AESNI_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_ctr_aese_ops {}", AES_CTR_AESE_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_ctr_sve_ops {}", AES_CTR_SVE_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_ctr_ssse3_ops {}", AES_CTR_SSSE3_OPS.get());
-    let _ = writeln!(out, "quicfuscate_aes_ctr_scalar_ops {}", AES_CTR_SCALAR_OPS.get());
-    let _ = writeln!(out, "quicfuscate_poly1305_avx512_ops {}", POLY1305_AVX512_OPS.get());
-    let _ = writeln!(out, "quicfuscate_poly1305_avx2_ops {}", POLY1305_AVX2_OPS.get());
-    let _ = writeln!(out, "quicfuscate_poly1305_sse2_ops {}", POLY1305_SSE2_OPS.get());
-    let _ = writeln!(out, "quicfuscate_poly1305_sve_ops {}", POLY1305_SVE_OPS.get());
-    let _ = writeln!(out, "quicfuscate_poly1305_neon_ops {}", POLY1305_NEON_OPS.get());
-    let _ = writeln!(out, "quicfuscate_poly1305_scalar_ops {}", POLY1305_SCALAR_OPS.get());
     let _ = writeln!(out, "quicfuscate_iter_sum_f32_avx512_ops {}", ITER_SUM_F32_AVX512_OPS.get());
     let _ = writeln!(out, "quicfuscate_iter_sum_f32_avx2_ops {}", ITER_SUM_F32_AVX2_OPS.get());
     let _ = writeln!(out, "quicfuscate_iter_sum_f32_neon_ops {}", ITER_SUM_F32_NEON_OPS.get());
@@ -434,18 +410,6 @@ pub fn export_telemetry_text() -> String {
             COMPRESS_DECISIONS_SKIP_PROFILE.get()
         );
     } // end congestion (compression)
-
-    // GHASH backend metrics
-    let _ = writeln!(out, "quicfuscate_ghash_pclmul_ops {}", GHASH_PCLMUL_OPS.get());
-    let _ = writeln!(out, "quicfuscate_ghash_vpclmul_ops {}", GHASH_VPCLMUL_OPS.get());
-    let _ = writeln!(out, "quicfuscate_ghash_pmull_ops {}", GHASH_PMULL_OPS.get());
-    let _ = writeln!(out, "quicfuscate_ghash_neon_ops {}", GHASH_NEON_OPS.get());
-    let _ = writeln!(out, "quicfuscate_ghash_sse_ops {}", GHASH_SSE_OPS.get());
-
-    // GHASH scalar fallback metrics
-    let _ = writeln!(out, "quicfuscate_ghash_scalar_ops_total {}", GHASH_SCALAR_OPS.get());
-    let _ = writeln!(out, "quicfuscate_ghash_scalar_calls_total {}", GHASH_SCALAR_CALLS.get());
-    let _ = writeln!(out, "quicfuscate_ghash_scalar_bytes_total {}", GHASH_SCALAR_BYTES.get());
 
     if packets {
         // H3

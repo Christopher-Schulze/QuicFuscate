@@ -2,42 +2,6 @@
 
 use super::*;
 
-/// AES single block encryption
-#[inline(always)]
-pub fn aes_encrypt_block(state: &mut [u8; 16], key: &[u8; 16]) {
-    let features = FeatureDetector::instance();
-
-    // SAFETY: Each branch is guarded by runtime feature detection matching
-    // the callee's `#[target_feature]`. Both `state` and `key` are fixed-size
-    // arrays, so pointer validity and length are guaranteed by the type system.
-    #[cfg(target_arch = "x86_64")]
-    {
-        let full = features.features_full();
-        let matrix = full.simd_dispatch_matrix();
-        if matrix.vaes_aes {
-            return unsafe { super::x86::aes_encrypt_vaes(state, key) };
-        }
-        if full.aesni && full.sse2 {
-            return unsafe { super::x86::aes_encrypt_aesni(state, key) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if features.features_full().aes {
-            return unsafe { arm::aes_encrypt_neon(state, key) };
-        }
-    }
-
-    scalar::aes_encrypt_block(state, key)
-}
-
-/// GHASH for GCM mode
-#[inline(always)]
-pub fn ghash(h: &[u8; 16], data: &[u8], tag: &mut [u8; 16]) {
-    tag.copy_from_slice(&qf_crypto::gcm::ghash(*h, &[], data));
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Sha256Backend {
     #[cfg(all(target_arch = "x86_64", not(windows)))]

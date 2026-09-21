@@ -252,16 +252,6 @@ fn hmac_sha256_rfc4231_vector() {
     assert_eq!(mac, expected, "HMAC-SHA256 RFC4231 test case 2 mismatch");
 }
 
-#[test]
-fn ghash_matches_canonical_gcm_for_partial_and_full_blocks() {
-    let h = [0x42u8; 16];
-    for data in [b"".as_slice(), b"partial", b"two complete blocks of payload!!"] {
-        let mut tag = [0u8; 16];
-        crypto::ghash(&h, data, &mut tag);
-        assert_eq!(tag, qf_crypto::gcm::ghash(h, &[], data));
-    }
-}
-
 // ===================== XOR blocks =====================
 
 #[test]

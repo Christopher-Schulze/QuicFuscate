@@ -30,8 +30,8 @@ fn validate_rejects_qpack_without_http3() {
 fn validate_rejects_intelligent_without_dynamic() {
     let mut cfg = StealthConfig::dynamic();
     cfg.dynamic_enabled = false;
-    let err = cfg.validate().expect_err("intelligent mode without dynamic must be rejected");
-    assert!(err.contains("intelligent mode requires dynamic_enabled"));
+    let err = cfg.validate().expect_err("dynamic mode without dynamic must be rejected");
+    assert!(err.contains("dynamic mode requires dynamic_enabled"));
     assert_eq!(cfg.mode, StealthMode::Dynamic);
 }
 

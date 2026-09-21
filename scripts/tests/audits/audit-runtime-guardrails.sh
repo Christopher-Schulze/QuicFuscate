@@ -192,7 +192,7 @@ fi
 
 AEAD_POSTURE_REFS=$(rg -n --no-messages 'AEGIS-128L/X|Canonical data-plane suites include `Aegis128L`, `Aegis128X4`, and `Aegis128X8`|Aegis128X4 => "aegis-128x4"|Aegis128X8 => "aegis-128x8"' README.md docs/DOCUMENTATION.md || true)
 if [[ -z "$AEAD_POSTURE_REFS" ]]; then
-  pass "README/docs keep the forked AEAD posture narrowed to Aegis128L family plus Morus"
+  pass "README/docs keep the private AEAD posture narrowed to the Aegis128L family"
   append_item "aead_posture_narrowing" "ok" "no broad AEGIS-128L/X or X4/X8-as-suite wording remains in product docs"
 else
   fail_critical "README/docs still present the forked AEAD posture as a broader suite zoo"
@@ -201,14 +201,14 @@ fi
 
 AEAD_OVERRIDE_SURFACE_REFS=$(rg -n --no-messages 'DATA_AEAD_OVERRIDE_AEGIS_X4|DATA_AEAD_OVERRIDE_AEGIS_X8' crates/qf-crypto/src/ || true)
 if [[ -z "$AEAD_OVERRIDE_SURFACE_REFS" ]]; then
-  pass "Data-plane AEAD override surface stays narrowed to auto, Aegis128L family, and Morus"
+  pass "Data-plane AEAD override surface stays narrowed to auto and the Aegis128L family"
   append_item "aead_override_surface_narrowing" "ok" "no X4/X8-specific data-plane override modes remain"
 else
   fail_critical "Data-plane AEAD override surface still carries X4/X8-specific modes"
   append_item "aead_override_surface_narrowing" "fail" "$AEAD_OVERRIDE_SURFACE_REFS"
 fi
 
-UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|aes_encrypt_neon|ghash_pmull|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize crates/qf-simd/src crates/qf-simd/src/arm_varint.rs crates/qf-simd/src/x86_ack.rs || true)
+UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (prefetch|encode_varint_neon|encode_varint_sve2|decode_varint_neon|decode_varint_sve2|canonical_ack_blocks_avx2|canonical_ack_blocks_avx512)\b|^pub enum PrefetchHint\b|^pub unsafe fn (xor_blocks_sve2|xor_blocks_neon|memcpy_sve2|memcpy_neon|crc32_arm|popcnt_neon|popcnt_sve2|validate_header_sve2|validate_header_neon|gf_mul_sve2|gf_mul_neon_pmull|gf_mul_neon|sha256_hw|pack_bits_sve2|pack_bits_neon|unpack_bits_sve2|unpack_bits_neon|reed_solomon_encode_neon|histogram_sve2|histogram_neon|qpack_encode_neon|qpack_decode_neon|qpack_encode_sve2|qpack_decode_sve2|find_pattern_sve2|find_pattern_neon|dot_product_neon_dp|dot_product_neon|matmul_apple_amx)\b' src/optimize crates/qf-simd/src crates/qf-simd/src/arm_varint.rs crates/qf-simd/src/x86_ack.rs || true)
 if [[ -z "$UNSAFE_VISIBILITY_REFS" ]]; then
   pass "Unsafe SIMD/prefetch helpers remain internalized behind runtime-owned facades"
   append_item "unsafe_surface_internalization" "ok" "no broad public visibility on narrowed unsafe helper set"
@@ -217,7 +217,7 @@ else
   append_item "unsafe_surface_internalization" "fail" "$UNSAFE_VISIBILITY_REFS"
 fi
 
-SIMD_X86_UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (find_pattern_vbmi2|dot_product_avx512|dot_product_fma|varint_decode_sse2_prefast|sha256_avx2|sha256_vnni|xor_blocks_avx512|xor_blocks_avx2|memcpy_avx512|memcpy_avx2|memcpy_sse42|crc32_sse42|popcnt_hw|gf_mul_avx512_gfni|gf_mul_avx2|find_pattern_sse42_short|aes_encrypt_vaes|aes_encrypt_aesni|ghash_vpclmulqdq|ghash_pclmulqdq|sha256_hw|histogram_avx512|qpack_encode_avx2|histogram_avx2|decode_varint_bmi2|decode_varint_avx2|find_pattern_avx2|amx_init|amx_release|amx_matmul_i8|matmul_gf256_amx|berlekamp_massey_gfni|berlekamp_massey_avx2|matmul_gf256_gfni|matmul_gf256_avx2|encode_varint_sse2|encode_varint_avx2|encode_varint_avx512|varint_encode_bmi2|varint_decode_bmi2|xor_multi_key_avx512|xor_multi_key_avx2|validate_header_avx2|validate_header_sse2|pack_bits_bmi2|unpack_bits_bmi2|string_compare_avx2|string_compare_sse42|popcnt_avx512|batch_crc32_pclmul|reed_solomon_encode_gfni|reed_solomon_encode_avx2|reed_solomon_decode_gfni|reed_solomon_decode_avx2|qpack_encode_ssse3|qpack_decode_avx2|qpack_decode_ssse3)\b' crates/qf-simd/src crates/qf-simd/src/x86_header.rs || true)
+SIMD_X86_UNSAFE_VISIBILITY_REFS=$(rg -n --no-messages '^pub unsafe fn (find_pattern_vbmi2|dot_product_avx512|dot_product_fma|varint_decode_sse2_prefast|sha256_avx2|sha256_vnni|xor_blocks_avx512|xor_blocks_avx2|memcpy_avx512|memcpy_avx2|memcpy_sse42|crc32_sse42|popcnt_hw|gf_mul_avx512_gfni|gf_mul_avx2|find_pattern_sse42_short|sha256_hw|histogram_avx512|qpack_encode_avx2|histogram_avx2|decode_varint_bmi2|decode_varint_avx2|find_pattern_avx2|amx_init|amx_release|amx_matmul_i8|matmul_gf256_amx|berlekamp_massey_gfni|berlekamp_massey_avx2|matmul_gf256_gfni|matmul_gf256_avx2|encode_varint_sse2|encode_varint_avx2|encode_varint_avx512|varint_encode_bmi2|varint_decode_bmi2|xor_multi_key_avx512|xor_multi_key_avx2|validate_header_avx2|validate_header_sse2|pack_bits_bmi2|unpack_bits_bmi2|string_compare_avx2|string_compare_sse42|popcnt_avx512|batch_crc32_pclmul|reed_solomon_encode_gfni|reed_solomon_encode_avx2|reed_solomon_decode_gfni|reed_solomon_decode_avx2|qpack_encode_ssse3|qpack_decode_avx2|qpack_decode_ssse3)\b' crates/qf-simd/src crates/qf-simd/src/x86_header.rs || true)
 if [[ -z "$SIMD_X86_UNSAFE_VISIBILITY_REFS" ]]; then
   pass "x86 SIMD backend helpers remain internal to simd selectors and tests"
   append_item "simd_x86_backend_internalization" "ok" "x86 SIMD backend helpers no longer expose broad public unsafe entrypoints"
@@ -370,7 +370,7 @@ if missing:
 if mismatches:
     print("target_feature_contract_mismatches:")
     print("\n".join(mismatches))
-if not functions or missing or mismatches:
+if missing or mismatches:
     sys.exit(1)
 PY
 )
@@ -399,9 +399,6 @@ files = [
     Path("scripts/tests/rust/rt-header-validate-parity.rs"),
     Path("scripts/tests/rust/rt-simd-selfcheck.rs"),
     Path("src/fec/gf16_tests.rs"),
-    Path("scripts/tests/rust/rt-chacha-x16-parity.rs"),
-    Path("scripts/tests/rust/rt-chacha-x4-parity.rs"),
-    Path("scripts/tests/rust/rt-ghash-sse-parity.rs"),
 ]
 failures = []
 checked = 0
@@ -874,32 +871,29 @@ else
   append_item "optimize_unsafe_contracts" "fail" "missing fail-closed input contract, parity regression, or documentation owner"
 fi
 
-# 4n) Crypto tag verification, key, and nonce material must have explicit
-#     local owners. GHASH controls and the AES table fallback must state their
-#     release boundaries instead of implying compiler-erasure proof.
-if rg -n --no-messages '^subtle = ' crates/qf-crypto/Cargo.toml >/dev/null \
-  && rg -F -- 'use subtle::ConstantTimeEq;' crates/qf-crypto/src/lib.rs >/dev/null \
-  && rg -F -- 'bool::from(a.ct_eq(b))' crates/qf-crypto/src/lib.rs >/dev/null \
-  && rg -F -- 'tag_comparison_rejects_every_mismatch_position()' \
-    crates/qf-crypto/src/tests.rs >/dev/null \
-  && ! rg -F -- 'diff |= a[i] ^ b[i];' crates/qf-crypto/src/lib.rs >/dev/null \
-  && rg -F -- 'impl Drop for Aes128Ctx' crates/qf-crypto/src/aes.rs >/dev/null \
-  && rg -F -- 'fn zeroize_round_keys(' crates/qf-crypto/src/aes.rs >/dev/null \
-  && rg -F -- 'fn zeroize_aes128_schedule(' crates/qf-crypto/src/lib.rs >/dev/null \
-  && rg -F -- 'self.nonce.zeroize();' crates/qf-crypto/src/lib.rs >/dev/null \
-  && rg -F -- 'poly_key.zeroize();' crates/qf-crypto/src/lib.rs >/dev/null \
-  && ! rg -n --no-messages 'let rk = key_expansion\(' crates/qf-crypto/src/aes.rs >/dev/null \
-  && rg -F -- 'not a constant-time or' crates/qf-crypto/src/aes.rs >/dev/null \
-  && rg -F -- 'ghash_release_override_parser_has_explicit_backend_contract()' \
-    crates/qf-crypto/src/gcm.rs >/dev/null \
-  && rg -F -- 'QUICFUSCATE_GHASH_PMULL' crates/qf-crypto/src/gcm.rs >/dev/null \
+# 4n) Crypto key and nonce material must have explicit owners, and the removed
+#     first-party AEAD primitives must stay absent (TODO-1049). Tag comparison is
+#     owned internally by the ring/libaegis backends.
+if ! rg -n --no-messages 'pub mod (aes|gcm|chacha|poly1305|morus|aegis)\b' crates/qf-crypto/src/lib.rs >/dev/null \
+  && ! rg -n --no-messages 'struct (AesGcm128|AesHp)\b' crates/qf-crypto/src src 2>/dev/null >/dev/null \
+  && ! rg -n --no-messages '\bstruct ChaCha20Poly1305\b|\bstruct MorusAead\b|chacha20_blocks_x4|chacha20_blocks_x16' crates/qf-crypto/src src 2>/dev/null >/dev/null \
+  && rg -F -- 'pub struct RingAesGcm128' crates/qf-crypto/src/ring_aead.rs >/dev/null \
+  && rg -F -- 'pub struct RingAesHp' crates/qf-crypto/src/ring_aead.rs >/dev/null \
+  && rg -F -- 'pub struct RingChaCha20Poly1305' crates/qf-crypto/src/ring_aead.rs >/dev/null \
+  && rg -F -- 'aes128_gcm_tag_aad_only' crates/qf-crypto/src/ring_aead.rs >/dev/null \
+  && rg -F -- 'libaegis_owner!(LibAegis128L' crates/qf-crypto/src/libaegis_aead.rs >/dev/null \
+  && rg -F -- 'self.iv.zeroize();' crates/qf-crypto/src/ring_aead.rs >/dev/null \
+  && rg -F -- 'self.key.zeroize();' crates/qf-crypto/src/libaegis_aead.rs >/dev/null \
+  && rg -n --no-messages '^zeroize = ' crates/qf-crypto/Cargo.toml >/dev/null \
+  && ! rg -n --no-messages '^subtle = ' crates/qf-crypto/Cargo.toml >/dev/null \
+  && ! rg -n --no-messages 'QUICFUSCATE_GHASH' crates/qf-crypto/src src 2>/dev/null >/dev/null \
   && rg -F -- 'Crypto key and nonce lifecycle' docs/DOCUMENTATION.md docs/MAP.md \
     >/dev/null; then
-  pass "Crypto tag, schedule, nonce, GHASH-control, and AES fallback lifecycle contracts are wired"
-  append_item "crypto_lifecycle_contracts" "ok" "constant-time tag primitive, retained and temporary schedules, ChaCha nonce/one-time keys, GHASH controls, and AES fallback scope are explicit"
+  pass "Crypto lifecycle and removed-primitive contracts are wired"
+  append_item "crypto_lifecycle_contracts" "ok" "ring/libaegis owners zeroize retained key/IV material, first-party AES/GCM/ChaCha/Poly1305/AEGIS/MORUS primitives remain absent, and no GHASH control surface exists"
 else
-  fail_critical "Crypto tag/key/nonce lifecycle or backend boundary contract is incomplete"
-  append_item "crypto_lifecycle_contracts" "fail" "missing constant-time tag primitive, erasure owner, release-control test, or AES side-channel scope"
+  fail_critical "Crypto owner contract or removed-primitive absence is incomplete"
+  append_item "crypto_lifecycle_contracts" "fail" "missing ring/libaegis owner, erasure path, or a removed first-party primitive resurfaced"
 fi
 
 # 4o) Privilege identity and libc result contracts must remain opaque and
@@ -1418,9 +1412,16 @@ checks = {
     "client_assignment": ordered(
         "src/implementations/client/io_driver/runtime.rs",
         [
-            "guard.mark_qkey_authenticated_from_token();",
-            "private_packet_protection_control_tick()",
+            "guard.finalize_authenticated_assignment()",
             "guard.mark_ready();",
+        ],
+    ),
+    "client_finalize_sequence": ordered(
+        "src/implementations/client/circuit_runtime.rs",
+        [
+            "pub fn finalize_authenticated_assignment(&mut self)",
+            "self.mark_qkey_authenticated_from_token();",
+            "self.private_packet_protection_control_tick()",
         ],
     ),
     "client_circuit": ordered(

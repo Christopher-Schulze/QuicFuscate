@@ -83,15 +83,4 @@ echo "[avx10-smoke] AVX10.1 detected (256-bit: $HAS_AVX10_256, 512-bit: $HAS_AVX
 echo "[avx10-smoke] running SIMD self-checks..."
 run_cargo test --features simd-selfcheck,rust-tests --test rt-simd-selfcheck -- --nocapture
 
-echo "[avx10-smoke] running GHASH parity tests..."
-run_cargo test --features rust-tests --test rt-ghash-sse-parity -- --nocapture
-
-if [[ "$HAS_AVX10_512" -ne 0 ]]; then
-  echo "[avx10-smoke] capturing GHASH + ChaCha20 microbenchmarks..."
-  cargo run --release --example microbench -- ghash "$BENCH_BYTES" "$BENCH_ITERS" | tee "$OUTPUT_DIR/bench-ghash.csv"
-  cargo run --release --example microbench -- chacha-x4 "$BENCH_BYTES" "$BENCH_ITERS" | tee "$OUTPUT_DIR/bench-chacha.csv"
-else
-  echo "[avx10-smoke] skipping 512-bit microbenchmarks (AVX10.1-512 not present)."
-fi
-
 echo "[avx10-smoke] done. Artifacts stored under $OUTPUT_DIR"

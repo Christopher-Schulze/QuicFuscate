@@ -1,8 +1,7 @@
 //! Audited ring AEAD and QUIC header-protection owners.
 //!
-//! Live Initial AES-128-GCM, AES header protection, TLS-Cover records, and
-//! QKey-registry at-rest envelopes use these types. First-party `AesGcm128`,
-//! `AesHp`, and `ChaCha20Poly1305` remain oracle/test implementations.
+//! Live Initial AES-128-GCM, AES header protection, Retry integrity tags,
+//! TLS-Cover records, and QKey-registry at-rest envelopes use these types.
 
 use crate::aead::{
     require_exact_key_iv, require_exact_length, require_minimum_length, AeadOpen, AeadSeal,
@@ -31,6 +30,18 @@ fn bind_key(
 ) -> Result<LessSafeKey, ConnectionError> {
     let unbound = UnboundKey::new(algorithm, key).map_err(|_| crypto_failure())?;
     Ok(LessSafeKey::new(unbound))
+}
+
+/// RFC 9001 §17.2.5 Retry integrity tag: AES-128-GCM over `aad` with an empty
+/// plaintext and the fixed per-version Retry key/nonce pair.
+pub fn aes128_gcm_tag_aad_only(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8]) -> [u8; 16] {
+    let key = bind_key(&AES_128_GCM, key).expect("fixed-size AES-128-GCM key is valid");
+    let tag = key
+        .seal_in_place_separate_tag(Nonce::assume_unique_for_key(*nonce), Aad::from(aad), &mut [])
+        .expect("sealing an empty payload cannot fail");
+    let mut out = [0u8; 16];
+    out.copy_from_slice(tag.as_ref());
+    out
 }
 
 /// RFC 9001 AES-128-GCM owner backed by ring.

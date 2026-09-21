@@ -415,15 +415,6 @@ unsafe fn memcpy_sve2_impl(dst: &mut [u8], src: &[u8]) {
 #[inline(always)]
 /// # Safety
 ///
-/// The caller must provide AArch64 NEON support and valid writable `state` and
-/// readable `key` arrays for the duration of the call. The implementation does
-/// not retain either reference.
-pub(super) unsafe fn aes_encrypt_neon(state: &mut [u8; 16], key: &[u8; 16]) {
-    scalar::aes_encrypt_block(state, key)
-}
-#[inline(always)]
-/// # Safety
-///
 /// The caller must provide the AArch64 SHA-256 instruction support required by
 /// the selected backend. `state` and `blocks` must be valid for the duration of
 /// the call, with `state` writable and `blocks` readable; no references escape.

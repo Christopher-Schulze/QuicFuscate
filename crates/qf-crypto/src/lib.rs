@@ -5,19 +5,13 @@
 //! private post-auth owner is libaegis AEGIS-128L, and only when the operator
 //! selects it. There is no first-party AEGIS or MORUS implementation.
 
-#[cfg(target_arch = "x86_64")]
-use qf_cpu::FeatureDetector;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
-use subtle::ConstantTimeEq;
-use zeroize::Zeroize;
 
 // Internal compatibility aliases keep the moved source readable while making the crate boundary
 // explicit: crypto owns the machine room and consumes only common, error, CPU, and telemetry
 // contracts. No root product module is reachable from this crate.
 pub(crate) use crate as crypto;
-pub(crate) use qf_common::{env_utils, secret};
 pub(crate) use qf_error as error;
 pub(crate) use qf_telemetry as telemetry;
 
@@ -41,161 +35,6 @@ mod tls_cover;
 pub use tls_cover::{
     TlsCoverCipherKind, TlsCoverCipherState, TlsCoverInstallOutcome, TlsCoverKeyMaterial,
 };
-
-pub(crate) mod chacha20poly1305 {
-    use super::chacha;
-    use super::poly1305;
-    use crate::crypto::aead::{AeadOpen, AeadSeal};
-    use crate::error::ConnectionError;
-    use zeroize::Zeroize;
-
-    /// ChaCha20-Poly1305 AEAD cipher (RFC 8439).
-    #[derive(Clone)]
-    pub struct ChaCha20Poly1305 {
-        key: [u8; 32],
-        nonce: [u8; 12],
-    }
-
-    impl ChaCha20Poly1305 {
-        /// Create a new instance from a 32-byte key and 12-byte IV/nonce.
-        pub fn new(key: &[u8], iv: &[u8]) -> Result<Self, crate::crypto::aead::KeyMaterialError> {
-            crate::crypto::aead::require_exact_key_iv("ChaCha20-Poly1305", key, 32, iv, 12)?;
-            let mut key_array = [0u8; 32];
-            key_array.copy_from_slice(key);
-            let mut iv_array = [0u8; 12];
-            iv_array.copy_from_slice(iv);
-            let cipher = Self::from_arrays(&key_array, &iv_array);
-            key_array.zeroize();
-            iv_array.zeroize();
-            Ok(cipher)
-        }
-
-        pub fn from_arrays(key: &[u8; 32], iv: &[u8; 12]) -> Self {
-            Self { key: *key, nonce: *iv }
-        }
-
-        #[inline(always)]
-        fn make_nonce(&self, counter: u64) -> Result<[u8; 12], ConnectionError> {
-            super::validate_packet_number(counter)?;
-            // QUIC/TLS style nonce construction: nonce = base_iv XOR packet_number.
-            let mut nonce = self.nonce;
-            let seq = counter.to_be_bytes();
-            for (idx, b) in seq.iter().enumerate() {
-                nonce[4 + idx] ^= *b;
-            }
-            Ok(nonce)
-        }
-
-        #[inline(always)]
-        fn one_time_key(&self, counter: u32, nonce12: &[u8; 12]) -> [u8; 32] {
-            let block0 = chacha::chacha20_block(&self.key, counter, nonce12);
-            let mut poly_key = [0u8; 32];
-            poly_key.copy_from_slice(&block0[..32]);
-            poly_key
-        }
-
-        #[inline(always)]
-        fn process_in_place(&self, counter: u32, nonce12: &[u8; 12], buf: &mut [u8]) {
-            chacha::xor_keystream_in_place(&self.key, counter, nonce12, buf);
-        }
-    }
-
-    impl Drop for ChaCha20Poly1305 {
-        fn drop(&mut self) {
-            self.key.zeroize();
-            self.nonce.zeroize();
-        }
-    }
-
-    impl AeadSeal for ChaCha20Poly1305 {
-        fn seal_with_u64_counter(
-            &self,
-            counter: u64,
-            ad: &[u8],
-            buf: &mut [u8],
-            len: usize,
-            _extra_in: Option<&[u8]>,
-        ) -> Result<usize, ConnectionError> {
-            let sealed = crate::crypto::checked_seal_capacity(buf.len(), len)?;
-            let (pt, rest) = buf.split_at_mut(len);
-
-            let mut nonce12 = self.make_nonce(counter)?;
-            let mut poly_key = self.one_time_key(0, &nonce12);
-
-            self.process_in_place(1, &nonce12, pt);
-
-            let tag = poly1305::aead_tag_chacha20poly1305(ad, pt, &poly_key);
-            poly_key.zeroize();
-            nonce12.zeroize();
-            rest[..16].copy_from_slice(&tag);
-            Ok(sealed)
-        }
-    }
-
-    impl AeadOpen for ChaCha20Poly1305 {
-        fn open_with_u64_counter(
-            &self,
-            counter: u64,
-            ad: &[u8],
-            buf: &mut [u8],
-        ) -> Result<usize, ConnectionError> {
-            if buf.len() < 16 {
-                return Err(ConnectionError::BufferTooShort);
-            }
-            let ct_len = buf.len() - 16;
-            let (ct, tag_in) = buf.split_at_mut(ct_len);
-            let mut tag = [0u8; 16];
-            tag.copy_from_slice(&tag_in[..16]);
-
-            let mut nonce12 = self.make_nonce(counter)?;
-            let mut poly_key = self.one_time_key(0, &nonce12);
-
-            let tag_calc = poly1305::aead_tag_chacha20poly1305(ad, ct, &poly_key);
-            poly_key.zeroize();
-            if !crate::crypto::subtle_ct_eq(&tag_calc, &tag) {
-                nonce12.zeroize();
-                return Err(ConnectionError::CryptoError("crypto failure".into()));
-            }
-
-            self.process_in_place(1, &nonce12, ct);
-            nonce12.zeroize();
-            Ok(ct_len)
-        }
-    }
-}
-
-/// Re-export of the ChaCha20-Poly1305 AEAD cipher (RFC 8439).
-pub use chacha20poly1305::ChaCha20Poly1305;
-
-
-/// Cross-platform AES-128 encryption for a single block.
-///
-/// The x86_64 path keeps its pre-existing AES-NI shortcut. Every other
-/// architecture uses the canonical runtime dispatcher in `crypto::aes` so
-/// packet protection and header protection cannot drift from its validated
-/// round implementation.
-#[inline]
-fn aes128_encrypt_block_fast(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: runtime feature detection in the if-guard ensures AES-NI is present
-    // before calling expand_aes128_schedule / aes128_encrypt_block_rk. Both take
-    // fixed-size stack values (&[u8; 16]), so no dangling pointers or length mismatches.
-    unsafe {
-        if FeatureDetector::instance().features_full().aesni {
-            // SAFETY:
-            // - runtime feature detection guarantees AESNI before entering the
-            //   accelerated round-key path below
-            // - inputs are fixed-size stack values, so the helper never sees
-            //   invalid lengths or dangling pointers
-            let mut rk = expand_aes128_schedule(key);
-            let mut out = *block;
-            aes128_encrypt_block_rk(&rk, &mut out);
-            zeroize_aes128_schedule(&mut rk);
-            return out;
-        }
-    }
-    crate::crypto::aes::aes128_encrypt_block(key, block)
-}
 
 /// Manages cryptographic keys and provides secure random data.
 /// This manager ensures that all cryptographic operations are backed by
@@ -223,18 +62,6 @@ impl Default for CryptoManager {
 // -----------------------------------------------------------------------------
 // QUIC AEAD/HP and supporting primitives (moved from native.rs)
 // -----------------------------------------------------------------------------
-
-/// Software AES-128 implementation (S-box, key expansion, encryption, CTR mode).
-pub mod aes;
-
-/// ChaCha20 stream cipher core with SIMD-dispatched keystream generation.
-pub mod chacha;
-
-/// Poly1305 one-time MAC (RFC 7539) with SIMD-dispatched accumulation.
-pub mod poly1305;
-
-/// AES-GCM authenticated encryption with SIMD-dispatched GHASH.
-pub mod gcm;
 
 /// SHA-256, HMAC-SHA-256, and HKDF (RFC 5869) key derivation.
 pub mod hkdf;
@@ -274,317 +101,13 @@ pub(crate) fn checked_seal_capacity(
 pub mod aead;
 mod libaegis_aead;
 mod ring_aead;
-pub use ring_aead::{RingAesGcm128, RingAesHp, RingChaCha20Poly1305};
-
-#[cfg(target_arch = "x86_64")]
-#[inline]
-// SAFETY: requires AES-NI (caller ensures). `rk` is &[__m128i; 11]; indexing 0..=10
-// stays within bounds. `block` is &mut [u8; 16]; _mm_loadu_si128 reads 16 bytes,
-// _mm_storeu_si128 writes 16 bytes back. Exclusive borrow prevents aliasing.
-pub(crate) unsafe fn aes128_encrypt_block_rk(
-    rk: &[core::arch::x86_64::__m128i; 11],
-    block: &mut [u8; 16],
-) {
-    use core::arch::x86_64::*;
-    let mut state = _mm_loadu_si128(block.as_ptr() as *const __m128i);
-    state = _mm_xor_si128(state, rk[0]);
-    for round_key in rk.iter().take(10).skip(1) {
-        state = _mm_aesenc_si128(state, *round_key);
-    }
-    state = _mm_aesenclast_si128(state, rk[10]);
-    _mm_storeu_si128(block.as_mut_ptr() as *mut __m128i, state);
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn zeroize_aes128_schedule(rk: &mut [core::arch::x86_64::__m128i; 11]) {
-    for word in rk {
-        // SAFETY: __m128i is an opaque 128-bit value and zero is a valid bit
-        // pattern. The schedule contains no borrowed pointers.
-        unsafe {
-            *word = core::arch::x86_64::_mm_setzero_si128();
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-// SAFETY: requires AES-NI (caller ensures). `key` is &[u8; 16]; _mm_loadu_si128
-// reads exactly 16 bytes. rk is stack-owned [__m128i; 11]; all 11 slots written
-// via aes_128_key_expansion. _mm_aeskeygenassist_si128 and _mm_slli_si128 are
-// register-to-register. rcon values are exhaustively matched (10 AES-128 rounds).
-pub(crate) unsafe fn expand_aes128_schedule(key: &[u8; 16]) -> [core::arch::x86_64::__m128i; 11] {
-    use core::arch::x86_64::*;
-    #[inline]
-    // SAFETY: requires AES-NI (caller ensures). All operations are register-to-register
-    // (_mm_aeskeygenassist_si128). rcon must be one of the 10 AES-128 round constants;
-    // unreachable_unchecked is sound because the match covers all values passed by
-    // expand_aes128_schedule.
-    unsafe fn aeskeygenassist_si128_rcon(key: __m128i, rcon: i32) -> __m128i {
-        match rcon {
-            0x01 => _mm_aeskeygenassist_si128(key, 0x01),
-            0x02 => _mm_aeskeygenassist_si128(key, 0x02),
-            0x04 => _mm_aeskeygenassist_si128(key, 0x04),
-            0x08 => _mm_aeskeygenassist_si128(key, 0x08),
-            0x10 => _mm_aeskeygenassist_si128(key, 0x10),
-            0x20 => _mm_aeskeygenassist_si128(key, 0x20),
-            0x40 => _mm_aeskeygenassist_si128(key, 0x40),
-            0x80 => _mm_aeskeygenassist_si128(key, 0x80),
-            0x1B => _mm_aeskeygenassist_si128(key, 0x1B),
-            0x36 => _mm_aeskeygenassist_si128(key, 0x36),
-            _ => core::hint::unreachable_unchecked(),
-        }
-    }
-
-    #[inline]
-    // SAFETY: requires AES-NI (caller ensures). All operations are register-to-register:
-    // _mm_shuffle_epi32, _mm_slli_si128, _mm_xor_si128. aeskeygenassist_si128_rcon
-    // has the same AES-NI requirement. Returns pair of by-value __m128i.
-    unsafe fn aes_128_key_expansion(mut key: __m128i, rcon: i32) -> (__m128i, __m128i) {
-        let mut temp2 = aeskeygenassist_si128_rcon(key, rcon);
-        temp2 = _mm_shuffle_epi32(temp2, 0xff);
-        let mut temp1 = key;
-        let mut temp3 = _mm_slli_si128(temp1, 4);
-        temp1 = _mm_xor_si128(temp1, temp3);
-        temp3 = _mm_slli_si128(temp3, 4);
-        temp1 = _mm_xor_si128(temp1, temp3);
-        temp3 = _mm_slli_si128(temp3, 4);
-        temp1 = _mm_xor_si128(temp1, temp3);
-        key = _mm_xor_si128(temp1, temp2);
-        (key, key)
-    }
-
-    let mut rk: [__m128i; 11] = [_mm_setzero_si128(); 11];
-    let mut k0 = _mm_loadu_si128(key.as_ptr() as *const __m128i);
-    rk[0] = k0;
-    let (k1, v1) = aes_128_key_expansion(k0, 0x01);
-    rk[1] = v1;
-    k0 = k1;
-    let (k2, v2) = aes_128_key_expansion(k0, 0x02);
-    rk[2] = v2;
-    k0 = k2;
-    let (k3, v3) = aes_128_key_expansion(k0, 0x04);
-    rk[3] = v3;
-    k0 = k3;
-    let (k4, v4) = aes_128_key_expansion(k0, 0x08);
-    rk[4] = v4;
-    k0 = k4;
-    let (k5, v5) = aes_128_key_expansion(k0, 0x10);
-    rk[5] = v5;
-    k0 = k5;
-    let (k6, v6) = aes_128_key_expansion(k0, 0x20);
-    rk[6] = v6;
-    k0 = k6;
-    let (k7, v7) = aes_128_key_expansion(k0, 0x40);
-    rk[7] = v7;
-    k0 = k7;
-    let (k8, v8) = aes_128_key_expansion(k0, 0x80);
-    rk[8] = v8;
-    k0 = k8;
-    let (k9, v9) = aes_128_key_expansion(k0, 0x1B);
-    rk[9] = v9;
-    k0 = k9;
-    let (_k10, v10) = aes_128_key_expansion(k0, 0x36);
-    rk[10] = v10;
-    rk
-}
-
-/// AES-128-GCM AEAD with optional AES-NI pre-expanded round keys.
-pub struct AesGcm128 {
-    key: [u8; 16],
-    iv: [u8; 12],
-    #[cfg(target_arch = "x86_64")]
-    rk: Option<[core::arch::x86_64::__m128i; 11]>,
-}
-
-impl AesGcm128 {
-    /// Create a new AES-128-GCM instance from a 16-byte key and 12-byte IV.
-    pub fn new(aead_key: &[u8], iv: &[u8]) -> Result<Self, crate::crypto::aead::KeyMaterialError> {
-        crate::crypto::aead::require_exact_key_iv("AES-128-GCM", aead_key, 16, iv, 12)?;
-        let mut key = [0u8; 16];
-        key.copy_from_slice(aead_key);
-        let mut iv_array = [0u8; 12];
-        iv_array.copy_from_slice(iv);
-        let cipher = Self::from_arrays(&key, &iv_array);
-        key.zeroize();
-        iv_array.zeroize();
-        Ok(cipher)
-    }
-
-    pub fn from_arrays(aead_key: &[u8; 16], iv: &[u8; 12]) -> Self {
-        let k = *aead_key;
-        let v = *iv;
-        // SAFETY: AES-NI feature checked before calling expand_aes128_schedule.
-        // k is [u8; 16] - valid 128-bit key. expand_aes128_schedule requires AES-NI.
-        #[cfg(target_arch = "x86_64")]
-        let rk = unsafe {
-            if FeatureDetector::instance().features_full().aesni {
-                Some(expand_aes128_schedule(&k))
-            } else {
-                None
-            }
-        };
-        #[cfg(not(target_arch = "x86_64"))]
-        let _rk: Option<()> = None;
-        #[cfg(target_arch = "x86_64")]
-        {
-            Self { key: k, iv: v, rk }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            Self { key: k, iv: v }
-        }
-    }
-
-    #[inline]
-    fn gen_keystream(&self, ctr: &[u8; 16]) -> [u8; 16] {
-        // SAFETY: self.rk is Some only when AES-NI was detected at construction.
-        // rk is &[__m128i; 11], out is stack-owned [u8; 16] copied from ctr.
-        // aes128_encrypt_block_rk requires AES-NI and reads/writes exactly 16 bytes.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            if let Some(rk) = &self.rk {
-                let mut out = *ctr;
-                aes128_encrypt_block_rk(rk, &mut out);
-                return out;
-            }
-        }
-        aes128_encrypt_block_fast(&self.key, ctr)
-    }
-}
-
-impl Drop for AesGcm128 {
-    fn drop(&mut self) {
-        self.key.zeroize();
-        self.iv.zeroize();
-        // The expanded round keys also contain key material.
-        #[cfg(target_arch = "x86_64")]
-        if let Some(rk) = &mut self.rk {
-            zeroize_aes128_schedule(rk);
-        }
-    }
-}
-
-fn subtle_ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
-    bool::from(a.ct_eq(b))
-}
-
-fn inc32(counter_block: &mut [u8; 16]) {
-    let mut n = u32::from_be_bytes([
-        counter_block[12],
-        counter_block[13],
-        counter_block[14],
-        counter_block[15],
-    ]);
-    n = n.wrapping_add(1);
-    let b = n.to_be_bytes();
-    counter_block[12] = b[0];
-    counter_block[13] = b[1];
-    counter_block[14] = b[2];
-    counter_block[15] = b[3];
-}
-
-use crate::crypto::aead::{AeadOpen, AeadSeal};
-
-// Implement AeadSeal and AeadOpen for AesGcm128 (Initial/Handshake only)
-impl AeadSeal for AesGcm128 {
-    fn seal_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-        len: usize,
-        _extra_in: Option<&[u8]>,
-    ) -> Result<usize, crate::error::ConnectionError> {
-        let sealed = crate::crypto::checked_seal_capacity(buf.len(), len)?;
-        let (pt, rest) = buf.split_at_mut(len);
-
-        // Use QUIC-compliant nonce construction via make_nonce16
-        let nonce16 = make_nonce16(&self.iv, counter)?;
-
-        // Form J0 per RFC 3610 for AES-GCM with 96-bit IV
-        let mut j0 = [0u8; 16];
-        j0[..12].copy_from_slice(&nonce16[..12]); // Use first 12 bytes of QUIC nonce
-        j0[15] = 1; // Initial counter value
-
-        // CTR encrypt in place
-        let mut ctr = j0;
-        inc32(&mut ctr);
-        let mut off = 0usize;
-        while off < pt.len() {
-            let ks = self.gen_keystream(&ctr);
-            let n = core::cmp::min(16, pt.len() - off);
-            for i in 0..n {
-                pt[off + i] ^= ks[i];
-            }
-            off += n;
-            inc32(&mut ctr);
-        }
-
-        // Compute tag = E(K, J0) XOR GHASH(H, AAD, CT)
-        let h = aes128_encrypt_block_fast(&self.key, &[0u8; 16]);
-        let s = crate::crypto::gcm::ghash(h, ad, pt);
-        let s_enc = self.gen_keystream(&j0);
-        let mut tag = [0u8; 16];
-        for i in 0..16 {
-            tag[i] = s_enc[i] ^ s[i];
-        }
-        rest[..16].copy_from_slice(&tag);
-        Ok(sealed)
-    }
-}
-
-impl AeadOpen for AesGcm128 {
-    fn open_with_u64_counter(
-        &self,
-        counter: u64,
-        ad: &[u8],
-        buf: &mut [u8],
-    ) -> Result<usize, crate::error::ConnectionError> {
-        use crate::error::ConnectionError;
-        if buf.len() < 16 {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let ct_len = buf.len() - 16;
-        let (ct, tag_in) = buf.split_at_mut(ct_len);
-        let mut tag = [0u8; 16];
-        tag.copy_from_slice(&tag_in[..16]);
-
-        // Use QUIC-compliant nonce construction via make_nonce16
-        let nonce16 = make_nonce16(&self.iv, counter)?;
-
-        // Form J0 per RFC 3610 for AES-GCM with 96-bit IV
-        let mut j0 = [0u8; 16];
-        j0[..12].copy_from_slice(&nonce16[..12]); // Use first 12 bytes of QUIC nonce
-        j0[15] = 1; // Initial counter value
-
-        let h = aes128_encrypt_block_fast(&self.key, &[0u8; 16]);
-        let s = crate::crypto::gcm::ghash(h, ad, ct);
-        let s_enc = self.gen_keystream(&j0);
-        let mut tag_calc = [0u8; 16];
-        for i in 0..16 {
-            tag_calc[i] = s_enc[i] ^ s[i];
-        }
-        if !subtle_ct_eq(&tag_calc, &tag) {
-            return Err(ConnectionError::CryptoError("crypto failure".into()));
-        }
-
-        // Decrypt in place
-        let mut ctr = j0;
-        inc32(&mut ctr);
-        let mut off = 0usize;
-        while off < ct.len() {
-            let ks = self.gen_keystream(&ctr);
-            let n = core::cmp::min(16, ct.len() - off);
-            for i in 0..n {
-                ct[off + i] ^= ks[i];
-            }
-            off += n;
-            inc32(&mut ctr);
-        }
-        Ok(ct_len)
-    }
-}
+pub use ring_aead::{
+    aes128_gcm_tag_aad_only, RingAesGcm128, RingAesHp, RingChaCha20Poly1305,
+};
 
 const MAX_QUIC_PACKET_NUMBER: u64 = (1 << 62) - 1;
+
+use crate::crypto::aead::{AeadOpen, AeadSeal};
 
 fn validate_packet_number(counter: u64) -> Result<(), crate::error::ConnectionError> {
     if counter > MAX_QUIC_PACKET_NUMBER {
@@ -901,6 +424,7 @@ pub fn select_packet_data_aead(key: &[u8; 32], iv: &[u8; 12]) -> (PacketAeadSeal
 
 /// Product-level private packet-AEAD family exposed to the authenticated negotiation layer.
 ///
+/// Selecting AEGIS-128L is a fork-specific data-plane decision, not a TLS cipher-suite decision; it applies only under the explicit full-fork assumption (QuicFuscate-to-QuicFuscate peers).
 /// The only family is libaegis AEGIS-128L. Wire id 2 (the removed MORUS id) is rejected by the decoder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -974,6 +498,7 @@ pub fn select_libaegis128_packet(
     )
 }
 
+#[cfg(test)]
 fn data_aead_override_mode() -> u8 {
     DATA_AEAD_OVERRIDE_MODE.load(Ordering::Relaxed)
 }

@@ -1,12 +1,6 @@
 // QuicFuscate Microbench CLI
-// Policy: AES-128-GCM only for handshake; ChaCha used for keystream tests only (no payload AEAD).
 // Usage:
 //   microbench help
-//   microbench aes-block <total_bytes_per_iter> <iters>
-//   microbench ghash <total_bytes_per_iter> <iters>
-//   microbench ghash-short <iters>
-//   microbench aes-gcm <total_bytes_per_iter> <iters>
-//   microbench chacha-x4 <total_bytes_per_iter> <iters>
 //   microbench bitpack <bit_width:1-8> <values_per_iter> <iters>
 //   microbench bitunpack <bit_width:1-8> <values_per_iter> <iters>
 //   microbench qpack-enc <bytes_per_iter> <iters>
@@ -33,183 +27,6 @@ fn format_mbps(bytes: usize, ns: u128) -> f64 {
     }
     let seconds = (ns as f64) / 1_000_000_000.0;
     (bytes as f64) / seconds / 1_000_000.0
-}
-
-fn bench_aes_block(total_bytes: usize, iters: usize) {
-    use quicfuscate::crypto::aes::aes128_encrypt_block;
-    let key = [0u8; 16];
-    let mut block = [0u8; 16];
-    let blocks = total_bytes.div_ceil(16);
-    let mut sink: u8 = 0;
-    let start = Instant::now();
-    for i in 0..iters {
-        // vary input minimally to avoid constant folding
-        block[0] = (i & 0xFF) as u8;
-        for _ in 0..blocks {
-            let out = aes128_encrypt_block(&key, &block);
-            sink ^= out[0];
-        }
-    }
-    let elapsed = start.elapsed().as_nanos();
-    let processed = blocks * 16 * iters;
-    println!(
-        "bench,aes-block,bytes,{},iters,{},ns_total,{},mbps,{:.3},sink,{}",
-        processed,
-        iters,
-        elapsed,
-        format_mbps(processed, elapsed),
-        sink
-    );
-}
-
-fn bench_ghash(total_bytes: usize, iters: usize) {
-    use quicfuscate::crypto::aes::aes128_encrypt_block;
-    use quicfuscate::crypto::gcm::ghash;
-    let key = [0u8; 16];
-    let zero = [0u8; 16];
-    let h = aes128_encrypt_block(&key, &zero);
-    let aad: [u8; 0] = [];
-    let mut ct = vec![0u8; total_bytes];
-    let mut sink: u8 = 0;
-    let start = Instant::now();
-    for i in 0..iters {
-        if !ct.is_empty() {
-            ct[0] = (i & 0xFF) as u8;
-        }
-        let tag = ghash(h, &aad, &ct);
-        sink ^= tag[0];
-    }
-    let elapsed = start.elapsed().as_nanos();
-    let processed = total_bytes * iters;
-    println!(
-        "bench,ghash,bytes,{},iters,{},ns_total,{},mbps,{:.3},sink,{}",
-        processed,
-        iters,
-        elapsed,
-        format_mbps(processed, elapsed),
-        sink
-    );
-}
-
-fn bench_ghash_short(iters: usize) {
-    use quicfuscate::crypto::aes::aes128_encrypt_block;
-    use quicfuscate::crypto::gcm::ghash;
-
-    const AAD_BYTES: usize = 32;
-    const CIPHERTEXT_BYTES: usize = 128;
-    let key = [0u8; 16];
-    let zero = [0u8; 16];
-    let h = aes128_encrypt_block(&key, &zero);
-    let aad = [0u8; AAD_BYTES];
-    let mut ct = [0u8; CIPHERTEXT_BYTES];
-    let mut sink: u8 = 0;
-    let start = Instant::now();
-    for i in 0..iters {
-        ct[0] = (i & 0xFF) as u8;
-        let tag = ghash(h, &aad, &ct);
-        sink ^= tag[0];
-    }
-    let elapsed = start.elapsed().as_nanos();
-    let processed = (AAD_BYTES + CIPHERTEXT_BYTES) * iters;
-    let ns_per_packet = if iters == 0 { 0.0 } else { elapsed as f64 / iters as f64 };
-    println!(
-        "bench,ghash-short,packets,{},bytes,{},iters,{},ns_total,{},ns_per_packet,{:.3},mbps,{:.3},sink,{}",
-        iters,
-        processed,
-        iters,
-        elapsed,
-        ns_per_packet,
-        format_mbps(processed, elapsed),
-        sink
-    );
-}
-
-fn bench_aes_gcm(total_bytes: usize, iters: usize) {
-    use quicfuscate::crypto::gcm::aes_gcm_seal;
-    let key = [0u8; 16];
-    let mut iv = [0u8; 12];
-    let aad: [u8; 0] = [];
-    let mut pt = vec![0u8; total_bytes];
-    let mut sink: u8 = 0;
-    let start = Instant::now();
-    for i in 0..iters {
-        iv[0] = (i & 0xFF) as u8;
-        if !pt.is_empty() {
-            pt[0] = (i & 0x7F) as u8;
-        }
-        let (ct, tag) = aes_gcm_seal(&key, &iv, &aad, &pt);
-        // light sink to avoid optimization
-        sink ^= tag[0] ^ ct.first().copied().unwrap_or(0);
-    }
-    let elapsed = start.elapsed().as_nanos();
-    let processed = total_bytes * iters;
-    println!(
-        "bench,aes-gcm,bytes,{},iters,{},ns_total,{},mbps,{:.3},sink,{}",
-        processed,
-        iters,
-        elapsed,
-        format_mbps(processed, elapsed),
-        sink
-    );
-}
-
-fn bench_chacha_x4(total_bytes: usize, iters: usize) {
-    use quicfuscate::optimize::crypto::chacha20_blocks_x4;
-    let key = [0u8; 32];
-    let nonce = [0u8; 12];
-    let mut sink: u8 = 0;
-    let blocks64 = total_bytes.div_ceil(64);
-    let groups = blocks64.div_ceil(4); // 4 blocks per call
-    let start = Instant::now();
-    for i in 0..iters {
-        let mut counter = i as u32;
-        for _ in 0..groups {
-            let blocks = chacha20_blocks_x4(&key, &nonce, counter);
-            counter = counter.wrapping_add(4);
-            for block in blocks.iter() {
-                sink ^= block[0];
-            }
-        }
-    }
-    let elapsed = start.elapsed().as_nanos();
-    let processed = groups * 4 * 64 * iters; // upper bound (may exceed requested bytes)
-    println!(
-        "bench,chacha-x4,bytes,{},iters,{},ns_total,{},mbps,{:.3},sink,{}",
-        processed,
-        iters,
-        elapsed,
-        format_mbps(processed, elapsed),
-        sink
-    );
-}
-
-fn bench_poly1305_mac(total_bytes: usize, iters: usize) {
-    use quicfuscate::crypto::poly1305;
-
-    let mut key = [0u8; 32];
-    let mut msg = vec![0u8; total_bytes];
-    let mut sink: u8 = 0;
-
-    let start = Instant::now();
-    for i in 0..iters {
-        key[0] = i as u8;
-        if !msg.is_empty() {
-            msg[0] = msg[0].wrapping_add(1);
-        }
-        let tag = poly1305::tag(&msg, &key);
-        sink ^= tag[0];
-    }
-
-    let elapsed = start.elapsed().as_nanos();
-    let processed = total_bytes * iters;
-    println!(
-        "bench,poly1305-mac,bytes,{},iters,{},ns_total,{},mbps,{:.3},sink,{}",
-        processed,
-        iters,
-        elapsed,
-        format_mbps(processed, elapsed),
-        sink
-    );
 }
 
 #[cfg(feature = "benches")]
@@ -297,7 +114,7 @@ fn print_profile_info() {
 
 fn print_help() {
     eprintln!(
-        "Microbench CLI\n\nCommands:\n  profile\n  aes-block <bytes_per_iter> <iters>\n  ghash <bytes_per_iter> <iters>\n  ghash-short <iters>\n  aes-gcm <bytes_per_iter> <iters>\n  chacha-x4 <bytes_per_iter> <iters>\n  poly1305-mac <bytes_per_iter> <iters>\n  sha256 <bytes_per_iter> <iters> [backend:auto|avx2|vnni|scalar] (requires --features benches)\n  hmac-sha256 <bytes_per_iter> <iters>\n  varint <values_per_iter> <iters>\n  hdr-validate <headers_per_iter> <iters>\n  bitpack <bit_width:1-8> <values_per_iter> <iters>\n  bitunpack <bit_width:1-8> <values_per_iter> <iters>\n  qpack-enc <bytes_per_iter> <iters>\n  qpack-dec <bytes_per_iter> <iters>\n  popcnt <bytes_per_iter> <iters>\nSizes accept suffixes: B, KiB, MiB"
+        "Microbench CLI\n\nCommands:\n  profile\n  sha256 <bytes_per_iter> <iters> [backend:auto|avx2|vnni|scalar] (requires --features benches)\n  hmac-sha256 <bytes_per_iter> <iters>\n  varint <values_per_iter> <iters>\n  hdr-validate <headers_per_iter> <iters>\n  bitpack <bit_width:1-8> <values_per_iter> <iters>\n  bitunpack <bit_width:1-8> <values_per_iter> <iters>\n  qpack-enc <bytes_per_iter> <iters>\n  qpack-dec <bytes_per_iter> <iters>\n  popcnt <bytes_per_iter> <iters>\nSizes accept suffixes: B, KiB, MiB"
     );
 }
 
@@ -310,16 +127,6 @@ fn main() {
     let cmd = &args[1];
     if cmd == "profile" {
         print_profile_info();
-        return;
-    }
-
-    if cmd == "ghash-short" {
-        if args.len() != 3 {
-            print_help();
-            std::process::exit(2);
-        }
-        let iters = parse_iters("iters", &args[2]).unwrap_or_else(|error| fail(error));
-        bench_ghash_short(iters as usize);
         return;
     }
 
@@ -343,11 +150,6 @@ fn main() {
     let iters = iters as usize;
 
     match cmd.as_str() {
-        "aes-block" => bench_aes_block(bytes, iters),
-        "ghash" => bench_ghash(bytes, iters),
-        "aes-gcm" => bench_aes_gcm(bytes, iters),
-        "chacha-x4" => bench_chacha_x4(bytes, iters),
-        "poly1305-mac" => bench_poly1305_mac(bytes, iters),
         "sha256" => bench_sha256(bytes, iters, args.get(4).map(String::as_str)),
         "hmac-sha256" => bench_hmac_sha256(bytes, iters),
         "varint" => bench_varint(bytes, iters),

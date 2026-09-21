@@ -1,6 +1,6 @@
 #![cfg(feature = "rust-tests")]
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::{select_private_packet_data_aead, AesGcm128, PrivateAeadFamily};
+use quicfuscate::crypto::{select_private_packet_data_aead, RingAesGcm128, PrivateAeadFamily};
 use quicfuscate::fec::matrix_multiply_scalar;
 
 fn make_vec(data: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -36,8 +36,8 @@ fn aes_gcm_roundtrip() {
     let mut buf = b"aes gcm payload".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
-    let open = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
+    let seal = RingAesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
+    let open = RingAesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
 
     let ad = b"aad";
     let pt_len = buf.len() - 16;
@@ -98,8 +98,8 @@ fn aes_gcm_rejects_tampered_tag() {
     let mut buf = b"tamper gcm".to_vec();
     buf.resize(buf.len() + 16, 0);
 
-    let seal = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
-    let open = AesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
+    let seal = RingAesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
+    let open = RingAesGcm128::new(&key, &iv).expect("exact AES-GCM fixture lengths");
     let ad = b"aad";
     let pt_len = buf.len() - 16;
     let ct_len = seal.seal_with_u64_counter(42, ad, &mut buf, pt_len, None).expect("seal");

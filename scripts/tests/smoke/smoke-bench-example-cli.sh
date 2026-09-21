@@ -54,9 +54,9 @@ expect_rejected() {
 
 echo "> microbench"
 expect_rejected "microbench rejects a malformed size" \
-  cargo run --quiet --example microbench --features benches -- ghash notanumber 10
+  cargo run --quiet --example microbench --features benches -- sha256 notanumber 10
 expect_rejected "microbench rejects zero iterations" \
-  cargo run --quiet --example microbench --features benches -- ghash 1024 0
+  cargo run --quiet --example microbench --features benches -- sha256 1024 0
 expect_rejected "microbench rejects an unknown benchmark" \
   cargo run --quiet --example microbench --features benches -- definitely-not-a-bench 1024 10
 

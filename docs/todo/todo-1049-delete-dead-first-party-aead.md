@@ -4,7 +4,7 @@ title: Delete dead first-party AES-GCM and ChaCha
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1034, TODO-1035, TODO-1050]
 ---
@@ -56,17 +56,25 @@ HKDF stays until TODO-1050 lands. This task depends on that so packet-key deriva
 
 ## Sub-Tasks
 
-- [ ] Call-site inventory committed in this file's Notes before deletion.
-- [ ] QKey legacy test seals with ring.
-- [ ] Packet tests use ring fixtures.
-- [ ] Delete modules, reexports, and the x4 parity test or retarget it.
-- [ ] `cargo test -p qf-crypto --lib --offline` and packet-header tests pass.
+- [x] Call-site inventory committed in this file's Notes before deletion.
+- [x] QKey legacy test seals with ring.
+- [x] Packet tests use ring fixtures.
+- [x] Delete modules, reexports, and the x4 parity test or retarget it.
+- [x] `cargo test -p qf-crypto --lib --offline` and packet-header tests pass.
 
 ## Acceptance
 
 - `rg` over `crates/` and `src/` finds no `chacha20_blocks_x4`, no `struct AesGcm128`, no first-party `ChaCha20Poly1305`.
 - Live seal owners unchanged: ring and libaegis only.
 - Legacy QKey fixture still upgrades.
+
+## Result
+
+Done. Removed: `aes.rs`, `gcm.rs`, `chacha.rs`, `poly1305.rs` from `crates/qf-crypto/src/` together with `AesGcm128`, `AesHp`, `ChaCha20Poly1305`, `Aes128Ctx`, `chacha20_blocks_x4`/`x16`, and the whole `src/optimize/simd/crypto.rs` + `src/optimize/crypto/` trees. The `subtle` dependency is gone (ring owns tag comparison). The retry integrity tag now uses `aes128_gcm_tag_aad_only` backed by ring AES-128-GCM. Runtime parity targets `rt-chacha-x4-parity`, `rt-chacha-x16-parity`, and `rt-ghash-sse-parity` plus the `micro-aes-block`/`micro-aes-gcm`/`micro-chacha-x4`/`micro-ghash` scripts are deleted; `micro-crypto-all.sh` measures the surviving `sha256`/`hmac-sha256` cells. `rt-baseline-oracles`, `rt-property-suite`, `rt-security-suite`, `rt-tls-cover-cipher`, the fuzz crypto target, `examples/aead_bakeoff.rs`, and `examples/microbench.rs` run on ring/libaegis owners. qf-simd keeps only SHA-256/HMAC/varint/bitstream delegates (`qf_crypto::hkdf` stays until TODO-1050).
+
+Verified: `cargo test -p qf-crypto --lib --offline` 59/59, packet tests 42/42 (including `retry_integrity_roundtrips_for_v1_and_v2` on the ring tag helper), QKey registry 13/13 (legacy `QFENC1` envelope seals with `RingChaCha20Poly1305` and upgrades), rt-baseline 6/6, rt-property 12/12, rt-security 26/26, rt-tls-cover 2/2, `cargo check --lib --bins --tests --examples --bench ci_regression` clean. `audit-runtime-guardrails.sh` check 4n rewritten to assert the ring/libaegis owner contract plus absence of the removed primitives.
+
+Post-sweep reconciliation: the safety-contract inventory now passes vacuously when qf-crypto holds zero `unsafe fn` (the removed kernels owned all of them); check 4n matches the macro-generated `libaegis_owner!(LibAegis128L)` declaration; the private-control bootstrap order check follows the refactored `finalize_authenticated_assignment()` sequence; the forked-posture doc wording moved into `PrivateAeadFamily`; `src/stealth/tests.rs` asserts the current `dynamic mode requires dynamic_enabled` message; the orphaned crypto doc comment in `src/optimize/simd/mod.rs` is removed; MAP.md/DOCUMENTATION.md drop the deleted rt-parity targets and scripts from the tree. Root library 1772/1772, full `--all-targets --features rust-tests` check clean, clippy clean.
 
 ## Risks
 

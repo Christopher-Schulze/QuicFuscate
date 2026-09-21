@@ -18,13 +18,13 @@ while [[ $# -gt 0 ]]; do
     --jobs) JOBS="$2"; shift;;
     --features) CARGO_FEATURES="$2"; shift;;
     --verbose) QUICFUSCATE_DEBUG_SCRIPTS=1;;
-    --help|-h) echo "Usage: $(basename "$0") [--only aegis,aes-gcm,ghash,chacha,aes-hp,simd,integration] [options]"; echo "Crypto & AEAD Comprehensive Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
+    --help|-h) echo "Usage: $(basename "$0") [--only aegis,aes-gcm,chacha,aes-hp,integration] [options]"; echo "Crypto & AEAD Comprehensive Test Suite"; usage_common_flags 2>/dev/null || true; exit 0;;
     *) echo "Unknown flag: $1" >&2; exit 2;;
   esac; shift
 done
 
 validate_scope_selection() {
-  qf_validate_scope_selection "$ONLY" "aegis,aes-gcm,ghash,chacha,aes-hp,simd,integration"
+  qf_validate_scope_selection "$ONLY" "aegis,aes-gcm,chacha,aes-hp,integration"
 }
 
 scope_selected() {
@@ -71,7 +71,7 @@ record_scope_skip() {
     "raw_output="
 }
 
-for scope in aegis aes-gcm ghash chacha aes-hp simd integration; do
+for scope in aegis aes-gcm chacha aes-hp integration; do
   if ! scope_selected "$scope" || { (( FAST )) && [[ "$ONLY" == "all" ]] && ! fast_scope_selected "$scope"; }; then
     record_scope_skip "$scope"
   fi
@@ -91,21 +91,6 @@ run_qf_crypto_filter() {
   run_cargo test -p qf-crypto --release --lib "$pattern" -- --nocapture
 }
 
-run_qf_crypto_filter_with_env() {
-  local env_assignment="$1"
-  local pattern="$2"
-  local list_output matched
-  if ! list_output="$(QF_DISABLE_COMMAND_JSON_LOG=1 run_cargo_with_env "$env_assignment" -- test -p qf-crypto --release --lib "$pattern" -- --list 2>&1)"; then
-    printf '%s\n' "$list_output" >&2
-    return 1
-  fi
-  matched="$(printf '%s\n' "$list_output" | awk '/: test$/{count++} END{print count+0}')"
-  if (( matched == 0 )); then
-    die "No qf-crypto tests matched filter with ${env_assignment}: ${pattern}"
-  fi
-  run_cargo_with_env "$env_assignment" -- test -p qf-crypto --release --lib "$pattern" -- --nocapture
-}
-
 echo "==============================================================="
 echo "  Crypto & AEAD Comprehensive Test Suite"
 echo "==============================================================="
@@ -118,13 +103,9 @@ if (( FAST )); then
   if scope_selected aes-gcm; then
     run_qf_crypto_filter aes_gcm
   fi
-  if [[ "$ONLY" != "all" ]] && scope_selected ghash; then
-    run_qf_crypto_filter_with_env QUICFUSCATE_GHASH_PMULL=1 ghash
-  fi
   if scope_selected integration; then
     run_cargo test --release \
       --test rt-tls-cover-cipher \
-      --test rt-ghash-sse-parity \
       -- --nocapture
   fi
   echo -e "\n[OK] Crypto Fast Tests Complete"
@@ -144,12 +125,6 @@ if scope_selected aes-gcm; then
   run_qf_crypto_filter aes_gcm
 fi
 
-# Test GHASH PMULL (ARM)
-if scope_selected ghash; then
-  echo -e "\n> Testing GHASH with PMULL (ARM)..."
-  run_qf_crypto_filter_with_env QUICFUSCATE_GHASH_PMULL=1 ghash
-fi
-
 # Test ChaCha20-Poly1305 fallback
 if scope_selected chacha; then
   echo -e "\n> Testing ChaCha20-Poly1305..."
@@ -162,21 +137,12 @@ if scope_selected aes-hp; then
   run_qf_crypto_filter aes_hp
 fi
 
-# Test SIMD paths (x86_64)
-if scope_selected simd; then
-  echo -e "\n> Testing SIMD Paths (AVX2/SSE2)..."
-  run_qf_crypto_filter_with_env RUSTFLAGS=-C\ target-cpu=native simd
-fi
-
 # Integration fixtures (Rust tests)
 if scope_selected integration; then
   echo -e "\n> Running Crypto Integration Fixtures..."
   run_cargo test --release \
     --test rt-baseline-oracles \
     --test rt-tls-cover-cipher \
-    --test rt-ghash-sse-parity \
-    --test rt-chacha-x4-parity \
-    --test rt-chacha-x16-parity \
     --test rt-fake-hmac \
     -- --nocapture
 fi

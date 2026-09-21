@@ -1062,7 +1062,7 @@ mod tests {
                 .expect("legacy key");
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&[0x91; NONCE_LEN]);
-        let cipher = crate::crypto::ChaCha20Poly1305::new(key.bytes.as_slice(), &nonce)
+        let cipher = crate::crypto::RingChaCha20Poly1305::new(key.bytes.as_slice(), &nonce)
             .expect("validated legacy registry key material");
         let mut ciphertext = PLAINTEXT.to_vec();
         ciphertext.resize(PLAINTEXT.len() + TAG_LEN, 0);

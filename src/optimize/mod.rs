@@ -9,7 +9,6 @@ pub mod brain;
 /// SIMD-accelerated compression helpers (histogram, entropy).
 pub mod compress;
 /// SIMD-accelerated cryptographic primitives (AES, ChaCha, GF).
-pub mod crypto;
 /// SIMD-accelerated iterator utilities (sum, reduce).
 pub mod iter;
 /// Memory management and cache-aware operations.

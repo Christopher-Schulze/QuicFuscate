@@ -8,7 +8,7 @@ use std::sync::{
 use crossbeam_channel::bounded;
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::ChaCha20Poly1305;
+use quicfuscate::crypto::RingChaCha20Poly1305;
 use quicfuscate::crypto::{install_data_aead_config, select_data_aead};
 use quicfuscate::engine::{AeadPreference, CryptoConfig};
 use quicfuscate::error::ConnectionError;
@@ -174,11 +174,11 @@ fn timing_attack_tag_mismatch_rejected() {
     let nonce = [0x22u8; 12];
     let mut buf = vec![0u8; 64 + 16];
     buf[..64].copy_from_slice(&[0xAB; 64]);
-    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+    let seal = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let out_len = seal.seal_with_u64_counter(0, b"aad", &mut buf, 64, None).expect("seal");
     assert_eq!(out_len, 80);
     buf[79] ^= 0x01;
-    let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+    let open = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let err = open.open_with_u64_counter(0, b"aad", &mut buf).expect_err("tamper must fail");
     assert!(matches!(err, ConnectionError::CryptoError(_)));
 }
@@ -207,10 +207,10 @@ fn crypto_properties_roundtrip() {
     let plaintext = b"quicfuscate-crypto-roundtrip";
     let mut buf = vec![0u8; plaintext.len() + 16];
     buf[..plaintext.len()].copy_from_slice(plaintext);
-    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+    let seal = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let sealed_len =
         seal.seal_with_u64_counter(7, b"ad", &mut buf, plaintext.len(), None).expect("seal");
-    let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+    let open = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
     let opened_len = open.open_with_u64_counter(7, b"ad", &mut buf).expect("open");
     assert_eq!(sealed_len, plaintext.len() + 16);
     assert_eq!(opened_len, plaintext.len());

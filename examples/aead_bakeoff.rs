@@ -12,7 +12,7 @@ use quicfuscate::crypto::aead::{
     AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem, PacketHeaderProtector,
 };
 use quicfuscate::crypto::{
-    select_libaegis128_packet, AesGcm128, LibAegis128Variant, RingAesGcm128, RingAesHp,
+    select_libaegis128_packet, LibAegis128Variant, RingAesGcm128, RingAesHp,
     RingChaCha20Poly1305,
 };
 use quicfuscate::error::ConnectionError;
@@ -37,7 +37,6 @@ enum Owner {
     SAegis,
     SAegisX2,
     SAegisX4,
-    FAes,
     IRing,
 }
 
@@ -50,7 +49,6 @@ impl Owner {
             Self::SAegis => "S-AEGIS",
             Self::SAegisX2 => "S-AEGIS-X2",
             Self::SAegisX4 => "S-AEGIS-X4",
-            Self::FAes => "F-AES",
             Self::IRing => "I-RING",
         }
     }
@@ -63,7 +61,6 @@ impl Owner {
             "S-AEGIS" | "SAEGIS" | "S-AEGIS-L" | "SAEGISL" => Self::SAegis,
             "S-AEGIS-X2" | "SAEGISX2" => Self::SAegisX2,
             "S-AEGIS-X4" | "SAEGISX4" => Self::SAegisX4,
-            "F-AES" | "FAES" => Self::FAes,
             "I-RING" | "IRING" => Self::IRing,
             _ => return None,
         })
@@ -78,7 +75,6 @@ fn all_owners() -> Vec<Owner> {
         Owner::SAegis,
         Owner::SAegisX2,
         Owner::SAegisX4,
-        Owner::FAes,
         Owner::IRing,
     ]
 }
@@ -141,7 +137,6 @@ fn rustls_packet(suite: rustls::SupportedCipherSuite) -> Result<RustlsPacket, St
 enum LivePair {
     Rustls(RustlsPacket),
     RingAes(RingAesGcm128),
-    FirstPartyAes(AesGcm128),
     Boxed(Box<dyn AeadSeal + Send + Sync>, Box<dyn AeadOpen + Send + Sync>),
 }
 
@@ -150,7 +145,6 @@ impl LivePair {
         match self {
             Self::Rustls(owner) => owner,
             Self::RingAes(owner) => owner,
-            Self::FirstPartyAes(owner) => owner,
             Self::Boxed(seal, _) => seal.as_ref(),
         }
     }
@@ -159,7 +153,6 @@ impl LivePair {
         match self {
             Self::Rustls(owner) => owner,
             Self::RingAes(owner) => owner,
-            Self::FirstPartyAes(owner) => owner,
             Self::Boxed(_, open) => open.as_ref(),
         }
     }
@@ -187,7 +180,6 @@ fn owner_status(owner: Owner) -> Result<LivePair, String> {
         Owner::SAegis => libaegis_pair(LibAegis128Variant::L),
         Owner::SAegisX2 => libaegis_pair(LibAegis128Variant::X2),
         Owner::SAegisX4 => libaegis_pair(LibAegis128Variant::X4),
-        Owner::FAes => Ok(LivePair::FirstPartyAes(AesGcm128::from_arrays(&AEAD_KEY16, &IV12))),
         Owner::IRing => RingAesGcm128::from_arrays(&AEAD_KEY16, &IV12)
             .map(LivePair::RingAes)
             .map_err(|error| error.to_string()),

@@ -275,10 +275,6 @@ pub static COMPRESS_DECISIONS_SKIP_LOSS: Counter = Counter::new();
 /// Compression skipped due to incompatible stealth profile.
 pub static COMPRESS_DECISIONS_SKIP_PROFILE: Counter = Counter::new();
 
-/// Total calls to GHASH scalar fallback path.
-pub static GHASH_SCALAR_CALLS: Counter = Counter::new();
-/// Total bytes processed by GHASH scalar fallback.
-pub static GHASH_SCALAR_BYTES: Counter = Counter::new();
 /// FEC operations using AVX-512 backend.
 pub static FEC_AVX512_OPS: Counter = Counter::new();
 /// FEC GF(2^16) operations using VBMI2 instructions.
@@ -302,20 +298,6 @@ pub static SVE2_OPS: Counter = Counter::new();
 /// General scalar (non-SIMD) fallback operations performed.
 pub static SCALAR_OPS: Counter = Counter::new();
 
-/// AES block operations via AES-NI (x86).
-pub static AES_BLOCK_AESNI_OPS: Counter = Counter::new();
-/// AES block operations via VAES (x86 wide).
-pub static AES_BLOCK_VAES_OPS: Counter = Counter::new();
-/// AES block operations via AESE (ARM).
-pub static AES_BLOCK_AESE_OPS: Counter = Counter::new();
-/// AES block operations via SSSE3 software table.
-pub static AES_BLOCK_SSSE3_OPS: Counter = Counter::new();
-/// AES block operations via SVE (ARM).
-pub static AES_BLOCK_SVE_OPS: Counter = Counter::new();
-/// AES block operations via NEON table lookup.
-pub static AES_BLOCK_NEON_TABLE_OPS: Counter = Counter::new();
-/// AES block operations via scalar fallback.
-pub static AES_BLOCK_SCALAR_OPS: Counter = Counter::new();
 /// SHA-256 operations via AVX2 backend.
 pub static SHA256_AVX2_OPS: Counter = Counter::new();
 /// SHA-256 operations via VNNI backend.
@@ -336,30 +318,6 @@ pub static HMAC_SHA256_NEON_OPS: Counter = Counter::new();
 pub static HMAC_SHA256_SVE2_OPS: Counter = Counter::new();
 /// HMAC-SHA256 operations via scalar fallback.
 pub static HMAC_SHA256_SCALAR_OPS: Counter = Counter::new();
-
-/// GHASH operations via PCLMULQDQ (x86).
-pub static GHASH_PCLMUL_OPS: Counter = Counter::new();
-/// GHASH operations via VPCLMULQDQ (x86 wide).
-pub static GHASH_VPCLMUL_OPS: Counter = Counter::new();
-/// GHASH operations via PMULL (ARM).
-pub static GHASH_PMULL_OPS: Counter = Counter::new();
-/// GHASH operations via NEON backend.
-pub static GHASH_NEON_OPS: Counter = Counter::new();
-/// GHASH operations via SSE backend.
-pub static GHASH_SSE_OPS: Counter = Counter::new();
-/// GHASH operations via scalar fallback.
-pub static GHASH_SCALAR_OPS: Counter = Counter::new();
-
-/// ChaCha20 4-way parallel operations via AVX2.
-pub static CHACHA20_X4_AVX2_OPS: Counter = Counter::new();
-/// ChaCha20 4-way parallel operations via AVX.
-pub static CHACHA20_X4_AVX_OPS: Counter = Counter::new();
-/// ChaCha20 4-way parallel operations via SSE4.1.
-pub static CHACHA20_X4_SSE41_OPS: Counter = Counter::new();
-/// ChaCha20 4-way parallel operations via NEON.
-pub static CHACHA20_X4_NEON_OPS: Counter = Counter::new();
-/// ChaCha20 4-way parallel operations via scalar fallback.
-pub static CHACHA20_X4_SCALAR_OPS: Counter = Counter::new();
 
 /// CRC32 operations via SSE4.2 hardware.
 pub static CRC32_SSE42_OPS: Counter = Counter::new();
@@ -400,9 +358,6 @@ pub static UNSAFE_LATENCY_REDUCTION_US: AtomicU64 = AtomicU64::new(0);
 pub static UNSAFE_THROUGHPUT_GBPS: AtomicU64 = AtomicU64::new(0);
 /// Active crypto profile identifier (maps to CpuProfile enum).
 pub static CRYPTO_PROFILE: AtomicU64 = AtomicU64::new(0);
-
-/// Total AEGIS batched encrypt/decrypt operations.
-pub static AEGIS_BATCH_OPS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether XDP fast path is currently active (0/1 gauge).
 pub static XDP_ACTIVE: AtomicU64 = AtomicU64::new(0);
@@ -476,28 +431,6 @@ pub static FAKETLS_CHACHA_OPS: Counter = Counter::new();
 pub static FAKETLS_AES_GCM_OPS: Counter = Counter::new();
 /// TLS-cover layer cipher operation failures.
 pub static FAKETLS_CIPHER_FAILURES: Counter = Counter::new();
-/// AES-CTR operations via AES-NI (x86).
-pub static AES_CTR_AESNI_OPS: Counter = Counter::new();
-/// AES-CTR operations via AESE (ARM).
-pub static AES_CTR_AESE_OPS: Counter = Counter::new();
-/// AES-CTR operations via SVE (ARM).
-pub static AES_CTR_SVE_OPS: Counter = Counter::new();
-/// AES-CTR operations via SSSE3 software table.
-pub static AES_CTR_SSSE3_OPS: Counter = Counter::new();
-/// AES-CTR operations via scalar fallback.
-pub static AES_CTR_SCALAR_OPS: Counter = Counter::new();
-/// Poly1305 MAC operations via AVX-512.
-pub static POLY1305_AVX512_OPS: Counter = Counter::new();
-/// Poly1305 MAC operations via AVX2.
-pub static POLY1305_AVX2_OPS: Counter = Counter::new();
-/// Poly1305 MAC operations via SSE2.
-pub static POLY1305_SSE2_OPS: Counter = Counter::new();
-/// Poly1305 MAC operations via SVE.
-pub static POLY1305_SVE_OPS: Counter = Counter::new();
-/// Poly1305 MAC operations via NEON.
-pub static POLY1305_NEON_OPS: Counter = Counter::new();
-/// Poly1305 MAC operations via scalar fallback.
-pub static POLY1305_SCALAR_OPS: Counter = Counter::new();
 /// f32 SIMD sum reductions via AVX-512.
 pub static ITER_SUM_F32_AVX512_OPS: Counter = Counter::new();
 /// f32 SIMD sum reductions via AVX2.

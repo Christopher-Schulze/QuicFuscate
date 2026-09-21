@@ -14,7 +14,7 @@
   const specs = [
     { key: "Engine", value: "Rust + Tokio" },
     { key: "Protocol", value: "Custom QUIC v1 [RFC 9000]" },
-    { key: "Cipher", value: "AEGIS-128" },
+    { key: "Cipher", value: "AES-128-GCM | AEGIS-128L" },
     { key: "FEC", value: "Reed-Solomon | Fountain" },
     { key: "Stealth", value: "Real TLS | Adaptive Stealth Stack" },
     { key: "UI", value: "Svelte 5 | Tauri [App]" },

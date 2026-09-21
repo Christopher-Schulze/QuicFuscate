@@ -924,7 +924,7 @@ fn tls_cover_open_failure_preserves_sequence_state() {
 
 #[test]
 fn packet_payload_boundaries_reject_overflow_before_aead() {
-    let aead = AesGcm128::from_arrays(&[0xB1; 16], &[0xB2; 12]);
+    let aead = RingAesGcm128::from_arrays(&[0xB1; 16], &[0xB2; 12]).expect("valid AES-GCM material");
     let mut packet = [0xC3u8; 64];
     let original = packet;
     assert!(encrypt_packet(&mut packet, usize::MAX, 0, 8, &aead).is_err());
@@ -1017,10 +1017,10 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
     let handshake_iv = [0x32; 12];
     let handshake_hp_key = [0x33; 16];
     installer.install_handshake_keys(QuicTlsHandshakeKeys {
-        seal: Box::new(AesGcm128::from_arrays(&handshake_key, &handshake_iv)),
-        open: Box::new(AesGcm128::from_arrays(&handshake_key, &handshake_iv)),
-        hp_seal: Box::new(crate::crypto::aead::AesHp::from_key(&handshake_hp_key)),
-        hp_open: Box::new(crate::crypto::aead::AesHp::from_key(&handshake_hp_key)),
+        seal: Box::new(RingAesGcm128::from_arrays(&handshake_key, &handshake_iv).expect("valid AES-GCM material")),
+        open: Box::new(RingAesGcm128::from_arrays(&handshake_key, &handshake_iv).expect("valid AES-GCM material")),
+        hp_seal: Box::new(crate::crypto::RingAesHp::from_key(&handshake_hp_key).expect("valid header-protection key")),
+        hp_open: Box::new(crate::crypto::RingAesHp::from_key(&handshake_hp_key).expect("valid header-protection key")),
         standard_cipher_suite: crate::qftls::StandardCipherSuite::Aes128GcmSha256,
     });
 
@@ -1028,16 +1028,16 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
     let one_rtt_iv = [0x42; 12];
     let one_rtt_hp_key = [0x43; 16];
     installer.install_one_rtt_keys(QuicTlsOneRttKeys {
-        seal: Arc::new(qf_crypto::PacketAeadSeal::dynamic(Box::new(AesGcm128::from_arrays(
-            &one_rtt_key,
-            &one_rtt_iv,
-        )))),
-        open: Arc::new(qf_crypto::PacketAeadOpen::dynamic(Box::new(AesGcm128::from_arrays(
-            &one_rtt_key,
-            &one_rtt_iv,
-        )))),
-        hp_seal: Arc::new(crate::crypto::aead::AesHp::from_key(&one_rtt_hp_key)),
-        hp_open: Arc::new(crate::crypto::aead::AesHp::from_key(&one_rtt_hp_key)),
+        seal: Arc::new(qf_crypto::PacketAeadSeal::dynamic(Box::new(
+            RingAesGcm128::from_arrays(&one_rtt_key, &one_rtt_iv)
+                .expect("valid AES-GCM material"),
+        ))),
+        open: Arc::new(qf_crypto::PacketAeadOpen::dynamic(Box::new(
+            RingAesGcm128::from_arrays(&one_rtt_key, &one_rtt_iv)
+                .expect("valid AES-GCM material"),
+        ))),
+        hp_seal: Arc::new(crate::crypto::RingAesHp::from_key(&one_rtt_hp_key).expect("valid header-protection key")),
+        hp_open: Arc::new(crate::crypto::RingAesHp::from_key(&one_rtt_hp_key).expect("valid header-protection key")),
         standard_cipher_suite: crate::qftls::StandardCipherSuite::Aes128GcmSha256,
     });
 
@@ -1101,7 +1101,7 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
 fn header_protection_test_context() -> CryptoContext {
     let mut crypto = CryptoContext::default();
     crypto.hp_initial = Some(Box::new(
-        crate::crypto::aead::AesHp::new(&[0x42; 16]).expect("valid header-protection key"),
+        crate::crypto::RingAesHp::new(&[0x42; 16]).expect("valid header-protection key"),
     ));
     crypto
 }
@@ -1136,8 +1136,8 @@ fn protect_and_remove_header_reject_missing_sample_without_mutation() {
 
 #[test]
 fn unprotect_rejects_missing_sample_before_header_or_payload_processing() {
-    let hp = crate::crypto::aead::AesHp::new(&[0x43; 16]).expect("valid header-protection key");
-    let aead = AesGcm128::from_arrays(&[0x44; 16], &[0x45; 12]);
+    let hp = crate::crypto::RingAesHp::new(&[0x43; 16]).expect("valid header-protection key");
+    let aead = RingAesGcm128::from_arrays(&[0x44; 16], &[0x45; 12]).expect("valid AES-GCM material");
     let header = Header {
         ty: PacketType::Initial,
         version: crate::transport::PROTOCOL_VERSION,
@@ -1161,7 +1161,7 @@ fn unprotect_rejects_missing_sample_before_header_or_payload_processing() {
 
 #[test]
 fn apply_hp_rejects_short_sample_and_packet_number_buffer() {
-    let hp = crate::crypto::aead::AesHp::new(&[0x46; 16]).expect("valid header-protection key");
+    let hp = crate::crypto::RingAesHp::new(&[0x46; 16]).expect("valid header-protection key");
     let mut pn = [0u8; 4];
     assert!(apply_hp(0x40, &mut pn, &[0u8; SAMPLE_LEN - 1], true, &hp).is_err());
 

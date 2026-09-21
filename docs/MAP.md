@@ -24,7 +24,7 @@ Current task status and evidence ownership are canonical only in `docs/todo.md` 
 - Engine-types ownership: `crates/qf-engine-types/src/lib.rs` retains root-independent contract types and re-exports; `src/config.rs`, `src/circuit.rs`, `src/qkey.rs`, and test-only `src/tests.rs` own configuration, circuit, QKey, and facade regressions respectively.
 - Privilege ownership: `crates/qf-privilege/src/drop.rs` retains production identity, capability, transition, and post-drop verification contracts; test-only `drop/tests.rs` owns the account, pointer-boundary, capability, and platform regressions.
 - qf-cpu ownership: `crates/qf-cpu/src/feature_detection.rs` owns cached runtime CPU feature detection, profile selection, and test-only profile overrides; `crates/qf-cpu/src/lib.rs` remains the stable facade and retains the `FeatureDetector` re-export plus the `CpuFeatures` policy table.
-- Brutal hot-path optimization ownership (2026-08-21): TODO-894 `StealthBrain` captures one `EnvSnapshot` at construction (`src/brain.rs` field `environment`) instead of per `apply_policy` tick. TODO-895 `AesBlock` (`crates/qf-crypto/src/aegis/aegis_aes_block.rs`) has no `Drop`; `AesHp` (`crates/qf-crypto/src/aead.rs`) caches the AES-NI round-key schedule in a `OnceLock` and erases it in `Drop`. TODO-896 TUN `WouldBlock` is absorbed as backpressure with `Metrics::record_tun_write_backpressure` (server, `src/implementations/server/live_auth.rs` + `metrics.rs` + `metrics/export.rs`) and lossless ingress re-queue via `ClientTunnelIngress::restore` (client, `src/implementations/client/io_driver.rs` + `io_driver/runtime.rs`). TODO-897 `LazyDecoder` (`crates/qf-fec/src/lazy.rs`) resets `seen_seqs` window-relatively before the flush/push decision, guarded by empty buffers and a 2k distance. TODO-898 AVX512 GF16 reduction (`crates/qf-simd/src/galois.rs`) uses the four-fold scheme; the SVE2 kernel (`crates/qf-fec/src/gf16.rs`) uses Russian-peasant carryless multiply with `0x100B`. TODO-899 `Decoder8` elimination (`crates/qf-fec/src/decoders/decoder8.rs`) is multi-RHS: one augmented pass for all byte columns. TODO-903 the core jitter gate (`src/core/connection/send.rs`) skips ACK-only packets via `SendInfo.congestion_controlled`. See the continued ownership bullet for TODO-899b/900/903 status.
+- Brutal hot-path optimization ownership (2026-08-21): TODO-894 `StealthBrain` captures one `EnvSnapshot` at construction (`src/brain.rs` field `environment`) instead of per `apply_policy` tick. TODO-895's `AesBlock`/`AesHp` erasure claims applied to the removed first-party AEGIS/AES-NI code; the current owners are `RingAesHp` and `LibAegis128L` (`crates/qf-crypto/src/ring_aead.rs`, `libaegis_aead.rs`), which zeroize retained key/IV material on `Drop` (TODO-1049). TODO-896 TUN `WouldBlock` is absorbed as backpressure with `Metrics::record_tun_write_backpressure` (server, `src/implementations/server/live_auth.rs` + `metrics.rs` + `metrics/export.rs`) and lossless ingress re-queue via `ClientTunnelIngress::restore` (client, `src/implementations/client/io_driver.rs` + `io_driver/runtime.rs`). TODO-897 `LazyDecoder` (`crates/qf-fec/src/lazy.rs`) resets `seen_seqs` window-relatively before the flush/push decision, guarded by empty buffers and a 2k distance. TODO-898 AVX512 GF16 reduction (`crates/qf-simd/src/galois.rs`) uses the four-fold scheme; the SVE2 kernel (`crates/qf-fec/src/gf16.rs`) uses Russian-peasant carryless multiply with `0x100B`. TODO-899 `Decoder8` elimination (`crates/qf-fec/src/decoders/decoder8.rs`) is multi-RHS: one augmented pass for all byte columns. TODO-903 the core jitter gate (`src/core/connection/send.rs`) skips ACK-only packets via `SendInfo.congestion_controlled`. See the continued ownership bullet for TODO-899b/900/903 status.
 - Brutal hot-path ownership continued (2026-08-21): TODO-899 `Decoder8` multi-RHS augmented elimination (`crates/qf-fec/src/decoders/decoder8.rs`), `Decoder16` word-domain multi-RHS via one `yb[m][words]` matrix (`crates/qf-fec/src/decoders/decoder16.rs`), permanent regression bench `fec_decode16_elimination/loss10_k16` in `scripts/benchmarks/ci_regression.rs` (1.36 ms / 128 payloads @ K=16, 10% loss); `Decoder16`/`Encoder16` exported through `quicfuscate::fec` for benches. TODO-900 `MemoryPool::free()` zeroize is policy-driven via `QUICFUSCATE_POOL_ZEROIZE_ON_FREE` (default ON - cross-connection stale-data barrier; `crates/qf-memory-pool/src/lib.rs` `runtime.zeroize_on_free`), permanent bench `memory_pool_cycle` (64K zeroize ~45% of cycle, MTU 4K ~8%, 4K beats 64K ~3.5x), `PoolOwnershipLedger` retained as fail-closed validator (lock-free rewrite scope-reduced, see `docs/todo/todo-900-per-connection-pool.md` Deviations). TODO-903 jitter gate skips ACK-only via `SendInfo.congestion_controlled` (`src/core/connection/send.rs`); `FlowShaper::apply_jitter` is traffic-aware from the bounded 2s history (`crates/qf-stealth/src/lib.rs` `jitter_range_for_traffic`: burst >=32 records -> low half, idle <8 -> full spread, steady -> uniform).
 - TODO-901 step 1 (2026-08-21): `recv_datagram_batch` (`src/implementations/server/dns_signals.rs`) drains the server socket until `WouldBlock` (cap 64) with one tokio wakeup per burst; `runtime_loop.rs` iterates the batch through the unchanged serial stateful path (labeled `'batch` break keeps fault exit prompt). Full SO_REUSEPORT sharding remains queued: `live_state` partitioning, consistent client-hash routing, TUN/admin ownership split, cross-shard shutdown - own design pass + Omega pps proof (`docs/todo/todo-901-server-rx-sharding.md` Deviations).
 
@@ -74,7 +74,7 @@ Current task status and evidence ownership are canonical only in `docs/todo.md` 
 - Linux outbound dispatch wiring (TODO-578, TODO-646): `OutboundDispatch::IoUringBatch` is admitted only when a runtime-owned `UringBatchWorker` initialised successfully. The worker owns one synchronous sender on one joined blocking thread, has one queued request, admits at most 256 packets and 524,288 aggregate payload bytes before copying, disables SendMsgZc, and turns timeout or hard completion failures into typed data-plane faults. A busy worker falls back to `sendmmsg`/socket sends; the shared `try_sendmmsg_batch()` match rejects accidental io_uring fall-through explicitly instead of silently returning zero sends, while `SendmmsgBatch` remains bounded by the payload count. Direct `UringBatchSender` calls remain synchronous compatibility primitives. TODO-798 continues to own partial-send semantics.
 - Audit logging wiring (TODO-515, TODO-525): `src/main_parts/late_tests_and_mlock.rs` resolves `[audit]` bounds and initializes the global `OnceLock<Arc<AuditLog>>` owner before privilege reduction -> typed lifecycle, privilege, authentication, QKey, admin, connection, configuration, and routing emitters validate JSON-encoded UTF-8 payload bounds before cloning dynamic fields and call non-blocking producer APIs -> one bounded `qf-audit-writer` assigns order and owns schema-v2 serialization, SHA-256 chaining, file I/O, deterministic rotation, retention, and atomic checkpoint durability -> Prometheus exposes queue-drop, payload-rejection, and persistence-error counters -> the atomic `Open`/`Closing`/`Closed` admission gate linearizes shutdown, drains in-flight producers, then sends the acknowledged final flush and joins the worker -> `verify-audit-log <path>` validates the checkpoint-declared ordered segment set with schema-v1 compatibility. Source IP, client ID, reason, message, and combined dynamic payload limits are 128, 512, 512, 8,192, and 8,192 JSON-encoded UTF-8 bytes. All audit artifacts are mode-`0o600` regular files owned by the runtime identity; special files and symlinks are rejected.
 - Memory locking wiring (TODO-516, TODO-851, TODO-852, TODO-854): `src/memory_lock.rs::MemoryLockPolicy` is the shared mapping for `SecurityConfig.lock_memory`, `lock_blocks`, and `memory_lock_failure_policy`. The default `best-effort` policy publishes typed degraded state after an `RLIMIT_MEMLOCK`, `mlockall`, or unsupported-platform failure; the Linux server template selects explicit `fail-closed`, which aborts before TLS/service exposure. Standalone `src/main.rs::run_server()` and embedded `QuicFuscateEngine::start()` apply the policy before server TLS identity construction; embedded startup applies it before `global_pool()` and runtime transport creation. Linux standalone startup with a configured UID/GID transition individually locks the TLS key before the transition and defers process-wide `mlockall` until verified setxid completion; the deferred result is propagated before runtime services and systemd `READY=1`. Unlimited budgets use current-and-future locking, finite budgets use current-only locking, and an unreadable budget is an explicit best-effort degradation or fail-closed error rather than an opaque `.ok()` fallback. `MemoryLockStartupStatus` is published to server Metrics, admin health/status, and systemd `/health`, `/ready`, and `/live`; degraded best-effort health remains service-ready, while deferred or failed state is not ready. The policy resets qftls process-coverage state, and the accepted TLS identity remains process-lifetime-owned; rejected values use an exact-range zeroize-before-`munlock` guard. Successful pool locks are tracked by `BlockLockLedger`; `MemoryPool::free()`, queue shrink, full-queue disposal, pool `Drop`, and TLS-cache `Drop` zeroize and `munlock()` before allocation release, while direct `AlignedBox` drops remain outside this owner boundary under TODO-516/TODO-678. Standalone reload rejects changes to all three startup-owned settings before runtime mutation. TODO-854 closes local deterministic negative-proof wiring; native Linux root-regain and Windows native fault lanes remain explicit unavailable boundaries. TODO-853 closes certificate/key correspondence and zeroizing identity-output ownership.
-- Retained-secret erasure wiring (TODO-526): `src/secret.rs` zeroizing byte/string owners -> `src/engine/qkey.rs` typed `QKeyToken` plus zeroizing JSON/base64 parse/generate temporaries -> server issuance and registry decode/hash -> client profile/config/live connection ownership. `src/qftls.rs` and `src/transport/config.rs` zeroize session-cache ticket owners, ticket copies, test-bound ticket/session owners, and private-key PEM read buffers; `src/transport/packet.rs` wraps QuicFuscate's copied 1-RTT secrets, `src/crypto/aead.rs` wipes AES header-protection keys, and `src/crypto/aegis.rs` wipes L/X4/X8 wrapper key/IV plus non-`Copy` local AEGIS state values on drop while concurrent packet operations remain mutex-free. Compiler-level register erasure remains a separate TODO-681 proof boundary.
+- Retained-secret erasure wiring (TODO-526): `src/secret.rs` zeroizing byte/string owners -> `src/engine/qkey.rs` typed `QKeyToken` plus zeroizing JSON/base64 parse/generate temporaries -> server issuance and registry decode/hash -> client profile/config/live connection ownership. `src/qftls.rs` and `src/transport/config.rs` zeroize session-cache ticket owners, ticket copies, test-bound ticket/session owners, and private-key PEM read buffers; `src/transport/packet.rs` wraps QuicFuscate's copied 1-RTT secrets, `crates/qf-crypto/src/ring_aead.rs` wipes AES header-protection keys, and `crates/qf-crypto/src/libaegis_aead.rs` wipes the AEGIS-128L key/IV on drop while concurrent packet operations remain mutex-free. Compiler-level register erasure remains a separate TODO-681 proof boundary.
 - QKey registry persistence wiring (TODO-539): standalone startup -> `qkey_registry.rs::QKeyRegistry::open()` -> `qkey_registry_storage.rs` protected current/previous keyring -> authenticated `QFQREG` version-1 ChaCha20-Poly1305 envelope. Startup propagates typed missing-key, wrong-key, corruption, version, permission, and I/O failures. Admin issue/revoke mutations serialize into zeroizing buffers and publish durable state before updating memory. Plaintext migration writes encrypted recovery before encrypted primary; an existing encrypted backup anchors plaintext-downgrade rejection; legacy/current-key rotation retains encrypted recovery and never interprets failed ciphertext as plaintext.
 - QKey replay-window maintenance wiring (TODO-578): standalone housekeeping -> `QKeyRegistry::prune_replay_window()` -> current Unix-epoch timestamp -> `ReplayWindow::prune(now)` -> stale-slot removal and logical-base advancement, including an empty quiet window.
 - Linux privilege-boundary wiring (TODO-527): CLI `--drop-user`/`--drop-group` -> `crates/qf-privilege/src/drop.rs::resolve_identity()` reentrant NSS or numeric-ID resolution -> pre-setup `try_check_capabilities()` and operation-specific capability gate -> TLS identity preload plus privileged UDP/TUN/routing initialization -> blocking-thread `drop_privileges_resolved()` clears supplementary groups, transitions all real/effective/saved IDs, and clears ambient/effective/permitted/inheritable capability sets -> `verify_process_privilege_state()` validates every Linux thread has the target real/effective/saved/filesystem IDs, empty groups, zero capability sets, and `PR_SET_NO_NEW_PRIVS` -> process-wide memory locking is applied after setxid while the TLS key and MemoryPool allocations are individually locked before it. TODO-849 makes `ResolvedIdentity` opaque, revalidates its non-root selector/account mapping at the final boundary, bounds `getgroups()` result counts, and defines `CurrentIds` on every target; TODO-850 adds typed partial-transition failure and complete local standard/Tokio probe assertions. The isolated `qf-privilege-probe` alone performs the destructive UID/GID root-regain attempt. `quicfuscate capabilities --json` exposes the same identity, capability, target, and readiness state; saved UID/GID fields are optional and remain null on Unix targets without a reliable query instead of copying effective IDs; systemd root-starts with only bounded setup capabilities and owns confinement plus post-drop host cleanup. TODO-527 is archived after current-source revalidation, with successor TODO-849, TODO-850, and TODO-854 proofs also archived.
@@ -564,11 +564,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |-- profiling-tun-mode.sh
 |   |   |-- profiling-zc.sh
 |   |   |-- micro
-|   |   |   |-- micro-aes-block.sh
-|   |   |   |-- micro-aes-gcm.sh
-|   |   |   |-- micro-chacha-x4.sh
 |   |   |   |-- micro-crypto-all.sh
-|   |   |   |-- micro-ghash.sh
 |   |   |   `-- micro-udpfast-throughput.sh
 |   |   |-- suites
 |   |   |   |-- bench-compression.sh
@@ -772,14 +768,11 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |-- rt-brain-activation-parity.rs
 |   |   |   |-- rt-brain-histogram.rs
 |   |   |   |-- rt-cc-algorithms.rs
-|   |   |   |-- rt-chacha-x16-parity.rs
-|   |   |   |-- rt-chacha-x4-parity.rs
 |   |   |   |-- rt-cli-help.rs
 |   |   |   |-- rt-compress-preprocessor.rs
 |   |   |   |-- rt-core-connection-basics.rs
 |   |   |   |-- rt-ecn-popcount.rs
 |   |   |   |-- rt-fake-hmac.rs
-|   |   |   |-- rt-ghash-sse-parity.rs
 |   |   |   |-- rt-harness-cli.rs
 |   |   |   |-- rt-harness-udpfast.rs
 |   |   |   |-- rt-header-validate-parity.rs
@@ -888,17 +881,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |-- compress.rs
     |-- core.rs
     |-- crypto
-    |   |-- aead.rs
-    |   |-- aegis.rs
-    |   |-- aes.rs
-    |   |-- chacha.rs
-    |   |-- gcm.rs
-    |   |-- hkdf.rs
-    |   |-- mod.rs
-    |   |-- morus.rs
-    |   |-- poly1305.rs
-    |   |-- quic_kdf.rs
-    |   `-- tests.rs
+    |   `-- mod.rs
     |-- engine
     |   |-- config.rs
     |   |-- engine.rs
@@ -965,25 +948,39 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |-- memory_lock.rs
     |-- metrics.rs
     |-- optimize
+    |   |-- brain
+    |   |   |-- histogram.rs
+    |   |   `-- tests.rs
     |   |-- brain.rs
     |   |-- compress.rs
-    |   |-- crypto
-    |   |   |-- aegis.rs
-    |   |   |-- mod.rs
-    |   |   |-- morus.rs
-    |   |   `-- planner.rs
     |   |-- iter.rs
     |   |-- memory.rs
     |   |-- mod.rs
+    |   |-- parts
+    |   |   |-- cache_and_const.rs
+    |   |   `-- manager.rs
     |   |-- random.rs
-    |   |-- simd.rs
+    |   |-- simd
+    |   |   |-- compress.rs
+    |   |   |-- core.rs
+    |   |   |-- galois.rs
+    |   |   |-- mod.rs
+    |   |   |-- neural.rs
+    |   |   |-- pattern.rs
+    |   |   `-- tests.rs
     |   |-- sort.rs
     |   |-- stealth.rs
     |   |-- string.rs
     |   |-- telemetry.rs
     |   |-- transport.rs
     |   |-- udp.rs
+    |   |-- unsafe
+    |   |   `-- tests.rs
     |   |-- unsafe.rs
+    |   |-- uring_batch
+    |   |   |-- recv.rs
+    |   |   |-- tests.rs
+    |   |   `-- worker.rs
     |   `-- uring_batch.rs
     |-- profile.rs
     |-- qftls.rs
@@ -1199,7 +1196,7 @@ The follow-up source reconciliation confirmed and expanded the server/runtime ba
 
 This pass reconciled the remaining unsafe inventory and the next transport/FEC lifecycle surfaces against the current source. No product implementation was changed.
 
-- **Crypto corrections:** TODO-631's blanket round-key zeroization claim is stale because the `qf-crypto` AES-NI schedule exists only on x86_64, is populated only when AES-NI is detected, and is zeroized in its target-specific `Drop`; key and IV zeroization remains cross-target. Native ARM64 `qf-crypto` coverage passes 140/140 and strict crate Clippy passes. TODO-642's zero-key fallback claim is stale because TLS cover entropy failure returns a typed crypto error before derivation. TODO-627 closes the constructor key/IV boundary; TODO-629 and TODO-632 retain the independent header-protection and nonce-lifecycle contracts, while TODO-633 closes the exact 32-byte KDF boundary and typed transport propagation.
+- **Crypto corrections:** TODO-631's blanket round-key zeroization claim applied to the removed first-party AES-NI schedule; the current owners (`RingAesGcm128`, `RingAesHp`, `RingChaCha20Poly1305`, `LibAegis128L`) zeroize retained key/IV material cross-target in `Drop` (TODO-1049). Native ARM64 `qf-crypto` coverage passes 140/140 and strict crate Clippy passes. TODO-642's zero-key fallback claim is stale because TLS cover entropy failure returns a typed crypto error before derivation. TODO-627 closes the constructor key/IV boundary; TODO-629 and TODO-632 retain the independent header-protection and nonce-lifecycle contracts, while TODO-633 closes the exact 32-byte KDF boundary and typed transport propagation.
 - **AMX:** TODO-816 removes the compile-time-absent AMX branch from `src/fec/parts/decoders.rs`, restores scalar GF(256) SpMV for ordinary and target-feature x86 builds, and removes the uncalled raw kernels and global tile config. TODO-817 removes the external detector process and separates CPU, OS, compiler, and backend eligibility evidence. TODO-818 adds `rt-amx-proof`, the exact target-feature shell lane, explicit `UNAVAILABLE` exit/result semantics, Linux x86 tile-state probing, scalar FEC parity/concurrency/dimension/scratch/telemetry coverage, and audit/full-suite/CI wiring. `WIEDEMANN_AMX_OPS` and AMX scratch telemetry remain reserved and zero in the active path; the native backend marker remains false, so no native AMX arithmetic claim is made. `X86_P3e` remains the AVX-512F + GFNI profile, while `Apple_M` routes current callers to NEON and its Apple matrix bit is metadata only. TODO-676 closes the current race/dispatch/runtime boundary for the inactive production backend; TODO-819 closes profile/documentation truth.
 - **Unsafe memory and pooled-buffer boundaries:** `src/optimize/unsafe.rs` calls a field named `tls_cache` through shared `UnsafeCell` state without actual thread-local storage, permits fallback allocations to desynchronize capacity/available counters, and performs block-size-independent prefetch pointer arithmetic. `UnsafeCompressor` exposes a shared mutable zstd context through `Sync`. The active safe `MemoryPool` has separate ephemeral, foreign-origin, TLS-shrink, and counter contracts, while compatibility raw `AlignedBox` boundaries remain explicitly owned; generic, FEC, and zero-copy DATAGRAM paths now use `PooledBlock` for pool-backed ownership. The historical `copy_to_block` inventory is absent from the current source. TODO-678 is the umbrella index; TODO-826 through TODO-833 own the completed split boundaries.
 - **SIMD:** TODO-679's current-source pass confirmed that the old AVX-512/GFNI Reed-Solomon delegation claim is stale for the active decoder. TODO-834 completed the dispatch and compiled-surface implementation, including the exact feature intersections, direct FEC/packet callers, and packet-number network-order regression. TODO-835 closes the critical `find_pattern_sse42_short` short-needle load, release-safe matrix/BMI2 dimension/output checks, overlong Berlekamp-Massey rejection, and private-helper caller contracts; remaining vector tails were cross-checked. TODO-836 completes the proof implementation for the current 131 unsafe declarations, source-driven restricted-visibility matching, exact feature wording, and explicit unsupported-ISA accounting. Native x86/Linux, Windows, SVE2, sanitizer, and Miri evidence remain unclaimed.
@@ -1414,8 +1411,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Implementation Reconciliation (2026-08-03, crypto key and IV constructor boundaries)
 
-- **Typed boundary:** `src/crypto/aead.rs` owns `KeyMaterialError` plus exact-length helpers. `ChaCha20Poly1305` requires a 32-byte key and 12-byte IV. AES-128-GCM and libaegis AEGIS-128L require a 16-byte key and a 12-byte IV.
-- **Header protection:** `AesHp::new` rejects secrets shorter than 16 bytes without a panic. Its documented raw-secret API still consumes the first 16 bytes of a longer secret; all packet setup paths derive the exact 16-byte header-protection key first and use the typed array constructor, so a 32-byte traffic secret is never silently installed as an HP key.
+- **Typed boundary:** `crates/qf-crypto/src/aead.rs` owns `KeyMaterialError` plus exact-length helpers. `RingChaCha20Poly1305` requires a 32-byte key and 12-byte IV. `RingAesGcm128`, `RingAesHp`, and libaegis AEGIS-128L require a 16-byte key and a 12-byte IV.
+- **Header protection:** `RingAesHp::from_key` accepts only an exact 16-byte key and returns a typed error otherwise. All packet setup paths derive the exact 16-byte header-protection key first, so a 32-byte traffic secret is never silently installed as an HP key.
 - **Propagation:** QKey registry encryption/decryption, TLS cover ciphers, packet initial/handshake/0-RTT/1-RTT setup, examples, runtime fixtures, property/security fixtures, and the retained backend benchmark all propagate or prove the fallible constructor boundary. No key/IV `unwrap_or(0)` construction fallback remains; TODO-633 closes exact 32-byte QUIC traffic-secret derivation, and header-protection sample handling remains separately owned by TODO-629.
 - **Verification:** Locked all-target/all-feature check and strict Clippy passed. Serial crypto tests passed 143/143, QKey registry storage 11/11, packet tests 25/25, baseline/property/security integration targets 6/6, 12/12, and 24/24, and all four retained backend benchmark smokes executed successfully. The Criterion benchmark target compiled with `--no-run`. The full local library passed 2,194/2,196; DNS resolution remains TODO-807 and rustls ClientHello readiness remains TODO-768. TODO-758 supersedes the former fuzz manifest path failure and closes hosted nightly sanitizer execution in job `93844215976`.
 
@@ -1429,10 +1426,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Implementation Reconciliation (2026-08-03, GHASH dispatch configuration)
 
-- **Test boundary:** `GHASH_TEST_OVERRIDE` and `__test_set_ghash_override` remain behind `cfg(test)` on x86_64; the prior claim that the test hook was compiled into production builds is not confirmed.
-- **x86 dispatch:** `GHASH_OVERRIDE` stores a parsed `GhashOverride` in `OnceLock`. `QUICFUSCATE_GHASH` is read and interpreted once, while normal GHASH calls use the immutable enum without environment access, string allocation, or case normalization.
-- **ARM dispatch:** `GHASH_PMULL_ENABLED` caches the startup value of `QUICFUSCATE_GHASH_PMULL`, removing the per-call environment read from the AArch64 GHASH path. CPU feature selection remains owned by the existing process-cached `FeatureDetector`.
-- **Benchmark:** `examples/microbench.rs ghash-short` measures repeated 32-byte AAD plus 128-byte ciphertext GHASH calls; `scripts/benchmarks/micro/micro-ghash.sh` runs it before the configurable size matrix and retains the CSV/JSON/log evidence.
+- **Test boundary (superseded):** `GHASH_TEST_OVERRIDE`, `__test_set_ghash_override`, `GHASH_OVERRIDE`, `QUICFUSCATE_GHASH`, and `GHASH_PMULL_ENABLED` are removed with the first-party GHASH backend (TODO-1049); ring owns GHASH internally and no in-tree override surface remains.
+- **Benchmark:** the former `ghash-short`/`ghash` microbench commands are removed with the first-party GHASH backend (TODO-1049); `micro-crypto-all.sh` now measures the surviving `sha256` and `hmac-sha256` cells.
 - **Regression proof:** Native all-target check and strict Clippy passed. The complete Crypto group passed 144/144, GCM passed 11/11 with `QUICFUSCATE_GHASH_PMULL=0` and `=1`, the release short-packet benchmark completed 1,000 packets, and the runner smoke completed with isolated artifacts. The x86_64-Apple cross-check remains blocked by pre-existing `avx10.1-*` feature-macro errors and the existing non-constant `_mm_prefetch` argument at `src/optimize/parts/cache_and_const.rs:54`; no x86 runtime proof is claimed on this ARM host.
 - **Scope boundary:** No UI, Omega, or unrelated crypto backend behavior changed. The broader project audit remains open under its existing task owners.
 
@@ -2107,8 +2102,8 @@ The audit remains open. These reconciliations document current evidence and owne
 - `scripts/tests/fuzz/Cargo.toml` resolves the root crate through `../../..` and exposes exactly six targets. `cargo metadata --no-deps --format-version 1 --locked` and local `cargo fuzz list --fuzz-dir scripts/tests/fuzz` are the available host proofs.
 - `.github/workflows/ci.yml` covers pull requests and main pushes with 60/120-second target budgets; `.github/workflows/fuzz-scheduled.yml` covers the extended Sunday lane with a 1,800-second budget. Both lanes require nightly, explicitly set AddressSanitizer, call `run-ci-fuzz.sh`, and upload crash artifacts on failure.
 - The tracked seed corpus is curated to eight files per target. Generated `corpus/` and `artifacts/` directories remain ignored and are populated only in the runtime lane.
-- The crypto target distinguishes all public configuration spellings from the internal AEGIS width backends and documents the intentional fallback path. Frontend files and surfaces are outside this backend-only task.
-- Closed lock path: `qf-crypto/Cargo.toml` direct `subtle` edge -> isolated `scripts/tests/fuzz/Cargo.lock` local-package dependency list -> Nightly `--locked` metadata -> six-target contract audit -> hosted AddressSanitizer runner. The repair adds one existing-package edge with no version churn; local metadata resolves `308/308` packages/nodes and the curated-seed dry-run retains `48/48` files. Commit `10c1559`, Clippy Matrix run `31510890429`, and Main CI job `93844215976` close the gate with `12,000` sanitizer executions and no crash artifact.
+- The crypto target exercises the public AEAD configuration spellings and the ring/libaegis owners; internal width backends are removed (TODO-1049). Frontend files and surfaces are outside this backend-only task.
+- Closed lock path: `qf-crypto/Cargo.toml` direct dependency edges -> isolated `scripts/tests/fuzz/Cargo.lock` local-package dependency list -> Nightly `--locked` metadata -> six-target contract audit -> hosted AddressSanitizer runner. The repair adds one existing-package edge with no version churn; local metadata resolves `308/308` packages/nodes and the curated-seed dry-run retains `48/48` files. The former direct `subtle` edge is removed because ring now owns tag comparison internally (TODO-1049). Commit `10c1559`, Clippy Matrix run `31510890429`, and Main CI job `93844215976` close the gate with `12,000` sanitizer executions and no crash artifact.
 
 ## Strict Panic and Invariant Contract (2026-08-08, TODO-757)
 
@@ -2280,7 +2275,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Crypto Workspace Crate Reconciliation (2026-08-09, TODO-562)
 
-- `crates/qf-crypto/` owns AES, ChaCha20, AES-GCM, Poly1305, HKDF, QUIC key derivation, header protection, libaegis AEGIS-128L, and the root-independent `DataAeadPreference` plus `CryptoConfig` contracts. First-party AEGIS and MORUS are not in the crate. The root `src/crypto/mod.rs` remains a compatibility adapter.
+- `crates/qf-crypto/` owns HKDF, QUIC key derivation, the AEAD trait boundaries, and the root-independent `DataAeadPreference` plus `CryptoConfig` contracts. AEAD implementations delegate to standard owners: `ring_aead.rs` wraps ring AES-128-GCM, ring ChaCha20-Poly1305, and ring AES-128 header protection (`RingAesGcm128`, `RingChaCha20Poly1305`, `RingAesHp`, `aes128_gcm_tag_aad_only`), and `libaegis_aead.rs` wraps the pinned `aegis` 0.9.18 crate for the private AEGIS-128L payload option. First-party AES/GCM/ChaCha20/Poly1305/AEGIS/MORUS primitives are removed (TODO-1049). The root `src/crypto/mod.rs` remains a compatibility adapter.
 - qf-crypto depends only on `qf-common`, `qf-cpu`, `qf-error`, and `qf-telemetry` among workspace crates. Root feature forwarding covers `rust-tests`, `benches`, `std`, `prefetch`, `aggressive_inline`, and `internal_avx10_preview`. No frontend or Tauri path changed, and this backend cut requires no frontend field/API addition.
 - Isolated qf-crypto tests pass `136/136`; strict all-target/all-feature Clippy and root all-target compatibility checking pass. The complete serial workspace all-target `rust-tests` run previously passed 102 result blocks with `3,005` passed, `0` failed, and `6` ignored; qf-crypto contributed `135/135` before the configuration-owner test was added. Formatting and workspace `rust-tests` Clippy pass for the current code.
 - The CI Clippy matrix invokes `cargo clippy --workspace --all-targets` for every covered feature combination, so extracted leaves are linted with the root package.
@@ -3269,8 +3264,8 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## x86 Integration-Test Feature Ownership (2026-08-10, TODO-562)
 
-- GHASH parity flow: root `rust-tests` -> qf-crypto `rust-tests` -> x86 test override mutex and setter -> shared GHASH selector -> SSE or scalar backend -> telemetry and output parity. Normal product builds compile only the release environment override.
-- ChaCha20 x16 parity flow: registered x86 integration target -> `optimize::simd::crypto::chacha20_blocks_x16` -> AVX-512 runtime gate -> vector kernel or wrapping scalar fallback. `optimize::crypto` retains only its established x4 compatibility export.
+- GHASH parity flow: superseded. The first-party GHASH backends and their override controls were removed with the first-party AES-GCM implementation (TODO-1049); ring owns GHASH internally for AES-GCM tag verification.
+- ChaCha20 x16 parity flow: superseded. `optimize::simd::crypto` and the first-party ChaCha20 block functions were removed (TODO-1049); ChaCha20-Poly1305 is served by the ring owner `RingChaCha20Poly1305`.
 - Verification: exact workspace `tun-tests,rust-tests` all-target Clippy; Linux-x86 qf-crypto all-target Clippy; qf-crypto `140/140`; strict workspace all-feature library/binary/example Clippy; formatting and diff hygiene. Hosted Linux retains authoritative root integration-target compilation because the local cross-build lacks a Linux C sysroot.
 
 ## Bounded Frontend Unit-Test Wiring (2026-08-11, TODO-753)

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use proptest::prelude::*;
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::ChaCha20Poly1305;
+use quicfuscate::crypto::RingChaCha20Poly1305;
 use quicfuscate::crypto::{install_data_aead_config, select_data_aead};
 use quicfuscate::engine::{AeadPreference, CryptoConfig};
 use quicfuscate::fec::{Encoder8, FecDecoder8, FecPacket};
@@ -64,10 +64,10 @@ proptest! {
         let mut buf = vec![0u8; plaintext.len() + 16];
         buf[..plaintext.len()].copy_from_slice(&plaintext);
 
-        let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+        let seal = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let sealed_len =
             seal.seal_with_u64_counter(counter, &aad, &mut buf, plaintext.len(), None).expect("seal");
-        let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+        let open = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let opened_len = open.open_with_u64_counter(counter, &aad, &mut buf).expect("open");
 
         prop_assert_eq!(sealed_len, plaintext.len() + 16);
@@ -332,7 +332,7 @@ proptest! {
         let mut buf = vec![0u8; ct_len];
         buf[..plaintext.len()].copy_from_slice(&plaintext);
 
-        let seal = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+        let seal = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let sealed_len = seal
             .seal_with_u64_counter(counter, &aad, &mut buf, plaintext.len(), None)
             .expect("seal");
@@ -342,7 +342,7 @@ proptest! {
         let bit_pos = (bit_index / sealed_len) % 8;
         buf[byte_pos] ^= 1u8 << bit_pos;
 
-        let open = ChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
+        let open = RingChaCha20Poly1305::new(&key, &nonce).expect("exact ChaCha fixture lengths");
         let result = open.open_with_u64_counter(counter, &aad, &mut buf);
         prop_assert!(result.is_err(), "tampered ciphertext must fail authentication");
     }

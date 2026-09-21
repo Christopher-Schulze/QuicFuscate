@@ -1,14 +1,12 @@
 //! Drives the public AEAD seal/open path and the retained data-AEAD selector with arbitrary
 //! bytes, including every accepted `force_aead` spelling.
 //!
-//! A panic, an aborted seal/open, or a fail-open selection on a malformed planner-owned width
-//! name is a finding. No key material or handshake state crosses this boundary. The public list
-//! covers every accepted `crypto.force_aead` spelling. The internal entries intentionally
-//! exercise the runtime's fail-closed fallback for planner-owned width names; they are not valid
-//! product configuration values.
+//! A panic, an aborted seal/open, or a fail-open selection on an arbitrary spelling is a finding.
+//! No key material or handshake state crosses this boundary. The public list covers every accepted
+//! `crypto.force_aead` spelling.
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::{install_data_aead_config, select_data_aead, ChaCha20Poly1305};
+use quicfuscate::crypto::{install_data_aead_config, select_data_aead, RingChaCha20Poly1305};
 use quicfuscate::engine::{AeadPreference, CryptoConfig};
 
 pub const PUBLIC_FORCE_AEAD_VALUES: [&str; 2] = ["auto", "aegis"];
@@ -25,14 +23,14 @@ pub fn exercise(data: &[u8]) {
     let mut buf = vec![0u8; payload_len + 16];
     buf[..payload_len].copy_from_slice(&data[44..44 + payload_len]);
 
-    let Ok(seal) = ChaCha20Poly1305::new(&key, &nonce) else {
+    let Ok(seal) = RingChaCha20Poly1305::new(&key, &nonce) else {
         return;
     };
     let sealed = seal.seal_with_u64_counter(1, b"ad", &mut buf, payload_len, None);
     if sealed.is_err() {
         return;
     }
-    let Ok(open) = ChaCha20Poly1305::new(&key, &nonce) else {
+    let Ok(open) = RingChaCha20Poly1305::new(&key, &nonce) else {
         return;
     };
     if open.open_with_u64_counter(1, b"ad", &mut buf).is_err() {

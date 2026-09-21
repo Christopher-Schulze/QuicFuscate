@@ -1,4 +1,4 @@
-use super::chacha20poly1305::ChaCha20Poly1305;
+use super::RingChaCha20Poly1305;
 use super::{DATA_AEAD_OVERRIDE_AEGIS_L, DATA_AEAD_OVERRIDE_AUTO};
 use crate::crypto::aead::{AeadOpen, AeadSeal};
 use crate::{
@@ -34,30 +34,15 @@ fn chacha20poly1305_rfc8439_vector() {
     let mut buffer = plaintext.clone();
     buffer.resize(plaintext.len() + 16, 0);
 
-    let seal = ChaCha20Poly1305::new(&key, &nonce).expect("valid ChaCha20-Poly1305 material");
+    let seal = RingChaCha20Poly1305::new(&key, &nonce).expect("valid ChaCha20-Poly1305 material");
     let out_len =
         seal.seal_with_u64_counter(0, &[], buffer.as_mut_slice(), plaintext.len(), None).unwrap();
     assert_eq!(out_len, plaintext.len() + 16);
 
-    let open = ChaCha20Poly1305::new(&key, &nonce).expect("valid ChaCha20-Poly1305 material");
+    let open = RingChaCha20Poly1305::new(&key, &nonce).expect("valid ChaCha20-Poly1305 material");
     let pt_len = open.open_with_u64_counter(0, &[], buffer.as_mut_slice()).unwrap();
     assert_eq!(pt_len, plaintext.len());
     assert_eq!(&buffer[..pt_len], plaintext.as_slice());
-}
-
-#[test]
-fn tag_comparison_rejects_every_mismatch_position() {
-    let expected = [0xA5u8; 16];
-    assert!(super::subtle_ct_eq(&expected, &expected));
-
-    for index in 0..expected.len() {
-        let mut candidate = expected;
-        candidate[index] ^= 1;
-        assert!(
-            !super::subtle_ct_eq(&expected, &candidate),
-            "tag mismatch at byte {index} must be rejected"
-        );
-    }
 }
 
 #[test]
@@ -66,12 +51,12 @@ fn aead_rejects_packet_numbers_above_quic_limit() {
     let key16 = [0x11u8; 16];
     let iv12 = [0x22u8; 12];
 
-    let chacha = ChaCha20Poly1305::new(&[0x33u8; 32], &iv12).expect("valid ChaCha material");
+    let chacha = RingChaCha20Poly1305::new(&[0x33u8; 32], &iv12).expect("valid ChaCha material");
     let mut chacha_buf = vec![0u8; 16];
     assert!(chacha.seal_with_u64_counter(invalid_counter, &[], &mut chacha_buf, 0, None).is_err());
     assert!(chacha.open_with_u64_counter(invalid_counter, &[], &mut chacha_buf).is_err());
 
-    let aes = super::AesGcm128::from_arrays(&key16, &iv12);
+    let aes = super::RingAesGcm128::from_arrays(&key16, &iv12).expect("valid AES-GCM material");
     let mut aes_buf = vec![0u8; 16];
     assert!(aes.seal_with_u64_counter(invalid_counter, &[], &mut aes_buf, 0, None).is_err());
     assert!(aes.open_with_u64_counter(invalid_counter, &[], &mut aes_buf).is_err());
@@ -171,7 +156,7 @@ fn default_crypto_config_ships_standard_without_private_family() {
 }
 
 #[test]
-fn ring_aes_gcm128_matches_nist_and_first_party_oracle() {
+fn ring_aes_gcm128_matches_nist_vector() {
     let key = [0u8; 16];
     let iv = [0u8; 12];
     let expected = hex_to_bytes(concat!(
@@ -187,11 +172,6 @@ fn ring_aes_gcm128_matches_nist_and_first_party_oracle() {
     assert_eq!(ring_len, expected.len());
     assert_eq!(ring_buffer.as_slice(), expected.as_slice());
 
-    let mut first_party = [0u8; 32];
-    let oracle = super::AesGcm128::new(&key, &iv).expect("valid first-party AES-128-GCM material");
-    oracle.seal_with_u64_counter(0, &[], &mut first_party, 16, None).expect("oracle seal");
-    assert_eq!(ring_buffer, first_party);
-
     let ring_open = super::RingAesGcm128::new(&key, &iv).expect("valid ring AES-128-GCM material");
     let plaintext_len = ring_open
         .open_with_u64_counter(0, &[], &mut ring_buffer)
@@ -201,37 +181,25 @@ fn ring_aes_gcm128_matches_nist_and_first_party_oracle() {
 }
 
 #[test]
-fn ring_and_first_party_aes_gcm_roundtrip_across_quic_counters() {
+fn ring_aes_gcm_roundtrips_across_quic_counters() {
     let key = [0x11u8; 16];
     let iv = [0x22u8; 12];
     let ad = b"quic-aad";
     let plaintext = b"initial-payload-bytes";
     let ring = super::RingAesGcm128::from_arrays(&key, &iv).expect("ring AES");
-    let oracle = super::AesGcm128::from_arrays(&key, &iv);
     for counter in [0u64, 1, 7, 255, 1 << 20] {
-        let mut ring_buf = vec![0u8; plaintext.len() + 16];
-        ring_buf[..plaintext.len()].copy_from_slice(plaintext);
-        ring.seal_with_u64_counter(counter, ad, &mut ring_buf, plaintext.len(), None)
+        let mut buf = vec![0u8; plaintext.len() + 16];
+        buf[..plaintext.len()].copy_from_slice(plaintext);
+        ring.seal_with_u64_counter(counter, ad, &mut buf, plaintext.len(), None)
             .expect("ring seal");
-        let mut oracle_buf = vec![0u8; plaintext.len() + 16];
-        oracle_buf[..plaintext.len()].copy_from_slice(plaintext);
-        oracle
-            .seal_with_u64_counter(counter, ad, &mut oracle_buf, plaintext.len(), None)
-            .expect("oracle seal");
-        assert_eq!(ring_buf, oracle_buf, "ciphertext diverged at counter {counter}");
-
-        let opened =
-            ring.open_with_u64_counter(counter, ad, &mut oracle_buf).expect("ring opens oracle");
-        assert_eq!(&oracle_buf[..opened], plaintext);
-        let opened =
-            oracle.open_with_u64_counter(counter, ad, &mut ring_buf).expect("oracle opens ring");
-        assert_eq!(&ring_buf[..opened], plaintext);
+        let opened = ring.open_with_u64_counter(counter, ad, &mut buf).expect("ring open");
+        assert_eq!(&buf[..opened], plaintext, "roundtrip failed at counter {counter}");
     }
 }
 
 #[test]
-fn ring_aes_hp_matches_fips197_and_first_party_oracle() {
-    use crate::crypto::aead::{AesHp, PacketHeaderProtector};
+fn ring_aes_hp_matches_fips197_block_vector() {
+    use crate::crypto::aead::PacketHeaderProtector;
 
     let key: [u8; 16] =
         hex_to_bytes("000102030405060708090a0b0c0d0e0f").try_into().expect("16-byte key");
@@ -240,41 +208,25 @@ fn ring_aes_hp_matches_fips197_and_first_party_oracle() {
     let expected = [0x69, 0xc4, 0xe0, 0xd8, 0x6a];
 
     let ring = super::RingAesHp::from_key(&key).expect("ring AES-HP");
-    let oracle = AesHp::from_key(&key);
     let ring_mask = ring.new_mask(&sample).expect("ring mask");
-    let oracle_mask = oracle.new_mask(&sample).expect("oracle mask");
     assert_eq!(ring_mask, expected);
-    assert_eq!(ring_mask, oracle_mask);
 }
 
 #[test]
-fn ring_chacha20poly1305_matches_rfc8439_and_first_party_oracle() {
-    let key = hex_to_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
-    let nonce = hex_to_bytes("000000000000004a00000000");
-    let plaintext = hex_to_bytes(concat!(
-        "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66",
-        "202739393a20497420776173207468652062657374206f662074696d65732c2069742077",
-        "61732074686520776f727374206f662074696d65732e",
-    ));
-
-    let mut ring_buf = plaintext.clone();
-    ring_buf.resize(plaintext.len() + 16, 0);
-    let ring = super::RingChaCha20Poly1305::new(&key, &nonce).expect("ring ChaCha");
-    ring.seal_with_u64_counter(0, &[], ring_buf.as_mut_slice(), plaintext.len(), None)
-        .expect("ring ChaCha seal");
-
-    let mut oracle_buf = plaintext.clone();
-    oracle_buf.resize(plaintext.len() + 16, 0);
-    let oracle = ChaCha20Poly1305::new(&key, &nonce).expect("oracle ChaCha");
-    oracle
-        .seal_with_u64_counter(0, &[], oracle_buf.as_mut_slice(), plaintext.len(), None)
-        .expect("oracle ChaCha seal");
-    assert_eq!(ring_buf, oracle_buf);
-
-    let opened = ring
-        .open_with_u64_counter(0, &[], oracle_buf.as_mut_slice())
-        .expect("ring opens oracle ChaCha");
-    assert_eq!(&oracle_buf[..opened], plaintext.as_slice());
+fn ring_chacha20poly1305_roundtrips_across_quic_counters() {
+    let key = [0x33u8; 32];
+    let iv = [0x22u8; 12];
+    let ad = b"cover-aad";
+    let plaintext = b"tls-cover-record-bytes";
+    let ring = super::RingChaCha20Poly1305::from_arrays(&key, &iv).expect("ring ChaCha");
+    for counter in [0u64, 1, 7, 255, 1 << 20] {
+        let mut buf = vec![0u8; plaintext.len() + 16];
+        buf[..plaintext.len()].copy_from_slice(plaintext);
+        ring.seal_with_u64_counter(counter, ad, &mut buf, plaintext.len(), None)
+            .expect("ring seal");
+        let opened = ring.open_with_u64_counter(counter, ad, &mut buf).expect("ring open");
+        assert_eq!(&buf[..opened], plaintext, "roundtrip failed at counter {counter}");
+    }
 }
 
 #[test]
@@ -297,56 +249,14 @@ fn payload_protection_pin_follows_stealth_mode() {
     assert_eq!(super::payload_protection_pin(false), (PacketProtectionMode::Standard, None));
 }
 
-#[test]
-fn aes_gcm128_matches_nist_single_block_vector() {
-    let key = [0u8; 16];
-    let iv = [0u8; 12];
-    let mut buffer = [0u8; 32];
-    let expected = hex_to_bytes(concat!(
-        "0388dace60b6a392f328c2b971b2fe78",
-        "ab6e47d42cec13bdf53a67b21257bddf",
-    ));
-
-    let seal = super::AesGcm128::new(&key, &iv).expect("valid AES-128-GCM material");
-    let sealed_len = seal
-        .seal_with_u64_counter(0, &[], &mut buffer, 16, None)
-        .expect("NIST AES-GCM sealing must succeed");
-    assert_eq!(sealed_len, expected.len());
-    assert_eq!(buffer.as_slice(), expected.as_slice());
-
-    let open = super::AesGcm128::new(&key, &iv).expect("valid AES-128-GCM material");
-    let plaintext_len =
-        open.open_with_u64_counter(0, &[], &mut buffer).expect("NIST AES-GCM opening must succeed");
-    assert_eq!(plaintext_len, 16);
-    assert_eq!(&buffer[..plaintext_len], &[0u8; 16]);
-}
-
 // --- Header Protection Tests ---
 
 #[test]
-fn aes_hp_matches_fips197_block_vector() {
-    use crate::crypto::aead::AesHp;
-    use crate::crypto::aead::PacketHeaderProtector;
-
-    let key: [u8; 16] =
-        hex_to_bytes("000102030405060708090a0b0c0d0e0f").try_into().expect("16-byte key");
-    let sample: [u8; 16] =
-        hex_to_bytes("00112233445566778899aabbccddeeff").try_into().expect("16-byte sample");
-    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
-
-    assert_eq!(
-        hp.new_mask(&sample).expect("valid header-protection sample"),
-        [0x69, 0xc4, 0xe0, 0xd8, 0x6a]
-    );
-}
-
-#[test]
 fn aes_hp_new_mask_deterministic() {
-    use crate::crypto::aead::AesHp;
     use crate::crypto::aead::PacketHeaderProtector;
 
     let key = [0x42u8; 16];
-    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
+    let hp = super::RingAesHp::new(&key).expect("valid AES-128-HP secret");
     let sample = [0x01u8; 16];
 
     let mask1 = hp.new_mask(&sample).expect("valid header-protection sample");
@@ -358,11 +268,10 @@ fn aes_hp_new_mask_deterministic() {
 
 #[test]
 fn aes_hp_different_samples_produce_different_masks() {
-    use crate::crypto::aead::AesHp;
     use crate::crypto::aead::PacketHeaderProtector;
 
     let key = [0xABu8; 16];
-    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
+    let hp = super::RingAesHp::new(&key).expect("valid AES-128-HP secret");
 
     let mask_a = hp.new_mask(&[0x01; 16]).expect("valid header-protection sample");
     let mask_b = hp.new_mask(&[0x02; 16]).expect("valid header-protection sample");
@@ -371,11 +280,10 @@ fn aes_hp_different_samples_produce_different_masks() {
 
 #[test]
 fn aes_hp_apply_remove_roundtrip() {
-    use crate::crypto::aead::AesHp;
     use crate::crypto::aead::HeaderProtector;
 
     let key = [0x55u8; 16];
-    let hp = AesHp::new(&key).expect("valid AES-128-HP secret");
+    let hp = super::RingAesHp::new(&key).expect("valid AES-128-HP secret");
     let sample = [0x99u8; 16];
 
     let original = [0x11, 0x22, 0x33, 0x44, 0x55];
@@ -388,11 +296,10 @@ fn aes_hp_apply_remove_roundtrip() {
 
 #[test]
 fn aes_hp_different_keys_produce_different_masks() {
-    use crate::crypto::aead::AesHp;
     use crate::crypto::aead::PacketHeaderProtector;
 
-    let hp_a = AesHp::new(&[0x11; 16]).expect("valid AES-128-HP secret");
-    let hp_b = AesHp::new(&[0x22; 16]).expect("valid AES-128-HP secret");
+    let hp_a = super::RingAesHp::new(&[0x11; 16]).expect("valid AES-128-HP secret");
+    let hp_b = super::RingAesHp::new(&[0x22; 16]).expect("valid AES-128-HP secret");
     let sample = [0x00; 16];
 
     let mask_a = hp_a.new_mask(&sample).expect("valid header-protection sample");
@@ -402,10 +309,10 @@ fn aes_hp_different_keys_produce_different_masks() {
 
 #[test]
 fn aes_hp_rejects_invalid_sample_and_mask_lengths() {
+    use crate::crypto::aead::HeaderProtector;
     use crate::crypto::aead::PacketHeaderProtector;
-    use crate::crypto::aead::{AesHp, HeaderProtector};
 
-    let hp = AesHp::new(&[0xA5; 16]).expect("valid AES-128-HP secret");
+    let hp = super::RingAesHp::new(&[0xA5; 16]).expect("valid AES-128-HP secret");
     assert!(hp.new_mask(&[0x11; 15]).is_err());
     assert!(hp.new_mask(&[0x11; 17]).is_err());
 
@@ -419,18 +326,18 @@ fn aes_hp_rejects_invalid_sample_and_mask_lengths() {
 
 #[test]
 fn crypto_constructors_reject_invalid_key_and_iv_lengths() {
-    assert!(ChaCha20Poly1305::new(&[0u8; 31], &[0u8; 12]).is_err());
-    assert!(ChaCha20Poly1305::new(&[0u8; 33], &[0u8; 12]).is_err());
-    assert!(ChaCha20Poly1305::new(&[0u8; 32], &[0u8; 11]).is_err());
-    assert!(ChaCha20Poly1305::new(&[0u8; 32], &[0u8; 13]).is_err());
+    assert!(RingChaCha20Poly1305::new(&[0u8; 31], &[0u8; 12]).is_err());
+    assert!(RingChaCha20Poly1305::new(&[0u8; 33], &[0u8; 12]).is_err());
+    assert!(RingChaCha20Poly1305::new(&[0u8; 32], &[0u8; 11]).is_err());
+    assert!(RingChaCha20Poly1305::new(&[0u8; 32], &[0u8; 13]).is_err());
 
-    assert!(super::AesGcm128::new(&[0u8; 15], &[0u8; 12]).is_err());
-    assert!(super::AesGcm128::new(&[0u8; 17], &[0u8; 12]).is_err());
-    assert!(super::AesGcm128::new(&[0u8; 16], &[0u8; 11]).is_err());
-    assert!(super::AesGcm128::new(&[0u8; 16], &[0u8; 13]).is_err());
+    assert!(super::RingAesGcm128::new(&[0u8; 15], &[0u8; 12]).is_err());
+    assert!(super::RingAesGcm128::new(&[0u8; 17], &[0u8; 12]).is_err());
+    assert!(super::RingAesGcm128::new(&[0u8; 16], &[0u8; 11]).is_err());
+    assert!(super::RingAesGcm128::new(&[0u8; 16], &[0u8; 13]).is_err());
 
-    assert!(super::aead::AesHp::new(&[0u8; 15]).is_err());
-    assert!(super::aead::AesHp::new(&[0u8; 32]).is_ok());
+    assert!(super::RingAesHp::new(&[0u8; 15]).is_err());
+    assert!(super::RingAesHp::new(&[0u8; 32]).is_ok());
 
     assert!(super::select_data_aead(&[0u8; 15], &[0u8; 12]).is_err());
     assert!(super::select_data_aead(&[0u8; 16], &[0u8; 13]).is_err());
@@ -511,7 +418,7 @@ mod aead_length_bounds {
 
         let key = [0x42u8; 32];
         let nonce = [0x24u8; 12];
-        let seal = crate::crypto::ChaCha20Poly1305::new(&key, &nonce).expect("exact key sizes");
+        let seal = crate::crypto::RingChaCha20Poly1305::new(&key, &nonce).expect("exact key sizes");
         let mut buf = vec![0u8; 4096];
 
         assert_eq!(

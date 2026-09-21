@@ -2,7 +2,7 @@
 # Description: Micro-benchmark runner: micro-crypto-all.
 set -euo pipefail
 
-# Microbench Suite (Crypto): AES block, GHASH, AES-GCM, ChaCha x4
+# Microbench Suite (Crypto): SHA-256 and HMAC-SHA-256
 # Consistent with existing scripts: uses scripts/tests/lib/lib-common.sh, scripts/out paths, flags
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -214,7 +214,7 @@ run_microbench_cell() {
 CELL=0
 for sz in "${SIZES[@]}"; do
   info "Running microbenches for size=$sz, iters=$ITERS"
-  for kind in aes-block ghash aes-gcm chacha-x4 poly1305-mac sha256 hmac-sha256; do
+  for kind in sha256 hmac-sha256; do
     CELL=$((CELL + 1))
     run_microbench_cell "$kind" "$sz" "$ITERS" "$CELL"
   done

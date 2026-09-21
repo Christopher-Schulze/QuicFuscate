@@ -355,68 +355,6 @@ pub(super) unsafe fn find_pattern_sse42_short(haystack: &[u8], needle: &[u8]) ->
     None
 }
 
-/// AES encryption with VAES - vectorized AES for parallel blocks
-#[target_feature(enable = "vaes", enable = "avx512f", enable = "aes", enable = "sse2")]
-/// # Safety
-///
-/// The caller must provide VAES, AVX-512F, AES-NI, and SSE2 support plus valid
-/// writable `state` and readable `key` arrays for the duration of the call.
-pub(super) unsafe fn aes_encrypt_vaes(state: &mut [u8; 16], key: &[u8; 16]) {
-    // For a single block, VAES provides no material benefit over AES-NI.
-    aes_encrypt_aesni(state, key);
-}
-
-/// AES encryption with AES-NI hardware acceleration
-#[target_feature(enable = "aes", enable = "sse2")]
-/// # Safety
-///
-/// The caller must provide AES-NI and SSE2 support plus valid writable `state`
-/// and readable `key` arrays for the duration of the intrinsic operations.
-pub(super) unsafe fn aes_encrypt_aesni(state: &mut [u8; 16], key: &[u8; 16]) {
-    use std::arch::x86_64::*;
-
-    macro_rules! expand_aes128_round_key {
-        ($prev:expr, $rcon:expr) => {{
-            let mut t = _mm_aeskeygenassist_si128($prev, $rcon);
-            t = _mm_shuffle_epi32(t, 0xff);
-
-            let mut k = $prev;
-            k = _mm_xor_si128(k, _mm_slli_si128(k, 4));
-            k = _mm_xor_si128(k, _mm_slli_si128(k, 4));
-            k = _mm_xor_si128(k, _mm_slli_si128(k, 4));
-            _mm_xor_si128(k, t)
-        }};
-    }
-
-    let rk0 = _mm_loadu_si128(key.as_ptr() as *const __m128i);
-    let rk1 = expand_aes128_round_key!(rk0, 0x01);
-    let rk2 = expand_aes128_round_key!(rk1, 0x02);
-    let rk3 = expand_aes128_round_key!(rk2, 0x04);
-    let rk4 = expand_aes128_round_key!(rk3, 0x08);
-    let rk5 = expand_aes128_round_key!(rk4, 0x10);
-    let rk6 = expand_aes128_round_key!(rk5, 0x20);
-    let rk7 = expand_aes128_round_key!(rk6, 0x40);
-    let rk8 = expand_aes128_round_key!(rk7, 0x80);
-    let rk9 = expand_aes128_round_key!(rk8, 0x1b);
-    let rk10 = expand_aes128_round_key!(rk9, 0x36);
-
-    let mut block = _mm_loadu_si128(state.as_ptr() as *const __m128i);
-    block = _mm_xor_si128(block, rk0);
-    block = _mm_aesenc_si128(block, rk1);
-    block = _mm_aesenc_si128(block, rk2);
-    block = _mm_aesenc_si128(block, rk3);
-    block = _mm_aesenc_si128(block, rk4);
-    block = _mm_aesenc_si128(block, rk5);
-    block = _mm_aesenc_si128(block, rk6);
-    block = _mm_aesenc_si128(block, rk7);
-    block = _mm_aesenc_si128(block, rk8);
-    block = _mm_aesenc_si128(block, rk9);
-    block = _mm_aesenclast_si128(block, rk10);
-
-    _mm_storeu_si128(state.as_mut_ptr() as *mut __m128i, block);
-}
-// Note: ARM/NEON/SVE code must not live in this x86 module.
-// A large aarch64 block was accidentally duplicated here; it was removed.
 
 #[cfg(test)]
 mod tests {

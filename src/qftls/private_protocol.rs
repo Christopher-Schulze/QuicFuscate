@@ -290,7 +290,8 @@ pub struct PrivateNegotiationMessage {
     pub kind: PrivateNegotiationKind,
     /// Monotonic connection-generation identifier.
     pub generation: u32,
-    /// Bit mask of supported product families: bit 0 AEGIS, bit 1 MORUS.
+    /// Bit mask of supported product families: bit 0 AEGIS-128L. Bit 1 is retired
+    /// (former MORUS) and must never be set; family ID 2 decodes fail-closed.
     pub supported_families: u8,
     /// Selected family, absent only in a proposal.
     pub selected_family: Option<PrivateAeadFamily>,

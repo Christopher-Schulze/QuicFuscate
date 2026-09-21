@@ -13,12 +13,6 @@ pub mod core;
 pub mod galois;
 
 // ========================================================================
-// CRYPTO OPS - For AEGIS, AES, ChaCha, etc.
-// ========================================================================
-/// Cryptographic SIMD operations: AES rounds, ChaCha20 keystream generation (x4/x16).
-pub mod crypto;
-
-// ========================================================================
 // PATTERN OPS - For stealth pattern matching
 // ========================================================================
 /// SIMD-accelerated byte pattern search for stealth protocol detection.

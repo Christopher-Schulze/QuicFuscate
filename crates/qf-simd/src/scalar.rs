@@ -1,7 +1,7 @@
 //! Extracted SIMD `scalar` submodule (TODO-563).
 
 use crate::FeatureDetector;
-use qf_crypto::{aes, gcm, hkdf};
+use qf_crypto::hkdf;
 /// GF(256) exponentiation for Reed-Solomon generator polynomials.
 pub fn gf_pow(base: u8, exp: u8) -> u8 {
     if exp == 0 {
@@ -85,19 +85,6 @@ pub fn gf_mul_byte(a: u8, b: u8) -> u8 {
         bb >>= 1;
     }
     result
-}
-
-/// AES-128 single-block encrypt in place (scalar, delegates to software AES).
-pub fn aes_encrypt_block(state: &mut [u8; 16], key: &[u8; 16]) {
-    let block = *state;
-    let encrypted = aes::aes128_encrypt_block(key, &block);
-    state.copy_from_slice(&encrypted);
-}
-
-/// GHASH for GCM mode (scalar fallback, delegates to crypto::gcm).
-pub fn ghash(h: &[u8; 16], data: &[u8], tag: &mut [u8; 16]) {
-    let computed = gcm::ghash(*h, &[], data);
-    tag.copy_from_slice(&computed);
 }
 
 /// SHA-256 digest (scalar fallback, delegates to hkdf::sha256).
@@ -548,45 +535,6 @@ pub fn gf_inv(a: u8) -> u8 {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
-
-    #[test]
-    fn aes_encrypt_block_matches_crypto_module() {
-        let key: [u8; 16] = [
-            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
-            0x4f, 0x3c,
-        ];
-        let mut state: [u8; 16] = [
-            0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37,
-            0x07, 0x34,
-        ];
-
-        aes_encrypt_block(&mut state, &key);
-
-        let expected = aes::aes128_encrypt_block(
-            &key,
-            &[
-                0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37,
-                0x07, 0x34,
-            ],
-        );
-
-        assert_eq!(state, expected);
-    }
-
-    #[test]
-    fn ghash_matches_crypto_module() {
-        let h = [
-            0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30,
-            0x83, 0x08,
-        ];
-        let data = b"scalar-ghash-test-data-123";
-        let mut tag = [0u8; 16];
-
-        ghash(&h, data, &mut tag);
-
-        let expected = gcm::ghash(h, &[], data);
-        assert_eq!(tag, expected);
-    }
 
     #[test]
     fn reed_solomon_encode_preserves_partial_input_shard() {

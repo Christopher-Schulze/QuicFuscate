@@ -457,7 +457,7 @@
 - Detail: `docs/todo/todo-1044-post-auth-aead-owner-decision.md`
 
 ### TODO-1045 - Drop homemade AEGIS/MORUS, keep rustls AES-GCM-128 and libaegis
-- IN_PROGRESS. `off` and `performance` pin post-auth payload to libaegis AEGIS-128L. `stealth`, `Stealth MAX`, and `dynamic` pin AES-GCM-128. `manual` selects either. Homemade AEGIS, MORUS, and `CryptoAeadPlan` are removed.
+- DONE. Homemade AEGIS, MORUS, and `CryptoAeadPlan` are removed. `PrivateAeadFamily` has only `Aegis128L`; `force_aead` accepts only `auto`/`aegis`. `off`/`performance` pin post-auth payload to libaegis AEGIS-128L; stealth modes and `dynamic` pin AES-GCM-128. qf-crypto 104/104 at close.
 - Detail: `docs/todo/todo-1045-drop-homemade-aead-keep-libaegis.md`
 
 ### TODO-1046 - FEC repairs as normal QUIC packets in stealth modes
@@ -473,7 +473,7 @@
 - Detail: `docs/todo/todo-1048-reality-replaces-domain-fronting.md`
 
 ### TODO-1049 - Delete dead first-party AES-GCM and ChaCha
-- OPEN. Ring and libaegis stay. First-party AES-GCM, ChaCha, Poly1305, and `chacha20_blocks_x4` go. Legacy QKey test seals with ring.
+- DONE. First-party AES/GCM/ChaCha20/Poly1305/AesHp modules and `chacha20_blocks_x4/x16` removed; ring/libaegis are the only AEAD owners. Retry tag uses `aes128_gcm_tag_aad_only` on ring. qf-crypto 59/59, packet 42/42, QKey legacy 13/13 green.
 - Detail: `docs/todo/todo-1049-delete-dead-first-party-aead.md`
 
 ### TODO-1050 - Derive QUIC packet keys with ring HKDF

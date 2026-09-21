@@ -101,7 +101,7 @@ impl FeatureDetector {
         #[cfg(target_arch = "x86_64")]
         {
             // ULTRA COMPLETE x86_64 detection
-            // Include SSE2 explicitly for MORUS SIMD gating
+            // SSE2 is baseline on x86_64 and feeds the dispatch matrix intersections
             if is_x86_feature_detected!("sse2") {
                 features.insert(CpuFeature::SSE2);
                 features_full.sse2 = true;

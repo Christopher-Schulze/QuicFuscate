@@ -381,16 +381,6 @@ path = "scripts/tests/rust/rt-brain-histogram.rs"
 required-features = ["rust-tests"]
 
 [[test]]
-name = "rt-chacha-x16-parity"
-path = "scripts/tests/rust/rt-chacha-x16-parity.rs"
-required-features = ["rust-tests"]
-
-[[test]]
-name = "rt-chacha-x4-parity"
-path = "scripts/tests/rust/rt-chacha-x4-parity.rs"
-required-features = ["rust-tests"]
-
-[[test]]
 name = "rt-cli-help"
 path = "scripts/tests/rust/rt-cli-help.rs"
 required-features = ["rust-tests"]
@@ -418,11 +408,6 @@ required-features = ["rust-tests"]
 [[test]]
 name = "rt-tls-cover-cipher"
 path = "scripts/tests/rust/rt-tls-cover-cipher.rs"
-required-features = ["rust-tests"]
-
-[[test]]
-name = "rt-ghash-sse-parity"
-path = "scripts/tests/rust/rt-ghash-sse-parity.rs"
 required-features = ["rust-tests"]
 
 [[test]]

@@ -1,10 +1,6 @@
 // Criterion benchmarks for CI regression detection (TODO-154).
 //
 // Covers the performance-critical hotpath operations:
-// - AES-128 block encrypt (handshake crypto)
-// - GHASH (GCM authentication)
-// - AES-128-GCM seal (handshake AEAD)
-// - AES-128-GCM seal
 // - libaegis aegis seal/open for the performance-mode payload owner
 // - Varint encode/decode (QUIC transport framing)
 // - QUIC header validation (SIMD-routed)
@@ -12,78 +8,6 @@
 // - Secure RNG fill (entropy path)
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
-
-// ---------------------------------------------------------------------------
-// AES-128 block encrypt
-// ---------------------------------------------------------------------------
-fn bench_aes_block(c: &mut Criterion) {
-    use quicfuscate::crypto::aes::aes128_encrypt_block;
-
-    let key = [0u8; 16];
-    let block = [0u8; 16];
-
-    let mut group = c.benchmark_group("aes128_block");
-    group.throughput(Throughput::Bytes(16));
-    group.bench_function("encrypt_1block", |b| {
-        b.iter(|| {
-            black_box(aes128_encrypt_block(black_box(&key), black_box(&block)));
-        });
-    });
-    group.finish();
-}
-
-// ---------------------------------------------------------------------------
-// GHASH
-// ---------------------------------------------------------------------------
-fn bench_ghash(c: &mut Criterion) {
-    use quicfuscate::crypto::aes::aes128_encrypt_block;
-    use quicfuscate::crypto::gcm::ghash;
-
-    let key = [0u8; 16];
-    let zero = [0u8; 16];
-    let h = aes128_encrypt_block(&key, &zero);
-
-    for size in [64, 1024, 8192] {
-        let ct = vec![0u8; size];
-        let aad: [u8; 0] = [];
-        let mut group = c.benchmark_group("ghash");
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_function(format!("{size}B"), |b| {
-            b.iter(|| {
-                black_box(ghash(black_box(h), black_box(&aad), black_box(&ct)));
-            });
-        });
-        group.finish();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AES-128-GCM seal
-// ---------------------------------------------------------------------------
-fn bench_aes_gcm(c: &mut Criterion) {
-    use quicfuscate::crypto::gcm::aes_gcm_seal;
-
-    let key = [0u8; 16];
-    let iv = [0u8; 12];
-    let aad: [u8; 0] = [];
-
-    for size in [64, 1024, 8192] {
-        let pt = vec![0u8; size];
-        let mut group = c.benchmark_group("aes_gcm_seal");
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_function(format!("{size}B"), |b| {
-            b.iter(|| {
-                black_box(aes_gcm_seal(
-                    black_box(&key),
-                    black_box(&iv),
-                    black_box(&aad),
-                    black_box(&pt),
-                ));
-            });
-        });
-        group.finish();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Retained data-plane AEAD backends (real packet trait path)
@@ -987,9 +911,6 @@ fn bench_brain_packet_observer(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 criterion_group!(
     crypto_benches,
-    bench_aes_block,
-    bench_ghash,
-    bench_aes_gcm,
     bench_data_aead_backends,
     bench_rustls_standard_packet_keys,
 );

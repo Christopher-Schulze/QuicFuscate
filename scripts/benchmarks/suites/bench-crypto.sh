@@ -30,25 +30,7 @@ mkdir -p "$OUTPUT_DIR"
 LOG_FILE="$OUTPUT_DIR/crypto-bench.log"
 JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "bench_crypto_comprehensive"; JSON_FIRST_RUN=1
 
-SELECTED_CELLS=(crypto_all_native)
-case "$(uname -m)" in
-  x86_64)
-    (( FAST )) || SELECTED_CELLS+=(crypto_all_sse2 crypto_all_avx2)
-    ;;
-  aarch64|arm64)
-    (( FAST )) || SELECTED_CELLS+=(crypto_all_neon)
-    ;;
-esac
-SELECTED_CELLS+=(aes_gcm_native)
-case "$(uname -m)" in
-  x86_64)
-    (( FAST )) || SELECTED_CELLS+=(aes_gcm_aesni aes_gcm_vaes)
-    ;;
-  aarch64|arm64)
-    (( FAST )) || SELECTED_CELLS+=(aes_gcm_crypto)
-    ;;
-esac
-SELECTED_CELLS+=(chacha20_poly1305_native)
+SELECTED_CELLS=(crypto_all_native aes_gcm_native chacha20_poly1305_native aegis128l_native)
 
 append_mode_metadata() {
     local mode="full"
@@ -75,7 +57,7 @@ append_skipped_cells() {
     for cell in "${SELECTED_CELLS[@]}"; do
         qf_benchmark_record "$JSON" "$cell" "not_measured" null "$result" "$reason" \
             "$command_status" "lib" "$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")" "" \
-            "$(qf_json_array cargo test --release --lib crypto::tests --features "$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")")" "$(qf_json_environment)"
+            "$(qf_json_array cargo test --release -p qf-crypto --lib tests --features "$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")")" "$(qf_json_environment)"
     done
 }
 
@@ -137,7 +119,7 @@ measure_throughput() {
     local reason=""
     local feature_set
     feature_set="$(qf_cargo_test_feature_set "${CARGO_FEATURES:-}")"
-    local -a cargo_command=(cargo test --release --lib "$test_pattern" --features "$feature_set")
+    local -a cargo_command=(cargo test --release -p qf-crypto --lib "$test_pattern" --features "$feature_set")
     [[ -n "${JOBS:-}" ]] && cargo_command+=(-j "$JOBS")
     
     echo -e "\n${BLUE}> Benchmarking $name...${NC}"
@@ -145,7 +127,7 @@ measure_throughput() {
     local command_argv_json
     local command_environment_json
     if [[ "${#env_vars[@]}" -gt 0 ]]; then
-        if qf_benchmark_run "$output_file" run_cargo_with_env "${env_vars[@]}" -- test --release --lib "$test_pattern"; then
+        if qf_benchmark_run "$output_file" run_cargo_with_env "${env_vars[@]}" -- test --release -p qf-crypto --lib "$test_pattern"; then
             command_status=0
         else
             command_status="$QF_BENCH_COMMAND_STATUS"
@@ -156,7 +138,7 @@ measure_throughput() {
         command_argv_json="$(qf_json_array env "${env_vars[@]}" "${cargo_command[@]}")"
         command_environment_json="$(qf_json_environment_with_assignments "${env_vars[@]}")"
     else
-        if qf_benchmark_run "$output_file" run_cargo_with_env -- test --release --lib "$test_pattern"; then
+        if qf_benchmark_run "$output_file" run_cargo_with_env -- test --release -p qf-crypto --lib "$test_pattern"; then
             command_status=0
         else
             command_status="$QF_BENCH_COMMAND_STATUS"
@@ -208,52 +190,36 @@ if (( FAST )); then
 else
     echo -e "\n${YELLOW}=== Full Crypto Suite Performance ===${NC}"
 fi
-measure_throughput "crypto_all_native" "crypto::tests" --
+measure_throughput "crypto_all_native" "tests" --
 
-if [[ "$FAST" -eq 0 && $(uname -m) == "x86_64" ]]; then
-    measure_throughput "crypto_all_sse2" "crypto::tests" "RUSTFLAGS=-C target-feature=+sse2" --
-    measure_throughput "crypto_all_avx2" "crypto::tests" "RUSTFLAGS=-C target-feature=+avx2" --
-elif [[ "$FAST" -eq 0 && ( $(uname -m) == "aarch64" || $(uname -m) == "arm64" ) ]]; then
-    measure_throughput "crypto_all_neon" "crypto::tests" "RUSTFLAGS=-C target-feature=+neon" --
-fi
-
-# AES-GCM Benchmarks
+# AES-GCM Benchmarks (ring owner)
 echo -e "\n${YELLOW}=== AES-GCM Performance ===${NC}"
-measure_throughput "aes_gcm_native" "crypto::gcm::tests" --
+measure_throughput "aes_gcm_native" "aes_gcm" --
 
-if [[ "$FAST" -eq 0 && $(uname -m) == "x86_64" ]]; then
-    measure_throughput "aes_gcm_aesni" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+aes,+sse2" --
-    measure_throughput "aes_gcm_vaes" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+vaes,+avx512f" --
-elif [[ "$FAST" -eq 0 && ( $(uname -m) == "aarch64" || $(uname -m) == "arm64" ) ]]; then
-    measure_throughput "aes_gcm_crypto" "crypto::gcm::tests" "RUSTFLAGS=-C target-feature=+aes,+neon" --
-fi
-
-# ChaCha20-Poly1305 Benchmarks (fallback)
+# ChaCha20-Poly1305 Benchmarks (ring owner, TLS-cover/QKey path)
 echo -e "\n${YELLOW}=== ChaCha20-Poly1305 Performance ===${NC}"
-measure_throughput "chacha20_poly1305_native" "crypto::tests::chacha20poly1305" --
+measure_throughput "chacha20_poly1305_native" "chacha20poly1305" --
+
+# AEGIS-128L Benchmarks (libaegis, performance-mode payload owner)
+echo -e "\n${YELLOW}=== AEGIS-128L Performance ===${NC}"
+measure_throughput "aegis128l_native" "aegis128l" --
 
 # Comparative Analysis
 echo -e "\n${YELLOW}=== Comparative Analysis ===${NC}"
 
 # Create comparison table
 cat > "$OUTPUT_DIR/comparison.txt" << EOF
-Crypto Performance Comparison (MB/s for 16KB blocks)
-====================================================
+Crypto Performance Comparison (qf-crypto test-proxy durations)
+==============================================================
 
-Algorithm         | Native | SSE2/NEON | AVX2/Crypto | AVX512/VAES
-------------------|--------|-----------|-------------|------------
+Algorithm         | Native
+------------------|--------
 EOF
 
 # Parse results and add to comparison
-for algo in crypto_all aes_gcm chacha20_poly1305; do
-    native=$(grep "16384" "$OUTPUT_DIR/${algo}_native.txt" 2>/dev/null | awk '{print $NF}' || echo "N/A")
-    sse2=$(grep "16384" "$OUTPUT_DIR/${algo}_sse2.txt" 2>/dev/null | awk '{print $NF}' || \
-           grep "16384" "$OUTPUT_DIR/${algo}_neon.txt" 2>/dev/null | awk '{print $NF}' || echo "N/A")
-    avx2=$(grep "16384" "$OUTPUT_DIR/${algo}_avx2.txt" 2>/dev/null | awk '{print $NF}' || \
-           grep "16384" "$OUTPUT_DIR/${algo}_crypto.txt" 2>/dev/null | awk '{print $NF}' || echo "N/A")
-    avx512=$(grep "16384" "$OUTPUT_DIR/${algo}_vaes.txt" 2>/dev/null | awk '{print $NF}' || echo "N/A")
-    
-    printf "%-17s | %-6s | %-9s | %-11s | %-11s\n" "$algo" "$native" "$sse2" "$avx2" "$avx512" >> "$OUTPUT_DIR/comparison.txt"
+for algo in crypto_all aes_gcm chacha20_poly1305 aegis128l; do
+    native=$(tail -1 "$OUTPUT_DIR/${algo}_native.txt" 2>/dev/null | awk '{print $NF}' || echo "N/A")
+    printf "%-17s | %-6s\n" "$algo" "$native" >> "$OUTPUT_DIR/comparison.txt"
 done
 
 cat "$OUTPUT_DIR/comparison.txt"
