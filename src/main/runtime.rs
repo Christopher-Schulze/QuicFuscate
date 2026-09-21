@@ -562,7 +562,10 @@ pub(super) fn load_runtime_profiles(
         )
     };
 
-    info!("Accepted FEC policy source={source}");
+    info!(
+        "Accepted FEC policy source={source} initial_mode={:?} force_on={}",
+        fec.initial_mode, fec.force_on
+    );
 
     if let Some(mode) = fec_mode_override {
         fec.apply_engine_mode(mode);
