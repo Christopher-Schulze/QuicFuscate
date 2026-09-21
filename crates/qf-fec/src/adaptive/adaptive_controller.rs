@@ -217,6 +217,7 @@ impl AdaptiveFec {
         if telemetry_enabled {
             qf_telemetry::fec_instance_opened(mode.telemetry_id(), k);
         }
+        log::info!("FEC runtime active_mode={mode:?} force_on={force_on} k={k} n={n}");
         fec
     }
 

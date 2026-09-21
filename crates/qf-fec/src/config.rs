@@ -175,6 +175,7 @@ impl FecConfig {
             kalman_r: Option<f32>,
             stream_every: Option<usize>,
             initial_mode: Option<String>,
+            force_on: Option<bool>,
             modes: Option<Vec<ModeSection>>,
         }
         #[derive(serde::Deserialize)]
@@ -215,7 +216,7 @@ impl FecConfig {
             burst_window: af.burst_window.unwrap_or(20),
             hysteresis: af.hysteresis.unwrap_or(0.02),
             initial_mode,
-            force_on: false,
+            force_on: af.force_on.unwrap_or(false),
             kalman_enabled: af.kalman_enabled.unwrap_or(false),
             kalman_q: af.kalman_q.unwrap_or(0.001),
             kalman_r: af.kalman_r.unwrap_or(0.01),

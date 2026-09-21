@@ -1474,3 +1474,73 @@ fn empty_transport_backlog_ends_the_drain_epoch() {
     let _ = connection.send_with_info(&mut wire);
     assert!(!connection.burst_draining.get(), "an emptied backlog ends the drain epoch");
 }
+
+#[test]
+fn reorder_window_tick_arms_under_committed_wire_fec() {
+    let mut connection = test_connection();
+    connection.conn.set_external_pacing(false);
+    connection.conn.set_stealth_timing(true, 5_000);
+    let now = Instant::now();
+    let framed = test_send_info();
+    assert!(!framed.bulk_only);
+    assert!(framed.congestion_controlled);
+
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(10, &[0xDD; 8], None),
+        wire_meta: Some(WirePacketMeta {
+            profile: WireProfile {
+                epoch: 1,
+                codec: wire::WireCodec::StreamingGf8,
+                source_count: 4,
+                total_count: 8,
+                interleave_depth: 1,
+            },
+            window: 0,
+            sequence: 0,
+            repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
+            block_index: 0,
+            systematic: true,
+            sliding: false,
+        }),
+        send_info: framed,
+        congestion_controlled: true,
+        paired: false,
+    });
+
+    connection.reorder_window_tick(&framed, now);
+    assert!(
+        connection.bulk_window_release.get().is_none(),
+        "raw-path bulk_only gate must not arm framed FEC traffic"
+    );
+
+    let mut armed_at = None;
+    for _ in 0..64 {
+        if connection.bulk_window_release.get().is_none() {
+            connection.reorder_window_tick_framed_source(&framed, now);
+        }
+        if let Some(edge) = connection.bulk_window_release.get() {
+            armed_at = Some(edge);
+            break;
+        }
+    }
+    let edge = armed_at.expect("committed wire-FEC systematic burst must arm the gather window");
+    assert!(edge > now);
+    assert!(edge - now <= Duration::from_micros(QuicFuscateConnection::REORDER_HOLD_MAX_US));
+
+    connection.bulk_window_release.set(None);
+    let mut path_control = framed;
+    path_control.path_control = true;
+    connection.reorder_window_tick_framed_source(&path_control, now);
+    assert!(
+        connection.bulk_window_release.get().is_none(),
+        "path-control framed packets must never arm a reorder window"
+    );
+
+    let mut repair_like = framed;
+    repair_like.congestion_controlled = false;
+    connection.reorder_window_tick_framed_source(&repair_like, now);
+    assert!(
+        connection.bulk_window_release.get().is_none(),
+        "repairs must never arm or extend the gather window"
+    );
+}

@@ -512,7 +512,14 @@ impl StealthManager {
                 config.set_ack_delay_exponent(3);
             }
         }
-        // Anti-DPI: prefer external pacing (RateChoker/Stealth layer), avoid double sleeps in transport
+        drop(fingerprint);
+        self.apply_stealth_transport_knobs(config);
+    }
+
+    /// Applies padding, timing, and pacing knobs even when uTLS is off.
+    /// `--no-utls` only skips the persona/ACK overlay; reorder and jitter
+    /// still need these transport flags or the window never arms.
+    pub(crate) fn apply_stealth_transport_knobs(&self, config: &mut crate::transport::Config) {
         if matches!(self.config.mode, StealthMode::AntiDpi) {
             config.set_external_pacing(true);
         }
@@ -548,7 +555,7 @@ impl StealthManager {
         }
         // Set default adaptive granularity (bytes) - sensible default 64
         config.set_stealth_adaptive_granularity(64);
-        // Set default BrowserMimic bias from active fingerprint
+        let fingerprint = self.current_fingerprint();
         let bias_default = match (fingerprint.browser, fingerprint.os) {
             (BrowserProfile::Safari, _) | (_, OsProfile::IOS) => 1,
             (BrowserProfile::Firefox, OsProfile::Linux) => 2,

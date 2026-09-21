@@ -84,7 +84,30 @@ impl QuicFuscateConnection {
     /// redistribution gain. No-op when stealth timing is disabled, the
     /// packet is not bulk-only, or the drain phase is active.
     pub(crate) fn reorder_window_tick(&self, send_info: &crate::transport::SendInfo, now: Instant) {
-        if !send_info.bulk_only || !self.conn.transport_stealth_timing_active() {
+        if !send_info.bulk_only {
+            return;
+        }
+        self.reorder_window_apply(now);
+    }
+
+    /// TODO-1022 Option A: framed systematic sources under a committed
+    /// wire profile may arm the gather window. `bulk_only` is the raw-path
+    /// gate and also strips FEC, so the wire branch never sees it.
+    /// Congestion-controlled app data is the framed equivalent. Path
+    /// control never arms, and repairs never call this.
+    pub(crate) fn reorder_window_tick_framed_source(
+        &self,
+        send_info: &crate::transport::SendInfo,
+        now: Instant,
+    ) {
+        if send_info.path_control || !send_info.congestion_controlled {
+            return;
+        }
+        self.reorder_window_apply(now);
+    }
+
+    fn reorder_window_apply(&self, now: Instant) {
+        if !self.conn.transport_stealth_timing_active() {
             return;
         }
         if self.burst_draining.get() {
@@ -848,12 +871,18 @@ impl QuicFuscateConnection {
         // the first Initial before a Core connection exists. FEC starts only after
         // this endpoint has entered 1-RTT. Zero mode retains raw zero-overhead output.
         if let Some(profile) = wire_profile {
+            // Tick before materializing the FEC drain so a lone train head
+            // still sees an empty outgoing queue, matching the raw path.
+            // Repairs generated below inherit the source send_info but are
+            // forced non-bulk and never retick this window.
+            self.reorder_window_tick_framed_source(&send_info, now);
             let source_sequence = self.fec_tx_sequence;
             let window = (source_sequence / profile.source_count as u64) as u32;
             self.fec.on_send_into(fec_packet, &mut self.fec_send_scratch);
             let mut drained = std::mem::take(&mut self.fec_send_scratch);
             for packet in drained.drain(..) {
-                let (sequence, repair_index, block_index) = if packet.is_systematic {
+                let is_systematic = packet.is_systematic;
+                let (sequence, repair_index, block_index) = if is_systematic {
                     (
                         source_sequence,
                         wire::SYSTEMATIC_REPAIR_INDEX,
@@ -874,10 +903,15 @@ impl QuicFuscateConnection {
                 // (TODO-1018) and are tagged by their *anchor's* window -
                 // a lane anchor may legitimately sit one aligned window
                 // behind the newest source when lanes lag.
-                let repair_window = if packet.is_systematic {
+                let repair_window = if is_systematic {
                     window
                 } else {
                     (sequence / profile.source_count as u64) as u32
+                };
+                let packet_send_info = if is_systematic {
+                    send_info
+                } else {
+                    crate::transport::SendInfo { bulk_only: false, ..send_info }
                 };
                 self.outgoing_fec_packets.push_back(OutgoingFecPacket {
                     wire_meta: Some(WirePacketMeta {
@@ -886,14 +920,13 @@ impl QuicFuscateConnection {
                         sequence,
                         repair_index,
                         block_index,
-                        systematic: packet.is_systematic,
-                        sliding: !packet.is_systematic
-                            && profile.codec == wire::WireCodec::StreamingGf8,
+                        systematic: is_systematic,
+                        sliding: !is_systematic && profile.codec == wire::WireCodec::StreamingGf8,
                     }),
                     packet,
-                    send_info,
-                    congestion_controlled: send_info.congestion_controlled,
-                    paired: false,
+                    send_info: packet_send_info,
+                    congestion_controlled: packet_send_info.congestion_controlled,
+                    paired: !is_systematic,
                 });
                 self.pair_swap_on_join();
             }
