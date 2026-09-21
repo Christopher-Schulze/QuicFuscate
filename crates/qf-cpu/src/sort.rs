@@ -13,6 +13,10 @@ use std::arch::x86_64::*;
 ///
 /// The previous x86 small-slice kernels shifted bits inside each integer rather
 /// than permuting lanes, so they could not preserve the input multiset.
+///
+/// TODO-1001: sanctioned rust-tests / SIMD-parity helper, not a product
+/// datapath. Keep even with no production callers so `rt-argsort-parity`
+/// and the `sort_simd` CI cell stay honest.
 #[inline(always)]
 pub fn sort_u32(data: &mut [u32]) {
     data.sort_unstable();

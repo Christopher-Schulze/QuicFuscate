@@ -4,7 +4,7 @@ title: Decide fate of benchmark-only SIMD sort/shuffle surface
 severity: LOW
 phase: S
 priority: P3
-status: OPEN
+status: DONE
 created: 2026-11-18
 depends_on: []
 ---
@@ -39,5 +39,17 @@ trivial, while every CI run pays for it now.
 - `cargo bench --bench ci_regression --features benches` and `cargo test`
   remain green.
 
+## Decision (2026-09-21)
+
+Option 2. The helpers stay as the sanctioned rust-tests / parity surface
+(`qf_cpu::sort`, `optimize::sort`, `rt-argsort-parity`,
+`rt-simd-selfcheck`). Deleting them would drop the AVX2/NEON sort
+parity gates for a trivial CI saving.
+
+`ci_regression` `sort_simd` / `shuffle_simd` stay as library-quality
+gates, not production-path regression guards. `test-performance-regression.sh`
+already uses `sort_simd/1024_elems` as the AVX2 comparison cell - that
+probe remains valid for "does the SIMD helper still compile and run".
+
 ## Deviations
-Recorded as OPEN decision item instead of deleting public API unilaterally.
+None. The OPEN decision is now recorded as a pin, not a delete.
